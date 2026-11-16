@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="wiz nb export">
+<title>A Wiz notebook</title>
+<style>
+:root { color-scheme: light dark; --paper: #fdfdfb; --ink: #1d1d1b;
+  --muted: #666; --line: #d9d9d4; --code: #f4f4ef; --accent: #7a3e00;
+  --error: #a11; --error-bg: #fff3f2; }
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #1d1d1b; --ink: #fdfdfb; --muted: #aaa; --line: #3a3a36;
+    --code: #262622; --accent: #ffb86b; --error: #ff8a80; --error-bg: #3a2020; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main.notebook { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+.notebook-header { border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
+.notebook-header h1 { margin: 0 0 .25rem; font-size: 1.9rem; line-height: 1.2; }
+.notebook-subtitle { color: var(--muted); margin: 0 0 1.25rem; font-size: .92rem; }
+.cell { margin: 0 0 1.4rem; }
+.cell-code { border-left: 3px solid var(--line); padding-left: 1rem; }
+.prompt { color: var(--muted); font: .8rem/1.4 ui-monospace, monospace;
+  user-select: none; }
+.cell-input { display: grid; grid-template-columns: 5.5rem 1fr; gap: .25rem;
+  align-items: start; }
+.cell-input .prompt { padding-top: .45rem; text-align: right; }
+pre { margin: .45rem 0; overflow-x: auto; background: var(--code);
+  border-radius: .25rem; padding: .65rem .75rem; }
+pre code { font: .88rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre; }
+.code { margin: 0; }
+.cell-outputs { margin-left: 5.75rem; }
+.output { margin: .4rem 0; }
+.output-result { display: grid; grid-template-columns: 4.5rem 1fr; gap: .5rem;
+  align-items: start; }
+.output-result .out-prompt { text-align: right; padding-top: .2rem; }
+.output-text, .output-json, .stream, .traceback { font: .85rem/1.45 ui-monospace,
+  SFMono-Regular, Menlo, monospace; }
+.stream-stderr { border-left: 3px solid var(--accent); }
+.output-error { background: var(--error-bg); border-left: 3px solid var(--error);
+  border-radius: .25rem; padding: .55rem .75rem; }
+.error-name { color: var(--error); font-weight: 600; margin: 0 0 .3rem; }
+.output-note { color: var(--muted); border-left: 3px solid var(--line);
+  padding: .2rem .75rem; }
+.output-caption { color: var(--muted); font-size: .85rem; margin: .2rem 0; }
+.output-html table { border-collapse: collapse; margin: .4rem 0; }
+.output-html th, .output-html td { border: 1px solid var(--line);
+  padding: .25rem .5rem; text-align: left; }
+.output-image img { max-width: 100%; height: auto; }
+.wiz-widget { border: 1px solid var(--line); border-radius: .3rem;
+  padding: .5rem .75rem; }
+.widget-title { font-weight: 600; margin-bottom: .3rem; }
+.widget-goal { font-size: .85rem; }
+.cell-raw pre { border: 1px dashed var(--line); }
+blockquote { margin: .5rem 0; padding-left: .9rem; border-left: 3px solid
+  var(--line); color: var(--muted); }
+.markdown-code { background: var(--code); }
+a { color: var(--accent); }
+@media print { .cell { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<main class="notebook">
+<header class="notebook-header">
+<p class="notebook-subtitle">Exported from <code>example.ipynb</code>. Static export: code and stored outputs are reproduced; the kernel, its definitions and any interactive output are not.</p>
+</header>
+<section class="cell cell-markdown" id="cell-1">
+<h1>A Wiz notebook</h1>
+<p>This notebook is deliberately small.  It has a definition, two ways of printing a value, an error, and a <code>%%scry</code> cell.  Running <code>wiz nb export</code> turns the stored outputs below into one static HTML page: no kernel, no JavaScript, no network.</p>
+<p>A definition stays in scope for the cells after it.  With the <code>repl</code> driver that is a live process; with the <code>batch</code> fallback the notebook is rechecked from the top, so the meaning is the same even though the state is not.</p>
+</section>
+<section class="cell cell-code" id="cell-2">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[1]:</span><pre class="code"><code class="language-wiz">def double (n : Nat) : Nat := n + n
+</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-3">
+<p><code>#eval</code> is a command: its value is a stream, exactly as in a file.</p>
+</section>
+<section class="cell cell-code" id="cell-4">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[2]:</span><pre class="code"><code class="language-wiz">#eval double 21
+</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">42
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-5">
+<p>A bare last expression becomes the cell&#x27;s <em>result</em>.  This is the kernel&#x27;s convenience, not new Wiz semantics: a Wiz file has no expression statements.</p>
+</section>
+<section class="cell cell-code" id="cell-6">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[3]:</span><pre class="code"><code class="language-wiz">20 + 22
+</code></pre></div>
+<div class="cell-outputs">
+<div class="output output-result"><span class="prompt out-prompt">Out&nbsp;[3]:</span><pre class="output-text">42</pre></div>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-7">
+<p>A Wiz error is reported on the error channel, and the session goes on.</p>
+</section>
+<section class="cell cell-code" id="cell-8">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[4]:</span><pre class="code"><code class="language-wiz">def broken : Nat := Bool.true
+</code></pre></div>
+<div class="cell-outputs">
+<div class="output output-error"><p class="error-name">WizError: type mismatch</p>
+<pre class="traceback">5:21: error: type mismatch
+  expected: Nat
+  inferred: Bool
+</pre>
+</div>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-9">
+<p><code>%%scry</code> reads the cell as C source and renders the taint findings.  It needs a <code>scry</code> executable (<code>PATH</code>, or <code>$WIZ_SCRY</code>); without one the cell reports <code>ScryUnavailable</code> instead of failing the kernel.</p>
+</section>
+<section class="cell cell-code" id="cell-10">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[5]:</span><pre class="code"><code class="language-wiz">%%scry
+char *getenv(const char *name);
+int system(const char *command);
+
+int main(void) {
+  char *cmd = getenv(0);
+  system(cmd);
+  return 0;
+}
+</code></pre></div>
+<div class="cell-outputs">
+<div class="output output-error"><p class="error-name">ScryUnavailable: no scry executable: install one (build the scry package, then put its binary on PATH) or set WIZ_SCRY, for example WIZ_SCRY='grail run scry --' from a checkout's scry/ directory</p>
+<pre class="traceback">no scry executable: install one (build the scry package, then put its binary on PATH) or set WIZ_SCRY, for example WIZ_SCRY='grail run scry --' from a checkout's scry/ directory
+</pre>
+</div>
+</div>
+</section>
+</main>
+</body>
+</html>
