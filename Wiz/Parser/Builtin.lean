@@ -275,6 +275,8 @@ continue onto a line starting at the command's column.
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
 | `command.attrCodeAction`     | "attribute" "[" "codeAction" ident "]" ident (11ae) |
 | `command.attrHover`          | "attribute" "[" "hover" ident "]" ident (11ae) |
+| `command.attrCodeActionTerm` | "attribute" "[" "codeActionTerm" ident "]" ident (11ag) |
+| `command.attrHoverTerm`      | "attribute" "[" "hoverTerm" ident "]" ident (11ag) |
 | `command.attrInline`         | "attribute" "[" "inline" "]" ident |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
@@ -367,6 +369,11 @@ def commandLeading : List LeadingParser := [
     p := seqs ["attribute", "[", nonReserved "codeAction", ident, "]", ident] },
   { kind := "command.attrHover", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "hover", ident, "]", ident] },
+  -- 11ag: term-aware forms: the function also gets the info-tree entry at the node
+  { kind := "command.attrCodeActionTerm", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "codeActionTerm", ident, "]", ident] },
+  { kind := "command.attrHoverTerm", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hoverTerm", ident, "]", ident] },
   { kind := "command.deriving", prec := maxPrec,
     p := seqs ["deriving", "instance", sepBy1 ident ",", nonReserved "for", sepBy1 ident ","] },
   { kind := "command.declareSyntaxCat", prec := maxPrec, p := seqs ["declare_syntax_cat", ident, optional (seqs ["(", nonReserved "keywords", ":=", ident, ")"])] },

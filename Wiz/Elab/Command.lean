@@ -102,6 +102,11 @@ structure CommandState (R : Type) where
   extCodeActions : List (Name × Name) := []
   /-- (11ae) `attribute [hover k] f`: the same, for the hover at a node of kind `k` -/
   extHovers : List (Name × Name) := []
+  /-- (11ag) `attribute [codeActionTerm k] f`: as `extCodeActions`, for a term-aware
+  `Syntax → ExtInfo → String` function -/
+  extCodeActionTerms : List (Name × Name) := []
+  /-- (11ag) `attribute [hoverTerm k] f`: as `extHovers`, for a term-aware function -/
+  extHoverTerms : List (Name × Name) := []
   /-- (HD8) `attribute [macro k] f` for `f : CommandMacro`, and `attribute [deriver C] f`,
   latest first -/
   cmdMacros : List (Name × Name) := []
@@ -2601,16 +2606,27 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .ok () =>
       modify fun s => { s with tactics := (k, f) :: s.tactics }
       remakeMetaCode
-  | "command.attrCodeAction" | "command.attrHover" =>
-    -- (11ae) `attribute [codeAction k] f` / `attribute [hover k] f`: a Wiz function the
-    -- language server runs on nodes of syntax kind `k`. It is pure and small on purpose:
-    -- `Syntax → String` (for `codeAction`, the string is JSON; the host bridges it).
-    let isAction := cmd.kind == "command.attrCodeAction"
+  | "command.attrCodeAction" | "command.attrHover" | "command.attrCodeActionTerm"
+  | "command.attrHoverTerm" =>
+    -- (11ae/11ag) `attribute [codeAction k] f` / `[hover k] f` (and the term-aware
+    -- `[codeActionTerm k]` / `[hoverTerm k]`): a Wiz function the language server runs
+    -- on nodes of syntax kind `k`. It is pure and small on purpose: `Syntax → String`,
+    -- or `Syntax → ExtInfo → String` for the term-aware form (it also gets the info-tree
+    -- entry at the node: expected type, inferred type, tactic goals). For `codeAction`
+    -- the string is JSON; the host bridges it.
+    let isAction := cmd.kind == "command.attrCodeAction" || cmd.kind == "command.attrCodeActionTerm"
+    let isTerm := cmd.kind == "command.attrCodeActionTerm" || cmd.kind == "command.attrHoverTerm"
     let what := if isAction then "codeAction" else "hover"
+    let shape := if isTerm then "Syntax → ExtInfo → String" else "Syntax → String"
     let k := ((cmd.getArg 3).getId?).getD "_"
     let f0 := ((cmd.getArg 5).getId?).getD "_"
-    let expected : Term R := .pi "_" .default (.qlit QuantitySyntax.explicitDefault)
-      (.const "Syntax" []) (.const "String" []) .hole
+    let q := QuantitySyntax.explicitDefault
+    let expected : Term R :=
+      if isTerm then
+        .pi "_" .default (.qlit q) (.const "Syntax" [])
+          (.pi "_" .default (.qlit q) (.const "ExtInfo" []) (.const "String" []) .hole) .hole
+      else
+        .pi "_" .default (.qlit q) (.const "Syntax" []) (.const "String" []) .hole
     let ok := runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros)
         (tactics := s.tactics) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances)
         s.globals do
@@ -2618,7 +2634,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
       let want ← evalIn {} expected
       unifyAt {} cmd want ty
     match ok with
-    | .error e => report .error e.info s!"{f0} is not a language-server extension for `{what}` (a `Syntax → String`): {e.msg}"
+    | .error e => report .error e.info s!"{f0} is not a language-server extension for `{what}` (a `{shape}`): {e.msg}"
     | .ok () =>
       -- (the global's name: a private declaration's is renamed)
       let f := s.globals.resolve f0
@@ -2626,8 +2642,12 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         report .error (cmd.getArg 5).info s!"unknown declaration '{f0}'"
       else
         modify fun s =>
-          if isAction then { s with extCodeActions := (k, f) :: s.extCodeActions }
-          else { s with extHovers := (k, f) :: s.extHovers }
+          if isAction then
+            if isTerm then { s with extCodeActionTerms := (k, f) :: s.extCodeActionTerms }
+            else { s with extCodeActions := (k, f) :: s.extCodeActions }
+          else
+            if isTerm then { s with extHoverTerms := (k, f) :: s.extHoverTerms }
+            else { s with extHovers := (k, f) :: s.extHovers }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So

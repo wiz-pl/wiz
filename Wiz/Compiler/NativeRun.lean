@@ -230,6 +230,13 @@ partial def runPrim (code : Code) : Prim → Array RVal → M RVal
 
 end
 
+/-- Run `f` applied to `args` with `fuel` steps. -/
+def applyWith (code : Code) (f : RVal) (args : List RVal) (fuel : Nat) : Except String (RVal × Nat) :=
+  match (args.foldlM (apply code) f).run fuel with
+  | .ok v rest => .ok (v, rest)
+  | .error "out of fuel" _ => .error s!"evaluation did not finish within {fuel} steps"
+  | .error e _ => .error s!"evaluation failed: {e}"
+
 /-- Run `e` with `fuel` steps. -/
 def runWith (code : Code) (e : ETerm) (fuel : Nat) : Except String (RVal × Nat) :=
   match (run code [] e).run fuel with

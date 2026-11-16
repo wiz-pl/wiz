@@ -1,5 +1,6 @@
 import Wiz.Query
 import Wiz.Actions
+import Wiz.Elab.Tactic
 import Lean.Data.Json
 
 /-!
@@ -53,19 +54,25 @@ open Lean (Json)
 
 variable {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R]
 
-/-- A registered extension: the syntax kind and the Wiz function. -/
+/-- A registered extension: the syntax kind and the Wiz function. `termAware` is set for
+the `[codeActionTerm k]`/`[hoverTerm k]` forms (`Syntax → ExtInfo → String`); the plain
+forms take just the syntax node (`Syntax → String`). -/
 structure Handler where
   kind : Name
   fn : Name
+  termAware : Bool := false
   deriving Inhabited, Repr, BEq
 
-/-- `attribute [codeAction k] f` registrations, latest first (`CommandState`). -/
+/-- `attribute [codeAction k] f` registrations, latest first (`CommandState`), then the
+term-aware ones. -/
 def codeActionHandlers (s : CommandState R) : Array Handler :=
-  s.extCodeActions.toArray.map fun (k, f) => { kind := k, fn := f }
+  (s.extCodeActions.toArray.map fun (k, f) => { kind := k, fn := f }) ++
+  (s.extCodeActionTerms.toArray.map fun (k, f) => { kind := k, fn := f, termAware := true })
 
-/-- `attribute [hover k] f` registrations, latest first. -/
+/-- `attribute [hover k] f` registrations, latest first, then the term-aware ones. -/
 def hoverHandlers (s : CommandState R) : Array Handler :=
-  s.extHovers.toArray.map fun (k, f) => { kind := k, fn := f }
+  (s.extHovers.toArray.map fun (k, f) => { kind := k, fn := f }) ++
+  (s.extHoverTerms.toArray.map fun (k, f) => { kind := k, fn := f, termAware := true })
 
 /-! ## The parsed syntax at a position -/
 
@@ -115,18 +122,121 @@ def nodeIn (s : CommandState R) (text : String) (start stop : Nat) (k : Name) : 
   let cmd ← commandAt s.tables text.toList.toArray 0 start
   findIn k start stop cmd
 
-/-! ## Running an extension -/
+/-! ## The info tree at a node (11ag)
+
+A term-aware extension gets an `ExtInfo` (lib/Prelude.wiz) besides the parsed node: the
+info-tree entry at it, if any. The expected type of a checked term, an identifier's
+inferred type, and the tactic goals are reflected as the prelude's `Expr` (with the
+same layout tactics use), and the type and goals are also rendered as text. No entry is
+`kind == ""`: the hook still runs and can fall back. -/
+
+/-- The info-tree entry at a parsed node. Prefer an entry with exactly the node's range
+(an identifier's entry for an identifier node, a term's otherwise), else the innermost
+entry containing the node's start. -/
+def entryAt (s : CommandState R) (stx : Syntax) : Option (Info R) :=
+  let r := stx.info
+  let isIdent := stx.isOfKind "term.ident"
+  let prefer (i : Info R) : Bool :=
+    match i with
+    | .ident .. => isIdent
+    | .term .. => !isIdent
+    | .tactic .. | .inst .. => true
+    | _ => false
+  let exact (p : Info R → Bool) : Option (Info R) :=
+    s.infos.findSome? fun i =>
+      let q := i.info
+      if q.start == r.start && q.stop == r.stop && q.stop > q.start && p i then some i else none
+  match exact prefer with
+  | some i => some i
+  | none => match exact fun _ => true with
+    | some i => some i
+    | none => Query.innermost s r.start prefer (endIn := true)
+
+/-- The info-tree entry's kind, for `ExtInfo.kind`. -/
+def infoKind : Info R → String
+  | .term .. => "term"
+  | .ident .. => "ident"
+  | .tactic .. => "tactic"
+  | .inst .. => "instance"
+  | .decl .. => "declaration"
+  | .matchCases .. => "match"
+  | .syntaxRef .. => "syntax"
+  | .expansion .. => "expansion"
+  | .importMod .. => "import"
+  | .unknownIdent .. => "unknown-identifier"
+  | .warning .. => "warning"
+  | .trace .. => "trace"
+  | .fix .. => "fix"
+
+/-- A term as the prelude's `Expr` value (`depth` variables in scope). -/
+def reflectTerm (t : Term R) (depth : Nat) : RVal :=
+  (Wiz.Elab.reflect t depth).run #[] |>.1
+
+/-- An `Option Expr` value. -/
+def encodeTerm? (t? : Option (Term R)) (depth : Nat) : RVal :=
+  match t? with
+  | some t => .obj 1 #[reflectTerm t depth]
+  | none => .obj 0 #[]
+
+/-- An `ExtGoal` value: its hypotheses (outermost first), its target, and its text. -/
+def encodeGoal (s : CommandState R) (g : GoalView R) : RVal :=
+  let hyps := (g.hyps.toList.mapIdx fun k (n, ty, _) =>
+      .obj 0 #[Elab.encodeString n, reflectTerm ty k]).foldr
+    (fun h acc => .obj 1 #[h, acc]) (.obj 0 #[])
+  .obj 0 #[hyps, reflectTerm g.target g.hyps.size, Elab.encodeString (g.show (some s.globals))]
+
+/-- The `ExtInfo` value for a node: the entry at it, its expected/inferred type, and the
+tactic goals at the node (after the innermost tactic, as the infoview shows them). -/
+def extInfo (s : CommandState R) (stx : Syntax) : RVal :=
+  let off := stx.info.start
+  let atNode := (Query.goalsAt s off).map (·.2.2) |>.getD #[]
+  let (kind, ty?, depth, goals, tyText) :
+      String × Option (Term R) × Nat × Array (GoalView R) × String :=
+    match entryAt s stx with
+    | some (.term _ g _) =>
+      ("term", some g.target, g.hyps.size, atNode,
+       g.target.pretty g.names (some s.globals))
+    | some (.ident _ _ _ names ty) =>
+      let ty := names.foldl (fun t n => t.instantiateAt 0 (.const n [])) ty
+      ("ident", some ty, names.length, atNode, ty.pretty names (some s.globals))
+    | some (.tactic _ _ _ after) =>
+      ("tactic", none, 0, after, "")
+    | some (.inst _ names ty _) =>
+      let ty := names.foldl (fun t n => t.instantiateAt 0 (.const n [])) ty
+      ("instance", some ty, names.length, atNode, ty.pretty names (some s.globals))
+    | some i => (infoKind i, none, 0, atNode, "")
+    | none => ("", none, 0, atNode, "")
+  let goalVals := goals.toList.foldr (fun g acc => .obj 1 #[encodeGoal s g, acc]) (.obj 0 #[])
+  let goalsText := "\n\n".intercalate (goals.toList.map fun g => g.show (some s.globals))
+  .obj 0 #[Elab.encodeString kind, encodeTerm? ty? depth, goalVals,
+    Elab.encodeString tyText, Elab.encodeString goalsText]
+
+/-! ## Running an extension
+
+Each call has a **step budget** (`Extensions.fuel`): the same erased interpreter as
+`#eval`, but through `NativeRun.applyWith`, where every application and primitive costs
+fuel. A runaway extension ends in an ordinary ignored failure instead of hanging the
+server. -/
 
 /-- The erased code of an extension function (and what it reaches), for the interpreter. -/
 def compile (s : CommandState R) (f : Name) : Except String Code :=
   (compileReachable s.globals s.builtins [f] (externImpls := false)).mapError
     fun e => s!"cannot compile the extension {f}: {e}"
 
-/-- Run `f stx`, expecting a `String` (the one thing an extension may return). -/
-def runString (code : Code) (f : Name) (stx : Syntax) : Except String String :=
-  match (apply code (run code [] (.global f)) (Elab.encodeSyntax stx)).toString? with
-  | some s => .ok s
-  | none => .error s!"{f} did not return a String"
+/-- The step budget of one extension call (a request may run several registrations; the
+host subtracts what each used). It is generous for a string-building function and small
+enough that a loop ends in milliseconds. -/
+def fuel : Nat := 1000000
+
+/-- Run `f` applied to `args`, expecting a `String` (the one thing an extension may
+return). Returns the string and the number of steps used. -/
+def runString (code : Code) (f : Name) (args : List RVal) (fuel : Nat) :
+    Except String (String × Nat) :=
+  match NativeRun.applyWith code (run code [] (.global f)) args fuel with
+  | .ok (v, rest) => match v.toString? with
+    | some s => .ok (s, fuel - rest)
+    | none => .error s!"{f} did not return a String"
+  | .error e => .error e
 
 /-! ## Code actions from the extension's JSON -/
 

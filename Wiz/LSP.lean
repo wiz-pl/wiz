@@ -482,12 +482,15 @@ def codeAction (srv : Server) (uri : String) (doc : Doc) (a : Actions.Action) (r
       [("edit", Json.mkObj [("changes", Json.mkObj [(uri, Json.arr edits)])])]
   Json.mkObj ([("title", Json.str a.title), ("kind", Json.str a.kind)] ++ diags ++ rest)
 
-/-! ## User-defined extensions (11ae)
+/-! ## User-defined extensions (11ae/11ag)
 
 `attribute [codeAction k] f` and `attribute [hover k] f` (see `Extensions.lean`): the
 function is compiled for the interpreter once per document (`Doc.extCode`) and run on the
-innermost parsed node of kind `k` at the cursor. A function that does not compile, fails,
-or returns malformed JSON is ignored: an extension never takes the server down. -/
+innermost parsed node of kind `k` at the cursor. The term-aware forms
+(`[codeActionTerm k]`/`[hoverTerm k]`) also get the info-tree entry at the node (an
+`ExtInfo`: expected/inferred type and tactic goals). A function that does not compile,
+fails, runs past its step budget, or returns malformed JSON is ignored: an extension
+never takes the server down. -/
 
 /-- The compiled code of an extension function, built once per document. -/
 def extCodeOf (doc : Doc) (f : Name) : Doc × Except String Code :=
@@ -496,36 +499,50 @@ def extCodeOf (doc : Doc) (f : Name) : Doc × Except String Code :=
   | none => let c := Extensions.compile doc.state f
             ({ doc with extCode := doc.extCode.insert f c }, c)
 
-/-- Run an extension on `stx`; `none` if it could not be compiled or run. -/
-def runExtension (doc : Doc) (h : Extensions.Handler) (stx : Syntax) : Doc × Option String :=
+/-- Run an extension on `stx` with `budget` steps left; returns the string, if any, and
+what is left. A plain handler gets the parsed node; a term-aware one also gets
+`Extensions.extInfo` (the info-tree entry at it, or a `kind == ""` fallback). -/
+def runExtension (doc : Doc) (h : Extensions.Handler) (stx : Syntax) (budget : Nat) :
+    Doc × Option String × Nat :=
   let (doc, c) := extCodeOf doc h.fn
   match c with
-  | .ok code => match Extensions.runString code h.fn stx with
-    | .ok out => (doc, some out)
-    | .error _ => (doc, none)
-  | .error _ => (doc, none)
+  | .ok code =>
+    let args := if h.termAware then [Elab.encodeSyntax stx, Extensions.extInfo doc.state stx]
+      else [Elab.encodeSyntax stx]
+    match Extensions.runString code h.fn args budget with
+    | .ok (out, used) => (doc, some out, budget - used)
+    | .error _ => (doc, none, budget)
+  | .error _ => (doc, none, budget)
 
-/-- The code actions the document's `codeAction` extensions add at `[start, stop]`. -/
+/-- The code actions the document's `codeAction` extensions add at `[start, stop]`. The
+step budget is shared by all the registrations of one request. -/
 def extensionActions (doc : Doc) (start stop : Nat) : Doc × Array Actions.Action := Id.run do
   let mut doc := doc
   let mut out : Array Actions.Action := #[]
+  let mut budget := Extensions.fuel
   for h in Extensions.codeActionHandlers doc.state do
     let some stx := Extensions.nodeIn doc.state doc.text start stop h.kind | continue
-    let (d, res) := runExtension doc h stx
+    if budget == 0 then break
+    let (d, res, b) := runExtension doc h stx budget
     doc := d
+    budget := b
     let some text := res | continue
     for a in Extensions.parseActions text do
       out := out.push (Extensions.ExtAction.toAction a stx.info)
   (doc, out)
 
-/-- The Markdown the document's `hover` extensions add at `off`. -/
+/-- The Markdown the document's `hover` extensions add at `off`, under one shared step
+budget. -/
 def extensionHover (doc : Doc) (off : Nat) : Doc × Option String := Id.run do
   let mut doc := doc
   let mut parts : Array String := #[]
+  let mut budget := Extensions.fuel
   for h in Extensions.hoverHandlers doc.state do
     let some stx := Extensions.nodeAt doc.state doc.text off h.kind | continue
-    let (d, res) := runExtension doc h stx
+    if budget == 0 then break
+    let (d, res, b) := runExtension doc h stx budget
     doc := d
+    budget := b
     if let some t := res then
       if !t.isEmpty then parts := parts.push t
   (doc, if parts.isEmpty then none else some ("\n\n".intercalate parts.toList))

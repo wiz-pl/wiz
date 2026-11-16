@@ -492,6 +492,41 @@ inductive Expr where
   | lit (n : Nat)
   | opaque (id : Nat)
 
+-- ## Term-aware language-server extensions (11ag)
+--
+-- A term-aware extension (`attribute [codeActionTerm k] f` / `[hoverTerm k] f`) gets
+-- the parsed node *and* the info-tree entry at it, as `ExtInfo`: the expected type
+-- (at a checked term), an identifier's inferred type, and the tactic goals. The host
+-- fills it; a node with no entry is `kind == ""` (`ExtInfo.found` is `false`).
+/-- One hypothesis of an `ExtGoal`: its name and (reflected) type. -/
+structure ExtHyp where
+  name : String
+  type : Expr
+/-- A tactic goal at the node: its hypotheses (outermost first), its target as a
+reflected term, and the goal rendered as text (`x : T`, then `⊢ T`). -/
+structure ExtGoal where
+  hyps : List ExtHyp
+  target : Expr
+  text : String
+/-- What the language server knows about a node for a term-aware extension:
+`kind` is the info-tree entry (`"term"`, `"ident"`, `"tactic"`, `"instance"`, or `""`
+when there is none); `type` is the expected type of a checked term or the inferred
+type of an identifier; `goals` are the tactic goals at the node; `typeText` and
+`goalsText` are the same information already rendered for messages. -/
+structure ExtInfo where
+  kind : String
+  type : Option Expr
+  goals : List ExtGoal
+  typeText : String
+  goalsText : String
+/-- Whether an info-tree entry was found at the node (`false`: the extension sees
+`ExtInfo.kind == ""`, `type == none`, `goals == []`). -/
+def ExtInfo.found (i : ExtInfo) : Bool := match i with
+  | .mk k _ _ _ _ => match k with
+    | .mk cs => match cs with
+      | .nil => .false
+      | .cons _ _ => .true
+
 -- Reflection (HD8): a declared inductive type or structure as command macros see it.
 -- Types are syntax, written with the names of the binders in scope (the parameters,
 -- then the earlier fields), not de Bruijn indices.

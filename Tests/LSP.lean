@@ -1149,10 +1149,88 @@ def two : Nat := 2
 def four : Nat := twice two
 "#
 
+/-- (11ag) A term-aware action: the function gets the parsed node and the info-tree
+entry, and uses the expected type. -/
+def extTermSrc : String := r#"import Prelude
+syntax (name := double) "double" term:max : term
+macro_rules
+  | `(term| double $x) => `(term| Nat.add $x $x)
+def doubleName : Syntax → String
+  | .ident n => n
+  | .node _ args => match Syntax.identNames args with
+    | .cons n _ => n
+    | .nil => "?"
+  | _ => "?"
+def doubleInfoAction (stx : Syntax) (i : ExtInfo) : String :=
+  let n := doubleName (Syntax.getArg stx 1);
+  "{\"title\": \"Rewrite at " ++ i.typeText ++ "\", \"text\": \"Nat.add " ++ n ++ " " ++ n ++ "\"}"
+attribute [codeActionTerm term.double] doubleInfoAction
+def two : Nat := 2
+def four : Nat := (double two : Nat)
+"#
+
+/-- (11ag) A term-aware hover on an identifier: the inferred type. -/
+def extTermHoverSrc : String := r#"import Prelude
+def identInfoHover (stx : Syntax) (i : ExtInfo) : String :=
+  "**inferred**: " ++ i.typeText ++ " (" ++ i.kind ++ ")"
+attribute [hoverTerm term.ident] identInfoHover
+def two : Nat := 2
+def four : Nat := two
+"#
+
+/-- (11ag) A term-aware hook at a node with no info-tree entry: the function still runs
+and falls back (`ExtInfo.found` is `false`). The file need not elaborate, which is where
+code actions matter. -/
+def extNoInfoSrc : String := r#"import Prelude
+syntax (name := widget) "widget" : term
+def widgetHover (stx : Syntax) (i : ExtInfo) : String :=
+  match i.found with
+  | .false => "**widget**: no info (fallback)"
+  | .true => "**widget**: " ++ i.kind
+attribute [hoverTerm term.widget] widgetHover
+def broken : Nat := widget
+"#
+
+/-- (11ag) The wrong type for the term-aware form. -/
+def extBadTermRegSrc : String := r#"import Prelude
+syntax (name := double) "double" term:max : term
+macro_rules
+  | `(term| double $x) => `(term| Nat.add $x $x)
+def badTermAction (stx : Syntax) : String := "{}"
+attribute [codeActionTerm term.double] badTermAction
+def two : Nat := 2
+def four : Nat := double two
+"#
+
+/-- (11ag) A term-aware hook that loops: the step budget must end it. -/
+def extLoopSrc : String := r#"import Prelude
+syntax (name := spin) "spin" term:max : term
+macro_rules
+  | `(term| spin $x) => `(term| $x)
+def spinAction (stx : Syntax) (i : ExtInfo) : String := spinAction stx i
+attribute [codeActionTerm term.spin] spinAction
+def two : Nat := 2
+def four : Nat := spin two
+"#
+
 def extGroup : Group where
   name := "lsp-ext"
   exercise := "Stage 11 (user-defined LSP extensions)"
   cases := [
+    { name := "DEBUG term info", run := fun _ => do
+        let (srv, _) ← openDoc extTermSrc
+        let some doc := srv.docs.get? "file:///t.wiz" | throw (IO.userError "no doc")
+        let off := offAfter extTermSrc "def four : Nat := " + 1
+        let some stx := Extensions.nodeIn doc.state doc.text off off "term.double"
+          | throw (IO.userError "no node")
+        IO.println s!"handlers: {Extensions.codeActionHandlers doc.state}"
+        IO.println s!"entry: {(Extensions.entryAt doc.state stx).map Extensions.infoKind}"
+        IO.println s!"info: {repr (Extensions.extInfo doc.state stx)}"
+        match Extensions.compile doc.state "doubleInfoAction" with
+        | .error e => IO.println s!"compile: {e}"
+        | .ok code =>
+          IO.println s!"run: {repr (Extensions.runString code "doubleInfoAction"
+            [Elab.encodeSyntax stx, Extensions.extInfo doc.state stx] Extensions.fuel)}" },
     { name := "a registered code action appears at its node, and only there", run := fun _ => do
         let (srv, out) ← openDoc extSrc
         check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
@@ -1191,7 +1269,40 @@ def extGroup : Group where
         let (srv, out) ← openDoc extBadJsonSrc
         check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
         let (_, as) := codeActions srv extBadJsonSrc (offAfter extBadJsonSrc "twice two" (-2))
-        check as.isEmpty s!"actions: {as.map (·.compress)}" }
+        check as.isEmpty s!"actions: {as.map (·.compress)}" },
+    { name := "a term-aware action uses the expected type", run := fun _ => do
+        let (srv, out) ← openDoc extTermSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (_, as) := codeActions srv extTermSrc (offAfter extTermSrc "def four : Nat := " + 1)
+        let some a := titled as "Rewrite at Nat" | throw (IO.userError s!"actions: {as.map (·.compress)}")
+        let some (.arr #[e]) := LSP.get? a ["edit", "changes", "file:///t.wiz"]
+          | throw (IO.userError s!"edit: {a.compress}")
+        checkEq "Nat.add two two" (LSP.getStr e ["newText"]) },
+    { name := "a term-aware hover shows the inferred type", run := fun _ => do
+        let (srv, out) ← openDoc extTermHoverSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (_, r) := ask srv "textDocument/hover" extTermHoverSrc (offAfter extTermHoverSrc "def four : Nat := ")
+        let value := LSP.getStr r ["contents", "value"]
+        check ((value.splitOn "inferred: Nat (ident)").length > 1) s!"hover: {r.compress}" },
+    { name := "a term-aware hook with no info falls back", run := fun _ => do
+        let (srv, _) ← openDoc extNoInfoSrc
+        let (_, r) := ask srv "textDocument/hover" extNoInfoSrc (offAfter extNoInfoSrc "def broken : Nat := ")
+        let value := LSP.getStr r ["contents", "value"]
+        check ((value.splitOn "no info (fallback)").length > 1) s!"hover: {r.compress}" },
+    { name := "a malformed term-aware registration is ignored, with a diagnostic", run := fun _ => do
+        let (srv, out) ← openDoc extBadTermRegSrc
+        check (has out[0]! "not a language-server extension") s!"no diagnostic: {out[0]!.compress}"
+        check (has out[0]! "Syntax → ExtInfo → String") s!"wrong shape in diagnostic: {out[0]!.compress}"
+        let (_, as) := codeActions srv extBadTermRegSrc (offAfter extBadTermRegSrc "double two" (-2))
+        check as.isEmpty s!"an action was registered: {as.map (·.compress)}" },
+    { name := "a looping term-aware hook is stopped by the step budget", run := fun _ => do
+        let (srv, out) ← openDoc extLoopSrc
+        check (!(has out[0]! "severity\":1")) s!"unexpected error: {out[0]!.compress}"
+        let (srv, as) := codeActions srv extLoopSrc (offAfter extLoopSrc "spin two" (-2))
+        check as.isEmpty s!"actions: {as.map (·.compress)}"
+        -- the server still answers: the budget ended the loop instead of hanging the request
+        let (_, r) := ask srv "textDocument/hover" extLoopSrc (offAfter extLoopSrc "def two : Nat" (-1))
+        check (has r "Nat : Type") s!"no ordinary hover after the budget: {r.compress}" }
   ]
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
