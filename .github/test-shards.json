@@ -68,6 +68,7 @@
     "regions",
     "=scry-wil",
     "=scry-c2wil",
+    "=scry-csharp",
     "=scry-ai",
     "=scry-taint",
     "=scry-uaf",
