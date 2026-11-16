@@ -395,10 +395,7 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let assets : List System.FilePath :=
     (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
   -- (the site keeps its title with --reference; the manual has its own)
-  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation",
-    web := web, assets := assets, serve := a.serve, lsp := a.lsp,
-    reference := a.reference.map System.FilePath.mk, check := a.check,
-    referenceTitle := a.title.getD "Wiz standard library reference" }
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference" }
   let r ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
   IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
   for f in r.written do IO.println s!"wiz doc: wrote {f}"
