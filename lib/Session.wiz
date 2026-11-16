@@ -186,3 +186,48 @@ def Proc.runLinkedThreads {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (P
     Chan.fork p (fun c => IO.bind (Proc.run (Proto.dual p) b c) (fun y => MVar.put m y))
       (fun c => IO.bind (Proc.run p a c) (fun x => IO.bind (MVar.take m) (fun y => IO.pure (x, y)))))
 attribute [implemented_by Proc.runLinkedThreads] Proc.runLinked
+
+-- ## 4. Direct style (stage 25i, plan D1)
+--
+-- The same channels, with the endpoint handed back as the result of an `IO1` action
+-- instead of to a continuation. Sequence the steps with `do1`: `c ⇐ Chan.sendD c a;`
+-- binds the next endpoint at quantity 1, and `(a, c) ⇐ Chan.recvD c;` the value received
+-- (ω) and the next endpoint (1). The natives are the same, so the two styles mix on one
+-- channel and the deadlock-freedom claim (25c) covers both. CPS from direct is one
+-- `IO1.bindIO` (`Chan.send c a k` is `IO1.bindIO (Chan.sendD c a) k`); direct from CPS
+-- can't be written outside this module, since a CPS continuation's `IO B` result is ω and
+-- can't hand a linear endpoint back out. (After agent/verif-d1-sa's draft.)
+
+/-- Make a channel following `p`: a new thread runs `child` on the dual end, and this
+thread gets the other end.
+
+```
+c ⇐ Chan.forkD PingPong ponger;
+``` -/
+def Chan.forkD (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → IO Unit) : IO1 (Chan p) := fun w =>
+  let 1 (c, w') := Chan.forkRaw child w; (c, w')
+/-- Send `a`; the result is the endpoint at `k a`. Never blocks. -/
+def Chan.sendD {A : Type} {k : A → Proto} (1 c : Chan (Proto.send A k)) (a : A) : IO1 (Chan (k a)) := fun w =>
+  let 1 (c', w') := Chan.sendRaw c a w; (c', w')
+/-- Wait for a value; the result is the value (unrestricted) and the endpoint at `k a`
+(linear): `(a, c) ⇐ Chan.recvD c;`. -/
+def Chan.recvD {A : Type} {k : A → Proto} (1 c : Chan (Proto.recv A k)) : IO1 ((a : A) × Chan (k a)) := fun w =>
+  let 1 (r, w') := Chan.recvRaw c w; (r, w')
+/-- Close a finished channel. -/
+def Chan.closeD (1 c : Chan Proto.done) : IO Unit := fun w => Chan.closeRaw c w
+/-- Cancel at a send point of a cancellable protocol: tell the peer, and close. -/
+def Chan.cancelD {A : Type} {k : A → Proto} (1 c : Chan (Proto.sendC A k)) : IO Unit := fun w =>
+  let 1 (c', w') := Chan.sendRaw c Msg.cancel w; Chan.closeRaw c' w'
+
+/-- A pure process run over an endpoint in direct style (`Proc.run`, one `do1` step per
+protocol step). -/
+def Proc.runD {R : Type} : (p : Proto) → Proc R p → (1 c : Chan p) → IO R
+  | .send A k => fun x c => do1
+      c ⇐ Chan.sendD c x.1;
+      Proc.runD (k x.1) x.2 c
+  | .recv A k => fun f c => do1
+      (a, c) ⇐ Chan.recvD c;
+      Proc.runD (k a) (f a) c
+  | .done => fun r c => do1
+      Chan.closeD c;
+      IO.pure r

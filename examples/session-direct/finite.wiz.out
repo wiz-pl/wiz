@@ -1,0 +1,4 @@
+../examples/session-direct/finite.wiz:1:1: warning: ../lib/Session.wiz is ignored: module Session is the toolchain's own (/workspace/wiz-lang/lib), which a module root cannot replace
+../examples/session-direct/finite.wiz:1:1: warning: ../lib/Prelude.wiz is ignored: module Prelude is the toolchain's own (/workspace/wiz-lang/lib), which a module root cannot replace
+../examples/session-direct/finite.wiz:1:1: warning: ../lib/IO.wiz is ignored: module IO is the toolchain's own (/workspace/wiz-lang/lib), which a module root cannot replace
+../examples/session-direct/finite.wiz:1:1: warning: ../lib/MVar.wiz is ignored: module MVar is the toolchain's own (/workspace/wiz-lang/lib), which a module root cannot replace

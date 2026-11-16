@@ -1,6 +1,6 @@
 import IO
 import Session
-import SessionDirect
+
 /-!
 Direct-style sessions over finite protocols (docs/stages/25-concurrency.md, 25i):
 ping-pong, a calculator server, and a stream whose length is sent first. Compiled,

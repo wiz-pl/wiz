@@ -1,0 +1,166 @@
+import IO
+import Session
+/-!
+# SessionRec
+
+Recursive protocols (stage 25j) and delegation (stage 25k) on top of `Session`'s
+channels: `import SessionRec` (docs/stages/25-concurrency.md). Neither needs a new
+native or a new trusted claim: both are ordinary `Proto`s, so `Chan`, `Proc`, `link` and
+both API styles (CPS, 25c, and direct, 25i) work on them unchanged, and so does the
+deadlock-freedom argument of 25c.
+
+**Recursive protocols.** A recursive protocol is a system of equations: a body `σ s` for
+each state `s : S`, whose leaves may be `.jump s'` ("go on as state `s'`", a recursion
+variable). Its meaning is the infinite unfolding (the greatest fixed point, ν). A channel
+follows a *finite approximation* of it: `Proto.loop σ n s` is the unfolding in which at
+most `n` jumps are taken; a jump past the bound ends the session (`.done`). The bound is
+the session's size. It is fixed when the channel is made, both ends see it in their
+types, and each side's loop is structural on it, so a server is total (no `partial`). A
+side that wants to stop earlier says so through a choice in the body. Unrolling is
+definitional: `Proto.loop σ (n + 1) s` reduces to the body of `s`, so it costs nothing
+at run time.
+
+```
+def Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))
+-- Proto.loop Ping 2 () reduces to: send, recv, send, recv, done
+```
+
+**Delegation.** `Proto.sendCh P k` hands the peer an endpoint following `P`, then goes on
+as `k`; the peer's side is `Proto.recvCh P (Proto.dual k)` (`Proto.dual_sendCh`). It is
+implemented by forwarding (`Chan.delegate`): the delegating thread relays every message
+between the endpoint it gives away and the channel, so the peer uses its own end of the
+channel as the delegated endpoint. The endpoint is consumed (it is linear), so the
+delegating side can't use it again, and the channel graph stays a forest. The peer
+finishes `P` before it goes on with `k`; moving the endpoint itself to the peer's thread
+needs a native that sends a linear value, which is not in `runtime/` yet.
+-/
+
+-- ## Equality of protocols
+
+/-- Equal arguments give equal protocols (`Eq.congrArg` of lib/Logic.wiz, into `Proto`). -/
+def Proto.congrArg {X : Type 1} (0 F : X → Proto) {a b : X} (e : a = b) : F a = F b :=
+  transp (fun b _ => F a = F b) (refl (F a)) e
+/-- Equality of protocols is transitive. -/
+def Proto.trans {p q r : Proto} (e₁ : p = q) (e₂ : q = r) : p = r :=
+  transp (fun r _ => p = r) e₁ e₂
+/-- Function extensionality for continuations (definitional: an equation of functions is
+pointwise; `funext` in lib/Logic.wiz is the same at `Type`). -/
+def Proto.funext {A : Type} {f g : A → Proto} (h : (a : A) → f a = g a) : f = g := h
+/-- Equal continuations, pointwise, give equal sends. -/
+def Proto.congrSend (A : Type) {f g : A → Proto} (h : (a : A) → f a = g a) : Proto.send A f = Proto.send A g :=
+  Proto.congrArg (Proto.send A) (Proto.funext h)
+/-- Equal continuations, pointwise, give equal receives. -/
+def Proto.congrRecv (A : Type) {f g : A → Proto} (h : (a : A) → f a = g a) : Proto.recv A f = Proto.recv A g :=
+  Proto.congrArg (Proto.recv A) (Proto.funext h)
+
+/-- `Proto.dual` is an involution (by induction on the protocol, pointwise). -/
+def Proto.dual_dual : (p : Proto) → Proto.dual (Proto.dual p) = p
+  | .send A k => Proto.congrSend A (fun a => Proto.dual_dual (k a))
+  | .recv A k => Proto.congrRecv A (fun a => Proto.dual_dual (k a))
+  | .done => refl Proto.done
+
+/-- Move an endpoint along an equation of protocols (linear, `Eq.subst`). -/
+def Chan.retype {p q : Proto} (0 e : p = q) (1 c : Chan p) : Chan q := Eq.subst (fun r => Chan r) e c
+
+-- ## 1. Recursive protocols (25j)
+
+/-- A protocol body whose leaves may jump to a state of `S`. -/
+inductive RProto (S : Type) : Type 1 where
+  | send (A : Type) (k : A → RProto S)
+  | recv (A : Type) (k : A → RProto S)
+  | done
+  | jump (s : S)
+
+/-- The other end's view of a body: sends and receives swap, jumps stay. -/
+def RProto.dual {S : Type} : RProto S → RProto S
+  | .send A k => .recv A (fun a => RProto.dual (k a))
+  | .recv A k => .send A (fun a => RProto.dual (k a))
+  | .done => .done
+  | .jump s => .jump s
+
+/-- The dual system: every body dualised. -/
+def RProto.dualSys {S : Type} (σ : S → RProto S) : S → RProto S := fun s => RProto.dual (σ s)
+
+/-- A body as a `Proto`, with `u s` in place of each `.jump s`. -/
+def RProto.close {S : Type} (u : S → Proto) : RProto S → Proto
+  | .send A k => .send A (fun a => RProto.close u (k a))
+  | .recv A k => .recv A (fun a => RProto.close u (k a))
+  | .done => .done
+  | .jump s => u s
+
+/-- The recursive protocol `σ` from state `s`, unfolded for at most `n` jumps (a jump past
+the bound ends the session). -/
+def Proto.loop {S : Type} (σ : S → RProto S) : Nat → S → Proto
+  | .zero => fun _ => .done
+  | .succ n => fun s => RProto.close (Proto.loop σ n) (σ s)
+
+/-- Dualising commutes with closing a body. -/
+def RProto.dual_close {S : Type} (u : S → Proto) : (p : RProto S) →
+    Proto.dual (RProto.close u p) = RProto.close (fun s => Proto.dual (u s)) (RProto.dual p)
+  | .send A k => Proto.congrRecv A (fun a => RProto.dual_close u (k a))
+  | .recv A k => Proto.congrSend A (fun a => RProto.dual_close u (k a))
+  | .done => refl Proto.done
+  | .jump s => refl (Proto.dual (u s))
+
+/-- Closing a body with pointwise equal jump targets gives equal protocols. -/
+def RProto.close_congr {S : Type} {u v : S → Proto} (h : (s : S) → u s = v s) (p : RProto S) :
+    RProto.close u p = RProto.close v p :=
+  @Proto.congrArg (S → Proto) (fun w => RProto.close w p) u v (Proto.funext h)
+
+/-- The dual of a bounded unfolding is the bounded unfolding of the dual system. -/
+def Proto.dual_loop {S : Type} (σ : S → RProto S) : (n : Nat) → (s : S) →
+    Proto.dual (Proto.loop σ n s) = Proto.loop (RProto.dualSys σ) n s
+  | .zero => fun _ => refl Proto.done
+  | .succ n => fun s => Proto.trans (RProto.dual_close (Proto.loop σ n) (σ s))
+      (RProto.close_congr (Proto.dual_loop σ n) (RProto.dual (σ s)))
+
+/-- Make a channel following `σ` from `s` for at most `n` jumps; the child gets its end at
+the dual system (`Proto.dual_loop`), so both sides are written against a system. -/
+def Chan.forkLoop {S : Type} (σ : S → RProto S) (n : Nat) (s : S)
+    (1 child : (1 c : Chan (Proto.loop (RProto.dualSys σ) n s)) → IO Unit) : IO1 (Chan (Proto.loop σ n s)) :=
+  Chan.forkD (Proto.loop σ n s) (fun c => child (Chan.retype (Proto.dual_loop σ n s) c))
+
+-- ## 2. Delegation (25k)
+
+/-- `p`, then `q` where `p` ends. -/
+def Proto.then (q : Proto) : Proto → Proto
+  | .send A k => .send A (fun a => Proto.then q (k a))
+  | .recv A k => .recv A (fun a => Proto.then q (k a))
+  | .done => q
+
+/-- Dualising commutes with sequencing. -/
+def Proto.dual_then (q : Proto) : (p : Proto) →
+    Proto.dual (Proto.then q p) = Proto.then (Proto.dual q) (Proto.dual p)
+  | .send A k => Proto.congrRecv A (fun a => Proto.dual_then q (k a))
+  | .recv A k => Proto.congrSend A (fun a => Proto.dual_then q (k a))
+  | .done => refl (Proto.dual q)
+
+/-- Hand the peer an endpoint following `P`, then go on as `k`. On the wire the peer drives
+`P` through this channel; this side relays (`Chan.delegate`). -/
+def Proto.sendCh (P k : Proto) : Proto := Proto.then k (Proto.dual P)
+/-- Receive an endpoint following `P`, then go on as `k`: this side's end of the channel
+*is* the received endpoint until `P` ends. -/
+def Proto.recvCh (P k : Proto) : Proto := Proto.then k P
+
+/-- The peer of `sendCh P k` follows `recvCh P (dual k)`. -/
+def Proto.dual_sendCh (P k : Proto) : Proto.dual (Proto.sendCh P k) = Proto.recvCh P (Proto.dual k) :=
+  Proto.trans (Proto.dual_then k (Proto.dual P)) (Proto.congrArg (Proto.then (Proto.dual k)) (Proto.dual_dual P))
+/-- The peer of `recvCh P k` follows `sendCh P (dual k)`. -/
+def Proto.dual_recvCh (P k : Proto) : Proto.dual (Proto.recvCh P k) = Proto.sendCh P (Proto.dual k) :=
+  Proto.dual_then k P
+
+/-- Delegate `d` over `c`: relay every message of `P` between them (structural on `P`),
+close `d` when `P` ends, and hand back `c` at `k`. `d` is consumed, so this side can't
+use it again. -/
+def Chan.delegate {k : Proto} : (P : Proto) → (1 d : Chan P) → (1 c : Chan (Proto.sendCh P k)) → IO1 (Chan k)
+  | .send A f => fun d c => IO1.bind (Chan.recvD c) (fun r => let 1 (a, c) := r;
+      IO1.bind (Chan.sendD d a) (fun d => Chan.delegate (f a) d c))
+  | .recv A f => fun d c => IO1.bind (Chan.recvD d) (fun r => let 1 (a, d) := r;
+      IO1.bind (Chan.sendD c a) (fun c => Chan.delegate (f a) d c))
+  | .done => fun d c => fun w => let 1 (u, w') := Chan.closeD d w; (c, w')
+
+/-- Make a channel that starts by delegating an endpoint following `P`; the child's end
+is `recvCh P (dual k)` (`Proto.dual_sendCh`). -/
+def Chan.forkSendCh (P k : Proto) (1 child : (1 c : Chan (Proto.recvCh P (Proto.dual k))) → IO Unit) :
+    IO1 (Chan (Proto.sendCh P k)) :=
+  Chan.forkD (Proto.sendCh P k) (fun c => child (Chan.retype (Proto.dual_sendCh P k) c))
