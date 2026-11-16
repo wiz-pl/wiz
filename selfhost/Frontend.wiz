@@ -700,6 +700,8 @@ def closeG (inline : Bool) (gs : Globals) : Nat → Tm → Tm
         | .const n _ _ v ty => .const n ps (lparamLvls ps) v ty
         | t => t
   | d, .pi q i j a b => .pi q i j (closeG inline gs d a) (closeG inline gs (d + 1) b)
+  -- (`A × B`, as the scope checker reads it)
+  | d, .sigma q i j a b => .sigma q i j (closeG inline gs d a) (closeG inline gs (d + 1) b)
   | d, .lam b => .lam (closeG inline gs (d + 1) b)
   | d, .app f a => .app (closeG inline gs d f) (closeG inline gs d a)
   | d, .letE ty v b => .letE (closeG inline gs d ty) (closeG inline gs d v) (closeG inline gs (d + 1) b)
@@ -1039,56 +1041,122 @@ def ctorName (c : Syntax) : String := match kid c 2 with
   | _ => "_"
 def ctorFields (c : Syntax) : List Field := fieldsOf (kids (kid c 3))
 
+-- an elaboration context: the kernel's (values, types) and the names
+-- (and the binders' types quoted, latest first, each when first needed: a new
+-- metavariable's type is a Π over the whole context, and quoting every type again for
+-- each one made big definitions run out of memory: stage 20b)
+inductive Cx where
+  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm))
+def Cx.c : Cx → TCtx
+  | .mk c _ _ => c
+def Cx.sc : Cx → Scope
+  | .mk _ sc _ => sc
+def Cx.tele : Cx → List (Unit → Tm)
+  | .mk _ _ t => t
+def Cx.lvl (cx : Cx) : Nat := TCtx.lvl (Cx.c cx)
+def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
+  | .mk c sc t =>
+    let d := TCtx.lvl c;
+    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+-- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
+-- metavariables applied to the context don't carry every `let`'s value along)
+def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
+  | .mk c sc t =>
+    let d := TCtx.lvl c;
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- an index (`tt` without one), scope-checked in `sc` and closed at depth `d`
 def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax → Elab
   | .none => .ok .star
   | .some s => match elab sc s with
     | .ok t => .ok (closeG inline gs d t)
     | e => e
+-- (A15) a field's type elaborated with types (`fieldTyT`, after the typed elaborator, is
+-- passed in): the term over the context and its inlined form
+inductive FTy where
+  | ok (t ti : Tm)
+  | err (msg : String)
+def pickT (inline : Bool) (t ti : Tm) : Tm := match inline with
+  | .true => ti
+  | .false => t
+-- (A15) a higher-order recursive field `H → T ps j` or `(h : H) → T ps j` (an infinitary
+-- one, `Desc.hrec`): the binder's name, the domain and the index. `T` is not in scope
+-- while `H` is elaborated, so it occurs strictly positively (in the Lean frontend
+-- `ctorDesc` checks that `H` doesn't mention it).
+inductive HRecF where
+  | yes (h : String) (H : Syntax) (j : Option Syntax)
+  | no
+def hrecField (T : String) (ps : List String) (nidx : Nat) (ty : Syntax) : HRecF :=
+  match strEq (kindOf ty) "term.arrow" with
+  | .true => match recField T ps nidx (kid ty 2) with
+    | .yes j => .yes "_" (kid ty 0) j
+    | .no => .no
+  | .false => match strEq (kindOf ty) "term.depArrow" with
+    | .true => match binderNames (kid ty 0) with
+      | .cons h .nil => match binderType (kid ty 0) with
+        | .some H => match recField T ps nidx (kid ty 2) with
+          | .yes j => .yes h H j
+          | .no => .no
+        | .none => .no
+      | _ => .no
+    | .false => .no
+-- bind the parameters (their types a telescope `pts`) in an elaboration context
+def bindParamsCx : Cx → List String → Tms → Cx
+  | cx, .cons x xs, .tcons A rest => bindParamsCx (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) xs rest
+  | cx, _, _ => cx
+-- (U2b) the universe level a field of sort `k` would be lifted from, if it doesn't live
+-- exactly in `Sort (lv+1)`
+def liftFrom (lv : Lvl) (c : TCtx) (A : Tm) : Option Lvl := match sortOf c (eval (TCtx.env c) A) with
+  | .some k => match lvlEquiv k (lsucc lv) with
+    | .true => .none
+    | .false => .some k
+  | .none => .none
 -- **Exercise 16.1.** The description of a constructor's fields (`ctorDesc` in
 -- `Inductive.lean`): a field `(q x : A)` is `darg q A (fun x => …)`, a recursive one (of
--- type `T ps j`, `recField`) is `drec q j …`, and the end is `dret i`, `i` the
+-- type `T ps j`, `recField`) is `drec q j …`, a higher-order one (`H → T ps j`,
+-- `hrecField`) is `dhrec q H (fun h => j) …`, and the end is `dret i`, `i` the
 -- constructor's index `res` (`idxTm`: `tt` for a type without indices). A recursive
--- field binds no variable. `sc` is the scope (the globals, then the parameters, `t✝`
--- and the fields so far that are bound) and `d` the number of those binders, for
--- closing a field's type over the globals (`closeG inline gs d`).
+-- field binds no variable. `cx` is the context (the parameters, `t✝` and the fields so
+-- far that are bound) and `d` its depth; a field's type is elaborated in it with types
+-- (`fe`, A15), an index is scope-checked (`idxTm`).
 --
 -- (U2b) A field must live exactly in `Sort (lv+1)`, where `lv` is the description's
 -- level (universes aren't cumulative). A field in a smaller universe — a proof field of a
 -- type in `Type`, or `B : Type v` of a type in `Type (max u v)` — is wrapped in
 -- `ULift.{lv+1}` as in the Lean frontend (`FieldLift` in `Inductive.lean`); the
 -- constructor still takes the field itself (it puts `up x` in the payload), and the
--- match compiler reads it back with `down` (`fieldCols`). `c` is the kernel context of
--- the parameters and the fields so far, to read a field's sort.
-def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (res : Option Syntax)
-    (lv : Lvl) : TCtx → Scope → Nat → List Field → Elab
+-- match compiler reads it back with `down` (`fieldCols`).
+def ctorDesc (inline : Bool) (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (T : String) (ps : List String) (nidx : Nat) (res : Option Syntax)
+    (lv : Lvl) : Cx → Nat → List Field → Elab
   --<sol
-  | _, sc, d, .nil => match idxTm inline gs sc d res with
+  | cx, d, .nil => match idxTm inline gs (Cx.sc cx) d res with
     | .ok i => .ok (.dret i)
     | e => e
-  | c, sc, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
-    | .yes j => match idxTm inline gs sc d j with
+  | cx, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
+    | .yes j => match idxTm inline gs (Cx.sc cx) d j with
       | .err m => .err m
-      | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
+      | .ok jt => match ctorDesc inline gs fe T ps nidx res lv cx d rest with
         | .ok D => .ok (.drec (.qlit q) jt D)
         | e => e
-    | .no => match elab sc ty with
-      | .err m => .err m
-      | .ok A =>
-        let Acl : Tm := closeG .false gs d A;
-        let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
-        let lifted : Bool := match k with
-          | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
-          | .none => .false;
-        match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+    | .no => match hrecField T ps nidx ty with
+      | .yes h Hs j => match fe gs cx Hs with
         | .err m => .err m
-        | .ok D => match lifted with
-          | .true => .ok (.darg (.qlit q) (.ulift (match k with
-              | .some k' => k'
-              | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
-          | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+        | .ok H HI => match idxTm inline gs (Scope.bind (Cx.sc cx) h) (d + 1) j with
+          | .err m => .err m
+          | .ok jt => match liftFrom lv (Cx.c cx) H with
+            | .some _ => .err (String.append (String.append "the domain of the higher-order field " x)
+                " is in a smaller universe than the type (a lifted domain is not supported by the self-hosted frontend)")
+            | .none => match ctorDesc inline gs fe T ps nidx res lv cx d rest with
+              | .ok D => .ok (.dhrec (.qlit q) (pickT inline H HI) (.lam jt) D)
+              | e => e
+      | .no => match fe gs cx ty with
+        | .err m => .err m
+        | .ok A AI => match ctorDesc inline gs fe T ps nidx res lv (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) (d + 1) rest with
+          | .err m => .err m
+          | .ok D => match liftFrom lv (Cx.c cx) A with
+            | .some k => .ok (.darg (.qlit q) (.ulift k (lsucc lv) (pickT inline A AI)) (.lam (downVar0 (d + 1) D)))
+            | .none => .ok (.darg (.qlit q) (pickT inline A AI) (.lam D))
   --|ex
-  --| | _, _, _, _ => .err "not implemented"
+  --| | _, _, _ => .err "not implemented"
   --sol>
 -- a constructor's index: the last argument of its result type `T ps i`
 def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
@@ -1097,17 +1165,60 @@ def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
     | .cons _ (.cons ty _) => .some (lastS (kids (kid ty 1)))
     | _ => .none
 
--- the constructors' descriptions, under the binder `t✝` of the tag
+-- the constructors' descriptions, under the binder `t✝` of the tag (`cx`: the
+-- parameters and `t✝`)
 inductive Descs where
   | ok (ds : Tms)
   | err (msg : String)
-def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (lv : Lvl) (cx : TCtx) : List Syntax → Descs
+def ctorDescs (inline : Bool) (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (T : String) (ps : List String) (nidx : Nat) (lv : Lvl) (cx : Cx) : List Syntax → Descs
   | .nil => .ok .tnil
-  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) lv cx (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons c cs => match ctorDesc inline gs fe T ps nidx (ctorRes nidx c) lv cx (Cx.lvl cx) (ctorFields c) with
     | .err m => .err m
-    | .ok D => match ctorDescs inline gs T ps nidx lv cx cs with
+    | .ok D => match ctorDescs inline gs fe T ps nidx lv cx cs with
       | .ok ds => .ok (.tcons D ds)
       | e => e
+-- (A15) `l`'s predecessor bound (`Level.predBound`): a field in `Sort k` needs the type in
+-- `Type l` with `l ≥ predBound k`
+def lvlPredB : Lvl → Lvl
+  | .lnum n => .lnum (n - 1)
+  | .lsucc l => l
+  | .lmax a b => .lmax (lvlPredB a) (lvlPredB b)
+  | .limax a b => .lmax (lvlPredB a) (lvlPredB b)
+  | l => l
+def lvlJoin (a b : Lvl) : Lvl := match lvlClosed b with
+  | .some .zero => a
+  | _ => match lvlEquiv (.lmax a b) a with
+    | .true => a
+    | .false => match lvlClosed (.lmax a b) with
+      | .some n => .lnum n
+      | .none => .lmax a b
+-- (A15) the universe a data type without a written one needs for its fields (as the Lean
+-- frontend infers it): each field's sort's predecessor; a recursive field needs none, a
+-- higher-order one its domain's. A field that doesn't elaborate stops the walk (the
+-- description reports it).
+def fieldsLvl (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (T : String) (ps : List String) (nidx : Nat) : Cx → List Field → Lvl
+  | _, .nil => .lnum 0
+  | cx, .cons (.mk x _ _ ty) rest => match recField T ps nidx ty with
+    | .yes _ => fieldsLvl gs fe T ps nidx cx rest
+    | .no =>
+      let hr := hrecField T ps nidx ty;
+      let dom : Syntax := match hr with
+        | .yes _ Hs _ => Hs
+        | .no => ty;
+      match fe gs cx dom with
+      | .err _ => .lnum 0
+      | .ok A _ =>
+        let env := TCtx.env (Cx.c cx);
+        let here : Lvl := match sortOf (Cx.c cx) (eval env A) with
+          | .some k => lvlPredB k
+          | .none => .lnum 0;
+        let cx' : Cx := match hr with
+          | .yes _ _ _ => cx
+          | .no => Cx.bind cx x (eval env A);
+        lvlJoin (fieldsLvl gs fe T ps nidx cx' rest) here
+def ctorsLvl (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (T : String) (ps : List String) (nidx : Nat) (cx : Cx) : List Syntax → Lvl
+  | .nil => .lnum 0
+  | .cons c cs => lvlJoin (ctorsLvl gs fe T ps nidx cx cs) (fieldsLvl gs fe T ps nidx cx (ctorFields c))
 -- a constructor's fields with their types, every field bound in the later ones
 inductive CFields where
   | ok (fs : List CField)
@@ -1131,6 +1242,37 @@ def ctorFieldTys (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (Tc
     match A with
     | .err m => .err m
     | .ok f => match ctorFieldTys gs T ps nidx Tc TcI (Scope.bind sc x) (d + 1) rest with
+      | .ok fs => .ok (List.append f fs)
+      | e => e
+-- (A15) the same for a data type's own constructors, each field's type elaborated with
+-- types in `cx` (the parameters and the fields before it); a higher-order recursive field
+-- `(h : H) → T ps j` is not marked recursive (as the mutual types' fields, 19e)
+def cfTy : List CField → Tm
+  | .cons (.mk _ _ A _) _ => A
+  | .nil => .star
+def ctorFieldTysT (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (T : String) (ps : List String) (nidx : Nat) (Tc TcI : Tm) : Cx → List Field → CFields
+  | _, .nil => .ok .nil
+  | cx, .cons (.mk x _ _ ty) rest =>
+    let np := List.length ps;
+    let d := Cx.lvl cx;
+    let sc := Cx.sc cx;
+    let A : CFields := match recField T ps nidx ty with
+      | .yes j => match idxArgs gs sc d j with
+        | .ok js => .ok (.cons (.mk x .true (tApps Tc (tmsAppend (pvars np d) js)) (tApps TcI (tmsAppend (pvars np d) js))) .nil)
+        | .err m => .err m
+      | .no => match hrecField T ps nidx ty with
+        | .yes h Hs j => match fe gs cx Hs with
+          | .err m => .err m
+          | .ok H HI => match idxArgs gs (Scope.bind sc h) (d + 1) j with
+            | .err m => .err m
+            | .ok js => .ok (.cons (.mk x .false (piH H (tApps Tc (tmsAppend (pvars np (d + 1)) js)))
+                (piH HI (tApps TcI (tmsAppend (pvars np (d + 1)) js)))) .nil)
+        | .no => match fe gs cx ty with
+          | .ok A AI => .ok (.cons (.mk x .false A AI) .nil)
+          | .err m => .err m;
+    match A with
+    | .err m => .err m
+    | .ok f => match ctorFieldTysT gs fe T ps nidx Tc TcI (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) (cfTy f))) rest with
       | .ok fs => .ok (List.append f fs)
       | e => e
 -- a constructor's type: `(fields) → T`
@@ -1363,14 +1505,14 @@ def tagTmB (lifted : Bool) (k i : Nat) : Tm := match lifted with
 def tagValTmB (lifted : Bool) (k i : Nat) : Val := match lifted with
   | .true => .vup (.vtag k i)
   | .false => .vtag k i
-def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : List (List Bool) → Globals → Nat → List Syntax → Added
+def addCtors (fe : Globals → Cx → Syntax → FTy) (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : List (List Bool) → Globals → Nat → List Syntax → Added
   | _, gs, _, .nil => .ok gs .nil
   | lifts, gs, i, .cons c cs =>
     let ls := liftHead lifts;
     let n := List.length (ctorFields c);
     let np := List.length ps;
     let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames (ctorFields c));
-    match ctorFieldTys gs T ps nidx Tc TcI (bindAll (Globals.scope gs) ps) np (ctorFields c) with
+    match ctorFieldTysT gs fe T ps nidx Tc TcI (bindParamsCx (Cx.mk empty (Globals.scope gs) .nil) ps pts) (ctorFields c) with
     | .err _ => .err
     | .ok fs => match idxArgs gs scF (np + n) (ctorRes nidx c) with
       | .err _ => .err
@@ -1387,7 +1529,7 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
         let v := markClosed (tLams (np + n) (.con (.pair (tagTm lv k i) (payloadPL proof ls n (n - 1))))) ty;
         match check empty v (eval .nil ty) with
         | .err _ => .err
-        | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
+        | .ok _ _ => match addCtors fe T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
           (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
@@ -1505,7 +1647,7 @@ def isStructCmd (stx : Syntax) : Bool := match kid stx 7 with
   | .atom _ => .true
   | _ => .false
 -- (`seal`: the seal axiom of a `sealed inductive`, 22k, the first domain of the index tail)
-def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
+def inductiveCmdL (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (stx0 : Syntax) (seal : Option Tm) : Step := match ctorQtyErr (kids (kid stx0 3)) (kids (kid stx0 6)) with
   | .some m => errStep gs m
   | .none => match kid stx0 1 with
   | .ident T =>
@@ -1524,10 +1666,17 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
       | .indexed _ => 1
       | _ => 0;
     let us := univParamsOf stx0;
-    let lv := dataLevel stx0;
+    let lv0 := dataLevel stx0;
     match elabTele gs (Globals.scope gs) 0 params with
     | .err m => errStep gs m
     | .ok pts =>
+      -- (U2b) the context of the parameters and the tag binder `t✝` (which `ctorDesc`
+      -- is under: its var 0), where the fields are elaborated (A15)
+      let cxT := Cx.bind (bindParamsCx (Cx.mk empty (Globals.scope gs) .nil) ps pts) "t✝" (.vunit (ln 1));
+      -- (A15) without a written universe, the fields raise it as they need
+      let lv := match sigLevel stx0 with
+        | .some l => l
+        | .none => lvlJoin lv0 (ctorsLvl gs fe T ps nidx cxT ctors);
       -- the index type, over the parameters
       let Ir : Elab := match sig with
         | .indexed I => match elab (bindAll (Globals.scope gs) ps) I with
@@ -1538,12 +1687,9 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
       match Ir with
       | .err m => errStep gs m
       | .ok I0 =>
-        -- (U2b) the context of the parameters and the tag binder `t✝` (which `ctorDesc`
-        -- is under: its var 0), for reading a field's sort
-        let cxP := TCtx.bind (paramCtx empty pts) (.vunit (ln 1));
-        match ctorDescs .false gs T ps nidx lv cxP ctors with
+        match ctorDescs .false gs fe T ps nidx lv cxT ctors with
         | .err m => errStep gs m
-        | .ok ds0 => match ctorDescs .true gs T ps nidx lv cxP ctors with
+        | .ok ds0 => match ctorDescs .true gs fe T ps nidx lv cxT ctors with
           | .err m => errStep gs m
           | .ok dsI0 =>
             -- phantom parameters: those that neither a constructor nor the index type
@@ -1591,14 +1737,14 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
                 let Tc : Tm := .const Tn us (lvlArgs us) val ty;
                 -- (U2b) which fields the description lifted
                 let lifts := descLiftsAll (mkD ds);
-                match addCtors T us lv ps pts nidx I Tc valI k (isStructCmd stx0) lifts gs1 0 ctors with
+                match addCtors fe T us lv ps pts nidx I Tc valI k (isStructCmd stx0) lifts gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
                     (Globals.addInd gs2 T (.mk np lv I (mkD ds) (mkD dsI) cs .none Tc (kids (kid stx 3))))
   | _ => errStep gs "an inductive type needs a name"
 
 -- (U2) symbolic levels in a data type's description: `inductive T.{u} (A : Type u) : Type u`
-def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
+def inductiveCmdS0 (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (stx0 : Syntax) (seal : Option Tm) : Step :=
   let us := univParamsOf stx0;
   let lv := dataLevel stx0;
   match lvlDeclared us lv with
@@ -1606,9 +1752,9 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
       (match us with
        | .nil => " (declare one: `inductive T.{u}`)"
        | .cons _ _ => ""))
-  | .true => inductiveCmdL gs stx0 seal
-def inductiveCmdS (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step :=
-  inductiveCmdS0 gs stx0 seal
+  | .true => inductiveCmdL gs fe stx0 seal
+def inductiveCmdS (gs : Globals) (fe : Globals → Cx → Syntax → FTy) (stx0 : Syntax) (seal : Option Tm) : Step :=
+  inductiveCmdS0 gs fe stx0 seal
 
 def sndN : Nat → Tm → Tm
   | .zero, t => t
@@ -1631,29 +1777,6 @@ def dropL {A : Type} : Nat → List A → List A
 -- `?mN Γ =?= t` when `t` lives in `Γ`; elaborated terms are zonked (the solutions put
 -- in) before the kernel checks them.
 
--- an elaboration context: the kernel's (values, types) and the names
--- (and the binders' types quoted, latest first, each when first needed: a new
--- metavariable's type is a Π over the whole context, and quoting every type again for
--- each one made big definitions run out of memory: stage 20b)
-inductive Cx where
-  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm))
-def Cx.c : Cx → TCtx
-  | .mk c _ _ => c
-def Cx.sc : Cx → Scope
-  | .mk _ sc _ => sc
-def Cx.tele : Cx → List (Unit → Tm)
-  | .mk _ _ t => t
-def Cx.lvl (cx : Cx) : Nat := TCtx.lvl (Cx.c cx)
-def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
-  | .mk c sc t =>
-    let d := TCtx.lvl c;
-    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
--- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
--- metavariables applied to the context don't carry every `let`'s value along)
-def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
-  | .mk c sc t =>
-    let d := TCtx.lvl c;
-    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- the metavariables: the depth each was made at, its solution (a term at that depth),
 -- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
 -- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
@@ -6104,7 +6227,17 @@ def withDefault (gs : Globals) (stx : Syntax) : Step := match reorderStructural 
       | .true => .mk line gs
       | .false => command gs1 main
   | .no => withDefault' gs stx
-def inductiveCmd (gs : Globals) (stx : Syntax) : Step := inductiveCmdS gs stx .none
+-- (A15) a constructor field's type, elaborated with types in `cx` (the parameters, then
+-- the fields before it) against a sort: `ctorDesc`'s `fe`
+def fieldTyT (us : List String) (gs : Globals) (cx : Cx) (s : Syntax) : FTy :=
+  match inferType gs (ES.withParams ES.empty us) cx s with
+  | .err m => .err m
+  | .ok A0 _ es => match finishElab gs es with
+    | .err m => .err m
+    | .ok es' => match zonk es' (Cx.lvl cx) A0 with
+      | .none => .err "could not infer an implicit argument"
+      | .some A => .ok A (inlineTm gs A)
+def inductiveCmd (gs : Globals) (stx : Syntax) : Step := inductiveCmdS gs (fieldTyT (univParamsOf stx)) stx .none
 -- **`sealed inductive T …`** (22k; `command.sealed` in `Elab/Command.lean`): the axiom
 -- `T.seal✝ : Type`, then `T` with the seal as the first domain of its index tail (a
 -- constant is compared by name, so no declaration that can't write the name is `T`)
@@ -6117,7 +6250,7 @@ def sealedCmd (gs : Globals) (stx : Syntax) : Step :=
       let K := String.append T ".seal✝";
       let Kn := Globals.declName gs K;
       let ax : Tm := .axiomC Kn (.univ 0);
-      inductiveCmdS (Globals.add gs (.mk K .nil (.univ 0) ax ax .nil .nil)) inner (.some ax)
+      inductiveCmdS (Globals.add gs (.mk K .nil (.univ 0) ax ax .nil .nil)) (fieldTyT (univParamsOf inner)) inner (.some ax)
     | _ => errStep gs "an inductive type needs a name"
 -- one definition (or inductive type), by its form
 def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "command.inductive" with
