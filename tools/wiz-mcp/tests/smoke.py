@@ -205,6 +205,7 @@ def run(argv: list[str]) -> int:
                 "version", "check", "parse", "fmt", "diagnostics", "hover", "goals",
                 "definition", "references", "document_symbols", "workspace_symbols", "term_goal",
                 "completion", "signature_help", "inlay_hints", "code_actions", "rename",
+                "search", "doc",
             }
             if tools != expected:
                 raise RuntimeError(f"tools/list mismatch: {sorted(tools)}")
@@ -298,6 +299,23 @@ def run(argv: list[str]) -> int:
             if nav.read_text(encoding="utf-8") != nav_text:
                 raise RuntimeError("rename changed the file; it must only propose")
             print(f"navigation: definition, Prelude, {len(refs)} references, rename proposed (3 edits, not applied)")
+
+            # Library search and docs (P2a), over the toolchain's own library.
+            def tool(tool_name: str, **arguments: object) -> dict:
+                envelope = envelope_of(bridge.rpc("tools/call", {"name": tool_name, "arguments": arguments}))
+                if not envelope["ok"]:
+                    raise RuntimeError(f"{tool_name} failed: {envelope}")
+                return envelope["result"]
+
+            by_type = [r["name"] for r in tool("search", query="Nat → Nat → Nat", by="type", limit=100)["results"]]
+            by_name = tool("search", query="Nat.add")["results"]
+            add_doc = tool("doc", name="Nat.add")["declarations"][0]
+            if "Nat.add" not in by_type or by_name[0]["name"] != "Nat.add" or not add_doc["doc"]:
+                raise RuntimeError(f"library search is wrong: {by_type[:10]} {by_name[:1]} {add_doc}")
+            resources = [r["uri"] for r in bridge.rpc("resources/list", {})["result"]["resources"]]
+            if resources:  # the smoke workspace is a temp dir: no ledger, docs or stages
+                raise RuntimeError(f"resources/list offers files the workspace does not have: {resources}")
+            print(f"library: search by type and name, doc for Nat.add, {len(resources)} resources")
 
             shutdown = bridge.rpc("shutdown", {})
             if "error" in shutdown:

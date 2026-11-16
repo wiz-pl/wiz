@@ -55,6 +55,11 @@ import time
 import traceback
 import urllib.parse
 from dataclasses import dataclass
+
+sys_path_entry = os.path.dirname(os.path.abspath(__file__))
+if sys_path_entry not in sys.path:
+    sys.path.insert(0, sys_path_entry)
+import wiz_index  # noqa: E402  (the library index; stdlib only, beside this file)
 from typing import Any, Iterable, Optional
 
 # ---------------------------------------------------------------------------
@@ -84,7 +89,9 @@ INSTRUCTIONS = (
     "(source=lsp adds range ends and error codes, and checks unsaved text); "
     "use fmt --check before committing. definition/references/workspace_symbols navigate "
     "(locations outside the workspace and toolchain are withheld); rename and code_actions only "
-    "propose edits, which you apply yourself. Use diagnostics/hover/goals when you need the "
+    "propose edits, which you apply yourself. search finds library declarations by name or type "
+    "(`List α → Nat`) and doc shows their documentation; resources hold the trust ledger, the "
+    "error codes (wiz://error-codes/{code}) and the design stages. Use diagnostics/hover/goals when you need the "
     "language server's view. The language-server tools share one lazy `wiz lsp` "
     "daemon for this worktree and can be slow on a cold cache."
 )
@@ -132,6 +139,8 @@ class Config:
     extra_roots: tuple[str, ...] = ()
     #: More environment variables to pass to children (secret-looking names never pass).
     pass_env: tuple[str, ...] = ()
+    #: an elaborated library index (`wiz doc --lib -o DIR`'s api.json, or DIR); never built here
+    doc_index: Optional[str] = None
 
 
 def resolve_path(workspace: str, path: str) -> str:
@@ -1250,6 +1259,46 @@ TOOLS: list[dict[str, Any]] = [
 ]
 TOOLS += [
     {
+        "name": "search",
+        "annotations": {"title": "Search the library", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": (
+            "Search the Wiz library by name (default), by type (a pattern like `List α → Nat` or "
+            "`(α → β) → List α → List β`; `_` is a wildcard, single letters are type variables) or by "
+            "text (names, docs, signatures). scope: library (the toolchain's), workspace, or all. "
+            "Results have name, kind, module, signature, type, doc summary, file and line."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "by": {"type": "string", "enum": ["name", "type", "text"]},
+                "scope": {"type": "string", "enum": ["library", "workspace", "all"]},
+                "kinds": {"type": "array", "items": {"type": "string"}, "description": "e.g. [\"def\", \"constructor\"]"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "doc",
+        "annotations": {"title": "Library documentation", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": (
+            "Documentation: `name` gives a declaration's full doc comment, signature, type, file and line "
+            "(an exact name, or every declaration whose last component matches); `module` gives a module's "
+            "doc and its declarations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "module": {"type": "string"},
+                "scope": {"type": "string", "enum": ["library", "workspace", "all"]},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "definition",
         "annotations": {"title": "Go to definition", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": 'Where the name at a position is defined (declaration=true: declared). Locations outside the workspace and toolchain library are withheld (counted).',
@@ -1429,6 +1478,8 @@ class Server:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.daemon = LSPDaemon(config)
+        self._indexes: dict[tuple[str, tuple[str, ...]], Any] = {}
+        self.resources = Resources(lambda: os.path.realpath(self.config.workspace), self.read_roots)
         self.shutting_down = False
         self._reaper_stop = threading.Event()
         if config.idle > 0:
@@ -1446,6 +1497,65 @@ class Server:
         self._reaper_stop.set()
         self.daemon.close()
 
+    # -- library search and docs (P2a) ---------------------------------------
+
+    def _library_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        scope = args.get("scope", "library")
+        if scope not in ("library", "workspace", "all"):
+            raise ToolError("invalid_args", "`scope` must be library, workspace or all")
+        if scope != "workspace" and not self.library_dirs():
+            raise ToolError("wiz_not_found", _wiz_missing_message(self.config.workspace, self.config.wiz)
+                            + " (the library index needs the toolchain's library)")
+        index = self.index_for(scope)
+        if name == "search":
+            query = _require_str(args, "query")
+            by = args.get("by", "name")
+            if by not in ("name", "type", "text"):
+                raise ToolError("invalid_args", "`by` must be name, type or text")
+            limit = args.get("limit", 20)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+                raise ToolError("invalid_args", "`limit` must be an integer between 1 and 100")
+            kinds = args.get("kinds")
+            if kinds is not None and (not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds)):
+                raise ToolError("invalid_args", "`kinds` must be a list of strings")
+            rows, total = wiz_index.search(index, query, by, limit, set(kinds) if kinds else None)
+            return make_envelope(name, result={
+                "results": rows, "total": total, "index": index.source, "scope": scope,
+            })
+        # doc
+        decl_name = args.get("name")
+        module = args.get("module")
+        if (decl_name is None) == (module is None):
+            raise ToolError("invalid_args", "give exactly one of `name` and `module`")
+        if module is not None:
+            if not isinstance(module, str) or not module.strip():
+                raise ToolError("invalid_args", "`module` must be a non-empty string")
+            found = index.module_doc(module.strip())
+            if found is None:
+                raise ToolError("not_found", f"no module {module} in the {scope} index")
+            path, doc, decls = found
+            listed = [
+                {"name": d.name, "kind": d.kind, "type": wiz_index.arrow_type(d.sig), "line": d.line,
+                 "doc": wiz_index.summary(d.doc, 120)}
+                for d in decls[:500]
+            ]
+            return make_envelope(name, path=path, result={
+                "module": module.strip(), "file": path, "doc": doc, "declarations": listed,
+                "total": len(decls), "index": index.source,
+            })
+        if not isinstance(decl_name, str) or not decl_name.strip():
+            raise ToolError("invalid_args", "`name` must be a non-empty string")
+        wanted = decl_name.strip()
+        decls = index.decls()
+        exact = [d for d in decls if d.name == wanted]
+        matches = exact or [d for d in decls if d.name.rsplit(".", 1)[-1] == wanted][:10]
+        if not matches:
+            raise ToolError("not_found", f"no declaration {wanted} in the {scope} index (try search)")
+        return make_envelope(name, result={
+            "declarations": [d.row(full_doc=True) for d in matches],
+            "exact": bool(exact), "index": index.source,
+        })
+
     # -- path policy ---------------------------------------------------------
 
     def read_roots(self) -> list[str]:
@@ -1458,6 +1568,35 @@ class Server:
     def write_roots(self) -> list[str]:
         """Where tools may write: the workspace only."""
         return [os.path.realpath(self.config.workspace)]
+
+    def library_dirs(self) -> list[str]:
+        """The toolchain library's module directories (`share/wiz/lib`, or a checkout's `lib`)."""
+        dirs = []
+        for root in toolchain_roots(resolve_wiz(self.config.workspace, self.config.wiz)):
+            lib = os.path.join(root, "lib")
+            dirs.append(lib if os.path.basename(root) == "wiz" and os.path.isdir(lib) else root)
+        return dirs
+
+    def index_for(self, scope: str) -> "wiz_index.LibraryIndex":
+        """The (cached, incrementally refreshed) index of `library`, `workspace` or `all`."""
+        roots = {
+            "library": self.library_dirs(),
+            "workspace": [os.path.realpath(self.config.workspace)],
+        }
+        wanted = roots["library"] + roots["workspace"] if scope == "all" else roots[scope]
+        key = (scope, tuple(wanted))
+        index = self._indexes.get(key)
+        if index is None:
+            read_roots = self.read_roots()
+            index = wiz_index.LibraryIndex(
+                roots=wanted,
+                elaborated_file=self.config.doc_index if scope != "workspace" else None,
+                allowed=lambda path: _allowed(path, read_roots),
+            )
+            self._indexes = {k: v for k, v in self._indexes.items() if k[0] != scope}
+            self._indexes[key] = index
+        index.refresh()
+        return index
 
     # -- tool implementations ---------------------------------------------
 
@@ -1522,6 +1661,8 @@ class Server:
         if name == "version":
             run = self._run(["--version"], timeout, use_cache=False)
             return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+        if name in ("search", "doc"):
+            return self._library_tool(name, args)
 
         if name in GATED_TOOLS and not any(tool["name"] == name for tool in visible_tools(self.config)):
             raise ToolError(
@@ -1760,7 +1901,10 @@ class Server:
                     msg_id,
                     {
                         "protocolVersion": version,
-                        "capabilities": {"tools": {"listChanged": False}},
+                        "capabilities": {
+                            "tools": {"listChanged": False},
+                            "resources": {"listChanged": False, "subscribe": False},
+                        },
                         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                         "instructions": INSTRUCTIONS,
                     },
@@ -1776,6 +1920,19 @@ class Server:
             return [reply(msg_id, {})], False
         if method == "tools/list":
             return [reply(msg_id, {"tools": visible_tools(self.config)})], False
+        if method == "resources/list":
+            return [reply(msg_id, {"resources": self.resources.list()})], False
+        if method == "resources/templates/list":
+            return [reply(msg_id, {"resourceTemplates": RESOURCE_TEMPLATES})], False
+        if method == "resources/read":
+            uri = params.get("uri")
+            if not isinstance(uri, str):
+                return [reply_error(msg_id, -32602, "resources/read needs a uri")], False
+            try:
+                contents = self.resources.read(uri)
+            except ToolError as exc:
+                return [reply_error(msg_id, -32002, f"{exc.kind}: {exc.message}")], False
+            return [reply(msg_id, {"contents": contents})], False
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments") or {}
@@ -1814,6 +1971,147 @@ class Server:
                 write_message(stdout, response)
             if stop:
                 break
+
+
+# ---------------------------------------------------------------------------
+# Resources (P2a): read-only project documents, from the workspace only
+
+
+#: (uri, workspace-relative path, name, mime type, description)
+STATIC_RESOURCES = [
+    ("wiz://trust-ledger", ".github/trust-baseline.tsv", "Trust ledger",
+     "text/tab-separated-values",
+     "The trusted base of lib/: one row per axiom, extern or unchecked item "
+     "(module, declaration, item, reason, owner, review)."),
+    ("wiz://trust-ledger.json", ".github/trust-baseline.tsv", "Trust ledger (JSON)",
+     "application/json", "The trust ledger's rows as JSON objects."),
+    ("wiz://error-codes", "docs/error-codes.md", "Error codes", "text/markdown",
+     "Every stable diagnostic code, the error, an example and its quick fixes."),
+    ("wiz://stages", "docs/stages", "Stages", "application/json",
+     "The design stages (docs/stages/*.md): name, title and resource URI."),
+]
+RESOURCE_TEMPLATES = [
+    {"uriTemplate": "wiz://error-codes/{code}", "name": "Error code", "mimeType": "application/json",
+     "description": "One diagnostic code's row of docs/error-codes.md (error, example, quick fixes)."},
+    {"uriTemplate": "wiz://stages/{name}", "name": "Stage", "mimeType": "text/markdown",
+     "description": "A design stage document, e.g. wiz://stages/07-type-classes."},
+    {"uriTemplate": "wiz://trust-ledger/{module}", "name": "Trust ledger for a module",
+     "mimeType": "application/json", "description": "The trust ledger's rows for one module."},
+]
+MAX_RESOURCE_BYTES = 1 << 20
+LEDGER_COLUMNS = ["module", "declaration", "item", "reason", "owner", "review"]
+
+
+def parse_ledger(text: str) -> list[dict[str, str]]:
+    rows = []
+    for line in text.split("\n"):
+        if not line.strip() or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        rows.append({k: (cells[i] if i < len(cells) else "") for i, k in enumerate(LEDGER_COLUMNS)})
+    return rows
+
+
+def parse_error_codes(text: str) -> dict[str, dict[str, str]]:
+    """The `| code | the error | example | quick fixes |` table, keyed by code."""
+    out: dict[str, dict[str, str]] = {}
+    for line in text.split("\n"):
+        if not line.startswith("| `"):
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip())[1:-1]]
+        if len(cells) < 2:
+            continue
+        code = cells[0].strip("`")
+        out[code] = {
+            "code": code,
+            "error": cells[1],
+            "example": cells[2] if len(cells) > 2 else "",
+            "quick_fixes": cells[3] if len(cells) > 3 else "",
+        }
+    return out
+
+
+class Resources:
+    """Read-only resources from the workspace's own docs; nothing outside it, nothing written."""
+
+    def __init__(self, workspace: Any, read_roots: Any) -> None:
+        self.workspace = workspace
+        self.read_roots = read_roots
+
+    def _path(self, rel: str) -> str:
+        path = os.path.join(self.workspace(), rel)
+        if not _allowed(path, [self.workspace()]):
+            raise ToolError("path_denied", f"{rel} is outside the workspace")
+        return path
+
+    def _text(self, rel: str) -> str:
+        path = self._path(rel)
+        if not os.path.isfile(path):
+            raise ToolError("not_found", f"{rel} is not in this workspace")
+        if os.path.getsize(path) > MAX_RESOURCE_BYTES:
+            raise ToolError("io_error", f"{rel} is larger than {MAX_RESOURCE_BYTES} bytes")
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def _stages(self) -> list[dict[str, str]]:
+        directory = self._path("docs/stages")
+        if not os.path.isdir(directory):
+            return []
+        out = []
+        for filename in sorted(os.listdir(directory)):
+            full = os.path.join(directory, filename)
+            if filename.endswith(".md") and os.path.isfile(full) and _allowed(full, [self.workspace()]):
+                name = filename[:-3]
+                title = name
+                with open(full, encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        if line.startswith("# "):
+                            title = line[2:].strip()
+                            break
+                out.append({"name": name, "title": title, "uri": f"wiz://stages/{name}"})
+        return out
+
+    def list(self) -> list[dict[str, Any]]:
+        out = []
+        for uri, rel, name, mime, description in STATIC_RESOURCES:
+            try:
+                if os.path.exists(self._path(rel)):
+                    out.append({"uri": uri, "name": name, "mimeType": mime, "description": description})
+            except ToolError:
+                continue
+        return out
+
+    def read(self, uri: str) -> list[dict[str, Any]]:
+        def text(body: str, mime: str) -> list[dict[str, Any]]:
+            return [{"uri": uri, "mimeType": mime, "text": body}]
+
+        def as_json(value: Any) -> list[dict[str, Any]]:
+            return text(json.dumps(value, ensure_ascii=False, indent=1), "application/json")
+
+        if uri == "wiz://trust-ledger":
+            return text(self._text(".github/trust-baseline.tsv"), "text/tab-separated-values")
+        if uri == "wiz://trust-ledger.json":
+            return as_json(parse_ledger(self._text(".github/trust-baseline.tsv")))
+        if uri.startswith("wiz://trust-ledger/"):
+            module = urllib.parse.unquote(uri[len("wiz://trust-ledger/"):])
+            rows = [r for r in parse_ledger(self._text(".github/trust-baseline.tsv")) if r["module"] == module]
+            return as_json(rows)
+        if uri == "wiz://error-codes":
+            return text(self._text("docs/error-codes.md"), "text/markdown")
+        if uri.startswith("wiz://error-codes/"):
+            code = urllib.parse.unquote(uri[len("wiz://error-codes/"):])
+            table = parse_error_codes(self._text("docs/error-codes.md"))
+            if code not in table:
+                raise ToolError("not_found", f"no error code {code!r} (see wiz://error-codes)")
+            return as_json(table[code])
+        if uri == "wiz://stages":
+            return as_json(self._stages())
+        if uri.startswith("wiz://stages/"):
+            name = urllib.parse.unquote(uri[len("wiz://stages/"):])
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) or ".." in name:
+                raise ToolError("invalid_args", f"bad stage name {name!r}")
+            return text(self._text(f"docs/stages/{name}.md"), "text/markdown")
+        raise ToolError("not_found", f"unknown resource {uri}")
 
 
 def _as_text(value: Any) -> str:
@@ -1895,6 +2193,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         metavar="NAME",
         help="pass another environment variable to wiz (repeatable); secret-looking names are still dropped",
     )
+    parser.add_argument(
+        "--doc-index",
+        metavar="PATH",
+        help="an elaborated library index for search/doc: the api.json (or its directory) that "
+        "`wiz doc --lib -o DIR` writes; never built by the server",
+    )
     args = parser.parse_args(argv)
     workspace = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(workspace):
@@ -1926,6 +2230,7 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         allow_build=args.allow_build,
         extra_roots=tuple(extra_roots),
         pass_env=tuple(args.pass_env),
+        doc_index=os.path.abspath(os.path.expanduser(args.doc_index)) if args.doc_index else None,
     )
 
 
