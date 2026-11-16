@@ -85,6 +85,19 @@ extern \"wiz_nat_show\" Nat.toString : Nat → Nat → String
 def main : Nat := 0
 "
 
+/-- The 63-bit natives against the host's unbounded `Nat`: `2 ^ 64`, the bound
+`Float64.ofNat`/`UInt64.ofNat` (lib/IO.wiz) compare with, and a `Float64.ofNat` that
+takes the wrong branch because of it but happens to round to the same value. -/
+def libPreludeWide : String := "import IO
+def showB (x : Bool) : String := match x with
+  | .true => \"true\"
+  | .false => \"false\"
+def main : IO Unit := do
+  IO.println (Nat.toString (Nat.pow 2 64));
+  IO.println (showB (Nat.lt 3 18446744073709551616));
+  IO.println (Float64.toString (Float64.ofNat 3))
+"
+
 def libPreludeGroup : Group where
   name := "selfhost-lib-prelude"
   exercise := "stage 21 (A14): the self-hosted backend on lib/Prelude.wiz"
@@ -116,6 +129,25 @@ def libPreludeGroup : Group where
         | some shOpts => withSelfhostCli fun exe => do
           libPreludeRun exe shOpts libPreludeStr "abcd\n4\n99\n"
           libPreludeRun exe shOpts libPreludeStr "abcd\n4\n99\n" #["--rc"] },
+    { name := "run: the 63-bit natives diverge from the host at 2^64 (pinned)", run := fun _ => do
+        match ← cliRunOptions with
+        | none => skip "no garbage collector, --gc-cflags"
+        | some shOpts => withSelfhostCli fun exe => do
+          let host ← cliDiffHost
+          let tc ← cliDiffHostToolchain
+          let sh ← libPreludeArgs shOpts
+          let spec : CliDiffSpec := { files := #[("prog.wiz", libPreludeWide)], args := #["run", "prog.wiz"]
+                                      hostArgs := tc, shArgs := sh }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 0 s.code
+          let hl := h.out.splitOn "\n"
+          let sl := s.out.splitOn "\n"
+          checkEq ["18446744073709551616", "true"] (hl.take 2)
+          -- (pinned: the self-hosted runtime's numbers are 63-bit words that wrap)
+          checkEq ["0", "false"] (sl.take 2)
+          checkEq (hl.drop 2) (sl.drop 2)
+          skip "63-bit natives: the self-hosted runtime's Nat wraps at 2^63, so 2^64 is 0 and lib/IO's `Float64.ofNat`/`UInt64.ofNat` bound checks (`n < 2^64`) are false for every n; small values still agree by luck (an open issue, see the PR)" },
     { name := "build: an extern of a wiz_ function rt.c lacks is an error naming it", run := fun _ => withSelfhostCli fun exe => do
         let sh ← libPreludeArgs #[]
         let dir ← cliDiffInit #[("prog.wiz", libPreludeMissing)]
