@@ -141,13 +141,16 @@ def libPreludeGroup : Group where
           let (h, s) ← cliDiffBoth host exe spec
           checkEq 0 h.code
           checkEq 0 s.code
+          -- A known divergence, asserted as it is (the case passes): the self-hosted
+          -- runtime's Nat is a 63-bit word that wraps, so 2^64 is 0 and lib/IO's
+          -- `Float64.ofNat`/`UInt64.ofNat` bound checks (`n < 2^64`) are false for every
+          -- n; small values still agree by luck (an open issue, see the PR). When the
+          -- runtime's numbers become unbounded, the second assertion fails: update it.
           let hl := h.out.splitOn "\n"
           let sl := s.out.splitOn "\n"
           checkEq ["18446744073709551616", "true"] (hl.take 2)
-          -- (pinned: the self-hosted runtime's numbers are 63-bit words that wrap)
           checkEq ["0", "false"] (sl.take 2)
-          checkEq (hl.drop 2) (sl.drop 2)
-          skip "63-bit natives: the self-hosted runtime's Nat wraps at 2^63, so 2^64 is 0 and lib/IO's `Float64.ofNat`/`UInt64.ofNat` bound checks (`n < 2^64`) are false for every n; small values still agree by luck (an open issue, see the PR)" },
+          checkEq (hl.drop 2) (sl.drop 2) },
     { name := "build: an extern of a wiz_ function rt.c lacks is an error naming it", run := fun _ => withSelfhostCli fun exe => do
         let sh ← libPreludeArgs #[]
         let dir ← cliDiffInit #[("prog.wiz", libPreludeMissing)]
