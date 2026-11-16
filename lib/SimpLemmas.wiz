@@ -1,0 +1,85 @@
+import Nat
+import Int
+import Text
+import Functor
+import ListLemmas
+/-!
+# Simp lemmas
+
+The umbrella for the default rewrite set (`import SimpLemmas`): the equations a
+simplifier uses, oriented left to right, collected from the libraries that state them.
+`simp` (stage 6h) uses the registered set without a list; `simp only [...]` does not,
+and `simp [h]` adds `h` before the default set.
+
+Each rule is registered with `attribute [simp]` in the module that defines it, so
+importing that module alone also gives `simp` the rule:
+
+* **`Nat`** (`lib/Nat.wiz`): `n + 0 → n`, `n * 1 → n`, `1 * n → n`, `n * 0 → 0`.
+* **`Int`** (`lib/Int.wiz`): `a + 0 → a`, `0 + a → a`, `a - 0 → a`, `a * 1 → a`,
+  `1 * a → a`, `a * 0 → 0`, `0 * a → 0`.
+* **`Bool`** (`lib/Logic.wiz`): `!(!b) → b`, `b && true → b`, `b && false → false`,
+  `b || false → b`, `b || true → true`, `a && a → a`, `a || a → a`, the absorption
+  laws and De Morgan. The three `&&`/`||` identities are stated with the notation
+  (the stuck form the macro makes differs from `Bool.and`/`Bool.or` applied); the rest
+  are `Bool.and`/`Bool.or` laws. `!` is `Bool.not`, so `Bool.not_not` fires on `!(!b)`.
+* **`List`** (`lib/ListLemmas.wiz`): `xs ++ [] → xs`, `l ++ m` pushed through `map`,
+  `length`, `filter`, `any` and `all`, and `reverse` in normal form
+  (`reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`, …).
+
+Every rule is a theorem (no axioms, no `sorry`). Rules that would loop are deliberately
+not registered: commutativity (`Nat.add_comm`, `Bool.and_comm`), associativity
+(`Nat.add_assoc`, `List.append_assoc`), distributivity, and the reverse of the
+identities above. The exclusions and their reasons are in the module that states the
+lemmas (`lib/Nat.wiz`, `lib/Logic.wiz`, `lib/ListLemmas.wiz`).
+
+```
+import SimpLemmas
+
+def ex (n : Nat) : (n + 0) * 1 = n := by
+  simp
+  rfl
+
+def exList {A : Type} (xs : List A) : xs ++ [] = xs := by
+  simp
+  rfl
+```
+-/
+
+-- ## Nat powers
+
+/-- `b ^ 0 = 1`. -/
+def Nat.pow_zero (b : Nat) : b ^ 0 = 1 := rfl
+/-- `b ^ (n + 1) = b * b ^ n` (the exponent recurses, so the step is on the left). -/
+def Nat.pow_succ (b n : Nat) : b ^ Nat.succ n = b * b ^ n := rfl
+
+-- Neither power rule is registered: `b ^ 0` computes to `1`, so its left side is gone in
+-- the goal, and `b ^ (n + 1) → b * b ^ n` expands the term; both stay explicit
+-- (`rw (Nat.pow_zero b)`, `simp only [Nat.pow_succ]`).
+
+-- ## Booleans
+
+/-- `if true then a else b = a`. -/
+def Bool.if_true {A : Type} (a b : A) : (if Bool.true then a else b) = a := rfl
+/-- `if false then a else b = b`. -/
+def Bool.if_false {A : Type} (a b : A) : (if Bool.false then a else b) = b := rfl
+
+-- The two `if`s are not registered: the condition is a closed data value, so the left
+-- side computes to the branch and the goal never contains the `if`. They stay available
+-- explicitly. The `&&`/`||` identities are in `lib/Logic.wiz` (stated on the notation).
+
+-- ## Option and pairs
+
+/-- Mapping over `none` is `none`. -/
+def Option.map_none {A B : Type} (f : A → B) : Option.map f .none = .none := rfl
+/-- Mapping over `some a` applies the function. -/
+def Option.map_some {A B : Type} (f : A → B) (a : A) :
+    Option.map f (.some a) = .some (f a) := rfl
+/-- The first projection of a pair. -/
+def Prod.fst_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).1 = a := rfl
+/-- The second projection of a pair. -/
+def Prod.snd_mk {A B : Type} (a : A) (b : B) : ((a, b) : A × B).2 = b := rfl
+
+-- Not registered: `Option.map f none` and `(a, b).1` compute to a data value or a
+-- variable, and `Option.map f (some a)` computes to a constructor carrying `f` and `a`;
+-- `Tac.rewriteAt` refuses a constructor-valued pattern with rule variables, and the
+-- other left sides have already computed away in the goal. The rules stay explicit.
