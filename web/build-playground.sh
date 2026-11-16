@@ -47,7 +47,7 @@ ENGINE="$OUT/playground.wiz"
 (cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_playground_eval,_free \
+-sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)

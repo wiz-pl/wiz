@@ -20,6 +20,12 @@
 // top of the document and says so. The next stage replaces this guesswork with an export
 // that keeps the frontend's `@OFFSET` tags (`runCommands` without `stripAts`).
 //
+// Stage 1: when the module has `wiz_playground_check` (the same check as JSON, each line
+// with its command's code-point offset), `check` is used and the counting is not needed;
+// a module without it falls back to the text above. The answer may also carry an
+// `index` (positions → expected types and goal states, a later stage); `PositionIndex`
+// answers `wiz/plainTermGoal`/`wiz/plainGoal` from it with no further Wasm call.
+//
 // `SelfhostServer.handle(text) → [message]` has the shape of the planned wasm export
 // `wiz_lsp_handle : String → String` (one JSON-RPC message in, a JSON array out), so a
 // later stage swaps its body for that call and keeps the socket.
@@ -226,13 +232,120 @@ export function diagnosticsFromOutput(text, output) {
   return diagnostics;
 }
 
+// ## Stage 1: `wiz_playground_check`'s JSON
+
+// `{"v":1,"lines":[{"off","sev","text"}],"index"?:[…]}` → the parsed answer, or null when
+// it is not one (an old module, or garbage): the caller falls back to the text path.
+export function parseCheck(json) {
+  if (json === null || json === undefined) return null;
+  let answer;
+  try { answer = typeof json === "string" ? JSON.parse(json) : json; } catch (_) { return null; }
+  if (!answer || !Array.isArray(answer.lines)) return null;
+  return answer;
+}
+
+// An offset in the checked source (code points, the Prelude line included) as a UTF-16
+// offset into the editor's text, clamped to it.
+function editorOffset(text, prefix, codePoints) {
+  return Math.max(0, Math.min(text.length, utf16OfCodePoints(prefix + text, codePoints) - prefix.length));
+}
+
+// The diagnostics for `text` from a parsed check answer. A line's range is its
+// command's first line (from `off`); a parse error's is the token at its own offset.
+export function diagnosticsFromCheck(text, answer) {
+  const { prefix } = withPrelude(text);
+  const diagnostics = [];
+  for (const line of answer.lines) {
+    const raw = String(line.text === undefined ? "" : line.text);
+    const severity = line.sev === 1 || line.sev === 2 ? line.sev : severityOf(raw);
+    const parseAt = parseErrorOffset(raw);
+    if (parseAt !== null) {
+      const at = editorOffset(text, prefix, parseAt);
+      let to = at;
+      while (to < text.length && !/\s/.test(text[to])) to++;
+      diagnostics.push({
+        severity: 1, source: "wiz-selfhost", code: "parse-error",
+        message: messageOf(raw), range: range(text, at, Math.max(to, Math.min(at + 1, text.length))),
+      });
+      continue;
+    }
+    const known = typeof line.off === "number";
+    const at = known ? editorOffset(text, prefix, line.off) : 0;
+    if (severity === 3 && (raw === "" || !known || !RESULT.test(text.slice(at)))) continue;
+    const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(raw) };
+    diagnostic.range = known ? range(text, at, lineEnd(text, at)) : range(text, 0, 0);
+    if (!known) diagnostic.message += " (position unknown)";
+    diagnostics.push(diagnostic);
+  }
+  return diagnostics;
+}
+
+// Positions → what the pane asks for, from a check answer's `index`. An entry is
+// `{s, e, kind: "term"|"goal", expected?: string, goals?: [string]}`, `s`/`e` code-point
+// offsets into the checked source (end-exclusive). A lookup is the innermost entry of
+// that kind containing the caret (a caret at an entry's end counts, as in an editor
+// right after a term); ties go to the later entry.
+export class PositionIndex {
+  constructor(text, entries) {
+    const { prefix } = withPrelude(text);
+    this.text = text;
+    this.entries = (Array.isArray(entries) ? entries : [])
+      .filter((x) => x && typeof x.s === "number" && typeof x.e === "number" && x.e >= x.s)
+      .map((x) => Object.assign({}, x, {
+        start: editorOffset(text, prefix, x.s),
+        end: editorOffset(text, prefix, x.e),
+      }));
+  }
+
+  get size() { return this.entries.length; }
+
+  lookup(offset, kind) {
+    let best = null;
+    for (const x of this.entries) {
+      if (x.kind !== kind || offset < x.start || offset > x.end) continue;
+      if (best === null || x.end - x.start <= best.end - best.start) best = x;
+    }
+    return best;
+  }
+
+  rangeOf(entry) { return range(this.text, entry.start, entry.end); }
+
+  // `wiz/plainTermGoal`: `{goal, range}` or null
+  termGoal(offset) {
+    const x = this.lookup(offset, "term");
+    return x && typeof x.expected === "string" ? { goal: x.expected, range: this.rangeOf(x) } : null;
+  }
+
+  // `wiz/plainGoal`: `{goals, rendered}` or null (`goals: []` is a finished proof)
+  goal(offset) {
+    const x = this.lookup(offset, "goal");
+    if (!x || !Array.isArray(x.goals)) return null;
+    const goals = x.goals.map(String);
+    const rendered = goals.length ? "```wiz\n" + goals.join("\n\n") + "\n```" : "no goals";
+    return { goals, rendered, range: this.rangeOf(x) };
+  }
+}
+
+// A position (`{line, character}`, UTF-16) as an offset into `text`.
+export function offsetOf(text, position) {
+  let offset = 0;
+  for (let line = 0; line < position.line; line++) {
+    const nl = text.indexOf("\n", offset);
+    if (nl < 0) return text.length;
+    offset = nl + 1;
+  }
+  return Math.min(text.length, lineEnd(text, offset), offset + position.character);
+}
+
 // ## The server (one per connection; documents are per connection)
 
 // `evaluate(source) → string | Promise<string>` is `wiz_playground_eval` (the page waits
-// for its engine inside it).
+// for its engine inside it); `check(source) → string | null | Promise<…>` is
+// `wiz_playground_check`, or null when the module has none (then `evaluate` is used).
 export class SelfhostServer {
-  constructor({ evaluate, serverInfo = SERVER_INFO } = {}) {
+  constructor({ evaluate, check = null, serverInfo = SERVER_INFO } = {}) {
     this.evaluate = evaluate;
+    this.check = check;
     this.serverInfo = serverInfo;
     this.docs = new Map();     // uri → {text, version}
     this.session = 0;
@@ -296,9 +409,13 @@ export class SelfhostServer {
       case "wiz/plainGoal":
       case "wiz/plainTermGoal": {
         const uri = params.textDocument && params.textDocument.uri;
-        if (!this.docs.has(uri)) return fail(ERR.invalidParams, "the document is not open: " + uri);
-        // Stage 0 has no positions inside a command: nothing at the cursor.
-        return ok(null);
+        const doc = this.docs.get(uri);
+        if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
+        // Answered from the last check's index; without one (stage 0, or a module whose
+        // check has no index yet) there is nothing at the cursor.
+        if (!doc.index || !doc.index.size || !params.position) return ok(null);
+        const offset = offsetOf(doc.text, params.position);
+        return ok(method === "wiz/plainGoal" ? doc.index.goal(offset) : doc.index.termGoal(offset));
       }
       case "textDocument/hover":
         return ok(null);
@@ -339,9 +456,16 @@ export class SelfhostServer {
     const session = ++this.session;
     const version = doc.version;
     let diagnostics;
+    let index = null;
     try {
-      const output = await this.evaluate(withPrelude(doc.text).source);
-      diagnostics = diagnosticsFromOutput(doc.text, output);
+      const source = withPrelude(doc.text).source;
+      const answer = this.check ? parseCheck(await this.check(source)) : null;
+      if (answer) {
+        diagnostics = diagnosticsFromCheck(doc.text, answer);
+        index = new PositionIndex(doc.text, answer.index);
+      } else {
+        diagnostics = diagnosticsFromOutput(doc.text, await this.evaluate(source));
+      }
     } catch (e) {
       diagnostics = [{
         severity: 1, source: "wiz-selfhost", range: range(doc.text, 0, 0),
@@ -351,6 +475,7 @@ export class SelfhostServer {
     // A newer text arrived while this one was checked: its own publish follows.
     const now = this.docs.get(uri);
     if (!now || now.version !== version || session !== this.session) return [];
+    now.index = index;
     const out = [{ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, version, diagnostics } }];
     if (this.wantsElaborated) out.push({ jsonrpc: "2.0", method: "wiz/elaborated", params: { uri, version, session } });
     return out;

@@ -41,6 +41,18 @@ function evalSource(src) {
   return text;
 }
 
+// (stage 1) `wiz_playground_check`: the same check as JSON with each line's offset, for
+// the in-page language server; null with a module built before it existed.
+function checkSource(src) {
+  if (typeof wasm._wiz_playground_check !== "function") return null;
+  const p = wasm.stringToNewUTF8(src);
+  const r = wasm._wiz_playground_check(big(p));
+  wasm._free(big(p));
+  const text = r ? wasm.UTF8ToString(Number(r)) : null;
+  if (r) wasm._free(r);
+  return text;
+}
+
 function line(text) {
   const el = document.createElement("div");
   el.className = "line";
@@ -107,7 +119,10 @@ let engineReady;
 const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
 engineLoaded.catch(() => { /* reported by start(); the shim reports it again */ });
 const selfhost = typeof location !== "undefined" && isSelfhostSearch(location.search)
-  ? selfhostEndpoint({ evaluate: (src) => engineLoaded.then(() => evalSource(src)) })
+  ? selfhostEndpoint({
+    evaluate: (src) => engineLoaded.then(() => evalSource(src)),
+    check: (src) => engineLoaded.then(() => checkSource(src)),
+  })
   : undefined;
 startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });
 

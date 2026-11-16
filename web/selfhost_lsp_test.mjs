@@ -15,7 +15,7 @@
 import {
   isSelfhostSearch, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
-  SelfhostServer, SELFHOST_URL,
+  SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
@@ -306,7 +306,124 @@ async function waitUntil(predicate, ms = 3000) {
   app.stop();
 }
 
-// ## 8. Nothing escaped
+// ## 8. Stage 1: `wiz_playground_check`'s JSON, and the position index
+
+// The stub of the export (web/playground-exports.wiz): stubEval's lines, each tagged with
+// its command's code-point offset, as `{"v":1,"lines":[{"off","sev","text"}]}`; `extra`
+// is merged in (an `index`, say).
+function stubCheck(source, extra = {}) {
+  const lines = [];
+  let offset = 0;   // UTF-16
+  const cp = (o) => Array.from(source.slice(0, o)).length;
+  for (const line of source.split("\n")) {
+    const at = line.indexOf("@@");
+    if (at >= 0) {
+      lines.push({ off: cp(offset), sev: 1, text: `parse error ${cp(offset + at)}: unexpected token '@@'` });
+      break;
+    }
+    const one = stubEval(line + "\n").replace(/\n$/, "");
+    if (/^(def|theorem|#check|#eval) /.test(line)) {
+      lines.push({ off: cp(offset), sev: one.startsWith("error:") ? 1 : 3, text: one });
+    }
+    offset += line.length + 1;
+  }
+  return JSON.stringify(Object.assign({ v: 1, lines }, extra));
+}
+
+check("check: garbage is not an answer", parseCheck("{"), null);
+check("check: an old module's null", parseCheck(null), null);
+check("check: no lines", parseCheck('{"v":1}'), null);
+{
+  const text = "-- 😀\ndef a : Nat := BAD\n#eval a\ndef b : Nat := @@\n";
+  const ds = diagnosticsFromCheck(text, parseCheck(stubCheck(withPrelude(text).source)));
+  check("check: error, result, parse error", ds.map((d) => d.severity), [1, 3, 1]);
+  check("check: the error on its command (after an astral character)", ds[0].range,
+    { start: { line: 1, character: 0 }, end: { line: 1, character: 18 } });
+  check("check: the result's line", ds[1].range.start.line, 2);
+  check("check: the parse error at its token", ds[2].range.start, { line: 3, character: 15 });
+  check("check: the parse error's code", ds[2].code, "parse-error");
+}
+{
+  // a tactic error spans lines; a line without a tag still reports
+  const answer = parseCheck(JSON.stringify({ v: 1, lines: [
+    { off: 16, sev: 1, text: "error: unsolved goals:\nn : Nat\n⊢ Nat" },
+    { off: null, sev: 1, text: "error: cannot find module X" },
+  ] }));
+  const ds = diagnosticsFromCheck("def k : Nat → Nat := by\n  intro n\n", answer);
+  check("check: a multi-line message is one diagnostic", ds[0].message, "unsolved goals:\nn : Nat\n⊢ Nat");
+  check("check: at its command (the Prelude line subtracted)", ds[0].range.start, { line: 0, character: 0 });
+  checkThat("check: an untagged line says so", ds[1].message.includes("position unknown"));
+}
+{
+  // offsets are into the checked source: the Prelude line (16 code points) comes first
+  const text = "def f (n : Nat) : Nat := g n\n";
+  const p = withPrelude(text).prefix.length;
+  const index = new PositionIndex(text, [
+    { s: p + 0, e: p + 28, kind: "term", expected: "Nat → Nat" },
+    { s: p + 25, e: p + 28, kind: "term", expected: "Nat" },
+    { s: p + 27, e: p + 28, kind: "term", expected: "Nat (n)" },
+    { s: p + 25, e: p + 28, kind: "goal", goals: ["n : Nat\n⊢ Nat"] },
+    { s: p + 0, e: p + 3, kind: "goal", goals: [] },
+    { s: 5, e: 2, kind: "term", expected: "bad: ends before it starts" },
+  ]);
+  check("index: well-formed entries kept", index.size, 5);
+  check("index: the innermost term", index.termGoal(27).goal, "Nat (n)");
+  check("index: the enclosing one", index.termGoal(26).goal, "Nat");
+  check("index: its range", index.termGoal(26).range, { start: { line: 0, character: 25 }, end: { line: 0, character: 28 } });
+  check("index: the caret at an end counts", index.termGoal(28).goal, "Nat (n)");
+  check("index: outside everything", index.termGoal(29), null);
+  check("index: goals", index.goal(26).goals, ["n : Nat\n⊢ Nat"]);
+  check("index: goals rendered as a fence", index.goal(26).rendered, "```wiz\nn : Nat\n⊢ Nat\n```");
+  check("index: a finished proof", index.goal(1).rendered, "no goals");
+  check("offsetOf: line and character", offsetOf("ab\ncd\n", { line: 1, character: 1 }), 4);
+  check("offsetOf: clamped to the line", offsetOf("ab\ncd\n", { line: 0, character: 9 }), 2);
+}
+{
+  // a module without the export: check answers null and the text path is used
+  let evals = 0;
+  const server = new SelfhostServer({ evaluate: (s) => { evals++; return stubEval(s); }, check: () => null });
+  await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}');
+  const out = await server.handle(JSON.stringify({ jsonrpc: "2.0", method: "textDocument/didOpen",
+    params: { textDocument: { uri: "u", version: 1, text: "def a : Nat := BAD\n" } } }));
+  check("fallback: evaluate was used", evals, 1);
+  check("fallback: its diagnostic", out[0].params.diagnostics.map((d) => d.message), ["unknown identifier 'BAD'"]);
+}
+{
+  // the export with an index, through the client and the panel
+  const text = "def k (n : Nat) : Nat := n\n#eval k 2\n";
+  const p = withPrelude(text).prefix.length;
+  let evals = 0;
+  const index = [
+    { s: p + 25, e: p + 26, kind: "term", expected: "Nat" },
+    { s: p + 25, e: p + 26, kind: "goal", goals: ["n : Nat\n⊢ Nat"] },
+  ];
+  const c2 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: (s) => { evals++; return stubEval(s); },
+    // the index belongs to the first text only; a new text's check has none
+    check: (s) => Promise.resolve(stubCheck(s, s.includes(":= n\n") ? { index } : {})),
+  }) });
+  await c2.connect();
+  const got = waitFor(c2, "diagnostics");
+  c2.openDocument(uri, text);
+  check("export: the result diagnostic", (await got).diagnostics.map((d) => [d.severity, d.message, d.range.start.line]), [[3, "42", 1]]);
+  check("export: evaluate not called", evals, 0);
+  check("export: plainTermGoal from the index", await c2.plainTermGoal(uri, { line: 0, character: 25 }),
+    { goal: "Nat", range: { start: { line: 0, character: 25 }, end: { line: 0, character: 26 } } });
+  check("export: nothing elsewhere", await c2.plainTermGoal(uri, { line: 1, character: 2 }), null);
+  const st = await readGoalState(c2, uri, { line: 0, character: 25 });
+  const p2 = { innerHTML: "" };
+  renderPanel(p2, { state: "open", endpoint: SELFHOST_URL, diagnostics: [], goals: st.goals, goalsKind: st.goalsKind,
+    term: st.term, termKind: st.termKind, info: null });
+  checkThat("export: the panel shows the goal", p2.innerHTML.includes("⊢ Nat") && p2.innerHTML.includes("n : Nat"), p2.innerHTML.slice(0, 500));
+  checkThat("export: and the expected type's span", p2.innerHTML.includes('data-span="0:25-0:26"'));
+  const changed2 = waitFor(c2, "diagnostics");
+  c2.changeDocument(uri, "def k (n : Nat) : Nat := BAD\n");
+  await changed2;
+  check("export: a new check replaces the index", await c2.plainTermGoal(uri, { line: 0, character: 25 }), null);
+  c2.close();
+}
+
+// ## 9. Nothing escaped
 
 await sleep(30);
 check("no unhandled rejections", rejections.length, 0);
