@@ -312,6 +312,10 @@ def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : Ela
     | .ok r => .ok r
     | .error e =>
       if subTy s.globals ctx.types.reverse.toArray inferred expected then .ok ((), s) else
+      -- (13b) a guess that would take a look-alike of a private type says so itself, with the
+      -- hole, the guess and both types (`checkGuessTypes`): not as a reason under the mismatch
+      if e.code == ErrorCode.private_ && e.msg.startsWith "a hole solved by shape" then
+        .error { e with info := (ctx.withInfo stx).info, state? := some s } else
       let show' (v : VTy R) := elideLong ((quote s.globals ctx.lvl v).pretty ctx.names (some s.globals))
       .error { info := (ctx.withInfo stx).info,
                msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++

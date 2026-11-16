@@ -955,7 +955,7 @@ partial def checkGuess (l : Lvl) (m : Nat) (args : Array (Val R)) (head : Val R)
   match ← metaAppType m args l with
   | .ok (expected, tys) =>
     match inferNe g tys head with
-    | some inferred => checkGuessTypes l tys inferred expected
+    | some inferred => checkGuessTypes l tys inferred expected m (args.map .app) head
     | none => markGuessed "the guessed head's type can't be read off"
   | .error why => markGuessed why
 
@@ -965,7 +965,8 @@ partial def checkGuessFlex (l : Lvl) (m : Nat) (sp : Array (Elim R)) (m' : Nat) 
     ElabM R Unit := do
   let appArgs (sp : Array (Elim R)) : Array (Val R) := sp.filterMap fun | .app a => some a | _ => none
   match ← metaAppType m (appArgs sp) l, ← metaAppType m' (appArgs sp') l with
-  | .ok (A, tys), .ok (B, _) => checkGuessTypes l tys A B
+  -- (shown as `?m'` guessed to be `?m`: the hole `?m'`, of type `B`, and the guess, of type `A`)
+  | .ok (A, tys), .ok (B, _) => checkGuessTypes l tys A B m' sp' (.neutral (.mvar m) sp)
   | .error why, _ | _, .error why => markGuessed s!"flex-flex: {why}"
 
 /-- The two types of a guess (`checkGuess`) are equal: a failure that met no hole is
@@ -974,8 +975,10 @@ final and throws; one that met a hole may not be, and leaves the guess to
 private types have their definitions back is the forgery this check is for: it throws
 with code `private` (and the guess is not retried another way, `unifyFirstOrder`); the
 types named are those whose definition alone makes them equal. `tys` are the variables'
-types, as `metaAppType` gives them (only for that comparison). -/
-partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R) : ElabM R Unit := do
+types, as `metaAppType` gives them (only for that comparison). The hole `?m sp` and the
+`guess` are for the message, which shows them with both types, as a type mismatch does. -/
+partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R)
+    (m : Nat) (sp : Array (Elim R)) (guess : Val R) : ElabM R Unit := do
   let s ← get
   let (r, saw) ← trackMeta (unify l inferred expected)
   match r with
@@ -994,9 +997,12 @@ partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected :
     let used := if alone.isEmpty then g.hidden.toList.map (·.1) else alone
     let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
     let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty [] (some g))
-    throwAt {} (s!"a hole solved by shape would take {pretty inferred} for {pretty expected}, which " ++
-      s!"agree only through the definition of {", ".intercalate (used.map show1)}, hidden outside its module " ++
-      "(it has private parts)") ErrorCode.private_
+    let desc := (← lookupMeta m).desc
+    let hole := pretty (.neutral (.mvar m) sp) ++ (if desc == "_" then "" else s!" ({desc})")
+    throwAt {} (s!"a hole solved by shape would take a look-alike of a private type\n" ++
+      s!"  hole: {hole}\n  expected: {pretty expected}\n  guess: {pretty guess}\n  its type: {pretty inferred}\n" ++
+      s!"the two types agree only through the definition of {", ".intercalate (used.map show1)}, " ++
+      "hidden outside its module (it has private parts)") ErrorCode.private_
 
 /-- The first-order approximation (see `unifyGlued`). -/
 partial def unifyFirstOrder (l : Lvl) (m : Nat) (sp : Array (Elim R)) (v : Val R) : ElabM R Bool := do
