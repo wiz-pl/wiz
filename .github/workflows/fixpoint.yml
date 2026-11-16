@@ -2,9 +2,11 @@
 #
 # `scripts/fixpoint.sh` builds the self-hosted compiler once with Lean and then compiles
 # the toolchain three times (one C stage per compile), comparing self1.c, self2.c and
-# self3.c byte for byte. It needs about 7 GiB: stage 2's self-compile peaked at 6.3 GiB
-# (docs/bootstrap-chain.md, "Measurements"; earlier runs 5.1-5.4 GiB), so a 5 or 6 GiB
-# job cap can kill it (exit 137). This workflow
+# self3.c byte for byte. It runs in reference-counting mode (`--rc`, the script's default
+# and the release's mode). It declares 4 GiB: the largest step is `cc -O2` of a stage's C
+# (2.7 GiB for the 10.8 MB RC C at aeaa34ef; the RC C is larger now), and the RC
+# self-compile peaked at 1.3 GiB (docs/bootstrap-chain.md, "Measurements"). The
+# collector's mode (`gc` below) needs 7 GiB: its stage 2 peaked at 6.3 GiB. This workflow
 # is opt-in:
 #
 #   * nightly on `master` (the schedule below), and from "Run workflow";
@@ -27,8 +29,8 @@ on:
         type: choice
         options: ["2", "3", "4"]
         default: "3"
-      rc:
-        description: Compile with reference counting (--rc)
+      gc:
+        description: Use the Boehm collector (--gc, 7 GiB) instead of reference counting
         type: boolean
         default: false
 
@@ -46,9 +48,10 @@ defaults:
 env:
   CACHIX_NAME: badlydrawnwizards
   LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
-  # The job's declared memory requirement, checked against MemAvailable before the run
-  # (stage 2's self-compile has peaked at 6.3 GiB; 7 GiB is the reservation).
-  WIZ_FIXPOINT_MEM_GIB: "7"
+  # The job's declared memory requirement, checked against MemAvailable before the run:
+  # 4 GiB in RC mode (cc -O2 of a stage's C is the peak), 7 GiB with `gc` (stage 2's
+  # self-compile has peaked at 6.3 GiB).
+  WIZ_FIXPOINT_MEM_GIB: ${{ inputs.gc && '7' || '4' }}
 
 jobs:
   preflight:
@@ -73,7 +76,7 @@ jobs:
           fi
 
   fixpoint:
-    name: fixpoint (self-hosted, 7 GiB)
+    name: fixpoint (self-hosted, ${{ inputs.gc && 'gc, 7' || 'rc, 4' }} GiB)
     needs: preflight
     if: needs.preflight.outputs.run == 'true'
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
@@ -92,7 +95,7 @@ jobs:
           avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
           echo "MemAvailable: $((avail_kib / 1024)) MiB; the fixpoint declares ${WIZ_FIXPOINT_MEM_GIB} GiB"
           if [ "$avail_kib" -lt "$need_kib" ]; then
-            echo "::error title=not enough memory::the fixpoint needs ${WIZ_FIXPOINT_MEM_GIB} GiB (stage 2 has peaked at 6.3 GiB) and this runner has $((avail_kib / 1024)) MiB available"
+            echo "::error title=not enough memory::the fixpoint needs ${WIZ_FIXPOINT_MEM_GIB} GiB and this runner has $((avail_kib / 1024)) MiB available"
             exit 1
           fi
       - name: Cache the Lake build
@@ -104,10 +107,9 @@ jobs:
       - name: Fixpoint
         env:
           STAGES: ${{ inputs.stages || '3' }}
-          RC: ${{ inputs.rc && '--rc' || '' }}
+          MODE: ${{ inputs.gc && '--gc' || '--rc' }}
         run: |
-          args=(--stages "$STAGES")
-          [ -n "$RC" ] && args+=("$RC")
+          args=(--stages "$STAGES" "$MODE")
           scripts/fixpoint.sh "${args[@]}" .lake/fixpoint 2>&1 | tee fixpoint.log
       - name: Summary
         if: always()
@@ -117,7 +119,7 @@ jobs:
             echo "### Bootstrap fixpoint (stages, ${WIZ_FIXPOINT_MEM_GIB} GiB)"
             echo
             echo '```'
-            grep -E 'FIXPOINT|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"
+            grep -E 'FIXPOINT|^mode:|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the C files of a failure

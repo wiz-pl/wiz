@@ -7,16 +7,17 @@ import Grail.Build
 
 * `checker`: the self-hosted frontend (reads `input.wiz`, prints what it makes of it);
 * `compiler`: the frontend and backend (reads `input.wiz`, prints C);
-* `bootstrap`: the fixpoint check of `scripts/fixpoint.sh`. Stage 1 (the compiler, built
-  by the Lean `wiz`) compiles the toolchain to C (`self1.c`); that C, compiled with
-  `selfhost/rt.c` and the collector, is stage 2, which compiles the toolchain again
-  (`self2.c`). The two must be equal.
+* `bootstrap`: the fixpoint check of `scripts/fixpoint.sh`, in its mode (`bootstrapMode`,
+  reference counting). Stage 1 (the compiler, built by the Lean `wiz`) compiles the
+  toolchain to C (`self1.c`); that C, compiled with `selfhost/rt.c` (no collector), is
+  stage 2, which compiles the toolchain again (`self2.c`). The two must be equal, and
+  stage 2 must free every object.
 
 Each step is a job (`Grail/Graph.lean`): the generated source (keyed by the
 `selfhost/*.wiz` texts — the tables are `selfhost/Tables.wiz`, so this binary only names
 them — installed as `.grail/gen/ROLE.wiz`), then the executable as for any `exe`, then
-`self1.c` (keyed by the stage-1 binary and its input), stage 2 (by `self1.c`, `rt.c`,
-the compiler and the collector's flags) and `self2.c`. Run again, the check runs nothing
+`self1.c` (keyed by the stage-1 binary, its input and the mode), stage 2 (by `self1.c`,
+`rt.c` and the compiler) and `self2.c`. Run again, the check runs nothing
 unless something it depends on changed.
 -/
 
@@ -35,14 +36,19 @@ def Runner.selfhostSources (r : Runner) (role : String) : IO (String × String) 
 def genFile (role : String) : String := s!".grail/gen/{role}.wiz"
 def genSelf (role : String) : String := s!".grail/gen/{role}-self.wiz"
 
-/-- Run `exe` in a fresh directory with `input` as `input.wiz`; its output goes to `file`. -/
-def runOn (exe : System.FilePath) (input : String) (out : System.FilePath) (file : String) :
-    IO (Except String Unit) := do
+/-- The backend mode of the `bootstrap` target's stages: reference counting, as
+`scripts/fixpoint.sh` (since R1) and the release. -/
+def bootstrapMode : String := "--rc"
+
+/-- Run `exe` with `args` in a fresh directory with `input` as `input.wiz`; its output
+goes to `file`. -/
+def runOn (exe : System.FilePath) (input : String) (out : System.FilePath) (file : String)
+    (args : Array String := #[]) : IO (Except String Unit) := do
   let exe ← IO.FS.realPath exe  -- it runs in another directory
   let work := out / "work"
   IO.FS.createDirAll work
   IO.FS.writeFile (work / "input.wiz") input
-  let o ← IO.Process.output { cmd := exe.toString, cwd := work }
+  let o ← IO.Process.output { cmd := exe.toString, args := args, cwd := work }
   IO.FS.removeDirAll work
   if o.exitCode != 0 then return .error s!"{exe} failed ({o.exitCode}): {o.stderr.take 2000}"
   IO.FS.writeFile (out / file) o.stdout

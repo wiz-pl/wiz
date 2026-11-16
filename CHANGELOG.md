@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* bootstrap (21ah): the fixpoint runs in reference-counting mode by default, as the
+  release does: `scripts/fixpoint.sh` and `scripts/repro-fixpoint.sh` pass `--rc` unless
+  given `--gc` (which keeps the Boehm collector for now), the nightly `fixpoint.yml`
+  declares 4 GiB instead of 7 (its "Run workflow" form has a `gc` box), and grail's
+  `bootstrap` target compiles its stages without the collector.
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container

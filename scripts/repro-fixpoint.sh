@@ -21,20 +21,22 @@
 #
 #   usage (from the repository root, with the toolchain environment of `nix develop` or
 #   wiz-env.sh):
-#     scripts/repro-fixpoint.sh [--stages N] [--base DIR] [--keep] [--rc]
+#     scripts/repro-fixpoint.sh [--stages N] [--base DIR] [--keep] [--rc | --gc]
 #     scripts/repro-fixpoint.sh --compare DIR_A DIR_B
 #
 #   --stages N   fixpoint stages per build (default 2: the Lean-built stage 1, self1.c,
 #                the stage-2 executable and self2.c); 3 adds stage3 and self3.c
 #   --base DIR   where the two copies go (default: a new directory under $TMPDIR)
 #   --keep       keep the copies (their .lake/fixpoint holds the artifacts)
-#   --rc         pass --rc to fixpoint.sh (reference-counted stages)
+#   --rc         reference-counted stages (fixpoint.sh's default; accepted for old callers)
+#   --gc         pass --gc to fixpoint.sh (Boehm collector stages; 7 GiB)
 #   --compare A B  only compare two artifact directories that already exist (e.g. a
 #                kept .lake/fixpoint and a Nix build's output); files present in both
 #                are compared, by name
 #
-# The fixpoint needs about 7 GiB (6.3 GiB peak) and the two builds run one after the other:
-#   heavy --mem 7G timeout 6000 bash scripts/repro-fixpoint.sh
+# The two builds run one after the other; each needs about 4 GiB in RC mode (cc -O2 of a
+# stage's C is the peak) and 7 GiB with --gc (6.3 GiB stage-2 peak):
+#   heavy --mem 4G timeout 6000 bash scripts/repro-fixpoint.sh
 #
 # Output: one line per artifact (sha256 of each side, SAME or DIFFERENT), and for the
 # first differing artifact the first differing byte or line, the ELF sections that
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
     --base) [ $# -ge 2 ] || die "--base needs a directory"; base=$2; shift 2 ;;
     --keep) keep=1; shift ;;
     --rc) rc=(--rc); shift ;;
+    --gc) rc=(--gc); shift ;;
     --compare) [ $# -ge 3 ] || die "--compare needs two directories"; compare=("$2" "$3"); shift 3 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
@@ -158,7 +161,8 @@ fi
 # ---------------------------------------------------------------------------------
 # Two builds
 
-: "${WIZ_GC_CFLAGS?needs the toolchain environment (nix develop, or wiz-env.sh)}"
+: "${WIZ_CFLAGS?needs the toolchain environment (nix develop, or wiz-env.sh)}"
+[ "${rc[0]:-}" != --gc ] || : "${WIZ_GC_CFLAGS?--gc needs the toolchain environment (nix develop, or wiz-env.sh)}"
 command -v lake >/dev/null || die "lake is not on PATH"
 lake_cache=${LAKE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lake}
 elan_home=${ELAN_HOME:-$HOME/.elan}
@@ -198,7 +202,7 @@ markers=("root A=$ra" "root B=$rb" "TMPDIR A=$base/tmp-a" "TMPDIR B=$base/tmp-b-
 
 common=(PATH="$PATH" LAKE_CACHE_DIR="$lake_cache" ELAN_HOME="$elan_home"
         WIZ_CFLAGS="${WIZ_CFLAGS:-}" WIZ_LDFLAGS="${WIZ_LDFLAGS:-}" WIZ_LLC="${WIZ_LLC:-}"
-        WIZ_GC_CFLAGS="$WIZ_GC_CFLAGS" WIZ_GC_LDFLAGS="${WIZ_GC_LDFLAGS:-}")
+        WIZ_GC_CFLAGS="${WIZ_GC_CFLAGS:-}" WIZ_GC_LDFLAGS="${WIZ_GC_LDFLAGS:-}")
 # (NIX_* variables are the cc wrapper's inputs; keep them so both builds use one compiler setup)
 while IFS='=' read -r k _; do
   case "$k" in NIX_CC*|NIX_CFLAGS_COMPILE*|NIX_LDFLAGS*|NIX_BINTOOLS*|NIX_HARDENING_ENABLE|NIX_ENFORCE*) common+=("$k=${!k}") ;; esac

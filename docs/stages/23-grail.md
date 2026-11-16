@@ -105,8 +105,9 @@ compiles. Its compiler fields are its `id`, which enters grail's keys.
 `selfhost/Tables.wiz` — for grail and the tests alike): `checker`, `compiler`, and
 `bootstrap`, the fixpoint check of
 `scripts/fixpoint.sh` as jobs (generate the source, build stage 1, `self1.c`, stage 2,
-`self2.c`, compare). `grail build bootstrap` runs it (minutes); run again, it runs
-nothing unless a source, `rt.c`, the toolchain or grail changed. `grail build` alone
+`self2.c`, compare), in reference-counting mode since stage 21ah. `grail build
+bootstrap` runs it (minutes); run again, it runs nothing unless a source, `rt.c`, the
+toolchain or grail changed. `grail build` alone
 leaves it out.
 
 ## 23f: a test runner

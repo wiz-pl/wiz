@@ -129,6 +129,9 @@ chain's `wizc` and relocated like `wiz-release`; the chain itself stays static.
 no collector to link, a self-compile peaks near 1.7 GB and takes about four minutes
 (the collector's peaks at 5.7 GB and takes about fourteen), and a leak is a hard error
 at exit. `rc = false` in `nix/bootstrap-chain.nix` gives the collector's chain.
+`scripts/fixpoint.sh`, `fixpoint.yml` and grail's `bootstrap` target use the same mode
+by default (stage 21ah); `scripts/fixpoint.sh --gc` keeps the collector's fixpoint until
+Boehm is deleted.
 
 The tarball (`packages.wizc-release`) is `wizc-SYSTEM/bin/wizc` and
 `wizc-SYSTEM/MANIFEST`, packed with the flags of `scripts/release-tarball.sh` (sorted,
@@ -146,8 +149,8 @@ release.
 
 A commit `R` may be declared the root when all of these hold at `R`:
 
-1. **Fixpoint.** `scripts/fixpoint.sh --stages 3` passes in both modes (`--rc` and the
-   collector): `self1.c = self2.c = self3.c`.
+1. **Fixpoint.** `scripts/fixpoint.sh --stages 3` passes in RC mode (its default) and,
+   while the collector exists, with `--gc`: `self1.c = self2.c = self3.c`.
 2. **Executable fixpoint.** With the pinned recipe (the static Nix build), `CC(C*)`
    reproduces `C*`, and stage 2's and stage 3's executables are byte-identical.
 3. **Parity bar.** The self-hosted compiler meets the parity bar the project uses for
@@ -198,8 +201,9 @@ not a merge gate:
 | nightly 05:17 UTC on master, and from "Run workflow" | `chain` | `scripts/chain-step-check.sh` in self mode; then in cross mode with `--pred` the newest earlier `wizc-nightly` artifact of master (skipped on the first night or when it is of the same commit); this night's tarball kept as `wizc-nightly` (90 days) and its fixed-output path `wizc-SYSTEM-COMMIT.tar.gz` pushed to Cachix, so `fetchToolchain` finds it by `(commit, hash)` | about 30 min per mode, about 3 GB |
 
 Nothing generated is committed. A `DIFFER` fails the `chain` job and blocks declaring a
-root at that commit (requirement 8); the three-stage collector fixpoint stays in
-`fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
+root at that commit (requirement 8); the three-stage fixpoint stays in `fixpoint.yml`
+(nightly, self-hosted runner; RC with 4 GiB, or the collector with 7 GiB from "Run
+workflow").
 
 ## The flake interface
 
@@ -449,7 +453,7 @@ by bytes that do not match the pin.
 
 | # | what | state |
 |---|---|---|
-| P1 | fixpoint in both modes, three stages | holds today (scheduled `fixpoint.yml`, GC; the bootstrap-seed prototype for RC) |
+| P1 | fixpoint in both modes, three stages | holds today (scheduled `fixpoint.yml`, RC since stage 21ah; GC from its "Run workflow" `gc` box; the release's own RC check) |
 | P2 | Lean-free assembly of `self.wiz`: today `Wiz/Selfhost.lean` strips imports, concatenates the files and computes `toolchainId` with Lean's string hash | open: move it into the self-hosted driver (or a POSIX script) with a sha256-based id |
 | P3 | cross-directory and cross-machine reproducibility | see "Measurements" |
 | P4 | the parity bar | open (the parity matrix's blocking rows) |
@@ -463,7 +467,8 @@ Run on x86_64 Linux (NixOS, gcc 16.2.0, nixpkgs `02c087f3`), 2026-11-16.
 
 ### Reproducibility of the fixpoint (collector mode), across two builds
 
-`heavy --mem 6G bash scripts/repro-fixpoint.sh --stages 2 --keep`, two copies of
+`heavy --mem 6G bash scripts/repro-fixpoint.sh --stages 2 --keep` (the collector was
+then the default; it is `--gc` now), two copies of
 master `d23473da` plus this branch's `scripts/`:
 
 | | build A | build B |
@@ -487,8 +492,10 @@ master `d23473da` plus this branch's `scripts/`:
 **6 of 6 byte-identical**, and each build reached the fixpoint (`self1.c = self2.c`).
 Per build: Lean `wiz build` of the compiler 199–204 s (2.6 GB), stage 1's self-compile
 40–45 s (0.7 GB), cc 150–175 s (2.6 GB), stage 2's self-compile 825–834 s with a
-**peak of 6.3 GB**. Declare **7G** for a fixpoint job, not 6G (`fixpoint.yml`
-and the scripts declare 7 GiB since 2026-11-16).
+**peak of 6.3 GB**. Declare **7G** for a collector (`--gc`) fixpoint job, not 6G. The
+default RC fixpoint declares **4G**: its largest step is `cc -O2` of the larger RC C
+(2.7 GB for 10.8 MB of C at `aeaa34ef`, where the RC stage 2 peaked at 1.3 GB), and the
+Lean build of the compiler above is 2.6 GB.
 
 Caveats: both builds ran on one machine as one user (the Nix sandbox build below
 varies the user), and build B's Lake step replayed modules from the shared Lake cache

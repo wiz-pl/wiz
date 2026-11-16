@@ -3,25 +3,31 @@
 #
 # Stage 1 is the self-hosted compiler built by the Lean `wiz build`; it compiles the
 # whole toolchain to C (self1.c). Each later stage compiles the previous stage's C with
-# selfhost/rt.c and Boehm GC (to stage2, stage3, ...) and that program compiles the
-# toolchain again (self2.c, self3.c, ...). Every stage's C must be byte-identical to
-# stage 1's. Three stages are the default: stage 1 = stage 2 shows the C the Lean-built
-# compiler emits is reproduced by the compiler that C builds; stage 2 = stage 3 shows
-# that reproduction is a fixed point, not one coincident round.
+# selfhost/rt.c (to stage2, stage3, ...) and that program compiles the toolchain again
+# (self2.c, self3.c, ...). Every stage's C must be byte-identical to stage 1's. Three
+# stages are the default: stage 1 = stage 2 shows the C the Lean-built compiler emits is
+# reproduced by the compiler that C builds; stage 2 = stage 3 shows that reproduction is
+# a fixed point, not one coincident round. Every stage runs in one mode (reference
+# counting by default), so GC C is never compared with RC C.
 #
 #   usage (from the repository root, in `nix develop`):
-#     scripts/fixpoint.sh [--rc] [--stages N] [--keep] [--compare-only] [OUTDIR]
+#     scripts/fixpoint.sh [--rc | --gc] [--stages N] [--keep] [--compare-only] [OUTDIR]
 #
-#   --rc            compile with reference counting (the compiler's flag, stage 21k), so
-#                   every stage is a reference-counted compiler that must free every object
+#   --rc            reference counting (the compiler's flag, stage 21k; the default since
+#                   R1, as for the release): every stage is a reference-counted compiler
+#                   that must free every object, and cc links no collector
+#   --gc            the Boehm collector instead (kept until Boehm is deleted; needs
+#                   WIZ_GC_CFLAGS/WIZ_GC_LDFLAGS and about 7 GiB)
 #   --stages N      how many C stages to generate and compare (N >= 2; default 3)
 #   --keep          keep the artifacts: self*.c, the stage binaries and run/
 #   --compare-only  only compare self1.c ... selfN.c already in OUTDIR (with --keep),
 #                   without building or compiling; useful to re-check kept artifacts
 #   OUTDIR          default .lake/fixpoint
 #
-# It prints each step's wall time and peak RSS (the self-compile stages need about
-# 7 GiB; stage 2 peaked at 6.3 GiB on 2026-11-16), and each stage's C size and md5 with PASS/FAIL.
+# It prints each step's wall time and peak RSS, and each stage's C size and md5 with
+# PASS/FAIL. Memory: in RC mode the largest step is `cc -O2` of a stage's C (2.7 GiB at
+# aeaa34ef, where the RC self-compile peaked at 1.3 GiB), so reserve 4 GiB; in GC mode
+# the stage-2 self-compile peaked at 6.3 GiB (2026-11-16), so reserve 7 GiB.
 # A stage killed by the OOM killer or a memory cgroup (exit 137) fails with a hint.
 # Slow: two or more compilations of the whole toolchain (CI runs it on a schedule).
 set -euo pipefail
@@ -29,7 +35,7 @@ set -euo pipefail
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 die() { echo "fixpoint: $*" >&2; exit 2; }
 
-mode=()
+mode=(--rc)
 stages=3
 keep=0
 compare_only=0
@@ -37,6 +43,7 @@ out=
 while [ $# -gt 0 ]; do
   case "$1" in
     --rc) mode=(--rc); shift ;;
+    --gc) mode=(--gc); shift ;;
     --stages) [ $# -ge 2 ] || die "--stages needs a number"; stages=$2; shift 2 ;;
     --stages=*) stages=${1#--stages=}; shift ;;
     --keep) keep=1; shift ;;
@@ -54,9 +61,19 @@ out=${out:-.lake/fixpoint}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
+# The C flags of a stage: the collector's in GC mode, none in RC mode (the release's
+# recipe, nix/bootstrap-chain.nix: rt.c includes gc.h only without WIZ_RC).
+stage_cflags=
+stage_ldflags=
 if [ "$compare_only" = 0 ]; then
-  : "${WIZ_GC_CFLAGS?needs the toolchain environment (nix develop)}"
+  : "${WIZ_CFLAGS?needs the toolchain environment (nix develop)}"
+  if [ "${mode[0]}" = --gc ]; then
+    : "${WIZ_GC_CFLAGS?--gc needs the toolchain environment (nix develop)}"
+    stage_cflags=$WIZ_GC_CFLAGS
+    stage_ldflags=${WIZ_GC_LDFLAGS:-}
+  fi
   mkdir -p "$out/run"
+  echo "mode: ${mode[0]#--}"
 fi
 
 step() { echo "::group::$1" 2>/dev/null; echo "== $1 ($(date +%T))"; }
@@ -161,8 +178,13 @@ run_step() {
     echo "FAILED: '$label' exited $rc after ${secs}s (peak $((kb / 1024)) MiB)." >&2
     if [ "$rc" -eq 137 ] || [ "$rc" -eq 9 ]; then
       echo "It was killed (SIGKILL), which is how the OOM killer and a memory cgroup end a run." >&2
-      echo "The fixpoint needs about 7 GiB: the stage-2 self-compile has peaked at 6.3 GiB." >&2
-      echo "Reserve it (e.g. 'heavy --mem 7G scripts/fixpoint.sh') and give the runner >= 7 GiB free." >&2
+      if [ "${mode[0]}" = --gc ]; then
+        echo "The GC fixpoint needs about 7 GiB: the stage-2 self-compile has peaked at 6.3 GiB." >&2
+        echo "Reserve it (e.g. 'heavy --mem 7G scripts/fixpoint.sh --gc') and give the runner >= 7 GiB free." >&2
+      else
+        echo "The RC fixpoint needs about 4 GiB: cc -O2 of a stage's C is its largest step." >&2
+        echo "Reserve it (e.g. 'heavy --mem 4G scripts/fixpoint.sh') and give the runner >= 4 GiB free." >&2
+      fi
     fi
     echo "Artifacts are in $out (run/ and the files already produced)." >&2
     exit 1
@@ -202,7 +224,7 @@ if [ "$compare_only" = 0 ]; then
     cp "$out/self$prev.c" "$out/cc/wizc.c"
     # shellcheck disable=SC2086
     run_step "cc self$prev.c -> stage$k" "$PWD" /dev/null \
-      cc -O2 -w -I"$PWD/selfhost" $WIZ_GC_CFLAGS "$out/cc/wizc.c" -o "$out/stage$k" $WIZ_GC_LDFLAGS
+      cc -O2 -w -I"$PWD/selfhost" $stage_cflags "$out/cc/wizc.c" -o "$out/stage$k" $stage_ldflags
     done_
 
     step "stage $k compiles the toolchain (self$k.c)"

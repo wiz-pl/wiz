@@ -461,22 +461,21 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     let stage1 := (d 0).out / "selfhost-stage1"
     let input := r.ctx.dir / genSelf "compiler"
     let self ← IO.FS.readFile input
-    let key := mixHash (hash "self1") (hash (toString [toString (hash (← IO.FS.readBinFile stage1)), self]))
-    pure (.job { key := key, timeoutMs := r.timeoutMs, how := .grail (node "run-on" [str stage1.toString, str input.toString, str "self1.c"]) })
+    let key := mixHash (hash "self1") (hash (toString [toString (hash (← IO.FS.readBinFile stage1)), self, bootstrapMode]))
+    pure (.job { key := key, timeoutMs := r.timeoutMs, how := .grail (node "run-on" [str stage1.toString, str input.toString, str "self1.c", str bootstrapMode]) })
   | .stage2 =>
     let self1 := (d 0).out / "self1.c"
     let rt ← IO.FS.readFile (r.ctx.dir / "selfhost" / "rt.c")
-    let key := mixHash (hash "stage2 -O2") (hash (toString [← IO.FS.readFile self1, rt, tc.cc,
-      " ".intercalate tc.gcCflags, " ".intercalate tc.gcLdflags]))
+    -- (reference counting: no collector flags, as the release's `cc`)
+    let key := mixHash (hash "stage2 -O2 rc") (hash (toString [← IO.FS.readFile self1, rt, tc.cc]))
     let rtDir ← IO.FS.realPath (r.ctx.dir / "selfhost")
     pure (.job {
       key := key, timeoutMs := r.timeoutMs, how := .cmd tc.cc fun out =>
-      #["-O2", "-w", s!"-I{rtDir}"] ++ tc.gcCflags.toArray ++
-        #[self1.toString, "-o", (out / "stage2").toString] ++ tc.gcLdflags.toArray })
+      #["-O2", "-w", s!"-I{rtDir}", self1.toString, "-o", (out / "stage2").toString] })
   | .self2 =>
     let input := r.ctx.dir / genSelf "compiler"
-    let key := mixHash (hash "self2") (hash (toString [toString (d 0).key, ← IO.FS.readFile input]))
-    pure (.job { key := key, timeoutMs := r.timeoutMs, how := .grail (node "run-on" [str ((d 0).out / "stage2").toString, str input.toString, str "self2.c"]) })
+    let key := mixHash (hash "self2") (hash (toString [toString (d 0).key, ← IO.FS.readFile input, bootstrapMode]))
+    pure (.job { key := key, timeoutMs := r.timeoutMs, how := .grail (node "run-on" [str ((d 0).out / "stage2").toString, str input.toString, str "self2.c", str bootstrapMode]) })
   | .command c tools inputs => r.prepCommand c tools inputs (d ·)
   | .fixpoint =>
     let self1 ← IO.FS.readFile ((d 0).out / "self1.c")
@@ -743,6 +742,8 @@ def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except Strin
   | .l #[.a "ir", .a file] => do writeCode r.ctx.dir out (← r.elab file)
   | .l #[.a "run-on", .a exe, .a input, .a file] => do
     runOn exe (← IO.FS.readFile input) out file
+  | .l #[.a "run-on", .a exe, .a input, .a file, .a mode] => do
+    runOn exe (← IO.FS.readFile input) out file #[mode]
   | .l #[.a "test", .a file, .a kind, .a exe] => do
     let kind := if kind == "run" then TestKind.run else .check
     -- a program that times out or fails is a failed test, not an output (`--update`

@@ -190,7 +190,8 @@ Prelude (`selfhost/rt.c`'s natives read the `argv` that `rt_start` saves). The a
 exclude the program's name; `#eval`/`#run` can't call them (they are C). With them the
 self-hosted compiler takes its backend mode as a flag: `--rc`, `--rc-owned` or `--gc`
 (`genProgramArgs`). The first-line pragma `-- wiz: rc` still works when no flag is
-given, for one release. `scripts/fixpoint.sh --rc` runs the bootstrap in that mode.
+given, for one release. `scripts/fixpoint.sh --rc` runs the bootstrap in that mode (the
+default since [21ah](#21ah-the-fixpoint-defaults-to-reference-counting)).
 
 ## 21l: foreign functions and foreign types, self-hosted
 
@@ -1076,3 +1077,39 @@ written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are n
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21ah: the fixpoint defaults to reference counting
+
+Stage R1 of the runtime convergence (one RC-only runtime for both backends; Boehm is
+deleted in a later stage). The bootstrap fixpoint now runs in the release's mode:
+
+* `scripts/fixpoint.sh` passes `--rc` to every stage unless it is given `--gc`, and in RC
+  mode compiles each stage's C with no collector flags (`cc -O2 -w -I selfhost`, the
+  release's recipe less `-static`). `--rc` is still accepted; `--gc` keeps the collector
+  until Boehm is deleted. The script prints `mode: rc` or `mode: gc` first.
+* `.github/workflows/fixpoint.yml` (nightly, self-hosted runner) runs `--rc` and declares
+  4 GiB instead of 7; its "Run workflow" form has a `gc` box (7 GiB) in place of the old
+  `rc` box. The weekly `fixpoint` job in `ci.yml` calls the script without a mode, so it
+  follows the default.
+* `scripts/repro-fixpoint.sh` follows the default and takes `--gc`.
+* grail's `bootstrap` target runs its stages with `--rc` and compiles stage 2 without the
+  collector's flags (the mode is part of the `self1.c`, stage-2 and `self2.c` keys).
+
+**Memory.** At `aeaa34ef` (`wiz-notes`' bootstrap validation, a shared machine) the RC
+fixpoint's steps peaked at: stage-1 self-compile 577 MB, `cc -O2` of the 10.8 MB RC C
+2741 MB, stage-2 self-compile 1316 MB; the script's peak was the `cc`, 2741 MB, and it
+took 636 s against the GC run's 1538 s and 3516 MB. GC stage 2 has since grown to
+5.4–6.3 GiB. The RC C is larger now (the release's `seed.c` is 14 MB), so `cc` is
+expected near 3.5 GiB; 4 GiB is the reservation until a run on the new base measures it.
+The RC self-compile alone (about 1.3 GiB) is no longer the bound.
+
+**What the gate compares.** Every stage's C against stage 1's, byte for byte, in one mode:
+`self1.c` = `self2.c` = `self3.c`, all RC. Nothing compares a GC C file with an RC one,
+and the two never could be equal (the RC backend emits `dup`/`drop`s and `#define
+WIZ_RC 1`). The release's checks (`nix/bootstrap-chain.nix`, `scripts/chain-step-check.sh`)
+were already RC throughout: `seed.c` = `self.c` (the release's fixpoint), c1 = c2 =
+`seed.c` (the step check), each with the same `--rc` flag. This change does not touch
+`selfhost/*.wiz` or `rt.c`, so `seed.c` is unchanged byte for byte. Since `fixpoint.sh`'s
+stage 1 is a Lean-built compiler of the same source run with `--rc` on the same
+`self.wiz`, its `self1.c` should now equal the release's `seed.c` for the same commit;
+that has not been checked yet.
