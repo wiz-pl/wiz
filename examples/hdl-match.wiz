@@ -1,0 +1,109 @@
+import Hdl.Core
+
+def B8 : HwTy := HwTy.bits 8
+
+inductive Phase where
+  | idle | start | data | stop
+  deriving BitPack
+
+-- H14 S4: `match` on an enumeration signal is a case tree over `Hw.eq` and `Hw.mux`
+def phaseName {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+  match p with
+  | .idle => 0
+  | .start => 1
+  | .data => 2
+  | .stop => 3
+
+-- the workaround it replaces: an `if` chain on the same literals
+def phaseNameIf {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+  if p === Phase.lit .idle then 0
+  else if p === Phase.lit .start then 1
+  else if p === Phase.lit .data then 2
+  else 3
+
+def phases : List Phase := [.idle, .start, .data, .stop]
+def cMatch : Circuit Phase.code B8 := Circuit.comb (fun p => phaseName p)
+def cIf : Circuit Phase.code B8 := Circuit.comb (fun p => phaseNameIf p)
+
+-- values: both give 0 1 2 3
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cMatch (Hdl.map Phase.pack phases))
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cIf (Hdl.map Phase.pack phases))
+-- the netlist is the same: same node count, byte-identical Verilog
+#eval ((Netlist.size (Circuit.netlist "phase" cMatch), Netlist.size (Circuit.netlist "phase" cIf)) : Nat × Nat)
+#eval Hdl.strEq (Verilog.emit (Circuit.netlist "phase" cMatch)) (Verilog.emit (Circuit.netlist "phase" cIf))
+
+-- `Bool` on a one-bit signal: two constructors, `true` (1) and `false` (0); a `_` branch
+def boolSel {r : HwTy → Type} [Hw r] (b : r HwTy.bit) : r B8 :=
+  match b with
+  | .true => 7
+  | _ => 9
+
+-- a three-branch Bool match (the last two cover the type, so `_` is unreachable)
+def boolSel3 {r : HwTy → Type} [Hw r] (b : r HwTy.bit) : r B8 :=
+  match b with
+  | .false => 9
+  | .true => 7
+  | _ => 0
+
+def oneBits : List (BitVec 1) := [BitVec.ofNat 1 1, BitVec.ofNat 1 0]
+def cBool : Circuit HwTy.bit B8 := Circuit.comb (fun b => boolSel b)
+def cBool3 : Circuit HwTy.bit B8 := Circuit.comb (fun b => boolSel3 b)
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cBool oneBits)
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cBool3 oneBits)
+
+-- a two-constructor enumeration (an `Option`-shaped, one-bit code): low = 0, high = 1
+inductive Grade where
+  | low | high
+  deriving BitPack
+
+def gradeSel {r : HwTy → Type} [Hw r] (p : r Grade.code) : r B8 :=
+  match p with
+  | .low => 10
+  | .high => 20
+
+def cGrade : Circuit Grade.code B8 := Circuit.comb (fun p => gradeSel p)
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cGrade (Hdl.map Grade.pack [.low, .high]))
+
+-- (a one-bit enumeration whose constructors are called `true`/`false` is still an
+-- enumeration: the `BitPack` order is `true` = 0, `false` = 1, not `Bool`'s bits)
+inductive Toggle where
+  | true | false
+  deriving BitPack
+
+def toggleSel {r : HwTy → Type} [Hw r] (p : r Toggle.code) : r B8 :=
+  -- (`Bool` is the default for unqualified `.true`/`.false` on a one-bit signal; a
+  -- user enumeration with those constructor names is named explicitly)
+  match p with
+  | Toggle.true => 1
+  | Toggle.false => 2
+
+def cToggle : Circuit Toggle.code B8 := Circuit.comb (fun p => toggleSel p)
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cToggle (Hdl.map Toggle.pack [.true, .false]))
+
+-- a nested match: each scrutinee is shared once
+def nested {r : HwTy → Type} [Hw r] (p : r Phase.code) (b : r HwTy.bit) : r B8 :=
+  match p with
+  | .idle => (match b with | .true => 5 | _ => 6)
+  | .start => 1
+  | .data => 2
+  | .stop => 3
+
+def cNested : Circuit (HwTy.prod Phase.code HwTy.bit) B8 :=
+  Circuit.comb (fun x => nested (Hw.fst x) (Hw.snd x))
+def inNested : List (HwTy.El (HwTy.prod Phase.code HwTy.bit)) :=
+  [ (Phase.pack .idle, BitVec.ofNat 1 1)
+  , (Phase.pack .idle, BitVec.ofNat 1 0)
+  , (Phase.pack .start, BitVec.ofNat 1 1)
+  , (Phase.pack .data, BitVec.ofNat 1 0)
+  , (Phase.pack .stop, BitVec.ofNat 1 1) ]
+#eval Hdl.map (HwTy.pack B8) (Circuit.run cNested inNested)
+
+-- qualified patterns name the enumeration explicitly
+def qualified {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+  match p with
+  | Phase.idle => 4
+  | Phase.start => 5
+  | Phase.data => 6
+  | Phase.stop => 7
+
+#eval Hdl.map (HwTy.pack B8) (Circuit.run (Circuit.comb (fun p => qualified p)) (Hdl.map Phase.pack phases))

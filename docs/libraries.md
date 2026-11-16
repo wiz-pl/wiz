@@ -608,6 +608,35 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `AndOp.and a b` / `OrOp.or a b` at the condition's type, so they print as `&&&`/`|||`
   and have the Verilog of those. On `Bool` they are unchanged (`!` is still `Bool.not`
   only: use `~~~` on a signal).
+* **`match` on a signal.** A `match` whose scrutinee is a signal (`r T` with an
+  `[Hw r]` instance) is a **case tree**, not an elimination: each nullary constructor
+  pattern `.c` becomes the comparator `Hw.eq x (T.lit c)`, the branches become a
+  right-nested `Hw.mux` spine in constructor order (the last constructor, or a `_`
+  branch, is the final else), and the scrutinee is shared once with `Hw.share`. A
+  single-constructor type needs no test: its one branch is the result. The result is
+  any `r U`; no wire becomes a `Nat` or a `Bool`, so the `Hw` invariant is kept.
+  `Bool` (`r HwTy.bit`, patterns `.true`/`.false`) is the two-constructor case of the
+  same tree; a nullary two-constructor `BitPack` enumeration (an `Option`-shaped code)
+  takes the ordinary enumeration path. On a one-bit signal an unqualified `.true` or
+  `.false` means `Bool`; an enumeration that also names constructors that way is
+  selected by qualifying it (`Toggle.true`).
+  ```
+  def phaseName {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+    match p with
+    | .idle => 0
+    | .start => 1
+    | .data => 2
+    | .stop => 3
+  ```
+  The lowering is exactly the `if` chain on `T.lit` (the same comparators, in the same
+  order, with the same right-nested mux association), so the netlist and its node count
+  are identical (`examples/hdl-match.wiz` checks both, and that the Verilog text is
+  byte-identical). Exhaustiveness is checked as the ordinary matcher checks it: a missing
+  constructor on a multi-constructor signal is a spanned error, not a silent
+  fall-through. Not covered: a constructor pattern that binds fields (a wire has no
+  projection), literal patterns on `bits n` (a `Nat` signal is out of scope: compare with
+  `===` and `if`), a concrete `Wire` scrutinee (write the function generically), and a
+  `match` that would return meta data (there is no eliminator for a wire).
 * **`deriving BitPack`.** `structure BitPack A` is a type's values as bit vectors of one
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
@@ -648,8 +677,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
-`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
+`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
+`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
@@ -1451,6 +1480,26 @@ trust ledger unchanged. Wiz has no `simp` and no `[simp]` attribute, so they are
 left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
 soundness/completeness in proofs and the `#check`/`#eval` behaviour.
+
+## Web: a React-style UI framework (`lib/Web/React.wiz`)
+
+`import Web.React` (over `Json`, `Optic` and `Tagged`): components, local state,
+typed event handlers, keyed lists, a pure virtual DOM, deterministic server-side
+rendering and a keyed diff to DOM patches. Nodes are `React.VNode M` (`text`, `raw`,
+`el`, keyed `el`, `on`), built with `React.el`/`React.text`/`React.on`/`React.keyed`;
+`React.render` gives `{tree, html, handlers}` (`React.toHtml` is the SSR string) and
+`React.Rendered.diff` a `List React.Patch` (`replace`, `text`, `setAttr`,
+`removeAttr`, `insert`, `remove`, `move`) that `React.patchesJson` hands to
+`web/framework/runtime.js`. An app is `React.App S M` (`init`, `update`, `view`); a
+component is `React.Component P S M`. Local state is a lens into the app state
+(`React.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
+commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the kernel
+makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
+the only trust boundary (and must be one element); all other text and attribute values
+are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
+no effects, and `value`/`checked` would need property patches. Tests: group `react`
+and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
+`wiz-notes/react-framework.md`.
 
 ## Numbers: classes, integers, words
 

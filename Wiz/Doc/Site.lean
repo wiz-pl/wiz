@@ -137,7 +137,7 @@ def instanceTypes (t : Term ZeroOneMany) : List Name :=
   let (_, args) := spine (body t)
   args.filterMap fun a => match (spine a).1 with
     | .const n _ => some n
-    | .mu _ _ _ _ _ (some (n, _, _)) | .nu _ _ _ _ _ (some (n, _, _)) => some n
+    | .mu _ _ _ _ _ (some (n, _, _)) _ | .nu _ _ _ _ _ (some (n, _, _)) => some n
     | _ => none
 
 /-- Make the entry of declaration `n`; `counter` numbers the signatures. -/

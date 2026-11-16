@@ -91,9 +91,9 @@ def ofTerm (ps : List String) : Term ZeroOneMany → Option Tm
     pure (.delim (← ofLevel ps v) (← ofTerm ps P) (← ofTerm ps a) (← ofTerm ps b) (← ofTerm ps c)
       (← ofTerm ps h) (← ofTerm ps D))
   -- only `μ^∞`: no sizes
-  | .mu l I D i .szInf _ => do pure (.mu (← ofLevel ps l) (← ofTerm ps I) (← ofTerm ps D) (← ofTerm ps i))
+  | .mu l I D i .szInf _ false => do pure (.mu (← ofLevel ps l) (← ofTerm ps I) (← ofTerm ps D) (← ofTerm ps i))
   | .con x => do pure (.con (← ofTerm ps x))
-  | .ind l I D v P m i x => do
+  | .ind l I D v P m i x false => do
     pure (.ind (← ofLevel ps l) (← ofTerm ps I) (← ofTerm ps D) (← ofLevel ps v) (← ofTerm ps P)
       (← ofTerm ps m) (← ofTerm ps i) (← ofTerm ps x))
   -- outside the fragment

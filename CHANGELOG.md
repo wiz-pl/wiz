@@ -24,7 +24,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   termination claim, and the de-mutualisation or measure that would remove the row), and
   `docs/trust-ledger.md` states that such a row is a design choice, not an unreviewed
   gap. The two structural fuel loops `Scry.rdLoop`/`Scry.domLoop` are now total, so the
-  group is 132 rows; the ledger's remaining `legacy:` rows are 24 (22f, 13a).
+  group is 132 rows. The migration is complete: the twenty `Prelude` numeral/`memo`
+  registrations, the `PMap`/`Scry` seals and `Proc.runLinked` have individual reasons
+  too, no `legacy:` row remains, and CI runs `--strict-legacy` (22f, 13a).
 * grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
   content-addressed vendor directory (`<sha256>.tar.gz` plus `vendor/index.sexpr`) without
   rewriting `grail.lock`; `--vendor DIR` (or `Package.set "vendor" "DIR"`) lets `fetch`, `build`,
@@ -112,6 +114,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* `wiz repl` (11ac): one command per line into one persistent frontend session
+  (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
+  `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
+  script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
+  modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
+  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
+  form, 11ah).
 * [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
   toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
   `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started
