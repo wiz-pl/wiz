@@ -1,0 +1,86 @@
+-- test: run
+import Sys
+import Scry.TaintCmd
+-- `scry taint --changed-lines`: exit codes for an in-diff finding, a finding on an
+-- unchanged line (zero in the diff), a changed path step, moved code, an added duplicate
+-- sink, `--diff-context`, `--diff all`, and the SARIF baseline state.
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def main : IO Unit := EIO.toIO (do
+  -- the sink line itself changed: exit 1
+  n1 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-sink.patch", "--fail-on-finding"];
+  check "diff sink: exit 1" (Nat.beq n1 1);
+
+  -- only an unrelated line changed: no finding in the diff, exit 0
+  n2 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-other.patch", "--fail-on-finding"];
+  check "diff unchanged: exit 0" (Nat.beq n2 0);
+
+  -- the source line changed but the sink line did not: still shown, exit 1
+  n3 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-source.patch", "--fail-on-finding"];
+  check "diff path step: exit 1" (Nat.beq n3 1);
+
+  -- the sink moved from run into main (delete + add): the new sink line counts, exit 1
+  n4 ← Scry.taintCmd ["tests/fixtures/taint-moved.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-moved.patch", "--fail-on-finding"];
+  check "diff moved sink: exit 1" (Nat.beq n4 1);
+
+  -- a duplicate sink is added: the new one is shown, the old one is counted as suppressed
+  n5 ← Scry.taintCmd ["tests/fixtures/taint-added.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-added.patch", "--fail-on-finding"];
+  check "diff added sink: exit 1" (Nat.beq n5 1);
+
+  -- one line of context reaches the unchanged sink line: exit 1
+  n6 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-other.patch", "--diff-context", "1", "--fail-on-finding"];
+  check "diff context 1: exit 1" (Nat.beq n6 1);
+
+  -- --diff all is the unfiltered mode
+  n7 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--diff", "all", "--fail-on-finding"];
+  check "diff all: exit 1" (Nat.beq n7 1);
+
+  -- flag validation
+  match Scry.taintArgs ["tests/fixtures/taint-unsafe.c", "--diff", "HEAD",
+      "--changed-lines", "tests/fixtures/diff/unsafe-sink.patch"] with
+  | .error _ => check "flags: --diff and --changed-lines conflict" .true
+  | .ok _ => check "flags: --diff and --changed-lines conflict" .false;
+  match Scry.taintArgs ["tests/fixtures/taint-unsafe.c", "--diff-context", "1"] with
+  | .error _ => check "flags: --diff-context needs a diff" .true
+  | .ok _ => check "flags: --diff-context needs a diff" .false;
+  match Scry.taintArgs ["tests/fixtures/taint-unsafe.c", "--diff", "all",
+      "--diff-context", "1"] with
+  | .error _ => check "flags: --diff all has no context" .true
+  | .ok _ => check "flags: --diff all has no context" .false;
+
+  -- a diff that names a different file: no entry, treated as unchanged with a note
+  n10 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-moved.patch", "--fail-on-finding"];
+  check "diff no entry: exit 0" (Nat.beq n10 0);
+
+  -- SARIF stays complete in diff mode: the suppressed result is `unchanged`, not absent
+  buildOk ← EIO.lift (FS.exists "build");
+  buildUnit ← (match buildOk with
+    | .true => EIO.pure ()
+    | .false => FS.createDir "build");
+  n8 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-other.patch", "--sarif", "build/diff-unchanged.sarif"];
+  check "sarif unchanged: exit 0" (Nat.beq n8 0);
+  s1 ← FS.readFile "build/diff-unchanged.sarif";
+  check "sarif unchanged: the result is kept" (String.contains s1 "command-injection");
+  check "sarif unchanged: baselineState unchanged"
+    (String.contains s1 "\"baselineState\":\"unchanged\"");
+  check "sarif unchanged: partialFingerprints"
+    (String.contains s1 "\"partialFingerprints\":{\"scry/v1\":\"f_");
+
+  n9 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-sink.patch", "--sarif", "build/diff-new.sarif"];
+  check "sarif new: exit 0 without --fail-on-finding" (Nat.beq n9 0);
+  s2 ← FS.readFile "build/diff-new.sarif";
+  check "sarif new: baselineState new" (String.contains s2 "\"baselineState\":\"new\"")
+)

@@ -112,9 +112,12 @@ leaves it out.
 ## 23f: a test runner
 
 `Package.tests NAME DIR` makes every `.wiz` file under `DIR` a test, with its expected
-output beside it in `.expected`. The first line gives the kind: `-- test: check` (the
+output beside it in `.expected` (not the files of a nested package: a subdirectory with
+its own `grail.wiz` is left out). The first line gives the kind: `-- test: check` (the
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
-compiled through C). A pass is a job like any other, keyed by the file (and its
+compiled through C). `-- test: skip REASON` marks an example that the package-wide run
+cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
+needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
 `grail test --update` writes the actual output. Every example is a test

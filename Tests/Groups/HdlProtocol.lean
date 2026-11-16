@@ -34,7 +34,7 @@ def hdlAxi4Synthesis : IO Unit := do
 yosys is on PATH: the register slice, both width converters and the source/sink pair. -/
 def hdlStreamSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do return
+  unless ys do skip "no yosys"; return
   let src ← IO.FS.readFile "examples/hdl-stream.wiz"
   let body := "import Hdl.Core\nimport Hdl.AxiStream\nimport Hdl.AxiStreamLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"stream_slice\" (AxiStream.sliceC 8))\n" ++
@@ -56,7 +56,7 @@ def hdlStreamSynthesis : IO Unit := do
 `synth_ice40`) when yosys is on PATH. -/
 def hdlSpiSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
-  unless ys do return
+  unless ys do skip "no yosys"; return
   let src ← IO.FS.readFile "examples/hdl-spi.wiz"
   let body := "import Hdl.Core\nimport Hdl.Spi\nimport Hdl.SpiLaw\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"spi_mode0\" (Spi.masterModeCW 8 Spi.cntW 1 0 2))\n" ++

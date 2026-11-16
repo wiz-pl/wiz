@@ -104,25 +104,34 @@ partial def markSynthetic : Syntax → Syntax
 /-- The source text of syntax, roughly: its tokens separated by spaces, with
 parentheses around arguments that need them (for "expands to" in hovers). Macro scopes
 print as `x✝`, as Lean shows inaccessible names. -/
-partial def reprint (s : Syntax) : String := go s
+partial def reprint (s : Syntax) : String := (go s).1
 where
   name (n : Name) : String := match n.splitOn "✝" with
     | [n] => n
     | n :: _ => n ++ "✝"
     | [] => n
   -- an argument without parentheses: one token, or something in brackets of its own
-  atomic (s : Syntax) : Bool :=
-    ["term.paren", "num", "str", "term.ident", "term.tuple", "term.anon"].contains s.kind || (go s).all (· != ' ')
-  arg (s : Syntax) : String := if atomic s then go s else s!"({go s})"
-  go (s : Syntax) : String := match s with
-    | missing => ""
-    | atom _ v => v
-    | ident _ n => name n
-    | node _ "num" #[atom _ v] => v
-    | node _ "str" #[atom _ v] => (repr v).pretty
+  knownAtomic (s : Syntax) : Bool :=
+    ["term.paren", "num", "str", "term.ident", "term.tuple", "term.anon"].contains s.kind
+  /-- The text, and whether it has no spaces (which `arg` reads without rendering again). -/
+  go (s : Syntax) : String × Bool := match s with
+    | missing => ("", true)
+    | atom _ v => (v, !v.contains ' ')
+    | ident _ n =>
+      let t := name n
+      (t, !t.contains ' ')
+    | node _ "num" #[atom _ v] => (v, true)
+    | node _ "str" #[atom _ v] => ((repr v).pretty, true)
     | node _ "term.app" as =>
-      " ".intercalate (arg (as.getD 0 missing) :: ((as.getD 1 missing).args.toList.map arg))
-    | node _ _ as => " ".intercalate ((as.toList.map go).filter (!·.isEmpty))
+      let t := " ".intercalate (arg (as.getD 0 missing) :: ((as.getD 1 missing).args.toList.map arg))
+      (t, !t.contains ' ')
+    | node _ _ as =>
+      let parts := (as.toList.map go).filter (!·.1.isEmpty)
+      let t := " ".intercalate (parts.map (·.1))
+      (t, !t.contains ' ')
+  arg (s : Syntax) : String :=
+    let (t, noSpace) := go s
+    if knownAtomic s || noSpace then t else s!"({t})"
 
 /-- Compact s-expression rendering, used in tests and `wiz parse`.
 Atoms are omitted unless `atoms := true`, `null` nodes print as `[...]`, and literals

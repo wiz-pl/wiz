@@ -1,0 +1,2652 @@
+import Text
+import Functor
+import WordArray
+import Scry.Wil
+import Scry.CstStore
+import Scry.Models
+import Scry.Preproc
+/-!
+# Scry.Lower: C to Wil, with origins
+
+The vertical slice of S2's C frontend (design `wiz-notes/code-analysis-design.md` §4.3,
+§6 S2; note `wiz-notes/scry-c2wil.md`): lower a C **function body** from the S1 CST
+(`Scry.CstStore`, filled by `native/ts_shim.c`) into `Wil`, then derive the CFG, the
+direct-call graph and the facts EDB of §4.3. `Scry.Cst.ofStore` reads a direct parse;
+`Scry.Cst.ofPreprocessed` takes the `cc -E` pipeline's line map (`Scry.Preproc`), so
+every origin is in the original file, line and column.
+
+The boundary is deliberate. What lowers:
+
+* local variables, parameters, and the `int`/`unsigned`/`char`/`short`/`long` integer
+  types (LP64 widths) plus `T *` pointers as Wil words;
+* integer literals, identifiers, parentheses, `+ - * / % & | ^ << >>`, the comparisons,
+  unary `- ~ ! +`, `=`, `+= -= *= /= %= &= |= ^= <<= >>=`, `++`/`--`;
+* `if`/`else`, `while`, `for` (desugared to a header block, a body and an update block),
+  `switch` (a compare/branch chain with fallthrough and `default`), `break`,
+  `continue`, `return`, compound statements and declarations;
+* direct calls to functions defined (or prototyped) in the translation unit;
+* **memory**: a struct/union local or an array is a stack slot (`Wil.Rhs.slot`) with a
+  cell layout, so `p.x`, `a[0]`, `a[i]` and `*p` are `gep`/`gepVar` + `load`/`store`; an
+  address-taken scalar (`&x`) is a one-cell slot; `malloc`/`calloc`/`realloc` are
+  `Wil.Rhs.alloc` and `free` is `Wil.free`, both read from the external model table
+  (`Scry.Models`), a module global is `Wil.Rhs.globalRef`, a function used as a value is
+  `Wil.Rhs.fnptr`, and a call through a function pointer is `Wil.Callee.indirect`;
+* `strcpy`/`strncpy`/`strcat`/`memcpy`/`memmove` are ordinary external calls; the taint
+  layer models their memory effect from the same table (`Scry.Models.copyPairsOf`), so
+  `sprintf`'s formatted arguments are a copy too.
+
+Everything else is **havoc plus a warning**, never a silent wrong value: a cast, `?:`,
+`sizeof`, a string literal, `&&`/`||` as a value, an unknown identifier, an unmodelled
+aggregate initialiser, `do`/`goto`, an unsupported declaration. A
+havoc'd value is the type's default (zero/null). Each warning carries the offending
+statement's `Wil.Span`, so `Scry.TU.warnings` is a list of
+`Scry.Warning {func, message, span}` and `scry taint` places the diagnostic on the
+statement, not the function definition.
+
+`Wil.Stmt`/`Wil.Term` carry `origin : Wil.Span` (file, byte range, CST node id, line,
+column), so every lowered statement points at original source; `Scry.edbOf` exports the
+§4.3 EDB:
+`assign`, `cfg`, `call`, `def`, `use`, `span`.
+-/
+
+/-- A read-only view of the CST columns the lowering walks. `CstStore` is the storage;
+this is the interface, so the lowering can also be run on a hand-built tree in a test. -/
+structure Scry.Cst where
+  /-- The number of nodes (ids are `0 … count-1`, root 0). -/
+  count : Nat
+  /-- Node `i`'s grammar kind (`function_definition`, `binary_expression`, `+`, …). -/
+  kindOf : Nat → String
+  /-- Node `i`'s field on its parent arc (`""` when anonymous arc). -/
+  fieldOf : Nat → String
+  /-- Node `i`'s origin: file, byte range, and node id. -/
+  spanOf : Nat → Wil.Span
+  /-- Node `i`'s parent. -/
+  parentOf : Nat → Option Nat
+  /-- Node `i`'s children, in tree order. -/
+  childrenOf : Nat → List Nat
+  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
+  for `Scry.spanText` and the lowering tests. -/
+  fileText : Nat → String
+  /-- The path of file `i` (as the preprocessor or the caller named it). -/
+  filePath : Nat → String
+  /-- The number of source files (`fileText`/`filePath` are meaningful for
+  `0 … count-1`). -/
+  fileCount : Nat
+  /-- Node `i`'s text as the parser saw it. For a preprocessed unit this is the text
+  tree-sitter parsed (so a macro-expanded literal reads `5`), while `spanOf` maps the
+  node back to the original source; token spellings come from here. It is sliced from a
+  precomputed word array of `pre.text`, in O(span) rather than O(file): a `String` is a
+  `List Char` in this runtime, so taking a token from the middle with `String.drop` was
+  O(file) per identifier, i.e. quadratic on a real file. A `U32Array` (not `Bytes`) is
+  deliberate: it has a pure list model, so the same lowering runs in the Lean test
+  interpreter as well as in compiled code. -/
+  nodeText : Nat → String
+
+/-- The text of words `[start, start + len)` as a string. -/
+def Scry.Cst.wordsText (a : U32Array) (start len : Nat) : String :=
+  String.ofChars (List.map (fun x => Char.mk (UIntN.toNat x))
+    (U32Array.toList (U32Array.slice a start len)))
+
+/-- The view of a *preprocessed* shim store: every node's span is mapped back through
+the `cc -E` line markers to the original file, byte range, line and column, and
+`fileText` serves the original texts. This is what `Scry.lowerTU` lowers, so the
+lowering never sees a preprocessed offset. -/
+def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry.Cst :=
+  let nodeBytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
+    U32Array.empty (String.chars pre.text);
+  Scry.Cst.mk (Scry.CstStore.nodeCount s)
+    (fun i => Scry.CstStore.kindName s i)
+    (fun i => Scry.CstStore.fieldName s i)
+    (fun i => let sp := Scry.CstStore.spanOf s i;
+      Scry.mapSpan pre i sp.start sp.stop)
+    (fun i => match Scry.CstStore.parentOf s i with
+      | .none => .none
+      | .some x => .some x.n)
+    (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
+    (fun f => List.getD pre.texts f "")
+    (fun f => List.getD pre.paths f "")
+    (List.length pre.paths)
+    (fun i => let sp := Scry.CstStore.spanOf s i;
+      Scry.Cst.wordsText nodeBytes sp.start (Nat.sub sp.stop sp.start))
+
+/-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
+store has one file per parse, so `text` is file 0. Line and column of every node's
+origin are derived from the text (a direct parse, not preprocessed). -/
+def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
+  Scry.Cst.ofPreprocessed (Scry.Preprocessed.plain (Scry.CstStore.pathName s 0) text) s
+
+/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). Byte
+offsets are used as character indices: the fixtures are ASCII (the shim's offsets are
+bytes; a UTF-8 identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
+def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String := c.nodeText i
+
+/-- The text of an origin. -/
+def Scry.spanText (files : List String) (sp : Wil.Span) : String :=
+  match List.getD files sp.file "" with
+  | text => String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+
+-- ## Reading the tree
+
+/-- Node `i`'s kind. -/
+def Scry.kind (c : Scry.Cst) (i : Nat) : String := c.kindOf i
+
+/-- Whether node `i` has kind `k`. -/
+def Scry.isK (c : Scry.Cst) (i : Nat) (k : String) : Bool := String.eq (c.kindOf i) k
+
+/-- Node `i`'s origin (its span). -/
+def Scry.originOf (c : Scry.Cst) (i : Nat) : Wil.Span := c.spanOf i
+
+/-- Node `i`'s children whose kind is `k`. -/
+def Scry.childrenK (c : Scry.Cst) (i : Nat) (k : String) : List Nat :=
+  List.filter (fun j => String.eq (c.kindOf j) k) (c.childrenOf i)
+
+/-- Node `i`'s first child of kind `k`. -/
+def Scry.childK (c : Scry.Cst) (i : Nat) (k : String) : Option Nat :=
+  List.find (fun j => String.eq (c.kindOf j) k) (c.childrenOf i)
+
+/-- Node `i`'s children whose parent arc has field `f`. -/
+def Scry.childrenF (c : Scry.Cst) (i : Nat) (f : String) : List Nat :=
+  List.filter (fun j => String.eq (c.fieldOf j) f) (c.childrenOf i)
+
+/-- Node `i`'s first child whose parent arc has field `f`. -/
+def Scry.childF (c : Scry.Cst) (i : Nat) (f : String) : Option Nat :=
+  List.find (fun j => String.eq (c.fieldOf j) f) (c.childrenOf i)
+
+/-- Node `i`'s named children, comments dropped. -/
+def Scry.kids (c : Scry.Cst) (i : Nat) : List Nat :=
+  List.filter (fun j => Bool.not (String.eq (c.kindOf j) "comment")) (c.childrenOf i)
+
+/-- The anonymous token on field `f` (`""` when absent): the operator of a binary or
+assignment expression is a token child, so its kind *is* its spelling. -/
+def Scry.tokenF (c : Scry.Cst) (i : Nat) (f : String) : String :=
+  match Scry.childF c i f with
+  | .some j => c.kindOf j
+  | .none => ""
+
+-- ## The lowering state and its monad
+
+/-- An aggregate local: a `struct`/`union` (a record) or an array. It lives in a stack
+slot, so the binding's register is the address of its first cell. -/
+structure Scry.Agg where
+  /-- The element type (an array) or the record type (a struct). -/
+  ty : Wil.Ty
+  /-- Cells the aggregate occupies in the analysis layout. -/
+  cells : Nat
+  /-- Elements: 1 for a struct, the declared length for an array. -/
+  len : Nat
+  /-- Is this an array (subscript allowed, and the name decays to a pointer)? -/
+  isArray : Bool
+
+/-- How a binding is stored. -/
+inductive Scry.BindKind where
+  /-- A plain register holding the value. -/
+  | reg
+  /-- A pointer register to the variable's cell(s): an address-taken scalar (`ty`, no
+  aggregate) or an aggregate local (`agg`). Reads load, writes store. -/
+  | slot (ty : Wil.Ty) (agg : Option Scry.Agg)
+
+/-- A binding in the current scope. -/
+structure Scry.Bind where
+  /-- The C identifier. -/
+  name : String
+  /-- Its register (the value, or the address of its slot). -/
+  var : Wil.Var
+  /-- Whether the register is the value or a slot address. -/
+  kind : Scry.BindKind
+
+/-- A translation-unit function symbol. -/
+structure Scry.Sym where
+  /-- The C name (`main`, `add3`, …). -/
+  name : String
+  /-- The number of parameters. -/
+  arity : Nat
+  /-- The declared return type. -/
+  ret : Wil.Ty
+  /-- `static`: the symbol is translation-unit local. -/
+  isStatic : Bool
+
+/-- A lowering diagnostic with its origin: the offending statement/expression, not the
+function definition. This is what `scry taint` turns into a `lowering-boundary` result. -/
+structure Scry.Warning where
+  /-- The function whose lowering produced it. -/
+  func : String
+  /-- What was not modelled. -/
+  message : String
+  /-- The origin of the offending statement or expression. -/
+  span : Wil.Span
+
+/-- The state threaded through the lowering. Blocks are collected in `done` (in
+completion order, with their ids) and assembled into index order at the end. -/
+structure Scry.LState where
+  /-- Registers allocated so far. -/
+  nextVar : Nat
+  /-- Blocks named so far. -/
+  nextBlock : Nat
+  /-- The block being filled. -/
+  curBlock : Nat
+  /-- Its statements, reversed. -/
+  curStmts : List Wil.Stmt
+  /-- False after a terminator: later statements in this block are dead. -/
+  live : Bool
+  /-- Completed blocks, `(id, block)`, newest first. -/
+  done : List (Nat × Wil.Block)
+  /-- Non-parameter registers (reversed). -/
+  locals : List Wil.Var
+  /-- Parameters, in order. -/
+  params : List Wil.Var
+  /-- The current scope's variables. -/
+  env : List Scry.Bind
+  /-- Typedefs and struct tags of the translation unit. -/
+  tys : List (String × Wil.Ty)
+  structs : List (String × List (String × Wil.Ty))
+  /-- Top-level variables (module globals): name, type, cells. -/
+  globals : List (String × Wil.Ty × Nat)
+  /-- The identifiers whose address is taken in the current function (`&x`); their
+  declarations become stack slots. -/
+  addrTaken : List String
+  /-- Every function of the translation unit. -/
+  syms : List Scry.Sym
+  /-- The current function's name (for warning prefixes). -/
+  fname : String
+  /-- The current function's return type. -/
+  retTy : Wil.Ty
+  /-- The current function's definition origin (a fallback for diagnostics). -/
+  funcOrigin : Wil.Span
+  /-- The innermost loop's `break` and `continue` targets. -/
+  breakTo : Option Nat
+  contTo : Option Nat
+  /-- Diagnostics, newest first, each with the statement that caused it. -/
+  warnings : List Scry.Warning
+
+/-- The lowering monad: state in, state and result out. -/
+def Scry.LM (A : Type) : Type := Scry.LState → (Scry.LState × A)
+
+instance : Monad Scry.LM where
+  pure := fun a => fun s => (s, a)
+  bind := fun x f => fun s => match x s with
+    | (s1, a) => f a s1
+
+/-- A value with no effect. -/
+def Scry.lret {A : Type} (a : A) : Scry.LM A := fun s => (s, a)
+
+/-- The state. -/
+def Scry.get : Scry.LM Scry.LState := fun s => (s, s)
+
+/-- Replace the state. -/
+def Scry.put (s : Scry.LState) : Scry.LM Unit := fun _ => (s, ())
+
+/-- Update the state. -/
+def Scry.modify (f : Scry.LState → Scry.LState) : Scry.LM Unit := fun s => (f s, ())
+
+/-- Run the lowering from `s`. -/
+def Scry.runLM {A : Type} (m : Scry.LM A) (s : Scry.LState) : Scry.LState × A := m s
+
+/-- A fresh register of type `ty`; it is a local unless the caller moves it to `params`. -/
+def Scry.fresh (ty : Wil.Ty) : Scry.LM Wil.Var := fun s =>
+  let v := Wil.Var.mk s.nextVar ty;
+  ({ s with nextVar := Nat.succ s.nextVar, locals := .cons v s.locals }, v)
+
+/-- A fresh register bound to a parameter (not a local). -/
+def Scry.freshParam (ty : Wil.Ty) : Scry.LM Wil.Var := fun s =>
+  let v := Wil.Var.mk s.nextVar ty;
+  ({ s with nextVar := Nat.succ s.nextVar, params := List.append s.params (.cons v .nil) }, v)
+
+/-- Bind `name` to `v` in the current scope. -/
+def Scry.bind (name : String) (v : Wil.Var) : Scry.LM Unit :=
+  Scry.modify (fun s => { s with env := .cons (Scry.Bind.mk name v .reg) s.env })
+
+/-- Bind `name` to a slot address `v` (an address-taken scalar, or an aggregate). -/
+def Scry.bindSlot (name : String) (v : Wil.Var) (ty : Wil.Ty) (agg : Option Scry.Agg) :
+    Scry.LM Unit :=
+  Scry.modify (fun s => { s with env := .cons (Scry.Bind.mk name v (.slot ty agg)) s.env })
+
+/-- The binding of `name` (the innermost binding wins). -/
+def Scry.lookupBind (s : Scry.LState) (name : String) : Option Scry.Bind :=
+  List.find (fun b => String.eq b.name name) s.env
+
+/-- The register bound to `name` (the innermost binding wins). -/
+def Scry.lookupVar (s : Scry.LState) (name : String) : Option Wil.Var :=
+  match Scry.lookupBind s name with
+  | .some b => .some b.var
+  | .none => .none
+
+/-- A warning about the given CST node: the diagnostic points at the node's origin, so
+`scry taint` can place it on the offending statement. -/
+def Scry.warnAt (c : Scry.Cst) (n : Nat) (m : String) : Scry.LM Unit :=
+  Scry.modify (fun s =>
+    { s with warnings := .cons (Scry.Warning.mk s.fname m (Scry.originOf c n)) s.warnings })
+
+/-- A warning with an explicit origin (the current function's definition when there is no
+better node). -/
+def Scry.warnSp (m : String) (sp : Wil.Span) : Scry.LM Unit :=
+  Scry.modify (fun s =>
+    { s with warnings := .cons (Scry.Warning.mk s.fname m sp) s.warnings })
+
+/-- A warning with the function definition's origin. -/
+def Scry.warnHere (m : String) : Scry.LM Unit :=
+  Scry.modify (fun s =>
+    { s with warnings := .cons (Scry.Warning.mk s.fname m s.funcOrigin) s.warnings })
+
+/-- Emit a statement in the current block (unless the block is already terminated). -/
+def Scry.emit (st : Wil.Stmt) : Scry.LM Unit :=
+  Scry.modify (fun s => match s.live with
+    | .true => { s with curStmts := .cons st s.curStmts }
+    | .false => s)
+
+/-- Emit `st` with the origin of node `n`. -/
+def Scry.emitAt (c : Scry.Cst) (n : Nat) (st : Wil.Stmt) : Scry.LM Unit :=
+  Scry.emit (Wil.withOrigin st (Scry.originOf c n))
+
+/-- Seal the current block with `t` and mark it done. -/
+def Scry.seal (t : Wil.Term) : Scry.LM Unit :=
+  Scry.modify (fun s => match s.live with
+    | .false => s
+    | .true =>
+      { s with done := .cons (s.curBlock, Wil.Block.mk (List.reverse s.curStmts) t) s.done
+        , live := .false })
+
+/-- Seal the current block with a goto whose origin is `o`. -/
+def Scry.sealTo (b : Nat) (o : Wil.Span) : Scry.LM Unit :=
+  Scry.seal (Wil.withTermOrigin (.goto (Wil.mkBlockId b) Wil.noSpan) o)
+
+/-- Allocate a block name (it is filled by `startBlock`). -/
+def Scry.newBlock : Scry.LM Nat := fun s => ({ s with nextBlock := Nat.succ s.nextBlock }, s.nextBlock)
+
+/-- Start filling block `b`; the previous one must have been sealed. -/
+def Scry.startBlock (b : Nat) : Scry.LM Unit :=
+  Scry.modify (fun s => { s with curBlock := b, curStmts := .nil, live := .true })
+
+/-- A fresh block that is started immediately. -/
+def Scry.freshBlock : Scry.LM Nat := do
+  b ← Scry.newBlock;
+  Scry.startBlock b;
+  Scry.lret b
+
+-- ## C types
+
+/-- The words of a type's spelling (`unsigned long` → `["unsigned", "long"]`). -/
+def Scry.lowerWords (s : String) : List String :=
+  List.filter (fun w => Bool.not (String.isEmpty w)) (String.splitOn (String.trim s) " ")
+
+/-- Whether `w` occurs in `ws`. -/
+def Scry.hasWord (w : String) (ws : List String) : Bool := List.any (String.eq w) ws
+
+/-- The LP64 Wil type for a C type spelling, or `none` when it is not a supported
+scalar. `typedef` names are looked up in `tys` first. -/
+def Scry.tyOfText (tys : List (String × Wil.Ty)) (text : String) : Option Wil.Ty :=
+  match List.find (fun p => String.eq p.1 (String.trim text)) tys with
+  | .some p => .some p.2
+  | .none =>
+    let ws := Scry.lowerWords text;
+    let uns := Scry.hasWord "unsigned" ws;
+    let signed := Bool.not uns;
+    match Scry.hasWord "char" ws, Scry.hasWord "short" ws,
+          Bool.or (Scry.hasWord "long" ws) (Scry.hasWord "long long" ws),
+          Scry.hasWord "int" ws, Scry.hasWord "void" ws, Scry.hasWord "_Bool" ws with
+    | .true, _, _, _, _, _ => .some (Wil.Ty.int 8 signed)
+    | _, .true, _, _, _, _ => .some (Wil.Ty.int 16 signed)
+    | _, _, .true, _, _, _ => .some (Wil.Ty.int 64 signed)
+    | _, _, _, .true, _, _ => .some (Wil.Ty.int 32 signed)
+    | _, _, _, _, .true, _ => .none
+    | _, _, _, _, _, .true => .some (Wil.Ty.int 8 .false)
+    | _, _, _, _, _, _ => match List.find (fun w => String.eq w "int") ws with
+      | .some _ => .some (Wil.Ty.int 32 signed)
+      | .none => .none
+
+/-- The struct tag of a `struct_specifier` node (`""` for an anonymous struct). -/
+def Scry.structTag (c : Scry.Cst) (n : Nat) : String :=
+  match Scry.childF c n "name" with
+  | .some j => c.textOf j
+  | .none => ""
+
+/-- The index of struct `tag` in a table, 0 when absent (`go` is the table tail at
+index `i`). -/
+def Scry.structIndexOf : Nat → String → List (String × List (String × Wil.Ty)) → Nat
+  | _, _, .nil => 0
+  | i, tag, .cons p rest => match String.eq p.1 tag with
+    | .true => i
+    | .false => Scry.structIndexOf (Nat.succ i) tag rest
+
+/-- The index of struct `tag` in the table (0 when it is not there: an unknown record,
+which the lowering only uses as a placeholder type). -/
+def Scry.structIndex (s : Scry.LState) (tag : String) : Nat :=
+  Scry.structIndexOf 0 tag s.structs
+
+/-- The Wil type of a `type_specifier` node. `struct`/`union`/`enum` become a record
+placeholder; the fields are only used by the struct table, not by this slice. -/
+def Scry.typeOf (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Wil.Ty :=
+  match c.kindOf n with
+  | k => match String.eq k "struct_specifier" with
+    | .true => Wil.Ty.record (Scry.structIndex s (Scry.structTag c n))
+    | .false => match String.eq k "union_specifier" with
+      | .true => Wil.Ty.record (Scry.structIndex s (Scry.structTag c n))
+      | .false => match String.eq k "enum_specifier" with
+        | .true => Wil.i32
+        | .false => match Scry.tyOfText s.tys (c.textOf n) with
+          | .some t => t
+          | .none => Wil.Ty.unknown
+
+/-- Is this node kind a declarator (so a parenthesised declarator's punctuation can be
+skipped)? -/
+def Scry.isDeclaratorK (k : String) : Bool :=
+  Bool.or (String.eq k "identifier")
+    (Bool.or (String.eq k "field_identifier")
+      (Bool.or (String.eq k "pointer_declarator")
+        (Bool.or (String.eq k "array_declarator")
+          (Bool.or (String.eq k "function_declarator")
+            (Bool.or (String.eq k "parenthesized_declarator")
+              (Bool.or (String.eq k "init_declarator")
+                (String.eq k "attributed_declarator")))))))
+
+/-- The declarator children of `n` (a parenthesised declarator also has `(`/`)` tokens). -/
+def Scry.declKids (c : Scry.Cst) (n : Nat) : List Nat :=
+  List.filter (fun j => Scry.isDeclaratorK (c.kindOf j)) (c.childrenOf n)
+
+/-- Wrap a type in as many pointers as the declarator's `pointer_declarator` nodes. -/
+def Scry.pointeeOf (base : Wil.Ty) (levels : Nat) : Wil.Ty :=
+  match levels with
+  | .zero => base
+  | .succ k => Wil.Ty.ptr (Scry.pointeeOf base k)
+
+mutual
+/-- A declarator's spelling and type: its identifier (the innermost one) and the type
+after applying its pointers and (for functions) its function type. `declarator`,
+`pointer_declarator`, `parenthesized_declarator`, `init_declarator` and
+`array_declarator` all end in an identifier; the latter is marked unsupported. -/
+def Scry.declInfo (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
+    String × Wil.Ty × Bool :=
+  match c.kindOf n with
+  | k => match Bool.or (String.eq k "identifier") (String.eq k "field_identifier") with
+    | .true => (c.textOf n, base, .false)
+    | .false => match String.eq k "pointer_declarator" with
+      | .true => match Scry.childF c n "declarator" with
+        | .some d => Scry.declInfo c s d (Wil.Ty.ptr base)
+        | .none => ("", Wil.Ty.ptr base, .true)
+      | .false => match String.eq k "init_declarator" with
+        | .true => match Scry.childF c n "declarator" with
+          | .some d => Scry.declInfo c s d base
+          | .none => ("", base, .true)
+        | .false => match String.eq k "function_declarator" with
+          | .true => Scry.fnDeclInfo c s n base
+          | .false => match String.eq k "parenthesized_declarator" with
+            | .true => match Scry.declKids c n with
+              | .cons d _ => Scry.declInfo c s d base
+              | .nil => ("", base, .true)
+            | .false => match Scry.tyOfText s.tys (c.textOf n) with
+              | .some t => ("", t, .false)
+              | .none => ("", base, .true)
+
+/-- A `function_declarator`'s name and function type (`arity` parameters, `ret`). -/
+def Scry.fnDeclInfo (c : Scry.Cst) (s : Scry.LState) (n : Nat) (ret : Wil.Ty) :
+    String × Wil.Ty × Bool :=
+  let params := Scry.paramsOf c s n;
+  match Scry.childF c n "declarator" with
+  | .some d => Scry.declInfo c s d (Wil.Ty.fn (List.length params) ret)
+  | .none => ("", Wil.Ty.fn (List.length params) ret, .false)
+
+/-- The parameters of a `function_declarator` (names and types; a `(void)` parameter
+list has none). Later definitions get registers for these names. -/
+def Scry.paramsOf (c : Scry.Cst) (s : Scry.LState) (fn : Nat) : List (String × Wil.Ty) :=
+  match Scry.childF c fn "parameters" with
+  | .none => .nil
+  | .some pl => List.concat (List.map (fun p =>
+      match Scry.isK c p "parameter_declaration" with
+      | .true => match Scry.childF c p "type" with
+        | .some tn =>
+          let base := Scry.typeOf c s tn;
+          match Scry.childF c p "declarator" with
+          | .some d => let di := Scry.declInfo c s d base; .cons (di.1, di.2.1) .nil
+          | .none => match Scry.hasWord "void" (Scry.lowerWords (c.textOf tn)) with
+            | .true => .nil
+            | .false => .cons ("", base) .nil
+        | .none => .nil
+      | .false => .nil) (c.childrenOf pl))
+
+/-- A struct declaration's fields (`struct P { int x; int y; };`): the name and type of
+each `field_declaration`'s declarator. This slice records them for the type table and
+for `sizeof` later; field access itself is havoc. -/
+def Scry.structFields (c : Scry.Cst) (s : Scry.LState) (body : Nat) :
+    List (String × Wil.Ty) :=
+  List.concat (List.map (fun f =>
+    match Scry.isK c f "field_declaration" with
+    | .true => match Scry.childF c f "type" with
+      | .some tn => let base := Scry.typeOf c s tn;
+        List.map (fun d => let di := Scry.declInfo c s d base; (di.1, di.2.1))
+          (Scry.childrenF c f "declarator")
+      | .none => .nil
+    | .false => .nil) (c.childrenOf body))
+end
+
+-- ## Expression kinds, so the matches are exhaustive
+
+/-- The expression kinds this lowering distinguishes (a `String`-keyed dispatch would
+not be exhaustive). -/
+inductive Scry.EKind where
+  | identifier
+  | number
+  | charLit
+  | stringLit
+  | binary
+  | unary
+  | assign
+  | update
+  | paren
+  | call
+  | castE
+  | conditional
+  | comma
+  | field
+  | subscript
+  | pointer
+  | sizeofE
+  | initList
+  | trueE
+  | falseE
+  | nullE
+  | other
+
+/-- Classify a CST node kind as an expression kind. -/
+def Scry.ekindOf (k : String) : Scry.EKind :=
+  match String.eq k "identifier" with
+  | .true => .identifier
+  | .false => match String.eq k "number_literal" with
+    | .true => .number
+    | .false => match String.eq k "char_literal" with
+      | .true => .charLit
+      | .false => match String.eq k "string_literal" with
+        | .true => .stringLit
+        | .false => match String.eq k "binary_expression" with
+          | .true => .binary
+          | .false => match String.eq k "unary_expression" with
+            | .true => .unary
+            | .false => match String.eq k "assignment_expression" with
+              | .true => .assign
+              | .false => match String.eq k "update_expression" with
+                | .true => .update
+                | .false => match String.eq k "parenthesized_expression" with
+                  | .true => .paren
+                  | .false => match String.eq k "call_expression" with
+                    | .true => .call
+                    | .false => match String.eq k "cast_expression" with
+                      | .true => .castE
+                      | .false => match String.eq k "conditional_expression" with
+                        | .true => .conditional
+                        | .false => match String.eq k "comma_expression" with
+                          | .true => .comma
+                          | .false => match String.eq k "field_expression" with
+                            | .true => .field
+                            | .false => match String.eq k "subscript_expression" with
+                              | .true => .subscript
+                              | .false => match String.eq k "pointer_expression" with
+                                | .true => .pointer
+                                | .false => match String.eq k "sizeof_expression" with
+                                  | .true => .sizeofE
+                                  | .false => match String.eq k "initializer_list" with
+                                    | .true => .initList
+                                    | .false => match String.eq k "true" with
+                                      | .true => .trueE
+                                      | .false => match String.eq k "false" with
+                                        | .true => .falseE
+                                        | .false => match String.eq k "null" with
+                                          | .true => .nullE
+                                          | .false => .other
+
+-- ## Literals and operators
+
+/-- The value of a digit character (`0`…`9`, `a`…`f`, `A`…`F`; 99 otherwise). -/
+def Scry.digitVal (ch : Char) : Nat :=
+  let n := Char.code ch;
+  match Nat.le 48 n with
+  | .false => 99
+  | .true => match Nat.le n 57 with
+    | .true => Nat.sub n 48
+    | .false => match Nat.le 97 n with
+      | .true => match Nat.le n 102 with
+        | .true => Nat.sub n 87
+        | .false => 99
+      | .false => match Nat.le 65 n with
+        | .true => match Nat.le n 70 with
+          | .true => Nat.sub n 55
+          | .false => 99
+        | .false => 99
+
+/-- Parse digits in `base` into `acc`. -/
+partial def Scry.parseDigits (base : Nat) : Nat → List Char → Option Nat
+  | acc, .nil => .some acc
+  | acc, .cons ch rest =>
+    let d := Scry.digitVal ch;
+    match Nat.lt d base with
+    | .false => .none
+    | .true => Scry.parseDigits base (Nat.add (Nat.mul acc base) d) rest
+
+/-- Whether `ch` is `u` or `U` (a literal suffix). -/
+def Scry.isU (ch : Char) : Bool :=
+  Bool.or (Nat.beq (Char.code ch) 117) (Nat.beq (Char.code ch) 85)
+
+/-- Whether `ch` is `l` or `L` (a literal suffix). -/
+def Scry.isL (ch : Char) : Bool :=
+  Bool.or (Nat.beq (Char.code ch) 108) (Nat.beq (Char.code ch) 76)
+
+/-- Whether `ch` is the digit `0`. -/
+def Scry.isZero (ch : Char) : Bool := Nat.beq (Char.code ch) 48
+
+/-- Whether `ch` is `x` or `X` (a hex prefix). -/
+def Scry.isX (ch : Char) : Bool :=
+  Bool.or (Nat.beq (Char.code ch) 120) (Nat.beq (Char.code ch) 88)
+
+/-- C's integer-literal suffix: whether it has a `u`/`U`. -/
+def Scry.litUnsigned (cs : List Char) : Bool := List.any Scry.isU cs
+
+/-- Drop the trailing `u`/`U`/`l`/`L` suffix. -/
+def Scry.dropSuffix (cs : List Char) : List Char :=
+  match List.reverse cs with
+  | .nil => .nil
+  | .cons ch rest =>
+    match Bool.or (Scry.isU ch) (Scry.isL ch) with
+    | .true => List.reverse rest
+    | .false => cs
+
+/-- A C integer literal (decimal, `0x` hex, or leading-0 octal) as a value and whether
+it is unsigned. Not modelled: digit separators, binary literals, `L`-typed widths. -/
+def Scry.parseCInt (text : String) : Option (Nat × Bool) :=
+  let cs := String.chars (String.trim text);
+  let us := Scry.litUnsigned cs;
+  let body := Scry.dropSuffix cs;
+  match body with
+  | .nil => .none
+  | .cons c0 rest => match Scry.isZero c0 with
+    | .false => match Scry.parseDigits 10 0 body with
+      | .some v => .some (v, us)
+      | .none => .none
+    | .true => match rest with
+      | .nil => .some (0, us)
+      | .cons c1 rest2 => match Scry.isX c1 with
+        | .true => match Scry.parseDigits 16 0 rest2 with
+          | .some v => .some (v, us)
+          | .none => .none
+        | .false => match Scry.parseDigits 8 0 rest with
+          | .some v => .some (v, us)
+          | .none => .none
+
+/-- The arithmetic operator of a token (`""` when it is not one). -/
+def Scry.arithOpOf (tok : String) : Option Wil.Op :=
+  match String.eq tok "+" with
+  | .true => .some .add
+  | .false => match String.eq tok "-" with
+    | .true => .some .sub
+    | .false => match String.eq tok "*" with
+      | .true => .some .mul
+      | .false => match String.eq tok "/" with
+        | .true => .some .div
+        | .false => match String.eq tok "%" with
+          | .true => .some .rem
+          | .false => match String.eq tok "&" with
+            | .true => .some .and
+            | .false => match String.eq tok "|" with
+              | .true => .some .or
+              | .false => match String.eq tok "^" with
+                | .true => .some .xor
+                | .false => match String.eq tok "<<" with
+                  | .true => .some .shl
+                  | .false => match String.eq tok ">>" with
+                    | .true => .some .shr
+                    | .false => .none
+
+/-- The comparison operator of a token. -/
+def Scry.cmpOpOf (tok : String) : Option Wil.Op :=
+  match String.eq tok "==" with
+  | .true => .some .eq
+  | .false => match String.eq tok "!=" with
+    | .true => .some .ne
+    | .false => match String.eq tok "<" with
+      | .true => .some .lt
+      | .false => match String.eq tok "<=" with
+        | .true => .some .le
+        | .false => match String.eq tok ">" with
+          | .true => .some .gt
+          | .false => match String.eq tok ">=" with
+            | .true => .some .ge
+            | .false => .none
+
+/-- A compound-assignment token's arithmetic operator (`+=` → `add`). -/
+def Scry.assignOpOf (tok : String) : Option Wil.Op :=
+  match String.eq tok "=" with
+  | .true => .none
+  | .false => match String.eq tok "+=" with
+    | .true => .some .add
+    | .false => match String.eq tok "-=" with
+      | .true => .some .sub
+      | .false => match String.eq tok "*=" with
+        | .true => .some .mul
+        | .false => match String.eq tok "/=" with
+          | .true => .some .div
+          | .false => match String.eq tok "%=" with
+            | .true => .some .rem
+            | .false => match String.eq tok "&=" with
+              | .true => .some .and
+              | .false => match String.eq tok "|=" with
+                | .true => .some .or
+                | .false => match String.eq tok "^=" with
+                  | .true => .some .xor
+                  | .false => match String.eq tok "<<=" with
+                    | .true => .some .shl
+                    | .false => match String.eq tok ">>=" with
+                      | .true => .some .shr
+                      | .false => .none
+
+/-- Structural equality of Wil types (the lowering refuses mixed widths rather than
+relying on Wil's left-operand width rule). -/
+def Scry.tyEq (a b : Wil.Ty) : Bool :=
+  match a, b with
+  | .int w s, .int w' s' => match s, s' with
+    | .true, .true => Nat.beq w w'
+    | .false, .false => Nat.beq w w'
+    | _, _ => .false
+  | .ptr p, .ptr q => Scry.tyEq p q
+  | .fn n r, .fn n' r' => Bool.and (Nat.beq n n') (Scry.tyEq r r')
+  | .record i, .record j => Nat.beq i j
+  | .dyn, .dyn => .true
+  | .unknown, .unknown => .true
+  | _, _ => .false
+
+/-- Whether assigning a value of type `src` to `dst` can be done by `Wil.Val.fit` without
+losing information the way C would: narrowing truncates (both do), same-width keeps bits,
+and widening is right only from an unsigned source (zero extension). A signed widening
+needs sign extension, which `Val.fit` does not do, so the lowering warns (and keeps the
+value: it is the best available). -/
+def Scry.convOk (src dst : Wil.Ty) : Bool :=
+  match src, dst with
+  | .int wa sa, .int wb _ =>
+    match Nat.le wb wa with
+    | .true => .true
+    | .false => match sa with
+      | .false => .true
+      | .true => Nat.beq wa wb
+  | .ptr _, .ptr _ => .true
+  | .dyn, _ => .true
+  | _, _ => Scry.tyEq src dst
+
+/-- A type's spelling, for diagnostics. -/
+def Scry.tyShow (t : Wil.Ty) : String :=
+  match t with
+  | .int w s => String.append (match s with | .true => "i" | .false => "u") (Nat.repr w)
+  | .ptr p => String.append (Scry.tyShow p) "*"
+  | .fn n r => String.append "fn" (String.append (Nat.repr n) (String.append "->" (Scry.tyShow r)))
+  | .record i => String.append "record" (Nat.repr i)
+  | .dyn => "dyn"
+  | .unknown => "unknown"
+
+-- ## Struct and typedef tables
+
+/-- Replace struct `tag`'s fields, or append it (index order is the record id). -/
+def Scry.putStructGo : String → List (String × Wil.Ty)
+    → List (String × List (String × Wil.Ty)) → List (String × List (String × Wil.Ty))
+  | _, _, .nil => .nil
+  | tag, fs, .cons p rest => match String.eq p.1 tag with
+    | .true => .cons (tag, fs) rest
+    | .false => .cons p (Scry.putStructGo tag fs rest)
+
+/-- Add a struct definition to the table (replacing an earlier declaration's fields). -/
+def Scry.putStruct (tag : String) (fs : List (String × Wil.Ty))
+    (l : List (String × List (String × Wil.Ty))) : List (String × List (String × Wil.Ty)) :=
+  match List.find (fun p => String.eq p.1 tag) l with
+  | .some _ => Scry.putStructGo tag fs l
+  | .none => List.append l (.cons (tag, fs) .nil)
+
+/-- If `tn` is a `struct_specifier` with a body, record its fields. Unknown tags get an
+empty field list; the type itself is `Wil.Ty.record` with the tag's index. -/
+def Scry.noteStruct (c : Scry.Cst) (tn : Nat) : Scry.LM Unit := do
+  s ← Scry.get;
+  match Scry.isK c tn "struct_specifier" with
+  | .false => Scry.lret ()
+  | .true => match Scry.childF c tn "body" with
+    | .none => Scry.lret ()
+    | .some body =>
+      let tag := Scry.structTag c tn;
+      let fs := Scry.structFields c s body;
+      Scry.modify (fun s' => { s' with structs := Scry.putStruct tag fs s'.structs })
+
+/-- Record a `type_definition` (`typedef int myint;`) in the type table. -/
+def Scry.learnTypedef (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  s ← Scry.get;
+  match Scry.childF c n "type" with
+  | .none => Scry.lret ()
+  | .some tn => do
+    Scry.noteStruct c tn;
+    s2 ← Scry.get;
+    let base := Scry.typeOf c s2 tn;
+    match Scry.childF c n "declarator" with
+    | .none => Scry.lret ()
+    | .some d =>
+      let di := Scry.declInfo c s2 d base;
+      match String.isEmpty di.1 with
+      | .true => Scry.lret ()
+      | .false => Scry.modify (fun s' => { s' with tys := .cons (di.1, di.2.1) s'.tys })
+
+-- ## Translation-unit preparation
+
+/-- `static` in a declaration's storage classes. -/
+def Scry.isStaticDecl (c : Scry.Cst) (n : Nat) : Bool :=
+  List.any (fun j => Bool.and (String.eq (c.kindOf j) "storage_class_specifier")
+    (String.eq (String.trim (c.textOf j)) "static")) (c.childrenOf n)
+
+/-- Record a function symbol from a declarator's `(name, ty, _)`. -/
+def Scry.noteSym (c : Scry.Cst) (n : Nat) (di : String × Wil.Ty × Bool) : Scry.LM Unit := do
+  match di.2.1 with
+  | .fn arity ret =>
+    match String.isEmpty di.1 with
+    | .true => Scry.lret ()
+    | .false => Scry.modify (fun s => match List.find (fun y => String.eq y.name di.1) s.syms with
+      | .some _ => s
+      | .none => { s with syms := List.append s.syms (.cons (Scry.Sym.mk di.1 arity ret
+          (Scry.isStaticDecl c n)) .nil) })
+  | _ => Scry.lret ()
+
+/-- Add symbols for a declaration's function declarators (prototypes); plain variables
+are translation-unit globals, which this slice does not model. -/
+def Scry.noteProtos (c : Scry.Cst) (n : Nat) (base : Wil.Ty) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons d rest => do
+    s ← Scry.get;
+    Scry.noteSym c n (Scry.declInfo c s d base);
+    Scry.noteProtos c n base rest
+
+/-- Second pass: function symbols (definitions and prototypes), in source order. -/
+def Scry.scanSyms (c : Scry.Cst) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons i rest =>
+    match Scry.isK c i "function_definition" with
+    | .true => do
+      s ← Scry.get;
+      match Scry.childF c i "type" with
+      | .some tn => match Scry.childF c i "declarator" with
+        | .some d => do Scry.noteSym c i (Scry.declInfo c s d (Scry.typeOf c s tn)); Scry.scanSyms c rest
+        | .none => Scry.scanSyms c rest
+      | .none => Scry.scanSyms c rest
+    | .false => match Scry.isK c i "declaration" with
+      | .true => do
+        s ← Scry.get;
+        match Scry.childF c i "type" with
+        | .some tn => do
+          let base := Scry.typeOf c s tn;
+          Scry.noteProtos c i base (Scry.childrenF c i "declarator");
+          Scry.scanSyms c rest
+        | .none => Scry.scanSyms c rest
+      | .false => Scry.scanSyms c rest
+
+
+-- ## Statement kinds
+
+/-- The statement kinds this lowering distinguishes. -/
+inductive Scry.SKind where
+  | compound
+  | decl
+  | expr
+  | retS
+  | ifS
+  | whileS
+  | forS
+  | breakS
+  | continueS
+  | doS
+  | switchS
+  | gotoS
+  | labelS
+  | typeDef
+  | otherS
+
+/-- Classify a CST node kind as a statement kind. -/
+def Scry.skindOf (k : String) : Scry.SKind :=
+  match String.eq k "compound_statement" with
+  | .true => .compound
+  | .false => match String.eq k "declaration" with
+    | .true => .decl
+    | .false => match String.eq k "expression_statement" with
+      | .true => .expr
+      | .false => match String.eq k "return_statement" with
+        | .true => .retS
+        | .false => match String.eq k "if_statement" with
+          | .true => .ifS
+          | .false => match String.eq k "while_statement" with
+            | .true => .whileS
+            | .false => match String.eq k "for_statement" with
+              | .true => .forS
+              | .false => match String.eq k "break_statement" with
+                | .true => .breakS
+                | .false => match String.eq k "continue_statement" with
+                  | .true => .continueS
+                  | .false => match String.eq k "do_statement" with
+                    | .true => .doS
+                    | .false => match String.eq k "switch_statement" with
+                      | .true => .switchS
+                      | .false => match String.eq k "goto_statement" with
+                        | .true => .gotoS
+                        | .false => match String.eq k "labeled_statement" with
+                          | .true => .labelS
+                          | .false => match String.eq k "type_definition" with
+                            | .true => .typeDef
+                            | .false => .otherS
+
+/-- Whether node `j` is a statement kind (the braces and semicolons of a compound are
+not). -/
+def Scry.isStmtK (c : Scry.Cst) (j : Nat) : Bool :=
+  match Scry.skindOf (c.kindOf j) with
+  | .otherS => .false
+  | _ => .true
+
+/-- Whether node `j` is an expression (or an initializer list). -/
+def Scry.isExprK (c : Scry.Cst) (j : Nat) : Bool :=
+  match Scry.ekindOf (c.kindOf j) with
+  | .other => Bool.or (String.eq (c.kindOf j) "comma_expression")
+      (String.eq (c.kindOf j) "initializer_list")
+  | _ => .true
+
+/-- The expression children of `n`, in order (parentheses, commas and keywords are not
+expression kinds and drop out). -/
+def Scry.exprKids (c : Scry.Cst) (n : Nat) : List Nat :=
+  List.filter (fun j => Scry.isExprK c j) (c.childrenOf n)
+
+-- ## Switch labels
+
+/-- One `case`/`default` label of a `switch`: its CST node, the case value (`none` for
+`default`) and the statements it guards (which fall through to the next label). -/
+structure Scry.Case where
+  node : Nat
+  value : Option Nat
+  stmts : List Nat
+
+/-- The label of a `case_statement` node (`none` for another kind of statement). -/
+def Scry.caseOf (c : Scry.Cst) (n : Nat) : Option Scry.Case :=
+  match Scry.isK c n "case_statement" with
+  | .false => .none
+  | .true => .some (Scry.Case.mk n (Scry.childF c n "value")
+      (List.filter (fun j => Scry.isStmtK c j) (c.childrenOf n)))
+
+/-- The `case`/`default` labels directly in a `switch` body, in source order. -/
+def Scry.casesOf (c : Scry.Cst) (body : Nat) : List Scry.Case :=
+  List.concat (List.map (fun j => match Scry.caseOf c j with
+    | .some k => .cons k .nil
+    | .none => .nil) (c.childrenOf body))
+
+/-- Pair each label with its block, in order. -/
+partial def Scry.zipCases (cases : List Scry.Case) : List Nat → List (Scry.Case × Nat)
+  | .nil => .nil
+  | .cons b bs => match cases with
+    | .nil => .nil
+    | .cons k ks => .cons (k, b) (Scry.zipCases ks bs)
+
+/-- The index of the first `default` label. -/
+def Scry.defaultIndexOf : Nat → List Scry.Case → Option Nat
+  | _, .nil => .none
+  | i, .cons k rest => match k.value with
+    | .none => .some i
+    | .some _ => Scry.defaultIndexOf (Nat.succ i) rest
+
+/-- `n` fresh block names, in order. -/
+def Scry.newBlocks : Nat → Scry.LM (List Nat)
+  | .zero => Scry.lret .nil
+  | .succ k => do
+    b ← Scry.newBlock;
+    rest ← Scry.newBlocks k;
+    Scry.lret (.cons b rest)
+
+-- ## The aggregate layout
+
+/-- The fields of the record with this id (`[]` when the id is not a known struct). -/
+def Scry.structAt (structs : List (String × List (String × Wil.Ty))) (id : Nat) :
+    List (String × Wil.Ty) :=
+  match Wil.listNth structs id with
+  | .some p => p.2
+  | .none => .nil
+
+/-- Cells a type occupies in the analysis layout: one per scalar/pointer, the sum of the
+fields for a record, one for an unknown/dynamic type. Recursive records are cut off after
+`depth` levels (they can only be reached through pointers, which are one cell). -/
+def Scry.cellsOfGo (structs : List (String × List (String × Wil.Ty))) : Nat → Wil.Ty → Nat
+  | .zero, _ => 1
+  | .succ k, t => match t with
+    | .int _ _ => 1
+    | .ptr _ => 1
+    | .fn _ _ => 1
+    | .dyn => 1
+    | .unknown => 1
+    | .record id =>
+      List.foldr (fun f acc => Nat.add acc (Scry.cellsOfGo structs k f.2)) 0
+        (Scry.structAt structs id)
+
+def Scry.cellsOf (structs : List (String × List (String × Wil.Ty))) (t : Wil.Ty) : Nat :=
+  Scry.cellsOfGo structs 8 t
+
+/-- The cell offset and type of field `name` of record `id`. -/
+def Scry.fieldOffsetGo (structs : List (String × List (String × Wil.Ty))) (id : Nat)
+    (name : String) : Nat → List (String × Wil.Ty) → Option (Nat × Wil.Ty)
+  | _, .nil => .none
+  | off, .cons f rest => match String.eq f.1 name with
+    | .true => .some (off, f.2)
+    | .false => Scry.fieldOffsetGo structs id name (Nat.add off (Scry.cellsOf structs f.2)) rest
+
+def Scry.fieldOffset (structs : List (String × List (String × Wil.Ty))) (id : Nat)
+    (name : String) : Option (Nat × Wil.Ty) :=
+  Scry.fieldOffsetGo structs id name 0 (Scry.structAt structs id)
+
+/-- A constant integer expression the lowering can fold: a literal, a parenthesised
+constant, or `+ - * /` of constants. Array sizes and indices use it. -/
+partial def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
+  match String.eq (c.kindOf n) "number_literal" with
+  | .true => match Scry.parseCInt (c.textOf n) with
+    | .some p => .some p.1
+    | .none => .none
+  | .false => match String.eq (c.kindOf n) "parenthesized_expression" with
+    | .true => match Scry.exprKids c n with
+      | .cons e _ => Scry.constInt c e
+      | .nil => .none
+    | .false => match String.eq (c.kindOf n) "unary_expression" with
+      | .false => .none
+      | .true => match Scry.childF c n "argument" with
+        | .none => .none
+        | .some a => match String.eq (Scry.tokenF c n "operator") "+" with
+          | .true => Scry.constInt c a
+          | .false => .none
+
+/-- The declared length of an array declarator (`0` when the size is not a constant the
+lowering folds). -/
+def Scry.arrayLen (c : Scry.Cst) (n : Nat) : Nat :=
+  match Scry.childF c n "size" with
+  | .none => 0
+  | .some sz => match Scry.constInt c sz with
+    | .some v => v
+    | .none => 0
+
+/-- The declarator part of an `array_declarator`: name, element type, length. -/
+def Scry.arrayDeclOf (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
+    Option (String × Wil.Ty × Nat) :=
+  let di : String × Wil.Ty × Bool := match Scry.childF c n "declarator" with
+    | .some d => Scry.declInfo c s d base
+    | .none => ("", base, .true);
+  match String.isEmpty di.1 with
+  | .true => .none
+  | .false => .some (di.1, di.2.1, Scry.arrayLen c n)
+
+/-- An array declarator (`int a[4]`, possibly under an `init_declarator`): its name, its
+element type, and its length (`0` when the size is not a constant the lowering folds). -/
+partial def Scry.arrayDecl (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
+    Option (String × Wil.Ty × Nat) :=
+  match String.eq (c.kindOf n) "init_declarator" with
+  | .true => match Scry.childF c n "declarator" with
+    | .some d => Scry.arrayDecl c s d base
+    | .none => .none
+  | .false => match String.eq (c.kindOf n) "array_declarator" with
+    | .false => .none
+    | .true => Scry.arrayDeclOf c s n base
+
+/-- Every identifier whose address is taken (`&x`) in a subtree: those declarations must
+become stack slots. `partial`: the recursion is over CST children, which Wiz does not see
+as structurally smaller. -/
+partial def Scry.addrTakenGo (c : Scry.Cst) (n : Nat) : List String :=
+  let here : List String := match String.eq (c.kindOf n) "pointer_expression" with
+    | .false => .nil
+    | .true => match Scry.tokenF c n "operator" with
+      | tok => match String.eq tok "&" with
+        | .false => .nil
+        | .true => match Scry.childF c n "argument" with
+          | .none => .nil
+          | .some a => match Scry.isK c a "identifier" with
+            | .false => .nil
+            | .true => .cons (c.textOf a) .nil;
+  List.append here (List.concat (List.map (fun j => Scry.addrTakenGo c j) (c.childrenOf n)))
+
+
+-- ## The lowering
+
+/-- Record the declarators of a top-level variable declaration as module globals (name,
+type, cells). Functions are left to `Scry.scanSyms`; arrays keep their length in the cell
+count. -/
+def Scry.noteGlobalDecls (c : Scry.Cst) (base : Wil.Ty) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons d rest => do
+    s ← Scry.get;
+    match Scry.arrayDecl c s d base with
+    | .some arr => do
+      let per := Scry.cellsOf s.structs arr.2.1;
+      let c0 := Nat.mul arr.2.2 per;
+      let cells := match Nat.beq c0 0 with
+        | .true => 1
+        | .false => c0;
+      Scry.modify (fun st => { st with globals := .cons (arr.1, arr.2.1, cells) st.globals });
+      Scry.noteGlobalDecls c base rest
+    | .none =>
+      let di := Scry.declInfo c s d base;
+      match String.isEmpty di.1 with
+      | .true => Scry.noteGlobalDecls c base rest
+      | .false => match di.2.1 with
+        | .fn _ _ => Scry.noteGlobalDecls c base rest
+        | t => do
+          Scry.modify (fun st => { st with globals := .cons (di.1, t, Scry.cellsOf s.structs t) st.globals });
+          Scry.noteGlobalDecls c base rest
+
+/-- First pass: typedefs and struct tags, in source order (later typedefs may use
+earlier structs; a typedef's own type is resolved once). Top-level variable declarations
+are recorded as globals; their initialisers are not modelled (analysis-only memory). -/
+def Scry.scanTypes (c : Scry.Cst) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons i rest =>
+    match Scry.isK c i "type_definition" with
+    | .true => do Scry.learnTypedef c i; Scry.scanTypes c rest
+    | .false => match Scry.isK c i "declaration" with
+      | .true => do
+        match Scry.childF c i "type" with
+        | .some tn => do
+          Scry.noteStruct c tn;
+          s2 ← Scry.get;
+          Scry.noteGlobalDecls c (Scry.typeOf c s2 tn) (Scry.childrenF c i "declarator")
+        | .none => Scry.lret ();
+        Scry.scanTypes c rest
+      | .false => match Scry.isK c i "function_definition" with
+        | .true => do
+          match Scry.childF c i "type" with
+          | .some tn => Scry.noteStruct c tn
+          | .none => Scry.lret ();
+          Scry.scanTypes c rest
+        | .false => match Scry.isK c i "struct_specifier" with
+          | .true => do Scry.noteStruct c i; Scry.scanTypes c rest
+          | .false => match Scry.isK c i "comment" with
+            | .true => Scry.scanTypes c rest
+            | .false => Scry.scanTypes c rest
+
+/-- Bind a module global to a fresh `globalRef` register on first use in a function: a
+scalar global becomes a slot (reads load, writes store), a struct global a slot with the
+record's layout. The concrete semantics has no global memory (the value is `undef`); the
+analysis does. -/
+def Scry.bindGlobal (c : Scry.Cst) (n : Nat) : Scry.LM (Option Scry.Bind) := do
+  s ← Scry.get;
+  match List.find (fun g => String.eq g.1 (c.textOf n)) s.globals with
+  | .none => Scry.lret .none
+  | .some g => do
+    v ← Scry.fresh (Wil.Ty.ptr g.2.1);
+    Scry.emitAt c n (Wil.globalRef v g.1);
+    match g.2.1 with
+    | .record _ => Scry.bindSlot g.1 v g.2.1
+        (.some (Scry.Agg.mk g.2.1 g.2.2 1 .false))
+    | _ => Scry.bindSlot g.1 v g.2.1 .none;
+    s2 ← Scry.get;
+    Scry.lret (Scry.lookupBind s2 g.1)
+
+mutual
+/-- A havoc'd value of `ty` with a warning naming what was not modelled. -/
+def Scry.havocAt (c : Scry.Cst) (n : Nat) (ty : Wil.Ty) (what : String) : Scry.LM Wil.Var := do
+  Scry.warnAt c n (what ++ " not modelled: havoc " ++ Scry.tyShow ty);
+  v ← Scry.fresh ty;
+  Scry.emitAt c n (Wil.havoc v);
+  Scry.lret v
+
+/-- A register holding zero of `ty`, emitted at `n` (a condition's `v != 0` needs one). -/
+def Scry.zeroAt (c : Scry.Cst) (n : Nat) (ty : Wil.Ty) : Scry.LM Wil.Var := do
+  v ← Scry.fresh ty;
+  Scry.emitAt c n (Wil.cst v (Wil.Val.default ty));
+  Scry.lret v
+
+/-- Read a binding as a value: a register is the value; a scalar slot is loaded; an
+aggregate slot is its address (an array decays to a pointer, and a struct is only read
+through a field or `&`). -/
+def Scry.readBind (c : Scry.Cst) (n : Nat) (b : Scry.Bind) : Scry.LM Wil.Var :=
+  match b.kind with
+  | .reg => Scry.lret b.var
+  | .slot ty agg => match agg with
+    | .some _ => Scry.lret b.var
+    | .none => do
+      t ← Scry.fresh ty;
+      Scry.emitAt c n (Wil.load t b.var);
+      Scry.lret t
+
+/-- Declare a stack slot (`Wil.Rhs.slot`) of `cells` cells for `name`, and initialise it
+when the declarator has a value. `elemTy` is the slot's pointee type: the variable's type
+for a scalar, the record type for a struct, the element type for an array. -/
+def Scry.slotDecl (c : Scry.Cst) (d : Nat) (name : String) (elemTy : Wil.Ty) (cells : Nat)
+    (agg : Option Scry.Agg) : Scry.LM Unit := do
+  v ← Scry.fresh (Wil.Ty.ptr elemTy);
+  Scry.emitAt c d (Wil.slot v cells);
+  Scry.bindSlot name v elemTy agg;
+  match Scry.childF c d "value" with
+  | .none => Scry.lret ()
+  | .some val => match Scry.isK c val "initializer_list" with
+    | .true => Scry.warnAt c d ("initializer list not modelled for " ++ name)
+    | .false => match agg with
+      | .some _ => Scry.warnAt c d ("aggregate initialiser not modelled for " ++ name)
+      | .none => do
+        e ← Scry.lowerExpr c val;
+        match Scry.convOk e.ty elemTy with
+        | .false => Scry.warnAt c d ("implicit conversion " ++ Scry.tyShow e.ty
+            ++ " to " ++ Scry.tyShow elemTy)
+        | .true => Scry.lret ();
+        Scry.emitAt c d (Wil.store v e)
+
+/-- The cell offset of field `field` in a record type, as a pointer: `gep base off`. -/
+def Scry.fieldAt (c : Scry.Cst) (n : Nat) (base : Wil.Var) (ty : Wil.Ty) (field : String) :
+    Scry.LM (Option (Wil.Var × Wil.Ty)) := do
+  s ← Scry.get;
+  match ty with
+  | .record id => match Scry.fieldOffset s.structs id field with
+    | .none => do
+      Scry.warnAt c n ("field " ++ field ++ " not found in the struct table");
+      Scry.lret .none
+    | .some fo => do
+      t ← Scry.fresh base.ty;
+      Scry.emitAt c n (Wil.gep t base fo.1);
+      Scry.lret (.some (t, fo.2))
+  | _ => do
+    Scry.warnAt c n ("field access on " ++ Scry.tyShow ty);
+    Scry.lret .none
+
+/-- The address of element `idx` of the array/pointer `base` (element type `elem`): a
+constant index is an exact `gep`, a variable one a `gepVar` that points-to widens to the
+base object. -/
+def Scry.indexAt (c : Scry.Cst) (n : Nat) (base : Wil.Var) (elem : Wil.Ty) (idx : Nat) :
+    Scry.LM (Option (Wil.Var × Wil.Ty)) := do
+  s ← Scry.get;
+  let scale0 := Scry.cellsOf s.structs elem;
+  let scale := match Nat.beq scale0 0 with
+    | .true => 1
+    | .false => scale0;
+  match Scry.constInt c idx with
+  | .some k => do
+    t ← Scry.fresh base.ty;
+    Scry.emitAt c n (Wil.gep t base (Nat.mul k scale));
+    Scry.lret (.some (t, elem))
+  | .none => do
+    i ← Scry.lowerExpr c idx;
+    t ← Scry.fresh base.ty;
+    Scry.emitAt c n (Wil.gepVar t base i scale);
+    Scry.lret (.some (t, elem))
+
+/-- The address of an lvalue: `(pointer register, pointee type)`. Handles identifiers
+(a slot, or a function name for `&f`), fields (`.` and `->`), subscripts (constant or
+variable index), dereferences (`*p`), and parentheses. -/
+def Scry.lowerAddr (c : Scry.Cst) (n : Nat) : Scry.LM (Option (Wil.Var × Wil.Ty)) :=
+  match Scry.ekindOf (c.kindOf n) with
+  | .paren => match Scry.exprKids c n with
+    | .cons e _ => Scry.lowerAddr c e
+    | .nil => Scry.lret .none
+  | .identifier => do
+    s ← Scry.get;
+    match Scry.lookupBind s (c.textOf n) with
+    | .some b => match b.kind with
+      | .slot ty _ => Scry.lret (.some (b.var, ty))
+      | .reg => do
+        Scry.warnAt c n ("address of register " ++ c.textOf n ++ " not modelled");
+        Scry.lret .none
+    | .none => do
+      g ← Scry.bindGlobal c n;
+      match g with
+      | .some b => Scry.lret (.some (b.var, match b.kind with
+          | .slot ty _ => ty
+          | .reg => b.var.ty))
+      | .none => do
+        Scry.warnAt c n ("address of unknown " ++ c.textOf n ++ " not modelled");
+        Scry.lret .none
+  | .field => match Scry.childF c n "argument" with
+    | .none => Scry.lret .none
+    | .some a =>
+      let fieldName := match Scry.childF c n "field" with
+        | .some f => c.textOf f
+        | .none => "";
+      match String.eq (Scry.tokenF c n "operator") "." with
+      | .true => do
+        base ← Scry.lowerAddr c a;
+        match base with
+        | .some bp => Scry.fieldAt c n bp.1 bp.2 fieldName
+        | .none => Scry.lret .none
+      | .false => do
+        p ← Scry.lowerExpr c a;
+        Scry.fieldAt c n p (Wil.pointee p.ty) fieldName
+  | .subscript => match Scry.childF c n "argument", Scry.childF c n "index" with
+    | .some a, .some idx => do
+      s ← Scry.get;
+      match Scry.isK c a "identifier" with
+      | .false => do
+        p ← Scry.lowerExpr c a;
+        Scry.indexAt c n p (Wil.pointee p.ty) idx
+      | .true => match Scry.lookupBind s (c.textOf a) with
+        | .some b => match b.kind with
+          | .slot _ (.some agg) => match agg.isArray with
+            | .true => Scry.indexAt c n b.var agg.ty idx
+            | .false => do
+              p ← Scry.lowerExpr c a;
+              Scry.indexAt c n p (Wil.pointee p.ty) idx
+          | _ => do
+            p ← Scry.lowerExpr c a;
+            Scry.indexAt c n p (Wil.pointee p.ty) idx
+        | .none => do
+          p ← Scry.lowerExpr c a;
+          Scry.indexAt c n p (Wil.pointee p.ty) idx
+    | _, _ => Scry.lret .none
+  | .pointer => match Scry.childF c n "argument" with
+    | .none => Scry.lret .none
+    | .some a => match String.eq (Scry.tokenF c n "operator") "&" with
+      | .false => do
+        p ← Scry.lowerExpr c a;
+        Scry.lret (.some (p, Wil.pointee p.ty))
+      | .true => match Scry.isK c a "identifier" with
+        | .false => Scry.lowerAddr c a
+        | .true => do
+          s ← Scry.get;
+          match List.find (fun y => String.eq y.name (c.textOf a)) s.syms with
+          | .none => Scry.lowerAddr c a
+          | .some sym => do
+            let qname := match sym.isStatic with
+              | .true => "static:" ++ sym.name
+              | .false => sym.name;
+            let fty := Wil.Ty.fn sym.arity sym.ret;
+            t ← Scry.fresh (Wil.Ty.ptr fty);
+            Scry.emitAt c n (Wil.fnptr t qname);
+            Scry.lret (.some (t, fty))
+  | _ => Scry.lret .none
+
+/-- Lower the statements `ids` in the current block. -/
+def Scry.lowerStmts (c : Scry.Cst) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons i rest => do
+    Scry.lowerStmt c i;
+    Scry.lowerStmts c rest
+
+/-- A compound statement: its declarations are scoped to it. -/
+def Scry.lowerBlock (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  s0 ← Scry.get;
+  Scry.lowerStmts c (List.filter (fun j => Scry.isStmtK c j) (c.childrenOf n));
+  Scry.modify (fun s => { s with env := s0.env })
+
+/-- One statement. A kind this slice does not model is a warning and is skipped (its
+effects are havoc'd at the expression that reads them). -/
+def Scry.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.LM Unit :=
+  match Scry.skindOf (c.kindOf n) with
+  | .compound => Scry.lowerBlock c n
+  | .decl => Scry.lowerDecl c n
+  | .expr => match Scry.exprKids c n with
+    | .cons e _ => do v ← Scry.lowerExpr c e; Scry.lret ()
+    | .nil => Scry.lret ()
+  | .retS => Scry.lowerReturn c n
+  | .ifS => Scry.lowerIf c n
+  | .whileS => Scry.lowerWhile c n
+  | .forS => Scry.lowerFor c n
+  | .breakS => do
+    s ← Scry.get;
+    match s.breakTo with
+    | .none => Scry.warnAt c n "break outside a loop"
+    | .some b => Scry.sealTo b (Scry.originOf c n)
+  | .continueS => do
+    s ← Scry.get;
+    match s.contTo with
+    | .none => Scry.warnAt c n "continue outside a loop"
+    | .some b => Scry.sealTo b (Scry.originOf c n)
+  | .typeDef => Scry.learnTypedef c n
+  | .doS => Scry.warnAt c n "do/while not modelled: statement skipped"
+  | .switchS => Scry.lowerSwitch c n
+  | .gotoS => Scry.warnAt c n "goto not modelled: statement skipped"
+  | .labelS => Scry.warnAt c n "labeled statement not modelled: statement skipped"
+  | .otherS => match Scry.isK c n "comment" with
+    | .true => Scry.lret ()
+    | .false => Scry.warnAt c n (c.kindOf n ++ " not modelled: statement skipped")
+
+/-- A declaration: one register per declarator, an `init_declarator`'s value copied
+into it. -/
+def Scry.lowerDecl (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  match Scry.childF c n "type" with
+  | .none => Scry.warnAt c n "declaration without a type"
+  | .some tn => do
+    Scry.noteStruct c tn;
+    s ← Scry.get;
+    let base := Scry.typeOf c s tn;
+    Scry.lowerDeclarators c n base (Scry.childrenF c n "declarator")
+
+/-- The declarators of one declaration, in order. Three storage shapes:
+
+* an **array** (`int a[4]`) or a **struct/union** local is an aggregate stack slot, so its
+  fields/elements are real memory cells (a field-sensitive store/load, not a havoc);
+* a scalar whose address is taken somewhere in the function (`&x`) is a one-cell stack
+  slot, so `store`/`load` through the pointer see the variable;
+* every other scalar is a plain register, exactly as before. -/
+def Scry.lowerDeclarators (c : Scry.Cst) (n : Nat) (base : Wil.Ty) : List Nat → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons d rest => do
+    s ← Scry.get;
+    match Scry.arrayDecl c s d base with
+    | .some arr => do
+      let elem := arr.2.1;
+      let len := arr.2.2;
+      let per := Scry.cellsOf s.structs elem;
+      let cells0 := Nat.mul len per;
+      let cells := match Nat.beq cells0 0 with
+        | .true => 1
+        | .false => cells0;
+      Scry.slotDecl c d arr.1 elem cells
+        (.some (Scry.Agg.mk elem cells len .true));
+      Scry.lowerDeclarators c n base rest
+    | .none =>
+      let di := Scry.declInfo c s d base;
+      match String.isEmpty di.1 with
+      | .true => do
+        Scry.warnAt c d ("declarator not modelled: " ++ c.textOf d);
+        Scry.lowerDeclarators c n base rest
+      | .false =>
+        match di.2.2 with
+        | .true => do
+          Scry.warnAt c d ("declarator not modelled (array/other): " ++ di.1);
+          v ← Scry.fresh (Wil.Ty.ptr base);
+          Scry.bind di.1 v;
+          Scry.emitAt c d (Wil.havoc v);
+          Scry.lowerDeclarators c n base rest
+        | .false => match di.2.1 with
+          | .record _ => do
+            let cells := Scry.cellsOf s.structs di.2.1;
+            Scry.slotDecl c d di.1 di.2.1 cells
+              (.some (Scry.Agg.mk di.2.1 cells 1 .false));
+            Scry.lowerDeclarators c n base rest
+          | _ => match List.any (String.eq di.1) s.addrTaken with
+            | .true => do
+              Scry.slotDecl c d di.1 di.2.1 1 .none;
+              Scry.lowerDeclarators c n base rest
+            | .false => do
+              v ← Scry.fresh di.2.1;
+              Scry.bind di.1 v;
+              match Scry.isK c d "init_declarator" with
+              | .false => Scry.lowerDeclarators c n base rest
+              | .true => match Scry.childF c d "value" with
+                | .none => Scry.lowerDeclarators c n base rest
+                | .some val =>
+                  match Scry.isK c val "initializer_list" with
+                  | .true => do
+                    Scry.warnAt c d ("initializer list not modelled for " ++ di.1);
+                    Scry.emitAt c d (Wil.havoc v);
+                    Scry.lowerDeclarators c n base rest
+                  | .false => do
+                    e ← Scry.lowerExpr c val;
+                    match Scry.convOk e.ty v.ty with
+                    | .true => Scry.lret ()
+                    | .false => Scry.warnAt c d ("implicit conversion " ++ Scry.tyShow e.ty
+                        ++ " to " ++ Scry.tyShow v.ty);
+                    Scry.emitAt c d (Wil.copy v e);
+                    Scry.lowerDeclarators c n base rest
+
+/-- `if`/`else`: a two-way branch and a join block. -/
+def Scry.lowerIf (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  let o := Scry.originOf c n;
+  let condN := match Scry.childF c n "condition" with
+    | .some x => x
+    | .none => n;
+  cond ← Scry.lowerCond c condN;
+  thenB ← Scry.newBlock;
+  elseB ← Scry.newBlock;
+  joinB ← Scry.newBlock;
+  Scry.seal (Wil.withTermOrigin (.br cond (Wil.mkBlockId thenB) (Wil.mkBlockId elseB) Wil.noSpan) o);
+  Scry.startBlock thenB;
+  match Scry.childF c n "consequence" with
+  | .some t => Scry.lowerStmt c t
+  | .none => Scry.warnAt c n "if without a consequence";
+  s1 ← Scry.get;
+  match s1.live with
+  | .true => Scry.sealTo joinB o
+  | .false => Scry.lret ();
+  Scry.startBlock elseB;
+  match Scry.childF c n "alternative" with
+  | .none => Scry.lret ()
+  | .some alt => match Scry.kids c alt with
+    | .cons a _ => Scry.lowerStmt c a
+    | .nil => Scry.warnAt c n "empty else";
+  s2 ← Scry.get;
+  match s2.live with
+  | .true => Scry.sealTo joinB o
+  | .false => Scry.lret ();
+  Scry.startBlock joinB
+
+/-- `while`: a header block (the condition), a body and an exit. -/
+def Scry.lowerWhile (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  let o := Scry.originOf c n;
+  header ← Scry.newBlock;
+  body ← Scry.newBlock;
+  exitB ← Scry.newBlock;
+  Scry.sealTo header o;
+  Scry.startBlock header;
+  let condN := match Scry.childF c n "condition" with
+    | .some x => x
+    | .none => n;
+  cond ← Scry.lowerCond c condN;
+  Scry.seal (Wil.withTermOrigin (.br cond (Wil.mkBlockId body) (Wil.mkBlockId exitB) Wil.noSpan) o);
+  Scry.startBlock body;
+  saved ← Scry.get;
+  Scry.modify (fun s => { s with breakTo := .some exitB, contTo := .some header });
+  match Scry.childF c n "body" with
+  | .some b => Scry.lowerStmt c b
+  | .none => Scry.warnAt c n "while without a body";
+  s ← Scry.get;
+  match s.live with
+  | .true => Scry.sealTo header o
+  | .false => Scry.lret ();
+  Scry.startBlock exitB;
+  Scry.modify (fun s => { s with breakTo := saved.breakTo, contTo := saved.contTo })
+
+/-- `for` desugared: initializer in the current block, then a header (condition), a
+body, and an update block that jumps back to the header. -/
+def Scry.lowerFor (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  let o := Scry.originOf c n;
+  match Scry.childF c n "initializer" with
+  | .none => Scry.lret ()
+  | .some ini => match Scry.isK c ini "declaration" with
+    | .true => Scry.lowerDecl c ini
+    | .false => do v ← Scry.lowerExpr c ini; Scry.lret ();
+  header ← Scry.newBlock;
+  body ← Scry.newBlock;
+  updateB ← Scry.newBlock;
+  exitB ← Scry.newBlock;
+  Scry.sealTo header o;
+  Scry.startBlock header;
+  match Scry.childF c n "condition" with
+  | .none => Scry.seal (Wil.withTermOrigin (.br (.const .true) (Wil.mkBlockId body) (Wil.mkBlockId exitB) Wil.noSpan) o)
+  | .some cn => do
+    cond ← Scry.lowerCond c cn;
+    Scry.seal (Wil.withTermOrigin (.br cond (Wil.mkBlockId body) (Wil.mkBlockId exitB) Wil.noSpan) o);
+  Scry.startBlock body;
+  let contB := match Scry.childF c n "update" with
+    | .some _ => updateB
+    | .none => header;
+  saved ← Scry.get;
+  Scry.modify (fun s => { s with breakTo := .some exitB, contTo := .some contB });
+  match Scry.childF c n "body" with
+  | .some b => Scry.lowerStmt c b
+  | .none => Scry.warnAt c n "for without a body";
+  s ← Scry.get;
+  match s.live with
+  | .true => Scry.sealTo contB o
+  | .false => Scry.lret ();
+  match Scry.childF c n "update" with
+  | .none => Scry.lret ()
+  | .some up => do
+    Scry.startBlock updateB;
+    v ← Scry.lowerExpr c up;
+    Scry.lret ();
+    Scry.sealTo header o;
+  Scry.startBlock exitB;
+  Scry.modify (fun s => { s with breakTo := saved.breakTo, contTo := saved.contTo })
+
+/-- The dispatch of a `switch`: one comparison and branch per `case`, chained, ending at
+`default` (or the exit when there is none). `switch` does not use `Scry.Cond.cmp`'s
+`&&`/`||`; each case value is lowered once, in the current block. -/
+def Scry.emitDispatch (c : Scry.Cst) (v : Wil.Var) (o : Wil.Span) (defaultB : Nat) :
+    List (Scry.Case × Nat) → Scry.LM Unit
+  | .nil => Scry.sealTo defaultB o
+  | .cons (k, b) rest => match k.value with
+    | .none => Scry.emitDispatch c v o defaultB rest
+    | .some vn => do
+      cv ← Scry.lowerExpr c vn;
+      match Scry.tyEq v.ty cv.ty with
+      | .false => do
+        Scry.warnAt c vn ("switch case " ++ c.textOf vn ++ " of type " ++ Scry.tyShow cv.ty
+          ++ " against " ++ Scry.tyShow v.ty ++ ": case not dispatched");
+        Scry.emitDispatch c v o defaultB rest
+      | .true => do
+        nextB ← Scry.newBlock;
+        Scry.seal (Wil.withTermOrigin (.br (.cmp .eq v cv) (Wil.mkBlockId b)
+          (Wil.mkBlockId nextB) Wil.noSpan) o);
+        Scry.startBlock nextB;
+        Scry.emitDispatch c v o defaultB rest
+
+/-- The bodies of a `switch`'s labels, in source order: each is a block, and falls
+through to the next label's block (or the exit) when it ends without a terminator.
+`break` targets the exit and `continue` keeps the enclosing loop's target. -/
+def Scry.emitCases (c : Scry.Cst) (o : Wil.Span) (exitB : Nat) :
+    List (Scry.Case × Nat) → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons (k, b) rest => do
+    Scry.startBlock b;
+    saved ← Scry.get;
+    Scry.modify (fun s => { s with breakTo := .some exitB });
+    Scry.lowerStmts c k.stmts;
+    s ← Scry.get;
+    match s.live with
+    | .true => do
+      let next : Nat := match rest with
+        | .cons (_, b2) _ => b2
+        | .nil => exitB;
+      Scry.sealTo next o
+    | .false => Scry.lret ();
+    Scry.modify (fun st => { st with breakTo := saved.breakTo });
+    Scry.emitCases c o exitB rest
+
+/-- `switch`: evaluate the condition once, then a chain of `==` comparisons branching to
+the case blocks (fallthrough is the natural block order), with `default` as the fallback
+and an exit block after. Case labels this slice cannot compare (a type mismatch) are
+warned and left unreachable; the body still lowers, so no effects are silently added. -/
+def Scry.lowerSwitch (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  let o := Scry.originOf c n;
+  let condN := match Scry.childF c n "condition" with
+    | .some x => x
+    | .none => n;
+  v ← match Scry.exprKids c condN with
+    | .cons e _ => Scry.lowerExpr c e
+    | .nil => Scry.lowerExpr c condN;
+  let body := match Scry.childF c n "body" with
+    | .some b => b
+    | .none => n;
+  match Scry.casesOf c body with
+  | .nil => Scry.warnAt c n "switch with no case labels: statement skipped"
+  | .cons k ks => do
+    let cases : List Scry.Case := .cons k ks;
+    blocks ← Scry.newBlocks (List.length cases);
+    exitB ← Scry.newBlock;
+    let pairs := Scry.zipCases cases blocks;
+    let defaultB := match Scry.defaultIndexOf 0 cases with
+      | .some i => List.getD blocks i exitB
+      | .none => exitB;
+    Scry.emitDispatch c v o defaultB pairs;
+    Scry.emitCases c o exitB pairs;
+    Scry.startBlock exitB
+
+/-- `return`; a fallthrough is an explicit `ret none` with a warning (C's implicit
+`return 0` only for `main`). -/
+def Scry.lowerReturn (c : Scry.Cst) (n : Nat) : Scry.LM Unit :=
+  match Scry.exprKids c n with
+  | .cons e _ => do
+    v ← Scry.lowerExpr c e;
+    Scry.seal (Wil.withTermOrigin (.ret (.some v) Wil.noSpan) (Scry.originOf c n))
+  | .nil => Scry.seal (Wil.withTermOrigin (.ret .none Wil.noSpan) (Scry.originOf c n))
+
+/-- Lower the expressions `ids` left to right. -/
+def Scry.lowerExprs (c : Scry.Cst) : List Nat → Scry.LM (List Wil.Var)
+  | .nil => Scry.lret .nil
+  | .cons i rest => do
+    v ← Scry.lowerExpr c i;
+    vs ← Scry.lowerExprs c rest;
+    Scry.lret (.cons v vs)
+
+/-- A call's callee name (only identifiers are direct calls in this slice). -/
+def Scry.calleeName (c : Scry.Cst) (fn : Nat) : Option String :=
+  match Scry.isK c fn "identifier" with
+  | .true => .some (c.textOf fn)
+  | .false => .none
+
+/-- One expression; the result is a register holding its value. -/
+def Scry.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var :=
+  match Scry.ekindOf (c.kindOf n) with
+  | .identifier => do
+    s ← Scry.get;
+    match Scry.lookupBind s (c.textOf n) with
+    | .some b => Scry.readBind c n b
+    | .none => match List.find (fun y => String.eq y.name (c.textOf n)) s.syms with
+      | .some sym => do
+        let qname := match sym.isStatic with
+          | .true => "static:" ++ sym.name
+          | .false => sym.name;
+        t ← Scry.fresh (Wil.Ty.ptr (Wil.Ty.fn sym.arity sym.ret));
+        Scry.emitAt c n (Wil.fnptr t qname);
+        Scry.lret t
+      | .none => do
+        g ← Scry.bindGlobal c n;
+        match g with
+        | .some b => Scry.readBind c n b
+        | .none => Scry.havocAt c n Wil.i32 ("identifier " ++ c.textOf n)
+  | .number => do
+    let txt := c.textOf n;
+    let neg := String.startsWith txt "-";
+    let mag := match neg with
+      | .true => String.drop 1 txt
+      | .false => txt;
+    match Scry.parseCInt mag with
+    | .none => Scry.havocAt c n Wil.i32 ("integer literal " ++ txt)
+    | .some p => do
+      let signed : Bool := match p.2 with
+        | .true => .false
+        | .false => .true;
+      let ty := Wil.Ty.int 32 signed;
+      v ← Scry.fresh ty;
+      Scry.emitAt c n (Wil.cst v (match neg with
+        | .true => Wil.Val.ofNeg 32 signed p.1
+        | .false => Wil.Val.ofNat 32 signed p.1));
+      Scry.lret v
+  | .charLit => do
+    v ← Scry.fresh Wil.i32;
+    Scry.emitAt c n (Wil.num v 0);
+    Scry.warnAt c n ("character literal " ++ c.textOf n ++ " not modelled (0)");
+    Scry.lret v
+  | .binary => Scry.lowerBinary c n
+  | .unary => Scry.lowerUnary c n
+  | .assign => Scry.lowerAssign c n
+  | .update => Scry.lowerUpdate c n
+  | .paren => match Scry.exprKids c n with
+    | .cons e _ => Scry.lowerExpr c e
+    | .nil => Scry.havocAt c n Wil.i32 "empty parenthesized expression"
+  | .call => Scry.lowerCall c n
+  | .comma => match Scry.exprKids c n with
+    | .nil => Scry.havocAt c n Wil.i32 "empty comma expression"
+    | .cons e rest => do
+      v ← Scry.lowerExpr c e;
+      Scry.lowerCommaTail c rest
+  | .trueE => do v ← Scry.fresh Wil.i32; Scry.emitAt c n (Wil.num v 1); Scry.lret v
+  | .falseE => do v ← Scry.fresh Wil.i32; Scry.emitAt c n (Wil.num v 0); Scry.lret v
+  | .nullE => do v ← Scry.fresh (Wil.Ty.ptr Wil.Ty.unknown); Scry.emitAt c n (Wil.cst v .nul); Scry.lret v
+  | .stringLit => Scry.havocAt c n (Wil.Ty.ptr Wil.i8) "string literal"
+  | .castE => Scry.havocAt c n Wil.i32 "cast"
+  | .conditional => Scry.havocAt c n Wil.i32 "conditional expression ?:"
+  | .field => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .some p => do
+      t ← Scry.fresh p.2;
+      Scry.emitAt c n (Wil.load t p.1);
+      Scry.lret t
+    | .none => Scry.havocAt c n Wil.i32 "struct field access"
+  | .subscript => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .some p => do
+      t ← Scry.fresh p.2;
+      Scry.emitAt c n (Wil.load t p.1);
+      Scry.lret t
+    | .none => Scry.havocAt c n Wil.i32 "subscript"
+  | .pointer => do
+    ap ← Scry.lowerAddr c n;
+    match ap with
+    | .none => Scry.havocAt c n Wil.i32 "pointer expression"
+    | .some p => match String.eq (Scry.tokenF c n "operator") "&" with
+      | .true => Scry.lret p.1
+      | .false => do
+        t ← Scry.fresh p.2;
+        Scry.emitAt c n (Wil.load t p.1);
+        Scry.lret t
+  | .sizeofE => Scry.havocAt c n Wil.u64 "sizeof"
+  | .initList => Scry.havocAt c n Wil.i32 "initializer list"
+  | .other => Scry.havocAt c n Wil.i32 ("expression " ++ c.kindOf n)
+
+/-- The tail of a comma expression: lower and discard all but the last. -/
+def Scry.lowerCommaTail (c : Scry.Cst) : List Nat → Scry.LM Wil.Var
+  | .nil => Scry.havocAt c 0 Wil.i32 "empty comma expression"
+  | .cons e rest => do
+    v ← Scry.lowerExpr c e;
+    match rest with
+    | .nil => Scry.lret v
+    | .cons _ _ => Scry.lowerCommaTail c rest
+
+/-- `+ - * / % & | ^ << >>` and the comparisons. Mixed operand types are refused with a
+warning: Wil's arithmetic takes its width from the left operand and has no explicit
+conversion, so a silent conversion here could be wrong. -/
+def Scry.lowerBinary (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
+  let tok := Scry.tokenF c n "operator";
+  match Scry.childF c n "left", Scry.childF c n "right" with
+  | .some ln, .some rn => do
+    a ← Scry.lowerExpr c ln;
+    b ← Scry.lowerExpr c rn;
+    match Scry.cmpOpOf tok with
+    | .some op => match Scry.tyEq a.ty b.ty with
+      | .false => Scry.havocAt c n (Wil.Ty.int 1 .false)
+          ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty)
+      | .true => do
+        r ← Scry.fresh (Wil.Ty.int 1 .false);
+        Scry.emitAt c n (Wil.binop r op a b);
+        Scry.lret r
+    | .none => match Scry.arithOpOf tok with
+      | .none => Scry.havocAt c n Wil.i32 ("operator " ++ tok)
+      | .some op => match Scry.tyEq a.ty b.ty with
+        | .false => Scry.havocAt c n a.ty
+            ("mixed arithmetic " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty)
+        | .true => do
+          r ← Scry.fresh a.ty;
+          Scry.emitAt c n (Wil.binop r op a b);
+          Scry.lret r
+  | _, _ => Scry.havocAt c n Wil.i32 ("binary expression " ++ c.textOf n)
+
+/-- Unary `-`, `~`, `!`, `+`. -/
+def Scry.lowerUnary (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
+  let tok := Scry.tokenF c n "operator";
+  match Scry.childF c n "argument" with
+  | .none => Scry.havocAt c n Wil.i32 ("unary expression " ++ c.textOf n)
+  | .some an => do
+    a ← Scry.lowerExpr c an;
+    match String.eq tok "-" with
+    | .true => do r ← Scry.fresh a.ty; Scry.emitAt c n (Wil.unop r .neg a); Scry.lret r
+    | .false => match String.eq tok "~" with
+      | .true => do r ← Scry.fresh a.ty; Scry.emitAt c n (Wil.unop r .not a); Scry.lret r
+      | .false => match String.eq tok "+" with
+        | .true => do r ← Scry.fresh a.ty; Scry.emitAt c n (Wil.copy r a); Scry.lret r
+        | .false => match String.eq tok "!" with
+          | .true => do
+            z ← Scry.zeroAt c n a.ty;
+            r ← Scry.fresh (Wil.Ty.int 1 .false);
+            Scry.emitAt c n (Wil.binop r .eq a z);
+            Scry.lret r
+          | .false => Scry.havocAt c n a.ty ("unary operator " ++ tok)
+
+/-- Assign to a plain register (a local or a parameter whose address is not taken): a
+copy, or a compound read-op-write. -/
+def Scry.assignReg (c : Scry.Cst) (n : Nat) (tok : String) (v : Wil.Var) (rn : Nat) :
+    Scry.LM Wil.Var := do
+  e ← Scry.lowerExpr c rn;
+  match Scry.assignOpOf tok with
+  | .none => do
+    match Scry.convOk e.ty v.ty with
+    | .true => Scry.lret ()
+    | .false => Scry.warnAt c n ("implicit conversion " ++ Scry.tyShow e.ty
+        ++ " to " ++ Scry.tyShow v.ty);
+    Scry.emitAt c n (Wil.copy v e);
+    Scry.lret v
+  | .some op => do
+    match Scry.convOk e.ty v.ty with
+    | .false => do
+      Scry.warnAt c n ("compound assignment of " ++ Scry.tyShow e.ty
+        ++ " to " ++ Scry.tyShow v.ty ++ " not modelled");
+      Scry.emitAt c n (Wil.havoc v);
+      Scry.lret v
+    | .true => do
+      r ← Scry.fresh v.ty;
+      Scry.emitAt c n (Wil.binop r op v e);
+      Scry.emitAt c n (Wil.copy v r);
+      Scry.lret v
+
+/-- Assign to a scalar stack slot (an address-taken local or a global): a store, or a
+load-op-store for a compound assignment. -/
+def Scry.assignSlot (c : Scry.Cst) (n : Nat) (tok : String) (v : Wil.Var) (ty : Wil.Ty)
+    (rn : Nat) : Scry.LM Wil.Var := do
+  e ← Scry.lowerExpr c rn;
+  match Scry.assignOpOf tok with
+  | .none => do
+    match Scry.convOk e.ty ty with
+    | .true => Scry.lret ()
+    | .false => Scry.warnAt c n ("implicit conversion " ++ Scry.tyShow e.ty
+        ++ " to " ++ Scry.tyShow ty);
+    Scry.emitAt c n (Wil.store v e);
+    Scry.lret e
+  | .some op => do
+    t ← Scry.fresh ty;
+    Scry.emitAt c n (Wil.load t v);
+    r ← Scry.fresh ty;
+    Scry.emitAt c n (Wil.binop r op t e);
+    Scry.emitAt c n (Wil.store v r);
+    Scry.lret r
+
+/-- Assign through an lvalue address (`p.x`, `a[i]`, `*p`): a store, or a load-op-store. -/
+def Scry.assignAddr (c : Scry.Cst) (n : Nat) (tok : String) (sp : Wil.Var × Wil.Ty)
+    (rn : Nat) : Scry.LM Wil.Var := do
+  e ← Scry.lowerExpr c rn;
+  match Scry.assignOpOf tok with
+  | .none => do
+    match Scry.convOk e.ty sp.2 with
+    | .true => Scry.lret ()
+    | .false => Scry.warnAt c n ("implicit conversion " ++ Scry.tyShow e.ty
+        ++ " to " ++ Scry.tyShow sp.2);
+    Scry.emitAt c n (Wil.store sp.1 e);
+    Scry.lret e
+  | .some op => do
+    t ← Scry.fresh sp.2;
+    Scry.emitAt c n (Wil.load t sp.1);
+    r ← Scry.fresh sp.2;
+    Scry.emitAt c n (Wil.binop r op t e);
+    Scry.emitAt c n (Wil.store sp.1 r);
+    Scry.lret r
+
+/-- `=`, `+=`, … on any lvalue the lowering models. -/
+def Scry.lowerAssign (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
+  let tok := Scry.tokenF c n "operator";
+  match Scry.childF c n "left", Scry.childF c n "right" with
+  | .some ln, .some rn => do
+    s ← Scry.get;
+    match Scry.isK c ln "identifier" with
+    | .false => do
+      sp ← Scry.lowerAddr c ln;
+      match sp with
+      | .some p => Scry.assignAddr c n tok p rn
+      | .none => do
+        e ← Scry.lowerExpr c rn;
+        Scry.warnAt c n ("assignment to " ++ c.kindOf ln ++ " not modelled");
+        Scry.lret e
+    | .true => match Scry.lookupBind s (c.textOf ln) with
+      | .some b => match b.kind with
+        | .reg => Scry.assignReg c n tok b.var rn
+        | .slot ty agg => match agg with
+          | .some _ => do
+            Scry.warnAt c n ("assignment to aggregate " ++ c.textOf ln ++ " not modelled");
+            Scry.lowerExpr c rn
+          | .none => Scry.assignSlot c n tok b.var ty rn
+      | .none => do
+        g ← Scry.bindGlobal c ln;
+        match g with
+        | .some b => match b.kind with
+          | .slot ty _ => Scry.assignSlot c n tok b.var ty rn
+          | .reg => Scry.assignReg c n tok b.var rn
+        | .none => do
+          e ← Scry.lowerExpr c rn;
+          Scry.warnAt c n ("assignment to unknown " ++ c.textOf ln ++ " not modelled");
+          Scry.lret e
+  | _, _ => Scry.havocAt c n Wil.i32 ("assignment " ++ c.textOf n)
+
+/-- `++`/`--` on a plain register: `x = x ± 1`; the prefix/postfix difference in the
+*value* is not modelled (both yield the updated variable), which is exact when the value
+is dropped. -/
+def Scry.updateReg (c : Scry.Cst) (n : Nat) (tok : String) (v : Wil.Var) : Scry.LM Wil.Var := do
+  one ← Scry.fresh v.ty;
+  Scry.emitAt c n (Wil.num one 1);
+  match String.eq tok "++" with
+  | .true => Scry.emitAt c n (Wil.binop v .add v one)
+  | .false => Scry.emitAt c n (Wil.binop v .sub v one);
+  Scry.lret v
+
+/-- `++`/`--` on a scalar slot: load, ±1, store. -/
+def Scry.updateSlot (c : Scry.Cst) (n : Nat) (tok : String) (v : Wil.Var) (ty : Wil.Ty) :
+    Scry.LM Wil.Var := do
+  t ← Scry.fresh ty;
+  Scry.emitAt c n (Wil.load t v);
+  one ← Scry.fresh ty;
+  Scry.emitAt c n (Wil.num one 1);
+  r ← Scry.fresh ty;
+  match String.eq tok "++" with
+  | .true => Scry.emitAt c n (Wil.binop r .add t one)
+  | .false => Scry.emitAt c n (Wil.binop r .sub t one);
+  Scry.emitAt c n (Wil.store v r);
+  Scry.lret r
+
+/-- `++`/`--` through an lvalue address (`a[i]++`, `(*p)++`). -/
+def Scry.updateAddr (c : Scry.Cst) (n : Nat) (tok : String) (an : Nat) : Scry.LM Wil.Var := do
+  ap ← Scry.lowerAddr c an;
+  match ap with
+  | .none => Scry.havocAt c n Wil.i32 ("update of " ++ c.kindOf an)
+  | .some sp => do
+    t ← Scry.fresh sp.2;
+    Scry.emitAt c n (Wil.load t sp.1);
+    one ← Scry.fresh sp.2;
+    Scry.emitAt c n (Wil.num one 1);
+    r ← Scry.fresh sp.2;
+    match String.eq tok "++" with
+    | .true => Scry.emitAt c n (Wil.binop r .add t one)
+    | .false => Scry.emitAt c n (Wil.binop r .sub t one);
+    Scry.emitAt c n (Wil.store sp.1 r);
+    Scry.lret r
+
+/-- `++`/`--` on the lvalue expression `an`. -/
+def Scry.lowerUpdate (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
+  let tok := Scry.tokenF c n "operator";
+  match Scry.childF c n "argument" with
+  | .none => Scry.havocAt c n Wil.i32 ("update expression " ++ c.textOf n)
+  | .some an => match Scry.isK c an "identifier" with
+    | .false => Scry.updateAddr c n tok an
+    | .true => do
+      s ← Scry.get;
+      match Scry.lookupBind s (c.textOf an) with
+      | .some b => match b.kind with
+        | .reg => Scry.updateReg c n tok b.var
+        | .slot ty agg => match agg with
+          | .some _ => do
+            Scry.warnAt c n ("update of aggregate " ++ c.textOf an ++ " not modelled");
+            Scry.lret b.var
+          | .none => Scry.updateSlot c n tok b.var ty
+      | .none => do
+        g ← Scry.bindGlobal c an;
+        match g with
+        | .some b => match b.kind with
+          | .slot ty _ => Scry.updateSlot c n tok b.var ty
+          | .reg => Scry.updateReg c n tok b.var
+        | .none => Scry.havocAt c n Wil.i32 ("update of unknown " ++ c.textOf an)
+
+/-- Is this the type of a function pointer (the callee of an indirect call)? -/
+def Scry.isFnPtr (t : Wil.Ty) : Bool :=
+  match t with
+  | .ptr inner => match inner with
+    | .fn _ _ => .true
+    | _ => .false
+  | _ => .false
+
+/-- The return type of a function-pointer type. -/
+def Scry.fnPtrRet (t : Wil.Ty) : Option Wil.Ty :=
+  match t with
+  | .ptr inner => match inner with
+    | .fn _ ret => .some ret
+    | _ => .none
+  | _ => .none
+
+/-- Cells an allocation request covers (`malloc`/`calloc`'s size argument): a
+`sizeof(T)`/`sizeof x` of a known type is exact in the analysis layout; a literal byte
+count is rounded up to whole 8-byte words; anything else is one cell. Points-to does not
+use this bound (locations have unbounded offsets), so it only affects a concrete run of a
+lowered fixture. -/
+def Scry.sizeCells (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Nat :=
+  match Scry.ekindOf (c.kindOf n) with
+  | .sizeofE => match Scry.childF c n "type" with
+    | .some tn => Scry.cellsOf s.structs (Scry.typeOf c s tn)
+    | .none => match Scry.childF c n "value" with
+      | .some vn => match Scry.ekindOf (c.kindOf vn) with
+        | .identifier => match Scry.lookupBind s (c.textOf vn) with
+          | .some b => match b.kind with
+            | .slot ty _ => Scry.cellsOf s.structs ty
+            | .reg => Scry.cellsOf s.structs b.var.ty
+          | .none => 1
+        | _ => 1
+      | .none => 1
+  | .number => match Scry.constInt c n with
+    | .some v => Nat.add 1 (Nat.div v 8)
+    | .none => 1
+  | _ => 1
+
+/-- Emit `Wil.alloc` (a heap object) for `malloc`/`calloc`, with the declared return type
+when the unit declares the function. -/
+def Scry.allocCall (c : Scry.Cst) (n : Nat) (name : String) (sizeN : Nat) (count : Nat) :
+    Scry.LM Wil.Var := do
+  s ← Scry.get;
+  let retTy := match List.find (fun y => String.eq y.name name) s.syms with
+    | .some sym => match sym.ret with
+      | .unknown => Wil.Ty.ptr Wil.Ty.unknown
+      | t => t
+    | .none => Wil.Ty.ptr Wil.Ty.unknown;
+  let one := Scry.sizeCells c s sizeN;
+  let c0 := Nat.mul (match Nat.beq count 0 with
+    | .true => 1
+    | .false => count) one;
+  let cells := match Nat.beq c0 0 with
+    | .true => 1
+    | .false => c0;
+  v ← Scry.fresh retTy;
+  Scry.emitAt c n (Wil.alloc v cells);
+  Scry.lret v
+
+/-- A call through a function value (`fp(x)`, `(*fp)(x)`): the callee expression is
+lowered as a value, so a function pointer that was copied, passed or stored is followed;
+points-to resolves the target and an unknown target stays unknown. -/
+def Scry.indirectCall (c : Scry.Cst) (n : Nat) (fnNode : Nat) (argNodes : List Nat) :
+    Scry.LM Wil.Var := do
+  f ← Scry.lowerExpr c fnNode;
+  args ← Scry.lowerExprs c argNodes;
+  let retTy := match Scry.fnPtrRet f.ty with
+    | .some t => match t with
+      | .unknown => Wil.i32
+      | _ => t
+    | .none => Wil.i32;
+  r ← Scry.fresh retTy;
+  Scry.emitAt c n (Wil.callIndirect (.some r) f args);
+  Scry.lret r
+
+/-- A direct call by name. `malloc`/`calloc` become `alloc` (a heap object) and `free`
+becomes `Wil.free`, so the memory model sees the allocation and its lifetime. A call to a
+function not in the translation unit is still a call (the call graph records it as
+external) but its result is havoc'd: its definition is not available, so
+`Wil.runFunction` on a function that reaches it faults on the missing callee unless the
+program supplies it. -/
+def Scry.lowerCall (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var := do
+  let argList := Scry.childF c n "arguments";
+  let argNodes : List Nat := match argList with
+    | .some a => Scry.exprKids c a
+    | .none => .nil;
+  match Scry.childF c n "function" with
+  | .none => Scry.havocAt c n Wil.i32 "call without a callee"
+  | .some fn => match Scry.calleeName c fn with
+    | .none => Scry.indirectCall c n fn argNodes
+    | .some name => do
+      s ← Scry.get;
+      let bound : Option Wil.Ty := match Scry.lookupBind s name with
+        | .some b => match b.kind with
+          | .reg => .some b.var.ty
+          | .slot ty _ => .some ty
+        | .none => .none;
+      match bound with
+      | .some ty => match Scry.isFnPtr ty with
+        | .true => Scry.indirectCall c n fn argNodes
+        | .false => Scry.directCall c n name argNodes
+      | .none => Scry.directCall c n name argNodes
+
+/-- An allocation call whose shape the external model table supplies. `malloc` is
+`(size, no count)`, `calloc` is `(size at 1, count at 0)` and `realloc` is `(size at 1)`.
+The size/count expressions are looked up in the *syntactic* argument list, so a model
+whose argument positions do not match the call is a havoc with a warning, not a silent
+misread. -/
+def Scry.allocCallByShape (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat)
+    (shape : Scry.AllocShape) : Scry.LM Wil.Var :=
+  match shape.sizeArg with
+  | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown) (name ++ " without a size model")
+  | .some si => match Wil.listNth argNodes si with
+    | .none => Scry.havocAt c n (Wil.Ty.ptr Wil.Ty.unknown)
+        (name ++ " without its size argument")
+    | .some sz =>
+      let count := match shape.countArg with
+        | .some ci => match Wil.listNth argNodes ci with
+          | .some cn => match Scry.constInt c cn with
+            | .some v => v
+            | .none => 1
+          | .none => 1
+        | .none => 1;
+      Scry.allocCall c n name sz count
+
+/-- The name-based part of `Scry.lowerCall` (also the path for an external function).
+Allocation and `free` are read from `Scry.Models`, so the lowering and the taint model
+agree on which names allocate and which free; every other call keeps its ordinary
+`Wil.call` and its result is the declared type (or `i32` when undeclared). -/
+def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat) :
+    Scry.LM Wil.Var :=
+  match Scry.Models.allocOf name with
+  | .some shape => Scry.allocCallByShape c n name argNodes shape
+  | .none => match Scry.Models.freeArgOf name with
+    | .some ai => do
+      v ← Scry.zeroAt c n Wil.i32;
+      match Wil.listNth argNodes ai with
+      | .some a => do
+        p ← Scry.lowerExpr c a;
+        Scry.emitAt c n (Wil.free p);
+        Scry.lret v
+      | .none => do
+        Scry.warnAt c n (name ++ " without its pointer argument");
+        Scry.lret v
+    | .none => do
+      args ← Scry.lowerExprs c argNodes;
+      s ← Scry.get;
+      match List.find (fun y => String.eq y.name name) s.syms with
+      | .none => do
+        Scry.warnAt c n ("call to undeclared function " ++ name ++ " (external)");
+        r ← Scry.fresh Wil.i32;
+        Scry.emitAt c n (Wil.call (.some r) name args);
+        Scry.lret r
+      | .some sym => do
+        match Nat.beq (List.length args) sym.arity with
+        | .false => Scry.warnAt c n ("arity mismatch calling " ++ name ++ " ("
+            ++ Nat.repr (List.length args) ++ " vs " ++ Nat.repr sym.arity ++ ")")
+        | .true => Scry.lret ();
+        let qname := match sym.isStatic with
+          | .true => "static:" ++ name
+          | .false => name;
+        r ← Scry.fresh sym.ret;
+        Scry.emitAt c n (Wil.call (.some r) qname args);
+        Scry.lret r
+
+/-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
+conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:
+Wil's `Cond.and`/`or` short-circuit evaluation, but any *side effect* in an operand has
+already been emitted, so a fixture that relies on side-effect order is not modelled
+(there is a warning). -/
+def Scry.lowerCond (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Cond :=
+  match Scry.ekindOf (c.kindOf n) with
+  | .paren => match Scry.exprKids c n with
+    | .cons e _ => Scry.lowerCond c e
+    | .nil => Scry.lret (.const .false)
+  | .binary => do
+    let tok := Scry.tokenF c n "operator";
+    match String.eq tok "&&" with
+    | .true => Scry.condBinary c n .true
+    | .false => match String.eq tok "||" with
+      | .true => Scry.condBinary c n .false
+      | .false => match Scry.cmpOpOf tok with
+        | .some op => match Scry.childF c n "left", Scry.childF c n "right" with
+          | .some ln, .some rn => do
+            a ← Scry.lowerExpr c ln;
+            b ← Scry.lowerExpr c rn;
+            match Scry.tyEq a.ty b.ty with
+            | .false => do
+              Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
+              Scry.lret (.const .false)
+            | .true => Scry.lret (.cmp op a b)
+          | _, _ => Scry.condValue c n
+        | .none => Scry.condValue c n
+  | .unary => do
+    let tok := Scry.tokenF c n "operator";
+    match String.eq tok "!" with
+    | .true => match Scry.childF c n "argument" with
+      | .some an => do k ← Scry.lowerCond c an; Scry.lret (.not k)
+      | .none => Scry.lret (.const .false)
+    | .false => Scry.condValue c n
+  | .trueE => Scry.lret (.const .true)
+  | .falseE => Scry.lret (.const .false)
+  | .number => do
+    v ← Scry.lowerExpr c n;
+    z ← Scry.zeroAt c n v.ty;
+    Scry.lret (.cmp .ne v z)
+  | _ => Scry.condValue c n
+
+/-- `&&`/`||` in a condition. -/
+def Scry.condBinary (c : Scry.Cst) (n : Nat) (isAnd : Bool) : Scry.LM Wil.Cond := do
+  match Scry.childF c n "left", Scry.childF c n "right" with
+  | .some ln, .some rn => do
+    Scry.warnAt c n ("short-circuit " ++ (match isAnd with | .true => "&&" | .false => "||")
+      ++ " lowered with both operands evaluated");
+    a ← Scry.lowerCond c ln;
+    b ← Scry.lowerCond c rn;
+    match isAnd with
+    | .true => Scry.lret (.and a b)
+    | .false => Scry.lret (.or a b)
+  | _, _ => Scry.condValue c n
+
+/-- A non-comparison condition: `v != 0`. -/
+def Scry.condValue (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Cond := do
+  v ← Scry.lowerExpr c n;
+  z ← Scry.zeroAt c n v.ty;
+  Scry.lret (.cmp .ne v z)
+end
+
+-- ## A whole function
+
+/-- The state a translation unit's lowering starts from. -/
+def Scry.emptyState : Scry.LState :=
+  Scry.LState.mk 0 0 0 .nil .true .nil .nil .nil .nil .nil .nil .nil .nil .nil
+    "" Wil.i32 Wil.noSpan .none .none .nil
+
+/-- Give each parameter a register and bind its name (an unnamed parameter still gets a
+register, so the arity matches). -/
+def Scry.setupParams (c : Scry.Cst) : List (String × Wil.Ty) → Scry.LM Unit
+  | .nil => Scry.lret ()
+  | .cons p rest => do
+    v ← Scry.freshParam p.2;
+    match String.isEmpty p.1 with
+    | .true => Scry.lret ()
+    | .false => Scry.bind p.1 v;
+    Scry.setupParams c rest
+
+/-- A named block that was never filled is `unreachable` (kept so block ids stay
+index-stable; the CFG validation still sees it). -/
+def Scry.blockAtDone (done : List (Nat × Wil.Block)) (i : Nat) : Option Wil.Block :=
+  match List.find (fun p => Nat.beq p.1 i) done with
+  | .some p => .some p.2
+  | .none => .none
+
+/-- The function's blocks in id order. -/
+def Scry.assemble (n : Nat) (done : List (Nat × Wil.Block)) : List Wil.Block :=
+  List.map (fun i => match Scry.blockAtDone done i with
+    | .some b => b
+    | .none => Wil.Block.mk .nil (.unreachable Wil.noSpan)) (Scry.schemaRange n)
+
+/-- The implicit fallthrough: `main` returns 0 (C's rule), any other function is
+`ret none` with a warning (its value is undefined in C). -/
+def Scry.implicitReturn (c : Scry.Cst) (n : Nat) : Scry.LM Unit := do
+  s ← Scry.get;
+  match String.eq s.fname "main" with
+  | .true => do
+    v ← Scry.zeroAt c n s.retTy;
+    Scry.seal (Wil.withTermOrigin (.ret (.some v) Wil.noSpan) (Scry.originOf c n))
+  | .false => do
+    Scry.warnAt c n "implicit return (undefined in C): ret none";
+    Scry.seal (Wil.withTermOrigin (.ret .none Wil.noSpan) (Scry.originOf c n))
+
+/-- Lower one `function_definition`. Parameters are registers `0 … n-1`; every other
+register is a local. -/
+def Scry.lowerFunc (c : Scry.Cst) (s0 : Scry.LState) (n : Nat) : Scry.LState × Wil.Func :=
+  let retBase := match Scry.childF c n "type" with
+    | .some tn => Scry.typeOf c s0 tn
+    | .none => Wil.i32;
+  let fnDecl := Scry.childF c n "declarator";
+  let di : String × Wil.Ty × Bool := match fnDecl with
+    | .some d => Scry.declInfo c s0 d retBase
+    | .none => ("", Wil.Ty.fn 0 retBase, .true);
+  let cname := di.1;
+  let isStatic := Scry.isStaticDecl c n;
+  let qname := match isStatic with
+    | .true => "static:" ++ cname
+    | .false => cname;
+  let params : List (String × Wil.Ty) := match fnDecl with
+    | .some d => Scry.paramsOf c s0 d
+    | .none => .nil;
+  let bodyN := Scry.childF c n "body";
+  let taken : List String := match bodyN with
+    | .some b => Scry.addrTakenGo c b
+    | .none => .nil;
+  let s1 := { s0 with nextVar := 0, nextBlock := 1, curBlock := 0, curStmts := .nil
+    , live := .true, done := .nil, locals := .nil, params := .nil, env := .nil
+    , fname := cname, retTy := retBase, funcOrigin := Scry.originOf c n
+    , addrTaken := taken, breakTo := .none, contTo := .none };
+  let s2 := (Scry.runLM (Scry.setupParams c params) s1).1;
+  let s3 := (Scry.runLM (Scry.startBlock 0) s2).1;
+  let s4 := match bodyN with
+    | .some b => (Scry.runLM (Scry.lowerStmt c b) s3).1
+    | .none => s3;
+  let s5 := match s4.live with
+    | .true => (Scry.runLM (Scry.implicitReturn c n) s4).1
+    | .false => s4;
+  (s5, Wil.Func.mk qname s5.params (List.reverse s5.locals) (Wil.mkBlockId 0)
+    (Scry.assemble s5.nextBlock s5.done) (Scry.originOf c n))
+
+/-- Lower every `function_definition` of the translation unit, in source order. -/
+def Scry.lowerFuncs (c : Scry.Cst) : List Nat → Scry.LState → List Wil.Func → Scry.LState × List Wil.Func
+  | .nil, s, acc => (s, List.reverse acc)
+  | .cons i rest, s, acc =>
+    match Scry.isK c i "function_definition" with
+    | .true => let r := Scry.lowerFunc c s i; Scry.lowerFuncs c rest r.1 (.cons r.2 acc)
+    | .false => Scry.lowerFuncs c rest s acc
+
+/-- A lowered translation unit: its functions, source files, warnings, and the calls
+whose callee is not defined in this unit. -/
+structure Scry.TU where
+  /-- The unit's path (the C source). -/
+  path : String
+  /-- The source texts (file 0 is the unit's source; origins index them). -/
+  files : List String
+  /-- The source paths, aligned with `files`. -/
+  paths : List String
+  /-- Lowered functions, in source order. -/
+  funcs : List Wil.Func
+  /-- Warnings, newest first, each with the offending statement's origin. -/
+  warnings : List Scry.Warning
+  /-- `(caller name, callee name)` for direct calls with no definition in this unit. -/
+  externalCalls : List (String × String)
+
+/-- The index of a function by its (possibly `static:`-qualified) name, `none` when the
+name is not defined here. -/
+def Scry.funcIndexGo (name : String) : Nat → List Wil.Func → Option Nat
+  | _, .nil => .none
+  | i, .cons f rest => match String.eq f.name name with
+    | .true => .some i
+    | .false => Scry.funcIndexGo name (Nat.succ i) rest
+
+def Scry.funcIndex (funcs : List Wil.Func) (name : String) : Option Nat :=
+  Scry.funcIndexGo name 0 funcs
+
+/-- Every direct callee name in a function's blocks. -/
+def Scry.calleesOf (fn : Wil.Func) : List String :=
+  List.filter (fun n => Bool.not (String.eq n "")) (List.concat (List.map (fun b =>
+    List.concat (List.map (fun s => match s with
+      | .call _ (.direct name) _ _ => .cons name .nil
+      | _ => .nil) b.stmts)) fn.blocks))
+
+/-- Deduplicate a list of strings, keeping first occurrences. -/
+def Scry.dedup (l : List String) : List String :=
+  List.foldl (fun acc x => match List.any (String.eq x) acc with
+    | .true => acc
+    | .false => List.append acc (.cons x .nil)) .nil l
+
+/-- `f` over `l`, dropping the `none`s (the list library has no `filterMap`). -/
+def Scry.filterMapOpt {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x rest => match f x with
+    | .some y => .cons y (Scry.filterMapOpt f rest)
+    | .none => Scry.filterMapOpt f rest
+
+/-- The calls of `fn` that do not resolve in `funcs`, as `(caller, callee)` pairs. -/
+def Scry.externalOf (funcs : List Wil.Func) : List (String × String) :=
+  List.concat (List.map (fun f =>
+    List.map (fun callee => (f.name, callee))
+      (List.filter (fun callee => match Scry.funcIndex funcs callee with
+        | .some _ => .false
+        | .none => .true) (Scry.dedup (Scry.calleesOf f)))) funcs)
+
+/-- The translation unit's top-level nodes with recovery `ERROR` nodes unwrapped, in
+source order. Tree-sitter often recovers from one bad construct by wrapping every later
+declaration in a single top-level `ERROR` (the generated `old-wizard.c`/`droste.c` both
+have one `ERROR` holding all 1 000-odd functions). Walking only `translation_unit`'s
+direct children would lower none of them, so a partial tree is still analysed function
+by function instead of becoming an empty unit. Nested `ERROR`s are unwrapped too; a
+node is never included twice. -/
+partial def Scry.recoverTop (c : Scry.Cst) : List Nat → List Nat
+  | .nil => .nil
+  | .cons i rest =>
+    match Scry.isK c i "ERROR" with
+    | .true => List.append (Scry.recoverTop c (c.childrenOf i)) (Scry.recoverTop c rest)
+    | .false => .cons i (Scry.recoverTop c rest)
+
+/-- Lower a translation unit's CST. The typedef/struct and function-symbol passes run
+first, so a call sees a definition that appears later in the file (C's rule). Parsing is
+recoverable: the passes and the function walk use `Scry.recoverTop`, so functions inside
+tree-sitter's `ERROR` nodes keep their partial AST and facts. -/
+def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
+  let top := Scry.recoverTop c (c.childrenOf 0);
+  let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
+  let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
+  let r := Scry.lowerFuncs c top s2 .nil;
+  let files := List.map (fun i => c.fileText i) (Scry.schemaRange c.fileCount);
+  let paths := List.map (fun i => c.filePath i) (Scry.schemaRange c.fileCount);
+  Scry.TU.mk path files paths r.2 r.1.warnings (Scry.externalOf r.2)
+
+-- ## The CFG
+
+/-- Deduplicate naturals, keeping first occurrences. -/
+def Scry.dedupNat (l : List Nat) : List Nat :=
+  List.foldl (fun acc x => match List.any (Nat.beq x) acc with
+    | .true => acc
+    | .false => List.append acc (.cons x .nil)) .nil l
+
+/-- `(index, value)` pairs for a list. -/
+partial def Scry.zipIdx {A : Type} (l : List A) : Nat → List (Nat × A)
+  | _ => match l with
+    | .nil => .nil
+    | .cons x rest => .cons (0, x) (List.map (fun p => (Nat.succ p.1, p.2)) (Scry.zipIdx rest 0))
+
+/-- The CFG edges of a function, `(block index, successor index)` for the facts EDB. The
+definition is `Wil.Func.cfg`; this is its numeric view. -/
+def Scry.cfgOf (fn : Wil.Func) : List (Nat × Nat) :=
+  List.map (fun e => (e.1.index, e.2.index)) (Wil.Func.cfg fn)
+
+/-- Every CFG target is a block of the function. -/
+def Scry.cfgValid (fn : Wil.Func) : Bool := Wil.Func.cfgValid fn
+
+/-- The blocks reachable from the entry (a worklist over `cfgOf`; `fuel` bounds it). -/
+partial def Scry.reachGo (edges : List (Nat × Nat)) : Nat → List Nat → List Nat
+  | .zero, seen => seen
+  | .succ fuel, seen => match List.find (fun e =>
+      Bool.and (List.any (Nat.beq e.1) seen) (Bool.not (List.any (Nat.beq e.2) seen))) edges with
+    | .none => seen
+    | .some e => Scry.reachGo edges fuel (List.append seen (.cons e.2 .nil))
+
+/-- The reachable block indices, entry first. -/
+def Scry.reachable (fn : Wil.Func) : List Nat :=
+  let reach := Scry.reachGo (Scry.cfgOf fn) (Nat.succ (List.length fn.blocks))
+    (.cons fn.entry.index .nil);
+  Scry.dedupNat reach
+
+-- ## The direct-call graph
+
+/-- Resolved direct-call edges `(caller function index, callee function index)`,
+translation-unit scope. Static functions are named `static:<name>` when lowered, so a
+static `f` in another unit is a different node. -/
+def Scry.callGraphOf (funcs : List Wil.Func) : List (Nat × Nat) :=
+  List.concat (List.map (fun p =>
+    Scry.filterMapOpt (fun callee => match Scry.funcIndex funcs callee with
+      | .some j => .some (p.1, j)
+      | .none => .none)
+      (Scry.dedup (Scry.calleesOf p.2)))
+    (Scry.zipIdx funcs 0))
+
+-- ## The facts EDB
+
+/-- One program point: a statement, or a block's terminator (`stmt = none`). -/
+structure Scry.Site where
+  /-- The function index. -/
+  func : Nat
+  /-- The site id (statements in block order, then a terminator point per block). -/
+  site : Nat
+  /-- The block index. -/
+  block : Nat
+  /-- The statement index within the block (the terminator's is the block length). -/
+  pc : Nat
+  /-- The statement (`none` at a terminator point). -/
+  stmt : Option Wil.Stmt
+  /-- The terminator (`none` at a statement point). -/
+  term : Option Wil.Term
+  /-- The point's origin. -/
+  origin : Wil.Span
+
+/-- Block entry sites of a function: `(block index, site)`, `base` is the function's
+first site id. -/
+partial def Scry.blockSites (base : Nat) : List Wil.Block → List (Nat × Nat) × Nat
+  | .nil => (.nil, base)
+  | .cons b rest =>
+    match Scry.blockSites (Nat.add base (Nat.succ (List.length b.stmts))) rest with
+    | (restSites, total) =>
+      (.cons (0, base) (List.map (fun p => (Nat.succ p.1, p.2)) restSites), total)
+
+/-- A function's site count: its statements plus one terminator point per block. -/
+partial def Scry.funcSites (base : Nat) : List Wil.Block → Nat
+  | .nil => base
+  | .cons b rest => Scry.funcSites (Nat.add base (Nat.succ (List.length b.stmts))) rest
+
+/-- The sites of one function at global base `base`. -/
+partial def Scry.lowerSitesOfFunc (fid : Nat) (base : Nat) : List Wil.Block → List Scry.Site
+  | .nil => .nil
+  | .cons b rest =>
+    let here := List.map (fun p =>
+        let st := List.getD b.stmts p.1 (.nop Wil.noSpan);
+        Scry.Site.mk fid (Nat.add base p.1) 0 p.1 (.some st) .none (Wil.stmtOrigin st))
+      (Scry.zipIdx b.stmts 0);
+    let termSite := Scry.Site.mk fid (Nat.add base (List.length b.stmts)) 0
+      (List.length b.stmts) .none (.some b.term) (Wil.termOrigin b.term);
+    List.append (List.append here (.cons termSite .nil))
+      (Scry.lowerSitesOfFunc fid (Nat.add base (Nat.succ (List.length b.stmts))) rest)
+
+/-- Every site of every function, in function then block then statement order. -/
+partial def Scry.allSitesGo : Nat → Nat → List Wil.Func → List Scry.Site
+  | _, _, .nil => .nil
+  | fid, base, .cons f rest =>
+    List.append (Scry.lowerSitesOfFunc fid base f.blocks)
+      (Scry.allSitesGo (Nat.succ fid) (Scry.funcSites base f.blocks) rest)
+
+def Scry.allSites (funcs : List Wil.Func) : List Scry.Site := Scry.allSitesGo 0 0 funcs
+
+/-- An operator's EDB code. -/
+def Scry.opCode : Wil.Op → Nat
+  | .add => 1
+  | .sub => 2
+  | .mul => 3
+  | .div => 4
+  | .rem => 5
+  | .and => 6
+  | .or => 7
+  | .xor => 8
+  | .shl => 9
+  | .shr => 10
+  | .eq => 11
+  | .ne => 12
+  | .lt => 13
+  | .le => 14
+  | .gt => 15
+  | .ge => 16
+  | .neg => 17
+  | .not => 18
+
+/-- The `(op, a, b)` columns of an assignment: `use` 0, `cst` 19, `load` 20, `gep` 21,
+`alloc` 22, `havoc` 23, `slot` 24, `globalRef` 25, `fnptr` 26, `gepVar` 27 (the scale of a
+`gepVar` and the name of a `globalRef`/`fnptr` are not EDB columns). -/
+def Scry.rhsCols (e : Wil.Rhs) : Nat × Nat × Nat :=
+  match e with
+  | .use v => (0, v.index, 0)
+  | .cst _ => (19, 0, 0)
+  | .bin op a b => (Scry.opCode op, a.index, b.index)
+  | .un op a => (Scry.opCode op, a.index, 0)
+  | .load p => (20, p.index, 0)
+  | .gep p k => (21, p.index, k)
+  | .gepVar p i _ => (27, p.index, i.index)
+  | .alloc k => (22, 0, k)
+  | .slot k => (24, 0, k)
+  | .globalRef _ => (25, 0, 0)
+  | .fnptr _ => (26, 0, 0)
+  | .havoc _ => (23, 0, 0)
+
+/-- The registers a right-hand side reads. -/
+def Scry.lowerRhsUses (e : Wil.Rhs) : List Nat :=
+  match e with
+  | .use v => .cons v.index .nil
+  | .cst _ => .nil
+  | .bin _ a b => .cons a.index (.cons b.index .nil)
+  | .un _ a => .cons a.index .nil
+  | .load p => .cons p.index .nil
+  | .gep p _ => .cons p.index .nil
+  | .gepVar p i _ => .cons p.index (.cons i.index .nil)
+  | .alloc _ => .nil
+  | .slot _ => .nil
+  | .globalRef _ => .nil
+  | .fnptr _ => .nil
+  | .havoc _ => .nil
+
+/-- The registers a condition reads. -/
+def Scry.lowerCondUses (k : Wil.Cond) : List Nat :=
+  match k with
+  | .const _ => .nil
+  | .cmp _ a b => .cons a.index (.cons b.index .nil)
+  | .not c => Scry.lowerCondUses c
+  | .and a b => List.append (Scry.lowerCondUses a) (Scry.lowerCondUses b)
+  | .or a b => List.append (Scry.lowerCondUses a) (Scry.lowerCondUses b)
+
+/-- The registers a statement defines. -/
+def Scry.lowerStmtDefs (s : Wil.Stmt) : List Nat :=
+  match s with
+  | .assign x _ _ => .cons x.index .nil
+  | .call (.some r) _ _ _ => .cons r.index .nil
+  | _ => .nil
+
+/-- The registers a statement uses. -/
+def Scry.lowerStmtUses (s : Wil.Stmt) : List Nat :=
+  match s with
+  | .assign _ e _ => Scry.lowerRhsUses e
+  | .assume k _ => Scry.lowerCondUses k
+  | .store p v _ => .cons p.index (.cons v.index .nil)
+  | .free p _ => .cons p.index .nil
+  | .call _ callee args _ =>
+    let us := List.map (fun v => v.index) args;
+    match callee with
+    | .direct _ => us
+    | .indirect f => .cons f.index us
+  | .nop _ => .nil
+
+/-- The §4.3 EDB: `assign`, `cfg`, `call`, `def`, `use`, and statement spans. -/
+structure Scry.Edb where
+  /-- `[site, var, op, a, b]`. -/
+  assigns : List (List Nat)
+  /-- `[from block entry site, to block entry site]`. -/
+  cfgs : List (List Nat)
+  /-- `[call site, callee function index]` (0 = a callee not defined here). -/
+  calls : List (List Nat)
+  /-- `[site, defined var]`. -/
+  defs : List (List Nat)
+  /-- `[site, used var]`. -/
+  uses : List (List Nat)
+  /-- `[site, file, start, stop]`. -/
+  spans : List (List Nat)
+  /-- The number of sites (statements + terminators). -/
+  siteCount : Nat
+
+/-- A two-column row. -/
+def Scry.row2 (a b : Nat) : List Nat := .cons a (.cons b .nil)
+/-- A three-column row. -/
+def Scry.row3 (a b c : Nat) : List Nat := .cons a (.cons b (.cons c .nil))
+/-- A four-column row. -/
+def Scry.row4 (a b c d : Nat) : List Nat := .cons a (.cons b (.cons c (.cons d .nil)))
+/-- A five-column row. -/
+def Scry.row5 (a b c d e : Nat) : List Nat := .cons a (.cons b (.cons c (.cons d (.cons e .nil))))
+
+/-- A row for every register in `vs` at site `s`. -/
+def Scry.varRows (s : Nat) (vs : List Nat) : List (List Nat) :=
+  List.map (fun v => .cons s (.cons v .nil)) vs
+
+/-- The EDB of a program. `assign` carries the right-hand side's op code; `call` resolves
+a direct callee to its function index (`0` when the callee is external); `cfg` joins
+block entry sites. -/
+def Scry.edbOf (funcs : List Wil.Func) : Scry.Edb :=
+  let sites : List Scry.Site := Scry.allSites funcs;
+  let assigns : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
+    | .some (.assign x e _) =>
+      let cols := Scry.rhsCols e;
+      .cons (Scry.row5 s.site x.index cols.1 cols.2.1 cols.2.2) .nil
+    | _ => .nil) sites);
+  let defs : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
+    | .some st => Scry.varRows s.site (Scry.lowerStmtDefs st)
+    | .none => .nil) sites);
+  let uses : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
+    | .some st => Scry.varRows s.site (Scry.lowerStmtUses st)
+    | .none => .nil) sites);
+  let calls : List (List Nat) := List.concat (List.map (fun s => match s.stmt with
+    | .some (.call _ (.direct name) _ _) => match Scry.funcIndex funcs name with
+      | .some j => .cons (Scry.row2 s.site j) .nil
+      | .none => .cons (Scry.row2 s.site 0) .nil
+    | _ => .nil) sites);
+  let spans : List (List Nat) := List.map (fun s =>
+    Scry.row4 s.site s.origin.file s.origin.start s.origin.stop) sites;
+  -- cfg: per function, block entry sites to successor block entry sites
+  let cfgs : List (List Nat) := List.concat (List.map (fun p =>
+    let bs : List (Nat × Nat) × Nat := Scry.blockSites 0 p.2.blocks;
+    Scry.filterMapOpt (fun i => match List.find (fun q => Nat.beq q.1 i.1) bs.1 with
+      | .none => .none
+      | .some from => match List.find (fun q => Nat.beq q.1 i.2) bs.1 with
+        | .none => .none
+        | .some to => .some (Scry.row2 (Nat.add p.1 from.2) (Nat.add p.1 to.2)))
+      (Scry.cfgOf p.2)) (Scry.zipIdx funcs 0));
+  Scry.Edb.mk assigns cfgs calls defs uses spans (List.length sites)
+
+-- ## Rendering the EDB (for tests and the CLI)
+
+/-- A relation's rows, one per line, named. -/
+def Scry.renderRel (name : String) (rows : List (List Nat)) : String :=
+  let lines := List.map (fun r => String.append name (String.append "\t"
+    (String.intercalate "\t" (List.map Nat.repr r)))) rows;
+  String.join (List.map (fun l => l ++ "\n") lines)
+
+/-- The EDB as named tab-separated rows, one relation after another. -/
+def Scry.renderEdb (e : Scry.Edb) : String :=
+  String.append ("sites\t" ++ Nat.repr e.siteCount ++ "\n")
+    (String.append (Scry.renderRel "assign" e.assigns)
+      (String.append (Scry.renderRel "cfg" e.cfgs)
+        (String.append (Scry.renderRel "call" e.calls)
+          (String.append (Scry.renderRel "def" e.defs)
+            (String.append (Scry.renderRel "use" e.uses)
+              (Scry.renderRel "span" e.spans))))))

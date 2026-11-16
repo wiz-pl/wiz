@@ -1,0 +1,1 @@
+examples/hdl-optic.wiz:35:1: info: (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))))))))), .true)

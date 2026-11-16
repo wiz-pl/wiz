@@ -27,8 +27,8 @@ existing web pages already work (web/Web.wiz, web/infoview.js):
 
 Updates are **VDOM patches addressed by a child-index path** (`"0.2.1"`), through the
 same `js_*` FFI the infoview uses: `React.patchesJson` gives JavaScript a list of
-operations, and `web/framework/runtime.js` applies them. No `unsafe` or `native_refl`
-is used anywhere in this file.
+operations, and `web/framework/runtime.js` applies them. Nothing in this file is
+`unsafe`, and no proof in it is evaluated natively (it trusts no native axiom).
 
 ## Components and local state
 
