@@ -447,6 +447,19 @@ def eqnsMultiDecls : List (String × Bool) := [
   ("def k2 : (_ _ : Nat) → Nat\n  | a, _ => a\n", true),
   ("def bad3 : (a b : Nat) → Nat\n  | a, b, c => a\n", false)]
 
+/-- (`lib/Word.wiz`, `lib/Logic.wiz`) `absurd e` on a proof of `False`/`Empty` or on a
+constructor equation that computed (`h.1` of `h : Bool.false = Bool.true`), and `()`
+checked against `True`: both frontends' verdicts. -/
+def absurdUnitDecls : List (String × Bool) := [
+  ("def g0 {0 P : Prop} (h : False) : P := absurd h\n", true),
+  ("def g1 (h : Nat.lt 0 0 = .true) : Nat := absurd h.1\n", true),
+  ("def g2 (h : Nat.beq 1 0 = .true) : Bool := absurd h\n", true),
+  ("def g3 (h : Nat.lt 0 1 = .true) : Nat := absurd h\n", false),
+  ("def g4 (n : Nat) : Nat := absurd n\n", false),
+  ("def t1 : True := ()\n", true),
+  ("def u1 : Unit := ()\n", true),
+  ("def b1 : Nat := ()\n", false)]
+
 /-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
@@ -1587,6 +1600,8 @@ def selfHostGroup : Group where
         selfhostAgrees quantityHeader quantityDecls },
     { name := "the self-hosted frontend: equations under a binder of several names, `(m n : Nat) → …` (lib/Word.wiz)", run := fun _ =>
         selfhostAgrees "" eqnsMultiDecls },
+    { name := "the self-hosted frontend: absurd, and () against True (lib/Word.wiz, lib/Logic.wiz)", run := fun _ =>
+        selfhostAgrees "" absurdUnitDecls },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
         -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)

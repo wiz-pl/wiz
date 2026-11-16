@@ -3266,6 +3266,16 @@ def headParamNames (gs : Globals) (cx : Cx) (h : Syntax) : List String :=
         | _ => .nil
       | .false => .nil
 
+-- (`absurd e`, the host's `findAbsurd`) the proof of `Empty`/`False` in `e : ty`: `e`
+-- itself, or a component of a Σ (a constructor equation that computed, as
+-- `Bool.false = Bool.true`)
+partial def findAbsurd (es : ES) (ty e : Val) : Option Val := match whnf (force es ty) with
+  | .vempty _ => .some e
+  | .vsigma _ _ _ A envB B => match findAbsurd es A (vfst e) with
+    | .some p => .some p
+    | .none => findAbsurd es (eval (.cons (vfst e) envB) B) (vsnd e)
+  | _ => .none
+
 mutual
 -- infer the type of `s` (an identifier's leading implicit arguments are inserted)
 def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
@@ -3446,6 +3456,18 @@ def checkRfl (gs : Globals) (es : ES) (cx : Cx) (ty : Val) : TE :=
   | .vunit _ => .ok .star ty es
   | v => .err (String.append "rfl: the expected type is not an equation (it may have computed further): "
       (show (scopeNames (Cx.sc cx)) d (quote d v)))
+-- `absurd e : T` for `e` a proof of `Empty`/`False` (or a Σ with such a component, as
+-- `h.1` of `h : Bool.false = Bool.true`): `exfalso T p` (the host's `term.absurd`)
+def checkAbsurd (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  match inferT gs es cx (kid s 1) with
+  | .ok e ety es1 => match whnf (force es1 ety) with
+    | .vempty _ => .ok (.exfalso (quote d (force es1 ty)) e) ty es1
+    | _ => match findAbsurd es1 ety (suspend (TCtx.env (Cx.c cx)) e) with
+    | .some p => .ok (.exfalso (quote d (force es1 ty)) (quote d p)) ty es1
+    | .none => .err (String.append "absurd expects a proof of False or Empty, got "
+        (show (scopeNames (Cx.sc cx)) d (quote d (force es1 ety))))
+  | e => e
 -- `cast e t` along `e : A ≡ B`: `coe A B e t : B` (`t : A`)
 def inferCast (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   match inferT gs es cx (kid s 1) with
@@ -3871,7 +3893,16 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
         | .true => letT gs es cx s (.some ty)
         | .false => match strEq k "term.rfl" with
         | .true => checkRfl gs es cx (force es ty)
-        | .false => match (match strEq k "term.app" with
+        | .false => match strEq k "term.absurd" with
+        | .true => checkAbsurd gs es cx s ty
+        | .false => match (match strEq k "term.unitVal" with
+          -- `()` is the unit of any universe, and `True`'s proof (`True.intro : True := ()`)
+          | .true => match whnf (force es ty) with
+            | .vunit _ => .some (TE.ok .star ty es)
+            | _ => .none
+          | .false => .none) with
+        | .some r => r
+        | .none => match (match strEq k "term.app" with
           | .true => match inferHead gs es cx (kid s 0) with
             | .ok f fty es1 m => appExpected gs es1 cx (kid s 0) f fty m (kids (kid s 1)) ty
             | .err msg => TE.err msg
