@@ -128,6 +128,12 @@ inductive Val (R : Type) where
   projections, which stay lazy). `whnf` forces it; quoting keeps the folded form. -/
   | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) (sp : Array (Elim R))
       (val : Thunk (Val R))
+  /-- (WIP kernel-lazy-let, UNCOMPILED, NOT FOR MERGE) a `let`-bound value, computed when
+  first observed: a `memoThunk` of exactly the `eval` the eager kernel made. **Headless**:
+  it has no identity, so conversion never compares it by a head (a `let` variable's level
+  is reused outside its scope). Every observer treats `.lazy v` as `v.get`
+  (`wiz-notes/kernel-lazy-let.md`). -/
+  | lazy (val : Thunk (Val R))
 
 /-- An elimination stuck on a neutral. -/
 inductive Elim (R : Type) where

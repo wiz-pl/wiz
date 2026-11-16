@@ -133,7 +133,18 @@ def convGroup : Group where
         let start ← IO.monoMsNow
         srcOk (nestedCastRefl 40)
         let ms := (← IO.monoMsNow) - start
-        check (ms < 20000) s!"took {ms} ms (a retry per level is exponential)" }
+        check (ms < 20000) s!"took {ms} ms (a retry per level is exponential)" },
+    -- (WIP kernel-lazy-let, unbuilt) the kernel binds a `let`'s value lazily: a closed
+    -- `match` on `fib 30` (about 1.6 million calls) that the body never inspects at the
+    -- type level is not evaluated by checking. Eagerly it is, once.
+    { name := "kernel-lazy-let: `let x := match <closed fib 30> …` checks in bounded time", run := fun _ => do
+        let src := "def fib : Nat → Nat\n  | .zero => 0\n  | .succ .zero => 1\n" ++
+          "  | .succ (.succ k) => Nat.add (fib k) (fib (.succ k))\n" ++
+          "def s : Nat := let x := match Nat.beq (fib 30) 0 with\n  | .true => 0\n  | .false => 1\n  x\n"
+        let start ← IO.monoMsNow
+        srcOk src
+        let ms := (← IO.monoMsNow) - start
+        check (ms < 10000) s!"took {ms} ms (the kernel evaluated the let's value)" }
   ]
 
 def structGroup : Group where

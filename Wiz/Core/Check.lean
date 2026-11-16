@@ -488,6 +488,18 @@ the checker never evaluates a term that was checked in proof mode. -/
 def Ctx.evalAt (ctx : Ctx R) (t : Term R) (ty : VTy R) : Val R :=
   if ctx.proof && ctx.isProofTy ty then suspend ctx.globals ctx.env t else ctx.eval t
 
+/-- (WIP kernel-lazy-let, UNCOMPILED) a `let`'s value for the environment: `evalAt`, but
+deferred (`Val.lazy`), so a value the body never observes is never computed. Strict for
+a normal form (`g.eager`) and with `--eager-proofs`, which must not hold a suspended
+redex. -/
+def Ctx.evalLetAt (ctx : Ctx R) (t : Term R) (ty : VTy R) : Val R :=
+  if ctx.globals.eager || !ctx.globals.lazyProofs then ctx.evalAt t ty
+  else .lazy (memoThunk fun _ => ctx.evalAt t ty)
+
+def Ctx.evalLet (ctx : Ctx R) (t : Term R) : Val R :=
+  if ctx.globals.eager || !ctx.globals.lazyProofs then ctx.eval t
+  else .lazy (memoThunk fun _ => ctx.eval t)
+
 /-- `Ctx.instArg` for an argument of type `dom`, bound by type (`evalAt`). -/
 def Ctx.instArgAt (ctx : Ctx R) (dom : VTy R) (c : Closure R) (a : Term R) : Val R :=
   match c with
@@ -572,7 +584,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let _ ← checkType ctx tty
     let vty := ctx.eval tty
     let uv ← check (ctx.erasedAt q) val vty
-    let ub ← check (ctx.define x q vty (ctx.evalAt val vty)) body ty
+    let ub ← check (ctx.define x q vty (ctx.evalLetAt val vty)) body ty
     let ub ← ctx.popUsageAt x q vty ub
     pure (q • uv + ub)
   | .pair a b, .sigma _ q A B _ => do
@@ -748,7 +760,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       pure (bty, q • uv + ub)
     else
     let uv ← check (ctx.erasedAt q) val vty
-    let (bty, ub) ← infer (ctx.define x q vty (ctx.eval val)) body
+    let (bty, ub) ← infer (ctx.define x q vty (ctx.evalLet val)) body
     let ub ← ctx.popUsageAt x q vty ub
     pure (bty, q • uv + ub)
   | .ann tm tty => do

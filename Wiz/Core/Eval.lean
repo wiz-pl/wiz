@@ -51,6 +51,8 @@ matching on a value's shape. -/
 partial def whnf : Val R → Val R
   | .unfold _ _ _ v => whnf v.get
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => whnf v.get
+  -- (WIP kernel-lazy-let) a lazy `let` value is what it computes
+  | .lazy v => whnf v.get
   | v => v
 
 /-- A value with its suspended inductions on constructors computed (`vInd`): they are
