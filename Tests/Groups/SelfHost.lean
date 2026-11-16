@@ -1104,6 +1104,79 @@ def parseDiffCorpus : List (Name × String) := [
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
 
 
+/-- (U2b) Polymorphic declarations: a structure at a level parameter, an inductive whose
+fields are at two different level parameters, a class at a level parameter, and generic
+instances for `List` and `Option`. The `Duo` fields are in smaller universes than
+`Type (max u v)`, so their description fields are `ULift`ed (Q4), as in the Lean
+frontend. -/
+def u2bDecls : String :=
+  "structure Box.{u} (A : Type u) where\n  val : A\n" ++
+  "inductive Duo.{u, v} (A : Type u) (B : Type v) : Type (max u v) where\n  | mk (a : A) (b : B)\n" ++
+  "def unbox.{u} {A : Type u} (b : Box A) : A := b.val\n" ++
+  "def duoSnd.{u, v} {A : Type u} {B : Type v} (d : Duo A B) : B := match d with\n  | .mk _ b => b\n" ++
+  "def duoUp : Duo.{1, 0} (Type 0) Nat := Duo.mk Nat 5\n" ++
+  "def duoBUp : Nat := duoSnd duoUp\n" ++
+  "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+  "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+  "instance instReprType : Repr (Type 0) where\n  repr := fun _ => 0\n" ++
+  "def typeRepr : Nat := Repr.repr Nat\n" ++
+  "def sumRepr {A : Type} [Repr A] : List A → Nat\n" ++
+  "  | .nil => 0\n  | .cons x xs => Repr.repr x + sumRepr xs\n" ++
+  "instance instReprList {A : Type} [Repr A] : Repr (List A) where\n  repr := fun xs => sumRepr xs\n" ++
+  "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+  "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+  "instance instInhabitedOption {A : Type} [Inhabited A] : Inhabited (Option A) where\n" ++
+  "  default := Option.some Inhabited.default\n" ++
+  "instance instInhabitedList {A : Type} [Inhabited A] : Inhabited (List A) where\n" ++
+  "  default := List.cons Inhabited.default List.nil\n" ++
+  "def duoVal : Duo Nat String := Duo.mk 9 \"xy\"\n" ++
+  "def boxVal : Box Nat := Box.mk 7\n" ++
+  "def optDefault : Nat := match (Inhabited.default : Option Nat) with\n  | .some n => n\n  | .none => 0\n" ++
+  "def listDefault : Nat := match (Inhabited.default : List Nat) with\n  | .cons n _ => n\n  | .nil => 0\n"
+
+/-- (U2b) A program with the polymorphic declarations (`u2bDecls`), printing
+`3 xy 42 42 7`: the generic `Repr (List A)` and `Inhabited (Option/List A)` instances,
+a `Duo` at two level parameters, and a `Box` structure. -/
+def u2bProgram : String := "import IO\n" ++ u2bDecls ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (Repr.repr (List.cons 1 (List.cons 2 List.nil))));\n" ++
+  "  IO.println (duoSnd duoVal);\n" ++
+  "  IO.println (Nat.toString optDefault);\n" ++
+  "  IO.println (Nat.toString listDefault);\n" ++
+  "  IO.println (Nat.toString (unbox boxVal))\n"
+
+/-- (U2b) Each declaration after `import Prelude` is a level mistake: both frontends
+reject it on the same line, the Lean one's message contains `phrase`, and the
+self-hosted one is a positioned `file:line:col: error:` line whose message contains the
+same `phrase`. (The self-hosted position is the command's, not the offending token's:
+D6.) -/
+def selfhostLevelErrors (decls : List (String × String)) : IO Unit := do
+  let loader ← preludeLoader
+  match ← selfhostCompiler with
+  | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    for (d, phrase) in decls do
+      let src := "import Prelude\n" ++ d
+      let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+      let hostErrs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+      let some hostErr := hostErrs[0]? | throw (IO.userError s!"the Lean frontend accepts:\n{d}")
+      unless (hostErr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the Lean frontend's message does not say {repr phrase}:\n{hostErr}")
+      let hostLine := hostErr.takeWhile (· != ':')
+      let dir ← IO.FS.createTempDir
+      IO.FS.writeFile (dir / "bad.wiz") src
+      let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+      checkEq (1 : UInt32) out.exitCode
+      checkEq "" out.stdout
+      let lines := (out.stderr.splitOn "\n").filter (!·.isEmpty)
+      let some line := lines[0]? | throw (IO.userError s!"the self-hosted frontend accepts:\n{d}")
+      unless line.startsWith "bad.wiz:" do
+        throw (IO.userError s!"the self-hosted diagnostic has no span:\n{line}")
+      let rest := (line.drop "bad.wiz:".length)
+      checkEq hostLine (rest.takeWhile (· != ':'))
+      unless (line.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the self-hosted message does not say {repr phrase}:\n{line}")
+
 /-- (A11) `deriving`: a `deriving` clause on an inductive/structure and
 `deriving instance … for …`, with the class declared in the file (the self-hosted
 prelude has none). A 0-field type, 1/2/3-field structures, a recursive polymorphic
@@ -1315,7 +1388,7 @@ def selfHostGroup : Group where
           "  IO.println (typeOf (.app idTm cnat));\n  IO.println (typeOf (.app (.app add two) two));\n" ++
           "  IO.println (normalize (.app (.app add two) two));\n  IO.println (typeOf (.app (.univ 0) (.univ 0)));\n" ++
           -- a variable out of scope is an error (it was `Sort 0`, as a type and as a value: `Prop : Prop`)
-          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit 0) .prop)))\n"
+          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit (ln 1)) .prop)))\n"
         ioRun (kernel ++ "\n" ++ defs ++ main) ("(x0 : U0) → (x1 : x0) → x0\n(x0 : U0) → (x1 : x0) → x0\n" ++
           "error: type mismatch: expected U0, got U1\n(x0 : U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\n" ++
           "λx0. λx1. λx2. (x1 (x1 (x1 (x1 x2))))\nerror: not a function: its type is U1\n" ++
@@ -1366,7 +1439,7 @@ def selfHostGroup : Group where
         let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
-          "def gTy (X : Tm) : Tm := piH X (.unit 0)\n" ++
+          "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
           "def eqn (s : Bool) : Tm := match s with\n" ++
           "  | .true => .eqTy (sortTy (gTy .ptrue)) (sortTy (gTy (piH .ptrue .ptrue)))\n" ++
           "  | .false => .eqTy (gTy .ptrue) (gTy (piH .ptrue .ptrue))\n" ++
@@ -1609,10 +1682,10 @@ def selfHostGroup : Group where
         -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
         let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
           "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let dq := "(.ann (.darg (.var 0) (.unit 0) (.lam (.dret .star))) (.descr 0 (.unit 0)))"
-        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit 0) (.unit 0)) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr 0 (.unit 0)) {dq} {dq}) (.unit 0))))"
-        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit 0) .qty) (.mu 0 (.unit 0) " ++
-          "(.app (.ann (.lam (.darg (.var 0) (.unit 0) (.lam (.dret .star)))) (piW .qty (.descr 0 (.unit 0)))) (.app (.var 0) .star)) .star)))"
+        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
+        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
+        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
+          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
     { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
@@ -2025,13 +2098,13 @@ def selfHostGroup : Group where
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
           "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
-          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit 0) .ptrue)\n" ++
-          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit 0) (.unit 0))\n" ++
-          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit 0) (.unit 0))\n" ++
-          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit 0))\n" ++
-          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit 0))\n" ++
+          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
+          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
+          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
           "def main : IO Unit := do\n" ++
-          "  IO.println (okT (.pi .qw .lhole .lhole (.unit 0) .ptrue));\n" ++
+          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
           "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
@@ -2461,6 +2534,115 @@ def selfHostGroup : Group where
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
           ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+    -- (U2) symbolic levels in an inductive description: the description's level is the
+    -- declaration's universe parameter (no closed numeral), which `Repr.{u}`/`Inhabited.{u}`
+    -- need (Q4 lifts the tag into the data type's universe)
+    { name := "U2: symbolic levels in inductive descriptions (U2/A15): a polymorphic data type, structure and classes", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++
+          "inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+          "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+          "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+          "def unbox.{u} {A : Type u} (b : Box A) : A := match b with\n  | .mk a => a\n" ++
+          "def wget.{u} {A : Type u} (w : Wrap A) : A := w.val\n" ++
+          "def unboxNat (b : Box Nat) : Nat := match b with\n  | .mk a => a\n" ++
+          "def wgetNat (w : Wrap Nat) : Nat := match w with\n  | .mk a => a\n" ++
+          "def reprWrap.{u} {A : Type u} [Repr A] (w : Wrap A) : Nat := Repr.repr w.val\n" ++
+          "def defaultNat : Nat := Inhabited.default\n" ++
+          "def natBox : Box Nat := Box.mk 7\n" ++
+          "def w5 : Wrap Nat := Wrap.mk 5\n" ++
+          "#reduce Nat.beq (unbox natBox) 7\n" ++
+          "#reduce Nat.beq (wget w5) 5\n" ++
+          "#reduce Nat.beq (unboxNat natBox) 7\n" ++
+          "#reduce Nat.beq (wgetNat w5) 5\n" ++
+          "#reduce Nat.beq (reprWrap w5) 5\n" ++
+          "#reduce Nat.beq defaultNat 42\n")
+          ("Box : (x0 : Sort((u)+1)) → Sort((u)+1)\n" ++
+           "Wrap : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Wrap.val : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "Repr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Repr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\n" ++
+           "instReprNat : (Repr.{0} Nat)\n" ++
+           "Inhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Inhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\n" ++
+           "instInhabitedNat : (Inhabited.{0} Nat)\n" ++
+           "unbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\n" ++
+           "wget : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "unboxNat : (x0 : (Box.{0} Nat)) → Nat\n" ++
+           "wgetNat : (x0 : (Wrap.{0} Nat)) → Nat\n" ++
+           "reprWrap : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : (Wrap.{u} x0)) → Nat\n" ++
+           "defaultNat : Nat\n" ++
+           "natBox : (Box.{0} Nat)\n" ++
+           "w5 : (Wrap.{0} Nat)\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n") },
+    { name := "U2: level mismatches in a symbolic data type are rejected, as in the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostAgrees ("inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n") [
+          ("def ok.{u} (A : Type u) (a : A) : Box.{u} A := Box.mk a\n", true),
+          ("def ok2.{u} (A : Type u) (w : Wrap A) : A := w.val\n", true),
+          ("def ok3 : Wrap Nat := Wrap.mk 3\n", true),
+          ("def ok4 : Nat := Repr.repr 5\n", true),
+          ("def bad1 : Box.{1} Nat := Box.mk 7\n", false),
+          ("def bad2.{u} : Wrap.{u} Nat := Wrap.mk 7\n", false),
+          ("def bad3.{u} : Box.{u} Nat := Box.mk 7\n", false),
+          ("def bad4.{u} (A : Type u) : Box A := Box.mk A\n", false),
+          -- an undeclared universe, and a field type above the data type's universe
+          ("inductive Bad : Type u where\n  | mk\n", false),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Type u)\n", false)] },
+    { name := "U2: an undeclared universe in a data type is a positioned error (U2/A15)", run := fun _ => do
+        match ← selfhostCompiler with
+        | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+        | .ok exe =>
+          let dir ← IO.FS.createTempDir
+          IO.FS.writeFile (dir / "bad.wiz") "import Prelude\ninductive Bad : Type u where\n  | mk\n"
+          let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+          checkEq (1 : UInt32) out.exitCode
+          checkEq "" out.stdout
+          checkEq ("bad.wiz:2:1: error: the data type's universe must be a declared universe parameter, not u (declare one: `inductive T.{u}`)\n") out.stderr },
+    -- (U2b) a field at another level: `Duo`'s fields live in `Type u`/`Type v`, below
+    -- `Type (max u v)`, so the description lifts them (Q4); a `structure` at a level
+    -- parameter (the `Box.{u}` shape) and a `Box.{1}` instance
+    { name := "U2b: a structure at a level parameter, and an inductive whose fields are at different levels (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "def boxOfType : Box.{1} (Type 0) := Box.mk Nat\n" ++
+          "#check Box\n#check Duo\n#check unbox\n#check duoSnd\n#check boxOfType\n" ++
+          "#reduce Nat.beq (unbox boxVal) 7\n" ++
+          "#reduce Nat.beq (String.length (duoSnd duoVal)) 2\n" ++
+          "#reduce Nat.beq (String.length (duoSnd (Duo.mk 1 \"abc\"))) 3\n" ++
+          "#reduce Nat.beq duoBUp 5\n")
+          "Box : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nBox.val : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nDuo : (x0 : Sort((u)+1)) → (x1 : Sort((v)+1)) → Sort((max(u, v))+1)\nunbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nduoSnd : (x0 :0 Sort((u)+1)) → (x1 :0 Sort((v)+1)) → (x2 : ((Duo.{u, v} x0) x1)) → x1\nduoUp : ((Duo.{1, 0} U0) Nat)\nduoBUp : Nat\nRepr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nRepr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\ninstReprNat : (Repr.{0} Nat)\ninstReprType : (Repr.{1} U0)\ntypeRepr : Nat\nsumRepr : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (x2 : (List x0)) → Nat\ninstReprList : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\nInhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nInhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\ninstInhabitedNat : (Inhabited.{0} Nat)\ninstInhabitedOption : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\ninstInhabitedList : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\nduoVal : ((Duo.{0, 0} Nat) String)\nboxVal : (Box.{0} Nat)\noptDefault : Nat\nlistDefault : Nat\nboxOfType : (Box.{1} U0)\n(x0 : Sort((?u0)+1)) → Sort((max(0, ?u0))+1)\n(x0 : Sort((?u0)+1)) → (x1 : Sort((?u1)+1)) → Sort((max(?u0, ?u1))+1)\n(x0 :0 Sort((?u0)+1)) → (x1 : (Box.{?u0} x0)) → x0\n(x0 :0 Sort((?u0)+1)) → (x1 :0 Sort((?u1)+1)) → (x2 : ((Duo.{?u0, ?u1} x0) x1)) → x1\n(Box.{1} U0)\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" },
+    -- (U2b) a polymorphic class and generic instances: `Repr (List A)` from `[Repr A]`,
+    -- and `Inhabited` for `Option`/`List` from `[Inhabited A]` (the resolution is at
+    -- level metavariables, U2)
+    { name := "U2b: a polymorphic class and generic instances (Repr (List A), Inhabited for Option/List) (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "#check instReprList\n#check instInhabitedOption\n#check instInhabitedList\n" ++
+          "#check instReprType\n#check typeRepr\n" ++
+          "#reduce Nat.beq (Repr.repr (List.cons 1 (List.cons 2 List.nil))) 3\n" ++
+          "#reduce Nat.beq (Repr.repr (List.nil : List Nat)) 0\n" ++
+          "#reduce Nat.beq optDefault 42\n" ++
+          "#reduce Nat.beq listDefault 42\n" ++
+          "#reduce Nat.beq typeRepr 0\n")
+          "Box : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nBox.val : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nDuo : (x0 : Sort((u)+1)) → (x1 : Sort((v)+1)) → Sort((max(u, v))+1)\nunbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nduoSnd : (x0 :0 Sort((u)+1)) → (x1 :0 Sort((v)+1)) → (x2 : ((Duo.{u, v} x0) x1)) → x1\nduoUp : ((Duo.{1, 0} U0) Nat)\nduoBUp : Nat\nRepr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nRepr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\ninstReprNat : (Repr.{0} Nat)\ninstReprType : (Repr.{1} U0)\ntypeRepr : Nat\nsumRepr : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (x2 : (List x0)) → Nat\ninstReprList : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\nInhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nInhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\ninstInhabitedNat : (Inhabited.{0} Nat)\ninstInhabitedOption : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\ninstInhabitedList : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\nduoVal : ((Duo.{0, 0} Nat) String)\nboxVal : (Box.{0} Nat)\noptDefault : Nat\nlistDefault : Nat\n(x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\n(x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\n(x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\n(Repr.{1} U0)\nNat\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" },
+    -- (U2b) the level mistakes the Lean frontend rejects, with the same message and a
+    -- positioned diagnostic (`selfhostLevelErrors`)
+    { name := "U2b: a level escape, a max/imax mismatch and a universe inconsistency are rejected like the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostLevelErrors [
+          ("def bad.{v} (A : Type u) : Type u := A\n", "unknown universe level 'u'"),
+          ("def bad.{u, v} (A : Sort (max u v)) : Sort (imax u v) := A\n", "type mismatch"),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Sort (u+1))\n", "can't lift")] },
+    -- (U2b) differential: the same polymorphic program (structure, two-level inductive,
+    -- generic class instances) is compiled by the Lean host and by the self-hosted
+    -- compiler (GC and RC) and prints the same values
+    { name := "U2b: the same polymorphic program compiles and runs in both toolchains (U2/A15)", run := fun _ => do
+        ioRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n" (flags := #["--rc"]) },
 
     { name := "(A11) deriving BEq: 0/1/2/3 fields, a recursive polymorphic inductive, and an after-the-fact instance", run := fun _ =>
         selfhostCheckFile selfhostDeriving selfhostDerivingExpected },
