@@ -366,7 +366,7 @@ def Fe.render (sb : Fe.Subst) : Fe.Out → Nat → List Char → List Char
   | .rgs ts ex, _, acc =>
     (match List.filter (fun (r : String) => Bool.not (String.elem r ex)) (List.revApp (Fe.rgsAll sb ts .nil) .nil) with
     | .nil => acc
-    | .cons r rs => List.append (String.chars ("{" +++ Fe.words (.cons r rs) +++ ": Region} ")) acc)
+    | .cons r rs => List.append (String.chars ("{0 " +++ Fe.words (.cons r rs) +++ ": Region} ")) acc)
 /-- The text of a plain piece of generated code (a variable's name, say), if it is one. -/
 def Fe.outName : Fe.Out → Option String
   | .s x => .some x
@@ -2860,7 +2860,7 @@ def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M S
   let head := Fe.Out.s kw ⊕ Fe.Out.at (Fe.sub p 1) (Fe.Out.s sig.name) ⊕ Fe.Out.s (" "
       +++ (match sig.rgs with
         | .nil => ""
-        | rs => "{" +++ Fe.words rs +++ ": Region} ")
+        | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
       +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
       +++ (match sig.tys with
         | .nil => ""
@@ -3078,7 +3078,7 @@ def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
       .ok ("def " +++ sig.name +++ ".Spec "
         +++ (match rgs with
           | .nil => ""
-          | rs => "{" +++ Fe.words rs +++ ": Region} ")
+          | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
         +++ (match sig.tys with
           | .nil => ""
           | ts => "{" +++ Fe.words ts +++ ": Type} ")
@@ -3114,7 +3114,7 @@ def Fe.specText (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except String Strin
         .ok ("def " +++ sig.name +++ ".Spec "
           +++ (match sig.rgs with
             | .nil => ""
-            | rs => "{" +++ Fe.words rs +++ ": Region} ")
+            | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
           +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
           +++ (match sig.tys with
             | .nil => ""

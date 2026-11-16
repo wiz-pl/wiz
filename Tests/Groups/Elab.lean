@@ -35,14 +35,14 @@ def group : Group where
     -- is the one known at the binder, so `{A}` with no type is data (ω)
     { name := "rule (b): a bare implicit whose type is a sort or a proposition is 0", run := fun _ => do
         fails "def leak {A : Type} (x : A) : Type := A" "quantity"
-        fails "def leakP {P : Prop} (x : Nat) : Prop := P" "quantity"
+        fails "def leakP {P : Prop} (x : P) : Prop := P" "quantity"
         ok "def leakW {ω A : Type} (x : A) : Type := A"
         okLib ("import Prelude\ndef p {P : Prop} {A : Type} {u : Type 1} {h : 1 = 1} {n : Nat} {F : Type → Type} (x : Nat) : Nat := x\n" ++
           "def q {0 n : Nat} {ω A : Type} (x : Nat) : Nat := x\n#check @p\n#check @q")
           ["p : {P : Prop} → {A : Type} → {u : Type 1} → {h : 1 = 1} → {n : Nat} → {F : Type → Type} → Nat → Nat",
            "q : {0 n : Nat} → {ω A : Type} → Nat → Nat"] },
     { name := "rule (b): an implicit with no written type is data (ω), decided at the binder", run := fun _ =>
-        ok "def g {A} (x : A) : A := x\n#check @g" ["g : {ω A : Type} → A → A"] },
+        okLib "import Prelude\ndef g {A} (x : A) (y : List A) : A := x\n#check @g" ["g : {ω A : Type} → A → List A → A"] },
     { name := "rule (b): the default follows a definition that unfolds to a sort", run := fun _ =>
         fails "def Ty : Type 1 := Type\ndef leak {A : Ty} (x : A) : Type := A" "quantity" },
     -- a recursive definition over an erased index: the definition checks (through the

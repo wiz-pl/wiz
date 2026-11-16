@@ -278,7 +278,7 @@ rule (b) gives a data implicit, when that differs from the one for a type (ω, n
 def dataImplicits (ty : Term R) : List Name :=
   match ty with
   | .pi x bi q _ B _ =>
-    let here := match q with
+    let here : Bool := match q with
       | .qlit r => bi == .implicit && r == QuantitySyntax.implicitDataDefault &&
           r != QuantitySyntax.implicitDefault (R := R)
       | _ => false

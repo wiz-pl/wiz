@@ -107,7 +107,7 @@ end
 Notation: `⟦e⟧` the lowering; `R A` is `Result A` (lib/Result.wiz).
 
 **L1. Items and generics.** `fn f {'a} {T : Type} [C T] (xs…) : Ret` ↦
-`def f {ρ : Region} {T : Type} [C T] (xs…) : R (…)`: region parameters first (implicit,
+`def f {0 ρ : Region} {T : Type} [C T] (xs…) : R (…)`: region parameters first (implicit,
 so quantity 0, RD12), then outlives bounds `'a : 'b` as erased proof arguments
 `(0 h : Outlives ρa ρb)` (L22), then type parameters, then instance arguments, then values.
 `struct S where f : T` ↦ `structure S where f : ⟦T⟧` (fields at ω, RD2).
