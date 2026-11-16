@@ -1,0 +1,395 @@
+import Text
+/-!
+# TestRun.Id
+
+Test identity and selection for the test runner (`docs/stages/33-test-runner.md`, 33a).
+
+**Ids.** A Lean-suite case is `group/slug`, where the slug is the case's name in lower
+case with every run of other characters made one `-` (at most 64 characters). When two
+cases of a group have the same slug, the second is `slug-2`, the third `slug-3`, and so
+on. A golden test is `pkg:path`. Timings and the quarantine are keyed by id, so a rename
+shows up as a changed line instead of a silent drop. The index of a case in its group
+stays an alias (`=G#3`).
+
+**Selectors** (`TestRun.Sel.parse`):
+
+```
+=G           group G                    G          groups whose name starts with G
+=G#3,7       cases 3 and 7 of G         =G/slug    one case by id
+tests/rv/**  golden files by path glob  ~text      cases whose name contains text
++tag  -tag   with / without a tag       !SEL       what SEL does not select
+@shard:N[/k] a shard (or part k of it)  @failed    @changed: last run's failures; changed keys
+```
+
+A selection is the union of its **includes**, or every case when there are none,
+narrowed by each **filter** (`+tag`, `-tag` and `!SEL`). An include that matches
+nothing is an error, as in the Lean driver (`@failed` and `@changed` may be empty).
+
+Globs: `*` is any run of characters other than `/`, `?` is one of them, `**` is anything,
+and `**/` is any number of whole directories (none included).
+
+```
+import TestRun.Id
+
+#eval TestRun.slug "Direct induction hypotheses agree (on every Desc)!"
+-- "direct-induction-hypotheses-agree-on-every-desc"
+#eval TestRun.glob "tests/**/*.wiz" "tests/rv/a.wiz"          -- .true
+```
+-/
+
+-- ## Ids
+
+/-- Whether a character is an ASCII letter or digit. -/
+def TestRun.isAlnum (c : Char) : Bool :=
+  Bool.or (Char.isDigit c) (Bool.or (Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 90))
+    (Bool.and (Nat.le 97 (Char.code c)) (Nat.le (Char.code c) 122)))
+
+/-- An ASCII upper-case letter in lower case; anything else unchanged. -/
+def TestRun.lower (c : Char) : Char :=
+  match Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 90) with
+  | .true => Char.mk (Char.code c + 32)
+  | .false => c
+
+/-- A character by its code (Wiz has no character literals). -/
+def TestRun.ch (n : Nat) : Char := Char.mk n
+
+/-- Whether `c` has the code `n`. -/
+def TestRun.is (n : Nat) (c : Char) : Bool := Nat.beq (Char.code c) n
+
+/-- The slug's characters, reversed onto `acc`; `dash` says a separator is pending. -/
+def TestRun.slugGo : List Char → Bool → List Char → List Char
+  | .nil, _, acc => acc
+  | .cons c cs, dash, acc => match TestRun.isAlnum c with
+    | .true => (match Bool.and dash (Bool.not (List.isEmpty acc)) with
+      | .true => TestRun.slugGo cs .false (.cons (TestRun.lower c) (.cons (TestRun.ch 45) acc))
+      | .false => TestRun.slugGo cs .false (.cons (TestRun.lower c) acc))
+    | .false => TestRun.slugGo cs .true acc
+
+/-- Drop `-`s at the front. -/
+def TestRun.dropDashes : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match TestRun.is 45 c with
+    | .true => TestRun.dropDashes cs
+    | .false => .cons c cs
+
+/-- A case name as an id: lower-case letters and digits, one `-` for every run of other
+characters, at most 64 characters, no `-` at either end. -/
+def TestRun.slug (name : String) : String :=
+  let cs := List.reverse (TestRun.slugGo (String.chars name) .false .nil);
+  String.ofChars (List.reverse (TestRun.dropDashes (List.reverse (List.take 64 cs))))
+
+/-- How often `s` has been seen in `seen` (a list of slugs and counts). -/
+def TestRun.seenCount (s : String) : List (String × Nat) → Nat
+  | .nil => 0
+  | .cons (k, n) rest => match String.eq k s with
+    | .true => n
+    | .false => TestRun.seenCount s rest
+
+/-- `seen` with the count of `s` one higher. -/
+def TestRun.bump (s : String) : List (String × Nat) → List (String × Nat)
+  | .nil => .cons (s, 1) .nil
+  | .cons (k, n) rest => match String.eq k s with
+    | .true => .cons (k, Nat.succ n) rest
+    | .false => .cons (k, n) (TestRun.bump s rest)
+
+/-- The slugs of a group's names, in order, with `-2`, `-3`, … on repeats. -/
+def TestRun.slugsGo : List String → List (String × Nat) → List String
+  | .nil, _ => .nil
+  | .cons n ns, seen =>
+    let s := TestRun.slug n;
+    let k := TestRun.seenCount s seen;
+    let s' := match Nat.beq k 0 with
+      | .true => s
+      | .false => String.join [s, "-", Nat.repr (Nat.succ k)];
+    .cons s' (TestRun.slugsGo ns (TestRun.bump s seen))
+
+/-- The ids of a group's cases, in order: `group/slug`, unique within the group. -/
+def TestRun.ids (group : String) (names : List String) : List String :=
+  List.map (fun s => String.join [group, "/", s]) (TestRun.slugsGo names .nil)
+
+/-- A golden test's id: `pkg:path`. -/
+def TestRun.goldenId (pkg path : String) : String := String.join [pkg, ":", path]
+
+-- ## Globs
+
+/-- A glob, cut into tokens. -/
+inductive GTok where
+  | lit (c : Char)
+  | one
+  | star
+  | dstar
+  /-- `**/`: any number of whole directories, none included -/
+  | dirs
+
+def GTok.eq : GTok → GTok → Bool
+  | .lit a, .lit b => Char.eq a b
+  | .one, .one => .true
+  | .star, .star => .true
+  | .dstar, .dstar => .true
+  | .dirs, .dirs => .true
+  | _, _ => .false
+
+def GTok.eqs : List GTok → List GTok → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (GTok.eq a b) (GTok.eqs as bs)
+  | _, _ => .false
+
+/-- Whether the (reversed) tokens so far end in `**`. -/
+def GTok.headDstar : List GTok → Bool
+  | .cons .dstar _ => .true
+  | _ => .false
+
+/-- The tokens of a glob, reversed onto `acc` (`*` is 42, `?` 63, `/` 47): `**` after
+`*`, and `**/` when a `/` follows `**`. -/
+def GTok.parseGo : List Char → List GTok → List GTok
+  | .nil, acc => acc
+  | .cons c rest, acc => match TestRun.is 42 c with
+    | .true => (match acc with
+      | .cons .star acc' => GTok.parseGo rest (.cons .dstar acc')
+      | _ => GTok.parseGo rest (.cons .star acc))
+    | .false => match TestRun.is 63 c with
+    | .true => GTok.parseGo rest (.cons .one acc)
+    | .false => match Bool.and (TestRun.is 47 c) (GTok.headDstar acc) with
+    | .true => GTok.parseGo rest (.cons .dirs (List.drop 1 acc))
+    | .false => GTok.parseGo rest (.cons (.lit c) acc)
+
+/-- Cut a glob into tokens. -/
+def GTok.parse (cs : List Char) : List GTok := List.reverse (GTok.parseGo cs .nil)
+
+/-- The states a state stands for before the next character: a leading `*` or `**`
+may match nothing, and `**/` is either nothing or `**` then `/`. -/
+def GTok.close : List GTok → List (List GTok)
+  | .nil => .cons .nil .nil
+  | .cons .star rest => .cons (.cons .star rest) (GTok.close rest)
+  | .cons .dstar rest => .cons (.cons .dstar rest) (GTok.close rest)
+  | .cons .dirs rest => .cons (.cons .dstar (.cons (.lit (TestRun.ch 47)) rest)) (.cons (.cons (.lit (TestRun.ch 47)) rest) (GTok.close rest))
+  | .cons t rest => .cons (.cons t rest) .nil
+
+/-- The states after one state reads `c`. -/
+def GTok.step (c : Char) : List GTok → List (List GTok)
+  | .cons (.lit d) rest => match Char.eq c d with
+    | .true => GTok.close rest
+    | .false => .nil
+  | .cons .one rest => match TestRun.is 47 c with
+    | .true => .nil
+    | .false => GTok.close rest
+  | .cons .star rest => match TestRun.is 47 c with
+    | .true => .nil
+    | .false => GTok.close (.cons .star rest)
+  | .cons .dstar rest => GTok.close (.cons .dstar rest)
+  | _ => .nil
+
+/-- Add the states of `xs` to `acc`, without repeats. -/
+def GTok.union : List (List GTok) → List (List GTok) → List (List GTok)
+  | .nil, acc => acc
+  | .cons x xs, acc => match List.any (GTok.eqs x) acc with
+    | .true => GTok.union xs acc
+    | .false => GTok.union xs (.cons x acc)
+
+/-- Read the characters from a set of states (a nondeterministic automaton: linear in
+the text, whatever the pattern). -/
+def GTok.run : List Char → List (List GTok) → List (List GTok)
+  | .nil, states => states
+  | .cons c cs, states =>
+    GTok.run cs (List.foldl (fun acc s => GTok.union (GTok.step c s) acc) .nil states)
+
+/-- Whether `path` matches the glob `pat`. -/
+def TestRun.glob (pat path : String) : Bool :=
+  List.any List.isEmpty (GTok.run (String.chars path) (GTok.close (GTok.parse (String.chars pat))))
+
+-- ## Cases and selectors
+
+/-- What selection knows about a case. -/
+structure CaseInfo where
+  /-- `group/slug` or `pkg:path` -/
+  id : String
+  /-- the Lean group, or the golden test's package -/
+  group : String
+  /-- the index in the group (an alias for the id) -/
+  index : Nat
+  name : String
+  /-- a golden test's file, relative to the package; empty for a Lean case -/
+  path : String
+  tags : List String
+  /-- the CI shard, and the part of a split shard (0 when it is not split) -/
+  shard : String
+  part : Nat
+
+/-- A Lean-suite case with no tags and no shard. -/
+def CaseInfo.lean (group : String) (index : Nat) (name id : String) : CaseInfo :=
+  CaseInfo.mk id group index name "" .nil "" 0
+
+/-- A golden test with no tags and no shard. -/
+def CaseInfo.golden (pkg : String) (index : Nat) (path : String) : CaseInfo :=
+  CaseInfo.mk (TestRun.goldenId pkg path) pkg index path path .nil "" 0
+
+/-- What the last run knew: its failures, and the cases whose cache key changed. -/
+structure SelCtx where
+  failed : List String
+  changed : List String
+
+def SelCtx.empty : SelCtx := SelCtx.mk .nil .nil
+
+/-- A selector (see the module header). -/
+inductive Sel where
+  | group (g : String)
+  | cases (g : String) (ixs : List Nat)
+  | pre (p : String)
+  | id (i : String)
+  | glob (pat : String)
+  | text (t : String)
+  | tag (t : String)
+  | notTag (t : String)
+  | neg (s : Sel)
+  | shard (name : String) (part : Option Nat)
+  | failed
+  | changed
+
+/-- Whether a selector narrows the selection (`+tag`, `-tag`, `!SEL`) rather than adding
+to it. -/
+def Sel.isFilter : Sel → Bool
+  | .tag _ => .true
+  | .notTag _ => .true
+  | .neg _ => .true
+  | _ => .false
+
+/-- Whether a selector may select nothing without that being an error. -/
+def Sel.mayBeEmpty : Sel → Bool
+  | .failed => .true
+  | .changed => .true
+  | _ => .false
+
+/-- The numbers of a comma-separated list, or `none` if one is not a number. -/
+def TestRun.parseNats : List String → Option (List Nat)
+  | .nil => .some .nil
+  | .cons s rest => match String.parseNat s with
+    | .none => .none
+    | .some n => (match TestRun.parseNats rest with
+      | .none => .none
+      | .some ns => .some (.cons n ns))
+
+/-- `=REST`: a group, cases by index, or an id. -/
+def Sel.parseEq (sel rest : String) : Except String Sel :=
+  match String.splitOn rest "#" with
+  | .cons g (.cons ixs .nil) => match TestRun.parseNats (String.splitOn ixs ",") with
+    | .some ns => (match String.isEmpty g with
+      | .true => .error (String.join ["selector ", sel, ": no group before #"])
+      | .false => .ok (.cases g ns))
+    | .none => .error (String.join ["selector ", sel, ": case indices are numbers (=G#3,7)"])
+  | .cons _ (.cons _ _) => .error (String.join ["selector ", sel, ": one # at most"])
+  | _ => match String.isEmpty rest with
+    | .true => .error "selector =: no group"
+    | .false => match String.containsChar rest (TestRun.ch 47) with
+      | .true => .ok (.id rest)
+      | .false => .ok (.group rest)
+
+/-- `@REST`: a shard, `@failed` or `@changed`. -/
+def Sel.parseAt (sel rest : String) : Except String Sel :=
+  match String.eq rest "failed" with
+  | .true => .ok .failed
+  | .false => match String.eq rest "changed" with
+    | .true => .ok .changed
+    | .false => match String.stripPrefix rest "shard:" with
+      | .none => .error (String.join ["selector ", sel, ": unknown (@shard:NAME[/k], @failed, @changed)"])
+      | .some spec => match String.splitOn spec "/" with
+        | .cons n .nil => .ok (.shard n .none)
+        | .cons n (.cons k .nil) => (match String.parseNat k with
+          | .some p => .ok (.shard n (.some p))
+          | .none => .error (String.join ["selector ", sel, ": a shard's part is a number"]))
+        | _ => .error (String.join ["selector ", sel, ": @shard:NAME[/k]"])
+
+/-- Whether a plain selector names files (it has a `/`, a `*` or ends in `.wiz`). -/
+def Sel.looksLikePath (s : String) : Bool :=
+  Bool.or (String.containsChar s (TestRun.ch 47)) (Bool.or (String.containsChar s (TestRun.ch 42)) (String.endsWith s ".wiz"))
+
+/-- A selector without a sigil: files or a group prefix. -/
+def Sel.plain (sel : String) : Sel := match Sel.looksLikePath sel with
+  | .true => .glob sel
+  | .false => .pre sel
+
+/-- A selector by its first character's code `c` (`!` 33, `~` 126, `+` 43, `-` 45,
+`=` 61, `@` 64), the rest of it, and the next level for `!` (`Sel.parse`, one shorter). -/
+def Sel.parseSigil (sel : String) (c : Nat) (rest : String) (inner : Except String Sel) : Except String Sel :=
+  match Nat.beq c 33 with
+  | .true => (match inner with
+    | .ok s => .ok (.neg s)
+    | .error e => .error e)
+  | .false => match Nat.beq c 126 with
+  | .true => .ok (.text rest)
+  | .false => match Nat.beq c 43 with
+  | .true => .ok (.tag rest)
+  | .false => match Nat.beq c 45 with
+  | .true => (match String.startsWith rest "-" with
+    | .true => .error (String.join ["unknown flag ", sel])
+    | .false => .ok (.notTag rest))
+  | .false => match Nat.beq c 61 with
+  | .true => Sel.parseEq sel rest
+  | .false => match Nat.beq c 64 with
+  | .true => Sel.parseAt sel rest
+  | .false => .ok (Sel.plain sel)
+
+/-- Parse a selector from its characters (structural on them, for `!`). -/
+def Sel.parseChars : List Char → Except String Sel
+  | .nil => .error "an empty selector"
+  | .cons c rest =>
+    Sel.parseSigil (String.ofChars (.cons c rest)) (Char.code c) (String.ofChars rest) (Sel.parseChars rest)
+
+/-- Parse one selector. Flags (`--x`) and empty selectors are errors. -/
+def Sel.parse (sel : String) : Except String Sel := Sel.parseChars (String.chars sel)
+
+/-- Whether `n` is in the list. -/
+def TestRun.natElem (n : Nat) : List Nat → Bool := List.any (Nat.beq n)
+
+/-- Whether a case's part is the one asked for (any part when none is). -/
+def Sel.partOk (part : Nat) : Option Nat → Bool
+  | .none => .true
+  | .some k => Nat.beq part k
+
+/-- Whether a selector selects a case. -/
+def Sel.matches (ctx : SelCtx) (c : CaseInfo) : Sel → Bool
+  | .group g => String.eq c.group g
+  | .cases g ixs => Bool.and (String.eq c.group g) (TestRun.natElem c.index ixs)
+  | .pre p => String.startsWith c.group p
+  | .id i => String.eq c.id i
+  | .glob pat => Bool.and (Bool.not (String.isEmpty c.path)) (TestRun.glob pat c.path)
+  | .text t => String.contains c.name t
+  | .tag t => String.elem t c.tags
+  | .notTag t => Bool.not (String.elem t c.tags)
+  | .neg s => Bool.not (Sel.matches ctx c s)
+  | .shard n p => Bool.and (String.eq c.shard n) (Sel.partOk c.part p)
+  | .failed => String.elem c.id ctx.failed
+  | .changed => String.elem c.id ctx.changed
+
+/-- Parse every selector, or the first error. -/
+def Sel.parseAll : List String → Except String (List (String × Sel))
+  | .nil => .ok .nil
+  | .cons s rest => match Sel.parse s with
+    | .error e => .error e
+    | .ok x => (match Sel.parseAll rest with
+      | .error e => .error e
+      | .ok xs => .ok (.cons (s, x) xs))
+
+/-- The first include (with its text) that selects no case, if any. -/
+def Sel.firstEmpty (ctx : SelCtx) (cases : List CaseInfo) : List (String × Sel) → Option String
+  | .nil => .none
+  | .cons (txt, s) rest =>
+    match Bool.or (Sel.isFilter s) (Bool.or (Sel.mayBeEmpty s) (List.any (fun c => Sel.matches ctx c s) cases)) with
+    | .true => Sel.firstEmpty ctx cases rest
+    | .false => .some txt
+
+/-- Whether a case is selected by the parsed selectors (see the module header). -/
+def Sel.selects (ctx : SelCtx) (sels : List Sel) (c : CaseInfo) : Bool :=
+  let incl := List.filter (fun s => Bool.not (Sel.isFilter s)) sels;
+  let filt := List.filter Sel.isFilter sels;
+  Bool.and
+    (Bool.or (List.isEmpty incl) (List.any (Sel.matches ctx c) incl))
+    (List.all (Sel.matches ctx c) filt)
+
+/-- Select cases, in their order. An error names a bad selector, or an include that
+matches nothing (exit 2 in the runner). -/
+def TestRun.select (ctx : SelCtx) (sels : List String) (cases : List CaseInfo) : Except String (List CaseInfo) :=
+  match Sel.parseAll sels with
+  | .error e => .error e
+  | .ok parsed => match Sel.firstEmpty ctx cases parsed with
+    | .some txt => .error (String.join ["selector ", txt, " matches no test"])
+    | .none => .ok (List.filter (Sel.selects ctx (List.map (fun p => p.2) parsed)) cases)

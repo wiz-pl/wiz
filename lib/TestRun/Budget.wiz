@@ -1,0 +1,143 @@
+import Nat
+/-!
+# TestRun.Budget
+
+Memory admission for the test runner (`docs/stages/33-test-runner.md`, 33c): a pool of
+`budget` MiB shared by at most `jobs` running cases. Admitting a case reserves its
+memory and releasing it gives the memory back. All of this is pure, so the scheduler
+(lib/TestRun/Sched.wiz) and its scripted tests use the same definitions that the proofs
+are about.
+
+A case is admitted in one of two ways:
+
+* **it fits**: fewer than `jobs` cases are running and `reserved + r ≤ budget`. It
+  holds `r`;
+* **alone**: nothing is running, and the case does not fit (it asks for more than the
+  whole budget). It holds all of what is free (`budget - reserved`, which is the whole
+  budget when nothing is running), so no other case is admitted beside it.
+
+The invariant is `Budget.admit_le`: **after any admission, the reservations are within
+the budget**. `Budget.release_le` shows that releasing keeps it, and
+`Budget.release_take` shows that releasing a fitted case gives its reservation back
+exactly.
+
+```
+import TestRun.Budget
+
+#eval Pool.admit (Pool.new 1000 4) 300      -- fits: holds 300
+#eval Pool.admit (Pool.new 1000 4) 5000     -- too big for the pool: runs alone, holds 1000
+```
+-/
+
+/-- A memory pool: the budget (MiB), what running cases reserve, how many run, and at
+most how many may run (`--jobs`). -/
+structure Pool where
+  budget : Nat
+  reserved : Nat
+  running : Nat
+  jobs : Nat
+
+/-- An empty pool of `budget` MiB for at most `jobs` cases. -/
+def Pool.new (budget jobs : Nat) : Pool := Pool.mk budget 0 0 jobs
+
+/-- An admission: the pool afterwards, and what the admitted case holds (what
+`Pool.release` gives back when it ends). -/
+structure Grant where
+  pool : Pool
+  held : Nat
+
+/-- Whether a case reserving `r` MiB fits beside the running ones. -/
+def Pool.fits (s : Pool) (r : Nat) : Bool :=
+  Bool.and (Nat.lt s.running s.jobs) (Nat.le (s.reserved + r) s.budget)
+
+/-- Whether nothing is running. -/
+def Pool.idle (s : Pool) : Bool := Nat.beq s.running 0
+
+/-- Reserve `r` MiB for one more running case (no check: see `Pool.admit`). -/
+def Pool.take (s : Pool) (r : Nat) : Pool :=
+  Pool.mk s.budget (s.reserved + r) (Nat.succ s.running) s.jobs
+
+/-- Run one case alone: it holds everything that is free. -/
+def Pool.takeAll (s : Pool) : Pool :=
+  Pool.mk s.budget s.budget (Nat.succ s.running) s.jobs
+
+/-- The admission decision, given the two tests' results (`Pool.admit` passes them). -/
+def Pool.admitBy (s : Pool) (r : Nat) : Bool → Bool → Option Grant
+  | .true, _ => .some (Grant.mk (Pool.take s r) r)
+  | .false, .true => .some (Grant.mk (Pool.takeAll s) (s.budget - s.reserved))
+  | .false, .false => .none
+
+/-- Admit a case that reserves `r` MiB: it fits, or it runs alone, or it waits (`none`). -/
+def Pool.admit (s : Pool) (r : Nat) : Option Grant := Pool.admitBy s r (Pool.fits s r) (Pool.idle s)
+
+/-- Give back what a finished case held. -/
+def Pool.release (s : Pool) (held : Nat) : Pool :=
+  Pool.mk s.budget (s.reserved - held) (Nat.pred s.running) s.jobs
+
+/-- The invariant: the reservations are within the budget. -/
+def Pool.Ok (s : Pool) : Prop := Nat.Le s.reserved s.budget
+
+-- ## Proofs
+
+/-- `a - b ≤ a`. -/
+def Budget.pred_le : (n : Nat) → Nat.Le (Nat.pred n) n
+  | .zero => rfl
+  | .succ n => Nat.le_succ n
+
+/-- Truncated subtraction never grows: `a - b ≤ a`. -/
+def Budget.sub_le (a : Nat) : (b : Nat) → Nat.Le (a - b) a
+  | .zero => Nat.le_refl a
+  | .succ b => Nat.le_trans (Nat.pred (a - b)) (a - b) a (Budget.pred_le (a - b)) (Budget.sub_le a b)
+
+/-- `(a + r) - r = a`. -/
+def Budget.add_sub_cancel (a r : Nat) : a + r - r = a := Nat.add_sub_add_right a 0 r
+
+/-- If `fits` holds, the new reservation is within the budget. -/
+def Budget.fits_le (s : Pool) (r : Nat) (h : Pool.fits s r = .true) : Nat.Le (s.reserved + r) s.budget :=
+  Bool.and_right (Nat.lt s.running s.jobs) (Nat.le (s.reserved + r) s.budget) h
+
+/-- `some a = some b → a = b` (under observational equality the equation of two `some`s
+is, by computation, the equation of their contents and a trivial rest). -/
+def Budget.some_inj {A : Type} {a b : A} (h : Option.some a = Option.some b) : a = b := h.1
+
+/-- A grant equal to one whose pool is `Ok` has an `Ok` pool. -/
+def Budget.ok_of_some (x g : Grant) (h : Option.some x = Option.some g) (ok : Pool.Ok x.pool) : Pool.Ok g.pool :=
+  Eq.substProp (fun (y : Grant) => Pool.Ok y.pool) (@Budget.some_inj Grant x g h) ok
+
+/-- `admitBy` with the actual result of `fits`: whatever it grants is within the budget. -/
+def Budget.admitBy_le (s : Pool) (r : Nat) :
+    (f i : Bool) → Pool.fits s r = f → (g : Grant) → Pool.admitBy s r f i = .some g → Pool.Ok g.pool
+  | .true, _, hf, g, h =>
+    Budget.ok_of_some (Grant.mk (Pool.take s r) r) g h (Budget.fits_le s r hf)
+  | .false, .true, _, g, h =>
+    Budget.ok_of_some (Grant.mk (Pool.takeAll s) (s.budget - s.reserved)) g h (Nat.le_refl s.budget)
+  | .false, .false, _, _, h => absurd h
+
+/-- **The admission invariant**: after an admission the reservations are within the
+budget, whichever way the case was admitted. -/
+def Budget.admit_le (s : Pool) (r : Nat) (g : Grant) (h : Pool.admit s r = .some g) :
+    Nat.Le g.pool.reserved g.pool.budget :=
+  Budget.admitBy_le s r (Pool.fits s r) (Pool.idle s) rfl g h
+
+/-- Releasing keeps the invariant. -/
+def Budget.release_le (s : Pool) (held : Nat) (h : Pool.Ok s) : Pool.Ok (Pool.release s held) :=
+  Nat.le_trans (s.reserved - held) s.reserved s.budget (Budget.sub_le s.reserved held) h
+
+/-- Releasing a fitted case gives back exactly its reservation. -/
+def Budget.release_take (s : Pool) (r : Nat) : (Pool.release (Pool.take s r) r).reserved = s.reserved :=
+  Budget.add_sub_cancel s.reserved r
+
+/-- Releasing a case counts it out again. -/
+def Budget.release_take_running (s : Pool) (r : Nat) : (Pool.release (Pool.take s r) r).running = s.running := rfl
+
+/-- An admitted case that fits holds what it asked for. -/
+def Budget.admit_fits_held (s : Pool) (r : Nat) (h : Pool.fits s r = .true) :
+    Pool.admit s r = .some (Grant.mk (Pool.take s r) r) :=
+  Eq.substProp (fun (b : Bool) => Pool.admitBy s r b (Pool.idle s) = .some (Grant.mk (Pool.take s r) r))
+    (Eq.symm h) rfl
+
+/-- A running pool never admits a case that does not fit: only an idle pool runs one alone. -/
+def Budget.admit_busy (s : Pool) (r : Nat) (hf : Pool.fits s r = .false) (hi : Pool.idle s = .false) :
+    Pool.admit s r = .none :=
+  Eq.substProp (fun (b : Bool) => Pool.admitBy s r b (Pool.idle s) = .none) (Eq.symm hf)
+    (Eq.substProp (fun (b : Bool) => Pool.admitBy s r .false b = .none) (Eq.symm hi) rfl)

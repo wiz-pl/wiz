@@ -1,0 +1,260 @@
+import TestRun.Id
+/-!
+# TestRun.Plan
+
+From selected cases to a plan (`docs/stages/33-test-runner.md`, 33b): each case's
+limits, the order cases start in, and the packing of a shard into parts.
+
+**Limits.** A case has a time limit and a memory reservation, resolved field by field:
+
+1. what the case **declares** (a golden header's `timeout`/`mem`, a group's entry in
+   `.github/test-shards.json`);
+2. what was **learned** from the timings baseline: `mem = max(256, p95(peak) × 5/4 + 64)`
+   MiB and `timeout = max(60 s, 4 × p95(time))`;
+3. the **class default**: `check` 300 s / 1 GiB, `run` 300 s / 1.5 GiB, a Lean case
+   600 s / 1 GiB, a fixture 1800 s / 5 GiB.
+
+A limit's `source` is that of its memory, since only a learned memory reservation is
+retried alone when it runs out (lib/TestRun/Sched.wiz). A learned value above a
+declared one is drift: `Limits.drift` reports it, and the declaration still wins.
+
+**Order.** Fixtures (shared builds) start first, then the cases longest first (LPT), with
+ties kept in selection order. **Packing** splits a shard into parts: cases that share a
+fixture stay in one part (unless the fixture is cached by key, which is TR5's), and the
+units go longest first into the least loaded part.
+
+```
+import TestRun.Plan
+
+#eval Limits.learn (Learned.mk 2000 400 5)      -- 60 s (4 × 2 s is less), 564 MiB
+```
+-/
+
+/-- What kind of case: a Lean-suite case, a golden `check` or `run`, or a fixture. -/
+inductive Kind where
+  | lean
+  | check
+  | run
+  | fixture
+
+def Kind.name : Kind → String
+  | .lean => "lean"
+  | .check => "check"
+  | .run => "run"
+  | .fixture => "fixture"
+
+/-- Where a limit came from. -/
+inductive Source where
+  | declared
+  | learned
+  | default
+
+def Source.name : Source → String
+  | .declared => "declared"
+  | .learned => "learned"
+  | .default => "default"
+
+/-- A case's limits: wall time (ms) and memory (MiB). -/
+structure Limits where
+  timeoutMs : Nat
+  memMib : Nat
+  source : Source
+
+/-- What the baseline knows about a case: p95 of its time (ms) and of its peak (MiB),
+over `runs` runs. -/
+structure Learned where
+  p95Ms : Nat
+  p95PeakMib : Nat
+  runs : Nat
+
+/-- A class's default limits. -/
+def Kind.defaults : Kind → Limits
+  | .check => Limits.mk 300000 1024 .default
+  | .run => Limits.mk 300000 1536 .default
+  | .lean => Limits.mk 600000 1024 .default
+  | .fixture => Limits.mk 1800000 5120 .default
+
+/-- A class's time estimate (ms) for a case that is not in the baseline. -/
+def Kind.estimate : Kind → Nat
+  | .check => 5000
+  | .run => 10000
+  | .lean => 10000
+  | .fixture => 150000
+
+/-- Learned limits: `max(60 s, 4 × p95)` and `max(256, p95 × 5/4 + 64)`. -/
+def Limits.learn (l : Learned) : Limits :=
+  Limits.mk (Nat.max 60000 (4 * l.p95Ms)) (Nat.max 256 (l.p95PeakMib * 5 / 4 + 64)) .learned
+
+/-- The learned time limit, if the case is in the baseline. -/
+def Learned.timeout : Option Learned → Option Nat
+  | .some x => .some (Limits.learn x).timeoutMs
+  | .none => .none
+
+/-- The learned memory reservation, if the case is in the baseline. -/
+def Learned.mem : Option Learned → Option Nat
+  | .some x => .some (Limits.learn x).memMib
+  | .none => .none
+
+/-- The first value that is there, else `d`. -/
+def TestRun.orElse (a : Option Nat) (b : Option Nat) (d : Nat) : Nat := match a with
+  | .some x => x
+  | .none => match b with
+    | .some y => y
+    | .none => d
+
+/-- Resolve a case's limits: declared time and memory (if any), the baseline (if any),
+the class default. -/
+def Limits.resolve (k : Kind) (declTimeoutMs declMem : Option Nat) (l : Option Learned) : Limits :=
+  let d := Kind.defaults k;
+  let lt := Learned.timeout l;
+  let lm := Learned.mem l;
+  let src := match declMem with
+    | .some _ => Source.declared
+    | .none => (match l with
+      | .some _ => Source.learned
+      | .none => Source.default);
+  Limits.mk (TestRun.orElse declTimeoutMs lt d.timeoutMs) (TestRun.orElse declMem lm d.memMib) src
+
+/-- A warning when the baseline wants more memory than the case declares. -/
+def Limits.drift (declMem : Option Nat) (l : Option Learned) : Option String :=
+  match declMem with
+  | .none => .none
+  | .some m => match l with
+    | .none => .none
+    | .some x =>
+      let lm := (Limits.learn x).memMib;
+      match Nat.lt m lm with
+      | .true => .some (String.join ["declares ", Nat.repr m, " MiB but its runs need ", Nat.repr lm, " MiB"])
+      | .false => .none
+
+/-- `--timeout-scale`, in thousandths (1000 changes nothing, 2500 is ×2.5). -/
+def Limits.scale (permille : Nat) (l : Limits) : Limits :=
+  Limits.mk (l.timeoutMs * permille / 1000) l.memMib l.source
+
+/-- A planned case. `estMs` is what ordering and packing go by. -/
+structure Case where
+  info : CaseInfo
+  kind : Kind
+  limits : Limits
+  estMs : Nat
+  /-- the shared builds it uses (`uses checker`), by name -/
+  fixtures : List String
+
+/-- A case with resolved limits; its estimate is the baseline's p95, else its class's. -/
+def Case.make (info : CaseInfo) (k : Kind) (declTimeoutMs declMem : Option Nat) (l : Option Learned)
+    (fixtures : List String) : Case :=
+  let est := match l with
+    | .some x => x.p95Ms
+    | .none => Kind.estimate k;
+  Case.mk info k (Limits.resolve k declTimeoutMs declMem l) est fixtures
+
+def Kind.isFixture : Kind → Bool
+  | .fixture => .true
+  | _ => .false
+
+-- ## Sorting
+
+/-- Merge two sorted lists (`lt y x` puts `y` first; ties keep `x` first, so the sort is
+stable). `fuel` is at least the total length. -/
+def TestRun.mergeBy {A : Type} (lt : A → A → Bool) : Nat → List A → List A → List A
+  | .zero, xs, ys => List.append xs ys
+  | .succ _, .nil, ys => ys
+  | .succ _, .cons x xs, .nil => .cons x xs
+  | .succ n, .cons x xs, .cons y ys => match lt y x with
+    | .true => .cons y (TestRun.mergeBy lt n (.cons x xs) ys)
+    | .false => .cons x (TestRun.mergeBy lt n xs (.cons y ys))
+
+/-- Merge neighbouring runs; `pending` is the left one of a pair. -/
+def TestRun.mergePairsGo {A : Type} (lt : A → A → Bool) : List (List A) → Option (List A) → List (List A)
+  | .nil, .none => .nil
+  | .nil, .some a => .cons a .nil
+  | .cons r rest, .none => TestRun.mergePairsGo lt rest (.some r)
+  | .cons r rest, .some a =>
+    .cons (TestRun.mergeBy lt (List.length a + List.length r) a r) (TestRun.mergePairsGo lt rest .none)
+
+/-- Merge neighbouring runs. -/
+def TestRun.mergePairs {A : Type} (lt : A → A → Bool) (rs : List (List A)) : List (List A) :=
+  TestRun.mergePairsGo lt rs .none
+
+/-- Merge rounds until one run is left (`fuel` rounds at most). -/
+def TestRun.mergeAll {A : Type} (lt : A → A → Bool) : Nat → List (List A) → List A
+  | .zero, rs => List.concat rs
+  | .succ _, .nil => .nil
+  | .succ _, .cons r .nil => r
+  | .succ n, rs => TestRun.mergeAll lt n (TestRun.mergePairs lt rs)
+
+/-- A stable merge sort: `lt a b` when `a` goes before `b`. -/
+def TestRun.sortBy {A : Type} (lt : A → A → Bool) (xs : List A) : List A :=
+  TestRun.mergeAll lt (List.length xs) (List.map (fun x => .cons x .nil) xs)
+
+-- ## Order
+
+/-- `a` starts before `b`: fixtures first, then the longer estimate. -/
+def Case.before (a b : Case) : Bool :=
+  match Kind.isFixture a.kind with
+  | .true => Bool.not (Kind.isFixture b.kind)
+  | .false => match Kind.isFixture b.kind with
+    | .true => .false
+    | .false => Nat.lt b.estMs a.estMs
+
+/-- The order cases start in: fixtures, then longest first; otherwise selection order. -/
+def Plan.order (cs : List Case) : List Case := TestRun.sortBy Case.before cs
+
+-- ## Packing a shard into parts
+
+/-- One part of a shard: its estimated load (ms) and its cases. -/
+structure Part where
+  load : Nat
+  cases : List Case
+
+/-- What keeps cases together: their first fixture, else the case itself. -/
+def Case.unitKey (c : Case) : String := match c.fixtures with
+  | .cons f _ => String.join ["fixture:", f]
+  | .nil => String.join ["case:", c.info.id]
+
+/-- Add a case to its unit (units are kept in first-seen order, reversed). -/
+def Plan.addUnit (c : Case) : List (String × List Case) → List (String × List Case)
+  | .nil => .cons (Case.unitKey c, .cons c .nil) .nil
+  | .cons (k, cs) rest => match String.eq k (Case.unitKey c) with
+    | .true => .cons (k, List.append cs (.cons c .nil)) rest
+    | .false => .cons (k, cs) (Plan.addUnit c rest)
+
+/-- Units that must not be split: the cases of each fixture, and every other case alone. -/
+def Plan.units (cs : List Case) : List (List Case) :=
+  List.map (fun u => u.2) (List.foldl (fun us c => Plan.addUnit c us) .nil cs)
+
+/-- The estimated load of some cases. -/
+def Plan.load (cs : List Case) : Nat := List.foldl (fun n c => n + c.estMs) 0 cs
+
+/-- The index of the least loaded part (the first on a tie). -/
+def Plan.leastGo : Nat → Nat → Nat → List Part → Nat
+  | _, best, _, .nil => best
+  | i, best, bestLoad, .cons p ps => match Nat.lt p.load bestLoad with
+    | .true => Plan.leastGo (Nat.succ i) i p.load ps
+    | .false => Plan.leastGo (Nat.succ i) best bestLoad ps
+
+def Plan.least : List Part → Nat
+  | .nil => 0
+  | .cons p ps => Plan.leastGo 1 0 p.load ps
+
+/-- Add a unit to part `i`. -/
+def Plan.addAt (u : List Case) : Nat → List Part → List Part
+  | _, .nil => .nil
+  | .zero, .cons p ps => .cons (Part.mk (p.load + Plan.load u) (List.append p.cases u)) ps
+  | .succ i, .cons p ps => .cons p (Plan.addAt u i ps)
+
+/-- `k` empty parts. -/
+def Plan.emptyParts : Nat → List Part
+  | .zero => .nil
+  | .succ k => .cons (Part.mk 0 .nil) (Plan.emptyParts k)
+
+/-- Split cases into `k` parts (at least one): units longest first into the least
+loaded part; each part's cases are then in plan order. -/
+def Plan.pack (k : Nat) (cs : List Case) : List Part :=
+  let us := TestRun.sortBy (fun a b => Nat.lt (Plan.load b) (Plan.load a)) (Plan.units cs);
+  let parts := List.foldl (fun ps u => Plan.addAt u (Plan.least ps) ps) (Plan.emptyParts (Nat.max 1 k)) us;
+  List.map (fun p => Part.mk p.load (Plan.order p.cases)) parts
+
+/-- How many cases the parts hold together (`Plan.pack` keeps every case exactly once;
+`TestRun.Plan`'s tests check that this is the number selected). -/
+def Plan.count (ps : List Part) : Nat := List.foldl (fun n p => n + List.length p.cases) 0 ps
