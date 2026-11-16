@@ -435,6 +435,18 @@ def quantityDecls : List (String × Bool) := [
   ("def l0 (x : Nat) : Nat := let 0 y := x; y\n", false),
   ("def linTwice (1 z : Nat) : Nat := lin z (fun y => Nat.add y y)\n", false)]
 
+/-- (`lib/Word.wiz`'s first divergence) Equations whose type writes several arguments under
+one binder, `(m n : Nat) → …`: one argument per name, as the Lean frontend peels its Πs
+(`elabDefEqns`). -/
+def eqnsMultiDecls : List (String × Bool) := [
+  ("def add2 : (m n : Nat) → Nat\n  | .zero, n => n\n  | .succ m, n => Nat.succ (add2 m n)\n", true),
+  ("def pick3 : (a b c : Nat) → Bool → Nat\n  | a, _, _, .true => a\n  | _, b, c, .false => Nat.add b c\n", true),
+  ("def lt0 : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true\n" ++
+    "  | .zero, .zero, h => absurd h.1\n  | .zero, .succ _, _ => rfl\n" ++
+    "  | .succ _, .zero, h => absurd h.1\n  | .succ i, .succ n, h => lt0 i n h\n", true),
+  ("def k2 : (_ _ : Nat) → Nat\n  | a, _ => a\n", true),
+  ("def bad3 : (a b : Nat) → Nat\n  | a, b, c => a\n", false)]
+
 /-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
 constructor fields (at 0, filled in at the call, not named by patterns): the same
 verdicts in both frontends. -/
@@ -1573,6 +1585,8 @@ def selfHostGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (get b + sum p))\n") "6\n" },
     { name := "the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10)", run := fun _ =>
         selfhostAgrees quantityHeader quantityDecls },
+    { name := "the self-hosted frontend: equations under a binder of several names, `(m n : Nat) → …` (lib/Word.wiz)", run := fun _ =>
+        selfhostAgrees "" eqnsMultiDecls },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
         -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)

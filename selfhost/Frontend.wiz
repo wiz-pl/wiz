@@ -4758,6 +4758,23 @@ def mutualInductiveCmd (gs : Globals) (defs : List Syntax) : Step :=
 inductive Peel where
   | mk (binders scruts : List Syntax) (res : Syntax)
   | fail
+-- what is left of an arrow after its first argument: the codomain, or, for a binder of
+-- several names (`(m n : Nat) → B`), the same arrow without the first name (the host
+-- peels one Π per name: `elabDefEqns`)
+def arrowRest (ty : Syntax) : Syntax :=
+  let b := kid ty 0;
+  match Bool.and (strEq (kindOf ty) "term.depArrow")
+      (Bool.or (strEq (kindOf b) "binder.explicit") (strEq (kindOf b) "binder.implicit")) with
+  | .false => kid ty 2
+  | .true => match kids b with
+    | .cons o (.cons q (.cons ns rest)) => match kids ns with
+      | .cons _ (.cons y ys) =>
+        let b' := mkNode (kindOf b) (.cons o (.cons q (.cons (mkNull (.cons y ys)) rest)));
+        mkNode (kindOf ty) (.cons b' (match kids ty with
+          | .cons _ tl => tl
+          | .nil => .nil))
+      | _ => kid ty 2
+    | _ => kid ty 2
 def peelArrows : Nat → Nat → Syntax → Peel
   | .zero, _, ty => .mk .nil .nil ty
   | .succ k, i, ty =>
@@ -4767,7 +4784,9 @@ def peelArrows : Nat → Nat → Syntax → Peel
     | .false => .fail
     | .true =>
       let x := match dep with
-        | .true => nthName (binderNames (kid ty 0)) 0
+        | .true => match strEq (nthName (binderNames (kid ty 0)) 0) "_" with
+          | .true => String.append "x✝" (Nat.toString i)
+          | .false => nthName (binderNames (kid ty 0)) 0
         | .false => String.append "x✝" (Nat.toString i);
       let A : Syntax := match dep with
         | .true => match binderType (kid ty 0) with
@@ -4776,7 +4795,7 @@ def peelArrows : Nat → Nat → Syntax → Peel
         | .false => kid ty 0;
       let binder := mkNode "binder.explicit" (.cons (.atom "(") (.cons (mkNull .nil)
         (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one A))) (one (.atom ")"))))));
-      match peelArrows k (i + 1) (kid ty 2) with
+      match peelArrows k (i + 1) (arrowRest ty) with
       | .mk bs xs res => .mk (.cons binder bs) (.cons (mkNode "term.ident" (one (.ident x))) xs) res
       | .fail => .fail
 def eqnsToMatch (stx : Syntax) : Option Syntax := match kids (kid stx 4) with
