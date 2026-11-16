@@ -2,7 +2,16 @@
 
 The generated [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every library
 module and declaration, with signatures and doc summaries, and searches names, doc
-comments and signatures.
+comments and signatures. The
+[reference manual](https://wiz-pl.github.io/wiz/docs/reference.html) is the library as one
+document: per module, every public declaration's full signature (implicit arguments
+included), its doc comment, the instances of each class (and for each type), and a
+notation table with each operator's precedence and associativity and what it expands to.
+It is generated from the elaborated modules and not committed: the flake's `reference`
+package runs `wiz doc --lib --reference` with the packaged `wiz` (`nix build .#reference`;
+`result/index.md` is the Markdown, a Cachix hit while the compiler and `lib/` are
+unchanged), and the published site has it as `/docs/reference.html` (every module page
+links to it) and `/docs/reference.md`.
 
 ## H0c: vectors and bit vectors
 
@@ -1500,6 +1509,27 @@ are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mou
 no effects, and `value`/`checked` would need property patches. Tests: group `react`
 and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
 `wiz-notes/react-framework.md`.
+
+## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
+
+`import Web.Widget` (over `Web.React`) turns a list of widget **descriptors** into a
+React VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
+each with an id, a DOM event, a value/label/data and a callback expression naming a
+`Widget.Callback` (`Widget.Event → List Widget.Widget → List Widget.Widget`).
+`Widget.display` returns `WIZ_WIDGET:` plus the rendered HTML and the descriptors;
+`Widget.handle` parses a previous bundle, runs the callback, re-renders both lists and
+returns a `WIZ_WIDGET:` bundle whose `patches` are
+`React.patchesJson (React.Rendered.diff old new)`. The Jupyter kernel
+(`tools/jupyter/wiz_kernel/widgets.py`) turns the display into
+`application/vnd.wiz.widget+json` and a comm, so a slider event re-enters the session
+and the new patches go back on the same comm; `tools/jupyter/static/widget.js` applies
+them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
+`web/widget/test.sh` (golden VDOM and patch application under Node),
+`tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
+(`nbclient`). Limits: no client-side state (every event is a kernel round trip),
+`plot` data is opaque JSON until a `Plot` module lands, and `Owned` cannot be held
+across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+the raw `React.on`/`React.App.event` path passes only a handler index.
 
 ## Numbers: classes, integers, words
 
