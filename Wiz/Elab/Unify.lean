@@ -278,7 +278,19 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
         let e' ← lookupMeta m'
         -- (its arity: the kept arguments among the ones for the context's variables)
         let arity := (keep.filter (· < e'.arity)).size
-        modify fun s => { s with metas := s.metas.push { info := e'.info, desc := "a pruned hole", arity } }
+        -- (13b) its type: the old hole's, in its context with the pruned variables no
+        -- longer bound (`metaAppType?` gives up on a type that mentions one). When an
+        -- argument past the context's is pruned, the hole's own Π loses a binder: that
+        -- type is not at hand, and the hole is left untyped (a guess about it falls back
+        -- to `checkGuessedDecl`)
+        let type? := e'.type?.bind fun (ctx0, ty) =>
+          if (List.range sp.size).any (fun i => i ≥ e'.arity && !keep.contains i) then none
+          else
+            -- the context's bound flags, outermost first: the i-th bound one is argument i
+            let (flags, _) := ctx0.bound.reverse.foldl (init := ([], 0)) fun (acc, i) b =>
+              if b then (acc ++ [keep.contains i], i + 1) else (acc ++ [false], i)
+            some ({ ctx0 with bound := flags.reverse }, ty)
+        modify fun s => { s with metas := s.metas.push { info := e'.info, desc := "a pruned hole", arity, type? } }
         let n := sp.size
         let body : Term R := keep.foldl (fun t i => .app t (.var (n - i - 1))) (.mvar m'')
         let sol := (List.range n).foldl (fun t i => Term.lam s!"x{n - i - 1}" t) body

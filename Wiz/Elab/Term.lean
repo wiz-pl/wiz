@@ -167,12 +167,14 @@ def placeholderFull (ctx : LocalCtx R) : Bool :=
 /-- A placeholder metavariable for an argument (`checkApp`): like `freshMeta`, but
 applied only to the bound variables that are their own values, so that unifying it with
 the argument stays in the pattern fragment in a `match` branch whose context has
-variables replaced by others (index unification). -/
-def freshPlaceholder (ctx : LocalCtx R) : ElabM R (Term R) := do
+variables replaced by others (index unification). `ty` is the argument's type (13b,
+`MetaEntry.type?`), recorded in `ctx` with only those variables bound. -/
+def freshPlaceholder (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Term R) := do
   let m := (← get).metas.size
   let live := (ctx.bound.zip (ctx.env.zip (List.range ctx.lvl).reverse)).reverse.map fun (b, v, l) =>
     b && isOwnVar v l
-  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc := "an argument", arity := (live.filter id).length } }
+  let type? := some ({ ctx with bound := live.reverse }, ty)
+  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc := "an argument", arity := (live.filter id).length, type? } }
   let mut t : Term R := .mvar m
   for b in live, lvl in [0:ctx.lvl] do
     if b then t := .app t (.var (ctx.lvl - lvl - 1))
@@ -2221,7 +2223,7 @@ partial def checkApp (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Elab
     (f, fty) ← insertImplicits ctx f fty
     match ← force fty with
     | .pi _ _ _ dom cod _ =>
-      let m ← freshPlaceholder (ctx.withInfo arg)
+      let m ← freshPlaceholder (ctx.withInfo arg) dom
       -- (does the rest of the type mention the argument? If not, the placeholder occurs
       -- only in `f`, which `respine` rebuilds: it needn't be solved)
       let used := match cod with | .mk _ body => body.hasVar 0
@@ -2405,7 +2407,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
           | .ok a => pure a
           | .error e =>
             if e.code != "non-pattern" then throw e
-            let m ← freshPlaceholder (ctx.withInfo arg)
+            let m ← freshPlaceholder (ctx.withInfo arg) dom
             waiting := waiting.push (arg, m, dom)
             pure m
       f := .app f a
@@ -4102,9 +4104,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       let P : Term R := .lam "x" (.lam "_"
         (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
       let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
-      let m ← freshMeta gl.ctx "goal"
+      let newTy ← evalIn gl.ctx newT
+      let m ← freshMeta gl.ctx "goal" newTy
       unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
+      let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
       let (r, st) ← refl st gl newT
       return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.getSimpLemmas then
