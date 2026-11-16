@@ -22,7 +22,7 @@ def group : Group where
         ok "def id2 : {A : Type} → A → A := fun x => x" },
     { name := "explicit implicit lambda", run := fun _ =>
         ok "def id3 : {A : Type} → A → A := fun {A} x => x" },
-    { name := "implicit binders are ω by default: a named implicit is usable as data", run := fun _ =>
+    { name := "rule (b): a data implicit is ω by default: a named implicit is usable as data", run := fun _ =>
         okLib "import Prelude\ndef width {n : Nat} : Nat := n\ndef t : {n : Nat} → Nat := fun {n} => n\ndef twice {n : Nat} : Nat := Nat.add n n" },
     { name := "an explicit quantity is authoritative: {0 n} stays erased", run := fun _ => do
         okLib "import Prelude\ndef f {0 n : Nat} (x : Nat) : Nat := x"
@@ -30,13 +30,41 @@ def group : Group where
     { name := "an explicit quantity is authoritative: {1 n} must be used once", run := fun _ => do
         okLib "import Prelude\ndef good {1 n : Nat} : Nat := n"
         failsLib "import Prelude\ndef bad {1 n : Nat} : Nat := Nat.add n n" "quantity" },
+    -- rule (b), the language decision of 2026-11-16: a bare implicit whose type is a sort or
+    -- a proposition is 0 (erased anyway, and printed bare), any other implicit ω; the type
+    -- is the one known at the binder, so `{A}` with no type is data (ω)
+    { name := "rule (b): a bare implicit whose type is a sort or a proposition is 0", run := fun _ => do
+        fails "def leak {A : Type} (x : A) : Type := A" "quantity"
+        fails "def leakP {P : Prop} (x : Nat) : Prop := P" "quantity"
+        ok "def leakW {ω A : Type} (x : A) : Type := A"
+        okLib ("import Prelude\ndef p {P : Prop} {A : Type} {u : Type 1} {h : 1 = 1} {n : Nat} {F : Type → Type} (x : Nat) : Nat := x\n" ++
+          "def q {0 n : Nat} {ω A : Type} (x : Nat) : Nat := x\n#check @p\n#check @q")
+          ["p : {P : Prop} → {A : Type} → {u : Type 1} → {h : 1 = 1} → {n : Nat} → {F : Type → Type} → Nat → Nat",
+           "q : {0 n : Nat} → {ω A : Type} → Nat → Nat"] },
+    { name := "rule (b): an implicit with no written type is data (ω), decided at the binder", run := fun _ =>
+        ok "def g {A} (x : A) : A := x\n#check @g" ["g : {ω A : Type} → A → A"] },
+    { name := "rule (b): the default follows a definition that unfolds to a sort", run := fun _ =>
+        fails "def Ty : Type 1 := Type\ndef leak {A : Ty} (x : A) : Type := A" "quantity" },
+    -- a recursive definition over an erased index: the definition checks (through the
+    -- eliminator), the implementation passes the 0-bound field to the ω parameter `n` (a
+    -- data implicit's default): an ordinary quantity error at the binder, not "a bug in Wiz"
+    { name := "rule (b): a recursive call passing an erased field to a data implicit is a quantity error at the binder", run := fun _ => do
+        let src := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n" ++
+          "inductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n" ++
+          "def map {A B : Type} (f : A → B) {n : Nat} : Vec A n → Vec B n\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (map f xs)"
+        fails src "in a recursive call of map: its implicit parameter n has the default quantity ω"
+        let e := (errors src)[0]!
+        if (e.splitOn "bug in Wiz").length > 1 then throw (IO.userError s!"still blames Wiz:\n{e}")
+        unless e.startsWith "7:" do throw (IO.userError s!"not reported at the binder (line 7):\n{e}")
+        ok (src.replace "{n : Nat}" "{0 n : Nat}") },
     { name := "class instance binders are ω by default: the dictionary can be used twice", run := fun _ =>
         okLib ("import Prelude\nclass Twice (A : Type) where\n  val : A\ninstance : Twice Nat where\n  val := 7\n" ++
           "def addIt {A : Type} [c : Twice A] : A := c.val\ndef twice [c : Twice Nat] : Nat := Nat.add c.val c.val") },
-    -- Erasure is type-directed, so a type or a proof is `◾` at any quantity; a data
-    -- implicit used only in types is erased only when written `{0 n}`: a bare `{n}` (ω)
-    -- is passed and computed at runtime (here `Nat.add k 5`).
-    { name := "erasure of implicits: a type is ◾ at ω, a data index is ◾ only when written {0 n}", run := fun _ =>
+    -- Erasure is type-directed, so a type or a proof is `◾` at any quantity (a bare
+    -- `{A : Type}` is 0 anyway, rule (b)); a data implicit used only in types is erased
+    -- only when written `{0 n}`: a bare `{n}` (ω) is passed and computed at runtime (here
+    -- `Nat.add k 5`).
+    { name := "erasure of implicits: a type is ◾, a data index is ◾ only when written {0 n}", run := fun _ =>
         okLib ("import Prelude\ninductive V (A : Type) : Nat → Type where\n  | nil : V A .zero\n" ++
           "def onlyType {n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n" ++
           "def onlyType0 {0 n : Nat} (v : V Nat n) (x : Nat) : Nat := x\n" ++
@@ -69,8 +97,8 @@ def group : Group where
         fails "def loop (A : Type) : A := loop A" "recursive call to loop in a definition without equations" },
     { name := "linearity is checked by the kernel", run := fun _ =>
         fails "def dup {A : Type} (f : A → A → A) (1 x : A) : A := f x x" "quantity" },
-    { name := "an implicit type is ω by default; {0 A} is still erased", run := fun _ => do
-        ok "def leak {A : Type} (x : A) : Type := A"
+    { name := "erased implicit used at runtime", run := fun _ => do
+        fails "def leak {A : Type} (x : A) : Type := A" "quantity"
         fails "def leak0 {0 A : Type} (x : A) : Type := A" "quantity" },
     { name := "binder quantity must match the expected type", run := fun _ =>
         fails "def f : (1 x : Type) → Type := fun (ω x) => x" "quantity" },

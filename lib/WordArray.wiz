@@ -30,16 +30,16 @@ Not here: arrays of other widths (`U16`, `I32`; add one the same way), in-place
 slices that share storage (a slice copies, unless it is a unique prefix), sorting.
 -/
 
-def List.getD {0 A : Type} : List A → Nat → A → A
+def List.getD {A : Type} : List A → Nat → A → A
   | .nil, _, d => d
   | .cons x _, .zero, _ => x
   | .cons _ xs, .succ i, d => List.getD xs i d
 -- `y` at `i` (the same list when `i` is out of range)
-def List.setAt {0 A : Type} : List A → Nat → A → List A
+def List.setAt {A : Type} : List A → Nat → A → List A
   | .nil, _, _ => .nil
   | .cons _ xs, .zero, y => .cons y xs
   | .cons x xs, .succ i, y => .cons x (List.setAt xs i y)
-def List.dropLast {0 A : Type} : List A → List A
+def List.dropLast {A : Type} : List A → List A
   | .nil => .nil
   | .cons x xs => match xs with
     | .nil => .nil
@@ -47,26 +47,26 @@ def List.dropLast {0 A : Type} : List A → List A
 
 -- Laws (the arrays' laws below follow from these)
 
-def List.length_snoc {0 A : Type} (x : A) : (l : List A) →
+def List.length_snoc {A : Type} (x : A) : (l : List A) →
     List.length (List.append l (.cons x .nil)) = Nat.succ (List.length l)
   | .nil => rfl
   | .cons _ xs => Eq.congrArg Nat.succ (List.length_snoc x xs)
-def List.getD_snoc {0 A : Type} (x d : A) : (l : List A) →
+def List.getD_snoc {A : Type} (x d : A) : (l : List A) →
     List.getD (List.append l (.cons x .nil)) (List.length l) d = x
   | .nil => rfl
   | .cons _ xs => List.getD_snoc x d xs
-def List.length_setAt {0 A : Type} (y : A) : (l : List A) → (i : Nat) →
+def List.length_setAt {A : Type} (y : A) : (l : List A) → (i : Nat) →
     List.length (List.setAt l i y) = List.length l
   | .nil, _ => rfl
   | .cons _ _, .zero => rfl
   | .cons _ xs, .succ i => Eq.congrArg Nat.succ (List.length_setAt y xs i)
-def List.getD_setAt {0 A : Type} (y d : A) : (l : List A) → (i : Nat) →
+def List.getD_setAt {A : Type} (y d : A) : (l : List A) → (i : Nat) →
     Nat.lt i (List.length l) = .true → List.getD (List.setAt l i y) i d = y
   | .nil, .zero, h => absurd h.1
   | .nil, .succ _, h => absurd h.1
   | .cons _ _, .zero, _ => rfl
   | .cons _ xs, .succ i, h => List.getD_setAt y d xs i h
-def List.length_append {0 A : Type} : (l m : List A) →
+def List.length_append {A : Type} : (l m : List A) →
     List.length (List.append l m) = Nat.add (List.length l) (List.length m)
   | .nil, _ => rfl
   | .cons _ xs, m => Eq.congrArg Nat.succ (List.length_append xs m)
@@ -97,11 +97,11 @@ def U8Array.pushN (x : U8) : Nat → U8Array → U8Array
   | .zero, a => a
   | .succ n, a => U8Array.pushN x n (U8Array.push a x)
 def U8Array.replicate (n : Nat) (x : U8) : U8Array := U8Array.pushN x n U8Array.empty
-def U8Array.foldlFrom {0 B : Type} (a : U8Array) (f : B → U8 → B) : Nat → Nat → B → B
+def U8Array.foldlFrom {B : Type} (a : U8Array) (f : B → U8 → B) : Nat → Nat → B → B
   | .zero, _, b => b
   | .succ k, i, b => U8Array.foldlFrom a f k (Nat.succ i) (f b (U8Array.get a i))
 -- `f (… (f b a[0]) …) a[n-1]`, by index
-def U8Array.foldl {0 B : Type} (f : B → U8 → B) (b : B) (a : U8Array) : B :=
+def U8Array.foldl {B : Type} (f : B → U8 → B) (b : B) (a : U8Array) : B :=
   U8Array.foldlFrom a f (U8Array.size a) 0 b
 
 extern "wiz_u8array_of_list" U8Array.ofListNative : List U8 → U8Array
@@ -165,11 +165,11 @@ def U32Array.pushN (x : U32) : Nat → U32Array → U32Array
   | .zero, a => a
   | .succ n, a => U32Array.pushN x n (U32Array.push a x)
 def U32Array.replicate (n : Nat) (x : U32) : U32Array := U32Array.pushN x n U32Array.empty
-def U32Array.foldlFrom {0 B : Type} (a : U32Array) (f : B → U32 → B) : Nat → Nat → B → B
+def U32Array.foldlFrom {B : Type} (a : U32Array) (f : B → U32 → B) : Nat → Nat → B → B
   | .zero, _, b => b
   | .succ k, i, b => U32Array.foldlFrom a f k (Nat.succ i) (f b (U32Array.get a i))
 -- `f (… (f b a[0]) …) a[n-1]`, by index
-def U32Array.foldl {0 B : Type} (f : B → U32 → B) (b : B) (a : U32Array) : B :=
+def U32Array.foldl {B : Type} (f : B → U32 → B) (b : B) (a : U32Array) : B :=
   U32Array.foldlFrom a f (U32Array.size a) 0 b
 
 extern "wiz_u32array_of_list" U32Array.ofListNative : List U32 → U32Array
@@ -233,11 +233,11 @@ def U64Array.pushN (x : U64) : Nat → U64Array → U64Array
   | .zero, a => a
   | .succ n, a => U64Array.pushN x n (U64Array.push a x)
 def U64Array.replicate (n : Nat) (x : U64) : U64Array := U64Array.pushN x n U64Array.empty
-def U64Array.foldlFrom {0 B : Type} (a : U64Array) (f : B → U64 → B) : Nat → Nat → B → B
+def U64Array.foldlFrom {B : Type} (a : U64Array) (f : B → U64 → B) : Nat → Nat → B → B
   | .zero, _, b => b
   | .succ k, i, b => U64Array.foldlFrom a f k (Nat.succ i) (f b (U64Array.get a i))
 -- `f (… (f b a[0]) …) a[n-1]`, by index
-def U64Array.foldl {0 B : Type} (f : B → U64 → B) (b : B) (a : U64Array) : B :=
+def U64Array.foldl {B : Type} (f : B → U64 → B) (b : B) (a : U64Array) : B :=
   U64Array.foldlFrom a f (U64Array.size a) 0 b
 
 extern "wiz_u64array_of_list" U64Array.ofListNative : List U64 → U64Array

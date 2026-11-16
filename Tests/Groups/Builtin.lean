@@ -21,7 +21,7 @@ def builtinGroup : Group where
   exercise := "Stage 6b"
   cases := [
     { name := "import the prelude", run := fun _ =>
-        okLib "import Prelude\n#check List.append" ["List.append : {0 A : Type} → List A → List A → List A"] },
+        okLib "import Prelude\n#check List.append" ["List.append : {A : Type} → List A → List A → List A"] },
     { name := "a stuck number times a big numeral, in a type (nat-pow-blowup)", run := fun _ =>
         okLib ("import Word\naxiom Q : Nat → Type\naxiom y : (n : Nat) → Q (Nat.mod n 18446744073709551616)\n" ++
           "def bump (a : I64) : I64 := IntN.ofNat 64 (Nat.mod (Nat.add a.toNat 1) (Nat.pow 2 64))") },
@@ -178,7 +178,7 @@ def builtinGroup : Group where
         okLib (treePrelude ++ "#eval Tree.depthAt (.node (fun i => .node (fun j => .leaf))) 3") ["3"] },
     { name := "infinitary inductive: indexed, dependent branching", run := fun _ =>
         okLib ("import Prelude\ninductive W (A : Type) : Nat → Type where\n  | sup (n : Nat) (k : (i : Nat) → W A i) : W A (.succ n)\n" ++
-          "#check W.sup") ["W.sup : {0 A : Type} → (n : Nat) → ((i : Nat) → W A i) → W A (.succ n)"] },
+          "#check W.sup") ["W.sup : {A : Type} → (n : Nat) → ((i : Nat) → W A i) → W A (.succ n)"] },
     { name := "infinitary inductive: the domain may not mention the type", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ninductive Bad where\n  | mk (k : Bad → Bad)" { trustedModule := Tests.libModule, loader := fun _ => some prelude }

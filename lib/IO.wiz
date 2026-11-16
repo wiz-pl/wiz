@@ -36,17 +36,17 @@ axiom World : Type
 returns the result with the new world. -/
 def IO (A : Type) : Type := (1 w : World) → A × World
 /-- The action that does nothing and returns `a`. -/
-def IO.pure {0 A : Type} (a : A) : IO A := fun w => (a, w)
+def IO.pure {A : Type} (a : A) : IO A := fun w => (a, w)
 /-- Run `x`, then run `f` on its result.
 
 The action and the continuation are used once, so both are quantity-1 parameters
 (L6): the continuation may capture linear resources, and an action that consumes one
 may be sequenced. (Unrestricted arguments are fine too.) `do` blocks in `IO` come down
 to this. -/
-def IO.bind {0 A B : Type} (1 x : IO A) (1 f : A → IO B) : IO B := fun w =>
+def IO.bind {A B : Type} (1 x : IO A) (1 f : A → IO B) : IO B := fun w =>
   let 1 (a, w') := x w; f a w'
 /-- Run `x`, drop its result, then run `y`: `IO.then1 (IO.println "a") (IO.println "b")`. -/
-def IO.then1 {0 A B : Type} (1 x : IO A) (1 y : IO B) : IO B := fun w =>
+def IO.then1 {A B : Type} (1 x : IO A) (1 y : IO B) : IO B := fun w =>
   let 1 (a, w') := x w; y w'
 /-- `IO` is a monad, so `do` notation works for it. -/
 instance : Monad IO where
@@ -66,15 +66,15 @@ result of an `IO1` action at quantity 1 and goes on in `IO` (`(x, y) ⇐ e;` tak
 pair apart). -/
 def IO1 (A : Type) : Type := (1 w : World) → (1 _ : A) × World
 /-- `pure` of `IO1`: the value, the world unchanged. -/
-def IO1.pure {0 A : Type} (1 a : A) : IO1 A := fun w => (a, w)
+def IO1.pure {A : Type} (1 a : A) : IO1 A := fun w => (a, w)
 /-- `bind` of `IO1`: linear in the action and in the continuation. -/
-def IO1.bind {0 A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO1 B) : IO1 B := fun w =>
+def IO1.bind {A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO1 B) : IO1 B := fun w =>
   let 1 (a, w') := x w; f a w'
 /-- run an `IO1` action and go on in `IO` with its (linear) result -/
-def IO1.bindIO {0 A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO B) : IO B := fun w =>
+def IO1.bindIO {A B : Type} (1 x : IO1 A) (1 f : (1 a : A) → IO B) : IO B := fun w =>
   let 1 (a, w') := x w; f a w'
 /-- an `IO` action as an `IO1` one (its result is unrestricted, so it may be used once) -/
-def IO.toIO1 {0 A : Type} (1 x : IO A) : IO1 A := fun w =>
+def IO.toIO1 {A : Type} (1 x : IO A) : IO1 A := fun w =>
   let 1 (a, w') := x w; (a, w')
 syntax (name := bindL) ident "⇐" term ";" doSeq : doSeq
 syntax (name := bindLP) "(" ident "," ident ")" "⇐" term ";" doSeq : doSeq

@@ -42,17 +42,17 @@ and so can an unrestricted one (an ω variable may be used once). `cast` itself 
 its argument's usage through; these just state it in their types.
 
 `Eq.cast e a` turns `a : A` into a `B`, given `e : A = B`. -/
-def Eq.cast.{u} {0 A B : Type u} (0 e : A = B) (1 a : A) : B := cast e a
+def Eq.cast.{u} {A B : Type u} (0 e : A = B) (1 a : A) : B := cast e a
 /-- Substitution: from `e : a = b` and `pa : P a`, a `P b` (the transported value is
 linear, as in `Eq.cast`).
 
 ```
 Eq.subst (fun n => Vec A n) e v : Vec A m   -- for v : Vec A n, e : n = m
 ``` -/
-def Eq.subst.{u, v} {0 A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pa : P a) : P b :=
+def Eq.subst.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pa : P a) : P b :=
   cast (transp (fun b _ => P a = P b) (refl (P a)) e) pa
 /-- Substitution backwards, without `Eq.symm`: from `e : a = b` and `pb : P b`, a `P a`. -/
-def Eq.substBack.{u, v} {0 A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pb : P b) : P a :=
+def Eq.substBack.{u, v} {A : Type u} (0 P : A → Type v) {0 a b : A} (0 e : a = b) (1 pb : P b) : P a :=
   cast (transp (fun b _ => P b = P a) (refl (P a)) e) pb
 
 /-- The Booleans, `false` and `true` (in that order: `Bool.casesOn` takes the `false`
@@ -109,12 +109,12 @@ inductive List (A : Type) where
 
 /-- The elements of the first list, then those of the second:
 `List.append [1, 2] [3] = [1, 2, 3]`. Written `xs ++ ys`. -/
-def List.append {0 A : Type} : List A → List A → List A
+def List.append {A : Type} : List A → List A → List A
   | .nil, ys => ys
   | .cons x xs, ys => .cons x (List.append xs ys)
 
 /-- The number of elements: `List.length [a, b] = 2`. -/
-def List.length {0 A : Type} : List A → Nat
+def List.length {A : Type} : List A → Nat
   | .nil => .zero
   | .cons _ xs => .succ (List.length xs)
 
@@ -137,7 +137,7 @@ def String.append : String → String → String
   | .mk xs, .mk ys => .mk (List.append xs ys)
 /-- `x |> f` is `f x` (stage 13): a pipeline reads left to right,
 `xs |> List.length |> Nat.succ`. At any universe, so proofs too: `h |> Eq.symm`. -/
-def pipe.{u, v} {0 A : Sort u} {0 B : Sort v} (a : A) (f : A → B) : B := f a
+def pipe.{u, v} {A : Sort u} {B : Sort v} (a : A) (f : A → B) : B := f a
 infixl:10 " |> " => pipe
 
 /-- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
@@ -174,7 +174,7 @@ def Nat.lt : Nat → Nat → Bool
 builtin nat.blt := Nat.lt
 /-- A memoised suspension (stage 15): to the kernel `memo f` is `f`; compiled code runs
 `f ()` at most once and keeps the result. -/
-def memo {0 A : Type} (f : Unit → A) : Unit → A := f
+def memo {A : Type} (f : Unit → A) : Unit → A := f
 builtin memo := memo
 /-- Whether `m ≤ n`, as a `Bool`: `Nat.le 3 3 = .true`. -/
 def Nat.le (m n : Nat) : Bool := Nat.lt m (Nat.succ n)
@@ -351,17 +351,17 @@ class HPow (A B : Type) (C : outParam Type) where
 class Pow (A B : Type) where
   pow : A → B → A
 /-- `a + b` at a type with `Add` is `Add.add` (the default instance). -/
-instance instHAdd {0 A : Type} [Add A] : HAdd A A A := HAdd.mk Add.add
+instance instHAdd {A : Type} [Add A] : HAdd A A A := HAdd.mk Add.add
 /-- `a - b` at a type with `Sub` is `Sub.sub`. -/
-instance instHSub {0 A : Type} [Sub A] : HSub A A A := HSub.mk Sub.sub
+instance instHSub {A : Type} [Sub A] : HSub A A A := HSub.mk Sub.sub
 /-- `a * b` at a type with `Mul` is `Mul.mul`. -/
-instance instHMul {0 A : Type} [Mul A] : HMul A A A := HMul.mk Mul.mul
+instance instHMul {A : Type} [Mul A] : HMul A A A := HMul.mk Mul.mul
 /-- `a / b` at a type with `Div` is `Div.div`. -/
-instance instHDiv {0 A : Type} [Div A] : HDiv A A A := HDiv.mk Div.div
+instance instHDiv {A : Type} [Div A] : HDiv A A A := HDiv.mk Div.div
 /-- `a % b` at a type with `Mod` is `Mod.mod`. -/
-instance instHMod {0 A : Type} [Mod A] : HMod A A A := HMod.mk Mod.mod
+instance instHMod {A : Type} [Mod A] : HMod A A A := HMod.mk Mod.mod
 /-- `a ^ b` at a type with `Pow` is `Pow.pow`. -/
-instance instHPow {0 A B : Type} [Pow A B] : HPow A B A := HPow.mk Pow.pow
+instance instHPow {A B : Type} [Pow A B] : HPow A B A := HPow.mk Pow.pow
 /-- `a ^ b` at `Nat` is `Nat.pow`. -/
 instance instPowNat : Pow Nat Nat := Pow.mk Nat.pow
 attribute [default_instance] instHAdd
@@ -432,9 +432,9 @@ result type `C` an output. -/
 class HShiftRight (A B : Type) (C : outParam Type) where
   hShiftRight : A → B → C
 /-- `a <<< k` at a type with `ShiftLeft` is `ShiftLeft.shiftLeft` (the default instance). -/
-instance {0 A : Type} [ShiftLeft A] : HShiftLeft A Nat A := HShiftLeft.mk ShiftLeft.shiftLeft
+instance {A : Type} [ShiftLeft A] : HShiftLeft A Nat A := HShiftLeft.mk ShiftLeft.shiftLeft
 /-- `a >>> k` at a type with `ShiftRight` is `ShiftRight.shiftRight` (the default instance). -/
-instance {0 A : Type} [ShiftRight A] : HShiftRight A Nat A := HShiftRight.mk ShiftRight.shiftRight
+instance {A : Type} [ShiftRight A] : HShiftRight A Nat A := HShiftRight.mk ShiftRight.shiftRight
 infixl:75 " <<< " => HShiftLeft.hShiftLeft
 infixl:75 " >>> " => HShiftRight.hShiftRight
 notation:max "~~~" a:max => Complement.complement a
@@ -626,13 +626,13 @@ def Tactic.myExact : Tactic := fun stx => do
 ``` -/
 def TacticM (A : Type) : Type := (A → Tac) → Tac
 /-- Return `a` without asking the elaborator anything. -/
-def TacticM.pure {0 A : Type} (a : A) : TacticM A := fun k => k a
+def TacticM.pure {A : Type} (a : A) : TacticM A := fun k => k a
 /-- Run `x`, then `f` on its result. -/
-def TacticM.bind {0 A B : Type} (x : TacticM A) (f : A → TacticM B) : TacticM B := fun k => x (fun a => f a k)
+def TacticM.bind {A B : Type} (x : TacticM A) (f : A → TacticM B) : TacticM B := fun k => x (fun a => f a k)
 /-- The requests of a tactic, ending with `Tac.done`: what the elaborator interprets. -/
 def TacticM.run (t : TacticM Unit) : Tac := t (fun _ => Tac.done)
 /-- Fail with the error message `msg` (caught by `TacticM.tryCatch`, `try`, `first`). -/
-def TacticM.fail {0 A : Type} (msg : String) : TacticM A := fun _ => Tac.fail msg
+def TacticM.fail {A : Type} (msg : String) : TacticM A := fun _ => Tac.fail msg
 /-- Show `msg` as an info message at the tactic. -/
 def TacticM.trace (msg : String) : TacticM Unit := fun k => Tac.trace msg (k ())
 /-- A fresh number, different from every earlier one (for fresh names in macros). -/
@@ -753,12 +753,12 @@ def twice : IO Unit := do
   IO.println "b"
 ``` -/
 class Monad (m : Type → Type) where
-  pure : {0 A : Type} → A → m A
-  bind : {0 A B : Type} → m A → (A → m B) → m B
+  pure : {A : Type} → A → m A
+  bind : {A B : Type} → m A → (A → m B) → m B
 /-- A bind that takes the action and the continuation at quantity 1 (L6), so the
 continuation may capture linear resources; `do1` is `do` notation over it. -/
 class Monad1 (m : Type → Type) where
-  bind1 : {0 A B : Type} → (1 x : m A) → (1 f : A → m B) → m B
+  bind1 : {A B : Type} → (1 x : m A) → (1 f : A → m B) → m B
 
 /-- `TacticM` is a monad, so tactics are written with `do`. -/
 instance : Monad TacticM where
@@ -769,9 +769,9 @@ instance : Monad TacticM where
 the reflection requests `MacroM.getInductive` and `MacroM.getType`). -/
 def MacroM (A : Type) : Type := TacticM A
 /-- Return `a`. -/
-def MacroM.pure {0 A : Type} (a : A) : MacroM A := TacticM.pure a
+def MacroM.pure {A : Type} (a : A) : MacroM A := TacticM.pure a
 /-- Fail with the error message `e`, reported at the macro's use. -/
-def MacroM.throw {0 A : Type} (e : String) : MacroM A := TacticM.fail e
+def MacroM.throw {A : Type} (e : String) : MacroM A := TacticM.fail e
 /-- A fresh number (for hygienic names). -/
 def MacroM.fresh : MacroM Nat := TacticM.fresh
 /-- A procedural macro, registered with `attribute [macro kind] f`: it rewrites a syntax
@@ -1142,7 +1142,7 @@ def TacticM.inaccessibleFrom : Nat → List (String × Expr) → List Nat
     | .false => TacticM.inaccessibleFrom (Nat.succ i) hs
 /-- The first list reversed, in front of the second:
 `List.revOnto [1, 2] [3] = [2, 1, 3]`. -/
-def List.revOnto {0 A : Type} : List A → List A → List A
+def List.revOnto {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.revOnto xs (.cons x acc)
 /-- Name the hypotheses at the indices with `names`; `names` are given innermost first,
@@ -1259,7 +1259,7 @@ def Expr.view (e : Expr) : ExprView := match Expr.spineOnto e .nil with
   | (.lam x b, .nil) => .lam x b
   | (h, args) => .other h args
 /-- The list without its first `n` elements: `List.dropN 1 [a, b] = [b]`. -/
-def List.dropN {0 A : Type} : Nat → List A → List A
+def List.dropN {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => List.dropN n xs
@@ -1471,14 +1471,14 @@ operators (HD9, homogeneous), so other libraries can give it more instances.
 class Append (A : Type) where
   append : A → A → A
 /-- `xs ++ ys` on lists is `List.append`. -/
-instance {0 A : Type} : Append (List A) := Append.mk List.append
+instance {A : Type} : Append (List A) := Append.mk List.append
 /-- `a ++ b` on strings is `String.append`. -/
 instance : Append String := Append.mk String.append
 /-- heterogeneous, as the numeric operators (7f): `HAppend A B C`, `HAppend A A A` by default -/
 class HAppend (A B : Type) (C : outParam Type) where
   hAppend : A → B → C
 /-- `a ++ b` at a type with `Append` is `Append.append` (the default instance). -/
-instance instHAppend {0 A : Type} [Append A] : HAppend A A A := HAppend.mk Append.append
+instance instHAppend {A : Type} [Append A] : HAppend A A A := HAppend.mk Append.append
 attribute [default_instance] instHAppend
 attribute [binop] HAppend.hAppend
 infixr:67 " ++ " => HAppend.hAppend

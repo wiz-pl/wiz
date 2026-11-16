@@ -216,7 +216,7 @@ def Clocking.primConns (ck : Clocking) : List String :=
         (Hdl.map (fun (o : String) => Verilog.conn o (Clocking.net o))
           (.cons ck.sys (List.append (Clocking.pllOuts ck)
             (Hdl.map (fun (q : String × String) => q.2) ck.signals))))))
-def Hdl.concatMap {0 A : Type} (f : A → String) : List A → String
+def Hdl.concatMap {A : Type} (f : A → String) : List A → String
   | .nil => ""
   | .cons x xs => f x <+> Hdl.concatMap f xs
 

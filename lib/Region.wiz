@@ -58,13 +58,13 @@ structure Lent (ρ : Region) (S : Type) where
 -- ## Scopes: fresh regions
 
 /-- a region nested in `σ` (a block) -/
-def Region.scope {0 B : Type} (0 σ : Region)
+def Region.scope {B : Type} (0 σ : Region)
     (body : (0 ρ : Region) → (0 h : Outlives σ ρ) → Result B) : Result B :=
   body σ (Outlives.refl σ)
 
 /-- `let r := &s` until the borrow's last use (NLL): inside, `s` is rebound to the
 borrow too (reads go through `.val`, moves and mutations don't type-check) -/
-def Shr.borrow {0 S B : Type} (0 σ : Region) (s : S)
+def Shr.borrow {S B : Type} (0 σ : Region) (s : S)
     (body : (0 ρ : Region) → (0 h : Outlives σ ρ) → Shr ρ S → Result B) : Result B :=
   body σ (Outlives.refl σ) (Shr.mk s)
 
@@ -78,7 +78,7 @@ attribute [inline] Shr.borrow
 /-- `&'a A` is a `&'b A` when `'a : 'b` (shared borrows are covariant in the region).
 A `&mut` argument is not weakened: a shorter one is a reborrow (a returned borrow is,
 `Mut.weaken`). -/
-def Shr.weaken {0 ρ ρ' : Region} {0 A : Type} (0 h : Outlives ρ ρ') (x : Shr ρ A) : Shr ρ' A :=
+def Shr.weaken {0 ρ ρ' : Region} {A : Type} (0 h : Outlives ρ ρ') (x : Shr ρ A) : Shr ρ' A :=
   Shr.mk x.val
 attribute [inline] Shr.weaken
 
@@ -120,13 +120,13 @@ inductive ResultH (q : Qty) (B H : Type) where
 
 /-- `Result1 B H` as a `ResultH 1 B H` (the identity: the two types are definitionally
 equal, both elaborating to the same description). -/
-def Result1.toResultH {0 B H : Type} (1 x : Result1 B H) : ResultH 1 B H := x
+def Result1.toResultH {B H : Type} (1 x : Result1 B H) : ResultH 1 B H := x
 /-- `ResultH 1 B H` as a `Result1 B H` (the identity). -/
-def ResultH.toResult1 {0 B H : Type} (1 x : ResultH 1 B H) : Result1 B H := x
+def ResultH.toResult1 {B H : Type} (1 x : ResultH 1 B H) : Result1 B H := x
 
 /-- Map the value, keeping the handle on both branches. The mapping function is
 unrestricted because the `err` branch drops it; the handle itself stays at `q`. -/
-def ResultH.map {0 q : Qty} {0 A B H : Type} (f : A → B) (1 x : ResultH q A H) : ResultH q B H :=
+def ResultH.map {0 q : Qty} {A B H : Type} (f : A → B) (1 x : ResultH q A H) : ResultH q B H :=
   match x with
   | .ok a h => .ok (f a) h
   | .err e h => .err e h
@@ -135,13 +135,13 @@ at `%q` and returns the next result; on error the handle is returned unchanged. 
 handle stays at the same quantity `q` (it cannot move to a different one), and `f` is
 unrestricted because the error branch drops it, so it must not capture a linear
 resource: thread resources through the handle, as `Result1` does. -/
-def ResultH.bind {0 q : Qty} {0 A B H : Type} (1 x : ResultH q A H)
+def ResultH.bind {0 q : Qty} {A B H : Type} (1 x : ResultH q A H)
     (f : (a : A) → (%q h : H) → ResultH q B H) : ResultH q B H := match x with
   | .ok a h => f a h
   | .err e h => .err e h
 /-- Case analysis that hands the handle to the chosen branch at `%q`; both branches are
 unrestricted (each is dropped on the other path), so they must consume the handle. -/
-def ResultH.elim {0 q : Qty} {0 A H C : Type}
+def ResultH.elim {0 q : Qty} {A H C : Type}
     (onOk : (a : A) → (%q h : H) → C)
     (onErr : (e : Error) → (%q h : H) → C)
     (1 x : ResultH q A H) : C := match x with
@@ -149,16 +149,16 @@ def ResultH.elim {0 q : Qty} {0 A H C : Type}
   | .err e h => onErr e h
 
 /-- `*r`: the value, and the handle back -/
-def Uniq.read {0 ρ : Region} {0 A B : Type} (1 r : Uniq ρ A) (1 k : (a : A) → (1 r : Uniq ρ A) → B) : B :=
+def Uniq.read {0 ρ : Region} {A B : Type} (1 r : Uniq ρ A) (1 k : (a : A) → (1 r : Uniq ρ A) → B) : B :=
   match r with
   | .mk v => k v (Uniq.mk v)
 /-- `*r`, direct style: the value and the handle back, as a pair to take apart with
 `let 1 (a, r) := Uniq.peek r` (the value comes out at ω, the handle at 1) -/
-def Uniq.peek {0 ρ : Region} {0 A : Type} (1 r : Uniq ρ A) : (a : A) × Uniq ρ A :=
+def Uniq.peek {0 ρ : Region} {A : Type} (1 r : Uniq ρ A) : (a : A) × Uniq ρ A :=
   match r with
   | .mk v => (v, Uniq.mk v)
 /-- `*r := a` -/
-def Uniq.write {0 ρ : Region} {0 A : Type} (1 r : Uniq ρ A) (a : A) : Uniq ρ A :=
+def Uniq.write {0 ρ : Region} {A : Type} (1 r : Uniq ρ A) (a : A) : Uniq ρ A :=
   match r with
   | .mk v => Uniq.mk a
 -- (a handle is taken apart by `match` on it: the value comes out at ω, the handle is used
@@ -166,13 +166,13 @@ def Uniq.write {0 ρ : Region} {0 A : Type} (1 r : Uniq ρ A) (a : A) : Uniq ρ 
 -- its result.)
 
 /-- end a borrow: its final value to `k` -/
-def Uniq.end {0 ρ : Region} {0 S R : Type} (1 r : Uniq ρ S) (1 k : (v : S) → R) : R :=
+def Uniq.end {0 ρ : Region} {S R : Type} (1 r : Uniq ρ S) (1 k : (v : S) → R) : R :=
   match r with
   | .mk v => k v
 
 /-- `let r := &mut s` until its last use: the lender comes back with the final value (the
 error path drops it: a panic unwinds) -/
-def Uniq.borrow {0 S B : Type} (0 σ : Region) (s : S)
+def Uniq.borrow {S B : Type} (0 σ : Region) (s : S)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (0 l : Lent ρ S) → (1 r : Uniq ρ S) → Result1 B (Uniq ρ S)) :
     Result (B × S) :=
   match body σ (Outlives.refl σ) (Lent.mk ()) (Uniq.mk s) with
@@ -182,7 +182,7 @@ def Uniq.borrow {0 S B : Type} (0 σ : Region) (s : S)
     | .mk v => .err e)
 /-- the same inside a scope that holds other handles `H` (a call borrowing two locals: the
 outer handle is threaded through the inner scope and handed back with the result) -/
-def Uniq.borrowIn {0 S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
+def Uniq.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (0 l : Lent ρ S) → (1 o : H) → (1 r : Uniq ρ S) →
       Result1 B ((1 _ : H) × Uniq ρ S)) :
     Result1 (B × S) H :=
@@ -190,7 +190,7 @@ def Uniq.borrowIn {0 S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
   | .ok b q => let 1 (o, r) := q; Uniq.end r (fun v => .ok (b, v) o)
   | .err e q => let 1 (o, r) := q; Uniq.end r (fun v => .err e o)
 /-- `&mut *r` at a shorter region -/
-def Uniq.reborrow {0 ρ : Region} {0 S B : Type} (1 r : Uniq ρ S)
+def Uniq.reborrow {0 ρ : Region} {S B : Type} (1 r : Uniq ρ S)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 l : Lent ρ' S) → (1 r : Uniq ρ' S) → Result1 B (Uniq ρ' S)) :
     Result1 B (Uniq ρ S) :=
   match r with
@@ -200,7 +200,7 @@ def Uniq.reborrow {0 ρ : Region} {0 S B : Type} (1 r : Uniq ρ S)
     | .err e r' => (match r' with
       | .mk w => .err e (Uniq.mk w)))
 /-- the same inside a scope that holds other handles `H`, threaded through and back -/
-def Uniq.reborrowIn {0 ρ : Region} {0 S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.reborrowIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 l : Lent ρ' S) → (1 o : H) → (1 r : Uniq ρ' S) →
       Result1 B ((1 _ : H) × Uniq ρ' S)) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
@@ -211,14 +211,14 @@ def Uniq.reborrowIn {0 ρ : Region} {0 S B H : Type} (1 r : Uniq ρ S) (1 outer 
     | .err e q => let 1 (o, r') := q; (match r' with
       | .mk w => .err e (o, Uniq.mk w)))
 /-- `&*r`, a shared reborrow of a mutable one -/
-def Uniq.share {0 ρ : Region} {0 S B : Type} (1 r : Uniq ρ S)
+def Uniq.share {0 ρ : Region} {S B : Type} (1 r : Uniq ρ S)
     (body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → Shr ρ' S → Result B) : Result1 B (Uniq ρ S) :=
   match r with
   | .mk v => (match body ρ (Outlives.refl ρ) (Shr.mk v) with
     | .ok b => .ok b (Uniq.mk v)
     | .err e => .err e (Uniq.mk v))
 /-- the same inside a scope that holds handles `H`, threaded through and back -/
-def Uniq.shareIn {0 ρ : Region} {0 S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.shareIn {0 ρ : Region} {S B H : Type} (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (1 o : H) → Shr ρ' S → Result1 B H) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
   match r with
@@ -227,11 +227,11 @@ def Uniq.shareIn {0 ρ : Region} {0 S B H : Type} (1 r : Uniq ρ S) (1 outer : H
     | .err e o => .err e (o, Uniq.mk v))
 /-- `let r := &s` inside a scope that holds handles `H` (linear mode): they are threaded
 through the shared borrow's body and come back with its result -/
-def Shr.borrowIn {0 S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
+def Shr.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (1 o : H) → Shr ρ S → Result1 B H) : Result1 B H :=
   body σ (Outlives.refl σ) outer (Shr.mk s)
 /-- `&mut r.p` for a place with a lens -/
-def Uniq.zoom {0 ρ : Region} {0 S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
+def Uniq.zoom {0 ρ : Region} {S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)) :
     Result1 B (Uniq ρ S) :=
   match r with
@@ -242,7 +242,7 @@ def Uniq.zoom {0 ρ : Region} {0 S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
     | .err e r' => (match r' with
       | .mk w => .err e (Uniq.mk (st.2 w))))
 /-- the same inside a scope that holds other handles `H`, threaded through and back -/
-def Uniq.zoomIn {0 ρ : Region} {0 S X B H : Type} (l : Lens S X) (1 r : Uniq ρ S) (1 outer : H)
+def Uniq.zoomIn {0 ρ : Region} {S X B H : Type} (l : Lens S X) (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 o : H) → (1 x : Uniq ρ' X) →
       Result1 B ((1 _ : H) × Uniq ρ' X)) :
     Result1 B ((1 _ : H) × Uniq ρ S) :=
@@ -254,7 +254,7 @@ def Uniq.zoomIn {0 ρ : Region} {0 S X B H : Type} (l : Lens S X) (1 r : Uniq ρ
     | .err e q => let 1 (o, r') := q; (match r' with
       | .mk w => .err e (o, Uniq.mk (st.2 w))))
 /-- a borrow of a pair is two borrows, live at once; they come back as a linear pair -/
-def Uniq.both {0 ρ : Region} {0 A B C : Type} (1 p : Uniq ρ (A × B))
+def Uniq.both {0 ρ : Region} {A B C : Type} (1 p : Uniq ρ (A × B))
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (1 a : Uniq ρ' A) → (1 b : Uniq ρ' B) →
       Result1 C ((1 _ : Uniq ρ' A) × Uniq ρ' B)) :
     Result1 C (Uniq ρ (A × B)) :=
@@ -298,66 +298,66 @@ inductive Borrowed (M H : Type) where
   | err (e : Error) (1 h : H)
 
 /-- `&mut r.p` for a place with a (partial) lens -/
-def Mut.ofLens {0 ρ : Region} {0 S A : Type} (1 r : Uniq ρ S) (l : Lens S A) : Mut ρ A S :=
+def Mut.ofLens {0 ρ : Region} {S A : Type} (1 r : Uniq ρ S) (l : Lens S A) : Mut ρ A S :=
   match r with
   | .mk v => Mut.mk (l v)
 /-- (a partial place's result as a borrow, or the lender `v` back) -/
-def Mut.ofR {0 ρ : Region} {0 S A : Type} (v : S) : Result (Store A S) → Borrowed (Mut ρ A S) (Uniq ρ S)
+def Mut.ofR {0 ρ : Region} {S A : Type} (v : S) : Result (Store A S) → Borrowed (Mut ρ A S) (Uniq ρ S)
   | .ok st => .ok (Mut.mk st)
   | .err e => .err e (Uniq.mk v)
 /-- `&mut r.p` for a place with a partial lens: a borrow, or an error with the lender's
 handle back. -/
-def Mut.ofPLens {0 ρ : Region} {0 S A : Type} (1 r : Uniq ρ S) (l : PLens S A) : Borrowed (Mut ρ A S) (Uniq ρ S) :=
+def Mut.ofPLens {0 ρ : Region} {S A : Type} (1 r : Uniq ρ S) (l : PLens S A) : Borrowed (Mut ρ A S) (Uniq ρ S) :=
   match r with
   | .mk v => Mut.ofR v (l v)
 /-- the whole of `r` (a cursor's start) -/
-def Mut.whole {0 ρ : Region} {0 S : Type} (1 r : Uniq ρ S) : Mut ρ S S :=
+def Mut.whole {0 ρ : Region} {S : Type} (1 r : Uniq ρ S) : Mut ρ S S :=
   match r with
   | .mk v => Mut.mk (Lens.id v)
 /-- `*m`, direct style: the value and the borrow back -/
-def Mut.peek {0 ρ : Region} {0 A S : Type} (1 m : Mut ρ A S) : (a : A) × Mut ρ A S :=
+def Mut.peek {0 ρ : Region} {A S : Type} (1 m : Mut ρ A S) : (a : A) × Mut ρ A S :=
   match m with
   | .mk st => (st.1, Mut.mk st)
 /-- `*m := a` -/
-def Mut.set {0 ρ : Region} {0 A S : Type} (1 m : Mut ρ A S) (a : A) : Mut ρ A S :=
+def Mut.set {0 ρ : Region} {A S : Type} (1 m : Mut ρ A S) (a : A) : Mut ρ A S :=
   match m with
   | .mk st => Mut.mk (a, st.2)
 /-- the borrow's last use: the lender's handle back, with the final value -/
-def Mut.release {0 ρ : Region} {0 A S : Type} (1 m : Mut ρ A S) : Uniq ρ S :=
+def Mut.release {0 ρ : Region} {A S : Type} (1 m : Mut ρ A S) : Uniq ρ S :=
   match m with
   | .mk st => Uniq.mk (Store.extract st)
 /-- the lender, had the final value been `fin` -/
-def Mut.close {0 ρ : Region} {0 A S : Type} (1 m : Mut ρ A S) (fin : A) : Uniq ρ S :=
+def Mut.close {0 ρ : Region} {A S : Type} (1 m : Mut ρ A S) (fin : A) : Uniq ρ S :=
   match m with
   | .mk st => Uniq.mk (st.2 fin)
 /-- a cursor moves down -/
-def Mut.comp {0 ρ : Region} {0 A B S : Type} (1 m : Mut ρ A S) (k : A → Store B A) : Mut ρ B S :=
+def Mut.comp {0 ρ : Region} {A B S : Type} (1 m : Mut ρ A S) (k : A → Store B A) : Mut ρ B S :=
   match m with
   | .mk st => Mut.mk (Store.comp st k)
 /-- shorter region (covariant) -/
-def Mut.weaken {0 ρ ρ' : Region} {0 A S : Type} (0 h : Outlives ρ ρ') (1 m : Mut ρ A S) : Mut ρ' A S :=
+def Mut.weaken {0 ρ ρ' : Region} {A S : Type} (0 h : Outlives ρ ρ') (1 m : Mut ρ A S) : Mut ρ' A S :=
   match m with
   | .mk st => Mut.mk st
 /-- a `&mut` argument returned as it is: its final value, written back, gives the handle back -/
-def Mut.ofUniq {0 ρ : Region} {0 A : Type} (1 r : Uniq ρ A) : Mut ρ A (Uniq ρ A) :=
+def Mut.ofUniq {0 ρ : Region} {A : Type} (1 r : Uniq ρ A) : Mut ρ A (Uniq ρ A) :=
   match r with
   | .mk v => Mut.mk (v, fun (a : A) => Uniq.mk a)
 /-- what the backward function gives back, mapped -/
-def Mut.mapBack {0 ρ : Region} {0 A S T : Type} (1 m : Mut ρ A S) (f : S → T) : Mut ρ A T :=
+def Mut.mapBack {0 ρ : Region} {A S T : Type} (1 m : Mut ρ A S) (f : S → T) : Mut ρ A T :=
   match m with
   | .mk st => Mut.mk (st.1, fun (x : A) => f (st.2 x))
 /-- the borrow's last use, when its lender is not one place: whatever comes back -/
-def Mut.finish {0 ρ : Region} {0 A S : Type} (1 m : Mut ρ A S) : S :=
+def Mut.finish {0 ρ : Region} {A S : Type} (1 m : Mut ρ A S) : S :=
   match m with
   | .mk st => Store.extract st
 /-- `Option (&mut A)` from an affine optic on `r` -/
-def MutOpt.ofAffine {0 ρ : Region} {0 A S : Type} (1 r : Uniq ρ S) (l : S → Affine A S) : MutOpt ρ A S :=
+def MutOpt.ofAffine {0 ρ : Region} {A S : Type} (1 r : Uniq ρ S) (l : S → Affine A S) : MutOpt ρ A S :=
   match r with
   | .mk v => (match l v with
     | .some a k => .some (Mut.mk (a, k))
     | .none s => .none (Uniq.mk s))
 /-- `if let .some x := o then *x := f *x`: the lender, updated or not -/
-def MutOpt.over {0 ρ : Region} {0 A S : Type} (f : A → A) (1 o : MutOpt ρ A S) : Uniq ρ S :=
+def MutOpt.over {0 ρ : Region} {A S : Type} (f : A → A) (1 o : MutOpt ρ A S) : Uniq ρ S :=
   match o with
   | .some m => (match m with
     | .mk st => Uniq.mk (st.2 (f st.1)))
@@ -365,13 +365,13 @@ def MutOpt.over {0 ρ : Region} {0 A S : Type} (f : A → A) (1 o : MutOpt ρ A 
 /-- a borrow of one lender that also holds another lender's handle `o` (a returned borrow
 that may come from either of two `&mut` arguments): the backward function gives back
 what `f` makes of both -/
-def Mut.alongside {0 ρ ρ' : Region} {0 A S T R : Type} (1 m : Mut ρ A S) (1 o : Uniq ρ' T)
+def Mut.alongside {0 ρ ρ' : Region} {A S T R : Type} (1 m : Mut ρ A S) (1 o : Uniq ρ' T)
     (f : S → Uniq ρ' T → R) : Mut ρ A R :=
   match m with
   | .mk st => (match o with
     | .mk t => Mut.mk (st.1, fun (a : A) => f (st.2 a) (Uniq.mk t)))
 /-- an optional borrow's last use: the lender's handle back either way -/
-def MutOpt.release {0 ρ : Region} {0 A S : Type} (1 o : MutOpt ρ A S) : Uniq ρ S :=
+def MutOpt.release {0 ρ : Region} {A S : Type} (1 o : MutOpt ρ A S) : Uniq ρ S :=
   match o with
   | .some m => Mut.release m
   | .none r => r
@@ -383,11 +383,11 @@ def MutOpt.release {0 ρ : Region} {0 A S : Type} (1 o : MutOpt ρ A S) : Uniq �
 -- not a resource to use.
 
 /-- the value behind a handle -/
-def Uniq.get {0 ρ : Region} {0 A : Type} (r : Uniq ρ A) : A :=
+def Uniq.get {0 ρ : Region} {A : Type} (r : Uniq ρ A) : A :=
   match r with
   | .mk v => v
 /-- a returned borrow's value and backward function -/
-def Mut.store {0 ρ : Region} {0 A S : Type} (m : Mut ρ A S) : Store A S :=
+def Mut.store {0 ρ : Region} {A S : Type} (m : Mut ρ A S) : Store A S :=
   match m with
   | .mk st => st
 -- (`Mut.ofPLens r l` is `Mut.ofR (Uniq.get r) (l (Uniq.get r))`, and `Mut.ofR v (.ok st)` is

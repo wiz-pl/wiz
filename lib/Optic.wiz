@@ -42,24 +42,24 @@ def p : Pair2 Nat Nat := Pair2.mk 1 2
 backward function that rebuilds the lender from the borrow's final value. -/
 def Store (A S : Type) : Type := A × (A → S)
 /-- A store from the current value and the backward function. -/
-def Store.mk {0 A S : Type} (a : A) (k : A → S) : Store A S := (a, k)
+def Store.mk {A S : Type} (a : A) (k : A → S) : Store A S := (a, k)
 /-- The borrowed value. -/
-def Store.pos {0 A S : Type} (st : Store A S) : A := st.1
+def Store.pos {A S : Type} (st : Store A S) : A := st.1
 /-- End the borrow with a final value: the rebuilt lender. -/
-def Store.put {0 A S : Type} (st : Store A S) (a : A) : S := st.2 a
+def Store.put {A S : Type} (st : Store A S) (a : A) : S := st.2 a
 /-- End the borrow without writing to it. -/
-def Store.extract {0 A S : Type} (st : Store A S) : S := st.2 st.1
+def Store.extract {A S : Type} (st : Store A S) : S := st.2 st.1
 /-- A borrow of a borrow (a reborrow `&mut (*r).f`): its put goes through both. -/
-def Store.comp {0 A B S : Type} (st : Store A S) (m : A → Store B A) : Store B S :=
+def Store.comp {A B S : Type} (st : Store A S) (m : A → Store B A) : Store B S :=
   let inner := m st.1;
   (inner.1, fun b => st.2 (inner.2 b))
 /-- A borrow out of `A` (which may fail), seen as a borrow out of `S`, given how to put
 `A` back into `S`. -/
-def Store.underR {0 A B S : Type} (k : A → S) : Result (Store B A) → Result (Store B S)
+def Store.underR {A B S : Type} (k : A → S) : Result (Store B A) → Result (Store B S)
   | .ok inner => .ok (inner.1, fun b => k (inner.2 b))
   | .err e => .err e
 /-- `Store.comp` when the inner borrow may fail (`&mut (*r)[i]`). -/
-def Store.compP {0 A B S : Type} (st : Store A S) (m : A → Result (Store B A)) : Result (Store B S) :=
+def Store.compP {A B S : Type} (st : Store A S) (m : A → Result (Store B A)) : Result (Store B S) :=
   Store.underR st.2 (m st.1)
 
 -- ## Lenses
@@ -75,23 +75,23 @@ on the lender, never on the value put. `List.atL` is an example. -/
 def PLens (S A : Type) : Type := S → Result (Store A S)
 
 /-- The whole value as a place. -/
-def Lens.id {0 S : Type} : Lens S S := fun s => (s, fun s' => s')
+def Lens.id {S : Type} : Lens S S := fun s => (s, fun s' => s')
 /-- Read a place: `Lens.get Pair2.fstL (Pair2.mk 1 2) = 1`. -/
-def Lens.get {0 S A : Type} (l : Lens S A) (s : S) : A := (l s).1
+def Lens.get {S A : Type} (l : Lens S A) (s : S) : A := (l s).1
 /-- Write a place, giving the new lender. -/
-def Lens.set {0 S A : Type} (l : Lens S A) (s : S) (a : A) : S := (l s).2 a
+def Lens.set {S A : Type} (l : Lens S A) (s : S) (a : A) : S := (l s).2 a
 /-- Update a place with `f`. -/
-def Lens.over {0 S A : Type} (l : Lens S A) (f : A → A) (s : S) : S :=
+def Lens.over {S A : Type} (l : Lens S A) (f : A → A) (s : S) : S :=
   let st := l s;
   st.2 (f st.1)
 /-- A place inside a place (`s.f.g`). -/
-def Lens.comp {0 S A B : Type} (l : Lens S A) (m : Lens A B) : Lens S B :=
+def Lens.comp {S A B : Type} (l : Lens S A) (m : Lens A B) : Lens S B :=
   fun s => Store.comp (l s) m
 /-- A total lens is a partial one that never fails. -/
-def Lens.toP {0 S A : Type} (l : Lens S A) : PLens S A := fun s => .ok (l s)
+def Lens.toP {S A : Type} (l : Lens S A) : PLens S A := fun s => .ok (l s)
 
 /-- A partial place inside a partial place (`v[i][j]`): fails if either does. -/
-def PLens.comp {0 S A B : Type} (l : PLens S A) (m : PLens A B) : PLens S B := fun s =>
+def PLens.comp {S A B : Type} (l : PLens S A) (m : PLens A B) : PLens S B := fun s =>
   match l s with
   | .ok st => Store.compP st m
   | .err e => .err e
@@ -106,14 +106,14 @@ def PLens.comp {0 S A B : Type} (l : PLens S A) (m : PLens A B) : PLens S B := f
 `&mut X` lowers to `X → Result (B × X)` (the value is handed back), and calling it on
 a sub-place of `s` is `zoom`. This is also the lowering of a `FnMut` closure that
 captures `&mut x` (state passing, RD5). -/
-def zoom {0 S X B : Type} (l : Lens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
+def zoom {S X B : Type} (l : Lens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
   let st := l s;
   match m st.1 with
   | .ok r => .ok (r.1, st.2 r.2)
   | .err e => .err e
 
 /-- `zoom` through a partial place: fails if the place does. -/
-def zoomP {0 S X B : Type} (l : PLens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
+def zoomP {S X B : Type} (l : PLens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
   match l s with
   | .ok st => (match m st.1 with
     | .ok r => .ok (r.1, st.2 r.2)
@@ -138,15 +138,15 @@ inductive Affine (A S : Type) where
 def ALens (S A : Type) : Type := S → Result (Affine A S)
 
 /-- The lender, after ending the borrow (if any) with its current value. -/
-def Affine.extract {0 A S : Type} : Affine A S → S
+def Affine.extract {A S : Type} : Affine A S → S
   | .none s => s
   | .some a k => k a
 /-- End the borrow (if any) with `f` of its current value. -/
-def Affine.over {0 A S : Type} (f : A → A) : Affine A S → S
+def Affine.over {A S : Type} (f : A → A) : Affine A S → S
   | .none s => s
   | .some a k => k (f a)
 /-- A borrow into a borrow that may not exist: `none` if either is missing. -/
-def Affine.comp {0 A B S : Type} (x : Affine A S) (m : A → Affine B A) : Affine B S := match x with
+def Affine.comp {A B S : Type} (x : Affine A S) (m : A → Affine B A) : Affine B S := match x with
   | .none s => .none s
   | .some a k => (match m a with
     | .none a' => .none (k a')
@@ -181,46 +181,46 @@ instance {A : Type} : TraverseMut (List A) A where
 -- `Result.All` says "if it succeeds", and `Result.Holds` says "it succeeds, and".
 
 /-- GetPut: a borrow that is never written leaves the lender unchanged. -/
-def Lens.GetPut {0 S A : Type} (l : Lens S A) : Prop := (s : S) → (l s).2 (l s).1 = s
+def Lens.GetPut {S A : Type} (l : Lens S A) : Prop := (s : S) → (l s).2 (l s).1 = s
 /-- PutGet: borrowing again after a write sees the write. -/
-def Lens.PutGet {0 S A : Type} (l : Lens S A) : Prop := (s : S) → (a : A) → (l ((l s).2 a)).1 = a
+def Lens.PutGet {S A : Type} (l : Lens S A) : Prop := (s : S) → (a : A) → (l ((l s).2 a)).1 = a
 /-- PutPut: a second borrow of the same place rebuilds the lender the same way. -/
-def Lens.PutPut {0 S A : Type} (l : Lens S A) : Prop :=
+def Lens.PutPut {S A : Type} (l : Lens S A) : Prop :=
   (s : S) → (a b : A) → (l ((l s).2 a)).2 b = (l s).2 b
 /-- A lawful lens: GetPut, PutGet and PutPut. -/
-def Lens.Lawful {0 S A : Type} (l : Lens S A) : Prop := Lens.GetPut l × Lens.PutGet l × Lens.PutPut l
+def Lens.Lawful {S A : Type} (l : Lens S A) : Prop := Lens.GetPut l × Lens.PutGet l × Lens.PutPut l
 
 /-- GetPut for a partial lens: if it succeeds, a borrow that is never written leaves the
 lender unchanged. -/
-def PLens.GetPut {0 S A : Type} (l : PLens S A) : Prop :=
+def PLens.GetPut {S A : Type} (l : PLens S A) : Prop :=
   (s : S) → Result.All (fun (st : Store A S) => st.2 st.1 = s) (l s)
 /-- PutGet for a partial lens: if it succeeds, borrowing again after a write succeeds and
 sees the write. -/
-def PLens.PutGet {0 S A : Type} (l : PLens S A) : Prop :=
+def PLens.PutGet {S A : Type} (l : PLens S A) : Prop :=
   (s : S) → Result.All (fun (st : Store A S) => (a : A) → Result.Holds (fun (st' : Store A S) => st'.1 = a) (l (st.2 a))) (l s)
 /-- PutPut for a partial lens: if it succeeds, borrowing again after a write succeeds and
 rebuilds the lender the same way. -/
-def PLens.PutPut {0 S A : Type} (l : PLens S A) : Prop :=
+def PLens.PutPut {S A : Type} (l : PLens S A) : Prop :=
   (s : S) → Result.All (fun (st : Store A S) => (a b : A) →
     Result.Holds (fun (st' : Store A S) => st'.2 b = st.2 b) (l (st.2 a))) (l s)
 /-- A lawful partial lens: GetPut, PutGet and PutPut. -/
-def PLens.Lawful {0 S A : Type} (l : PLens S A) : Prop := PLens.GetPut l × PLens.PutGet l × PLens.PutPut l
+def PLens.Lawful {S A : Type} (l : PLens S A) : Prop := PLens.GetPut l × PLens.PutGet l × PLens.PutPut l
 
 /-- Two places are independent (disjoint borrows, `split_at_mut`): a put to one neither
 changes the other's value nor depends on the order of the puts. -/
-def Lens.Indep {0 S A B : Type} (l : Lens S A) (m : Lens S B) : Prop :=
+def Lens.Indep {S A B : Type} (l : Lens S A) (m : Lens S B) : Prop :=
   ((s : S) → (a : A) → (m ((l s).2 a)).1 = (m s).1) ×
   ((s : S) → (b : B) → (l ((m s).2 b)).1 = (l s).1) ×
   ((s : S) → (a : A) → (b : B) → (m ((l s).2 a)).2 b = (l ((m s).2 b)).2 a)
 
 /-- Two independent places borrowed at once (`let (a, b) = (&mut s.x, &mut s.y)`). -/
-def Lens.pair {0 S A B : Type} (l : Lens S A) (m : Lens S B) : Lens S (A × B) := fun s =>
+def Lens.pair {S A B : Type} (l : Lens S A) (m : Lens S B) : Lens S (A × B) := fun s =>
   (((l s).1, (m s).1), fun ab => (m ((l s).2 ab.1)).2 ab.2)
 
 /-- The resolution equation, which `final(r)` specs desugar to: whatever the borrow's
 final value `fin`, the lender's final value is `put fin`. It holds by definition;
 stated so that specs can cite it. -/
-def Store.final {0 A S : Type} (st : Store A S) (fin : A) : Store.put st fin = st.2 fin := rfl
+def Store.final {A S : Type} (st : Store A S) (fin : A) : Store.put st fin = st.2 fin := rfl
 
 -- ## The frame rule, for values
 --
@@ -231,7 +231,7 @@ def Store.final {0 A S : Type} (st : Store A S) (fin : A) : Store.put st fin = s
 
 /-- `zoom` of `r` into the place `n`, whose value is `y` whatever the input (the frame: `n`
 is unchanged). -/
-def zoom.frameAt {0 S X Y B : Type} (n : Lens S Y) (k : X → S) (y : Y) (hk : (x : X) → (n (k x)).1 = y) :
+def zoom.frameAt {S X Y B : Type} (n : Lens S Y) (k : X → S) (y : Y) (hk : (x : X) → (n (k x)).1 = y) :
     (r : Result (B × X)) →
     Result.All (fun (p : B × S) => (n p.2).1 = y) (match r with
       | .ok p => Result.ok (p.1, k p.2)
@@ -239,7 +239,7 @@ def zoom.frameAt {0 S X Y B : Type} (n : Lens S Y) (k : X → S) (y : Y) (hk : (
   | .ok p => hk p.2
   | .err e => ()
 /-- The frame rule for `zoom`: a place `n` independent of `l` is unchanged. -/
-def zoom.frame {0 S X Y B : Type} (l : Lens S X) (n : Lens S Y) (i : Lens.Indep l n)
+def zoom.frame {S X Y B : Type} (l : Lens S X) (n : Lens S Y) (i : Lens.Indep l n)
     (m : X → Result (B × X)) (s : S) :
     Result.All (fun (p : B × S) => (n p.2).1 = (n s).1) (zoom l m s) :=
   zoom.frameAt n (l s).2 (n s).1 (fun x => i.1 s x) (m (l s).1)
@@ -255,29 +255,29 @@ structure Pair2 (A B : Type) where
   snd : B
 
 /-- The place `p.fst`. -/
-def Pair2.fstL {0 A B : Type} : Lens (Pair2 A B) A := fun s =>
+def Pair2.fstL {A B : Type} : Lens (Pair2 A B) A := fun s =>
   (s.fst, fun a => Pair2.mk a s.snd)
 /-- The place `p.snd`. -/
-def Pair2.sndL {0 A B : Type} : Lens (Pair2 A B) B := fun s =>
+def Pair2.sndL {A B : Type} : Lens (Pair2 A B) B := fun s =>
   (s.snd, fun b => Pair2.mk s.fst b)
 
 /-- `Pair2.fstL` is lawful (every law by `rfl`). -/
-def Pair2.fstL_lawful {0 A B : Type} : @Lens.Lawful (Pair2 A B) A (@Pair2.fstL A B) :=
+def Pair2.fstL_lawful {A B : Type} : @Lens.Lawful (Pair2 A B) A (@Pair2.fstL A B) :=
   (fun s => rfl, fun s a => rfl, fun s a b => rfl)
 /-- `Pair2.sndL` is lawful (every law by `rfl`). -/
-def Pair2.sndL_lawful {0 A B : Type} : @Lens.Lawful (Pair2 A B) B (@Pair2.sndL A B) :=
+def Pair2.sndL_lawful {A B : Type} : @Lens.Lawful (Pair2 A B) B (@Pair2.sndL A B) :=
   (fun s => rfl, fun s a => rfl, fun s a b => rfl)
 /-- The two fields of a pair are independent places. -/
-def Pair2.indep {0 A B : Type} : @Lens.Indep (Pair2 A B) A B (@Pair2.fstL A B) (@Pair2.sndL A B) :=
+def Pair2.indep {A B : Type} : @Lens.Indep (Pair2 A B) A B (@Pair2.fstL A B) (@Pair2.sndL A B) :=
   (fun s a => rfl, fun s b => rfl, fun s a b => rfl)
 
 /-- `&mut v[0]` on a list: panics (`.outOfBounds`) on the empty list. -/
-def List.headL {0 A : Type} : PLens (List A) A
+def List.headL {A : Type} : PLens (List A) A
   | .nil => .err .outOfBounds
   | .cons x xs => .ok (x, fun x' => List.cons x' xs)
 
 /-- `List.headL` is a lawful partial lens (by cases on the list). -/
-def List.headL_lawful {0 A : Type} : PLens.Lawful (@List.headL A) :=
+def List.headL_lawful {A : Type} : PLens.Lawful (@List.headL A) :=
   (fun s => match s with
     | .nil => ()
     | .cons x xs => refl (List.cons x xs),
@@ -296,7 +296,7 @@ def List.headL_lawful {0 A : Type} : PLens.Lawful (@List.headL A) :=
 
 /-- The composite of two lawful lenses is lawful: a reborrow chain `&mut (*r).f.g` is a
 composite of field lenses, so its laws follow from theirs. -/
-def Lens.comp_lawful {0 S A B : Type} (l : Lens S A) (m : Lens A B)
+def Lens.comp_lawful {S A B : Type} (l : Lens S A) (m : Lens A B)
     (hl : Lens.Lawful l) (hm : Lens.Lawful m) : Lens.Lawful (Lens.comp l m) :=
   (fun s => Eq.trans (Eq.congrArg (l s).2 (hm.1 (l s).1)) (hl.1 s),
    fun s b => Eq.trans
@@ -311,17 +311,17 @@ def Lens.comp_lawful {0 S A B : Type} (l : Lens S A) (m : Lens A B)
 /-- GetPut for two independent places borrowed at once. (PutGet and PutPut hold too, by
 `Indep`; their proofs are in drafts/feral/Optic.wiz until the elaborator compares an
 equation of pairs with its computed form; `Lens.pair_putGet` is PutGet.) -/
-def Lens.pair_getPut {0 S A B : Type} (l : Lens S A) (m : Lens S B) (hl : Lens.Lawful l) (hm : Lens.Lawful m) :
+def Lens.pair_getPut {S A B : Type} (l : Lens S A) (m : Lens S B) (hl : Lens.Lawful l) (hm : Lens.Lawful m) :
     Lens.GetPut (Lens.pair l m) := fun s =>
   @Eq.substProp S (fun (y : S) => (m y).2 (m s).1 = s) s ((l s).2 (l s).1) (Eq.symm (hl.1 s)) (hm.1 s)
 
 /-- Equality of a pair with a pair-valued variable, componentwise. The equation computes to
 `(e : a = p.1) × (cast B B _ b = p.2)` (the second component's type is cast along the
 first's equation, and `B` is a variable, so the cast is stuck): `castRefl` removes it. -/
-def Optic.pairEq {0 A B : Type} (a : A) (b : B) (p : A × B) (e₁ : a = p.1) (e₂ : b = p.2) : (a, b) = p :=
+def Optic.pairEq {A B : Type} (a : A) (b : B) (p : A × B) (e₁ : a = p.1) (e₂ : b = p.2) : (a, b) = p :=
   (e₁, Eq.trans (@castRefl B rfl b) e₂)
 /-- PutGet for two independent places borrowed at once, from the laws of each and `Indep`. -/
-def Lens.pair_putGet {0 S A B : Type} (l : Lens S A) (m : Lens S B) (hl : Lens.Lawful l) (hm : Lens.Lawful m)
+def Lens.pair_putGet {S A B : Type} (l : Lens S A) (m : Lens S B) (hl : Lens.Lawful l) (hm : Lens.Lawful m)
     (hi : Lens.Indep l m) : Lens.PutGet (Lens.pair l m) := fun s ab =>
   Optic.pairEq ((l ((m ((l s).2 ab.1)).2 ab.2)).1) ((m ((m ((l s).2 ab.1)).2 ab.2)).1) ab
     (Eq.trans (hi.2.1 ((l s).2 ab.1) ab.2) (hl.2.1 s ab.1))
@@ -330,19 +330,19 @@ def Lens.pair_putGet {0 S A B : Type} (l : Lens S A) (m : Lens S B) (hl : Lens.L
 /-- `underR` preserves GetPut, case by case on the inner result. This and the lemmas below
 are for a partial lens behind a lens whose put-then-get is definitional (a field, a
 constructor's argument): the composite's laws are the inner lens's. -/
-def Store.underR_gp {0 A B S : Type} (k : A → S) (a : A) (s : S) (hk : k a = s) : (r : Result (Store B A)) →
+def Store.underR_gp {A B S : Type} (k : A → S) (a : A) (s : S) (hk : k a = s) : (r : Result (Store B A)) →
     Result.All (fun (st : Store B A) => st.2 st.1 = a) r →
     Result.All (fun (st : Store B S) => st.2 st.1 = s) (Store.underR k r)
   | .ok st, h => Eq.trans (Eq.congrArg k h) hk
   | .err e, h => ()
 /-- `underR` keeps the borrowed value: a successful get still sees `b`. -/
-def Store.underR_get {0 A B S : Type} (k : A → S) (b : B) : (r : Result (Store B A)) →
+def Store.underR_get {A B S : Type} (k : A → S) (b : B) : (r : Result (Store B A)) →
     Result.Holds (fun (st : Store B A) => st.1 = b) r →
     Result.Holds (fun (st : Store B S) => st.1 = b) (Store.underR k r)
   | .ok st, h => h
   | .err e, h => h
 /-- One step of `Store.underR_pg`: PutGet through `underR`, for one store. -/
-def Store.underR_pg1 {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
+def Store.underR_pg1 {A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
     (hC : (x : A) → @Store.underR A B S k (m x) = C (k x)) (st : Store B A) (b : B)
     (h : Result.Holds (fun (st' : Store B A) => st'.1 = b) (m (st.2 b))) :
     Result.Holds (fun (st' : Store B S) => st'.1 = b) (C (k (st.2 b))) :=
@@ -350,7 +350,7 @@ def Store.underR_pg1 {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S
     (Store.underR k (m (st.2 b))) (C (k (st.2 b))) (hC (st.2 b))
     (Store.underR_get k b (m (st.2 b)) h)
 /-- `underR` preserves PutGet. -/
-def Store.underR_pg {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
+def Store.underR_pg {A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
     (hC : (x : A) → @Store.underR A B S k (m x) = C (k x)) : (r : Result (Store B A)) →
     Result.All (fun (st : Store B A) => (b : B) →
       Result.Holds (fun (st' : Store B A) => st'.1 = b) (m (st.2 b))) r →
@@ -359,13 +359,13 @@ def Store.underR_pg {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S 
   | .ok st, h => fun b => Store.underR_pg1 k m C hC st b (h b)
   | .err e, h => ()
 /-- `underR` puts back through `k`: a put of `b` that gave `t` now gives `k t`. -/
-def Store.underR_put {0 A B S : Type} (k : A → S) (b : B) (t : A) : (r : Result (Store B A)) →
+def Store.underR_put {A B S : Type} (k : A → S) (b : B) (t : A) : (r : Result (Store B A)) →
     Result.Holds (fun (st : Store B A) => st.2 b = t) r →
     Result.Holds (fun (st : Store B S) => st.2 b = k t) (Store.underR k r)
   | .ok st, h => Eq.congrArg k h
   | .err e, h => h
 /-- One step of `Store.underR_pp`: PutPut through `underR`, for one store. -/
-def Store.underR_pp1 {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
+def Store.underR_pp1 {A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
     (hC : (x : A) → @Store.underR A B S k (m x) = C (k x)) (st : Store B A) (a b : B)
     (h : Result.Holds (fun (st' : Store B A) => st'.2 b = st.2 b) (m (st.2 a))) :
     Result.Holds (fun (st' : Store B S) => st'.2 b = k (st.2 b)) (C (k (st.2 a))) :=
@@ -373,7 +373,7 @@ def Store.underR_pp1 {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S
     (Store.underR k (m (st.2 a))) (C (k (st.2 a))) (hC (st.2 a))
     (Store.underR_put k b (st.2 b) (m (st.2 a)) h)
 /-- `underR` preserves PutPut. -/
-def Store.underR_pp {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
+def Store.underR_pp {A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S B)
     (hC : (x : A) → @Store.underR A B S k (m x) = C (k x)) : (r : Result (Store B A)) →
     Result.All (fun (st : Store B A) => (a b : B) →
       Result.Holds (fun (st' : Store B A) => st'.2 b = st.2 b) (m (st.2 a))) r →
@@ -384,31 +384,31 @@ def Store.underR_pp {0 A B S : Type} (k : A → S) (m : PLens A B) (C : PLens S 
 
 /-- `&mut v[i]` on a list (the kernel model of a vector): panics (`.outOfBounds`) past
 the end. A lawful partial lens, by induction on the index (`List.atL_lawful`). -/
-def List.atL {0 A : Type} : Nat → PLens (List A) A
+def List.atL {A : Type} : Nat → PLens (List A) A
   | _, .nil => .err .outOfBounds
   | .zero, .cons x xs => .ok (x, fun x' => List.cons x' xs)
   | .succ i, .cons x xs => Store.underR (List.cons x) (List.atL i xs)
 
 /-- GetPut for `List.atL`. -/
-def List.atL_gp {0 A : Type} : (i : Nat) → (s : List A) →
+def List.atL_gp {A : Type} : (i : Nat) → (s : List A) →
     Result.All (fun (st : Store A (List A)) => st.2 st.1 = s) (List.atL i s)
   | _, .nil => ()
   | .zero, .cons x xs => refl (List.cons x xs)
   | .succ i, .cons x xs => Store.underR_gp (List.cons x) xs (List.cons x xs) rfl (List.atL i xs) (List.atL_gp i xs)
 /-- PutGet for `List.atL`. -/
-def List.atL_pg {0 A : Type} : (i : Nat) → (s : List A) →
+def List.atL_pg {A : Type} : (i : Nat) → (s : List A) →
     Result.All (fun (st : Store A (List A)) => (a : A) →
       Result.Holds (fun (st' : Store A (List A)) => st'.1 = a) (List.atL i (st.2 a))) (List.atL i s)
   | _, .nil => ()
   | .zero, .cons x xs => fun a => refl a
   | .succ i, .cons x xs => Store.underR_pg (List.cons x) (List.atL i) (List.atL (Nat.succ i)) (fun y => rfl) (List.atL i xs) (List.atL_pg i xs)
 /-- PutPut for `List.atL`. -/
-def List.atL_pp {0 A : Type} : (i : Nat) → (s : List A) →
+def List.atL_pp {A : Type} : (i : Nat) → (s : List A) →
     Result.All (fun (st : Store A (List A)) => (a b : A) →
       Result.Holds (fun (st' : Store A (List A)) => st'.2 b = st.2 b) (List.atL i (st.2 a))) (List.atL i s)
   | _, .nil => ()
   | .zero, .cons x xs => fun a b => refl (List.cons b xs)
   | .succ i, .cons x xs => Store.underR_pp (List.cons x) (List.atL i) (List.atL (Nat.succ i)) (fun y => rfl) (List.atL i xs) (List.atL_pp i xs)
 /-- `List.atL i` is a lawful partial lens. -/
-def List.atL_lawful {0 A : Type} (i : Nat) : PLens.Lawful (@List.atL A i) :=
+def List.atL_lawful {A : Type} (i : Nat) : PLens.Lawful (@List.atL A i) :=
   (fun s => List.atL_gp i s, fun s => List.atL_pg i s, fun s => List.atL_pp i s)

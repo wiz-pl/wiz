@@ -77,23 +77,23 @@ inductive Tree (K V : Type) where
   | node (left : Tree K V) (key : K) (val : V) (right : Tree K V) (sz : Nat)
 
 /-- The number of entries in a tree (read from the root, O(1)). -/
-def Tree.size {0 K V : Type} : Tree K V → Nat
+def Tree.size {K V : Type} : Tree K V → Nat
   | .leaf => .zero
   | .node _ _ _ _ n => n
 
 /-- A node with its size computed from its subtrees. -/
-def Tree.mkNode {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
+def Tree.mkNode {K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
   .node l k v r (Nat.succ (Nat.add (Tree.size l) (Tree.size r)))
 
 /-- The height (for diagnostics and the balance tests; O(n)). -/
-def Tree.height {0 K V : Type} : Tree K V → Nat
+def Tree.height {K V : Type} : Tree K V → Nat
   | .leaf => .zero
   | .node l _ _ r _ => Nat.succ (Nat.max (Tree.height l) (Tree.height r))
 
 /-- A left rotation about the root (the right subtree is heavier). The single rotation is
 used when the right child's left subtree is lighter than its right subtree; otherwise a
 double rotation (through the right child's left child). -/
-def Tree.rotateL {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
+def Tree.rotateL {K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
   match r with
   | .leaf => Tree.mkNode l k v r
   | .node rl rk rv rr _ =>
@@ -105,7 +105,7 @@ def Tree.rotateL {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : 
         Tree.mkNode (Tree.mkNode l k v rll) rlk rlv (Tree.mkNode rlr rk rv rr)
 
 /-- A right rotation about the root, the mirror image of `Tree.rotateL`. -/
-def Tree.rotateR {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
+def Tree.rotateR {K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
   match l with
   | .leaf => Tree.mkNode l k v r
   | .node ll lk lv lr _ =>
@@ -118,7 +118,7 @@ def Tree.rotateR {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : 
 
 /-- A node from a key, a value and two subtrees, rebalanced when one side is more than
 three times the other. -/
-def Tree.balance {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
+def Tree.balance {K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : Tree K V :=
   let sl := Tree.size l;
   let sr := Tree.size r;
   if Nat.lt (Nat.add sl sr) 2 then Tree.mkNode l k v r
@@ -128,7 +128,7 @@ def Tree.balance {0 K V : Type} (l : Tree K V) (k : K) (v : V) (r : Tree K V) : 
 
 /-- Insert `k ↦ v`: replace the value when the key is there, otherwise add an entry.
 Only the nodes on the search path are copied. -/
-def Tree.insert {0 K V : Type} (cmp : K → K → Ordering) (k : K) (v : V) :
+def Tree.insert {K V : Type} (cmp : K → K → Ordering) (k : K) (v : V) :
     Tree K V → Tree K V
   | .leaf => .node .leaf k v .leaf (Nat.succ .zero)
   | .node l kk vv r n => match cmp k kk with
@@ -137,7 +137,7 @@ def Tree.insert {0 K V : Type} (cmp : K → K → Ordering) (k : K) (v : V) :
     | .gt => Tree.balance l kk vv (Tree.insert cmp k v r)
 
 /-- The smallest entry of a non-empty tree, and the tree without it. -/
-def Tree.deleteMin {0 K V : Type} : Tree K V → Option (K × V × Tree K V)
+def Tree.deleteMin {K V : Type} : Tree K V → Option (K × V × Tree K V)
   | .leaf => .none
   | .node .leaf k v r _ => .some (k, v, r)
   | .node l k v r _ => match Tree.deleteMin l with
@@ -145,7 +145,7 @@ def Tree.deleteMin {0 K V : Type} : Tree K V → Option (K × V × Tree K V)
     | .some p => .some (p.1, p.2.1, Tree.balance p.2.2 k v r)
 
 /-- Remove `k` (the map is unchanged when it is not there). -/
-def Tree.erase {0 K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V → Tree K V
+def Tree.erase {K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V → Tree K V
   | .leaf => .leaf
   | .node l kk vv r _ => match cmp k kk with
     | .lt => Tree.balance (Tree.erase cmp k l) kk vv r
@@ -159,7 +159,7 @@ def Tree.erase {0 K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V �
           | .some p => Tree.balance l p.1 p.2.1 p.2.2
 
 /-- `k`'s value, if it is there. -/
-def Tree.find {0 K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V → Option V
+def Tree.find {K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V → Option V
   | .leaf => .none
   | .node l kk vv r _ => match cmp k kk with
     | .lt => Tree.find cmp k l
@@ -167,17 +167,17 @@ def Tree.find {0 K V : Type} (cmp : K → K → Ordering) (k : K) : Tree K V →
     | .gt => Tree.find cmp k r
 
 /-- The entries by increasing key, in front of `acc`. -/
-def Tree.toListOnto {0 K V : Type} : Tree K V → List (K × V) → List (K × V)
+def Tree.toListOnto {K V : Type} : Tree K V → List (K × V) → List (K × V)
   | .leaf, acc => acc
   | .node l k v r _, acc => Tree.toListOnto l (.cons (k, v) (Tree.toListOnto r acc))
 
 /-- The keys by increasing key, in front of `acc`. -/
-def Tree.keysOnto {0 K V : Type} : Tree K V → List K → List K
+def Tree.keysOnto {K V : Type} : Tree K V → List K → List K
   | .leaf, acc => acc
   | .node l k _ r _, acc => Tree.keysOnto l (.cons k (Tree.keysOnto r acc))
 
 /-- `f (… (f b k₀ v₀) …) kₙ vₙ`, by increasing key. -/
-def Tree.foldl {0 K V B : Type} (f : B → K → V → B) : Tree K V → B → B
+def Tree.foldl {K V B : Type} (f : B → K → V → B) : Tree K V → B → B
   | .leaf, b => b
   | .node l k v r _, b => Tree.foldl f r (f (Tree.foldl f l b) k v)
 
@@ -189,69 +189,69 @@ sealed inductive PMap (K V : Type) where
   | private mk (tree : Tree K V)
 
 /-- The tree of a map (for the module's definitions). -/
-def PMap.tree {0 K V : Type} : PMap K V → Tree K V
+def PMap.tree {K V : Type} : PMap K V → Tree K V
   | .mk t => t
 
 /-- The empty map. -/
-def PMap.empty {0 K V : Type} : PMap K V := .mk .leaf
+def PMap.empty {K V : Type} : PMap K V := .mk .leaf
 
 /-- `m` with `k ↦ v` (replacing `k`'s value if it has one). The old map is unchanged. -/
-def PMap.insert {0 K V : Type} [c : Compare K] (m : PMap K V) (k : K) (v : V) : PMap K V :=
+def PMap.insert {K V : Type} [c : Compare K] (m : PMap K V) (k : K) (v : V) : PMap K V :=
   .mk (Tree.insert Compare.compare k v m.tree)
 
 /-- `m` without `k` (unchanged when `k` is not there). The old map is unchanged. -/
-def PMap.erase {0 K V : Type} [c : Compare K] (m : PMap K V) (k : K) : PMap K V :=
+def PMap.erase {K V : Type} [c : Compare K] (m : PMap K V) (k : K) : PMap K V :=
   .mk (Tree.erase Compare.compare k m.tree)
 
 /-- `k`'s value, if it has one. -/
-def PMap.find {0 K V : Type} [c : Compare K] (m : PMap K V) (k : K) : Option V :=
+def PMap.find {K V : Type} [c : Compare K] (m : PMap K V) (k : K) : Option V :=
   Tree.find Compare.compare k m.tree
 
 /-- `k`'s value, or `d`. -/
-def PMap.findD {0 K V : Type} [c : Compare K] (m : PMap K V) (k : K) (d : V) : V :=
+def PMap.findD {K V : Type} [c : Compare K] (m : PMap K V) (k : K) (d : V) : V :=
   match PMap.find m k with
   | .none => d
   | .some v => v
 
 /-- Whether `k` is in the map. -/
-def PMap.contains {0 K V : Type} [c : Compare K] (m : PMap K V) (k : K) : Bool :=
+def PMap.contains {K V : Type} [c : Compare K] (m : PMap K V) (k : K) : Bool :=
   match PMap.find m k with
   | .none => .false
   | .some _ => .true
 
 /-- The number of entries (O(1)). -/
-def PMap.size {0 K V : Type} (m : PMap K V) : Nat := Tree.size m.tree
+def PMap.size {K V : Type} (m : PMap K V) : Nat := Tree.size m.tree
 
 /-- The height of the tree (O(n); for tests and diagnostics). -/
-def PMap.height {0 K V : Type} (m : PMap K V) : Nat := Tree.height m.tree
+def PMap.height {K V : Type} (m : PMap K V) : Nat := Tree.height m.tree
 
 /-- The entries by increasing key. -/
-def PMap.toList {0 K V : Type} (m : PMap K V) : List (K × V) := Tree.toListOnto m.tree .nil
+def PMap.toList {K V : Type} (m : PMap K V) : List (K × V) := Tree.toListOnto m.tree .nil
 
 /-- The keys by increasing key. -/
-def PMap.keys {0 K V : Type} (m : PMap K V) : List K := Tree.keysOnto m.tree .nil
+def PMap.keys {K V : Type} (m : PMap K V) : List K := Tree.keysOnto m.tree .nil
 
 /-- `f (… (f b k₀ v₀) …) kₙ vₙ`, by increasing key. -/
-def PMap.foldl {0 K V B : Type} (f : B → K → V → B) (b : B) (m : PMap K V) : B :=
+def PMap.foldl {K V B : Type} (f : B → K → V → B) (b : B) (m : PMap K V) : B :=
   Tree.foldl f m.tree b
 
 /-- A map from a list of entries; a later entry for the same key wins. -/
-def PMap.fromListAux {0 K V : Type} [c : Compare K] :
+def PMap.fromListAux {K V : Type} [c : Compare K] :
     List (K × V) → PMap K V → PMap K V
   | .nil, m => m
   | .cons e rest, m => PMap.fromListAux rest (PMap.insert m e.1 e.2)
-def PMap.fromList {0 K V : Type} [c : Compare K] (l : List (K × V)) : PMap K V :=
+def PMap.fromList {K V : Type} [c : Compare K] (l : List (K × V)) : PMap K V :=
   PMap.fromListAux l PMap.empty
 /-- The same as `PMap.fromList`. -/
-def PMap.ofList {0 K V : Type} [c : Compare K] (l : List (K × V)) : PMap K V :=
+def PMap.ofList {K V : Type} [c : Compare K] (l : List (K × V)) : PMap K V :=
   PMap.fromList l
 
 -- Laws that hold on the definitions (the constructor is a `mk` around the tree).
 
 /-- The empty map has no entries. -/
-def PMap.size_empty {0 K V : Type} : PMap.size (PMap.empty : PMap K V) = .zero := rfl
+def PMap.size_empty {K V : Type} : PMap.size (PMap.empty : PMap K V) = .zero := rfl
 /-- Nothing is in the empty map. -/
-def PMap.find_empty {0 K V : Type} [c : Compare K] (k : K) :
+def PMap.find_empty {K V : Type} [c : Compare K] (k : K) :
     PMap.find (PMap.empty : PMap K V) k = .none := rfl
 
 -- ## PSet
@@ -260,39 +260,39 @@ def PMap.find_empty {0 K V : Type} [c : Compare K] (k : K) :
 def PSet (K : Type) : Type := PMap K Unit
 
 /-- The empty set. -/
-def PSet.empty {0 K : Type} : PSet K := PMap.empty
+def PSet.empty {K : Type} : PSet K := PMap.empty
 
 /-- `s` with `k` added (unchanged when `k` is already there). -/
-def PSet.insert {0 K : Type} [c : Compare K] (s : PSet K) (k : K) : PSet K :=
+def PSet.insert {K : Type} [c : Compare K] (s : PSet K) (k : K) : PSet K :=
   PMap.insert s k ()
 
 /-- `s` without `k` (unchanged when `k` is not there). -/
-def PSet.erase {0 K : Type} [c : Compare K] (s : PSet K) (k : K) : PSet K :=
+def PSet.erase {K : Type} [c : Compare K] (s : PSet K) (k : K) : PSet K :=
   PMap.erase s k
 
 /-- Whether `k` is in the set. -/
-def PSet.contains {0 K : Type} [c : Compare K] (s : PSet K) (k : K) : Bool :=
+def PSet.contains {K : Type} [c : Compare K] (s : PSet K) (k : K) : Bool :=
   PMap.contains s k
 
 /-- The number of elements (O(1)). -/
-def PSet.size {0 K : Type} (s : PSet K) : Nat := PMap.size s
+def PSet.size {K : Type} (s : PSet K) : Nat := PMap.size s
 
 /-- The elements in increasing order. -/
-def PSet.toList {0 K : Type} (s : PSet K) : List K := PMap.keys s
+def PSet.toList {K : Type} (s : PSet K) : List K := PMap.keys s
 
 /-- `f (… (f b k₀) …) kₙ`, by increasing key. -/
-def PSet.foldl {0 K B : Type} (f : B → K → B) (b : B) (s : PSet K) : B :=
+def PSet.foldl {K B : Type} (f : B → K → B) (b : B) (s : PSet K) : B :=
   PMap.foldl (fun acc k _ => f acc k) b s
 
 /-- A set from a list; duplicates are ignored. -/
-def PSet.fromListAux {0 K : Type} [c : Compare K] : List K → PSet K → PSet K
+def PSet.fromListAux {K : Type} [c : Compare K] : List K → PSet K → PSet K
   | .nil, s => s
   | .cons k rest, s => PSet.fromListAux rest (PSet.insert s k)
-def PSet.fromList {0 K : Type} [c : Compare K] (l : List K) : PSet K :=
+def PSet.fromList {K : Type} [c : Compare K] (l : List K) : PSet K :=
   PSet.fromListAux l PSet.empty
 
 /-- The empty set has no elements. -/
-def PSet.size_empty {0 K : Type} : PSet.size (PSet.empty : PSet K) = .zero := rfl
+def PSet.size_empty {K : Type} : PSet.size (PSet.empty : PSet K) = .zero := rfl
 /-- Nothing is in the empty set. -/
-def PSet.contains_empty {0 K : Type} [c : Compare K] (k : K) :
+def PSet.contains_empty {K : Type} [c : Compare K] (k : K) :
     PSet.contains (PSet.empty : PSet K) k = .false := rfl

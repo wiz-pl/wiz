@@ -36,67 +36,67 @@ import Text
 -- ## Lists
 
 /-- `xs` reversed onto `acc`: `List.revApp [1, 2] [3]` is `[2, 1, 3]`. -/
-def List.revApp {0 A : Type} : List A → List A → List A
+def List.revApp {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.revApp xs (.cons x acc)
 /-- The list in reverse order (linear, through `List.revApp`). -/
-def List.reverse {0 A : Type} (l : List A) : List A := List.revApp l .nil
+def List.reverse {A : Type} (l : List A) : List A := List.revApp l .nil
 /-- Apply `f` to every element. -/
-def List.map {0 A B : Type} (f : A → B) : List A → List B
+def List.map {A B : Type} (f : A → B) : List A → List B
   | .nil => .nil
   | .cons x xs => .cons (f x) (List.map f xs)
 /-- The elements that satisfy `p`, in order. -/
-def List.filter {0 A : Type} (p : A → Bool) : List A → List A
+def List.filter {A : Type} (p : A → Bool) : List A → List A
   | .nil => .nil
   | .cons x xs => match p x with
     | .true => .cons x (List.filter p xs)
     | .false => List.filter p xs
 /-- Fold from the left: `List.foldl f b [x, y]` is `f (f b x) y`. -/
-def List.foldl {0 A B : Type} (f : B → A → B) : B → List A → B
+def List.foldl {A B : Type} (f : B → A → B) : B → List A → B
   | b, .nil => b
   | b, .cons x xs => List.foldl f (f b x) xs
 /-- Fold from the right: `List.foldr f b [x, y]` is `f x (f y b)`. -/
-def List.foldr {0 A B : Type} (f : A → B → B) (b : B) : List A → B
+def List.foldr {A B : Type} (f : A → B → B) (b : B) : List A → B
   | .nil => b
   | .cons x xs => f x (List.foldr f b xs)
 /-- Whether some element satisfies `p` (stops at the first). -/
-def List.any {0 A : Type} (p : A → Bool) : List A → Bool
+def List.any {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .false
   | .cons x xs => match p x with
     | .true => .true
     | .false => List.any p xs
 /-- Whether every element satisfies `p` (stops at the first that doesn't). -/
-def List.all {0 A : Type} (p : A → Bool) : List A → Bool
+def List.all {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .true
   | .cons x xs => match p x with
     | .true => List.all p xs
     | .false => .false
 /-- The first element that satisfies `p`, if any. -/
-def List.find {0 A : Type} (p : A → Bool) : List A → Option A
+def List.find {A : Type} (p : A → Bool) : List A → Option A
   | .nil => .none
   | .cons x xs => match p x with
     | .true => .some x
     | .false => List.find p xs
 /-- Whether the list is empty. -/
-def List.isEmpty {0 A : Type} : List A → Bool
+def List.isEmpty {A : Type} : List A → Bool
   | .nil => .true
   | .cons _ _ => .false
 /-- The first element, if any. -/
-def List.head {0 A : Type} : List A → Option A
+def List.head {A : Type} : List A → Option A
   | .nil => .none
   | .cons x _ => .some x
 /-- The first `n` elements (all of them if there are fewer). -/
-def List.take {0 A : Type} : Nat → List A → List A
+def List.take {A : Type} : Nat → List A → List A
   | .zero, _ => .nil
   | .succ _, .nil => .nil
   | .succ n, .cons x xs => .cons x (List.take n xs)
 /-- Without the first `n` elements. -/
-def List.drop {0 A : Type} : Nat → List A → List A
+def List.drop {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ _, .nil => .nil
   | .succ n, .cons _ xs => List.drop n xs
 /-- The lists one after the other: `List.concat [[1], [2, 3]]` is `[1, 2, 3]`. -/
-def List.concat {0 A : Type} : List (List A) → List A
+def List.concat {A : Type} : List (List A) → List A
   | .nil => .nil
   | .cons x xs => List.append x (List.concat xs)
 
@@ -255,7 +255,7 @@ def String.parseNat (s : String) : Option Nat := match String.chars s with
   | .nil => .none
   | .cons c cs => Chars.natGo 0 (.cons c cs)
 /-- The value of key `k` in a list of pairs (the first one), if any. -/
-def String.lookup {0 A : Type} (k : String) : List (String × A) → Option A
+def String.lookup {A : Type} (k : String) : List (String × A) → Option A
   | .nil => .none
   | .cons p rest => match String.eq p.1 k with
     | .true => .some p.2

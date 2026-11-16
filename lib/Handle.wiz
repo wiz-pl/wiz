@@ -38,51 +38,51 @@ would show in `#print axioms`), the same gap as MVar.Hole, Lock.Guard and Chan.
 
 /-- The obligation to release the handle `h`: a token at quantity 1, indexed by the handle
 (as `MVar.Hole m` and `Lock.Guard l` are), so it can be neither dropped nor copied. -/
-axiom Owned : {0 H : Type} → H → Type
+axiom Owned : {H : Type} → H → Type
 private extern "wiz_handle_own" Owned.mint : {0 H : Type} → {0 h : H} → IO (Owned h)
 private extern "wiz_handle_disown" Owned.burn : {0 H : Type} → {0 h : H} → (1 o : Owned h) → IO Unit
 
 -- own a fresh `h` (private: only the owned constructors below, which create `h`, mint)
-private def Handle.own {0 H B : Type} (h : H) (1 k : (1 o : Owned h) → IO B) : IO B :=
+private def Handle.own {H B : Type} (h : H) (1 k : (1 o : Owned h) → IO B) : IO B :=
   fun w => let 1 (o, w') := @Owned.mint H h w; k o w'
 -- release `h` with `close`, using up the token; `k` gets the close's result (private: the
 -- public releases fix `close`)
-private def Handle.releaseWith {0 H B : Type} (close : H → EIO Unit) (h : H) (1 o : Owned h)
+private def Handle.releaseWith {H B : Type} (close : H → EIO Unit) (h : H) (1 o : Owned h)
     (1 k : (r : Except String Unit) → IO B) : IO B :=
   fun w => let 1 (u, w') := Owned.burn o w; IO.bind (close h) k w'
 /-- An operation on an owned handle: the token goes in and comes back. -/
-def Handle.use {0 H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B := do1
+def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B := do1
   a ← act h;
   k a o
 -- acquire a fresh handle with `acquire` (an error owns nothing), then `k` owns it. `k` is
 -- an ordinary function (it runs only if `acquire` succeeds), so it can't capture another
 -- linear value: an acquisition that fails would leave that value unused.
-private def Handle.with {0 H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B := do
+private def Handle.with {H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B := do
   h ← acquire;
   Handle.own h (k h)
 
 -- ## The handles of lib/Sys.wiz: owned constructors and their releases
 
 /-- `File.open p mode`, owned: a fresh handle and its token. -/
-def File.withOwned {0 B : Type} (p mode : String) (k : (f : File) → (1 o : Owned f) → EIO B) : EIO B :=
+def File.withOwned {B : Type} (p mode : String) (k : (f : File) → (1 o : Owned f) → EIO B) : EIO B :=
   Handle.with (File.open p mode) k
 -- close it; `k` gets the close's result (an error is reported, not dropped)
 /-- Close the file; `k` gets the close's result (an error is reported, not dropped). -/
-def File.releaseOwned {0 B : Type} (f : File) (1 o : Owned f) (1 k : (r : Except String Unit) → IO B) : IO B :=
+def File.releaseOwned {B : Type} (f : File) (1 o : Owned f) (1 k : (r : Except String Unit) → IO B) : IO B :=
   Handle.releaseWith (fun (f : File) => File.close f) f o k
 /-- `Fd.open p a fl`, owned. -/
-def Fd.withOwned {0 B : Type} (p : String) (a : Access) (fl : OpenFlags) (k : (f : Fd) → (1 o : Owned f) → EIO B) : EIO B :=
+def Fd.withOwned {B : Type} (p : String) (a : Access) (fl : OpenFlags) (k : (f : Fd) → (1 o : Owned f) → EIO B) : EIO B :=
   Handle.with (Fd.open p a fl) k
 /-- Close the descriptor; `k` gets the close's result. -/
-def Fd.releaseOwned {0 B : Type} (f : Fd) (1 o : Owned f) (1 k : (r : Except String Unit) → IO B) : IO B :=
+def Fd.releaseOwned {B : Type} (f : Fd) (1 o : Owned f) (1 k : (r : Except String Unit) → IO B) : IO B :=
   Handle.releaseWith (fun (f : Fd) => Fd.close f) f o k
 /-- `Process.spawn …`, owned: released by waiting for the child. -/
-def Process.spawnOwned {0 B : Type} (cmd : String) (args : List String) (stdin stdout stderr : Stdio)
+def Process.spawnOwned {B : Type} (cmd : String) (args : List String) (stdin stdout stderr : Stdio)
     (k : (c : Child) → (1 o : Owned c) → EIO B) : EIO B :=
   Handle.with (Process.spawn cmd args stdin stdout stderr) k
 -- wait for it; `k` gets the exit status, or the error
 /-- Wait for the child; `k` gets the exit status, or the error. -/
-def Child.releaseOwned {0 B : Type} (c : Child) (1 o : Owned c) (1 k : (r : Except String ExitStatus) → IO B) : IO B :=
+def Child.releaseOwned {B : Type} (c : Child) (1 o : Owned c) (1 k : (r : Except String ExitStatus) → IO B) : IO B :=
   fun w => let 1 (u, w') := Owned.burn o w; IO.bind (Child.wait c) k w'
 
 -- ## Direct style: operations on owned handles as `IO1` actions (cohesion M6 part 2)
@@ -95,7 +95,7 @@ def Child.releaseOwned {0 B : Type} (c : Child) (1 o : Owned c) (1 k : (r : Exce
 
 -- any operation on an owned handle: its result, and the token back
 /-- Any operation on an owned handle, in direct style: its result, and the token back. -/
-def Handle.use1 {0 H A : Type} (h : H) (1 o : Owned h) (act : H → IO A) : IO1 ((a : A) × Owned h) := fun w =>
+def Handle.use1 {H A : Type} (h : H) (1 o : Owned h) (act : H → IO A) : IO1 ((a : A) × Owned h) := fun w =>
   let 1 (a, w') := act h w; ((a, o), w')
 
 /-- `File.write`, owned (direct style). -/

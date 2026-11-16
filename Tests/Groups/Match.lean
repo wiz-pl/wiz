@@ -32,7 +32,9 @@ def matchGroup : Group where
         ok (matchPrelude ++ "def tail {A : Type} {n : Nat} : Vec A (.succ n) → Vec A n\n  | .cons _ xs => xs\n" ++
             "#reduce tail (Vec.cons Nat.zero (Vec.cons (Nat.succ Nat.zero) Vec.nil))") [".cons .zero (.succ .zero) .nil"] },
     { name := "zip: impossible pairs omitted, lengths unified", run := fun _ =>
-        ok (matchPrelude ++ "def zip {A B : Type} {n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
+        -- (`n` is only needed in types, and the recursive call passes the erased field of
+        -- `cons`: rule (b) makes a bare `{n : Nat}` data, ω, so it is written 0)
+        ok (matchPrelude ++ "def zip {A B : Type} {0 n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
             "  | .nil, .nil => .nil\n  | .cons a as, .cons b bs => .cons (a, b) (zip as bs)\n" ++
             "#reduce zip (Vec.cons Nat.zero Vec.nil) (Vec.cons (Nat.succ Nat.zero) Vec.nil)")
           [".cons .zero (.zero, .succ .zero) .nil"] },

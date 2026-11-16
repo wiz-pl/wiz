@@ -68,7 +68,8 @@ instance : QRig Nat where
   mul_le_mul _ _ _ _ h₁ h₂ := by simp_all
 
 /-- There is no ω in `Nat`, so explicit binders default to exactly once. Implicit
-binders stay at 0: in exact counting a default of 1 would reject every implicit that is
+binders stay at 0 whatever their type (`implicitDataDefault` is left at
+`implicitDefault`): in exact counting a default of 1 would reject every implicit that is
 used only in types, and there is no unrestricted quantity to default to. -/
 instance : QuantitySyntax Nat where
   ofLiteral := String.toNat?
@@ -222,15 +223,18 @@ instance : QuantitySyntax ZeroOneMany where
     | "ω" => some many
     | _ => none
   explicitDefault := many
-  -- implicits are inferred and used freely: ω, like explicit binders (the language
-  -- decision "implicit binders are ω by default"; `{0 x}`/`{1 x}` stay authoritative)
-  implicitDefault := many
+  -- rule (b), the language decision of 2026-11-16: an implicit whose type is a sort or a
+  -- proposition is 0 (erased anyway), any other implicit ω (`Elab.binderDefaultQty`);
+  -- `{0 x}`/`{1 x}`/`{ω x}` stay authoritative
+  implicitDefault := zero
+  implicitDataDefault := many
   display := toString
 
 instance : RigTag ZeroOneMany where
-  -- bumped: the implicit-binder default changed from 0 to ω, so cached terms from the
-  -- old meaning must not be reused (`RigTag`'s contract)
-  tag := "zero-one-many-implicit-many"
+  -- bumped: an implicit binder's default now depends on its type (0 for a sort or a
+  -- proposition, ω otherwise), so cached terms from the old meaning (0 for every
+  -- implicit) must not be reused (`RigTag`'s contract)
+  tag := "zero-one-many-implicit-by-type"
 
 end ZeroOneMany
 

@@ -22,7 +22,7 @@ def inductiveGroup : Group where
     { name := "Nat, Vec, Point", run := fun _ => ok indPrelude },
     { name := "constructor types print nominally", run := fun _ =>
         ok (indPrelude ++ "#check Vec.cons")
-          ["Vec.cons : {0 A : Type} → {0 n : Nat} → A → Vec A n → Vec A (.succ n)"] },
+          ["Vec.cons : {A : Type} → {0 n : Nat} → A → Vec A n → Vec A (.succ n)"] },
     { name := "values print with constructor names", run := fun _ =>
         ok (indPrelude ++ "#reduce two") [".cons (.succ .zero) .zero (.cons .zero (.succ .zero) .nil)"] },
     { name := "structure fields by name", run := fun _ =>
@@ -40,7 +40,7 @@ def inductiveGroup : Group where
             "#reduce add (.succ .zero) (.succ (.succ .zero))") [".succ (.succ (.succ .zero))"] },
     { name := "Vec.rec has Lean's shape", run := fun _ =>
         ok (indPrelude ++ "#check Vec.rec")
-          ["Vec.rec : {0 A : Type} → (0 motive : (x : Nat) → Vec A x → Sort ?u0) → motive .zero .nil → ({0 n : Nat} → (x : A) → (xs : Vec A n) → motive n xs → motive (.succ n) (.cons n x xs)) → {0 x : Nat} → (x' : Vec A x) → motive x x'"] },
+          ["Vec.rec : {A : Type} → (0 motive : (x : Nat) → Vec A x → Sort ?u0) → motive .zero .nil → ({0 n : Nat} → (x : A) → (xs : Vec A n) → motive n xs → motive (.succ n) (.cons n x xs)) → {0 x : Nat} → (x' : Vec A x) → motive x x'"] },
     { name := "Vec.rec computes through indices", run := fun _ =>
         ok (indPrelude ++ "def len {A : Type} {n : Nat} (v : Vec A n) : Nat := Vec.rec (fun _ _ => Nat) .zero (fun _ _ ih => .succ ih) v\n" ++
             "#reduce len two") [".succ (.succ .zero)"] },

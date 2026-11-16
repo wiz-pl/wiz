@@ -63,35 +63,35 @@ def Scry.TupleRel.insert (t : Scry.TupleRel) (row : List U64) : Scry.TupleRel ×
 sealed inductive Scry.LatRel (L : Type) where
   | private mk (entries : List (List U64 × L))
 
-def Scry.LatRel.toList {0 L : Type} : Scry.LatRel L → List (List U64 × L)
+def Scry.LatRel.toList {L : Type} : Scry.LatRel L → List (List U64 × L)
   | .mk es => es
-def Scry.LatRel.size {0 L : Type} (t : Scry.LatRel L) : Nat := List.length t.toList
-def Scry.LatRel.findL {0 L : Type} (key : List U64) : List (List U64 × L) → Option L
+def Scry.LatRel.size {L : Type} (t : Scry.LatRel L) : Nat := List.length t.toList
+def Scry.LatRel.findL {L : Type} (key : List U64) : List (List U64 × L) → Option L
   | .nil => .none
   | .cons e rest => if Scry.rowEq key e.1 then .some e.2 else Scry.LatRel.findL key rest
-def Scry.LatRel.find {0 L : Type} (t : Scry.LatRel L) (key : List U64) : Option L :=
+def Scry.LatRel.find {L : Type} (t : Scry.LatRel L) (key : List U64) : Option L :=
   Scry.LatRel.findL key t.toList
-def Scry.LatRel.mem {0 L : Type} (t : Scry.LatRel L) (key : List U64) : Bool :=
+def Scry.LatRel.mem {L : Type} (t : Scry.LatRel L) (key : List U64) : Bool :=
   match Scry.LatRel.find t key with
   | .none => .false
   | .some _ => .true
 
 /-- `es` with `key` mapped to `v`, replacing an existing entry (the first one). -/
-def Scry.LatRel.setL {0 L : Type} : List (List U64 × L) → List U64 → L → List (List U64 × L)
+def Scry.LatRel.setL {L : Type} : List (List U64 × L) → List U64 → L → List (List U64 × L)
   | .nil, k, v => .cons (k, v) .nil
   | .cons e rest, k, v =>
     if Scry.rowEq k e.1 then .cons (k, v) rest else .cons e (Scry.LatRel.setL rest k v)
 
-def Scry.LatRel.set {0 L : Type} (t : Scry.LatRel L) (key : List U64) (v : L) : Scry.LatRel L :=
+def Scry.LatRel.set {L : Type} (t : Scry.LatRel L) (key : List U64) (v : L) : Scry.LatRel L :=
   .mk (Scry.LatRel.setL t.toList key v)
 
 /-- Set the value at a relation number in an association list, adding the entry if it
 is absent. -/
-def Scry.assocSet {0 A : Type} (k : Nat) (v : A) : List (Nat × A) → List (Nat × A)
+def Scry.assocSet {A : Type} (k : Nat) (v : A) : List (Nat × A) → List (Nat × A)
   | .nil => .cons (k, v) .nil
   | .cons e rest => if Nat.beq k e.1 then .cons (k, v) rest else .cons e (Scry.assocSet k v rest)
 
-def Scry.assocGet {0 A : Type} (d : A) (k : Nat) : List (Nat × A) → A
+def Scry.assocGet {A : Type} (d : A) (k : Nat) : List (Nat × A) → A
   | .nil => d
   | .cons e rest => if Nat.beq k e.1 then e.2 else Scry.assocGet d k rest
 
@@ -101,32 +101,32 @@ structure Scry.Db (L : Type) where
   tuples : List (Nat × Scry.TupleRel)
   lats : List (Nat × Scry.LatRel L)
 
-def Scry.Db.empty {0 L : Type} : Scry.Db L := Scry.Db.mk .nil .nil
+def Scry.Db.empty {L : Type} : Scry.Db L := Scry.Db.mk .nil .nil
 
-def Scry.Db.tupleAt {0 L : Type} (db : Scry.Db L) (r : Nat) : Scry.TupleRel :=
+def Scry.Db.tupleAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.TupleRel :=
   Scry.assocGet Scry.TupleRel.empty r db.tuples
-def Scry.Db.latAt {0 L : Type} (db : Scry.Db L) (r : Nat) : Scry.LatRel L :=
+def Scry.Db.latAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.LatRel L :=
   Scry.assocGet (Scry.LatRel.mk .nil) r db.lats
-def Scry.Db.setTupleAt {0 L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.TupleRel) : Scry.Db L :=
+def Scry.Db.setTupleAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.TupleRel) : Scry.Db L :=
   Scry.Db.mk (Scry.assocSet r t db.tuples) db.lats
-def Scry.Db.setLatAt {0 L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.LatRel L) : Scry.Db L :=
+def Scry.Db.setLatAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.LatRel L) : Scry.Db L :=
   Scry.Db.mk db.tuples (Scry.assocSet r t db.lats)
 
 /-- Add `row` to relation `r`; the flag says whether it was new. -/
-def Scry.Db.insertTuple {0 L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Scry.Db L × Bool :=
+def Scry.Db.insertTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Scry.Db L × Bool :=
   match (Scry.Db.tupleAt db r).insert row with
   | (t, new) => (Scry.Db.setTupleAt db r t, new)
 
-def Scry.Db.memTuple {0 L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Bool :=
+def Scry.Db.memTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Bool :=
   (Scry.Db.tupleAt db r).mem row
 
-def Scry.Db.findLat {0 L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) : Option L :=
+def Scry.Db.findLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) : Option L :=
   (Scry.Db.latAt db r).find key
 
-def Scry.Db.setLat {0 L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) (v : L) : Scry.Db L :=
+def Scry.Db.setLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) (v : L) : Scry.Db L :=
   Scry.Db.setLatAt db r ((Scry.Db.latAt db r).set key v)
 
 /-- The number of rows in a tuple relation and the number of entries in a lattice
 relation; handy for tests and for a fixpoint's progress report. -/
-def Scry.Db.relSize {0 L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.tupleAt db r).size
-def Scry.Db.latSize {0 L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.latAt db r).size
+def Scry.Db.relSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.tupleAt db r).size
+def Scry.Db.latSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat := (Scry.Db.latAt db r).size

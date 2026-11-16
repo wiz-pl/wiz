@@ -34,8 +34,8 @@ file, so `simp` normalises Boolean goals without a rule list.
 ```
 import Logic
 
-def swap {0 P Q : Prop} (h : P ∧ Q) : Q ∧ P := And.intro h.2 h.1
-def orSwap {0 P Q : Prop} (h : P ∨ Q) : Q ∨ P := Or.elim h Or.inr Or.inl
+def swap {P Q : Prop} (h : P ∧ Q) : Q ∧ P := And.intro h.2 h.1
+def orSwap {P Q : Prop} (h : P ∨ Q) : Q ∨ P := Or.elim h Or.inr Or.inl
 def ex3 : ∃ n : Nat, n = 3 := Ex.intro (fun n => n = 3) 3 rfl
 ```
 -/
@@ -50,9 +50,9 @@ def False.elim {0 P : Prop} (h : False) : P := absurd h
 def Not (P : Prop) : Prop := P → False
 notation:max "¬" p:40 => Not p
 /-- From `¬ P` and `P`, anything. -/
-def Not.elim {0 P : Prop} {0 R : Prop} (n : Not P) (p : P) : R := absurd (n p)
+def Not.elim {P : Prop} {0 R : Prop} (n : Not P) (p : P) : R := absurd (n p)
 /-- `Not.elim` with the arguments the other way round: from `P` and `¬ P`, anything. -/
-def absurdOf {0 P : Prop} {0 R : Prop} (p : P) (n : Not P) : R := absurd (n p)
+def absurdOf {P : Prop} {0 R : Prop} (p : P) (n : Not P) : R := absurd (n p)
 
 -- ## Conjunction
 
@@ -63,15 +63,15 @@ def And (P Q : Prop) : Prop := P × Q
 infixr:35 " /\\ " => And
 infixr:35 " ∧ " => And
 /-- Prove `P ∧ Q` from both halves. -/
-def And.intro {0 P Q : Prop} (p : P) (q : Q) : P ∧ Q := (p, q)
+def And.intro {P Q : Prop} (p : P) (q : Q) : P ∧ Q := (p, q)
 /-- The left half of a conjunction. -/
-def And.left {0 P Q : Prop} (h : P ∧ Q) : P := h.1
+def And.left {P Q : Prop} (h : P ∧ Q) : P := h.1
 /-- The right half of a conjunction. -/
-def And.right {0 P Q : Prop} (h : P ∧ Q) : Q := h.2
+def And.right {P Q : Prop} (h : P ∧ Q) : Q := h.2
 /-- Use both halves of a conjunction at once: `And.elim h (fun p q => …)`. -/
-def And.elim {0 P Q : Prop} {0 R : Prop} (h : P ∧ Q) (k : P → Q → R) : R := k h.1 h.2
+def And.elim {P Q : Prop} {0 R : Prop} (h : P ∧ Q) (k : P → Q → R) : R := k h.1 h.2
 /-- `∧` is commutative. -/
-def And.symm {0 P Q : Prop} (h : P ∧ Q) : Q ∧ P := (h.2, h.1)
+def And.symm {P Q : Prop} (h : P ∧ Q) : Q ∧ P := (h.2, h.1)
 /-- Map both halves of a conjunction. -/
 def And.imp {P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∧ Q) : P' ∧ Q' := (f h.1, g h.2)
 
@@ -83,24 +83,24 @@ def Or (P Q : Prop) : Prop := (0 R : Prop) → (P → R) → (Q → R) → R
 infixr:30 " \\/ " => Or
 infixr:30 " ∨ " => Or
 /-- The left injection: `P` proves `P ∨ Q`. -/
-def Or.inl {0 P Q : Prop} (p : P) : P ∨ Q := fun R l r => l p
+def Or.inl {P Q : Prop} (p : P) : P ∨ Q := fun R l r => l p
 /-- The right injection: `Q` proves `P ∨ Q`. -/
-def Or.inr {0 P Q : Prop} (q : Q) : P ∨ Q := fun R l r => r q
+def Or.inr {P Q : Prop} (q : Q) : P ∨ Q := fun R l r => r q
 /-- Case analysis on a disjunction, into a proposition `R`.
 
 ```
 Or.elim h (fun p => …) (fun q => …)
 ``` -/
-def Or.elim {0 P Q : Prop} {0 R : Prop} (h : P ∨ Q) (l : P → R) (r : Q → R) : R := h R l r
+def Or.elim {P Q : Prop} {0 R : Prop} (h : P ∨ Q) (l : P → R) (r : Q → R) : R := h R l r
 /-- `∨` is commutative. -/
-def Or.symm {0 P Q : Prop} (h : P ∨ Q) : Q ∨ P := h (Q ∨ P) (fun p => Or.inr p) (fun q => Or.inl q)
+def Or.symm {P Q : Prop} (h : P ∨ Q) : Q ∨ P := h (Q ∨ P) (fun p => Or.inr p) (fun q => Or.inl q)
 /-- Map both sides of a disjunction. -/
 def Or.imp {P Q P' Q' : Prop} (f : P → P') (g : Q → Q') (h : P ∨ Q) : P' ∨ Q' :=
   h (P' ∨ Q') (fun p => Or.inl (f p)) (fun q => Or.inr (g q))
 /-- The disjunctive syllogism: from `P ∨ Q` and `¬ P`, `Q`. -/
-def Or.resolveLeft {0 P Q : Prop} (h : P ∨ Q) (n : ¬ P) : Q := h Q (fun p => absurd (n p)) (fun q => q)
+def Or.resolveLeft {P Q : Prop} (h : P ∨ Q) (n : ¬ P) : Q := h Q (fun p => absurd (n p)) (fun q => q)
 /-- From `P ∨ Q` and `¬ Q`, `P`. -/
-def Or.resolveRight {0 P Q : Prop} (h : P ∨ Q) (n : ¬ Q) : P := h P (fun p => p) (fun q => absurd (n q))
+def Or.resolveRight {P Q : Prop} (h : P ∨ Q) (n : ¬ Q) : P := h P (fun p => p) (fun q => absurd (n q))
 
 -- ## Equivalence
 
@@ -110,17 +110,17 @@ def Iff (P Q : Prop) : Prop := (P → Q) × (Q → P)
 infix:20 " <-> " => Iff
 infix:20 " ↔ " => Iff
 /-- Prove `P ↔ Q` from both implications. -/
-def Iff.intro {0 P Q : Prop} (f : P → Q) (g : Q → P) : P ↔ Q := (f, g)
+def Iff.intro {P Q : Prop} (f : P → Q) (g : Q → P) : P ↔ Q := (f, g)
 /-- The forward implication of an equivalence ("modus ponens"). -/
-def Iff.mp {0 P Q : Prop} (h : P ↔ Q) (p : P) : Q := h.1 p
+def Iff.mp {P Q : Prop} (h : P ↔ Q) (p : P) : Q := h.1 p
 /-- The backward implication of an equivalence. -/
-def Iff.mpr {0 P Q : Prop} (h : P ↔ Q) (q : Q) : P := h.2 q
+def Iff.mpr {P Q : Prop} (h : P ↔ Q) (q : Q) : P := h.2 q
 /-- Every proposition is equivalent to itself. -/
 def Iff.refl (P : Prop) : P ↔ P := (fun p => p, fun p => p)
 /-- `↔` is symmetric. -/
-def Iff.symm {0 P Q : Prop} (h : P ↔ Q) : Q ↔ P := (h.2, h.1)
+def Iff.symm {P Q : Prop} (h : P ↔ Q) : Q ↔ P := (h.2, h.1)
 /-- `↔` is transitive. -/
-def Iff.trans {0 P Q R : Prop} (h₁ : P ↔ Q) (h₂ : Q ↔ R) : P ↔ R :=
+def Iff.trans {P Q R : Prop} (h₁ : P ↔ Q) (h₂ : Q ↔ R) : P ↔ R :=
   (fun p => h₂.1 (h₁.1 p), fun r => h₁.2 (h₂.2 r))
 
 -- ## Existential quantification
@@ -128,14 +128,14 @@ def Iff.trans {0 P Q R : Prop} (h₁ : P ↔ Q) (h₂ : Q ↔ R) : P ↔ R :=
 /-- `∃ a, P a`, Church-encoded: for every proposition `R`, a way to get `R` from any
 witness and its proof gives `R`. Write it with the binder notation `∃ x, P x` (or
 `exists x, P x`); build it with `Ex.intro`, use it with `Ex.elim`. -/
-def Ex {0 A : Type} (P : A → Prop) : Prop := (0 R : Prop) → ((a : A) → P a → R) → R
+def Ex {A : Type} (P : A → Prop) : Prop := (0 R : Prop) → ((a : A) → P a → R) → R
 /-- Prove `∃ a, P a` from a witness and its proof: `Ex.intro (fun n => n = 3) 3 rfl`.
 The predicate is explicit (it can't be inferred from the witness). -/
-def Ex.intro {0 A : Type} (0 P : A → Prop) (a : A) (p : P a) : Ex P := fun R k => k a p
+def Ex.intro {A : Type} (0 P : A → Prop) (a : A) (p : P a) : Ex P := fun R k => k a p
 /-- Use an existential: get `R` from any witness and its proof. -/
-def Ex.elim {0 A : Type} {P : A → Prop} {0 R : Prop} (h : Ex P) (k : (a : A) → P a → R) : R := h R k
+def Ex.elim {A : Type} {P : A → Prop} {0 R : Prop} (h : Ex P) (k : (a : A) → P a → R) : R := h R k
 /-- Map the proof inside an existential, keeping the witness. -/
-def Ex.imp {0 A : Type} {P Q : A → Prop} (f : (a : A) → P a → Q a) (h : Ex P) : Ex Q :=
+def Ex.imp {A : Type} {P Q : A → Prop} (f : (a : A) → P a → Q a) (h : Ex P) : Ex Q :=
   h (Ex Q) (fun a p => Ex.intro Q a (f a p))
 
 -- ### Binder notation (stage 13e)
@@ -182,7 +182,7 @@ attribute [macro term.exAscii] Ex.binderMacro
 app_unexpander Ex
   | `(term| $f (fun $x => $b)) => `(term| ∃ $x, $b)
 /-- `∃` commutes with `∧` on a side that doesn't mention the witness. -/
-def Ex.andRight {0 A : Type} {P : A → Prop} {0 Q : Prop} (h : (∃ a, P a) ∧ Q) : ∃ a, P a ∧ Q :=
+def Ex.andRight {A : Type} {P : A → Prop} {Q : Prop} (h : (∃ a, P a) ∧ Q) : ∃ a, P a ∧ Q :=
   h.1 (∃ a, P a ∧ Q) (fun a p => Ex.intro (fun a => P a ∧ Q) a (p, h.2))
 
 -- ## Universal quantification
@@ -190,10 +190,10 @@ def Ex.andRight {0 A : Type} {P : A → Prop} {0 Q : Prop} (h : (∃ a, P a) ∧
 -- `∀` is the Π type `(a : A) → P a`, a proposition whenever `P a` is (impredicativity).
 -- `∀` and `∃` interact as usual:
 /-- If some `a` has `P a`, it is not the case that every `a` has `¬ P a`. -/
-def Ex.notForall {0 A : Type} {P : A → Prop} (h : ∃ a, P a) (n : ∀ a, ¬ P a) : False :=
+def Ex.notForall {A : Type} {P : A → Prop} (h : ∃ a, P a) (n : ∀ a, ¬ P a) : False :=
   h False (fun a p => n a p)
 /-- If no `a` has `P a`, every `a` has `¬ P a`. -/
-def Forall.notEx {0 A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P a :=
+def Forall.notEx {A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P a :=
   fun p => n (Ex.intro P a p)
 
 -- ## Equality
@@ -201,13 +201,13 @@ def Forall.notEx {0 A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ 
 -- `transp` is the eliminator; these are J in its usual shapes. (lib/Optic.wiz has the
 -- same lemmas under `Optic.*`.)
 /-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`). -/
-def Eq.symm {0 A : Type} {0 a b : A} (e : a = b) : b = a :=
+def Eq.symm {A : Type} {0 a b : A} (e : a = b) : b = a :=
   transp (fun b _ => b = a) (refl a) e
 /-- Equality is transitive. -/
-def Eq.trans {0 A : Type} {0 a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
+def Eq.trans {A : Type} {0 a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
   transp (fun c _ => a = c) e₁ e₂
 /-- Equal arguments give equal results: from `a = b`, `f a = f b`. -/
-def Eq.congrArg {0 A B : Type} (0 f : A → B) {0 a b : A} (e : a = b) : f a = f b :=
+def Eq.congrArg {A B : Type} (0 f : A → B) {0 a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- Transport a proof of `P a` along `a = b` to a proof of `P b`, for a family of
 propositions `P`.
@@ -215,23 +215,23 @@ propositions `P`.
 (It goes through `congrArg`: a motive `fun b _ => P b` would use `b`, which `transp`
 binds at 0; an equation of propositions computes to the pair of implications, whose
 second field is the direction we want.) -/
-def Eq.substProp {0 A : Type} (0 P : A → Prop) {0 a b : A} (e : a = b) (pa : P a) : P b :=
+def Eq.substProp {A : Type} (0 P : A → Prop) {0 a b : A} (e : a = b) (pa : P a) : P b :=
   (@Eq.congrArg A Prop P b a (@Eq.symm A a b e)).2 pa
 /-- Equivalent propositions are equal: propositional extensionality is definitional
 (`P = Q` computes to a pair of implications). -/
-def Iff.toEq {0 P Q : Prop} (h : P ↔ Q) : P = Q := (h.1, h.2)
+def Iff.toEq {P Q : Prop} (h : P ↔ Q) : P = Q := (h.1, h.2)
 /-- Equal propositions are equivalent. -/
-def Iff.ofEq {0 P Q : Prop} (e : P = Q) : P ↔ Q := ((@Eq.symm Prop P Q e).2, e.2)
+def Iff.ofEq {P Q : Prop} (e : P = Q) : P ↔ Q := ((@Eq.symm Prop P Q e).2, e.2)
 /-- Propositional extensionality, `(P ↔ Q) → P = Q`: a theorem (`Iff.toEq`), not an axiom. -/
-def propext {0 P Q : Prop} (h : P ↔ Q) : P = Q := Iff.toEq h
+def propext {P Q : Prop} (h : P ↔ Q) : P = Q := Iff.toEq h
 /-- Function extensionality is definitional: an equation of functions *is* pointwise,
 `(0 x : A) → f x = g x`. Its binder is erased, so a proof that uses `x` (passes it to a
 lemma that matches on it) can't be written against it directly; `funext` takes the
 unerased form and lets subtyping (quantities don't matter in a Π that is a
 proposition, CoreSpec §11.5) do the rest. -/
-def funext {0 A B : Type} {0 f g : A → B} (h : (x : A) → f x = g x) : f = g := h
+def funext {A B : Type} {0 f g : A → B} (h : (x : A) → f x = g x) : f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
-def congrFun {0 A B : Type} {0 f g : A → B} (e : f = g) (x : A) : f x = g x := e x
+def congrFun {A B : Type} {0 f g : A → B} (e : f = g) (x : A) : f x = g x := e x
 
 -- ## Composing relations: `Trans` and `calc`
 
@@ -253,18 +253,18 @@ class Trans (p q : Prop) (r : outParam Prop) where
   trans : p → q → r
 
 /-- `=` composes with itself. -/
-instance {0 A : Type} {0 a b c : A} : Trans (a = b) (b = c) (a = c) :=
+instance {A : Type} {0 a b c : A} : Trans (a = b) (b = c) (a = c) :=
   Trans.mk (fun e₁ e₂ => Eq.trans e₁ e₂)
 /-- `=` between propositions is transitive. (The generic `Eq.trans` is at a `Type`, and
 `Prop` is a `Sort`, not a `Type`.) -/
-def Eq.transProp {0 P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
+def Eq.transProp {P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
   Iff.toEq (Iff.trans (Iff.ofEq e₁) (Iff.ofEq e₂))
 /-- `=` between propositions composes with itself. (The generic instance does not apply:
 equations of propositions live at `Prop`, not at a `Type`.) -/
-instance {0 P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
+instance {P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
   Trans.mk (fun e₁ e₂ => Eq.transProp e₁ e₂)
 /-- `↔` composes with itself. -/
-instance {0 P Q R : Prop} : Trans (P ↔ Q) (Q ↔ R) (P ↔ R) :=
+instance {P Q R : Prop} : Trans (P ↔ Q) (Q ↔ R) (P ↔ R) :=
   Trans.mk (fun h₁ h₂ => Iff.trans h₁ h₂)
 
 -- ## Booleans

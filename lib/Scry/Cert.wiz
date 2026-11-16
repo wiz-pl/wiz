@@ -121,12 +121,12 @@ def Scry.notLtZero (n : Nat) (h : Nat.lt n 0 = .true) : False :=
   Bool.trueNeFalse (Eq.trans (Eq.symm h) (Nat.lt_zero n))
 
 /-- `List.all` with `Bool.and`, so its head/tail projections are the `Bool.and` ones. -/
-def Scry.allB {0 A : Type} (f : A → Bool) : List A → Bool
+def Scry.allB {A : Type} (f : A → Bool) : List A → Bool
   | .nil => .true
   | .cons x xs => Bool.and (f x) (Scry.allB f xs)
 
 /-- `allB f l = .true` and a valid index give `f` at that index. -/
-def Scry.allB_getD {0 A : Type} (f : A → Bool) (d : A) :
+def Scry.allB_getD {A : Type} (f : A → Bool) (d : A) :
     (l : List A) → Scry.allB f l = .true → (i : Nat) →
       Nat.lt i (List.length l) = .true → f (List.getD l i d) = .true
   | .nil, _, i, hi => absurd (Scry.notLtZero i hi)
@@ -135,17 +135,17 @@ def Scry.allB_getD {0 A : Type} (f : A → Bool) (d : A) :
     Scry.allB_getD f d xs (Scry.andRight (f x) (Scry.allB f xs) h) j hi
 
 /-- `a ++ b` is `a`'s elements then `b`'s (the certificate's node-list append). -/
-def Scry.appendAll {0 A : Type} : List A → List A → List A
+def Scry.appendAll {A : Type} : List A → List A → List A
   | .nil, ys => ys
   | .cons x xs, ys => .cons x (Scry.appendAll xs ys)
 
 /-- `a ++ [] = a`. -/
-def Scry.append_nil {0 A : Type} : (l : List A) → Scry.appendAll l List.nil = l
+def Scry.append_nil {A : Type} : (l : List A) → Scry.appendAll l List.nil = l
   | .nil => rfl
   | .cons x xs => Eq.congrArg (fun ys => List.cons x ys) (Scry.append_nil xs)
 
 /-- `(a ++ b) ++ c = a ++ (b ++ c)`. -/
-def Scry.append_assoc {0 A : Type} :
+def Scry.append_assoc {A : Type} :
     (a b c : List A) → Scry.appendAll (Scry.appendAll a b) c =
       Scry.appendAll a (Scry.appendAll b c)
   | .nil, _, _ => rfl
@@ -156,7 +156,7 @@ def Scry.append_assoc {0 A : Type} :
 /-- A fact holds in a database: a tuple is present; a lattice fact's value is below the
 stored value for its key (an absent key holds nothing). -/
 /-- The value of a lattice key in a database (`bot` when absent). -/
-def Scry.latVal {0 L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+def Scry.latVal {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
     (rel : Nat) (args : List U64) : L :=
   match Scry.Db.findLat db rel args with
   | .none => ops.bot
@@ -164,21 +164,21 @@ def Scry.latVal {0 L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
 
 /-- The Boolean test behind `factHolds`: a tuple is present; a lattice fact's value is
 below the value of its key (`bot` when absent). -/
-def Scry.factHoldsB {0 L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+def Scry.factHoldsB {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
     (f : Scry.PFact L) : Bool :=
   match f with
   | .mk rel args .none => Scry.Db.memTuple db rel args
   | .mk rel args (.some v) => ops.le v (Scry.latVal ops db rel args)
 
 /-- A fact holds in a database. -/
-def Scry.factHolds {0 L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
+def Scry.factHolds {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L)
     (f : Scry.PFact L) : Prop :=
   Scry.factHoldsB ops db f = .true
 
 /-- A body atom holds under an environment: a positive atom's instantiated row is a
 fact; a negated atom's instantiated row is absent (`db` is the completed lower strata);
 a lattice atom reads the value bound to its lattice variable. -/
-def Scry.atomHolds {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.atomHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (a : Scry.Atom) (env : Scry.Env L) : Prop :=
   match a with
   | .pos rel args =>
@@ -190,7 +190,7 @@ def Scry.atomHolds {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
     | .some v => Scry.factHolds p.ops db (Scry.PFact.mk rel (Scry.evalTerms env.vals key) (.some v))
 
 /-- Every body atom holds under `env`, in order. -/
-def Scry.bodyHolds {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.bodyHolds {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     List Scry.Atom → Scry.Env L → Prop
   | .nil, _ => True
   | .cons a rest, env => Scry.atomHolds p db a env ∧ Scry.bodyHolds p db rest env
@@ -217,19 +217,19 @@ structure Scry.Derivation (L : Type) where
 
 /-- The default rule, used only when an index is out of range (the checker rejects
 that case before it matters). -/
-def Scry.defaultRule {0 L : Type} : Scry.Rule L :=
+def Scry.defaultRule {L : Type} : Scry.Rule L :=
   Scry.Rule.mk (Scry.Head.tuple 0 List.nil) List.nil
 
 /-- The default node, the result of an out-of-range premise lookup. -/
-def Scry.defaultNode {0 L : Type} : Scry.ProofNode L :=
+def Scry.defaultNode {L : Type} : Scry.ProofNode L :=
   Scry.ProofNode.mk (Scry.PFact.mk 0 List.nil .none) .edb
 
 /-- The default provenance step, for an out-of-range lookup while explaining. -/
-def Scry.defaultStep {0 L : Type} : Scry.ProofStep L :=
+def Scry.defaultStep {L : Type} : Scry.ProofStep L :=
   Scry.ProofStep.mk 0 (Scry.PFact.mk 0 List.nil .none) .none List.nil
 
 /-- A head fact under an environment. -/
-def Scry.headFactOf {0 L : Type} (p : Scry.Program L) (head : Scry.Head L)
+def Scry.headFactOf {L : Type} (p : Scry.Program L) (head : Scry.Head L)
     (env : Scry.Env L) : Scry.PFact L :=
   match head with
   | .tuple rel args => Scry.PFact.mk rel (Scry.evalTerms env.vals args) .none
@@ -238,42 +238,42 @@ def Scry.headFactOf {0 L : Type} (p : Scry.Program L) (head : Scry.Head L)
       (.some (Scry.LExpr.eval p.ops p.funcs val env.lats))
 
 /-- A rule's head fact under an environment. -/
-def Scry.headFact {0 L : Type} (p : Scry.Program L) (r : Scry.Rule L)
+def Scry.headFact {L : Type} (p : Scry.Program L) (r : Scry.Rule L)
     (env : Scry.Env L) : Scry.PFact L :=
   Scry.headFactOf p r.head env
 
 /-- A database is closed under a program: every rule instance whose body holds has its
 head fact. -/
-def Scry.closed {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) : Prop :=
+def Scry.closed {L : Type} (p : Scry.Program L) (db : Scry.Db L) : Prop :=
   (ri : Nat) → (env : Scry.Env L) →
     Nat.lt ri (List.length p.rules) = .true →
     Scry.bodyHolds p db (List.getD p.rules ri Scry.defaultRule).body env →
     Scry.factHolds p.ops db (Scry.headFact p (List.getD p.rules ri Scry.defaultRule) env)
 
 /-- `a` entails `b` (used for the EDB-to-closed-database inclusion). -/
-def Scry.dbIncl {0 L : Type} (ops : Scry.LatOps L) (a b : Scry.Db L) : Prop :=
+def Scry.dbIncl {L : Type} (ops : Scry.LatOps L) (a b : Scry.Db L) : Prop :=
   (f : Scry.PFact L) → Scry.factHolds ops a f → Scry.factHolds ops b f
 
 /-- **A fact is in the least fixpoint** iff it holds in every database that contains
 the EDB and is closed under the rules (the intersection of all such databases). -/
-def Scry.inLfp {0 L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+def Scry.inLfp {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
     (f : Scry.PFact L) : Prop :=
   (db : Scry.Db L) → Scry.dbIncl p.ops edb db → Scry.closed p db →
     Scry.factHolds p.ops db f
 
 /-- The conclusion of a derivation (the fact at its root position). -/
-def Scry.Derivation.concl {0 L : Type} (d : Scry.Derivation L) : Option (Scry.PFact L) :=
+def Scry.Derivation.concl {L : Type} (d : Scry.Derivation L) : Option (Scry.PFact L) :=
   .some (Scry.ProofNode.fact (List.getD d.nodes d.root Scry.defaultNode))
 
 /-- The number of nodes (the certificate's size). -/
-def Scry.Derivation.size {0 L : Type} (d : Scry.Derivation L) : Nat :=
+def Scry.Derivation.size {L : Type} (d : Scry.Derivation L) : Nat :=
   List.length d.nodes
 
 -- ## The checker
 
 /-- Fact equality for certificates: relation number and columns structurally, lattice
 values through `ops.eq`. Mixed tuple/lattice facts are never equal. -/
-def Scry.factEq {0 L : Type} (ops : Scry.LatOps L) (a b : Scry.PFact L) : Bool :=
+def Scry.factEq {L : Type} (ops : Scry.LatOps L) (a b : Scry.PFact L) : Bool :=
   match a, b with
   | .mk ra arga .none, .mk rb argb .none =>
     Bool.and (Nat.beq ra rb) (Scry.rowEqB arga argb)
@@ -283,23 +283,23 @@ def Scry.factEq {0 L : Type} (ops : Scry.LatOps L) (a b : Scry.PFact L) : Bool :
 
 /-- Structure eta for `PFact`, both directions: the constructor applied to the
 projections is the fact. -/
-def Scry.pfact_eta {0 L : Type} (f : Scry.PFact L) :
+def Scry.pfact_eta {L : Type} (f : Scry.PFact L) :
     Scry.PFact.mk f.rel f.args f.lat = f := rfl
 
-def Scry.pfact_etaR {0 L : Type} (f : Scry.PFact L) :
+def Scry.pfact_etaR {L : Type} (f : Scry.PFact L) :
     f = Scry.PFact.mk f.rel f.args f.lat := rfl
 
 /-- Tuple-fact equality on the fact's fields, with the lattice part as an explicit
 `Option` argument (Wiz's equation compiler reduces an inductive match in a proof, but not
 a structure match, so the fields are passed separately). -/
-def Scry.factEqTLat {0 L : Type} (rel : Nat) (row : List U64)
+def Scry.factEqTLat {L : Type} (rel : Nat) (row : List U64)
     (lat : Option L) (r : Nat) (args : List U64) : Bool :=
   match lat with
   | .none => Bool.and (Nat.beq rel r) (Scry.rowEqB row args)
   | .some _ => Bool.false
 
 /-- The fields a tuple-fact equality pins. -/
-def Scry.factEqTLat_sound {0 L : Type} (rel : Nat) (row : List U64) :
+def Scry.factEqTLat_sound {L : Type} (rel : Nat) (row : List U64) :
     (lat : Option L) → (r : Nat) → (args : List U64) →
     Scry.factEqTLat rel row lat r args = .true →
       (lat = .none ∧ rel = r ∧ row = args)
@@ -312,11 +312,11 @@ def Scry.factEqTLat_sound {0 L : Type} (rel : Nat) (row : List U64) :
   | .some _, _, _, h => absurd h.1
 
 /-- Tuple-fact equality: `f` is the tuple `(rel, row)`. -/
-def Scry.factEqT {0 L : Type} (rel : Nat) (row : List U64) (f : Scry.PFact L) : Bool :=
+def Scry.factEqT {L : Type} (rel : Nat) (row : List U64) (f : Scry.PFact L) : Bool :=
   Scry.factEqTLat rel row f.lat f.rel f.args
 
 /-- A tuple fact `(rel, row)` equal to `f` is the fact `f` itself. -/
-def Scry.factEqT_true {0 L : Type} (rel : Nat) (row : List U64) :
+def Scry.factEqT_true {L : Type} (rel : Nat) (row : List U64) :
     (f : Scry.PFact L) → Scry.factEqT rel row f = .true →
       f = Scry.PFact.mk rel row .none
   | f, h =>
@@ -338,19 +338,19 @@ def Scry.factEqT_true {0 L : Type} (rel : Nat) (row : List U64) :
 
 /-- Head equality for a rule instance: tuple heads use the specialized tuple equality,
 lattice heads the general one (with `ops.eq`). -/
-def Scry.checkHeadEq {0 L : Type} (p : Scry.Program L) (head : Scry.Head L)
+def Scry.checkHeadEq {L : Type} (p : Scry.Program L) (head : Scry.Head L)
     (env : Scry.Env L) (fact : Scry.PFact L) : Bool :=
   match head with
   | .tuple rel args => Scry.factEqT rel (Scry.evalTerms env.vals args) fact
   | .lat _ _ _ => Scry.factEq p.ops (Scry.headFactOf p head env) fact
 
 /-- Is `f` in the database (the EDB leaves of a certificate)? -/
-def Scry.factInDb {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.factInDb {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (f : Scry.PFact L) : Bool :=
   Scry.factHoldsB p.ops db f
 
 /-- `factInDb` is the Boolean form of `factHolds` (definitionally). -/
-def Scry.factInDb_true {0 L : Type} :
+def Scry.factInDb_true {L : Type} :
     (p : Scry.Program L) → (db : Scry.Db L) → (f : Scry.PFact L) →
     Scry.factInDb p db f = .true → Scry.factHolds p.ops db f :=
   fun p db f h => h
@@ -358,7 +358,7 @@ def Scry.factInDb_true {0 L : Type} :
 /-- Check the bodies of a rule instance against the premise positions. The
 environment is supplied by the certificate but every atom is re-instantiated and
 compared with a premise (or the database), so it is not trusted. -/
-def Scry.checkAtoms {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) (env : Scry.Env L)
+def Scry.checkAtoms {L : Type} (p : Scry.Program L) (db : Scry.Db L) (env : Scry.Env L)
     (done : List (Scry.ProofNode L)) : List Scry.Atom → List Nat → Bool
   | .nil, .nil => .true
   | .nil, .cons _ _ => .false
@@ -394,7 +394,7 @@ def Scry.checkAtoms {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) (env : Sc
 
 /-- A lattice join: both facts have the same relation and key, and the conclusion is
 their join. -/
-def Scry.checkJoin {0 L : Type} (p : Scry.Program L) (fa fb f : Scry.PFact L) : Bool :=
+def Scry.checkJoin {L : Type} (p : Scry.Program L) (fa fb f : Scry.PFact L) : Bool :=
   match fa, fb, f with
   | .mk ra arga (.some va), .mk rb argb (.some vb), .mk rf argf (.some v) =>
     if Nat.beq ra rb then
@@ -407,7 +407,7 @@ def Scry.checkJoin {0 L : Type} (p : Scry.Program L) (fa fb f : Scry.PFact L) : 
   | _, _, _ => .false
 
 /-- Check the head and body of a rule instance (the bound on `ri` is the caller's). -/
-def Scry.checkRuleParts {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkRuleParts {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (done : List (Scry.ProofNode L)) (fact : Scry.PFact L) (head : Scry.Head L)
     (body : List Scry.Atom) (env : Scry.Env L) (pids : List Nat) : Bool :=
   if Scry.checkAtoms p db env done body pids then
@@ -417,7 +417,7 @@ def Scry.checkRuleParts {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 /-- Check one node (its fact and kind) against the already-validated prefix `done`.
 The kind is an argument so the soundness proof can reduce the match: Wiz reduces an
 inductive match in a proof, but not a structure match. -/
-def Scry.checkNode {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkNode {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (done : List (Scry.ProofNode L)) (fact : Scry.PFact L)
     (kind : Scry.ProofKind L) : Bool :=
   match kind with
@@ -439,7 +439,7 @@ def Scry.checkNode {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
     else .false
 
 /-- Check every node, in order, against the growing validated prefix. -/
-def Scry.checkNodes {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.checkNodes {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     List (Scry.ProofNode L) → List (Scry.ProofNode L) → Bool
   | _done, .nil => .true
   | done, .cons n rest =>
@@ -451,7 +451,7 @@ def Scry.checkNodes {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
 inside the node list and every node is checked in premise-first order. Stratification
 and range restriction are `Program.check`'s job; the certificate validates one
 derivation, and its soundness does not need them (see the notes). -/
-def Scry.Derivation.check {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.Derivation.check {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (d : Scry.Derivation L) : Bool :=
   if Nat.lt d.root (List.length d.nodes) then
     Scry.checkNodes p db List.nil d.nodes
@@ -481,33 +481,33 @@ def Scry.bodyPos_tail : (a : Scry.Atom) → (rest : List Scry.Atom) →
   | .lat _ _ _, _, h => absurd h.1
 
 /-- Whether a head is a tuple head. -/
-def Scry.headTupleB {0 L : Type} : Scry.Head L → Bool
+def Scry.headTupleB {L : Type} : Scry.Head L → Bool
   | .tuple _ _ => .true
   | .lat _ _ _ => .false
 
 /-- A rule in the positive tuple fragment: a tuple head and a body of positive atoms. -/
-def Scry.Rule.posTuple {0 L : Type} (r : Scry.Rule L) : Bool :=
+def Scry.Rule.posTuple {L : Type} (r : Scry.Rule L) : Bool :=
   Bool.and (Scry.headTupleB r.head) (Scry.bodyPos r.body)
 
 /-- A program in the positive tuple fragment: every rule is. -/
-def Scry.Program.posTuple {0 L : Type} (p : Scry.Program L) : Bool :=
+def Scry.Program.posTuple {L : Type} (p : Scry.Program L) : Bool :=
   Scry.allB Scry.Rule.posTuple p.rules
 
 /-- A kind is join-free (the fragment's derivation side). -/
-def Scry.ProofKind.joinFree {0 L : Type} : Scry.ProofKind L → Bool
+def Scry.ProofKind.joinFree {L : Type} : Scry.ProofKind L → Bool
   | .join _ _ => .false
   | _ => .true
 
 /-- A node is join-free. -/
-def Scry.ProofNode.joinFree {0 L : Type} (n : Scry.ProofNode L) : Bool :=
+def Scry.ProofNode.joinFree {L : Type} (n : Scry.ProofNode L) : Bool :=
   Scry.ProofKind.joinFree n.kind
 
 /-- A derivation has no join nodes. -/
-def Scry.Derivation.tuple {0 L : Type} (d : Scry.Derivation L) : Bool :=
+def Scry.Derivation.tuple {L : Type} (d : Scry.Derivation L) : Bool :=
   Scry.allB Scry.ProofNode.joinFree d.nodes
 
 /-- The rule at a valid index has a tuple head and a positive body. -/
-def Scry.rulePos_of_program {0 L : Type} (p : Scry.Program L)
+def Scry.rulePos_of_program {L : Type} (p : Scry.Program L)
     (hp : Scry.Program.posTuple p = .true) (ri : Nat)
     (hri : Nat.lt ri (List.length p.rules) = .true) :
     Scry.Rule.posTuple (List.getD p.rules ri Scry.defaultRule) = .true :=
@@ -516,13 +516,13 @@ def Scry.rulePos_of_program {0 L : Type} (p : Scry.Program L)
 -- ## Folding the node list
 
 /-- `allInLfp` on a list of nodes: every node's fact is in the least fixpoint. -/
-def Scry.allInLfp {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.allInLfp {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     List (Scry.ProofNode L) → Prop
   | .nil => True
   | .cons n rest => Scry.inLfp p db n.fact ∧ Scry.allInLfp p db rest
 
 /-- Append two checked prefixes. -/
-def Scry.allInLfp_append {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.allInLfp_append {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     (a b : List (Scry.ProofNode L)) → Scry.allInLfp p db a → Scry.allInLfp p db b →
       Scry.allInLfp p db (Scry.appendAll a b)
   | .nil, _, _, hb => hb
@@ -530,13 +530,13 @@ def Scry.allInLfp_append {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     And.intro ha.1 (Scry.allInLfp_append p db rest b ha.2 hb)
 
 /-- A one-node list is checked when its fact is. -/
-def Scry.allInLfp_single {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.allInLfp_single {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (n : Scry.ProofNode L) (h : Scry.inLfp p db n.fact) :
     Scry.allInLfp p db (List.cons n List.nil) :=
   And.intro h True.intro
 
 /-- The fact at a valid position of a checked list is in the least fixpoint. -/
-def Scry.allInLfp_getD {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.allInLfp_getD {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     (l : List (Scry.ProofNode L)) → Scry.allInLfp p db l → (i : Nat) →
       Nat.lt i (List.length l) = .true →
       Scry.inLfp p db (Scry.ProofNode.fact (List.getD l i Scry.defaultNode))
@@ -546,19 +546,19 @@ def Scry.allInLfp_getD {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     Scry.allInLfp_getD p db rest ha.2 j hi
 
 /-- Transport `allInLfp` along an equality of node lists. -/
-def Scry.allInLfp_congr {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.allInLfp_congr {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     (a b : List (Scry.ProofNode L)) → a = b →
     Scry.allInLfp p db a → Scry.allInLfp p db b :=
   fun a b e h => @Eq.substProp (List (Scry.ProofNode L)) (fun l => Scry.allInLfp p db l) a b e h
 
 /-- Transport a fact's membership along an equality of facts. -/
-def Scry.factHolds_congr {0 L : Type} (ops : Scry.LatOps L) (db : Scry.Db L) :
+def Scry.factHolds_congr {L : Type} (ops : Scry.LatOps L) (db : Scry.Db L) :
     (f g : Scry.PFact L) → f = g →
     Scry.factHolds ops db f → Scry.factHolds ops db g :=
   fun f g e h => @Eq.substProp (Scry.PFact L) (fun x => Scry.factHolds ops db x) f g e h
 
 /-- Transport `inLfp` along an equality of facts. -/
-def Scry.inLfp_congr {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
+def Scry.inLfp_congr {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
     (f g : Scry.PFact L) → f = g → Scry.inLfp p db f → Scry.inLfp p db g :=
   fun f g e h => @Eq.substProp (Scry.PFact L) (fun x => Scry.inLfp p db x) f g e h
 
@@ -566,7 +566,7 @@ def Scry.inLfp_congr {0 L : Type} (p : Scry.Program L) (db : Scry.Db L) :
 
 /-- **The body of a checked rule instance holds in every closed database containing
 the EDB**, given that every premise fact is in the least fixpoint. -/
-def Scry.checkAtoms_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkAtoms_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (env : Scry.Env L) (done : List (Scry.ProofNode L)) :
     (body : List Scry.Atom) → (pids : List Nat) →
     Scry.allInLfp p db done →
@@ -618,7 +618,7 @@ def Scry.checkAtoms_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 /-- **A checked rule instance's fact is in the least fixpoint** (positive tuple
 fragment). The head is an equation argument, so the tuple branch can compute its fact
 and the lattice branch is excluded by `Rule.posTuple`. -/
-def Scry.checkRuleParts_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkRuleParts_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (done : List (Scry.ProofNode L)) (hprog : Scry.Program.posTuple p = .true)
     (hdone : Scry.allInLfp p db done) :
     (ri : Nat) → (hri : Nat.lt ri (List.length p.rules) = .true) →
@@ -664,7 +664,7 @@ def Scry.checkRuleParts_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
     absurd hhead.1
 
 /-- **A checked node is in the least fixpoint** (the local step of the induction). -/
-def Scry.checkNode_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkNode_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (done : List (Scry.ProofNode L)) (hprog : Scry.Program.posTuple p = .true)
     (hdone : Scry.allInLfp p db done) :
     (fact : Scry.PFact L) → (kind : Scry.ProofKind L) →
@@ -695,7 +695,7 @@ def Scry.checkNode_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
   | _fact, .join _ _, hfree, _hcheck => absurd hfree.1
 
 /-- **Every checked node is in the least fixpoint** (the list induction). -/
-def Scry.checkNodes_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkNodes_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (hprog : Scry.Program.posTuple p = .true) :
     (done nodes : List (Scry.ProofNode L)) →
     Scry.allInLfp p db done →
@@ -733,7 +733,7 @@ def Scry.checkNodes_sound {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 
 /-- **`Derivation.check` is sound on the positive tuple fragment**: an accepted
 certificate's conclusion is in the least fixpoint of the program over the EDB. -/
-def Scry.checkSoundPosTupleStmt {0 L : Type} (p : Scry.Program L) : Prop :=
+def Scry.checkSoundPosTupleStmt {L : Type} (p : Scry.Program L) : Prop :=
   (db : Scry.Db L) → (d : Scry.Derivation L) → (f : Scry.PFact L) →
     Scry.Derivation.tuple d = .true →
     Scry.Derivation.concl d = .some f →
@@ -741,7 +741,7 @@ def Scry.checkSoundPosTupleStmt {0 L : Type} (p : Scry.Program L) : Prop :=
     Scry.inLfp p db f
 
 /-- The positive tuple fragment's soundness theorem. -/
-def Scry.check_sound_posTuple {0 L : Type} (p : Scry.Program L)
+def Scry.check_sound_posTuple {L : Type} (p : Scry.Program L)
     (hprog : Scry.Program.posTuple p = .true) : Scry.checkSoundPosTupleStmt p :=
   fun db d f htuple hconcl hcheck =>
     let hb : Nat.lt d.root (List.length d.nodes) = .true ∧
@@ -766,7 +766,7 @@ def Scry.renderRow (row : List U64) : String :=
   String.intercalate "," (List.map (fun x => Nat.repr (UIntN.toNat x)) row)
 
 /-- Render a fact (`r3(1,2)`; a lattice fact adds `=value`). -/
-def Scry.renderFact {0 L : Type} (showL : L → String) (f : Scry.PFact L) : String :=
+def Scry.renderFact {L : Type} (showL : L → String) (f : Scry.PFact L) : String :=
   let base : String :=
     String.append "r" (String.append (Nat.repr f.rel)
       (String.append "(" (String.append (Scry.renderRow f.args) ")")));
@@ -775,7 +775,7 @@ def Scry.renderFact {0 L : Type} (showL : L → String) (f : Scry.PFact L) : Str
   | .some v => String.append base (String.append "=" (showL v))
 
 /-- Render a node's justification. -/
-def Scry.renderKind {0 L : Type} (k : Scry.ProofKind L) : String :=
+def Scry.renderKind {L : Type} (k : Scry.ProofKind L) : String :=
   match k with
   | .edb => "edb"
   | .rule ri _ pids =>
@@ -785,7 +785,7 @@ def Scry.renderKind {0 L : Type} (k : Scry.ProofKind L) : String :=
     String.append "join " (String.append (Nat.repr a) (String.append " " (Nat.repr b)))
 
 /-- The lines of a derivation, one per node, numbering from `i`. -/
-def Scry.renderNodes {0 L : Type} (showL : L → String) :
+def Scry.renderNodes {L : Type} (showL : L → String) :
     Nat → List (Scry.ProofNode L) → List String
   | _, .nil => List.nil
   | i, .cons n rest =>
@@ -797,21 +797,21 @@ def Scry.renderNodes {0 L : Type} (showL : L → String) :
 
 /-- Render a derivation: one line per node in premise-first order, then the root
 position. This is the string a finding carries (`scry explain` prints it). -/
-def Scry.Derivation.render {0 L : Type} (showL : L → String)
+def Scry.Derivation.render {L : Type} (showL : L → String)
     (d : Scry.Derivation L) : String :=
   String.append (String.intercalate "\n" (Scry.renderNodes showL 0 d.nodes))
     (String.append "\nroot: " (Nat.repr d.root))
 
 /-- The checked witness for a finding: `explain` returns the derivation only if it
 checks against the EDB, so a caller that prints it can trust the check result. -/
-def Scry.explain {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.explain {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (d : Scry.Derivation L) : Option (Scry.Derivation L) :=
   if Scry.Derivation.check p db d then .some d else .none
 
 -- ## Rebuilding a certificate from the evaluator's provenance
 
 /-- Insert a provenance step into a list sorted by id. -/
-def Scry.insertStep {0 L : Type} (s : Scry.ProofStep L) :
+def Scry.insertStep {L : Type} (s : Scry.ProofStep L) :
     List (Scry.ProofStep L) → List (Scry.ProofStep L)
   | .nil => List.cons s List.nil
   | .cons t ts =>
@@ -819,19 +819,19 @@ def Scry.insertStep {0 L : Type} (s : Scry.ProofStep L) :
     else List.cons t (Scry.insertStep s ts)
 
 /-- Provenance steps sorted by id (a topological order: a premise's id is smaller). -/
-def Scry.sortSteps {0 L : Type} : List (Scry.ProofStep L) → List (Scry.ProofStep L)
+def Scry.sortSteps {L : Type} : List (Scry.ProofStep L) → List (Scry.ProofStep L)
   | .nil => List.nil
   | .cons s rest => Scry.insertStep s (Scry.sortSteps rest)
 
 /-- The position of a step id in a sorted list. -/
-def Scry.stepPosL {0 L : Type} (id : Nat) : List (Scry.ProofStep L) → Nat → Option Nat
+def Scry.stepPosL {L : Type} (id : Nat) : List (Scry.ProofStep L) → Nat → Option Nat
   | .nil, _ => .none
   | .cons s rest, i =>
     if Nat.beq s.id id then .some i else Scry.stepPosL id rest (Nat.succ i)
 
 /-- Renumber premise ids to positions (an unknown id maps past the end, so the checker
 rejects it). -/
-def Scry.renumberPids {0 L : Type} (steps : List (Scry.ProofStep L))
+def Scry.renumberPids {L : Type} (steps : List (Scry.ProofStep L))
     (ids : List Nat) : List Nat :=
   List.map (fun id =>
     match Scry.stepPosL id steps 0 with
@@ -842,7 +842,7 @@ def Scry.renumberPids {0 L : Type} (steps : List (Scry.ProofStep L))
 positive atom's terms with the premise's row, and bind each lattice variable to the
 premise's value. (A reconstruction that disagrees with the facts is simply rejected by
 the checker, so this is untrusted convenience, not a trusted part.) -/
-def Scry.envOfAtoms {0 L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
+def Scry.envOfAtoms {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
     List Scry.Atom → List Nat → Scry.Env L → Option (Scry.Env L)
   | .nil, _, env => .some env
   | .cons a rest, pids, env =>
@@ -873,7 +873,7 @@ def Scry.envOfAtoms {0 L : Type} (p : Scry.Program L) (steps : List (Scry.ProofS
         | .mk _ _ .none => .none
 
 /-- Turn a provenance step into a proof node (rebuilding the environment). -/
-def Scry.nodeOfStep {0 L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L))
+def Scry.nodeOfStep {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L))
     (s : Scry.ProofStep L) : Option (Scry.ProofNode L) :=
   match s.rule with
   | .none => .some (Scry.ProofNode.mk s.fact .edb)
@@ -887,7 +887,7 @@ def Scry.nodeOfStep {0 L : Type} (p : Scry.Program L) (steps : List (Scry.ProofS
     else .none
 
 /-- Turn every provenance step into a proof node. -/
-def Scry.nodesOfSteps {0 L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
+def Scry.nodesOfSteps {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
     List (Scry.ProofStep L) → Option (List (Scry.ProofNode L))
   | .nil => .some List.nil
   | .cons s rest =>
@@ -904,7 +904,7 @@ against `edb` (the input facts, not the derived state); `.none` means the proven
 did not produce a valid certificate. Lattice findings are not reconstructed here: a
 lattice step records the accumulated value, not its contribution, so joining the
 contributions needs an engine that stores them (see the notes). -/
-def Scry.State.explainTuple {0 L : Type} (p : Scry.Program L) (edb : Scry.Db L)
+def Scry.State.explainTuple {L : Type} (p : Scry.Program L) (edb : Scry.Db L)
     (st : Scry.State L) (rel : Nat) (row : List U64) : Option (Scry.Derivation L) :=
   match st.whyTuple p.ops rel row with
   | .none => .none
@@ -923,7 +923,7 @@ def Scry.State.explainTuple {0 L : Type} (p : Scry.Program L) (edb : Scry.Db L)
 
 -- ## Lattice laws and the full proof (all node kinds)
 
-structure Scry.LatLaws {0 L : Type} (ops : Scry.LatOps L) where
+structure Scry.LatLaws {L : Type} (ops : Scry.LatOps L) where
   eq_refl : (a : L) -> ops.eq a a = .true
   eq_sound : (a b : L) -> ops.eq a b = .true -> a = b
   join_idem : (a : L) -> ops.join a a = a
@@ -931,13 +931,13 @@ structure Scry.LatLaws {0 L : Type} (ops : Scry.LatOps L) where
   join_assoc : (a b c : L) -> ops.join (ops.join a b) c = ops.join a (ops.join b c)
 
 /-- `le a a`. -/
-def Scry.le_refl {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.le_refl {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (a : L) : Scry.LatOps.le ops a a = .true :=
   @Eq.substProp L (fun x => ops.eq x a = .true) a (ops.join a a)
     (Eq.symm (laws.join_idem a)) (laws.eq_refl a)
 
 /-- `le` is transitive. -/
-def Scry.le_trans {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.le_trans {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (a b c : L) (hab : Scry.LatOps.le ops a b = .true)
     (hbc : Scry.LatOps.le ops b c = .true) : Scry.LatOps.le ops a c = .true :=
   let e1 : ops.join a b = b := laws.eq_sound (ops.join a b) b hab;
@@ -954,7 +954,7 @@ def Scry.le_trans {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (Eq.symm s) (laws.eq_refl c)
 
 /-- `a` is below `a ⊔ b`. -/
-def Scry.join_ub_left {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.join_ub_left {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (a b : L) : Scry.LatOps.le ops a (ops.join a b) = .true :=
   let e1 : ops.join a (ops.join a b) = ops.join (ops.join a a) b :=
     Eq.symm (laws.join_assoc a a b);
@@ -966,7 +966,7 @@ def Scry.join_ub_left {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws op
     (laws.eq_refl (ops.join a b))
 
 /-- `b` is below `a ⊔ b`. -/
-def Scry.join_ub_right {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.join_ub_right {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (a b : L) : Scry.LatOps.le ops b (ops.join a b) = .true :=
   let e1 : ops.join b (ops.join a b) = ops.join (ops.join b a) b :=
     Eq.symm (laws.join_assoc b a b);
@@ -983,7 +983,7 @@ def Scry.join_ub_right {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws o
     (laws.eq_refl (ops.join a b))
 
 /-- The join is the least upper bound. -/
-def Scry.join_least {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.join_least {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (a b c : L) (ha : Scry.LatOps.le ops a c = .true)
     (hb : Scry.LatOps.le ops b c = .true) :
     Scry.LatOps.le ops (ops.join a b) c = .true :=
@@ -999,7 +999,7 @@ def Scry.join_least {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
 
 /-- A database inclusion is monotone for lattice values: the stored value of a key in
 `db` is below its value in any included `db'`. -/
-def Scry.latVal_le {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
+def Scry.latVal_le {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
     (db db' : Scry.Db L) (hincl : Scry.dbIncl ops db db')
     (rel : Nat) (key : List U64) :
     Scry.LatOps.le ops (Scry.latVal ops db rel key)
@@ -1010,7 +1010,7 @@ def Scry.latVal_le {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops)
 /-- `factEq` is sound: it only compares equal facts.  Written on the fields with the
 lattice part as an explicit `Option` (Wiz reduces an inductive match in a proof, but not
 a structure match), as `factEqTLat` is. -/
-def Scry.factEq_sound {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops) :
+def Scry.factEq_sound {L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws ops) :
     (ra : Nat) -> (arga : List U64) -> (la : Option L) ->
     (rb : Nat) -> (argb : List U64) -> (lb : Option L) ->
     Scry.factEq ops (@Scry.PFact.mk L ra arga la) (@Scry.PFact.mk L rb argb lb) = .true ->
@@ -1063,7 +1063,7 @@ def Scry.factEq_sound {0 L : Type} (ops : Scry.LatOps L) (laws : Scry.LatLaws op
 
 /-- `checkHeadEq` soundness: a checked node fact is the rule head's fact under the
 certificate's environment. -/
-def Scry.checkHeadEq_sound {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
+def Scry.checkHeadEq_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
     (head : Scry.Head L) -> (env : Scry.Env L) -> (fact : Scry.PFact L) ->
     Scry.checkHeadEq p head env fact = .true ->
       fact = Scry.headFactOf p head env
@@ -1141,24 +1141,24 @@ def Scry.bodyNegRelsOk_true_of_bodyHasNeg_false (frozen : Nat -> Bool) :
   | .cons (.neg rel args) rest, h => absurd h.1
 
 /-- A predicate on all facts in a node list (generic form of `allInLfp`). -/
-def Scry.AllOn {0 L : Type} (P : Scry.PFact L -> Prop) :
+def Scry.AllOn {L : Type} (P : Scry.PFact L -> Prop) :
     List (Scry.ProofNode L) -> Prop
   | .nil => True
   | .cons n rest => P n.fact ∧ Scry.AllOn P rest
 
-def Scry.AllOn_append {0 L : Type} (P : Scry.PFact L -> Prop) :
+def Scry.AllOn_append {L : Type} (P : Scry.PFact L -> Prop) :
     (a b : List (Scry.ProofNode L)) -> Scry.AllOn P a -> Scry.AllOn P b ->
       Scry.AllOn P (Scry.appendAll a b)
   | .nil, _, _, hb => hb
   | .cons n rest, b, ha, hb =>
     And.intro ha.1 (Scry.AllOn_append P rest b ha.2 hb)
 
-def Scry.AllOn_single {0 L : Type} (P : Scry.PFact L -> Prop)
+def Scry.AllOn_single {L : Type} (P : Scry.PFact L -> Prop)
     (n : Scry.ProofNode L) (h : P n.fact) :
     Scry.AllOn P (List.cons n List.nil) :=
   And.intro h True.intro
 
-def Scry.AllOn_getD {0 L : Type} (P : Scry.PFact L -> Prop) :
+def Scry.AllOn_getD {L : Type} (P : Scry.PFact L -> Prop) :
     (l : List (Scry.ProofNode L)) -> Scry.AllOn P l -> (i : Nat) ->
       Nat.lt i (List.length l) = .true ->
       P (Scry.ProofNode.fact (List.getD l i Scry.defaultNode))
@@ -1167,7 +1167,7 @@ def Scry.AllOn_getD {0 L : Type} (P : Scry.PFact L -> Prop) :
   | .cons n rest, ha, .succ j, hi =>
     Scry.AllOn_getD P rest ha.2 j hi
 
-def Scry.AllOn_congr {0 L : Type} (P : Scry.PFact L -> Prop) :
+def Scry.AllOn_congr {L : Type} (P : Scry.PFact L -> Prop) :
     (a b : List (Scry.ProofNode L)) -> a = b ->
     Scry.AllOn P a -> Scry.AllOn P b :=
   fun a b e h => @Eq.substProp (List (Scry.ProofNode L)) (fun l => Scry.AllOn P l)
@@ -1176,7 +1176,7 @@ def Scry.AllOn_congr {0 L : Type} (P : Scry.PFact L -> Prop) :
 /-- A database extension preserves the absences of `db` on the `frozen` relations: a
 tuple of a frozen relation absent from `db` is absent from `db'`. A stratum's lower
 relations are exactly such an extension (see the notes). -/
-def Scry.NegTransfer {0 L : Type} (frozen : Nat -> Bool) (db db' : Scry.Db L) : Prop :=
+def Scry.NegTransfer {L : Type} (frozen : Nat -> Bool) (db db' : Scry.Db L) : Prop :=
   (rel : Nat) -> frozen rel = .true -> (row : List U64) ->
     Scry.Db.memTuple db rel row = .false ->
     Scry.Db.memTuple db' rel row = .false
@@ -1185,7 +1185,7 @@ def Scry.NegTransfer {0 L : Type} (frozen : Nat -> Bool) (db db' : Scry.Db L) : 
 every database containing `db`, closed under the rules, and satisfying `agree`. With
 `agree` the empty predicate this is vacuous; with `agree = NegTransfer db` it is the
 stratified reading of a derivation at one stratum. -/
-def Scry.inLfpAgree {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.inLfpAgree {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (agree : Scry.Db L -> Prop) (f : Scry.PFact L) : Prop :=
   (db' : Scry.Db L) -> Scry.dbIncl p.ops db db' -> Scry.closed p db' ->
     agree db' -> Scry.factHolds p.ops db' f
@@ -1193,12 +1193,12 @@ def Scry.inLfpAgree {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 /-- The semantics used by the full checker: extensions that add no tuple absent from
 the EDB on the frozen relations. A stratified program freezes its lower-stratum
 relations, so a negated atom sees exactly the completed lower model. -/
-def Scry.inLfpNeg {0 L : Type} (p : Scry.Program L) (frozen : Nat -> Bool)
+def Scry.inLfpNeg {L : Type} (p : Scry.Program L) (frozen : Nat -> Bool)
     (db : Scry.Db L) (f : Scry.PFact L) : Prop :=
   Scry.inLfpAgree p db (Scry.NegTransfer frozen db) f
 
 /-- A `match` on an `Option` known to be `none` is its default. -/
-def Scry.matchNone_eq {0 A B : Type} (o : Option A) (d : B) (f : A -> B)
+def Scry.matchNone_eq {A B : Type} (o : Option A) (d : B) (f : A -> B)
     (he : o = .none) :
     (match o with | .none => d | .some a => f a) = d :=
   @Eq.substProp (Option A)
@@ -1206,7 +1206,7 @@ def Scry.matchNone_eq {0 A B : Type} (o : Option A) (d : B) (f : A -> B)
     .none o (Eq.symm he) rfl
 
 /-- A `match` on an `Option` known to be `some a` is the `some` branch. -/
-def Scry.matchSome_eq {0 A B : Type} (o : Option A) (a : A) (d : B) (f : A -> B)
+def Scry.matchSome_eq {A B : Type} (o : Option A) (a : A) (d : B) (f : A -> B)
     (he : o = .some a) :
     (match o with | .none => d | .some a => f a) = f a :=
   @Eq.substProp (Option A)
@@ -1215,7 +1215,7 @@ def Scry.matchSome_eq {0 A B : Type} (o : Option A) (a : A) (d : B) (f : A -> B)
 
 /-- The `lat` branch's Boolean test, with the looked-up value passed explicitly (so a
 proof can case on it as a variable). -/
-def Scry.checkLatMatchB {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.checkLatMatchB {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (env : Scry.Env L) (done : List (Scry.ProofNode L))
     (rel : Nat) (key : List Scry.Term) (rest : List Scry.Atom)
     (ps : List Nat) (pid : Nat) (o : Option L) : Bool :=
@@ -1229,7 +1229,7 @@ def Scry.checkLatMatchB {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 
 /-- The lattice atom's meaning, with its matched value passed explicitly (so the proof can
 case on the `Option` as a variable). -/
-def Scry.latHoldsAt {0 L : Type} (p : Scry.Program L) (db' : Scry.Db L)
+def Scry.latHoldsAt {L : Type} (p : Scry.Program L) (db' : Scry.Db L)
     (rel : Nat) (key : List U64) (o : Option L) : Prop :=
   match o with
   | .none => False
@@ -1237,7 +1237,7 @@ def Scry.latHoldsAt {0 L : Type} (p : Scry.Program L) (db' : Scry.Db L)
 
 /-- One checked `lat` atom: the value lookup succeeded, the premise matches the body
 fact, and the premise is in the least fixpoint, so the atom holds. -/
-def Scry.checkLatAtom_sound {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkLatAtom_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (db' : Scry.Db L)
     (hincl : Scry.dbIncl p.ops db db') (hclosed : Scry.closed p db')
     (hagree : agree db') (env : Scry.Env L) (done : List (Scry.ProofNode L))
@@ -1286,7 +1286,7 @@ least fixpoint of the extensions satisfying `agree`, then the body holds in a pa
 such extension `db'`. The `hneg` argument supplies the absence of a checked negated tuple
 in `db'` for the frozen relations, and `hok` says every negated atom of the body names a
 frozen relation; both are vacuous for bodies without negations. -/
-def Scry.checkAtoms_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkAtoms_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (frozen : Nat -> Bool)
     (db' : Scry.Db L)
     (hincl : Scry.dbIncl p.ops db db') (hclosed : Scry.closed p db')
@@ -1378,7 +1378,7 @@ def Scry.checkAtoms_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.Lat
 
 /-- **A checked join's fields**: all three facts are lattice facts and the conclusion is
 their join. -/
-def Scry.checkJoin_fields {0 L : Type} (p : Scry.Program L)
+def Scry.checkJoin_fields {L : Type} (p : Scry.Program L)
     (ra : Nat) (arga : List U64) (va : L)
     (rb : Nat) (argb : List U64) (vb : L)
     (rf : Nat) (argf : List U64) (v : L)
@@ -1421,7 +1421,7 @@ def Scry.checkJoin_fields {0 L : Type} (p : Scry.Program L)
 
 /-- **A checked join is in the least fixpoint**: the join of two facts in the least
 fixpoint is below the key's stored value in every relevant extension. -/
-def Scry.checkJoin_sound {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkJoin_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop)
     (ra : Nat) (arga : List U64) (va : L)
     (rb : Nat) (argb : List U64) (vb : L)
@@ -1472,7 +1472,7 @@ def Scry.checkJoin_sound {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws 
 
 /-- `checkJoin_sound` on arbitrary facts: the mixed tuple/lattice cases are rejected by
 the checker. -/
-def Scry.checkJoin_sound_facts {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkJoin_sound_facts {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) :
     (ra : Nat) -> (arga : List U64) -> (la : Option L) ->
     (rb : Nat) -> (argb : List U64) -> (lb : Option L) ->
@@ -1490,7 +1490,7 @@ def Scry.checkJoin_sound_facts {0 L : Type} (p : Scry.Program L) (laws : Scry.La
   | _, _, .some _, _, _, .some _, _, _, .none, _, _, hcheck => absurd hcheck.1
 
 /-- **A checked rule instance's fact is in the least fixpoint** (all rule shapes). -/
-def Scry.checkRuleParts_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkRuleParts_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (frozen : Nat -> Bool)
     (done : List (Scry.ProofNode L))
     (hdone : Scry.AllOn (Scry.inLfpAgree p db agree) done) :
@@ -1537,7 +1537,7 @@ def Scry.checkRuleParts_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry
         (@Eq.symm (Scry.PFact L) fact (Scry.headFactOf p head env) heq) hfhHead
 
 /-- **A checked node is in the least fixpoint** (all node kinds). -/
-def Scry.checkNode_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkNode_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (frozen : Nat -> Bool)
     (done : List (Scry.ProofNode L))
     (hdone : Scry.AllOn (Scry.inLfpAgree p db agree) done) :
@@ -1606,7 +1606,7 @@ def Scry.checkNode_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.LatL
       hfa hfb h2.2
 
 /-- Transport `inLfpAgree` along an equality of facts. -/
-def Scry.inLfpAgree_congr {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
+def Scry.inLfpAgree_congr {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (agree : Scry.Db L -> Prop) :
     (f g : Scry.PFact L) -> f = g ->
     Scry.inLfpAgree p db agree f -> Scry.inLfpAgree p db agree g :=
@@ -1615,7 +1615,7 @@ def Scry.inLfpAgree_congr {0 L : Type} (p : Scry.Program L) (db : Scry.Db L)
 
 /-- **Every checked node is in the least fixpoint** (the list induction, all node
 kinds). -/
-def Scry.checkNodes_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.checkNodes_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (db : Scry.Db L) (agree : Scry.Db L -> Prop) (frozen : Nat -> Bool)
     (hneg : (db' : Scry.Db L) -> agree db' -> (ri : Nat) ->
       (hri : Nat.lt ri (List.length p.rules) = .true) ->
@@ -1657,7 +1657,7 @@ def Scry.checkNodes_sound_all {0 L : Type} (p : Scry.Program L) (laws : Scry.Lat
 semantics: for any frozen set that contains every relation the program negates, the
 conclusion is in the least fixpoint of the extensions that add no absent tuple of a
 frozen relation. -/
-def Scry.checkSoundNegStmt {0 L : Type} (p : Scry.Program L) (frozen : Nat -> Bool)
+def Scry.checkSoundNegStmt {L : Type} (p : Scry.Program L) (frozen : Nat -> Bool)
     (hokRule : (ri : Nat) -> (hri : Nat.lt ri (List.length p.rules) = .true) ->
       Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true) :
     Prop :=
@@ -1668,7 +1668,7 @@ def Scry.checkSoundNegStmt {0 L : Type} (p : Scry.Program L) (frozen : Nat -> Bo
 
 /-- The full soundness theorem (negation handled by frozen relations, lattice facts by
 `LatLaws`). -/
-def Scry.check_sound_neg {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.check_sound_neg {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (frozen : Nat -> Bool)
     (hokRule : (ri : Nat) -> (hri : Nat.lt ri (List.length p.rules) = .true) ->
       Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true) :
@@ -1706,15 +1706,15 @@ def Scry.not_true_false : (b : Bool) -> Bool.not b = .true -> b = .false
   | .false, _ => rfl
 
 /-- A rule body has no negation. -/
-def Scry.Rule.negFree {0 L : Type} (r : Scry.Rule L) : Bool :=
+def Scry.Rule.negFree {L : Type} (r : Scry.Rule L) : Bool :=
   Bool.not (Scry.bodyHasNeg r.body)
 
 /-- Every rule body of a program has no negation. -/
-def Scry.Program.negFree {0 L : Type} (p : Scry.Program L) : Bool :=
+def Scry.Program.negFree {L : Type} (p : Scry.Program L) : Bool :=
   Scry.allB Scry.Rule.negFree p.rules
 
 /-- A valid rule of a neg-free program has a neg-free body. -/
-def Scry.ruleNegFree_of_program {0 L : Type} (p : Scry.Program L)
+def Scry.ruleNegFree_of_program {L : Type} (p : Scry.Program L)
     (hp : Scry.Program.negFree p = .true) (ri : Nat)
     (hri : Nat.lt ri (List.length p.rules) = .true) :
     Scry.bodyHasNeg (List.getD p.rules ri Scry.defaultRule).body = .false :=
@@ -1722,7 +1722,7 @@ def Scry.ruleNegFree_of_program {0 L : Type} (p : Scry.Program L)
     (Scry.allB_getD Scry.Rule.negFree Scry.defaultRule p.rules hp ri hri)
 
 /-- The old, unconditional `inLfp` statement for programs without negation. -/
-def Scry.checkSoundNegFreeStmt {0 L : Type} (p : Scry.Program L) : Prop :=
+def Scry.checkSoundNegFreeStmt {L : Type} (p : Scry.Program L) : Prop :=
   (db : Scry.Db L) -> (d : Scry.Derivation L) -> (f : Scry.PFact L) ->
     Scry.Derivation.concl d = .some f ->
     Scry.Derivation.check p db d = .true ->
@@ -1730,7 +1730,7 @@ def Scry.checkSoundNegFreeStmt {0 L : Type} (p : Scry.Program L) : Prop :=
 
 /-- **`Derivation.check` is sound for negation-free programs** (lattice rules and join
 nodes included): the conclusion is in the least fixpoint in the original sense. -/
-def Scry.check_sound_negFree {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
+def Scry.check_sound_negFree {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (hp : Scry.Program.negFree p = .true) : Scry.checkSoundNegFreeStmt p :=
   fun db d f hconcl hcheck =>
     let frozen : Nat -> Bool := fun _ => Bool.false;
@@ -1778,13 +1778,13 @@ fixpoint of the extensions that add no absent tuple of a frozen relation
 part needs `LatLaws`, and the negation part needs the frozen-set side condition. The
 original `Scry.inLfp` statement is proved for negation-free programs by
 `Scry.check_sound_negFree`, which includes lattice rules and `join` nodes. -/
-def Scry.checkSoundStmt {0 L : Type} (p : Scry.Program L) : Prop :=
+def Scry.checkSoundStmt {L : Type} (p : Scry.Program L) : Prop :=
   (frozen : Nat -> Bool) ->
   (hok : (ri : Nat) -> (hri : Nat.lt ri (List.length p.rules) = .true) ->
     Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true) ->
   Scry.checkSoundNegStmt p frozen hok
 
 /-- The full soundness theorem. -/
-def Scry.check_sound {0 L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
+def Scry.check_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops) :
     Scry.checkSoundStmt p :=
   fun frozen hok => Scry.check_sound_neg p laws frozen hok

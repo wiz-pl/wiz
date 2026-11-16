@@ -44,7 +44,7 @@ axiom Loc : Type → Type
 -- owning the cell `l`, which holds `v`: no constructor, no ω producer
 /-- Owning the cell `l`, which holds `v`: no constructor and no ω producer, so a token is
 used at quantity 1 (exactly once). -/
-axiom Pts : {0 V : Type} → Loc V → V → Type
+axiom Pts : {V : Type} → Loc V → V → Type
 
 -- a full cell and its token
 private extern "wiz_ref_new" Ref.newRaw : {0 V : Type} → (v : V) → IO ((l : Loc V) × Pts l v)
@@ -60,7 +60,7 @@ private extern "wiz_ref_free" Ref.freeRaw : {0 V : Type} → (l : Loc V) → {0 
 
 -- `{emp} new v {l. l ↦ v}`: a new cell holding `v`, and its token
 /-- A new cell holding `v`, and its token (`{emp} new v {l. l ↦ v}`). -/
-def Ref.new {0 V B : Type} (v : V) (1 k : (l : Loc V) → (1 t : Pts l v) → IO B) : IO B :=
+def Ref.new {V B : Type} (v : V) (1 k : (l : Loc V) → (1 t : Pts l v) → IO B) : IO B :=
   fun w => let 1 (r, w') := Ref.newRaw v w; k r.1 r.2 w'
 -- `{l ↦ v} get l {a. \[a = v] ⋆ l ↦ v}`: reading takes the token and hands it back (an
 -- erased use would not do: a stale token, kept at quantity 0 past a `set`, would read the
@@ -69,18 +69,18 @@ def Ref.new {0 V B : Type} (v : V) (1 k : (l : Loc V) → (1 t : Pts l v) → IO
 (`{l ↦ v} get l {a. [a = v] ⋆ l ↦ v}`). Reading takes the token: an erased use would
 let a stale token, kept past a `set`, read the new value with a proof that it is the old
 one. -/
-def Ref.get {0 V B : Type} (l : Loc V) {0 v : V} (1 t : Pts l v)
+def Ref.get {V B : Type} (l : Loc V) {0 v : V} (1 t : Pts l v)
     (1 k : (a : V) → (0 e : a = v) → (1 t : Pts l v) → IO B) : IO B :=
   fun w => let 1 (r, w') := Ref.readRaw l t w; k r.1 r.2.1 r.2.2 w'
 /-- Write `w`; the token comes back indexed by `w` (`{l ↦ v} set l x {l ↦ x}`). -/
-def Ref.set {0 V B : Type} (l : Loc V) (x : V) {0 v : V} (1 t : Pts l v) (1 k : (1 t' : Pts l x) → IO B) : IO B :=
+def Ref.set {V B : Type} (l : Loc V) (x : V) {0 v : V} (1 t : Pts l v) (1 k : (1 t' : Pts l x) → IO B) : IO B :=
   fun w => let 1 (t', w') := Ref.writeRaw l x t w; k t' w'
 /-- Give up the cell: the token is consumed and the value released (`{l ↦ v} free l
 {emp}`); the cell's memory goes when the last `Loc` does. -/
-def Ref.free {0 V B : Type} (l : Loc V) {0 v : V} (1 t : Pts l v) (1 next : IO B) : IO B :=
+def Ref.free {V B : Type} (l : Loc V) {0 v : V} (1 t : Pts l v) (1 next : IO B) : IO B :=
   fun w => let 1 (u, w') := Ref.freeRaw l t w; next w'
 
 /-- A token whose index is known equal to another value, retyped (erased proof, linear
 token). -/
-def Pts.cast {0 V : Type} {0 l : Loc V} {0 a b : V} (0 e : a = b) (1 t : Pts l a) : Pts l b :=
+def Pts.cast {V : Type} {0 l : Loc V} {0 a b : V} (0 e : a = b) (1 t : Pts l a) : Pts l b :=
   Eq.subst (Pts l) e t

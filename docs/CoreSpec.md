@@ -2103,14 +2103,16 @@ Each item says what the code does; the code is what the kernel checks.
 
 **The self-hosted frontend's quantities** (`Frontend.wiz`, stage 21m; finding K10 of audit 2,
 now closed). The frontend reads written quantities (`0`, `1`, `ω`) on binders, `fun`
-binders and `let`, with the Lean elaborator's defaults (ω on explicit and implicit
-binders; a generated constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
+binders and `let`, with the Lean elaborator's defaults (ω on an explicit binder; on an
+implicit one rule (b): 0 when its type is a sort or a proposition, ω otherwise; a
+generated constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
 variable used once in each branch of a `match` was a difference until stage 21v: the Lean
 frontend now compiles such a match to the additive `T.casesOnA`, and both accept it.
 Constructor field quantities and implicit constructor fields were differences until 21x:
-a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at the default
-ω, inserted at the call and not named by patterns; write `{0 n : A}` for an erased
-index), a match binds each field at its quantity (`T.casesOn`'s
+a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at rule (b)'s
+default, ω for data and 0 for a sort or a proposition, inserted at the call and not named
+by patterns; write `{0 n : A}` for an erased index), a match binds each field at its
+quantity (`T.casesOn`'s
 method does), and a structure's field at 0 has no projection.
 Commands: `#eval` is `#reduce` here, and `attribute [inline]` is checked and ignored
 (21u); classes and instances, the other attributes and `import_c` are errors.
@@ -2119,6 +2121,7 @@ Commands: `#eval` is `#reduce` here, and `attribute [inline]` is checked and ign
 |---|---|---|
 | a `match` on a linear scrutinee (`def m2 (1 x : Nat) : Nat := match x with \| .zero => 0 \| .succ k => k`) | accepts (4h): `T.casesOn1`, the case at 1; `k` is an ω field, so it comes out at `1·ω` | **rejects**: the match is the kernel's case at ω, which uses `x` ω times (the Kernel.wiz rule is the same; only the frontend does not emit `scase` at 1) |
 | `%t` quantity terms, quantity variables | yes | an error |
+| a bare implicit `Π` binder written inside a constructor field's or an index's type, whose type is a proposition or a definition that unfolds to a sort (`(f : {h : a = b} → Nat)`) | rule (b) on the elaborated type: 0 | rule (b) from the syntax on these scope-checked paths (only a written `Type`, `Sort u` or `Prop` is a sort): ω. For a proposition the kernel ignores the binder's quantity (conversion and usage), so only the printed type differs; for a definition unfolding to a sort the two frontends' types do not convert (write the quantity) |
 
 **The self-hosted FFI** (stages 21l, 21o–21t) takes the Lean frontend's `extern`,
 `foreign_type`, `export`, callbacks, `c_struct`, `link_c`/`link_lib` and `implemented_by`

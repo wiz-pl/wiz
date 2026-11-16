@@ -113,18 +113,18 @@ def Prog.counter_spec : Triple emp Prog.counter (fun r => hexists (fun (c : Nat)
 -- ## The length of a mutable list (read-only traversal)
 
 /-- The length, counted onto an accumulator (as the loop `Prog.lenLoop` counts). -/
-def List.lenAcc {0 A : Type} : List A → Nat → Nat
+def List.lenAcc {A : Type} : List A → Nat → Nat
   | .nil, acc => acc
   | .cons _ xs, acc => List.lenAcc xs (Nat.succ acc)
 /-- Moving a `succ` out of the accumulator. -/
-def List.lenAcc_succ {0 A : Type} : (L : List A) → (acc : Nat) → List.lenAcc L (Nat.succ acc) = Nat.succ (List.lenAcc L acc)
+def List.lenAcc_succ {A : Type} : (L : List A) → (acc : Nat) → List.lenAcc L (Nat.succ acc) = Nat.succ (List.lenAcc L acc)
   | .nil, acc => rfl
   | .cons _ xs, acc => List.lenAcc_succ xs (Nat.succ acc)
 /-- Chain `a = succ b` and `b = c` (`succ b = succ c` computes to `b = c`). -/
 def Nat.succ_eq_of {0 a b c : Nat} (e₁ : a = Nat.succ b) (e₂ : b = c) : a = Nat.succ c :=
   @Eq.trans Nat a (Nat.succ b) (Nat.succ c) e₁ e₂
 /-- Counting from 0 is `List.length`. -/
-def List.lenAcc_zero {0 A : Type} : (L : List A) → List.lenAcc L 0 = List.length L
+def List.lenAcc_zero {A : Type} : (L : List A) → List.lenAcc L 0 = List.length L
   | .nil => rfl
   | .cons _ xs =>
       Nat.succ_eq_of (List.lenAcc_succ xs 0) (List.lenAcc_zero xs)
@@ -207,14 +207,14 @@ def Prog.freeAll.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
 -- ## Running programs on concrete heaps
 
 /-- The heap holding `vs` from location `l` on. -/
-def Heap.ofList {0 V : Type} : List V → Nat → Heap V
+def Heap.ofList {V : Type} : List V → Nat → Heap V
   | .nil, l => Heap.empty
   | .cons v vs, l => Heap.union (Heap.single l v) (Heap.ofList vs (Nat.succ l))
 /-- The cells `l … l + k - 1` of a heap. -/
-def Heap.toList {0 V : Type} (h : Heap V) : Nat → Nat → List (Option V)
+def Heap.toList {V : Type} (h : Heap V) : Nat → Nat → List (Option V)
   | .zero, l => .nil
   | .succ k, l => .cons (h l) (Heap.toList h k (Nat.succ l))
 /-- Run a program on a concrete heap (bound `n`) and show its result and the first `k`
 cells; `none` if it faults. -/
-def Prog.show {0 V A : Type} (c : Prog V A) (h : Heap V) (n k : Nat) : Option (A × List (Option V)) :=
+def Prog.show {V A : Type} (c : Prog V A) (h : Heap V) (n k : Nat) : Option (A × List (Option V)) :=
   Option.caseOf (Prog.run c h n) .none (fun r => .some (r.1, Heap.toList r.2.1 k 0))

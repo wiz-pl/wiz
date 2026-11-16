@@ -20,22 +20,22 @@ This module adds what is specific to hardware:
 -/
 
 /-- `g` on the place `l` of `s`: its next value is put back, the output passed on. -/
-def Hdl.zoom {0 S T I O : Type} (l : Lens S T) (g : T → I → T × O) (s : S) (x : I) : S × O :=
+def Hdl.zoom {S T I O : Type} (l : Lens S T) (g : T → I → T × O) (s : S) (x : I) : S × O :=
   let r := g (Lens.get l s) x;
   (Lens.set l s r.1, r.2)
 
 /-- What the zoomed step does to the place itself. -/
-def Hdl.zoom_get {0 S T I O : Type} (l : Lens S T) (hl : Lens.Lawful l) (g : T → I → T × O) (s : S) (x : I) :
+def Hdl.zoom_get {S T I O : Type} (l : Lens S T) (hl : Lens.Lawful l) (g : T → I → T × O) (s : S) (x : I) :
     Lens.get l (Hdl.zoom l g s x).1 = (g (Lens.get l s) x).1 :=
   hl.2.1 s (g (Lens.get l s) x).1
 
 /-- Independence the other way round (derived lenses state it for fields in order). -/
-def Hdl.indep_symm {0 S A B : Type} (l : Lens S A) (m : Lens S B) (h : Lens.Indep l m) : Lens.Indep m l :=
+def Hdl.indep_symm {S A B : Type} (l : Lens S A) (m : Lens S B) (h : Lens.Indep l m) : Lens.Indep m l :=
   (h.2.1, h.1, fun (s : S) (b : B) (a : A) => Eq.symm (h.2.2 s a b))
 
 /-- The frame rule: a place `m` independent of `l` is unchanged by a step zoomed into
 `l`. -/
-def Hdl.zoom_frame {0 S T U I O : Type} (l : Lens S T) (m : Lens S U) (h : Lens.Indep l m) (g : T → I → T × O) (s : S) (x : I) :
+def Hdl.zoom_frame {S T U I O : Type} (l : Lens S T) (m : Lens S U) (h : Lens.Indep l m) (g : T → I → T × O) (s : S) (x : I) :
     Lens.get m (Hdl.zoom l g s x).1 = Lens.get m s :=
   h.1 s (g (Lens.get l s) x).1
 

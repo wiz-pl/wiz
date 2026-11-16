@@ -228,8 +228,9 @@ def binderType (b : Syntax) : Option Syntax := match isInstB b with
     | _ => .none
 
 -- Quantities (stage 21m), as `elabQuantity` in the Lean elaborator: a binder's written
--- quantity (`(1 x : A)`, `{0 A : Type}`, `(ω f : …)`), or its default: ω on an explicit
--- binder, 0 on an implicit one. A written quantity is the optional `quantity` node
+-- quantity (`(1 x : A)`, `{0 n : Nat}`, `(ω f : …)`), or its default: ω on an explicit
+-- binder; on an implicit one rule (b), 0 for a sort or a proposition and ω for data
+-- (`binderQ`, `typeQ`). A written quantity is the optional `quantity` node
 -- (`num`, `ω`, or `%t`); `bad` for one this frontend can't read (`%t`, a numeral other
 -- than 0 or 1), which is an error (`qtyErr`) wherever it is written.
 inductive QW where
@@ -260,11 +261,21 @@ def binderW (b : Syntax) : QW := match b with
   | _ => match Bool.or (strEq (kindOf b) "binder.explicit") (isImplicitB b) with
     | .true => writtenQ (kid b 1)
     | .false => .dflt
--- a binder's quantity, the default filled in (implicits are ω too: the language decision
--- "implicit binders are ω by default")
+-- is this written type a sort (`Type`, `Type u`, `Sort u`, `Prop`)?
+def sortStx (t : Syntax) : Bool := Bool.or (strEq (kindOf t) "term.type")
+  (Bool.or (strEq (kindOf t) "term.sort") (strEq (kindOf t) "term.prop"))
+-- a binder's quantity, the default filled in: ω for an explicit binder; for an implicit
+-- one rule (b) (`binderDflt` below), here from the syntax alone: 0 when its written type
+-- is a sort, else ω. Where the binder's type is elaborated, `typeQ` decides instead.
 def binderQ (b : Syntax) : Option Q := match binderW b with
   | .is q => .some q
-  | .dflt => .some .qw
+  | .dflt => .some (match isImplicitB b with
+    | .true => (match binderType b with
+      | .some t => (match sortStx t with
+        | .true => .qz
+        | .false => .qw)
+      | .none => .qw)
+    | .false => .qw)
   | .bad => .none
 def qsFor (q : Q) : List String → List Q
   | .nil => .nil
@@ -294,6 +305,51 @@ def headQ : List Q → Q
 def tailQ : List Q → List Q
   | .nil => .nil
   | .cons _ qs => qs
+-- Rule (b), the language decision of 2026-11-16 (`binderDefaultQty` in
+-- `Elab/Term.lean`): an implicit binder with no quantity written is at 0 when its type is
+-- a sort or a proposition (erased anyway) and at ω otherwise (data). `binderQ` decides
+-- from the syntax alone (a written `Type`, `Sort u` or `Prop` is a sort); where the type
+-- has been elaborated, `typeQ` decides from it, as the Lean elaborator does.
+def binderDflt (b : Syntax) : Bool := match isImplicitB b with
+  | .true => (match binderW b with
+    | .dflt => .true
+    | _ => .false)
+  | .false => .false
+def bsFor (d : Bool) : List String → List Bool
+  | .nil => .nil
+  | .cons _ xs => .cons d (bsFor d xs)
+-- one per name, as `binderQs`
+def binderDflts : List Syntax → List Bool
+  | .nil => .nil
+  | .cons b bs => List.append (bsFor (binderDflt b) (binderNames b)) (binderDflts bs)
+def headB : List Bool → Bool
+  | .nil => .false
+  | .cons d _ => d
+def tailB : List Bool → List Bool
+  | .nil => .nil
+  | .cons _ ds => ds
+-- the quantity rule (b) gives an implicit of type `A` (a value, its metavariables
+-- forced), in the sort `l` (if known): 0 when `A` is a sort or `l` is `Prop`, else ω
+def typeQ (A : Val) (l : Option Lvl) : Q := match whnf A with
+  | .vsort _ => .qz
+  | _ => match l with
+    | .some l' => match lvlIsZero l' with
+      | .true => .qz
+      | .false => .qw
+    | .none => .qw
+-- the same with the sort computed in the context `c`
+def typeQC (c : TCtx) (A : Val) : Q := typeQ A (sortOf c A)
+-- `q`, or for an implicit with none written (`d`) the quantity its type gives
+def pickQC (d : Bool) (q : Q) (c : TCtx) (A : Val) : Q := match d with
+  | .true => typeQC c A
+  | .false => q
+-- the quantities of a telescope of binders (`binderQs`, `binderDflts`) whose types `pts`
+-- are elaborated, each over the ones before, in the context `c`
+def resolveQs (c : TCtx) : List Bool → List Q → Tms → List Q
+  | .cons d ds, .cons q qs, .tcons A rest =>
+    let Av := eval (TCtx.env c) A;
+    .cons (pickQC d q c Av) (resolveQs (TCtx.bind c Av) ds qs rest)
+  | _, qs, _ => qs
 
 -- all the names of a `fun`'s binders
 def binders : List Syntax → List String
@@ -469,7 +525,7 @@ def piGroup : Scope → Q → List String → Syntax → List Syntax → Syntax 
     | e => e
 end
 
-def List.reverseOf {0 A : Type} : List A → List A → List A
+def List.reverseOf {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => List.reverseOf xs (.cons x acc)
 
@@ -761,7 +817,7 @@ def binderParamNames : List Syntax → List String
   | .nil => .nil
   | .cons b bs => List.append (binderNames b) (binderParamNames bs)
 -- (A9) the names a type's leading Π binders introduce: a declaration may write its
--- parameters in its type (`axiom f : {0 A : Type} → …`, `extern … : {0 A : Type} → …`)
+-- parameters in its type (`axiom f : {A : Type} → …`, `extern … : {A : Type} → …`)
 partial def typeBinderNames : Syntax → List String
   | s => match strEq (kindOf s) "term.depArrow" with
     | .true => List.append (binderNames (kid s 0)) (typeBinderNames (kid s 2))
@@ -943,15 +999,54 @@ def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
     | .cons _ (.cons ty _) => .some (lastS (kids (kid ty 1)))
     | _ => .none
 
+-- the context of the parameters (their types, each over the ones before)
+def paramCtx : TCtx → Tms → TCtx
+  | c, .tnil => c
+  | c, .tcons A rest => paramCtx (TCtx.bind c (eval (TCtx.env c) A)) rest
+-- (rule b) one flag per field (as `fieldsOf`): an implicit field with no quantity written
+def fieldDflts : List Syntax → List Bool
+  | .nil => .nil
+  | .cons b bs => match binderType b with
+    | .none => fieldDflts bs
+    | .some _ => List.append (bsFor (binderDflt b) (binderNames b)) (fieldDflts bs)
+-- (rule b) a constructor's fields, an implicit field with no quantity written at the
+-- quantity its type gives (`typeQC`), as the Lean elaborator's `elabTelescope`: each
+-- type scope-checked as `ctorFieldTys` does (`sc` the globals, the parameters and the
+-- fields before, `d` their number) and evaluated in `c` (the parameters' context, then
+-- the fields before). A recursive field (`isRec`) has the type being defined: data (ω).
+def resolveFields (gs : Globals) (isRec : Syntax → Bool) : TCtx → Scope → Nat → List Bool → List Field → List Field
+  | _, _, _, _, .nil => .nil
+  | c, sc, d, ds, .cons (.mk x q impl ty) rest =>
+    let Ao : Option Tm := match isRec ty with
+      | .true => .none
+      | .false => match elab sc ty with
+        | .ok A => .some (closeG .false gs d A)
+        | .err _ => .none;
+    let Av : Val := match Ao with
+      | .some A => eval (TCtx.env c) A
+      | .none => .vunit 0;
+    let q' := match headB ds with
+      | .true => (match Ao with
+        | .some _ => typeQC c Av
+        | .none => .qw)
+      | .false => q;
+    .cons (.mk x q' impl ty) (resolveFields gs isRec (TCtx.bind c Av) (Scope.bind sc x) (d + 1) (tailB ds) rest)
+def isYesRF : RecF → Bool
+  | .yes _ => .true
+  | .no => .false
+-- a constructor's fields, their quantities by rule (b) (`pts` the parameters' types)
+def ctorFieldsQ (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (pts : Tms) (c : Syntax) : List Field :=
+  resolveFields gs (fun (ty : Syntax) => isYesRF (recField T ps nidx ty)) (paramCtx empty pts)
+    (bindAll (Globals.scope gs) ps) (List.length ps) (fieldDflts (kids (kid c 3))) (ctorFields c)
 -- the constructors' descriptions, under the binder `t✝` of the tag
 inductive Descs where
   | ok (ds : Tms)
   | err (msg : String)
-def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) : List Syntax → Descs
+def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (pts : Tms) (nidx : Nat) : List Syntax → Descs
   | .nil => .ok .tnil
-  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFieldsQ gs T ps nidx pts c) with
     | .err m => .err m
-    | .ok D => match ctorDescs inline gs T ps nidx cs with
+    | .ok D => match ctorDescs inline gs T ps pts nidx cs with
       | .ok ds => .ok (.tcons D ds)
       | e => e
 -- a constructor's fields with their types, every field bound in the later ones
@@ -1102,10 +1197,6 @@ def occursTms : Nat → Tms → Bool
   | _, .tnil => .false
   | i, .tcons t rest => Bool.or (occurs i t) (occursTms i rest)
 end
--- the context of the parameters (their types, each over the ones before)
-def paramCtx : TCtx → Tms → TCtx
-  | c, .tnil => c
-  | c, .tcons A rest => paramCtx (TCtx.bind c (eval (TCtx.env c) A)) rest
 -- the phantom domain `D` of the parameter `k` of `np` (its type `A` over the ones
 -- before), at depth `np` in the parameters' context `c`; `none` if it gets none
 def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
@@ -1170,15 +1261,16 @@ def structBindQs : List Q → List Q
 def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (Tc TcI : Tm) (k : Nat) (strct : Bool) : Globals → Nat → List Syntax → Added
   | gs, _, .nil => .ok gs .nil
   | gs, i, .cons c cs =>
-    let n := List.length (ctorFields c);
+    let cfs := ctorFieldsQ gs T ps nidx pts c;
+    let n := List.length cfs;
     let np := List.length ps;
-    let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames (ctorFields c));
-    match ctorFieldTys gs T ps nidx Tc TcI (bindAll (Globals.scope gs) ps) np (ctorFields c) with
+    let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames cfs);
+    match ctorFieldTys gs T ps nidx Tc TcI (bindAll (Globals.scope gs) ps) np cfs with
     | .err _ => .err
     | .ok fs => match idxArgs gs scF (np + n) (ctorRes nidx c) with
       | .err _ => .err
       | .ok ics =>
-        let qs := fieldQs (ctorFields c);
+        let qs := fieldQs cfs;
         let ty := sortTy (piTeleZ pts (ctorType (tApps Tc (tmsAppend (pvars np (np + n)) ics)) qs fs));
         -- (without an index: `tt`, or `refl` at a phantom tail)
         let proof : Tm := match ics with
@@ -1191,12 +1283,12 @@ def addCtors (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (I : Tm) (
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T ps pts nidx I Tc TcI k strct (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
-          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
+          (List.append (impls np) (fieldKinds (fieldImpl cfs))) .nil)) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with
             | .true => structBindQs qs
-            | .false => qs) (fieldImpl (ctorFields c))) rest)
+            | .false => qs) (fieldImpl cfs)) rest)
         | .err => .err
 -- the types of a telescope, each over the ones before
 def elabTele (gs : Globals) : Scope → Nat → List Field → TmsR
@@ -1244,8 +1336,9 @@ def lastIdx : List Syntax → Nat → Nat
     | .nil => i
     | .cons _ _ => lastIdx rest (i + 1)
 -- (stage 21m, 21x) A constructor field's quantity is its description's (`darg q S D`,
--- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit and an
--- implicit field alike (`{n : Nat}`; `{0 n : Nat}` erases it), as `elabQuantity` gives it. A bad quantity
+-- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit field
+-- and rule (b) for an implicit one (`ctorFieldsQ`: ω for data such as `{n : Nat}`, 0 for a
+-- sort or a proposition; `{0 n : Nat}` erases it), as `elabTelescope` gives it. A bad quantity
 -- (`2`, `%t`) on a field or a parameter is an error.
 def fieldQtyErr : List Syntax → Option String
   | .nil => .none
@@ -1317,9 +1410,9 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
       match Ir with
       | .err m => errStep gs m
       | .ok I0 =>
-        match ctorDescs .false gs T ps nidx ctors with
+        match ctorDescs .false gs T ps pts nidx ctors with
         | .err m => errStep gs m
-        | .ok ds0 => match ctorDescs .true gs T ps nidx ctors with
+        | .ok ds0 => match ctorDescs .true gs T ps pts nidx ctors with
           | .err m => errStep gs m
           | .ok dsI0 =>
             -- phantom parameters: those that neither a constructor nor the index type
@@ -1348,9 +1441,9 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
               let body := fun (D : Tm) => (match sig with
                 | .indexed _ => .lam (.mu 0 (shiftTm 1 0 I) (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0))
                 | _ => .mu 0 I D tl : Tm);
-              let ty := sortTy (piTeleQ (match binderQs (kids (kid stx 3)) with
+              let ty := sortTy (piTeleQ (resolveQs (paramCtx empty pts) (binderDflts (kids (kid stx 3))) (match binderQs (kids (kid stx 3)) with
                 | .some qs => qs
-                | .none => .nil) pts (match sig with
+                | .none => .nil) pts) pts (match sig with
                 | .indexed _ => piH I (.univ 0)
                 | _ => .univ 0));
               let val := markClosed (tLams np (body (mkD ds))) ty;
@@ -1382,12 +1475,12 @@ def sndN : Nat → Tm → Tm
   | .zero, t => t
   | .succ n, t => sndN n (.snd t)
 
-def takeL {0 A : Type} : Nat → List A → List A
+def takeL {A : Type} : Nat → List A → List A
   | .zero, _ => .nil
   | .succ k, xs => match xs with
     | .nil => .nil
     | .cons x rest => .cons x (takeL k rest)
-def dropL {0 A : Type} : Nat → List A → List A
+def dropL {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ k, xs => match xs with
     | .nil => .nil
@@ -1423,7 +1516,7 @@ def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
     let d := TCtx.lvl c;
     .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- the metavariables: the depth each was made at, its solution (a term at that depth),
--- and, for an implicit argument that is a type (`{0 A : Type u}`), the sort its solution
+-- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
 -- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
 -- `?u` once the argument is known, as in `id 5`)
 inductive MetaInfo where
@@ -2175,7 +2268,15 @@ def dotCtor (gs : Globals) (es : ES) (ty : Val) (s : Syntax) : Option Syntax :=
 def sortLvl (es : ES) (ty : Val) : Lvl := match whnf (force es ty) with
   | .vsort l => l
   | _ => .lnum 0
--- an implicit argument's metavariable; when its type is a sort (`{0 A : Type u}`), the
+-- (rule b) the quantity of a binder elaborated at type `A` in the sort `la` (as
+-- `inferType` gives them): `q`, or for an implicit with none written (`d`) the
+-- quantity its type gives (`typeQ`)
+def implicitQ (d : Bool) (q : Q) (es : ES) (A la : Val) : Q := match d with
+  | .true => typeQ (force es A) (match whnf (force es la) with
+    | .vsort l => .some l
+    | _ => .none)
+  | .false => q
+-- an implicit argument's metavariable; when its type is a sort (`{A : Type u}`), the
 -- solution's own sort is recorded, which solves the level (`id 5` has `?u = 0`)
 def newImplicit (es : ES) (cx : Cx) (dom : Val) : MetaR := match whnf (force es dom) with
   | .vsort l => newMetaS es cx dom (.some l)
@@ -2611,7 +2712,7 @@ def dropEnv : Nat → Env → Env
   | .succ k, e => match e with
     | .nil => .nil
     | .cons _ rest => dropEnv k rest
-def lenL {0 A : Type} (xs : List A) : Nat := List.length xs
+def lenL {A : Type} (xs : List A) : Nat := List.length xs
 
 def colTyAt : List Col → Nat → Option Tm
   | .nil, _ => .none
@@ -3529,7 +3630,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
         | .false => match strEq k "term.depArrow" with
           | .true => match binderType (kid s 0) with
             | .some aStx => match binderQ (kid s 0) with
-              | .some q => depPis gs es cx q (binderNames (kid s 0)) aStx (kid s 2)
+              | .some q => depPis gs es cx (binderDflt (kid s 0)) q (binderNames (kid s 0)) aStx (kid s 2)
               | .none => .err qtyErr
             | .none => .err "a Π needs a binder type"
           | .false => match strEq k "term.ascription" with
@@ -3553,7 +3654,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
               | .false => match strEq k "term.fun" with
                 | .true => match Nat.beq (lenL (binders (kids (kid s 1)))) (lenL (fieldsOf (kids (kid s 1)))) with
                   | .true => match binderQs (kids (kid s 1)) with
-                    | .some qs => inferLams gs es cx qs (fieldsOf (kids (kid s 1))) (kid s 3)
+                    | .some qs => inferLams gs es cx (binderDflts (kids (kid s 1))) qs (fieldsOf (kids (kid s 1))) (kid s 3)
                     | .none => .err qtyErr
                   | .false => .err "cannot infer the type of a λ; add a type ascription"
                 | .false => match strEq k "term.structUpdate" with
@@ -3640,14 +3741,14 @@ def forallPis (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (body : Synt
   | .nil => inferType gs es cx body
   | .cons b rest => match binderQ b with
     | .none => .err qtyErr
-    | .some q => forallNames gs es cx q (binderNames b) (match binderType b with
+    | .some q => forallNames gs es cx (binderDflt b) q (binderNames b) (match binderType b with
         | .some t => t
         | .none => holeStx) rest body
-def forallNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx : Syntax) (bs : List Syntax) (body : Syntax) : TE := match xs with
+def forallNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aStx : Syntax) (bs : List Syntax) (body : Syntax) : TE := match xs with
   | .nil => forallPis gs es cx bs body
   | .cons x xs' => match inferType gs es cx aStx with
-    | .ok a la es1 => match forallNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) q xs' aStx bs body with
-      | .ok b lb es2 => .ok (piSortedQ q es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
+    | .ok a la es1 => match forallNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) d q xs' aStx bs body with
+      | .ok b lb es2 => .ok (piSortedQ (implicitQ d q es1 (eval (TCtx.env (Cx.c cx)) a) la) es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
       | e => e
     | e => e
 -- `(a, b, c)` without an expected type: `A × (B × C)`
@@ -3675,15 +3776,16 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
       | e => e
     | _ => .err (String.append "a tuple against a type that isn't a Σ type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es ty))))
 -- `fun (x : A) … => b` with every binder typed: `(x : A) → B` (stage 20a)
-def inferLams (gs : Globals) (es : ES) (cx : Cx) (qs : List Q) : List Field → Syntax → TE
+def inferLams (gs : Globals) (es : ES) (cx : Cx) (ds : List Bool) (qs : List Q) : List Field → Syntax → TE
   | .nil, body => inferT gs es cx body
   | .cons (.mk x _ _ aS) rest, body => match strEq (kindOf aS) "" with
     | .true => .err "cannot infer the type of a λ; add a type ascription"
     | .false => match inferType gs es cx aS with
-      | .ok A _ es1 =>
-        let cx' := Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A);
-        match inferLams gs es1 cx' (tailQ qs) rest body with
-        | .ok b bty es2 => .ok (.lam b) (eval (TCtx.env (Cx.c cx)) (piTm (headQ qs) A (quote (Cx.lvl cx') (force es2 bty)))) es2
+      | .ok A la es1 =>
+        let Av := eval (TCtx.env (Cx.c cx)) A;
+        let cx' := Cx.bind cx x Av;
+        match inferLams gs es1 cx' (tailB ds) (tailQ qs) rest body with
+        | .ok b bty es2 => .ok (.lam b) (eval (TCtx.env (Cx.c cx)) (piTm (implicitQ (headB ds) (headQ qs) es1 Av la) A (quote (Cx.lvl cx') (force es2 bty)))) es2
         | e => e
       | e => e
 -- a type: its sort is computed again by the kernel later, so any sort is fine here
@@ -3693,11 +3795,11 @@ def inferType (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE := match infe
     | _ => .err (String.append "not a type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) t))
   | e => e
 -- `(x y : A) → B`
-def depPis (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
+def depPis (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
   | .nil => inferType gs es cx body
   | .cons x rest => match inferType gs es cx aStx with
-    | .ok a la es1 => match depPis gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) q rest aStx body with
-      | .ok b lb es2 => .ok (piSortedQ q es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
+    | .ok a la es1 => match depPis gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) d q rest aStx body with
+      | .ok b lb es2 => .ok (piSortedQ (implicitQ d q es1 (eval (TCtx.env (Cx.c cx)) a) la) es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
       | e => e
     | e => e
 -- the arguments of an application, inserting implicit ones by the mask. A `.c`
@@ -4358,14 +4460,16 @@ def defT (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (tyS vS : Syntax)
   | .cons b rest => match binderType b with
     | .none => .err "the binders of a definition need types"
     | .some aS => match binderQ b with
-      | .some q => defNames gs es cx q (binderNames b) aS rest tyS vS
+      | .some q => defNames gs es cx (binderDflt b) q (binderNames b) aS rest tyS vS
       | .none => .err qtyErr
-def defNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS vS : Syntax) : DefR :=
+def defNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS vS : Syntax) : DefR :=
   match xs with
   | .nil => defT gs es cx rest tyS vS
   | .cons x xs' => match inferType gs es cx aS with
-    | .ok A _ es1 => match defNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) q xs' aS rest tyS vS with
-      | .ok ty v es2 => .ok (piTm q A ty) (.lam v) es2
+    | .ok A la es1 =>
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match defNames gs es1 (Cx.bind cx x Av) d q xs' aS rest tyS vS with
+      | .ok ty v es2 => .ok (piTm (implicitQ d q es1 Av la) A ty) (.lam v) es2
       | e => e
     | .err m => .err m
 end
@@ -4489,9 +4593,9 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
           | .ok RE0 _ esR => match zonk esR n RE0 with
           | .none => errStep gs "could not infer an implicit argument"
           | .some RE =>
-            let tyT := sortTy (piTeleQ (match binderQs (kids (kid stx 3)) with
+            let tyT := sortTy (piTeleQ (resolveQs (paramCtx empty pts) (binderDflts (kids (kid stx 3))) (match binderQs (kids (kid stx 3)) with
               | .some qs => qs
-              | .none => .nil) pts RE);
+              | .none => .nil) pts) pts RE);
             let sc := bindAll (Globals.scope gs) params;
             match peelCtx n empty (eval .nil tyT) with
               | .mk c Rv => match sortOf c Rv with
@@ -4635,11 +4739,21 @@ def mctorsOf (j : Nat) : List Syntax → List MCtor
 def memberCtors : List Syntax → Nat → List MCtor
   | .nil, _ => .nil
   | .cons d rest, j => List.append (mctorsOf j (kids (kid d 6))) (memberCtors rest (j + 1))
-def mdescs (inline : Bool) (gs : Globals) (members ps : List String) (m : Nat) : List MCtor → Descs
+-- (rule b) a member constructor's fields, their quantities by rule (b) (`ctorFieldsQ`;
+-- a field typed by a member, or a function into one, is recursive)
+def isMemberField (members ps : List String) (ty : Syntax) : Bool := match memberOf members ps ty with
+  | .some _ => .true
+  | .none => match hrecMember members ps ty with
+    | .yes _ _ => .true
+    | .no => .false
+def mctorFieldsQ (gs : Globals) (members ps : List String) (pts : Tms) (c : Syntax) : List Field :=
+  resolveFields gs (fun (ty : Syntax) => isMemberField members ps ty) (paramCtx empty pts)
+    (bindAll (Globals.scope gs) ps) (List.length ps) (fieldDflts (kids (kid c 3))) (ctorFields c)
+def mdescs (inline : Bool) (gs : Globals) (members ps : List String) (pts : Tms) (m : Nat) : List MCtor → Descs
   | .nil => .ok .tnil
-  | .cons (.mk j c) rest => match mctorDesc inline gs members ps m j (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons (.mk j c) rest => match mctorDesc inline gs members ps m j (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (mctorFieldsQ gs members ps pts c) with
     | .err e => .err e
-    | .ok D => match mdescs inline gs members ps m rest with
+    | .ok D => match mdescs inline gs members ps pts m rest with
       | .ok ds => .ok (.tcons D ds)
       | e => e
 def identOf' (s : Syntax) : String := match s with
@@ -4673,7 +4787,7 @@ def markRec (members ps : List String) : List Field → List CField → List CFi
 def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → Nat → List MCtor → MAdded
   | gs, _, .nil => .ok gs .nil
   | gs, ci, .cons (.mk j c) rest =>
-    let fs0 := ctorFields c;
+    let fs0 := mctorFieldsQ gs members ps pts c;
     let n := List.length fs0;
     let np := List.length ps;
     let T := nthName members j;
@@ -4722,9 +4836,9 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
   let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (.enum k) (.lam (.ecase (.descr 0 I) (.var 0) ds)) : Tm);
   match elabTele gs (Globals.scope gs) 0 params with
   | .err e => errStep gs e
-  | .ok pts => match mdescs .false gs members ps m mcs with
+  | .ok pts => match mdescs .false gs members ps pts m mcs with
     | .err e => errStep gs e
-    | .ok ds => match mdescs .true gs members ps m mcs with
+    | .ok ds => match mdescs .true gs members ps pts m mcs with
       | .err e => errStep gs e
       | .ok dsI =>
         -- `fun ps i => μ D i` (the description moved under `i`)
@@ -4834,15 +4948,36 @@ def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
     | .zero => .cons v rest
     | .succ j => .cons s (setNthSyn v rest j)
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
--- (an implicit binder keeps its written quantity; a bare implicit now means ω, the same
--- as a bare explicit binder, so its empty quantity slot needs nothing written)
-def explicitBinders : List Syntax → List Syntax
-  | .nil => .nil
-  | .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (kid b 1) (.cons (kid b 2)
-      (.cons (kid b 3) (one (.atom ")"))))))) (explicitBinders rest)
 -- a generated parameter binder is implicit at quantity 0 (as the Lean elaborator's
--- `implicitΔ`), even though a user-written bare implicit is now ω
+-- `implicitΔ`), whatever its type
 def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
+-- a quantity as binder syntax (ω is a bare binder)
+def qtyStxOf (q : Q) : Syntax := match q with
+  | .qz => zeroQtyStx
+  | .qo => mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "1"))))))
+  | .qw => mkNull .nil
+def dropQ : Nat → List Q → List Q
+  | .zero, qs => qs
+  | .succ k, qs => dropQ k (tailQ qs)
+-- the binders made explicit, each keeping its quantity: a written one, or for an implicit
+-- with none written the one rule (b) gave it (`qs`, one per name: a bare explicit binder
+-- would be ω)
+def explicitBinders (qs : List Q) : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (match binderDflt b with
+      | .true => qtyStxOf (headQ qs)
+      | .false => kid b 1) (.cons (kid b 2)
+      (.cons (kid b 3) (one (.atom ")"))))))) (explicitBinders (dropQ (lenL (binderNames b)) qs) rest)
+-- the quantities of a definition's binders, one per name, rule (b) applied to their
+-- elaborated types (as `defT`)
+def defParamQs (gs : Globals) (stx : Syntax) : List Q :=
+  let bs := kids (kid stx 3);
+  let qs := match binderQs bs with
+    | .some qs => qs
+    | .none => .nil;
+  match elabParams gs (univParamsOf stx) (Cx.mk empty (Globals.scope gs) .nil) (fieldsOf bs) with
+  | .ok pts _ => resolveQs (paramCtx empty pts) (binderDflts bs) qs pts
+  | .err _ => qs
 -- `let x := scrutinee; …` for the clause's variables
 def letsFor (body : Syntax) : List Syntax → List Syntax → Syntax
   | .cons p ps, .cons sc scs => match strEq (identOf p) "_" with
@@ -4870,7 +5005,7 @@ def withDefault' (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
       | .true =>
         let g := String.append f "✝d";
         let dstx := mkNode "command.def" (.cons (.atom "def") (.cons (.ident g) (.cons (kid stx 2)
-          (.cons (mkNull (explicitBinders (kids (kid stx 3)))) (.cons (kid stx 4) (.cons (.atom ":=")
+          (.cons (mkNull (explicitBinders (defParamQs gs stx) (kids (kid stx 3)))) (.cons (kid stx 4) (.cons (.atom ":=")
             (one (letsFor (kid a 3) pats scruts))))))));
         match command gs dstx with
         | .mk line gs1 => match strEq (String.mk (takeL 6 (match line with
@@ -5021,14 +5156,16 @@ def teleT (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (tyS : Syntax) :
   | .cons b rest => match binderType b with
     | .none => .err "the binders of a definition need types"
     | .some aS => match binderQ b with
-      | .some q => teleNames gs es cx q (binderNames b) aS rest tyS
+      | .some q => teleNames gs es cx (binderDflt b) q (binderNames b) aS rest tyS
       | .none => .err qtyErr
-def teleNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS : Syntax) : TE :=
+def teleNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS : Syntax) : TE :=
   match xs with
   | .nil => teleT gs es cx rest tyS
   | .cons x xs' => match inferType gs es cx aS with
-    | .ok A _ es1 => match teleNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) q xs' aS rest tyS with
-      | .ok B _ es2 => .ok (piTm q A B) (.vsort (.lnum 0)) es2
+    | .ok A la es1 =>
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match teleNames gs es1 (Cx.bind cx x Av) d q xs' aS rest tyS with
+      | .ok B _ es2 => .ok (piTm (implicitQ d q es1 Av la) A B) (.vsort (.lnum 0)) es2
       | e => e
     | e => e
 end
@@ -5669,7 +5806,7 @@ def binderStx (ob cb x : String) (A : Syntax) : Syntax := match strEq ob "[" wit
     | .false => "binder.explicit") (.cons (.atom ob) (.cons (mkNull .nil)
     (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one A))) (one (.atom cb))))))
 -- the parameter binders, made implicit at 0 (generated declarations keep the erased
--- parameter even though a user-written bare implicit is now ω)
+-- parameter, as the Lean elaborator's `implicitΔ`, whatever rule (b) would give it)
 def implicitBinders : List Syntax → List Syntax
   | .nil => .nil
   | .cons b rest => .cons (mkNode "binder.implicit" (.cons (.atom "{") (.cons zeroQtyStx (.cons (kid b 2)
@@ -6313,7 +6450,7 @@ def glueCmd (gs : Globals) (stx : Syntax) : Step :=
           let gs2 := Globals.addFFI gs1 (.code ("static " +++ kindCType gs rk +++ " " +++ cname +++ "(" +++
             (if strEq cparams "" then "void" else cparams) +++ ") {\n" +++ body +++ "\n}"));
           .mk "" (Globals.addFFI gs2 (.fn name cname "" ks rk io ""))
-def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {0 A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {0 A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {0 A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {0 A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {0 A : Type} : Array A\naxiom Array.push {0 A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {0 A : Type} (a : Array A) : Nat\naxiom Array.getD {0 A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {0 A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {0 A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {0 A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {0 V : Type} : StrMap V\naxiom StrMap.insert {0 V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {0 V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {0 V : Type} (m : StrMap V) : Nat\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
+def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
 
 -- Notation and macros (stage 19b; A12). `notation`, `infixl`/`infixr`/`infix`, `syntax`
 -- and `macro_rules` all become parser-table changes and *macro rules*: a pattern tree, a

@@ -411,12 +411,15 @@ variable at run time:
 |---|---|---|
 | `0` | never: erased | types, proofs, indices like `Vec`'s length |
 | `1` | exactly once: linear | resources: a file handle, a channel end, the world |
-| `ω` | any number of times | everything else; the default for explicit **and implicit** binders |
+| `ω` | any number of times | everything else; the default |
 
-An implicit binder is inferred and may be used freely, so `fun {n} => n` uses `n` as
-data without writing `{ω n}`. An explicit quantity is still authoritative: write
-`{0 A : Type}` for an erased type argument inside braces, or `{1 x}` to make an
-implicit linear.
+A binder with no quantity written is `ω`, except an implicit one whose type is a sort or
+a proposition (`{A : Type}`, `{P : Prop}`, `{h : a = b}`), which is `0`: such an
+argument is erased anyway. Any other implicit is data and `ω`, so `fun {n : Nat} => n`
+may use `n` at run time; an index needed only in types is cheaper written `{0 n : Nat}`
+(a bare `{n : Nat}` is passed at run time). A written quantity is always authoritative:
+`{0 n}`, `{1 x}`, `{ω A : Type}`. The type that decides is the one written on the
+binder: `{A}` with no type is data until you write `{A : Type}` or `{0 A}`.
 
 ```wiz
 def id {0 A : Type} (1 x : A) : A := x

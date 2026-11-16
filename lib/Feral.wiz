@@ -105,7 +105,7 @@ syntax:20 (name := forE) "for" ident "in" feral_expr:51 ".." feral_expr:51 "do" 
 syntax (name := letS) "let" "mut"? ident (":" feral_ty)? ":=" feral_expr : feral_stmt
 syntax (name := expr) feral_expr : feral_stmt
 
--- binders: `(x : T)`, `()`, `{'a 'b}`, `{'a : 'b}`, `{0 T : Type}`
+-- binders: `(x : T)`, `()`, `{'a 'b}`, `{'a : 'b}`, `{T : Type}`
 syntax (name := val) "(" ident ":" feral_ty ")" : feral_binder
 syntax (name := none) "(" ")" : feral_binder
 syntax (name := regions) "{" feral_lt+ (":" feral_lt)? "}" : feral_binder
@@ -142,7 +142,7 @@ def Fe.splitGo : List Char → List Char → String × String
 `Fe.split "x" = ("x", "")`. Field accesses and method calls arrive as one dotted identifier. -/
 def Fe.split (s : String) : String × String := Fe.splitGo .nil (String.chars s)
 /-- The element at index `n` (from 0), if the list is long enough. -/
-def Fe.nth {0 A : Type} : List A → Nat → Option A
+def Fe.nth {A : Type} : List A → Nat → Option A
   | .nil, _ => .none
   | .cons x xs, n => (match n with
     | .zero => .some x
@@ -455,16 +455,16 @@ inductive Fe.Res (A : Type) where
 since it has a `Monad` instance. -/
 def Fe.M (A : Type) : Type := Fe.St → Fe.Res A
 /-- Returns a value without changing the state. -/
-def Fe.M.pure {0 A : Type} (a : A) : Fe.M A := fun s => Fe.Res.ok a s
+def Fe.M.pure {A : Type} (a : A) : Fe.M A := fun s => Fe.Res.ok a s
 /-- Runs `x`, then `f` on its value; an error stops the computation. -/
-def Fe.M.bind {0 A B : Type} (x : Fe.M A) (f : A → Fe.M B) : Fe.M B := fun s => match x s with
+def Fe.M.bind {A B : Type} (x : Fe.M A) (f : A → Fe.M B) : Fe.M B := fun s => match x s with
   | .ok a s2 => f a s2
   | .err p m => .err p m
 instance : Monad Fe.M where
   pure := Fe.M.pure
   bind := Fe.M.bind
 /-- Fails with `msg` at the node at path `p`. -/
-def Fe.fail {0 A : Type} (p : List Nat) (msg : String) : Fe.M A := fun _ => Fe.Res.err p msg
+def Fe.fail {A : Type} (p : List Nat) (msg : String) : Fe.M A := fun _ => Fe.Res.err p msg
 /-- A fresh number (for inference variables and generated names). -/
 def Fe.fresh : Fe.M Nat := fun s => Fe.Res.ok s.next (Fe.St.mk (Nat.succ s.next) s.subst s.soft s.aux s.cell)
 /-- A fresh inference variable. -/
@@ -644,7 +644,7 @@ def Fe.headGo : Fe.Ty → List Fe.Ty → Option (String × List Fe.Ty)
 /-- A type application's head and arguments: `T a b` ↦ `("T", [a, b])`. -/
 def Fe.head (t : Fe.Ty) : Option (String × List Fe.Ty) := Fe.headGo t .nil
 /-- Pairs up two lists (as long as the shorter). -/
-def Fe.zip {0 A B : Type} : List A → List B → List (A × B)
+def Fe.zip {A B : Type} : List A → List B → List (A × B)
   | .cons a as, .cons b bs => .cons (a, b) (Fe.zip as bs)
   | _, _ => .nil
 /-- Applies a type to arguments, one at a time: `Fe.appN f [a, b]` is `f a b`. -/
@@ -689,7 +689,7 @@ def Fe.libEnums : List Fe.Enum :=
      (.cons ("error", .cons ("e", .con "E") .nil) (.cons ("ok", .cons ("a", .con "T") .nil) .nil))) .nil)
 
 /-- dispatch on a node kind -/
-def Fe.sw {0 A : Type} (k : String) : List (String × (Unit → A)) → (Unit → A) → A
+def Fe.sw {A : Type} (k : String) : List (String × (Unit → A)) → (Unit → A) → A
   | .nil, d => d ()
   | .cons c cs, d => (match String.eq k c.1 with
     | .true => c.2 ()
@@ -793,7 +793,7 @@ def Fe.evidence (cx : Fe.Cx) (p : List Nat) (a b : Fe.Ty) : Fe.M Fe.Out := do
 
 /-- a value of type `t` flowing to a place of type `exp`: a reference of a longer region is
 weakened (L22); anything else must unify -/
-def Fe.mismatch {0 A : Type} (p : List Nat) (t exp : Fe.Ty) : Fe.M A := do
+def Fe.mismatch {A : Type} (p : List Nat) (t exp : Fe.Ty) : Fe.M A := do
   t ← Fe.zonkM t;
   exp ← Fe.zonkM exp;
   Fe.fail p ("type mismatch: expected " +++ Fe.tyStr exp +++ ", found " +++ Fe.tyStr t)
@@ -922,7 +922,7 @@ def Fe.flush (pre : Fe.Env) (keep : String) (e : Fe.Env) : Fe.Out × Fe.Env := F
 
 -- ## Pieces of generated code
 /-- `Fe.M.pure`, with a shorter name. -/
-def Fe.pure {0 A : Type} (a : A) : Fe.M A := Fe.M.pure a
+def Fe.pure {A : Type} (a : A) : Fe.M A := Fe.M.pure a
 /-- (a `match` bound in a `do` block needs its type from outside) -/
 def Fe.the (A : Type) (x : A) : A := x
 /-- Type ascription, for a `match` in a `do` block. -/
@@ -1042,7 +1042,7 @@ def Fe.unwords : List String → String
   | .nil => ""
   | .cons x xs => " " +++ x +++ Fe.unwords xs
 /-- The length of a list. -/
-def Fe.len {0 A : Type} : List A → Nat
+def Fe.len {A : Type} : List A → Nat
   | .nil => 0
   | .cons _ xs => Nat.succ (Fe.len xs)
 /-- The syntax of the variable `x` (to treat a method's receiver as an argument). -/
@@ -1288,7 +1288,7 @@ def Fe.cat : List Fe.Out → Fe.Out
   | .nil => Fe.o ""
   | .cons x xs => Fe.Out.s " " ⊕ x ⊕ Fe.cat xs
 /-- The elements whose index is in `idx`. -/
-def Fe.pick {0 A : Type} (idx : List Nat) : List (Nat × A) → List A
+def Fe.pick {A : Type} (idx : List Nat) : List (Nat × A) → List A
   | .nil => .nil
   | .cons h hs => (match Fe.memNat h.1 idx with
     | .true => .cons h.2 (Fe.pick idx hs)
@@ -1337,11 +1337,11 @@ def Fe.writeT (x : String) (v : Fe.Out) : Nat → Fe.Out
 def Fe.argPaths (p : List Nat) (i : Nat) (s : Syntax) : List (List Nat × Syntax) :=
   List.map (fun (a : Nat × Syntax) => (Fe.sub (Fe.sub p i) a.1, a.2)) (Fe.kids (Fe.arg s i))
 /-- The first option if it has a value, else the second. -/
-def Fe.orElse {0 A : Type} : Option A → Option A → Option A
+def Fe.orElse {A : Type} : Option A → Option A → Option A
   | .some a, _ => .some a
   | .none, b => b
 /-- The element of a one-element list. -/
-def Fe.single {0 A : Type} : List A → Option A
+def Fe.single {A : Type} : List A → Option A
   | .cons a .nil => .some a
   | _ => .none
 /-- The code that reads through a reference or a returned borrow `v` of this type. -/
@@ -2626,7 +2626,7 @@ def Fe.addNew (x : String) (xs : List String) : List String := match String.elem
 def Fe.addAll : List String → List String → List String
   | .nil, acc => acc
   | .cons x xs, acc => Fe.addAll xs (Fe.addNew x acc)
-/-- Reads a function's binders: `(x : T)`, `()`, `{'a 'b}`, `{'a : 'b}`, `{0 T : Type}`. -/
+/-- Reads a function's binders: `(x : T)`, `()`, `{'a 'b}`, `{'a : 'b}`, `{T : Type}`. -/
 def Fe.binders (p : List Nat) : List (Nat × Syntax) → Fe.B → Fe.M Fe.B
   | .nil, b => Fe.pure b
   | .cons x xs, b =>
@@ -3131,7 +3131,7 @@ inductive Fe.Item where
   | spec (p : List Nat) (it : Syntax)
   | bad (p : List Nat) (msg : String)
 /-- Runs a front-end computation from the empty state. -/
-def Fe.run {0 A : Type} (m : Fe.M A) : Fe.Res A := m (Fe.St.mk 0 .nil .nil .nil .nil)
+def Fe.run {A : Type} (m : Fe.M A) : Fe.Res A := m (Fe.St.mk 0 .nil .nil .nil .nil)
 /-- first pass: the declarations and the signatures (so that functions can call each other) -/
 def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × List Fe.Item
   | .nil, g => (g, .nil)
@@ -3163,7 +3163,7 @@ structure Fe.Outp where
   notes : List Syntax
   srcs : List Syntax
 /-- The first element of a list, if any, as a list. -/
-def Fe.first {0 A : Type} : List A → List A
+def Fe.first {A : Type} : List A → List A
   | .nil => .nil
   | .cons a _ => .cons a .nil
 /-- The second pass: lowers each function. `mode` 0 is `feral`, 1 `#lower feral`

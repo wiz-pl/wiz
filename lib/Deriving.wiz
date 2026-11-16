@@ -50,7 +50,7 @@ class DecidableEq.{u} (A : Type u) where
 
 /-- A value as Wiz source, at the top level (no parentheses): `Repr.repr (Option.some 1)`
 is `"Option.some 1"`. -/
-def Repr.repr.{u} {0 A : Type u} [Repr A] (a : A) : String := Repr.reprPrec a 0
+def Repr.repr.{u} {A : Type u} [Repr A] (a : A) : String := Repr.reprPrec a 0
 /-- Put an application in parentheses when it is shown at argument position (`p` ≥ 1024). -/
 def Repr.addAppParen (s : String) (p : Nat) : String := match Nat.lt p 1024 with
   | .true => s
@@ -59,7 +59,7 @@ def Repr.addAppParen (s : String) (p : Nat) : String := match Nat.lt p 1024 with
 -- Decimal numerals (for `Repr Nat`): `Nat.repr`, lib/Text.wiz's (pure, so `#eval` runs it).
 
 /-- Equality of lists, by an equality of elements. -/
-def List.beqBy {0 A : Type} (eq : A → A → Bool) : List A → List A → Bool
+def List.beqBy {A : Type} (eq : A → A → Bool) : List A → List A → Bool
   | .nil, .nil => .true
   | .cons a xs, .cons b ys => Bool.and (eq a b) (List.beqBy eq xs ys)
   | _, _ => .false
@@ -83,16 +83,16 @@ instance : DecidableEq String := DecidableEq.mk String.beq
 instance : Repr String := Repr.mk (fun s _ =>
   String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
 /-- Componentwise equality of options (there is no deriver for a recursive type). -/
-def Option.decEq {0 A : Type} [DecidableEq A] (a b : Option A) : Bool := match a, b with
+def Option.decEq {A : Type} [DecidableEq A] (a b : Option A) : Bool := match a, b with
   | .none, .none => .true
   | .some x, .some y => DecidableEq.decide x y
   | _, _ => .false
 /-- `Option.decEq`, as an instance. -/
-instance {0 A : Type} [DecidableEq A] : DecidableEq (Option A) := DecidableEq.mk Option.decEq
+instance {A : Type} [DecidableEq A] : DecidableEq (Option A) := DecidableEq.mk Option.decEq
 /-- Elementwise equality of lists (there is no deriver for a recursive type). -/
-def List.decEq {0 A : Type} [DecidableEq A] (a b : List A) : Bool := List.beqBy DecidableEq.decide a b
+def List.decEq {A : Type} [DecidableEq A] (a b : List A) : Bool := List.beqBy DecidableEq.decide a b
 /-- `List.decEq`, as an instance. -/
-instance {0 A : Type} [DecidableEq A] : DecidableEq (List A) := DecidableEq.mk List.decEq
+instance {A : Type} [DecidableEq A] : DecidableEq (List A) := DecidableEq.mk List.decEq
 
 -- ## Writing derivers
 -- Names a deriver introduces end in `✝` or contain it, so they can't capture the user's.

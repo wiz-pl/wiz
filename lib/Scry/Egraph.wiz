@@ -57,7 +57,7 @@ is proved about terms or rewrites.
 
 -- ## Small list helpers
 
-def Scry.egConcatMap {0 A B : Type} (f : A → List B) : List A → List B
+def Scry.egConcatMap {A B : Type} (f : A → List B) : List A → List B
   | .nil => .nil
   | .cons x xs => List.append (f x) (Scry.egConcatMap f xs)
 

@@ -213,7 +213,7 @@ def Serial.open (path : String) (c : SerialConfig) : EIO Fd := do
   Serial.discard f .both;
   EIO.pure f
 /-- Open a port, run `body` on it, close it (also when `body` fails). -/
-def Serial.withPort {0 A : Type} (path : String) (c : SerialConfig) (body : Fd → EIO A) : EIO A := do
+def Serial.withPort {A : Type} (path : String) (c : SerialConfig) (body : Fd → EIO A) : EIO A := do
   f ← Serial.open path c;
   r ← EIO.lift (body f);
   Fd.close f;

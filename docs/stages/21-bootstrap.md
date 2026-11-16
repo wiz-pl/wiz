@@ -247,10 +247,21 @@ runtime; 21p). `implemented_by`, callbacks and `c_struct` came later (21q–21t)
 Finding K10 of audit 2: `Frontend.wiz` built every binder at ω, whatever was written, so
 `def twice (1 x : Nat) (f : Nat → Nat → Nat) : Nat := f x x` was accepted. It now reads
 the binder's `quantity` node as `elabQuantity` does in the Lean elaborator (`binderQ`,
-`writtenQ`): `0`, `1` or `ω`, by default ω on explicit **and implicit** binders (the
-language decision "implicit binders are ω by default"; write `{0 x}`/`{1 x}` to override
-it); a numeral other than 0 or 1, or a quantity term `%t`, is an error. The quantities
-reach the kernel, which already checks usage (`popUsage`):
+`writtenQ`): `0`, `1` or `ω`; a numeral other than 0 or 1, or a quantity term `%t`, is
+an error. With none written, an explicit binder is ω and an implicit one follows
+**rule (b)** (the language decision of 2026-11-16, `binderDefaultQty` in the Lean
+elaborator): 0 when its type is a sort or a proposition, ω otherwise (data). The rule
+reads the binder's type as elaborated at the binder, before anything after it: the type
+forced (solved metavariables, definitions unfolded at the head) is `Sort u`, or its own
+sort is `Prop`. An implicit with no type (`{A}`), or whose type is still a metavariable,
+is data (ω), and so is a type family (`{F : Type → Type}`: a function into a sort is not
+erased). Here `implicitQ`/`typeQC` decide it where the binder's type is elaborated
+(definition and partial-definition signatures, `∀`, a dependent arrow, an inferred
+`fun`, an inductive type's parameters, constructor fields via `ctorFieldsQ`);
+`binderQ` alone, on the scope-checked paths that never type the binder (a Π written
+inside a constructor field's or an index's type), decides from the syntax (a written
+`Type`, `Sort u` or `Prop`). The quantities reach the kernel, which already checks usage
+(`popUsage`):
 
 * the binders of a `def`, an `axiom` and a partial definition's signature (`defT`,
   `teleT`, and the match-compiled definitions' telescope, `piTeleQ`), `(1 x : A) → B`
@@ -262,13 +273,13 @@ reach the kernel, which already checks usage (`popUsage`):
 * a constructor's *generated* parameters are implicit at 0 (the Lean elaborator's
   `implicitΔ`), so `List.cons` is `(x0 :0 U0) → (x1 : x0) → …`; an inductive type's own
   parameters keep their binders' quantities. The helper definition that `withDefault'`
-  makes writes a generated parameter's 0 out when it makes the binder explicit (a
-  user-written bare implicit is now ω, so the generated binders must say `0`).
+  makes writes an implicit binder's quantity out when it makes the binder explicit: the
+  one rule (b) gave it (`defParamQs`), since a bare explicit binder would be ω.
 
-Erasure needs no new rule: an argument or field at 0 is erased as before, and a bare
-implicit is now ω like an explicit binder (write `{0 n}` to erase one whose value is
-only needed in types). The self-hosted sources needed no change: the Lean frontend
-checks them with the same rules.
+Erasure needs no new rule: an argument or field at 0 is erased as before, and a type or
+a proof is erased at any quantity. A bare data implicit is ω and passed at run time
+(write `{0 n}` to erase one whose value is only needed in types). The self-hosted
+sources needed no change: the Lean frontend checks them with the same rules.
 
 What does not match the Lean frontend (pinned in a test, and in
 [CoreSpec §15](../CoreSpec.md)): a linear variable used once in each branch of a `match`
@@ -281,8 +292,8 @@ eliminator rules (PR #84).
 
 **Tests** (group `selfhost`): `selfhostAgrees` runs 23 declarations through both
 frontends (accepted and rejected alike: linear functions passed and used twice, `let 1`,
-`let 0`, implicit parameters used at runtime — accepted now that implicit binders are
-ω by default — a `fun`'s quantity against the expected one, a quantity `2`);
+`let 0`, data implicit parameters used at runtime, accepted now that rule (b) makes them
+ω, a `fun`'s quantity against the expected one, a quantity `2`);
 `selfhostVerdicts` pins the three differences above; a program with quantities is
 compiled and run under both collectors.
 
@@ -695,8 +706,9 @@ field's quantity as the Lean kernel's do (`Desc.arg q S D`, CoreSpec §9.1):
   two descriptions), `castDesc`, `groundEqDesc`, `eqPayload`, `quote` and `show`
   (`arg(0 Nat, …)`; nothing is printed at ω) follow the Lean kernel.
 
-`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit and
-implicit by default; write `{0 n : Nat}` for an erased index; `2` and `%t` are errors),
+`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit; an
+implicit field by rule (b), 21m: ω for data, 0 for a sort or a proposition; write
+`{0 n : Nat}` for an erased index; `2` and `%t` are errors),
 kept in `Field` (now `mk name q impl ty`), and goes into the description (`ctorDesc`,
 `mctorDesc`) and the constructor's type (`ctorType`).
 An implicit field (`| cons {n : Nat} …`) is an implicit argument of the constructor

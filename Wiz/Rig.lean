@@ -77,16 +77,23 @@ class RigTag (R : Type) where
 
 /-- How quantities are written in surface syntax and printed back.
 
-Binders without a quantity get a default. Both explicit and implicit binders default to
-the rig's unrestricted quantity (ω): an implicit argument is inferred and may be used
-freely, so `fun {n} => …` can use `n` as data without writing `{ω n}`. A rig without an
-unrestricted quantity (`Nat`, exact counting) keeps 0 for implicit binders. Write `{0 x}`, `{1 x}` or `{ω x}` to override the default. The pretty printer
-omits a quantity equal to the default. -/
+Binders without a quantity get a default. An explicit binder takes `explicitDefault` (ω
+in the 0/1/ω rig). An implicit binder's default depends on its type (the language
+decision of 2026-11-16, "rule (b)"): `implicitDefault` (0) when the type is a sort or a
+proposition, whose arguments are erased anyway, and `implicitDataDefault` (ω) for any
+other (data) implicit, which may then be used at run time. The type is the one known when
+the binder is elaborated (`Elab.binderDefaultQty`): an implicit with no written type
+(`{A}`) or whose type is still a metavariable is data. A rig without an unrestricted
+quantity (`Nat`, exact counting) keeps 0 for both. Write `{0 x}`, `{1 x}` or `{ω x}` to
+override the default. The pretty printer omits a quantity equal to the default. -/
 class QuantitySyntax (R : Type) where
   /-- parse a quantity literal such as `0`, `1` or `ω` -/
   ofLiteral : String → Option R
   explicitDefault : R
+  /-- an implicit binder whose type is a sort or a proposition -/
   implicitDefault : R
+  /-- any other implicit binder (rule (b)) -/
+  implicitDataDefault : R := implicitDefault
   display : R → String
 
 end Wiz
