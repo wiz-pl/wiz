@@ -60,12 +60,17 @@ structure Opts where
   backend : List String
   verify : String
   target : Option String
+  -- (`--prelude-from-roots`) `import Prelude` (and `IO`, `Std`, `Sys`) is resolved
+  -- through the roots (`lib/Prelude.wiz` with `-I lib`), as on the host; without it the
+  -- embedded prelude, which this frontend checks cleanly and whose natives the Backend
+  -- knows (the default flips once `lib/Prelude.wiz` checks here)
+  fromRoots : Bool
 
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
   Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
-    "warn" .none
+    "warn" .none .false
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
@@ -232,11 +237,11 @@ def noneGraph : IO (Option Graph) := IO.pure (.none : Option Graph)
 
 -- the frontend's loader (A14): `import M` is `M.wiz` under the `-I` roots, then the
 -- working directory; the root module is `Main`, its path the FILE the user named
-def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
+def loadGraph (fromRoots : Bool) (roots : List String) (file : String) : IO (Option Graph) :=
   IO.bind (readIf file) (fun t => match t with
     | .none => noneGraph
     | .some text => IO.bind (moduleHeaderTexts text) (fun hs =>
-        IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
+        IO.bind (moduleRootSourcesFrom fromRoots cats tokens roots "Main" file text) (fun tab =>
           someGraph (Graph.mk tab hs))))
 
 def runGraph (g : Graph) : Prepared := match g with
@@ -244,8 +249,8 @@ def runGraph (g : Graph) : Prepared := match g with
     | .mk run _ _ order => Prepared.mk tab run order
 
 -- the whole program: the loader, every module checked, and the run it produced
-def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
-  IO.bind (loadGraph roots file) (fun g => match g with
+def prepare (fromRoots : Bool) (roots : List String) (file : String) : IO (Option Prepared) :=
+  IO.bind (loadGraph fromRoots roots file) (fun g => match g with
     | .none => nonePrepared
     | .some g => somePrepared (runGraph g))
 
@@ -836,7 +841,9 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   | .some m => match verifyOk m with
                                     | .true => parseOptsGo rest { o with verify := m } file extra
                                     | .false => .err (verifyErr m)
-                                  | .none => match isBackendFlag a with
+                                  | .none => match strEq a "--prelude-from-roots" with
+                                  | .true => parseOptsGo rest { o with fromRoots := .true } file extra
+                                  | .false => match isBackendFlag a with
                                     | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
                                     | .false => match strStarts "-" a with
                                       | .true => .err (String.append "unknown flag: " a)
@@ -865,6 +872,8 @@ def usageText : String :=
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --prelude-from-roots (`import Prelude` through the -I roots, lib/Prelude.wiz with\n" +++
+  "  -I lib; without it the embedded prelude)\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 
@@ -925,7 +934,7 @@ def missingFile (file : String) : IO Unit := do
   Process.exit 1
 
 def checkCmd (o : Opts) (file : String) : IO Unit := do
-  gopt ← loadGraph o.roots file;
+  gopt ← loadGraph o.fromRoots o.roots file;
   match gopt with
   | .none => missingFile file
   | .some g => checkGraph o g
@@ -981,7 +990,7 @@ def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
   | .none => usageError "build needs -o OUT"
   | .some out => do
-    gopt ← loadGraph o.roots file;
+    gopt ← loadGraph o.fromRoots o.roots file;
     match gopt with
     | .none => missingFile file
     | .some g => buildWith o out g
@@ -1048,7 +1057,7 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
         compileAndRun o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
-  gopt ← loadGraph o.roots file;
+  gopt ← loadGraph o.fromRoots o.roots file;
   match gopt with
   | .none => missingFile file
   | .some g => match o.cache with
@@ -1089,7 +1098,8 @@ def legacyFinish (args : List String) (text : String) (lines : List String) (gs 
 def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
-  tab ← moduleRootSources cats tokens (modRoots args) text;
+  tab ← moduleRootSourcesFrom (modHasFlag args "--prelude-from-roots") cats tokens (modRoots args)
+    "Main" "input.wiz" text;
   match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
@@ -1147,7 +1157,7 @@ def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types") (strEq a "--prelude-from-roots")))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)

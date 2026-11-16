@@ -554,49 +554,59 @@ def builtinDerivers : StrMap (Option String) :=
 -- the globals so far: by position (the first is `0`), their names in scope, the
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
 -- reads them, since the frontend is pure), and the derivers by class
+-- the registrations a prelude makes that the elaborator only records or consults: the
+-- `builtin KEY := C` table (key and constant, the latest first; this frontend's kernel
+-- does not compute with them, so a registration assumes nothing here), the default
+-- instances (`attribute [default_instance p] i`: class, instance, priority, order), and
+-- the classes with a `binop` method (`attribute [binop] C.f`, recorded only)
+inductive BuiltinReg where
+  | mk (key : String) (name : String)
+inductive GExt where
+  | mk (builtins : List BuiltinReg) (defaults : List InstInfo) (binops : List String)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String))
+       (priv : Bool) (ders : StrMap (Option String)) (ext : GExt)
 def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+  (GExt.mk .nil .nil .nil)
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ _ => sc
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d ex
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs _ d ex => .mk all sc inds ffi cls ins hs p d ex
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match g with
+  | .mk all sc inds ffi cls ins hs p d ex => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d ex
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d =>
+  | .mk all sc inds ffi cls ins hs p d ex =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d ex
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds (.cons f ffi) cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all sc inds (.cons f ffi) cls ins hs p d ex
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d ex
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -605,33 +615,48 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins _ p d ex => .mk all sc inds ffi cls ins hs p d ex
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d ex
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f))
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) ex
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls (.cons i ins) hs p d
+  | .mk all sc inds ffi cls ins hs p d ex => .mk all sc inds ffi cls (.cons i ins) hs p d ex
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d ex => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d ex
+-- (the prelude's registrations: `builtin`, `[default_instance]`, `[binop]`)
+def Globals.ext : Globals → GExt
+  | .mk _ _ _ _ _ _ _ _ _ ex => ex
+def Globals.setExt (gs : Globals) (ex : GExt) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d _ => .mk all sc inds ffi cls ins hs p d ex
+def Globals.builtins (gs : Globals) : List BuiltinReg := match Globals.ext gs with
+  | .mk bs _ _ => bs
+def Globals.addBuiltin (gs : Globals) (key name : String) : Globals := match Globals.ext gs with
+  | .mk bs ds ops => Globals.setExt gs (.mk (.cons (BuiltinReg.mk key name) bs) ds ops)
+def Globals.defaults (gs : Globals) : List InstInfo := match Globals.ext gs with
+  | .mk _ ds _ => ds
+def Globals.addDefault (gs : Globals) (i : InstInfo) : Globals := match Globals.ext gs with
+  | .mk bs ds ops => Globals.setExt gs (.mk bs (.cons i ds) ops)
+def Globals.addBinop (gs : Globals) (C : String) : Globals := match Globals.ext gs with
+  | .mk bs ds ops => Globals.setExt gs (.mk bs ds (.cons C ops))
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -640,13 +665,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -658,7 +683,7 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
@@ -720,7 +745,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -2918,11 +2943,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -3557,7 +3582,7 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ _ =>
+    | .mk _ _ inds _ _ _ _ _ _ _ =>
       match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
@@ -3710,9 +3735,11 @@ def globalUse (gs : Globals) (es : ES) (cx : Cx) (j : Nat) (explicit : List Synt
 -- instances rejected, overlapping candidates cannot arise today). A problem whose class
 -- arguments are not all known at the end of the command is reported as stuck.
 --
--- Boundary: no `outParam`, no default instances (`attribute [default_instance]`), no
--- priorities in choosing between overlapping instances, no `binop`/`OfNat` (a numeral
--- at a non-`Nat` type is still not a class problem). See `docs/stages/30-*`.
+-- A problem stuck on an unknown class argument whose class has default instances
+-- (`attribute [default_instance]`) waits; when nothing else can move, the defaults are
+-- tried (`applyDefault`). Boundary: no `outParam`, no priorities in choosing between
+-- overlapping instances, `binop` only recorded, no `OfNat` (a numeral at a non-`Nat`
+-- type is still not a class problem). See `docs/stages/30-*`.
 
 -- a class application's head and arguments, without unfolding the class (`whnf` would
 -- turn it into its `μ`)
@@ -3822,14 +3849,49 @@ def resolveOne (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
           | .no => match tryGlobals gs es cx ty (sortInsts (instsOf C (Globals.insts gs))) with
             | .ok es1 t => commit es1 t
             | .no => .err (missingMsg p)
--- all the problems, each after the ones it creates (the step budget catches cycles)
-partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : InstRes := match es with
+-- (default instances) a problem stuck on an unknown class argument waits when its class
+-- has default instances (`attribute [default_instance]`); a class without them is stuck
+-- at once, as before
+def defaultWaits (gs : Globals) (es : ES) (p : PInst) : Bool := match p with
+  | .mk _ ty cx => match goalOf es ty with
+    | .other => .false
+    | .mk C args => match instsOf C (Globals.defaults gs) with
+      | .nil => .false
+      | .cons _ _ => Bool.not (allClosed es (Cx.lvl cx) args)
+-- when only waiting problems are left and none has become ready, the first of them gets
+-- its class's default instances, highest priority first, as the host's
+-- `applyDefaultInstance`; none applying leaves it stuck
+def applyDefault (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
+  | .mk hole ty cx => match goalOf es ty with
+    | .other => .err (stuckMsg p)
+    | .mk C _ => match tryGlobals gs es cx ty (sortInsts (instsOf C (Globals.defaults gs))) with
+      | .ok es1 t => (match unify es1 cx (eval (TCtx.env (Cx.c cx)) hole) (eval (TCtx.env (Cx.c cx)) t) with
+        | .some es2 => InstRes.ok es2
+        | .none => InstRes.err (missingMsg p))
+      | .no => .err (stuckMsg p)
+def anyReady (gs : Globals) (es : ES) : List PInst → Bool
+  | .nil => .false
+  | .cons p rest => Bool.or (Bool.not (defaultWaits gs es p)) (anyReady gs es rest)
+-- all the problems, each after the ones it creates (the step budget catches cycles);
+-- `held`: the waiting problems, the latest first
+partial def resolveHeld (gs : Globals) (es : ES) (fuel : Nat) (held : List PInst) : InstRes := match es with
   | .mk ms ps ls lps (.cons p rest) => match fuel with
     | .zero => .err (String.append "instance search did not finish in 100 steps (a cyclic instance?): " (goalShow p))
-    | .succ f => match resolveOne gs (.mk ms ps ls lps rest) p with
-      | .err m => .err m
-      | .ok es' => resolveAll gs es' f
-  | _ => .ok es
+    | .succ f => match defaultWaits gs es p with
+      | .true => resolveHeld gs (.mk ms ps ls lps rest) f (.cons p held)
+      | .false => match resolveOne gs (.mk ms ps ls lps rest) p with
+        | .err m => .err m
+        | .ok es' => resolveHeld gs es' f held
+  | .mk ms ps ls lps .nil => match List.reverseOf held .nil with
+    | .nil => .ok es
+    | .cons p rest => match fuel with
+      | .zero => .err (String.append "instance search did not finish in 100 steps (a cyclic instance?): " (goalShow p))
+      | .succ f => match anyReady gs es (.cons p rest) with
+        | .true => resolveHeld gs (.mk ms ps ls lps (.cons p rest)) f .nil
+        | .false => match applyDefault gs (.mk ms ps ls lps rest) p with
+          | .err m => .err m
+          | .ok es' => resolveHeld gs es' f .nil
+partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : InstRes := resolveHeld gs es fuel .nil
 
 -- (A9) named arguments `f a (x := e) b`. The kernel's `Tm`/`Val` carry no binder
 -- names, so a global keeps its parameters' names beside their binder kinds. A call
@@ -6192,7 +6254,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -6538,8 +6600,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -6606,7 +6668,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -6789,8 +6851,8 @@ def structCmd (gs : Globals) (stx : Syntax) : Step :=
 -- that problem at each use of `C e₁ e₂ m`); the methods' parameters are implicit.
 --
 -- Not supported (errors): private fields, `outParam` (no rewrite of an output
--- parameter's type), `attribute [default_instance]`/`[binop]`, and `deriving` on a
--- class. A class at universe parameters (`class Repr.{u} (A : Type u)`) works: its
+-- parameter's type) and `deriving` on a class (`attribute [default_instance]`/`[binop]`
+-- are the prelude's registrations, `preludeStep`). A class at universe parameters (`class Repr.{u} (A : Type u)`) works: its
 -- methods carry the class's universe parameters (U2).
 def classFieldNames : List Syntax → List String
   | .nil => .nil
@@ -8054,6 +8116,141 @@ def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
       | .succ (.zero) => LinkR.mk .none (Globals.addDeriver gs C f)
       | n => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: it takes " +++ Nat.toString n
           +++ " arguments, expected one (String → MacroM (List Syntax))")) gs
+-- The prelude's registrations (`lib/Prelude.wiz`, with `--prelude-from-roots`), checked
+-- as the host's `Elab/Command.lean` does and recorded in `Globals.ext`:
+--
+-- `builtin KEY := C` names the constant behind a native operation. This frontend's
+-- kernel never computes with a registration (numerals stay `Nat.succ`/`Nat.zero` terms,
+-- `Nat.add` unfolds as written), so it assumes nothing here and needs no trust; the
+-- checks are the host's: a known key, each key and each constant once, `C` declared and
+-- of the operation's shape (an inductive type for `nat`/`string`/`int`; otherwise a
+-- definition over the registered `nat` type, `nat.zero`/`nat.succ` its constructors).
+-- `attribute [default_instance p] i` (p 1000 by default) makes instance `i` a default
+-- of its class (`applyDefault`); `attribute [binop] C.f` is checked to be a class
+-- method and recorded (numerals are `Nat` here, so it changes nothing yet).
+def builtinKeys : List String :=
+  .cons "nat" (.cons "nat.zero" (.cons "nat.succ" (.cons "nat.pred" (.cons "nat.add" (.cons "nat.sub"
+  (.cons "nat.mul" (.cons "nat.beq" (.cons "nat.blt" (.cons "string" (.cons "memo" (.cons "int"
+  (.cons "nat.div" (.cons "nat.mod" (.cons "nat.pow" (.cons "nat.land" (.cons "nat.lor" (.cons "nat.xor"
+  (.cons "nat.shiftLeft" (.cons "nat.shiftRight" (.cons "nat.log2" .nil))))))))))))))))))))
+def strIn (x : String) : List String → Bool
+  | .nil => .false
+  | .cons y rest => Bool.or (strEq x y) (strIn x rest)
+def commaList : List String → String
+  | .nil => ""
+  | .cons x rest => match rest with
+    | .nil => x
+    | .cons _ _ => x +++ ", " +++ commaList rest
+def builtinOfKey (key : String) : List BuiltinReg → Option String
+  | .nil => .none
+  | .cons (.mk k n) rest => match strEq k key with
+    | .true => .some n
+    | .false => builtinOfKey key rest
+def builtinOfName (n : String) : List BuiltinReg → Option String
+  | .nil => .none
+  | .cons (.mk k m) rest => match Bool.and (strEq m n) (strIn k builtinKeys) with
+    | .true => .some k
+    | .false => builtinOfName n rest
+def natOpArity (key : String) : Nat := match strEq key "nat.zero" with
+  | .true => 0
+  | .false => match Bool.or (strEq key "nat.succ") (Bool.or (strEq key "nat.pred") (strEq key "nat.log2")) with
+    | .true => 1
+    | .false => 2
+def isConstOf (N : String) : Tm → Bool
+  | .const c _ _ _ _ => strEq c N
+  | .axiomC c _ => strEq c N
+  | _ => .false
+-- the domains of a Π telescope, and its result
+def piDomsAll (N : String) : Tm → Bool
+  | .pi _ _ _ a b => Bool.and (isConstOf N a) (piDomsAll N b)
+  | _ => .true
+partial def piResult : Tm → Tm
+  | .pi _ _ _ _ b => piResult b
+  | t => t
+def ctorIn (N n : String) : List Ctor → Bool
+  | .nil => .false
+  | .cons (.mk cn _ _ _ _ _) rest => Bool.or (strEq n (N +++ "." +++ cn)) (ctorIn N n rest)
+def isCtorOf (gs : Globals) (N n : String) : Bool := match Globals.ind gs N with
+  | .none => .false
+  | .some (.mk _ _ _ _ _ cs _ _ _) => ctorIn N n cs
+def builtinShape (gs : Globals) (key n : String) : Option String :=
+  match Bool.or (strEq key "nat") (Bool.or (strEq key "string") (strEq key "int")) with
+  | .true => match Globals.ind gs n with
+    | .some _ => .none
+    | .none => .some "it must be an inductive type"
+  | .false => match strEq key "memo" with
+    | .true => .none
+    | .false => match builtinOfKey "nat" (Globals.builtins gs) with
+      | .none => .some "register `builtin nat := …` first"
+      | .some N => match Scope.lookup (Globals.scope gs) n with
+        | .none => .some "it must be a definition"
+        | .some i => match globalTm .false gs i with
+          | .const _ _ _ v ty => match isAxiomTm v with
+            | .true => .some "it must be a definition"
+            | .false =>
+              let ar := natOpArity key;
+              match Bool.and (Nat.beq (piArity ty) ar) (piDomsAll N ty) with
+              | .false => .some ("it must take " +++ Nat.toString ar +++ " argument" +++
+                  (match Nat.beq ar 1 with
+                    | .true => ""
+                    | .false => "s") +++ " of type " +++ N)
+              | .true => match Bool.and (Bool.or (strEq key "nat.zero") (strEq key "nat.succ"))
+                  (Bool.not (isCtorOf gs N n)) with
+                | .true => .some ("it must be a constructor of " +++ N)
+                | .false => match Bool.or (Bool.or (strEq key "nat.beq") (strEq key "nat.blt"))
+                    (isConstOf N (piResult ty)) with
+                  | .true => .none
+                  | .false => .some ("its result must have type " +++ N)
+          | _ => .some "it must be a definition"
+def builtinCmd (gs : Globals) (stx : Syntax) : LinkR :=
+  let key := identOf' (kid stx 1);
+  let n := identOf' (kid stx 3);
+  let err := fun (m : String) => LinkR.mk (.some ("error: " +++ m)) gs;
+  match strIn key builtinKeys with
+  | .false => err ("unknown builtin " +++ key +++ "; known: [" +++ commaList builtinKeys +++ "]")
+  | .true => match builtinOfKey key (Globals.builtins gs) with
+    | .some m => err ("builtin " +++ key +++ " is already registered (as " +++ m +++ "); a builtin can be registered only once")
+    | .none => match builtinOfName n (Globals.builtins gs) with
+      | .some k => err (n +++ " is already registered as builtin " +++ k)
+      | .none => match Scope.lookup (Globals.scope gs) n with
+        | .none => err ("unknown declaration " +++ n)
+        | .some _ => match builtinShape gs key n with
+          | .some e => err ("builtin " +++ key +++ " := " +++ n +++ ": " +++ e)
+          | .none => LinkR.mk .none (Globals.addBuiltin gs key n)
+-- the priority of `[default_instance p]` (its optional wraps the numeral)
+def defaultPrio (s : Syntax) : Nat := match strEq (kindOf s) "num" with
+  | .true => numValue s
+  | .false => instPrio s
+def findInst (n : String) : List InstInfo → Option InstInfo
+  | .nil => .none
+  | .cons i rest => match strEq (nameOf i) n with
+    | .true => .some i
+    | .false => findInst n rest
+def defaultInstanceCmd (gs : Globals) (stx : Syntax) : LinkR :=
+  let i := identOf' (kid stx 5);
+  match findInst i (Globals.insts gs) with
+  | .none => LinkR.mk (.some ("error: " +++ i +++ " is not an instance")) gs
+  | .some (.mk C n _ o) => LinkR.mk .none (Globals.addDefault gs (InstInfo.mk C n (defaultPrio (kid stx 3)) o))
+-- the class whose method `f` is (`C.f`, one of the class's fields)
+def methodIn (f C : String) : List String → Bool
+  | .nil => .false
+  | .cons m rest => Bool.or (strEq f (C +++ "." +++ m)) (methodIn f C rest)
+def binopCmd (gs : Globals) (stx : Syntax) : LinkR :=
+  let f := identOf' (kid stx 4);
+  match splitLast f with
+  | .some (.mk C _) => match Globals.class gs C with
+    | .some (.mk ms) => match methodIn f C ms with
+      | .true => LinkR.mk .none (Globals.addBinop gs C)
+      | .false => LinkR.mk (.some ("error: " +++ f +++ " is not a method of a class")) gs
+    | .none => LinkR.mk (.some ("error: " +++ f +++ " is not a method of a class")) gs
+  | .none => LinkR.mk (.some ("error: " +++ f +++ " is not a method of a class")) gs
+def preludeStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.builtin" with
+  | .true => .some (builtinCmd gs stx)
+  | .false => match strEq (kindOf stx) "command.attrDefaultInstance" with
+    | .true => .some (defaultInstanceCmd gs stx)
+    | .false => match strEq (kindOf stx) "command.attrBinop" with
+      | .true => .some (binopCmd gs stx)
+      | .false => .none
 -- (stage 21u) `attribute [inline] f`: a hint to the Lean compiler, checked as the Lean
 -- frontend does (`f` must have a definition); it changes nothing here
 def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attrInline" with
@@ -8068,7 +8265,7 @@ def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf
     | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs)
   | .false => match strEq (kindOf stx) "command.attrDeriver" with
     | .true => .some (deriverCmd gs stx)
-    | .false => .none
+    | .false => preludeStep gs stx
 -- `link_c`, `link_lib`, `export` (stage 21o) and `implemented_by` (21t): no output line
 -- unless an error
 def linkStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.linkC" with
@@ -8777,8 +8974,12 @@ def checkFile (cats : List Cat) (tokens : List String) (text : String) : List St
 -- root that has it, else in the working directory (`A.B` is `A/B.wiz`). Each module is
 -- elaborated once, before the modules that import it, into the same globals (`Globals`)
 -- and parser tables, so an importer sees the declarations of the modules it imports.
--- `Prelude` is always the embedded prelude (`preludeText`): the self-hosted prelude is
--- what this frontend can check, not `lib/Prelude.wiz` (A9-A23). A module's imports are
+-- By default `Prelude` (and `IO`, `Std`, `Sys`) is the embedded prelude (`preludeText`),
+-- the prelude this frontend checks cleanly today. With `--prelude-from-roots` the names
+-- are resolved through the roots like any module, so `-I lib` gives `lib/Prelude.wiz`, as
+-- on the host; a root without them falls back to the embedded prelude
+-- (`moduleRootSourcesFrom`, `modAmbientFallback`). The default flips once
+-- `lib/Prelude.wiz` checks without errors here. A module's imports are
 -- hoisted: they are loaded (and the modules checked) before any other command of the
 -- module, in source order; the module's own declarations keep their source order.
 --
@@ -8845,10 +9046,13 @@ def modCandidates (roots : List String) (name : String) : List String :=
 -- the module is elaborated: its imports are then what was read before the error)
 --
 -- The names the self-hosted toolchain's own drivers use (`IO`, `Std`, `Sys`) all mean the
--- embedded prelude until `lib/` can be checked by this frontend: the prelude declares the
--- `IO` names, and a real `IO.wiz` cannot be checked today (A9-A23). This is the one place
+-- embedded prelude on the *embedded* path (the default, and what the bootstrap uses: the
+-- Backend knows the embedded prelude's natives, not `lib/`'s). This is the one place
 -- module names are canonicalised, so a program importing `IO` and `Prelude` loads one
--- prelude.
+-- prelude. On the *roots* path (`--prelude-from-roots`, for the checker and every driver
+-- command) the names are kept and resolved through the `-I` roots like any module:
+-- `import Prelude` is `lib/Prelude.wiz` with `-I lib`, as on the host; only a name the
+-- roots do not have falls back to the embedded prelude (`modAmbientFallback`).
 def modCanonical (name : String) : String :=
   match strEq name "IO" with
   | .true => "Prelude"
@@ -8857,17 +9061,23 @@ def modCanonical (name : String) : String :=
     | .false => match strEq name "Sys" with
       | .true => "Prelude"
       | .false => name
-partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat) : List String :=
+-- an import's module name: canonicalised on the embedded path, as written on the roots path
+def modImportName (canon : Bool) (name : String) : String := match canon with
+  | .true => modCanonical name
+  | .false => name
+partial def modImportsAt (canon : Bool) (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat) : List String :=
   match Nat.lt (skipWs input pos) (Array.size input) with
   | .false => .nil
   | .true => match parseCommandAt cats tokens input pos with
     | .err _ => .nil
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
-      | .true => .cons (modCanonical (identOf'' (kid stx 1))) (modImportsAt cats tokens input stop)
-      | .false => modImportsAt cats tokens input stop
+      | .true => .cons (modImportName canon (identOf'' (kid stx 1))) (modImportsAt canon cats tokens input stop)
+      | .false => modImportsAt canon cats tokens input stop
 
+def moduleImportsWith (canon : Bool) (cats : List Cat) (tokens : List String) (text : String) : List String :=
+  modImportsAt canon cats tokens (String.codes text) 0
 def moduleImports (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  modImportsAt cats tokens (String.codes text) 0
+  moduleImportsWith .true cats tokens text
 
 -- the module an import is written in (the head of the loader's stack; `Main` at the top)
 def modImporting : List String → String
@@ -8883,7 +9093,8 @@ partial def modImportAt (cats : List Cat) (tokens : List String) (input : Array 
   | .true => match parseCommandAt cats tokens input pos with
     | .err _ => 0
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
-      | .true => match strEq (modCanonical (identOf'' (kid stx 1))) name with
+      | .true => match Bool.or (strEq (identOf'' (kid stx 1)) name)
+          (strEq (modCanonical (identOf'' (kid stx 1))) name) with
         | .true => skipWs input pos
         | .false => modImportAt cats tokens input stop name
       | .false => modImportAt cats tokens input stop name
@@ -8953,11 +9164,12 @@ inductive ModLoad where
 -- declares the ambient names, it is not part of the program's output). A module's lines
 -- are tagged with its name (`tagFirst`, D6), so a driver can put each diagnostic in the
 -- file it came from; `stripAt` removes the tag for the checker's own output.
-def modRunBody (r : Run) (name : String) (text : String) : Run :=
+def modRunBody (r : Run) (name : String) (path : String) (text : String) : Run :=
   -- (21n) the module's commands run with `name` as the current module: its `private`
   -- declarations are private to it, and every name it declares is marked in its name
   let gs0 := Globals.setModule (Run.gs r) name;
-  let r' := match strEq name "Prelude" with
+  -- (only the *embedded* prelude, path "prelude": `lib/Prelude.wiz` declares `do` itself)
+  let r' := match Bool.and (strEq name "Prelude") (strEq path "prelude") with
     | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
         (Run.notesOf r) (String.codes text) 0 gs0 .nil with
       | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
@@ -8987,7 +9199,7 @@ def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
           let l1 : ModLoad := .mk run (modMark vis name 1) (.cons name stack) order;
           match modLoadAll tab l1 is with
           | .mk run2 vis2 _ order2 =>
-            .mk (modRunBody run2 name t) (modMark vis2 name 2) stack (.cons name order2)
+            .mk (modRunBody run2 name p t) (modMark vis2 name 2) stack (.cons name order2)
 def modLoadAll (tab : List ModSrc) (l : ModLoad) : List String → ModLoad
   | .nil => l
   | .cons n ns => modLoadAll tab (modLoadOne tab l n) ns
@@ -9070,36 +9282,57 @@ def modHasFlag : List String → String → Bool
 -- the first candidate path of `name` with text ("" when none: with `IO.readFile` an empty
 -- file and a missing one look alike)
 mutual
-partial def modProbeAt (cats : List Cat) (tokens : List String) (name : String) : List String → IO ModSrc
+partial def modProbeAt (canon : Bool) (cats : List Cat) (tokens : List String) (name : String) : List String → IO ModSrc
   | .nil => IO.pure (ModSrc.mk name "" "" .nil)
-  | .cons p ps => IO.bind (IO.readFile p) (fun t => modProbeGo cats tokens name p t ps)
-partial def modProbeGo (cats : List Cat) (tokens : List String) (name p t : String) (ps : List String) : IO ModSrc :=
-  if modEmpty t then modProbeAt cats tokens name ps
-  else IO.pure (ModSrc.mk name p t (moduleImports cats tokens t))
+  | .cons p ps => IO.bind (IO.readFile p) (fun t => modProbeGo canon cats tokens name p t ps)
+partial def modProbeGo (canon : Bool) (cats : List Cat) (tokens : List String) (name p t : String) (ps : List String) : IO ModSrc :=
+  if modEmpty t then modProbeAt canon cats tokens name ps
+  else IO.pure (ModSrc.mk name p t (moduleImportsWith canon cats tokens t))
 end
+-- (roots path) a module the roots do not have: `Prelude` is the embedded prelude (its
+-- path "prelude"), and `IO`/`Std`/`Sys` stand for it (a module whose only command is
+-- `import Prelude`), as on the embedded path; any other name stays missing
+def modAmbientFallback (m : ModSrc) : ModSrc := match m with
+  | .mk n p t is => match strEq n "Prelude" with
+    | .true => ModSrc.mk "Prelude" "prelude" preludeText .nil
+    | .false => match strEq (modCanonical n) "Prelude" with
+      | .true => ModSrc.mk n "prelude" "" (.cons "Prelude" .nil)
+      | .false => ModSrc.mk n p t is
 -- read `name`, and then (breadth first) the modules it imports, once each
 mutual
-partial def modDiscover (cats : List Cat) (tokens : List String) (roots : List String)
+partial def modDiscover (canon : Bool) (cats : List Cat) (tokens : List String) (roots : List String)
     (tab : List ModSrc) (queue : List String) : IO (List ModSrc) :=
   match queue with
   | .nil => IO.pure tab
   | .cons name rest => match modFind tab name with
-    | .some _ => modDiscover cats tokens roots tab rest
-    | .none => IO.bind (modProbeAt cats tokens name (modCandidates roots name)) (fun m =>
-      modDiscoverGo cats tokens roots tab m rest)
-partial def modDiscoverGo (cats : List Cat) (tokens : List String) (roots : List String)
-    (tab : List ModSrc) (m : ModSrc) (rest : List String) : IO (List ModSrc) :=
-  if modEmpty (modText m) then modDiscover cats tokens roots (.cons m tab) rest
-  else modDiscover cats tokens roots (.cons m tab) (List.append rest (modImports m))
+    | .some _ => modDiscover canon cats tokens roots tab rest
+    | .none => IO.bind (modProbeAt canon cats tokens name (modCandidates roots name)) (fun m =>
+      modDiscoverGo canon cats tokens roots tab m rest)
+partial def modDiscoverGo (canon : Bool) (cats : List Cat) (tokens : List String) (roots : List String)
+    (tab : List ModSrc) (m0 : ModSrc) (rest : List String) : IO (List ModSrc) :=
+  let m : ModSrc := match Bool.and (Bool.not canon) (modEmpty (modPath m0)) with
+    | .true => modAmbientFallback m0
+    | .false => m0;
+  if modEmpty (modPath m) then modDiscover canon cats tokens roots (.cons m tab) rest
+  else modDiscover canon cats tokens roots (.cons m tab) (List.append rest (modImports m))
 end
 
 -- the root module and, from it, the modules it imports: its name and the path its
--- diagnostics are reported at (the driver's FILE; the checker's `input.wiz`)
-def moduleRootSourcesAs (cats : List Cat) (tokens : List String) (roots : List String)
+-- diagnostics are reported at (the driver's FILE; the checker's `input.wiz`). On the
+-- embedded path (`fromRoots` false: the compiler, `build`, the bootstrap) `Prelude` is
+-- always the embedded prelude; on the roots path it is found through the roots, and the
+-- embedded one is only the fallback (`modAmbientFallback`).
+def moduleRootSourcesFrom (fromRoots : Bool) (cats : List Cat) (tokens : List String) (roots : List String)
     (name path text : String) : IO (List ModSrc) := do
-  let root : ModSrc := ModSrc.mk name path text (moduleImports cats tokens text);
-  let tab0 : List ModSrc := .cons (ModSrc.mk "Prelude" "prelude" preludeText .nil) (.cons root .nil);
-  modDiscover cats tokens roots tab0 (modImports root)
+  let canon := Bool.not fromRoots;
+  let root : ModSrc := ModSrc.mk name path text (moduleImportsWith canon cats tokens text);
+  let tab0 : List ModSrc := match fromRoots with
+    | .true => .cons root .nil
+    | .false => .cons (ModSrc.mk "Prelude" "prelude" preludeText .nil) (.cons root .nil);
+  modDiscover canon cats tokens roots tab0 (modImports root)
+def moduleRootSourcesAs (cats : List Cat) (tokens : List String) (roots : List String)
+    (name path text : String) : IO (List ModSrc) :=
+  moduleRootSourcesFrom .false cats tokens roots name path text
 
 -- the root module (`Main` is the file `input.wiz`) and, from it, the modules it imports
 def moduleRootSources (cats : List Cat) (tokens : List String) (roots : List String)
@@ -9113,12 +9346,14 @@ partial def modPrint : List String → IO Unit
     modPrint ss
 
 -- (A14) the checker's driver: read `input.wiz` and its modules (with `-I` roots), check
--- the graph and print the output lines; `--key` prints the graph's cache key instead
+-- the graph and print the output lines; `--key` prints the graph's cache key instead;
+-- `--prelude-from-roots` resolves `Prelude`/`IO`/`Std`/`Sys` through the roots
 def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   args ← IO.args;
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
-  tab ← moduleRootSources cats tokens (modRoots args) text;
+  tab ← moduleRootSourcesFrom (modHasFlag args "--prelude-from-roots") cats tokens (modRoots args)
+    "Main" "input.wiz" text;
   match modHasFlag args "--oneshot" with
   -- (21n) the one-shot path (`checkFile`: the embedded Prelude inline, one module
   -- `input`), kept reachable for the checker's own tests; the loader is the default
