@@ -160,11 +160,19 @@ inductive Elab where
   | err (msg : String)
 
 -- the names a binder introduces, and its type (if any)
+-- the non-atom children (a `sepBy` list without its separators)
+def nonAtomsS : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons s rest => match s with
+    | .atom _ => nonAtomsS rest
+    | _ => .cons s (nonAtomsS rest)
 def identNames : List Syntax → List String
   | .nil => .nil
   | .cons s rest => .cons (match s with
       | .ident n => n
       | _ => "_") (identNames rest)
+-- (A11) the names of a `sepBy1` list (`C₁, C₂`): the `,` atoms are separators, not names
+def sepIdentNames (xs : List Syntax) : List String := identNames (nonAtomsS xs)
 -- (A10) a binder's kind, as the Lean frontend's `BinderInfo`: explicit, implicit
 -- (`{x : A}`), or instance (`[i : C A]`, resolved by `resolveInstances`). The mask of a
 -- global is one kind per parameter, and an `inst` binder inserts a class problem.
@@ -6431,7 +6439,7 @@ inductive DerivedR where
 -- the classes written in a `deriving` clause (its optional wraps `deriving` and the
 -- `sepBy1` of names in a `null`), or none
 def derivingNames (stx : Syntax) : List String := match kids (kid stx 7) with
-  | .cons _ (.cons ids _) => identNames (kids ids)
+  | .cons _ (.cons ids _) => sepIdentNames (kids ids)
   | _ => .nil
 -- the error a deriver reports, in the host's shape (`deriving C for T: reason`, the
 -- reason being the deriver's message): `report` in `Elab/Command.lean`'s expansion
@@ -6891,8 +6899,8 @@ def withDeriving (gs : Globals) (stx : Syntax) (step : Step) : Step := match ste
         | _ => .mk line gs1
 -- `deriving instance C₁, C₂ for T₁, T₂`: the cross product, in source order
 def derivingCmd (gs : Globals) (stx : Syntax) : Step :=
-  let classes := identNames (kids (kid stx 2));
-  let types := identNames (kids (kid stx 4));
+  let classes := sepIdentNames (kids (kid stx 2));
+  let types := sepIdentNames (kids (kid stx 4));
   match deriveForTypes classes types gs with
   | .ok gs1 _ => .mk "" gs1
   | .err m => .mk m gs
@@ -6904,8 +6912,8 @@ def mutualDeriving : List Syntax → Option String
   | .nil => .none
   | .cons d rest => match derivingNames d with
     | .nil => mutualDeriving rest
-    | classes => .some ("deriving " +++ identOf' (kid d 1)
-        +++ " on a mutual inductive is not supported (it derives for the joint family, an indexed family); derive each member's instances by hand")
+    | .cons C _ => .some ("deriving " +++ C +++ " for " +++ identOf' (kid d 1)
+        +++ ": a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand")
 
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
@@ -7011,7 +7019,10 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
         | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
-        | .none => .next (atLine start (.some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
+        -- (A11) `deriving instance` prints no line, as in the Lean toolchain
+        | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
+            | .true => .none
+            | .false => .some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports cats tokens notes input pos gs with

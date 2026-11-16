@@ -1129,10 +1129,13 @@ def derivingSelfHeader : String :=
   "instance : BEq Nat := BEq.mk Nat.beq\ninstance : BEq Bool := BEq.mk Bool.beqE\n" ++
   "instance : DecidableEq Nat := DecidableEq.mk Nat.beq\n" ++
   "instance : DecidableEq Bool := DecidableEq.mk Bool.beqE\n" ++
-  "instance : Repr Nat := Repr.mk (fun n p => Nat.toString n)\n" ++
+  "instance : Repr Nat := Repr.mk (fun n p => \"n\")\n" ++
   "instance : Repr Bool := Repr.mk (fun b p => \"b\")\n" ++
   "def Nat.compare (a b : Nat) : Ordering :=\n  if Nat.lt a b then Ordering.lt else (if Nat.beq a b then Ordering.eq else Ordering.gt)\n" ++
-  "instance : Compare Nat := Compare.mk Nat.compare\n"
+  "instance : Compare Nat := Compare.mk Nat.compare\n" ++
+  "def Bool.cmp : Bool → Bool → Ordering\n  | .false, .true => Ordering.lt\n  | .true, .false => Ordering.gt\n" ++
+  "  | _, _ => Ordering.eq\n" ++
+  "instance : Compare Bool := Compare.mk Bool.cmp\n"
 
 /-- (A11) The deriver table and the five built-ins, on every form: a `deriving` clause on
 an `inductive` and on a `structure`, `deriving instance C for T`, several classes and
@@ -1146,7 +1149,7 @@ def selfhostDerivingTable : String :=
   "inductive Tree (A : Type) where\n  | leaf\n  | node (l : Tree A) (x : A) (r : Tree A)\n  deriving Inhabited, BEq, Repr, Compare\n" ++
   "structure Box (A : Type) where\n  val : A\n" ++
   "deriving instance Inhabited, BEq, Repr for Box\n" ++
-  "structure One where\n  a : Nat\nstructure Two where\n  a : Nat\n  b : Bool\n" ++
+  "structure One where\n  a : Nat\nstructure Two where\n  a : Nat\n  b : Nat\n" ++
   "deriving instance BEq for One, Two\n" ++
   "class Eq2 (A : Type) where\n  decide : A → A → Bool\n" ++
   "instance : Eq2 Nat := Eq2.mk Nat.beq\n" ++
@@ -1170,14 +1173,15 @@ def selfhostDerivingTable : String :=
   "#reduce ordIs (Compare.compare t1 t2)\n" ++
   "#reduce BEq.beq (Box.mk 3) (Box.mk 3)\n" ++
   "#reduce BEq.beq (One.mk 1) (One.mk 2)\n" ++
-  "#reduce BEq.beq (Two.mk 1 .false) (Two.mk 1 .false)\n" ++
+  "#reduce BEq.beq (Two.mk 1 0) (Two.mk 1 0)\n" ++
   "#reduce Eq2.decide Swatch.on Swatch.on\n" ++
   "#reduce Eq2.decide Swatch.on Swatch.off\n" ++
   "#reduce Nat.beq (String.length (Repr.reprPrec (Point.mk 1 .true) 0)) 12\n" ++
   "#reduce Nat.beq (String.length (Repr.reprPrec (Point.mk 1 .true) 1024)) 14\n" ++
   "#reduce Nat.beq (String.length (Repr.reprPrec (Box.mk 7) 0)) 8\n"
 
-def selfhostDerivingTableExpected : String := "PLACEHOLDER"
+def selfhostDerivingTableExpected : String :=
+  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nordIs : (x0 : Ordering) → Nat\nColor : U0\nPoint : U0\nPoint.x : (x0 : Point) → Nat\nPoint.y : (x0 : Point) → Bool\nTree : (x0 : U0) → U0\nBox : (x0 : U0) → U0\nBox.val : (x0 :0 U0) → (x1 : (Box x0)) → x0\nOne : U0\nOne.a : (x0 : One) → Nat\nTwo : U0\nTwo.a : (x0 : Two) → Nat\nTwo.b : (x0 : Two) → Nat\nEq2 : (x0 : U0) → U0\nEq2.decide : (x0 :0 U0) → (x1 : (Eq2 x0)) → (x2 : x0) → (x3 : x0) → Bool\ninstEq2 : (Eq2 Nat)\nSwatch : U0\nt1 : (Tree Nat)\nt2 : (Tree Nat)\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
 
 /-- (A11) The deriver table's errors: a class with no deriver, a type a deriver rejects
 (an indexed family, an all-recursive constructor, a recursive field for `DecidableEq`), a
@@ -1188,7 +1192,7 @@ def selfhostDerivingNeg : String :=
   "class Size (A : Type) where\n  size : A → Nat\n" ++
   "deriving instance Size for Nat\n" ++
   "inductive Vec (A : Type) : Nat → Type where\n" ++
-  "  | vnil : Vec A 0\n  | vcons (x : A) (xs : Vec A 0) : Vec A 0\n  deriving BEq\n" ++
+  "  | vnil : Vec A Nat.zero\n  | vcons (x : A) (xs : Vec A Nat.zero) : Vec A Nat.zero\n  deriving BEq\n" ++
   "inductive L where\n  | nil\n  | cons (n : Nat) (t : L)\n  deriving DecidableEq\n" ++
   "inductive R where\n  | mk (r : R)\n  deriving Inhabited\n" ++
   "def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n" ++
@@ -1197,7 +1201,8 @@ def selfhostDerivingNeg : String :=
   "deriving instance Bar for Nat\n" ++
   "mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n"
 
-def selfhostDerivingNegExpected : String := "PLACEHOLDER"
+def selfhostDerivingNegExpected : String :=
+  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\nerror: deriving BEq for Vec: indexed families are not supported\nerror: deriving DecidableEq for L: DecidableEq is derived for an enumeration or a single-constructor record only, and L\nerror: deriving Inhabited for R: every constructor of R is recursive or has a proof field\nmyD : (x0 : String) → (x1 : String) → String\nerror: myD is not a deriver: it takes 2 arguments, expected one (String → MacroM (List Syntax))\nBar : (x0 : U0) → U0\nBar.bar : (x0 :0 U0) → (x1 : (Bar x0)) → (x2 : x0) → Nat\nmyDeriver : (x0 : String) → String\nerror: deriving Bar for Nat: the deriver myDeriver cannot be run (this frontend has no elaboration-time evaluator; the derivers it runs are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)\nerror: deriving BEq for B: a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand\n"
 
 /-- (A11, D6) The self-hosted driver's `check` reports a refused derivation at the
 command's position, in the host's message shape. -/
@@ -2428,12 +2433,12 @@ def selfHostGroup : Group where
 
     { name := "(A11) deriving: the Lean host and the self-hosted frontend agree on every form", run := fun _ =>
         derivingAgrees derivingSelfHeader [
-          ("inductive D1 where\n  | a\n  | b\n  deriving BEq\n", true),
+          ("inductive D1 where\n  | a\n  | b\n  | c\n  deriving BEq\n", true),
           ("structure D2 where\n  x : Nat\n  deriving BEq\n", true),
           ("structure D3 where\n  x : Nat\n  b : Bool\nderiving instance BEq, Repr for D3\n", true),
-          ("structure D4 where\n  x : Nat\nstructure D5 where\n  x : Nat\nderiving instance BEq for D4, D5\n", true),
+          ("structure D4 where\n  x : Nat\nstructure D5 where\n  x : Bool\nderiving instance BEq for D4, D5\n", true),
           ("inductive D6 where\n  | a\n  deriving Inhabited, BEq, Repr, DecidableEq\n", true),
-          ("inductive Vec (A : Type) : Nat → Type where\n  | vnil : Vec A 0\n  | vcons (x : A) (xs : Vec A 0) : Vec A 0\n  deriving BEq\n", false),
+          ("inductive Vec (A : Type) : Nat → Type where\n  | vnil : Vec A Nat.zero\n  | vcons (x : A) (xs : Vec A Nat.zero) : Vec A Nat.zero\n  deriving BEq\n", false),
           ("inductive L where\n  | nil\n  | cons (n : Nat) (t : L)\n  deriving DecidableEq\n", false),
           ("inductive R where\n  | mk (r : R)\n  deriving Inhabited\n", false),
           ("class Sz (A : Type) where\n  size : A → Nat\nderiving instance Sz for Nat\n", false),

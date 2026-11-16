@@ -198,7 +198,8 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   `attribute [deriver C] f`)`, the host's message); a class with the wrong arity; and a
   registered deriver this frontend cannot run. A field with no `BEq` instance is rejected
   through ordinary instance resolution when the generated `BEq.beq` cannot be solved.
-  `deriving C` on a `mutual` block itself is refused with the command's span: the host
+  `deriving C` on a `mutual` block itself is refused with the command's span (`deriving C
+  for T: a mutual inductive is not supported …`): the host
   derives for the joint family (`A_B t`, an indexed family, so one instance covers every
   member), which this frontend's equation-based derivers do not support; `deriving Repr`
   on a mutual block is therefore a pinned difference (the host accepts it).
@@ -206,6 +207,13 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   position it (`file:line:col`); the checker's own output (`checkFile`) strips the offset
   like every other command's. The host positions the error at the class name inside the
   command (`4:19`); this frontend's diagnostics are command-granular (D6).
+* **Structural types meet the duplicate check.** Data types are descriptions, so two
+  declarations with the same shape are the same type to the kernel: `inductive D | a |
+  b` is `Bool`, and two one-field `Nat` records are each other. Deriving `BEq` for both
+  then makes a second instance of the same type, which the duplicate check refuses
+  (`duplicate instance: instBEq1 already has the type of this one`). The host accepts
+  it. The tests give each derived type a distinct shape (a known difference, not pinned by
+  a case).
 
 What a **user deriver** still needs: (1) a way to run Wiz code at elaboration time (an
 interpreter over the kernel's terms, or compiling with `Backend.wiz` and loading the
