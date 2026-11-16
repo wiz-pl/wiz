@@ -67,6 +67,7 @@
     "=native",
     "=natives",
     "=nvim",
+    "=react",
     "optic",
     "persistent",
     "phantom",
