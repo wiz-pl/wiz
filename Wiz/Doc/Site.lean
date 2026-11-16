@@ -54,6 +54,8 @@ structure Options where
   reference : Option System.FilePath := none
   /-- with `--reference`: write nothing, and report the files that differ (`--check`) -/
   check : Bool := false
+  /-- the manual's own title (`--title`, else "Wiz standard library reference") -/
+  referenceTitle : String := "Wiz standard library reference"
 
 /-- What `run` made: the site's pages, the reference files that are not up to date (with
 `--check`), and the reference files it wrote. -/

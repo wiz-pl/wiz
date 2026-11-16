@@ -75,7 +75,7 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Ru
   IO.FS.writeFile (o.out / "api.json")
     (Json.mkObj [("title", o.title), ("modules", Json.arr apiModules), ("decls", Json.arr apiDecls)]).compress
   -- (the reference manual: the page of the site, and the committed Markdown when asked)
-  let data := Reference.collect o.title sections states
+  let data := Reference.collect o.referenceTitle sections states
   IO.FS.writeFile (o.out / "reference.html") (Reference.html o data states names)
   let mut stale : Array String := #[]
   let mut written : Array String := #[]
