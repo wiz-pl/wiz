@@ -946,6 +946,22 @@ def checkCmd (o : Opts) (file : String) : IO Unit := do
 -- ------------------------------------------------------------------------------------
 -- build: the C, to OUT
 
+-- the Backend's refusals in the C it generated (an extern the runtime does not have, a
+-- native shape it cannot represent): each `#error MSG` line as `error: MSG`, in order.
+-- `build` reports them and exits 1 instead of writing C that cannot compile.
+partial def cErrorsGo (atStart : Bool) (cs : List Char) (acc : List String) : List String :=
+  match cs with
+  | .nil => List.reverseOf acc .nil
+  | .cons c rest => match atStart with
+    | .true => match dropPrefix (charsOf "#error ") cs with
+      | .some after =>
+        let r := cTakeWhile (fun d => Bool.not (strEqC d 10)) after;
+        cErrorsGo .false r.2 (.cons (String.append "error: " (String.mk r.1)) acc)
+      | .none => cErrorsGo (strEqC c 10) rest acc
+    | .false => cErrorsGo (strEqC c 10) rest acc
+def cErrors (c : String) : List String := match c with
+  | .mk cs => cErrorsGo .true cs .nil
+
 def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   let lines := linesOf p.run;
   let ds := diagsOf p.tab lines;
@@ -953,8 +969,11 @@ def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   | .true => IO.bind (emitErrors ds) (fun u => noneIO)
   | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
     | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
-    | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
-        (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
+    | .nil =>
+      let code := docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run));
+      match cErrors code with
+      | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines)) code)
+      | .cons e es => IO.bind (ePrintAll (.cons e es)) (fun u => noneIO))
 
 def writeOut (out text : String) : IO Unit := do
   ok ← writeFile out text;
