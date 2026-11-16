@@ -531,11 +531,14 @@ package's `lib` targets with its module roots (dependencies included), into
   anchor is the declaration's name (or `module-<M>` for a module), so links do not move
   when the source does. `reference.html` is the same manual as a page of the site:
   every module page links each declaration and the module heading to it.
-  `--check` writes nothing and exits 1 when `DIR/index.md` differs from what the modules
-  say; CI's `docs` job runs `wiz doc --lib --reference docs/reference --check`, so the
-  committed manual cannot rot. The group `doc` checks a fixture (an implicit argument, a
-  class with two instances, an infix operator, markup, a module without doc comments) and
-  the committed `docs/reference/index.md` itself.
+  The standard library's manual is built, not committed: the flake's `reference` package
+  (`nix build .#reference`) runs `wiz doc --lib --reference` with the packaged `wiz`, so it
+  cannot go stale and a rebuild is a Cachix hit while the compiler and `lib/` are
+  unchanged; CI builds it with `wiz` and the docs job publishes it. For a project that
+  commits its own manual, `--check` writes nothing and exits 1 when `DIR/index.md`
+  differs from what the modules say. The group `doc` checks a fixture (an implicit
+  argument, a class with two instances, an infix operator, markup, a module without doc
+  comments), and `--check` passing and failing on it.
 * **Interactive signatures, with the infoview's Wasm.** Each page carries its data as
   JSON (`<script id="wiz-doc-data">`, and `A.B.json`): per declaration the signature in
   the infoview protocol's tagged-text format and the table of its subterms, each a

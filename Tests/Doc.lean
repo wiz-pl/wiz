@@ -433,11 +433,6 @@ def docGroup : Group where
           "--reference", ref.toString, "--check"] }
         check (p.exitCode == 1) s!"--check exit {p.exitCode}: {p.stdout}{p.stderr}"
         check (has p.stderr "is out of date") p.stderr },
-    { name := "the committed reference manual (docs/reference/index.md) is up to date", run := fun _ => do
-        let dir ← IO.FS.createTempDir
-        let o ← runOut (← wiz) ["doc", "--lib", "-o", (dir / "site").toString,
-          "--reference", "docs/reference", "--check"]
-        checkHas o "is up to date" },
     libDocCase
   ]
 

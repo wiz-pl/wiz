@@ -8,8 +8,9 @@
   # The packages: `wiz` (the default; it has `grail` too), built with Lake and the Lean
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
-  # and wiz (`nix run .#nvim-wiz`). CI pushes them to the Cachix cache `badlydrawnwizards`; see
-  # docs/building.md for `nix run`.
+  # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
+  # manual, generated with that wiz (never committed). CI pushes them to the Cachix
+  # cache `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -173,6 +174,33 @@
               platforms = systems;
             };
           };
+          # The standard library's reference manual (stage 11s; `wiz doc --lib --reference`):
+          # built, not committed. It reads only the packaged wiz (its lib/ and its
+          # read-only elaboration cache), so while the compiler and lib/ are unchanged a
+          # rebuild is a Cachix hit. $out/index.md is the Markdown manual; $out/site is the
+          # plain-HTML site it came with (reference.html among its pages).
+          reference = pkgs.stdenv.mkDerivation {
+            pname = "wiz-reference";
+            inherit (unwrapped) version;
+            dontUnpack = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              ${wiz}/bin/wiz doc --lib -o site --reference manual
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp manual/index.md $out/index.md
+              cp -r site $out/site
+              runHook postInstall
+            '';
+            meta = {
+              description = "The Wiz standard library reference manual (generated)";
+              platforms = systems;
+            };
+          };
           # tower, the toolchain manager (stage 26): the Wiz implementation in `tower/`,
           # built by grail (stage 26e/26h). It needs no Lean at build time; the binary
           # links GMP (the flags below), so the closure grows by GMP and glibc only.
@@ -270,7 +298,7 @@
                 platforms = systems;
               };
             };
-        in { inherit wiz unwrapped tower tests wiz-nvim nvim-wiz; default = wiz; };
+        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz; default = wiz; };
     in {
       packages = forAll packagesFor;
 
