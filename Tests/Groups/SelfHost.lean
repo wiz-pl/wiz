@@ -2592,6 +2592,27 @@ def selfHostGroup : Group where
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
           ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+    -- (A15) constructor fields are elaborated with types (`fieldTyT` in Frontend.wiz): a
+    -- higher-order recursive field is `Desc.hrec` when the type occurs strictly
+    -- positively, `×` in a field is a Σ, and a type without a written universe is raised
+    -- to its fields' (as `class Monad` in lib/Prelude.wiz needs)
+    { name := "the self-hosted frontend: typed constructor fields, higher-order recursive fields and inferred universes (A15)", run := fun _ =>
+        selfhostAgrees "" [
+          ("inductive TacA where\n  | done\n  | fresh (k : Nat → TacA)\n  | named (g : Nat) (k : (x : Nat) → TacA)\n" ++
+            "  | trace (msg : Nat) (next : TacA)\n" ++
+            "def tacExA : TacA := TacA.fresh (fun n => TacA.trace n TacA.done)\n" ++
+            "def tacTagA (t : TacA) : Nat := match t with\n  | .done => 0\n  | .fresh _ => 1\n  | .named g _ => g\n  | .trace m _ => m\n", true),
+          ("inductive NegA where\n  | mk (k : NegA → Nat)\n", false),
+          ("inductive NegB where\n  | mk (k : (NegB → Nat) → NegB)\n", false),
+          ("inductive SatA where\n  | sat\n  | unsat (proof : Nat × List Nat)\n" ++
+            "def unsatExA : SatA := SatA.unsat (3, List.nil)\n", true),
+          ("structure LenIsA (xs : List Nat) where\n  n : Nat\n  ok : List.length xs = n\n", true),
+          ("structure MoA (m : Type → Type) where\n  pure : (A : Type) → A → m A\n" ++
+            "def moOptA : MoA Option := MoA.mk (fun _ a => Option.some a)\n", true),
+          ("class MonA (m : Type → Type) where\n  pure : {A : Type} → A → m A\n" ++
+            "  bind : {A B : Type} → m A → (A → m B) → m B\n", true),
+          ("structure SmallA where\n  pure : (A : Type) → A → A\n" ++
+            "def needsT0A (A : Type) : Nat := 0\ndef badSmallA : Nat := needsT0A SmallA\n", false)] },
     -- (U2) symbolic levels in an inductive description: the description's level is the
     -- declaration's universe parameter (no closed numeral), which `Repr.{u}`/`Inhabited.{u}`
     -- need (Q4 lifts the tag into the data type's universe)
