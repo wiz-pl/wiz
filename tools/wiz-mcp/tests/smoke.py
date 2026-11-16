@@ -252,6 +252,23 @@ def run(argv: list[str]) -> int:
                 raise RuntimeError(f"hover did not mention Nat: {hover['result']!r}")
             print(f"hover: ok ({second_ms:.0f} ms), {json.dumps(hover['result'])[:120]}")
 
+            # Structured diagnostics from both sources, on a buffer with one type error.
+            bad = "import Prelude\n\ndef answer : Nat := Bool.true\n"
+            (Path(workspace) / "bad.wiz").write_text(bad, encoding="utf-8")
+            found = {}
+            for source in ("cli", "lsp"):
+                check = envelope_of(
+                    bridge.rpc("tools/call", {"name": "check", "arguments": {"path": "bad.wiz", "source": source}})
+                )
+                result = check["result"] or {}
+                if check["ok"] or check["error"] or result.get("counts", {}).get("error") != 1:
+                    raise RuntimeError(f"check ({source}) did not report exactly one error: {check}")
+                d = result["diagnostics"][0]
+                found[source] = (d["line"], d["column"], d["severity"], d["message"])
+                print(f"check ({source}): {d['line']}:{d['column']} {d['severity']} code={d['code']} {d['message'].splitlines()[0]!r}")
+            if found["cli"] != found["lsp"]:
+                raise RuntimeError(f"check sources disagree: {found}")
+
             shutdown = bridge.rpc("shutdown", {})
             if "error" in shutdown:
                 raise RuntimeError(f"shutdown failed: {shutdown}")
