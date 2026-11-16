@@ -24,7 +24,8 @@ quantity 0, so they are erased.
   (`class Commute (e₁ e₂) (m) [i : Monad m] …`) inserts that problem at every use of
   `C e₁ e₂ m`, as in Lean.
   Rejected: private fields (a class's fields are its methods), and (by the elaborator's
-  ordinary errors) `outParam`, universe-polymorphic classes, `deriving`.
+  ordinary errors) `outParam`, `deriving`. A class at universe parameters
+  (`class Repr.{u} (A : Type u)`) works since U2 (30d).
 * `instance [priority] [name] {ps} : C a… := v` (or `where f := v …`) is an ordinary
   definition whose type is checked to be a class application (`C` must be a class). For
   `where` the body is `C.mk f₁ … fₙ` in the class's field order; a missing, duplicated
@@ -115,8 +116,8 @@ with the new code, still checks itself.
 * `attribute [default_instance]`, `attribute [binop]`, `binop%`;
 * dictionary unboxing and projection inlining in the backend (performance, not
   semantics);
-* universe-polymorphic classes (`class Repr.{u} …`), which need A15's level parameters
-  and U2's symbolic descriptions.
+* `outParam` rewriting and default instances (above); universe-polymorphic classes
+  landed with U2 (30d).
 
 ## 30b: `deriving`
 
@@ -244,3 +245,73 @@ unrunnable registered deriver, and a `mutual` block), with exact messages pinned
 **differential** case that checks the Lean host (importing `lib/Deriving.wiz`) and the
 self-hosted frontend agree on every form's verdict; and a **span** case through the
 self-hosted driver's `check`, pinned as `input.wiz:4:1: error: …`.
+
+## 30d: symbolic levels in descriptions (U2)
+
+A data type at a universe parameter (`inductive Box.{u} (A : Type u) : Type u`,
+`structure Wrap.{u} (A : Type u)`, `class Repr.{u} (A : Type u)`) has no closed
+description level. `Tm.descr`, `delim`, `mu`/`mus`, `nu`, `sfix`/`scase`, `scofix`,
+`coit`, `ind`, `ulift`, `unit`/`empty` and their `Val` counterparts now carry `Lvl`
+instead of `Nat`; the kernel compares them with `lvlEquiv` in `convTy`, `tmEq`,
+`ground*` and `subTy`, and the templates (`interpTm`, `allTm`, `hypsTm`, `mapTm`,
+`delim*`, `ind*`, `sfix*`, `scase*`, `coit*`) build `lsucc`/`lmax`/`limax` levels.
+
+The frontend (`inductiveCmdL`, `dataLevel`) takes the declaration's universe parameter
+(or the largest universe parameter a `Type u` in the declaration mentions) as the
+description level; a field that is itself `Type u` needs `u+1`, the gap below. Above `Type 0` the
+description's tag field is lifted (`ULift (Enum k)`, Q4), as in the Lean frontend: the
+constructor stores `up tag`, the description eliminates it through `down`, and match
+compilation lifts/downs the tag in the method type and the reconstructed constructor.
+The lift is decided at the declaration's (symbolic) level and carried into every
+instantiation: the stored description keeps its `ULift` even when the level substitutes
+to `0`, so a concrete match on `Box Nat` must follow the declaration, not the
+instantiated level (otherwise it reads the tag as an unlifted `Enum`).
+Level metavariables of a constant's instantiation are unified (`unifyHead`/`unifyLvls`)
+so `Box Nat` solves `Box.{?u} ?A` from the expected type. A class's method projections
+carry the class's `.{u}` parameters.
+
+Tests (`=selfhost`): a polymorphic `inductive`/`structure`/`class` with `Repr` and
+`Inhabited` instances and compiled reductions; verdict parity on level mismatches,
+an undeclared universe and a field above the data type's universe; and a positioned
+diagnostic for `inductive Bad : Type u`. The fixpoint and `=check`/`=elab`/
+`=inductive`/`=sized types` remain the regression evidence.
+
+Not implemented: inferring the result universe of a data type whose *field* is itself a
+`Type u` (that needs `u+1`, and is rejected with the kernel's ULift message); a general
+level solver. Smaller non-tag fields landed in 30e.
+
+## 30e: fields at another level (U2b)
+
+`inductive Duo.{u, v} (A : Type u) (B : Type v) : Type (max u v)` has no field whose
+type lives in `Sort (max u v + 1)`: `A` lives in `Sort (u+1)` and `B` in `Sort (v+1)`,
+and universes are not cumulative, so the description's `darg` field types must be lifted.
+As in the Lean frontend's `FieldLift`/`descFieldLifts` (`Inductive.lean`), `ctorDesc`
+reads each non-recursive field's sort in a kernel context of the parameters and the
+fields before it (`paramCtx` + `TCtx.bind`, `sortOf`) and, when the sort is not
+`Sort (lv+1)`, wraps the field type in `ULift.{lv+1}`. The continuation is rewritten with
+`downVar0` (later fields that mention the field see it at its own type), and the
+constructor's payload boxes the value (`up x`, `payloadPL`); the constructor's *type*
+still takes the field itself, so source code is unchanged. `Ctor.lifts` records the
+flags, and the match compiler reads a lifted field back with `down` (`fieldCols`), the
+same `wrap`/`unwrap` shape as the host. A field whose sort is *above* `Sort (lv+1)` is
+lifted too, so the kernel rejects it with the host's message
+(`ULift.{l} can't lift A, which is in Sort k`).
+
+Explicit level arguments with several levels (`Duo.{1, 0}`) are read without their `,`
+separators (the list used to count them, so `Duo.{1, 0}` was refused for having two
+parameters).
+
+Tests (`=selfhost`): `structure Box.{u} (A : Type u)` and `Box.{1} (Type 0)`; `Duo` at
+`Nat`/`String` with reductions through `unbox`/`duoSnd`; generic instances
+`instance {A : Type} [Repr A] : Repr (List A)` and `Inhabited` for `Option`/`List`; a
+level escape, a `max`/`imax` mismatch and a too-large field (positioned, same line and
+message as the Lean frontend); and a differential that compiles and runs the same
+polymorphic program with the host and the self-hosted compiler (GC and RC).
+
+Still missing: `instance` has no universe parameters in either frontend's grammar, so a
+generic instance such as `Repr (List A)` is at `Type 0` (the class may be
+`Repr.{u}`); an indexed family whose index expression mentions a lifted field is not
+unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
+(`mutualInductiveCmd`); and the result universe of a data type whose field is itself
+`Type u` is not inferred. A generic instance's level is printed unnormalised
+(`Repr.{max(0, 0)} (List x0)`): the printer does not simplify it.

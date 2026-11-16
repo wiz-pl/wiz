@@ -6,7 +6,7 @@ import Vec
 A small, board-independent valid/ready bus (`import Hdl.Bus`): a request/response
 record, a two-master round-robin arbiter, an address decode/route helper, and a
 behavioural RAM for simulation. It generalises the golem SoC's `GBus`/`Bus.wiz`
-(`/workspace/wiz-rv/src/Rv/Golem/Bus.wiz`): the golem bus hard-codes a 32-bit address,
+(`wiz-rv/src/Rv/Golem/Bus.wiz`): the golem bus hard-codes a 32-bit address,
 32-bit data, golem's DDR window and a 28-bit cache port; here the address and data
 widths are parameters and nothing knows a board or a memory map.
 
