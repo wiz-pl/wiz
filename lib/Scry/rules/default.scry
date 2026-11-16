@@ -37,6 +37,7 @@ rule command-injection
   source getopt_long result
   sanitise escape_shell result
   sanitise shellescape result
+  sanitise quote_arg result
   sanitise sanitize arg 0
   sink system arg 0
   sink popen arg 0
@@ -112,4 +113,12 @@ rule strcpy-overflow
   message hint, not a finding: unbounded strcpy/strcat; destination capacity unknown
   call strcpy
   call strcat
+end
+
+rule buffer-overflow
+  kind taint
+  severity warning
+  message Attacker-controlled length reaches a copy or read; the destination can overflow
+  sanitise clamp_len result
+  sanitise checked_size result
 end

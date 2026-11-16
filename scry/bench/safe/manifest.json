@@ -1,0 +1,236 @@
+{
+  "format": "scry-bench-corpus",
+  "version": 1,
+  "description": "Opt-in safe-code corpus: realistic C that uses the vulnerable cases' constructs with the correct guard (sanitiser, bounds check, size-limited format, realpath, null-after-free). Every case must have zero findings; any finding is a measured false positive.",
+  "cases": [
+    {
+      "id": "safe/alias/distinct-slots",
+      "suite": "SAFE",
+      "cwe": "CWE-78",
+      "file": "alias/distinct-slots.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/alias/rebind-write",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "alias/rebind-write.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "known_fp": "alias imprecision: one location set per register unions `a` and `b`; a strong update on the pointer assignment (or S6 path correlation) is the fix",
+      "expected_findings": 1
+    },
+    {
+      "id": "safe/alloc/size-checked",
+      "suite": "SAFE",
+      "cwe": "CWE-190",
+      "file": "alloc/size-checked.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/cmd/allowlist",
+      "suite": "SAFE",
+      "cwe": "CWE-78",
+      "file": "cmd/allowlist.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/cmd/escape-shell",
+      "suite": "SAFE",
+      "cwe": "CWE-78",
+      "file": "cmd/escape-shell.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/cmd/inplace-sanitise",
+      "suite": "SAFE",
+      "cwe": "CWE-78",
+      "file": "cmd/inplace-sanitise.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/cmd/quote-arg",
+      "suite": "SAFE",
+      "cwe": "CWE-78",
+      "file": "cmd/quote-arg.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/copy/memcpy-literal",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "copy/memcpy-literal.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/copy/read-checked",
+      "suite": "SAFE",
+      "cwe": "CWE-787",
+      "file": "copy/read-checked.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "known_fp": "missing path correlation: the `n < 64` branch guards the length, but the buffer-overflow rule is a reachability rule; S6 path conditions are the fix",
+      "expected_findings": 1
+    },
+    {
+      "id": "safe/copy/read-clamped",
+      "suite": "SAFE",
+      "cwe": "CWE-787",
+      "file": "copy/read-clamped.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/copy/snprintf-clamped",
+      "suite": "SAFE",
+      "cwe": "CWE-787",
+      "file": "copy/snprintf-clamped.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "known_fp": "missing path correlation: the `n > 63 -> n = 63` clamp is a branch, not a sanitiser call; S6 path conditions are the fix",
+      "expected_findings": 1
+    },
+    {
+      "id": "safe/copy/strcpy-literal",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "copy/strcpy-literal.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "known_fp": "blanket rule: `strcpy` is forbidden whenever it appears; a bound on the destination and the source length (S9/S12) is the fix, not a weaker taint condition",
+      "expected_findings": 1
+    },
+    {
+      "id": "safe/copy/strlcpy-sized",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "copy/strlcpy-sized.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/copy/strncat-bounded",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "copy/strncat-bounded.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/copy/strncpy-bounded",
+      "suite": "SAFE",
+      "cwe": "CWE-120",
+      "file": "copy/strncpy-bounded.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/fmt/chained-literal",
+      "suite": "SAFE",
+      "cwe": "CWE-134",
+      "file": "fmt/chained-literal.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/fmt/literal-format",
+      "suite": "SAFE",
+      "cwe": "CWE-134",
+      "file": "fmt/literal-format.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/fmt/sanitised-format",
+      "suite": "SAFE",
+      "cwe": "CWE-134",
+      "file": "fmt/sanitised-format.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/fmt/snprintf-bounded",
+      "suite": "SAFE",
+      "cwe": "CWE-134",
+      "file": "fmt/snprintf-bounded.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/path/realpath",
+      "suite": "SAFE",
+      "cwe": "CWE-22",
+      "file": "path/realpath.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/path/sanitised-path",
+      "suite": "SAFE",
+      "cwe": "CWE-22",
+      "file": "path/sanitised-path.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/uaf/early-return",
+      "suite": "SAFE",
+      "cwe": "CWE-416",
+      "file": "uaf/early-return.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/uaf/free-then-null",
+      "suite": "SAFE",
+      "cwe": "CWE-416",
+      "file": "uaf/free-then-null.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/uaf/realloc-checked",
+      "suite": "SAFE",
+      "cwe": "CWE-416",
+      "file": "uaf/realloc-checked.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    },
+    {
+      "id": "safe/uaf/reassign",
+      "suite": "SAFE",
+      "cwe": "CWE-416",
+      "file": "uaf/reassign.c",
+      "expect": "safe",
+      "note": "safe control: same construct family as the vulnerable corpus, expected zero findings",
+      "expected_findings": 0
+    }
+  ]
+}

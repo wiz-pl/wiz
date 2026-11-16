@@ -390,3 +390,58 @@ falls back to a host-compatible Nix gcc wrapper when `cc` is not on `PATH`.
 * The corpus is intentionally small and selected for small, buildable
   reproducers. It is not a random sample of CVEs and cannot estimate
   precision on all real code.
+
+## Precision branch re-run (`agent/scry-precision`)
+
+Status: measurement on the precision branch (base `agent/scry-models` `54f6ded5`). The
+branch changes the **false-positive** side only:
+
+1. the default pack now trusts the shipped policy sanitisers `quote_arg`,
+   `sanitize_format` and `clamp_len`/`checked_size`; and
+2. the points-to freed diagnostic asks the **reaching definitions** of the access
+   register, so a pointer cleared or re-allocated after `free` is not a use-after-free;
+3. a pack sanitiser also kills a **unit-defined** callee's tainted return
+   (`rtRuleRetSrc` carries `!san`), which is what makes a `clamp_len` helper work.
+
+None of the three adds or removes a source, sink or forbidden call; the second only
+**filters** `scry/memory/use-after-free` warnings (it never creates a finding), and no
+CVE reproducer calls a sanitiser name. The CVE corpus is therefore a control: it must
+not move. The run below used the base model
+binary with the branch's `lib/Scry/rules/default.scry` (the pack is loaded from the
+working tree), because a fresh `scry` build is blocked by the `Models.wiz` checker
+timeout recorded below.
+
+Run (pack change only, same 12 cases):
+
+```sh
+cd scry
+SCRY_BIN=/workspace/wt/scry-models/scry/.grail/bin/scry \
+  scripts/cve-bench.sh --timeout 120 --max-nodes 200000
+```
+
+| metric | base `54f6ded5` | precision branch |
+|---|---:|---:|
+| in-scope cases | 6 | 6 |
+| detected (TP) | 0 | **0** |
+| missed (FN) | 6 | **6** |
+| overall CVE detection | 0/12 | **0/12** |
+| extra alerts (rule + memory diagnostics) | 45 | **45** |
+
+**No delta.** The per-case outcomes are `fn` for the six in-scope cases and
+`out-of-scope` for the six others, exactly as in the table above; the 45 extras are 12
+`strcpy-overflow`, 21 `unknown-memory`, 1 `unknown-indirect` and 11
+`unmodelled-external`. The pack's three new sanitiser names do not occur in any CVE
+reproducer, and no CVE reaches a `free`-then-use warning on the paths the analysis sees.
+
+### Build note (environment, not analysis)
+
+A clean `grail build scry` in this worktree does not finish: the checker times out on
+`../lib/Scry/Models.wiz` at grail's 1800 s per-job limit (the same failure recorded in
+the external-model re-run above). The unchanged modules' job cache was seeded from the
+base worktree (the keys are content-addressed and 192/194 match), which gets the build
+past `Models`; `RuleTaint.wiz` then re-elaborates `Models` as an import and hits the same
+limit. Consequence: the **C CLI** was not rebuilt on this branch. The safe-corpus CLI
+numbers below use the base model binary with the branch's pack; the lifetime change is
+verified by the `scry-taint` group (a new Wil-level null-after-free case) and a
+standalone probe over the same `freedHit` code, both described in
+`scry/bench/safe/README.md`.

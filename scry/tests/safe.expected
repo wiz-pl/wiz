@@ -1,0 +1,38 @@
+safe: corpus run is ok: ok
+safe: 25 cases: ok
+safe: the known-FP set has four pinned cases: ok
+safe: every non-pinned case has zero findings: ok
+safe: each pinned case has exactly one finding: ok
+safe/alias/distinct-slots: 0 finding(s), 2 boundary warning(s)
+safe/alias/rebind-write: 1 finding(s), 2 boundary warning(s)
+safe/alloc/size-checked: 0 finding(s), 4 boundary warning(s)
+safe/cmd/allowlist: 0 finding(s), 4 boundary warning(s)
+safe/cmd/escape-shell: 0 finding(s), 1 boundary warning(s)
+safe/cmd/inplace-sanitise: 0 finding(s), 0 boundary warning(s)
+safe/cmd/quote-arg: 0 finding(s), 1 boundary warning(s)
+safe/copy/memcpy-literal: 0 finding(s), 0 boundary warning(s)
+safe/copy/read-checked: 1 finding(s), 1 boundary warning(s)
+safe/copy/read-clamped: 0 finding(s), 1 boundary warning(s)
+safe/copy/snprintf-clamped: 1 finding(s), 5 boundary warning(s)
+safe/copy/strcpy-literal: 1 finding(s), 3 boundary warning(s)
+safe/copy/strlcpy-sized: 0 finding(s), 2 boundary warning(s)
+safe/copy/strncat-bounded: 0 finding(s), 2 boundary warning(s)
+safe/copy/strncpy-bounded: 0 finding(s), 1 boundary warning(s)
+safe/fmt/chained-literal: 0 finding(s), 3 boundary warning(s)
+safe/fmt/literal-format: 0 finding(s), 3 boundary warning(s)
+safe/fmt/sanitised-format: 0 finding(s), 1 boundary warning(s)
+safe/fmt/snprintf-bounded: 0 finding(s), 6 boundary warning(s)
+safe/path/realpath: 0 finding(s), 3 boundary warning(s)
+safe/path/sanitised-path: 0 finding(s), 2 boundary warning(s)
+safe/uaf/early-return: 0 finding(s), 3 boundary warning(s)
+safe/uaf/free-then-null: 0 finding(s), 4 boundary warning(s)
+safe/uaf/realloc-checked: 0 finding(s), 3 boundary warning(s)
+safe/uaf/reassign: 0 finding(s), 3 boundary warning(s)
+safe/uaf/free-then-null: zero findings: ok
+safe/uaf/free-then-null: no use-after-free warning: ok
+safe/uaf/reassign: zero findings: ok
+safe/uaf/reassign: no use-after-free warning: ok
+safe/uaf/early-return: zero findings: ok
+safe/uaf/early-return: no use-after-free warning: ok
+safe/uaf/realloc-checked: zero findings: ok
+safe/uaf/realloc-checked: no use-after-free warning: ok

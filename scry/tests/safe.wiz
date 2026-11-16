@@ -1,0 +1,86 @@
+-- test: run
+import Sys
+import Scry.Bench
+import Scry.BenchCmd
+import Scry.TaintCmd
+import Scry.Interproc
+-- The opt-in **safe-code corpus** (S2 precision half).
+--
+-- `bench/safe/manifest.json` names 25 realistic C files that use the same
+-- constructs as the vulnerable corpus but with the correct guard: a sanitiser
+-- before the shell, a constant format, a bounded/size-limited copy, a checked
+-- length, `realpath` before a file open, or a pointer nulled/reassigned after
+-- `free`. Every case must produce **zero findings**. A finding here is a
+-- measured false positive; the per-case count below is the regression gate.
+--
+-- It is deliberately *not* part of `bench/corpus` or `scry bench`'s default
+-- baseline (the opt-in group is `scry bench --corpus bench/safe`), so a
+-- precision experiment cannot silently change the recall baseline.
+--
+-- The UAF cases also assert the absence of the `scry/memory/use-after-free`
+-- warning: the points-to freed diagnostic is flow-insensitive, and the
+-- null-after-free/reassignment refinements must keep these quiet.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def analyze (path : String) : EIO Scry.TaintReport :=
+  match Scry.taintArgs [path] with
+  | .ok o => EIO.lift (Scry.analyzeFile o)
+  | .error e => EIO.fail e
+
+def uafWarnings (rep : Scry.TaintReport) : Nat :=
+  List.length (List.filter (fun w => String.eq w.rule "scry/memory/use-after-free") rep.memory)
+
+def checkUaf (label path : String) : EIO Unit := do
+  rep ← analyze path;
+  check (label ++ ": zero findings") (Nat.beq (List.length rep.findings) 0);
+  check (label ++ ": no use-after-free warning") (Nat.beq (uafWarnings rep) 0)
+
+def caseLine (r : Scry.BenchCaseResult) : String :=
+  r.caseId ++ ": " ++ Nat.repr r.findings ++ " finding(s), "
+    ++ Nat.repr r.boundary ++ " boundary warning(s)"
+
+/-- The pinned false positives: cases whose safe construct still needs an analysis
+capability this branch does not have (S6 path conditions, flow-sensitive points-to, or a
+destination-bound rule). They are expected to have exactly one finding, so the gate is
+"zero findings everywhere else" and a fix (or a new false positive) is a visible change
+to this list, never a silent one. `bench/safe/README.md` records the reason per case. -/
+def knownFp : List String :=
+  [ "safe/alias/rebind-write"
+  , "safe/copy/read-checked"
+  , "safe/copy/snprintf-clamped"
+  , "safe/copy/strcpy-literal" ]
+
+def isKnownFp (id : String) : Bool :=
+  List.any (fun k => String.eq k id) knownFp
+
+def printCases : List Scry.BenchCaseResult → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons r rs => do
+    EIO.lift (IO.println (caseLine r))
+    printCases rs
+
+def main : IO Unit := EIO.toIO (do
+  run ← Scry.benchRun { Scry.benchDefaultOpts with
+    corpus := "bench/safe", baseline := .none, noTiming := .true, quiet := .true };
+  check "safe: corpus run is ok" (String.eq run.status "ok");
+  check "safe: 25 cases" (Nat.beq (List.length run.cases) 25);
+  check "safe: the known-FP set has four pinned cases"
+    (Nat.beq (List.length (List.filter (fun r => isKnownFp r.caseId) run.cases)) 4);
+  check "safe: every non-pinned case has zero findings"
+    (List.all (fun r => Bool.or (isKnownFp r.caseId) (Nat.beq r.findings 0)) run.cases);
+  check "safe: each pinned case has exactly one finding"
+    (List.all (fun r => match isKnownFp r.caseId with
+      | .true => Nat.beq r.findings 1
+      | .false => .true) run.cases);
+  printCases run.cases;
+
+  -- The four lifetime shapes assert the warning too, not only rule findings.
+  checkUaf "safe/uaf/free-then-null" "bench/safe/uaf/free-then-null.c";
+  checkUaf "safe/uaf/reassign" "bench/safe/uaf/reassign.c";
+  checkUaf "safe/uaf/early-return" "bench/safe/uaf/early-return.c";
+  checkUaf "safe/uaf/realloc-checked" "bench/safe/uaf/realloc-checked.c")

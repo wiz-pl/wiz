@@ -167,6 +167,37 @@ def Scry.distinctFn : Wil.Func :=
 
 def Scry.taintDistinct : Wil.Program := Wil.program [Scry.distinctFn]
 
+/-- A use-after-free: the object is freed and then written through the same pointer.
+Points: 0 alloc, 1 free, 2 store, 3 return. -/
+def Scry.freedUseFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.tv 1;
+  Wil.func "freedUse" [] [p, x]
+    [ Wil.block
+        [ Wil.alloc p 1
+        , Wil.free p
+        , Wil.store p x ]
+        (Wil.ret .none) ]
+
+def Scry.freedUse : Wil.Program := Wil.program [Scry.freedUseFn]
+
+/-- The safe counterpart: the pointer is cleared after the free, so the later store
+cannot touch the freed object. A flow-insensitive freed set reports this; the reaching
+definitions of `p` at the store are the literal, which is a kill.
+Points: 0 alloc, 1 free, 2 assign 0, 3 store, 4 return. -/
+def Scry.freedNullFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.tv 1;
+  Wil.func "freedNull" [] [p, x]
+    [ Wil.block
+        [ Wil.alloc p 1
+        , Wil.free p
+        , Wil.assign p (.cst Wil.Val.nul)
+        , Wil.store p x ]
+        (Wil.ret .none) ]
+
+def Scry.freedNull : Wil.Program := Wil.program [Scry.freedNullFn]
+
 /-- Field sensitivity: the tainted store is cell 0, the first sink reads cell 1 (no
 flow), the second reads cell 0 (flow). Points: 0 source, 1 alloc, 2 gep 0, 3 store,
 4 gep 1, 5 load, 6 clean sink, 7 load cell 0, 8 tainted sink, 9 ret. -/
