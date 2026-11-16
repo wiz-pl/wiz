@@ -1,0 +1,132 @@
+# The three-stage bootstrap fixpoint on the self-hosted runner.
+#
+# `scripts/fixpoint.sh` builds the self-hosted compiler once with Lean and then compiles
+# the toolchain three times (one C stage per compile), comparing self1.c, self2.c and
+# self3.c byte for byte. It needs about 6 GiB: the self-compiles peak at 5.1-5.4 GiB
+# (stage 2 has reached 5.42 GiB), so a 5 GiB job cap kills it (exit 137). This workflow
+# is opt-in:
+#
+#   * nightly on `master` (the schedule below), and from "Run workflow";
+#   * only on the self-hosted runner named by the repository variable
+#     WIZ_RUNNER_HEAVY (docs/ci-runner.md); when the variable is unset the preflight job
+#     says so and the fixpoint job is skipped, cleanly, instead of queueing for a runner
+#     that does not exist;
+#   * never on a pull request, and not part of `CI result`.
+#
+# The weekly `fixpoint` job in ci.yml still runs on ubuntu-latest as the fallback.
+name: fixpoint
+
+on:
+  schedule:
+    - cron: "41 3 * * *" # nightly: master's three-stage fixpoint on the heavy runner
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: C stages to generate and compare (2 is the old check, 3 is the default)
+        type: choice
+        options: ["2", "3", "4"]
+        default: "3"
+      rc:
+        description: Compile with reference counting (--rc)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixpoint
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
+  # The job's declared memory requirement, checked against MemAvailable before the run
+  # (the self-compiles peak at 5.1-5.4 GiB; 6 GiB is the reservation).
+  WIZ_FIXPOINT_MEM_GIB: "6"
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Is there a heavy runner?
+        id: gate
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ vars.WIZ_RUNNER_HEAVY }}
+        run: |
+          if [ -n "$RUNNER_LABEL" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self-hosted runner: $RUNNER_LABEL (the fixpoint declares ${WIZ_FIXPOINT_MEM_GIB} GiB)"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=fixpoint skipped::WIZ_RUNNER_HEAVY is unset. The fixpoint needs a self-hosted runner with ${WIZ_FIXPOINT_MEM_GIB} GiB; set the repository variable to run it (docs/ci-runner.md)."
+          fi
+
+  fixpoint:
+    name: fixpoint (self-hosted, 6 GiB)
+    needs: preflight
+    if: needs.preflight.outputs.run == 'true'
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: true
+      - name: Check the memory requirement
+        shell: bash
+        run: |
+          need_kib=$((WIZ_FIXPOINT_MEM_GIB * 1024 * 1024))
+          avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          echo "MemAvailable: $((avail_kib / 1024)) MiB; the fixpoint declares ${WIZ_FIXPOINT_MEM_GIB} GiB"
+          if [ "$avail_kib" -lt "$need_kib" ]; then
+            echo "::error title=not enough memory::the fixpoint needs ${WIZ_FIXPOINT_MEM_GIB} GiB (the self-compiles peak near 5.4 GiB) and this runner has $((avail_kib / 1024)) MiB available"
+            exit 1
+          fi
+      - name: Cache the Lake build
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'selfhost/*.wiz', 'lib/*.wiz') }}
+          restore-keys: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+      - name: Fixpoint
+        env:
+          STAGES: ${{ inputs.stages || '3' }}
+          RC: ${{ inputs.rc && '--rc' || '' }}
+        run: |
+          args=(--stages "$STAGES")
+          [ -n "$RC" ] && args+=("$RC")
+          scripts/fixpoint.sh "${args[@]}" .lake/fixpoint 2>&1 | tee fixpoint.log
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Bootstrap fixpoint (stages, ${WIZ_FIXPOINT_MEM_GIB} GiB)"
+            echo
+            echo '```'
+            grep -E 'FIXPOINT|^stage [0-9]|^   |^total|^timings|^FAILED' fixpoint.log || echo "(no result)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the C files of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixpoint-artifacts
+          path: |
+            .lake/fixpoint/self*.c
+            .lake/fixpoint/timings.tsv
+            fixpoint.log
+          if-no-files-found: ignore
+          retention-days: 7

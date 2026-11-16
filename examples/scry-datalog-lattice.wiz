@@ -1,0 +1,46 @@
+import Scry.Eval
+-- A lattice-valued relation (`scry-datalog-lattice`): one product lattice holds both a
+-- **min** and a **max** value. The first component is a min-lattice (shorter is better),
+-- the second a max-lattice (longer is better), and the transfer function decreases the
+-- first while it increases the second, as a monotone function in the product order.
+-- The example is the design's `lattice val (p) : Itv` shape, with a product chosen so
+-- that both joins are exercised in one relation.
+
+def minNat (a b : Nat) : Nat := if Nat.lt a b then a else b
+def maxNat (a b : Nat) : Nat := if Nat.lt a b then b else a
+
+-- bot = (∞ for the min side, 0 for the max side); join is componentwise.
+def prodOps : Scry.LatOps (Nat × Nat) :=
+  Scry.LatOps.mk (1000000, 0)
+    (fun p q => (minNat p.1 q.1, maxNat p.2 q.2))
+    (fun p q => if Nat.beq p.1 q.1 then Nat.beq p.2 q.2 else .false)
+
+def step (p : Nat × Nat) : Nat × Nat :=
+  (if Nat.lt 0 p.1 then Nat.sub p.1 1 else 0, Nat.add p.2 1)
+
+-- 0 = edge (a, b), 1 = val (node) : Nat × Nat
+def seed : Scry.Rule (Nat × Nat) :=
+  Scry.Rule.mk
+    (Scry.Head.lat 1 [Scry.Term.lit (U64.ofNat 0)] (Scry.LExpr.lit (1000, 0))) []
+def move : Scry.Rule (Nat × Nat) :=
+  Scry.Rule.mk
+    (Scry.Head.lat 1 [Scry.Term.var 1] (Scry.LExpr.map 0 (Scry.LExpr.var 0)))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.lat 1 [Scry.Term.var 0] 0]
+def latProg : Scry.Program (Nat × Nat) :=
+  Scry.Program.mk prodOps [2, 1] [1] [step] [seed, move]
+
+def u (n : Nat) : U64 := U64.ofNat n
+def ed (st : Scry.State (Nat × Nat)) (a b : Nat) : Scry.State (Nat × Nat) :=
+  Scry.State.addTuple st 0 [u a, u b]
+
+def latDb : Scry.State (Nat × Nat) :=
+  ed (ed (ed Scry.State.empty 0 1) 1 2) 2 3
+
+def main : Nat :=
+  match Scry.eval latProg latDb with
+  | .none => 999
+  | .some st =>
+    match Scry.Db.findLat st.db 1 [u 3] with
+    | .none => 888
+    | .some v => (v.1 * 10 + v.2) * 1000 + Scry.Db.latSize st.db 1

@@ -1,0 +1,64 @@
+-- test: run
+import IO
+import Sys
+import Word
+import Scry.CstStore
+import Scry.Native
+-- The S1 shim end to end: `fixtures/hello.c` through the vendored tree-sitter,
+-- the column store, and the model view. Every number is checked (a mismatch exits
+-- 1), then the malformed `fixtures/broken.c` must be refused by `parseChecked`.
+--
+-- Counts are for tree-sitter 0.27.2 + tree-sitter-c 0.24.2; both are pinned in
+-- native/README.md, so a change here means the vendored sources changed.
+
+def checkNat (label : String) (got want : Nat) : IO Unit :=
+  match Nat.beq got want with
+  | .true => IO.println (label ++ ": " ++ Nat.repr got)
+  | .false => IO.bind
+      (IO.println (label ++ ": got " ++ Nat.repr got ++ ", want " ++ Nat.repr want))
+      (fun _ => Process.exit 1)
+
+def checkStr (label : String) (got want : String) : IO Unit :=
+  match String.eq got want with
+  | .true => IO.println (label ++ ": " ++ got)
+  | .false => IO.bind
+      (IO.println (label ++ ": got \"" ++ got ++ "\", want \"" ++ want ++ "\""))
+      (fun _ => Process.exit 1)
+
+def showOpt (o : Option Scry.NodeId) : String := match o with
+  | .none => "-"
+  | .some n => Nat.repr n.n
+
+def showSpan (s : Scry.Span) : String :=
+  "[" ++ Nat.repr s.start ++ "," ++ Nat.repr s.stop ++ ")"
+
+def malformed : EIO Unit := do
+  r ← EIO.lift (Scry.Native.parseChecked "fixtures/broken.c");
+  match r with
+  | .error e => EIO.lift (IO.println ("malformed: " ++ e))
+  | .ok _ => EIO.fail "parseChecked accepted a malformed C file"
+
+def main : IO Unit := EIO.toIO (do
+  st ← Scry.Native.parseFile "fixtures/hello.c";
+  cst ← EIO.lift (Scry.Native.toCstStore "fixtures/hello.c" st);
+  let stats := Scry.CstStore.statsOf cst;
+  EIO.lift (checkNat "nodes" stats.nodes 55);
+  EIO.lift (checkNat "edges" stats.edges 54);
+  EIO.lift (checkNat "roots" stats.roots 1);
+  EIO.lift (checkNat "errors" stats.errors 0);
+  EIO.lift (checkNat "max depth" stats.maxDepth 7);
+  EIO.lift (checkStr "root kind" (Scry.CstStore.kindName cst 0) "translation_unit");
+  EIO.lift (checkStr "root span" (showSpan (Scry.CstStore.spanOf cst 0)) "[0,95)");
+  EIO.lift (checkStr "node 1 kind" (Scry.CstStore.kindName cst 1) "function_definition");
+  EIO.lift (checkStr "node 1 parent" (showOpt (Scry.CstStore.parentOf cst 1)) "0");
+  EIO.lift (checkNat "node 1 children" (List.length (Scry.CstStore.childrenOf cst 1)) 3);
+  EIO.lift (checkStr "node 1 next sibling" (showOpt (Scry.CstStore.nextSiblingOf cst 1)) "25");
+  EIO.lift (checkStr "node 2 kind" (Scry.CstStore.kindName cst 2) "primitive_type");
+  EIO.lift (checkStr "node 2 field" (Scry.CstStore.fieldName cst 2) "type");
+  EIO.lift (checkStr "node 2 span" (showSpan (Scry.CstStore.spanOf cst 2)) "[0,3)");
+  EIO.lift (checkStr "node 2 parent" (showOpt (Scry.CstStore.parentOf cst 2)) "1");
+  EIO.lift (checkNat "csr offsets" (U32Array.size cst.childOff) 56);
+  EIO.lift (checkNat "csr arcs" (U32Array.size cst.children) 54);
+  first ← EIO.lift (Scry.Native.firstChildColumn st);
+  EIO.lift (checkNat "root first child" (UIntN.toNat (U32Array.get first 0)) 2);
+  malformed)

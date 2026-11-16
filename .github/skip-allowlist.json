@@ -1,0 +1,17 @@
+{
+  "comment": "Groups that may skip cases in CI, with the reason and an owner (scripts/ci.py check-skips; docs/building.md, 'Skips'). A group that is not here must run in CI: if it skips wholesale the run fails. A skip whose reason names a tool the dev shell (flake.nix, devShells.default) must provide is a failure even for a group here. Prefer fixing the shell or the test to adding an entry.",
+  "groups": [
+    {
+      "group": "hdl",
+      "reason": "no iverilog",
+      "owner": "HDL (Tests/Groups/Hdl.lean, lib/Hdl)",
+      "why": "Icarus simulation is optional in the dev shell; yosys (synthesis) is required and is in flake.nix, so a 'no yosys' skip in this group still fails."
+    },
+    {
+      "group": "tower",
+      "reason": "no source toolchain",
+      "owner": "tower (Tests/Tower.lean, docs/building.md)",
+      "why": "the 'from source' case needs Lake's toolchain inside a checkout, which the store-built shards do not have; the rest of the group runs."
+    }
+  ]
+}

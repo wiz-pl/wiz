@@ -87,8 +87,13 @@ macro_rules
 /-- Unsigned 64-bit machine integers: opaque to the kernel, native at runtime (through
 the FFI). Arithmetic wraps around modulo 2⁶⁴. -/
 axiom UInt64 : Type
-/-- The `UInt64` for a `Nat` (modulo 2⁶⁴). -/
-extern "wiz_u64_id" UInt64.ofNat : Nat → UInt64
+/-- The raw conversion (`wiz_u64_id`): the C argument is a `uint64_t`, so the `Nat` must
+already be below 2⁶⁴. -/
+private extern "wiz_u64_id" UInt64.ofNatRaw : Nat → UInt64
+/-- The `UInt64` for a `Nat` (modulo 2⁶⁴): `UInt64.ofNat (2^64) = 0`. The reduction is in
+Wiz, before the call: the C function takes a `uint64_t`, and the marshalling rejects a
+larger `Nat` (`wiz_in_nat`: "a number is too big for a C integer"). -/
+def UInt64.ofNat (n : Nat) : UInt64 := UInt64.ofNatRaw (Nat.mod n (Nat.pow 2 64))
 /-- The `Nat` of a `UInt64`. -/
 extern "wiz_u64_id" UInt64.toNat : UInt64 → Nat
 /-- Addition, wrapping around. -/
@@ -109,8 +114,9 @@ extern "wiz_u64_eq" UInt64.eq : UInt64 → UInt64 → Bool
 /-- Double-precision (IEEE 754) floating-point numbers: opaque to the kernel, native at
 runtime. -/
 axiom Float64 : Type
-/-- The `Float64` nearest a `Nat`. -/
-extern "wiz_f64_of_nat" Float64.ofNat : Nat → Float64
+/-- The `Float64` nearest a `Nat` below `2^64` (the native conversion: one
+`uint64_t`). -/
+extern "wiz_f64_of_nat" Float64.ofNatU64 : Nat → Float64
 /-- Addition. -/
 extern "wiz_f64_add" Float64.add : Float64 → Float64 → Float64
 /-- Subtraction. -/
@@ -123,6 +129,33 @@ extern "wiz_f64_div" Float64.div : Float64 → Float64 → Float64
 extern "wiz_f64_lt" Float64.lt : Float64 → Float64 → Bool
 /-- The number as text, as C's `printf` shows it. -/
 extern "wiz_f64_show" Float64.toString : Float64 → String
+
+/-- `x` doubled `k` times: `x * 2^k`, exactly (used by `Float64.ofNat`). -/
+def Float64.scale : Nat → Float64 → Float64
+  | .zero, x => x
+  | .succ k, x => Float64.scale k (Float64.add x x)
+/-- The `Float64` nearest a `Nat`: round to nearest, ties to even.  `ofNatU64` covers
+`n < 2^64`; above that the 53-bit mantissa is taken from `Nat.log2` and the dropped
+bits decide the rounding, so the result is correctly rounded for every `Nat` (and
+`inf` from `2^1024` on). -/
+def Float64.ofNat (n : Nat) : Float64 :=
+  match Nat.lt n 18446744073709551616 with
+  | .true => Float64.ofNatU64 n
+  | .false =>
+    let k := Nat.log2 n;
+    match Nat.lt 1023 k with
+    | .true => Float64.div (Float64.ofNatU64 1) (Float64.ofNatU64 0)
+    | .false =>
+      let sh := Nat.sub k 52;
+      let hi := Nat.shiftRight n sh;
+      let rem := Nat.sub n (Nat.shiftLeft hi sh);
+      let half := Nat.pow 2 (Nat.sub sh 1);
+      let up := Bool.or (Nat.lt half rem)
+                        (Bool.and (Nat.beq half rem) (Nat.isOdd hi));
+      let hi' := match up with
+        | .true => Nat.succ hi
+        | .false => hi;
+      Float64.scale sh (Float64.ofNatU64 hi')
 
 -- (7e) `+ - * / %` and numerals at the machine types (`UInt64` wraps around natively;
 -- the kernel knows nothing about these: they are foreign functions).

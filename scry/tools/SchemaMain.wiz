@@ -1,0 +1,62 @@
+import Sys
+import Json
+import Scry.Codegen
+/-!
+# scry-schema: emit `C.Schema` from a grammar's `node-types.json`
+
+`scry-schema PATH` prints the generated module to stdout; the `schema` target in
+`grail.wiz` installs it as `build/Schema.wiz`:
+
+    .grail/bin/scry-schema grammars/tree-sitter-c/node-types.json > gen/C/Schema.wiz
+
+`scry-schema --check SCHEMA PATH` regenerates and compares with the checked-in
+`SCHEMA` (exit 1, naming the first difference, when it is stale). `tests/codegen.wiz`
+runs the same comparison, and `build/schema-check.txt` records the counts.
+-/
+
+/-- Print `m` on stderr and give back an empty string (the caller exits 1). -/
+def Scry.fail (m : String) : IO String :=
+  IO.bind (IO.ePrintln m) (fun _ => IO.pure "")
+
+/-- The generated module for the `node-types.json` at `path`. -/
+def Scry.genOf (path : String) : IO String :=
+  IO.bind (IO.readFile path) (fun text => match Json.parse text with
+    | .error e => Scry.fail (path ++ ": invalid JSON: " ++ e)
+    | .ok j => match Scry.generate j with
+      | .error e => Scry.fail (path ++ ": " ++ e)
+      | .ok out => IO.pure out)
+
+/-- The first difference, from line `i` on (`""` when the rest is equal). -/
+partial def Scry.firstDiffGo (i : Nat) : List String → List String → String
+  | .nil, .nil => ""
+  | .cons x xt, .cons y yt => match String.eq x y with
+    | .true => Scry.firstDiffGo (Nat.succ i) xt yt
+    | .false => "line " ++ Nat.repr (Nat.succ i) ++ ": expected \"" ++ y
+        ++ "\", generated \"" ++ x ++ "\""
+  | .nil, .cons y _ => "line " ++ Nat.repr (Nat.succ i) ++ ": expected \"" ++ y
+      ++ "\", the generated file ends"
+  | .cons x _, .nil => "line " ++ Nat.repr (Nat.succ i) ++ ": generated \"" ++ x
+      ++ "\", the checked-in file ends"
+
+/-- The first line where `a` and `b` differ (`""` when they are equal): the check's
+message names it so a stale schema is easy to fix. -/
+def Scry.firstDiff (a b : String) : String :=
+  Scry.firstDiffGo 0 (String.splitOn a "\n") (String.splitOn b "\n")
+
+/-- `--check`: 0 when `schemaPath` is `gen`'s output, 1 (with a message) when stale. -/
+def Scry.checkSchema (schemaPath jsonPath : String) : IO Unit :=
+  IO.bind (Scry.genOf jsonPath) (fun gen => IO.bind (IO.readFile schemaPath) (fun old =>
+    match String.eq gen old with
+    | .true => IO.println (schemaPath ++ ": up to date")
+    | .false => IO.bind (IO.ePrintln (schemaPath ++ ": STALE. " ++ Scry.firstDiff old gen))
+        (fun _ => Process.exit 1)))
+
+/-- The CLI: `PATH` or `--check SCHEMA PATH`. -/
+def main : IO Unit := IO.bind IO.args (fun args => match args with
+  | .cons "--check" (.cons schemaPath (.cons jsonPath .nil)) =>
+    Scry.checkSchema schemaPath jsonPath
+  | .cons jsonPath .nil => IO.bind (Scry.genOf jsonPath) (fun out => IO.print out)
+  | _ => IO.bind (IO.ePrintln
+      ("usage: scry-schema PATH            print the generated C.Schema\n"
+       ++ "       scry-schema --check SCHEMA PATH  compare with a checked-in module"))
+      (fun _ => Process.exit 2))
