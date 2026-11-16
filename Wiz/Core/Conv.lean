@@ -418,7 +418,28 @@ partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
   -- (outside vs inside a projection, a `transp` motive) compare. An equation between two
   -- data *types* still uses the inert-only rule; the flag does reach the equation's two
   -- *sides*, i.e. Cast-Refl for equation proofs (wiz-notes/conv-proof-field.md §8).
-  let g := if propSort? a == some true && propSort? b == some true then { g with regularity := .full } else g
+  --
+  -- **Cheap first** (perf lead 1a; wiz-notes/checker-regression-1a.md): `.full` is sticky,
+  -- so turning it on at once made every stuck cast in the equation's sides (a whole
+  -- pipeline state, say) call `convTy` in `unCast` and lose `convGlued`'s spine shortcut:
+  -- a 65 s check became > 600 s. So the comparison is first made with the rule it would
+  -- have had without the flag (inert-only; `propCheap` marks it), and only if that fails
+  -- is it made again at `.full`: the accepted pairs are exactly those of the `.full`
+  -- comparison, plus the inert-only ones (which `.full` accepts as well). A proposition
+  -- comparison *inside* the first attempt neither turns `.full` on nor retries (the outer
+  -- retry is at `.full` throughout), so the retry happens once per outermost proposition
+  -- comparison and never compounds with depth.
+  if g.regularity != .full && !g.propCheap && propSort? a == some true && propSort? b == some true then
+    convTyBody { g with propCheap := true } tys a b || convTyBody { g with regularity := .full } tys a b
+  else convTyBody g tys a b
+  --|ex
+  --| sorry
+  --sol>
+
+/-- The structural part of `convTy` (after `whnf`, `unCast`, `ULift` and the proposition
+gate): compare two types by their heads. -/
+partial def convTyBody (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
+  --<sol
   let v := Val.var tys.size
   match a, b with
   | .sort u, .sort u' => u.equiv u'

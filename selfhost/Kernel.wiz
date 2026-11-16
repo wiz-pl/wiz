@@ -2084,12 +2084,14 @@ end
 -- (P2) `pm` is the proof marker's mode: `0` relevant (a term whose sort may be `0` must be
 -- marked or neutral-shaped), `1` inside a proof (nothing is required), `2` the term is
 -- the one a marker wraps (exempt; relevant again below it)
--- (PF-C) `reg`: regularity at every type is on for this comparison. Set by `convTy` when
--- both sides are propositions (`TCtx.propGate`), and inherited by every comparison below
--- it; `false` (the default) keeps the inert-only rule. (`g.regularity := .full` in
--- `Conv.lean`; `stripCast` reads it.)
+-- (PF-C) `reg`: the regularity mode of this comparison. `0` (the default) is the
+-- inert-only rule; `2` is regularity at every type (`g.regularity := .full` in
+-- `Conv.lean`; `stripCast` reads it), set by `convTy` when both sides are propositions
+-- and inherited by every comparison below it; `1` is `convTy`'s inert-only first attempt
+-- at two propositions (`propCheap` in `Conv.lean`, perf lead 1a): below it a proposition
+-- comparison neither turns `2` on nor retries.
 inductive TCtx where
-  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Bool)
+  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Nat)
 def TCtx.lvl : TCtx → Nat
   | .mk _ _ l _ _ _ => l
 def TCtx.env : TCtx → Env
@@ -2100,7 +2102,10 @@ def TCtx.erased : TCtx → Bool
   | .mk _ _ _ x _ _ => x
 def TCtx.pm : TCtx → Nat
   | .mk _ _ _ _ m _ => m
+-- is regularity at every type on (mode `2`)?
 def TCtx.reg : TCtx → Bool
+  | .mk _ _ _ _ _ r => Nat.beq r 2
+def TCtx.regMode : TCtx → Nat
   | .mk _ _ _ _ _ r => r
 def TCtx.erase (c : TCtx) : TCtx := match c with
   | .mk e t l _ m r => .mk e t l .true m r
@@ -2143,7 +2148,10 @@ def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
   | .mk e t l x m r => .mk (.cons v e) (.cons ty t) (l + 1) x m r
 -- (PF-C) the same context with regularity at every type on
 def TCtx.fullReg (c : TCtx) : TCtx := match c with
-  | .mk e t l x m _ => .mk e t l x m .true
+  | .mk e t l x m _ => .mk e t l x m 2
+-- (1a) the same context in `convTy`'s inert-only first attempt at two propositions
+def TCtx.cheapReg (c : TCtx) : TCtx := match c with
+  | .mk e t l x m _ => .mk e t l x m 1
 -- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
 -- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
 -- every type; so while they are compared, a stuck cast is its argument at *any* type, not
@@ -2153,13 +2161,16 @@ def TCtx.fullReg (c : TCtx) : TCtx := match c with
 -- product is that). Both tests see weak head normal forms (`convTy` whnf's first). It is
 -- off outside such a comparison: two data *types* are still compared by the inert-only
 -- rule.
-def TCtx.propGate (c : TCtx) (a b : Val) : TCtx := match propSort a with
+-- **Cheap first** (perf lead 1a, `convTy` in `Conv.lean`): `2` is sticky, so the two
+-- propositions are first compared at the mode they came with (`1` marks the attempt), and
+-- only if that fails again at `2`. Inside the first attempt a proposition comparison
+-- neither turns `2` on nor retries, so the retry happens once per outermost proposition
+-- comparison.
+def propPair (a b : Val) : Bool := match propSort a with
   | .some pa => match propSort b with
-    | .some pb => match Bool.and pa pb with
-      | .true => TCtx.fullReg c
-      | .false => c
-    | .none => c
-  | .none => c
+    | .some pb => Bool.and pa pb
+    | .none => .false
+  | .none => .false
 
 -- Usage (`Usage` in `Check.lean`): one quantity per variable, the innermost first.
 def qadd : Q → Q → Q
@@ -2655,7 +2666,14 @@ def conv : TCtx → Val → Val → Val → Bool
   --sol>
 def convTy (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .true => .true
-  | .false => let a := whnf a; let b := whnf b; convTyW (TCtx.propGate c a b) a b
+  | .false => let a := whnf a; let b := whnf b; convTyGate c a b
+-- (1a) the prop gate, cheap first (`propPair`)
+def convTyGate (c : TCtx) (a b : Val) : Bool :=
+  match Bool.and (Nat.beq (TCtx.regMode c) 0) (Bool.and (Bool.not kernelRegularity) (propPair a b)) with
+  | .false => convTyW c a b
+  | .true => match convTyW (TCtx.cheapReg c) a b with
+    | .true => .true
+    | .false => convTyW (TCtx.fullReg c) a b
 -- two glued values with the same head: compare the spines (else they get unfolded)
 def lazyDelta : TCtx → Val → Val → Bool
   | c, .vglued h sp _, .vglued h' sp' _ => convSpine c h h' sp sp'
@@ -3605,7 +3623,7 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0 .false
+def empty : TCtx := .mk .nil .nil 0 .false 0 0
 
 -- does the term have a level the predicate rejects, in any level position? (the
 -- declaration check uses it for "every level parameter is declared, and none is left
@@ -4181,7 +4199,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 0
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t

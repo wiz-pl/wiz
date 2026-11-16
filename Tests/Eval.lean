@@ -72,6 +72,31 @@ def isConvTy (x y : Raw Unit) : Bool :=
 
 def aa : Raw Unit := arr () "A" "A"
 
+/-- (1a) The errors of checking `src` with the frontend (and the Lean kernel). -/
+def srcErrors (src : String) : Array String :=
+  let s := runFrontend (R := ZeroOneMany) src
+  (s.messages.filter (·.severity == .error)).map fun m => m.render src
+
+def srcOk (src : String) : IO Unit := do
+  let errs := srcErrors src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+
+def srcFails (src fragment : String) : IO Unit := do
+  let errs := srcErrors src
+  unless errs.any (fun e => (e.splitOn fragment).length > 1) do
+    throw (IO.userError s!"expected an error mentioning '{fragment}', got {errs}")
+
+/-- (1a) Nested equations of propositions, `d` deep, each level needing Cast-Refl at a
+type variable (PF-C): `L (k+1) := (L k = R k)`, `R (k+1) := (R k = R k)`, with
+`L 0 := (cast e a = a)` and `R 0 := (a = a)`; the claim is `L d = R d` by `rfl`. -/
+def nestedCastRefl (d : Nat) : String := Id.run do
+  let mut s := "def L0 (A : Type) (e : A = A) (a : A) : Prop := cast e a = a\n" ++
+    "def R0 (A : Type) (e : A = A) (a : A) : Prop := a = a\n"
+  for k in [0:d] do
+    s := s ++ s!"def L{k+1} (A : Type) (e : A = A) (a : A) : Prop := L{k} A e a = R{k} A e a\n" ++
+      s!"def R{k+1} (A : Type) (e : A = A) (a : A) : Prop := R{k} A e a = R{k} A e a\n"
+  s ++ s!"def nest (A : Type) (e : A = A) (a : A) : L{d} A e a = R{d} A e a := rfl\n"
+
 def convGroup : Group where
   name := "conv"
   parallel := true
@@ -90,7 +115,25 @@ def convGroup : Group where
     { name := "λx y. x ≢ λx y. y",
       run := fun _ => check (!isConv (arr () "A" aa) constR (lams ["x", "y"] "y")) "" },
     { name := "Π: (A : Type) → A ≢ (A : Type) → Type",
-      run := fun _ => check (!isConvTy (pi' "A" () ty "A") (pi' "A" () ty ty)) "" }
+      run := fun _ => check (!isConvTy (pi' "A" () ty "A") (pi' "A" () ty ty)) "" },
+    -- (1a) the cheap-first prop gate keeps what PF-C (#324) accepts: Cast-Refl at every
+    -- type inside an equation, found by the `.full` retry after the inert-only attempt fails
+    { name := "1a: Cast-Refl inside an equation is still accepted (PF-C), by the .full retry; a type-position cast still is not", run := fun _ => do
+        srcOk "def reg (A : Type) (e : A = A) (a : A) : cast e a = a := rfl\n"
+        srcOk "def t5 (A : Type) (k : A) (e : A = A) : (cast e k : A) = k := rfl\n"
+        srcOk ("inductive L (A : Type) where\n  | nil\n  | cons (x : A) (xs : L A)\n" ++
+          "def castL (A : Type) (e : L A = L A) (l : L A) : (cast e l : L A) = l := rfl\n")
+        -- needed only inside an inner proposition comparison (made during the outer
+        -- inert-only attempt, where it neither turns `.full` on nor retries)
+        srcOk (nestedCastRefl 1)
+        srcFails "def regTy (A : Type) (e : A = A) (a : A) (F : A → Type) (x : F (cast e a)) : F a := x\n" "type mismatch" },
+    -- (1a) bounded time: nested proposition comparisons retry at `.full` once, at the
+    -- outermost one. A retry at every level would take 2^40 comparisons here.
+    { name := "1a: 40 nested proposition comparisons needing Cast-Refl check in bounded time (one .full retry, not one per level)", run := fun _ => do
+        let start ← IO.monoMsNow
+        srcOk (nestedCastRefl 40)
+        let ms := (← IO.monoMsNow) - start
+        check (ms < 20000) s!"took {ms} ms (a retry per level is exponential)" }
   ]
 
 def structGroup : Group where

@@ -596,6 +596,11 @@ structure Globals (R : Type) where
   eager : Bool := false
   /-- which casts reduce by regularity (D1: `off`, so that checking terminates) -/
   regularity : Regularity := .off
+  /-- (1a, internal) the comparison in progress is the inert-only first attempt at two
+  propositions (`Conv.convTy`): a proposition comparison below it neither turns on
+  `.full` nor retries; the outermost one retries the whole comparison at `.full` instead.
+  Never set outside `convTy`. -/
+  propCheap : Bool := false
   /-- P2 (the default; `--eager-proofs` turns it off while the transition lasts): proofs
   are never evaluated. The positions the syntax marks as proofs (`cast`'s equation,
   `transp`'s two proofs) are suspended; a cast between propositions is stuck instead of
