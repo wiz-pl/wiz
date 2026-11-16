@@ -14,7 +14,8 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
-  programming
+  programming; [`notebooks/tour.ipynb`](notebooks/tour.ipynb)
+  ([exported page](notebooks/tour.html)) is the same tour as a runnable notebook
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
