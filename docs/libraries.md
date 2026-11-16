@@ -1477,7 +1477,9 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   instead of `.negSucc 9` (a printing hint, not an axiom: `#print axioms` lists nothing
   for it). Division truncates (`-7 / 2 = -3`, `-7 % 2 = -1`), like `IntN` and C. Also
   `Int.natAbs`, `Int.toNat` (negatives to 0), `Int.lt`/`le`/`beq`, and lemmas
-  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
+  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.mul_one`, `Int.one_mul`,
+  `Int.mul_zero`, `Int.zero_mul`, `Int.sub_zero`, `Int.natAbs_neg`, `Int.lt_irrefl`,
+  `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
   are in lib/IntRing.wiz and lib/IntOrder.wiz ("Arithmetic", below).
 * **Words.** One set of instances at `UIntN w` serves `U8 … U64` and `BitVec n` (aliases
   are seen through). `UIntN w` and `IntN w` have the same shape but are sealed, different
@@ -1540,6 +1542,91 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
   integer identity and `q_ring!` is `int_ring!` on numerators and denominators. Use the
   congruences (`Q.add_congr`, `Q.le_congr`, …) to rewrite under `≈`.
 * `Vec.wiz` and `Hoare.wiz` import `Nat` for the lemmas they used to define themselves.
+
+## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
+
+The rewrite library: equations oriented left to right, towards the normal form `simp`
+(stage 6h) computes. Each rule is registered with `attribute [simp]` in the module that
+defines it, so importing that module alone is enough; `import SimpLemmas` is the
+umbrella that brings them all, and it also keeps the lemmas that are deliberately not
+registered. `simp` uses the registered set without a list; `simp only [...]` and `rw`
+use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
+
+| module | registered rules (left to right) |
+|--------|----------------------------------|
+| `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
+| `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
+| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
+| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
+
+* **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
+  `Bool.not` in the prelude. For a variable first argument the `&&`/`||` match is *not*
+  the same stuck term as `Bool.and`/`Bool.or` applied (`Bool.and` matches on both
+  arguments, so its stuck form carries the second match in a lambda). The three
+  notation identities (`b && true`, `b && false`, `b || false`) are therefore stated
+  with the notation, while the other `Bool.and`/`Bool.or` laws are for goals that
+  contain the functions themselves; both live in `lib/Logic.wiz`. `!` *is* `Bool.not`,
+  so `Bool.not_not` fires on `!(!b)`.
+* **What is not registered, and why.** A rule must be `∀ x₁ … xₙ, lhs = rhs` with no
+  premise (dischargers are S3) and a left side that still appears in a goal. So several
+  lemmas are explicit-only:
+  * identities whose left side computes to a variable or a data value — `Nat.zero_add`,
+    `Nat.zero_mul`, `Nat.pow_zero`, `List.nil_append`, `Bool.true_and`,
+    `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
+    `Bool.not_false`, `Option.map_none`, `Prod.fst_mk`, `Prod.snd_mk`,
+    `Bool.if_true`, `Bool.if_false`;
+  * patterns that compute to a constructor carrying rule variables — `List.map_nil`,
+    `List.map_cons`, `Option.map_some`;
+  * commutativity and associativity (`Nat.add_comm`, `Bool.and_comm`,
+    `List.append_assoc`, …), which have no normal form to aim at, and distributivity,
+    which expands;
+  * the `↔` lemmas (`List.mem_append`, `List.mem_map`, `Bool.and_eq_true`, …), which
+    are not equations;
+  * conditional equations (`List.filter_cons_true`, `List.any_cons_true`, `Eq.symm`,
+    `propext`, …), which need a discharger.
+
+  Each library file lists its own exclusions with the reason.
+* **Orientation.** Rewriting goes from the left column (the term with the neutral
+  operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
+  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `b && true → b`,
+  `reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`. Rules that
+  would loop are deliberately absent: commutativity, associativity, distributivity, and
+  the other directions of the identities above. `Nat.add_zero` and `Int.add_zero` are
+  stated for an explicit argument (`rw (Nat.add_zero n)`), so a rewrite chain names the
+  instance.
+* **`rw` and definitional equations.** `rw` needs the elaborated type of its lemma to be
+  an equation. When both sides are definitionally equal (`Nat.zero_add`,
+  `Nat.zero_mul`, `Nat.pow_zero`, `Nat.pow_succ`, `List.nil_append`, `List.map_nil`,
+  `List.map_cons`, `Option.map_none`, `Option.map_some`, `Prod.fst_mk`, `Prod.snd_mk`,
+  `Bool.if_true`, `Bool.if_false`), the kernel computes that type to `True` (or to the
+  payload equation of the constructors), so `rw` rejects the lemma even though it is
+  true. The `std` tests therefore check those by direct application and the rest by
+  `rw`; `simp` uses the registered safe subset and the others explicitly. This is a
+  limitation of `rw`, not of the lemma set.
+
+`simp` rewrites and the user closes the goal, so a normal form is `simp; rfl`:
+
+```
+import SimpLemmas
+
+def t (n : Nat) : (n + 0) * 1 = n := by
+  simp
+  rfl
+def u {A : Type} (xs : List A) : xs ++ [] = xs := by
+  simp
+  rfl
+def v {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
+  rfl
+```
+
+`v` is the case the registrations were for: by `rw` it needs
+`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`; `simp`
+finds both occurrences and restarts after each rewrite. The same annotations make the
+`List.reverse`, `List.filter`, `List.any` and `List.all` lemmas usable as normal forms
+instead of one `rw` per step.
+
 ## Native structures: word arrays, word maps, interned strings
 
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
@@ -1782,3 +1869,60 @@ skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a s
 claim, and the target covers the parser boundary rather than the Wiz lowering/taint
 pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
 `wiz-notes/scry-fuzz.md` records the branch results.
+
+## Plot: data plots as deterministic SVG (`lib/Plot.wiz`)
+
+`import Plot` draws a `Frame` of named `Series` (`line`, `scatter`, `bar`, `step`) and
+optional error `Band`s on a linear or base-10 log x/y scale, and returns one SVG
+document:
+
+```
+import Plot
+
+def sales : Plot.Frame := Plot.frame [
+  Plot.line "2024" [Plot.ptNat 0 12, Plot.ptNat 1 14, Plot.ptNat 2 15],
+  Plot.scatter "2025" [Plot.ptNat 0 12, Plot.ptNat 1 16, Plot.ptNat 2 17]]
+
+def chart : Plot.Chart :=
+  Plot.labels "quarter" "units" (Plot.size 480 300 (Plot.chart "Sales" sales))
+
+#eval Plot.svg chart                     -- the SVG document
+#eval Json.render (Plot.toJson chart)    -- data, domains and ticks for a JS renderer
+#eval Json.render (Plot.render chart)    -- a Jupyter mime bundle
+```
+
+`Plot.chart title frame` gives 640 × 400 with linear axes; `Plot.size`, `Plot.labels`
+and `Plot.scales Plot.Scale.linear Plot.Scale.log` set the fixed layout. Points are
+exact rationals: `Plot.frac 3 2` is 3/2, `Plot.fracInt (-1) 4` is −1/4, and `(3 : Q)`
+works too. `Plot.boundsOf`/`Plot.logBoundsOf` pad a domain by 5% (all-equal data, one
+point and zero are handled without a degenerate axis); `Plot.niceRange` widens a domain
+to whole multiples of its step, and `Plot.niceStep` / `Plot.linearTicks` /
+`Plot.logTicks` generate ticks of the form `1/2/5 × 10^k` inside the domain, increasing
+and integer multiples of the chosen step. (`Plot.svg` keeps the padded domain and draws
+the ticks inside it; a renderer that wants the axis to end exactly on a tick calls
+`Plot.niceRange`.)
+
+![A two-series plot with an error band, drawn by lib/Plot.wiz](assets/plot-example.svg)
+
+**Arithmetic and determinism.** The library is exact: `Q` from `lib/Rat.wiz` over
+`Int`, with every coordinate rounded once to an integer pixel (half away from zero).
+`Float64` is an axiom of `lib/IO.wiz` (opaque to the kernel and to `#eval`), so it is not
+used in the core: that is what lets the whole library be checked and `#eval`'d, and what
+makes the SVG byte-stable. There is no NaN or infinity in `Q`; log scales drop
+non-positive values (and fall back to `[1, 10]` when there is no positive data) rather
+than emitting a NaN coordinate. Log positions use a fixed-point `log10` (six decimals,
+an integer algorithm), not the host's `libm`. The SVG has no timestamps, ids or random
+values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; the
+`plot` test group compares four drawings byte for byte (`Tests/data/plot/*.svg`).
+
+`Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
+`x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
+`series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
+`upper`), all numbers as decimal strings. `Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
+kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
+bundle (the `tools/jupyter` hook), with no other coupling to this module.
+
+Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
+stacked bars (several bar series are drawn at the same positions; grouping is a layout
+policy), and text metrics (labels use fixed offsets, not measured widths).
