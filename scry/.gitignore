@@ -1,0 +1,3 @@
+# grail's store and the command targets' installed outputs
+/.grail/
+/build/

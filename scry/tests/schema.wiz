@@ -1,0 +1,20 @@
+-- test: check
+import Scry.Facts
+-- The loader's invariants, on a store written inline (the same shape as
+-- fixtures/demo.facts.json). The numbers are: files, nodes, edges, relations, tuples,
+-- roots, max depth, errors, then the CSR row counts (out offsets, out arcs, in offsets,
+-- in arcs). A second case must be refused: node ids are 0, 1, 2, … in order.
+def demo : String := "{\"format\":\"scry-facts\",\"version\":1,\"language\":\"c\",\"files\":[{\"id\":0,\"path\":\"demo.c\",\"bytes\":64}],\"nodes\":[{\"id\":0,\"kind\":\"translation_unit\",\"span\":[0,64],\"named\":true},{\"id\":1,\"kind\":\"function_definition\",\"parent\":0,\"span\":[0,30],\"named\":true},{\"id\":2,\"kind\":\"call_expression\",\"parent\":1,\"span\":[10,20],\"named\":true}],\"edges\":[{\"id\":0,\"src\":0,\"dst\":1,\"label\":\"child\"},{\"id\":1,\"src\":1,\"dst\":2,\"label\":\"body\"}],\"relations\":[{\"id\":0,\"name\":\"cfg\",\"arity\":2,\"tuples\":[[1,2]]}]}"
+
+#eval match Scry.Facts.ofText demo with
+  | .error e => "error: " ++ e
+  | .ok f =>
+    let s := Scry.statsOf f;
+    String.intercalate "," (List.map Nat.repr
+      [s.files, s.nodes, s.edges, s.relations, s.tuples, s.roots, s.maxDepth, s.errors,
+       List.length f.out.offsets, List.length f.out.targets,
+       List.length f.incoming.offsets, List.length f.incoming.targets])
+
+#eval match Scry.Facts.ofText "{\"format\":\"scry-facts\",\"version\":1,\"nodes\":[{\"id\":1,\"kind\":\"x\",\"span\":[0,1]}],\"edges\":[]}" with
+  | .error e => e
+  | .ok f => "accepted: " ++ Nat.repr (List.length f.nodes)

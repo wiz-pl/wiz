@@ -1,0 +1,20 @@
+import Hdl.Core
+
+def B8 : HwTy := HwTy.bits 8
+
+-- Staged.wiz's clampedInc, on today's L2 surface (no ⇑ ⟨⟩ ~)
+def clampedInc {r : HwTy → Type} [Hw r] (x : r B8) : r B8 :=
+  if x === 255 then 255 else x + 1
+
+-- Staged.wiz's addK: a meta `Nat` parameter used to build a constant
+def addK {r : HwTy → Type} [Hw r] (k : Nat) (x : r B8) : r B8 :=
+  x + Hw.ofNat k
+
+-- a meta-level recursion generating hardware (Crc.hwIter style)
+def incN {r : HwTy → Type} [Hw r] : Nat → r B8 → r B8
+  | .zero, x => x
+  | .succ k, x => incN k (x + 1)
+
+def c : Circuit B8 B8 := Circuit.comb (fun x => addK 3 (clampedInc x))
+#eval Hdl.map (HwTy.pack B8) (Circuit.run c (Hdl.map (BitVec.ofNat 8) (List.cons 0 (List.cons 253 (List.cons 254 (List.cons 255 List.nil))))))
+#eval Netlist.size (Circuit.netlist "c" c)

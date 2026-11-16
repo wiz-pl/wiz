@@ -1,0 +1,37 @@
+import Scry.Eval
+-- Same-generation (`scry-datalog-samegen`): the classic two-rule recursive program.
+-- `sg(x, x)` for a node that has a parent, and cousins through the parents' `sg`.
+-- `main` is the digest: the number of pairs and four membership bits.
+
+def sgOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- 0 = parent (parent, child), 1 = sg (x, y)
+def sgSelf : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 1, Scry.Term.var 1])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+def sgStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 3])
+    [Scry.Atom.pos 0 [Scry.Term.var 1, Scry.Term.var 0],
+     Scry.Atom.pos 1 [Scry.Term.var 1, Scry.Term.var 2],
+     Scry.Atom.pos 0 [Scry.Term.var 2, Scry.Term.var 3]]
+def sg : Scry.Program Nat := Scry.Program.mk sgOps [2, 2] [] [] [sgSelf, sgStep]
+
+def u (n : Nat) : U64 := U64.ofNat n
+def ed (st : Scry.State Nat) (a b : Nat) : Scry.State Nat :=
+  Scry.State.addTuple st 0 [u a, u b]
+
+-- 9 -> 0 -> {1, 2} -> {3, 4}, so 1 and 2 are siblings, 3 and 4 are cousins.
+def sgDb : Scry.State Nat :=
+  ed (ed (ed (ed (ed Scry.State.empty 9 0) 0 1) 0 2) 1 3) 2 4
+
+def main : Nat :=
+  match Scry.eval sg sgDb with
+  | .none => 999
+  | .some st =>
+    let pairs := Scry.Db.relSize st.db 1;
+    let a := if Scry.Db.memTuple st.db 1 [u 1, u 2] then 100000 else 0;
+    let b := if Scry.Db.memTuple st.db 1 [u 3, u 4] then 10000 else 0;
+    let c := if Scry.Db.memTuple st.db 1 [u 0, u 0] then 1000 else 0;
+    let d := if Scry.Db.memTuple st.db 1 [u 3, u 1] then 1 else 0;
+    pairs * 1000000 + a + b + c + d

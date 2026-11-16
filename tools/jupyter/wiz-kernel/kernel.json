@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "python3",
+    "-m",
+    "wiz_kernel",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "Wiz",
+  "language": "wiz",
+  "interrupt_mode": "message",
+  "env": {},
+  "metadata": {
+    "debugger": false
+  }
+}

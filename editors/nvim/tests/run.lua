@@ -118,6 +118,9 @@ test('typing one key at a time (an embedded nvim): expansions run between keys',
   local col = req('nvim_win_get_cursor', 0)[2]
   req('nvim_input', '<Esc>')
   vim.fn.jobstop(chan)
+  -- Reap it: a job still exiting while nvim tears down is one way `nvim -l` ends
+  -- with exit status 1 after a clean summary (run.sh reports that as a harness anomaly).
+  vim.fn.jobwait({ chan }, 5000)
   eq('f λ x →× y⟨a\\>', line, 'the line')
   eq(#line, col, 'the cursor at the end')
 end)
@@ -318,6 +321,7 @@ else
     tcp:connect('127.0.0.1', b.port, function(e)
       if e then
         got = 'connect: ' .. e
+        tcp:close()
         return
       end
       tcp:read_start(function(_, data)
@@ -330,6 +334,9 @@ else
     wait(10000, function()
       return got ~= nil
     end, 'the handshake')
+    if not tcp:is_closing() then
+      tcp:close() -- (the read callback closes it on the success path)
+    end
     eq(true, got:find('101 Switching Protocols', 1, true) ~= nil, 'answer: ' .. got)
   end)
 

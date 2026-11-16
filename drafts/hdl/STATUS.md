@@ -50,7 +50,7 @@ only through Bits).
 | Uart.wiz | types, hand-written BitPack instances, `BitPack.ofIso` check | `deriving instance BitPack for …` ("no deriver for BitPack") → deriving-bitpack; `txStep`, `txInit` → numeric-classes-bitvec (cascade: `uartTx`, the samples) |
 | Cpu.wiz | `Instr`, `encode`, `decode`, `Cpu`, `Vec.index/update` check | `deriving instance BitPack` → deriving-bitpack; `attribute [hdl …]` → hdl-commands; `Isa.exec`, `cpu`, `multiply`, `mem0` → numeric-classes-bitvec (cascade: `Isa.step`, `run`) |
 | Synth.wiz | checks | (exits 1 only through Bits). Workarounds marked: numerals-in-class-decls, implicit-lambda-binders, projection-functions |
-| Staged.wiz | fails throughout, by design | `⇑`, `⟨…⟩`, `~` → hdl-staging-2ltt |
+| Staged.wiz | historical sketch, not a target | The staging surface (`⇑`, `⟨…⟩`, `~`) was dropped 2026-11-15: L2 + H14 S2 deliver static synthesisability and the operator surface. The one surviving idea, `match` on a signal, is `wishful/hdl-match-signals`. See `DECISION-2ltt.md`. |
 
 ## Simulation results (`#eval`) vs expectations
 
