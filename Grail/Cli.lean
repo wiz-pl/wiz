@@ -21,16 +21,21 @@ def usage : String := "usage:
                           into DIR (default: ./NAME); an existing non-empty
                           directory is refused, the name must be a letter then
                           letters, digits, '_' or '-'
-  grail build [TARGET…]   build the package's targets (by default all but the
-                          bootstrap check, which takes minutes)
-  grail test [FILTER…] [--update]
+  grail build [TARGET…] [--force] [--dry-run]
+                          build the package's targets (by default all but the
+                          bootstrap check, which takes minutes); --force runs jobs
+                          whose outputs are up to date, --dry-run only reports them
+  grail test [FILTER…] [--update] [--force]
                           run the tests (of `tests` targets) whose path contains a
-                          filter; --update writes the actual output to .expected
+                          filter; --update writes the actual output to .expected,
+                          --force reruns recorded passes
   grail update            resolve the git dependencies again and write grail.lock
                           (builds use the lock only)
-  grail run TARGET [-- ARGS…]
+  grail run TARGET [-- ARGS…] [--force] [--dry-run]
                           build an exe or command target's needs and run it with
-                          ARGS, its input and output grail's own; exits with its code
+                          ARGS, its input and output grail's own; exits with its
+                          code; --force rebuilds its needs, --dry-run prints what
+                          would run (and writes nothing)
   grail lsp [OPTIONS…]     the language server (`wiz lsp OPTIONS…`) with the package's
                           module roots (its lib targets' and its dependencies') and
                           its toolchain; --wiz PATH picks the wiz (default: the one
@@ -48,6 +53,7 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
+  --force (rerun jobs whose outputs are up to date), --dry-run (report, run nothing),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
@@ -70,6 +76,10 @@ structure Opts where
   testTimeout : Option Nat := none
   /-- `grail lsp`: the `wiz` to run -/
   wiz : Option String := none
+  /-- (23p) rerun jobs whose outputs are up to date -/
+  force : Bool := false
+  /-- (23p) report what would run, without running or installing anything -/
+  dryRun : Bool := false
 
 /-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
@@ -80,6 +90,8 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--timeout" :: n :: rest => grailOpts { o with timeout := n.toNat? } rest
   | "--test-timeout" :: n :: rest => grailOpts { o with testTimeout := n.toNat? } rest
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
+  | "--force" :: rest => grailOpts { o with force := true } rest
+  | "--dry-run" :: rest => grailOpts { o with dryRun := true } rest
   | a :: rest =>
     if a.startsWith "-j" && (a.drop 2).toString.toNat?.isSome then grailOpts { o with jobs := (a.drop 2).toString.toNat? } rest
     else let (o, r) := grailOpts o rest; (o, a :: r)
@@ -118,7 +130,8 @@ def cliMain (args : List String) : IO UInt32 := do
   let jobs := opts.jobs.getD (max 1 (min 4 (System.Platform.Internal.getHardwareConcurrency ()).toNat))
   let mkRunner (ctx : Ctx) : IO Runner := do
     pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
-           timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs := 1000 * opts.testTimeout.getD 300 }
+           timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs := 1000 * opts.testTimeout.getD 300,
+           force := opts.force, dryRun := opts.dryRun }
   -- the flags win over the build files; read them now, apply them last
   let raw := args
   let (flagged, args) := defaults.parseFlags args
@@ -244,9 +257,11 @@ def cliMain (args : List String) : IO UInt32 := do
       pure 0
     | "test" :: rest =>
       let update := rest.contains "--update"
-      let filters := rest.filter (· != "--update")
+      let filters := rest.filter fun a => a != "--update" && a != "--force"
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
+      -- (a test's dry run has no result to report; `--dry-run` is for build and run)
+      let r := { r with dryRun := false }
       let results ← r.tests pkg.targets filters update
       let passed := results.filter (·.ok) |>.size
       let cached := results.filter (·.cached) |>.size
@@ -269,7 +284,8 @@ def cliMain (args : List String) : IO UInt32 := do
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
       let ok ← r.build pkg.targets targets
       let st ← r.stats.get
-      IO.println s!"{st.ran} jobs run, {st.upToDate} up to date{if st.failed > 0 then s!", {st.failed} failed" else ""}{if st.skipped > 0 then s!", {st.skipped} skipped" else ""}"
+      let would := if st.wouldRun > 0 then s!", {st.wouldRun} would run" else ""
+      IO.println s!"{st.ran} jobs run, {st.upToDate} up to date{would}{if st.failed > 0 then s!", {st.failed} failed" else ""}{if st.skipped > 0 then s!", {st.skipped} skipped" else ""}"
       pure (if ok then 0 else 1)
   | _ => IO.println usage; pure 0
 

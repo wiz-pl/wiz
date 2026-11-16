@@ -238,6 +238,9 @@ structure Job where
   key : UInt64
   how : How
   timeoutMs : Nat
+  /-- (23p) a command target: its stored outputs are checked against the manifest
+  written beside them before the job is called up to date -/
+  declared : Option Command := none
   /-- run even if the output exists -/
   force : Bool := false
   /-- judges the job's end (by default: its exit code, and its output is the report) -/
@@ -322,7 +325,7 @@ def Runner.prepCommand (r : Runner) (c : Command) (tools : Array (Tool × Option
   let key := mixHash (hash "command") (hash (toString [toString (repr { c with name := "" }), toString ids.toList, toString ins.toList]))
   let label := s!"command {c.name}"
   pure (.job {
-    key, timeoutMs := r.timeoutMs, force := c.phony,
+    key, timeoutMs := r.timeoutMs, force := c.phony, declared := some c,
     setup := fun tmp => prepareOutputs c (abs tmp / "out"),
     how := .command exe (fun tmp => renderArgs c pkgAbs (abs tmp / "out"))
       (fun tmp => if c.inOutDir then abs tmp / "out" else pkgAbs) c.env,
@@ -341,6 +344,8 @@ def Runner.prepCommand (r : Runner) (c : Command) (tools : Array (Tool × Option
           (if logText.trimAscii.isEmpty then ", and printed nothing" else s!"; the end of its output:\n{tailLines logText}"))
       if let some p := c.stdout then IO.FS.writeFile (tmp / "out" / p) o.stdout
       if let .error e ← checkOutputs c (tmp / "out") then return ← failed e
+      -- (23p) the hashes a later build checks before reusing this directory
+      if !c.phony then writeOutputManifest c tmp
       pure { res := .ok (), record := !c.phony,
              log := s!"[{label}]\n" ++ (if c.phony then o.stdout ++ o.stderr else "") },
     onOk := fun _ out => do
@@ -360,7 +365,8 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
   | .ir file => pure (.job { key := mixHash (hash "ir+c") (d 0).key, how := .grail (node "ir" [str file]), timeoutMs := r.timeoutMs })
   | .obj _ =>
     let cFile := (d 0).out / "main.c"
-    let cText ← IO.FS.readFile cFile
+    -- (a dry run does not write the C it would hash: a placeholder key is enough)
+    let cText ← try IO.FS.readFile cFile catch _ => pure ""
     let key := mixHash (hash "obj") (hash (toString [cText, tc.cc, " ".intercalate tc.cflags]))
     pure (.job {
       key := key, timeoutMs := r.timeoutMs, how := .cmd tc.cc fun out =>
@@ -478,6 +484,25 @@ structure Sched where
 
 def Runner.stat (r : Runner) (f : Stats → Stats) : IO Unit := r.stats.modify f
 
+/-- Move `new` to `old`, replacing an earlier directory with the same key (a forced run,
+or one whose stored outputs no longer match their manifest). The old directory is kept
+under `tmp/` until the new one is in place, so a failed rename leaves the store as it
+was. -/
+def replaceDir (old new : System.FilePath) : IO Unit := do
+  if ← old.pathExists then
+    let saved := old.toString ++ s!".old{← IO.Process.getPID}-{← IO.monoNanosNow}"
+    let moved ← try
+        IO.FS.rename old saved
+        pure true
+      catch _ => pure false
+    if moved then
+      try IO.FS.rename new old catch _ => IO.FS.removeDirAll new
+      try IO.FS.removeDirAll saved catch _ => pure ()
+    else
+      -- another build put a directory there first; its result is as good as ours
+      IO.FS.removeDirAll new
+  else try IO.FS.rename new old catch _ => IO.FS.removeDirAll new
+
 /-- Run the graph: every node, dependencies first, jobs `r.jobs` at a time. -/
 partial def Runner.schedule (r : Runner) (g : Graph)
     (prep : Node → Array (Except String Done) → IO Prep) : IO (Array (Option Res)) := do
@@ -508,8 +533,9 @@ partial def Runner.schedule (r : Runner) (g : Graph)
       let out := r.outDir key
       if fin.record then
         IO.FS.createDirAll (r.ctx.grailDir / "build")
-        try IO.FS.rename tmp out
-        catch _ => IO.FS.removeDirAll tmp   -- someone else made it first
+        IO.FS.createDirAll (r.ctx.grailDir / "tmp")
+        -- (23p) a forced run or an invalid cache entry has the same key: replace it
+        replaceDir out tmp
       else IO.FS.removeDirAll tmp
       r.stat fun s => { s with ran := s.ran + 1 }
       let extra ← try j.onOk false out catch e => pure s!"{e}\n"
@@ -563,10 +589,22 @@ partial def Runner.schedule (r : Runner) (g : Graph)
     | .fail msg log => failNode i msg log
     | .job j =>
       let out := r.outDir j.key
-      if !j.force && (← out.pathExists) then
+      -- (23p) a command's key directory is reused only when its outputs are still
+      -- there with the hashes written when it ran
+      let stored ← if ← out.pathExists then
+          match j.declared with
+          | some c => checkOutputManifest c out
+          | none => pure true
+        else pure false
+      if !(r.force || j.force) && stored then
         r.stat fun s => { s with upToDate := s.upToDate + 1 }
-        let extra ← try j.onOk true out catch e => pure s!"{e}\n"
-        finishNode i (.ok { key := j.key, out }) extra ""
+        if r.dryRun then finishNode i (.ok { key := j.key, out }) "" ""
+        else
+          let extra ← try j.onOk true out catch e => pure s!"{e}\n"
+          finishNode i (.ok { key := j.key, out }) extra ""
+      else if r.dryRun then
+        r.stat fun s => { s with wouldRun := s.wouldRun + 1 }
+        finishNode i (.ok { key := j.key, out }) s!"would run: {nd.label}\n" ""
       else st.modify fun s => { s with queue := s.queue.push (i, j) }
   let emit : IO Unit := do
     repeat
@@ -617,7 +655,8 @@ def Runner.build (r : Runner) (all targets : List Target) : IO Bool := do
       pure g
     catch e => r.err s!"{e}\n"; return false
   -- (23i) outputs an earlier build installed that no command declares now
-  r.out (← removeStale r.ctx all)
+  -- (a dry run must not write, so it does not remove them)
+  if !r.dryRun then r.out (← removeStale r.ctx all)
   let res ← r.schedule g (r.prep false (← IO.mkRef {}))
   pure (res.all (· matches some (.ok _)))
 
@@ -638,6 +677,9 @@ def Runner.runTarget (r : Runner) (all : List Target) (t : Target) (extra : Arra
   match t with
   | .exe n _ =>
     unless ← r.build all [t] do return 1
+    if r.dryRun then
+      r.out s!"would run: {bin n} {" ".intercalate extra.toList}\n"
+      return 0
     spawn (bin n).toString extra []
   | .command c =>
     let mut needs : List Target := []
@@ -655,10 +697,16 @@ def Runner.runTarget (r : Runner) (all : List Target) (t : Target) (extra : Arra
         | .ok (run, _) => pure run
         | .error e => r.err s!"{e}\n"; return 127
     for i in c.inputs do
-      unless (producerOf all i).isSome || (← (r.ctx.dir / i).pathExists) do
-        r.err s!"command {c.name}: the input {i} does not exist, and no target makes it\n"; return 1
+      -- (a dry run has not built the inputs the command would read)
+      if !r.dryRun then
+        unless (producerOf all i).isSome || (← (r.ctx.dir / i).pathExists) do
+          r.err s!"command {c.name}: the input {i} does not exist, and no target makes it\n"; return 1
+    let args := renderArgs { c with inOutDir := false } pkgAbs pkgAbs ++ extra
+    if r.dryRun then
+      r.out s!"would run: {exe} {" ".intercalate args.toList}\n"
+      return 0
     prepareOutputs c pkgAbs
-    spawn exe (renderArgs { c with inOutDir := false } pkgAbs pkgAbs ++ extra) c.env
+    spawn exe args c.env
   | _ => r.err s!"grail run: {t.name} is not an exe or a command target\n"; pure 2
 
 /-- Run the tests of these targets whose path contains one of `filters` (all, if none). -/

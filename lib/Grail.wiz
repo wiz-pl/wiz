@@ -158,7 +158,22 @@ def Command.needs (path : String) (c : Command) : Command := Command.add (.input
 def Command.makes (path : String) (c : Command) : Command := Command.add (.output path) c
 /-- An output directory that is not an argument. -/
 def Command.makesDir (path : String) (c : Command) : Command := Command.add (.dir path) c
-/-- An output directory that is also an argument. -/
+/-- `Command.outputs [p1, p2, …]`: declare output files that are not arguments (their
+paths may be computed from the design, e.g. `"build/" ++ name ++ ".v"`). -/
+def Command.outputs (paths : List String) (c : Command) : Command :=
+  match paths with
+  | .nil => c
+  | .cons p ps => Command.outputs ps (Command.add (.output p) c)
+/-- `Command.outputsDir [p1, p2, …]`: declare output directories that are not arguments
+(every file written under one is an output; the command may choose their names). -/
+def Command.outputsDir (paths : List String) (c : Command) : Command :=
+  match paths with
+  | .nil => c
+  | .cons p ps => Command.outputsDir ps (Command.add (.dir p) c)
+/-- An output directory that is also an argument: grail makes it empty, passes its path
+to the command and installs what the command wrote there. This is the `--out-dir`
+contract: the command may name the files inside the directory after its design, and the
+directory (with all of them) is the declared output. -/
 def Command.outDir (path : String) (c : Command) : Command :=
   Command.add (.arg (Grail.one (.output path))) (Command.add (.dir path) c)
 /-- The command's stdout is this output file. -/

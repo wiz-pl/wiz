@@ -639,14 +639,17 @@ def runner (dir : System.FilePath) (tc : Toolchain) (pkg : Grail.Package) (jobs 
 
 /-- Run grail's build on a package directory; also returns the report. -/
 def buildLog (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (jobs : Nat := 1)
-    (timeoutMs : Option Nat := none) : IO (Grail.Stats × Bool × String) := do
+    (timeoutMs : Option Nat := none) (force : Bool := false) (dryRun : Bool := false)
+    (defaultOnly : Bool := false) : IO (Grail.Stats × Bool × String) := do
   match ← Grail.readConfig tc (← binId tc) "lib" dir with
   | .error e => throw (IO.userError e)
   | .ok (pkg, _) =>
     let log ← IO.mkRef ""
     let r ← runner dir tc pkg jobs log
-    let r := { r with timeoutMs := timeoutMs.getD r.timeoutMs }
-    let ok ← r.build pkg.targets (pkg.targets.filter fun t => only.isEmpty || only.contains t.name)
+    let r := { r with timeoutMs := timeoutMs.getD r.timeoutMs, force, dryRun }
+    let targets := if !only.isEmpty then pkg.targets.filter fun t => only.contains t.name
+      else if defaultOnly then pkg.targets.filter (·.isDefault) else pkg.targets
+    let ok ← r.build pkg.targets targets
     pure (← r.stats.get, ok, ← log.get)
 
 def build (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (jobs : Nat := 1) : IO (Grail.Stats × Bool) := do
@@ -1381,6 +1384,35 @@ def cmdGrail (extra : String := "") : String :=
 def cmdFiles (extra : String := "") : List (String × String) :=
   [("grail.wiz", cmdGrail extra), ("src/in.txt", "hello\n")]
 
+/-- (23p) A package whose `gen` command declares the output directory it writes into
+(`Command.outDir`), a command that consumes a design-named file under it, and a manual
+command. -/
+def outGrail : String :=
+  "import Grail\ndef package : Package := Package.new \"c\"\n" ++
+  "  |> Package.command (Command.new \"gen\" (Tool.path \"sh\")\n" ++
+  "       |> Command.arg \"-c\"\n" ++
+  "       |> Command.arg \"cat \\\"$2\\\" > \\\"$1/out.txt\\\"; echo extra > \\\"$1/extra.txt\\\"\"\n" ++
+  "       |> Command.arg \"sh\"\n" ++
+  "       |> Command.outDir \"build/gen\"\n" ++
+  "       |> Command.input \"src/in.txt\")\n" ++
+  "  |> Package.command (Command.new \"copy\" (Tool.path \"cp\")\n" ++
+  "       |> Command.input \"build/gen/out.txt\" |> Command.output \"build/out.txt\")\n" ++
+  "  |> Package.command (Command.manual (Command.new \"manual\" (Tool.path \"sh\")\n" ++
+  "       |> Command.arg \"-c\" |> Command.arg \"echo m > \\\"$1/manual.txt\\\"\" |> Command.arg \"sh\"\n" ++
+  "       |> Command.outDir \"build/manual\"))\n"
+
+def outFiles : List (String × String) := [("grail.wiz", outGrail), ("src/in.txt", "hello\n")]
+
+/-- (23p) A command that writes files into its own output directory and declares them
+by name (`Command.outputs`, `Command.outputsDir`). -/
+def listGrail : String :=
+  "import Grail\ndef package : Package := Package.new \"c\"\n" ++
+  "  |> Package.command (Command.new \"list\" (Tool.path \"sh\")\n" ++
+  "       |> Command.arg \"-c\" |> Command.arg \"mkdir -p build/dir; echo one > build/one.txt; echo two > build/dir/two.txt\" |> Command.arg \"sh\"\n" ++
+  "       |> Command.inOutDir\n" ++
+  "       |> Command.outputs [\"build/one.txt\"]\n" ++
+  "       |> Command.outputsDir [\"build/dir\"])\n"
+
 def cmdTc : IO Toolchain := do pure { cacheDir := some (← IO.FS.createTempDir) }
 
 def has (log needle : String) : Bool := (log.splitOn needle).length > 1
@@ -1419,6 +1451,110 @@ def grailCommandsGroup : Group where
         check ok "the second build failed"
         checkEq 0 s.ran
         checkEq 2 s.upToDate },
+    { name := "a declared out-dir is installed and cached; deleting or editing an output is repaired", run := fun _ => do
+        let dir ← mkTree outFiles
+        let tc ← cmdTc
+        let (s, ok, log) ← buildLog dir tc ["gen"]
+        check ok log
+        checkEq 1 s.ran
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        checkEq "extra\n" (← IO.FS.readFile (dir / "build/gen/extra.txt"))
+        -- the file name inside the directory is the command's, not grail's
+        check (has log "[command gen]") log
+        let (s, _, _) ← buildLog dir tc ["gen"]
+        checkEq 0 s.ran
+        checkEq 1 s.upToDate
+        -- a deleted installed output comes back from the store, without running
+        IO.FS.removeFile (dir / "build/gen/out.txt")
+        let (s, _, _) ← buildLog dir tc ["gen"]
+        checkEq 0 s.ran
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        -- an edited output is grail's: the next build puts the stored one back
+        IO.FS.writeFile (dir / "build/gen/out.txt") "mine\n"
+        let (s, _, _) ← buildLog dir tc ["gen"]
+        checkEq 0 s.ran
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        -- an edited *store* output is not trusted: the manifest makes the command run
+        let mut stored : Option System.FilePath := none
+        for e in ← (dir / ".grail/build").readDir do
+          let f := e.path / "out/build/gen/out.txt"
+          if ← f.pathExists then stored := some f
+        let some storeFile := stored | throw (IO.userError "no stored gen output")
+        IO.FS.writeFile storeFile "tampered\n"
+        let (s, _, log) ← buildLog dir tc ["gen"]
+        checkEq 1 s.ran
+        check (has log "[command gen]") log
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        -- --force runs even when everything is up to date
+        let (s, _, _) ← buildLog dir tc ["gen"] (force := true)
+        checkEq 1 s.ran },
+    { name := "a dry run reports what would run and writes nothing; an edit then reruns", run := fun _ => do
+        let dir ← mkTree outFiles
+        let tc ← cmdTc
+        let (s, ok, log) ← buildLog dir tc ["gen"]
+        check ok log
+        checkEq 1 s.ran
+        IO.FS.writeFile (dir / "src/in.txt") "world\n"
+        -- dry run: the command would run, but nothing is written or installed
+        let (s, ok, log) ← buildLog dir tc ["gen"] (dryRun := true)
+        check ok log
+        checkEq 0 s.ran
+        checkEq 1 s.wouldRun
+        check (has log "would run: command gen") log
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        -- the real build then runs it once
+        let (s, _, _) ← buildLog dir tc ["gen"]
+        checkEq 1 s.ran
+        checkEq "world\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        -- and a dry run of an up-to-date package says nothing would run
+        let (s, _, _) ← buildLog dir tc ["gen"] (dryRun := true)
+        checkEq 0 s.ran
+        checkEq 0 s.wouldRun
+        checkEq 1 s.upToDate },
+    { name := "grail run --dry-run prints the command, grail build --force reruns it", run := fun _ => do
+        let dir ← mkTree outFiles
+        let cache ← IO.FS.createTempDir
+        let self ← IO.appPath
+        let grail (args : List String) : IO (UInt32 × String × String) := do
+          let o ← IO.Process.output { cmd := self.toString, args := ("--grail" :: "-C" :: dir.toString :: "--cache" :: cache.toString :: args).toArray }
+          pure (o.exitCode, o.stdout, o.stderr)
+        let (c, out, err) ← grail ["run", "--dry-run", "gen"]
+        checkEq 0 c
+        check (has (out ++ err) "would run:") s!"{out}{err}"
+        check (!(← (dir / "build/gen").pathExists)) "the dry run wrote an output"
+        let (c, _, _) ← grail ["run", "gen"]
+        checkEq 0 c
+        checkEq "hello\n" (← IO.FS.readFile (dir / "build/gen/out.txt"))
+        let (c, _, _) ← grail ["build", "gen"]
+        checkEq 0 c
+        let (c, out, _) ← grail ["build", "--force", "gen"]
+        checkEq 0 c
+        check (has out "1 jobs run") out },
+    { name := "Command.outputs and Command.outputsDir declare files a command names itself", run := fun _ => do
+        let dir ← mkTree [("grail.wiz", listGrail)]
+        let tc ← cmdTc
+        let (s, ok, log) ← buildLog dir tc ["list"]
+        check ok log
+        checkEq 1 s.ran
+        checkEq "one\n" (← IO.FS.readFile (dir / "build/one.txt"))
+        checkEq "two\n" (← IO.FS.readFile (dir / "build/dir/two.txt"))
+        let (s, _, _) ← buildLog dir tc ["list"]
+        checkEq 0 s.ran
+        checkEq 1 s.upToDate },
+    { name := "Command.manual: not in a bare build, and cached when named", run := fun _ => do
+        let dir ← mkTree outFiles
+        let tc ← cmdTc
+        let (s, ok, log) ← buildLog dir tc (defaultOnly := true)
+        check ok log
+        checkEq 2 s.ran
+        check (!(← (dir / "build/manual").pathExists)) "the manual command ran in a bare build"
+        let (s, ok, log) ← buildLog dir tc ["manual"]
+        check ok log
+        checkEq 1 s.ran
+        checkEq "m\n" (← IO.FS.readFile (dir / "build/manual/manual.txt"))
+        let (s, _, _) ← buildLog dir tc ["manual"]
+        checkEq 0 s.ran
+        checkEq 1 s.upToDate },
     { name := "an edit reruns; going back and deleting an output restore it from the store", run := fun _ => do
         let dir ← mkTree (cmdFiles)
         let tc ← cmdTc

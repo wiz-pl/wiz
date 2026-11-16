@@ -49,6 +49,8 @@ structure Stats where
   failed : Nat := 0
   /-- not run because a job they depend on failed -/
   skipped : Nat := 0
+  /-- (23p) a dry run: jobs that would run -/
+  wouldRun : Nat := 0
 
 def hex (k : UInt64) : String :=
   let s := String.ofList (Nat.toDigits 16 k.toNat)
@@ -75,6 +77,10 @@ structure Runner where
   /-- a job's time limit, in milliseconds; tests have their own -/
   timeoutMs : Nat := 1800000
   testTimeoutMs : Nat := 300000
+  /-- (23p) run jobs even when their outputs are up to date (`grail build/run --force`) -/
+  force : Bool := false
+  /-- (23p) report what would run, without running or installing anything (`--dry-run`) -/
+  dryRun : Bool := false
 
 def Runner.load (r : Runner) (file : String) : IO Loaded := do
   if let some l := (← r.memo.get).loaded[file]? then return l
