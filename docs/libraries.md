@@ -1477,7 +1477,9 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   instead of `.negSucc 9` (a printing hint, not an axiom: `#print axioms` lists nothing
   for it). Division truncates (`-7 / 2 = -3`, `-7 % 2 = -1`), like `IntN` and C. Also
   `Int.natAbs`, `Int.toNat` (negatives to 0), `Int.lt`/`le`/`beq`, and lemmas
-  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
+  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.mul_one`, `Int.one_mul`,
+  `Int.mul_zero`, `Int.zero_mul`, `Int.sub_zero`, `Int.natAbs_neg`, `Int.lt_irrefl`,
+  `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
   are in lib/IntRing.wiz and lib/IntOrder.wiz ("Arithmetic", below).
 * **Words.** One set of instances at `UIntN w` serves `U8 … U64` and `BitVec n` (aliases
   are seen through). `UIntN w` and `IntN w` have the same shape but are sealed, different
@@ -1540,6 +1542,91 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
   integer identity and `q_ring!` is `int_ring!` on numerators and denominators. Use the
   congruences (`Q.add_congr`, `Q.le_congr`, …) to rewrite under `≈`.
 * `Vec.wiz` and `Hoare.wiz` import `Nat` for the lemmas they used to define themselves.
+
+## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
+
+The rewrite library: equations oriented left to right, towards the normal form `simp`
+(stage 6h) computes. Each rule is registered with `attribute [simp]` in the module that
+defines it, so importing that module alone is enough; `import SimpLemmas` is the
+umbrella that brings them all, and it also keeps the lemmas that are deliberately not
+registered. `simp` uses the registered set without a list; `simp only [...]` and `rw`
+use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
+
+| module | registered rules (left to right) |
+|--------|----------------------------------|
+| `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
+| `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
+| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
+| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
+
+* **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
+  `Bool.not` in the prelude. For a variable first argument the `&&`/`||` match is *not*
+  the same stuck term as `Bool.and`/`Bool.or` applied (`Bool.and` matches on both
+  arguments, so its stuck form carries the second match in a lambda). The three
+  notation identities (`b && true`, `b && false`, `b || false`) are therefore stated
+  with the notation, while the other `Bool.and`/`Bool.or` laws are for goals that
+  contain the functions themselves; both live in `lib/Logic.wiz`. `!` *is* `Bool.not`,
+  so `Bool.not_not` fires on `!(!b)`.
+* **What is not registered, and why.** A rule must be `∀ x₁ … xₙ, lhs = rhs` with no
+  premise (dischargers are S3) and a left side that still appears in a goal. So several
+  lemmas are explicit-only:
+  * identities whose left side computes to a variable or a data value — `Nat.zero_add`,
+    `Nat.zero_mul`, `Nat.pow_zero`, `List.nil_append`, `Bool.true_and`,
+    `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
+    `Bool.not_false`, `Option.map_none`, `Prod.fst_mk`, `Prod.snd_mk`,
+    `Bool.if_true`, `Bool.if_false`;
+  * patterns that compute to a constructor carrying rule variables — `List.map_nil`,
+    `List.map_cons`, `Option.map_some`;
+  * commutativity and associativity (`Nat.add_comm`, `Bool.and_comm`,
+    `List.append_assoc`, …), which have no normal form to aim at, and distributivity,
+    which expands;
+  * the `↔` lemmas (`List.mem_append`, `List.mem_map`, `Bool.and_eq_true`, …), which
+    are not equations;
+  * conditional equations (`List.filter_cons_true`, `List.any_cons_true`, `Eq.symm`,
+    `propext`, …), which need a discharger.
+
+  Each library file lists its own exclusions with the reason.
+* **Orientation.** Rewriting goes from the left column (the term with the neutral
+  operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
+  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `b && true → b`,
+  `reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`. Rules that
+  would loop are deliberately absent: commutativity, associativity, distributivity, and
+  the other directions of the identities above. `Nat.add_zero` and `Int.add_zero` are
+  stated for an explicit argument (`rw (Nat.add_zero n)`), so a rewrite chain names the
+  instance.
+* **`rw` and definitional equations.** `rw` needs the elaborated type of its lemma to be
+  an equation. When both sides are definitionally equal (`Nat.zero_add`,
+  `Nat.zero_mul`, `Nat.pow_zero`, `Nat.pow_succ`, `List.nil_append`, `List.map_nil`,
+  `List.map_cons`, `Option.map_none`, `Option.map_some`, `Prod.fst_mk`, `Prod.snd_mk`,
+  `Bool.if_true`, `Bool.if_false`), the kernel computes that type to `True` (or to the
+  payload equation of the constructors), so `rw` rejects the lemma even though it is
+  true. The `std` tests therefore check those by direct application and the rest by
+  `rw`; `simp` uses the registered safe subset and the others explicitly. This is a
+  limitation of `rw`, not of the lemma set.
+
+`simp` rewrites and the user closes the goal, so a normal form is `simp; rfl`:
+
+```
+import SimpLemmas
+
+def t (n : Nat) : (n + 0) * 1 = n := by
+  simp
+  rfl
+def u {A : Type} (xs : List A) : xs ++ [] = xs := by
+  simp
+  rfl
+def v {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
+  rfl
+```
+
+`v` is the case the registrations were for: by `rw` it needs
+`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`; `simp`
+finds both occurrences and restarts after each rewrite. The same annotations make the
+`List.reverse`, `List.filter`, `List.any` and `List.all` lemmas usable as normal forms
+instead of one `rw` per step.
+
 ## Native structures: word arrays, word maps, interned strings
 
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
