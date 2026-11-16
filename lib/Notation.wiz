@@ -1,0 +1,12 @@
+import Prelude
+/-!
+# Notation
+
+The canonical spellings that are not in `Prelude` yet. Today: list cons, `::`.
+
+`Prelude` itself is owned by the notation workstream; this module is the seam so the
+project assemblies can use the one spelling without a local `infix` each. When the
+`::` infix lands in `Prelude`, delete this module and its imports.
+-/
+
+infixr:67 " :: " => List.cons

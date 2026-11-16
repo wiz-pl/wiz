@@ -38,7 +38,7 @@ Along the way the elaborator learned to:
   `head`, `tail` and `zipWith` on vectors failed at runtime).
 
 Not yet: facts like `Vec.get v (Fin.of 3 1 rfl) = 20 := rfl` (the `rfl` shape
-problem above; `drafts/vec-lib/VecProofs.wiz`), arithmetic facts about `BitVec` in general, numerals and operators
+problem above), arithmetic facts about `BitVec` in general, numerals and operators
 (`a + b`) for `BitVec` (decision HD9).
 
 `lib/BitVecShift.wiz` (`import BitVecShift`): the first of those arithmetic facts, for

@@ -167,9 +167,10 @@ tuples and look-alike types don't convert to it.
 All of this is elaboration only, as above: the kernel checks against the full
 environment, and whatever the elaborator accepts with `T`'s definition hidden also
 checks with it unfolded. The self-hosted frontend parses the `private` markers and
-ignores them. The motivating use is the HDL's signals (`drafts/hdl/Signal.wiz`): user
-code builds and observes them only through the library's combinators and `sample`
-(`drafts/hdl/rejected/observe_signal.wiz`). Tests: group `elabfix`.
+ignores them. The motivating use was the HDL's signals (`drafts/hdl/Signal.wiz`, since
+deleted): user code builds and observes them only through the library's combinators and
+`sample` (`drafts/hdl/rejected/observe_signal.wiz`, kept as the rejected example).
+Tests: group `elabfix`.
 
 ## 13c: `if`, `&&`, `||`, `!` in the Prelude
 

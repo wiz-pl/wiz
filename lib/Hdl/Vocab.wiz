@@ -1,0 +1,156 @@
+import Hdl.Core
+/-!
+# Hdl.Vocab: the small shared vocabulary of the board projects
+
+The width aliases, gate helpers and host-side serial-line vocabulary that
+`wiz-arty`, `wiz-icestick-uart` and `wiz-rv` used to copy. Board-specific pieces
+(the pins, the LED split of an output bus, the CRC protocol) stay in the projects.
+
+Everything here is polymorphic in the representation `r`, so it simulates
+(`HwTy.El`) and synthesises (`Wire`) from the same text.
+-/
+
+-- ## Widths
+
+def Bit : HwTy := HwTy.bit
+def B2 : HwTy := HwTy.bits 2
+def B3 : HwTy := HwTy.bits 3
+def B4 : HwTy := HwTy.bits 4
+def B5 : HwTy := HwTy.bits 5
+def B7 : HwTy := HwTy.bits 7
+def B8 : HwTy := HwTy.bits 8
+def B9 : HwTy := HwTy.bits 9
+def B10 : HwTy := HwTy.bits 10
+def W1 : HwTy := HwTy.bit
+
+-- ## Gates
+
+def hi {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 1
+def lo {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 0
+
+-- Shift registers, least significant bit first: `b` comes in at the top.
+def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1) d
+def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r Bit) : r B9 := Hw.cat b (Hw.slice 1 8 x)
+def shiftIn8 {r : HwTy → Type} [Hw r] (x : r B8) (b : r Bit) : r B8 := Hw.cat b (Hw.slice 1 7 x)
+
+def shl1 {r : HwTy → Type} [Hw r] (c : r B8) : r B8 := Hw.cat (Hw.slice 0 7 c) (Hw.lit 1 0)
+
+-- A read-only memory as a chain of multiplexers: entry `k` of the list at index `k`
+-- (a meta-level recursion: the list is gone from the netlist, only constants remain).
+def rom {r : HwTy → Type} [Hw r] (idx : r B5) : Nat → List Nat → r B8
+  | _, .nil => Hw.lit 8 0
+  | k, .cons c cs => if idx === Hw.ofNat k then Hw.ofNat c else rom idx (Nat.succ k) cs
+
+------------------------------------------------------------------------------------
+-- ## The host's side of the serial line
+
+-- The host's side of the serial line, as functions on lists: waveforms (one level per
+-- clock cycle) from bytes, bytes from waveforms, and a cycle-by-cycle circuit runner.
+-- The host's bit period is a rational number of clock cycles, `num / den`, so that a
+-- host whose baud rate differs from the board's can be simulated.
+
+-- `k` copies of `v` pushed onto `acc`
+def Wave.rep {A : Type} : Nat → A → List A → List A
+  | .zero, _, acc => acc
+  | .succ k, v, acc => Wave.rep k v (List.cons v acc)
+
+def Wave.ceilDiv (a b : Nat) : Nat := Nat.div (a + b - 1) b
+
+-- A level held for `u` time units from time `t` (a cycle is `den` units): the clock
+-- edges that fall in [t, t + u) see it.
+def Wave.hold (den t u v : Nat) (acc : List Nat) : List Nat :=
+  Wave.rep (Wave.ceilDiv (t + u) den - Wave.ceilDiv t den) v acc
+
+-- the low `k` bits of `b`, least significant first
+def Wave.bitsOf : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, b => .cons (Nat.mod b 2) (Wave.bitsOf k (Nat.div b 2))
+
+-- 8N1: a start bit (low), eight data bits, a stop bit (high)
+def Wave.frame (b : Nat) : List Nat := .cons 0 (List.append (Wave.bitsOf 8 b) (.cons 1 .nil))
+
+def Wave.levels (num den : Nat) : List Nat → Nat → List Nat → Nat × List Nat
+  | .nil, t, acc => (t, acc)
+  | .cons v vs, t, acc => Wave.levels num den vs (t + num) (Wave.hold den t num v acc)
+
+-- What the host does: send a byte, or keep the line idle for some clock cycles.
+inductive Ev where
+  | byte (b : Nat)
+  | idle (cycles : Nat)
+
+def Wave.eventsGo (num den : Nat) : List Ev → Nat → List Nat → List Nat
+  | .nil, t, acc => Hdl.rev acc .nil
+  | .cons e es, t, acc => match e with
+    | .byte b =>
+      let ω r := Wave.levels num den (Wave.frame b) t acc;
+      Wave.eventsGo num den es r.1 r.2
+    | .idle k => Wave.eventsGo num den es (t + k * den) (Wave.rep k 1 acc)
+
+-- the RX pin, cycle by cycle
+def Wave.events (num den : Nat) (es : List Ev) : List Nat := Wave.eventsGo num den es 0 .nil
+
+-- A software receiver with the host's bit period: a low level when idle starts a frame
+-- at that cycle; the line is sampled 1.5, 2.5, … 9.5 bit periods later. A frame whose
+-- stop bit is low is reported as 256 + the byte.
+def Wave.decodeGo (num den : Nat) : List Nat → Nat → Bool → Nat → Nat → Nat → List Nat → List Nat
+  | .nil, c, busy, next, k, val, acc => Hdl.rev acc .nil
+  | .cons v vs, c, .false, next, k, val, acc => (match Nat.beq v 0 with
+    | .true => Wave.decodeGo num den vs (c + 1) .true (c * den + num + Nat.div num 2) 0 0 acc
+    | .false => Wave.decodeGo num den vs (c + 1) .false next k val acc)
+  | .cons v vs, c, .true, next, k, val, acc => match Nat.lt (c * den) next with
+    | .true => Wave.decodeGo num den vs (c + 1) .true next k val acc
+    | .false => match Nat.lt k 8 with
+      | .true => Wave.decodeGo num den vs (c + 1) .true (next + num) (k + 1) (val + v * Nat.pow 2 k) acc
+      | .false => Wave.decodeGo num den vs (c + 1) .false 0 0 0
+          (List.cons (match Nat.beq v 1 with
+            | .true => val
+            | .false => 256 + val) acc)
+
+def Wave.decode (num den : Nat) (line : List Nat) : List Nat :=
+  Wave.decodeGo num den line 0 .false 0 0 0 .nil
+
+------------------------------------------------------------------------------------
+-- ## Running a circuit on bus encodings
+
+-- from the state `s` (the initial state: `Sim.run`)
+def Sim.go {ω i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (xs : List Nat) : List Nat :=
+  Hdl.map (HwTy.pack o) (Circuit.runAcc c s (Hdl.map (HwTy.unpack i) xs) .nil)
+def Sim.run {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : List Nat := Circuit.runPacked c xs
+
+def NatList.last : Nat → List Nat → Nat
+  | d, .nil => d
+  | d, .cons x xs => NatList.last x xs
+
+------------------------------------------------------------------------------------
+-- ## Test data: a linear congruential generator, lines of bytes.
+
+def Rng.next (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
+def Rng.pick (s m : Nat) : Nat := Nat.mod (Nat.div s 256) m
+
+-- a byte for a line: 1 … 127 (what a Wiz string can carry to a serial port), never 10
+def Gen.textByte (s : Nat) : Nat := match Nat.beq (1 + Rng.pick s 127) 10 with
+  | .true => 11
+  | .false => 1 + Rng.pick s 127
+-- any byte but 10 (simulation only)
+def Gen.anyByte (s : Nat) : Nat := match Nat.beq (Rng.pick s 256) 10 with
+  | .true => 255
+  | .false => Rng.pick s 256
+
+def Gen.bytes (f : Nat → Nat) : Nat → Nat → List Nat
+  | .zero, s => .nil
+  | .succ k, s => .cons (f s) (Gen.bytes f k (Rng.next s))
+
+def Gen.skip : Nat → Nat → Nat
+  | .zero, s => s
+  | .succ k, s => Gen.skip k (Rng.next s)
+
+-- `count` lines of 0 … `maxLen - 1` bytes each
+def Gen.lines (f : Nat → Nat) (maxLen : Nat) : Nat → Nat → List (List Nat)
+  | .zero, s => .nil
+  | .succ k, s =>
+    .cons (Gen.bytes f (Rng.pick s maxLen) (Rng.next s))
+      (Gen.lines f maxLen k (Gen.skip (Rng.pick s maxLen + 1) s))
+
+def Ev.bytes : List Nat → List Ev → List Ev
+  | .nil, rest => rest
+  | .cons b bs, rest => .cons (Ev.byte b) (Ev.bytes bs rest)
