@@ -117,7 +117,10 @@ its own `grail.wiz` is left out). The first line gives the kind: `-- test: check
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
 compiled through C). `-- test: skip REASON` marks an example that the package-wide run
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
-needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
+needs no `.expected`, and is not a pass. A `check` or `run` line may end in
+`timeout SECS` (`-- test: run timeout 900`) for a test that needs more than
+`--test-timeout` gives every test: the larger limit applies to its job and to its
+program. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
 `grail test --update` writes the actual output. Every example is a test

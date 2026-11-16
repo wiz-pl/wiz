@@ -435,14 +435,15 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
       let f ← r.judgeTest file update results (.error msg)
       return .fail msg f.log
     let exe := if kind == .run then ((d 0).out / testExe file).toString else ""
+    let limitMs := testLimitMs r.testTimeoutMs (← IO.FS.readFile (r.ctx.dir / file))
     pure (.job {
-      key := key, timeoutMs := r.testTimeoutMs, force := force, onOk := onOk,
+      key := key, timeoutMs := limitMs, force := force, onOk := onOk,
       how := .grail (node "test" [str file, str kind.name, str exe]),
       finish := some fun o out => do
-        if o.code == 124 then r.judgeTest file update results (.error s!"timed out after {secs r.testTimeoutMs} s")
+        if o.code == 124 then r.judgeTest file update results (.error s!"timed out after {secs limitMs} s")
         -- (exit 1: the test failed, its message on stderr; else the process died)
         else if o.code == 1 && !o.stderr.trimAscii.isEmpty then r.judgeTest file update results (.error o.stderr.trimAsciiEnd.toString)
-        else if o.code != 0 then r.judgeTest file update results (.error s!"the test's process failed: {failureMessage o r.testTimeoutMs}")
+        else if o.code != 0 then r.judgeTest file update results (.error s!"the test's process failed: {failureMessage o limitMs}")
         else r.judgeTest file update results (.ok (← IO.FS.readFile (out / "actual"))) })
   | .source role =>
     let (prog, self) ← r.selfhostSources role
