@@ -1,0 +1,6 @@
+spi modes: names 0 (CPOL=0, CPHA=0) | 1 (CPOL=0, CPHA=1) | 2 (CPOL=1, CPHA=0) | 3 (CPOL=1, CPHA=1)
+spi round-trip: mode 0 yes, mode 1 yes, mode 2 yes, mode 3 yes
+spi divider sweep div 1..8, all modes yes
+spi loopback sweep div 1..8, all modes yes, byte model yes
+spi mode 0 = original master yes, value = simulate = simFast yes
+spi well formed yes

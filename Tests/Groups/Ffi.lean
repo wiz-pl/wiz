@@ -14,6 +14,8 @@ def ffiGroup : Group where
   cases := [
     { name := "IO actions run in order", run := fun _ =>
         ioRun "import IO\ndef main : IO Unit := do\n  IO.println \"one\";\n  IO.println \"two\"" "one\ntwo\n" },
+    { name := "IO.arg past the end is empty (no i+1 overflow at 2^64-1)", run := fun _ =>
+        ioRun "import IO\ndef main : IO Unit := do\n  a ← IO.arg 18446744073709551615;\n  IO.println a" "\n" },
     { name := "the world is linear: it can't be duplicated", run := fun _ =>
         ioFails "import IO\ndef bad (x : IO Unit) : IO Unit := fun w =>\n  let 1 (a, w') := x w; x w" "quantity 1" },
     { name := "linear sequencing: IO.bind, IO.then1 and do1 take an action and a continuation that use a linear value (L6)", run := fun _ => do
@@ -58,6 +60,19 @@ def ffiGroup : Group where
         ioRun ("import IO\ndef main : IO Unit := do\n" ++
           "  IO.println (Nat.toString (UInt64.toNat (UInt64.mul (UInt64.ofNat 1000000) (UInt64.ofNat 1000000))));\n" ++
           "  IO.println (Float64.toString (Float64.div (Float64.ofNat 1) (Float64.ofNat 4)))") "1000000000000\n0.25\n" },
+    -- `wiz_u64_id` takes a `uint64_t` (the marshalling is `wiz_in_nat`), so
+    -- `UInt64.ofNat` has to reduce mod 2^64 in Wiz: a Nat at or above 2^64 used to
+    -- reach the C side and panic ("a number is too big for a C integer").
+    { name := "UInt64.ofNat reduces mod 2^64 at the boundary (C and LLVM)", run := fun _ => do
+        let src := "import IO\ndef main : IO Unit := do\n" ++
+          "  IO.println (Nat.toString (UInt64.toNat (UInt64.ofNat (Nat.sub (Nat.pow 2 64) 1))));\n" ++
+          "  IO.println (Nat.toString (UInt64.toNat (UInt64.ofNat (Nat.pow 2 64))));\n" ++
+          "  IO.println (Nat.toString (UInt64.toNat (UInt64.ofNat (Nat.add (Nat.pow 2 64) 1))));\n" ++
+          "  IO.println (Nat.toString (UInt64.toNat (UInt64.ofNat (Nat.add (Nat.pow 2 65) 7))));\n" ++
+          "  IO.println (Nat.toString (UInt64.toNat (18446744073709551616 : UInt64)))"
+        let want := "18446744073709551615\n0\n1\n7\n0\n"
+        ioRun src want
+        ioRun src want (llvm := true) },
     { name := "strings are marshalled as UTF-8", run := fun _ =>
         ioRun "import IO\ndef main : IO Unit := IO.println \"λ ✓\"" "λ ✓\n" },
     { name := "a C library function, through its header", run := fun _ =>
@@ -112,7 +127,7 @@ def ffiGroup : Group where
         ioRun ("import IO\ndef fill : Nat → Bytes → Bytes\n  | .zero, b => b\n  | .succ n, b => Bytes.push (fill n b) (65 + n)\n" ++
           "def main : IO Unit := do\n  IO.println (Bytes.toString (fill 3 Bytes.empty));\n" ++
           "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"λx\")))") "ABC\n3\n" },
-    { name := "byte buffers in #eval and #run (the interpreters' model, 21ac)", run := fun _ =>
+    { name := "byte buffers in #eval and #run (the interpreters' model, 21ad)", run := fun _ =>
         okLib ("import Std\n" ++
           "#eval Bytes.show (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))\n" ++
           "#eval Bytes.size (Bytes.push Bytes.empty 256)\n" ++

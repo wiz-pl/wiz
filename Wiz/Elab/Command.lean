@@ -2275,7 +2275,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         | _ => pure none
       -- (9i) a read-only buffer and its length (`const void *buf, size_t n`): `Bytes`
       let lenNames := ["n", "__n", "len", "__len", "nbytes", "__nbytes", "length", "__length"]
-      -- (21ac) a `char *`, `unsigned char *` or `signed char *` (and `uint8_t *`, a
+      -- (21ad) a `char *`, `unsigned char *` or `signed char *` (and `uint8_t *`, a
       -- typedef for `unsigned char`) with a length is a buffer too; without one a
       -- `char *` is still the NUL-terminated `String`
       let isChar (t : FFI.CType) : Bool := match t with

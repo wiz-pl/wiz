@@ -4,6 +4,7 @@
     python -m wiz_kernel install [--user|--prefix DIR|--sys-prefix]
     python -m wiz_kernel uninstall [...]
     python -m wiz_kernel --self-test [--wiz PATH] [--backend ...]
+    python -m wiz_kernel nb export FILE.ipynb [--to html|md] [--out FILE] [--check]
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in ("install", "uninstall"):
         from . import install
         return install.main(argv)
+    if argv and argv[0] == "nb":
+        from . import export
+        return export.main(argv[1:])
     if "--self-test" in argv:
         argv.remove("--self-test")
         from . import selftest

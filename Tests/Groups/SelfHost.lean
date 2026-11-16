@@ -1115,7 +1115,7 @@ def bytesFfiProgram (header : String) : String :=
 
 def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
 
-/-- (21ac) The encodings of `lib/IO.wiz`: `ofUtf8`/`toUtf8` (every character, NULs
+/-- (21ad) The encodings of `lib/IO.wiz`: `ofUtf8`/`toUtf8` (every character, NULs
 included; the decoder checks overlong forms and surrogates), `ofString`/`toString`
 (through a C string: they stop at a NUL) and `ofLatin1`/`toLatin1` (one byte per
 character, an error above 255). The strings are observed through `Bytes` only (a text
@@ -1141,7 +1141,7 @@ def bytesEncExpected : String :=
   "3\n1\n[97]\neq\n4\n4\neq\n[233]\n[233]\nnot Latin-1: character 0 is U+256\n" ++
   "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
 
-/-- (21ac) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
+/-- (21ad) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
 `Bytes.slice`/`append`/`eq`/`get`/`push` boundaries the semantics matrix pins: a slice
 past the end clamps, a drop past the end is empty, a read past the end is 0, a pushed
 number keeps its low eight bits, and equality is byte for byte, length included. -/
@@ -1168,7 +1168,7 @@ def bytesArrayProgram : String :=
 def bytesArrayExpected : String :=
   "[1, 2, 44]\n3\n44\n[1, 2, 44]\n[3]\n0\n[1, 2, 3]\n[1, 2, 3]\neq\nne\nne\n0\n[0, 1]\n[]\n"
 
-/-- (21ac) A header for a buffer pointer written three ways: `const char *`,
+/-- (21ad) A header for a buffer pointer written three ways: `const char *`,
 `uint8_t *` (a typedef for `unsigned char`) and `unsigned char *`, each followed by its
 length, which the frontends fold into one `Bytes` parameter (kind `y`). -/
 def bytesPtrHeader : String :=
@@ -1186,7 +1186,7 @@ def bytesPtrHeader : String :=
   "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
   "#endif\n"
 
-/-- (21ac) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
+/-- (21ad) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
 called with one `Bytes` argument; the buffer is **borrowed** for the call (C may read it
 and must not keep it), so the same Wiz buffer is usable after the call. Prints
 `198 258 198 [65, 66, 67] 3`. -/
@@ -1203,7 +1203,7 @@ def bytesPtrProgram (header : String) : String :=
 
 def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n"
 
-/-- (21ac) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
+/-- (21ad) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
 value and comes back by value (the field is copied into the C array and out of it), and
 glue may pass the struct on but not read the buffer field (`glueDeclFields` leaves it
 out, as the Lean frontend does). Prints `70`, the field's bytes, `7`, `127`. -/
@@ -1598,9 +1598,11 @@ def selfHostGroup : Group where
         selfhostCompileRun quantityProgram "6\n5\n9\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: private declarations, constructors and fields, as in one Lean module (21n)", run := fun _ =>
         selfhostAgrees "" privateDecls },
+    -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
+    -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\nattribute [macro f] f\nattribute [tactic f] f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.attrMacro\nerror: unsupported command command.attrTactic\ng : Nat\n" },
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -1658,11 +1660,11 @@ def selfHostGroup : Group where
         ioRun prog bytesFfiExpected
         selfhostCompileRun prog bytesFfiExpected
         selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
-    { name := "Bytes (21ac): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
+    { name := "Bytes (21ad): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
         ffiAgrees bytesEncProgram bytesEncExpected },
-    { name := "Bytes (21ac): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
+    { name := "Bytes (21ad): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
         ffiAgrees bytesArrayProgram bytesArrayExpected },
-    { name := "Bytes (21ac): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
+    { name := "Bytes (21ad): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_bytes2.h"
         IO.FS.writeFile h bytesPtrHeader
@@ -1670,7 +1672,7 @@ def selfHostGroup : Group where
         ioRun prog bytesPtrExpected
         selfhostCompileRun prog bytesPtrExpected
         selfhostCompileRun prog bytesPtrExpected (flags := #["--rc"]) },
-    { name := "Bytes (21ac): #reduce in the self-hosted checker (the Prelude's Bytes model)", run := fun _ =>
+    { name := "Bytes (21ad): #reduce in the self-hosted checker (the Prelude's Bytes model)", run := fun _ =>
         selfhostCheckFile
           ("import Prelude\n" ++
            "#reduce Nat.beq (Bytes.size (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))) 3\n" ++
@@ -1684,7 +1686,7 @@ def selfHostGroup : Group where
            "#reduce Nat.beq (Bytes.size (Bytes.ofUtf8 \"a\\x00b\")) 3\n" ++
            "#reduce Bytes.ofList (List.cons 1 (List.cons 2 .nil))\n")
           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt))))), (tt, tt))))\n" },
-    { name := "Bytes (21ac): a c_struct with a Bytes field through glue, in both toolchains", run := fun _ => do
+    { name := "Bytes (21ad): a c_struct with a Bytes field through glue, in both toolchains", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_bytes2.h"
         IO.FS.writeFile h bytesPtrHeader
