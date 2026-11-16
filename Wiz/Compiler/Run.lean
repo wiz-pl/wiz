@@ -254,16 +254,29 @@ end RVal
 /-- Erased global definitions, by name. -/
 abbrev Code := Std.HashMap Name ETerm
 
+/-- The code the interpreter runs, with the values of the closed definitions it has
+computed (`cafs`, see `RunCode.withCafs`). A `Code` is a `RunCode` without any. -/
+structure RunCode where
+  code : Code
+  cafs : Std.HashMap Name (Thunk RVal) := {}
+
+instance : Coe Code RunCode := ⟨fun code => { code }⟩
+
 mutual
 
 /-- **Exercise 5.2.** Evaluate an erased term. `proj` of `◾` is `◾` (it was a proof or
 a type); `case` branches on the tag of an object; `fix` builds a `fixv`; primitives
 go to `runPrim`. -/
-partial def run (code : Code) (env : List RVal) : ETerm → RVal
+partial def run (code : RunCode) (env : List RVal) : ETerm → RVal
   --<sol
   | .erased => .erased
   | .var i => env[i]?.getD .erased
-  | .global n => match code[n]? with
+  | .global n =>
+    -- a closed definition computed once (`RunCode.withCafs`)
+    match code.cafs[n]? with
+    | some v => v.get
+    | none =>
+    match code.code[n]? with
     | some (.prim .unreachable #[.global op]) =>
       -- a definition registered as a native operation (`builtin`)
       if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
@@ -285,7 +298,7 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
   --| | t => sorry
   --sol>
 
-partial def apply (code : Code) (f a : RVal) : RVal :=
+partial def apply (code : RunCode) (f a : RVal) : RVal :=
   match f with
   | .clo env b => run code (a :: env) b
   | .fixv env b => apply code (run code (.fixv env b :: env) b) a
@@ -314,9 +327,9 @@ partial def fireNative (op : Name) (args : Array RVal) : RVal :=
     .obj 0 #[chars]
   | _ => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
 
-partial def applyN (code : Code) (f : RVal) (as : List RVal) : RVal := as.foldl (apply code) f
+partial def applyN (code : RunCode) (f : RVal) (as : List RVal) : RVal := as.foldl (apply code) f
 
-partial def firePap (code : Code) : PapOp → Array RVal → RVal
+partial def firePap (code : RunCode) : PapOp → Array RVal → RVal
   | .delimRec, #[mret, marg, mrec, mhrec, F, s] => delim code mret marg mrec mhrec (apply code F s)
   | .indK, #[D, m, j, k, h] => ind code D m (apply code j h) (apply code k h)
   | .mapK, #[f, j, k, h] => applyN code f [apply code j h, apply code k h]
@@ -328,7 +341,7 @@ partial def firePap (code : Code) : PapOp → Array RVal → RVal
 where `hyps` walks the description alongside the payload, recursing at each `rec`
 field (see the module docstring). `D` may be marked as the description of numbers,
 `⟨5 D'⟩`: `unpack` needs the mark, `hyps` walks `D'`, and the recursive calls get `D`. -/
-partial def ind (code : Code) (D m i x : RVal) : RVal :=
+partial def ind (code : RunCode) (D m i x : RVal) : RVal :=
   --<sol
   let u := RVal.unpackWith (apply code) D x
   let d := match D with
@@ -347,7 +360,7 @@ where
   --| sorry
   --sol>
 
-partial def delim (code : Code) (mret marg mrec mhrec D : RVal) : RVal :=
+partial def delim (code : RunCode) (mret marg mrec mhrec D : RVal) : RVal :=
   match D with
   | .obj 0 #[i] => apply code mret i
   | .obj 1 #[_, F] | .obj 4 #[_, F] => applyN code marg [.erased, .erased, F, .pap .delimRec #[mret, marg, mrec, mhrec, F]]
@@ -358,7 +371,7 @@ partial def delim (code : Code) (mret marg mrec mhrec D : RVal) : RVal :=
 /-- **Exercise 5.3b.** Observe a coinductive value. A `coit` runs one step and re-wraps
 the recursive positions (`map`); an `scofix` unfolds once; anything else (a `cocon`,
 whose erased form is its payload) is already observed. -/
-partial def out (code : Code) (x : RVal) : RVal :=
+partial def out (code : RunCode) (x : RVal) : RVal :=
   --<sol
   match x with
   | .coit D step i s => map D (.pap .coitK #[D, step]) (applyN code step [i, s])
@@ -376,7 +389,7 @@ where
   --| sorry
   --sol>
 
-partial def runPrim (code : Code) : Prim → Array RVal → RVal
+partial def runPrim (code : RunCode) : Prim → Array RVal → RVal
   | .ind, #[D, m, i, x] => ind code D m i x
   | .delim, #[a, b, c, h, D] => delim code a b c h D
   | .coit, #[D, st, i, s] => .coit D st i s
@@ -513,6 +526,40 @@ partial def ETerm.globals (e : ETerm) (acc : Array Name := #[]) : Array Name :=
   | .obj _ fs | .prim _ fs => fs.foldl (fun acc f => f.globals acc) acc
   | .case s bs => bs.foldl (fun acc b => b.globals acc) (s.globals acc)
   | _ => acc
+
+/-- The closed definitions among those `roots` reach (their erased bodies are not lambdas:
+constant applicative forms, `IR.cafs`), each computed on its first use and then shared,
+as compiled code does. Without it a constant is recomputed at every use, and a chain
+`c (i+1) := c i + c i` is exponential. A value is a `Thunk`, so a definition that is
+never used is never computed.
+
+Each thunk runs with the values of the definitions finished before it: the globals are
+visited depth first and a definition is added after everything it reaches, so a constant
+finds every constant it uses, except along a cycle, where the use is recomputed as
+before (the same value, without the sharing). -/
+def RunCode.withCafs (code : Code) (roots : Array Name) : RunCode := Id.run do
+  let isCaf : ETerm → Bool := fun
+    | .lam .. | .prim .unreachable #[.global _] => false
+    | _ => true
+  let mut seen : Std.HashSet Name := {}
+  let mut cafs : Std.HashMap Name (Thunk RVal) := {}
+  -- (an explicit stack: `true` once the definition's globals are pushed)
+  let mut stack : Array (Name × Bool) := roots.map ((·, false))
+  while h : stack.size > 0 do
+    let (n, finished) := stack.back
+    stack := stack.pop
+    if finished then
+      if let some t := code[n]? then
+        if isCaf t then
+          let rc : RunCode := { code, cafs }
+          cafs := cafs.insert n (Thunk.mk fun _ => run rc [] t)
+    else if !seen.contains n then
+      seen := seen.insert n
+      stack := stack.push (n, true)
+      if let some t := code[n]? then
+        for m in t.globals do
+          unless seen.contains m do stack := stack.push (m, false)
+  return { code, cafs }
 
 /-- (HD9) An erased body that compiled code substitutes wherever its definition is
 applied, at little cost in code size: under its lambdas, a small application (at most 16

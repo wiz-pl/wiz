@@ -2891,7 +2891,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- the interpreter can't fail: running a stub would print a wrong value
         report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
       | .ok (ty, e, code, []) =>
-        let v := run code [] e
+        let v := run (RunCode.withCafs code e.globals) [] e
         report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
       | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
