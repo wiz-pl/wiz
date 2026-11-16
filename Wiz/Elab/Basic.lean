@@ -20,26 +20,19 @@ variable in scope (not the `let`-bound ones, whose values are known). A solution
 then a closed function `fun x₁ … xₙ => rhs`. This makes scoping explicit and lets the
 kernel's evaluator handle metas as ordinary stuck neutrals (`Head.mvar`).
 
-Metas are untyped here, because the stage 1 kernel re-checks every elaborated
+Metas are mostly untyped here, because the stage 1 kernel re-checks every elaborated
 declaration. The elaborator only has to produce *candidates*; the kernel is the
 trusted judge (the "de Bruijn criterion"). Quantities are likewise left to the
-kernel.
+kernel. The exception (13b) is a solution unification *guesses* by shape: the kernel
+sees private types of other modules unfolded, so it would accept a look-alike the
+elaborator must not. A hole records its type when its maker knows it
+(`MetaEntry.type?`), and such a guess is type-checked against it in the elaborator's
+view (`checkGuess`, `Unify.lean`).
 -/
 
 namespace Wiz
 
 variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
-
-structure MetaEntry (R : Type) where
-  solution : Option (Val R) := none
-  /-- where the hole came from, for "could not infer" errors -/
-  info : SourceInfo := {}
-  /-- the name of a `?x` hole, or a description like "implicit argument A" -/
-  desc : String := "_"
-  /-- how many bound variables it is applied to -/
-  arity : Nat := 0
-  /-- (7e) the hole of an instance problem (`addInstProblem`) -/
-  isInst : Bool := false
 
 /-- A type class: its parameters' output flags (`outParam`) and its fields, in order. -/
 structure ClassInfo where
@@ -81,6 +74,23 @@ structure LocalCtx (R : Type) where
   `match` with one in scope uses the additive case `T.casesOnA`, so that each branch may
   use it once -/
   linearLvls : List Lvl := []
+
+structure MetaEntry (R : Type) where
+  solution : Option (Val R) := none
+  /-- where the hole came from, for "could not infer" errors -/
+  info : SourceInfo := {}
+  /-- the name of a `?x` hole, or a description like "implicit argument A" -/
+  desc : String := "_"
+  /-- how many bound variables it is applied to -/
+  arity : Nat := 0
+  /-- (7e) the hole of an instance problem (`addInstProblem`) -/
+  isInst : Bool := false
+  /-- (13b) the hole's type, in the context it was made in (`freshMeta`: the hole stands
+  for a function of that context's bound variables). A solution unification guesses by
+  shape (the first-order approximation, the flex-flex last resort) is checked against it
+  where the guess is made (`checkGuess`, `Unify.lean`); `none` when the maker didn't
+  know the type, and such a guess is left to `checkGuessedDecl` -/
+  type? : Option (LocalCtx R × VTy R) := none
 
 /-- (7f) An instance problem not solved yet: the hole, in its context, and its class type.
 `blockers` are the unsolved holes in its (non-output) class arguments when it was last
@@ -280,9 +290,10 @@ structure ElabState (R : Type) where
   Unification's own backtracking keeps it (`keepLearnt`). -/
   unifySawMeta : Bool := false
   /-- set when unification solved a hole by the first-order approximation (or the
-  flex-flex last resort): the solution was picked by shape, so it has not been typed by
-  the elaborator. The declaration is checked again where opaque types have no definition
-  (`privacyCheck`), which is what closes a shape-based forgery (`Unify.lean`). -/
+  flex-flex last resort) and could not type-check the solution where it guessed it
+  (`checkGuess`: the hole had no recorded type, or the comparison met a hole). The
+  declaration is then checked again where opaque types have no definition
+  (`checkGuessedDecl`), which closes a shape-based forgery in that case too. -/
   unifyGuessed : Bool := false
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
@@ -560,17 +571,22 @@ def solveMeta (m : Nat) (v : Val R) : ElabM R Unit :=
     | some ps => { s with instWaiters := s.instWaiters.erase m, instReadyQ := s.instReadyQ ++ ps }
     | none => s
 
-/-- A fresh metavariable applied to all the bound variables of `ctx`. -/
-def freshMeta (ctx : LocalCtx R) (desc : String := "_") : ElabM R (Term R) := do
-  let m := (← get).metas.size
-  let arity := (ctx.bound.filter id).length
-  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity } }
+/-- The metavariable `m` applied to all the bound variables of `ctx`. -/
+def metaApp (ctx : LocalCtx R) (m : Nat) : Term R := Id.run do
   -- `bound` is innermost first; walk it from the outside in, i.e. by level
   let flags := ctx.bound.reverse
   let mut t : Term R := .mvar m
   for b in flags, lvl in [0:ctx.lvl] do
     if b then t := .app t (.var (ctx.lvl - lvl - 1))
   pure t
+
+/-- A fresh metavariable applied to all the bound variables of `ctx`; `ty`, when the
+caller knows it, is the hole's type in `ctx` (`MetaEntry.type?`). -/
+def freshMeta (ctx : LocalCtx R) (desc : String := "_") (ty : Option (VTy R) := none) : ElabM R (Term R) := do
+  let m := (← get).metas.size
+  let arity := (ctx.bound.filter id).length
+  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity, type? := ty.map (ctx, ·) } }
+  pure (metaApp ctx m)
 
 /-- Record that the hole `t` (in `ctx`) must have type `Sort l`. -/
 def addSortConstraint (ctx : LocalCtx R) (t : Term R) (l : Level) : ElabM R Unit :=

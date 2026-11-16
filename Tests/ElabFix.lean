@@ -328,8 +328,8 @@ def group : Group where
         okLib ("import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n  intro A; intro B; intro f; intro a\n  apply f\n  assumption") },
     { name := "(13b): a first-order unification solution cannot forge a value of a private type", run := fun _ => do
         -- `?F ?p =?= G x` is solved by `?F := G`, `?p := x`; the solutions are picked by
-        -- shape, so the declaration is checked once more where opaque types have no
-        -- definition (a solution that used one is rejected).
+        -- shape, so `G` is checked against `?F`'s type where it is guessed, where opaque
+        -- types have no definition (`Look Nat → Type` is not `Pos Nat → Type` there).
         failsPriv privMod ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
           "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
           "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++

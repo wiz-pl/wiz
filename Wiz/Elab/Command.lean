@@ -362,12 +362,15 @@ def solveSortConstraints : ElabM R Unit := do
       try unify ctx.lvl (← refreshVal ctx A) ty catch _ => set s
     if (← solvedLevels) == before then break
 
-/-- A declaration whose elaboration used a first-order solution (`ElabState.unifyGuessed`)
-is checked once more where opaque types have no definition: the kernel's check of the
-declaration is in the full environment, where a private type is its definition again, so
-it would accept a look-alike (the same view `rfl` and a holed `assign` already compare
-in). A declaration that used no guess is not affected, which is why this costs nothing on
-the common path. -/
+/-- A declaration whose elaboration used a first-order solution that could not be typed
+where it was guessed (`ElabState.unifyGuessed`; a guess is normally checked against its
+hole's type on the spot, `checkGuess` in `Unify.lean`) is checked once more where opaque
+types have no definition: the kernel's check of the declaration is in the full
+environment, where a private type is its definition again, so it would accept a
+look-alike (the same view `rfl` and a holed `assign` already compare in). This is the
+fallback only: a quoted term can carry an evaluated `μ (T.desc …)` without the name `T`,
+which has no type in that view, so the check also rejects some honest declarations
+(`privacyCheck`). A declaration whose guesses were all typed is not affected. -/
 def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Option (Term R)) :
     ElabM R Unit := do
   if (← get).unifyGuessed then

@@ -127,7 +127,7 @@ partial def applyConst (ix : HeadIndex) (ctx : LocalCtx R) (ty : VTy R) (c : Nam
   for _ in [0:numPis d.type] do
     match ← forceMeta cty with
     | .pi x bi _ dom cod _ =>
-      let m ← freshMeta ctx s!"argument {x}"
+      let m ← freshMeta ctx s!"argument {x}" dom
       holes := holes.push (m, dom, bi)
       t := .app t m
       cty := Closure.inst g cod (← evalIn ctx m)

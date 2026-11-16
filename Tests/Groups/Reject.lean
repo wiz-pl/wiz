@@ -326,7 +326,7 @@ def group : Group where
        "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
        "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n" ++
        "#eval (forge (Look.mk 11)).val\n")
-      (some "private") "def forge" "hidden outside its module"
+      (some "private") "G.mk x" "hidden outside its module"
       [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
@@ -335,7 +335,7 @@ def group : Group where
        "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
        "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
        "def forge : Look Nat → Pos Nat\n  | x => sel _ (G.mk x)\n")
-      (some "private") "def forge" "hidden outside its module"
+      (some "private") "G.mk x" "hidden outside its module"
       [("Priv", privMod)],
     accepted "accept: a first-order solution that uses no opaque shape"
       ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
