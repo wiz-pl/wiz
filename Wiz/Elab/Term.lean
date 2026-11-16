@@ -3837,12 +3837,22 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     unifyGoal gl (.cast newT goalT pf m)
     let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
-  if tag == TacTag.rewriteAt then
-    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
+  if tag == TacTag.rewriteAt || tag == TacTag.rewriteAtT then
+    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side;
+    -- S2 adds the occurrence selector (nth/path), the target (goal or a hypothesis)
+    -- and premise goals for a conditional rule (S3).
     let h ← zonk lvl (← reify st.handles (fld 1) lvl)
     let rtl := decodeBool (fld 2) == some true
-    let all := decodeBool (fld 3) == some true
-    let ans (r : RVal) := apply code (fld 4) r
+    let occ ← if tag == TacTag.rewriteAt then
+        pure (if decodeBool (fld 3) == some true then Occ.all else Occ.first)
+      else match decodeOcc (fld 3) with
+        | some o => pure o
+        | none => throwAt info "simp: malformed occurrence" ErrorCode.tacticFailed
+    let (target, kf) ← if tag == TacTag.rewriteAt then pure (Target.goal, fld 4)
+      else match decodeTarget (fld 4) with
+        | some t => pure (t, fld 5)
+        | none => throwAt info "simp: malformed target" ErrorCode.tacticFailed
+    let ans (r : RVal) := apply code kf r
     -- (the rule's type as written when its head is a constant: its equation may compute)
     let (body, happ, pairs) ← match ← ruleType? gl.ctx g h with
       | some p => pure p
@@ -3862,30 +3872,68 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
         let _ ← (RCtx.ofLocal gl.ctx).typeOfUnifying? happ
         zonk lvl happ
       else pure happ
-    let goalT ← zonk lvl (quote g lvl gl.ty)
+    -- the type whose subterms are matched: the goal's, or hypothesis `i`'s
+    let targetGl ← match target with
+      | .goal => pure gl
+      | .hyp i => do
+        unless i < lvl do throwAt info "simp at h: no such hypothesis" ErrorCode.tacticFailed
+        pure { gl with ty := gl.ctx.types[i]! }
+    let targetT ← zonk lvl (quote g lvl targetGl.ty)
     -- (`← h` matches the equation's right side and puts the left one back)
     let pat := if rtl then rhs else lhs
-    match ← matchRule gl g A pat lhs rhs happ pairs with
+    match ← matchRule targetGl g A pat lhs rhs happ pairs occ with
     | none => return ← runTac code info st (ans (mkCon 0 []))
-    | some (A', a', b', app, cand) => do
-      let repl := if rtl then a' else b'
-      -- abstract the subterm the goal really has (the rule's side may only match it up
-      -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
-      let (abstr, (found, _)) :=
-        (abstractOccAt cand goalT (if all then none else some 0)).run (false, 0)
-      if !found then return ← runTac code info st (ans (mkCon 0 []))
+    | some m => do
+      let repl := if rtl then m.lhs else m.rhs
+      -- abstract the subterm the target really has (the rule's side may only match it up
+      -- to conversion: `List.append x []` is written `x ++ []` in the lemma): every
+      -- occurrence for `all`, otherwise exactly the selected match's path
+      let abstr? : Option (Term R) := match occ with
+        | .all =>
+          let (a, (found, _)) := (abstractOccAt m.cand targetT none).run (false, 0)
+          if found then some a else none
+        | _ => abstractPath m.cand targetT m.path
+      let some abstr := abstr? | return ← runTac code info st (ans (mkCon 0 []))
       let newT := abstr.instantiateAt 0 repl
       -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
-      let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
-      -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
-      let P : Term R := .lam "x" (.lam "_"
-        (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
-      let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
-      let m ← freshMeta gl.ctx "goal"
-      unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
-      let (r, st) ← refl st gl newT
-      return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
+      let Ga := abstr.instantiateAt 0 (if rtl then repl else m.cand)
+      -- goals for the premises the match left (empty unless the rule is conditional)
+      let mut stp := st
+      let mut premises : List Nat := []
+      for (dom, arg) in m.premises do
+        let (st', id) := addGoal stp { ctx := gl.ctx, ty := ← evalIn gl.ctx dom, tm := arg }
+        stp := st'
+        premises := premises ++ [id]
+      match target with
+      | .goal => do
+        -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
+        let P : Term R := .lam "x" (.lam "_"
+          (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
+        let pf : Term R := .transp m.ty m.lhs P (.reflTy Ga) m.rhs m.proof
+        let mgoal ← freshMeta gl.ctx "goal"
+        unifyGoal gl (.cast newT targetT pf mgoal)
+        let (st, id) := addGoal stp { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := mgoal }
+        let (r, st) ← refl st gl newT
+        return ← runTac code info st (ans (mkCon 1 [.nat id, encodeList (premises.map encodeNat), r]))
+      | .hyp i => do
+        -- `pf : A = A'` (old = new), the *opposite* orientation to the goal case:
+        -- the new hypothesis is `cast pf h`, so no dependent context transport is needed
+        let P : Term R := .lam "x" (.lam "_"
+          (if rtl then .eqTy (abstr.lift 1) (Ga.lift 2) else .eqTy (Ga.lift 2) (abstr.lift 1)))
+        let pf : Term R := .transp m.ty m.lhs P (.reflTy Ga) m.rhs m.proof
+        let value : Term R := .cast targetT newT pf (.var i)
+        -- keep the old hypothesis, under an inaccessible name; the new one shadows it
+        let oldName := gl.ctx.names[i]!
+        let name := if oldName == "_" || Name.isInaccessible oldName then "h" else oldName
+        let names := gl.ctx.names.set i
+          (if Name.isInaccessible oldName then oldName else oldName ++ inaccessibleMark)
+        let ctx' := ({ gl.ctx with names }).define name (← evalIn gl.ctx newT)
+          (← evalIn gl.ctx value)
+        -- the same hole, one binder deeper (the let-binding is not applied by the meta)
+        let gl' : Goal R := { gl with ctx := ctx', tm := gl.tm.lift 1 }
+        let (st, id) := addGoal stp gl'
+        let (r, st) ← refl st gl newT
+        return ← runTac code info st (ans (mkCon 1 [.nat id, encodeList (premises.map encodeNat), r]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty

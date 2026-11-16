@@ -80,6 +80,8 @@ def assignLate := 37
 def nativeDecide := 38
 -- (stage 6h) match a lemma's `∀` telescope, rewrite an occurrence, one request
 def rewriteAt := 39
+-- (6h/S2) the same with an explicit occurrence and target (goal or hypothesis)
+def rewriteAtT := 40
 end TacTag
 
 structure Goal (R : Type) where
@@ -696,6 +698,88 @@ partial def subtermsPre (t : Term R) : List (Term R) :=
       (fun _ c => modify fun xs => xs ++ [c])) []).2
   t :: cs.flatMap subtermsPre
 
+/-- The immediate children of `t` with the binder depth each one is under, in the
+order `mapChildrenM` visits them (binary `app`: function first, argument second). -/
+def childrenWithDepth (t : Term R) : List (Nat × Term R) :=
+  ((t.forChildren (m := StateM (List (Nat × Term R))) (fun _ => pure ())
+    (fun k c => modify fun xs => xs ++ [(k, c)])) []).2
+
+/-- The subterms of `t` in pre-order, each with its **path**: the child indices from
+the root, in `childrenWithDepth` order. This is what `Occurrence.path` selects. -/
+partial def subtermsPath (t : Term R) : List (List Nat × Term R) :=
+  let cs := childrenWithDepth t
+  (([], t) :: cs.zipIdx.flatMap fun ((_, c), i) =>
+    (subtermsPath c).map fun (p, s) => (i :: p, s))
+
+/-- Rebuild `t` with its immediate children replaced by `cs`, in `childrenWithDepth`
+order. `none` when `cs` is not exactly the children. -/
+def rebuildChildren (t : Term R) (cs : List (Term R)) : Option (Term R) :=
+  let (t', rest) := (t.mapChildrenM (m := StateM (List (Term R))) (fun l => pure l)
+    (fun _ c => do
+      match (← get) with
+      | [] => pure c
+      | x :: xs => set xs; pure x)).run cs
+  if rest.isEmpty then some t' else none
+
+/-- `t` with **the single occurrence at `path`** (a child-index path from `t`'s root,
+as `subtermsPath` gives) abstracted as the variable `depth`, the other variables making
+room for it. `none` when the path does not reach the matched subterm `a`. -/
+partial def abstractPath (a : Term R) (t : Term R) (path : List Nat) (depth : Nat := 0) :
+    Option (Term R) :=
+  match path with
+  | [] => if t == a.lift depth then some (.var depth) else none
+  | i :: rest => do
+    let cs := childrenWithDepth t
+    let (k, c) ← cs[i]?
+    let c' ← abstractPath a c rest (depth + k)
+    let cs' := cs.mapIdx fun j (_, cj) => if j == i then c' else cj
+    rebuildChildren t cs'
+
+/-- Which occurrence of the matched term a step replaces: the first match, every
+occurrence of the first match's term, the `n`th match, or the subterm at a path. -/
+inductive Occ where
+  | first
+  | all
+  | nth (n : Nat)
+  | path (p : List Nat)
+
+/-- What a `rewriteAt` request rewrites: the goal, or the type of hypothesis `i`
+(`0` is the innermost). -/
+inductive Target where
+  | goal
+  | hyp (i : Nat)
+
+/-- The occurrence an `Occurrence` value in Wiz encodes: `first` (tag 0), `all` (1),
+`nth n` (2, a number), `path p` (3, a list of numbers). -/
+def decodeOcc (v : RVal) : Option Occ :=
+  match v.tag? with
+  | some 0 => some .first
+  | some 1 => some .all
+  | some 2 => (v.conField 0).toNat?.map .nth
+  | some 3 => do
+    let xs ← decodeList (v.conField 0)
+    pure (.path (← xs.mapM (·.toNat?)))
+  | _ => none
+
+/-- The target a `SimpTarget` value in Wiz encodes: `goal` (tag 0) or `hyp i` (1). -/
+def decodeTarget (v : RVal) : Option Target :=
+  match v.tag? with
+  | some 0 => some .goal
+  | some 1 => (v.conField 0).toNat?.map .hyp
+  | _ => none
+
+/-- One matching rewrite: the rule's equation (its type, two sides and instantiated
+proof), the goal subterm it matched (and its path), and the premises it still needs
+(`(type, proof term)`; empty for an unconditional rule). -/
+structure RuleMatch (R : Type) where
+  ty : Term R
+  lhs : Term R
+  rhs : Term R
+  proof : Term R
+  cand : Term R
+  path : List Nat
+  premises : List (Term R × Term R)
+
 /-- Strip the leading `∀` binders of a rule's type, making a fresh metavariable for
 each: the body (the equation) and the metavariables, outermost first. `fuel` bounds
 the number of binders (a telescope is finite). The body is kept **syntactically** when
@@ -770,20 +854,100 @@ def isConVal : Val R → Bool
   | .con _ => true
   | _ => false
 
+/-- Try to match the rule's pattern side `pat` against one goal subterm `cand` at
+`path`. On success the result is the equation's type, its two sides, the instantiated
+lemma, the matched subterm (which is what the transport abstracts: it is the term the
+goal actually contains, and the rule's side may differ from it only up to conversion)
+and the premises still to prove. `pairs` are the rule's binder domains with their
+arguments: the arguments' types solve the implicit parameters that matching a value
+does not reach.
+
+A binder the match leaves unsolved is a **premise** when its domain is a proposition
+(`h : a < b` in `… → a / b = 0`): its type becomes a goal and its proof term stays a
+metavariable, which the Wiz discharger closes. An unsolved binder at a non-proposition
+is a rule variable the match did not determine: the rule does not fire. -/
+def tryCandidate (gl : Goal R) (g : Globals R) (A lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) (pv : Val R) (cand : Term R) (path : List Nat) :
+    ElabM R (Option (RuleMatch R)) := do
+  let lvl := gl.ctx.lvl
+  let rc := RCtx.ofLocal gl.ctx
+  let cv ← evalIn gl.ctx cand
+  if isConVal pv && !isConVal cv then return none
+  let s ← get
+  let r ← try
+    unify lvl pv cv
+    -- the arguments' types solve the implicit parameters (the match works on values)
+    let mut premises : List (Term R × Term R) := []
+    let mut allowed : Array Nat := #[]
+    let mut unsolved := false
+    for (dom, arg) in pairs do
+      let arg' ← zonk lvl arg
+      if arg'.mvars.isEmpty then
+        match ← rc.typeOf? arg' with
+        | some ty => unify lvl (← evalIn gl.ctx dom) ty
+        | none => pure ()
+      else do
+        -- an unsolved binder: a premise if its domain is a proposition
+        let dom' ← zonk lvl dom
+        if isProp g gl.ctx.types.reverse.toArray (← evalIn gl.ctx dom') then
+          premises := premises ++ [(dom', arg')]
+          allowed := allowed ++ arg'.mvars
+        else unsolved := true
+    if unsolved then pure none
+    else do
+      let app ← zonk lvl happ
+      let A' ← zonk lvl A
+      let a' ← zonk lvl lhs
+      let b' ← zonk lvl rhs
+      -- every metavariable left must be a premise (its proof is a goal)
+      let onlyPremises (t : Term R) := t.mvars.all fun m => allowed.contains m
+      -- (a rule that rewrites a term to itself is not a step)
+      if !onlyPremises app || !onlyPremises A' || !onlyPremises a' || !onlyPremises b'
+          || a' == b' then pure none
+      else pure (some { ty := A', lhs := a', rhs := b', proof := app, cand, path, premises })
+  catch _ => pure none
+  match r with
+  | some m => pure (some m)
+  | none => set s; pure none
+
+/-- The first candidate whose match succeeds (the state is restored after failures). -/
+partial def matchFirst (gl : Goal R) (g : Globals R) (A lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) (pv : Val R) :
+    List (List Nat × Term R) → ElabM R (Option (RuleMatch R))
+  | [] => pure none
+  | (p, cand) :: rest => do
+    let s ← get
+    match ← tryCandidate gl g A lhs rhs happ pairs pv cand p with
+    | some m => pure (some m)
+    | none => set s; matchFirst gl g A lhs rhs happ pairs pv rest
+
+/-- The `n`th successful candidate (the state is restored after every skipped match). -/
+partial def matchNth (gl : Goal R) (g : Globals R) (A lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) (pv : Val R) :
+    Nat → List (List Nat × Term R) → ElabM R (Option (RuleMatch R))
+  | _, [] => pure none
+  | k, (p, cand) :: rest => do
+    let s ← get
+    match ← tryCandidate gl g A lhs rhs happ pairs pv cand p with
+    | none => set s; matchNth gl g A lhs rhs happ pairs pv k rest
+    | some m =>
+      match k with
+      | 0 => pure (some m)
+      | k + 1 => set s; matchNth gl g A lhs rhs happ pairs pv k rest
+
 /-- Match the rule's pattern side `pat` (one side of the equation `lhs = rhs`, with the
-telescope metavariables of `happ`) against each subterm of the goal type, in pre-order.
-The first subterm whose unification determines every metavariable wins: the result is
-the equation's type, its two sides, the instantiated lemma, and the matched subterm
-(which is what the transport abstracts: it is the term the goal actually contains, and
-the rule's side may differ from it only up to conversion). `pairs` are the rule's
-binder domains with their arguments: the arguments' types solve the implicit
-parameters that matching a value does not reach. `none` is no match. -/
+telescope metavariables of `happ`) against the subterms of the goal type, in pre-order,
+choosing the occurrence `occ`: the first match (`first`/`all`), the `n`th match
+(`nth`), or the subterm at a path (`path`). The first chosen subterm whose unification
+determines every metavariable wins. `none` is no match.
+
+Note that `all` only chooses the first match here; the caller abstracts every
+occurrence of that match's term, which is `Tac.rewrite`'s behaviour. -/
 partial def matchRule (gl : Goal R) (g : Globals R) (A pat lhs rhs happ : Term R)
-    (pairs : List (Term R × Term R)) :
-    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+    (pairs : List (Term R × Term R)) (occ : Occ := .first) :
+    ElabM R (Option (RuleMatch R)) := do
   let lvl := gl.ctx.lvl
   let goalT ← zonk lvl (quote g lvl gl.ty)
-  let rc := RCtx.ofLocal gl.ctx
   let pvRaw ← evalIn gl.ctx pat
   let pvF ← force pvRaw
   -- (a pattern that computes to a data value: only a *closed* one is matched, by plain
@@ -794,36 +958,13 @@ partial def matchRule (gl : Goal R) (g : Globals R) (A pat lhs rhs happ : Term R
   -- `Nat.add ?n 0` into a stuck form that no longer matches the goal's.)
   if isConVal pvF && !pat.mvars.isEmpty then return none
   let pv := if isConVal pvF then pvF else pvRaw
-  let rec go : List (Term R) → ElabM R (Option (Term R × Term R × Term R × Term R × Term R))
-    | [] => pure none
-    | cand :: rest => do
-      let cv ← evalIn gl.ctx cand
-      if isConVal pv && !isConVal cv then go rest
-      else do
-        let s ← get
-        let r ← try
-          unify lvl pv cv
-          -- the arguments' types solve the implicit parameters (the match works on values)
-          for (dom, arg) in pairs do
-            let arg' ← zonk lvl arg
-            if arg'.mvars.isEmpty then
-              match ← rc.typeOf? arg' with
-              | some ty => unify lvl (← evalIn gl.ctx dom) ty
-              | none => pure ()
-          let app ← zonk lvl happ
-          if !app.mvars.isEmpty then pure none
-          else do
-            let A' ← zonk lvl A
-            let a' ← zonk lvl lhs
-            let b' ← zonk lvl rhs
-            if !A'.mvars.isEmpty || !a'.mvars.isEmpty || !b'.mvars.isEmpty then pure none
-            -- (a rule that rewrites a term to itself is not a step)
-            else if a' == b' then pure none
-            else pure (some (A', a', b', app, cand))
-        catch _ => pure none
-        match r with
-        | some p => pure (some p)
-        | none => do set s; go rest
-  go (subtermsPre goalT)
+  let cands := subtermsPath goalT
+  match occ with
+  | .path p =>
+    match cands.find? (·.1 == p) with
+    | some (p, cand) => tryCandidate gl g A lhs rhs happ pairs pv cand p
+    | none => pure none
+  | .first | .all => matchFirst gl g A lhs rhs happ pairs pv cands
+  | .nth n => matchNth gl g A lhs rhs happ pairs pv n cands
 
 end Wiz.Elab
