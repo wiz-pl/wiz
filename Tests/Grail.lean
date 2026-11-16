@@ -1714,11 +1714,11 @@ def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain
     ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
   pure (root, dir, sha, { cacheDir := some cache })
 
-/-- The checked-in local index fixture (`tests/fixtures/grail-index`): one `index/`
+/-- The checked-in local index fixture (`Tests/fixtures/grail-index`): one `index/`
 directory of S-expressions, relative `source` paths and their archives. Hermetic: no git,
 no network, no generated tarballs. -/
 def indexFixture : IO System.FilePath := do
-  let p ← IO.FS.realPath "tests/fixtures/grail-index"
+  let p ← IO.FS.realPath "Tests/fixtures/grail-index"
   unless ← (p / "index").isDir do
     throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
   pure p
