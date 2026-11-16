@@ -94,6 +94,15 @@ def nonNullMem (rep : Scry.TaintReport) : List Scry.BoundaryFinding :=
 def hasFindingRule (rep : Scry.TaintReport) (rule : String) : Bool :=
   List.any (fun f => String.eq f.rule rule) rep.findings
 
+/-- The report without one rule's findings. The `strcpy-overflow` hint fires on every
+`sprintf` into a fixed buffer (a real CWE-120: `%s` or a tainted format has no bound),
+so the sprintf model cases check the hint separately and the taint finding alone. -/
+def dropRule (rule : String) (rep : Scry.TaintReport) : Scry.TaintReport :=
+  { rep with findings := List.filter (fun f => Bool.not (String.eq f.rule rule)) rep.findings }
+
+def ruleCount (rule : String) (rep : Scry.TaintReport) : Nat :=
+  List.length (List.filter (fun f => String.eq f.rule rule) rep.findings)
+
 def firstFinding (rep : Scry.TaintReport) : Option Scry.RuleFinding :=
   match rep.findings with
   | .cons f _ => .some f
@@ -332,6 +341,9 @@ def main : IO Unit := EIO.toIO (do
 
   oModel3 ← opts ["tests/fixtures/model-sprintf-copy.c"];
   repModel3 ← Scry.analyzeFile oModel3;
+  check "model-sprintf-copy: the strcpy-overflow hint flags the unbounded sprintf"
+    (Nat.beq (ruleCount "strcpy-overflow" repModel3) 1);
+  let repModel3 := dropRule "strcpy-overflow" repModel3;
   checkOne "model-sprintf-copy" repModel3 "command-injection" "main";
   match firstFinding repModel3 with
   | .some f => check "model-sprintf-copy: the sink is system, not sprintf"
@@ -340,6 +352,9 @@ def main : IO Unit := EIO.toIO (do
 
   oModel4 ← opts ["tests/fixtures/model-sprintf-format.c"];
   repModel4 ← Scry.analyzeFile oModel4;
+  check "model-sprintf-format: the strcpy-overflow hint flags the unbounded sprintf"
+    (Nat.beq (ruleCount "strcpy-overflow" repModel4) 1);
+  let repModel4 := dropRule "strcpy-overflow" repModel4;
   checkOne "model-sprintf-format" repModel4 "format-string" "main";
   match firstFinding repModel4 with
   | .some f => check "model-sprintf-format: the format argument"

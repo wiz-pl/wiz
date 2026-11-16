@@ -177,12 +177,12 @@ turn a one-minute CVE analysis into a ten-minute one.
 
 The default pack has a `path-traversal` rule (CWE-22): taint from `getenv`/`recv`/
 `read`/`fgets` reaches `fopen`, `freopen`, `open`, `openat`, `creat`, `stat`/`lstat`,
-`unlink`, `remove`, `rename`, `chdir`, `opendir`, `access` or `mkdir`, unless a policy
+`unlink`, `remove`, `rename`, `chdir`, `opendir`, `access` or `mkdir`, unless `realpath` or a policy
 sanitiser (`sanitize_path`, `confine_path`) cleans it.
 
 `lib/Scry/rules/path-traversal.scry` is the wider opt-in variant: command injection,
 format strings and the forbidden calls **plus** a `path-traversal` rule that also takes
-`getline`/`fread` and C's `argv`, adds `rmdir`, and trusts `realpath`. Run it with
+`getline`/`fread` and C's `argv` and adds `rmdir`. Run it with
 `--rules ../lib/Scry/rules/path-traversal.scry`.
 
 `source argv result` is a pack directive, not a call pattern: it seeds the second
@@ -192,7 +192,8 @@ for every pack; the directive keeps the path pack explicit about it.)
 `realpath` is a policy model (`Scry.Models`): when a pack names it, it sanitises its
 **result** and the destination it writes (argument 1), never its input.
 `realpath(user, buf); open(buf)` is clean; `realpath(user, buf); open(user)` is still
-reported; `p = realpath(user, 0); open(p)` is clean. The default pack does not name it.
+reported; `p = realpath(user, 0); open(p)` is clean. Both path rules name it (the safe-code
+corpus pins `safe/path/realpath` at zero findings).
 
 `tests/fixtures/path-*.c` and `tests/taint.wiz` cover the vulnerable/`realpath` pairs,
 including the "sanitiser result used, input still used" control.

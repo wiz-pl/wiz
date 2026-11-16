@@ -240,6 +240,7 @@ def Scry.demoPackText : String :=
   "  source recv result\n" ++
   "  source read arg 1\n" ++
   "  source fgets arg 0\n" ++
+  "  sanitise realpath result\n" ++
   "  sanitise sanitize_path result\n" ++
   "  sanitise confine_path result\n" ++
   "  sink fopen arg 0\n" ++

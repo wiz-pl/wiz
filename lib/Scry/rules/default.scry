@@ -198,6 +198,7 @@ rule path-traversal
   source recv result
   source read arg 1
   source fgets arg 0
+  sanitise realpath result
   sanitise sanitize_path result
   sanitise confine_path result
   sink fopen arg 0
