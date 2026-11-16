@@ -574,9 +574,11 @@ def cacheWriteIf (o : Opts) (use : Bool) (key ext : String) (status : Nat) (payl
   | .true => cacheWrite o key ext status payload
   | .false => IO.pure (Bool.false)
 
+-- `-v` still says a run was not served from the cache; without a cache there is no key,
+-- so the line names the reason instead
 def cacheMissMsg (o : Opts) (use : Bool) (key : String) : IO Unit := match use with
   | .true => if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ()
-  | .false => IO.pure ()
+  | .false => if o.verbose then IO.ePrintln "cache miss: no-cache" else IO.pure ()
 
 -- ------------------------------------------------------------------------------------
 -- The command line
@@ -704,6 +706,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
   | .mk tab _ => match o.cache with
     -- no cache: do not even build the key (it hashes every module's text)
     | .none => do
+      cacheMissMsg o .false "";
       let p := runGraph g;
       let ds := diagsOf p.tab (linesOf p.run);
       let st := statusOf ds;
