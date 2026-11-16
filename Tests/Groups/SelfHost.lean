@@ -464,7 +464,7 @@ def absurdUnitDecls : List (String × Bool) := [
 expected type and the columns whose types mention the scrutinee, as the Lean frontend's
 motive does. -/
 def depMatchDecls : List (String × Bool) := [
-  ("def h0 (n : Nat) : Nat.lt n 1 = Nat.beq n 0 := match n with\n  | .zero => rfl\n  | .succ m => rfl\n", true),
+  ("def h0 (n : Nat) : Nat.beq n n = .true := match n with\n  | .zero => rfl\n  | .succ m => h0 m\n", true),
   ("def h1 (n : Nat) : Nat.lt n 1 = .true := match n with\n  | .zero => rfl\n  | .succ m => rfl\n", false),
   ("def lts : (n : Nat) → Nat.lt n (Nat.succ n) = .true\n  | .zero => rfl\n  | .succ n => lts n\n", true),
   ("def ltsm (n : Nat) : Nat.le n n = .true := match n with\n  | .zero => rfl\n  | .succ m => ltsm m\n", true),

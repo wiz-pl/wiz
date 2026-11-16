@@ -3233,6 +3233,7 @@ def setEnv : Env → Nat → Val → Env
 def absEnv (d : Nat) : List Nat → Nat → Env
   | .nil, _ => freshEnv d
   | .cons l rest, to => setEnv (absEnv d rest (to + 1)) (d - 1 - l) (fresh to)
+def lenL {A : Type} (xs : List A) : Nat := List.length xs
 -- the generalised columns of a dependent split, and the motive's body (at depth `d + 2`)
 inductive NDep where
   | no
@@ -3249,9 +3250,9 @@ def dependsOn (d : Nat) (vs : List Nat) (to : Nat) (t : Tm) : Bool :=
 -- scrutinee's variable or on an earlier such column, with their variables, in order
 inductive GenAcc where
   | mk (gens : List Col) (tys : List Tm) (vars : List Nat)
-def depCols (es : ES) (env : Env) (d to k : Nat) (acc : GenAcc) : Nat → List Col → GenAcc
-  | _, .nil => acc
-  | i, .cons (.mk l ty tyI q) rest => match acc with
+def depCols (es : ES) (env : Env) (d to k : Nat) : GenAcc → Nat → List Col → GenAcc
+  | acc, _, .nil => acc
+  | acc, i, .cons (.mk l ty tyI q) rest => match acc with
     | .mk gens tys vs => match Nat.beq i k with
       | .true => depCols es env d to k acc (i + 1) rest
       | .false =>
@@ -3348,16 +3349,16 @@ def replaceGen (olds news : List Col) : List Col → List Col
   | .cons (.mk l ty tyI q) rest => .cons (replaceGen1 l (.mk l ty tyI q) olds news) (replaceGen olds news rest)
 -- the scrutinee in a dependent branch: `con (tag, (f₁, …, snd^F rest))`, its payload
 -- written with the fields (bound as variables from level `d0`; a lifted one `up`)
-def payloadVal (d0 : Nat) (lifts : List Bool) (j : Nat) (rest : Val) : Nat → Val
-  | .zero => rest
-  | .succ k =>
+def payloadVal (d0 : Nat) : List Bool → Nat → Val → Nat → Val
+  | _, _, rest, .zero => rest
+  | lifts, j, rest, .succ k =>
     let f := fresh (d0 + j);
     .vpair (match headB lifts with
       | .true => .vup f
       | .false => f) (payloadVal d0 (tailB lifts) (j + 1) (vsnd rest) k)
-def payloadT (D d0 : Nat) (lifts : List Bool) (j : Nat) (rest : Tm) : Nat → Tm
-  | .zero => rest
-  | .succ k =>
+def payloadT (D d0 : Nat) : List Bool → Nat → Tm → Nat → Tm
+  | _, _, rest, .zero => rest
+  | lifts, j, rest, .succ k =>
     let f : Tm := .var (D - 1 - (d0 + j));
     .pair (match headB lifts with
       | .true => .up f
@@ -3431,7 +3432,6 @@ def dropEnv : Nat → Env → Env
   | .succ k, e => match e with
     | .nil => .nil
     | .cons _ rest => dropEnv k rest
-def lenL {A : Type} (xs : List A) : Nat := List.length xs
 
 def colTyAt : List Col → Nat → Option Tm
   | .nil, _ => .none
@@ -4368,10 +4368,10 @@ def runOpUnfold (gs : Globals) (es : ES) (st : STacState) (g : Nat) (names : Lis
 -- `privBase` turns a private type's kernel name back into the source `T`)
 def ctorNamesOf (T : String) : List Ctor → List String
   | .nil => .nil
-  | .cons (.mk n _ _ _ _) rest => .cons (String.append (String.append T ".") n) (ctorNamesOf T rest)
+  | .cons (.mk n _ _ _ _ _) rest => .cons (String.append (String.append T ".") n) (ctorNamesOf T rest)
 def indCtorsOf (gs : Globals) : Val → List String
   | .vglued (.hconst n _ _ _ _) _ u => match Globals.ind gs n with
-    | .some (.mk _ _ _ _ cs _ _ _) => ctorNamesOf (privBase n) cs
+    | .some (.mk _ _ _ _ _ cs _ _ _) => ctorNamesOf (privBase n) cs
     | .none => indCtorsOf gs (u ())
   | .vglued _ _ u => indCtorsOf gs (u ())
   | _ => .nil
@@ -5401,11 +5401,11 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
           let ndm := match top with
             | .true => NDep.no
             | .false => depNonTop es cx d L cols k expected;
-          let dep := match top with
+          let dep : Bool := match top with
             | .true => Bool.not (tmEq MBtop0 MBtopD)
             | .false => match ndm with
-              | .yes _ _ => .true
-              | .no => .false;
+              | .yes _ _ => Bool.true
+              | .no => Bool.false;
           let gensC : List Col := match ndm with
             | .yes gc _ => gc
             | .no => .nil;
