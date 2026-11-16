@@ -49,9 +49,11 @@ finding; the control uses the trusted `clamp_len` sanitiser, which kills both.
 
 ## Measurement on the out-of-scope CVE cases
 
-These are the CVE corpus entries that `scry/bench/cve-v2.md` lists as out of scope
-because no CWE-787/125 family existed. Measured with the branch's build and the opt-in
-pack:
+These are the CVE corpus entries that the CVE v2 report (`scripts/cve-bench-v2.sh
+--write-report`, generated into `build/cve-v2/report.md`) lists as out of scope because
+no CWE-787/125 family existed. The family is opt-in: it is not part of `default.scry`, so
+it changes neither that report's 2x2 nor the `scry bench` baseline. Measured with the
+branch's build and the opt-in pack:
 
 ```sh
 for c in cve-2021-23017 cve-2018-1000001 cve-2014-0160; do
