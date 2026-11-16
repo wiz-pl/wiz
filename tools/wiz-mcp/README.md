@@ -10,6 +10,9 @@ server's diagnostics, hover and tactic state.
 * **Opt-in.** Nothing in `flake.nix` references this tool, and it
   is not on the default dev shell's path. Add the MCP configuration to one
   worktree or to your global client config when you want it.
+* **Scry is separate.** [`tools/scry-mcp`](../scry-mcp/README.md) is its own
+  read-only server (`scry` in `.mcp.json`). It reuses this bridge's transport
+  and policy.
 
 ## Why MCP and not the `lsp` config
 
