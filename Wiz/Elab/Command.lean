@@ -371,7 +371,16 @@ def solveSortConstraints : ElabM R Unit := do
 /-- (13b, `--trace-guess-fallback` of `wiz` and of the tests binary) print each declaration
 that reaches `checkGuessedDecl` (stderr). A process-wide switch, set once before anything
 is elaborated: the elaborator is pure and the test suite builds its states in some 180
-places, so it is read as the frontend reads its isolation memo (`isoGet`). -/
+places, so it is read as the frontend reads its isolation memo (`isoGet`).
+
+**Invariant: the switch changes only what is printed, never what is accepted, rechecked
+or cached in a run without the flag.** It is false unless `--trace-guess-fallback` is
+given, and it is read in three places only: here, where it gates a `dbgTrace` and nothing
+else (whether `checkGuessedDecl` rechecks depends on `unifyGuessed` and the foreign
+opaque types alone); in `Cache.elaborateCached`, where a traced run reads and writes no
+cache (a cache is transparent by contract, so that changes no result either); and in
+`wiz`'s own cache switch (`Main.lean`). Like `isoGet`/`isoPut`, this host-side `unsafe`
+read is outside the trust ledger, which covers the Wiz sources of `lib/`. -/
 initialize traceGuessesRef : IO.Ref Bool ← IO.mkRef false
 
 private unsafe def traceGuessesOnImpl (_ : Name) : Bool := unsafeBaseIO traceGuessesRef.get
