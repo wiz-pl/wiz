@@ -9,6 +9,10 @@
    shared or immortal objects; in-place updates need rc == 1, which a shared object
    never has, and a shared thunk is forced under a lock and its value marked shared. */
 
+#ifdef WIZ_NO_THREADS
+/* one thread: nothing crosses to another, so nothing becomes shared */
+static void wiz_mark_mt(wiz_val v) { (void)v; }
+#else
 static void wiz_mark_mt(wiz_val v) {
   size_t cap = 64, n = 0;
   wiz_val *st = (wiz_val *)malloc(cap * sizeof(wiz_val));
@@ -40,6 +44,15 @@ static void wiz_mark_mt(wiz_val v) {
 #undef WIZ_PUSH
   free(st);
 }
+#endif
+
+/* Wait while `c` holds, on `cv` under `mu`. With WIZ_NO_THREADS no other thread can
+   make `c` false, so waiting would never end: stop with `what` instead. */
+#ifdef WIZ_NO_THREADS
+#define WIZ_WAIT_WHILE(c, cv, mu, what) do { if (c) wiz_no_threads(what); } while (0)
+#else
+#define WIZ_WAIT_WHILE(c, cv, mu, what) while (c) pthread_cond_wait(cv, mu)
+#endif
 
 /* every thread but main is counted, so the program can wait for them before it checks
    for leaks; a finished thread adds its allocation balance to wiz_live_exited */
@@ -67,6 +80,10 @@ static void *wiz_thread_main(void *p) {
 
 /* run `fn arg world` on a new thread; `fn` must be shared already, `arg` is moved */
 static void wiz_spawn(wiz_val fn, wiz_val arg) {
+#ifdef WIZ_NO_THREADS
+  (void)fn; (void)arg;
+  wiz_no_threads("starting a thread");
+#endif
   wiz_spawn_args *a = (wiz_spawn_args *)malloc(sizeof *a);
   a->fn = fn; a->arg = arg;
   const char *mb = getenv("WIZ_THREAD_STACK_MB");
@@ -134,6 +151,9 @@ static wiz_chan *wiz_chan_of(wiz_val c, int *side) {
 /* `Chan.forkRaw child`: a new channel; `child` runs on end 1 in a new thread, the
    caller gets end 0 */
 WIZ_API wiz_val wiz_chan_fork(wiz_val child) {
+#ifdef WIZ_NO_THREADS
+  wiz_no_threads("Chan.fork");
+#endif
   wiz_chan *ch = (wiz_chan *)calloc(1, sizeof(wiz_chan));
   pthread_mutex_init(&ch->mu, NULL);
   pthread_cond_init(&ch->cv, NULL);
@@ -167,7 +187,7 @@ WIZ_API wiz_val wiz_chan_recv(wiz_val c) {
   int side;
   wiz_chan *ch = wiz_chan_of(c, &side);
   pthread_mutex_lock(&ch->mu);
-  while (!ch->head[side]) pthread_cond_wait(&ch->cv, &ch->mu);
+  WIZ_WAIT_WHILE(!ch->head[side], &ch->cv, &ch->mu, "Chan.recv on an empty channel would wait forever");
   wiz_msg *m = ch->head[side];
   ch->head[side] = m->next;
   if (!m->next) ch->tail[side] = NULL;
@@ -207,7 +227,8 @@ WIZ_API wiz_val wiz_mvar_new(void) {
 static wiz_val wiz_mvar_take_(wiz_val mv, int keep) {
   wiz_mvar *m = (wiz_mvar *)((wiz_ext *)mv)->ptr;
   pthread_mutex_lock(&m->mu);
-  while (!m->full) pthread_cond_wait(&m->cv, &m->mu);
+  WIZ_WAIT_WHILE(!m->full, &m->cv, &m->mu, keep ? "MVar.read of an empty MVar would wait forever"
+                                                : "MVar.take of an empty MVar would wait forever");
   wiz_val v = m->v;
   if (keep) wiz_inc(v);
   else { m->full = 0; m->v = WIZ_BOX(0); pthread_cond_broadcast(&m->cv); }
@@ -220,7 +241,7 @@ WIZ_API void wiz_mvar_put(wiz_val mv, wiz_val a) {
   wiz_mvar *m = (wiz_mvar *)((wiz_ext *)mv)->ptr;
   wiz_mark_mt(a);
   pthread_mutex_lock(&m->mu);
-  while (m->full) pthread_cond_wait(&m->cv, &m->mu);
+  WIZ_WAIT_WHILE(m->full, &m->cv, &m->mu, "MVar.put into a full MVar would wait forever");
   m->v = a; m->full = 1;
   pthread_cond_broadcast(&m->cv);
   pthread_mutex_unlock(&m->mu);
@@ -279,7 +300,7 @@ WIZ_API wiz_val wiz_lock_new(void) {
 WIZ_API wiz_val wiz_lock_acquire(wiz_val lv) {
   wiz_lock *l = (wiz_lock *)((wiz_ext *)lv)->ptr;
   pthread_mutex_lock(&l->mu);
-  while (l->held) pthread_cond_wait(&l->cv, &l->mu);
+  WIZ_WAIT_WHILE(l->held, &l->cv, &l->mu, "Lock.acquire of a held lock would wait forever");
   l->held = 1;
   pthread_mutex_unlock(&l->mu);
   wiz_dec(lv);
@@ -335,6 +356,10 @@ static void *wiz_main_thread(void *p) {
 WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
   wiz_main_args args = {entry, io, 0};
   wiz_track_init();
+#ifdef WIZ_NO_THREADS
+  /* one thread: run on this one, with the stack it has */
+  return wiz_main_thread(&args), args.rc;
+#endif
   const char *mb = getenv("WIZ_STACK_MB");
   size_t size = (size_t)(mb ? atol(mb) : 1024) << 20;
   pthread_attr_t attr;
