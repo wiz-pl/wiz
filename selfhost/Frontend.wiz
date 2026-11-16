@@ -1014,6 +1014,29 @@ def ctorName (c : Syntax) : String := match kid c 2 with
   | _ => "_"
 def ctorFields (c : Syntax) : List Field := fieldsOf (kids (kid c 3))
 
+-- an elaboration context: the kernel's (values, types) and the names
+-- (and the binders' types quoted, latest first, each when first needed: a new
+-- metavariable's type is a Π over the whole context, and quoting every type again for
+-- each one made big definitions run out of memory: stage 20b)
+inductive Cx where
+  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm))
+def Cx.c : Cx → TCtx
+  | .mk c _ _ => c
+def Cx.sc : Cx → Scope
+  | .mk _ sc _ => sc
+def Cx.tele : Cx → List (Unit → Tm)
+  | .mk _ _ t => t
+def Cx.lvl (cx : Cx) : Nat := TCtx.lvl (Cx.c cx)
+def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
+  | .mk c sc t =>
+    let d := TCtx.lvl c;
+    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+-- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
+-- metavariables applied to the context don't carry every `let`'s value along)
+def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
+  | .mk c sc t =>
+    let d := TCtx.lvl c;
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- an index (`tt` without one), scope-checked in `sc` and closed at depth `d`
 def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax → Elab
   | .none => .ok .star
@@ -1606,29 +1629,6 @@ def dropL {A : Type} : Nat → List A → List A
 -- `?mN Γ =?= t` when `t` lives in `Γ`; elaborated terms are zonked (the solutions put
 -- in) before the kernel checks them.
 
--- an elaboration context: the kernel's (values, types) and the names
--- (and the binders' types quoted, latest first, each when first needed: a new
--- metavariable's type is a Π over the whole context, and quoting every type again for
--- each one made big definitions run out of memory: stage 20b)
-inductive Cx where
-  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm))
-def Cx.c : Cx → TCtx
-  | .mk c _ _ => c
-def Cx.sc : Cx → Scope
-  | .mk _ sc _ => sc
-def Cx.tele : Cx → List (Unit → Tm)
-  | .mk _ _ t => t
-def Cx.lvl (cx : Cx) : Nat := TCtx.lvl (Cx.c cx)
-def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
-  | .mk c sc t =>
-    let d := TCtx.lvl c;
-    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
--- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
--- metavariables applied to the context don't carry every `let`'s value along)
-def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
-  | .mk c sc t =>
-    let d := TCtx.lvl c;
-    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- the metavariables: the depth each was made at, its solution (a term at that depth),
 -- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
 -- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
