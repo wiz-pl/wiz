@@ -559,7 +559,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
+  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting, and
+  again end to end on the matrix the jobs are started from; `check-shards --self-test`
+  checks the check on a stand-in driver). See
   "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
@@ -619,7 +621,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
   ```sh
   r=$(mktemp -d)
-  scripts/ci.py fetch-runs 21 "$r"             # $r/RUN/timings.jsonl and jobs.json
+  scripts/ci.py fetch-runs --branch 'master|integration/.*' 14 "$r"
+                                               # $r/RUN/timings.jsonl and jobs.json
   scripts/ci.py rebalance "$r"/*               # report only
   scripts/ci.py rebalance --write "$r"/*       # .github/test-timings.json, test-shards.json
   ```
@@ -628,8 +631,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
   runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
   shard with the longest part, until the job budget (`--jobs`, default the current
-  number of test jobs) is used or no part is longer than the longest job that cannot be
-  split. The case list is the test driver's (`--bin`), or the last run's; cases that no
+  number of test jobs) is used or another part would not shorten the longest one; a
+  long job that cannot be split does not stop it. It exits with an error if the parts
+  do not cover every case of the split shards exactly once. The case list is the test driver's (`--bin`), or the last run's; cases that no
   run has measured yet (a case just split) can be given with `--assume TSV`
   (`GROUP<TAB>CASE<TAB>SECONDS`, or `drop` for a case that is gone). It prints the
   predicted time of every job under the current and the new counts.

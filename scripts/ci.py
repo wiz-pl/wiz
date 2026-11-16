@@ -47,10 +47,13 @@
                                      a Markdown report (stdout); on drift, writes the
                                      regenerated baseline to FILE. Exits 0 (1 with
                                      --strict when there is drift)
-  scripts/ci.py fetch-runs N DIR      download the last N completed (not cancelled) CI
+  scripts/ci.py fetch-runs [--branch REGEX] N DIR
+                                     download the last N completed (not cancelled) CI
                                      runs that have a `test-timings` artifact into
                                      DIR/RUN_ID/ (timings.jsonl, and jobs.json from the
-                                     jobs API), the input of `rebalance`; needs `gh`
+                                     jobs API), the input of `rebalance`; --branch: only
+                                     runs whose branch matches REGEX (whole name, e.g.
+                                     'master|integration/.*'); needs `gh`
   scripts/ci.py rebalance [--jobs N] [--assume TSV] [--write] [--bin BIN] RUN..
                                      re-derive the split shards from measured times:
                                      each RUN is one run's `--timings` file (the
@@ -71,8 +74,10 @@
                                      or `drop`: a case that is gone). --jobs N: at most
                                      N test jobs in all (default: as many as now); the
                                      split counts grow greedily, a part at a time to the
-                                     shard with the longest part, and stop once no split
-                                     part is longer than the longest unsplittable job
+                                     shard with the longest part, until the budget is
+                                     used or another part would not shorten it. Exits
+                                     with an error if the parts do not cover every case
+                                     of the split shards exactly once
   scripts/ci.py check-skips [--max-ratio F] [--allow FILE] LOG|JSONL..
                                      a green run must have tested something: fail when
                                      a group skipped wholesale, when a skip names a tool
@@ -260,7 +265,7 @@ def expanded(binary, base=None):
     return out
 
 
-def matrix(binary, only=None):
+def matrix_entries(binary, only=None):
     # "heavy": true shards (and the parts of a split one) may run on the self-hosted
     # runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
     heavy = {s["name"] for s in shards() if s.get("heavy")}
@@ -270,9 +275,12 @@ def matrix(binary, only=None):
         return n in heavy or (base in split and base in heavy)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
-    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n),
-                                 "jobs": jobs}
-                                for n, sel, _, jobs in expanded(binary) if wanted(n)]}, ensure_ascii=False))
+    return [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n), "jobs": jobs}
+            for n, sel, _, jobs in expanded(binary) if wanted(n)]
+
+
+def matrix(binary, only=None):
+    print(json.dumps({"shard": matrix_entries(binary, only)}, ensure_ascii=False))
 
 
 def plan(binary):
@@ -314,6 +322,28 @@ def check_shards(binary):
     for (g, i), by in runs.items():
         if len(by) > 1:
             errors.append(f"case {g} #{i} is run by several shards: {', '.join(by)}")
+    # end to end: the jobs of the full matrix (what CI runs when every shard is needed),
+    # with their selectors read back from the matrix's newline-joined form, run every
+    # case of the listing exactly once and nothing else
+    if not errors:
+        jobs = matrix_entries(binary)
+        seen = {}
+        for e in jobs:
+            for g, i, _ in set(list_cases(binary, e["select"].split("\n"))):
+                seen.setdefault((g, i), []).append(e["name"])
+        lost = sorted(k for k in runs if k not in seen)
+        extra = sorted(k for k in seen if k not in runs)
+        twice = sorted(k for k, by in seen.items() if len(by) > 1)
+        if lost:
+            errors.append(f"the matrix runs {len(lost)} cases of the listing in no job "
+                          f"(first: {lost[0][0]} #{lost[0][1]})")
+        if extra:
+            errors.append(f"the matrix runs {len(extra)} cases that the listing lacks")
+        if twice:
+            errors.append(f"the matrix runs {len(twice)} cases in several jobs "
+                          f"(first: {twice[0][0]} #{twice[0][1]}: {', '.join(seen[twice[0]])})")
+        if {g for g, _ in seen} != {g for g, _ in runs}:
+            errors.append("the matrix's groups differ from the listing's")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -326,8 +356,96 @@ def check_shards(binary):
             if new:
                 warn(f"{len(new)} cases of the split shard {s['name']!r} are unbalanced: not in "
                      f".github/test-timings.json (estimated at their group's median)", "Shard balance")
-    print(f"ok: {len(groups)} groups, {len(runs)} cases, each in exactly one of {len(parts)} shards")
+    print(f"ok: {len(groups)} groups, {len(runs)} cases, each in exactly one of {len(parts)} shards "
+          f"(the matrix's {len(jobs)} jobs run them all, once)")
     return 0
+
+
+FAKE_DRIVER = r'''#!/usr/bin/env python3
+"""A stand-in for the test driver (`check-shards --self-test`): answers --list,
+--list-shards and --list-cases from LISTING (group, index, name, shard hint)."""
+import json, sys
+LISTING = json.loads(%r)
+def sel(group, s):
+    return group == s[1:].split("#")[0] if s.startswith("=") else group.startswith(s)
+def picks(g, i, s):
+    if not sel(g, s):
+        return False
+    return "#" not in s or i in [int(x) for x in s.split("#", 1)[1].split(",")]
+a = sys.argv[1:]
+groups = list(dict.fromkeys(g for g, _, _, _ in LISTING))
+if a == ["--list"]:
+    print("\n".join(groups))
+elif a == ["--list-shards"]:
+    hint = {g: h for g, _, _, h in LISTING}
+    print("\n".join(f"{g}\t{hint[g]}" for g in groups))
+elif a[:1] == ["--list-cases"]:
+    for g, i, n, _ in LISTING:
+        if not a[1:] or any(picks(g, i, s) for s in a[1:]):
+            print(f"{g}\t{i}\t{n}")
+else:
+    sys.exit(2)
+'''
+
+
+def fake_driver(directory, listing):
+    """Write a stand-in test driver answering from LISTING [(group, index, name, shard
+    hint)] (see FAKE_DRIVER) into DIRECTORY; its path."""
+    path = os.path.join(directory, "tests")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(FAKE_DRIVER % json.dumps(listing))
+    os.chmod(path, 0o755)
+    return path
+
+
+def check_shards_self_test():
+    """`check-shards` on stand-in drivers and shard files: a good layout (with a split
+    shard and a group that only its own shard hint places) passes, and a dropped case,
+    a case in two shards and a selector that selects nothing fail. Exits 1 if an
+    expectation is wrong."""
+    import contextlib, io, tempfile
+    global SHARDS, TIMINGS
+    listing = ([("alpha", i, f"a{i}", "") for i in range(5)]
+               + [("beta", i, f"b{i}", "") for i in range(7)]
+               + [("gamma", i, f"c{i}", "") for i in range(3)]
+               + [("delta", 0, "d0", "solo")])
+    good = [{"name": "solo", "select": []},
+            {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+            {"name": "small", "select": ["alp"]}]
+    trials = [
+        ("good", listing, good, 0),
+        ("a case the shards drop", listing,
+         [{"name": "solo", "select": []},
+          {"name": "big", "split": 3, "default": True, "select": ["=beta#0,1,2,3,4,5", "=gamma"]},
+          {"name": "small", "select": ["alp"]}], 1),
+        ("a case in two shards", listing,
+         [{"name": "solo", "select": []},
+          {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+          {"name": "small", "select": ["alp", "=gamma#1"]}], 1),
+        ("a selector that selects nothing", listing,
+         [{"name": "solo", "select": []},
+          {"name": "big", "split": 2, "default": True, "select": ["=beta", "=gamma", "=epsilon"]},
+          {"name": "small", "select": ["alp"]}], 1),
+    ]
+    saved, wrong = (SHARDS, TIMINGS), []
+    try:
+        for name, lst, config, want in trials:
+            with tempfile.TemporaryDirectory() as d:
+                SHARDS, TIMINGS = os.path.join(d, "shards.json"), os.path.join(d, "timings.json")
+                with open(SHARDS, "w") as f:
+                    json.dump(config, f)
+                with open(TIMINGS, "w") as f:
+                    json.dump({"cases": {"beta": {f"b{i}": {"seconds": 10.0 + i} for i in range(7)}},
+                               "builds": {}}, f)
+                binary = fake_driver(d, lst)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    got = check_shards(binary)
+                print(f"{'ok ' if got == want else 'BAD'} {name}: exit {got} (expected {want})")
+                if got != want:
+                    wrong.append(name)
+    finally:
+        SHARDS, TIMINGS = saved
+    return 1 if wrong else 0
 
 
 # Path filters (`changes`). Files only people read: a change of only these runs no build
@@ -1033,8 +1151,11 @@ def job_walls(p):
 
 
 def fetch_runs(args):
+    branch = None
+    if args[:1] == ["--branch"] and len(args) >= 2:
+        branch, args = re.compile(args[1]), args[2:]
     if len(args) != 2:
-        sys.exit("usage: scripts/ci.py fetch-runs N DIR")
+        sys.exit("usage: scripts/ci.py fetch-runs [--branch REGEX] N DIR")
     n, out = int(args[0]), args[1]
     gh = lambda *a: subprocess.run(["gh", *a], capture_output=True, text=True, check=True).stdout
     repo = os.environ.get("WIZ_REPO", "wiz-pl/wiz")
@@ -1048,6 +1169,8 @@ def fetch_runs(args):
             if got >= n:
                 break
             if r["conclusion"] in ("cancelled", "skipped"):
+                continue
+            if branch and not branch.fullmatch(r["head_branch"] or ""):
                 continue
             d = os.path.join(out, str(r["id"]))
             try:
@@ -1142,12 +1265,27 @@ def rebalance(args):
     counts = {sh: 1 for sh in split}
     parts = {sh: partition(items[sh], 1, base["builds"]) for sh in split}
     longest = lambda sh: max(cost(sh, p) for p in parts[sh])
+    # fill the budget: a part at a time to the shard with the longest part, while that
+    # shortens it (a job that cannot be split, e.g. a single long case, is no reason to
+    # stop: the other shards still get shorter and their spread smaller)
     while len(fixed) + sum(counts.values()) < budget:
         sh = max(split, key=lambda k: (longest(k), k))
-        if longest(sh) <= floor + 1e-9:
+        trial = partition(items[sh], counts[sh] + 1, base["builds"])
+        if max(cost(sh, p) for p in trial) >= longest(sh) - 1e-9:
             break
         counts[sh] += 1
-        parts[sh] = partition(items[sh], counts[sh], base["builds"])
+        parts[sh] = trial
+    # nothing dropped: every case of the listing is in exactly one job
+    for sh in split:
+        got = sorted((g, n) for p in parts[sh] for g, _, n, *_ in p)
+        want = sorted(known.get(sh, []))
+        if got != want:
+            sys.exit(f"rebalance: the parts of {sh} do not cover its cases exactly once")
+    ran = {g for g, _ in cases}
+    gone = sorted(g for g in ran if g not in {g for g, _ in listed})
+    if gone:
+        print(f"Note: {len(gone)} groups measured by the runs are not in the case list "
+              f"(renamed or removed?): {', '.join(gone)}")
     # the report
     print(f"Runs: {len(paths)} `--timings` files; cases from {source}; budget {budget} jobs.")
     if ratios:
@@ -1211,6 +1349,8 @@ def main(args):
     if args[:1] == ["matrix"]:
         matrix(binary)
         return 0
+    if args[:2] == ["check-shards", "--self-test"]:
+        return check_shards_self_test()
     if args[:1] == ["check-shards"]:
         return check_shards(binary)
     if args[:1] == ["check-skips"]:
