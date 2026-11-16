@@ -47,6 +47,32 @@
                                      a Markdown report (stdout); on drift, writes the
                                      regenerated baseline to FILE. Exits 0 (1 with
                                      --strict when there is drift)
+  scripts/ci.py fetch-runs N DIR      download the last N completed (not cancelled) CI
+                                     runs that have a `test-timings` artifact into
+                                     DIR/RUN_ID/ (timings.jsonl, and jobs.json from the
+                                     jobs API), the input of `rebalance`; needs `gh`
+  scripts/ci.py rebalance [--jobs N] [--assume TSV] [--write] [--bin BIN] RUN..
+                                     re-derive the split shards from measured times:
+                                     each RUN is one run's `--timings` file (the
+                                     `test-timings` artifact) or a `fetch-runs`
+                                     directory; a case's time is its median over the
+                                     runs. With jobs.json, a shard's prediction is
+                                     scaled by its measured wall time over its case
+                                     sum (`--jobs` overlaps cases), and a shard that is
+                                     not split is its median wall time. Prints the new baseline's
+                                     summary, the "split" count of each split shard and
+                                     the predicted time of every job (min/median/max);
+                                     with --write, writes .github/test-timings.json and
+                                     the "split" counts of .github/test-shards.json.
+                                     The case list is the test driver's (--bin, default
+                                     .lake/build/bin/tests, when it exists), else the
+                                     last JSONL's. --assume TSV: `GROUP<TAB>CASE<TAB>S`
+                                     rows for cases no run has measured yet (S seconds,
+                                     or `drop`: a case that is gone). --jobs N: at most
+                                     N test jobs in all (default: as many as now); the
+                                     split counts grow greedily, a part at a time to the
+                                     shard with the longest part, and stop once no split
+                                     part is longer than the longest unsplittable job
   scripts/ci.py check-skips [--max-ratio F] [--allow FILE] LOG|JSONL..
                                      a green run must have tested something: fail when
                                      a group skipped wholesale, when a skip names a tool
@@ -907,7 +933,14 @@ def make_baseline(paths):
         old = cases.setdefault(r["group"], {}).get(r["case"])
         if old is None or old["seconds"] < own:
             cases[r["group"]][r["case"]] = {"seconds": own, **({"uses": uses} if uses else {})}
-    # one case per line, sorted, so that the file diffs and merges well
+    print(baseline_json({"cases": cases, "builds": builds}))
+    return 0
+
+
+def baseline_json(base):
+    """.github/test-timings.json's text: one case per line, sorted, so that the file
+    diffs and merges well."""
+    cases, builds = base["cases"], base["builds"]
     dump = lambda x: json.dumps(x, ensure_ascii=False)
     out = ['{', f' "builds": {dump(dict(sorted(builds.items())))},', ' "cases": {']
     for k, (g, cs) in enumerate(sorted(cases.items())):
@@ -916,7 +949,255 @@ def make_baseline(paths):
         out += [l + "," for l in lines[:-1]] + lines[-1:]
         out.append('  }' + ("," if k < len(cases) - 1 else ""))
     out += [' }', '}']
-    print("\n".join(out))
+    return "\n".join(out)
+
+
+# --- Rebalance (`rebalance`) ---------------------------------------------------------
+def median(xs):
+    xs = sorted(xs)
+    return (xs[(len(xs) - 1) // 2] + xs[len(xs) // 2]) / 2
+
+
+def run_medians(paths):
+    """Per-case and per-build medians over runs (one `--timings` file per run):
+    ({(group, case): (seconds, own seconds, uses, shard)}, {program: seconds},
+    {shard: seconds per run}). A case's `own` time leaves out the builds it did; a
+    failed case counts only if no run passed it. `shard` is the job the case ran in
+    last (its split shard's name for a part)."""
+    split = [s["name"] for s in shards() if s.get("split", 1) > 1]
+    seen, builds, totals, ratios, walls = {}, {}, {}, {}, {}
+    for p in paths:
+        run_builds, run_sums = {}, {}
+        for r in read_timings([timings_of(p)]):
+            run_sums[r["shard"]] = run_sums.get(r["shard"], 0.0) + r["seconds"]
+            built = 0.0
+            for n in r.get("notes", []):
+                if n.startswith(NOTE_BUILT):
+                    res, t = n[len(NOTE_BUILT):].rsplit(" ", 1)
+                    run_builds[res] = max(run_builds.get(res, 0.0), float(t))
+                    built += float(t)
+            uses = tuple(sorted({n[len(NOTE_USES):] for n in r.get("notes", []) if n.startswith(NOTE_USES)}))
+            shard = split_of(r["shard"], split) or r["shard"]
+            seen.setdefault((r["group"], r["case"]), []).append(
+                (r.get("ok", True), r["seconds"], max(r["seconds"] - built, 0.0), uses, shard))
+            totals.setdefault(r["shard"], {}).setdefault(p, 0.0)
+            totals[r["shard"]][p] += r["seconds"]
+        for res, t in run_builds.items():
+            builds.setdefault(res, []).append(t)
+        run_walls = job_walls(p)
+        for job, w in run_walls.items():
+            walls.setdefault(split_of(job, split) or job, []).append(w)
+        fam = {}
+        for job, w in run_walls.items():
+            if job in run_sums:
+                f = fam.setdefault(split_of(job, split) or job, [0.0, 0.0])
+                f[0] += w
+                f[1] += run_sums[job]
+        for sh, (w, c) in fam.items():
+            if c > 0:
+                ratios.setdefault(sh, []).append(w / c)
+    cases = {}
+    for k, rs in seen.items():
+        ok = [r for r in rs if r[0]] or rs
+        cases[k] = (median([r[1] for r in ok]), median([r[2] for r in ok]),
+                    max((r[3] for r in ok), key=len), ok[-1][4])
+    return (cases, {r: median(ts) for r, ts in builds.items()},
+            {sh: median(list(v.values())) for sh, v in totals.items()},
+            {sh: median(v) for sh, v in ratios.items()},
+            {sh: median(v) for sh, v in walls.items() if sh not in split})
+
+
+def timings_of(p):
+    """A run's `--timings` file: P itself, or P/timings.jsonl (`fetch-runs`)."""
+    return os.path.join(p, "timings.jsonl") if os.path.isdir(p) else p
+
+
+def job_walls(p):
+    """{job: seconds of its `tests -- …` step} of the successful test jobs of a
+    `fetch-runs` directory's jobs.json ({} without one)."""
+    from datetime import datetime
+    path = os.path.join(p, "jobs.json") if os.path.isdir(p) else None
+    if not path or not os.path.exists(path):
+        return {}
+    t = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00"))
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        jobs = json.load(f).get("jobs", [])
+    for j in jobs:
+        if not j["name"].startswith("test (") or j.get("conclusion") != "success":
+            continue
+        for st in j.get("steps", []):
+            if st["name"].startswith("tests -- ") and st.get("started_at") and st.get("completed_at"):
+                out[j["name"][len("test ("):-1]] = (t(st["completed_at"]) - t(st["started_at"])).total_seconds()
+    return out
+
+
+def fetch_runs(args):
+    if len(args) != 2:
+        sys.exit("usage: scripts/ci.py fetch-runs N DIR")
+    n, out = int(args[0]), args[1]
+    gh = lambda *a: subprocess.run(["gh", *a], capture_output=True, text=True, check=True).stdout
+    repo = os.environ.get("WIZ_REPO", "wiz-pl/wiz")
+    got, page = 0, 1
+    while got < n and page <= 10:
+        runs = json.loads(gh("api", f"repos/{repo}/actions/workflows/ci.yml/runs?status=completed&per_page=100&page={page}"))
+        page += 1
+        if not runs["workflow_runs"]:
+            break
+        for r in runs["workflow_runs"]:
+            if got >= n:
+                break
+            if r["conclusion"] in ("cancelled", "skipped"):
+                continue
+            d = os.path.join(out, str(r["id"]))
+            try:
+                gh("run", "download", str(r["id"]), "-R", repo, "-n", "test-timings", "-D", d)
+            except subprocess.CalledProcessError:
+                continue  # no test-timings artifact (the run stopped before its result job)
+            with open(os.path.join(d, "jobs.json"), "w", encoding="utf-8") as f:
+                f.write(gh("api", f"repos/{repo}/actions/runs/{r['id']}/jobs?filter=latest&per_page=100"))
+            got += 1
+            print(d)
+    return 0 if got else 1
+
+
+def rebalance(args):
+    jobs, assume, write, binary, paths = None, None, False, DEFAULT_BIN, []
+    it = iter(args)
+    for a in it:
+        if a == "--jobs":
+            jobs = int(next(it))
+        elif a == "--assume":
+            assume = next(it)
+        elif a == "--write":
+            write = True
+        elif a == "--bin":
+            binary = next(it)
+        else:
+            paths.append(a)
+    if not paths:
+        sys.exit("rebalance: no --timings files")
+    cases, builds, shard_secs, ratios, walls = run_medians(paths)
+    config = shards()
+    split = {s["name"]: s for s in config if s.get("split", 1) > 1}
+    # the current case list: the driver's, or the last run's
+    if os.path.exists(binary):
+        listed = {}
+        for s in resolved(binary):
+            for g, i, n in list_cases(binary, s["select"]):
+                listed[(g, n)] = s["name"]
+        source = binary
+    else:
+        listed = {}
+        for r in read_timings([timings_of(paths[-1])]):
+            listed[(r["group"], r["case"])] = split_of(r["shard"], list(split)) or r["shard"]
+        source = paths[-1]
+    assumed = set()
+    if assume:
+        with open(assume, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                g, n, t = line.rstrip("\n").split("\t")
+                if t == "drop":
+                    listed.pop((g, n), None)
+                    continue
+                if (g, n) in cases:
+                    continue  # measured: the measurement wins
+                # an unmeasured case goes to its group's shard
+                sh = next((s for (gg, _), s in listed.items() if gg == g), None)
+                if sh is None:
+                    sys.exit(f"rebalance: --assume names the group {g!r}, which no shard runs")
+                listed[(g, n)] = sh
+                cases[(g, n)] = (float(t), float(t), (), sh)
+                assumed.add((g, n))
+    missing = sorted(k for k, sh in listed.items() if sh in split and k not in cases)
+    # the new baseline: the split shards' current cases
+    base = {"cases": {}, "builds": {r: round(t, 3) for r, t in sorted(builds.items())}}
+    for (g, n), sh in listed.items():
+        if sh in split and (g, n) in cases:
+            _, own, uses, _ = cases[(g, n)]
+            base["cases"].setdefault(g, {})[n] = {"seconds": round(own, 3), **({"uses": list(uses)} if uses else {})}
+    # each split shard's items, as `estimate` gives them (index: the listing's order)
+    items = {name: [] for name in split}
+    known = {}
+    for (g, n), sh in listed.items():
+        if sh in split:
+            known.setdefault(sh, []).append((g, n))
+    for sh, ks in known.items():
+        idx = {}
+        for g, n in ks:
+            idx[g] = idx.get(g, -1) + 1
+            items[sh].append((g, idx[g], n))
+        items[sh] = estimate(items[sh], base)
+    # the jobs that cannot be split: the other shards, and the longest single unit
+    fixed = {s["name"]: walls.get(s["name"], shard_secs.get(s["name"], 0.0)) for s in config if s["name"] not in split}
+    # a split part's predicted wall: its estimated case sum times the shard's measured
+    # wall/case-sum ratio (below 1 when "jobs" runs cases at once)
+    ratio = {sh: ratios.get(sh, 1.0) for sh in split}
+    cost = lambda sh, p: part_cost(p, base["builds"]) * ratio[sh]
+    unit = lambda sh: max((cost(sh, [it]) for it in items[sh]), default=0.0)
+    floor = max(list(fixed.values()) + [unit(sh) for sh in split])
+    budget = jobs if jobs is not None else len(fixed) + sum(s["split"] for s in split.values())
+    counts = {sh: 1 for sh in split}
+    parts = {sh: partition(items[sh], 1, base["builds"]) for sh in split}
+    longest = lambda sh: max(cost(sh, p) for p in parts[sh])
+    while len(fixed) + sum(counts.values()) < budget:
+        sh = max(split, key=lambda k: (longest(k), k))
+        if longest(sh) <= floor + 1e-9:
+            break
+        counts[sh] += 1
+        parts[sh] = partition(items[sh], counts[sh], base["builds"])
+    # the report
+    print(f"Runs: {len(paths)} `--timings` files; cases from {source}; budget {budget} jobs.")
+    if ratios:
+        print("Measured wall/case-sum ratios: " + ", ".join(f"{sh} {r:.2f}" for sh, r in sorted(ratios.items())))
+    else:
+        print("No jobs.json: predictions are case sums (an overestimate for shards with \"jobs\").")
+    if assumed:
+        print(f"Assumed (not yet measured): {len(assumed)} cases, {sum(cases[k][1] for k in assumed):.0f} s in all.")
+    if missing:
+        print(f"Not measured and not assumed: {len(missing)} cases of split shards (estimated at their group's median).")
+    print()
+    print("| shard | was | now |")
+    print("|---|---:|---:|")
+    for sh in split:
+        print(f"| {sh} | {split[sh]['split']} | {counts[sh]} |")
+    def predicted(cs):
+        out = dict(fixed)
+        for sh in split:
+            ps = parts[sh] if cs[sh] == counts[sh] else partition(items[sh], cs[sh], base["builds"])
+            for k, p in enumerate(ps, 1):
+                out[f"{sh}-{k}"] = cost(sh, p)
+        return out
+    def spread(ts):
+        ts = sorted(ts.values())
+        return (f"{len(ts)} jobs: min {ts[0]:.0f}, median {median(ts):.0f}, max {ts[-1]:.0f} "
+                f"({ts[-1] / max(median(ts), 1e-9):.2f}x the median)")
+    was = predicted({sh: split[sh]["split"] for sh in split})
+    now = predicted(counts)
+    print()
+    print(f"Predicted seconds of tests per job, the current split counts: {spread(was)}")
+    print(f"Predicted seconds of tests per job, the new split counts: {spread(now)}")
+    print(f"Floor: {floor:.0f} s (the longest job or case that cannot be split)")
+    print()
+    print("| job | predicted s (current counts) | predicted s (new counts) |")
+    print("|---|---:|---:|")
+    for n in sorted(set(was) | set(now), key=lambda n: -max(was.get(n, 0), now.get(n, 0))):
+        f = lambda d: f"{d[n]:.0f}" if n in d else ""
+        print(f"| {md(n)} | {f(was)} | {f(now)} |")
+    if write:
+        with open(TIMINGS, "w", encoding="utf-8") as f:
+            f.write(baseline_json(base) + "\n")
+        text = open(SHARDS, encoding="utf-8").read()
+        for sh, n in counts.items():
+            text, k = re.subn(r'("name": "' + re.escape(sh) + r'",\s*"split": )\d+', lambda m: m.group(1) + str(n), text)
+            if k != 1:
+                sys.exit(f"rebalance: cannot find the \"split\" of {sh} in {SHARDS}")
+        with open(SHARDS, "w", encoding="utf-8") as f:
+            f.write(text)
+        print()
+        print(f"Wrote {os.path.relpath(TIMINGS, ROOT)} and the split counts of {os.path.relpath(SHARDS, ROOT)}.")
     return 0
 
 
@@ -940,6 +1221,10 @@ def main(args):
         return summary(args[1], args[2:])
     if args[:1] == ["balance"]:
         return balance(args[1:])
+    if args[:1] == ["fetch-runs"]:
+        return fetch_runs(args[1:])
+    if args[:1] == ["rebalance"]:
+        return rebalance(args[1:])
     if args[:1] == ["baseline"] and len(args) >= 2:
         return make_baseline(args[1:])
     print(__doc__, file=sys.stderr)

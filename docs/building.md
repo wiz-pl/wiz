@@ -593,14 +593,32 @@ the elan toolchain, so the setup action keeps the elan cache for those
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
   baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
-  `scaling`; the last is a sweep over `lib/` and `examples/`, split 2 with its long case
-  in one part).
+  `scaling`).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
   `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
+* **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
+  (after a perf fix, or when a group grows), fetch the last runs and rebalance:
+
+  ```sh
+  r=$(mktemp -d)
+  scripts/ci.py fetch-runs 21 "$r"             # $r/RUN/timings.jsonl and jobs.json
+  scripts/ci.py rebalance "$r"/*               # report only
+  scripts/ci.py rebalance --write "$r"/*       # .github/test-timings.json, test-shards.json
+  ```
+
+  A case's time is its median over the runs, and each part's prediction is scaled by
+  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
+  runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
+  shard with the longest part, until the job budget (`--jobs`, default the current
+  number of test jobs) is used or no part is longer than the longest job that cannot be
+  split. The case list is the test driver's (`--bin`), or the last run's; cases that no
+  run has measured yet (a case just split) can be given with `--assume TSV`
+  (`GROUP<TAB>CASE<TAB>SECONDS`, or `drop` for a case that is gone). It prints the
+  predicted time of every job under the current and the new counts.
 * **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
   opted-in groups run N cases at a time. Only set it on a shard whose groups were
   verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
@@ -631,9 +649,12 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
   If a shard stays over the limit after the refresh, raise its `"split"` or make it a
   split shard. `scripts/ci.py plan` shows the predicted parts. One case longer than the
-  limit cannot be split: `grail-selfhost` is one case of several minutes, and
-  `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
-  `scaling` shard's other part holds its 26 shorter cases).
+  limit cannot be split by the shards: `grail-selfhost` is one case of several minutes.
+  Split such a case in its test instead, into cases over parts of its input that
+  together check the same things: `scaling`'s sweep of the induction hypotheses over
+  `lib/` and `examples/` (up to 31 min as one case) is a case for `lib/`, one for the
+  modules checked apart, and six over the examples, with a case that checks that the
+  six cover every example once.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
