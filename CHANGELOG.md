@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
+  by key: a row one side deleted and the other left unchanged is deleted (a union kept
+  it, so a branch merging master resurrected rows master had removed), and a row one
+  side deleted and the other modified is a conflict the driver refuses (22f).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
