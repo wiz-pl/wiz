@@ -7,7 +7,7 @@ server's diagnostics, hover and tactic state.
 * **stdlib only.** Python 3.9+; no packages, no virtualenv, no build step.
 * **One process per workspace.** The client starts it; it owns exactly one
   `wiz lsp` daemon for that worktree, started on demand.
-* **Opt-in.** Nothing in `flake.nix`/`devenv.nix` references this tool, and it
+* **Opt-in.** Nothing in `flake.nix` references this tool, and it
   is not on the default dev shell's path. Add the MCP configuration to one
   worktree or to your global client config when you want it.
 
