@@ -102,9 +102,11 @@ the three notation identities are stated with the notation; `!` is `Bool.not`, s
 
 `Tac.rewrite` takes a *complete* equation: `rw (Nat.add_zero n)`. Matching a rule needs
 fresh metavariables and unification, and the reflected `Expr` has no metavariable, so
-that part stays host-side (the Wiz driver never sees a metavariable):
+that part stays host-side (the Wiz driver never sees a metavariable). The Prelude
+declares (an excerpt: `RewriteResult` and two of `Tac`'s constructors, so not checked
+on its own):
 
-```wiz
+```wiz no-check
 inductive RewriteResult where
   | noMatch
   | rewritten (goal : Nat) (type : Expr)   -- the new goal and its type, reflected
