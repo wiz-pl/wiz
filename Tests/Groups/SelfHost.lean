@@ -441,9 +441,9 @@ one binder, `(m n : Nat) → …`: one argument per name, as the Lean frontend p
 def eqnsMultiDecls : List (String × Bool) := [
   ("def add2 : (m n : Nat) → Nat\n  | .zero, n => n\n  | .succ m, n => Nat.succ (add2 m n)\n", true),
   ("def pick3 : (a b c : Nat) → Bool → Nat\n  | a, _, _, .true => a\n  | _, b, c, .false => Nat.add b c\n", true),
-  ("def lt0 : (i n : Nat) → Nat.lt i n = .true → Nat.lt i (Nat.succ n) = .true\n" ++
-    "  | .zero, .zero, h => absurd h.1\n  | .zero, .succ _, _ => rfl\n" ++
-    "  | .succ _, .zero, h => absurd h.1\n  | .succ i, .succ n, h => lt0 i n h\n", true),
+  -- (a proof under the binder; one that needs the earlier columns refined in `h`'s type
+  -- is dependent matching's: `depMatchDecls`)
+  ("def eqz : (m n : Nat) → Nat.beq m n = Nat.beq m n\n  | .zero, n => rfl\n  | .succ m, n => rfl\n", true),
   ("def k2 : (_ _ : Nat) → Nat\n  | a, _ => a\n", true),
   ("def bad3 : (a b : Nat) → Nat\n  | a, b, c => a\n", false)]
 
