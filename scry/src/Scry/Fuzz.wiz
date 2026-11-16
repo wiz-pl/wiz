@@ -1,0 +1,266 @@
+import Sys
+import Json
+import Text
+import IO
+import Scry.Parse
+import Scry.CstStore
+import Scry.Native
+/-!
+# Scry.Fuzz: dynamic evidence from the C front end
+
+`scry fuzz-span` is the bridge between a fuzzer artifact and scry's own source model.
+It reads a file as text (`FS.readFile`), parses it with the vendored tree-sitter shim
+(`scry_parse`),
+and reports the input's CST summary in the same `start`/`stop` span shape the static
+findings use:
+
+* the root span and byte/node/edge/root/error counts;
+* every `ERROR`/`MISSING` node, up to 64, with its kind and 1-based line/column;
+* when `--offset N` is given, the smallest CST node containing byte `N` as `crash_span`
+  (a native crash usually has no input offset; an invariant failure in
+  `fuzz/ts_shim_fuzz.c` prints `input_offset=N`, which is what the driver passes here).
+
+Offsets are **bytes** (tree-sitter's spans), and the line/column helper counts
+characters. The C frontend's slice is ASCII, so the two agree for the checked-in corpus;
+the driver skips span mapping for an artifact that is not ASCII or contains NUL, because
+`FS.readFile` stops at NUL and would truncate it.
+
+This module produces evidence, not a verdict: a span says which source range the parser
+was looking at, not that the program is safe or that the analysis is complete.
+-/
+
+/-- One CST node mapped to a source span and 1-based line/column. -/
+structure Scry.FuzzSpan where
+  /-- The preorder node id. -/
+  node : Nat
+  /-- The grammar's node kind. -/
+  kind : String
+  /-- `root`, `node`, `ERROR`, `MISSING` or `ERROR+MISSING`. -/
+  status : String
+  /-- The byte range `[start, stop)`. -/
+  span : Scry.Span
+  /-- 1-based line of `start` (byte-exact for the ASCII C slice). -/
+  line : Nat
+  /-- 1-based column of `start`. -/
+  column : Nat
+  /-- 1-based line of `stop`. -/
+  endLine : Nat
+  /-- 1-based column of `stop`. -/
+  endColumn : Nat
+
+/-- A fuzz input's deterministic CST summary. -/
+structure Scry.FuzzInput where
+  path : String
+  bytes : Nat
+  nodes : Nat
+  edges : Nat
+  roots : Nat
+  errors : Nat
+  root : Scry.FuzzSpan
+  /-- The first at most 64 `ERROR`/`MISSING` nodes, in preorder. -/
+  errorSpans : List Scry.FuzzSpan
+  /-- True when there were more error nodes than `errorSpans` keeps. -/
+  truncated : Bool
+
+/-- A parsed artifact: the summary plus the store and text the offset mapper needs. -/
+structure Scry.FuzzParsed where
+  input : Scry.FuzzInput
+  cst : Scry.CstStore
+  text : String
+
+-- ## Line/column
+
+/-- `(line, column)` of offset `off`, both 1-based, over characters. A newline at
+`off` is the last character of its line (its column), and `off` past the end is the
+position after the last character. -/
+partial def Scry.fuzzLineColGo (cs : List Char) (fuel line col : Nat) : Nat × Nat :=
+  match fuel with
+  | .zero => (line, col)
+  | .succ k => match cs with
+    | .nil => (line, col)
+    | .cons c rest =>
+      match Nat.beq (Char.code c) 10 with
+      | .true => Scry.fuzzLineColGo rest k (Nat.succ line) 1
+      | .false => Scry.fuzzLineColGo rest k line (Nat.succ col)
+
+/-- The 1-based line/column of `off` in `text`. -/
+def Scry.fuzzLineCol (text : String) (off : Nat) : Nat × Nat :=
+  Scry.fuzzLineColGo (String.chars text) off 1 1
+
+-- ## Nodes
+
+/-- `root`, `node`, `ERROR`, `MISSING` or `ERROR+MISSING`. -/
+def Scry.fuzzStatusOf (s : Scry.CstStore) (i : Nat) : String :=
+  let e := Scry.CstStore.errorOf s i;
+  let m := Scry.CstStore.missingOf s i;
+  match Bool.and e m with
+  | .true => "ERROR+MISSING"
+  | .false => match e with
+    | .true => "ERROR"
+    | .false => match m with
+      | .true => "MISSING"
+      | .false => match Scry.CstStore.parentOf s i with
+        | .none => "root"
+        | .some _ => "node"
+
+/-- Map node `i` to a span with its source line/column. -/
+def Scry.fuzzSpanOfNode (text : String) (s : Scry.CstStore) (i : Nat) : Scry.FuzzSpan :=
+  let sp := Scry.CstStore.spanOf s i;
+  let a := Scry.fuzzLineCol text sp.start;
+  let z := Scry.fuzzLineCol text sp.stop;
+  Scry.FuzzSpan.mk i (Scry.CstStore.kindName s i) (Scry.fuzzStatusOf s i) sp a.1 a.2 z.1 z.2
+
+/-- The number of roots (nodes without a parent). -/
+partial def Scry.fuzzRootCountGo (s : Scry.CstStore) (i n : Nat) (acc : Nat) : Nat :=
+  match Nat.lt i n with
+  | .false => acc
+  | .true => match Scry.CstStore.parentOf s i with
+    | .none => Scry.fuzzRootCountGo s (Nat.succ i) n (Nat.succ acc)
+    | .some _ => Scry.fuzzRootCountGo s (Nat.succ i) n acc
+
+/-- The number of roots (normally 1: tree-sitter's `translation_unit`). -/
+def Scry.fuzzRootCount (s : Scry.CstStore) : Nat :=
+  Scry.fuzzRootCountGo s 0 (Scry.CstStore.nodeCount s) 0
+
+/-- The first at most 64 error/missing nodes, in preorder. -/
+partial def Scry.fuzzErrorSpansGo (text : String) (s : Scry.CstStore) (i : Nat)
+    (acc : List Scry.FuzzSpan) : List Scry.FuzzSpan :=
+  match Nat.lt i (Scry.CstStore.nodeCount s) with
+  | .false => List.reverse acc
+  | .true =>
+    let isErr := Bool.or (Scry.CstStore.errorOf s i) (Scry.CstStore.missingOf s i);
+    let acc := match isErr with
+      | .true => match Nat.lt (List.length acc) 64 with
+        | .true => List.cons (Scry.fuzzSpanOfNode text s i) acc
+        | .false => acc
+      | .false => acc;
+    Scry.fuzzErrorSpansGo text s (Nat.succ i) acc
+
+/-- Build the deterministic summary. -/
+def Scry.fuzzInputOf (path : String) (text : String) (s : Scry.CstStore)
+    (errors roots : Nat) : Scry.FuzzInput :=
+  Scry.FuzzInput.mk path (Scry.Native.byteLength text) (Scry.CstStore.nodeCount s)
+    (Scry.CstStore.edgeCount s) roots errors (Scry.fuzzSpanOfNode text s 0)
+    (Scry.fuzzErrorSpansGo text s 0 .nil) (Nat.lt 64 errors)
+
+-- ## Offset mapping
+
+/-- Whether `off` is inside the node's inclusive byte range. -/
+def Scry.fuzzContains (sp : Scry.Span) (off : Nat) : Bool :=
+  Bool.and (Nat.le sp.start off) (Nat.le off sp.stop)
+
+/-- Whether node `cand` is a better (smaller, then later) span than `best`. -/
+def Scry.fuzzBetter (s : Scry.CstStore) (cand best : Nat) : Bool :=
+  let a := Scry.CstStore.spanOf s cand;
+  let b := Scry.CstStore.spanOf s best;
+  let la := Nat.sub a.stop a.start;
+  let lb := Nat.sub b.stop b.start;
+  match Nat.lt la lb with
+  | .true => .true
+  | .false => match Nat.lt lb la with
+    | .true => .false
+    | .false => match Nat.lt a.start b.start with
+      | .true => .false
+      | .false => match Nat.lt b.start a.start with
+        | .true => .true
+        | .false => Nat.lt best cand
+
+/-- The smallest node containing byte `off`; ties prefer the deeper (later) node. -/
+partial def Scry.fuzzBestGo (s : Scry.CstStore) (off i : Nat)
+    (best : Option Nat) : Option Nat :=
+  match Nat.lt i (Scry.CstStore.nodeCount s) with
+  | .false => best
+  | .true =>
+    let sp := Scry.CstStore.spanOf s i;
+    let best := match Scry.fuzzContains sp off with
+      | .false => best
+      | .true => match best with
+        | .none => .some i
+        | .some b => match Scry.fuzzBetter s i b with
+          | .true => .some i
+          | .false => .some b;
+    Scry.fuzzBestGo s off (Nat.succ i) best
+
+/-- The smallest CST node containing byte `off`, if any. -/
+def Scry.fuzzBestAt (text : String) (s : Scry.CstStore) (off : Nat) : Option Scry.FuzzSpan :=
+  match Scry.fuzzBestGo s off 0 .none with
+  | .none => .none
+  | .some i => .some (Scry.fuzzSpanOfNode text s i)
+
+-- ## Reading a file
+
+/-- Parse a file as text and summarise its CST. The shim always returns a recovery
+tree for C; a shim-level failure (not a parse error) is an `EIO` error. The driver
+only asks for a span map when the artifact is ASCII (no NUL), where character and
+byte offsets agree. -/
+def Scry.Fuzz.parseFile (path : String) : EIO Scry.FuzzParsed := do
+  text ← FS.readFile path;
+  st ← Scry.Native.parse "c" text;
+  cst ← EIO.lift (Scry.Native.toCstStore path st);
+  let errors := Scry.Native.errorCount st;
+  let roots := Scry.fuzzRootCount cst;
+  EIO.pure (Scry.FuzzParsed.mk (Scry.fuzzInputOf path text cst errors roots) cst text)
+
+-- ## JSON
+
+/-- One span as JSON. -/
+def Scry.fuzzSpanJson (x : Scry.FuzzSpan) : Json :=
+  Json.mkObj
+    [ ("node", Json.ofNat x.node)
+    , ("kind", Json.mkStr x.kind)
+    , ("status", Json.mkStr x.status)
+    , ("start", Json.ofNat x.span.start)
+    , ("stop", Json.ofNat x.span.stop)
+    , ("line", Json.ofNat x.line)
+    , ("column", Json.ofNat x.column)
+    , ("end_line", Json.ofNat x.endLine)
+    , ("end_column", Json.ofNat x.endColumn) ]
+
+/-- The input summary's fields (without the optional crash span). -/
+def Scry.fuzzInputFields (x : Scry.FuzzInput) : List (String × Json) :=
+  [ ("format", Json.mkStr "scry-fuzz-input")
+  , ("version", Json.ofNat 1)
+  , ("kind", Json.mkStr "dynamic")
+  , ("path", Json.mkStr x.path)
+  , ("bytes", Json.ofNat x.bytes)
+  , ("nodes", Json.ofNat x.nodes)
+  , ("edges", Json.ofNat x.edges)
+  , ("roots", Json.ofNat x.roots)
+  , ("errors", Json.ofNat x.errors)
+  , ("root", Scry.fuzzSpanJson x.root)
+  , ("error_spans", Json.mkArr (List.map Scry.fuzzSpanJson x.errorSpans))
+  , ("error_spans_truncated", Json.mkBool x.truncated) ]
+
+/-- The input summary without an offset. -/
+def Scry.fuzzInputJson (x : Scry.FuzzInput) : Json :=
+  Json.mkObj (Scry.fuzzInputFields x)
+
+/-- The input summary, plus `crash_offset` and the smallest node containing it (or
+`null` when the offset is absent or outside every node). -/
+def Scry.fuzzInputJsonAt (p : Scry.FuzzParsed) (off : Option Nat) : Json :=
+  let extra := match off with
+    | .none => [("crash_offset", Json.mkNull), ("crash_span", Json.mkNull)]
+    | .some o => match Scry.fuzzBestAt p.text p.cst o with
+      | .none => [("crash_offset", Json.ofNat o), ("crash_span", Json.mkNull)]
+      | .some sp => [("crash_offset", Json.ofNat o)
+                    , ("crash_span", Scry.fuzzSpanJson sp)];
+  Json.mkObj (List.append (Scry.fuzzInputFields p.input) extra)
+
+-- ## Text
+
+/-- `[start,stop) line:col-line:col`. -/
+def Scry.fuzzSpanText (x : Scry.FuzzSpan) : String :=
+  "[" ++ Nat.repr x.span.start ++ "," ++ Nat.repr x.span.stop ++ ") "
+  ++ x.status ++ " " ++ x.kind ++ " "
+  ++ Nat.repr x.line ++ ":" ++ Nat.repr x.column ++ "-"
+  ++ Nat.repr x.endLine ++ ":" ++ Nat.repr x.endColumn
+
+/-- A short text view for `scry fuzz-span FILE` without `--json`. -/
+def Scry.fuzzInputText (x : Scry.FuzzInput) : String :=
+  let head := "fuzz-span: " ++ x.path ++ "\n"
+    ++ "bytes: " ++ Nat.repr x.bytes ++ ", nodes: " ++ Nat.repr x.nodes
+    ++ ", edges: " ++ Nat.repr x.edges ++ ", roots: " ++ Nat.repr x.roots
+    ++ ", errors: " ++ Nat.repr x.errors ++ "\n"
+    ++ "root: " ++ Scry.fuzzSpanText x.root ++ "\n";
+  let spans := List.map (fun s => "  " ++ Scry.fuzzSpanText s ++ "\n") x.errorSpans;
+  String.append head (String.intercalate "" spans)

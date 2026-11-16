@@ -10,7 +10,7 @@ the canonical `wiz`:
 | file | expected |
 |---|---|
 | `01-l2-surface.wiz` | checks; `#eval`s print `4 1 2 2` and `9` (nodes) |
-| `02-match-on-wire.wiz` | `error: cannot match on a value of type r Phase.code` |
+| `02-match-on-wire.wiz` | checks since `match` on a signal became a case tree (H14 S4); it is the same 4-way decode as `03` |
 | `03-if-chain-workaround.wiz` | checks; `#eval`s print `0 1 2 3`, `15` (nodes), and the Verilog (3 comparators + 3 multiplexers + constants) |
 
 `01` is the staged entry's `clampedInc`/`addK` on the L2 surface (H14 S2 operators) plus

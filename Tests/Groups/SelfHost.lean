@@ -176,9 +176,11 @@ def selfhostC (file : String) (flags : Array String := #[]) : IO (Option String)
     unless out.exitCode == 0 do throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}")
     return some out.stdout
 
-/-- (A14) The C the self-hosted compiler prints for a set of module files: `input.wiz`
-is the root module, the others are written beside it (subdirectories included); `args`
-go to the compiler (`-I DIR`, `--rc`, …). -/
+/-- (A14) The C the self-hosted compiler's driver writes for a set of module files
+(`build input.wiz -o out.c`): `input.wiz` is the root module, the others are written
+beside it (subdirectories included); `args` go to the driver after the command (`-I DIR`,
+`--rc`, …). Without a command the compiler is the one-shot mode, which takes no roots: its
+flags alone are the host's usage (`SelfhostCliDiff`). -/
 def selfhostModuleC (files : List (String × String)) (args : Array String := #[]) :
     IO (Option String) := do
   match ← selfhostCompiler with
@@ -192,9 +194,11 @@ def selfhostModuleC (files : List (String × String)) (args : Array String := #[
     for (name, text) in files do
       if let some parent := (dir / name).parent then IO.FS.createDirAll parent
       IO.FS.writeFile (dir / name) text
-    let out ← IO.Process.output { cmd := "timeout", args := #["300", exe.toString] ++ args, cwd := dir }
-    unless out.exitCode == 0 do throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}")
-    return some out.stdout
+    let out ← IO.Process.output { cmd := "timeout",
+      args := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"] ++ args, cwd := dir }
+    unless out.exitCode == 0 do
+      throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}{out.stdout}")
+    return some (← IO.FS.readFile (dir / "out.c"))
 
 /-- The self-hosted compiler rejects a program: exit code 1, the errors on standard
 error, and no C (15g). -/

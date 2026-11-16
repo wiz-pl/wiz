@@ -4259,10 +4259,10 @@ def runOpUnfold (gs : Globals) (es : ES) (st : STacState) (g : Nat) (names : Lis
 -- `privBase` turns a private type's kernel name back into the source `T`)
 def ctorNamesOf (T : String) : List Ctor → List String
   | .nil => .nil
-  | .cons (.mk n _ _ _ _) rest => .cons (String.append (String.append T ".") n) (ctorNamesOf T rest)
+  | .cons (.mk n _ _ _ _ _) rest => .cons (String.append (String.append T ".") n) (ctorNamesOf T rest)
 def indCtorsOf (gs : Globals) : Val → List String
   | .vglued (.hconst n _ _ _ _) _ u => match Globals.ind gs n with
-    | .some (.mk _ _ _ _ cs _ _ _) => ctorNamesOf (privBase n) cs
+    | .some (.mk _ _ _ _ _ cs _ _ _) => ctorNamesOf (privBase n) cs
     | .none => indCtorsOf gs (u ())
   | .vglued _ _ u => indCtorsOf gs (u ())
   | _ => .nil
@@ -6852,7 +6852,8 @@ def structCmd (gs : Globals) (stx : Syntax) : Step :=
 --
 -- Not supported (errors): private fields, `outParam` (no rewrite of an output
 -- parameter's type) and `deriving` on a class (`attribute [default_instance]`/`[binop]`
--- are the prelude's registrations, `preludeStep`). A class at universe parameters (`class Repr.{u} (A : Type u)`) works: its
+-- are the prelude's registrations, `preludeStep`). A class at universe parameters
+-- (`class Repr.{u} (A : Type u)`) works: its
 -- methods carry the class's universe parameters (U2).
 def classFieldNames : List Syntax → List String
   | .nil => .nil

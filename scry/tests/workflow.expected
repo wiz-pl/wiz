@@ -1,0 +1,25 @@
+identity: a ./ prefix is normalized: ok
+identity: the rule is part of the id: ok
+identity: a path-shape change is a new id: ok
+identity: the line hash ignores whitespace: ok
+identity: the line hash sees a content change: ok
+triage: new -> confirmed: ok
+triage: new -> fixed is refused: ok
+triage: confirmed -> fixed: ok
+triage: false-positive can reopen: ok
+triage: fixed can reopen on a regression: ok
+triage: new -> confirmed -> fixed: ok
+store: round-trips one record: ok
+store: an unknown schema is refused: ok
+tier: command injection is T1: ok
+tier: use-after-free is T2: ok
+tier: buffer overflow is T3: ok
+tier: gets is N/A: ok
+witness: L3 validated is accepted: ok
+witness: input text becomes a deterministic file: ok
+witness: an unvalidated/L0 witness is rejected: ok
+repro: the fake compiler builds and the harness runs: ok
+repro: no sanitizer is reported: ok
+repro: dynamic.json records the compile command and exit: ok
+verify: clean/not-reported is an accepted exit: ok
+verify: still-reported is a failing exit: ok

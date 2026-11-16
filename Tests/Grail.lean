@@ -1098,8 +1098,10 @@ def toolchainGroup : Group where
         -- (a full scan: the manifests match the bytes)
         let v0 ← run #["cache", "verify", "--cache", cache.toString]
         checkEq 0 v0.exitCode
-        check ((v0.stdout.splitOn "0 modules").length == 1) s!"no modules verified: {v0.stdout}"
-        check ((v0.stdout.splitOn "0 unmanifested").length > 1) s!"unmanifested: {v0.stdout}"
+        -- (each layer prints `DIR: N modules, …, N unmanifested`; match the separators too,
+        -- or a read-only layer of 120 modules reads as an empty one)
+        check ((v0.stdout.splitOn ": 0 modules").length == 1) s!"no modules verified: {v0.stdout}"
+        check ((v0.stdout.splitOn ", 0 unmanifested").length > 1) s!"unmanifested: {v0.stdout}"
         -- (the generation index names its predecessor and an expiry)
         let m ← run #["cache", "manifest", "--cache", cache.toString, "--valid-days", "1"]
         checkEq 0 m.exitCode

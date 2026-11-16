@@ -1,0 +1,203 @@
+-- test: run
+import Sys
+import Text
+import Json
+import Scry.Project
+import Scry.ProjectIO
+import Scry.ProjectTaint
+import Scry.ProjectCache
+import Scry.TaintCmd
+-- Multi-file project driver tests:
+--
+-- * compile-database parsing (`arguments` vs `command`, flag filtering);
+-- * shared-header dedupe, the static-symbol qualification, duplicate and unresolved
+--   policy;
+-- * cross-TU taint (a source in app.c reaching a sink in io.c), per-file counts and
+--   checked certificates;
+-- * SARIF `artifacts` with relative URIs, `%SRCROOT%`, and an index on every result;
+-- * the per-TU parse cache: cold, warm, a changed declaration, and a corrupt entry.
+--
+-- `cc` must be on PATH (the same requirement as `scry project` itself).
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def build (dir : String) (cache : Scry.CacheOpts) :
+    EIO (Scry.Project × Scry.CacheStats) :=
+  Scry.ProjectIO.buildProject dir .none "cc" .true .false .false .nil cache
+
+def buildSkip (dir : String) : EIO (Scry.Project × Scry.CacheStats) :=
+  Scry.ProjectIO.buildProject dir .none "cc" .true .false .true .nil Scry.CacheOpts.none
+
+def reportOf (dir : String) (cache : Scry.CacheOpts) :
+    EIO (Scry.ProjectReport × Scry.CacheStats) := do
+  r ← build dir cache;
+  pack ← Scry.loadTaintPack .none;
+  EIO.pure (Scry.analyzeProject r.1 pack r.2, r.2)
+
+def jNat (j : Json) (k : String) : Nat :=
+  match Json.get j k with
+  | .some x => match Json.asNat x with | .some n => n | .none => 0
+  | .none => 0
+
+def jStr (j : Json) (k : String) : String :=
+  match Json.get j k with
+  | .some x => match Json.asString x with | .some s => s | .none => ""
+  | .none => ""
+
+def jList (j : Json) (k : String) : List Json :=
+  match Json.get j k with
+  | .some x => Json.asList x
+  | .none => .nil
+
+def contains (xs : List String) (x : String) : Bool := List.any (String.eq x) xs
+
+def countName (p : Scry.Project) (n : String) : Nat :=
+  List.length (List.filter (fun s => String.eq s n) p.paths)
+
+def main : IO Unit := EIO.toIO (do
+  -- path normalisation and URI escaping (the line-marker/artifact edge cases)
+  check "path: a/x/../b.c normalises to a/b.c"
+    (String.eq (Scry.normalisePath "a/x/../b.c") "a/b.c");
+  check "path: absolute normalisation keeps the root"
+    (String.eq (Scry.normalisePath "/a/./b/../c.c") "/a/c.c");
+  check "uri: a space is percent-encoded"
+    (String.eq (Scry.uriEscape "a b.c") "a%20b.c");
+
+  -- compile database: arguments and command forms, flags filtered
+  let dbText :=
+    "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"inc\",\"-DFOO=1\",\"" ++
+    "-c\",\"a.c\",\"-o\",\"a.o\",\"-MMD\"]}," ++
+    "{\"directory\":\"d\",\"file\":\"b.c\",\"command\":\"cc -Iinc2 -DBAR=2 -c b.c -o b.o\"}]";
+  match Scry.parseCompdb dbText with
+  | .error e => check ("compdb parse: " ++ e) .false
+  | .ok cmds => do
+    check "compdb: two entries" (Nat.beq (List.length cmds) 2);
+    let c1 := List.getD cmds 0 (Scry.CompileCommand.mk "" "" .nil);
+    let c2 := List.getD cmds 1 (Scry.CompileCommand.mk "" "" .nil);
+    check "compdb: -I and -D kept, -c/-o/-MMD dropped"
+      (Bool.and (contains c1.flags "-I") (Bool.and (contains c1.flags "inc")
+        (Bool.and (contains c1.flags "-DFOO=1")
+          (Bool.not (contains c1.flags "-o")))));
+    check "compdb: command form keeps -Iinc2 and -DBAR=2"
+      (Bool.and (contains c2.flags "-Iinc2") (contains c2.flags "-DBAR=2"));
+
+  -- duplicate non-static definitions: reported, first analysed, no crash
+  rd ← build "corpus/project/duplicate" Scry.CacheOpts.none;
+  let pd := rd.1;
+  check "duplicate: two units" (Nat.beq (List.length pd.units) 2);
+  check "duplicate: one duplicate name" (Nat.beq (List.length pd.dups) 1);
+  check "duplicate: both definitions in symbols" (Nat.beq (List.length pd.symbols) 3);
+  check "duplicate: only first definition analysed" (Nat.beq (List.length pd.analyzed) 2);
+  check "duplicate: call resolves to first definition"
+    (match pd.callGraph with
+      | .cons e _ => Bool.and (Nat.beq e.1 1) (Nat.beq e.2 0)
+      | .nil => .false);
+
+  -- unresolved call
+  rm ← build "corpus/project/missing" Scry.CacheOpts.none;
+  check "unresolved: one call" (Nat.beq (List.length rm.1.unresolved) 1);
+  check "unresolved: callee name" (match rm.1.unresolved with
+    | .cons u _ => String.eq u.2 "missing"
+    | .nil => .false);
+
+  -- shared header, static qualification and cross-TU call graph
+  rp ← build "corpus/project" Scry.CacheOpts.none;
+  let p := rp.1;
+  check "project: three real files" (Nat.beq (List.length p.realPaths) 3);
+  check "project: shared header appears once" (Nat.beq (countName p "math.h") 1);
+  check "project: static helper is unit-qualified"
+    (Bool.and (Nat.beq (List.length (p.funcIndices "static:0:helper")) 1)
+      (Nat.beq (List.length (p.funcIndices "static:helper")) 0));
+  check "project: three direct-call edges" (Nat.beq (List.length p.callGraph) 3);
+  check "project: no duplicates" (Nat.beq (List.length p.dups) 0);
+
+  -- --skip-broken: a missing include is recorded, not fatal
+  bad ← FS.createTempDir;
+  FS.writeFile (String.append bad "/good.c") "int good(void) { return 1; }\n";
+  FS.writeFile (String.append bad "/bad.c") "#include <missing-header.h>\nint bad(void) { return 0; }\n";
+  rs ← buildSkip bad;
+  check "skip-broken: one unit" (Nat.beq (List.length rs.1.units) 1);
+  check "skip-broken: one skipped TU" (Nat.beq (List.length rs.1.skipped) 1);
+  FS.removeAll bad;
+
+  -- cross-TU taint, per-file findings and certificates
+  rt ← reportOf "corpus/project/taint" Scry.CacheOpts.none;
+  let rep := rt.1;
+  check "taint: two findings" (Nat.beq (List.length rep.findings) 2);
+  check "taint: both checked" (Nat.beq (rep.checkedCount) 2);
+  check "taint: finding in io.c" (Nat.beq (rep.fileOf "io.c").findings 1);
+  check "taint: finding in util.c" (Nat.beq (rep.fileOf "util.c").findings 1);
+  check "taint: no finding in app.c" (Nat.beq (rep.fileOf "app.c").findings 0);
+  check "taint: path crosses the TU boundary"
+    (match rep.findings with
+      | .cons f _ => Bool.and (String.eq f.func "run_cmd")
+          (match f.path with
+            | .cons first _ => String.eq first.func "main"
+            | .nil => .false)
+      | .nil => .false);
+  check "taint: app.c and io.c helpers stay distinct"
+    (Bool.and (Nat.beq (List.length (rep.project.funcIndices "static:0:helper")) 1)
+      (Nat.beq (List.length (rep.project.funcIndices "static:1:helper")) 1));
+
+  -- SARIF: artifacts are relative, indexed, and every result names one
+  let sj := rep.sarifJson;
+  match Json.get sj "runs" with
+  | .none => check "sarif: runs" .false
+  | .some runs => match Json.asList runs with
+    | .nil => check "sarif: one run" .false
+    | .cons run _ => do
+      let arts := jList run "artifacts";
+      check "sarif: four artifacts" (Nat.beq (List.length arts) 4);
+      check "sarif: first artifact is app.c"
+        (match arts with
+          | .cons a _ => match Json.get a "location" with
+            | .some loc => String.eq (jStr loc "uri") "app.c"
+            | .none => .false
+          | .nil => .false);
+      let results := jList run "results";
+      check "sarif: one result per finding and warning"
+        (Nat.beq (List.length results)
+          (Nat.add (List.length rep.findings)
+            (Nat.add (List.length rep.boundaries) (List.length rep.memory))));
+      check "sarif: result artifact has uriBaseId and index"
+        (match results with
+          | .cons r _ => match Json.get r "locations" with
+            | .some ls => match Json.asList ls with
+              | .cons l _ => match Json.get l "physicalLocation" with
+                | .some pl => match Json.get pl "artifactLocation" with
+                  | .some al => Bool.and
+                      (String.eq (jStr al "uriBaseId") "%SRCROOT%")
+                      (match Json.get al "index" with
+                        | .some (.int .false n) => Nat.lt n 4
+                        | _ => .false)
+                  | .none => .false
+                | .none => .false
+              | .nil => .false
+            | .none => .false
+          | .nil => .false);
+
+  -- cache: cold, warm, changed declaration, corrupt entry
+  tmp ← FS.createTempDir;
+  let cacheDir := String.append tmp "/cache";
+  let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true cacheDir;
+  c1 ← build "corpus/project/taint" cache;
+  let s1 := c1.2;
+  check "cache: cold miss for every TU" (Bool.and (Nat.beq s1.hit 0) (Bool.and (Nat.beq s1.miss 3) (Nat.beq s1.write 3)));
+  c2 ← build "corpus/project/taint" cache;
+  let s2 := c2.2;
+  check "cache: warm hit for every TU" (Bool.and (Nat.beq s2.hit 3) (Nat.beq s2.miss 0));
+  -- corrupt every entry, then the run must recompute and rewrite
+  names ← FS.listDir cacheDir;
+  Scry.corruptCacheEntries cacheDir names;
+  c3 ← build "corpus/project/taint" cache;
+  let s3 := c3.2;
+  check "cache: corrupt entries are recomputed" (Bool.and (Nat.lt 0 s3.corrupt) (Nat.beq s3.hit 0));
+  c4 ← build "corpus/project/taint" cache;
+  let s4 := c4.2;
+  check "cache: warm again after corruption" (Nat.beq s4.hit 3);
+  FS.removeAll tmp;
+  check "cache: cleanup" .true)

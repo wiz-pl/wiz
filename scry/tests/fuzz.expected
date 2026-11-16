@@ -1,0 +1,21 @@
+broken: bytes: 34
+broken: nodes: 14
+broken: errors: 2
+broken: error spans: 2
+broken: one root: ok
+broken: root starts at 0: ok
+broken: root stops at EOF: ok
+broken: root kind: ok
+broken: not truncated: ok
+broken: first error is ERROR: ok
+broken: first error is on line 1: ok
+broken: first error has a span: ok
+offset: maps to a span: ok
+offset: past EOF has no span: ok
+json: format: ok
+json: dynamic kind: ok
+json: crash offset: ok
+json: crash span: ok
+json: error spans: ok
+json: no offset is null: ok
+json: no crash offset is null: ok
