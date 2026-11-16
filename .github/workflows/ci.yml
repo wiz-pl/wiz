@@ -206,6 +206,8 @@ jobs:
           scripts/trust-ledger.sh --check
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
+          python3 scripts/host-unsafe-ledger.py --check
+          Tests/host-unsafe-ledger/run.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
