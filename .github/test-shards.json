@@ -45,7 +45,7 @@
     "sys",
     "wasm"
   ]},
-  {"name": "library", "split": 7, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 8, "jobs": 4, "default": true, "select": [
     "=bus-crc",
     "=bus-law",
     "=bus-protocol",
