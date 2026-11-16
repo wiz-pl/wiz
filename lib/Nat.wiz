@@ -1,3 +1,4 @@
+import Classes
 import Logic
 import Order
 /-!
@@ -15,9 +16,9 @@ are `Nat.Le` and `Nat.Lt`.
 Main definitions: `congrArg`, `congrArg2`; the laws `Nat.add_comm`, `Nat.add_assoc`,
 `Nat.mul_comm`, `Nat.mul_assoc`, `Nat.mul_add`, `Nat.add_mul`, …; cancellation
 (`Nat.add_left_cancel`); `Nat.Le`, `Nat.Lt` with reflexivity, transitivity,
-antisymmetry, totality (`Nat.le_cases`) and monotonicity of `+` and `*`; `Nat.cmp`, a
-three-way comparison. Identities of `+` and `*` are better proved by `nat_ring!`
-(lib/Ring.wiz).
+antisymmetry, totality (`Nat.le_cases`) and monotonicity of `+` and `*`; the
+`Compare` instance (`Nat.compare`), a three-way comparison. Identities of `+` and `*`
+are better proved by `nat_ring!` (lib/Ring.wiz).
 
 ```
 import Nat
@@ -146,35 +147,18 @@ def Nat.beq_eq : (m n : Nat) → Nat.beq m n = .true → m = n
   | .succ _, .zero, h => absurd h.1
   | .succ m, .succ n, h => congrArg Nat.succ (Nat.beq_eq m n h)
 
-/-- The result of a three-way comparison. -/
-inductive Ordering where
-  | lt
-  | eq
-  | gt
-
-/-- Lexicographic combination: the first comparison, unless it is `eq`. -/
-def Ordering.andThen : Ordering → Ordering → Ordering
-  | .lt, _ => .lt
-  | .eq, o => o
-  | .gt, _ => .gt
-/-- `andThen` is `eq` only when both are. -/
+/-- `andThen` is `eq` only when both are (`Ordering` is the Prelude's). -/
 def Ordering.andThen_eq : (a b : Ordering) → Ordering.andThen a b = .eq → (a = .eq) ∧ (b = .eq)
   | .lt, _, h => absurd h.1
   | .eq, _, h => (rfl, h)
   | .gt, _, h => absurd h.1
 
-/-- Three-way comparison of natural numbers. -/
-def Nat.cmp : Nat → Nat → Ordering
-  | .zero, .zero => .eq
-  | .zero, .succ _ => .lt
-  | .succ _, .zero => .gt
-  | .succ m, .succ n => Nat.cmp m n
-/-- `Nat.cmp m n = .eq` gives `m = n`. -/
-def Nat.cmp_eq : (m n : Nat) → Nat.cmp m n = .eq → m = n
+/-- `Nat.compare m n = .eq` gives `m = n`. -/
+def Nat.compare_eq : (m n : Nat) → Nat.compare m n = .eq → m = n
   | .zero, .zero, _ => rfl
   | .zero, .succ _, h => absurd h.1
   | .succ _, .zero, h => absurd h.1
-  | .succ m, .succ n, h => congrArg Nat.succ (Nat.cmp_eq m n h)
+  | .succ m, .succ n, h => congrArg Nat.succ (Nat.compare_eq m n h)
 
 -- ## Order
 

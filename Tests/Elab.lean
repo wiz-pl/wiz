@@ -160,16 +160,18 @@ def Tree.depthAt : Tree → Nat → Nat
   | .node k, n => Tree.depthAt (k n) n + 1
 "
 
-/-- `import Prelude`, `import Word`, `import Functor` and `import Logic`. -/
+/-- `import Prelude`, `import Word`, `import Functor`, `import Logic` and `import Text`
+(which imports `Classes`). -/
 def preludeLoader : IO (Name → Option String) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let word ← IO.FS.readFile "lib/Word.wiz"
   let functor ← IO.FS.readFile "lib/Functor.wiz"
   let logic ← IO.FS.readFile "lib/Logic.wiz"
   let text ← IO.FS.readFile "lib/Text.wiz"
+  let classes ← IO.FS.readFile "lib/Classes.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "Word" then some word
     else if m == "Functor" then some functor else if m == "Logic" then some logic
-    else if m == "Text" then some text else none
+    else if m == "Text" then some text else if m == "Classes" then some classes else none
 
 /-- `ok`, with `lib/` available to `import` (the tests run from the package root). -/
 
@@ -421,10 +423,12 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   let textLib ← IO.FS.readFile "lib/Text.wiz"
   let derivingLib ← IO.FS.readFile "lib/Deriving.wiz"
+  let classesLib ← IO.FS.readFile "lib/Classes.wiz"
   let loader : Name → Option String := fun m =>
     if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Eff" then some effLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else if m == "Functor" then some functorLib
-    else if m == "Text" then some textLib else if m == "Deriving" then some derivingLib else none
+    else if m == "Text" then some textLib else if m == "Deriving" then some derivingLib
+    else if m == "Classes" then some classesLib else none
   let headers ← Build.preprocessHeaders (← toolchain) src
   let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule, cHeaders := (headers[·]?) }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
@@ -2147,9 +2151,10 @@ def derivingRun (input : String) : IO (CommandState ZeroOneMany) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let derivingLib ← IO.FS.readFile "lib/Deriving.wiz"
   let textLib ← IO.FS.readFile "lib/Text.wiz"
+  let classesLib ← IO.FS.readFile "lib/Classes.wiz"
   let loader : Name → Option String := fun m =>
     if m == "Prelude" then some prelude else if m == "Deriving" then some derivingLib
-    else if m == "Text" then some textLib else none
+    else if m == "Text" then some textLib else if m == "Classes" then some classesLib else none
   pure (runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule })
 
 def okDeriving (input : String) (infos : List String := []) : IO Unit := do

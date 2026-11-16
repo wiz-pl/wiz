@@ -148,7 +148,7 @@ def Hdl.binAux : Nat → Nat → List Char → List Char
 /-- `v` as `w` binary digits: `Hdl.bin 4 5 = "0101"` (VCD values are written so). -/
 def Hdl.bin (w v : Nat) : String := String.mk (Hdl.binAux w v List.nil)
 /-- String equality. -/
-def Hdl.strEq (a b : String) : Bool := String.beq a b
+def Hdl.strEq (a b : String) : Bool := BEq.beq a b
 /-- A string as a key of an `HTrie` (its character codes). -/
 def Hdl.strKey (s : String) : List Nat := match s with
   | .mk cs => Hdl.map Char.code cs
@@ -3385,14 +3385,14 @@ def HdlDerive.lastName : List ParamView → String
   | .cons _ ps => HdlDerive.lastName ps
 /-- Syntax without one level of parentheses. -/
 def HdlDerive.unparen (t : Syntax) : Syntax := match t with
-  | .node k args => (match String.beq k "term.paren" with
+  | .node k args => (match BEq.beq k "term.paren" with
     | .true => SyntaxF.nth args 1
     | .false => t)
   | _ => t
 /-- A field type `h a₁ … aₖ` split into (`h a₁ … aₖ₋₁`, `aₖ`): the bundle or representation
 and what it is applied to. -/
 def HdlDerive.split (t : Syntax) : Syntax × Syntax := match HdlDerive.unparen t with
-  | .node k args => (match String.beq k "term.app" with
+  | .node k args => (match BEq.beq k "term.app" with
     | .true =>
       let ω xs := HdlDerive.list (match Syntax.getArg (.node k args) 1 with
         | .node _ l => l
@@ -3402,14 +3402,14 @@ def HdlDerive.split (t : Syntax) : Syntax × Syntax := match HdlDerive.unparen t
   | _ => (.missing, .missing)
 /-- Whether syntax is the variable `r`. -/
 def HdlDerive.isVar (r : String) (t : Syntax) : Bool := match HdlDerive.unparen t with
-  | .node k args => Bool.and (String.beq k "term.ident") (match SyntaxF.nth args 0 with
-    | .ident x => String.beq x r
+  | .node k args => Bool.and (BEq.beq k "term.ident") (match SyntaxF.nth args 0 with
+    | .ident x => BEq.beq x r
     | _ => .false)
   | _ => .false
 
 /-- `G` ↦ `G.suffix`, for an identifier. -/
 def HdlDerive.identSuffixed (suffix : String) (t : Syntax) : Syntax := match HdlDerive.unparen t with
-  | .node k args => (match String.beq k "term.ident" with
+  | .node k args => (match BEq.beq k "term.ident" with
     | .true => (match SyntaxF.nth args 0 with
       | .ident x => Syntax.mkVar (String.append x suffix)
       | _ => t)
@@ -3417,7 +3417,7 @@ def HdlDerive.identSuffixed (suffix : String) (t : Syntax) : Syntax := match Hdl
   | _ => t
 /-- `G a₁ … aₖ` ↦ `G.suffix a₁ … aₖ` (a nested bundle's `code`, `pack`, `unpack`). -/
 def HdlDerive.suffixed (suffix : String) (t : Syntax) : Syntax := match HdlDerive.unparen t with
-  | .node k args => (match String.beq k "term.app" with
+  | .node k args => (match BEq.beq k "term.app" with
     | .true => Syntax.mkApp (HdlDerive.identSuffixed suffix (SyntaxF.nth args 0))
         (HdlDerive.list (match Syntax.getArg (.node k args) 1 with
           | .node _ l => l

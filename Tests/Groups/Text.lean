@@ -20,7 +20,7 @@ def textGroup : Group where
           okLibs s!"import Text\nimport {m}\n#eval Nat.repr 120" ["\"120\""]
           okLibs s!"import {m}\nimport Text\n#eval String.eq \"ab\" \"ab\"" [".true"]
         okLibs ("import Json\nimport Deriving\nimport Hoare\nimport Hdl.Core\nimport Functor\nimport Text\n" ++
-          "#eval List.reverse (.cons 1 (.cons 2 .nil))\n#eval String.beq \"a\" \"b\"")
+          "#eval List.reverse (.cons 1 (.cons 2 .nil))\n#eval BEq.beq \"a\" \"b\"")
           [".cons 2 (.cons 1 .nil)", ".false"] },
     { name := "split, join, trim, replace, prefixes, numbers (#eval)", run := fun _ =>
         okLibs ("import Text\n#eval String.splitOn \"a,b,,c\" \",\"\n#eval String.splitOn \"a::b::\" \"::\"\n" ++
@@ -29,11 +29,11 @@ def textGroup : Group where
           "#eval String.stripPrefix \"refs/tags/v1\" \"refs/tags/\"\n#eval String.stripSuffix \"v1^{}\" \"^{}\"\n" ++
           "#eval String.endsWith \"abc\" \"bc\"\n#eval String.contains \"hello world\" \"o w\"\n" ++
           "#eval String.parseNat \"1203\"\n#eval String.parseNat \"12a\"\n#eval Nat.repr 1234567890123\n" ++
-          "#eval String.lt \"abc\" \"abd\"\n#eval String.dropEnd 3 \"abcdef\"\n" ++
+          "#eval Compare.compare \"abc\" \"abd\"\n#eval String.dropEnd 3 \"abcdef\"\n" ++
           "#eval String.lookup \"b\" (.cons (\"a\", 1) (.cons (\"b\", 2) .nil))\n")
           [".cons \"a\" (.cons \"b\" (.cons \"\" (.cons \"c\" .nil)))", ".cons \"a\" (.cons \"b\" (.cons \"\" .nil))",
            ".cons \"abc\" .nil", "\"a, b\"", "\"hi there\"", "\"it'\\\\''s\"", ".some \"v1\"", ".some \"v1\"",
-           ".true", ".true", ".some 1203", ".none", "\"1234567890123\"", ".true", "\"abc\"", ".some 2"] },
+           ".true", ".true", ".some 1203", ".none", "\"1234567890123\"", ".lt", "\"abc\"", ".some 2"] },
     { name := "compiled: long strings stay linear", run := fun _ =>
         -- 200000 characters split, joined and trimmed: quadratic code would not finish
         ioRun ("import IO\nimport Text\ndef build : Nat → List Char → List Char\n  | .zero, acc => acc\n" ++

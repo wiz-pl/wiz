@@ -1074,6 +1074,7 @@ def serverGroup : Group where
         -- plus whatever Optic/FeralCore import on this tree (Result, Logic, OpticDerive and
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
         for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
+                       ("Classes", "lib/Classes.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
                        ("Result", "lib/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do

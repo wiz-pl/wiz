@@ -31,7 +31,7 @@ def OpticDerive.pis : List ParamView → Syntax → Syntax
 /-- the constructor's arguments, with `x` for field `target` and `s.g` for the others -/
 def OpticDerive.mkArgs (s x : Syntax) (target : String) : List FieldView → List Syntax
   | .nil => .nil
-  | .cons f fs => .cons (match String.beq (FieldView.name f) target with
+  | .cons f fs => .cons (match BEq.beq (FieldView.name f) target with
       | .true => x
       | .false => Derive.proj s (FieldView.name f)) (OpticDerive.mkArgs s x target fs)
 

@@ -1,0 +1,205 @@
+import Prelude
+/-!
+# Classes
+
+The classes for comparing and showing values (`import Classes`): `Inhabited` (a
+default value), `BEq` (Boolean equality), `Compare` (a three-way order) and `Repr` (a
+value as Wiz source). They are plain type classes, so a library gives one instance per
+type and every caller finds it by instance resolution instead of calling a
+type-specific `X.eq`/`X.cmp` function. `lib/Deriving.wiz` derives them for an inductive
+type (`deriving BEq, Repr`).
+
+This module also gives the Prelude's types their instances (`Bool`, `Nat`, `Char`,
+`String`, `List`, `Option`, pairs and `Unit`). The ordered types compare with
+`Ordering` (`lt`, `eq`, `gt`); `Compare` instances for `Int`, `String` and the word
+types live with those types.
+
+```
+import Classes
+
+#eval BEq.beq [1, 2] [1, 3]          -- .false
+#eval Compare.compare 'a' 'b'        -- .lt
+#eval Repr.repr (Option.some 1)      -- "Option.some 1"
+```
+
+(The tour's `Describe` class, examples/tour/04-classes.wiz, shows how to write one.)
+-/
+
+/-- Types with a chosen value, `Inhabited.default`. Derivable: the first constructor
+without recursive or proof fields, at `default` values. -/
+class Inhabited.{u} (A : Type u) where
+  default : A
+/-- Boolean equality, `BEq.beq a b`. Derivable: the same constructor, and equal fields
+(proof fields are not compared). -/
+class BEq.{u} (A : Type u) where
+  beq : A → A → Bool
+/-- Keys with a total order. `compare a b` must be `.lt` exactly when `a < b`, `.eq`
+exactly when `a = b`, and `.gt` otherwise. -/
+class Compare (K : Type) where
+  compare : K → K → Ordering
+/-- Showing values as Wiz source. `reprPrec a p` is `a` as Wiz source, in parentheses if
+it is an application and `p` is the precedence of an argument (1024). Derivable:
+`T.c a b` (in parentheses at argument position), `T.c` for a constant. -/
+class Repr.{u} (A : Type u) where
+  reprPrec : A → Nat → String
+
+/-- A value as Wiz source, at the top level (no parentheses): `Repr.repr (Option.some 1)`
+is `"Option.some 1"`. -/
+def Repr.repr.{u} {A : Type u} [Repr A] (a : A) : String := Repr.reprPrec a 0
+/-- Put an application in parentheses when it is shown at argument position (`p` ≥ 1024). -/
+def Repr.addAppParen (s : String) (p : Nat) : String := match Nat.lt p 1024 with
+  | .true => s
+  | .false => String.append "(" (String.append s ")")
+
+-- ## The Prelude's types
+
+-- Bool: `false` before `true`, as the constructors are.
+
+/-- The default Boolean is `false` (the first constructor). -/
+instance : Inhabited Bool := Inhabited.mk .false
+/-- Booleans are equal when they are the same constructor. -/
+def Bool.beq : Bool → Bool → Bool
+  | .false, .false => .true
+  | .true, .true => .true
+  | _, _ => .false
+/-- `Bool.beq`. -/
+instance : BEq Bool := BEq.mk Bool.beq
+/-- `false` comes before `true`. -/
+def Bool.compare : Bool → Bool → Ordering
+  | .false, .false => .eq
+  | .false, .true => .lt
+  | .true, .true => .eq
+  | .true, .false => .gt
+/-- Booleans are compared by `Bool.compare`. -/
+instance : Compare Bool := Compare.mk Bool.compare
+/-- `Bool.true` or `Bool.false`. -/
+instance : Repr Bool where
+  reprPrec := fun b _ => match b with
+    | .true => "Bool.true"
+    | .false => "Bool.false"
+
+-- Nat: equality is the native `Nat.beq`, the order the native `Nat.lt` (in compiled
+-- code these are builtins; `Nat.compare` would otherwise recurse once per unary `succ`).
+
+/-- The default natural number is `0`. -/
+instance : Inhabited Nat := Inhabited.mk 0
+/-- `Nat.beq`. -/
+instance : BEq Nat := BEq.mk Nat.beq
+/-- Three-way comparison of natural numbers, through the native `Nat.lt` and `Nat.beq`. -/
+def Nat.compare (a b : Nat) : Ordering := match Nat.lt a b with
+  | .true => .lt
+  | .false => match Nat.beq a b with
+    | .true => .eq
+    | .false => .gt
+/-- Natural numbers are compared by `Nat.compare`. -/
+instance : Compare Nat := Compare.mk Nat.compare
+/-- A decimal numeral (`Nat.repr`). -/
+instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
+
+-- Char: by code point.
+
+/-- The default character is `Char.mk 0`, the null character. -/
+instance : Inhabited Char := Inhabited.mk (Char.mk 0)
+/-- Characters are equal by code point. -/
+instance : BEq Char := BEq.mk (fun a b => Nat.beq (Char.code a) (Char.code b))
+/-- Characters are ordered by code point. -/
+instance : Compare Char := Compare.mk (fun a b => Nat.compare (Char.code a) (Char.code b))
+/-- A character as `Char.mk <code>`. -/
+instance : Repr Char := Repr.mk (fun c _ => String.append "Char.mk " (Nat.repr (Char.code c)))
+
+-- List: componentwise, in order.
+
+/-- Equality of lists, by an equality of elements. -/
+def List.beq {A : Type} [BEq A] : List A → List A → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => match BEq.beq a b with
+    | .true => List.beq as bs
+    | .false => .false
+  | _, _ => .false
+/-- Lists are equal when they have the same elements. -/
+instance {A : Type} [BEq A] : BEq (List A) := BEq.mk List.beq
+/-- The default list is empty. -/
+instance {A : Type} : Inhabited (List A) := Inhabited.mk .nil
+/-- Lexicographic comparison of lists: a proper prefix is smaller, then the first
+different element decides. -/
+def List.compare {A : Type} [Compare A] : List A → List A → Ordering
+  | .nil, .nil => .eq
+  | .nil, .cons _ _ => .lt
+  | .cons _ _, .nil => .gt
+  | .cons a as, .cons b bs => Ordering.andThen (Compare.compare a b) (List.compare as bs)
+/-- Lists are compared lexicographically. -/
+instance {A : Type} [Compare A] : Compare (List A) := Compare.mk List.compare
+/-- A list as `List.cons a (List.cons b List.nil)`, the shape the deriver shows. -/
+def List.reprPrec {A : Type} [Repr A] : List A → Nat → String
+  | .nil, _ => "List.nil"
+  | .cons a as, p =>
+    Repr.addAppParen
+      (String.append "List.cons " (String.append (Repr.reprPrec a 1024) (String.append " " (List.reprPrec as 1024))))
+      p
+/-- A list is shown in the constructors' spelling. -/
+instance {A : Type} [Repr A] : Repr (List A) := Repr.mk List.reprPrec
+
+-- Option: `none` before `some`, and the value inside.
+
+/-- Options are equal when both are `none` or both are `some` of equal values. -/
+def Option.beq {A : Type} [BEq A] : Option A → Option A → Bool
+  | .none, .none => .true
+  | .some a, .some b => BEq.beq a b
+  | _, _ => .false
+/-- `Option.beq`. -/
+instance {A : Type} [BEq A] : BEq (Option A) := BEq.mk Option.beq
+/-- The default option is `none`. -/
+instance {A : Type} : Inhabited (Option A) := Inhabited.mk .none
+/-- `none` comes before any `some`; two `some`s compare their values. -/
+def Option.compare {A : Type} [Compare A] : Option A → Option A → Ordering
+  | .none, .none => .eq
+  | .none, .some _ => .lt
+  | .some _, .none => .gt
+  | .some x, .some y => Compare.compare x y
+/-- Options are compared by `Option.compare`. -/
+instance {A : Type} [Compare A] : Compare (Option A) := Compare.mk Option.compare
+/-- `Option.some x` (parenthesized at argument position), or `Option.none`. -/
+def Option.reprPrec {A : Type} [Repr A] : Option A → Nat → String
+  | .none, _ => "Option.none"
+  | .some a, p => Repr.addAppParen (String.append "Option.some " (Repr.reprPrec a 1024)) p
+/-- An option is shown in the constructors' spelling. -/
+instance {A : Type} [Repr A] : Repr (Option A) := Repr.mk Option.reprPrec
+
+-- Pairs and Unit.
+
+/-- Pairs are equal when both components are. -/
+instance {A B : Type} [BEq A] [BEq B] : BEq.{0} (A × B) :=
+  BEq.mk (fun p q => Bool.and (BEq.beq p.1 q.1) (BEq.beq p.2 q.2))
+/-- The default pair is the pair of defaults. -/
+instance {A B : Type} [Inhabited A] [Inhabited B] : Inhabited.{0} (A × B) :=
+  Inhabited.mk (Inhabited.default, Inhabited.default)
+/-- A pair as `(a, b)`. -/
+instance {A B : Type} [Repr A] [Repr B] : Repr.{0} (A × B) :=
+  Repr.mk (fun p _ =>
+    String.append "(" (String.append (Repr.repr p.1) (String.append ", " (String.append (Repr.repr p.2) ")"))))
+
+/-- `Unit` has one value. -/
+instance : Inhabited Unit := Inhabited.mk ()
+/-- Any two units are equal. -/
+instance : BEq Unit := BEq.mk (fun _ _ => .true)
+/-- The unit value as `()`. -/
+instance : Repr Unit := Repr.mk (fun _ _ => "()")
+
+-- String: by code point, character by character.
+
+/-- Equality of strings, by characters. It is also the implementation of `BEq String`,
+which programs should use. -/
+def String.eq : String → String → Bool
+  | .mk a, .mk b => List.beq a b
+/-- Strings are equal when their characters are. -/
+instance : BEq String := BEq.mk String.eq
+/-- The default string is empty. -/
+instance : Inhabited String := Inhabited.mk ""
+/-- Strings compare by characters: lexicographically by code point. -/
+def String.compare : String → String → Ordering
+  | .mk a, .mk b => List.compare a b
+/-- Strings are compared by `String.compare`. -/
+instance : Compare String := Compare.mk String.compare
+/-- The string in double quotes (no escaping). -/
+instance : Repr String := Repr.mk (fun s _ =>
+  String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))

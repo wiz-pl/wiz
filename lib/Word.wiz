@@ -1,3 +1,4 @@
+import Classes
 import Prelude
 
 /-!
@@ -477,6 +478,19 @@ def I16.ofNeg (n : Nat) : I16 := IntN.ofNeg 16 n
 def I32.ofNeg (n : Nat) : I32 := IntN.ofNeg 32 n
 /-- `-n` as an `I64` (mod `2^64`): `I64.ofNeg 1` is `-1`. -/
 def I64.ofNeg (n : Nat) : I64 := IntN.ofNeg 64 n
+
+-- ## Equality and order of words (`BEq`, `Compare`, lib/Classes.wiz)
+
+/-- Words are equal when their values are. -/
+instance {w : Nat} : BEq (UIntN w) := BEq.mk UIntN.beq
+/-- Three-way comparison of words, unsigned, through `UIntN.lt` and `UIntN.beq`. -/
+def UIntN.compare {w : Nat} (a b : UIntN w) : Ordering := match UIntN.lt a b with
+  | .true => .lt
+  | .false => match UIntN.beq a b with
+    | .true => .eq
+    | .false => .gt
+/-- Words are compared unsigned, by `UIntN.compare`. -/
+instance {w : Nat} : Compare (UIntN w) := Compare.mk UIntN.compare
 
 -- Native implementations for compiled code (runtime/). `#eval` and `#run` run the
 -- definitions above; the word group's tables check that both agree.

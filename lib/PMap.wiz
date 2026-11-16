@@ -11,9 +11,10 @@ rebalancing rotations).
 
 The representation is a size-balanced binary search tree (a weight-balanced tree, after
 Adams; the same scheme as Haskell's `Data.Map`), with the subtree size stored in each
-node. Keys are ordered by a `Compare` instance: `compare k k'` is `.lt`, `.eq` or `.gt`.
-Instances are provided for `Nat` (through the builtin `Nat.lt`/`Nat.beq`) and `U64`
-(unsigned); any other key type gets one by defining its `Compare` instance. (`U64Map` in lib/WordMap.wiz is the specialised, in-place when unique
+node. Keys are ordered by a `Compare` instance (lib/Classes.wiz): `compare k k'` is `.lt`,
+`.eq` or `.gt`. Instances are provided for `Nat` (through the builtin `Nat.lt`/`Nat.beq`)
+and `U64` (unsigned); any other key type gets one by defining its `Compare` instance.
+(`U64Map` in lib/WordMap.wiz is the specialised, in-place when unique
 map with a native hash-table backend; `PMap` is the pure model a future `U64Map` can be
 defined against, see `wiz-notes/persistent-data.md`.)
 
@@ -42,31 +43,8 @@ Laws (`find_empty`, `size_empty`) are proved on the definitions. The other expec
 rotations; they are checked by the tests (group `persistent`) rather than proved here.
 -/
 
--- (`Ordering` is lib/Nat.wiz's three-way comparison type.)
-
-/-- Keys with a total order. `compare a b` must be `.lt` exactly when `a < b`, `.eq`
-exactly when `a = b`, and `.gt` otherwise. -/
-class Compare (K : Type) where
-  compare : K → K → Ordering
-
-/-- Three-way comparison of natural numbers, through the native `Nat.lt` and `Nat.beq`
-(in compiled code these are builtins; `Nat.cmp` would recurse once per unary `succ`). -/
-def Nat.compare (a b : Nat) : Ordering := match Nat.lt a b with
-  | .true => .lt
-  | .false => match Nat.beq a b with
-    | .true => .eq
-    | .false => .gt
-/-- Natural numbers are compared by `Nat.compare`. -/
-instance : Compare Nat := Compare.mk Nat.compare
-
-/-- Three-way comparison of 64-bit words (unsigned). -/
-def U64.cmp (a b : U64) : Ordering := match UIntN.lt a b with
-  | .true => .lt
-  | .false => match UIntN.beq a b with
-    | .true => .eq
-    | .false => .gt
-/-- 64-bit words are compared unsigned, by `U64.cmp`. -/
-instance : Compare U64 := Compare.mk U64.cmp
+-- (`Ordering` is the Prelude's three-way comparison type, and `Compare` is
+-- lib/Classes.wiz's class.)
 
 -- ## The tree
 
@@ -254,6 +232,21 @@ def PMap.size_empty {K V : Type} : PMap.size (PMap.empty : PMap K V) = .zero := 
 def PMap.find_empty {K V : Type} [c : Compare K] (k : K) :
     PMap.find (PMap.empty : PMap K V) k = .none := rfl
 
+-- ## Equality, a default and a printer
+
+/-- Two maps are equal when they have the same entries. -/
+def PMap.beq {K V : Type} [BEq K] [BEq V] (a b : PMap K V) : Bool :=
+  List.beq (PMap.toList a) (PMap.toList b)
+/-- Maps are equal when their entries are (`PMap.beq`). -/
+instance {K V : Type} [BEq K] [BEq V] : BEq (PMap K V) := BEq.mk PMap.beq
+/-- The default map is the empty one. -/
+instance {K V : Type} : Inhabited (PMap K V) := Inhabited.mk PMap.empty
+/-- A map as `PMap.fromList` of its entries, in key order. -/
+def PMap.reprPrec {K V : Type} [Repr K] [Repr V] (m : PMap K V) (_ : Nat) : String :=
+  String.append "PMap.fromList " (List.reprPrec (PMap.toList m) 1024)
+/-- A map is shown as a `PMap.fromList` call. -/
+instance {K V : Type} [Repr K] [Repr V] : Repr (PMap K V) := Repr.mk PMap.reprPrec
+
 -- ## PSet
 
 /-- A persistent set of keys: a `PMap K Unit`. -/
@@ -296,3 +289,9 @@ def PSet.size_empty {K : Type} : PSet.size (PSet.empty : PSet K) = .zero := rfl
 /-- Nothing is in the empty set. -/
 def PSet.contains_empty {K : Type} [c : Compare K] (k : K) :
     PSet.contains (PSet.empty : PSet K) k = .false := rfl
+
+/-- A set as `PSet.fromList` of its elements, in key order. -/
+def PSet.reprPrec {K : Type} [Repr K] (s : PSet K) (_ : Nat) : String :=
+  String.append "PSet.fromList " (List.reprPrec (PSet.toList s) 1024)
+/-- A set is shown as a `PSet.fromList` call. -/
+instance {K : Type} [Repr K] : Repr (PSet K) := Repr.mk PSet.reprPrec

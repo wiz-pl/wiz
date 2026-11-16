@@ -57,7 +57,7 @@ def Ring.Key.cmp : List Nat → List Nat → Ordering
   | .nil, .nil => .eq
   | .nil, .cons _ _ => .lt
   | .cons _ _, .nil => .gt
-  | .cons x xs, .cons y ys => Ordering.andThen (Nat.cmp x y) (Ring.Key.cmp xs ys)
+  | .cons x xs, .cons y ys => Ordering.andThen (Nat.compare x y) (Ring.Key.cmp xs ys)
 
 /-- Keys that compare `eq` are equal. -/
 def Ring.Key.cmp_eq : (xs ys : List Nat) → Ring.Key.cmp xs ys = .eq → xs = ys
@@ -65,8 +65,8 @@ def Ring.Key.cmp_eq : (xs ys : List Nat) → Ring.Key.cmp xs ys = .eq → xs = y
   | .nil, .cons _ _, h => absurd h.1
   | .cons _ _, .nil, h => absurd h.1
   | .cons x xs, .cons y ys, h =>
-    let hs := Ordering.andThen_eq (Nat.cmp x y) (Ring.Key.cmp xs ys) h;
-    congrArg2 List.cons (Nat.cmp_eq x y hs.1) (Ring.Key.cmp_eq xs ys hs.2)
+    let hs := Ordering.andThen_eq (Nat.compare x y) (Ring.Key.cmp xs ys) h;
+    congrArg2 List.cons (Nat.compare_eq x y hs.1) (Ring.Key.cmp_eq xs ys hs.2)
 
 /-- The product of the atoms of a key. -/
 def Ring.Key.prod (ρ : List Nat) : List Nat → Nat

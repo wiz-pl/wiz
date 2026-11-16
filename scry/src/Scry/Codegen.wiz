@@ -117,11 +117,10 @@ def Scry.dedup : List String → List String
 /-- Insert `s` into a sorted string list (dropping a duplicate). -/
 def Scry.insertStr (s : String) : List String → List String
   | .nil => .cons s .nil
-  | .cons t rest => match String.lt s t with
-    | .true => .cons s (.cons t rest)
-    | .false => match String.eq s t with
-      | .true => .cons t rest
-      | .false => .cons t (Scry.insertStr s rest)
+  | .cons t rest => match Compare.compare s t with
+    | .lt => .cons s (.cons t rest)
+    | .eq => .cons t rest
+    | .gt => .cons t (Scry.insertStr s rest)
 
 /-- Insertion sort (stable, duplicates dropped); the schema's order must not depend on
 `node-types.json`'s object key order. -/

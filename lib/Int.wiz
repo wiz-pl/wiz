@@ -1,3 +1,4 @@
+import Classes
 import Prelude
 /-!
 # Int
@@ -9,8 +10,9 @@ computes it on numerals and compiled code runs `Nat`'s natives on the magnitudes
 `#eval` prints `-5`, not `.negSucc 4` (`builtin int`).
 
 Main definitions: the type `Int`, its arithmetic (`Int.add`, `Int.mul`, `Int.div`,
-`Int.mod`, …) with the usual operator instances, comparisons (`Int.lt`, `Int.le`,
-`Int.beq`) and a few lemmas (`Int.neg_neg`, `Int.add_zero`, …).
+`Int.mod`, …) with the usual operator instances, comparisons (`Int.lt`, `Int.le`, and
+the `BEq`/`Compare`/`Inhabited`/`Repr` instances) and a few lemmas (`Int.neg_neg`,
+`Int.add_zero`, …).
 
 ```
 import Int
@@ -80,11 +82,6 @@ def Int.div (a b : Int) : Int :=
 /-- The remainder of `Int.div`: it takes the dividend's sign, `-7 % 2 = -1`; `a % 0 = a`. -/
 def Int.mod (a b : Int) : Int := Int.ofSign (Int.isNeg a) (Nat.mod (Int.natAbs a) (Int.natAbs b))
 
-/-- Equality test. -/
-def Int.beq : Int → Int → Bool
-  | .ofNat m, .ofNat n => Nat.beq m n
-  | .negSucc m, .negSucc n => Nat.beq m n
-  | _, _ => .false
 /-- `a < b`. -/
 def Int.lt : Int → Int → Bool
   | .ofNat m, .ofNat n => Nat.lt m n
@@ -93,6 +90,32 @@ def Int.lt : Int → Int → Bool
   | .negSucc m, .negSucc n => Nat.lt n m
 /-- `a ≤ b`. -/
 def Int.le (a b : Int) : Bool := Bool.not (Int.lt b a)
+
+/-- Integers are equal when they have the same representation. -/
+instance : BEq Int where
+  beq := fun a b => match a with
+    | .ofNat m => match b with
+      | .ofNat n => Nat.beq m n
+      | .negSucc _ => .false
+    | .negSucc m => match b with
+      | .ofNat _ => .false
+      | .negSucc n => Nat.beq m n
+/-- Three-way comparison of integers, through `Int.lt` and `BEq.beq`. -/
+def Int.compare (a b : Int) : Ordering := match Int.lt a b with
+  | .true => .lt
+  | .false => match BEq.beq a b with
+    | .true => .eq
+    | .false => .gt
+/-- Integers are compared by `Int.compare`. -/
+instance : Compare Int := Compare.mk Int.compare
+/-- The default integer is `0`. -/
+instance : Inhabited Int := Inhabited.mk (.ofNat 0)
+/-- `a` in decimal, with a minus sign when it is negative: `Int.repr (-5)` is `"-5"`. -/
+def Int.repr : Int → String
+  | .ofNat n => Nat.repr n
+  | .negSucc n => String.append "-" (Nat.repr (Nat.succ n))
+/-- An integer in decimal. -/
+instance : Repr Int := Repr.mk (fun a _ => Int.repr a)
 
 /-- Numerals: a literal `n : Int` is `Int.ofNat n`. -/
 instance {ω n : Nat} : OfNat Int n := OfNat.mk (.ofNat n)

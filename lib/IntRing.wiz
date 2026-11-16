@@ -275,8 +275,8 @@ attribute [macro term.intPairRing] IntPairRing.expand
 
 -- ## The normaliser with integer coefficients
 
-/-- `Int.beq` decides equality. -/
-def Int.beq_eq : (a b : Int) → Int.beq a b = .true → a = b
+/-- `BEq.beq` decides equality. -/
+def Int.beq_eq : (a b : Int) → BEq.beq a b = .true → a = b
   | .ofNat m, .ofNat n, h => congrArg Int.ofNat (Nat.beq_eq m n h)
   | .negSucc m, .negSucc n, h => congrArg Int.negSucc (Nat.beq_eq m n h)
   | .ofNat _, .negSucc _, h => absurd h.1
@@ -305,7 +305,7 @@ def IntPoly.addEq : Bool → Int → List Nat → IntPoly → IntPoly
 `rec` is the result for the tail. -/
 def IntPoly.addMonoO : Ordering → Int → List Nat → Int → List Nat → IntPoly → IntPoly → IntPoly
   | .lt, c, xs, d, ys, p, _ => .cons (c, xs) (.cons (d, ys) p)
-  | .eq, c, xs, d, _, p, _ => IntPoly.addEq (Int.beq (c + d) 0) (c + d) xs p
+  | .eq, c, xs, d, _, p, _ => IntPoly.addEq (BEq.beq (c + d) 0) (c + d) xs p
   | .gt, _, _, d, ys, _, rec => .cons (d, ys) rec
 /-- Add the monomial `c·xs` to a polynomial, keeping it sorted. -/
 def IntPoly.addMono (c : Int) (xs : List Nat) : IntPoly → IntPoly
@@ -362,7 +362,7 @@ def IntPoly.keyProd_merge (ρ : List Int) : (xs ys : List Nat) →
 
 /-- Soundness of `IntPoly.addEq`. -/
 def IntPoly.eval_addEq (ρ : List Int) (s : Int) (xs : List Nat) (p : IntPoly) :
-    (b : Bool) → Int.beq s 0 = b → IntPoly.eval ρ (IntPoly.addEq b s xs p) = s * IntPoly.keyProd ρ xs + IntPoly.eval ρ p
+    (b : Bool) → BEq.beq s 0 = b → IntPoly.eval ρ (IntPoly.addEq b s xs p) = s * IntPoly.keyProd ρ xs + IntPoly.eval ρ p
   | .true, h =>
     Eq.trans (int_pair_ring! IntPoly.eval ρ p = 0 * IntPoly.keyProd ρ xs + IntPoly.eval ρ p)
       (congrArg (fun z => z * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) (Eq.symm (Int.beq_eq s 0 h)))
@@ -375,7 +375,7 @@ def IntPoly.eval_addMonoO (ρ : List Int) (c : Int) (xs : List Nat) (d : Int) (y
   | .lt, _ => rfl
   | .eq, h =>
     let e := Ring.Key.cmp_eq xs ys h;
-    Eq.trans (IntPoly.eval_addEq ρ (c + d) xs p (Int.beq (c + d) 0) rfl)
+    Eq.trans (IntPoly.eval_addEq ρ (c + d) xs p (BEq.beq (c + d) 0) rfl)
       (Eq.trans (int_pair_ring! (c + d) * IntPoly.keyProd ρ xs + IntPoly.eval ρ p = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p))
         (congrArg (fun (zs : List Nat) => c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ zs + IntPoly.eval ρ p)) e))
   | .gt, _ =>
@@ -435,7 +435,7 @@ def IntExpr.eval_norm (ρ : List Int) : (e : IntExpr) → IntPoly.eval ρ (IntEx
 /-- Boolean equality of polynomials (see `NatPoly.beq`). -/
 def IntPoly.beq : IntPoly → IntPoly → Bool
   | .nil, .nil => .true
-  | .cons m p, .cons n q => Bool.and (Bool.and (Int.beq m.1 n.1) (Ring.Key.beq m.2 n.2)) (IntPoly.beq p q)
+  | .cons m p, .cons n q => Bool.and (Bool.and (BEq.beq m.1 n.1) (Ring.Key.beq m.2 n.2)) (IntPoly.beq p q)
   | _, _ => .false
 /-- Polynomials that `IntPoly.beq` finds equal have the same value. -/
 def IntPoly.beq_eval (ρ : List Int) : (p q : IntPoly) → IntPoly.beq p q = .true → IntPoly.eval ρ p = IntPoly.eval ρ q

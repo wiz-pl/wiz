@@ -1,3 +1,4 @@
+import Classes
 import Prelude
 /-!
 # Text
@@ -22,7 +23,9 @@ runtime alike (`builtin string` only changes how values print), so:
 Main definitions: list functions (`List.map`, `List.filter`, `List.foldr`,
 `List.find`, …), character tests (`Char.isSpace`, `Char.isDigit`), and strings:
 `String.splitOn`, `String.intercalate`, `String.trim`, `String.replace`,
-`String.parseNat`, `String.startsWith`, `Nat.repr`.
+`String.parseNat`, `String.startsWith`. Equality, ordering and showing are the
+instances of `BEq`, `Compare` and `Repr` (lib/Classes.wiz); `Nat.repr` is the
+Prelude's.
 
 ```
 import Text
@@ -102,8 +105,6 @@ def List.concat {A : Type} : List (List A) → List A
 
 -- ## Characters
 
-/-- Equality of characters, by code point. -/
-def Char.eq (a b : Char) : Bool := Nat.beq (Char.code a) (Char.code b)
 /-- ASCII white space: space, tab, newline, carriage return, form feed, vertical tab. -/
 def Char.isSpace (c : Char) : Bool := match Nat.beq (Char.code c) 32 with
   | .true => .true
@@ -113,28 +114,11 @@ def Char.isDigit (c : Char) : Bool := Bool.and (Nat.le 48 (Char.code c)) (Nat.le
 
 -- ## Character lists
 
-/-- Equality of character lists. -/
-def Chars.eq : List Char → List Char → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => match Char.eq a b with
-    | .true => Chars.eq as bs
-    | .false => .false
-  | _, _ => .false
-/-- `a < b`, lexicographically by code point (a proper prefix is smaller). -/
-def Chars.lt : List Char → List Char → Bool
-  | .nil, .nil => .false
-  | .nil, .cons _ _ => .true
-  | .cons _ _, .nil => .false
-  | .cons a as, .cons b bs => match Nat.lt (Char.code a) (Char.code b) with
-    | .true => .true
-    | .false => match Char.eq a b with
-      | .true => Chars.lt as bs
-      | .false => .false
 /-- `Chars.stripPrefix p s`: `s` without the prefix `p`, if it starts with it. -/
 def Chars.stripPrefix : List Char → List Char → Option (List Char)
   | .nil, s => .some s
   | .cons _ _, .nil => .none
-  | .cons p ps, .cons c cs => match Char.eq p c with
+  | .cons p ps, .cons c cs => match BEq.beq p c with
     | .true => Chars.stripPrefix ps cs
     | .false => .none
 /-- Whether `p` is a prefix of `s`. -/
@@ -191,12 +175,6 @@ def String.singleton (c : Char) : String := .mk (.cons c .nil)
 def String.length (s : String) : Nat := List.length (String.chars s)
 /-- Whether the string is empty. -/
 def String.isEmpty (s : String) : Bool := List.isEmpty (String.chars s)
-/-- Equality of strings. -/
-def String.eq (a b : String) : Bool := Chars.eq (String.chars a) (String.chars b)
-/-- Equality of strings, the same as `String.eq`. -/
-def String.beq (a b : String) : Bool := String.eq a b
-/-- `a < b`, lexicographically by code point. -/
-def String.lt (a b : String) : Bool := Chars.lt (String.chars a) (String.chars b)
 /-- `String.startsWith s p`: whether `s` starts with `p`. -/
 def String.startsWith (s p : String) : Bool := Chars.isPrefix (String.chars p) (String.chars s)
 /-- `String.endsWith s p`: whether `s` ends with `p` (reverses both once). -/
@@ -216,7 +194,7 @@ def String.stripSuffix (s p : String) : Option String :=
 /-- `String.contains s needle`: whether `needle` occurs in `s`. -/
 def String.contains (s needle : String) : Bool := Chars.contains (String.chars needle) (String.chars s)
 /-- Whether the character occurs in the string. -/
-def String.containsChar (s : String) (c : Char) : Bool := List.any (Char.eq c) (String.chars s)
+def String.containsChar (s : String) (c : Char) : Bool := List.any (BEq.beq c) (String.chars s)
 /-- The first `n` characters. -/
 def String.take (n : Nat) (s : String) : String := .mk (List.take n (String.chars s))
 /-- Without the first `n` characters. -/
@@ -257,19 +235,11 @@ def String.parseNat (s : String) : Option Nat := match String.chars s with
 /-- The value of key `k` in a list of pairs (the first one), if any. -/
 def String.lookup {A : Type} (k : String) : List (String × A) → Option A
   | .nil => .none
-  | .cons p rest => match String.eq p.1 k with
+  | .cons p rest => match BEq.beq p.1 k with
     | .true => .some p.2
     | .false => String.lookup k rest
 /-- Whether `s` is in the list. -/
-def String.elem (s : String) (l : List String) : Bool := List.any (String.eq s) l
+def String.elem (s : String) (l : List String) : Bool := List.any (BEq.beq s) l
 
--- ## Numbers
-
-/-- The decimal digits of `n` in front of `tail` (`Nat.div`/`Nat.mod` run natively on
-numerals). A helper for `Nat.repr`. -/
-partial def Nat.reprGo (n : Nat) (tail : List Char) : List Char := match Nat.lt n 10 with
-  | .true => .cons (Char.mk (48 + n)) tail
-  | .false => Nat.reprGo (Nat.div n 10) (.cons (Char.mk (48 + Nat.mod n 10)) tail)
-/-- `n` in decimal: `Nat.repr 42` is `"42"` (pure; `Nat.toString` is the same as a foreign
-function). -/
-def Nat.repr (n : Nat) : String := .mk (Nat.reprGo n .nil)
+-- (`Nat.repr` is the Prelude's; the `Repr` instances for the text types are in
+-- lib/Classes.wiz.)

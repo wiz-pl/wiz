@@ -8,7 +8,8 @@ It has:
 
 * the basic data types: `Bool`, `Nat` (unary to the kernel, native at runtime),
   `List`, `Option`, `Except`, `Char` and `String`, with their basic functions
-  (`Nat.add`, `Nat.div`, `Nat.land`, `List.append`, …);
+  (`Nat.add`, `Nat.div`, `Nat.land`, `Nat.repr`, `List.append`, …), and `Ordering`
+  (the result of a three-way comparison);
 * transport along equations (`Eq.cast`, `Eq.subst`) and the regularity axiom
   `castRefl`;
 * the numeric classes `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg` and `OfNat` behind
@@ -60,6 +61,19 @@ branch first). `if`, `&&`, `||` and `!` are notation over them (stage 13c). -/
 inductive Bool where
   | false
   | true
+
+/-- The result of a three-way comparison: `lt`, `eq` or `gt`. `Compare`
+(lib/Classes.wiz) compares values with it, and `Ordering.andThen` combines
+comparisons lexicographically. -/
+inductive Ordering where
+  | lt
+  | eq
+  | gt
+/-- Lexicographic combination: the first comparison, unless it is `eq`. -/
+def Ordering.andThen : Ordering → Ordering → Ordering
+  | .lt, _ => .lt
+  | .eq, o => o
+  | .gt, _ => .gt
 
 /-- The natural numbers, in unary: `zero` and `succ n`. The kernel computes with these
 definitions; at runtime (and on numerals in the kernel) numbers are native
@@ -436,6 +450,17 @@ infixl:75 " <<< " => HShiftLeft.hShiftLeft
 infixl:75 " >>> " => HShiftRight.hShiftRight
 notation:max "~~~" a:max => Complement.complement a
 -- (end of the numeric classes)
+
+-- Decimal numerals (`Nat.repr`), for `Repr Nat` (lib/Classes.wiz) and text output.
+
+/-- The decimal digits of `n` in front of `tail` (`Nat.div`/`Nat.mod` run natively on
+numerals). A helper for `Nat.repr`. -/
+partial def Nat.reprGo (n : Nat) (tail : List Char) : List Char := match Nat.lt n 10 with
+  | .true => .cons (Char.mk (48 + n)) tail
+  | .false => Nat.reprGo (Nat.div n 10) (.cons (Char.mk (48 + Nat.mod n 10)) tail)
+/-- `n` in decimal: `Nat.repr 42` is `"42"` (pure; `Nat.toString` is the same as a foreign
+function). It is the `Repr` of `Nat` (lib/Classes.wiz). -/
+def Nat.repr (n : Nat) : String := .mk (Nat.reprGo n .nil)
 
 /-- The result of a computation that can fail: an `error e` or a success `ok a`. Its
 `Monad` instance is in lib/Functor.wiz. -/

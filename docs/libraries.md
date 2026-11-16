@@ -856,12 +856,14 @@ pure (so `#eval` runs them) and linear in their input.
 
 * **Lists**: `List.reverse`, `revApp`, `map`, `filter`, `foldl`, `foldr`, `any`, `all`,
   `find`, `isEmpty`, `head`, `take`, `drop`, `concat`.
-* **Characters**: `Char.eq`, `isSpace` (ASCII), `isDigit`.
-* **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `eq` (also `beq`),
-  `lt` (by code point), `startsWith`, `endsWith`, `stripPrefix`, `stripSuffix`
-  (`Option`), `contains`, `containsChar`, `take`, `drop`, `dropEnd`, `splitOn`, `join`,
-  `intercalate`, `trim`, `trimLeft`, `trimRight`, `replace`, `parseNat` (`Option Nat`),
-  `lookup` (in a list of pairs keyed by strings), `elem`; `Nat.repr` (decimal, pure).
+* **Characters**: `Char.isSpace` (ASCII), `Char.isDigit`.
+* **Strings**: `chars`, `ofChars`, `singleton`, `length`, `isEmpty`, `startsWith`,
+  `endsWith`, `stripPrefix`, `stripSuffix` (`Option`), `contains`, `containsChar`,
+  `take`, `drop`, `dropEnd`, `splitOn`, `join`, `intercalate`, `trim`, `trimLeft`,
+  `trimRight`, `replace`, `parseNat` (`Option Nat`), `lookup` (in a list of pairs
+  keyed by strings), `elem`. Equality, order and showing are the `BEq`, `Compare`
+  (`String.compare`, lexicographic by code point) and `Repr` instances in
+  `lib/Classes.wiz`; `Nat.repr` (decimal, pure) is the Prelude's.
   The same functions on `List Char` are `Chars.*`.
 
 **Cost model.** A `String` is `String.mk` around a `List Char` in the kernel *and* at
@@ -874,8 +876,28 @@ reverse once); and each call into C converts the list to a C string and back. Sp
 `Std.Str` is the native alternative for indexing.
 
 `lib/Json.wiz`, `lib/Deriving.wiz` and `lib/Hoare.wiz` import `Text` and use its
-`String.eq`, `String.chars`, `String.beq`, `Nat.repr`, `List.revApp` and `List.reverse`
+`String.eq`, `String.chars`, `Nat.repr`, `List.revApp` and `List.reverse`
 instead of copies of their own (two modules declaring one name are an error at import).
+
+## Equality, order and showing (`lib/Classes.wiz`)
+
+`import Classes` (only `Prelude` underneath): the classes `Inhabited` (`default`),
+`BEq` (`beq`), `Compare` (`compare : K → K → Ordering`, where `Ordering` is the
+Prelude's `lt`/`eq`/`gt`) and `Repr` (`reprPrec : A → Nat → String`, with `Repr.repr`
+at the top level). Instances are given for `Bool`, `Nat`, `Char`, `String`, `List`,
+`Option`, pairs and `Unit`; `Int`, the word types, `PMap`/`PSet` and `Result` define
+theirs with their types. `lib/Deriving.wiz` derives the three derivable ones
+(`Inhabited`, `BEq`, `Repr`) for an inductive type. A library gives an instance instead
+of a type-specific `X.eq`/`X.cmp` function, so callers use `BEq.beq` and
+`Compare.compare` uniformly (as in Lean).
+
+```
+import Classes
+
+#eval BEq.beq [1, 2] [1, 2]        -- .true
+#eval Compare.compare "ab" "b"     -- .lt
+#eval Repr.repr (Option.some 1)    -- "Option.some 1"
+```
 
 ## Numbers: classes, integers, words
 
@@ -922,7 +944,7 @@ and doc comments; std's tests check one example of each.
 | module | contents |
 |--------|----------|
 | `lib/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
-| `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
+| `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; the `Compare` instance (`Nat.compare`) |
 | `lib/Ring.wiz` | `nat_ring! lhs = rhs`: identities of commutative semirings at `Nat`, by reflection |
 | `lib/IntRing.wiz` | `int_ring! lhs = rhs` at `Int`; the ring laws `Int.add_comm` … `Int.neg_mul`; the pair representation `Int.ofPair a b = a - b` |
 | `lib/IntOrder.wiz` | `Int.Le`/`Int.Lt` (`b - a` not negative) with `≤`/`<`; monotonicity, cancellation, `Int.abs` and the triangle inequality |
@@ -983,9 +1005,10 @@ the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotati
 increasing key order, and `fromList` accepts entries in any order (a later duplicate
 wins).
 
-Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
-for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
-define one instance to use any other key type. `PSet` and the map
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`, lib/Classes.wiz),
+with instances for `Nat` (through the native `Nat.lt`/`Nat.beq`), `U64` (`UIntN.compare`,
+unsigned) and the other word types; define one instance to use any other key type. Maps
+and sets have `BEq`, `Inhabited` (empty) and `Repr` instances. `PSet` and the map
 algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
 subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
 O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is

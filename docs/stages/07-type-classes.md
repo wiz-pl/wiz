@@ -91,8 +91,10 @@ deriving instance Repr for Shape             -- after the fact
 * **Deriving.** `inductive … deriving C₁, C₂` (also `structure`) and
   `deriving instance C₁, C₂ for T₁, T₂` run C's **deriver**, a Wiz function
   `Deriver := String → MacroM (List Syntax)` registered with `attribute [deriver C] f`.
-  `lib/Deriving.wiz` defines `Inhabited`, `BEq` and `Repr` (`reprPrec : A → Nat →
-  String`), their derivers, and instances for `Nat`, `String`, `Bool`, `Option`, `List`.
+  `lib/Deriving.wiz` defines the derivers of `Inhabited`, `BEq` and `Repr`
+  (`reprPrec : A → Nat → String`); the classes themselves and the instances for the
+  Prelude's types are in `lib/Classes.wiz` (`Bool`, `Nat`, `Char`, `String`, `List`,
+  `Option`, pairs and `Unit`).
   A derived instance has type `{A : Type} → [C A] → … → C (T A …)` (an instance argument
   for each `Type` parameter) and eliminates with `T.rec`, so recursion needs no
   termination check; a structure uses its projections.

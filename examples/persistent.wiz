@@ -199,7 +199,7 @@ def Key.a : Key → Nat
 def Key.b : Key → Nat
   | .mk _ b => b
 def Key.cmp (x y : Key) : Ordering :=
-  Ordering.andThen (Nat.cmp (Key.a x) (Key.a y)) (Nat.cmp (Key.b x) (Key.b y))
+  Ordering.andThen (Nat.compare (Key.a x) (Key.a y)) (Nat.compare (Key.b x) (Key.b y))
 instance : Compare Key := Compare.mk Key.cmp
 
 def checkGeneric : Nat :=
