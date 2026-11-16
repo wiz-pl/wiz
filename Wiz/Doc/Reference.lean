@@ -339,8 +339,12 @@ def refNotationHtml (d : Data) : String :=
   if d.ops.isEmpty then "<p class=\"nothing\">No operator notation is declared.</p>" else
   let rows := d.ops.toList.map fun o =>
     let exp := if o.expands.isEmpty then "" else s!"<code>{htmlEscape o.expands}</code>"
+    -- (a link only to a module of this manual: an operator from an imported module that
+    -- is not documented here, such as the Prelude's, names it without a link)
     let mod := if o.module.isEmpty then "" else
-      s!"<a href=\"#module-{htmlEscape o.module}\">{htmlEscape o.module}</a>"
+      if d.sections.any (·.1.name == o.module) then
+        s!"<a href=\"#module-{htmlEscape o.module}\">{htmlEscape o.module}</a>"
+      else htmlEscape o.module
     s!"<tr><td class=\"op\"><code>{htmlEscape o.op}</code></td><td>{o.fixity}</td>" ++
     s!"<td class=\"num\">{o.prec}</td><td>{o.assoc}</td><td>{exp}</td><td>{mod}</td></tr>"
   s!"<table class=\"api-table notation\"><thead><tr><th>operator</th><th>fixity</th>" ++
