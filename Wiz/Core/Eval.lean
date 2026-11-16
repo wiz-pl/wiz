@@ -50,7 +50,7 @@ def qtyApart (a b : Val R) : Bool :=
 matching on a value's shape. -/
 partial def whnf : Val R → Val R
   | .unfold _ _ _ v => whnf v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => whnf v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => whnf v.get
   | v => v
 
 /-- A value with its suspended inductions on constructors computed (`vInd`): they are
@@ -58,7 +58,7 @@ lazy for speed alone, so wherever a value's shape or read-back is looked at with
 (`quote`, the elaborator's unifier) they count as what they compute, as before they were
 lazy. Inductions on numerals stay folded (`Val.lazyInd` since stage 7). -/
 partial def unlazyCon : Val R → Val R
-  | v@(.lazyInd _ _ _ _ _ _ _ x _ val) => if whnf x matches .con _ then unlazyCon val.get else v
+  | v@(.lazyInd _ _ _ _ _ _ _ x _ _ val) => if whnf x matches .con _ then unlazyCon val.get else v
   | v => v
 
 /-- **Exercise 4.4b.** First projection. -/
@@ -66,7 +66,7 @@ partial def vFst : Val R → Val R
   -- (given) a projection of a glued value stays glued, like an application (`vApp`):
   -- `(f a).1` is computed only when needed (`f a` may be a big computation)
   | .unfold n us sp v => .unfold n us (sp.push .fst) (memoThunk fun _ => vFst v.get)
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .fst) (memoThunk fun _ => vFst v.get)  -- (given)
+  | .lazyInd l I D w P m i x pr sp v => .lazyInd l I D w P m i x pr (sp.push .fst) (memoThunk fun _ => vFst v.get)  -- (given)
   --<sol
   | .pair a _ => a
   | .neutral h sp => .neutral h (sp.push .fst)
@@ -78,7 +78,7 @@ partial def vFst : Val R → Val R
 /-- **Exercise 4.4c.** Second projection. -/
 partial def vSnd : Val R → Val R
   | .unfold n us sp v => .unfold n us (sp.push .snd) (memoThunk fun _ => vSnd v.get)  -- (given)
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .snd) (memoThunk fun _ => vSnd v.get)  -- (given)
+  | .lazyInd l I D w P m i x pr sp v => .lazyInd l I D w P m i x pr (sp.push .snd) (memoThunk fun _ => vSnd v.get)  -- (given)
   --<sol
   | .pair _ b => b
   | .neutral h sp => .neutral h (sp.push .snd)
@@ -90,7 +90,7 @@ partial def vSnd : Val R → Val R
 /-- `down` (Q4): `down (up a) ↦ a`; stuck on a neutral. -/
 partial def vDown : Val R → Val R
   | .unfold _ _ _ v => vDown v.get
-  | .lazyInd l I D w P m i x sp v => .lazyInd l I D w P m i x (sp.push .down) (memoThunk fun _ => vDown v.get)
+  | .lazyInd l I D w P m i x pr sp v => .lazyInd l I D w P m i x pr (sp.push .down) (memoThunk fun _ => vDown v.get)
   | .up a => a
   | .neutral h sp => .neutral h (sp.push .down)
   | _ => panic! "vDown: ill-typed"
@@ -191,7 +191,7 @@ unfolded first, as `Kernel.wiz` does: `absurd (lemma h)` was a panic, and the va
 came back was `Sort 0`; `wiz-notes/soundness-audit.md`, F2.) -/
 partial def vAbsurd (m : Val R) : Val R → Val R
   | .unfold _ _ _ v => vAbsurd m v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => vAbsurd m v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => vAbsurd m v.get
   | .neutral h sp => .neutral h (sp.push (.absurd m))
   | _ => panic! "vAbsurd: ill-typed"
 
@@ -221,7 +221,9 @@ def propSort? : Val R → Option Bool
     | some false, _ | _, some false => some false
     | _, _ => none
   | .unit s | .empty s | .ulift _ s _ => sortProp? s
-  | .sort _ | .qty | .enum _ | .desc .. | .mu .. | .nu .. | .size | .sizeLt _ => some false
+  | .sort _ | .qty | .enum _ | .desc .. | .nu .. | .size | .sizeLt _ => some false
+  | .mu _ _ _ _ _ _ true => some true
+  | .mu .. => some false
   | .neutral (.eq ..) #[] | .neutral (.eqTy ..) #[] => some true
   | _ => none
 
@@ -248,7 +250,7 @@ def proofHead (h : Head R) : Bool :=
 for a size variable, which can't be built from or observed. -/
 partial def sizePred? : Val R → Option (Val R)
   | .unfold _ _ _ v => sizePred? v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => sizePred? v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => sizePred? v.get
   | .szInf => some .szInf
   | .szSuc s => some s
   | _ => none
@@ -383,10 +385,10 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   | .dhrec q H j D => .dhrec (eval g env q) (eval g env H) (eval g env j) (eval g env D)
   | .delim v P a b c h D =>
     vDelim g v (eval g env P) (eval g env a) (eval g env b) (eval g env c) (eval g env h) (eval g env D)
-  | .mu l I D i s h => .mu l (eval g env I) (eval g env D) (eval g env i) (eval g env s) (evalHint g env h)
+  | .mu l I D i s h p => .mu l (eval g env I) (eval g env D) (eval g env i) (eval g env s) (evalHint g env h) p
   | .con x => .con (eval g env x)
-  | .ind l I D v P m i x =>
-    vInd g l (eval g env I) (eval g env D) v (eval g env P) (eval g env m) (eval g env i) (eval g env x)
+  | .ind l I D v P m i x p =>
+    vInd g l (eval g env I) (eval g env D) v (eval g env P) (eval g env m) (eval g env i) (eval g env x) p
   | .nu l I D i s h => .nu l (eval g env I) (eval g env D) (eval g env i) (eval g env s) (evalHint g env h)
   | .out x => vOut g (eval g env x)
   | .size => .size
@@ -491,7 +493,7 @@ type error that the checker should have ruled out (use `panic!`). -/
 partial def vApp (g : Globals R) : Val R → Val R → Val R
   -- (given) a glued application grows its spine, and its unfolding lazily
   | .unfold n us sp v, a => .unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
-  | .lazyInd l I D w P m i x sp v, a => .lazyInd l I D w P m i x (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
+  | .lazyInd l I D w P m i x pr sp v, a => .lazyInd l I D w P m i x pr (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
   --<sol
   | .lam _ c, a => Closure.inst g c a
   | .neutral h sp, a => .neutral h (sp.push (.app a))
@@ -540,26 +542,26 @@ partial def vSplit (g : Globals R) (q : Val R) (s : Val R) (z : Name) (m : Closu
 neutrals. `vInd` and `vOut` use the description templates of `Wiz.Core.Templates`. -/
 
 /-- `λ j. μ^s D j` and `λ j. ν^s D j` at a given size. -/
-partial def muFamilyAt (l : Level) (I D s : Val R) : Val R :=
-  .lam "j" (.mk [s, D, I] (.mu l (.var 3) (.var 2) (.var 0) (.var 1) none))
+partial def muFamilyAt (l : Level) (I D s : Val R) (prop : Bool := false) : Val R :=
+  .lam "j" (.mk [s, D, I] (.mu l (.var 3) (.var 2) (.var 0) (.var 1) none prop))
 
 partial def nuFamilyAt (l : Level) (I D s : Val R) : Val R :=
   .lam "j" (.mk [s, D, I] (.nu l (.var 3) (.var 2) (.var 0) (.var 1) none))
 
 /-- `λ j. μ D j`, the family being defined, as a value. -/
-partial def muFamily (l : Level) (I D : Val R) : Val R :=
-  .lam "j" (.mk [D, I] (.mu l (.var 2) (.var 1) (.var 0) .szInf none))
+partial def muFamily (l : Level) (I D : Val R) (prop : Bool := false) : Val R :=
+  .lam "j" (.mk [D, I] (.mu l (.var 2) (.var 1) (.var 0) .szInf none prop))
 
 partial def nuFamily (l : Level) (I D : Val R) : Val R :=
   .lam "j" (.mk [D, I] (.nu l (.var 2) (.var 1) (.var 0) .szInf none))
 
 /-- `⟦D⟧ X i` -/
-partial def vInterp (g : Globals R) (l : Level) (I D X i : Val R) : Val R :=
-  [I, D, X, i].foldl (vApp g) (eval g [] (Templates.interpTm l))
+partial def vInterp (g : Globals R) (l : Level) (I D X i : Val R) (prop : Bool := false) : Val R :=
+  [I, D, X, i].foldl (vApp g) (eval g [] (Templates.interpTm l prop))
 
 /-- `All D X P i xs` -/
-partial def vAll (g : Globals R) (l v : Level) (I D X P i xs : Val R) : Val R :=
-  [I, D, X, P, i, xs].foldl (vApp g) (eval g [] (Templates.allTm l v))
+partial def vAll (g : Globals R) (l v : Level) (I D X P i xs : Val R) (prop : Bool := false) : Val R :=
+  [I, D, X, P, i, xs].foldl (vApp g) (eval g [] (Templates.allTm l v prop))
 
 /-- **Exercise 4.19a.** `ecase` on a tag picks the branch (evaluated in `env`). -/
 partial def vEcase (g : Globals R) (z : Name) (m : Closure R) (s : Val R) (env : Env R)
@@ -720,8 +722,8 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   | none => unfold ()
 
 /-- `hyps D X P f i xs` by `Templates.hypsTm`: the definition. -/
-partial def vHypsTemplate (g : Globals R) (l v : Level) (I D X P f i xs : Val R) : Val R :=
-  [I, D, X, P, f, i, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v))
+partial def vHypsTemplate (g : Globals R) (l v : Level) (I D X P f i xs : Val R) (prop : Bool := false) : Val R :=
+  [I, D, X, P, f, i, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v prop))
 
 /-- (given) `hyps D X P f i xs` computed directly on a canonical description, one step of
 `Templates.hypsTm`'s `Desc.elim` at a time, without evaluating the template (most of the
@@ -734,33 +736,83 @@ cost of a data operation: `wiz-notes/kernel-eval.md`, F2):
 
 On a description that isn't canonical (stuck), the template from there on, which is what
 the template itself reduces to after the steps already taken. -/
-partial def vHyps (g : Globals R) (l v : Level) (I D X P f i xs : Val R) : Val R :=
+partial def vHyps (g : Globals R) (l v : Level) (I D X P f i xs : Val R) (prop : Bool := false) : Val R :=
   match whnf D with
   | .dret _ => .tt
-  | .darg _ _ E => vHyps g l v I (vApp g E (vFst xs)) X P f i (vSnd xs)
-  | .drec _ j E => .pair (vApp g (vApp g f j) (vFst xs)) (vHyps g l v I E X P f i (vSnd xs))
+  | .darg _ _ E => vHyps g l v I (vApp g E (vFst xs)) X P f i (vSnd xs) prop
+  | .drec _ j E => .pair (vApp g (vApp g f j) (vFst xs)) (vHyps g l v I E X P f i (vSnd xs) prop)
   | .dhrec _ _ j E =>
     -- h0 x1 j2 f3
     .pair (.lam "h" (.mk [vFst xs, j, f] (.app (.app (.var 3) (.app (.var 2) (.var 0))) (.app (.var 1) (.var 0)))))
-      (vHyps g l v I E X P f i (vSnd xs))
-  | _ => vHypsTemplate g l v I D X P f i xs
+      (vHyps g l v I E X P f i (vSnd xs) prop)
+  | _ => vHypsTemplate g l v I D X P f i xs prop
+
+/-- Is this type a subsingleton, by its shape: a proposition (proof irrelevance) or a
+singleton data type (`Unit`, an enumeration of at most one tag, a `Σ`/`Π`/`ULift` of
+subsingletons, the empty type). Used for singleton elimination out of an inductive
+proposition (`descSingleton`): a constructor field of a singleton type stores no
+information. -/
+partial def isSingletonVal (g : Globals R) (depth : Nat) (T : Val R) : Bool :=
+  depth < 64 &&
+  if propSort? T == some true then true else
+  match whnf T with
+  | .unit _ | .empty _ => true
+  | .enum ls => ls.length <= 1
+  | .ulift _ _ A => isSingletonVal g (depth + 1) A
+  | .sigma _ _ A B _ =>
+    isSingletonVal g (depth + 1) A && isSingletonVal g (depth + 1) (Closure.inst g B (Val.var depth))
+  | .pi _ _ _ _ B _ => isSingletonVal g (depth + 1) (Closure.inst g B (Val.var depth))
+  | _ => false
+
+/-- Does the description have at most one constructor, whose fields are all of
+(sub)singleton types? Then `μ D i` is a subsingleton, and its eliminator may target
+any sort (Lean's "singleton elimination"). The elaborator's descriptions put the
+constructors' tags in the first `arg` field (`Enum ls`, possibly under `ULift`); a
+description that does not have that shape is refused (conservatively: it may still be
+a singleton, but not one the kernel can see). -/
+partial def descSingleton (g : Globals R) (depth : Nat) (D : Val R) : Bool :=
+  depth < 64 &&
+  match whnf D with
+  | .dret _ => true
+  | .darg _ S E =>
+    if !isSingletonVal g (depth + 1) S then false else
+    match whnf S with
+    | .enum ls =>
+      if ls.length > 1 then false
+      else match ls with
+        | [] => true
+        | [_] => descSingleton g (depth + 1) (vApp g E (.tag ls 0))
+        | _ => false
+    | .ulift _ _ A => match whnf A with
+      | .enum ls =>
+        if ls.length > 1 then false
+        else match ls with
+          | [] => true
+          | [_] => descSingleton g (depth + 1) (vApp g E (.up (.tag ls 0)))
+          | _ => false
+      | _ => descSingleton g (depth + 1) (vApp g E (Val.var depth))
+    | _ => descSingleton g (depth + 1) (vApp g E (Val.var depth))
+  | .drec _ _ E => descSingleton g (depth + 1) E
+  | .dhrec _ _ _ E => descSingleton g (depth + 1) E
+  | _ => false
 
 /-- **Exercise 4.19c.** Induction computes on constructors:
 
     ind P m i (con xs) ↦ m i xs (hyps D (μ D) P (fun j y => ind P m j y) i xs)
 
 (`Templates.hypsTm`; the `fun j y => …` is a template closure). -/
-partial def vIndStep (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) : Val R :=
+partial def vIndStep (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R)
+    (prop : Bool := false) : Val R :=
   let x := vNatView g (whnf x)
   --<sol
   match x with
   | .con xs =>
     -- y0 j1 m2 P3 D4 I5
     let f : Val R := .lam "j" (.mk [m, P, D, I]
-      (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0))))
-    let hyps := vHyps g l v I D (muFamily l I D) P f i xs
+      (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0) prop)))
+    let hyps := vHyps g l v I D (muFamily l I D prop) P f i xs prop
     [i, xs, hyps].foldl (vApp g) m
-  | .neutral h sp => .neutral h (sp.push (.ind l I D v P m i))
+  | .neutral h sp => .neutral h (sp.push (.ind l I D v P m i prop))
   | _ => panic! "vInd: ill-typed"
   --|ex
   --| sorry
@@ -774,12 +826,22 @@ cost its length (`wiz-notes/kernel-eval.md`). Not for a normal form (`g.eager`, 
 `ind` on a constructor is a redex, which a normal form must not contain; and not with
 `--eager-proofs` (`!g.lazyProofs`), where the evaluator runs everything as it did before
 (the D1 experiments' loops are loops of that evaluator). -/
-partial def vInd (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) : Val R :=
-  match whnf x with
-  | .natLit (_ + 1) => .lazyInd l I D v P m i x #[] (memoThunk fun _ => vIndStep g l I D v P m i x)
-  | .con _ => if g.eager || !g.lazyProofs then vIndStep g l I D v P m i x
-    else .lazyInd l I D v P m i x #[] (memoThunk fun _ => vIndStep g l I D v P m i x)
-  | _ => vIndStep g l I D v P m i x
+partial def vInd (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R)
+    (prop : Bool := false) : Val R :=
+  -- (singleton elimination out of an inductive proposition: the scrutinee is a proof,
+  -- which `prf` suspends; evaluating its body is what the elimination computes)
+  if prop && !v.isZero then
+    match whnf x with
+    | .neutral (.prf env t) #[] => vInd g l I D v P m i (eval g env t) prop
+    | x => vIndCore g l I D v P m i x prop
+  else vIndCore g l I D v P m i x prop
+where
+  vIndCore (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) : Val R :=
+    match whnf x with
+    | .natLit (_ + 1) => .lazyInd l I D v P m i x prop #[] (memoThunk fun _ => vIndStep g l I D v P m i x prop)
+    | .con _ => if g.eager || !g.lazyProofs then vIndStep g l I D v P m i x prop
+      else .lazyInd l I D v P m i x prop #[] (memoThunk fun _ => vIndStep g l I D v P m i x prop)
+    | _ => vIndStep g l I D v P m i x prop
 
 /-- **Exercise 4.22a.** Sized recursion unfolds on a constructor, with the recursive
 calls at size `∞` (sizes are irrelevant at runtime):
@@ -923,8 +985,9 @@ partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
   | .enum _ => match a, b with
     | .tag _ i, .tag _ j => if i == j then .unit 0 else .empty 0
     | _, _ => stuck
-  | .mu l I D i _ _ => match a, b with
-    | .con x, .con y => markDataEq ((vEqPayload g l I (muFamily l I D) i D x y).getD stuck) A0 a0 b0
+  | .mu l I D i _ _ pr => match a, b with
+    | .con x, .con y =>
+      markDataEq ((vEqPayload g l I (muFamily l I D pr) i D x y pr).getD stuck) A0 a0 b0
     | _, _ => stuck
   | .sort l =>
     if l.equiv 0 then
@@ -953,7 +1016,7 @@ equation with a cast along the tags' equation, which without regularity would be
 
 The choice between rules depends only on `D` and on whether tags are canonical (computed or
 stuck), so it is stable under substitution. -/
-partial def vEqPayload (g : Globals R) (l : Level) (I X i D x y : Val R) : Option (Val R) :=
+partial def vEqPayload (g : Globals R) (l : Level) (I X i D x y : Val R) (prop : Bool := false) : Option (Val R) :=
   let pairTy (A B : Val R) : Val R := .sigma "_" (.qlit 0) A (.mk [B] (.var 1)) ⟨0, 0⟩
   -- a field's equation, and the rest's unless the rest is just `ret` (whose equation is
   -- `True`): decided by the description, so `succ m = succ n` is `m = n` and the
@@ -970,16 +1033,16 @@ partial def vEqPayload (g : Globals R) (l : Level) (I X i D x y : Val R) : Optio
       match tagOf x, tagOf y with
       | .tag ls a, .tag _ b =>
         let t : Val R := if lifted then .up (.tag ls a) else .tag ls a
-        if a == b then vEqPayload g l I X i (vApp g E t) (vSnd x) (vSnd y)
+        if a == b then vEqPayload g l I X i (vApp g E t) (vSnd x) (vSnd y) prop
         -- different tags: the Σ rule, whose first component is `False`
-        else some (vEq g (vInterp g l I (.darg q S E) X i) x y)
+        else some (vEq g (vInterp g l I (.darg q S E) X i prop) x y)
       | _, _ => none
-    | _ => some (vEq g (vInterp g l I (.darg q S E) X i) x y)
+    | _ => some (vEq g (vInterp g l I (.darg q S E) X i prop) x y)
   | .drec _ j E => do
-    let r ← vEqPayload g l I X i E (vSnd x) (vSnd y)
+    let r ← vEqPayload g l I X i E (vSnd x) (vSnd y) prop
     pure (withRest (vEq g (vApp g X j) (vFst x) (vFst y)) E r)
   | .dhrec q H j E => do
-    let r ← vEqPayload g l I X i E (vSnd x) (vSnd y)
+    let r ← vEqPayload g l I X i E (vSnd x) (vSnd y) prop
     -- h0 j1 X2
     let F : Val R := .pi "h" .default q H (.mk [j, X] (.app (.var 2) (.app (.var 1) (.var 0)))) ⟨.succ l, .succ l⟩
     pure (withRest (vEq g F (vFst x) (vFst y)) E r)
@@ -1039,7 +1102,10 @@ partial def vEqType (g : Globals R) (X Y : Val R) : Val R :=
   | .desc l I, .desc l' I' => if l.equiv l' then vEqType g I I' else .neutral (.eqTy X Y) #[]
   -- (4g) by the codes, for every `I`, `D`, `D'` (no syntactic shortcut, nothing simplified):
   -- the equation between the codes `(I, D, i) = (I', D', i')` at `famCodeTy l`
-  | .mu l I D i s _, .mu l' I' D' i' s' _ | .nu l I D i s _, .nu l' I' D' i' s' _ =>
+  | .mu l I D i s _ pr, .mu l' I' D' i' s' _ pr' =>
+    if !(pr == pr' && l.equiv l' && sizeEqTrue s s') then .neutral (.eqTy X Y) #[] else
+    vEq g (famCodeTy l) (.pair I (.pair D i)) (.pair I' (.pair D' i'))
+  | .nu l I D i s _, .nu l' I' D' i' s' _ =>
     if !(l.equiv l' && sizeEqTrue s s') then .neutral (.eqTy X Y) #[] else
     vEq g (famCodeTy l) (.pair I (.pair D i)) (.pair I' (.pair D' i'))
   | _, _ => if canonical X && canonical Y then .empty 0 else .neutral (.eqTy X Y) #[]
@@ -1130,7 +1196,8 @@ partial def inertTy (g : Globals R) (depth : Nat) (A : Val R) : Bool :=
   | .ulift _ l A₁ => l.isNeverZero && inertTy g (depth + 1) A₁
   | .sigma _ _ A₁ B σ => !σ.hasHole && σ.sigmaSort.isNeverZero && inertTy g (depth + 1) A₁ &&
       inertTy g (depth + 1) (Closure.inst g B (groundAtom (1000 + depth)))
-  | .mu _ I D _ _ _ => inertTy g (depth + 1) I && inertDesc g (depth + 1) D
+  | .mu _ I D _ _ _ false => inertTy g (depth + 1) I && inertDesc g (depth + 1) D
+  | .mu _ _ _ _ _ _ true => false
   | _ => false
 
 /-- Every field of the description is inert (`inertTy`). -/
@@ -1203,8 +1270,8 @@ partial def groundEqTy (g : Globals R) (d : Nat) (A B : Val R) : Bool :=
     sameQty q q' == some true && groundEqTy g (d + 1) A₁ A₂ &&
       let x := groundAtom d
       groundEqTy g (d + 1) (Closure.inst g B₁ x) (Closure.inst g B₂ x)
-  | .mu l I D i s _, .mu l' I' D' i' s' _ =>
-    l.equiv l' && groundSizeEq s s' && groundEqTy g (d + 1) I I' &&
+  | .mu l I D i s _ pr, .mu l' I' D' i' s' _ pr' =>
+    pr == pr' && l.equiv l' && groundSizeEq s s' && groundEqTy g (d + 1) I I' &&
       groundEqDesc g (d + 1) I D D' && groundEqVal g (d + 1) I i i'
   | _, _ => false
 
@@ -1249,8 +1316,8 @@ partial def groundEqVal (g : Globals R) (d : Nat) (T a b : Val R) : Bool :=
     let a₁ := vFst a
     groundEqVal g d A₁ a₁ (vFst b) && groundEqVal g d (Closure.inst g B₁ a₁) (vSnd a) (vSnd b)
   | .ulift _ _ A₁ => groundEqVal g d A₁ (vDown a) (vDown b)
-  | .mu l I D i _ _ => match vNatView g a, vNatView g b with
-    | .con x, .con y => groundEqVal g d (vInterp g l I D (muFamily l I D) i) x y
+  | .mu l I D i _ _ pr => match vNatView g a, vNatView g b with
+    | .con x, .con y => groundEqVal g d (vInterp g l I D (muFamily l I D pr) i pr) x y
     | a, b => groundAtomEq a b
   | _ => false
 
@@ -1258,7 +1325,7 @@ partial def groundEqVal (g : Globals R) (d : Nat) (T a b : Val R) : Bool :=
 base with a number of `↑`s. -/
 partial def sizeViewE : Val R → Option (Val R) × Nat
   | .unfold _ _ _ v => sizeViewE v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => sizeViewE v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => sizeViewE v.get
   | .szInf => (none, 0)
   | .szSuc s => let (b, k) := sizeViewE s; (b, k + 1)
   | v => (some v, 0)
@@ -1349,12 +1416,12 @@ partial def famPayloadEq? (g : Globals R) (A B e : Val R) : Option (Val R × Val
     let Xi' := vInterp g l I' D' (fam I' D') i'
     -- under `t _`: _0 t1 Xi2 sp3; under `k`: k0 _1 t2 Xi3 sp4
     let famT : Term R := .lam "k" (if nu then .nu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4) none
-      else .mu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4) none)
+      else .mu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4) none false)
     let P : Val R := .lam "t" (.mk [Xi, sp] (.lam "_" (.eqTy (.var 2)
       ((Templates.interpTm l).app (.fst (.var 1)) |>.app (.fst (.snd (.var 1))) |>.app famT |>.app (.snd (.snd (.var 1)))))))
     pure (Xi, Xi', .neutral (.transp (famCodeTy l) (.pair I (.pair D i)) P (.neutral (.reflTy Xi) #[]) (.pair I' (.pair D' i')) e) #[])
   match A, B with
-  | .mu l I D i s _, .mu l' I' D' i' s' _ => go false l l' I D i s I' D' i' s'
+  | .mu l I D i s _ _, .mu l' I' D' i' s' _ _ => go false l l' I D i s I' D' i' s'
   | .nu l I D i s _, .nu l' I' D' i' s' _ => go true l l' I D i s I' D' i' s'
   | _, _ => none
 
@@ -1419,7 +1486,7 @@ partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
   | .unfold n us sp _ => quote g l (.neutral (.global n us) sp)
   -- (folded only on a numeral, as before kernel-eval: `ind` on a constructor is lazy for
   -- speed alone and reads back as what it computes, so read-back is unchanged)
-  | .lazyInd lv I D v P m i x sp val =>
+  | .lazyInd lv I D v P m i x pr sp val =>
     if (whnf x matches .con _) then quote g l (unlazyCon val.get) else
     sp.foldl (fun t e => match e with
       | .app a => .app t (quote g l a)
@@ -1430,7 +1497,7 @@ partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
       -- `vApp`, `vFst`, `vSnd`, `vDown`. Anything else here is a bug, not something to drop.)
       | .split .. | .absurd _ | .ecase .. | .delim .. | .ind .. | .sfix .. | .scase .. | .out =>
         panic! "quote: an elimination that a glued induction cannot carry")
-      (.ind lv (quote g l I) (quote g l D) v (quote g l P) (quote g l m) (quote g l i) (quote g l x))
+      (.ind lv (quote g l I) (quote g l D) v (quote g l P) (quote g l m) (quote g l i) (quote g l x) pr)
   --<sol
   | .neutral h sp =>
     let hd : Unit → Term R := fun _ => match h with
@@ -1460,7 +1527,7 @@ partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
         .ecase z (quote g (l + 1) (Closure.inst g m (Val.var l))) acc
           (bs.map fun b => quote g l (eval g env b))
       | .delim v P a b c h => .delim v (quote g l P) (quote g l a) (quote g l b) (quote g l c) (quote g l h) acc
-      | .ind lv I D v P m i => .ind lv (quote g l I) (quote g l D) v (quote g l P) (quote g l m) (quote g l i) acc
+      | .ind lv I D v P m i pr => .ind lv (quote g l I) (quote g l D) v (quote g l P) (quote g l m) (quote g l i) acc pr
       | .out => .out acc
       | .down => .down acc
       | .scase lv q I D v P m s i =>
@@ -1525,7 +1592,7 @@ partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
   | .darg q S D => .darg (quote g l q) (quote g l S) (quote g l D)
   | .drec q j D => .drec (quote g l q) (quote g l j) (quote g l D)
   | .dhrec q H j D => .dhrec (quote g l q) (quote g l H) (quote g l j) (quote g l D)
-  | .mu k I D i s h => .mu k (quote g l I) (quote g l D) (quote g l i) (quote g l s) (h.map fun (n, us, as) => (n, us, as.map (quote g l)))
+  | .mu k I D i s h p => .mu k (quote g l I) (quote g l D) (quote g l i) (quote g l s) (h.map fun (n, us, as) => (n, us, as.map (quote g l))) p
   | .con x => .con (quote g l x)
   | .natLit n => .natLit n
   | .ulift k u A => .ulift k u (quote g l A)
@@ -1555,7 +1622,7 @@ partial def vElims (g : Globals R) (v : Val R) (sp : Array (Elim R)) : Val R :=
     | .absurd m => vAbsurd m v
     | .ecase z m env bs => vEcase g z m v env bs
     | .delim lv P a b c h => vDelim g lv P a b c h v
-    | .ind l I D lv P m i => vInd g l I D lv P m i v
+    | .ind l I D lv P m i pr => vInd g l I D lv P m i v pr
     | .out => vOut g v
     | .down => vDown v
     | .sfix l I D lv P f s i => vSfix g l I D lv P f s i v

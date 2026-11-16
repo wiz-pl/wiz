@@ -1,0 +1,152 @@
+import Scry.Optics
+import Scry.Schema
+import Scry.Facts
+import Scry.CstStore
+/-!
+# Scry.CstOptics: read-only accessors and traversals over the CST and facts
+
+`import Scry.CstOptics`.
+
+The CST/facts half of `Scry.Optics` (which lives in the library root and holds the
+core optics plus the Wil/analysis accessors). `Scry.Node`, `Scry.Facts`, `Scry.Relation`
+and `Scry.CstStore` are in the `scry` source root, so this adapter is there too.
+
+O4: a CST is traversed direct and read-only. These are `Fold`s over the existing lists
+and the existing CSR/model views, not a lens per node and not a second store. A query
+that needs one native column should call `CstStore.kindName`/`spanOf`/`childArcs`
+directly; the folds here are for the uniform model view and for composition with the
+field getters. O11: the field getters are a small, stable set (kind, span, parent,
+field, edge endpoints/label, relation name/arity), not one per structure field.
+-/
+
+-- ## Scry.Cst: field accessors (a small, stable set; O11)
+
+/-- A CST node's id. -/
+def Scry.Cst.nodeId : Scry.Getter Scry.Node Scry.NodeId :=
+  Scry.Getter.mk (fun n => n.id)
+
+/-- A CST node's grammar kind. -/
+def Scry.Cst.nodeKind : Scry.Getter Scry.Node String :=
+  Scry.Getter.mk (fun n => n.kind)
+
+/-- A CST node's field name on its parent arc (`""` when none). -/
+def Scry.Cst.nodeField : Scry.Getter Scry.Node String :=
+  Scry.Getter.mk (fun n => n.field)
+
+/-- A CST node's byte span. -/
+def Scry.Cst.nodeSpan : Scry.Getter Scry.Node Scry.Span :=
+  Scry.Getter.mk (fun n => n.span)
+
+/-- A CST node's parent (`none` for a root). -/
+def Scry.Cst.nodeParent : Scry.Getter Scry.Node (Option Scry.NodeId) :=
+  Scry.Getter.mk (fun n => n.parent)
+
+/-- An edge's source. -/
+def Scry.Cst.edgeSrc : Scry.Getter Scry.Edge Scry.NodeId :=
+  Scry.Getter.mk (fun e => e.src)
+
+/-- An edge's target. -/
+def Scry.Cst.edgeDst : Scry.Getter Scry.Edge Scry.NodeId :=
+  Scry.Getter.mk (fun e => e.dst)
+
+/-- An edge's label. -/
+def Scry.Cst.edgeLabel : Scry.Getter Scry.Edge String :=
+  Scry.Getter.mk (fun e => e.label)
+
+/-- A relation's name. -/
+def Scry.Cst.relationName : Scry.Getter Scry.Relation String :=
+  Scry.Getter.mk (fun r => r.name)
+
+/-- A relation's arity. -/
+def Scry.Cst.relationArity : Scry.Getter Scry.Relation Nat :=
+  Scry.Getter.mk (fun r => r.arity)
+
+/-- Every tuple of a relation. -/
+def Scry.Cst.relationTuplesF : Scry.Fold Scry.Relation (List Nat) :=
+  Scry.Fold.mk (fun r => r.tuples)
+
+/-- A relation's tuples, projected to one column. -/
+def Scry.Cst.relationColumnF (i : Nat) : Scry.Fold Scry.Relation Nat :=
+  Scry.Fold.mk (fun r => List.map (fun t => List.getD t i 0) r.tuples)
+
+-- ## Scry.Facts: direct read-only traversal (O4)
+
+/-- Every CST node of a fact store. -/
+def Scry.Facts.nodesF : Scry.Fold Scry.Facts Scry.Node :=
+  Scry.Fold.mk (fun f => f.nodes)
+
+/-- Every edge of a fact store. -/
+def Scry.Facts.edgesF : Scry.Fold Scry.Facts Scry.Edge :=
+  Scry.Fold.mk (fun f => f.edges)
+
+/-- Every relation of a fact store. -/
+def Scry.Facts.relationsF : Scry.Fold Scry.Facts Scry.Relation :=
+  Scry.Fold.mk (fun f => f.relations)
+
+/-- Every source file of a fact store. -/
+def Scry.Facts.filesF : Scry.Fold Scry.Facts Scry.SourceFile :=
+  Scry.Fold.mk (fun f => f.files)
+
+/-- The node with id `id`, if present (a zero-or-one fold). -/
+def Scry.Facts.nodeF (id : Scry.NodeId) : Scry.Fold Scry.Facts Scry.Node :=
+  Scry.Fold.mk (fun f => match Scry.findNode f.nodes id with
+    | .none => .nil
+    | .some n => .cons n .nil)
+
+/-- The relation called `name`, if present (a zero-or-one fold). -/
+def Scry.Facts.relationF (name : String) : Scry.Fold Scry.Facts Scry.Relation :=
+  Scry.Fold.mk (fun f => match Scry.findRelation f.relations name with
+    | .none => .nil
+    | .some r => .cons r .nil)
+
+/-- Every tuple of a fact store's relation called `name`. -/
+def Scry.Facts.relationTuplesF (name : String) : Scry.Fold Scry.Facts (List Nat) :=
+  Scry.Fold.comp (Scry.Facts.relationF name) Scry.Cst.relationTuplesF
+
+/-- Every tuple in every relation of a fact store. -/
+def Scry.Facts.allTuplesF : Scry.Fold Scry.Facts (List Nat) :=
+  Scry.Fold.comp Scry.Facts.relationsF Scry.Cst.relationTuplesF
+
+-- ## Scry.CstStore: the native columns, read through the model view
+
+/-- Every CST node of a native store (the model view of its columns). Native queries that
+do not need a whole `Node` should read `kindName`/`spanOf`/`childArcs` directly; this is
+the uniform, direct traversal for the model view. -/
+def Scry.CstStore.nodesF : Scry.Fold Scry.CstStore Scry.Node :=
+  Scry.Fold.mk Scry.CstStore.nodesOf
+
+/-- Every edge of a native store. -/
+def Scry.CstStore.edgesF : Scry.Fold Scry.CstStore Scry.Edge :=
+  Scry.Fold.mk Scry.CstStore.edgesOf
+
+/-- Every relation of a native store. -/
+def Scry.CstStore.relationsF : Scry.Fold Scry.CstStore Scry.Relation :=
+  Scry.Fold.mk Scry.CstStore.relationsOf
+
+-- ## Query examples: paths that compose
+
+/-- Every node kind in a fact store (`nodes` then `nodeKind`). -/
+def Scry.CstOptics.kinds (f : Scry.Facts) : List String :=
+  Scry.Fold.toList (Scry.Fold.mapGetter Scry.Facts.nodesF Scry.Cst.nodeKind) f
+
+
+/-- The nodes of kind `kind`, as a one-line query. -/
+def Scry.CstOptics.nodesOfKind (f : Scry.Facts) (kind : String) : List Scry.Node :=
+  Scry.Fold.toList (Scry.Fold.filter
+    (fun n => String.eq (Scry.Cst.nodeKind.get n) kind) Scry.Facts.nodesF) f
+
+
+/-- The source of every edge labelled `label`. -/
+def Scry.CstOptics.edgeSources (f : Scry.Facts) (label : String) : List Scry.NodeId :=
+  Scry.Fold.toList
+    (Scry.Fold.mapGetter
+      (Scry.Fold.filter (fun e => String.eq (Scry.Cst.edgeLabel.get e) label)
+        Scry.Facts.edgesF)
+      Scry.Cst.edgeSrc) f
+
+
+/-- The tuples of the relation called `name`. -/
+def Scry.CstOptics.relationTuples (f : Scry.Facts) (name : String) : List (List Nat) :=
+  Scry.Fold.toList (Scry.Facts.relationTuplesF name) f
+
+

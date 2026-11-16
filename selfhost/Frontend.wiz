@@ -105,6 +105,9 @@ def Scope.setModule (sc : Scope) (m : String) : Scope := match sc with
   | .mk ls d gs nms pvs _ n => .mk ls d gs nms pvs m n
 def Scope.cur : Scope → String
   | .mk _ _ _ _ _ c _ => c
+-- the local binders, innermost first (a tactic goal's context)
+def Scope.localNames : Scope → List String
+  | .mk ls _ _ _ _ _ _ => ls
 def nameKey (m x : String) : String := "module:" +++ m +++ ":" +++ x
 -- whether the source name `x` was declared in the module `m`
 def Scope.declaredIn (sc : Scope) (m x : String) : Bool := match sc with
@@ -818,28 +821,98 @@ def fieldsOf : List Syntax → List Field
     | .some ty => List.append (fieldsNamed (match binderQ b with
         | .some q => q
         | .none => .qw) (isImplicitB b) ty (binderNames b)) (fieldsOf bs)
+-- map every term position of a term: `f k c` is the child under `k` more binders
+def tmsMapWith (f : Nat → Tm → Tm) : Tms → Tms
+  | .tnil => .tnil
+  | .tcons t rest => .tcons (f 0 t) (tmsMapWith f rest)
+-- (the tactic engine traverses arbitrary goal types: `shiftTm`, `abstractOcc` and
+-- `instAt` all use one traversal, so a constructor added to `Tm` has one place to go)
+def tmMapChildren (f : Nat → Tm → Tm) (t : Tm) : Tm := match t with
+  | .pi q i j a b => .pi q i j (f 0 a) (f 1 b)
+  | .lam b => .lam (f 1 b)
+  | .app g a => .app (f 0 g) (f 0 a)
+  | .letE ty v b => .letE (f 0 ty) (f 0 v) (f 1 b)
+  | .ann x ty => .ann (f 0 x) (f 0 ty)
+  | .letq q ty v b => .letq q (f 0 ty) (f 0 v) (f 1 b)
+  | .sigma q i j a b => .sigma q i j (f 0 a) (f 1 b)
+  | .sigmaQ q i j a b => .sigmaQ (f 0 q) i j (f 0 a) (f 1 b)
+  | .pair a b => .pair (f 0 a) (f 0 b)
+  | .fst x => .fst (f 0 x)
+  | .snd x => .snd (f 0 x)
+  | .exfalso m x => .exfalso (f 0 m) (f 0 x)
+  | .letUnit u b => .letUnit (f 0 u) (f 0 b)
+  | .ecase m sc bs => .ecase (f 1 m) (f 0 sc) (tmsMapWith f bs)
+  | .eq a b c => .eq (f 0 a) (f 0 b) (f 0 c)
+  | .eqTy a b => .eqTy (f 0 a) (f 0 b)
+  | .eqRefl a b => .eqRefl (f 0 a) (f 0 b)
+  | .tyRefl a => .tyRefl (f 0 a)
+  | .coe a b e x => .coe (f 0 a) (f 0 b) (f 0 e) (f 0 x)
+  | .subst a b p q c e => .subst (f 0 a) (f 0 b) (f 0 p) (f 0 q) (f 0 c) (f 0 e)
+  | .descr l i => .descr l (f 0 i)
+  | .dret i => .dret (f 0 i)
+  | .darg q s d => .darg q (f 0 s) (f 0 d)
+  | .drec q j d => .drec q (f 0 j) (f 0 d)
+  | .dhrec q h j d => .dhrec q (f 0 h) (f 0 j) (f 0 d)
+  | .delim v p r a b c d => .delim v (f 0 p) (f 0 r) (f 0 a) (f 0 b) (f 0 c) (f 0 d)
+  | .mu l i d j => .mu l (f 0 i) (f 0 d) (f 0 j)
+  | .con x => .con (f 0 x)
+  | .szSuc s => .szSuc (f 0 s)
+  | .sizeLt s => .sizeLt (f 0 s)
+  | .mus l i d j s => .mus l (f 0 i) (f 0 d) (f 0 j) (f 0 s)
+  | .nu l i d j s => .nu l (f 0 i) (f 0 d) (f 0 j) (f 0 s)
+  | .out x => .out (f 0 x)
+  | .cocon x => .cocon (f 0 x)
+  | .sfix l i d v p fn s j x => .sfix l (f 0 i) (f 0 d) v (f 0 p) (f 0 fn) (f 0 s) (f 0 j) (f 0 x)
+  | .scase l q i d v p m s j x => .scase l q (f 0 i) (f 0 d) v (f 0 p) (f 0 m) (f 0 s) (f 0 j) (f 0 x)
+  | .scofix l i d a fn s j x => .scofix l (f 0 i) (f 0 d) (f 0 a) (f 0 fn) (f 0 s) (f 0 j) (f 0 x)
+  | .coit l i d s st j x => .coit l (f 0 i) (f 0 d) (f 0 s) (f 0 st) (f 0 j) (f 0 x)
+  | .ind l i d v p m j x => .ind l (f 0 i) (f 0 d) v (f 0 p) (f 0 m) (f 0 j) (f 0 x)
+  | .ulift k l a => .ulift k l (f 0 a)
+  | .up a => .up (f 0 a)
+  | .down a => .down (f 0 a)
+  | .prf l x => .prf l (f 0 x)
+  | t => t
 -- shift the variables from `c` on of a scope-checked term by `k`
-def shiftTm (k : Nat) : Nat → Tm → Tm
-  | c, .var i => match Nat.lt i c with
+partial def shiftTm (k : Nat) (c : Nat) (t : Tm) : Tm := match t with
+  | .var i => match Nat.lt i c with
     | .true => .var i
     | .false => .var (i + k)
-  | c, .pi q i j a b => .pi q i j (shiftTm k c a) (shiftTm k (c + 1) b)
-  | c, .lam b => .lam (shiftTm k (c + 1) b)
-  | c, .app f a => .app (shiftTm k c f) (shiftTm k c a)
-  | c, .letE ty v b => .letE (shiftTm k c ty) (shiftTm k c v) (shiftTm k (c + 1) b)
-  | c, .letq q ty v b => .letq q (shiftTm k c ty) (shiftTm k c v) (shiftTm k (c + 1) b)
-  | c, .ann t ty => .ann (shiftTm k c t) (shiftTm k c ty)
-  | c, .sigma q i j a b => .sigma q i j (shiftTm k c a) (shiftTm k (c + 1) b)
-  | c, .sigmaQ q i j a b => .sigmaQ (shiftTm k c q) i j (shiftTm k c a) (shiftTm k (c + 1) b)
-  | c, .eq A a b => .eq (shiftTm k c A) (shiftTm k c a) (shiftTm k c b)
-  | c, .eqRefl A a => .eqRefl (shiftTm k c A) (shiftTm k c a)
-  | c, .pair a b => .pair (shiftTm k c a) (shiftTm k c b)
-  | c, .fst t => .fst (shiftTm k c t)
-  | c, .snd t => .snd (shiftTm k c t)
-  | c, .con t => .con (shiftTm k c t)
-  | c, .exfalso m t => .exfalso (shiftTm k c m) (shiftTm k c t)
-  | c, .letUnit u b => .letUnit (shiftTm k c u) (shiftTm k c b)
-  | _, t => t
+  | t => tmMapChildren (fun inc child => shiftTm k (c + inc) child) t
+-- `t` with the occurrences of `a` replaced by the variable `depth` (the other variables
+-- making room for it): `usesVar depth` on the result says whether there was one. This is
+-- the syntactic occurrence test `rw` uses (host `abstractOcc`).
+partial def abstractOcc (a : Tm) (t : Tm) (depth : Nat) : Tm :=
+  match tmEq t (shiftTm depth 0 a) with
+  | .true => .var depth
+  | .false => match t with
+    | .var i => .var (match Nat.lt i depth with
+        | .true => i
+        | .false => i + 1)
+    | t => tmMapChildren (fun inc child => abstractOcc a child (depth + inc)) t
+-- instantiate the variable `depth` of `t` with `arg` (the variable itself: `instAt arg 0`)
+partial def instAt (arg : Tm) (d : Nat) (t : Tm) : Tm := match t with
+  | .var i => match Nat.beq i d with
+    | .true => shiftTm d 0 arg
+    | .false => match Nat.lt d i with
+      | .true => .var (i - 1)
+      | .false => .var i
+  | t => tmMapChildren (fun inc child => instAt arg (d + inc) child) t
+def substNthTm : List Tm → Nat → Option Tm
+  | .nil, _ => .none
+  | .cons t rest, n => match n with
+    | .zero => .some t
+    | .succ k => substNthTm rest k
+-- substitute the first `k` variables of `t` (at depth `k`) with `args`, whose index `i`
+-- is the value of variable `i`; the result is at the depth the arguments are (`d` binders
+-- crossed). A metavariable made in a context that later grew a `let` is applied to the
+-- let's value, not to its variable; `zonk` needs this, not just a shift.
+partial def substArgs (args : List Tm) (d : Nat) (t : Tm) : Tm := match t with
+  | .var i => match Nat.lt i d with
+    | .true => .var i
+    | .false => match substNthTm args (i - d) with
+      | .some a => shiftTm d 0 a
+      | .none => .var (i - d)
+  | t => tmMapChildren (fun inc child => substArgs args (d + inc) child) t
 inductive TmsR where
   | ok (ts : Tms)
   | err (msg : String)
@@ -1988,12 +2061,18 @@ def zonk (es : ES) (d : Nat) (t : Tm) : Option Tm := match metaHead t 0 with
   | .mk i _ => match ES.get es i with
     | .mk k (.some sol) _ => match zonk es k sol with
       | .some sol' =>
-        let extra := dropL k (appArgs t .nil);
-        match extra with
-        | .nil => .some (shiftTm (d - k) 0 sol')
-        | _ => match zonkAll es d extra with
-          | .some extra' => .some (nfAt d (tAppsL (shiftTm (d - k) 0 sol') extra'))
-          | .none => .none
+        let args := appArgs t .nil;
+        let ctxArgs := takeL k args;
+        let extra := dropL k args;
+        match zonkAll es d ctxArgs with
+        | .none => .none
+        | .some ctxArgs' =>
+          let sol'' := substArgs (List.reverseOf ctxArgs' .nil) 0 sol';
+          match extra with
+          | .nil => .some sol''
+          | _ => match zonkAll es d extra with
+            | .some extra' => .some (nfAt d (tAppsL sol'' extra'))
+            | .none => .none
       | .none => .none
     | _ => .none
   | .none => match t with
@@ -2128,6 +2207,438 @@ def zonkAll (es : ES) (d : Nat) : List Tm → Option (List Tm)
       | .none => .none
     | .none => .none
 end
+
+-- ------------------------------------------------------------------------------------
+-- (A13) The core tactic engine: goals, the `STac` request monad, and its state.
+--
+-- A goal is the expected type, the metavariable that fills it, and the local context
+-- (the kernel's `TCtx` and the scope that names its variables). `by` makes one, runs the
+-- script, and reports the goals that are left; a solved block is an ordinary term, so the
+-- kernel checks it as it checks any other.
+
+inductive TacGoal where
+  | mk (cx : Cx) (ty : Val) (tm : Tm)
+def TacGoal.cx : TacGoal → Cx
+  | .mk cx _ _ => cx
+def TacGoal.ty : TacGoal → Val
+  | .mk _ ty _ => ty
+def TacGoal.tm : TacGoal → Tm
+  | .mk _ _ tm => tm
+
+-- a term `assign` accepted while it still had holes: its type is inferred and compared
+-- with the goal at the end of the block (the host's `unchecked`)
+inductive SUnchecked where
+  | mk (gl : TacGoal) (t : Tm)
+
+-- the requests: one tactic operation, with the goal taken from the open list when the
+-- interpreter runs it. (The self-hosted frontend has no inductive field that recurses
+-- through a function type, so the host's continuation encoding has to be a command tree:
+-- `seq`, `try`, `first` and `repeat` are constructors, not continuations.)
+inductive STacOp where
+  | intro (x : String)
+  | introFresh
+  | intros
+  | exact (stx : Syntax)
+  | apply (stx : Syntax)
+  | assumption
+  | closeRfl
+  | change (stx : Syntax)
+  | unfold (names : List String)
+  | constructor
+  | rw (stx : Syntax) (rtl : Bool)
+  | calc (stx : Syntax)
+  | have (x : String) (tyStx : Syntax) (valStx : Option Syntax)
+  | suffices (x : String) (tyStx : Syntax)
+  | obtain (x : String) (y : String) (eStx : Syntax)
+  | trace (msg : String)
+inductive STac where
+  | done
+  | fail (msg : String)
+  | op (o : STacOp)
+  | eval (stx : Syntax)
+  | seq (a b : STac)
+  | tryTac (body : STac)
+  | firstTac (a b : STac)
+  | repeatTac (body : STac)
+
+inductive STacState where
+  | mk (goals : List TacGoal) (open : List Nat) (unchecked : List SUnchecked)
+def STacState.goals : STacState → List TacGoal
+  | .mk g _ _ => g
+def STacState.open : STacState → List Nat
+  | .mk _ o _ => o
+def STacState.unchecked : STacState → List SUnchecked
+  | .mk _ _ u => u
+
+def nthNat : List Nat → Nat → Option Nat
+  | .nil, _ => .none
+  | .cons x rest, n => match n with
+    | .zero => .some x
+    | .succ k => nthNat rest k
+def nthGoal : List TacGoal → Nat → Option TacGoal
+  | .nil, _ => .none
+  | .cons x rest, n => match n with
+    | .zero => .some x
+    | .succ k => nthGoal rest k
+def setGoalAt : List TacGoal → Nat → TacGoal → List TacGoal
+  | .nil, _, _ => .nil
+  | .cons x rest, n, y => match n with
+    | .zero => .cons y rest
+    | .succ k => .cons x (setGoalAt rest k y)
+def nthStr : List String → Nat → String
+  | .nil, _ => "x"
+  | .cons x rest, n => match n with
+    | .zero => x
+    | .succ k => nthStr rest k
+def envToList : Env → List Val
+  | .nil => .nil
+  | .cons v rest => .cons v (envToList rest)
+def nthVal : List Val → Nat → Option Val
+  | .nil, _ => .none
+  | .cons x rest, n => match n with
+    | .zero => .some x
+    | .succ k => nthVal rest k
+def openRemove (g : Nat) : List Nat → List Nat
+  | .nil => .nil
+  | .cons x rest => match Nat.beq x g with
+    | .true => rest
+    | .false => .cons x (openRemove g rest)
+-- replace `g` in the open list by the goals `new` (in order)
+def openReplace (g : Nat) (new : List Nat) : List Nat → List Nat
+  | .nil => .nil
+  | .cons x rest => match Nat.beq x g with
+    | .true => List.append new rest
+    | .false => .cons x (openReplace g new rest)
+def STacState.addGoal (st : STacState) (gl : TacGoal) : STacState × Nat := match st with
+  | .mk gs op un =>
+    let n := List.length gs;
+    (.mk (List.append gs (.cons gl .nil)) op un, n)
+def STacState.replaceGoal (st : STacState) (g : Nat) (gl : TacGoal) : STacState := match st with
+  | .mk gs op un => .mk (setGoalAt gs g gl) op un
+def STacState.solve (st : STacState) (g : Nat) : STacState := match st with
+  | .mk gs op un => .mk gs (openRemove g op) un
+def STacState.pushUnchecked (st : STacState) (u : SUnchecked) : STacState := match st with
+  | .mk gs op us => .mk gs op (List.append us (.cons u .nil))
+
+def tacGoalNames (gl : TacGoal) : List String := Scope.localNames (Cx.sc (TacGoal.cx gl))
+-- `show` names its variables by level, outermost first
+def tacGoalNamesOuter (gl : TacGoal) : List String :=
+  List.reverseOf (Scope.localNames (Cx.sc (TacGoal.cx gl))) .nil
+-- the type of the `j`th context variable, quoted at the goal's depth (`TCtx.types` holds
+-- each value as it was when its variable was introduced)
+def tacGoalHypType (es : ES) (gl : TacGoal) (j : Nat) : Tm :=
+  let d := Cx.lvl (TacGoal.cx gl);
+  match nthVal (envToList (TCtx.types (Cx.c (TacGoal.cx gl)))) j with
+  | .some v => match zonk es d (quote d v) with
+    | .some t => t
+    | .none => quote d v
+  | .none => .star
+partial def tacGoalShowStep (es : ES) (gl : TacGoal) (d : Nat) (names : List String) : Nat → String → String
+  | i, acc => match Nat.lt i d with
+    | .false => acc
+    | .true =>
+      let j := d - 1 - i;
+      let line := String.append (String.append (nthStr names (d - 1 - j)) " : ")
+        (show names d (tacGoalHypType es gl j));
+      let acc' := match strEq acc "" with
+        | .true => line
+        | .false => String.append (String.append acc "\n") line;
+      tacGoalShowStep es gl d names (i + 1) acc'
+def tacGoalShow (es : ES) (gl : TacGoal) : String :=
+  let d := Cx.lvl (TacGoal.cx gl);
+  let names := tacGoalNamesOuter gl;
+  let body := match zonk es d (quote d (TacGoal.ty gl)) with
+    | .some t => show names d t
+    | .none => show names d (quote d (TacGoal.ty gl));
+  let ctx := tacGoalShowStep es gl d names 0 "";
+  match strEq ctx "" with
+  | .true => String.append "⊢ " body
+  | .false => String.append (String.append ctx "\n⊢ ") body
+-- a goal is open while its metavariable is unsolved (unification can solve a subgoal
+-- that a later argument determined; it is then closed, as in the host)
+def goalIsOpen (es : ES) (gl : TacGoal) : Bool :=
+  match zonk es (Cx.lvl (TacGoal.cx gl)) (TacGoal.tm gl) with
+  | .some _ => .false
+  | .none => .true
+def goalListOpen (es : ES) (st : STacState) : List Nat → List Nat
+  | .nil => .nil
+  | .cons g rest => match nthGoal (STacState.goals st) g with
+    | .some gl => match goalIsOpen es gl with
+      | .true => .cons g (goalListOpen es st rest)
+      | .false => goalListOpen es st rest
+    | .none => goalListOpen es st rest
+def tacGoalsShowGo (es : ES) (st : STacState) : List Nat → String → String
+  | .nil, acc => acc
+  | .cons g rest, acc => match nthGoal (STacState.goals st) g with
+    | .none => tacGoalsShowGo es st rest acc
+    | .some gl => match goalIsOpen es gl with
+      | .false => tacGoalsShowGo es st rest acc
+      | .true =>
+        let s := tacGoalShow es gl;
+        let acc' := match strEq acc "" with
+          | .true => s
+          | .false => String.append (String.append acc "\n\n") s;
+        tacGoalsShowGo es st rest acc'
+def tacGoalsShow (es : ES) (st : STacState) : String :=
+  let s := tacGoalsShowGo es st (STacState.open st) "";
+  match strEq s "" with
+  | .true => "no goals"
+  | .false => s
+def unsolvedGoals (es : ES) (st : STacState) : String :=
+  String.append "unsolved goals:\n" (tacGoalsShow es st)
+
+-- the monad is the command tree (`Unit`-valued: a tactic script is a sequence of
+-- requests). `seq` is `bind`, `fail` is `STac.fail`, and `try`/`first` are the
+-- backtracking constructors (their failed branch's state changes are dropped).
+def STacticM (A : Type) : Type := STac
+def STacticM.pure {A : Type} (_ : A) : STacticM A := .done
+def STacticM.fail {A : Type} (msg : String) : STacticM A := .fail msg
+def STacticM.op (o : STacOp) : STac := .op o
+def STacticM.eval (stx : Syntax) : STac := .eval stx
+def STacticM.catch (body : STac) (_ : String → STac) : STac := .tryTac body
+def STacticM.repeatN (n : Nat) (stx : Syntax) : STac := match n with
+  | .zero => .done
+  | .succ k => .tryTac (.seq (.eval stx) (STacticM.repeatN k stx))
+
+def identNameOf : Syntax → Option String
+  | .ident n => .some n
+  | _ => .none
+-- the identifiers of a `sepBy1 ident ","` node (`unfold f, g`)
+mutual
+def tacticIdentsOf (s : Syntax) : List String := match s with
+  | .ident n => .cons n .nil
+  | .node _ _ => tacticIdentsOfL (kids s)
+  | _ => .nil
+def tacticIdentsOfL : List Syntax → List String
+  | .nil => .nil
+  | .cons s rest => List.append (tacticIdentsOf s) (tacticIdentsOfL rest)
+end
+def strPrefix (p s : String) : Bool := match p with
+  | .mk ps => match s with
+    | .mk ss => match matchPrefix ps ss with
+      | .some _ => .true
+      | .none => .false
+def isTacticSyntax (s : Syntax) : Bool := strPrefix "tactic." (kindOf s)
+mutual
+def firstTactic (s : Syntax) : Option Syntax :=
+  match isTacticSyntax s with
+  | .true => .some s
+  | .false => firstTacticList (kids s)
+def firstTacticList : List Syntax → Option Syntax
+  | .nil => .none
+  | .cons s rest => match firstTactic s with
+    | .some t => .some t
+    | .none => firstTacticList rest
+end
+def tacticKids (s : Syntax) : List Syntax := match strEq (kindOf s) "null" with
+  | .true => kids s
+  | .false => .cons s .nil
+def tacticStepsGo : List Syntax → List Syntax → List Syntax
+  | .nil, acc => acc
+  | .cons x rest, acc => match firstTactic x with
+    | .some t => tacticStepsGo rest (List.append acc (.cons t .nil))
+    | .none => tacticStepsGo rest acc
+def tacticSteps (stx : Syntax) : List Syntax := tacticStepsGo (kids (kid stx 1)) .nil
+def optionalTerm (s : Syntax) : Option Syntax := match strEq (kindOf s) "null" with
+  | .true => match kids s with
+    | .nil => .none
+    | .cons _ (.cons t _) => .some t
+    | .cons t _ => .some t
+  | .false => .some s
+
+-- one tactic of a script, as a request
+mutual
+def tacOfStx (stx : Syntax) : STac :=
+  let k := kindOf stx;
+  match strEq k "tactic.intro" with
+  | .true => match identNameOf (kid stx 1) with
+    | .some x => STacticM.op (STacOp.intro x)
+    | .none => STac.fail "intro needs an identifier"
+  | .false => match strEq k "tactic.intros" with
+    | .true => STacticM.op STacOp.intros
+    | .false => match strEq k "tactic.exact" with
+      | .true => STacticM.op (STacOp.exact (kid stx 1))
+      | .false => match strEq k "tactic.apply" with
+        | .true => STacticM.op (STacOp.apply (kid stx 1))
+        | .false => match strEq k "tactic.assumption" with
+          | .true => STacticM.op STacOp.assumption
+          | .false => match strEq k "tactic.rfl" with
+            | .true => STacticM.op STacOp.closeRfl
+            | .false => match strEq k "tactic.change" with
+              | .true => STacticM.op (STacOp.change (kid stx 1))
+              | .false => match strEq k "tactic.unfold" with
+                | .true => STacticM.op (STacOp.unfold (tacticIdentsOf (kid stx 1)))
+                | .false => match strEq k "tactic.constructor" with
+                  | .true => STacticM.op STacOp.constructor
+                  | .false => match strEq k "tactic.rw" with
+                | .true => STacticM.op (STacOp.rw (kid stx 1) .false)
+                | .false => match strEq k "tactic.rwBack" with
+                  | .true => STacticM.op (STacOp.rw (kid stx 2) .true)
+                  | .false => match strEq k "tactic.calc" with
+                    | .true => STacticM.op (STacOp.calc stx)
+                    | .false => match strEq k "tactic.have" with
+                      | .true => match identNameOf (kid stx 1) with
+                        | .some x => STacticM.op (STacOp.have x (kid stx 3) (optionalTerm (kid stx 4)))
+                        | .none => STac.fail "have needs an identifier"
+                      | .false => match strEq k "tactic.suffices" with
+                        | .true => match identNameOf (kid stx 1) with
+                          | .some x => STacticM.op (STacOp.suffices x (kid stx 3))
+                          | .none => STac.fail "suffices needs an identifier"
+                        | .false => match strEq k "tactic.obtain" with
+                          | .true => match identNameOf (kid stx 2) with
+                            | .some x => match identNameOf (kid stx 4) with
+                              | .some y => STacticM.op (STacOp.obtain x y (kid stx 7))
+                              | .none => STac.fail "obtain needs two identifiers"
+                            | .none => STac.fail "obtain needs two identifiers"
+                          | .false => match strEq k "tactic.try" with
+                            | .true => STacticM.catch (STacticM.eval (kid stx 1)) (fun _ => STacticM.pure ())
+                            | .false => match strEq k "tactic.first" with
+                              | .true => .firstTac (STacticM.eval (kid stx 2)) (STacticM.eval (kid stx 4))
+                              | .false => match strEq k "tactic.repeat" with
+                                | .true => STacticM.repeatN 64 (kid stx 1)
+                                | .false => match strEq k "tactic.paren" with
+                                  | .true => tacticSeq (tacticKids (kid stx 1))
+                                  | .false => STac.fail (String.append "the tactic syntax "
+                                      (String.append k " has no meaning (the self-hosted frontend has the core tactics only)"))
+def tacticSeq (xs : List Syntax) : STac := match xs with
+  | .nil => .done
+  | .cons x rest => match isTacticSyntax x with
+    | .true => .seq (.eval x) (tacticSeq rest)
+    | .false => tacticSeq rest
+end
+
+-- what an interpreter step answered: the state and the elaborator state, or a failure
+inductive STacR where
+  | ok (st : STacState) (es : ES)
+  | err (msg : String)
+-- the endpoints of a `calc` step's equation
+inductive CalcEnd where
+  | mk (A a b : Tm)
+-- a `calc` chain's accumulated relation: `startA`, its left endpoint, the current right
+-- endpoint, the proof so far, and the current relation's type
+inductive CalcAcc where
+  | mk (startA startLhs prevRhs : Tm) (pf : Tm) (ty : Val)
+inductive CalcR where
+  | ok (pf : Tm) (ty : Val) (es : ES)
+  | err (msg : String)
+def STacState.getGoal (st : STacState) (g : Nat) : Option TacGoal :=
+  nthGoal (STacState.goals st) g
+def tacGoalUnify (es : ES) (gl : TacGoal) (t : Tm) : Option ES :=
+  let cx := TacGoal.cx gl;
+  unify es cx (eval (TCtx.env (Cx.c cx)) (TacGoal.tm gl)) (eval (TCtx.env (Cx.c cx)) t)
+def tacGoalError : STacR := .err "tactic: unknown goal"
+-- the unchecked-solution path (`assign`): a term with holes is checked against its goal
+-- at the end of the block, a term without holes now
+def assignInto (es : ES) (st : STacState) (g : Nat) (t : Tm) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl =>
+    let st' := match tmHasHole t with
+      | .true => STacState.pushUnchecked st (SUnchecked.mk gl t)
+      | .false => st;
+    let checked : Option ES := match tmHasHole t with
+      | .true => .some es
+      | .false => match infer (Cx.c (TacGoal.cx gl)) t with
+        | .ok ty _ => unify es (TacGoal.cx gl) (force es (TacGoal.ty gl)) ty
+        | .err m => .none;
+    match checked with
+    | .none => .err "assign: the term does not have the goal's type"
+    | .some es' => match tacGoalUnify es' gl t with
+      | .none => .err "assign: the term does not have the goal's type"
+      | .some es'' => .ok (STacState.solve st' g) es''
+def goalIntro (es : ES) (st : STacState) (g : Nat) (x : String) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl =>
+    let cx := TacGoal.cx gl;
+    let lvl := Cx.lvl cx;
+    match whnf (force es (TacGoal.ty gl)) with
+    | .vpi q i j dom env cod =>
+      let cx' := Cx.bind cx x dom;
+      let body := eval (.cons (fresh lvl) env) cod;
+      match newMeta es cx' body with
+      | .mk mt es' => match tacGoalUnify es' gl (.lam mt) with
+        | .none => .err "intro: the goal's hole does not accept a λ"
+        | .some es'' => .ok (STacState.replaceGoal st g (TacGoal.mk cx' body mt)) es''
+    | _ => .err "intro: the goal is not a function type"
+def nameTaken (x : String) : List String → Bool
+  | .nil => .false
+  | .cons y rest => match strEq x y with
+    | .true => .true
+    | .false => nameTaken x rest
+partial def freshHypNameS (taken : List String) (base : String) (cand : String) (n : Nat) : String :=
+  let next := String.append cand (Nat.toString n);
+  match nameTaken next taken with
+  | .false => next
+  | .true => freshHypNameS taken base cand (n + 1)
+partial def freshHypName (taken : List String) (base : String) : String :=
+  let cand := String.append base "✝";
+  match nameTaken cand taken with
+  | .false => cand
+  | .true => freshHypNameS taken base cand 1
+def goalIntroFresh (es : ES) (st : STacState) (g : Nat) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl =>
+    let cx := TacGoal.cx gl;
+    let lvl := Cx.lvl cx;
+    let names := tacGoalNames gl;
+    match whnf (force es (TacGoal.ty gl)) with
+    | .vpi q i j dom env cod =>
+      let x := freshHypName names (match isProp (Cx.c cx) dom with
+        | .true => "h"
+        | .false => "x");
+      let cx' := Cx.bind cx x dom;
+      let body := eval (.cons (fresh lvl) env) cod;
+      match newMeta es cx' body with
+      | .mk mt es' => match tacGoalUnify es' gl (.lam mt) with
+        | .none => .err "intros: the goal's hole does not accept a λ"
+        | .some es'' => .ok (STacState.replaceGoal st g (TacGoal.mk cx' body mt)) es''
+    | _ => .err "intros: the goal is not a function type"
+partial def goalIntros (es : ES) (st : STacState) (g : Nat) (fuel : Nat) : STacR :=
+  match fuel with
+  | .zero => .ok st es
+  | .succ k => match STacState.getGoal st g with
+    | .none => tacGoalError
+    | .some gl => match whnf (force es (TacGoal.ty gl)) with
+      | .vpi _ _ _ _ _ _ => match goalIntroFresh es st g with
+        | .ok st' es' => goalIntros es' st' g k
+        | .err m => .err m
+      | _ => .ok st es
+partial def goalApply (es : ES) (st : STacState) (g : Nat) (f : Tm) (ty : Val) (fuel : Nat)
+    (acc : List Nat) : STacR :=
+  match Nat.beq fuel 0 with
+  | .true => .err "apply: too many arguments"
+  | .false => match STacState.getGoal st g with
+    | .none => tacGoalError
+    | .some gl =>
+      let cx := TacGoal.cx gl;
+      match whnf (force es ty) with
+      | .vpi q i j dom env cod =>
+        match newMeta es cx dom with
+        | .mk mt es' =>
+          let body := eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod;
+          let st1 := STacState.addGoal st (TacGoal.mk cx dom mt);
+          let id := st1.2;
+          goalApply es' st1.1 g (.app f mt) body (fuel - 1) (List.append acc (.cons id .nil))
+      | _ => match unify es cx (force es ty) (force es (TacGoal.ty gl)) with
+        | .none => .err "apply: the result type does not match the goal"
+        | .some es' => match assignInto es' st g f with
+          | .ok st' es'' => .ok (STacState.mk (STacState.goals st') (openReplace g acc (STacState.open st)) (STacState.unchecked st')) es''
+          | .err m => .err m
+def checkUncheckedGo : List SUnchecked → ES → Option String
+  | .nil, _ => .none
+  | .cons (.mk gl t) rest, es =>
+    let d := Cx.lvl (TacGoal.cx gl);
+    match zonk es d t with
+    | .none => .some "assign: the assigned term still has holes at the end of the tactic block"
+    | .some tz => match infer (Cx.c (TacGoal.cx gl)) tz with
+      | .err m => .some (String.append "assign: " m)
+      | .ok ty _ => match unify es (TacGoal.cx gl) (force es (TacGoal.ty gl)) ty with
+        | .none => .some "assign: the assigned term does not have the goal's type"
+        | .some es' => checkUncheckedGo rest es'
+def checkUnchecked (es : ES) (st : STacState) : Option String :=
+  checkUncheckedGo (STacState.unchecked st) es
 
 inductive HE where
   | ok (t : Tm) (ty : Val) (es : ES) (mask : List BKind)
@@ -3418,7 +3929,377 @@ def headParamNames (gs : Globals) (cx : Cx) (h : Syntax) : List String :=
         | _ => .nil
       | .false => .nil
 
+-- (A13) `unfold`'s traversal result (the term, and whether an occurrence changed)
+inductive UnfoldR where
+  | mk (t : Tm) (changed : Bool)
+
 mutual
+-- ------------------------------------------------------------------------------------
+-- (A13) The tactic interpreter. Each request either updates the goal state or reports a
+-- failure; `STac.catch` runs its handler on the state from before the failed branch.
+
+/-- Elaborate a `calc` chain of equations: `a = b := h₁  _ = c := h₂ …`. Each step is
+checked against its own relation; consecutive endpoints must unify; the proof is composed
+with the kernel's `subst` (the equality transitivity), so no `Trans` class is needed. -/
+def calcEndpoints (t : Tm) : Option CalcEnd := match t with
+  | .eq A a b => .some (.mk A a b)
+  | _ => .none
+def calcStepNodes (stx : Syntax) : List Syntax := kids (kid stx 1)
+def calcGo (gs : Globals) (cx : Cx) (d : Nat) (env : Env) (steps : List Syntax)
+    (acc : Option CalcAcc) (es : ES) : CalcR := match steps with
+  | .nil => match acc with
+    | .none => .err "calc needs at least one step"
+    | .some (.mk A a b pf ty) => .ok pf (vEq (eval env A) (eval env a) (eval env b)) es
+  | .cons step rest =>
+    let propStx := kid step 0;
+    let proofStx := kid step 2;
+    match inferType gs es cx propStx with
+    | .err m => .err m
+    | .ok prop propSort es1 =>
+      match unify es1 cx (force es1 propSort) (.vsort (.lnum 0)) with
+      | .none => .err "a calc step must be a proposition, `a = b` (or another relation to a proposition)"
+      | .some es2 => match calcEndpoints prop with
+        | .none => .err (String.append "calc: a step must be an equation between two terms, not "
+            (show (scopeNames (Cx.sc cx)) d prop))
+        | .some (.mk A0 a0 b0) =>
+          let cont : ES → CalcR := fun (es0 : ES) =>
+            -- the step's `_` is a meta; the endpoint unification just solved it
+            let propZ := match zonk es0 d prop with
+              | .some t => t
+              | .none => prop;
+            (match calcEndpoints propZ with
+            | .none => .err (String.append "calc: a step must be an equation between two terms, not "
+                (show (scopeNames (Cx.sc cx)) d propZ))
+            | .some (.mk A a b) =>
+              let pv := eval env propZ;
+              match checkT gs es0 cx proofStx pv with
+              | .err m => .err m
+              | .ok pf _ es3 => match acc with
+                | .none => calcGo gs cx d env rest (.some (.mk A a b pf pv)) es3
+                | .some (.mk sA sL pR pF pT) =>
+                  -- `pF : sL = pR`, `pf : a = b` (with `pR` unified with `a`): `subst`
+                  let P : Tm := .lam (.lam (.eq (shiftTm 2 0 sA) (shiftTm 2 0 sL) (.var 1)));
+                  let pf' : Tm := .subst sA pR P pF (quote d (eval env b)) pf;
+                  calcGo gs cx d env rest (.some (.mk sA sL b pf' pv)) es3);
+          match acc with
+          | .none => cont es2
+          | .some (.mk sA sL pR pF pT) =>
+            match unify es2 cx (eval env a0) (eval env pR) with
+            | .none => .err (String.append (String.append (String.append
+                "calc: the middle term does not match: this step starts at "
+                (show (scopeNames (Cx.sc cx)) d a0)) "\nbut the previous step ends at\n")
+                (show (scopeNames (Cx.sc cx)) d pR))
+            | .some es3 => cont es3
+def calcRun (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) : CalcR :=
+  calcGo gs cx (Cx.lvl cx) (TCtx.env (Cx.c cx)) (calcStepNodes stx) .none es
+
+def runOpSuffices (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (tyStx : Syntax) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match inferType gs es (TacGoal.cx gl) tyStx with
+    | .err m => .err m
+    | .ok A _ es1 =>
+      let cx := TacGoal.cx gl;
+      let d := Cx.lvl cx;
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match newMeta es1 cx Av with
+      | .mk pf es2 =>
+        let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) pf) Av;
+        let goalT := quote (d + 1) (force es2 (TacGoal.ty gl));
+        match newMeta es2 cx' (eval (TCtx.env (Cx.c cx')) goalT) with
+        | .mk m es3 => match tacGoalUnify es3 gl (.letE A pf m) with
+          | .none => .err "suffices: the goal's hole does not accept the intermediate proof"
+          | .some es4 =>
+            let st1 := STacState.addGoal st (TacGoal.mk cx Av pf);
+            let st2 := STacState.addGoal st1.1 (TacGoal.mk cx' (eval (TCtx.env (Cx.c cx')) goalT) m);
+            let st3 := STacState.mk (STacState.goals st2.1) (openReplace g (.cons st1.2 (.cons st2.2 .nil)) (STacState.open st2.1)) (STacState.unchecked st2.1);
+            .ok st3 es4
+def runOpHave (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (tyStx : Syntax)
+    (valStx : Option Syntax) : STacR :=
+  match valStx with
+  | .none => runOpSuffices gs es st g x tyStx
+  | .some vstx => match STacState.getGoal st g with
+    | .none => tacGoalError
+    | .some gl => match inferType gs es (TacGoal.cx gl) tyStx with
+      | .err m => .err m
+      | .ok A _ es1 =>
+        let cx := TacGoal.cx gl;
+        let d := Cx.lvl cx;
+        let Av := eval (TCtx.env (Cx.c cx)) A;
+        match checkT gs es1 cx vstx Av with
+        | .err m => .err m
+        | .ok v _ es2 =>
+          let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) v) Av;
+          let goalT := quote (d + 1) (force es2 (TacGoal.ty gl));
+          match newMeta es2 cx' (eval (TCtx.env (Cx.c cx')) goalT) with
+          | .mk m es3 => match tacGoalUnify es3 gl (.letE A v m) with
+            | .none => .err "have: the goal's hole does not accept the hypothesis"
+            | .some es4 => .ok (STacState.replaceGoal st g (TacGoal.mk cx' (eval (TCtx.env (Cx.c cx')) goalT) m)) es4
+def runOpObtain (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (y : String)
+    (eStx : Syntax) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match inferT gs es (TacGoal.cx gl) eStx with
+    | .err m => .err m
+    | .ok e ety es1 =>
+      let cx := TacGoal.cx gl;
+      let d := Cx.lvl cx;
+      let env := TCtx.env (Cx.c cx);
+      match whnf (force es1 ety) with
+      | .vsigma q i j A envB B =>
+        let cx1 := Cx.bind cx x A;
+        let Bv := eval (.cons (fresh d) envB) B;
+        let cx2 := Cx.bind cx1 y Bv;
+        let goalT := quote (d + 2) (force es1 (TacGoal.ty gl));
+        match newMeta es1 cx2 (eval (TCtx.env (Cx.c cx2)) goalT) with
+        | .mk m es2 =>
+          let body : Tm := .letE (quote d A) (.fst e)
+            (.letE (quote (d + 1) Bv) (.snd (shiftTm 1 0 e)) m);
+          match tacGoalUnify es2 gl body with
+          | .none => .err "obtain: the goal's hole does not accept the pair"
+          | .some es3 => .ok (STacState.replaceGoal st g (TacGoal.mk cx2 (eval (TCtx.env (Cx.c cx2)) goalT) m)) es3
+      | v => .err (String.append "obtain: expected a pair (a Σ type), got "
+          (show (scopeNames (Cx.sc cx)) d (quote d v)))
+
+def runOpRw (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) (rtl : Bool) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match inferT gs es (TacGoal.cx gl) stx with
+    | .err m => .err m
+    | .ok h hty es1 =>
+      let cx := TacGoal.cx gl;
+      let d := Cx.lvl cx;
+      let env := TCtx.env (Cx.c cx);
+      match whnf (force es1 hty) with
+      | .vne (.heq A a b) .snil =>
+        let At : Tm := quote d A;
+        let at : Tm := quote d a;
+        let bt : Tm := quote d b;
+        let goalT := match zonk es1 d (quote d (force es1 (TacGoal.ty gl))) with
+          | .some t => t
+          | .none => quote d (force es1 (TacGoal.ty gl));
+        let old := match rtl with | .true => bt | .false => at;
+        let new := match rtl with | .true => at | .false => bt;
+        let body := abstractOcc old goalT 0;
+        match usesVar 0 body with
+        | .false => .err (String.append (String.append "rewrite: the goal does not mention "
+            (show (scopeNames (Cx.sc cx)) d old)) "")
+        | .true =>
+          let newT := instAt new 0 body;
+          let Ga := instAt at 0 body;
+          let P : Tm := .lam (.lam (match rtl with
+            | .true => .eqTy (shiftTm 2 0 Ga) (shiftTm 1 0 body)
+            | .false => .eqTy (shiftTm 1 0 body) (shiftTm 2 0 Ga)));
+          let pf : Tm := .subst At at P (.tyRefl Ga) bt h;
+          match newMeta es1 cx (eval env newT) with
+          | .mk m es2 => match tacGoalUnify es2 gl (.coe newT goalT pf m) with
+            | .none => .err "rewrite: the cast does not solve the goal"
+            | .some es3 =>
+              let st1 := STacState.addGoal st (TacGoal.mk cx (eval env newT) m);
+              let st2 := STacState.mk (STacState.goals st1.1) (openReplace g (.cons st1.2 .nil) (STacState.open st1.1)) (STacState.unchecked st1.1);
+              .ok st2 es3
+      | _ => .err (String.append "rewrite: not an equation between two terms: "
+          (show (scopeNames (Cx.sc cx)) d (quote d (force es1 hty))))
+
+def runOpCalc (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match calcRun gs es (TacGoal.cx gl) stx with
+    | .err m => .err m
+    | .ok pf ty es1 => match unify es1 (TacGoal.cx gl) (force es1 (TacGoal.ty gl)) (force es1 ty) with
+      | .none => .err "calc: the last step does not have the goal's type"
+      | .some es2 => match tacGoalUnify es2 gl pf with
+        | .none => .err "calc: the proof does not solve the goal"
+        | .some es3 => .ok (STacState.solve st g) es3
+
+def anyHyp (es : ES) (cx : Cx) (goalTy : Val) (tys : List Val) (i : Nat) : Option (ES × Nat) :=
+  match tys with
+  | .nil => .none
+  | .cons ty rest => match unify es cx (force es goalTy) (force es ty) with
+    | .some es' => .some (es', i)
+    | .none => anyHyp es cx goalTy rest (i + 1)
+def runOpAssumption (es : ES) (st : STacState) (g : Nat) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl =>
+    let cx := TacGoal.cx gl;
+    match anyHyp es cx (TacGoal.ty gl) (envToList (TCtx.types (Cx.c cx))) 0 with
+    | .none => .err "assumption: no hypothesis matches the goal"
+    | .some p => assignInto p.1 st g (.var p.2)
+def runOpExact (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match checkT gs es (TacGoal.cx gl) stx (TacGoal.ty gl) with
+    | .err m => .err m
+    | .ok t _ es1 => match tacGoalUnify es1 gl t with
+      | .none => .err "exact: the term does not have the goal's type"
+      | .some es2 => .ok (STacState.solve st g) es2
+def runOpChange (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match inferType gs es (TacGoal.cx gl) stx with
+    | .err m => .err m
+    | .ok A _ es1 =>
+      let cx := TacGoal.cx gl;
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match unify es1 cx (force es1 (TacGoal.ty gl)) Av with
+      | .none => .err "change: the new goal is not convertible with the old one"
+      | .some es2 => match newMeta es2 cx Av with
+        | .mk m es3 => match tacGoalUnify es3 gl m with
+          | .none => .err "change: the goal's hole does not accept the new goal"
+          | .some es4 => .ok (STacState.replaceGoal st g (TacGoal.mk cx Av m)) es4
+
+-- (A13) `unfold f, g`: replace the applications of each definition by its value, once,
+-- in the goal's type. The occurrence test is syntactic; the kernel checks the resulting
+-- term at the end of the block, as it does for `change`.
+def unfoldOne (gs : Globals) (n : String) (t : Tm) : Tm := match t with
+  | .const m ps ls v _ => match strEq m n with
+    | .true => substIfAny ps ls v
+    | .false => t
+  | t => tmMapChildren (fun _ c => unfoldOne gs n c) t
+def unfoldNamesGo (gs : Globals) (names : List String) (t : Tm) (changed : Bool) : UnfoldR := match names with
+  | .nil => .mk t changed
+  | .cons n rest =>
+    let t' := unfoldOne gs n t;
+    unfoldNamesGo gs rest t' (Bool.or changed (Bool.not (tmEq t t')))
+def checkUnfoldNames (gs : Globals) : List String → Option String
+  | .nil => .none
+  | .cons n rest => match Scope.find (Globals.scope gs) n with
+    | .none => .some (String.append "unfold: unknown constant " n)
+    | .some _ => checkUnfoldNames gs rest
+def runOpUnfold (gs : Globals) (es : ES) (st : STacState) (g : Nat) (names : List String) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match checkUnfoldNames gs names with
+    | .some m => .err m
+    | .none =>
+      let cx := TacGoal.cx gl;
+      let d := Cx.lvl cx;
+      let env := TCtx.env (Cx.c cx);
+      -- (the goal type as written: `force` would whnf `double 0 = 0` to `True` and
+      -- lose the occurrence `unfold` looks for)
+      let goalT := match zonk es d (quote d (TacGoal.ty gl)) with
+        | .some t => t
+        | .none => quote d (TacGoal.ty gl);
+      match unfoldNamesGo gs names goalT .false with
+      | .mk t' changed => match changed with
+        | .false => .err "unfold: nothing to unfold: the goal has no application of these definitions that computes"
+        | .true =>
+          let Av := eval env t';
+          match unify es cx (force es (TacGoal.ty gl)) Av with
+          | .none => .err "unfold: the unfolded goal is not convertible with the goal"
+          | .some es1 => match newMeta es1 cx Av with
+            | .mk m es2 => match tacGoalUnify es2 gl m with
+              | .none => .err "unfold: the goal's hole does not accept the unfolded goal"
+              | .some es3 => .ok (STacState.replaceGoal st g (TacGoal.mk cx Av m)) es3
+-- (A13) `constructor`: the first constructor of the goal's type that applies.
+-- (the constructors' globals are `T.c`, but `IndInfo.Ctor` holds the source name `c`;
+-- `privBase` turns a private type's kernel name back into the source `T`)
+def ctorNamesOf (T : String) : List Ctor → List String
+  | .nil => .nil
+  | .cons (.mk n _ _ _ _) rest => .cons (String.append (String.append T ".") n) (ctorNamesOf T rest)
+def indCtorsOf (gs : Globals) : Val → List String
+  | .vglued (.hconst n _ _ _ _) _ u => match Globals.ind gs n with
+    | .some (.mk _ _ _ _ cs _ _ _) => ctorNamesOf (privBase n) cs
+    | .none => indCtorsOf gs (u ())
+  | .vglued _ _ u => indCtorsOf gs (u ())
+  | _ => .nil
+def tryCtors (gs : Globals) (es : ES) (st : STacState) (g : Nat) (cx : Cx) : List String → STacR
+  | .nil => .err "constructor: no constructor applies"
+  | .cons n rest => match inferT gs es cx (.ident n) with
+    | .err _ => tryCtors gs es st g cx rest
+    | .ok f ty es1 => match goalApply es1 st g f ty 64 .nil with
+      | .ok st' es' => .ok st' es'
+      | .err _ => tryCtors gs es st g cx rest
+def runOpConstructor (gs : Globals) (es : ES) (st : STacState) (g : Nat) : STacR :=
+  match STacState.getGoal st g with
+  | .none => tacGoalError
+  | .some gl => match indCtorsOf gs (TacGoal.ty gl) with
+    | .nil => .err "constructor: the goal is not an inductive type (or it has no constructors)"
+    | names => tryCtors gs es st g (TacGoal.cx gl) names
+def mainGoalId (st : STacState) : Option Nat := match STacState.open st with
+  | .nil => .none
+  | .cons g _ => .some g
+def runOpAt (gs : Globals) (es : ES) (st : STacState) (g : Nat) (o : STacOp) : STacR := match o with
+  | .intro x => goalIntro es st g x
+  | .introFresh => goalIntroFresh es st g
+  | .intros => goalIntros es st g 4096
+  | .exact stx => runOpExact gs es st g stx
+  | .apply stx => match STacState.getGoal st g with
+    | .none => tacGoalError
+    | .some gl => match inferT gs es (TacGoal.cx gl) stx with
+      | .err m => .err m
+      | .ok f ty es1 => goalApply es1 st g f ty 64 .nil
+  | .assumption => runOpAssumption es st g
+  | .closeRfl => match STacState.getGoal st g with
+    | .none => tacGoalError
+    | .some gl => match checkRfl gs es (TacGoal.cx gl) (force es (TacGoal.ty gl)) with
+      | .err m => .err m
+      | .ok t _ es1 => match tacGoalUnify es1 gl t with
+        | .none => .err "rfl: the proof does not solve the goal"
+        | .some es2 => .ok (STacState.solve st g) es2
+  | .change stx => runOpChange gs es st g stx
+  | .unfold names => runOpUnfold gs es st g names
+  | .constructor => runOpConstructor gs es st g
+  | .rw stx rtl => runOpRw gs es st g stx rtl
+  | .calc stx => runOpCalc gs es st g stx
+  | .have x ty val => runOpHave gs es st g x ty val
+  | .suffices x ty => runOpSuffices gs es st g x ty
+  | .obtain x y e => runOpObtain gs es st g x y e
+  | .trace _ => .ok st es
+def runOp (gs : Globals) (es : ES) (st : STacState) (o : STacOp) : STacR := match o with
+  | .trace _ => .ok st es
+  | _ => match mainGoalId st with
+    | .none => .err "no goals"
+    | .some g => runOpAt gs es st g o
+def runRepeat (gs : Globals) (es : ES) (st : STacState) (body : STac) : Nat → STacR
+  | .zero => .ok st es
+  | .succ k => match runTac gs es st body with
+    | .ok st' es' => runRepeat gs es' st' body k
+    | .err _ => .ok st es
+def runTac (gs : Globals) (es : ES) (st : STacState) (t : STac) : STacR := match t with
+  | .done => .ok st es
+  | .fail m => .err m
+  | .op o => runOp gs es st o
+  | .eval stx => evalTacticStx gs es st stx
+  | .seq a b => match runTac gs es st a with
+    | .ok st' es' => runTac gs es' st' b
+    | .err m => .err m
+  | .tryTac body => match runTac gs es st body with
+    | .ok st' es' => .ok st' es'
+    | .err _ => .ok st es
+  | .firstTac a b => match runTac gs es st a with
+    | .ok st' es' => .ok st' es'
+    | .err _ => runTac gs es st b
+  | .repeatTac body => runRepeat gs es st body 64
+
+def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) : STacR :=
+  match stx with
+  | .atom _ => .ok st es
+  | _ => runTac gs es st (tacOfStx stx)
+
+def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (steps : List Syntax) : STacR := match steps with
+  | .nil => .ok st es
+  | .cons t rest => match evalTacticStx gs es st t with
+    | .ok st' es' => runTacticSteps gs es' st' rest
+    | .err m => .err (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st)))
+
+/-- `by tac₁; tac₂ …`: a hole of the expected type, filled by the tactic script, and
+checked by the kernel as an ordinary term. -/
+def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) : TE :=
+  match newMeta es cx expected with
+  | .mk m es0 =>
+    let st0 := STacState.mk (.cons (TacGoal.mk cx expected m) .nil) (.cons 0 .nil) .nil;
+    match runTacticSteps gs es0 st0 (tacticSteps stx) with
+    | .err msg => .err msg
+    | .ok st es' => match goalListOpen es' st (STacState.open st) with
+      | .cons _ _ => .err (unsolvedGoals es' st)
+      | .nil => match checkUnchecked es' st with
+        | .some msg => .err msg
+        | .none => match zonk es' 0 m with
+          | .some mz => .ok mz expected es'
+          | .none => .err "by: the goal still has holes at the end of the tactic block"
+
 -- infer the type of `s` (an identifier's leading implicit arguments are inserted)
 def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   -- a `match` (or `if`) without an expected type: against a new metavariable, a type
@@ -3639,7 +4520,20 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
 -- the other forms
 def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   let k := kindOf s;
-  match strEq k "term.paren" with
+  match strEq k "term.hole" with
+  | .true => match newMeta es cx (.vsort (.lnum 1)) with
+    | .mk mt es1 =>
+      let T := eval (TCtx.env (Cx.c cx)) mt;
+      match newMeta es1 cx T with
+      | .mk m es2 => .ok m T es2
+  | .false => match strEq k "term.by" with
+  | .true => match newMeta es cx (.vsort (.lnum 1)) with
+    | .mk mt es1 =>
+      let T := eval (TCtx.env (Cx.c cx)) mt;
+      match elabBy gs es1 cx s T with
+      | .ok t _ es2 => .ok t (force es2 T) es2
+      | e => e
+  | .false => match strEq k "term.paren" with
   | .true => inferT gs es cx (kid s 1)
   | .false => match strEq k "term.num" with
     | .true => match numTooBig s with
@@ -4004,7 +4898,9 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
-  match strEq k "term.paren" with
+  match strEq k "term.by" with
+  | .true => elabBy gs es cx s ty
+  | .false => match strEq k "term.paren" with
   | .true => checkT gs es cx (kid s 1) ty
   | .false => match dotCtor gs es ty s with
     | .some s' => checkT gs es cx s' ty
@@ -7002,11 +7898,6 @@ inductive QP where
 inductive QPRes where
   | ok (q : QP)
   | err (msg : String)
-def strPrefix (p s : String) : Bool := match p with
-  | .mk pc => match s with
-    | .mk sc => match matchPrefix pc sc with
-      | .some _ => .true
-      | .none => .false
 def quoteIs (s : Syntax) : Bool := strPrefix "quote." (kindOf s)
 def quoteBody (lhs rhs : Syntax) : QPRes := match quoteIs lhs with
   | .false => .err "a macro rule is `| `(cat| pattern) => `(cat| template)`"
@@ -7913,6 +8804,12 @@ def modText : ModSrc → String
   | .mk _ _ t _ => t
 def modImports : ModSrc → List String
   | .mk _ _ _ is => is
+-- (the cache key) every module in the discovery table, by name. The table exists before
+-- elaboration, so a cache lookup can key on it; the elaboration order is only known
+-- after the modules have been checked.
+def tabNames : List ModSrc → List String
+  | .nil => .nil
+  | .cons (.mk n _ _ _) rest => .cons n (tabNames rest)
 -- the module `m` among `tab`, if present
 def modFind : List ModSrc → String → Option ModSrc
   | .nil, _ => .none
