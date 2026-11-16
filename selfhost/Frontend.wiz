@@ -1625,10 +1625,22 @@ def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
     .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
 -- metavariables applied to the context don't carry every `let`'s value along)
-def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
+-- (#422) a `let`-bound variable whose value is computed only when something looks through
+-- it (`whnf`): the value of a `let`, a `match` scrutinee or a shared clause body is a term
+-- the program computes at run time, and evaluating it here would run it while compiling
+-- (a `match` on a closed scrutinee, say, evaluates in full)
+def Cx.defineL (cx : Cx) (x : String) (v : Unit → Val) (ty : Val) : Cx := match cx with
   | .mk c sc t =>
     let d := TCtx.lvl c;
-    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo v)) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := Cx.defineL cx x (fun _ => v) ty
+-- (#422) a Π's codomain (`cod` under `env`) at the argument `a`, a term at the depth of
+-- `cx`: `a` is evaluated only if the codomain mentions it, as the kernel's `infer` does
+-- for an application. An argument is an elaborated term (a `match` on a closed scrutinee,
+-- say), and evaluating it would run it while compiling.
+def codAt (cx : Cx) (env : Env) (cod : Tm) (a : Tm) : Val := match usesVar 0 cod with
+  | .true => eval (.cons (eval (TCtx.env (Cx.c cx)) a) env) cod
+  | .false => eval (.cons .vtt env) cod
 -- the metavariables: the depth each was made at, its solution (a term at that depth),
 -- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
 -- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
@@ -1948,9 +1960,13 @@ partial def pruneTm (k d : Nat) (es : ES) (t : Tm) : Pruned := match spineHead t
     | .lam b => match pruneTm k (d + 1) es b with
       | .mk es1 b' => .mk es1 (.lam b')
     | t' => .mk es t'
-def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
+-- solve the unsolved metavariable `i` (applied to its `k` context variables) with `tm0`, a
+-- term at the depth of `cx`; `tv` is its value, needed only for an implicit type
+-- argument's sort. (#422) A postponed argument's elaborated term is taken as it is
+-- (`postSolve`), not evaluated and read back: that would run a `match` on a closed
+-- scrutinee while compiling, and put its result in the program.
+def solveTm (es0 : ES) (cx : Cx) (i k : Nat) (tm0 : Tm) (tv : Unit → Val) : Option ES :=
   let d := Cx.lvl cx;
-  let tm0 := quote d t;
   let pr := match lowerTm (d - k) 0 tm0 with
     | .some _ => Pruned.mk es0 tm0
     | .none => pruneTm k d es0 tm0;
@@ -1971,10 +1987,12 @@ def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
         -- the universe level it mentions)
         match sc with
         | .none => .some es1
-        | .some l => match sortOf (Cx.c cx) t with
+        | .some l => match sortOf (Cx.c cx) (tv ()) with
           | .none => .none
           | .some sl => unifyLevel es1 sl l
     | .none => .none
+-- the same with a value `t`, read back first
+def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES := solveTm es0 cx i k (quote (Cx.lvl cx) t) (fun _ => t)
 mutual
 -- unify two values (types, mostly) at depth `cx`, solving metavariables
 def unify (es : ES) (cx : Cx) (a b : Val) : Option ES :=
@@ -4029,7 +4047,7 @@ def runOpHave (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (
         match checkT gs es1 cx vstx Av with
         | .err m => .err m
         | .ok v _ es2 =>
-          let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) v) Av;
+          let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
           let goalT := quote (d + 1) (force es2 (TacGoal.ty gl));
           match newMeta es2 cx' (eval (TCtx.env (Cx.c cx')) goalT) with
           | .mk m es3 => match tacGoalUnify es3 gl (.letE A v m) with
@@ -4382,7 +4400,7 @@ def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) 
     | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
       | .ok pt' pty' es4 => match whnf (force es4 pty') with
         | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
-          | .some es5 => .ok (.app pt' bt) (eval (.cons (eval (TCtx.env (Cx.c cx)) bt) env) cod) es5 .nil
+          | .some es5 => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
           | .none => .err (String.append "cannot apply the projection " f)
         | _ => .err (String.append "not a projection: " f)
       | .err msg => .err msg
@@ -4630,7 +4648,7 @@ def structUpdT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
         match updErr S fields outer ups .nil .nil with
         | .some m => .err m
         | .none =>
-          let cx' := Cx.define cx "upd✝" (eval (TCtx.env (Cx.c cx)) t) sty;
+          let cx' := Cx.defineL cx "upd✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) sty;
           let mk := mkNode "term.ident" (one (.ident (String.append S ".mk")));
           let app := match updArgs S outer ups fields with
             | .nil => mk
@@ -4716,7 +4734,7 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
   | .cons a .nil => checkT gs es cx a ty
   | .cons a rest => match whnf (force es ty) with
     | .vsigma _ _ _ A env B => match checkT gs es cx a A with
-      | .ok ta _ es1 => match checkTuple gs es1 cx rest (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) B) with
+      | .ok ta _ es1 => match checkTuple gs es1 cx rest (codAt cx env B ta) with
         | .ok tb _ es2 => .ok (.pair ta tb) ty es2
         | e => e
       | e => e
@@ -4795,7 +4813,7 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
           | .mk mt es1 => appArgsT gs es1 cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailKinds m) rest
               (.cons (.mk a dom mt) post) expected pre
         | .false => match checkT gs es cx a dom with
-          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) cod) (tailKinds m) rest post expected pre
+          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (codAt cx env cod ta) (tailKinds m) rest post expected pre
           | e => e
       | ty => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- the arguments of an application; with named ones, rewritten to positional first
@@ -4828,6 +4846,16 @@ def appExpected (gs : Globals) (es : ES) (cx : Cx) (h : Syntax) (f : Tm) (fty : 
         | .some es2 => appArgsT gs es2 cx f fty m args .nil (.some ty) ims
         | .none => appArgsT gs es cx f fty m args .nil (.some ty) .nil
       | .none => appArgsT gs es cx f fty m args .nil (.some ty) .nil
+-- (#422) a postponed argument's metavariable `mt` and its elaborated term `t`: the
+-- metavariable, still unsolved, takes `t` as it is (`solveTm`); else the two are unified as
+-- values. (Evaluating `t` would run a `match` on a closed scrutinee while compiling.)
+def postSolve (es : ES) (cx : Cx) (mt t : Tm) : Option ES :=
+  let env := TCtx.env (Cx.c cx);
+  match metaApp es (force es (eval env mt)) with
+  | .mk i k => match Nat.beq k (Cx.lvl cx) with
+    | .true => solveTm es cx i k t (fun _ => eval env t)
+    | .false => unify es cx (eval env mt) (eval env t)
+  | .none => unify es cx (eval env mt) (eval env t)
 -- the postponed arguments, each unified with its metavariable (one whose type is
 -- still unknown waits longer: `drain`)
 def resolvePosts (gs : Globals) (es : ES) (cx : Cx) : List Post → Option ES
@@ -4836,9 +4864,7 @@ def resolvePosts (gs : Globals) (es : ES) (cx : Cx) : List Post → Option ES
     | .some es1 => match isMetaApp es1 dom with
       | .true => .some (ES.pend es1 (.mk a dom mt cx))
       | .false => match checkT gs es1 cx a dom with
-        | .ok t _ es2 =>
-          let env := TCtx.env (Cx.c cx);
-          unify es2 cx (eval env mt) (eval env t)
+        | .ok t _ es2 => postSolve es2 cx mt t
         | .err _ => .none
     | .none => .none
 -- the arguments still waiting, while some can be done
@@ -4847,9 +4873,7 @@ def drainList (gs : Globals) : ES → Bool → List Pend → DR
   | es, pr, .cons (.mk a dom mt cx) rest => match isMetaApp es dom with
     | .true => drainList gs (ES.pend es (.mk a dom mt cx)) pr rest
     | .false => match checkT gs es cx a dom with
-      | .ok t _ es2 =>
-        let env := TCtx.env (Cx.c cx);
-        match unify es2 cx (eval env mt) (eval env t) with
+      | .ok t _ es2 => match postSolve es2 cx mt t with
         | .some es3 => drainList gs es3 .true rest
         | .none => .err
       | .err _ => .err
@@ -4870,7 +4894,7 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
     | _ => Q.qw;
   let body := fun (A : Tm) (Av : Val) (v : Tm) (es2 : ES) => (match kid s 2 with
     | .ident x =>
-      let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) v) Av;
+      let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
       match expected with
       | .some T => match checkT gs es2 cx' (kid s 7) T with
         | .ok b _ es3 => TE.ok (letTm q A v b) T es3
@@ -4951,7 +4975,7 @@ def scrutLets (gs : Globals) (es : ES) (cx : Cx) : List Syntax → SL
     | .ok t xty es1 =>
       let d := Cx.lvl cx;
       let A := quote d (force es1 xty);
-      match scrutLets gs es1 (Cx.define cx "x✝" (eval (TCtx.env (Cx.c cx)) t) xty) rest with
+      match scrutLets gs es1 (Cx.defineL cx "x✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) xty) rest with
       | .ok cx' cols wrap es2 => .ok cx' (.cons (.mk d A A .qw) cols) (fun b => .letE A t (wrap b)) es2
       | e => e
 -- `fun x y => b` against a Π type
@@ -5017,7 +5041,7 @@ def compileM (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
                 let dv := bindLetsT b' cx binds';
                 let d := Cx.lvl cx;
                 let nm := String.append "dflt✝" (Nat.toString d);
-                let cxD := Cx.define cx nm (eval (TCtx.env (Cx.c cx)) dv) expected;
+                let cxD := Cx.defineL cx nm (fun _ => eval (TCtx.env (Cx.c cx)) dv) expected;
                 match splitCol gs mc es1 cxD expected cols top ihLvls
                     (replaceLastRhs (mkNode "term.ident" (one (.ident nm))) cls) k with
                 | .ok body es2 => .ok (.letE (quote d expected) dv body) es2

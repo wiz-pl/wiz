@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
+  need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
+  shared clause body, and a postponed argument (read back as its normal form, which also
+  put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
+  as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
+  (`fib 40`) at 120 s in `check` and in the one-shot compile.
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
