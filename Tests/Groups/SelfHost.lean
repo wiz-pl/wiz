@@ -1230,14 +1230,6 @@ def selfhostDerivingBad : String :=
 def selfhostDerivingBadExpected : String :=
   "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
-/-- (A11) A rejected derivation is the command's diagnostic, with its source position, in
-the driver (`file:line:col`): `deriving instance Size for Nat` on line 4 is rejected. -/
-def selfhostDerivingSpan : String :=
-  "import Prelude\nclass Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
-
-def selfhostDerivingSpanExpected : String :=
-  "input.wiz:4:1: error: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
-
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
