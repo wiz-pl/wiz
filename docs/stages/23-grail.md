@@ -138,8 +138,8 @@ dependencies are done (an object's key hashes the C its `c` node wrote); a node 
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
 (`grail --grail-job …` with the toolchain as flags, or the C compiler) with a time limit
-(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, so a test that
-hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
+(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, or the larger `timeout SECS` of a
+test's `-- test:` line (23f), so a test that hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
