@@ -1119,6 +1119,12 @@ so `build` on the real Prelude is for checking the loader, not for running progr
   are `Nat` terms here (equivalent to the default `instOfNatNat`), so it does not change
   elaboration yet.
 
+Tests (`=selfhost`): `lib/Word.wiz:413-452`'s numeric instances, read from the file,
+check over stand-in `UIntN`/`IntN` with `-I lib --prelude-from-roots` and fail with
+`Add is not a class` without the flag (the real `UIntN` has a constructor field `… = .true`
+this frontend cannot elaborate yet, so `import Word` is not the test); the embedded
+fallback and a root's own `Prelude`/`IO` load once; default instances; `builtin`'s checks.
+
 **Not done.** Numerals at another type (`OfNat`), `outParam` and binop numeral
 unification. `lib/Prelude.wiz` itself still has errors here under the flag, from three
 gaps in inductive and structure elaboration: a constructor field of function type
