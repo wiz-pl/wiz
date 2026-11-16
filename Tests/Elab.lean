@@ -899,9 +899,9 @@ partial def toTerm : MTm → Term ZeroOneMany
   | drec j E q => .drec (.qlit q) j.toTerm E.toTerm
   | dhrec H j E q => .dhrec (.qlit q) H.toTerm j.toTerm E.toTerm
   | delim v P a b c h D => .delim (Level.ofNat v) P.toTerm a.toTerm b.toTerm c.toTerm h.toTerm D.toTerm
-  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none
+  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none false
   | con x => .con x.toTerm
-  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm
+  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm false
   | const n ls => .const n (ls.map Level.ofNat)
   | sortParam u => .sort (.param u)
   | sortLv l => .sort l.toLevel
@@ -912,7 +912,7 @@ partial def toTerm : MTm → Term ZeroOneMany
   | szInf => .szInf
   | szSuc s => .szSuc s.toTerm
   | sizeLt s => .sizeLt s.toTerm
-  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
+  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none false
   | sfix l I D v P f s i x => .sfix (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm f.toTerm s.toTerm i.toTerm x.toTerm
   | nu l I D i s => .nu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
   | out x => .out x.toTerm
@@ -973,8 +973,8 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .drec (.qlit q) j E => return drec (← ofTerm j) (← ofTerm E) q
   | .dhrec (.qlit q) H j E => return dhrec (← ofTerm H) (← ofTerm j) (← ofTerm E) q
   | .delim v P a b c h D => return delim (← v.toNat?) (← ofTerm P) (← ofTerm a) (← ofTerm b) (← ofTerm c) (← ofTerm h) (← ofTerm D)
-  | .mu l I D i .szInf _ => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
-  | .mu l I D i s _ => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
+  | .mu l I D i .szInf _ false => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
+  | .mu l I D i s _ false => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .nu l I D i s _ => return nu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .out x => return out (← ofTerm x)
   | .cocon x => return cocon (← ofTerm x)
@@ -988,7 +988,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .szSuc s => return szSuc (← ofTerm s)
   | .sizeLt s => return sizeLt (← ofTerm s)
   | .con x => return con (← ofTerm x)
-  | .ind l I D v P m i x => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
+  | .ind l I D v P m i x false => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
   | .const n us => return const n (← us.mapM Level.toNat?)
   | .ulift k l A => return ulift (← k.toNat?) (← l.toNat?) (← ofTerm A)
   | .up a => return up (← ofTerm a)
