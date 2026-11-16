@@ -488,12 +488,17 @@ not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corp
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
-The nightly `.github/workflows/bench.yml` runs this as a second job
-(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
-`bench.yml` is owned by its own PR, so the exact diff is in
-`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
-job declares 6 GiB (the preparation builds the checker) and uploads
-`bench-out/mem-bench.json` as an artifact.
+The nightly `.github/workflows/bench.yml` runs this as a second job, `mem`, with
+`--check --markdown "$GITHUB_STEP_SUMMARY"`. It runs after the timing job `bench`,
+whatever that job's result, so the two never share the runner, and it uploads
+`bench-out/mem-bench.json` as an artifact. It declares 3 GiB (`WIZ_MEM_BENCH_GIB`).
+Its largest step is the preparation, building the self-hosted checker, which peaked
+at about 1.8 GB after the `inlineTm` fix. A cold run records that build's peak and
+wall time as `checker_build` in the JSON and in the step summary, so the declaration
+can be checked against each night's number. The build is not gated. The job's Nix
+step only substitutes (`--max-jobs 0`): `wiz` comes from the timing job's build on
+the same runner or from Cachix, and a Lean compile never runs under this budget.
+`--phases` (about 6 GiB, the in-process checker build) is not part of the nightly.
 
 ## Continuous integration
 

@@ -197,11 +197,13 @@ def build_flags():
     return flags
 
 
-def ensure_checker(wiz, quiet=False, force=False, timeout=1800):
-    """Build the self-hosted checker from this revision; return (exe, log).
+def ensure_checker(wiz, quiet=False, force=False, timeout=1800, interval=0.02):
+    """Build the self-hosted checker from this revision; return (exe, log, build).
 
     This is preparation, not a corpus entry: the checker's *run* is what the memory
     gate tracks. The build is kept between runs (the sources are the freshness key).
+    `build` is the build's peak and wall time ({} when cached): not gated, but it is
+    the largest step of a cold run, so it is what a runner's memory must cover.
     """
     d = work_dir()
     src = os.path.join(d, "checker.wiz")
@@ -214,16 +216,21 @@ def ensure_checker(wiz, quiet=False, force=False, timeout=1800):
         os.path.getmtime(os.path.join(ROOT, f)) <= os.path.getmtime(exe)
         for f in CHECKER_FILES)
     if fresh:
-        return exe, "cached"
+        return exe, "cached", {}
     if not quiet:
         print(f"building the self-hosted checker -> {exe}", file=sys.stderr)
-    r = subprocess.run([wiz, "build", src, "-o", exe] + build_flags(), cwd=ROOT,
-                       capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        sys.stderr.write(r.stdout[-4000:])
-        sys.stderr.write(r.stderr[-4000:])
-        raise SystemExit("building the self-hosted checker failed")
-    return exe, "built"
+    r = run_measured([wiz, "build", src, "-o", exe] + build_flags(), ROOT,
+                     dict(os.environ), timeout, interval)
+    if r["exit"] != 0 or r["timed_out"]:
+        sys.stderr.write(r["stdout"])
+        sys.stderr.write(r["stderr"])
+        raise SystemExit("building the self-hosted checker failed"
+                         + (" (timed out)" if r["timed_out"] else ""))
+    build = {"peak_mib": round(r["peak_kib"] / 1024, 1), "wall_s": round(r["wall_s"], 1)}
+    if not quiet:
+        print(f"checker build: peak {build['peak_mib']} MiB, {build['wall_s']} s",
+              file=sys.stderr)
+    return exe, "built", build
 
 
 def checker_input():
@@ -657,6 +664,7 @@ def main(argv=None):
                  f"{', '.join(e[0] for e in CORPUS)}")
     env = dict(os.environ)
     phases = None
+    checker_build = {}
     if args.from_json:
         previous = load_json(args.from_json)
         results = previous.get("invocations", {})
@@ -667,8 +675,9 @@ def main(argv=None):
         checker = ""
         how = "not needed"
         if "selfhost-checker" in selected:
-            checker, how = ensure_checker(args.wiz, args.quiet, args.rebuild_checker,
-                                          timeout=max(args.timeout, 1800))
+            checker, how, checker_build = ensure_checker(
+                args.wiz, args.quiet, args.rebuild_checker,
+                timeout=max(args.timeout, 1800), interval=args.interval)
             checker_input()
         entries = make_corpus(args.wiz, out_binary, checker, rundir)
         entries = [e for e in entries if e["name"] in selected]
@@ -712,6 +721,8 @@ def main(argv=None):
     }
     if phases is not None:
         record["phases"] = phases
+    if checker_build:
+        record["checker_build"] = checker_build
 
     failed = False
     rows = None
@@ -729,6 +740,9 @@ def main(argv=None):
         if args.markdown:
             with open(args.markdown, "a", encoding="utf-8") as f:
                 f.write(markdown_table(rows, tol))
+                if checker_build:
+                    f.write(f"\nPreparation (not gated): the self-hosted checker build peaked "
+                            f"at {checker_build['peak_mib']} MiB in {checker_build['wall_s']} s.\n")
 
     if not args.quiet:
         if not args.check:
