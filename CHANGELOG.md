@@ -10,6 +10,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail test (23f): `--rerun` runs tests whose pass is recorded again instead of reporting
+  the recorded pass; the result replaces the record (a failure removes it). Before, forcing
+  a cached test meant `--update` and a `git diff` of the `.expected` files.
 * grail test (23f): a test may declare its own time limit, `-- test: run timeout 900`
   (or `check … timeout SECS`); the larger of it and `--test-timeout` applies to the test's
   job and to its program, so one long test no longer needs a large flag on every run.

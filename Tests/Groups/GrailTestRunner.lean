@@ -40,6 +40,34 @@ def testRunnerGroup : Group where
         let (res, st) ← runTests dir tc
         check (res.all (·.cached)) "a pass was not recorded"
         checkEq 0 st.ran },
+    { name := "--rerun runs recorded passes again and records the new result", run := fun _ => do
+        let dir ← mkTree testPkg
+        let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
+        let _ ← runTests dir tc (update := true)
+        let _ ← runTests dir tc
+        let (res, st) ← runTests dir tc
+        check (res.all fun t => t.ok && t.cached) s!"not recorded: {res.toList.map (·.message)}"
+        checkEq 0 st.ran
+        let expected ← IO.FS.readFile (dir / "tests/two.expected")
+        -- every test runs again, none is reported from the record, and the passes are
+        -- recorded again (the plain run after it runs nothing)
+        let (res, st) ← runTests dir tc (rerun := true)
+        check (res.all (·.ok)) s!"the rerun failed: {res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "--rerun reported a recorded pass"
+        checkEq 2 st.ran
+        let (res, st) ← runTests dir tc
+        check (res.all (·.cached)) "--rerun did not record its passes"
+        checkEq 0 st.ran
+        -- a rerun that fails (here: under a 1 ms limit) leaves no pass behind: the next
+        -- plain run runs the tests instead of reporting the old record
+        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 1)
+        check (res.all (!·.ok)) s!"the 1 ms rerun passed: {res.toList.map (·.message)}"
+        let (res, st) ← runTests dir tc
+        check (res.all (·.ok)) s!"{res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "a pass survived a failed rerun"
+        checkEq 2 st.ran
+        -- --rerun leaves the .expected files alone
+        checkEq expected (← IO.FS.readFile (dir / "tests/two.expected")) },
     { name := "a wrong output fails, with the first difference", run := fun _ => do
         let dir ← mkTree (testPkg ++ [("tests/two.expected", "tests/two.wiz:2:1: info: 3\n")])
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }

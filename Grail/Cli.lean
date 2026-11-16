@@ -25,9 +25,11 @@ def usage : String := "usage:
                           letters, digits, '_' or '-'
   grail build [TARGET…]   build the package's targets (by default all but the
                           bootstrap check, which takes minutes)
-  grail test [FILTER…] [--update]
+  grail test [FILTER…] [--update] [--rerun]
                           run the tests (of `tests` targets) whose path contains a
-                          filter; --update writes the actual output to .expected
+                          filter; --update writes the actual output to .expected;
+                          --rerun runs tests with a recorded pass again (and records
+                          the new result: a pass, or no pass)
   grail update [--locked] resolve the dependencies again and write grail.lock
                           (builds use the lock only); --locked fails if the lock
                           would change
@@ -551,9 +553,11 @@ def cliMain (args : List String) : IO UInt32 := do
       pure 0
     | "test" :: rest =>
       let update := rest.contains "--update"
-      let filters := rest.filter (· != "--update")
+      let rerun := rest.contains "--rerun"
+      let filters := rest.filter (fun a => a != "--update" && a != "--rerun")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
+      let r := { r with rerunTests := rerun }
       let results ← r.tests pkg.targets filters update
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
