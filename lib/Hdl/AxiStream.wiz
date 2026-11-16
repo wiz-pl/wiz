@@ -1,0 +1,415 @@
+import Hdl.Core
+/-!
+# Hdl.AxiStream
+
+The AXI4-Stream handshake subset (`import Hdl.AxiStream`): a width-parameterised beat
+bundle, a source and a sink, a one-beat register slice, and up/down width converters.
+
+A beat is `tdata`, `tvalid`, `tlast`, `tkeep`, `tuser` and `tready`; `tkeep` has one bit
+per byte of `tdata` (`tdata`'s width / 8), and `tuser` is one opaque bit. The handshake is
+the usual AXI4-Stream rule: the source holds `tdata`/`tlast`/`tkeep`/`tuser` and
+`tvalid` high until the sink raises `tready` in a cycle with `tvalid` high. A beat is
+*accepted* exactly in such a cycle; no other cycle moves a beat. That one rule gives the
+three backpressure properties this module's laws state:
+
+* **no beat lost**: every accepted input beat is an accepted output beat;
+* **no beat duplicated**: the number of accepted output beats is the number of accepted
+  input beats;
+* **order preserved**: the accepted payloads appear in the same order on both sides.
+
+The parts:
+
+* `AxiStream.Beat dw` is the full bundle (all six signals, so a value trace of beats is
+  one list); `AxiStream.Tx dw` is the source-driven half (everything but `tready`).
+* `AxiStream.sourceC dw n` emits `n` beats (data `0 … n-1`, `tlast` on the last, all
+  keeps set, `tuser` low) and accepts a beat only when `tready` is high.
+* `AxiStream.sinkC dw period` raises `tready` once every `period` cycles (the
+  backpressure source the example uses); `AxiStream.readySinkC dw` is always ready.
+* `AxiStream.pairC dw n period` wires the source of `n` beats to the stalling sink. It is
+  the value/netlist test of the handshake: the sink must count exactly `n` beats and see
+  `tlast` on beat `n-1`.
+* `AxiStream.sliceC dw` is a one-beat register slice with full throughput: when the
+  buffer is empty it passes a beat through, when the output stalls it buffers one beat,
+  and it accepts a new input in the same cycle the buffered beat leaves. It never drops a
+  beat or repeats one.
+* `AxiStream.upC dw ratio` groups `ratio` beats of `dw` bits into one beat of
+  `dw * ratio` bits; `AxiStream.downC dw ratio` splits one `dw * ratio`-bit beat into
+  `ratio` beats of `dw` bits. Both preserve `tkeep` bit for bit (the first input beat's
+  keep bits are the high bits of the wide keep), carry `tlast` (upsize ORs the group's
+  `tlast`s, downsize raises it on the group's last beat), and carry `tuser`
+  (upsize ORs, downsize repeats it).
+
+**Limits.** The converters group a fixed `ratio` of beats: an upsize does not flush a
+short packet early when `tlast` arrives before the group is full, and a downsize always
+emits all `ratio` narrow beats, so the source must present packets whose beat counts
+(except the final one) are multiples of `ratio`. `tuser` is carried, never interpreted:
+there is no user-side routing, and there are no AXI4-Stream attributes (`TID`, `TDEST`,
+`TKEEP`-based null-byte suppression, or `TSTRB`). The register slice is one beat deep: a
+pipeline of slices is a composition, not a parameter.
+
+`examples/hdl-stream.wiz` (test group `bus-protocol`) drives source/sink, slice and
+converters with a stalling sink, checks the `Hdl.AxiStreamLaw` obligations, and compares
+the value simulation, `Netlist.simulate` and `Circuit.simFast`.
+-/
+
+/-- One bit. -/
+def AxiStream.Bit : HwTy := HwTy.bits 1
+/-- The keep width of a `dw`-bit beat: one bit per byte. -/
+def AxiStream.keepW (dw : Nat) : Nat := Nat.div dw 8
+/-- The all-ones keep of a `dw`-bit beat. -/
+def AxiStream.allKeep (dw : Nat) : Nat := Nat.sub (Nat.pow 2 (AxiStream.keepW dw)) 1
+
+/-- A full AXI4-Stream beat, both directions of the handshake in one bundle (so a value
+trace is a list of beats). `tvalid` and `tready` are low at rest. -/
+structure AxiStream.Beat (dw : Nat) (r : HwTy → Type) where
+  tdata : r (HwTy.bits dw)
+  tvalid : r AxiStream.Bit
+  tlast : r AxiStream.Bit
+  tkeep : r (HwTy.bits (AxiStream.keepW dw))
+  tuser : r AxiStream.Bit
+  tready : r AxiStream.Bit
+  deriving Bundle
+
+/-- The source-driven half of a beat: no `tready`. A source output and a sink input are
+`Tx` bundles; the sink's `tready` is the only return path. -/
+structure AxiStream.Tx (dw : Nat) (r : HwTy → Type) where
+  tdata : r (HwTy.bits dw)
+  tvalid : r AxiStream.Bit
+  tlast : r AxiStream.Bit
+  tkeep : r (HwTy.bits (AxiStream.keepW dw))
+  tuser : r AxiStream.Bit
+  deriving Bundle
+
+/-- A quiet source half: `tvalid` low, empty keep. -/
+def AxiStream.noTx {r : HwTy → Type} [Hw r] {ω dw : Nat} : AxiStream.Tx dw r :=
+  AxiStream.Tx.mk (Hw.lit dw 0) (Hw.lit 1 0) (Hw.lit 1 0)
+    (Hw.lit (AxiStream.keepW dw) 0) (Hw.lit 1 0)
+
+/-- A full beat from a source half and the sink's `tready`. -/
+def AxiStream.beatOf {r : HwTy → Type} [Hw r] {ω dw : Nat} (x : AxiStream.Tx dw r)
+    (ready : r AxiStream.Bit) : AxiStream.Beat dw r :=
+  AxiStream.Beat.mk x.tdata x.tvalid x.tlast x.tkeep x.tuser ready
+
+/-- Zero-extend or truncate a signal to `n` bits (the `Axi4.zext` idiom, at elaboration
+time): the result width is fixed by the slice, so width arithmetic never has to reduce
+definitionally. -/
+def AxiStream.fit {r : HwTy → Type} [Hw r] {ω m n : Nat} (x : r (HwTy.bits m)) :
+    r (HwTy.bits n) :=
+  Hw.slice 0 n (Hw.cat (Hw.lit (Nat.sub n m) 0) x)
+
+/-- An all-ones keep value of a `dw`-bit beat. -/
+def AxiStream.keepOnes {r : HwTy → Type} [Hw r] {ω dw : Nat} :
+    r (HwTy.bits (AxiStream.keepW dw)) :=
+  Hw.lit (AxiStream.keepW dw) (AxiStream.allKeep dw)
+
+------------------------------------------------------------------------------------
+-- The source: `n` beats, data `0 … n-1`, `tlast` on the last, every keep set.
+
+/-- The source's state: the number of beats emitted and the number still to emit. -/
+structure AxiStream.SourceSt (r : HwTy → Type) where
+  sent : r (HwTy.bits 16)
+  left : r (HwTy.bits 16)
+  deriving Bundle
+
+/-- The source at rest: nothing sent, `n` left. -/
+def AxiStream.sourceInit (n : Nat) : AxiStream.SourceSt HwTy.El :=
+  AxiStream.SourceSt.mk (BitVec.ofNat 16 0) (BitVec.ofNat 16 n)
+
+/-- One cycle of the source. `tvalid` is high while beats are left; a beat leaves every
+cycle in which the sink raises `tready` (`tvalid && tready`). `tlast` is high on the last
+beat, `tkeep` is all ones and `tuser` is low. -/
+def AxiStream.sourceStep {r : HwTy → Type} [Hw r] {ω dw : Nat} (s : AxiStream.SourceSt r)
+    (ready : r AxiStream.Bit) :
+    r (HwTy.prod (AxiStream.SourceSt.code) (AxiStream.Tx.code dw)) :=
+  let empty := s.left === 0;
+  let valid := ~~~empty;
+  let last := s.left === 1;
+  let fire := valid &&& ready;
+  let left' := if fire then s.left - 1 else s.left;
+  let sent' := if fire then Hw.add s.sent 1 else s.sent;
+  Hw.pair (AxiStream.SourceSt.pack (AxiStream.SourceSt.mk sent' left'))
+    (AxiStream.Tx.pack dw (AxiStream.Tx.mk
+      (AxiStream.fit (n := dw) s.sent) valid last (AxiStream.keepOnes (dw := dw)) (Hw.lit 1 0)))
+
+/-- A source of `n` beats as a circuit: input `tready`, output the source half of a beat. -/
+def AxiStream.sourceC (dw n : Nat) : Circuit AxiStream.Bit (AxiStream.Tx.code dw) :=
+  Circuit.mk (AxiStream.SourceSt.code) (AxiStream.SourceSt.pack (AxiStream.sourceInit n))
+    (fun s (ready : r AxiStream.Bit) =>
+      AxiStream.sourceStep (dw := dw) (AxiStream.SourceSt.unpack s) ready)
+
+------------------------------------------------------------------------------------
+-- The sink. `period = 1` is always ready; `period > 1` raises `tready` in the last cycle
+-- of each `period`-cycle window, so the source sees real backpressure.
+
+/-- The sink's state: the accepted-beat count, the stall counter, and the last accepted
+payload (`tdata`, `tlast`). -/
+structure AxiStream.SinkSt (dw : Nat) (r : HwTy → Type) where
+  count : r (HwTy.bits 16)
+  k : r (HwTy.bits 16)
+  lastData : r (HwTy.bits dw)
+  sawLast : r AxiStream.Bit
+  deriving Bundle
+
+/-- The sink at rest: no beats, stall counter 0, no last seen. -/
+def AxiStream.sinkInit (dw : Nat) : AxiStream.SinkSt dw HwTy.El :=
+  AxiStream.SinkSt.mk (BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat dw 0)
+    (BitVec.ofNat 1 0)
+
+/-- The sink's output: `tready`, the accepted count, the last accepted data and whether a
+`tlast` has been seen. -/
+structure AxiStream.SinkOut (dw : Nat) (r : HwTy → Type) where
+  tready : r AxiStream.Bit
+  count : r (HwTy.bits 16)
+  lastData : r (HwTy.bits dw)
+  sawLast : r AxiStream.Bit
+  deriving Bundle
+
+/-- One cycle of the sink: accept a beat when `tvalid && tready`, count it, and remember
+the payload of the last one (`tlast` included). -/
+def AxiStream.sinkStep (dw period : Nat) {r : HwTy → Type} [Hw r]
+    (s : AxiStream.SinkSt dw r) (x : AxiStream.Beat dw r) :
+    r (HwTy.prod (AxiStream.SinkSt.code dw) (AxiStream.SinkOut.code dw)) :=
+  let ready := if Nat.beq period 1 then Hw.lit 1 1 else s.k === Hw.ofNat (period - 1);
+  let fire := x.tvalid &&& ready;
+  let k' := if s.k === Hw.ofNat (period - 1) then 0 else s.k + 1;
+  let count' := if fire then s.count + 1 else s.count;
+  let lastData' := if fire &&& x.tlast then x.tdata else s.lastData;
+  let sawLast' := if fire &&& x.tlast then 1 else s.sawLast;
+  Hw.pair (AxiStream.SinkSt.pack dw (AxiStream.SinkSt.mk count' k' lastData' sawLast'))
+    (AxiStream.SinkOut.pack dw (AxiStream.SinkOut.mk ready s.count s.lastData s.sawLast))
+
+/-- A sink as a circuit: input a full beat (only `tvalid`, `tdata` and `tlast` are read),
+output `tready` and the accepted-beat observations. -/
+def AxiStream.sinkC (dw period : Nat) :
+    Circuit (AxiStream.Beat.code dw) (AxiStream.SinkOut.code dw) :=
+  Circuit.bundled (AxiStream.SinkSt.bundle dw) (AxiStream.Beat.bundle dw)
+    (AxiStream.SinkOut.bundle dw) (AxiStream.sinkInit dw)
+    (fun s x => AxiStream.sinkStep dw period s x)
+
+/-- An always-ready sink. -/
+def AxiStream.readySinkC (dw : Nat) :
+    Circuit (AxiStream.Beat.code dw) (AxiStream.SinkOut.code dw) :=
+  AxiStream.sinkC dw 1
+
+------------------------------------------------------------------------------------
+-- Source and sink as one circuit.
+
+/-- The pair's state: the source and the sink state. -/
+structure AxiStream.PairSt (dw : Nat) (r : HwTy → Type) where
+  src : AxiStream.SourceSt r
+  snk : AxiStream.SinkSt dw r
+  deriving Bundle
+
+/-- The pair's output: the sink's observations and the source's remaining count. -/
+structure AxiStream.PairOut (dw : Nat) (r : HwTy → Type) where
+  ready : r AxiStream.Bit
+  count : r (HwTy.bits 16)
+  lastData : r (HwTy.bits dw)
+  sawLast : r AxiStream.Bit
+  left : r (HwTy.bits 16)
+  deriving Bundle
+
+/-- One cycle of the source/sink pair. The sink's `tready` is a function of its own state,
+so it is computed first and fed to the source; the source's beat then feeds the sink. -/
+def AxiStream.pairStep (dw n period : Nat) {r : HwTy → Type} [Hw r]
+    (s : AxiStream.PairSt dw r) :
+    r (HwTy.prod (AxiStream.PairSt.code dw) (AxiStream.PairOut.code dw)) :=
+  let so := Circuit.inst (AxiStream.sinkC dw period) (AxiStream.SinkSt.pack dw s.snk)
+    (AxiStream.Beat.pack dw (AxiStream.beatOf (dw := dw)
+      (AxiStream.noTx : AxiStream.Tx dw r) (Hw.lit 1 0)));
+  let ready := (AxiStream.SinkOut.unpack dw (Hw.snd so)).tready;
+  let src := Circuit.inst (AxiStream.sourceC dw n) (AxiStream.SourceSt.pack s.src) ready;
+  let tx := (AxiStream.Tx.unpack dw (Hw.snd src));
+  let beat := AxiStream.Beat.pack dw (AxiStream.beatOf (dw := dw) tx ready);
+  let snk := Circuit.inst (AxiStream.sinkC dw period) (AxiStream.SinkSt.pack dw s.snk) beat;
+  let snkOut := (AxiStream.SinkOut.unpack dw (Hw.snd snk));
+  let srcSt := AxiStream.SourceSt.unpack (Hw.fst src);
+  Hw.pair (AxiStream.PairSt.pack dw (AxiStream.PairSt.mk srcSt
+      (AxiStream.SinkSt.unpack dw (Hw.fst snk))))
+    (AxiStream.PairOut.pack dw (AxiStream.PairOut.mk snkOut.tready snkOut.count
+      snkOut.lastData snkOut.sawLast srcSt.left))
+
+/-- The source/sink pair as a circuit: not started by an input (the source's `n` is a
+meta parameter) and with no input at all (`HwTy.bits 0`). -/
+def AxiStream.pairCW (dw n period : Nat) : Circuit (HwTy.bits 0) (AxiStream.PairOut.code dw) :=
+  Circuit.mk (AxiStream.PairSt.code dw)
+    (AxiStream.PairSt.pack dw (AxiStream.PairSt.mk (AxiStream.sourceInit n) (AxiStream.sinkInit dw)))
+    (fun s (_ : r (HwTy.bits 0)) => AxiStream.pairStep dw n period (AxiStream.PairSt.unpack dw s))
+
+/-- The pair with `n` beats and a sink that stalls to `period`; the input is ignored. -/
+def AxiStream.pairC (dw n period : Nat) :
+    Circuit (HwTy.bits 0) (AxiStream.PairOut.code dw) :=
+  AxiStream.pairCW dw n period
+
+------------------------------------------------------------------------------------
+-- The one-beat register slice. Full throughput: if the buffer is empty a beat passes
+-- through; if the output stalls the beat is buffered; and a buffered beat leaving the
+-- same cycle a new beat arrives replaces it (no bubble).
+
+/-- The slice's buffer: valid and the payload of the buffered beat. -/
+structure AxiStream.SliceSt (dw : Nat) (r : HwTy → Type) where
+  valid : r AxiStream.Bit
+  tdata : r (HwTy.bits dw)
+  tlast : r AxiStream.Bit
+  tkeep : r (HwTy.bits (AxiStream.keepW dw))
+  tuser : r AxiStream.Bit
+  deriving Bundle
+
+/-- The slice at rest: empty. -/
+def AxiStream.sliceInit (dw : Nat) : AxiStream.SliceSt dw HwTy.El :=
+  AxiStream.SliceSt.mk (BitVec.ofNat 1 0) (BitVec.ofNat dw 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat (AxiStream.keepW dw) 0) (BitVec.ofNat 1 0)
+
+/-- The slice's input-ready term: high when the buffer is empty or the output is taking
+the buffered beat. This is the signal to wire back to the upstream source. -/
+def AxiStream.sliceInReady {r : HwTy → Type} [Hw r] {ω dw : Nat}
+    (s : AxiStream.SliceSt dw r) (ready : r AxiStream.Bit) : r AxiStream.Bit :=
+  Hw.or (Hw.not s.valid) ready
+
+/-- One cycle of the slice. `inReady` is high when the buffer is empty or the output is
+taking the buffered beat; the output takes the buffered beat if there is one, otherwise
+the input beat. The buffer's next value is the input beat exactly when `inReady` and
+`tvalid`; otherwise it keeps its payload (and stays valid if the output did not take it). -/
+def AxiStream.sliceStep (dw : Nat) {r : HwTy → Type} [Hw r]
+    (s : AxiStream.SliceSt dw r) (x : AxiStream.Beat dw r) :
+    r (HwTy.prod (AxiStream.SliceSt.code dw) (AxiStream.Beat.code dw)) :=
+  let inReady := AxiStream.sliceInReady s x.tready;
+  let fireBuf := Hw.and s.valid x.tready;
+  let fireIn := Hw.and x.tvalid inReady;
+  let outValid := Hw.or s.valid x.tvalid;
+  let outData := Hw.mux s.valid s.tdata x.tdata;
+  let outLast := Hw.mux s.valid s.tlast x.tlast;
+  let outKeep := Hw.mux s.valid s.tkeep x.tkeep;
+  let outUser := Hw.mux s.valid s.tuser x.tuser;
+  let store := Hw.and fireIn (Hw.or s.valid (Hw.not x.tready));
+  let nextValid := Hw.or (Hw.and s.valid (Hw.not x.tready)) store;
+  let nextData := if store then x.tdata else s.tdata;
+  let nextLast := if store then x.tlast else s.tlast;
+  let nextKeep := if store then x.tkeep else s.tkeep;
+  let nextUser := if store then x.tuser else s.tuser;
+  Hw.pair
+    (AxiStream.SliceSt.pack dw (AxiStream.SliceSt.mk nextValid nextData nextLast nextKeep nextUser))
+    (AxiStream.Beat.pack dw (AxiStream.Beat.mk outData outValid outLast outKeep outUser x.tready))
+
+/-- The register slice as a circuit. -/
+def AxiStream.sliceC (dw : Nat) :
+    Circuit (AxiStream.Beat.code dw) (AxiStream.Beat.code dw) :=
+  Circuit.bundled (AxiStream.SliceSt.bundle dw) (AxiStream.Beat.bundle dw)
+    (AxiStream.Beat.bundle dw) (AxiStream.sliceInit dw)
+    (fun s x => AxiStream.sliceStep dw s x)
+
+------------------------------------------------------------------------------------
+-- The width converters.
+
+/-- An upsize's state: the accumulated wide beat, its keep, the group's `tlast`/`tuser`
+(ORed), and the number of narrow beats accumulated. `n = ratio` means the output is
+valid. -/
+structure AxiStream.UpSt (dw ratio : Nat) (r : HwTy → Type) where
+  data : r (HwTy.bits (Nat.mul dw ratio))
+  keep : r (HwTy.bits (Nat.div (Nat.mul dw ratio) 8))
+  last : r AxiStream.Bit
+  user : r AxiStream.Bit
+  n : r (HwTy.bits 16)
+  deriving Bundle
+
+/-- The upsize at rest: no beats accumulated. -/
+def AxiStream.upInit (dw ratio : Nat) : AxiStream.UpSt dw ratio HwTy.El :=
+  AxiStream.UpSt.mk (BitVec.ofNat (Nat.mul dw ratio) 0)
+    (BitVec.ofNat (Nat.div (Nat.mul dw ratio) 8) 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 16 0)
+
+/-- The upsize's input-ready term: high while the group is not full. -/
+def AxiStream.upInReady {r : HwTy → Type} [Hw r] {ω dw ratio : Nat}
+    (s : AxiStream.UpSt dw ratio r) : r AxiStream.Bit :=
+  Hw.not (s.n === Hw.ofNat ratio)
+
+/-- One cycle of the upsize: accept a narrow beat while the group is not full (or the
+output is being consumed), shift it into the high end of the accumulator, and emit the
+wide beat in the cycle after the `ratio`-th beat arrives. -/
+def AxiStream.upStep (dw ratio : Nat) {r : HwTy → Type} [Hw r]
+    (s : AxiStream.UpSt dw ratio r) (x : AxiStream.Beat dw r) :
+    r (HwTy.prod (AxiStream.UpSt.code dw ratio) (AxiStream.Beat.code (Nat.mul dw ratio))) :=
+  let full := s.n === Hw.ofNat ratio;
+  let inReady := AxiStream.upInReady s;
+  let fireIn := Hw.and x.tvalid inReady;
+  let fireOut := Hw.and full x.tready;
+  let data' := if fireIn then
+      Hw.or (Hw.shl s.data dw) (AxiStream.fit (n := Nat.mul dw ratio) x.tdata)
+    else s.data;
+  let keep' := if fireIn then
+      Hw.or (Hw.shl s.keep (AxiStream.keepW dw))
+        (AxiStream.fit (n := Nat.div (Nat.mul dw ratio) 8) x.tkeep)
+    else s.keep;
+  let last' := if fireIn then Hw.or s.last x.tlast else s.last;
+  let user' := if fireIn then Hw.or s.user x.tuser else s.user;
+  let n' := if fireOut then 0 else if fireIn then s.n + 1 else s.n;
+  let data'' := if fireOut then Hw.lit (Nat.mul dw ratio) 0 else data';
+  let keep'' := if fireOut then Hw.lit (Nat.div (Nat.mul dw ratio) 8) 0 else keep';
+  Hw.pair
+    (AxiStream.UpSt.pack dw ratio (AxiStream.UpSt.mk data'' keep''
+      (if fireOut then 0 else last') (if fireOut then 0 else user') n'))
+    (AxiStream.Beat.pack (Nat.mul dw ratio)
+      (AxiStream.Beat.mk s.data full s.last s.keep s.user x.tready))
+
+/-- The upsize as a circuit: `ratio` `dw`-bit beats become one `dw * ratio`-bit beat. -/
+def AxiStream.upC (dw ratio : Nat) :
+    Circuit (AxiStream.Beat.code dw) (AxiStream.Beat.code (Nat.mul dw ratio)) :=
+  Circuit.bundled (AxiStream.UpSt.bundle dw ratio) (AxiStream.Beat.bundle dw)
+    (AxiStream.Beat.bundle (Nat.mul dw ratio)) (AxiStream.upInit dw ratio)
+    (fun s x => AxiStream.upStep dw ratio s x)
+
+/-- A downsize's state: the wide beat being split, its keep, `tlast`/`tuser`, whether a
+wide beat is in flight, and the index of the next narrow beat. -/
+structure AxiStream.DownSt (dw ratio : Nat) (r : HwTy → Type) where
+  active : r AxiStream.Bit
+  data : r (HwTy.bits (Nat.mul dw ratio))
+  keep : r (HwTy.bits (Nat.div (Nat.mul dw ratio) 8))
+  last : r AxiStream.Bit
+  user : r AxiStream.Bit
+  idx : r (HwTy.bits 16)
+  deriving Bundle
+
+/-- The downsize at rest: no wide beat in flight. -/
+def AxiStream.downInit (dw ratio : Nat) : AxiStream.DownSt dw ratio HwTy.El :=
+  AxiStream.DownSt.mk (BitVec.ofNat 1 0) (BitVec.ofNat (Nat.mul dw ratio) 0)
+    (BitVec.ofNat (Nat.div (Nat.mul dw ratio) 8) 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 16 0)
+
+/-- The downsize's input-ready term: high only while no wide beat is in flight. -/
+def AxiStream.downInReady {r : HwTy → Type} [Hw r] {ω dw ratio : Nat}
+    (s : AxiStream.DownSt dw ratio r) : r AxiStream.Bit :=
+  Hw.not s.active
+
+/-- One cycle of the downsize: accept a wide beat when idle, then emit its low `dw` bits
+and shift the rest down; `tlast` is high on the last narrow beat, and `tuser` is repeated
+on every narrow beat of the group. -/
+def AxiStream.downStep (dw ratio : Nat) {r : HwTy → Type} [Hw r]
+    (s : AxiStream.DownSt dw ratio r) (x : AxiStream.Beat (Nat.mul dw ratio) r) :
+    r (HwTy.prod (AxiStream.DownSt.code dw ratio) (AxiStream.Beat.code dw)) :=
+  let active := s.active;
+  let inReady := AxiStream.downInReady s;
+  let lastChunk := s.idx === Hw.ofNat (ratio - 1);
+  let outValid := active;
+  let outLast := Hw.and s.last lastChunk;
+  let fireOut := Hw.and outValid x.tready;
+  let finish := Hw.and fireOut lastChunk;
+  let start := Hw.and x.tvalid inReady;
+  let data' := if start then x.tdata else if fireOut then Hw.lshr s.data dw else s.data;
+  let keep' := if start then x.tkeep
+    else if fireOut then Hw.lshr s.keep (AxiStream.keepW dw) else s.keep;
+  let last' := if start then x.tlast else if finish then 0 else s.last;
+  let user' := if start then x.tuser else s.user;
+  let idx' := if start then 0 else if fireOut then (if lastChunk then 0 else s.idx + 1) else s.idx;
+  let active' := if start then 1 else if finish then 0 else s.active;
+  Hw.pair
+    (AxiStream.DownSt.pack dw ratio (AxiStream.DownSt.mk active' data' keep' last' user' idx'))
+    (AxiStream.Beat.pack dw (AxiStream.Beat.mk
+      (Hw.slice 0 dw s.data) outValid outLast (Hw.slice 0 (AxiStream.keepW dw) s.keep)
+      s.user x.tready))
+
+/-- The downsize as a circuit: one `dw * ratio`-bit beat becomes `ratio` `dw`-bit beats. -/
+def AxiStream.downC (dw ratio : Nat) :
+    Circuit (AxiStream.Beat.code (Nat.mul dw ratio)) (AxiStream.Beat.code dw) :=
+  Circuit.bundled (AxiStream.DownSt.bundle dw ratio)
+    (AxiStream.Beat.bundle (Nat.mul dw ratio)) (AxiStream.Beat.bundle dw)
+    (AxiStream.downInit dw ratio) (fun s x => AxiStream.downStep dw ratio s x)

@@ -118,7 +118,7 @@ uint64_t wizser_pty_open(void) {
   return (uint64_t)m;
 }
 /* the path of its terminal side ("" with an error) */
-static char wizser_name[256];
+static _Thread_local char wizser_name[256];
 const char *wizser_pty_name(uint64_t m) {
   if (ptsname_r((int)m, wizser_name, sizeof wizser_name) != 0) wizser_name[0] = 0;
   return wizser_name;

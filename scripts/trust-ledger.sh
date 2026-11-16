@@ -25,9 +25,10 @@
 # and fix the date; they are for the gate's own tests.
 #
 # Build the driver first: `lake build wiz tests` (`lake build` alone does not build it).
+# `TESTS_BIN` overrides the driver path (the same variable Tests/trust-ledger/run.sh takes).
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-bin=$root/.lake/build/bin/tests
+bin=${TESTS_BIN:-$root/.lake/build/bin/tests}
 if [ ! -x "$bin" ]; then
   echo "trust-ledger: no $bin: build it first with 'lake build wiz tests'" >&2
   exit 2

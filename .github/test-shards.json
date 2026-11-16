@@ -6,7 +6,8 @@
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
-    "=audit-kernels"
+    "=audit-kernels",
+    "=selfhost-macro"
   ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
