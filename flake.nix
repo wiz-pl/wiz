@@ -50,7 +50,10 @@
                 fileset = fs.unions [
                   ./lakefile.lean ./lake-manifest.json ./lean-toolchain
                   ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
-                  ./Tests # the test driver (`packages.tests`)
+                  # the test driver (`packages.tests`): only its Lean modules. Fixtures and
+                  # data under Tests/ are read by the driver at run time, from the checkout,
+                  # so editing one doesn't rebuild wiz, grail or the driver.
+                  (fs.fileFilter (f: f.hasExt "lean") ./Tests)
                   ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
                   ./c # linked into the executables (moreLinkObjs)
                 ];

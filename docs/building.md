@@ -703,7 +703,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
-  and the test driver from the same build, and wraps the binaries with the toolchain as
+  and the test driver from the same build (from `Tests/`'s Lean modules only: the
+  fixtures and data beside them are read at run time from the checkout, so editing
+  one changes no store path), and wraps the binaries with the toolchain as
   flags (`--cc`, `--cflags`, `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags
   you pass come later and win) and, for `wiz`, the packaged standard library as a module
   root after `./lib`. The job then checks the package from a directory with no checkout
