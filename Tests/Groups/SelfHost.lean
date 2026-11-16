@@ -80,8 +80,8 @@ def termSamples (c : Term ZeroOneMany) (w : Level) : List (Term ZeroOneMany × N
    (.eq c c c, 3, 0), (.eqTy c c, 2, 0), (.refl c c, 2, 0), (.reflTy c, 1, 0), (.cast c c c c, 4, 0),
    (.transp c c c c c c, 6, 0), (.qty, 0, 0), (.qlit .one, 0, 0), (.enum ["a"], 0, 0), (.tag ["a"] 0, 0, 0),
    (.ecase "z" c c [c, c], 4, 0), (.desc w c, 1, 1), (.dret c, 1, 0), (.darg c c c, 3, 0), (.drec c c c, 3, 0),
-   (.dhrec c c c c, 4, 0), (.delim w c c c c c c, 6, 1), (.mu w c c c c (some ("h", [w], [c])), 5, 2),
-   (.con c, 1, 0), (.ind w c c w c c c c, 6, 2), (.nu w c c c c (some ("h", [w], [c])), 5, 2), (.out c, 1, 0),
+   (.dhrec c c c c, 4, 0), (.delim w c c c c c c, 6, 1), (.mu w c c c c (some ("h", [w], [c])) false, 5, 2),
+   (.con c, 1, 0), (.ind w c c w c c c c false, 6, 2), (.nu w c c c c (some ("h", [w], [c])), 5, 2), (.out c, 1, 0),
    (.size, 0, 0), (.szInf, 0, 0), (.szSuc c, 1, 0), (.sizeLt c, 1, 0), (.sfix w c c w c c c c c, 7, 2),
    (.scase w c c c w c c c c c, 8, 2), (.cocon c, 1, 0), (.scofix w c c c c c c c, 7, 1), (.coit w c c c c c c, 6, 1),
    (.natLit 3, 0, 0), (.natOp "nat.add" #[c, c], 2, 0), (.ulift w w c, 1, 2), (.up c, 1, 0), (.down c, 1, 0),
@@ -2521,6 +2521,88 @@ def selfHostGroup : Group where
 
     { name := "(A11) deriving rejects a field with no BEq instance and a class with no deriver", run := fun _ =>
         selfhostCheckFile selfhostDerivingBad selfhostDerivingBadExpected },
+    -- (A13) `by`: the core tactic engine. A real block is intro/apply/assumption, an
+    -- equation is rewritten, and `calc`, `have`, `suffices` and `obtain` are exercised.
+    { name := "the self-hosted frontend: `by` and the core tactics (A13)", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def ap : (A B : Type) → (A → B) → A → B := by\n" ++
+          "  intro A; intro B; intro f; intro a\n" ++
+          "  apply f\n" ++
+          "  assumption\n" ++
+          "def k : Nat → Bool → Nat := by intro n; intro b; assumption\n" ++
+          "def two : 1 + 1 = 2 := by rfl\n" ++
+          "def rwL (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by\n" ++
+          "  rw h\n" ++
+          "  exact pb\n" ++
+          "def rwR (a b : Nat) (h : a = b) (P : Nat → Prop) (pa : P a) : P b := by\n" ++
+          "  rw ← h\n" ++
+          "  exact pa\n" ++
+          "def tr (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by\n" ++
+          "  calc a = b := h₁\n" ++
+          "       _ = c := h₂\n" ++
+          "def hv (a b : Nat) (h : a = b) : a = b := by\n" ++
+          "  have h₂ : a = b := h\n" ++
+          "  exact h₂\n" ++
+          "def sf (a b : Nat) (h : a = b) : a = b := by\n" ++
+          "  suffices h₂ : a = b\n" ++
+          "  exact h\n" ++
+          "  exact h₂\n" ++
+          "def ob (p : Nat × Nat) : Nat := by\n" ++
+          "  obtain ⟨x, y⟩ := p\n" ++
+          "  exact x\n" ++
+          "#check ap\n#check tr\n#check ob\n"
+        let some out ← selfhostOutput src | return
+        let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the core tactics:\n{out}") },
+    { name := "(A13) per-tactic cases: intros, change, unfold, constructor, try/first/repeat", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def idn : Nat → Nat := by intro n; exact n\n" ++
+          "def id2 : Nat → Nat → Nat := by intros; assumption\n" ++
+          "def ch : 1 + 1 = 2 := by change 2 = 2; rfl\n" ++
+          "def F (A : Type) : Type := A\n" ++
+          "def un : List (F Nat) := by unfold F; exact List.nil\n" ++
+          "inductive Box where\n" ++
+          "  | mk (n : Nat)\n" ++
+          "def box : Box := by constructor; exact 7\n" ++
+          "def tf : Nat := by first | exact 0 | exact 1\n" ++
+          "def tt (n : Nat) : n = n := by try (exact 0); rfl\n" ++
+          "def rep (a b : Nat) (h : a = b) : a = b := by repeat rw h; rfl\n" ++
+          "#check idn\n#check box\n"
+        let some out ← selfhostOutput src | return
+        let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects a core tactic:\n{out}") },
+    { name := "the self-hosted frontend: unsolved goals are reported with their context (A13)", run := fun _ =>
+        selfhostCheckFile "import Prelude\ndef bad : Nat → Bool := by intro n\n"
+          "error: unsolved goals:\nn : Nat\n⊢ Bool\n" },
+    { name := "the self-hosted frontend: a tactic failure is an error with the goals (A13)", run := fun _ => do
+        let some out ← selfhostOutput "import Prelude\ndef bad : Nat := by assumption\n" | return
+        unless (out.splitOn "assumption: no hypothesis matches the goal").length > 1 do
+          throw (IO.userError s!"the failure does not name the tactic:\n{out}")
+        unless (out.splitOn "remaining goals:").length > 1 do
+          throw (IO.userError s!"the failure does not list the remaining goals:\n{out}") },
+    -- the differential case: the same script, host and selfhost, verdict and error text
+    { name := "the core tactics: the Lean and self-hosted frontends agree (A13)", run := fun _ => do
+        let loader ← preludeLoader
+        let src := "import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n" ++
+          "  intro A; intro B; intro f; intro a\n  apply f\n  assumption\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let errs := s.messages.filter (·.severity == .error)
+        unless errs.isEmpty do throw (IO.userError "the Lean frontend rejects the differential script")
+        let some out ← selfhostOutput src | return
+        let selfErrs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless selfErrs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the differential script:\n{out}")
+        -- and a failing rewrite: the same verdict and the same message
+        let bad := "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n" ++
+          "  rw h\n  exact pc\n"
+        let sBad := runFrontend (R := ZeroOneMany) bad { loader, trustedModule := Tests.libModule }
+        let leanBad := sBad.messages.filter (·.severity == .error)
+        unless !leanBad.isEmpty do throw (IO.userError "the Lean frontend accepts the bad rewrite")
+        let some badOut ← selfhostOutput bad | return
+        let selfBad := (badOut.splitOn "\n").filter (fun l => l.startsWith "error")
+        unless !selfBad.isEmpty do throw (IO.userError s!"the self-hosted frontend accepts the bad rewrite:\n{badOut}")
+        let expected := "error: " ++ (leanBad.toList.head!).text
+        unless selfBad.head! == expected do
+          throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
 
     { name := "(A11) the deriver table: the five built-ins on every form (inductive, structure, after the fact, several classes, several types, re-registered)", run := fun _ =>
         selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },

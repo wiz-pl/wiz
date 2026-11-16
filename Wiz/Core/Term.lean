@@ -158,11 +158,16 @@ inductive Term (R : Type) where
   /-- the eliminator of descriptions, into `P : Desc I → Sort v` -/
   | delim (v : Level) (P mret marg mrec mhrec D : Term R)
   /-- the least fixed point `μ D i`. `hint` is display metadata: the nominal form
-  (`Vec A n`) to print instead; conversion ignores it. -/
-  | mu (l : Level) (I D i : Term R) (sz : Term R) (hint : Option (Name × List Level × List (Term R)))
+  (`Vec A n`) to print instead; conversion ignores it. `prop` says the fixed point's
+  sort is `Prop` (`Sort 0`) rather than `Sort (l+1)`: an **inductive proposition**
+  (issue #252), whose eliminators are restricted (`ind`). -/
+  | mu (l : Level) (I D i : Term R) (sz : Term R)
+      (hint : Option (Name × List Level × List (Term R))) (prop : Bool)
   | con (x : Term R)
-  /-- induction: `ind P m i x : P i x` for `x : μ D i` -/
-  | ind (l : Level) (I D : Term R) (v : Level) (P m i x : Term R)
+  /-- induction: `ind P m i x : P i x` for `x : μ D i`. `prop` is the scrutinee's
+  `μ`'s `prop` flag: when it is set, the motive may be in `Sort 0` always, and in any
+  other sort only when the description is a singleton. -/
+  | ind (l : Level) (I D : Term R) (v : Level) (P m i x : Term R) (prop : Bool)
   /-- the greatest fixed point `ν D i` -/
   | nu (l : Level) (I D i : Term R) (sz : Term R) (hint : Option (Name × List Level × List (Term R)))
   /-- observation: `out x : ⟦D⟧ (ν D) i` -/
@@ -303,10 +308,10 @@ don't need a case per constructor. -/
   | .drec q j D => return .drec (← f 0 q) (← f 0 j) (← f 0 D)
   | .dhrec q H j D => return .dhrec (← f 0 q) (← f 0 H) (← f 0 j) (← f 0 D)
   | .delim v P a b c h D => return .delim (← fl v) (← f 0 P) (← f 0 a) (← f 0 b) (← f 0 c) (← f 0 h) (← f 0 D)
-  | .mu l I D i s h => return .mu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM (hintM fl f))
+  | .mu l I D i s h p => return .mu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM (hintM fl f)) p
   | .con x => return .con (← f 0 x)
-  | .ind l I D v P mt i x =>
-    return .ind (← fl l) (← f 0 I) (← f 0 D) (← fl v) (← f 0 P) (← f 0 mt) (← f 0 i) (← f 0 x)
+  | .ind l I D v P mt i x p =>
+    return .ind (← fl l) (← f 0 I) (← f 0 D) (← fl v) (← f 0 P) (← f 0 mt) (← f 0 i) (← f 0 x) p
   | .nu l I D i s h => return .nu (← fl l) (← f 0 I) (← f 0 D) (← f 0 i) (← f 0 s) (← h.mapM (hintM fl f))
   | .out x => return .out (← f 0 x)
   | .szSuc s => return .szSuc (← f 0 s)
