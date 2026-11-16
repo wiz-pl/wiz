@@ -661,7 +661,7 @@ def Scry.modelSinkClasses : List Scry.SinkClass :=
 
 def Scry.modelRule (c : Scry.SinkClass) : Scry.PackRule :=
   .taint (Scry.TaintRule.mk (Scry.SinkClass.ruleId c) (Scry.SinkClass.severity c)
-    (Scry.SinkClass.message c) .nil .nil .nil)
+    (Scry.SinkClass.message c) "" .nil .nil .nil)
 
 def Scry.RulePack.hasRule (p : Scry.RulePack) (id : String) : Bool :=
   List.any (fun r => String.eq (Scry.PackRule.id r) id) p.rules

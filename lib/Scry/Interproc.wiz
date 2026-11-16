@@ -266,8 +266,7 @@ def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.unionNat (Scry.paramContributions graph results fn.name)
-      (Scry.argvParamsOf pack fn);
+    let contrib := Scry.paramContributions graph results fn.name;
     let ret := match List.find (fun r => String.eq r.fn.name fn.name) results with
       | .some r => Scry.returnsTainted r
       | .none => (.false : Bool);
@@ -350,7 +349,7 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
           match Bool.or pointerArg pointerRet with
           | .false => .nil
           | .true => List.cons (Scry.memWarning Scry.MemWarnKind.unmodelledExternal
-              r.fn.name n ("call to unmodelled external " ++ name
+              r.fn.name n ("external " ++ name) ("call to unmodelled external " ++ name
                 ++ ": result and memory effects are unknown")) .nil
     | _ => .nil) (Scry.range g.count)
 

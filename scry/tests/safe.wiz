@@ -29,7 +29,7 @@ def check (label : String) (ok : Bool) : EIO Unit :=
 
 def analyze (path : String) : EIO Scry.TaintReport :=
   match Scry.taintArgs [path] with
-  | .ok o => EIO.lift (Scry.analyzeFile o)
+  | .ok o => Scry.analyzeFile o
   | .error e => EIO.fail e
 
 def uafWarnings (rep : Scry.TaintReport) : Nat :=
@@ -58,11 +58,9 @@ def knownFp : List String :=
 def isKnownFp (id : String) : Bool :=
   List.any (fun k => String.eq k id) knownFp
 
-def printCases : List Scry.BenchCaseResult → EIO Unit
-  | .nil => EIO.pure ()
-  | .cons r rs => do
-    EIO.lift (IO.println (caseLine r))
-    printCases rs
+def printCases (rs : List Scry.BenchCaseResult) : EIO Unit :=
+  EIO.lift (List.foldl (fun acc r => IO.bind acc (fun _ => IO.println (caseLine r)))
+    (IO.pure ()) rs)
 
 def main : IO Unit := EIO.toIO (do
   run ← Scry.benchRun { Scry.benchDefaultOpts with

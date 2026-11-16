@@ -415,7 +415,7 @@ Run (pack change only, same 12 cases):
 
 ```sh
 cd scry
-SCRY_BIN=/workspace/wt/scry-models/scry/.grail/bin/scry \
+SCRY_BIN=<scry-models worktree>/scry/.grail/bin/scry \
   scripts/cve-bench.sh --timeout 120 --max-nodes 200000
 ```
 

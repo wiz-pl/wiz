@@ -499,7 +499,7 @@ def Scry.nullWarningsOfCfg (fnName : String) (ncfg : Scry.NCfg) (st : AState)
       let nulls := List.filter (fun a => match a with
         | .nullDeref _ => .true
         | _ => .false) alarms;
-      List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point
+      List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point "dereference"
         (Scry.nullDetail b.2)) nulls) ncfg.blocks
 
 /-- The null-dereference warnings of one function. -/
