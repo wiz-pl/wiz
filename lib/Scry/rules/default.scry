@@ -156,9 +156,7 @@ end
 # this analysis has not established (for example a `char *` from a caller) is a
 # bounds question the taint domain does not answer. The rule therefore reports a
 # `note`; it is not evidence of a CVE on its own. `strlcpy`/`strncat` are bounded
-# and are not called here. `sprintf`/`vsprintf` are not listed: a constant format into
-# a fixed buffer is the common safe case, and the hint would fire on all of it (the
-# safe-code corpus pins that). `snprintf` truncation is deliberately NOT a sanitiser:
+# and are not called here. `snprintf` truncation is deliberately NOT a sanitiser:
 # a truncated command can still be dangerous, and truncation is not a content
 # sanitiser.
 rule strcpy-overflow
@@ -168,6 +166,8 @@ rule strcpy-overflow
   cwe CWE-120
   call strcpy
   call strcat
+  call sprintf
+  call vsprintf
   call stpcpy
 end
 
