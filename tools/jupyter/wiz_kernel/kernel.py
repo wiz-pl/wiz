@@ -18,8 +18,10 @@ import traceback
 
 from . import __version__
 from .backends import (Backend, BackendError, BackendUnavailable, CellResult,
-                       ErrorReport, make_backend)
+                       ErrorReport, Stream, make_backend)
 from .magics import handle_magic
+from .widgets import (MIME, PREFIX, SCHEMA, TARGET, WidgetError, WidgetManager,
+                      decode_eval_text, mime_bundle, parse_display, plain_summary)
 from .progress import COMM_TARGET, ProgressChannel
 from .wire import Message, Session, WireError, iopub_topic
 
@@ -34,7 +36,9 @@ BANNER = """Wiz kernel {version}
 Wiz is a didactic dependently typed language (https://wiz-pl.github.io/wiz/).
 Cells keep their definitions; magics are %%scry (C taint analysis), %%sh (shell),
 %%time (wall clock and peak RSS), %%wiz, %backend and %progress.  `wiz check`
-reports, not runs: a bare final expression becomes the cell's result.
+reports, not runs: a bare final expression becomes the cell's result.  `Web.Widget`
+displays render as an interactive MIME bundle (`application/vnd.wiz.widget+json`)
+over a comm.
 """
 
 
@@ -54,6 +58,7 @@ class Kernel:
         self.wiz = wiz
         self.toolchain_args = list(toolchain_args or [])
         self.backend: Backend | None = None
+        self.widgets = WidgetManager(self.backend)
         self.progress = ProgressChannel(publish=self.publish, stream=self.stream)
         self.fallback_reason: str | None = None
         self.backend_error: str | None = None
@@ -111,6 +116,7 @@ class Kernel:
                 self.backend_kind, self.wiz, self.cwd, self.toolchain_args)
         except BackendUnavailable as exc:
             self.backend_error = str(exc)
+        self.widgets.backend = self.backend
         self.publish("status", {"execution_state": "starting"})
         self.loop()
 
@@ -225,7 +231,7 @@ class Kernel:
         elif kind == "history_request":
             self.reply(socket, msg, "history_reply", {"status": "ok", "history": []})
         elif kind == "comm_info_request":
-            comms = {}
+            comms = self.widgets.info()
             if self.progress.comm_id:
                 comms[self.progress.comm_id] = {"target_name": COMM_TARGET}
             self.reply(socket, msg, "comm_info_reply", {"status": "ok", "comms": comms})
@@ -233,14 +239,22 @@ class Kernel:
             content = msg.content or {}
             if content.get("target_name") == COMM_TARGET:
                 self.progress.attach_comm(content.get("comm_id", ""))
+            else:
+                self.handle_comm_open(msg)
         elif kind == "comm_msg":
             content = msg.content or {}
             if content.get("comm_id") and content["comm_id"] == self.progress.comm_id:
                 data = content.get("data") or {}
                 if isinstance(data, dict) and data.get("method") == "close":
                     self.progress.detach_comm(content["comm_id"])
+            else:
+                self.handle_comm_msg(msg)
         elif kind == "comm_close":
-            self.progress.detach_comm((msg.content or {}).get("comm_id", ""))
+            comm_id = (msg.content or {}).get("comm_id", "")
+            if comm_id and comm_id == self.progress.comm_id:
+                self.progress.detach_comm(comm_id)
+            else:
+                self.handle_comm_close(msg)
         elif kind == "connect_request":
             self.reply(socket, msg, "connect_reply", {
                 "status": "ok",
@@ -291,7 +305,8 @@ class Kernel:
                 {"text": "Jupyter kernel source",
                  "url": "https://github.com/wiz-pl/wiz/tree/master/tools/jupyter"},
             ],
-            "metadata": {"wiz_backend": backend_name},
+            "metadata": {"wiz_backend": backend_name,
+                         "wiz_widgets": {"mime": MIME, "comm": TARGET}},
         })
 
     def handle_is_complete(self, socket, msg: Message) -> None:
@@ -317,6 +332,12 @@ class Kernel:
                 self.stream("stderr", self._backend_notice(), parent=parent)
         result = self._run_cell(code, parent)
         self.progress.finish()
+        for bundle in result.comms:
+            self.publish("comm_open", {
+                "comm_id": bundle["comm_id"],
+                "target_name": TARGET,
+                "data": bundle,
+            }, parent=parent)
         for stream in result.streams:
             self.stream(stream.name, stream.text, parent=parent)
         for error in result.errors:
@@ -363,19 +384,112 @@ class Kernel:
                                  emit=lambda name, text: self.stream(name, text,
                                                                      parent=parent))
             if magic is not None:
-                return magic
-            return self.backend.execute(code)
+                return self._attach_widgets(magic)
+            result = self.backend.execute(code)
+            return self._attach_widgets(result)
         except BackendError as exc:
             return CellResult(errors=[ErrorReport("BackendError", str(exc), [str(exc)])])
         except Exception as exc:  # a broken cell must not kill the kernel
             trace = traceback.format_exc().splitlines()
             return CellResult(errors=[ErrorReport(type(exc).__name__, str(exc), trace)])
 
+    def _attach_widgets(self, result: CellResult) -> CellResult:
+        """Turn a `WIZ_WIDGET:` result (or stream line) into a MIME bundle + comm.
+
+        `Widget.display` is a pure String, so it arrives either as the cell's last
+        expression (`result.result`) or from an explicit `#eval` (a stream).  One
+        display per cell is supported; a second is a stream note, not a second
+        execute_result (Jupyter has one per request).
+        """
+        if result.errors:
+            return result
+        found: list[dict] = []
+        if result.result is not None:
+            bundle = parse_display(decode_eval_text(result.result))
+            if bundle is not None:
+                found.append(bundle)
+        for stream in result.streams:
+            if PREFIX not in stream.text:
+                continue
+            kept = []
+            for line in stream.text.splitlines(keepends=True):
+                bundle = parse_display(decode_eval_text(line))
+                if bundle is not None:
+                    found.append(bundle)
+                else:
+                    kept.append(line)
+            stream.text = "".join(kept)
+        if not found:
+            return result
+        if len(found) > 1:
+            result.streams.append(Stream("stderr", "widget: only the last of "
+                                         f"{len(found)} displays in one cell is shown\n"))
+        opened = self.widgets.open(found[-1])
+        result.comms.append(opened)
+        result.data = mime_bundle(opened)
+        result.result = plain_summary(opened)
+        return result
+
+    # -- comms -----------------------------------------------------------
+
+    def handle_comm_open(self, msg: Message) -> None:
+        """Adopt a comm a front end opened (a notebook reconnecting to a display)."""
+        content = msg.content or {}
+        if content.get("target_name") != TARGET:
+            return
+        data = content.get("data")
+        if isinstance(data, dict) and data.get("schema") == SCHEMA:
+            self.widgets.adopt(content.get("comm_id", ""), data)
+
+    def handle_comm_msg(self, msg: Message) -> None:
+        content = msg.content or {}
+        comm_id = content.get("comm_id", "")
+        data = content.get("data") or {}
+        if not comm_id:
+            return
+        if isinstance(data, dict) and data.get("method") == "close":
+            self.handle_comm_close(msg)
+            return
+        try:
+            bundle = self.widgets.event(comm_id, data if isinstance(data, dict) else {})
+        except WidgetError as exc:
+            self.publish("comm_msg", {
+                "comm_id": comm_id,
+                "data": {"method": "error", "error": str(exc)},
+            }, parent=msg.header)
+            return
+        except Exception as exc:  # a broken callback must not kill the kernel
+            traceback.print_exc()
+            self.publish("comm_msg", {
+                "comm_id": comm_id,
+                "data": {"method": "error",
+                         "error": f"widget evaluation failed: {type(exc).__name__}: {exc}"},
+            }, parent=msg.header)
+            return
+        self.publish("comm_msg", {
+            "comm_id": comm_id,
+            "data": {"method": "update", "bundle": bundle,
+                     "patches": bundle.get("patches", [])},
+        }, parent=msg.header)
+
+    def handle_comm_close(self, msg: Message) -> None:
+        comm_id = (msg.content or {}).get("comm_id", "")
+        if not comm_id:
+            return
+        self.widgets.close(comm_id)
+        self.publish("comm_close", {"comm_id": comm_id, "data": {}}, parent=msg.header)
+
     # -- shutdown --------------------------------------------------------
 
     def close(self) -> None:
         self.running = False
         self._hb_stop.set()
+        for comm_id in list(self.widgets.comms):
+            try:
+                self.publish("comm_close", {"comm_id": comm_id, "data": {}})
+            except Exception:
+                pass
+        self.widgets.comms.clear()
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2)
         if self.backend is not None:

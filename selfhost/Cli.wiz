@@ -839,7 +839,11 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   | .none => match isBackendFlag a with
                                     | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
                                     | .false => match strStarts "-" a with
-                                      | .true => .err (String.append "unknown flag: " a)
+                                      -- (A14) a root with its directory attached: `-IDIR`,
+                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                      | .true => match modAttachedRoot a with
+                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                        | .none => .err (String.append "unknown flag: " a)
                                       | .false => match file with
                                         | .none => parseOptsGo rest o (.some a) extra
                                         | .some _ => parseOptsGo rest o file (.cons a extra)
