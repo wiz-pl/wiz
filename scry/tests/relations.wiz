@@ -1,0 +1,33 @@
+-- test: check
+import Scry.Facts
+import Scry.CstStore
+-- Relation tuples survive the columns (regression: `relOff` held tuple counts while
+-- `relationsOf`/`relRows` read it as value offsets, so arity ≥ 2 came out truncated).
+-- One store with an arity-2 relation (2 tuples), an arity-3 relation (2 tuples) and an
+-- empty arity-2 relation. Each line: the relations as read back, through `ofFacts`,
+-- through the `scry-cst` spill (`render` → `ofText`), and back to the model
+-- (`toFacts`); then `tupleCount` and the stats' tuple count.
+def facts : String := "{\"format\":\"scry-facts\",\"version\":1,\"language\":\"c\",\"files\":[{\"id\":0,\"path\":\"r.c\",\"bytes\":8}],\"nodes\":[{\"id\":0,\"kind\":\"translation_unit\",\"span\":[0,8]},{\"id\":1,\"kind\":\"identifier\",\"parent\":0,\"span\":[0,1]},{\"id\":2,\"kind\":\"identifier\",\"parent\":0,\"span\":[2,3]},{\"id\":3,\"kind\":\"identifier\",\"parent\":0,\"span\":[4,5]}],\"edges\":[{\"id\":0,\"src\":0,\"dst\":1,\"label\":\"child\"},{\"id\":1,\"src\":0,\"dst\":2,\"label\":\"child\"},{\"id\":2,\"src\":0,\"dst\":3,\"label\":\"child\"}],\"relations\":[{\"id\":0,\"name\":\"cfg\",\"arity\":2,\"tuples\":[[1,2],[2,3]]},{\"id\":1,\"name\":\"flow\",\"arity\":3,\"tuples\":[[1,2,3],[3,2,1]]},{\"id\":2,\"name\":\"none\",\"arity\":2,\"tuples\":[]}]}"
+
+def showTuple (t : List Nat) : String := "(" ++ String.intercalate " " (List.map Nat.repr t) ++ ")"
+
+def showRels (rs : List Scry.Relation) : String :=
+  String.intercalate "; " (List.map (fun r => r.name ++ "/" ++ Nat.repr r.arity ++ " "
+    ++ String.intercalate "" (List.map showTuple r.tuples)) rs)
+
+def report (s : Scry.CstStore) : String :=
+  showRels (Scry.CstStore.relationsOf s) ++ " | tuples "
+    ++ Nat.repr (Scry.CstStore.tupleCount s) ++ " stats "
+    ++ Nat.repr (Scry.CstStore.statsOf s).tuples
+
+#eval match Scry.Facts.ofText facts with
+  | .error e => "error: " ++ e
+  | .ok f =>
+    let s := Scry.CstStore.ofFacts f;
+    let spill := match Scry.CstStore.ofText (Scry.CstStore.render s) with
+      | .error e => "spill error: " ++ e
+      | .ok t => "spill: " ++ report t;
+    let model := match Scry.CstStore.toFacts s with
+      | .error e => "toFacts error: " ++ e
+      | .ok g => "model: " ++ showRels g.relations;
+    "columns: " ++ report s ++ "\n" ++ spill ++ "\n" ++ model
