@@ -192,11 +192,15 @@ partial def Plot.floorLog10Down (x : Q) (e : Int) : Int :=
   | .true => Plot.floorLog10Down x (Int.sub e 1)
   | .false => e
 
-/-- The floor of `log10 x` for `x > 0`, exactly (a comparison loop, not `libm`). -/
+/-- The floor of `log10 x` for `x > 0`, exactly (a comparison loop, not `libm`). There is
+no logarithm of `x ≤ 0`: it is `0` here, so a caller's non-positive log bound cannot send
+the loop below forever. -/
 def Plot.floorLog10 (x : Q) : Int :=
-  match Plot.qLt x 1 with
-  | .true => Plot.floorLog10Down x (-1)
-  | .false => Plot.floorLog10Up x 0
+  match Plot.qLe x 0 with
+  | .true => 0
+  | .false => match Plot.qLt x 1 with
+    | .true => Plot.floorLog10Down x (-1)
+    | .false => Plot.floorLog10Up x 0
 
 /-- Fixed-point multiplication, six decimals (truncating; deterministic). -/
 def Plot.fxMul (a b : Int) : Int := Int.div (Int.mul a b) 1000000
@@ -204,13 +208,14 @@ def Plot.fxMul (a b : Int) : Int := Int.div (Int.mul a b) 1000000
 /-- Fixed-point division, six decimals. -/
 def Plot.fxDiv (a b : Int) : Int := Int.div (Int.mul a 1000000) b
 
-/-- `atanh z = z + z³/3 + z⁵/5 + …`, in fixed point, `n` terms. -/
-partial def Plot.atanhSum (z z2 : Int) (n : Nat) (term acc : Int) : Int :=
-  match Nat.lt n 48 with
-  | .false => acc
-  | .true =>
+/-- `atanh z = z + z³/3 + z⁵/5 + …`, in fixed point: `left` more terms (48 in all), the
+`n`th being `term / (2n+1)`. -/
+def Plot.atanhSum (z2 : Int) (left : Nat) (n : Nat) (term acc : Int) : Int :=
+  match left with
+  | .zero => acc
+  | .succ l =>
     let acc := Int.add acc (Int.div term (Int.ofNat (Nat.succ (Nat.mul 2 n))));
-    Plot.atanhSum z z2 (Nat.succ n) (Plot.fxMul term z2) acc
+    Plot.atanhSum z2 l (Nat.succ n) (Plot.fxMul term z2) acc
 
 /-- `log10 x` for `x > 0`, in fixed point with six decimals: an integer algorithm
 (`ln m = 2 atanh((m-1)/(m+1))`, divided by the fixed constant `ln 10`), so the SVG does
@@ -220,7 +225,7 @@ def Plot.log10Fixed (x : Q) : Int :=
   let m := Q.div x (Plot.pow10Q e);
   let z := Q.div (Q.sub m 1) (Q.add m 1);
   let zf := Plot.qRound (Q.mul z 1000000);
-  let a := Plot.atanhSum zf (Plot.fxMul zf zf) 0 zf 0;
+  let a := Plot.atanhSum (Plot.fxMul zf zf) 48 0 zf 0;
   let lnM := Plot.fxMul 2000000 a;
   let fr := Plot.fxDiv lnM 2302585;
   Int.add (Int.mul e 1000000) fr
@@ -452,7 +457,7 @@ def Plot.niceRange (lo hi : Q) (target : Nat) : Plot.Bounds :=
   Plot.Bounds.mk (Q.mul (Q.ofInt kLo) s.value) (Q.mul (Q.ofInt kHi) s.value)
 
 /-- The ticks `k · step` of a step, from the first one inside the domain. -/
-partial def Plot.ticksStepGo (hi : Q) (s : Plot.Step) (k : Int) (fuel : Nat) : List Plot.Tick :=
+def Plot.ticksStepGo (hi : Q) (s : Plot.Step) (fuel : Nat) (k : Int) : List Plot.Tick :=
   match fuel with
   | .zero => .nil
   | .succ f =>
@@ -460,12 +465,12 @@ partial def Plot.ticksStepGo (hi : Q) (s : Plot.Step) (k : Int) (fuel : Nat) : L
     let v := Q.mul (Q.ofInt p.1) (Plot.pow10Q p.2);
     match Plot.qLe v hi with
     | .false => .nil
-    | .true => .cons (Plot.Tick.mk v p.1 p.2) (Plot.ticksStepGo hi s (Int.add k 1) f)
+    | .true => .cons (Plot.Tick.mk v p.1 p.2) (Plot.ticksStepGo hi s f (Int.add k 1))
 
 /-- The ticks of a nice step that lie in a domain, left to right. -/
 def Plot.ticksWith (b : Plot.Bounds) (s : Plot.Step) (target : Nat) : List Plot.Tick :=
   let k0 := Plot.ceilDivInt (Int.mul b.lo.num s.value.den) (Int.mul b.lo.den s.value.num);
-  Plot.ticksStepGo b.hi s k0 (Nat.add 16 (Nat.mul 4 (Nat.max 1 target)))
+  Plot.ticksStepGo b.hi s (Nat.add 16 (Nat.mul 4 (Nat.max 1 target))) k0
 
 /-- Linear nice ticks: at most about `target` of them, each an integer multiple of a
 `1/2/5 × 10^k` step. -/
@@ -479,14 +484,14 @@ def Plot.mantTicks (e : Int) : List Plot.Tick :=
       (.cons (Plot.Tick.mk (Q.mul 5 (Plot.pow10Q e)) 5 e) .nil))
 
 /-- The `1/2/5` candidates of the decades `e, e+1, …`. -/
-partial def Plot.logGo (b : Plot.Bounds) (e : Int) (fuel : Nat) : List Plot.Tick :=
+def Plot.logGo (b : Plot.Bounds) (fuel : Nat) (e : Int) : List Plot.Tick :=
   match fuel with
   | .zero => .nil
   | .succ f =>
     List.append
       (List.filter (fun t => Bool.and (Plot.qLe b.lo t.value) (Plot.qLe t.value b.hi))
         (Plot.mantTicks e))
-      (Plot.logGo b (Int.add e 1) f)
+      (Plot.logGo b f (Int.add e 1))
 
 /-- Every `k`-th element (the first, then `k` apart). `k = 0` keeps the list. -/
 partial def Plot.thin {A : Type} (k : Nat) : List A → List A
@@ -501,7 +506,7 @@ def Plot.logTicks (b : Plot.Bounds) (target : Nat) : List Plot.Tick :=
   let e0 := Plot.floorLog10 b.lo;
   let e1 := Plot.floorLog10 b.hi;
   let fuel := Int.toNat (Int.add (Int.sub e1 e0) 1);
-  let all := Plot.logGo b e0 fuel;
+  let all := Plot.logGo b fuel e0;
   let decades := List.filter (fun t => Int.beq t.mant 1) all;
   match Nat.le (Int.toNat (Int.sub e1 e0)) 1 with
   | .true => all
@@ -616,14 +621,15 @@ def Plot.pointsAttr (ps : List (Nat × Nat)) : String :=
   String.intercalate " " (List.map Plot.pair ps)
 
 /-- The `points` attribute of a step through pixel points: horizontal, then vertical. -/
-partial def Plot.stepAttr : List (Nat × Nat) → String
+def Plot.stepAttr : List (Nat × Nat) → String
   | .nil => ""
-  | .cons p .nil => Plot.pair p
-  | .cons p (.cons q rest) =>
-    String.append (Plot.pair p)
-      (String.append " "
-        (String.append (Plot.pair (q.1, p.2))
-          (String.append " " (Plot.stepAttr (.cons q rest)))))
+  | .cons p tl => match tl with
+    | .nil => Plot.pair p
+    | .cons q _ =>
+      String.append (Plot.pair p)
+        (String.append " "
+          (String.append (Plot.pair (q.1, p.2))
+            (String.append " " (Plot.stepAttr tl))))
 
 -- ## SVG
 
