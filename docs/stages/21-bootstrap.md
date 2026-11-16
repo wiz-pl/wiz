@@ -348,9 +348,15 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   behaviour) is one module, `input`: private names are visible throughout the file.
 * **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
   key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
-  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
-  the diagnostics of the same graph (the key covers every module's text, and the toolchain
-  id every selfhost source).
+  visibility check is a lookup on every elaboration, so a warm cache hit replays the
+  diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source). The driver builds that key from the loader's discovery
+  table before elaborating (`tabNames`/`keyOfGraph` in `Cli.wiz`, plus the root's
+  `import_c` header texts), so a warm `check`/`run` repeats no command; `--no-cache`
+  does not construct the key at all. Before this, `prepare` elaborated the graph first
+  and the hit only saved the rendering, so a warm check cost the same as a cold one
+  (measured in `bench/selfhost-bench.py`: compiler.wiz warm 10.6 s vs cold 38.3 s after
+  the fix; 1.8x the host's RSS, 1.2x its cold time).
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
@@ -1002,3 +1008,88 @@ including the self-check (28.3 s) and the repinned `#67`, which matches its new
 expected output. The same cases were also exercised case by case with light probes
 (`wiz check`/`wiz run` for the Lean frontend, the checker and compiler for the
 Wiz-hosted one), and the macro-using program prints `25 2 1 9 71` from both toolchains.
+
+## 21ad: tactics in the self-hosted frontend (A13, core)
+
+`by` and `term.by` are now elaborated by the Wiz-hosted frontend, not rejected. The
+engine is the host's (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean` `runTac`) in the
+self-hosted surface: a goal is a context (`Cx`: names, types and values), an expected
+type (`Val`) and a hole (`Tm`, the `MVarId` analogue — goals are numbered by position,
+as in `TacState`), and a tactic script is an `STac` request tree (`op`, `seq`, `try`,
+`first`, `repeat`) interpreted against a goal list and an elaborator state.
+
+**Surface.** `by tac₁; tac₂ …` in a checking and in an inferring position. The core
+tactics are `intro`, `intros`, `exact`, `apply`, `assumption`, `rfl`, `rw`/`rw ←`
+(syntactic occurrence rewriting of the goal type, as the host's `abstractOcc`),
+`change`, `unfold f, g` (one unfolding per definition; fails when nothing changes),
+`calc`, `have`, `suffices`, `obtain ⟨x, y⟩ := e`, `constructor` (the first constructor
+of the goal's type whose application succeeds), and `try`/`first`/`repeat`/`(…; …)`.
+`constructor`'s siblings `cases`/`induction` are not in this milestone (they need the
+match compiler's motive/recursor surface exposed to tactics). The tactic grammar is
+built into the parser tables (`Wiz/Selfhost.lean` `selfhostTacticRules`, hence
+`selfhost/Tables.wiz`), because the host gets it from `syntax … : tactic` declarations
+in `lib/Prelude.wiz` and the self-hosted frontend does not run macro/tactic
+registrations yet (21ac).
+
+**Solved means solved.** A block makes one metavariable; a tactic's `exact`/`apply`/
+`assumption` either closes its goal (its hole zonks) or replaces it. At the end of the
+block the open list is filtered by zonk: a goal that a later argument's unification
+determined is not reported. If any goal is left the command fails with
+`unsolved goals:` and each goal's context, one hypothesis per line (`n : Nat`) and
+`⊢ type`; a failed tactic additionally appends `remaining goals:` and the state it
+failed in. A term `apply`/`assumption` assigns with holes is kept in an `unchecked`
+list and its type is inferred and compared with its goal at the end of the block (the
+host's `assign` path), so a hole cannot become a proof of the wrong thing; a solved
+block is handed to the kernel as an ordinary term and checked as usual.
+
+**Frequency in `lib/`.** A token scan of the `by` blocks in the 95 `lib/**/*.wiz` files
+at this commit (comments and strings excluded, equation bodies included) finds **40
+blocks / 47 tactic steps in 4 files**. The frequency order is:
+
+| tactic | steps | files | note |
+|---|---:|---:|---|
+| `xgo` | 12 | 3 | Hoare/Eff custom tactic (`syntax … : tactic`) |
+| `xstep` | 10 | 1 | custom |
+| `xunfold` | 8 | 1 | custom |
+| `xapp` | 5 | 1 | custom |
+| `unfold` | 4 | 1 | built in, implemented here |
+| `rw` | 4 | 1 | built in, implemented here |
+| `rfl` | 4 | 1 | built in, implemented here |
+
+The custom four are 35 of 47 steps and are declared with `syntax … : tactic` /
+`macro_rules` and registered with `attribute [tactic …]`; they need the
+elaboration-time evaluator that A12 has not ported, so they parse but have no meaning in
+the self-hosted frontend (the error names the syntax kind). The parity matrix's "46
+`lib` files use `by`" is a raw `\bby\b` grep that also matches the English word in
+comments; the real proof blocks are in `HoareExamples`, `HeapBorrow`, `EffHeap` and
+`ListLemmas`. That is why the top built-in form is `unfold`, and why it and `rw`/`rfl`
+were the first ones implemented; `calc`/`have`/`suffices`/`obtain` are included for the
+proof surface even though `lib/` does not use them as tactics yet.
+
+**Tests.** `=selfhost` gains five cases: a real block (`intro`/`apply`/`assumption`), the
+per-tactic cases (`intros`, `change`, `unfold`, `constructor`, `try`/`first`/`repeat`),
+unsolved goals with their context, a tactic failure with the remaining goals, and the
+differential. The differential case runs the same `ap` proof in the Lean and Wiz-hosted
+frontends, and the same failing `rw` in both, comparing verdicts and the error text
+(`rewrite: the goal does not mention c`). `=tactics` (the Lean host's group) is
+unchanged and remains the host-side regression.
+
+**Verification on this branch** (A12+A11+A13 merged; the self-hosted compiler built from
+the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #147–#151), and
+`=tactics` is 28/28. A full `=selfhost` run reached **112 cases, 0 failures** (and
+#112–#114 also passed) before the machine restarted; the remaining tail was being
+re-run when it restarted again, and the A13 cases were then re-checked individually. The
+fixpoint was not run: `selfhost/*.wiz` does not use `by` yet, and the 6 GiB heavy slot
+was not available; a fixpoint run is the remaining gate for the compiler's own sources.
+
+**Limits.** No `simp`/`simp`-set management, no decision procedures (`decide`,
+`omega`, `linarith`, `ring`, `bv_decide`), no `cases`/`induction` (and `constructor`
+covers ordinary inductives only), no rewriting in hypotheses, no
+`trace_state`/`rename_i`, no unfolding of a hypothesis, and no user tactic functions
+(A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
+type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
+whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
+written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+guaranteed to match the host. The error position is the failed command, as for the rest
+of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
+are not reproduced.

@@ -146,6 +146,40 @@ says what its constructors look like, and its least fixed point. That is how the
 kernel can stay small; [stages/04-data.md](stages/04-data.md) tells the story.
 (`examples/tour/02-data.wiz`.)
 
+### Inductive propositions
+
+Write `Prop` where the result would be `Type` to declare a **proposition** rather than
+data. Relations are the usual use: `Le` is an indexed family whose values are proofs.
+
+```
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+
+inductive Le : Nat → Nat → Prop where
+  | refl (n : Nat) : Le n n
+  | step {n m : Nat} (h : Le n m) : Le n (.succ m)
+
+def Le.widen {a b : Nat} (h : Le a b) : Le a (.succ b) :=
+  Le.rec (fun x y _ => Le x (.succ y))
+    (fun n => .step (.refl n))
+    (fun _ ih => .step ih) h
+```
+
+A proof of an inductive proposition is erased and **proof-irrelevant**: any two
+proofs of one proposition are definitionally equal. The eliminators follow Lean's
+singleton rule. A proposition with more than one constructor (or a constructor with a
+field that stores data) only eliminates into `Prop`, so `Le.rec` has a motive in
+`Prop`. A proposition with at most one constructor whose fields are all propositions
+or other singleton values (`And`, `Eq`, `Acc`, `False`) is a **subsingleton**, and may
+eliminate into any sort: `And.rec` and `Eq.rec` compute data.
+
+What is **not** allowed: eliminating a non-singleton Prop into `Type` (Berardi/Hurkens
+would make the logic inconsistent), deriving `BEq` or `Repr` for a proposition (proofs
+are not data), and sized or linear case analysis on a proof. `structure` and
+`coinductive` are `Type`-only. The declaration itself may use any `Desc` level, so a
+Prop inductive may store a type of any universe; only its *elimination* is restricted.
+
 ## 3: structures
 
 ```wiz

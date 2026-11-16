@@ -15,6 +15,38 @@ strengthened past the local `T` in the constructor's type, and the generated rec
 must take the payload apart with `split`s (a projection needs `1 ≤ q`, not known). -/
 def qtyIndPrelude : String := "\ninductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive BoxQ (q : Qty) (A : Type) where\n  | mk (%q a : A)\n\ninductive PairQ (q : Qty) (A : Type) where\n  | mk (%q a : A) (b : Nat)\n\ndef box {q : Qty} {A : Type} (%q a : A) : BoxQ q A := .mk a\n\ndef unbox {q : Qty} {A : Type} (f : (%q a : A) → A) (b : BoxQ q A) : A :=\n  match b with\n  | .mk a => f a\n\ndef unbox0 {A : Type} (f : (0 a : A) → A) (b : BoxQ 0 A) : A :=\n  match b with\n  | .mk a => f a\n\ndef mapBox {q : Qty} {A B : Type} (f : (%q a : A) → B) (b : BoxQ q A) : BoxQ q B :=\n  BoxQ.rec (fun _ => BoxQ q B) (fun a => .mk (f a)) b\n\ndef pairQ {q : Qty} {A : Type} (%q a : A) (b : Nat) : PairQ q A := .mk a b\n\ndef firstPair {q : Qty} {A : Type} (f : (%q a : A) → A) (p : PairQ q A) : A :=\n  match p with\n  | .mk a _ => f a\n\ndef bW : BoxQ ω Nat := .mk (.succ .zero)\ndef b1 : BoxQ 1 Nat := .mk (.succ .zero)\ndef b0 : BoxQ 0 Nat := .mk (.succ .zero)\ndef pW : PairQ ω Nat := pairQ (.succ .zero) (.succ .zero)\n\n"
 
+/-- Inductive propositions (#252): an indexed relation in `Prop`, a proof by induction,
+and singleton elimination (a one-constructor proposition with proof fields, eliminating
+into `Type`). -/
+def propIndPrelude : String := "\ninductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n\ndef leSucc (n : Nat) : Le n (.succ n) := .step (.refl n)\n\ndef leWiden {a b : Nat} (h : Le a b) : Le a (.succ b) :=\n  Le.rec (fun x y _ => Le x (.succ y)) (fun n => .step (.refl n)) (fun _ ih => .step ih) h\n\ninductive EqP {A : Type} (a : A) : A → Prop where\n  | refl : EqP a a\n\ndef eqPTest : Nat :=\n  EqP.rec (fun (b : Nat) (_ : EqP Nat.zero b) => Nat) (Nat.succ Nat.zero) (EqP.refl)\n\ninductive AndP (A B : Prop) : Prop where\n  | intro (a : A) (b : B)\n\ndef andPComm {A B : Prop} (h : AndP A B) : AndP B A :=\n  AndP.rec (fun _ => AndP B A) (fun a b => .intro b a) h\n\n"
+
+def propIndGroup : Group where
+  name := "inductive-props"
+  exercise := "issue #252"
+  cases := [
+    { name := "Le: an indexed proposition, with a proof by induction", run := fun _ =>
+        ok propIndPrelude [] },
+    { name := "a non-singleton proposition eliminates only into Prop", run := fun _ =>
+        ok (propIndPrelude ++
+          "def leRefl (k : Nat) : Le k k := Le.casesOn (fun _ _ _ => Le k k) (fun _ => .refl k) (fun _ => .refl k) (.refl k)") [] },
+    { name := "singleton elimination computes into Type (EqP.rec)", run := fun _ =>
+        ok (propIndPrelude ++ "#reduce eqPTest") [".succ .zero"] },
+    { name := "large elimination of a non-singleton proposition is rejected", run := fun _ =>
+        fails (propIndPrelude ++
+          "def bad (h : Le .zero .zero) : Nat := match h with\n  | .refl _ => .zero\n  | .step _ => .zero")
+          "large elimination" },
+    { name := "a non-positive occurrence in a proposition is rejected", run := fun _ =>
+        fails (propIndPrelude ++ "inductive BadP : Prop where\n  | mk (f : BadP → Nat)") "may only occur" },
+    { name := "BEq and Repr are not derived for a proposition", run := fun _ =>
+        fails "inductive RP : Prop where\n  | mk\n  deriving BEq" "cannot derive BEq" },
+    { name := "AndP: a one-constructor proposition with proof fields", run := fun _ =>
+        ok propIndPrelude [] },
+    { name := "mutual inductive propositions", run := fun _ =>
+        ok "mutual\ninductive A : Prop where\n  | mk\ninductive B : Prop where\n  | mk\nend" [] }
+  ]
+
+builtin_initialize registerGroup propIndGroup
+
 def inductiveGroup : Group where
   name := "inductive"
   exercise := "Exercise 4.21"

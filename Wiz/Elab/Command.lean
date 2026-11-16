@@ -436,7 +436,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   let .pi x0 bi0 q0 A0 B s0 := ty | throwAt info "internal error: sized definition"
   -- the outer `fun x0 =>`
   let vA0 ← evalIn ctx A0
-  let .mu l I D idx _ hint ← force vA0 | throwAt info "internal error: sized argument"
+  let .mu l I D idx _ hint _ ← force vA0 | throwAt info "internal error: sized argument"
   -- (an index type that is only a phantom tail, `phantomTail`, has one value too)
   unless (← force I) matches .unit _ | .pi .. do
     throwAt info "sized recursion is only supported on non-indexed types (for now)"
@@ -465,7 +465,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   let .pi _ _ _ xTy c_x _ ← force afterI | throwAt info "internal error"
   -- keep the nominal display (the match compiler finds `T` through it)
   let xTy := match xTy with
-    | .mu l' I' D' i' s' _ => Val.mu l' I' D' i' s' hint
+    | .mu l' I' D' i' s' _ _ => Val.mu l' I' D' i' s' hint false
     | t => t
   let ctxX := ctxI.bind x0 xTy
   let xLvl := ctxI.lvl
@@ -477,7 +477,7 @@ def elabSizedDef (name : Name) (cmd : Syntax) (ctx : LocalCtx R) (tele : Array (
   -- (the hint sits in `y`'s domain, under `j` only)
   let hintT := hint.map fun (n, us, as) => (n, us, as.map (quote g (L + 1)))
   let fTyTm : Term R := .pi "j" .implicit (.qlit 0) (.sizeLt sT)
-    (.pi "y" .default (.qlit w) (.mu l (q ctxX I |>.lift 1) (q ctxX D |>.lift 1) (q ctxX idx |>.lift 1) (.var 0) hintT)
+    (.pi "y" .default (.qlit w) (.mu l (q ctxX I |>.lift 1) (q ctxX D |>.lift 1) (q ctxX idx |>.lift 1) (.var 0) hintT false)
       ((Term.app (Term.app ((P.lift (L - c1.lvl)).lift 2) ((q ctxX idx).lift 2)) (.var 0))) .hole) .hole
   -- β-reduce `P () y` (the kernel can't infer the type of an applied lambda)
   let fTyTm := quote g L (← evalIn ctxX fTyTm)
@@ -715,7 +715,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   -- a recursive definition whose first argument has a size-variable size: compile to `sfix`
   if rc.isSome && pos == 0 then
     if let some x0 := vars.head? then
-      if let .mu _ _ _ _ (.neutral (.local si) #[]) _ ← force ctx'.types[ctx'.lvl - x0 - 1]! then
+      if let .mu _ _ _ _ (.neutral (.local si) #[]) _ _ ← force ctx'.types[ctx'.lvl - x0 - 1]! then
         if si < ctx.lvl then
           let (t, v) ← elabSizedDef name cmd ctx tele ty si clauses
           return (t, v, none)
@@ -1170,7 +1170,7 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | _ => false
   if key == "nat" || key == "string" || key == "int" then
     match d.type, d.value.map (eval g []) with
-    | .sort _, some (.mu _ _ _ _ _ (some (T, _, _))) => if T == d.name then none else some "it must be an inductive type"
+    | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
   else match g.builtins.lookup "nat" with
@@ -1206,16 +1206,26 @@ members may have constructors of the same name, and `.c` at an expected `A` is `
 partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Except String (List Syntax) := do
   let names := defs.map fun d => ((d.getArg 1).getId?).getD "_"
   for d in defs do
-    unless (d.getArg 2).args.isEmpty && (d.getArg 3).args.isEmpty && (d.getArg 4).args.isEmpty do
-      throw "mutual inductive types may not have universe parameters, parameters or indices (yet)"
+    unless (d.getArg 2).args.isEmpty && (d.getArg 3).args.isEmpty do
+      throw "mutual inductive types may not have universe parameters or parameters (yet)"
+    -- (issue #252) a member may say `: Prop`; any other signature would be indices
+    let sig := d.getArg 4
+    unless sig.args.isEmpty || sig.args.any (·.isOfKind "term.prop") do
+      throw "mutual inductive types may not have indices (yet)"
   let fam := "_".intercalate names.toList
+  -- (issue #252) a block of inductive propositions is one propositional family
+  let isPropCmd (d : Syntax) : Bool := (d.getArg 4).args.any (·.isOfKind "term.prop")
+  let anyProp := defs.any isPropCmd
+  let allProp := defs.all isPropCmd
+  if anyProp && !allProp then
+    throw "mutual inductive types must be all Prop or all Type (they share one family)"
   let parse (text : String) : Except String Syntax := match parseCommand text.toList.toArray tables 0 with
     | .ok (stx, _) => pure stx
     | .error _ => throw s!"internal error: could not parse {text}"
   -- the tags name the members without dots (a private member is `_private.M._0.A`)
   let tagOf (n : Name) : Name := (Globals.privateBase n).replace "." "_"
   let tagCmd ← parse s!"inductive {fam}.Tag where{String.join (names.toList.map (s!"\n  | " ++ tagOf ·))}"
-  let famFrame ← parse s!"inductive {fam} : {fam}.Tag → Type where"
+  let famFrame ← parse s!"inductive {fam} : {fam}.Tag → {if allProp then "Prop" else "Type"} where"
   let substs ← names.mapM fun n => match parseCategory tables "term" s!"({fam} {fam}.Tag.{tagOf n})" with
     | .ok t => pure (n, t)
     | .error e => throw s!"internal error: {e}"
@@ -1234,7 +1244,7 @@ partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Exce
       | _ => c
     if (c.getArg 4).args.isEmpty then c.setArg 4 (.node {} "null" #[.atom {} ":", self]) else c
   let famCmd := famFrame.setArg 6 (.node {} "null" ctors)
-  let typeDefs ← names.mapM fun n => parse s!"def {n} : Type := {fam} {fam}.Tag.{tagOf n}"
+  let typeDefs ← names.mapM fun n => parse s!"def {n} : {if allProp then "Prop" else "Type"} := {fam} {fam}.Tag.{tagOf n}"
   -- `deriving C` on a member: for the family (one instance `C (A_B t)` covers every
   -- member, and its methods recurse through all of them)
   let classes := defs.foldl (init := ([] : List Name)) fun acc d =>
@@ -1551,7 +1561,15 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
   -- `deriving C` for the type `T`: run `C`'s deriver
   let derive (C T : Name) (info : SourceInfo) : StateM (CommandState R) Unit := do
     let s ← get
-    match s.derivers.lookup C with
+    -- (issue #252) a proposition is not data: proofs are erased and all proofs of it are
+    -- equal, so equality and printing would be meaningless
+    let isProp := match (s.globals.find? T).map (fun d => (peelPis d.type).2) with
+      | some (.sort l) => l.isZero
+      | _ => false
+    if isProp && (C == "BEq" || C == "Repr") then
+      report .error info s!"cannot derive {C} for the inductive proposition {T}: \
+a proposition is not data (proofs are erased and all its proofs are definitionally equal)"
+    else match s.derivers.lookup C with
     | none => report .error info s!"no deriver for {C} (register one with `attribute [deriver {C}] f`)"
     | some f =>
       let r := match metaCodeFor f with
@@ -2099,9 +2117,15 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           -- (indexed families also get `recN`/`casesOnN`, for motives that don't depend
           -- on the scrutinee)
           let indexed := isIndexed g name
+          -- (issue #252) an inductive proposition has no sized or linear eliminators
+          let prop := match (g.find? name).map (fun d => (peelPis d.type).2) with
+            | some (.sort l) => l.isZero
+            | _ => false
           let mut recNames : List Name := []
-          for (withIH, sized, nondep) in [(false, false, false), (true, false, false), (false, true, false)] ++
-              (if indexed then [(false, false, true), (true, false, true)] else []) do
+          let shapes := [(false, false, false), (true, false, false)] ++
+              (if prop then [] else [(false, true, false)]) ++
+              (if indexed then [(false, false, true), (true, false, true)] else [])
+          for (withIH, sized, nondep) in shapes do
             match mkRecursor g name ctors withIH sized nondep with
             | .error e => report .error cmd.info s!"could not generate the recursor: {e}"; return
             | .ok d =>
@@ -2115,7 +2139,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
           -- linear variable (none for a type without constructors: its bundle would be
           -- a linear argument nothing uses)
           -- (linear-case stage 2) and `T.casesOn1`, the case on a scrutinee held at 1
-          unless ctors.isEmpty do
+          unless ctors.isEmpty || prop do
             for linear in [false, true] do
               match mkRecursor g name ctors false (additive := true) (linear := linear) with
               | .error e => report .error cmd.info s!"could not generate the recursor: {e}"; return
@@ -2747,7 +2771,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     let rec target (g : Globals R) (lvl : Nat) : Val R → Nat → Option Name × Nat
       | ty, fuel + 1 => match whnf ty with
         | .pi _ _ _ _ cod _ => let (T, n) := target g (lvl + 1) (Closure.inst g cod (.var lvl)) fuel; (T, n + 1)
-        | .mu _ _ _ _ _ (some (T, _, _)) => (some T, 0)
+        | .mu _ _ _ _ _ (some (T, _, _)) _ => (some T, 0)
         | _ => (none, 0)
       | _, 0 => (none, 0)
     let rec lastDom (g : Globals R) (lvl : Nat) : Val R → Nat → Option Name
@@ -2755,7 +2779,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
         | .pi _ _ _ dom cod _ => match whnf (Closure.inst g cod (.var lvl)) with
           | .pi .. => lastDom g (lvl + 1) (Closure.inst g cod (.var lvl)) fuel
           | _ => match whnf dom with
-            | .mu _ _ _ _ _ (some (T, _, _)) => some T
+            | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
             | _ => none
         | _ => none
       | _, 0 => none
