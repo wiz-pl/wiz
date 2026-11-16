@@ -33,6 +33,8 @@ Requirements this design meets, each in its own section below:
    release is mirrored to the Cachix cache `badlydrawnwizards`.
 7. A lint rejects any pin that is not commit plus hash; a periodic audit rebuilds the
    links since the last checkpoint.
+8. Every release that any commit pins is retained indefinitely, on GitHub and in Cachix.
+   Snapshot pruning never applies to chain releases (see "Retention").
 
 ## Terms
 
@@ -99,7 +101,8 @@ through an FOD (`fetchurl` with a hash). Two shapes were considered:
 
 **Decision: static.** The self-hosted compiler needs only libc (reference-counted
 mode) or libc and Boehm GC (collector mode). `pkgsStatic.stdenv.cc` is in the NixOS
-binary cache, and `pkgsStatic.boehmgc` builds in about a minute. The evidence is in
+binary cache at the pinned nixpkgs; `pkgsStatic.boehmgc` (collector mode only) is not,
+and is built from source. The evidence is in
 "Measurements": the release derivation fails unless the executable contains no
 `/nix/store` string, `disallowedReferences` forbids musl's store path, and the C that
 the static executable prints equals the C the glibc build prints.
@@ -361,6 +364,33 @@ nothing is rebuilt (the FOD is already in the store or in Cachix).
 | rollback: an old release served for a new commit | the pin names the exact hash; attestations name the commit | |
 | a stolen local builder key | Rekor logs every attestation; the key list is in the repository and revocable | attestations made before revocation |
 
+## Retention
+
+**Requirement: a release that any commit pins is kept forever.** The tower snapshots
+(`snapshot-<sha>`, docs/stages/26-tower.md, 26g) keep only the newest 20 plus tagged
+ones, and a bisect has already failed because a pinned commit's snapshot had been
+pruned. The chain cannot work that way: a pruned release makes every later link
+unverifiable by the shortcut path, and every commit that pins it unbuildable without a
+rebuild from the root or a checkpoint. So:
+
+* chain releases are separate GitHub releases (`toolchain-COMMIT`), never matched by
+  the snapshot pruner (`scripts/release-snapshots.sh` selects only `snapshot-*`
+  releases; P7 adds a test that keeps it that way), and each is protected by a tag
+  `toolchain-COMMIT` that is never deleted. (For tower pins the existing escape is a
+  `keep/NAME` tag at the commit, which the pruner honours; a chain pin must not depend
+  on someone remembering to push one.)
+* every release's FOD store path is pushed to Cachix (`badlydrawnwizards`) and pinned
+  there (`cachix pin`, without `--keep-revisions` limits), so Cachix's garbage
+  collection does not drop it;
+* the set of releases that must exist is the set of hashes in `wizc-toolchain.json`
+  across master's history; the audit checks each one is fetchable from both GitHub and
+  Cachix (a `nix store prefetch-file`/`nix path-info --store` probe, no download needed
+  for Cachix);
+* a mirror that only adds copies (any URL in `urls`) is welcome; none is required.
+
+Retention is cheap: one tarball per commit that changes `selfhost/` (a static RC
+executable, a few MB compressed).
+
 ## The periodic audit
 
 A scheduled job (once the chain is active; weekly is enough) rebuilds every link since
@@ -369,6 +399,16 @@ with the pin of the next commit, and on success moves the checkpoint (a tag
 `chain-checkpoint`, pointing at the last verified link). Every eighth audit also
 rebuilds the root from the Lean host. A failure opens an issue naming the first link
 that did not reproduce and what differed (`scripts/repro-fixpoint.sh --compare`).
+
+**A missing release.** When the retention check finds a pinned release absent from a
+source (pruned, deleted, or the cache lost it), the audit rebuilds it from source: it
+takes the nearest verified predecessor (the checkpoint, or the root from the Lean host),
+runs `step` for each link up to the missing one, and compares the rebuilt tarball's
+sha256 with the pin. Equal: the rebuilt file is the release (the hash proves it), so the
+audit re-uploads it to every source that lost it and records the restoration in the
+issue. Different: the link is unverifiable, which is a chain failure, not a retention
+one; the issue says so and nothing is re-uploaded. A missing release is never replaced
+by bytes that do not match the pin.
 
 ## Prerequisites before the root
 
@@ -380,6 +420,7 @@ that did not reproduce and what differed (`scripts/repro-fixpoint.sh --compare`)
 | P4 | the parity bar | open (the parity matrix's blocking rows) |
 | P5 | a local builder with a key, and a dispatch-only workflow that builds and attests | open |
 | P6 | tower reads a hash in `wiz-toolchain` | open |
+| P7 | retention: `toolchain-*` releases excluded from pruning, Cachix pins, the audit's fetchability check | open |
 
 ## Measurements
 
