@@ -10,6 +10,21 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
+  (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
+  group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
+  FFI rows (`Word`, `WordArray`, `WordMap`, `Intern`) are reviewed per C symbol, and
+  `scripts/trust-ffi-audit.sh --check` compiles each extern's generated prototype
+  against `runtime/wiz_rt.h` (9g, 22f).
+* runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
+  `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
+  reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
+* trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
+  per block (compiled-only general recursion, an inhabited witness at 22f, no
+  termination claim, and the de-mutualisation or measure that would remove the row), and
+  `docs/trust-ledger.md` states that such a row is a design choice, not an unreviewed
+  gap. The two structural fuel loops `Scry.rdLoop`/`Scry.domLoop` are now total, so the
+  group is 132 rows; the ledger's remaining `legacy:` rows are 24 (22f, 13a).
 * grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
   content-addressed vendor directory (`<sha256>.tar.gz` plus `vendor/index.sexpr`) without
   rewriting `grail.lock`; `--vendor DIR` (or `Package.set "vendor" "DIR"`) lets `fetch`, `build`,
@@ -68,6 +83,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
   length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
   and the rotate composition for `k >= w` (22a, 22c).
+
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

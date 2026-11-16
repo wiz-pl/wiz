@@ -70,6 +70,10 @@ def unknownSyntax := "unknown-syntax"
 def unknownClass := "unknown-class"
 /-- a command (`builtin`, `attribute`, `export`, …) naming an unknown declaration -/
 def unknownDeclaration := "unknown-declaration"
+/-- `attribute [simp] f` where `f`'s type is not an equation after its binders -/
+def simpLemmaNotEquation := "simp-lemma-not-equation"
+/-- `attribute [simp] f` where `f` has a premise before its equation (S3) -/
+def simpLemmaConditional := "simp-lemma-conditional"
 /-- a variable used against its quantity (erased, linear) -/
 def quantity := "quantity"
 /-- any other error of the kernel's -/
@@ -87,7 +91,7 @@ def all : List String :=
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
    duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
-   unknownDeclaration, quantity, kernelRejected, parseError]
+   unknownDeclaration, simpLemmaNotEquation, simpLemmaConditional, quantity, kernelRejected, parseError]
 
 /-- The code a message is reported with: internal codes become the public ones. -/
 def reported (code : String) : String :=

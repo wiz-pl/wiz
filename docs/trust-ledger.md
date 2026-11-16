@@ -116,10 +116,10 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The migration's 753 rows are not a renewal list: the reviewed base is now 682 rows
-(639 still carrying the migration marker), 71 fewer. The reduction is no longer over 10%:
-the signed shift/compare exception below is a correctness fix for the native IR. The
-removals are all structural, not a loosening of the gate:
+The migration's 753 rows are not a renewal list: the reviewed base is now 680 rows
+(24 still carrying the migration marker), 73 fewer (9.7%). The reduction is no longer
+over 10%: the signed shift/compare exception below is a correctness fix for the native
+IR. The removals are all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
 | --- | --- | --- |
@@ -127,6 +127,7 @@ removals are all structural, not a loosening of the gate:
 | `toList`/`ofList` projections on arrays, maps and intern tables | 8 | the constructor's `repr:` registration already gives the native representation; the separate projection registration proved nothing new |
 | `InternTable.empty`/`size` and `U64Map.contains` natives | 9 | their Wiz bodies are `.mk .nil`, a length and a match on the (still native) `find`/`toList`; all are cheaper to review than to trust twice |
 | `partial` definitions that the kernel accepts as total | 2 | `Json.digits` recurses on the list tail, `Ring.synEq` on the syntax tree (`Json.sub` stays partial as an elaboration fence and is now reasoned) |
+| `Scry.rdLoop` and `Scry.domLoop` fuel loops | 2 | their only recursive argument is `fuel`, a `Nat` predecessor, so removing `partial` is checked structural recursion (see the group below) |
 
 The rule the BitVec IR test encodes: **a native is removed only if the Wiz body emits
 the same primitive**. `IntN.shiftRight` and `IntN.lt` fail that test: their Wiz
@@ -142,16 +143,28 @@ The remaining rows fall into five groups, with the plan for each:
   function) and a `builtin extern:` row (the marshalling). These are the mechanical
   bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
   replace the two `legacy:` rows with one reason naming the symbol and its contract.
-  Do not bulk-renew them.
-* **Mutual recursion, 109 `partial` rows.** `Feral` (70), `Json` (9), `SatTactic` (7),
-  `BvDecide` (6), `Tagged` (6), `Ring` (2) and the rest are compiled engines. Wiz's
-  structural checker does not accept nested/mutual induction here, so they cannot be
-  made total mechanically; the plan is to de-mutualise or size-index the few that are
-  worth it, and otherwise review them as intentionally compiled-only engines.
-* **Explicit `partial`, 25 rows (27 before this pass; two are now total).** The rest are fuel loops
-  (`Scry.*`, `Text`, `IO`, `Prelude`) or recurse through a helper (`stripPrefix`,
-  `Nat.div`); they need a structurally recursive variant or an individual review, not
-  a blind renewal.
+  Do not bulk-renew them. Both FFI audits are done: the OS/runtime modules (147
+  declarations, 290 rows) and the word/array/map modules (66 declarations, 198
+  rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 in Wiz
+  (the marshalling used to panic above 2^64 while the doc promised modulo), and
+  `Float64.ofNat` rounds for every `Nat` on top of the `Float64.ofNatU64` extern.
+  The remaining legacy rows are outside the `partial` group (below).
+* **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
+  `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
+  `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
+  engines (18), `SatTactic` (7), `BvDecide` (6), `Tagged` (6), `Infoview` (7), `Ring`
+  (2), `Prelude` (2), `Text` (3) and `IO` (1). Wiz's kernel treats a `partial`
+  definition as opaque: the definition is justified by an inhabited witness of its
+  type (22f), never by a termination proof, so a row is not a claim that the recursion
+  terminates. The 134 rows are accepted as one reviewed group, deliberately not
+  de-mutualised: each reason names its block and what would remove the row —
+  de-mutualising into structural recursion over the syntax or data tree, or a checked
+  measure (fuel, a decreasing counter, or a worklist/visited-set measure). Two small
+  fuel loops are structural and are now total (`Scry.rdLoop`, `Scry.domLoop`: the only
+  recursive argument is the `Nat` predecessor of `fuel`), so 2 rows are gone and 132
+  remain. A `mutual`/`partial` row is therefore a documented design choice, not an
+  unreviewed gap: a new one still needs a reason, and `--strict-legacy` still lists any
+  that has not been through this review.
 * **`implemented_by`, 56 rows.** The remaining ones are the performance-critical
   `UIntN`, array, map, intern and channel fast paths. They are covered by the
   differential `=word`/`=natives` tests; review each against the C function it names.
@@ -162,11 +175,59 @@ The remaining rows fall into five groups, with the plan for each:
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
 `Prelude.castRefl`) now carry a specific reason and the owner `Reuben Steenekamp`; so
-do the kept `UIntN.toNat` native (the word tests pin it in the compiled IR) and the six
-signed shift/compare rows. The FFI
-and engine rows still say `legacy:`; `--strict-legacy` lists them, and the 2027-05-14
-expiry is the deadline for the per-symbol and per-engine review above. `Json.sub` is
-partial by intent (it is an elaboration fence, not recursion) and now has a reason.
+do the kept `UInt64.toNat` native (the word tests pin it in the compiled IR) and the six
+signed shift/compare rows. The 24 rows that still say `legacy:` are outside the group:
+the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals, and
+`Proc.runLinked`. `--strict-legacy` lists them, and the 2027-05-14 expiry is their
+deadline. `Json.sub` is partial by intent (it is an elaboration fence, not recursion)
+and has a reason.
+
+### `partial` and `mutual`: a reviewed design choice
+
+A `mutual … end` block of definitions and an explicit `partial def` are the same
+source of trust: the kernel records the declaration with no value, checks an inhabited
+witness of its type (22f), and treats the compiled body as opaque. The ledger row says
+so; it does not say the recursion terminates, and the kernel makes no such claim. The
+reason on every such row names the block, calls it compiled-only general recursion, and
+states the removal path. De-mutualising is not a blanket goal: for the parser core,
+`Feral`, `Json`, `SatTactic`, `BvDecide`, `Tagged` and the `Scry` engines the mutual
+shape is the readable form of the algorithm, and a checked measure or a structural
+rewrite is worthwhile only for a block that is small and hot.
+
+### The numeric/container FFI audit
+
+`Word`, `WordArray`, `WordMap` and `Intern` declare 66 externs (198 rows: each extern's
+`axiom` and `builtin extern:` pair, plus the `native` registration and the seal
+`builtin`s). All are reviewed with a reason naming the C function, the property that
+makes it the definition, and the marshalling's kind string; the `native` rows name the
+extern and point at the group that runs the model and the native against each other
+(`=word` for the words, `=natives` for arrays, maps and intern tables, in C and LLVM).
+
+The declaration is checked against the C prototype by
+`scripts/trust-ffi-audit.sh --check` (the OS audit's script, shared): for every ledger
+`builtin extern:SYM:kinds:result:…` it writes
+`static <result> (*chk)(<params>) = SYM;` with the C types the marshalling uses and
+compiles it against `runtime/wiz_rt.h`. `-Werror=incompatible-pointer-types` makes a
+width or signedness mismatch a failure on compilers that would otherwise only warn:
+without it a `uint64_t` declaration against an `int` definition is a silent
+truncation, which the `native`/`natives` tests need not reach.
+
+That check and the review found one real mismatch, in the `IO` module's machine types:
+`UInt64.ofNat` said "modulo 2⁶⁴" and had type `Nat → UInt64`, so its `Nat` was
+marshalled as a `uint64_t` (`wiz_in_nat`), which **panics** for a `Nat` of 2⁶⁴ or more.
+The reduction now happens in Wiz before the call
+(`UInt64.ofNat n := UInt64.ofNatRaw (Nat.mod n (2^64))`, with a private
+`wiz_u64_id` extern), and the `ffi` group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM.
+`UInt64.toNat` needs no change (a `UInt64` is a raw 64-bit box, so the C side takes the
+bits). `Float64.ofNat`'s rounding is another change; the `UInt64` fix does not overlap
+it.
+
+Not established by this pass: whether a *word* scalar in [2⁶², 2⁶³) can ever reach a
+runtime path that assumes every scalar is a `Nat` (a word's representation is its bits,
+so `wiz_word_out` boxes up to 2⁶³−1, while `wiz_out_nat` boxes only to 2⁶²−1); the
+answer turns on the type discipline between `UIntN w` and `Nat` at every C entry point,
+not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are in
+`IO`/`Std` (the OS audit's modules), so their reasons are not in this pass.
 
 ## Tests
 
