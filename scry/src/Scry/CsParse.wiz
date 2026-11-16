@@ -1,0 +1,2081 @@
+import Text
+import WordArray
+/-!
+# Scry.CsParse: a C# lexer and recursive-descent parser
+
+The first slice of scry's C# frontend (design `wiz-notes/scry-csharp.md`). A hand-written
+lexer and parser, in Wiz, for the subset in that note's §2: namespaces, classes, structs,
+interfaces, enums, fields, methods, constructors, properties, the usual statements
+(including `try`/`catch`/`finally`, `using`, `foreach`, `switch`), and expressions with
+C#'s precedence, strings (regular, verbatim and interpolated), arrays, generics, casts,
+object creation and lambdas.
+
+The parser emits **rows of a concrete syntax tree** whose node kinds and field names
+follow tree-sitter-c-sharp's vocabulary (`class_declaration`, `invocation_expression`,
+fields `name`, `body`, `function`, `arguments`, …). `Scry.CsLower` turns the rows into a
+`Scry.Cst`, the same read-only view the C lowering walks, so a vendored tree-sitter grammar
+can replace this parser later without touching the lowering.
+
+## Rows
+
+A node is a `Scry.Cs.Row`: kind, field on its parent arc, named flag, byte span, token
+text (leaves only) and children. Rows are created bottom-up (a node after its children),
+so ids are **postorder**; the parser keeps the rows newest first, which is exactly the
+reversed order: in the finished list the root is at index 0 and node `p` (postorder) is
+at index `count - 1 - p`. `Scry.Cs.Tree` holds the list in that final numbering.
+
+A field is set *after* its child is parsed (`Scry.Cs.fld`): the child is always the newest
+row, so this is an O(1) update of the list head.
+
+## What is refused
+
+Outside the subset the parse fails with a message and the offset of the offending token
+(the `scry-csharp` tests have golden errors). There is no error recovery in this slice:
+a file either parses completely or not at all, the same contract as
+`Scry.parseCheckedText` for C.
+
+Offsets are character offsets into the source (the fixtures are ASCII; a UTF-8 source
+would need byte offsets, as for C).
+-/
+
+-- ## Characters
+
+def Scry.Cs.between (c lo hi : Nat) : Bool := Bool.and (Nat.le lo c) (Nat.le c hi)
+
+def Scry.Cs.isIdStart (c : Nat) : Bool :=
+  Bool.or (Bool.or (Scry.Cs.between c 65 90) (Scry.Cs.between c 97 122))
+    (Bool.or (Nat.beq c 95) (Nat.le 128 c))
+
+def Scry.Cs.isDigit (c : Nat) : Bool := Scry.Cs.between c 48 57
+
+def Scry.Cs.isIdRest (c : Nat) : Bool := Bool.or (Scry.Cs.isIdStart c) (Scry.Cs.isDigit c)
+
+def Scry.Cs.isHex (c : Nat) : Bool :=
+  Bool.or (Scry.Cs.isDigit c) (Bool.or (Scry.Cs.between c 65 70) (Scry.Cs.between c 97 102))
+
+def Scry.Cs.isSpace (c : Nat) : Bool :=
+  Bool.or (Nat.beq c 32) (Scry.Cs.between c 9 13)
+
+def Scry.Cs.str (cs : List Char) : String := String.ofChars cs
+
+-- ## Tokens
+
+/-- A token. `kind` is one of `id`, `kw`, `int`, `real`, `str` (regular string), `vstr`
+(verbatim string), `istr` (interpolated string), `chr`, `op`, `eof`. `holes` are an
+interpolated string's expression holes: the offset of the hole's text and the text (the
+format specifier after a top-level `:` or `,` removed). -/
+structure Scry.Cs.Tok where
+  kind : String
+  text : String
+  start : Nat
+  stop : Nat
+  holes : List (Nat × String)
+
+def Scry.Cs.keywords : List String :=
+  ["abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked",
+   "class", "const", "continue", "decimal", "default", "delegate", "do", "double", "else",
+   "enum", "event", "explicit", "extern", "false", "finally", "fixed", "float", "for",
+   "foreach", "goto", "if", "implicit", "in", "int", "interface", "internal", "is", "lock",
+   "long", "namespace", "new", "null", "object", "operator", "out", "override", "params",
+   "private", "protected", "public", "readonly", "ref", "return", "sbyte", "sealed",
+   "short", "sizeof", "stackalloc", "static", "string", "struct", "switch", "this",
+   "throw", "true", "try", "typeof", "uint", "ulong", "unchecked", "unsafe", "ushort",
+   "using", "virtual", "void", "volatile", "while"]
+
+/-- Punctuators and operators, longest first (so the first prefix match is the longest).
+`>>` and `>>=` are deliberately absent: `>` is always one token and the parser joins two
+adjacent `>` into a shift, so `List<List<int>>` closes two type-argument lists. -/
+def Scry.Cs.puncts : List String :=
+  ["<<=", "??=", "...",
+   "?.", "??", "=>", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=",
+   "/=", "%=", "&=", "|=", "^=", "<<", "::", "..",
+   "{", "}", "(", ")", "[", "]", ";", ",", ".", ":", "?", "=", "<", ">", "+", "-", "*",
+   "/", "%", "&", "|", "^", "!", "~"]
+
+def Scry.Cs.mkTok (kind : String) (cs : List Char) (start stop : Nat) : Scry.Cs.Tok :=
+  Scry.Cs.Tok.mk kind (Scry.Cs.str cs) start stop .nil
+
+/-- The lexer's result: tokens, or a message and an offset. -/
+inductive Scry.Cs.LexR where
+  | ok (toks : List Scry.Cs.Tok)
+  | err (msg : String) (pos : Nat)
+
+/-- `cs` split after the longest prefix whose characters satisfy `p`: (prefix, rest,
+length). -/
+def Scry.Cs.spanWhile (p : Nat → Bool) : List Char → List Char × List Char × Nat
+  | .nil => (.nil, .nil, 0)
+  | .cons c cs => match p (Char.code c) with
+    | .false => (.nil, .cons c cs, 0)
+    | .true => match Scry.Cs.spanWhile p cs with
+      | (a, r, n) => (.cons c a, r, Nat.succ n)
+
+/-- The rest after the end of the line (the newline is consumed) and the characters
+skipped. -/
+def Scry.Cs.skipLine : List Char → List Char × Nat
+  | .nil => (.nil, 0)
+  | .cons c cs => match Nat.beq (Char.code c) 10 with
+    | .true => (cs, 1)
+    | .false => match Scry.Cs.skipLine cs with
+      | (r, n) => (r, Nat.succ n)
+
+/-- The rest after `*/` and the characters skipped; `none` when unterminated. -/
+def Scry.Cs.skipBlock : List Char → Option (List Char × Nat)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 42, cs with
+    | .true, .cons d ds => match Nat.beq (Char.code d) 47 with
+      | .true => .some (ds, 2)
+      | .false => match Scry.Cs.skipBlock cs with
+        | .some (r, n) => .some (r, Nat.succ n)
+        | .none => .none
+    | _, _ => match Scry.Cs.skipBlock cs with
+      | .some (r, n) => .some (r, Nat.succ n)
+      | .none => .none
+
+/-- A regular string or character literal's body after the opening quote `q`: the
+characters up to and including the closing quote (escapes kept raw), the rest, and the
+length; `none` when unterminated (a newline ends the line first). -/
+partial def Scry.Cs.quoted (q : Nat) : List Char → Option (List Char × List Char × Nat)
+  | .nil => .none
+  | .cons c cs =>
+    let k := Char.code c;
+    match Nat.beq k q with
+    | .true => .some (.cons c .nil, cs, 1)
+    | .false => match Nat.beq k 10 with
+      | .true => .none
+      | .false => match Nat.beq k 92, cs with
+        | .true, .cons d ds => match Scry.Cs.quoted q ds with
+          | .some (a, r, n) => .some (.cons c (.cons d a), r, Nat.add n 2)
+          | .none => .none
+        | _, _ => match Scry.Cs.quoted q cs with
+          | .some (a, r, n) => .some (.cons c a, r, Nat.succ n)
+          | .none => .none
+
+/-- A verbatim string's body after `@"`: up to and including the closing quote (`""` is
+an escaped quote), the rest, and the length. -/
+partial def Scry.Cs.verbatim : List Char → Option (List Char × List Char × Nat)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 34 with
+    | .true => match cs with
+      | .cons d ds => match Nat.beq (Char.code d) 34 with
+        | .true => match Scry.Cs.verbatim ds with
+          | .some (a, r, n) => .some (.cons c (.cons d a), r, Nat.add n 2)
+          | .none => .none
+        | .false => .some (.cons c .nil, cs, 1)
+      | .nil => .some (.cons c .nil, .nil, 1)
+    | .false => match Scry.Cs.verbatim cs with
+      | .some (a, r, n) => .some (.cons c a, r, Nat.succ n)
+      | .none => .none
+
+/-- The text of an interpolation hole up to its closing `}` at depth 0: (hole text,
+rest after `}`, length including `}`). Nested brackets and quoted strings are skipped. -/
+partial def Scry.Cs.holeGo (depth : Nat) : List Char → Option (List Char × List Char × Nat)
+  | .nil => .none
+  | .cons c cs =>
+    let k := Char.code c;
+    match Bool.and (Nat.beq k 125) (Nat.beq depth 0) with
+    | .true => .some (.nil, cs, 1)
+    | .false =>
+      match Nat.beq k 34 with
+      | .true => match Scry.Cs.quoted 34 cs with
+        | .some (a, r, n) => match Scry.Cs.holeGo depth r with
+          | .some (h, r2, m) => .some (List.append (.cons c a) h, r2, Nat.add (Nat.succ n) m)
+          | .none => .none
+        | .none => .none
+      | .false =>
+        let d2 : Nat := match Bool.or (Nat.beq k 40) (Bool.or (Nat.beq k 91) (Nat.beq k 123)) with
+          | .true => Nat.succ depth
+          | .false => match Bool.or (Nat.beq k 41) (Bool.or (Nat.beq k 93) (Nat.beq k 125)) with
+            | .true => Nat.sub depth 1
+            | .false => depth;
+        match Scry.Cs.holeGo d2 cs with
+        | .some (h, r, n) => .some (.cons c h, r, Nat.succ n)
+        | .none => .none
+
+/-- A hole's expression text: up to a top-level `:` (format) or `,` (alignment). -/
+partial def Scry.Cs.holeExprGo (depth : Nat) : List Char → List Char
+  | .nil => .nil
+  | .cons c cs =>
+    let k := Char.code c;
+    match Bool.and (Nat.beq depth 0) (Bool.or (Nat.beq k 58) (Nat.beq k 44)) with
+    | .true => .nil
+    | .false =>
+      let d2 : Nat := match Bool.or (Nat.beq k 40) (Nat.beq k 91) with
+        | .true => Nat.succ depth
+        | .false => match Bool.or (Nat.beq k 41) (Nat.beq k 93) with
+          | .true => Nat.sub depth 1
+          | .false => depth;
+      .cons c (Scry.Cs.holeExprGo d2 cs)
+
+/-- An interpolated string's body after the opening quote. `verb` is `$@"…"` (a `""`
+escape, no backslash escapes). Returns (raw body including the closing quote, holes as
+`(offset, text)`, rest, length); `pos` is the offset of the body's first character. -/
+partial def Scry.Cs.interp (verb : Bool) (pos : Nat) : List Char →
+    Option (List Char × List (Nat × String) × List Char × Nat)
+  | .nil => .none
+  | .cons c cs =>
+    let k := Char.code c;
+    let next : List Char → List Char → Nat → Option (List Char × List (Nat × String) × List Char × Nat) :=
+      fun raw rest n =>
+      match Scry.Cs.interp verb (Nat.add pos n) rest with
+      | .some (a, hs, r, m) => .some (List.append raw a, hs, r, Nat.add n m)
+      | .none => .none;
+    match Nat.beq k 34 with
+    | .true => match verb, cs with
+      | .true, .cons d ds => match Nat.beq (Char.code d) 34 with
+        | .true => next (.cons c (.cons d .nil)) ds 2
+        | .false => .some (.cons c .nil, .nil, cs, 1)
+      | _, _ => .some (.cons c .nil, .nil, cs, 1)
+    | .false => match Nat.beq k 123, cs with
+      | .true, .cons d ds => match Nat.beq (Char.code d) 123 with
+        | .true => next (.cons c (.cons d .nil)) ds 2
+        | .false => match Scry.Cs.holeGo 0 cs with
+          | .some (h, r, n) =>
+            match Scry.Cs.interp verb (Nat.add pos (Nat.succ n)) r with
+            | .some (a, hs, r2, m) =>
+              .some (List.append (.cons c (List.append h (.cons (Char.mk 125) .nil))) a,
+                .cons (Nat.succ pos, Scry.Cs.str (Scry.Cs.holeExprGo 0 h)) hs, r2,
+                Nat.add (Nat.succ n) m)
+            | .none => .none
+          | .none => .none
+      | _, _ => match Bool.and (Nat.beq k 92) (Bool.not verb), cs with
+        | .true, .cons d ds => next (.cons c (.cons d .nil)) ds 2
+        | _, _ => match Nat.beq k 10 with
+          | .true => match verb with
+            | .true => next (.cons c .nil) cs 1
+            | .false => .none
+          | .false => next (.cons c .nil) cs 1
+
+/-- The first punctuator that prefixes `cs`. -/
+def Scry.Cs.punctOf (cs : List Char) : Option String :=
+  List.find (fun p => Chars.isPrefix (String.chars p) cs) Scry.Cs.puncts
+
+/-- A decimal literal (digits, fraction, exponent, suffix). -/
+def Scry.Cs.decimal (cs : List Char) : List Char × List Char × Nat × Bool :=
+  match Scry.Cs.spanWhile (fun k => Bool.or (Scry.Cs.isDigit k) (Nat.beq k 95)) cs with
+  | (d, r, n) =>
+    let frac : List Char × List Char × Nat × Bool := match r with
+      | .cons dot (.cons e rest) => match Bool.and (Nat.beq (Char.code dot) 46) (Scry.Cs.isDigit (Char.code e)) with
+        | .true => match Scry.Cs.spanWhile (fun k => Bool.or (Scry.Cs.isDigit k) (Nat.beq k 95)) (.cons e rest) with
+          | (f, r2, m) => (.cons dot f, r2, Nat.succ m, .true)
+        | .false => (.nil, r, 0, .false)
+      | _ => (.nil, r, 0, .false);
+    match frac with
+    | (f, r2, m, isReal) =>
+      let ex : List Char × List Char × Nat × Bool := match r2 with
+        | .cons e rest => match Bool.or (Nat.beq (Char.code e) 101) (Nat.beq (Char.code e) 69) with
+          | .true =>
+            let sg : List Char × List Char × Nat := match rest with
+              | .cons s rest2 => match Bool.or (Nat.beq (Char.code s) 43) (Nat.beq (Char.code s) 45) with
+                | .true => (.cons s .nil, rest2, 1)
+                | .false => (.nil, rest, 0)
+              | .nil => (.nil, rest, 0);
+            match sg with
+            | (sc, rest3, sn) => match Scry.Cs.spanWhile Scry.Cs.isDigit rest3 with
+              | (ed, r3, en) => (.cons e (List.append sc ed), r3, Nat.succ (Nat.add sn en), .true)
+          | .false => (.nil, r2, 0, .false)
+        | .nil => (.nil, r2, 0, .false);
+      match ex with
+      | (e, r3, en, exReal) =>
+        match Scry.Cs.spanWhile (fun k => Bool.or (Nat.beq k 76) (Bool.or (Nat.beq k 108)
+            (Bool.or (Nat.beq k 85) (Bool.or (Nat.beq k 117) (Bool.or (Nat.beq k 102)
+            (Bool.or (Nat.beq k 70) (Bool.or (Nat.beq k 100) (Bool.or (Nat.beq k 68)
+            (Bool.or (Nat.beq k 109) (Nat.beq k 77)))))))))) r3 with
+        | (s, r4, sn) =>
+          let realSuffix := List.any (fun c => let k := Char.code c;
+            Bool.or (Bool.or (Nat.beq k 102) (Nat.beq k 70))
+              (Bool.or (Bool.or (Nat.beq k 100) (Nat.beq k 68)) (Bool.or (Nat.beq k 109) (Nat.beq k 77)))) s;
+          (List.append d (List.append f (List.append e s)), r4,
+            Nat.add n (Nat.add m (Nat.add en sn)),
+            Bool.or isReal (Bool.or exReal realSuffix))
+
+/-- A numeric literal's length: digits, `_`, `.digit`, exponent, hex, suffixes. Returns
+(characters, rest, length, isReal). -/
+def Scry.Cs.number (cs : List Char) : List Char × List Char × Nat × Bool :=
+  match cs with
+  | .cons z (.cons x rest) => match Bool.and (Nat.beq (Char.code z) 48)
+      (Bool.or (Nat.beq (Char.code x) 120) (Nat.beq (Char.code x) 88)) with
+    | .true => match Scry.Cs.spanWhile (fun k => Bool.or (Scry.Cs.isHex k) (Nat.beq k 95)) rest with
+      | (h, r, n) => match Scry.Cs.spanWhile (fun k => Bool.or (Nat.beq k 76) (Bool.or (Nat.beq k 108)
+            (Bool.or (Nat.beq k 85) (Nat.beq k 117)))) r with
+        | (s, r2, m) => (.cons z (.cons x (List.append h s)), r2, Nat.add 2 (Nat.add n m), .false)
+    | .false => Scry.Cs.decimal cs
+  | _ => Scry.Cs.decimal cs
+
+/-- Lex `cs` (at offset `pos`), consing tokens onto `acc` (reversed). -/
+partial def Scry.Cs.lexGo (pos : Nat) (acc : List Scry.Cs.Tok) : List Char → Scry.Cs.LexR
+  | .nil => .ok (List.reverse (.cons (Scry.Cs.Tok.mk "eof" "" pos pos .nil) acc))
+  | .cons c cs =>
+    let k := Char.code c;
+    let k2 : Nat := match cs with
+      | .cons d _ => Char.code d
+      | .nil => 0;
+    let k3 : Nat := match cs with
+      | .cons _ (.cons e _) => Char.code e
+      | _ => 0;
+    match Scry.Cs.isSpace k with
+    | .true => Scry.Cs.lexGo (Nat.succ pos) acc cs
+    | .false =>
+    match Bool.and (Nat.beq k 47) (Nat.beq k2 47) with
+    | .true => match Scry.Cs.skipLine cs with
+      | (r, n) => Scry.Cs.lexGo (Nat.add pos (Nat.succ n)) acc r
+    | .false =>
+    match Bool.and (Nat.beq k 47) (Nat.beq k2 42) with
+    | .true => match cs with
+      | .cons _ rest => match Scry.Cs.skipBlock rest with
+        | .some (r, n) => Scry.Cs.lexGo (Nat.add pos (Nat.add 2 n)) acc r
+        | .none => .err "unterminated comment" pos
+      | .nil => .err "unterminated comment" pos
+    | .false =>
+    -- a preprocessor line (`#nullable`, `#region`, …): skipped
+    match Nat.beq k 35 with
+    | .true => match Scry.Cs.skipLine cs with
+      | (r, n) => Scry.Cs.lexGo (Nat.add pos (Nat.succ n)) acc r
+    | .false =>
+    -- `$"…"`, `$@"…"`, `@$"…"`
+    let interpStart : Option (Bool × Nat × List Char) :=
+      match Bool.and (Nat.beq k 36) (Nat.beq k2 34) with
+      | .true => match cs with
+        | .cons _ rest => .some (.false, 2, rest)
+        | .nil => .none
+      | .false => match Bool.and (Bool.or (Bool.and (Nat.beq k 36) (Nat.beq k2 64))
+            (Bool.and (Nat.beq k 64) (Nat.beq k2 36))) (Nat.beq k3 34) with
+        | .true => match cs with
+          | .cons _ (.cons _ rest) => .some (.true, 3, rest)
+          | _ => .none
+        | .false => .none;
+    match interpStart with
+    | .some (verb, n0, rest) =>
+      match Scry.Cs.interp verb (Nat.add pos n0) rest with
+      | .some (raw, holes, r, n) =>
+        let text := List.append (List.take n0 (.cons c cs)) raw;
+        Scry.Cs.lexGo (Nat.add pos (Nat.add n0 n))
+          (.cons (Scry.Cs.Tok.mk "istr" (Scry.Cs.str text) pos (Nat.add pos (Nat.add n0 n)) holes) acc) r
+      | .none => .err "unterminated interpolated string" pos
+    | .none =>
+    match Bool.and (Nat.beq k 64) (Nat.beq k2 34) with
+    | .true => match cs with
+      | .cons q rest => match Scry.Cs.verbatim rest with
+        | .some (body, r, n) =>
+          let stop := Nat.add pos (Nat.add 2 n);
+          Scry.Cs.lexGo stop (.cons (Scry.Cs.mkTok "vstr" (.cons c (.cons q body)) pos stop) acc) r
+        | .none => .err "unterminated verbatim string" pos
+      | .nil => .err "unterminated verbatim string" pos
+    | .false =>
+    -- `@ident`: a verbatim identifier (the text is the identifier without `@`)
+    match Bool.and (Nat.beq k 64) (Scry.Cs.isIdStart k2) with
+    | .true => match Scry.Cs.spanWhile Scry.Cs.isIdRest cs with
+      | (w, r, n) => Scry.Cs.lexGo (Nat.add pos (Nat.succ n))
+          (.cons (Scry.Cs.mkTok "id" w pos (Nat.add pos (Nat.succ n))) acc) r
+    | .false =>
+    match Bool.or (Nat.beq k 34) (Nat.beq k 39) with
+    | .true => match Scry.Cs.quoted k cs with
+      | .some (body, r, n) =>
+        let stop := Nat.add pos (Nat.succ n);
+        let kind : String := match Nat.beq k 34 with
+          | .true => "str"
+          | .false => "chr";
+        Scry.Cs.lexGo stop (.cons (Scry.Cs.mkTok kind (.cons c body) pos stop) acc) r
+      | .none => .err "unterminated literal" pos
+    | .false =>
+    match Bool.or (Scry.Cs.isDigit k) (Bool.and (Nat.beq k 46) (Scry.Cs.isDigit k2)) with
+    | .true => match Scry.Cs.number (.cons c cs) with
+      | (w, r, n, isReal) =>
+        let kind : String := match isReal with
+          | .true => "real"
+          | .false => "int";
+        Scry.Cs.lexGo (Nat.add pos n) (.cons (Scry.Cs.mkTok kind w pos (Nat.add pos n)) acc) r
+    | .false =>
+    match Scry.Cs.isIdStart k with
+    | .true => match Scry.Cs.spanWhile Scry.Cs.isIdRest (.cons c cs) with
+      | (w, r, n) =>
+        let kind : String := match String.elem (Scry.Cs.str w) Scry.Cs.keywords with
+          | .true => "kw"
+          | .false => "id";
+        Scry.Cs.lexGo (Nat.add pos n) (.cons (Scry.Cs.mkTok kind w pos (Nat.add pos n)) acc) r
+    | .false =>
+    match Scry.Cs.punctOf (.cons c cs) with
+    | .some p =>
+      let n := String.length p;
+      Scry.Cs.lexGo (Nat.add pos n) (.cons (Scry.Cs.Tok.mk "op" p pos (Nat.add pos n) .nil) acc)
+        (List.drop n (.cons c cs))
+    | .none => .err ("unexpected character '" ++ Scry.Cs.str (.cons c .nil) ++ "'") pos
+
+/-- Lex a whole source starting at offset `pos` (0 for a file; a hole's offset when an
+interpolation is re-lexed). -/
+def Scry.Cs.lexAt (pos : Nat) (src : String) : Scry.Cs.LexR := Scry.Cs.lexGo pos .nil (String.chars src)
+
+def Scry.Cs.lex (src : String) : Scry.Cs.LexR := Scry.Cs.lexAt 0 src
+
+/-- The tokens as `kind:text` lines (the lexer golden test). -/
+def Scry.Cs.renderToks (r : Scry.Cs.LexR) : String := match r with
+  | .err m p => "error at " ++ Nat.repr p ++ ": " ++ m
+  | .ok ts => String.intercalate "\n" (List.map (fun t =>
+      Nat.repr t.start ++ " " ++ t.kind ++ " " ++ t.text
+        ++ String.join (List.map (fun h => " {" ++ Nat.repr h.1 ++ ":" ++ h.2 ++ "}") t.holes)) ts)
+
+-- ## Rows and the parser monad
+
+/-- A CST node (see the module doc). -/
+structure Scry.Cs.Row where
+  kind : String
+  field : String
+  named : Bool
+  start : Nat
+  stop : Nat
+  /-- The token text of a leaf (`""` for an inner node). -/
+  text : String
+  /-- Children, postorder ids, in tree order. -/
+  kids : List Nat
+
+/-- The parser state: the remaining tokens, the rows (newest first), the next postorder
+id, and the end offset of the last consumed token. -/
+structure Scry.Cs.PS where
+  toks : List Scry.Cs.Tok
+  rows : List Scry.Cs.Row
+  next : Nat
+  last : Nat
+
+inductive Scry.Cs.PR (A : Type) where
+  | ok (s : Scry.Cs.PS) (a : A)
+  | err (msg : String) (pos : Nat)
+
+def Scry.Cs.P (A : Type) : Type := Scry.Cs.PS → Scry.Cs.PR A
+
+instance : Monad Scry.Cs.P where
+  pure := fun a => fun s => Scry.Cs.PR.ok s a
+  bind := fun x f => fun s => match x s with
+    | .ok s1 a => f a s1
+    | .err m p => .err m p
+
+def Scry.Cs.ret {A : Type} (a : A) : Scry.Cs.P A := fun s => .ok s a
+
+def Scry.Cs.eofTok : Scry.Cs.Tok := Scry.Cs.Tok.mk "eof" "" 0 0 .nil
+
+def Scry.Cs.headTok : List Scry.Cs.Tok → Scry.Cs.Tok
+  | .nil => Scry.Cs.eofTok
+  | .cons t _ => t
+
+/-- The `k`-th token ahead (0 = the next one). -/
+def Scry.Cs.nthTok : Nat → List Scry.Cs.Tok → Scry.Cs.Tok
+  | _, .nil => Scry.Cs.eofTok
+  | .zero, .cons t _ => t
+  | .succ k, .cons _ ts => Scry.Cs.nthTok k ts
+
+def Scry.Cs.peek : Scry.Cs.P Scry.Cs.Tok := fun s => .ok s (Scry.Cs.headTok s.toks)
+
+def Scry.Cs.peekAt (k : Nat) : Scry.Cs.P Scry.Cs.Tok := fun s => .ok s (Scry.Cs.nthTok k s.toks)
+
+def Scry.Cs.getState : Scry.Cs.P Scry.Cs.PS := fun s => .ok s s
+
+def Scry.Cs.failAt {A : Type} (msg : String) (pos : Nat) : Scry.Cs.P A := fun _ => .err msg pos
+
+/-- Push an anonymous operator row spelled `spelling` from `start` to the last token. -/
+def Scry.Cs.opRow (spelling : String) (start : Nat) : Scry.Cs.P Nat := fun s =>
+  .ok { s with rows := .cons (Scry.Cs.Row.mk spelling "" .false start s.last spelling .nil) s.rows,
+               next := Nat.succ s.next } s.next
+
+def Scry.Cs.fail {A : Type} (msg : String) : Scry.Cs.P A := fun s =>
+  .err msg (Scry.Cs.headTok s.toks).start
+
+/-- Consume the next token. -/
+def Scry.Cs.advance : Scry.Cs.P Scry.Cs.Tok := fun s => match s.toks with
+  | .nil => .ok s Scry.Cs.eofTok
+  | .cons t ts => match String.eq t.kind "eof" with
+    | .true => .ok s t
+    | .false => .ok { s with toks := ts, last := t.stop } t
+
+def Scry.Cs.isOp (t : Scry.Cs.Tok) (p : String) : Bool :=
+  Bool.and (String.eq t.kind "op") (String.eq t.text p)
+
+def Scry.Cs.isKw (t : Scry.Cs.Tok) (w : String) : Bool :=
+  Bool.and (String.eq t.kind "kw") (String.eq t.text w)
+
+/-- An identifier token, optionally with this spelling (contextual keywords such as
+`var`, `get`, `set`, `async` are identifiers). -/
+def Scry.Cs.isId (t : Scry.Cs.Tok) : Bool := String.eq t.kind "id"
+
+def Scry.Cs.isIdText (t : Scry.Cs.Tok) (w : String) : Bool :=
+  Bool.and (Scry.Cs.isId t) (String.eq t.text w)
+
+def Scry.Cs.describe (t : Scry.Cs.Tok) : String := match String.eq t.kind "eof" with
+  | .true => "end of file"
+  | .false => "'" ++ t.text ++ "'"
+
+/-- Consume `p` or fail. -/
+def Scry.Cs.expectOp (p : String) : Scry.Cs.P Unit := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t p with
+  | .true => do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.ret ()
+  | .false => Scry.Cs.fail ("expected '" ++ p ++ "', found " ++ Scry.Cs.describe t)
+
+def Scry.Cs.expectKw (w : String) : Scry.Cs.P Unit := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isKw t w with
+  | .true => do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.ret ()
+  | .false => Scry.Cs.fail ("expected '" ++ w ++ "', found " ++ Scry.Cs.describe t)
+
+/-- Consume `p` if it is next. -/
+def Scry.Cs.acceptOp (p : String) : Scry.Cs.P Bool := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t p with
+  | .true => do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.ret .true
+  | .false => Scry.Cs.ret .false
+
+/-- The start offset of the next token. -/
+def Scry.Cs.here : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  Scry.Cs.ret t.start
+
+/-- Create a row spanning `[start, last)`; its id. -/
+def Scry.Cs.node (kind : String) (start : Nat) (kids : List Nat) : Scry.Cs.P Nat := fun s =>
+  .ok { s with rows := .cons (Scry.Cs.Row.mk kind "" .true start s.last "" kids) s.rows,
+               next := Nat.succ s.next } s.next
+
+/-- Consume the next token as a leaf row of `kind` (named) carrying its text. -/
+def Scry.Cs.leaf (kind : String) (named : Bool) : Scry.Cs.P Nat := fun s =>
+  let t := Scry.Cs.headTok s.toks;
+  let toks : List Scry.Cs.Tok := match s.toks with
+    | .nil => .nil
+    | .cons _ ts => ts;
+  .ok { s with toks := toks, last := t.stop,
+               rows := .cons (Scry.Cs.Row.mk kind "" named t.start t.stop t.text .nil) s.rows,
+               next := Nat.succ s.next } s.next
+
+/-- Set the field of the newest row (the node `m` just returned). -/
+def Scry.Cs.setField (f : String) : Scry.Cs.P Unit := fun s => match s.rows with
+  | .nil => .ok s ()
+  | .cons r rs => .ok { s with rows := .cons { r with field := f } rs } ()
+
+/-- Run `m` (which returns its root, the newest row) and label it with field `f`. -/
+def Scry.Cs.fld (f : String) (m : Scry.Cs.P Nat) : Scry.Cs.P Nat := do
+  n ← m;
+  Scry.Cs.setField f;
+  Scry.Cs.ret n
+
+/-- Run `m`; on failure restore the state and return `none` (backtracking). -/
+def Scry.Cs.attempt {A : Type} (m : Scry.Cs.P A) : Scry.Cs.P (Option A) := fun s =>
+  match m s with
+  | .ok s1 a => .ok s1 (.some a)
+  | .err _ _ => .ok s .none
+
+/-- Run `m` and report whether it would succeed, without consuming anything. -/
+def Scry.Cs.lookahead {A : Type} (m : Scry.Cs.P A) : Scry.Cs.P Bool := fun s =>
+  match m s with
+  | .ok _ _ => .ok s .true
+  | .err _ _ => .ok s .false
+
+-- ## Types
+
+def Scry.Cs.predefined : List String :=
+  ["bool", "byte", "char", "decimal", "double", "float", "int", "long", "object", "sbyte",
+   "short", "string", "uint", "ulong", "ushort", "void"]
+
+def Scry.Cs.isPredef (t : Scry.Cs.Tok) : Bool :=
+  Bool.and (String.eq t.kind "kw") (String.elem t.text Scry.Cs.predefined)
+
+def Scry.Cs.modifierWords : List String :=
+  ["public", "private", "protected", "internal", "static", "readonly", "sealed", "abstract",
+   "virtual", "override", "const", "extern", "unsafe", "new", "volatile"]
+
+/-- Contextual modifiers (identifiers in the lexer). -/
+def Scry.Cs.ctxModifiers : List String := ["partial", "async", "required", "file"]
+
+def Scry.Cs.isModifier (t : Scry.Cs.Tok) (next : Scry.Cs.Tok) : Bool :=
+  Bool.or (Bool.and (String.eq t.kind "kw") (String.elem t.text Scry.Cs.modifierWords))
+    (Bool.and (Scry.Cs.isId t) (Bool.and (String.elem t.text Scry.Cs.ctxModifiers)
+      (Bool.or (Scry.Cs.isId next) (String.eq next.kind "kw"))))
+
+/-- Binary operator precedence (higher binds tighter); 0 = not a binary operator here.
+`??` is right-associative and handled with the others (its right operand is parsed at
+the same level). -/
+def Scry.Cs.binPrec (op : String) : Nat :=
+  if String.eq op "??" then 1
+  else if String.eq op "||" then 2
+  else if String.eq op "&&" then 3
+  else if String.eq op "|" then 4
+  else if String.eq op "^" then 5
+  else if String.eq op "&" then 6
+  else if Bool.or (String.eq op "==") (String.eq op "!=") then 7
+  else if Bool.or (Bool.or (String.eq op "<") (String.eq op ">"))
+      (Bool.or (String.eq op "<=") (String.eq op ">=")) then 8
+  else if Bool.or (String.eq op "<<") (String.eq op ">>") then 9
+  else if Bool.or (String.eq op "+") (String.eq op "-") then 10
+  else if Bool.or (Bool.or (String.eq op "*") (String.eq op "/")) (String.eq op "%") then 11
+  else 0
+
+def Scry.Cs.assignOps : List String :=
+  ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", "??="]
+
+/-- A token that can start a cast's operand (so `(T)x` is a cast, `(a) - b` is not). -/
+def Scry.Cs.castFollower (t : Scry.Cs.Tok) : Bool :=
+  Bool.or (Scry.Cs.isId t)
+    (Bool.or (String.elem t.kind ["int", "real", "str", "vstr", "istr", "chr"])
+      (Bool.or (Bool.and (String.eq t.kind "op") (String.elem t.text ["(", "!", "~"]))
+        (Bool.and (String.eq t.kind "kw") (String.elem t.text
+          ["this", "base", "new", "true", "false", "null", "typeof", "default", "checked",
+           "unchecked", "sizeof"]))))
+
+/-- A token that may follow a generic name's `>` in an expression (C# spec §6.2.5's
+disambiguation, the common part). -/
+def Scry.Cs.genericFollower (t : Scry.Cs.Tok) : Bool :=
+  Bool.and (String.eq t.kind "op") (String.elem t.text ["(", ")", "]", "}", ":", ";", ",", ".", "?", "==", "!="])
+
+mutual
+/-- A simple name: an identifier, or `identifier<types>` when `generic` and a type
+argument list parses. -/
+partial def Scry.Cs.simpleName (inExpr : Bool) : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isId t with
+  | .false => Scry.Cs.fail ("expected an identifier, found " ++ Scry.Cs.describe t)
+  | .true => do
+    id ← Scry.Cs.leaf "identifier" .true;
+    t2 ← Scry.Cs.peek;
+    match Scry.Cs.isOp t2 "<" with
+    | .false => Scry.Cs.ret id
+    | .true => do
+      targs ← Scry.Cs.attempt (Scry.Cs.typeArgsChecked inExpr);
+      match targs with
+      | .none => Scry.Cs.ret id
+      | .some ta => Scry.Cs.node "generic_name" start [id, ta]
+
+/-- A type argument list; in an expression the token after `>` must be a generic
+follower, else the `<` is a comparison. -/
+partial def Scry.Cs.typeArgsChecked (inExpr : Bool) : Scry.Cs.P Nat := do
+  ta ← Scry.Cs.typeArgs;
+  t ← Scry.Cs.peek;
+  match Bool.or (Bool.not inExpr) (Scry.Cs.genericFollower t) with
+  | .true => Scry.Cs.ret ta
+  | .false => Scry.Cs.fail "not a type argument list"
+
+partial def Scry.Cs.typeArgs : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "<";
+  first ← Scry.Cs.parseType;
+  rest ← Scry.Cs.typeList;
+  Scry.Cs.expectOp ">";
+  Scry.Cs.node "type_argument_list" start (.cons first rest)
+
+partial def Scry.Cs.typeList : Scry.Cs.P (List Nat) := do
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (.nil : List Nat)
+  | .true => do
+    t ← Scry.Cs.parseType;
+    ts ← Scry.Cs.typeList;
+    Scry.Cs.ret (List.cons t ts)
+
+/-- A (possibly qualified, possibly generic) type name. -/
+partial def Scry.Cs.typeName : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  first ← Scry.Cs.simpleName .false;
+  Scry.Cs.qualifyType start first
+
+partial def Scry.Cs.qualifyType (start : Nat) (left : Nat) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Bool.and (Scry.Cs.isOp t ".") (Scry.Cs.isId t2) with
+  | .false => Scry.Cs.ret left
+  | .true => do
+    Scry.Cs.setField "qualifier";
+    ign ← Scry.Cs.advance;
+    right ← Scry.Cs.fld "name" (Scry.Cs.simpleName .false);
+    q ← Scry.Cs.node "qualified_name" start [left, right];
+    Scry.Cs.qualifyType start q
+
+/-- A type: predefined, `var`, a name; then `?` and `[]` suffixes. -/
+partial def Scry.Cs.parseType : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  base ← match Scry.Cs.isPredef t with
+    | .true => Scry.Cs.leaf "predefined_type" .true
+    | .false => match Scry.Cs.isIdText t "var" with
+      | .true => Scry.Cs.leaf "implicit_type" .true
+      | .false => match Scry.Cs.isId t with
+        | .true => Scry.Cs.typeName
+        | .false => Scry.Cs.fail ("expected a type, found " ++ Scry.Cs.describe t);
+  Scry.Cs.typeSuffix start base
+
+partial def Scry.Cs.typeSuffix (start : Nat) (base : Nat) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Scry.Cs.isOp t "?" with
+  | .true => do
+    Scry.Cs.setField "type";
+    ign ← Scry.Cs.advance;
+    n ← Scry.Cs.node "nullable_type" start [base];
+    Scry.Cs.typeSuffix start n
+  | .false => match Bool.and (Scry.Cs.isOp t "[") (Bool.or (Scry.Cs.isOp t2 "]") (Scry.Cs.isOp t2 ",")) with
+    | .true => do
+      Scry.Cs.setField "type";
+      rs ← Scry.Cs.rankSpec;
+      n ← Scry.Cs.node "array_type" start [base, rs];
+      Scry.Cs.typeSuffix start n
+    | .false => Scry.Cs.ret base
+
+partial def Scry.Cs.rankSpec : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "[";
+  Scry.Cs.commas;
+  Scry.Cs.expectOp "]";
+  Scry.Cs.fld "rank" (Scry.Cs.node "array_rank_specifier" start .nil)
+
+partial def Scry.Cs.commas : Scry.Cs.P Unit := do
+  c ← Scry.Cs.acceptOp ",";
+  match c with
+  | .true => Scry.Cs.commas
+  | .false => Scry.Cs.ret ()
+end
+
+-- ## Expressions
+
+mutual
+/-- An expression (assignment level, right-associative). -/
+partial def Scry.Cs.expr : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  lam ← Scry.Cs.attempt Scry.Cs.lambda;
+  match lam with
+  | .some l => Scry.Cs.ret l
+  | .none => do
+    lhs ← Scry.Cs.conditional;
+    t ← Scry.Cs.peek;
+    t2 ← Scry.Cs.peekAt 1;
+    -- `a >>= b`: `>` immediately followed by `>=`
+    let shiftAssign := Bool.and (Scry.Cs.isOp t ">") (Bool.and (Scry.Cs.isOp t2 ">=") (Nat.beq t.stop t2.start));
+    match Bool.or shiftAssign (Bool.and (String.eq t.kind "op") (String.elem t.text Scry.Cs.assignOps)) with
+    | .false => Scry.Cs.ret lhs
+    | .true => do
+      Scry.Cs.setFieldOf lhs "left";
+      op ← match shiftAssign with
+        | .true => Scry.Cs.joinedOp ">>="
+        | .false => Scry.Cs.leaf t.text .false;
+      Scry.Cs.setField "operator";
+      rhs ← Scry.Cs.fld "right" Scry.Cs.expr;
+      Scry.Cs.node "assignment_expression" start [lhs, op, rhs]
+
+/-- Consume two tokens (`>` `>` or `>` `>=`) as one anonymous operator row. -/
+partial def Scry.Cs.joinedOp (spelling : String) : Scry.Cs.P Nat := do
+  a ← Scry.Cs.advance;
+  ign ← Scry.Cs.advance;
+  Scry.Cs.opRow spelling a.start
+
+/-- Set the field of row `id`, which must be the newest row *or* an older one: the
+parser only calls this for the left operand, which is the newest row when no operator
+token has been consumed yet. -/
+partial def Scry.Cs.setFieldOf (id : Nat) (f : String) : Scry.Cs.P Unit := fun s =>
+  match Nat.beq (Nat.succ id) s.next with
+  | .true => Scry.Cs.setField f s
+  | .false => .ok s ()
+
+/-- A lambda: `x => e`, `(a, b) => e`, `(int a) => { … }`, `async` prefix, `_`. -/
+partial def Scry.Cs.lambda : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  ign ← match Bool.and (Scry.Cs.isIdText t "async") (Bool.or (Scry.Cs.isId t2) (Scry.Cs.isOp t2 "(")) with
+    | .true => Scry.Cs.leaf "modifier" .true
+    | .false => Scry.Cs.ret 0;
+  t3 ← Scry.Cs.peek;
+  params ← match Scry.Cs.isId t3 with
+    | .true => Scry.Cs.fld "parameters" (Scry.Cs.leaf "identifier" .true)
+    | .false => Scry.Cs.fld "parameters" Scry.Cs.lambdaParams;
+  Scry.Cs.expectOp "=>";
+  t4 ← Scry.Cs.peek;
+  body ← match Scry.Cs.isOp t4 "{" with
+    | .true => Scry.Cs.fld "body" Scry.Cs.block
+    | .false => Scry.Cs.fld "body" Scry.Cs.expr;
+  Scry.Cs.node "lambda_expression" start [params, body]
+
+partial def Scry.Cs.lambdaParams : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "(";
+  t ← Scry.Cs.peek;
+  ps ← match Scry.Cs.isOp t ")" with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => Scry.Cs.lambdaParamList;
+  Scry.Cs.expectOp ")";
+  Scry.Cs.node "parameter_list" start ps
+
+partial def Scry.Cs.lambdaParamList : Scry.Cs.P (List Nat) := do
+  p ← Scry.Cs.lambdaParam;
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons p .nil)
+  | .true => do
+    ps ← Scry.Cs.lambdaParamList;
+    Scry.Cs.ret (List.cons p ps)
+
+/-- A lambda parameter: `x` or `T x`. -/
+partial def Scry.Cs.lambdaParam : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Bool.and (Scry.Cs.isId t) (Bool.or (Scry.Cs.isOp t2 ",") (Scry.Cs.isOp t2 ")")) with
+  | .true => do
+    n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    Scry.Cs.node "parameter" start [n]
+  | .false => do
+    ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+    n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    Scry.Cs.node "parameter" start [ty, n]
+
+/-- `c ? a : b`. -/
+partial def Scry.Cs.conditional : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  c ← Scry.Cs.binary 1;
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "?" with
+  | .false => Scry.Cs.ret c
+  | .true => do
+    Scry.Cs.setFieldOf c "condition";
+    ign ← Scry.Cs.advance;
+    a ← Scry.Cs.fld "consequence" Scry.Cs.expr;
+    Scry.Cs.expectOp ":";
+    b ← Scry.Cs.fld "alternative" Scry.Cs.expr;
+    Scry.Cs.node "conditional_expression" start [c, a, b]
+
+/-- Binary operators by precedence climbing, from level `minPrec`. -/
+partial def Scry.Cs.binary (minPrec : Nat) : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  lhs ← Scry.Cs.unary;
+  Scry.Cs.binaryRest minPrec start lhs
+
+partial def Scry.Cs.binaryRest (minPrec : Nat) (start : Nat) (lhs : Nat) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  -- `>` `>` adjacent is a right shift (the lexer never produces `>>`)
+  let isShift := Bool.and (Scry.Cs.isOp t ">") (Bool.and (Scry.Cs.isOp t2 ">") (Nat.beq t.stop t2.start));
+  let opText : String := match isShift with
+    | .true => ">>"
+    | .false => match String.eq t.kind "op" with
+      | .true => t.text
+      | .false => "";
+  let prec := Scry.Cs.binPrec opText;
+  -- `is` / `as` sit at the relational level (8)
+  match Bool.and (Bool.or (Scry.Cs.isKw t "is") (Scry.Cs.isKw t "as")) (Nat.le minPrec 8) with
+  | .true => do
+    Scry.Cs.setFieldOf lhs "expression";
+    ign ← Scry.Cs.advance;
+    n ← (match Scry.Cs.isKw t "as" with
+      | .true => do
+        ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+        Scry.Cs.node "as_expression" start [lhs, ty]
+      | .false => do
+        pat ← Scry.Cs.fld "pattern" Scry.Cs.pattern;
+        Scry.Cs.node "is_pattern_expression" start [lhs, pat]);
+    Scry.Cs.binaryRest minPrec start n
+  | .false =>
+  -- `>` immediately followed by `>=` is the `>>=` assignment, not a comparison
+  let shiftAssign := Bool.and (Scry.Cs.isOp t ">") (Bool.and (Scry.Cs.isOp t2 ">=") (Nat.beq t.stop t2.start));
+  match Bool.or shiftAssign (Bool.or (Nat.beq prec 0) (Nat.lt prec minPrec)) with
+  | .true => Scry.Cs.ret lhs
+  | .false => do
+    Scry.Cs.setFieldOf lhs "left";
+    op ← match isShift with
+      | .true => Scry.Cs.joinedOp ">>"
+      | .false => Scry.Cs.leaf opText .false;
+    Scry.Cs.setField "operator";
+    -- `??` is right-associative: its right operand starts at the same level
+    let nextMin : Nat := match Nat.beq prec 1 with
+      | .true => prec
+      | .false => Nat.succ prec;
+    rstart ← Scry.Cs.here;
+    r0 ← Scry.Cs.unary;
+    rhs ← Scry.Cs.binaryRest nextMin rstart r0;
+    Scry.Cs.setFieldOf rhs "right";
+    n ← Scry.Cs.node "binary_expression" start [lhs, op, rhs];
+    Scry.Cs.binaryRest minPrec start n
+
+/-- A pattern after `is`: `null`, `not null`, `T`, `T x`, or a constant. -/
+partial def Scry.Cs.pattern : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isIdText t "not" with
+  | .true => do
+    ign ← Scry.Cs.advance;
+    p ← Scry.Cs.pattern;
+    Scry.Cs.node "negated_pattern" start [p]
+  | .false => match Bool.or (Scry.Cs.isKw t "null") (Bool.or (String.elem t.kind ["int", "str", "chr", "real"])
+      (Bool.or (Scry.Cs.isKw t "true") (Scry.Cs.isKw t "false"))) with
+    | .true => do
+      e ← Scry.Cs.primary;
+      Scry.Cs.node "constant_pattern" start [e]
+    | .false => do
+      ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+      t2 ← Scry.Cs.peek;
+      match Scry.Cs.isId t2 with
+      | .true => do
+        n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+        Scry.Cs.node "declaration_pattern" start [ty, n]
+      | .false => Scry.Cs.node "type_pattern" start [ty]
+
+/-- Prefix operators, casts, `await`, `throw` expressions. -/
+partial def Scry.Cs.unary : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  match Bool.and (String.eq t.kind "op") (String.elem t.text ["!", "-", "+", "~", "++", "--"]) with
+  | .true => do
+    op ← Scry.Cs.leaf t.text .false;
+    Scry.Cs.setField "operator";
+    a ← Scry.Cs.fld "operand" Scry.Cs.unary;
+    Scry.Cs.node "prefix_unary_expression" start [op, a]
+  | .false => match Scry.Cs.isIdText t "await" with
+    | .true => do
+      t2 ← Scry.Cs.peekAt 1;
+      match Bool.or (Scry.Cs.castFollower t2) (String.eq t2.kind "kw") with
+      | .true => do
+        ign ← Scry.Cs.advance;
+        a ← Scry.Cs.fld "expression" Scry.Cs.unary;
+        Scry.Cs.node "await_expression" start [a]
+      | .false => Scry.Cs.postfix
+    | .false => match Scry.Cs.isKw t "throw" with
+      | .true => do
+        ign ← Scry.Cs.advance;
+        a ← Scry.Cs.fld "expression" Scry.Cs.expr;
+        Scry.Cs.node "throw_expression" start [a]
+      | .false => match Scry.Cs.isOp t "(" with
+        | .true => do
+          c ← Scry.Cs.attempt Scry.Cs.cast;
+          match c with
+          | .some n => Scry.Cs.ret n
+          | .none => Scry.Cs.postfix
+        | .false => Scry.Cs.postfix
+
+/-- `(T)e`: a predefined type is always a cast; a name only when the token after `)`
+can start an operand. -/
+partial def Scry.Cs.cast : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "(";
+  t ← Scry.Cs.peek;
+  ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+  Scry.Cs.expectOp ")";
+  t2 ← Scry.Cs.peek;
+  match Bool.or (Bool.and (Scry.Cs.isPredef t) (Bool.not (Scry.Cs.isOp t2 ".")))
+      (Scry.Cs.castFollower t2) with
+  | .false => Scry.Cs.fail "not a cast"
+  | .true => do
+    e ← Scry.Cs.fld "value" Scry.Cs.unary;
+    Scry.Cs.node "cast_expression" start [ty, e]
+
+/-- A primary expression and its postfix chain. -/
+partial def Scry.Cs.postfix : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  p ← Scry.Cs.primary;
+  Scry.Cs.postfixRest start p
+
+partial def Scry.Cs.postfixRest (start : Nat) (e : Nat) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Scry.Cs.isOp t "." with
+  | .true => do
+    Scry.Cs.setFieldOf e "expression";
+    ign ← Scry.Cs.advance;
+    nm ← Scry.Cs.fld "name" (Scry.Cs.simpleName .true);
+    n ← Scry.Cs.node "member_access_expression" start [e, nm];
+    Scry.Cs.postfixRest start n
+  | .false => match Scry.Cs.isOp t "?." with
+    | .true => do
+      Scry.Cs.setFieldOf e "expression";
+      ign ← Scry.Cs.advance;
+      nm ← Scry.Cs.fld "name" (Scry.Cs.simpleName .true);
+      n ← Scry.Cs.node "conditional_access_expression" start [e, nm];
+      Scry.Cs.postfixRest start n
+    | .false => match Scry.Cs.isOp t "(" with
+      | .true => do
+        Scry.Cs.setFieldOf e "function";
+        args ← Scry.Cs.fld "arguments" (Scry.Cs.argList "(" ")" "argument_list");
+        n ← Scry.Cs.node "invocation_expression" start [e, args];
+        Scry.Cs.postfixRest start n
+      | .false => match Scry.Cs.isOp t "[" with
+        | .true => do
+          Scry.Cs.setFieldOf e "expression";
+          args ← Scry.Cs.fld "subscript" (Scry.Cs.argList "[" "]" "bracketed_argument_list");
+          n ← Scry.Cs.node "element_access_expression" start [e, args];
+          Scry.Cs.postfixRest start n
+        | .false => match Bool.or (Scry.Cs.isOp t "++") (Scry.Cs.isOp t "--") with
+          | .true => do
+            Scry.Cs.setFieldOf e "operand";
+            op ← Scry.Cs.leaf t.text .false;
+            Scry.Cs.setField "operator";
+            n ← Scry.Cs.node "postfix_unary_expression" start [e, op];
+            Scry.Cs.postfixRest start n
+          | .false => match Bool.and (Scry.Cs.isOp t "!") (Bool.not (Scry.Cs.castFollower t2)) with
+            | .true => do
+              Scry.Cs.setFieldOf e "operand";
+              op ← Scry.Cs.leaf "!" .false;
+              Scry.Cs.setField "operator";
+              n ← Scry.Cs.node "postfix_unary_expression" start [e, op];
+              Scry.Cs.postfixRest start n
+            | .false => Scry.Cs.ret e
+
+/-- `( args )` or `[ args ]` as a node of `kind`. -/
+partial def Scry.Cs.argList (o : String) (c : String) (kind : String) : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp o;
+  t ← Scry.Cs.peek;
+  args ← match Scry.Cs.isOp t c with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => Scry.Cs.args;
+  Scry.Cs.expectOp c;
+  Scry.Cs.node kind start args
+
+partial def Scry.Cs.args : Scry.Cs.P (List Nat) := do
+  a ← Scry.Cs.argument;
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons a .nil)
+  | .true => do
+    rest ← Scry.Cs.args;
+    Scry.Cs.ret (List.cons a rest)
+
+/-- An argument: `name: e`, `ref e`, `out var x`, `out T x`, `out x`, or `e`. -/
+partial def Scry.Cs.argument : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  named ← match Bool.and (Scry.Cs.isId t) (Scry.Cs.isOp t2 ":") with
+    | .true => do
+      n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+      Scry.Cs.expectOp ":";
+      Scry.Cs.ret (List.cons n .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  t3 ← Scry.Cs.peek;
+  refk ← match Bool.or (Scry.Cs.isKw t3 "ref") (Bool.or (Scry.Cs.isKw t3 "out") (Scry.Cs.isKw t3 "in")) with
+    | .true => do
+      m ← Scry.Cs.leaf "modifier" .true;
+      Scry.Cs.ret (List.cons m .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  isOut ← Scry.Cs.ret (Scry.Cs.isKw t3 "out");
+  decl ← match isOut with
+    | .true => Scry.Cs.attempt Scry.Cs.declExpr
+    | .false => Scry.Cs.ret (.none : Option Nat);
+  e ← match decl with
+    | .some d => Scry.Cs.ret d
+    | .none => Scry.Cs.fld "expression" Scry.Cs.expr;
+  Scry.Cs.node "argument" start (List.append named (List.append refk (.cons e .nil)))
+
+/-- `T x` in an `out` argument (`declaration_expression`). -/
+partial def Scry.Cs.declExpr : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isId t with
+  | .false => Scry.Cs.fail "not a declaration expression"
+  | .true => do
+    n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    Scry.Cs.fld "expression" (Scry.Cs.node "declaration_expression" start [ty, n])
+
+/-- Literals, names, `this`, `base`, parentheses, `new`, `typeof`, `default`,
+interpolated strings. -/
+partial def Scry.Cs.primary : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  let k := t.kind;
+  if String.eq k "int" then Scry.Cs.leaf "integer_literal" .true
+  else if String.eq k "real" then Scry.Cs.leaf "real_literal" .true
+  else if String.eq k "str" then Scry.Cs.leaf "string_literal" .true
+  else if String.eq k "vstr" then Scry.Cs.leaf "verbatim_string_literal" .true
+  else if String.eq k "chr" then Scry.Cs.leaf "character_literal" .true
+  else if String.eq k "istr" then Scry.Cs.interpolated t
+  else if String.eq k "id" then Scry.Cs.simpleName .true
+  else if Scry.Cs.isPredef t then Scry.Cs.leaf "predefined_type" .true
+  else if Bool.or (Scry.Cs.isKw t "true") (Scry.Cs.isKw t "false") then Scry.Cs.leaf "boolean_literal" .true
+  else if Scry.Cs.isKw t "null" then Scry.Cs.leaf "null_literal" .true
+  else if Scry.Cs.isKw t "this" then Scry.Cs.leaf "this_expression" .true
+  else if Scry.Cs.isKw t "base" then Scry.Cs.leaf "base_expression" .true
+  else if Scry.Cs.isOp t "(" then do
+    ign ← Scry.Cs.advance;
+    e ← Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    Scry.Cs.node "parenthesized_expression" start [e]
+  else if Scry.Cs.isKw t "new" then Scry.Cs.newExpr
+  else if Scry.Cs.isKw t "typeof" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp "(";
+    ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+    Scry.Cs.expectOp ")";
+    Scry.Cs.node "typeof_expression" start [ty]
+  else if Scry.Cs.isKw t "default" then do
+    ign ← Scry.Cs.advance;
+    t2 ← Scry.Cs.peek;
+    match Scry.Cs.isOp t2 "(" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+      Scry.Cs.expectOp ")";
+      Scry.Cs.node "default_expression" start [ty]
+    | .false => Scry.Cs.node "default_expression" start .nil
+  else if Scry.Cs.isOp t "{" then Scry.Cs.initializer
+  else Scry.Cs.fail ("expected an expression, found " ++ Scry.Cs.describe t)
+
+/-- `new T(args) {init}`, `new T {init}`, `new T[n]`, `new T[] {…}`, `new[] {…}`,
+`new()`. -/
+partial def Scry.Cs.newExpr : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectKw "new";
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "[" with
+  | .true => do
+    rs ← Scry.Cs.rankSpec;
+    ini ← Scry.Cs.fld "initializer" Scry.Cs.initializer;
+    Scry.Cs.node "implicit_array_creation_expression" start [rs, ini]
+  | .false => match Scry.Cs.isOp t "(" with
+    | .true => do
+      args ← Scry.Cs.fld "arguments" (Scry.Cs.argList "(" ")" "argument_list");
+      Scry.Cs.node "implicit_object_creation_expression" start [args]
+    | .false => do
+      tstart ← Scry.Cs.here;
+      ty0 ← Scry.Cs.typeNameOrPredef;
+      t2 ← Scry.Cs.peek;
+      t3 ← Scry.Cs.peekAt 1;
+      -- `new T[n]`: a sized array; `new T[] {…}` is parsed by the type suffix
+      match Bool.and (Scry.Cs.isOp t2 "[") (Bool.not (Bool.or (Scry.Cs.isOp t3 "]") (Scry.Cs.isOp t3 ","))) with
+      | .true => do
+        Scry.Cs.setField "type";
+        sz ← Scry.Cs.fld "rank" (Scry.Cs.argList "[" "]" "array_rank_specifier");
+        arrTy ← Scry.Cs.fld "type" (Scry.Cs.node "array_type" tstart [ty0, sz]);
+        t4 ← Scry.Cs.peek;
+        ini ← match Scry.Cs.isOp t4 "{" with
+          | .true => do
+            i ← Scry.Cs.fld "initializer" Scry.Cs.initializer;
+            Scry.Cs.ret (List.cons i .nil)
+          | .false => Scry.Cs.ret (.nil : List Nat);
+        Scry.Cs.node "array_creation_expression" start (.cons arrTy ini)
+      | .false => do
+        ty ← Scry.Cs.typeSuffix tstart ty0;
+        Scry.Cs.setField "type";
+        t4 ← Scry.Cs.peek;
+        args ← match Scry.Cs.isOp t4 "(" with
+          | .true => do
+            a ← Scry.Cs.fld "arguments" (Scry.Cs.argList "(" ")" "argument_list");
+            Scry.Cs.ret (List.cons a .nil)
+          | .false => Scry.Cs.ret (.nil : List Nat);
+        t5 ← Scry.Cs.peek;
+        ini ← match Scry.Cs.isOp t5 "{" with
+          | .true => do
+            i ← Scry.Cs.fld "initializer" Scry.Cs.initializer;
+            Scry.Cs.ret (List.cons i .nil)
+          | .false => Scry.Cs.ret (.nil : List Nat);
+        match Bool.and (List.isEmpty args) (List.isEmpty ini) with
+        | .true => Scry.Cs.fail "expected '(' or an initializer after new T"
+        | .false =>
+          let kind : String := match Scry.Cs.isOp t4 "(" with
+            | .true => "object_creation_expression"
+            | .false => match Scry.Cs.isOp t2 "[" with
+              | .true => "array_creation_expression"
+              | .false => "object_creation_expression";
+          Scry.Cs.node kind start (.cons ty (List.append args ini))
+
+partial def Scry.Cs.typeNameOrPredef : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isPredef t with
+  | .true => Scry.Cs.leaf "predefined_type" .true
+  | .false => Scry.Cs.typeName
+
+/-- `{ e, e, … }` (array, collection, or object initialiser: `X = e` elements are
+assignments). -/
+partial def Scry.Cs.initializer : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "{";
+  es ← Scry.Cs.initElems;
+  Scry.Cs.expectOp "}";
+  Scry.Cs.node "initializer_expression" start es
+
+partial def Scry.Cs.initElems : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "}" with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    e ← Scry.Cs.expr;
+    more ← Scry.Cs.acceptOp ",";
+    match more with
+    | .false => Scry.Cs.ret (List.cons e .nil)
+    | .true => do
+      rest ← Scry.Cs.initElems;
+      Scry.Cs.ret (List.cons e rest)
+
+/-- An interpolated string: the token's holes are re-lexed at their offsets and parsed
+as expressions (`interpolation` nodes). -/
+partial def Scry.Cs.interpolated (t : Scry.Cs.Tok) : Scry.Cs.P Nat := do
+  ign ← Scry.Cs.advance;
+  saved ← Scry.Cs.getState;
+  hs ← Scry.Cs.holes t.holes;
+  Scry.Cs.restoreToks saved;
+  Scry.Cs.node "interpolated_string_expression" t.start hs
+
+partial def Scry.Cs.restoreToks (saved : Scry.Cs.PS) : Scry.Cs.P Unit := fun s =>
+  .ok { s with toks := saved.toks, last := saved.last } ()
+
+partial def Scry.Cs.holes : List (Nat × String) → Scry.Cs.P (List Nat)
+  | .nil => Scry.Cs.ret (.nil : List Nat)
+  | .cons h hs => do
+    n ← Scry.Cs.hole h.1 h.2;
+    rest ← Scry.Cs.holes hs;
+    Scry.Cs.ret (List.cons n rest)
+
+partial def Scry.Cs.hole (pos : Nat) (text : String) : Scry.Cs.P Nat :=
+  match Scry.Cs.lexAt pos text with
+  | .err m p => Scry.Cs.failAt m p
+  | .ok toks => do
+    Scry.Cs.setToks toks;
+    e ← Scry.Cs.fld "expression" Scry.Cs.expr;
+    t ← Scry.Cs.peek;
+    match String.eq t.kind "eof" with
+    | .false => Scry.Cs.fail ("unexpected " ++ Scry.Cs.describe t ++ " in an interpolation")
+    | .true => Scry.Cs.node "interpolation" pos [e]
+
+partial def Scry.Cs.setToks (toks : List Scry.Cs.Tok) : Scry.Cs.P Unit := fun s =>
+  .ok { s with toks := toks } ()
+
+-- ## Statements
+
+/-- `{ statements }`. -/
+partial def Scry.Cs.block : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "{";
+  ss ← Scry.Cs.stmts;
+  Scry.Cs.expectOp "}";
+  Scry.Cs.node "block" start ss
+
+partial def Scry.Cs.stmts : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Bool.or (Scry.Cs.isOp t "}") (String.eq t.kind "eof") with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    s ← Scry.Cs.stmt;
+    rest ← Scry.Cs.stmts;
+    Scry.Cs.ret (List.cons s rest)
+
+/-- Statements inside a `switch` section (until `case`, `default:` or `}`). -/
+partial def Scry.Cs.sectionStmts : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Bool.or (Bool.or (Scry.Cs.isOp t "}") (String.eq t.kind "eof"))
+      (Bool.or (Scry.Cs.isKw t "case") (Bool.and (Scry.Cs.isKw t "default") (Scry.Cs.isOp t2 ":"))) with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    s ← Scry.Cs.stmt;
+    rest ← Scry.Cs.sectionStmts;
+    Scry.Cs.ret (List.cons s rest)
+
+/-- `T x = e, y;` without the `;` (`variable_declaration`). -/
+partial def Scry.Cs.varDecl : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isId t with
+  | .false => Scry.Cs.fail ("expected a variable name, found " ++ Scry.Cs.describe t)
+  | .true => do
+    ds ← Scry.Cs.declarators;
+    Scry.Cs.node "variable_declaration" start (.cons ty ds)
+
+partial def Scry.Cs.declarators : Scry.Cs.P (List Nat) := do
+  d ← Scry.Cs.declarator;
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons d .nil)
+  | .true => do
+    ds ← Scry.Cs.declarators;
+    Scry.Cs.ret (List.cons d ds)
+
+partial def Scry.Cs.declarator : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  eq ← Scry.Cs.acceptOp "=";
+  match eq with
+  | .false => Scry.Cs.node "variable_declarator" start [n]
+  | .true => do
+    v ← Scry.Cs.fld "value" Scry.Cs.expr;
+    Scry.Cs.node "variable_declarator" start [n, v]
+
+/-- A local declaration is tried first: a type followed by an identifier and then `=`,
+`;`, `,` (or `in` in a `foreach`). Anything else is an expression statement. -/
+partial def Scry.Cs.declLooksLike : Scry.Cs.P Unit := do
+  ign ← Scry.Cs.parseType;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Bool.and (Scry.Cs.isId t) (Bool.or (Bool.and (String.eq t2.kind "op") (String.elem t2.text ["=", ";", ",", ")"]))
+      (Scry.Cs.isKw t2 "in")) with
+  | .true => Scry.Cs.ret ()
+  | .false => Scry.Cs.fail "not a declaration"
+
+partial def Scry.Cs.stmt : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  if Scry.Cs.isOp t "{" then Scry.Cs.block
+  else if Scry.Cs.isOp t ";" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.node "empty_statement" start .nil
+  else if Scry.Cs.isKw t "if" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp "(";
+    c ← Scry.Cs.fld "condition" Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    a ← Scry.Cs.fld "consequence" Scry.Cs.stmt;
+    t3 ← Scry.Cs.peek;
+    match Scry.Cs.isKw t3 "else" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      b ← Scry.Cs.fld "alternative" Scry.Cs.stmt;
+      Scry.Cs.node "if_statement" start [c, a, b]
+    | .false => Scry.Cs.node "if_statement" start [c, a]
+  else if Scry.Cs.isKw t "while" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp "(";
+    c ← Scry.Cs.fld "condition" Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    b ← Scry.Cs.fld "body" Scry.Cs.stmt;
+    Scry.Cs.node "while_statement" start [c, b]
+  else if Scry.Cs.isKw t "do" then do
+    ign ← Scry.Cs.advance;
+    b ← Scry.Cs.fld "body" Scry.Cs.stmt;
+    Scry.Cs.expectKw "while";
+    Scry.Cs.expectOp "(";
+    c ← Scry.Cs.fld "condition" Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    Scry.Cs.expectOp ";";
+    Scry.Cs.node "do_statement" start [b, c]
+  else if Scry.Cs.isKw t "for" then Scry.Cs.forStmt
+  else if Scry.Cs.isKw t "foreach" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp "(";
+    ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+    n ← Scry.Cs.fld "left" (Scry.Cs.leaf "identifier" .true);
+    Scry.Cs.expectKw "in";
+    e ← Scry.Cs.fld "right" Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    b ← Scry.Cs.fld "body" Scry.Cs.stmt;
+    Scry.Cs.node "foreach_statement" start [ty, n, e, b]
+  else if Scry.Cs.isKw t "return" then do
+    ign ← Scry.Cs.advance;
+    t3 ← Scry.Cs.peek;
+    match Scry.Cs.isOp t3 ";" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      Scry.Cs.node "return_statement" start .nil
+    | .false => do
+      e ← Scry.Cs.expr;
+      Scry.Cs.expectOp ";";
+      Scry.Cs.node "return_statement" start [e]
+  else if Scry.Cs.isKw t "break" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp ";";
+    Scry.Cs.node "break_statement" start .nil
+  else if Scry.Cs.isKw t "continue" then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp ";";
+    Scry.Cs.node "continue_statement" start .nil
+  else if Scry.Cs.isKw t "throw" then do
+    ign ← Scry.Cs.advance;
+    t3 ← Scry.Cs.peek;
+    match Scry.Cs.isOp t3 ";" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      Scry.Cs.node "throw_statement" start .nil
+    | .false => do
+      e ← Scry.Cs.expr;
+      Scry.Cs.expectOp ";";
+      Scry.Cs.node "throw_statement" start [e]
+  else if Scry.Cs.isKw t "try" then Scry.Cs.tryStmt
+  else if Scry.Cs.isKw t "switch" then Scry.Cs.switchStmt
+  else if Bool.and (Scry.Cs.isKw t "using") (Scry.Cs.isOp t2 "(") then do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.expectOp "(";
+    isDecl ← Scry.Cs.lookahead Scry.Cs.declLooksLike;
+    r ← match isDecl with
+      | .true => Scry.Cs.varDecl
+      | .false => Scry.Cs.expr;
+    Scry.Cs.expectOp ")";
+    b ← Scry.Cs.fld "body" Scry.Cs.stmt;
+    Scry.Cs.node "using_statement" start [r, b]
+  else if Scry.Cs.isKw t "using" then do
+    m ← Scry.Cs.leaf "using" .false;
+    d ← Scry.Cs.varDecl;
+    Scry.Cs.expectOp ";";
+    Scry.Cs.node "local_declaration_statement" start [m, d]
+  else if Bool.or (Scry.Cs.isKw t "const") (Bool.or (Scry.Cs.isKw t "goto") (Bool.or (Scry.Cs.isIdText t "yield")
+      (Bool.or (Scry.Cs.isKw t "lock") (Bool.or (Scry.Cs.isKw t "checked") (Scry.Cs.isKw t "unchecked"))))) then
+    Scry.Cs.fail ("'" ++ t.text ++ "' statements are outside the supported subset")
+  else do
+    isDecl ← Scry.Cs.lookahead Scry.Cs.declLooksLike;
+    match isDecl with
+    | .true => do
+      d ← Scry.Cs.varDecl;
+      Scry.Cs.expectOp ";";
+      Scry.Cs.node "local_declaration_statement" start [d]
+    | .false => do
+      e ← Scry.Cs.expr;
+      Scry.Cs.expectOp ";";
+      Scry.Cs.node "expression_statement" start [e]
+
+/-- `for (init; cond; update) body`; `init` is a declaration or expressions. -/
+partial def Scry.Cs.forStmt : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ign ← Scry.Cs.advance;
+  Scry.Cs.expectOp "(";
+  t ← Scry.Cs.peek;
+  init ← (match Scry.Cs.isOp t ";" with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => do
+      isDecl ← Scry.Cs.lookahead Scry.Cs.declLooksLike;
+      match isDecl with
+      | .true => do
+        d ← Scry.Cs.fld "initializer" Scry.Cs.varDecl;
+        Scry.Cs.ret (List.cons d .nil)
+      | .false => Scry.Cs.exprList "initializer");
+  Scry.Cs.expectOp ";";
+  t2 ← Scry.Cs.peek;
+  cond ← (match Scry.Cs.isOp t2 ";" with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => do
+      c ← Scry.Cs.fld "condition" Scry.Cs.expr;
+      Scry.Cs.ret (List.cons c .nil));
+  Scry.Cs.expectOp ";";
+  t3 ← Scry.Cs.peek;
+  upd ← match Scry.Cs.isOp t3 ")" with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => Scry.Cs.exprList "update";
+  Scry.Cs.expectOp ")";
+  b ← Scry.Cs.fld "body" Scry.Cs.stmt;
+  Scry.Cs.node "for_statement" start (List.append init (List.append cond (List.append upd (.cons b .nil))))
+
+partial def Scry.Cs.exprList (f : String) : Scry.Cs.P (List Nat) := do
+  e ← Scry.Cs.fld f Scry.Cs.expr;
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons e .nil)
+  | .true => do
+    rest ← Scry.Cs.exprList f;
+    Scry.Cs.ret (List.cons e rest)
+
+/-- `try block catch* finally?`. -/
+partial def Scry.Cs.tryStmt : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ign ← Scry.Cs.advance;
+  b ← Scry.Cs.fld "body" Scry.Cs.block;
+  cs ← Scry.Cs.catches;
+  t ← Scry.Cs.peek;
+  fin ← match Scry.Cs.isKw t "finally" with
+    | .true => do
+      fstart ← Scry.Cs.here;
+      ign ← Scry.Cs.advance;
+      fb ← Scry.Cs.block;
+      f ← Scry.Cs.node "finally_clause" fstart [fb];
+      Scry.Cs.ret (List.cons f .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  match Bool.and (List.isEmpty cs) (List.isEmpty fin) with
+  | .true => Scry.Cs.fail "a try statement needs a catch or a finally clause"
+  | .false => Scry.Cs.node "try_statement" start (.cons b (List.append cs fin))
+
+partial def Scry.Cs.catches : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isKw t "catch" with
+  | .false => Scry.Cs.ret (.nil : List Nat)
+  | .true => do
+    start ← Scry.Cs.here;
+    ign ← Scry.Cs.advance;
+    t2 ← Scry.Cs.peek;
+    decl ← match Scry.Cs.isOp t2 "(" with
+      | .true => do
+        dstart ← Scry.Cs.here;
+        ign ← Scry.Cs.advance;
+        ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+        t3 ← Scry.Cs.peek;
+        nm ← match Scry.Cs.isId t3 with
+          | .true => do
+            n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+            Scry.Cs.ret (List.cons n .nil)
+          | .false => Scry.Cs.ret (.nil : List Nat);
+        Scry.Cs.expectOp ")";
+        d ← Scry.Cs.node "catch_declaration" dstart (.cons ty nm);
+        Scry.Cs.ret (List.cons d .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    t4 ← Scry.Cs.peek;
+    filt ← match Scry.Cs.isIdText t4 "when" with
+      | .true => do
+        fstart ← Scry.Cs.here;
+        ign ← Scry.Cs.advance;
+        Scry.Cs.expectOp "(";
+        e ← Scry.Cs.expr;
+        Scry.Cs.expectOp ")";
+        f ← Scry.Cs.node "catch_filter_clause" fstart [e];
+        Scry.Cs.ret (List.cons f .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    b ← Scry.Cs.fld "body" Scry.Cs.block;
+    c ← Scry.Cs.node "catch_clause" start (List.append decl (List.append filt (.cons b .nil)));
+    rest ← Scry.Cs.catches;
+    Scry.Cs.ret (List.cons c rest)
+
+/-- `switch (e) { case c: … default: … }` (constant labels only). -/
+partial def Scry.Cs.switchStmt : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ign ← Scry.Cs.advance;
+  Scry.Cs.expectOp "(";
+  e ← Scry.Cs.fld "value" Scry.Cs.expr;
+  Scry.Cs.expectOp ")";
+  bstart ← Scry.Cs.here;
+  Scry.Cs.expectOp "{";
+  secs ← Scry.Cs.sections;
+  Scry.Cs.expectOp "}";
+  body ← Scry.Cs.fld "body" (Scry.Cs.node "switch_body" bstart secs);
+  Scry.Cs.node "switch_statement" start [e, body]
+
+partial def Scry.Cs.sections : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Bool.or (Scry.Cs.isKw t "case") (Scry.Cs.isKw t "default") with
+  | .false => Scry.Cs.ret (.nil : List Nat)
+  | .true => do
+    start ← Scry.Cs.here;
+    labels ← Scry.Cs.labels;
+    ss ← Scry.Cs.sectionStmts;
+    s ← Scry.Cs.node "switch_section" start (List.append labels ss);
+    rest ← Scry.Cs.sections;
+    Scry.Cs.ret (List.cons s rest)
+
+partial def Scry.Cs.labels : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  start ← Scry.Cs.here;
+  match Scry.Cs.isKw t "case" with
+  | .true => do
+    ign ← Scry.Cs.advance;
+    e ← Scry.Cs.conditional;
+    Scry.Cs.expectOp ":";
+    l ← Scry.Cs.node "case_switch_label" start [e];
+    rest ← Scry.Cs.labels;
+    Scry.Cs.ret (List.cons l rest)
+  | .false => match Scry.Cs.isKw t "default" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      Scry.Cs.expectOp ":";
+      l ← Scry.Cs.node "default_switch_label" start .nil;
+      rest ← Scry.Cs.labels;
+      Scry.Cs.ret (List.cons l rest)
+    | .false => Scry.Cs.ret (.nil : List Nat)
+end
+
+-- ## Declarations
+
+mutual
+/-- `[…]` attribute lists, skipped as opaque `attribute_list` nodes. -/
+partial def Scry.Cs.attributes : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "[" with
+  | .false => Scry.Cs.ret (.nil : List Nat)
+  | .true => do
+    start ← Scry.Cs.here;
+    ign ← Scry.Cs.advance;
+    Scry.Cs.skipBalanced 0;
+    a ← Scry.Cs.node "attribute_list" start .nil;
+    rest ← Scry.Cs.attributes;
+    Scry.Cs.ret (List.cons a rest)
+
+/-- Skip tokens up to the `]` that closes depth 0. -/
+partial def Scry.Cs.skipBalanced (depth : Nat) : Scry.Cs.P Unit := do
+  t ← Scry.Cs.advance;
+  match String.eq t.kind "eof" with
+  | .true => Scry.Cs.fail "unterminated attribute list"
+  | .false => match Scry.Cs.isOp t "]" with
+    | .true => match depth with
+      | .zero => Scry.Cs.ret ()
+      | .succ d => Scry.Cs.skipBalanced d
+    | .false => match Scry.Cs.isOp t "[" with
+      | .true => Scry.Cs.skipBalanced (Nat.succ depth)
+      | .false => Scry.Cs.skipBalanced depth
+
+partial def Scry.Cs.modifiers : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Scry.Cs.isModifier t t2 with
+  | .false => Scry.Cs.ret (.nil : List Nat)
+  | .true => do
+    m ← Scry.Cs.leaf "modifier" .true;
+    rest ← Scry.Cs.modifiers;
+    Scry.Cs.ret (List.cons m rest)
+
+/-- A dotted name (`System.Collections.Generic`). -/
+partial def Scry.Cs.dottedName : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  first ← Scry.Cs.leaf "identifier" .true;
+  Scry.Cs.dottedRest start first
+
+partial def Scry.Cs.dottedRest (start : Nat) (left : Nat) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "." with
+  | .false => Scry.Cs.ret left
+  | .true => do
+    Scry.Cs.setField "qualifier";
+    ign ← Scry.Cs.advance;
+    r ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    q ← Scry.Cs.node "qualified_name" start [left, r];
+    Scry.Cs.dottedRest start q
+
+/-- `using N;`, `using static N;`, `using A = N;`, `global using …`. -/
+partial def Scry.Cs.usingDirective : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  g ← match Scry.Cs.isIdText t "global" with
+    | .true => do
+      m ← Scry.Cs.leaf "global" .false;
+      Scry.Cs.ret (List.cons m .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  Scry.Cs.expectKw "using";
+  t2 ← Scry.Cs.peek;
+  st ← match Scry.Cs.isKw t2 "static" with
+    | .true => do
+      m ← Scry.Cs.leaf "static" .false;
+      Scry.Cs.ret (List.cons m .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  t3 ← Scry.Cs.peekAt 1;
+  als ← match Scry.Cs.isOp t3 "=" with
+    | .true => do
+      a ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+      Scry.Cs.expectOp "=";
+      Scry.Cs.ret (List.cons a .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  n ← Scry.Cs.typeName;
+  Scry.Cs.expectOp ";";
+  Scry.Cs.node "using_directive" start (List.append g (List.append st (List.append als (.cons n .nil))))
+
+/-- Top-level or namespace-level items until `}` or end of file. -/
+partial def Scry.Cs.items : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Bool.or (Scry.Cs.isOp t "}") (String.eq t.kind "eof") with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    i ← Scry.Cs.item;
+    rest ← Scry.Cs.items;
+    Scry.Cs.ret (List.cons i rest)
+
+partial def Scry.Cs.item : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  match Bool.or (Scry.Cs.isKw t "using") (Bool.and (Scry.Cs.isIdText t "global") (Scry.Cs.isKw t2 "using")) with
+  | .true => Scry.Cs.usingDirective
+  | .false => match Scry.Cs.isKw t "namespace" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      n ← Scry.Cs.fld "name" Scry.Cs.dottedName;
+      t3 ← Scry.Cs.peek;
+      match Scry.Cs.isOp t3 ";" with
+      | .true => do
+        ign ← Scry.Cs.advance;
+        its ← Scry.Cs.items;
+        Scry.Cs.node "file_scoped_namespace_declaration" start (.cons n its)
+      | .false => do
+        bstart ← Scry.Cs.here;
+        Scry.Cs.expectOp "{";
+        its ← Scry.Cs.items;
+        Scry.Cs.expectOp "}";
+        body ← Scry.Cs.fld "body" (Scry.Cs.node "declaration_list" bstart its);
+        Scry.Cs.node "namespace_declaration" start [n, body]
+    | .false => do
+      attrs ← Scry.Cs.attributes;
+      mods ← Scry.Cs.modifiers;
+      Scry.Cs.typeDecl start (List.append attrs mods) ""
+
+/-- A class, struct, interface, record or enum, after its attributes and modifiers. -/
+partial def Scry.Cs.typeDecl (start : Nat) (pre : List Nat) (outer : String) : Scry.Cs.P Nat := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isKw t "enum" with
+  | .true => Scry.Cs.enumDecl start pre
+  | .false => do
+    kind ← if Scry.Cs.isKw t "class" then Scry.Cs.ret "class_declaration"
+      else if Scry.Cs.isKw t "struct" then Scry.Cs.ret "struct_declaration"
+      else if Scry.Cs.isKw t "interface" then Scry.Cs.ret "interface_declaration"
+      else if Scry.Cs.isIdText t "record" then Scry.Cs.ret "record_declaration"
+      else Scry.Cs.fail ("expected a type declaration, found " ++ Scry.Cs.describe t);
+    ign ← Scry.Cs.advance;
+    nameTok ← Scry.Cs.peek;
+    n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    t2 ← Scry.Cs.peek;
+    tps ← match Scry.Cs.isOp t2 "<" with
+      | .true => do
+        p ← Scry.Cs.fld "type_parameters" Scry.Cs.typeParams;
+        Scry.Cs.ret (List.cons p .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    t3 ← Scry.Cs.peek;
+    bases ← match Scry.Cs.isOp t3 ":" with
+      | .true => do
+        bstart ← Scry.Cs.here;
+        ign ← Scry.Cs.advance;
+        first ← Scry.Cs.parseType;
+        rest ← Scry.Cs.typeList;
+        b ← Scry.Cs.node "base_list" bstart (.cons first rest);
+        Scry.Cs.ret (List.cons b .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    Scry.Cs.constraints;
+    bstart ← Scry.Cs.here;
+    Scry.Cs.expectOp "{";
+    ms ← Scry.Cs.members nameTok.text;
+    Scry.Cs.expectOp "}";
+    ign ← Scry.Cs.acceptOp ";";
+    body ← Scry.Cs.fld "body" (Scry.Cs.node "declaration_list" bstart ms);
+    Scry.Cs.node kind start (List.append pre (.cons n (List.append tps (List.append bases (.cons body .nil)))))
+
+/-- `where T : …` constraint clauses are skipped (erasure makes them irrelevant here). -/
+partial def Scry.Cs.constraints : Scry.Cs.P Unit := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isIdText t "where" with
+  | .false => Scry.Cs.ret ()
+  | .true => do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.skipConstraint;
+    Scry.Cs.constraints
+
+partial def Scry.Cs.skipConstraint : Scry.Cs.P Unit := do
+  t ← Scry.Cs.peek;
+  match Bool.or (Bool.or (Scry.Cs.isOp t "{") (Scry.Cs.isOp t ";")) (Bool.or (Scry.Cs.isOp t "=>")
+      (Bool.or (Scry.Cs.isIdText t "where") (String.eq t.kind "eof"))) with
+  | .true => Scry.Cs.ret ()
+  | .false => do
+    ign ← Scry.Cs.advance;
+    Scry.Cs.skipConstraint
+
+partial def Scry.Cs.typeParams : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "<";
+  ps ← Scry.Cs.typeParamList;
+  Scry.Cs.expectOp ">";
+  Scry.Cs.node "type_parameter_list" start ps
+
+partial def Scry.Cs.typeParamList : Scry.Cs.P (List Nat) := do
+  start ← Scry.Cs.here;
+  t ← Scry.Cs.peek;
+  ign ← match Bool.or (Scry.Cs.isKw t "in") (Scry.Cs.isKw t "out") with
+    | .true => Scry.Cs.advance
+    | .false => Scry.Cs.peek;
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  p ← Scry.Cs.node "type_parameter" start [n];
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons p .nil)
+  | .true => do
+    rest ← Scry.Cs.typeParamList;
+    Scry.Cs.ret (List.cons p rest)
+
+partial def Scry.Cs.enumDecl (start : Nat) (pre : List Nat) : Scry.Cs.P Nat := do
+  ign ← Scry.Cs.advance;
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  t ← Scry.Cs.peek;
+  ign ← match Scry.Cs.isOp t ":" with
+    | .true => do
+      ign ← Scry.Cs.advance;
+      Scry.Cs.parseType
+    | .false => Scry.Cs.ret 0;
+  bstart ← Scry.Cs.here;
+  Scry.Cs.expectOp "{";
+  ms ← Scry.Cs.enumMembers;
+  Scry.Cs.expectOp "}";
+  ign ← Scry.Cs.acceptOp ";";
+  body ← Scry.Cs.fld "body" (Scry.Cs.node "enum_member_declaration_list" bstart ms);
+  Scry.Cs.node "enum_declaration" start (List.append pre [n, body])
+
+partial def Scry.Cs.enumMembers : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "}" with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    start ← Scry.Cs.here;
+    ign ← Scry.Cs.attributes;
+    n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+    eq ← Scry.Cs.acceptOp "=";
+    vs ← match eq with
+      | .true => do
+        v ← Scry.Cs.fld "value" Scry.Cs.expr;
+        Scry.Cs.ret (List.cons v .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    m ← Scry.Cs.node "enum_member_declaration" start (.cons n vs);
+    more ← Scry.Cs.acceptOp ",";
+    match more with
+    | .false => Scry.Cs.ret (List.cons m .nil)
+    | .true => do
+      rest ← Scry.Cs.enumMembers;
+      Scry.Cs.ret (List.cons m rest)
+
+/-- Class members until `}`. `cls` is the class name (for constructors). -/
+partial def Scry.Cs.members (cls : String) : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Bool.or (Scry.Cs.isOp t "}") (String.eq t.kind "eof") with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    m ← Scry.Cs.member cls;
+    rest ← Scry.Cs.members cls;
+    Scry.Cs.ret (List.cons m rest)
+
+partial def Scry.Cs.member (cls : String) : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  attrs ← Scry.Cs.attributes;
+  mods ← Scry.Cs.modifiers;
+  let pre := List.append attrs mods;
+  t ← Scry.Cs.peek;
+  t2 ← Scry.Cs.peekAt 1;
+  if Bool.or (Bool.or (Scry.Cs.isKw t "class") (Scry.Cs.isKw t "struct"))
+      (Bool.or (Bool.or (Scry.Cs.isKw t "interface") (Scry.Cs.isKw t "enum"))
+        (Bool.and (Scry.Cs.isIdText t "record") (Scry.Cs.isId t2))) then
+    Scry.Cs.typeDecl start pre cls
+  else if Bool.and (Scry.Cs.isIdText t cls) (Scry.Cs.isOp t2 "(") then Scry.Cs.ctorDecl start pre
+  else if Bool.or (Scry.Cs.isOp t "~") (Bool.or (Scry.Cs.isKw t "event")
+      (Bool.or (Scry.Cs.isKw t "delegate") (Bool.or (Scry.Cs.isKw t "implicit") (Scry.Cs.isKw t "explicit")))) then
+    Scry.Cs.fail ("'" ++ t.text ++ "' members are outside the supported subset")
+  else do
+    ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+    t3 ← Scry.Cs.peek;
+    t4 ← Scry.Cs.peekAt 1;
+    if Bool.or (Scry.Cs.isKw t3 "operator") (Scry.Cs.isKw t3 "this") then
+      Scry.Cs.fail ("'" ++ t3.text ++ "' members are outside the supported subset")
+    else if Bool.and (Scry.Cs.isId t3) (Bool.or (Scry.Cs.isOp t4 "(") (Scry.Cs.isOp t4 "<")) then
+      Scry.Cs.methodDecl start pre ty
+    else if Bool.and (Scry.Cs.isId t3) (Bool.or (Scry.Cs.isOp t4 "{") (Scry.Cs.isOp t4 "=>")) then
+      Scry.Cs.propertyDecl start pre ty
+    else do
+      Scry.Cs.setFieldOf ty "type";
+      ds ← Scry.Cs.declarators;
+      Scry.Cs.expectOp ";";
+      d ← Scry.Cs.node "variable_declaration" start (.cons ty ds);
+      Scry.Cs.node "field_declaration" start (List.append pre (.cons d .nil))
+
+/-- The body of a method/constructor/accessor: a block, `=> e;`, or `;`. -/
+partial def Scry.Cs.funcBody : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "{" with
+  | .true => do
+    b ← Scry.Cs.fld "body" Scry.Cs.block;
+    Scry.Cs.ret (List.cons b .nil)
+  | .false => match Scry.Cs.isOp t "=>" with
+    | .true => do
+      start ← Scry.Cs.here;
+      ign ← Scry.Cs.advance;
+      e ← Scry.Cs.expr;
+      Scry.Cs.expectOp ";";
+      b ← Scry.Cs.fld "body" (Scry.Cs.node "arrow_expression_clause" start [e]);
+      Scry.Cs.ret (List.cons b .nil)
+    | .false => do
+      Scry.Cs.expectOp ";";
+      Scry.Cs.ret (.nil : List Nat)
+
+partial def Scry.Cs.methodDecl (start : Nat) (pre : List Nat) (ty : Nat) : Scry.Cs.P Nat := do
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  t ← Scry.Cs.peek;
+  tps ← match Scry.Cs.isOp t "<" with
+    | .true => do
+      p ← Scry.Cs.fld "type_parameters" Scry.Cs.typeParams;
+      Scry.Cs.ret (List.cons p .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  ps ← Scry.Cs.fld "parameters" Scry.Cs.params;
+  Scry.Cs.constraints;
+  body ← Scry.Cs.funcBody;
+  Scry.Cs.node "method_declaration" start
+    (List.append pre (.cons ty (.cons n (List.append tps (.cons ps body)))))
+
+partial def Scry.Cs.ctorDecl (start : Nat) (pre : List Nat) : Scry.Cs.P Nat := do
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  ps ← Scry.Cs.fld "parameters" Scry.Cs.params;
+  t ← Scry.Cs.peek;
+  ini ← match Scry.Cs.isOp t ":" with
+    | .true => do
+      istart ← Scry.Cs.here;
+      ign ← Scry.Cs.advance;
+      t2 ← Scry.Cs.peek;
+      k ← match Bool.or (Scry.Cs.isKw t2 "base") (Scry.Cs.isKw t2 "this") with
+        | .true => Scry.Cs.leaf t2.text .false
+        | .false => Scry.Cs.fail "expected 'base' or 'this'";
+      args ← Scry.Cs.fld "arguments" (Scry.Cs.argList "(" ")" "argument_list");
+      i ← Scry.Cs.node "constructor_initializer" istart [k, args];
+      Scry.Cs.ret (List.cons i .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  body ← Scry.Cs.funcBody;
+  Scry.Cs.node "constructor_declaration" start (List.append pre (.cons n (.cons ps (List.append ini body))))
+
+partial def Scry.Cs.params : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  Scry.Cs.expectOp "(";
+  t ← Scry.Cs.peek;
+  ps ← match Scry.Cs.isOp t ")" with
+    | .true => Scry.Cs.ret (.nil : List Nat)
+    | .false => Scry.Cs.paramList;
+  Scry.Cs.expectOp ")";
+  Scry.Cs.node "parameter_list" start ps
+
+partial def Scry.Cs.paramList : Scry.Cs.P (List Nat) := do
+  p ← Scry.Cs.param;
+  more ← Scry.Cs.acceptOp ",";
+  match more with
+  | .false => Scry.Cs.ret (List.cons p .nil)
+  | .true => do
+    rest ← Scry.Cs.paramList;
+    Scry.Cs.ret (List.cons p rest)
+
+/-- `[attrs] [ref|out|in|params|this] T name [= default]`. -/
+partial def Scry.Cs.param : Scry.Cs.P Nat := do
+  start ← Scry.Cs.here;
+  ign ← Scry.Cs.attributes;
+  t ← Scry.Cs.peek;
+  mods ← match Bool.or (Bool.or (Scry.Cs.isKw t "ref") (Scry.Cs.isKw t "out"))
+      (Bool.or (Bool.or (Scry.Cs.isKw t "in") (Scry.Cs.isKw t "params")) (Scry.Cs.isKw t "this")) with
+    | .true => do
+      m ← Scry.Cs.leaf "modifier" .true;
+      Scry.Cs.ret (List.cons m .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  ty ← Scry.Cs.fld "type" Scry.Cs.parseType;
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  eq ← Scry.Cs.acceptOp "=";
+  dv ← match eq with
+    | .true => do
+      v ← Scry.Cs.fld "default" Scry.Cs.expr;
+      Scry.Cs.ret (List.cons v .nil)
+    | .false => Scry.Cs.ret (.nil : List Nat);
+  Scry.Cs.node "parameter" start (List.append mods (.cons ty (.cons n dv)))
+
+/-- `T P { get; set; }`, `T P { get { … } set { … } } = init;`, `T P => e;`. -/
+partial def Scry.Cs.propertyDecl (start : Nat) (pre : List Nat) (ty : Nat) : Scry.Cs.P Nat := do
+  n ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "=>" with
+  | .true => do
+    astart ← Scry.Cs.here;
+    ign ← Scry.Cs.advance;
+    e ← Scry.Cs.expr;
+    Scry.Cs.expectOp ";";
+    v ← Scry.Cs.fld "value" (Scry.Cs.node "arrow_expression_clause" astart [e]);
+    Scry.Cs.node "property_declaration" start (List.append pre [ty, n, v])
+  | .false => do
+    astart ← Scry.Cs.here;
+    Scry.Cs.expectOp "{";
+    accs ← Scry.Cs.accessors;
+    Scry.Cs.expectOp "}";
+    al ← Scry.Cs.fld "accessors" (Scry.Cs.node "accessor_list" astart accs);
+    eq ← Scry.Cs.acceptOp "=";
+    ini ← match eq with
+      | .true => do
+        v ← Scry.Cs.fld "value" Scry.Cs.expr;
+        Scry.Cs.expectOp ";";
+        Scry.Cs.ret (List.cons v .nil)
+      | .false => Scry.Cs.ret (.nil : List Nat);
+    Scry.Cs.node "property_declaration" start (List.append pre (.cons ty (.cons n (.cons al ini))))
+
+partial def Scry.Cs.accessors : Scry.Cs.P (List Nat) := do
+  t ← Scry.Cs.peek;
+  match Scry.Cs.isOp t "}" with
+  | .true => Scry.Cs.ret (.nil : List Nat)
+  | .false => do
+    start ← Scry.Cs.here;
+    ign ← Scry.Cs.attributes;
+    mods ← Scry.Cs.modifiers;
+    t2 ← Scry.Cs.peek;
+    match Bool.and (Scry.Cs.isId t2) (String.elem t2.text ["get", "set", "init"]) with
+    | .false => Scry.Cs.fail ("expected 'get', 'set' or 'init', found " ++ Scry.Cs.describe t2)
+    | .true => do
+      k ← Scry.Cs.fld "name" (Scry.Cs.leaf "identifier" .true);
+      body ← Scry.Cs.funcBody;
+      a ← Scry.Cs.node "accessor_declaration" start (List.append mods (.cons k body));
+      rest ← Scry.Cs.accessors;
+      Scry.Cs.ret (List.cons a rest)
+end
+
+-- ## The tree
+
+/-- A finished parse: rows in final numbering (root 0, see the module doc). -/
+structure Scry.Cs.Tree where
+  path : String
+  text : String
+  rows : List Scry.Cs.Row
+
+def Scry.Cs.Tree.count (t : Scry.Cs.Tree) : Nat := List.length t.rows
+
+def Scry.Cs.emptyRow : Scry.Cs.Row := Scry.Cs.Row.mk "" "" .false 0 0 "" .nil
+
+def Scry.Cs.Tree.row (t : Scry.Cs.Tree) (i : Nat) : Scry.Cs.Row := List.getD t.rows i Scry.Cs.emptyRow
+
+/-- Node `i`'s children in final numbering. -/
+def Scry.Cs.Tree.kids (t : Scry.Cs.Tree) (i : Nat) : List Nat :=
+  let n := Scry.Cs.Tree.count t;
+  List.map (fun p => Nat.sub (Nat.sub n 1) p) (Scry.Cs.Tree.row t i).kids
+
+inductive Scry.Cs.Result where
+  | ok (t : Scry.Cs.Tree)
+  | err (msg : String) (pos : Nat)
+
+/-- The compilation unit: items until end of file. -/
+def Scry.Cs.unit : Scry.Cs.P Nat := do
+  its ← Scry.Cs.items;
+  t ← Scry.Cs.peek;
+  match String.eq t.kind "eof" with
+  | .false => Scry.Cs.fail ("unexpected " ++ Scry.Cs.describe t)
+  | .true => Scry.Cs.node "compilation_unit" 0 its
+
+/-- Parse a C# source file. -/
+def Scry.Cs.parse (path : String) (src : String) : Scry.Cs.Result :=
+  match Scry.Cs.lex src with
+  | .err m p => .err m p
+  | .ok toks =>
+    let s0 := Scry.Cs.PS.mk toks .nil 0 0;
+    match Scry.Cs.unit s0 with
+    | .err m p => .err m p
+    | .ok s _ =>
+      -- the compilation unit spans the whole file
+      let rows : List Scry.Cs.Row := match s.rows with
+        | .cons r rs => .cons { r with stop := String.length src } rs
+        | .nil => .nil;
+      .ok (Scry.Cs.Tree.mk path src rows)
+
+-- ## Rendering (the golden format)
+
+/-- Line and column (both 1-based) of offset `pos`. -/
+def Scry.Cs.lineCol (src : String) (pos : Nat) : Nat × Nat :=
+  List.foldl (fun (acc : Nat × Nat) c => match Nat.beq (Char.code c) 10 with
+    | .true => (Nat.succ acc.1, 1)
+    | .false => (acc.1, Nat.succ acc.2)) (1, 1) (List.take pos (String.chars src))
+
+def Scry.Cs.indent : Nat → String
+  | .zero => ""
+  | .succ k => "  " ++ Scry.Cs.indent k
+
+/-- Leaves whose text is shown. -/
+def Scry.Cs.showsText (kind : String) : Bool :=
+  String.elem kind ["identifier", "predefined_type", "implicit_type", "modifier", "integer_literal",
+    "real_literal", "string_literal", "verbatim_string_literal", "character_literal",
+    "boolean_literal"]
+
+/-- `ls` with `)` appended to its last line. -/
+def Scry.Cs.closeLast (ls : List String) : List String := match List.reverse ls with
+  | .cons l rest => List.reverse (.cons (l ++ ")") rest)
+  | .nil => .nil
+
+/-- Node `i` as tree-sitter-style S-expression lines at depth `d`: named nodes only,
+anonymous tokens only when they have a field (`operator: "+"`). -/
+partial def Scry.Cs.renderNode (t : Scry.Cs.Tree) (d : Nat) (i : Nat) : List String :=
+  let r := Scry.Cs.Tree.row t i;
+  let pre : String := match String.isEmpty r.field with
+    | .true => ""
+    | .false => r.field ++ ": ";
+  match r.named with
+  | .false => match String.isEmpty r.field with
+    | .true => .nil
+    | .false => .cons (Scry.Cs.indent d ++ pre ++ "\"" ++ r.text ++ "\"") .nil
+  | .true =>
+    let txt : String := match Scry.Cs.showsText r.kind with
+      | .true => " " ++ r.text
+      | .false => "";
+    let kids := List.concat (List.map (Scry.Cs.renderNode t (Nat.succ d)) (Scry.Cs.Tree.kids t i));
+    match kids with
+    | .nil => .cons (Scry.Cs.indent d ++ pre ++ "(" ++ r.kind ++ txt ++ ")") .nil
+    | _ => .cons (Scry.Cs.indent d ++ pre ++ "(" ++ r.kind ++ txt) (Scry.Cs.closeLast kids)
+
+/-- A parse result as the golden text: the S-expression, or `path:line:col: error: msg`. -/
+def Scry.Cs.render (path : String) (src : String) (r : Scry.Cs.Result) : String :=
+  match r with
+  | .err m p => match Scry.Cs.lineCol src p with
+    | (l, c) => path ++ ":" ++ Nat.repr l ++ ":" ++ Nat.repr c ++ ": error: " ++ m
+  | .ok t => String.intercalate "\n" (Scry.Cs.renderNode t 0 0)
+
+/-- Parse and render (the `scry-csharp` golden tests call this). -/
+def Scry.Cs.parseRender (path : String) (src : String) : String :=
+  Scry.Cs.render path src (Scry.Cs.parse path src)
