@@ -5,7 +5,7 @@ import Tests.Elab
 /-!
 # A property harness for the kernels: substitution laws
 
-The laws tested (`wiz-notes/metatheory-plan.md` §5.1 M1b; `wiz-notes/prop-harness.md`):
+The laws tested (`wiz-notes/metatheory-plan.md` §5.1 M1b):
 
 * **P1** typing is stable under substitution, for term, quantity and level variables;
 * **P2** conversion is an equivalence on the sample and stable under substitution;
@@ -2008,8 +2008,7 @@ def runWorld (w : World) (b : Budget) (acc : Acc) (seen : List String) : IO (Acc
   return (acc, seen)
 
 /-- The rules of type equality and of casts that the default run must reach (from
-`vEqType` and `vCast` in `Wiz/Core/Eval.lean`; `wiz-notes/prop-harness.md` lists the arms
-that are not here, and why). -/
+`vEqType` and `vCast` in `Wiz/Core/Eval.lean`). -/
 def requiredRules : List String :=
   (["Π = Π  ↦ Σ", "Π = Π  ↦ False", "Π = Π  ↦ stuck", "Σ = Σ  ↦ Σ", "Σ = Σ  ↦ False", "Σ = Σ  ↦ stuck",
     "Πᵖ = Πᵖ  ↦ Σ", "Π? = Π?  ↦ stuck", "Sort = Sort  ↦ True", "Unit = Unit  ↦ True",
