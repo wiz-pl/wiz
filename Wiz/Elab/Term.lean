@@ -2089,7 +2089,7 @@ partial def elabLet (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy R)
     let g ← getGlobals
     -- an instance problem left for later that mentions `x`: it would be solved with `x`
     -- opaque, after the `let` (no retry then)
-    for (i, p) in (← get).pendingInsts do
+    for (i, p) in (← get).pendingInsts.toArray do
       if i ≥ inst0 && p.ctx.lvl > ctx.lvl &&
           (quote g p.ctx.lvl p.ty).hasVar (p.ctx.lvl - ctx.lvl - 1) then retry
     match expected with
