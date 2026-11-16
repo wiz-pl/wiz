@@ -116,7 +116,10 @@ notebook MIME bundle and opens a Jupyter **comm**; the browser applies the VDOM 
 the kernel sends back. No Wasm is involved: the Wiz side runs in the kernel's native
 toolchain process, and the browser half is `web/framework/runtime.js`.
 
-```wiz
+The block below is a notebook cell, not a file: its last line is a bare expression whose
+value the kernel displays, so it is not checked as a Wiz file.
+
+```wiz no-check
 import Web.Widget
 
 -- The callback is pure: it receives the event and the widget list as displayed last
