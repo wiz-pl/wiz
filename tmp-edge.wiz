@@ -1,0 +1,15 @@
+import Linarith
+
+def nl (x y : Int) : x * y ≤ y * x := by linarith
+def nl_hyp (x y : Int) (h : x * y ≤ 3) : x * y ≤ 4 := by linarith
+def sym (a b c : Nat) (h1 : a ≤ b) (h2 : b ≤ c) : a + 1 ≤ c + 1 := by linarith
+def false_hyp (x : Int) (h : False) : x ≤ x + 1 := by linarith
+def eq_hyp (x y : Int) (h : x = y) : x ≤ y := by linarith
+def eq_hyp2 (x y : Int) (h : x = y) : y ≤ x := by linarith
+def nat_false2 (a b : Nat) (h : a ≤ b) : b ≤ a := by linarith
+def q_false2 (x y : Q) (h : x < y) : y ≤ x := by linarith
+def q_rational (x : Q) : x ≤ x + 1 := by linarith
+def int_atom (f : Int → Int) (x : Int) : f x ≤ f x + 1 := by linarith
+#print axioms sym
+#print axioms eq_hyp
+#print axioms int_atom

@@ -1,0 +1,9 @@
+import Linarith
+
+def t1 (x y : Int) (h : x ≤ y) : x + 1 ≤ y + 1 := by linarith
+def t2 (x y : Int) (h : x ≤ y) : x ≤ y + 1 := by linarith
+def t3 (a b : Nat) (h : a ≤ b) : a + 2 ≤ b + 2 := by linarith
+def t4 (p q : Q) (h : p ≤ q) : 2 * p ≤ 2 * q := by linarith
+#print axioms t1
+#print axioms t3
+#print axioms t4

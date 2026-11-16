@@ -1,0 +1,11 @@
+import Linarith
+
+def q_trans_lt (x y z : Q) (h1 : x < y) (h2 : y < z) : x < z := by linarith
+def q_lt_le (x y z : Q) (h1 : x < y) (h2 : y ≤ z) : x < z := by linarith
+def q_le_lt (x y z : Q) (h1 : x ≤ y) (h2 : y < z) : x < z := by linarith
+def q_mixed (x y : Q) (h : x < y) : x + 1 < y + 2 := by linarith
+def int_trans (x y z : Int) (h1 : x < y) (h2 : y < z) : x + 1 ≤ z := by linarith
+def nat_trans (a b c : Nat) (h1 : a < b) (h2 : b ≤ c) : a + 1 ≤ c := by linarith
+def q_false_strict (x y : Q) (h : x ≤ y) : y < x := by linarith
+#print axioms q_trans_lt
+#print axioms int_trans

@@ -1,0 +1,6 @@
+import Linarith
+
+def a (x y : Q) (h : x < y) : x < y := by linarith
+def b (x y : Q) (h : x < y) : x + 1 < y + 1 := by linarith
+def c (x y z : Q) (h1 : x < y) (h2 : y ≤ z) : x < z := by linarith
+def d (x y z : Q) (h1 : x ≤ y) (h2 : y < z) : x < z := by linarith

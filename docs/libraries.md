@@ -910,6 +910,8 @@ and doc comments; std's tests check one example of each.
 | `lib/IntOrder.wiz` | `Int.Le`/`Int.Lt` (`b - a` not negative) with `≤`/`<`; monotonicity, cancellation, `Int.abs` and the triangle inequality |
 | `lib/Rat.wiz` | `Q`: unreduced fractions with `≈`, an ordered field up to `≈` (`Q.inv`, `Q.mul_inv`, `Q.abs_add`, `Q.lt_ceil`); `q_ring! lhs ≈ rhs` |
 | `lib/RingTactic.wiz` | `by ring`: the three normalisers as a tactic that reads the goal |
+| `lib/NormNum.wiz` | `by norm_num`: closed arithmetic at `Nat`/`Int`/`Q` by the kernel's `rfl` (computation, no `native_decide`) |
+| `lib/Linarith.wiz` | `by linarith`: linear `Nat`/`Int`/`Q` inequalities and equations by Fourier–Motzkin; the certificate is a kernel-checked proof term, and nonlinear goals are refused |
 
 ```
 import Rat
@@ -946,6 +948,28 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
 * **`Q` is not reduced**: `p ≈ q` is `p.num · q.den = q.num · p.den`, so every law is an
   integer identity and `q_ring!` is `int_ring!` on numerators and denominators. Use the
   congruences (`Q.add_congr`, `Q.le_congr`, …) to rewrite under `≈`.
+* **`norm_num`** (`lib/NormNum.wiz`) closes a goal by `rfl`: the kernel computes the
+  closed arithmetic subterms and checks that the proposition is a proof. It is small on
+  purpose, does not use hypotheses, and never calls `native_decide`. A false closed
+  proposition fails with `norm_num: the closed arithmetic proposition is false`; a goal
+  with variables that does not compute says that `norm_num` does not use hypotheses.
+* **`linarith`** (`lib/Linarith.wiz`) reads the goal and the hypotheses as linear forms
+  (addition, subtraction, numerals and multiplication by a literal; every other subterm
+  is an atom), eliminates variables by Fourier–Motzkin, and builds a proof from the order
+  lemmas (`Nat.mul_le_mul_left`, `Nat.add_le_add`, `Int.nonneg_mul`,
+  `Int.nonneg_add`, `Q.nonneg_mul`, `Q.pos_add`, …). It handles `≤` and `<` at `Nat`,
+  `Int` and `Q`, equations at `Nat`/`Int` (antisymmetry of two inequalities, or `ring`),
+  and `≈` at `Q`. A product of two non-constant expressions is refused with
+  `linarith: nonlinear term`; a false goal with
+  `linarith: the goal does not follow by linear arithmetic`; a `Nat` goal whose
+  certificate would need a division (`2*a ≤ 2*b ⊢ a ≤ b`) is refused (lib/Nat.wiz has no
+  multiplication-cancellation lemma). The search is **untrusted**; it returns only
+  nonnegative coefficients, and the proof term it assigns is checked by the kernel. No
+  `native_decide`, SMT axiom or `sorry` is involved: `#print axioms` on a theorem proved
+  by either tactic reports “does not depend on any axioms”. The tests are the 12 cases of
+  the `arith-tactics` group (`Tests/Groups/ArithTactics.lean`): true and false goals at
+  each carrier, strict and non-strict hypotheses, equations, a symbolic goal, the
+  nonlinear refusals, the `Nat` division refusal, and `#print axioms`.
 * `Vec.wiz` and `Hoare.wiz` import `Nat` for the lemmas they used to define themselves.
 ## Native structures: word arrays, word maps, interned strings
 

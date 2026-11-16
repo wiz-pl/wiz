@@ -199,6 +199,11 @@ def Forall.notEx {A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P 
 /-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`). -/
 def Eq.symm {A : Type} {a b : A} (e : a = b) : b = a :=
   transp (fun b _ => b = a) (refl a) e
+/-- `Eq.symm` with its type and sides explicit (for tactics that build terms). -/
+def Eq.symmEx {A : Type} (a b : A) (h : a = b) : b = a := Eq.symm h
+/-- `absurd` with its result type explicit (for tactics that build terms). -/
+def False.elimEx (P : Prop) (h : False) : P := absurd h
+
 /-- Equality is transitive. -/
 def Eq.trans {A : Type} {a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
   transp (fun c _ => a = c) e₁ e₂

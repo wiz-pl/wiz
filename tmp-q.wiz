@@ -1,0 +1,5 @@
+import Linarith
+
+def qid (p q : Q) : 2 * (q - p) ≈ 1 * (2 * q - 2 * p) := by ring
+def qid2 (p q : Q) : 2 * q - 2 * p ≈ 2 * q + - (2 * p) := by ring
+def qid3 (p q : Q) : q - p ≈ q - p := by ring

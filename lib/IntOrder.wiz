@@ -219,6 +219,13 @@ def Int.abs_mul_pos (a b : Int) (hb : Int.Lt 0 b) : Int.abs a * b = Int.abs (a *
 
 /-- `a = b → a ≤ b`. -/
 def Int.le_of_eq {ω a b : Int} (e : a = b) : Int.Le a b := Int.Le.congr (refl a) e (Int.le_refl a)
+/-- `Int.NonNeg.congr` with explicit arguments. -/
+def Int.nonneg_congr_ex (a b : Int) (e : a = b) (h : Int.NonNeg a) : Int.NonNeg b := Int.NonNeg.congr e h
+/-- `Int.le_of_eq` with explicit arguments. -/
+def Int.le_of_eq_ex (a b : Int) (e : a = b) : Int.Le a b := Int.le_of_eq e
+/-- `a = b → b ≤ a`, with explicit arguments. -/
+def Int.le_of_eq'_ex (a b : Int) (e : a = b) : Int.Le b a := Int.le_of_eq (Eq.symm e)
+
 /-- Transport `<` along equations of both sides. -/
 def Int.Lt.congr {ω a b c d : Int} (e : a = c) (e' : b = d) (h : Int.Lt a b) : Int.Lt c d :=
   Int.Le.congr (congrArg (fun x => x + 1) e) e' h

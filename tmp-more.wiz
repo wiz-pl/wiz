@@ -1,0 +1,21 @@
+import Linarith
+
+def int_le (x y z : Int) (h1 : x ≤ y) (h2 : y ≤ z) : x ≤ z := by linarith
+def int_lt (x y : Int) (h : x < y) : x + 1 ≤ y := by linarith
+def int_eq (x y : Int) (h1 : x ≤ y) (h2 : y ≤ x) : x = y := by linarith
+def int_eq_goal (x : Int) : x + 0 = x := by linarith
+def nat_lt (a b : Nat) (h : a < b) : a + 1 ≤ b := by linarith
+def nat_eq (a b : Nat) (h1 : a ≤ b) (h2 : b ≤ a) : a = b := by linarith
+def q_le (x y z : Q) (h1 : x ≤ y) (h2 : y ≤ z) : x ≤ z := by linarith
+def q_lt (x y : Q) (h : x < y) : x + 1 ≤ y + 1 := by linarith
+def q_eq (x y : Q) (h1 : x ≤ y) (h2 : y ≤ x) : x ≈ y := by linarith
+def q_strict (x y : Q) (h : x < y) : x < y + 1 := by linarith
+def q_scale (x y : Q) (h : 2 * x ≤ 2 * y) : x ≤ y := by linarith
+def nat_false (a b : Nat) (h : a ≤ b) : b ≤ a := by linarith
+def int_false (x y : Int) (h : x < y) : y < x := by linarith
+def q_false (x y : Q) (h : x < y) : y ≤ x := by linarith
+def nonlinear (x y : Int) : x * y = y * x := by linarith
+#print axioms int_le
+#print axioms nat_lt
+#print axioms q_strict
+#print axioms q_scale

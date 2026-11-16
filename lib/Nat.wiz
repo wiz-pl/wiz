@@ -218,6 +218,23 @@ def Nat.not_le : (a b : Nat) → Nat.le a b = .false → Nat.Lt b a
   | .zero, _, h => absurd h.1
   | .succ _, .zero, _ => rfl
   | .succ a, .succ b, h => Nat.not_le a b h
+/-- An equation gives `≤`: `a = b → a ≤ b`. -/
+def Nat.le_of_eq {a b : Nat} (e : a = b) : Nat.Le a b :=
+  Eq.mp' (fun (x : Nat) => Nat.Le a x) e (Nat.le_refl a)
+/-- An equation gives `≤` in the other direction: `a = b → b ≤ a`. -/
+def Nat.le_of_eq' {a b : Nat} (e : a = b) : Nat.Le b a :=
+  Eq.mp' (fun (x : Nat) => Nat.Le x a) e (Nat.le_refl a)
+/-- Rewrite the right side of a `≤` along an equation. -/
+def Nat.le_of_eq_right {a b c : Nat} (e : b = c) (h : Nat.Le a b) : Nat.Le a c :=
+  Eq.mp' (fun (x : Nat) => Nat.Le a x) e h
+
+/-- `Nat.le_of_eq` with explicit arguments. -/
+def Nat.le_of_eq_ex (a b : Nat) (e : a = b) : Nat.Le a b := Nat.le_of_eq e
+/-- `Nat.le_of_eq'` with explicit arguments. -/
+def Nat.le_of_eq'_ex (a b : Nat) (e : a = b) : Nat.Le b a := Nat.le_of_eq' e
+/-- `Nat.le_of_eq_right` with explicit arguments. -/
+def Nat.le_of_eq_right_ex (a b c : Nat) (e : b = c) (h : Nat.Le a b) : Nat.Le a c := Nat.le_of_eq_right e h
+
 /-- `a ≤ b` or `b < a`: which one is decided by `Nat.le a b`. -/
 def Nat.le_or_lt (a b : Nat) : Nat.Le a b ∨ Nat.Lt b a :=
   Or.imp (fun (h : Nat.le a b = .true) => h) (fun h => Nat.not_le a b h) (Bool.cases (Nat.le a b))

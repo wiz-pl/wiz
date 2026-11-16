@@ -1,0 +1,21 @@
+import Linarith
+
+def dumpArgs (g : Nat) : List Expr → TacticM Unit
+  | .nil => TacticM.pure ()
+  | .cons a rest => do
+      s ← TacticM.ppExpr g a;
+      TacticM.trace s;
+      dumpArgs g rest
+
+syntax (name := dbg) "dbg" : tactic
+def dbgTac : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  match Expr.view ty with
+  | .const n args => do
+    TacticM.trace n;
+    dumpArgs g args
+  | _ => TacticM.trace "not const"
+attribute [tactic tactic.dbg] dbgTac
+
+def c (x y z : Q) (h1 : x < y) (h2 : y ≤ z) : x < z := by dbg; linarith
