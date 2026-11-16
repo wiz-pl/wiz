@@ -14,6 +14,18 @@ natively (`def t : Nat.mod 300 256 = 44 := refl 44`), as do `#eval`, `#run`, C/L
 `Nat.mod n 0 = n` and `Nat.log2 0 = 0`. One table (`natNative?`, `Wiz/Core/Eval.lean`)
 serves the kernel and both interpreters.
 
+**Shifts by an arbitrary count.** Every shift count is a `Nat`, never a word, so no
+shift count is negative. The rules are total:
+
+* `Nat.shiftLeft a k = a * 2^k` and `Nat.shiftRight a k = a / 2^k` (floor). In
+  particular `0 << k = 0`, and `a >> k = 0` once `k` is at least the bit length of
+  `a`, so a huge count never has to build `2^k`. A nonzero `a << k` with a huge `k`
+  is a number with `k` bits: the rule fixes its value, but an implementation may
+  fail from resource exhaustion instead of materialising it (a resource limit, not
+  a value difference).
+* Words (22c) cap the exponent at the width, so `k ≥ w` gives `0` (or `-1` for a
+  negative arithmetic shift) without building `2^k`.
+
 ## 22b: `implemented_by`
 
 `attribute [implemented_by g] f` gives a definition `f` a different implementation in
@@ -38,6 +50,14 @@ arithmetic wraps around), with `ofNat`/`toNat`, wrapping `add`/`sub`/`mul`/`neg`
 as Rust; `x / 0 = 0` and `x % 0 = x` as Lean, where Rust panics), comparisons, bitwise
 operations, shifts (`shiftLeft` by `k ≥ w` gives `0`; `IntN.shiftRight` is
 arithmetic), `resize` (zero- or sign-extending, or truncating) and `toIntN`/`toUIntN`.
+The shift rules hold for every `Nat` count `k`, including counts far beyond the
+width: `UIntN.shiftLeft a k = (a * 2^k) mod 2^w` and `UIntN.shiftRight a k = a / 2^k`
+are both `0` for `k ≥ w`; `IntN.shiftLeft` is the same bits as `UIntN.shiftLeft`, and
+`IntN.shiftRight a k = floor(a / 2^k)` (arithmetic) is `0` for `k ≥ w` when `a ≥ 0`
+and `-1` (all ones) when `a < 0`. The model (`lib/Word.wiz`) caps the exponent at `w`
+(`Word.min k w`), so it never asks `Nat.shiftLeft` to materialise `2^k` for a result
+that is `0`.
+`lib/Int.wiz`'s unbounded `Int` has no shift operation.
 
 * **One width-indexed type** serves both clients: the HDL's `Unsigned n` needs any
   width (1, 5, 65, …) and Rust's `u32` is `U32 := UIntN 32` (also `U8 … U64`, `USize`,
@@ -97,7 +117,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
 
 ## 22e: phantom parameters
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where
   | mk (toNat : Nat)                     -- no field mentions `w`
 def f (x : UIntN 8) : UIntN 16 := x      -- type mismatch
@@ -194,7 +214,7 @@ Two ways to prove `False` without writing `axiom` are closed.
 
 ## 22g: regions: borrow checking as typing
 
-```
+```wiz no-check
 def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
   | .true => .ok y
@@ -281,7 +301,7 @@ live on after the borrow), and with the second it also has to request the instan
 
 `BitVec n` (`lib/BitVec.wiz`) and `UIntN n` (`lib/Word.wiz`) are one type:
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where | mk (toNat : Nat)   -- lib/Word.wiz: the model + natives
 def BitVec (n : Nat) : Type := UIntN n               -- lib/BitVec.wiz: the HDL/proof names
 def BitVec.add {ω n : Nat} (a b : BitVec n) : BitVec n := UIntN.add a b
@@ -313,7 +333,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
 
 ## 22i: unboxed newtypes and `attribute [inline]`
 
-```
+```wiz no-check
 structure Uniq (ρ : Region) (A : Type) where
   val : A                                  -- at run time, a Uniq ρ A is its A
 attribute [inline] Uniq.borrow             -- compiled code runs the scope's body in place
@@ -388,7 +408,7 @@ design). The self-hosted toolchain doesn't have phantom tails at all yet.
 
 ## 22j: Feral, the surface language
 
-```
+```wiz no-check
 import FeralCore
 import Feral
 feral
@@ -420,7 +440,7 @@ loops, `?`, `U64`, and functions that return borrows.
   and elaborated like anything else. `#lower feral … end` also shows that text: the
   function above becomes
 
-  ```
+  ```wiz no-check
   def swap {ρa ρb : Region} (x : (Uniq ρa U64)) (y : (Uniq ρb U64)) : Result (Unit × ((Uniq ρa U64) × (Uniq ρb U64))) :=
     let t := x.val;
     let x := (Uniq.set x y.val);

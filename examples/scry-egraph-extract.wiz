@@ -1,0 +1,47 @@
+import Scry.Egraph
+-- Extraction (`scry-egraph-extract`): a cheapest term per e-class. The first class has
+-- `x`, `x + 0` and `(x + 0) * 1`; unit cost extracts `x`. The second has a leaf `k` and
+-- `0 + 1`; with a heavy weight on `k`, extraction picks the smaller `0 + 1` instead.
+-- `main` is the digest.
+
+-- ops: 0 = x, 1 = add, 2 = zero, 3 = mul, 4 = one, 5 = k
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let z := Scry.EGraph.add x.1 (Scry.ENode.leaf 2);
+  let o := Scry.EGraph.add z.1 (Scry.ENode.leaf 4);
+  let axz := Scry.EGraph.add o.1 (Scry.ENode.mk 1 [x.2, z.2]);
+  let maxz := Scry.EGraph.add axz.1 (Scry.ENode.mk 3 [axz.2, o.2]);
+  let k := Scry.EGraph.add maxz.1 (Scry.ENode.leaf 5);
+  let kAdd := Scry.EGraph.add k.1 (Scry.ENode.mk 1 [z.2, o.2]);
+  let m1 := Scry.EGraph.merge kAdd.1 x.2 axz.2;
+  let m2 := Scry.EGraph.merge m1.1 x.2 maxz.2;
+  let m3 := Scry.EGraph.merge m2.1 k.2 kAdd.2;
+  m3.1
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def headD : List Nat → Nat
+  | .nil => 99
+  | .cons x _ => x
+
+def main : Nat :=
+  let xcls := classOfD ga (Scry.ENode.leaf 0) 900;
+  let kcls := classOfD ga (Scry.ENode.leaf 5) 901;
+  let w := fun op => if Nat.beq op 5 then 100 else 0;
+  let unit := Scry.EGraph.extract ga xcls;
+  let weighted := Scry.EGraph.extractWith ga w kcls;
+  let unitCost := Scry.EGraph.cost ga (fun _ => 0) xcls;
+  let weightedCost := Scry.EGraph.cost ga w kcls;
+  match unit with
+  | .none => 902
+  | .some t1 =>
+    match weighted with
+    | .none => 903
+    | .some t2 =>
+      unitCost * 10000 + Scry.ETerm.size t1 * 1000 + weightedCost * 100 +
+      List.length (Scry.ETerm.toList t2) * 10 + headD (Scry.ETerm.toList t2) +
+      (if Scry.EGraph.canonical ga then 1 else 0)

@@ -675,6 +675,16 @@ def group : Group where
     { name := "a match on a list does not run through its tail (1000 matches on 2000 elements)", run := fun _ => do
         let _ ← within 30 1000 fun _ => elabOk (listMatchProgram 2000 1000)
         pure () },
+    -- (#256) `rfl` over a machine run behind one definition. Conversion computes the
+    -- equation at the data type (`Option Int`) to a Σ, and `rfl` used to build a
+    -- structural proof over every field, re-evaluating the run at each step: three
+    -- completions did not finish in two minutes (and exceeded 5 GB), while the same
+    -- equation inline checked in seconds. A computed data equation now carries its
+    -- original sides (`markDataEq`), so `rfl` is one `refl`; definitional unfoldings are
+    -- memoised (`memoThunk`). Before: over 120 s; now about 5 s.
+    { name := "a machine run behind a definition is not re-evaluated per field (three completions, #256)", run := fun _ => do
+        let src ← IO.FS.readFile "Tests/data/rfl-shared-run.wiz"
+        checksLibsWithin 30 src },
     -- the same laziness must not lose a hypothesis that is used, here under a binder
     { name := "a recursive call used under a `fun` is still computed (lazy hypotheses)", run := fun _ => do
         let _ ← elabOk ("import Prelude\n" ++ hypUnderBinder ++ "def t : sumF (.cons 1 (.cons 2 (.cons 3 .nil))) 0 = 6 := refl 6\n")
@@ -863,7 +873,8 @@ def probeReuse : IO UInt32 := do
       unless bad.isEmpty do failures := failures + 1
     catch e => IO.println s!"{m}: not compiled ({(toString e).take 120})"
   let srcs ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
-  for (what, prog) in [("selfhost checker", Selfhost.checkerSource (srcs.take 4)), ("selfhost compiler", Selfhost.compilerSource srcs)] do
+  let checkSrcs ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+  for (what, prog) in [("selfhost checker", Selfhost.checkerSource checkSrcs), ("selfhost compiler", Selfhost.compilerSource srcs)] do
     let st := runFrontend (R := ZeroOneMany) prog { trustedModule := Tests.libModule, loader }
     let errs := (st.messages.filter (·.severity == .error)).map fun m => m.render prog
     unless errs.isEmpty do throw (IO.userError s!"{what}: unexpected errors:\n{"\n".intercalate (errs.toList.take 5)}")

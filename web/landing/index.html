@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiz — a dependently typed language, self-hosted</title>
+<meta name="description" content="Wiz is a dependently typed programming language with quantitative types, observational equality, a self-hosted toolchain, native code generation and a playground that runs in the browser.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231d1d1b'/%3E%3Ctext x='32' y='45' font-size='40' font-family='system-ui,sans-serif' fill='%23fdfdfb' text-anchor='middle'%3E%CE%BB%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="landing.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <a class="brand" href="./" aria-label="Wiz home"><span class="brand-mark" aria-hidden="true">λ</span> Wiz</a>
+  <nav class="site-nav" aria-label="Main">
+    <ul>
+      <li><a href="docs/">Docs</a></li>
+      <li><a href="bench/">Benchmarks</a></li>
+      <li><a href="playground/">Playground</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a class="external" href="https://github.com/wiz-pl/wiz">GitHub<span class="external-mark" aria-hidden="true"> ↗</span></a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="main">
+  <section class="hero" aria-labelledby="hero-title">
+    <p class="eyebrow">Dependently typed · quantitative · self-hosted</p>
+    <h1 id="hero-title">A small language with <em>big ideas</em>.</h1>
+    <p class="lede">
+      Wiz is a dependently typed programming language with quantitative types,
+      observational equality and data described by its own theory. Its kernel,
+      elaborator and compiler are written in Wiz itself, and it compiles to native
+      code through C and LLVM.
+    </p>
+    <p class="hero-actions">
+      <a class="button primary" href="docs/">Read the docs</a>
+      <a class="button" href="playground/">Try the playground</a>
+    </p>
+    <pre class="hero-code" tabindex="0" aria-label="Example: the identity function"><code><span class="tok-keyword">def</span> id {<span class="tok-number">0</span> A : Type} (<span class="tok-number">1</span> x : A) : A := x</code></pre>
+    <p class="hero-note">
+      The <code>0</code> says <code>A</code> is erased at run time; the <code>1</code>
+      says <code>x</code> is used exactly once.
+    </p>
+  </section>
+
+  <section id="features" class="section" aria-labelledby="features-title">
+    <h2 id="features-title">What it is</h2>
+    <p class="section-lede">
+      A learning project and the basis of a course in the style of
+      <em>Software Foundations</em>: every stage of the implementation is a set of
+      exercises, with a test suite that says when you got them right.
+    </p>
+    <ul class="cards">
+      <li class="card">
+        <h3>Quantitative types</h3>
+        <p>Quantities <code>0</code>, <code>1</code> and <code>ω</code> on binders, with
+          quantity polymorphism. Erased arguments cost nothing at run time.</p>
+      </li>
+      <li class="card">
+        <h3>Observational equality</h3>
+        <p>An impredicative, proof-irrelevant <code>Prop</code>, function extensionality,
+          and a <code>cast</code> that computes on data.</p>
+      </li>
+      <li class="card">
+        <h3>Data as descriptions</h3>
+        <p><code>inductive</code> and <code>structure</code> elaborate to indexed
+          descriptions with <code>μ</code>/<code>ν</code>: dependent pattern matching,
+          mutual and indexed families, sized types and codata.</p>
+      </li>
+      <li class="card">
+        <h3>Self-hosted</h3>
+        <p>The kernel, frontend and compiler in <code>selfhost/*.wiz</code> check and
+          compile themselves; the bootstrap reaches a fixpoint (stage-1 C equals
+          stage-2 C).</p>
+      </li>
+      <li class="card">
+        <h3>Native code</h3>
+        <p>Erasure to an IR with Perceus reference counting and reuse, C and LLVM
+          backends, a C FFI with header import, and machine integers and bit
+          vectors.</p>
+      </li>
+      <li class="card">
+        <h3>Tools that know the language</h3>
+        <p>A language server with an infoview (terminal and browser clients), a
+          content-addressed elaboration cache, and
+          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/23-grail.md">grail</a>,
+          a build tool and test runner configured in Wiz.</p>
+      </li>
+    </ul>
+  </section>
+
+  <section id="install" class="section" aria-labelledby="install-title">
+    <h2 id="install-title">Get started</h2>
+    <p class="section-lede">
+      Wiz runs on x86_64 Linux (glibc 2.27 or later). Pick one of these, or read the
+      full <a href="https://github.com/wiz-pl/wiz/blob/master/docs/install.md">installation
+      guide</a> for editors and a first project.
+    </p>
+    <ol class="steps">
+      <li>
+        <h3>Install a toolchain with tower</h3>
+        <p>Tower works like elan or rustup: it puts <code>wiz</code> and
+          <code>grail</code> shims on <code>PATH</code> and keeps toolchains per
+          project.</p>
+        <pre tabindex="0"><code>curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh | sh
+export PATH="$HOME/.tower/bin:$PATH"
+tower default nightly</code></pre>
+        <p class="small">Or with Nix:
+          <code>nix profile install github:wiz-pl/wiz#tower</code>.
+          More in the
+          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/26-tower.md">tower
+          guide</a>.</p>
+      </li>
+      <li>
+        <h3>Run it without a checkout</h3>
+        <p>The binaries are on the public Cachix cache, so Nix can fetch instead of
+          building:</p>
+        <pre tabindex="0"><code>cachix use badlydrawnwizards
+nix run github:wiz-pl/wiz#wiz -- check hello.wiz   # `#grail` for grail</code></pre>
+      </li>
+      <li>
+        <h3>Build from a checkout</h3>
+        <p>Everything the compiler and tests need comes from the development
+          shell:</p>
+        <pre tabindex="0"><code>nix develop         # the toolchain; writes this machine's paths to grail.local.wiz
+lake build          # the library and the `wiz` executable
+lake test           # the test suite (`lake test -- --list` for the groups)</code></pre>
+        <p class="small">See
+          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/building.md">building.md</a>
+          for CI, caches and the rest.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section id="explore" class="section" aria-labelledby="explore-title">
+    <h2 id="explore-title">Explore</h2>
+    <ul class="links">
+      <li>
+        <a href="docs/">
+          <span class="link-title">Documentation</span>
+          <span class="link-desc">The standard library, one page per module, with
+            searchable declarations and interactive signatures.</span>
+        </a>
+      </li>
+      <li>
+        <a href="playground/">
+          <span class="link-title">Playground</span>
+          <span class="link-desc">The self-hosted checker compiled to WebAssembly:
+            write a program and run it in the page, with no server.</span>
+        </a>
+      </li>
+      <li>
+        <a href="bench/">
+          <span class="link-title">Benchmarks</span>
+          <span class="link-desc">Standard-library timings and the Scry taint corpus,
+            generated from the JSON checked into the repository, with the commands to
+            reproduce them.</span>
+        </a>
+      </li>
+      <li>
+        <a href="https://github.com/wiz-pl/wiz/blob/master/docs/tour.md">
+          <span class="link-title">Language tour</span>
+          <span class="link-desc">A tour for people who know a little functional
+            programming, with checked examples.</span>
+        </a>
+      </li>
+      <li>
+        <a href="notebooks/tour.html">
+          <span class="link-title">Tour notebook</span>
+          <span class="link-desc">The language tour as a runnable notebook, one
+            chapter per section, exported to one page.</span>
+        </a>
+      </li>
+      <li>
+        <a href="https://github.com/wiz-pl/wiz">
+          <span class="link-title">Source on GitHub</span>
+          <span class="link-desc">The implementation, the stages, the exercise
+            tree and the issue tracker.</span>
+        </a>
+      </li>
+    </ul>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>
+    Wiz is free software under the
+    <a href="https://github.com/wiz-pl/wiz/blob/master/LICENSE">GPL-3.0-or-later</a>.
+    Programs you build with it are yours to license as you like.
+  </p>
+  <nav aria-label="Footer">
+    <ul>
+      <li><a href="docs/">Docs</a></li>
+      <li><a href="bench/">Benchmarks</a></li>
+      <li><a href="playground/">Playground</a></li>
+      <li><a href="https://github.com/wiz-pl/wiz">GitHub</a></li>
+      <li><a href="https://github.com/wiz-pl/wiz/issues">Issues</a></li>
+      <li><a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/26-tower.md">Toolchain</a></li>
+    </ul>
+  </nav>
+  <p class="small">No cookies, no analytics, no third-party scripts.</p>
+</footer>
+</body>
+</html>

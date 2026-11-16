@@ -178,6 +178,14 @@ def Vec.ofFn {A : Type} : (n : Nat) → (Fin n → A) → Vec A n
   | .zero, _ => .nil
   | .succ n, f => .cons (f Fin.zero) (Vec.ofFn n (fun i => f (Fin.succ i)))
 
+/-- `Vec.ofFn n f` reads back as `f`: `Vec.get (Vec.ofFn n f) i = f i`. -/
+def Vec.get_ofFn {A : Type} : (n : Nat) → (f : Fin n → A) → (i : Fin n) →
+    Vec.get (Vec.ofFn n f) i = f i
+  | .zero, _, Fin.mk .zero h => absurd h.1
+  | .zero, _, Fin.mk (.succ _) h => absurd h.1
+  | .succ n, f, Fin.mk .zero _ => rfl
+  | .succ n, f, Fin.mk (.succ i) h => Vec.get_ofFn n (fun (j : Fin n) => f (Fin.succ j)) (@Fin.mk n i h)
+
 /-- Shift `x` in at the front, dropping the last element (a shift register). -/
 def Vec.shiftIn {A : Type} {0 n : Nat} (x : A) (v : Vec A n) : Vec A n := Vec.initFrom x v
 

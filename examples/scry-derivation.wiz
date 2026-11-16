@@ -1,0 +1,195 @@
+import Scry.Cert
+-- Derivation certificates (`scry-derivation`): a valid transitive-closure
+-- derivation, three rejections (a wrong premise, an out-of-range rule, a falsified
+-- fact), a lattice join (min) certificate, a negation certificate, `explain` from the
+-- evaluator's provenance, and the rendered certificate. `main` is the test group's arithmetic digest.
+
+-- ## Transitive closure: edges (rel 0) and reach (rel 1)
+
+def dcOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+def dcBase : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+def dcStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 2])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.pos 0 [Scry.Term.var 1, Scry.Term.var 2]]
+def dcProg : Scry.Program Nat :=
+  Scry.Program.mk dcOps [2, 2] [] [] [dcBase, dcStep]
+
+def u (n : Nat) : U64 := U64.ofNat n
+
+def tcState : Scry.State Nat :=
+  Scry.State.addTuple
+    (Scry.State.addTuple
+      (Scry.State.addTuple (Scry.State.addTuple Scry.State.empty 0 [u 1, u 2]) 0 [u 2, u 3]) 0 [u 3, u 4])
+    0 [u 1, u 2]
+
+def tcEdb : Scry.Db Nat := tcState.db
+
+def ev (pairs : List (Nat × Nat)) : Scry.Env Nat :=
+  Scry.Env.mk (List.map (fun p => (p.1, u p.2)) pairs) []
+
+def pnode (rel : Nat) (args : List Nat) (rule : Nat) (env : Scry.Env Nat) (pids : List Nat) :
+    Scry.ProofNode Nat :=
+  Scry.ProofNode.mk (Scry.PFact.mk rel (List.map u args) .none) (.rule rule env pids)
+
+def enode (rel : Nat) (args : List Nat) : Scry.ProofNode Nat :=
+  Scry.ProofNode.mk (Scry.PFact.mk rel (List.map u args) .none) .edb
+
+def ln (rel : Nat) (key : Nat) (v : Nat) (rule : Nat) (env : Scry.Env Nat) (pids : List Nat) :
+    Scry.ProofNode Nat :=
+  Scry.ProofNode.mk (Scry.PFact.mk rel [u key] (.some v)) (.rule rule env pids)
+
+def jn (rel : Nat) (key : Nat) (v : Nat) (a b : Nat) : Scry.ProofNode Nat :=
+  Scry.ProofNode.mk (Scry.PFact.mk rel [u key] (.some v)) (.join a b)
+
+def tcNodes : List (Scry.ProofNode Nat) := [
+  enode 0 [1, 2],
+  enode 0 [2, 3],
+  enode 0 [3, 4],
+  pnode 1 [1, 2] 0 (ev [(0, 1), (1, 2)]) [0],
+  pnode 1 [2, 3] 0 (ev [(0, 2), (1, 3)]) [1],
+  pnode 1 [3, 4] 0 (ev [(0, 3), (1, 4)]) [2],
+  pnode 1 [1, 3] 1 (ev [(0, 1), (1, 2), (2, 3)]) [3, 1],
+  pnode 1 [1, 4] 1 (ev [(0, 1), (1, 3), (2, 4)]) [6, 2]
+]
+
+def tcDeriv : Scry.Derivation Nat := Scry.Derivation.mk tcNodes 7
+
+-- The same certificate with the last step reading `edge(2,3)` instead of
+-- `edge(3,4)`, an out-of-range rule, and a root fact that was never derived.
+def badPremiseNodes : List (Scry.ProofNode Nat) := [
+  enode 0 [1, 2],
+  enode 0 [2, 3],
+  enode 0 [3, 4],
+  pnode 1 [1, 2] 0 (ev [(0, 1), (1, 2)]) [0],
+  pnode 1 [2, 3] 0 (ev [(0, 2), (1, 3)]) [1],
+  pnode 1 [3, 4] 0 (ev [(0, 3), (1, 4)]) [2],
+  pnode 1 [1, 3] 1 (ev [(0, 1), (1, 2), (2, 3)]) [3, 1],
+  pnode 1 [1, 4] 1 (ev [(0, 1), (1, 3), (2, 4)]) [6, 1]
+]
+def badPremise : Scry.Derivation Nat := Scry.Derivation.mk badPremiseNodes 7
+
+def badRule : Scry.Derivation Nat :=
+  Scry.Derivation.mk
+    [Scry.ProofNode.mk (Scry.PFact.mk 1 [u 1, u 2] .none) (.rule 9 Scry.Env.empty [])] 0
+
+def badFact : Scry.Derivation Nat := Scry.Derivation.mk [enode 0 [4, 1]] 0
+
+-- ## A lattice-valued relation: `val` (rel 1) with the min lattice
+
+def minNat (a b : Nat) : Nat := if Nat.lt a b then a else b
+
+def minOps : Scry.LatOps Nat := Scry.LatOps.mk 1000000 minNat Nat.beq
+
+def latSeed : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.lit (u 0)] (Scry.LExpr.lit 100)) []
+def latMove : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.var 1] (Scry.LExpr.var 0))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.lat 1 [Scry.Term.var 0] 0]
+def latProg : Scry.Program Nat :=
+  Scry.Program.mk minOps [2, 1] [1] [] [latSeed, latMove]
+
+def latState : Scry.State Nat :=
+  Scry.State.addLatFact
+    (Scry.State.addTuple Scry.State.empty 0 [u 0, u 1]) minOps 1 [u 0] 5
+
+def latEdb : Scry.Db Nat := latState.db
+
+def lnode (key : Nat) (v : Nat) (rule : Nat) (env : Scry.Env Nat) (pids : List Nat) :
+    Scry.ProofNode Nat := ln 1 key v rule env pids
+
+def latNodes : List (Scry.ProofNode Nat) := [
+  enode 0 [0, 1],
+  Scry.ProofNode.mk (Scry.PFact.mk 1 [u 0] (.some 5)) .edb,
+  lnode 0 100 0 (Scry.Env.mk [] []) [],
+  jn 1 0 5 1 2,
+  lnode 1 5 1 (Scry.Env.mk [(0, u 0), (1, u 1)] [(0, 5)]) [0, 3]
+]
+
+def latDeriv : Scry.Derivation Nat := Scry.Derivation.mk latNodes 4
+
+-- The join claims `val(0) = 9`, which `min 5 100` does not.
+def latBadDeriv : Scry.Derivation Nat :=
+  Scry.Derivation.mk [
+    enode 0 [0, 1],
+    Scry.ProofNode.mk (Scry.PFact.mk 1 [u 0] (.some 5)) .edb,
+    lnode 0 100 0 (Scry.Env.mk [] []) [],
+    jn 1 0 9 1 2,
+    lnode 1 5 1 (Scry.Env.mk [(0, u 0), (1, u 1)] [(0, 5)]) [0, 3]
+  ] 4
+
+-- ## Negation: `bad(x)` when `node(x)` holds and `edge(x,2)` is absent
+
+def negRule : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0])
+    [Scry.Atom.pos 0 [Scry.Term.var 0],
+     Scry.Atom.neg 2 [Scry.Term.var 0, Scry.Term.lit (u 2)]]
+
+def negProg : Scry.Program Nat :=
+  Scry.Program.mk dcOps [1, 1, 2] [] [] [negRule]
+
+def negState : Scry.State Nat :=
+  Scry.State.addTuple
+    (Scry.State.addTuple
+      (Scry.State.addTuple Scry.State.empty 0 [u 1]) 0 [u 2]) 2 [u 1, u 2]
+
+def negEdb : Scry.Db Nat := negState.db
+
+-- `bad(2)`: `node(2)` holds and `edge(2,2)` is absent, so the negation holds.
+def negDeriv : Scry.Derivation Nat :=
+  Scry.Derivation.mk [
+    enode 0 [2],
+    pnode 1 [2] 0 (ev [(0, 2)]) [0]
+  ] 1
+
+-- `bad(1)`: `node(1)` holds but `edge(1,2)` is present, so the negation fails.
+def negBadDeriv : Scry.Derivation Nat :=
+  Scry.Derivation.mk [
+    enode 0 [1],
+    pnode 1 [1] 0 (ev [(0, 1)]) [0]
+  ] 1
+
+-- A lattice head with a negated body: `val(0) = 9` under `not edge(2,2)` holds,
+-- under `not edge(1,2)` does not.
+def negLatGood : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.lit (u 0)] (Scry.LExpr.lit 9))
+    [Scry.Atom.neg 2 [Scry.Term.lit (u 2), Scry.Term.lit (u 2)]]
+def negLatBad : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.lat 1 [Scry.Term.lit (u 0)] (Scry.LExpr.lit 9))
+    [Scry.Atom.neg 2 [Scry.Term.lit (u 1), Scry.Term.lit (u 2)]]
+def negLatProg : Scry.Program Nat :=
+  Scry.Program.mk dcOps [1, 1, 2] [1] [] [negLatGood, negLatBad]
+
+def negLatOkDeriv : Scry.Derivation Nat :=
+  Scry.Derivation.mk [lnode 0 9 0 (Scry.Env.mk [] []) []] 0
+def negLatBadDeriv : Scry.Derivation Nat :=
+  Scry.Derivation.mk [lnode 0 9 1 (Scry.Env.mk [] []) []] 0
+
+def bit (b : Bool) : Nat := if b then 1 else 0
+
+def explained : Nat :=
+  match Scry.eval dcProg tcState with
+  | .none => 0
+  | .some st =>
+    match Scry.State.explainTuple dcProg tcEdb st 1 [u 1, u 4] with
+    | .none => 0
+    | .some d => if Scry.Derivation.check dcProg tcEdb d then 1 else 0
+
+def renderOk : Nat :=
+  if Nat.lt 0 (String.length (Scry.Derivation.render (fun n => Nat.repr n) tcDeriv))
+  then 1 else 0
+
+def main : Nat :=
+  bit (Scry.Derivation.check dcProg tcEdb tcDeriv) * 10000000 +
+  bit (Scry.Derivation.check dcProg tcEdb badPremise) * 1000000 +
+  bit (Scry.Derivation.check dcProg tcEdb badRule) * 100000 +
+  bit (Scry.Derivation.check dcProg tcEdb badFact) * 10000 +
+  bit (Scry.Derivation.check latProg latEdb latDeriv) * 1000 +
+  bit (Scry.Derivation.check latProg latEdb latBadDeriv) * 100 +
+  explained * 10 +
+  renderOk
