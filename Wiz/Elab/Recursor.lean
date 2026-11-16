@@ -316,13 +316,21 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
         let z := bvar (d - 1)
         let Dz : B R := if prop then (fun d' => betaApps (Fv d') [upTag z d']) else app Fv [upTag z]
         -- normalise only the template parts: evaluation would drop `conAt`'s annotation
-        (B.piS "rest" .default (qlit (if linear then 1 else w))
-          (norm g (interpOf Dz)) l1 (fun r =>
+        -- (an inductive proposition writes the binder sorts out; a `Type` inductive
+        -- leaves them as holes, as before #252)
+        if prop then
+          (B.piS "rest" .default (qlit (if linear then 1 else w))
+            (norm g (interpOf Dz)) l1 (fun r =>
+              let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
+              if ih?.isSome then
+                B.piS "h" .default (qlit w) (norm g (allOf Dz r)) (.max l1 v)
+                  (fun _ => goal) v
+              else goal) v) d
+        else
+          (B.pi "rest" .default (qlit (if linear then 1 else w)) (norm g (interpOf Dz)) fun r =>
             let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
-            if ih?.isSome then
-              B.piS "h" .default (qlit w) (allOf Dz r) (.max l1 v)
-                (fun _ => goal) v
-            else goal) v) d
+            if ih?.isSome then B.pi "h" .default (qlit w) (norm g (allOf Dz r)) fun _ => goal
+            else goal) d
       let branches : List (B R) := cinfo.toList.zipIdx.map fun ((c, fields, idx), ci) =>
         let withH (k : B R → B R) : B R := if ih?.isSome then B.lam "h" k else k (closed .tt)
         B.lam "rest" fun r => withH fun h =>
