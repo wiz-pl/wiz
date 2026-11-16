@@ -4,8 +4,9 @@ The code-analysis platform's grail package. The design is
 `wiz-notes/code-analysis-design.md` §4/§6; the package layout, schema and the S1
 checklist are in `wiz-notes/scry-package.md`.
 
-S1 now parses C with a **vendored tree-sitter** (`native/README.md`: tree-sitter
-v0.27.2 and tree-sitter-c v0.24.2, both MIT). One C shim, `native/ts_shim.c`, parses a
+S1 now parses C with **tree-sitter** (`native/README.md`: the vendored runtime
+v0.27.2 and tree-sitter-c v0.24.2, which Nix fetches; both MIT; run
+`native/link-grammars.sh` once before building). One C shim, `native/ts_shim.c`, parses a
 file, walks the tree with a `TSTreeCursor` and bulk-loads the CST into struct-of-arrays
 columns; no `TSNode` crosses the FFI. `src/Scry/Native.wiz` exposes the columns as
 `U32Array`/`U64Array` and builds the `Scry.CstStore` model. The JSON fact store and the
@@ -270,7 +271,7 @@ silent empty result.
 The C → Wil → points-to → taint pipeline used to scale worse than linearly: the CST child
 lookup copied the whole child column per node, token text was sliced with
 `String.drop` (a `List Char`, so O(file) per identifier), and the origin map scanned the
-source from byte 0 for every program point. The vendored tree-sitter-c grammar
+source from byte 0 for every program point. The generated tree-sitter-c parser
 (`native/tree-sitter-c/src/parser.c`, 3.9 MB, 1.1 M nodes) therefore never finished under
 a 300 s limit. The lookup, slice and line-table paths are now O(children), O(span) and
 O(points + lines); the fixpoint machinery is bounded and reports what it did.
@@ -307,12 +308,13 @@ lowering walk. One generated grammar function dominates the two tree-sitter runt
 files: rule evaluation of a single very large function is the remaining hot spot, and
 `--timeout` (or a smaller `--max-nodes`) is the escape hatch.
 
-`tests/scale.wiz` is the regression test: on a checkout with the vendored grammar it
+`tests/scale.wiz` is the regression test: on a checkout with the grammar out-link it
 asserts the node count, that the run is complete under the default limit, that
 `--max-nodes` refuses cleanly, that `--max-rounds 1` returns a marked partial result, and
 that the CLI's `--timeout 1` exits 124 with the timeout message and no stdout. When
-`native/tree-sitter-c/src/parser.c` is absent it prints `scale: skip (… absent)` and
-passes, so a bare tree stays green.
+`native/tree-sitter-c/src/parser.c` is absent (no out-link, `native/README.md`) it
+prints `scale: skip (… absent)` and passes; nothing else in `grail test` builds without
+the out-links.
 
 `tests/native.wiz` checks the shim on `fixtures/hello.c`: 55 nodes, 54 edges, the root
 span `[0,95)`, parent/child/next-sibling links, and that `fixtures/broken.c` is refused
@@ -538,8 +540,8 @@ limits.
 first harness run found and this branch fixes a 744-byte leak on every successful parse
 in `native/ts_shim.c`; that is a dynamic finding, not a clean bill of health.
 
-Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
-only grammar. Threads, a native store shared across files, and tree-sitter queries are
+Limits: the shim is sequential (one parser, one tree, one file), and the C taint pipeline
+reads tree-sitter-c only (C# has its own slice, `CSHARP.md`). Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
 
 ## `scry findings`: exploration → triage → repro → verify

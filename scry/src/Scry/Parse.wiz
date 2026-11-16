@@ -127,7 +127,8 @@ def Scry.parseBlock (path : String) : EIO Scry.ParseBlock := do
         (Scry.CstStore.statsOf cst))
 
 /-- Parse one C (or other supported language) file into the model store. The shim has
-tree-sitter-c only; another `lang` is an error from `Scry.Native.parse`. -/
+tree-sitter-c (`"c"`) and tree-sitter-c-sharp (`"c_sharp"`); another `lang` is an error
+from `Scry.Native.parse`. -/
 def Scry.parseSource (lang : String) (path : String) : EIO Scry.CstStore := do
   text ← FS.readFile path;
   st ← Scry.Native.parse lang text;

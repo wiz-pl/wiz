@@ -30,5 +30,7 @@ bench/history.jsonl
 # benchmark build outputs
 bench/.build/
 
-# scry: the fetched C# grammar, an out-link to `nix build .#tree-sitter-c-sharp` (scry/native/README.md)
+# scry: the fetched C and C# grammars, out-links to `nix build .#tree-sitter-c` and
+# `.#tree-sitter-c-sharp` (scry/native/link-grammars.sh, scry/native/README.md)
+/scry/native/tree-sitter-c
 /scry/native/tree-sitter-c-sharp

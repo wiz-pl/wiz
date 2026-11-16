@@ -8,9 +8,10 @@ import Scry.CstStore
 # Scry.Native: tree-sitter through one C shim
 
 S1's parser (design §4.1). `native/ts_shim.c` parses one file with the vendored
-tree-sitter runtime and a grammar (the vendored tree-sitter-c, language `"c"`, or
-tree-sitter-c-sharp, `"c_sharp"`, which Nix fetches: `native/tree-sitter-c-sharp` is the
-uncommitted out-link of `nix build .#tree-sitter-c-sharp`, see `native/README.md`), walks the tree with a `TSTreeCursor` and
+tree-sitter runtime and a grammar (tree-sitter-c, language `"c"`, or tree-sitter-c-sharp,
+`"c_sharp"`; Nix fetches both: `native/tree-sitter-c` and `native/tree-sitter-c-sharp`
+are the uncommitted out-links that `native/link-grammars.sh` makes, see
+`native/README.md`), walks the tree with a `TSTreeCursor` and
 bulk-loads it into struct-of-arrays columns. No `TSNode` crosses the FFI by value: Wiz
 sees a `ScryStore` handle and the columns, copied into `U32Array`/`U64Array` by
 `wiz_warray_of_c` (the C interface of `lib/WordArray.wiz`).

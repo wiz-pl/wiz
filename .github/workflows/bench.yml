@@ -234,6 +234,8 @@ jobs:
             exit 0
           fi
           mkdir -p bench-out
+          # The C and C# grammars are Nix out-links, not committed (scry/native/README.md).
+          if [ -x scry/native/link-grammars.sh ]; then scry/native/link-grammars.sh; fi
           cmd=(grail run scry -- bench --no-timing --fail-on-regression \
                --json bench-out/scry-bench.json --markdown bench-out/scry-bench.md)
           if [ -n "$CPUSET" ]; then cmd=(taskset -c "$CPUSET" "${cmd[@]}"); fi

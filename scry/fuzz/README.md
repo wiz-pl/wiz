@@ -12,7 +12,8 @@ The target is the vendored C front end:
 ```
 fuzz/ts_shim_fuzz.c          libFuzzer target; includes native/ts_shim.c
 native/tree-sitter/…         the pinned tree-sitter 0.27.2 runtime
-native/tree-sitter-c/…       the pinned tree-sitter-c 0.24.2 grammar
+native/tree-sitter-c/…       the pinned tree-sitter-c 0.24.2 grammar (a Nix out-link:
+                             run native/link-grammars.sh first)
 ```
 
 libFuzzer calls `scry_parse("c", bytes, len)` and checks the struct-of-arrays contract

@@ -8,7 +8,8 @@ import Grail
 --   grail run scry -- facts fixtures/demo.facts.json
 --   grail test                  the pure loader/stats tests (tests/*.expected)
 --
--- S1: `parse --stats` parses C with the vendored tree-sitter shim; the JSON and
+-- S1: `parse --stats` parses C with the tree-sitter shim (run native/link-grammars.sh
+-- once first: the grammars are Nix out-links, native/README.md); the JSON and
 -- scry-cst stores remain for the synthetic corpus and the spill format.
 def package : Package := Package.new "scry"
   |> Package.lib "src" "src"
@@ -45,7 +46,7 @@ def package : Package := Package.new "scry"
        |> Command.arg "--stats"
        |> Command.input "fixtures/demo.facts.json"
        |> Command.stdout "build/parse-stats.txt")
-  -- The real parser (S1): a C fixture through the vendored tree-sitter shim.
+  -- The real parser (S1): a C fixture through the tree-sitter shim.
   |> Package.command (Command.new "parse-native" (Tool.exe "scry")
        |> Command.arg "parse"
        |> Command.arg "--stats"
