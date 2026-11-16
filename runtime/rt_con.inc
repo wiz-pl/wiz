@@ -316,61 +316,6 @@ WIZ_API void wiz_lock_release(wiz_val lv, wiz_val g) {
   wiz_dec(lv);
 }
 
-/* the objects still alive, once every thread has finished */
-static int64_t wiz_live_total(void) {
-  wiz_wait_threads();
-  return wiz_live + wiz_live_exited;
-}
-
-/* run `main : IO A`: apply it to the world, and drop the result */
-WIZ_API int wiz_finish_io(wiz_val main) {
-  wiz_val w = WIZ_BOX(0);
-  wiz_val r = wiz_apply(main, 1, &w);
-  wiz_dec(r);
-  int64_t live = wiz_live_total();
-  if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
-  return 0;
-}
-
-WIZ_API int wiz_finish(wiz_val r) {
-  wiz_print(r);
-  putchar('\n');
-  wiz_dec(r);
-  int64_t live = wiz_live_total();
-  if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
-  return 0;
-}
-
-/* ---- main: run on a thread with a big stack (deep recursion is normal in functional
-   code); $WIZ_STACK_MB sets its size, default 1024 ---- */
-
-typedef struct { wiz_val (*entry)(void); int io; int rc; } wiz_main_args;
-
-static void *wiz_main_thread(void *p) {
-  wiz_main_args *a = (wiz_main_args *)p;
-  wiz_val v = a->entry();
-  a->rc = a->io ? wiz_finish_io(v) : wiz_finish(v);
-  return NULL;
-}
-
-WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
-  wiz_main_args args = {entry, io, 0};
-  wiz_track_init();
-#ifdef WIZ_NO_THREADS
-  /* one thread: run on this one, with the stack it has */
-  return wiz_main_thread(&args), args.rc;
-#endif
-  const char *mb = getenv("WIZ_STACK_MB");
-  size_t size = (size_t)(mb ? atol(mb) : 1024) << 20;
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, size);
-  pthread_t t;
-  if (pthread_create(&t, &attr, wiz_main_thread, &args) != 0) return wiz_main_thread(&args), args.rc;
-  pthread_join(t, NULL);
-  return args.rc;
-}
-
 /* ---- pure tasks (lib/Task.wiz, stage 31): `Task.spawn f` may compute `f ()` on another
    thread, `Task.get` waits for it ----
 
@@ -381,24 +326,38 @@ WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
    tasks can't deadlock. At most one task thread per online CPU runs at a time; a task
    spawned beyond that has no thread and runs at the `get` that needs it. A task's value
    is marked shared before it is published (another thread may `get` it). The task
-   object (a foreign object) and its thread each hold a reference to the record. With
-   WIZ_NO_THREADS, spawning stops with `wiz_no_threads` like `Chan.fork`. */
+   object (a foreign object) and its thread each hold a reference to the record. A task
+   object that became immortal (a closed definition, `def t : Task A := …`) is never
+   finalised, so at the end the program drops what its record still holds before the
+   leak check (`wiz_task_exit`). With WIZ_NO_THREADS, spawning stops with
+   `wiz_no_threads` like `Chan.fork`. */
 
-typedef struct {
+typedef struct wiz_task {
   int state;    /* 0 waiting to start, 1 running, 2 done */
   int refs;     /* the Wiz object, and the thread if one was started */
+  int held;     /* the Wiz object still refers to this record */
+  wiz_val obj;  /* that object (not a reference: valid while `held`) */
   wiz_val fn;   /* `Unit → A`, shared; taken by whoever runs it */
   wiz_val val;  /* the value, shared, once done */
+  struct wiz_task *prev, *next; /* every record alive (for wiz_task_exit) */
 } wiz_task;
 
+/* all under wiz_task_mu: states, counts, the list */
 static pthread_mutex_t wiz_task_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wiz_task_cv = PTHREAD_COND_INITIALIZER;
+static wiz_task *wiz_tasks = NULL;
 static int64_t wiz_task_threads = 0; /* task threads running now */
 static int64_t wiz_task_max = 0;     /* their limit: the online CPUs (0: not read yet) */
 
-static void wiz_task_unref(wiz_task *t) {
+/* drop one reference (the object's, if `obj`); the last one frees the record */
+static void wiz_task_drop(wiz_task *t, int obj) {
   pthread_mutex_lock(&wiz_task_mu);
+  if (obj) t->held = 0;
   int last = --t->refs == 0;
+  if (last) {
+    if (t->prev) t->prev->next = t->next; else wiz_tasks = t->next;
+    if (t->next) t->next->prev = t->prev;
+  }
   pthread_mutex_unlock(&wiz_task_mu);
   if (!last) return;
   /* (outside the lock: dropping a value may finalise other tasks) */
@@ -406,7 +365,26 @@ static void wiz_task_unref(wiz_task *t) {
   if (t->state == 2) wiz_dec(t->val);
   free(t);
 }
-static void wiz_task_fin(void *p) { wiz_task_unref((wiz_task *)p); }
+static void wiz_task_unref(wiz_task *t) { wiz_task_drop(t, 0); }
+static void wiz_task_fin(void *p) { wiz_task_drop((wiz_task *)p, 1); }
+
+/* at the end, once every thread has finished: an immortal task object keeps its record
+   for ever, so drop the function or value the record holds (they are not immortal: they
+   were shared when the task was made or ran), one record at a time, outside the lock */
+static void wiz_task_exit(void) {
+  for (;;) {
+    wiz_val drop = 0;
+    pthread_mutex_lock(&wiz_task_mu);
+    for (wiz_task *t = wiz_tasks; t && !drop; t = t->next) {
+      if (!t->held || ((wiz_hdr *)t->obj)->rc != 0) continue;
+      if (t->fn) { drop = t->fn; t->fn = 0; }
+      else if (t->state == 2 && t->val != WIZ_BOX(0)) { drop = t->val; t->val = WIZ_BOX(0); }
+    }
+    pthread_mutex_unlock(&wiz_task_mu);
+    if (!drop) return;
+    wiz_dec(drop);
+  }
+}
 
 /* run a task this thread moved to state 1, and publish its value */
 static void wiz_task_run(wiz_task *t) {
@@ -487,10 +465,17 @@ WIZ_API wiz_val wiz_task_spawn(wiz_val fn) {
 #endif
   wiz_task *t = (wiz_task *)calloc(1, sizeof(wiz_task));
   t->refs = 1;
+  t->held = 1;
   t->val = WIZ_BOX(0);
   wiz_mark_mt(fn);
   t->fn = fn;
   wiz_val tv = wiz_out_ptr(t, wiz_task_fin);
+  t->obj = tv;
+  pthread_mutex_lock(&wiz_task_mu);
+  t->next = wiz_tasks;
+  if (wiz_tasks) wiz_tasks->prev = t;
+  wiz_tasks = t;
+  pthread_mutex_unlock(&wiz_task_mu);
   wiz_task_start(t);
   return tv;
 }
@@ -555,4 +540,60 @@ WIZ_API wiz_val wiz_task_race(wiz_val f, wiz_val g) {
   wiz_dec(tf);
   wiz_dec(tg);
   return v;
+}
+
+/* the objects still alive, once every thread has finished */
+static int64_t wiz_live_total(void) {
+  wiz_wait_threads();
+  wiz_task_exit();
+  return wiz_live + wiz_live_exited;
+}
+
+/* run `main : IO A`: apply it to the world, and drop the result */
+WIZ_API int wiz_finish_io(wiz_val main) {
+  wiz_val w = WIZ_BOX(0);
+  wiz_val r = wiz_apply(main, 1, &w);
+  wiz_dec(r);
+  int64_t live = wiz_live_total();
+  if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
+  return 0;
+}
+
+WIZ_API int wiz_finish(wiz_val r) {
+  wiz_print(r);
+  putchar('\n');
+  wiz_dec(r);
+  int64_t live = wiz_live_total();
+  if (live != 0) { fprintf(stderr, "wiz: %ld objects leaked\n", (long)live); wiz_report_leaks(); return 2; }
+  return 0;
+}
+
+/* ---- main: run on a thread with a big stack (deep recursion is normal in functional
+   code); $WIZ_STACK_MB sets its size, default 1024 ---- */
+
+typedef struct { wiz_val (*entry)(void); int io; int rc; } wiz_main_args;
+
+static void *wiz_main_thread(void *p) {
+  wiz_main_args *a = (wiz_main_args *)p;
+  wiz_val v = a->entry();
+  a->rc = a->io ? wiz_finish_io(v) : wiz_finish(v);
+  return NULL;
+}
+
+WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
+  wiz_main_args args = {entry, io, 0};
+  wiz_track_init();
+#ifdef WIZ_NO_THREADS
+  /* one thread: run on this one, with the stack it has */
+  return wiz_main_thread(&args), args.rc;
+#endif
+  const char *mb = getenv("WIZ_STACK_MB");
+  size_t size = (size_t)(mb ? atol(mb) : 1024) << 20;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, size);
+  pthread_t t;
+  if (pthread_create(&t, &attr, wiz_main_thread, &args) != 0) return wiz_main_thread(&args), args.rc;
+  pthread_join(t, NULL);
+  return args.rc;
 }

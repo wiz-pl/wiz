@@ -77,6 +77,12 @@ def taskGroup : Group where
           "def l4 : raced = work 3000 := rfl\n") },
     { name := "compiled tasks agree with the model (differential), nested tasks included", run := fun _ =>
         cRunLibs taskMain "500500\n5050\n20100\n36012000\n1010000\n4501500\n" },
+    { name := "a task held by a closed definition (an immortal object): its value is released at the end", run := fun _ =>
+        cRunLibs ("import IO\nimport Task\ndef mk : Nat → List Nat\n  | .zero => .nil\n  | .succ n => .cons n (mk n)\n" ++
+          "def t : Task (List Nat) := Task.spawn (fun _ => mk 5)\n" ++
+          "def len : List Nat → Nat\n  | .nil => 0\n  | .cons _ xs => .succ (len xs)\n" ++
+          "def main : IO Unit := do\n  IO.println (Nat.toString (len (Task.get t)));\n" ++
+          "  IO.println (Nat.toString (len (Task.get t)))\n") "5\n5\n" },
     { name := "WIZ_NO_THREADS: the first spawn stops with a clear message", run := fun _ => do
         noThreadsFails taskMain "wiz: Task.spawn: threads are not available in this build (WIZ_NO_THREADS)"
         noThreadsFails (taskProg ++ "def main : IO Unit := IO.println (Nat.toString two.1)")

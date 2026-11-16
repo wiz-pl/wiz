@@ -62,7 +62,9 @@ model's.
 * A task's function is marked shared before it crosses to its thread, and its value
   before it is published (the transfer rule of 25a). The task object is a foreign object
   whose record is shared by the object and the thread. The program waits for every task
-  thread before its leak check, as it does for other threads.
+  thread before its leak check, as it does for other threads. A task object held by a
+  closed definition (`def t : Task A := Task.spawn …`) is immortal and never finalised,
+  so at the end the program drops what its record holds before the leak check.
 * `both` runs `f ()` on the calling thread while `g ()` is a task. `par` builds every task
   before it waits for the first (the list of tasks is the data dependency, so the
   optimiser can't sink a spawn past a `get`). `both` and `race` are natives of their own
