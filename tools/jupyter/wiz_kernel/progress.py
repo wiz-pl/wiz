@@ -63,18 +63,20 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
 
 
 def comm_capability() -> tuple[bool, str]:
-    """Whether comm support is in this kernel and why.
+    """Whether the kernel should open a progress comm itself, and why.
 
-    ``wiz-widgets`` adds ``wiz_kernel.widgets`` and the comm handlers around it;
-    its presence is the signal that comms are available.  Outbound progress
-    comms work without it, but a front end has nothing to render them until the
-    widget support lands, so the default stays on iopub streams.
+    ``wiz-widgets`` adds ``wiz_kernel.widgets`` and the comm handlers around it,
+    but its front end (``static/widget.js``/``loader.js``) registers only the
+    ``wiz.widgets`` target: nothing renders a ``wiz.progress`` comm, and a front
+    end that does not know a target drops its messages.  So the default stays on
+    iopub streams; a client that does render progress opens the comm itself
+    (``ProgressChannel.attach_comm``) and is then used.
     """
     try:
         importlib.import_module(".widgets", __package__)
     except Exception:
         return False, "no widget comm support (wiz-widgets is not merged)"
-    return True, "comm support from wiz-widgets"
+    return False, "the widget front end does not render wiz.progress comms"
 
 
 class ProgressChannel:

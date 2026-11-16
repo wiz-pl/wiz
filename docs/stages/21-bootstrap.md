@@ -1083,3 +1083,64 @@ written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are n
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
+
+The matrix above counts **features**; this measures the **library**. A new group,
+`selfhost-libdiff`, runs both compilers on every `*.wiz` under `lib/` and `scry/` (the
+file as a root module, its imports under `lib/`, `drafts/feral/lib` and the `scry/`
+package roots) and compares
+
+* **acceptance** (does the frontend report an error at all),
+* the **code** of the first error (`ErrorCode` on the Lean side, the self-hosted
+  driver's table on the other),
+* its **span** (file, line, column),
+* its **message** (whitespace-normalised; the driver's `[code]` suffix moved out), and
+* the **number of declarations** the file produced.
+
+The first divergence is reported per file. A file both compilers accept with the same
+declaration count is `ok`; one both reject is `rejected` (the counts of the same code,
+same span and same message are reported apart, because D6's positioning differs by
+design); one whose verdicts differ is `diverging` — that is the gap list. A run that
+hits the per-file time or memory bound is `bounded`, not a gap.
+
+The host side is the Lean frontend in a child process (`tests --libdiff-host FILE`, the
+same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/
+`cSourceTable`/`preprocessHeaders` as `Main.initState` sets them), so the sweep can
+bound it; its declaration count is the file's `declSites` in module `""` without a
+structure's constructors, fields and projections, plus its `#check` info messages. The
+self-hosted side is the compiler binary `selfhostCompiler` builds, `check FILE --types`:
+its info lines are the per-declaration reports (a structure's projections dropped), so
+the two counts are the same notion.
+
+The files are found by walking the tree (not a list), `--only` takes a path, a path
+suffix or a module name, and `--limit N` the first N — a work list, not a gate. To make
+progress a diff rather than a number, `--baseline FILE` writes the current
+`verdict/divergence/class` per file when the file does not exist, and reports
+`fixed`/`regressed`/`changed`/`new` against it when it does. `--json` writes one record
+per file (both sides: acceptance, exit, errors, decls, first error code/span/message;
+plus the verdict, the first divergence, the missing construct and the note) and a final
+summary record. `--timeout`/`--host-timeout`/`--self-timeout` (seconds) and `--mem`
+(megabytes, the self-hosted side's `ulimit -v`) bound each file.
+
+Usage:
+
+```sh
+heavy --mem 4G .lake/build/bin/tests --libdiff                 # everything
+heavy --mem 4G .lake/build/bin/tests --libdiff --limit 10      # a first look
+heavy --mem 4G .lake/build/bin/tests --libdiff --only lib/Hoare.wiz
+heavy --mem 4G .lake/build/bin/tests --libdiff --json > gap.jsonl
+heavy --mem 4G .lake/build/bin/tests --libdiff --baseline libdiff-baseline.json
+lake test -- '=selfhost-libdiff'                               # the same, as a group
+```
+
+The group skips (a skipped case is not a pass) when there is no C toolchain for the
+self-hosted compiler, and never fails because of a gap; it writes the full report to
+`.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
+case's output. CI runs it as its own shard (`selfhost-libdiff` in
+`.github/test-shards.json`).
+
+`--only` and `--limit` make it usable as the A13 work list: the gap list groups the
+files whose verdicts differ by the construct the self-hosted frontend names
+(`unsupported syntax term.by` is `by`, `unsupported command command.syntax` is `syntax`,
+…), and prints the ten files to start with (most common construct first).
