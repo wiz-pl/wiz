@@ -1964,14 +1964,15 @@ def privBase (x : String) : String := match x with
 
 -- (U2) the old display of a small type: `Unit n` is the type in `Sort (n+1)` (the level
 -- stored on `unit` is the sort, so the printed number is its predecessor)
-def showSmall (name : String) (zero : String) (l : Lvl) : String := match l with
-  | .lnum n => match n with
+-- (a closed level is printed as its number, whatever its form: the templates' `Unit` is
+-- at `max (l+1) v`, which the Lean kernel prints as a number too)
+def showSmall (name : String) (zero : String) (l : Lvl) : String := match lvlClosed l with
+  | .some n => match n with
     | .zero => zero
     | .succ m => String.append name (Nat.toString m)
-  | .lsucc k => String.append name (match lvlClosed k with
-    | .some n => Nat.toString n
-    | .none => String.append "(" (String.append (lvlShow k) ")"))
-  | _ => String.append name (String.append "(" (String.append (lvlShow l) ")"))
+  | .none => match l with
+    | .lsucc k => String.append name (String.append "(" (String.append (lvlShow k) ")"))
+    | _ => String.append name (String.append "(" (String.append (lvlShow l) ")"))
 
 mutual
 -- terms, printed with the variables named by level (`x0` is the outermost, unless
