@@ -637,7 +637,7 @@ def serverGroup : Group where
         checkEq "Nat → Nat" (LSP.getStr r ["type"])
         checkEq "definition" (LSP.getStr r ["kind"])
         check ((LSP.getStr r ["value"]).startsWith "fun " && has r "Nat.add") s!"value: {r.compress}"
-        check (LSP.get? r ["axioms"] matches some (.arr _)) s!"axioms: {r.compress}"
+        check (LSP.get? r ["axioms"] matches some (Lean.Json.arr _)) s!"axioms: {r.compress}"
         check (has r "\"location\":{" && !has r "\"raw\"") s!"location/raw: {r.compress}"
         -- a tactic proof: its term, after the tactics ran
         let (srv, r) ← core srv ",\"name\":\"k\""
