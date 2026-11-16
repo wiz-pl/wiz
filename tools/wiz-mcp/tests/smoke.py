@@ -201,7 +201,11 @@ def run(argv: list[str]) -> int:
             bridge.notify("notifications/initialized")
             tools = {tool["name"] for tool in bridge.rpc("tools/list", {})["result"]["tools"]}
             # `build` is listed only with --allow-build; the smoke test runs the default (read-only) server.
-            expected = {"version", "check", "parse", "fmt", "diagnostics", "hover", "goals"}
+            expected = {
+                "version", "check", "parse", "fmt", "diagnostics", "hover", "goals",
+                "definition", "references", "document_symbols", "workspace_symbols", "term_goal",
+                "completion", "signature_help", "inlay_hints", "code_actions", "rename",
+            }
             if tools != expected:
                 raise RuntimeError(f"tools/list mismatch: {sorted(tools)}")
             print(f"tools: {len(tools)} listed")
@@ -269,6 +273,31 @@ def run(argv: list[str]) -> int:
                 print(f"check ({source}): {d['line']}:{d['column']} {d['severity']} code={d['code']} {d['message'].splitlines()[0]!r}")
             if found["cli"] != found["lsp"]:
                 raise RuntimeError(f"check sources disagree: {found}")
+
+            # Navigation and a rename proposal (P1c): nothing may be written.
+            nav_text = "import Prelude\n\ndef answer : Nat := 42\n\ndef twice : Nat := answer + answer\n"
+            nav = Path(workspace) / "nav.wiz"
+            nav.write_text(nav_text, encoding="utf-8")
+
+            def call(tool: str, **arguments: object) -> dict:
+                envelope = envelope_of(bridge.rpc("tools/call", {"name": tool, "arguments": dict({"path": "nav.wiz"}, **arguments)}))
+                if not envelope["ok"]:
+                    raise RuntimeError(f"{tool} failed: {envelope}")
+                return envelope["result"]
+
+            use = call("definition", line=4, character=20)["locations"]
+            if [(loc["line"], Path(loc["file"]).name) for loc in use] != [(3, "nav.wiz")]:
+                raise RuntimeError(f"definition of `answer` is wrong: {use}")
+            nat = call("definition", line=2, character=14)["locations"]
+            if len(nat) != 1 or not nat[0]["file"].endswith("Prelude.wiz"):
+                raise RuntimeError(f"definition of `Nat` is not in the toolchain's Prelude: {nat}")
+            refs = call("references", line=4, character=20)["locations"]
+            proposal = call("rename", line=4, character=20, new_name="reply")
+            if len(refs) != 3 or proposal["applied"] is not False or proposal["edit_count"] != 3:
+                raise RuntimeError(f"references/rename are wrong: {refs} {proposal}")
+            if nav.read_text(encoding="utf-8") != nav_text:
+                raise RuntimeError("rename changed the file; it must only propose")
+            print(f"navigation: definition, Prelude, {len(refs)} references, rename proposed (3 edits, not applied)")
 
             shutdown = bridge.rpc("shutdown", {})
             if "error" in shutdown:
