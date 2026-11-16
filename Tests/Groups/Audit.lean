@@ -782,11 +782,12 @@ def pinned : List (String × Query × String × String) :=
 
 def templatePairs : List (String × Term ZeroOneMany) :=
   let L := Level.ofNat
-  [("interpTm 0", Templates.interpTm (L 0)), ("interpTm 1", Templates.interpTm (L 1)),
-   ("allTm 0 0", Templates.allTm (L 0) (L 0)), ("allTm 0 1", Templates.allTm (L 0) (L 1)),
-   ("allTm 1 3", Templates.allTm (L 1) (L 3)),
-   ("hypsTm 0 0", Templates.hypsTm (L 0) (L 0)), ("hypsTm 0 2", Templates.hypsTm (L 0) (L 2)),
-   ("mapTm 0", Templates.mapTm (L 0)), ("mapTm 1", Templates.mapTm (L 1))]
+  -- (U2b) Kernel.wiz's templates take a `Lvl`: the call is written with `ln n`
+  [("interpTm (ln 0)", Templates.interpTm (L 0)), ("interpTm (ln 1)", Templates.interpTm (L 1)),
+   ("allTm (ln 0) (ln 0)", Templates.allTm (L 0) (L 0)), ("allTm (ln 0) (ln 1)", Templates.allTm (L 0) (L 1)),
+   ("allTm (ln 1) (ln 3)", Templates.allTm (L 1) (L 3)),
+   ("hypsTm (ln 0) (ln 0)", Templates.hypsTm (L 0) (L 0)), ("hypsTm (ln 0) (ln 2)", Templates.hypsTm (L 0) (L 2)),
+   ("mapTm (ln 0)", Templates.mapTm (L 0)), ("mapTm (ln 1)", Templates.mapTm (L 1))]
 
 /-- (21x) Drop the description fields' quantities and every `sigmaQ` to the `Σ` at ω, as
 the Lean side's `dropQty` does before `MTm.ofTerm`: the audit compares the kernels modulo
