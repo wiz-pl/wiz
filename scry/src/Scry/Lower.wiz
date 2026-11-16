@@ -92,13 +92,15 @@ the `cc -E` line markers to the original file, byte range, line and column, and
 `fileText` serves the original texts. This is what `Scry.lowerTU` lowers, so the
 lowering never sees a preprocessed offset. -/
 def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry.Cst :=
-  let nodeBytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
-    U32Array.empty (String.chars pre.text);
+  -- the span tables are built once: `Scry.mapSpan` is O(file) per span (it walks the
+  -- line lists and drops from the start of the text), `Scry.mapSpanAt` is not.
+  let ix := Scry.spanIndexOf pre;
+  let nodeBytes := ix.preWords;
   Scry.Cst.mk (Scry.CstStore.nodeCount s)
     (fun i => Scry.CstStore.kindName s i)
     (fun i => Scry.CstStore.fieldName s i)
     (fun i => let sp := Scry.CstStore.spanOf s i;
-      Scry.mapSpan pre i sp.start sp.stop)
+      Scry.mapSpanAt ix i sp.start sp.stop)
     (fun i => match Scry.CstStore.parentOf s i with
       | .none => .none
       | .some x => .some x.n)

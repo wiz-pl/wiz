@@ -133,3 +133,46 @@ result, and that the CLI's `--timeout 1` exits 124 with the timeout message and 
 stdout. When `native/tree-sitter-c/src/parser.c` is absent the test prints
 `scale: skip (… absent)` and passes; the timeout sub-check is skipped when
 `.grail/bin/scry` has not been built. `tests/taint.wiz` covers the JSON/SARIF fields.
+
+## The lowering regression after the preprocessor path (2026-11-16)
+
+Branch `agent/scry-scale-lower`. After `scry-integrate` (#376), `Scry.Cst.ofStore` goes
+through `Scry.Preprocessed.plain` and `Scry.Cst.ofPreprocessed`, so **every** node origin
+(`originOf`, i.e. every `emitAt`/`warnAt`) ran `Scry.mapSpan`. That function is O(file)
+per span: `posOf` scans the line-start list linearly and takes `String.length` of the
+whole original text (twice per span), and `mapSpan` takes `String.drop start` of both the
+preprocessed and the original text (a `String` is a `List Char`). Lowering cost was
+therefore *(spans lowered) × (file size)*.
+
+Size ladder, cut from the real generated `parser.c` at case and table-entry boundaries
+(`ts_lex` with its first *k* `case`s, then a prefix of `ts_small_parse_table` after it).
+Time is the `lower` stage alone (`--progress`), peak is `VmHWM` at the end of lowering;
+light-slot wall clock, **informational**. Reproduce with
+`python3 scripts/lower-ladder.py native/tree-sitter-c/src/parser.c OUT` and
+`scripts/lower-probe.sh .grail/bin/scry OUT/<input>.c`:
+
+| input | bytes | before | after | peak (before / after) |
+|---|---:|---:|---:|---:|
+| `ts_lex` 40 cases | 164 795 | 4.35 s | 0.05 s | 57 / 57 MiB |
+| `ts_lex` 80 cases | 178 953 | 12.5 s | | 61 MiB |
+| `ts_lex` 160 cases | 195 592 | 23.5 s | | 67 MiB |
+| `ts_lex` 324 cases | 229 525 | 46.1 s | 0.17 s | 80 / 77 MiB |
+| + 6 000 table lines | 374 580 | 65.3 s | 0.23 s | 121 / 121 MiB |
+| + 12 000 table lines | 520 000 | 86.4 s | 0.25 s | 164 / 164 MiB |
+| + 25 000 table lines | 839 093 | | 0.41 s | 260 MiB |
+| + 52 000 table lines | 1 473 629 | | 0.67 s | 453 MiB |
+| full `parser.c` | 3 872 012 | ≈ 9–10 min (extrapolated: +0.137 s/KB) | 1.56 s | 1.19 GiB |
+
+The fix builds `Scry.SpanIndex` once per unit (`Scry.spanIndexOf`: the line tables as
+`U64Array`s, the preprocessed and original texts as word arrays, each file's length), and
+`Scry.Cst.ofPreprocessed` maps with `Scry.mapSpanAt`: a binary search for the line and a
+slice comparison, O(log lines + span). `Scry.mapSpan` stays as the reference definition;
+`tests/preproc.wiz` checks that the two agree on every node of the `cc -E` fixture
+(including line-fallback origins). The remaining growth with file size at a fixed function
+is linear (building the index and the store). `scry taint --json/--sarif/--origin-map`
+output is byte-identical on all 105 C fixtures, and `scry project` (with and without
+`--taint`, facts included) on the five project corpora.
+
+Note: after lowering, the summary stage of `ts_lex` still takes minutes on master; that
+is the per-function analysis that `agent/scry-scale` `eeb1b172` linearised and that had
+not landed.
