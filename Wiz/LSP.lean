@@ -635,7 +635,7 @@ def packageModules (srv : Server) : IO (Server × Array (String × String × St)
 global's in every open document and the package's modules, a local's in `doc`. -/
 def referencesOf (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
     IO (Server × Option (Refs.Target × SourceInfo × Array (String × String × Array SourceInfo))) := do
-  let some (t, r) := Refs.targetAt doc.state off | return (srv, none)
+  let some (t, r) := Refs.targetAt doc.state doc.text off | return (srv, none)
   match t with
   | .local .. => pure (srv, some (t, r, #[(uri, doc.text, Refs.rangesIn doc.state doc.text t)]))
   | .global _ =>
@@ -749,15 +749,15 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
       Json.mkObj [("start", toPos text r.start), ("end", toPos text r.stop)]
     match method with
     | "textDocument/documentHighlight" =>
-      match Refs.targetAt doc.state off with
+      match Refs.targetAt doc.state doc.text off with
       | some (t, _) => pure (srv, #[reply (Json.arr ((Refs.rangesIn doc.state doc.text t).map fun r =>
           Json.mkObj [("range", rangeIn doc.text r), ("kind", (1 : Nat))]))])
       | none => pure (srv, #[reply Json.null])
     | "textDocument/prepareRename" =>
-      match Refs.targetAt doc.state off with
+      match Refs.targetAt doc.state doc.text off with
       | some (.global n, _) =>
         if inToolchain srv doc n then pure (srv, #[replyError (-32803) s!"{n} is declared in the toolchain's library"]) else
-        match Refs.targetAt doc.state off with
+        match Refs.targetAt doc.state doc.text off with
         | some (_, r) => pure (srv, #[reply (Json.mkObj [("range", rangeIn doc.text r), ("placeholder", Json.str (Refs.textAt doc.text r))])])
         | none => pure (srv, #[reply Json.null])
       | some (_, r) => pure (srv, #[reply (Json.mkObj [("range", rangeIn doc.text r), ("placeholder", Json.str (Refs.textAt doc.text r))])])
@@ -780,10 +780,11 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         let name := match t with
           | .global n => n
           | .local x .. => x
-        -- edit the places that spell the whole name (not `p.norm` for `Point.norm`)
+        -- edit the places that spell the whole name (not `p.norm` for `Point.norm`), and
+        -- (#434) a constructor's or field's last component where it is declared
         let changes := docs.filterMap fun (u, text, rs) =>
-          let es := (rs.filter (Refs.textAt text · == name)).map fun r =>
-            Json.mkObj [("range", rangeIn text r), ("newText", Json.str new)]
+          let es := rs.filterMap fun r => (Refs.renameText name new (Refs.textAt text r)).map fun t =>
+            Json.mkObj [("range", rangeIn text r), ("newText", Json.str t)]
           if es.isEmpty then none else some (u, Json.arr es)
         pure (srv, #[reply (Json.mkObj [("changes", Json.mkObj changes.toList)])])
       | none => pure (srv, #[replyError (-32602) "nothing to rename here"])

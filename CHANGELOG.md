@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* LSP: references, document highlights, `prepareRename` and rename work with the cursor
+  on a declaration's own name (a `def`/`inductive`/`structure` header, a constructor, a
+  structure field), with the same answer as from a use; a constructor or field renamed
+  within its namespace is edited where it is declared too (11y, #434).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container

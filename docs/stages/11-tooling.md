@@ -734,6 +734,19 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+* **From a declaration's own name** (#434). The name in a `def`, `inductive`,
+  `structure` or `class` header, a constructor (`| red`) and a structure field (`px :
+  Nat`) are not identifiers of the info tree, so the cursor there used to find nothing.
+  Now `targetAt` falls back to the command's syntax (parsed again, `declIdents`): the
+  first identifier of each declaring node is the name it declares, and the cursor on it
+  is the same target as a use, so references, highlights and rename give the same answer
+  from either place. The declaration site in the results is that identifier (before, the
+  name's first occurrence in the command's text, which missed constructors and fields).
+  A constructor or field is written by its last component (`red` for `Col.red`): rename
+  edits it there with the new name's last component when the new name keeps the prefix
+  (`Col.crimson`), and leaves it when it doesn't (the declaration can't say `Other.x`).
+  Tests: `lsp-server`, "#434: references, highlights and rename from a declaration's own
+  name".
 
 ## 11aa: `wiz fmt`, a formatter
 
