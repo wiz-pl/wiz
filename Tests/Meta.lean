@@ -66,6 +66,21 @@ def kernelInfer (g : Globals ZeroOneMany) (t0 : Term ZeroOneMany) : TCM (VTy Zer
     let t := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t0).1
     infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t).1
 
+/-- The verdict when at least one side rejects (`none`: that side accepts). Only the kernel
+rejecting what the reference checker accepts can be excused, and only for a rule the
+reference checker does not implement (usage; the `μ` guard). The kernel accepting what
+the reference checker rejects is always a disagreement. `none, none` is not decided here
+(the types are compared). -/
+def rejectionVerdict : Option String → Option String → Option Outcome
+  | none, none => none
+  | none, some m => some (.disagree s!"the kernel accepts, the reference checker rejects: {m}")
+  | some _, some _ => some .reject
+  | some m, none =>
+    if has m "declared with quantity" || has m "cannot project the field" || has m "cannot discard" ||
+        has m "a projection needs an unrestricted pair" then some .usage
+    else if has m unguardedDescription then some .guard
+    else some (.disagree s!"the reference checker accepts, the kernel rejects: {m}")
+
 /-- One term: the Lean kernel's verdict against the reference checker's. -/
 def vote (g : Globals ZeroOneMany) (sg : Sig) (t : MTm) (opts : Opts := kernelOpts) : Outcome :=
   match WizMeta.ofTerm [] t.toTerm with
@@ -84,14 +99,9 @@ def vote (g : Globals ZeroOneMany) (sg : Sig) (t : MTm) (opts : Opts := kernelOp
         | .ok false => .disagree "both accept, with types that are not convertible"
         | .error .fuel => .fuel
         | .error (.fail m) => .disagree s!"both accept; comparing the types failed: {m}"
-    | .ok _, .error (.fail m) => .disagree s!"the kernel accepts, the reference checker rejects: {m}"
-    | .error e, .ok _ =>
-      let m := toString e
-      if has m "declared with quantity" || has m "cannot project the field" || has m "cannot discard" ||
-          has m "a projection needs an unrestricted pair" then .usage
-      else if has m unguardedDescription then .guard
-      else .disagree s!"the reference checker accepts, the kernel rejects: {m}"
-    | .error _, .error (.fail _) => .reject
+    | .ok _, .error (.fail m) => (rejectionVerdict none (some m)).getD (.disagree m)
+    | .error e, .ok _ => (rejectionVerdict (some (toString e)) none).getD (.disagree (toString e))
+    | .error e, .error (.fail m) => (rejectionVerdict (some (toString e)) (some m)).getD .reject
 
 /-- The terms of the differential test (`Tests/Elab.lean`): the samples, then 400
 generated ones. Keep in step with that case. -/
@@ -369,6 +379,34 @@ def group : Group where
           check (t.accept ≥ 200) s!"too few accepted terms: {t.accept}"
           check (t.reject ≥ 100) s!"too few rejected terms: {t.reject}"
           check (t.acceptUncompared ≤ 10) s!"too many types not compared: {t.acceptUncompared}" },
+    { name := "the μ guard is excused only where the kernel rejects and the reference checker accepts", run := fun _ => do
+        let isGuard (o : Option Outcome) : Bool := o == some .guard
+        let isDisagree (o : Option Outcome) : Bool := match o with
+          | some (.disagree _) => true
+          | _ => false
+        -- the one excused direction
+        check (isGuard (rejectionVerdict (some s!"error: {unguardedDescription}") none)) "kernel-only guard rejection is not `guard`"
+        -- the kernel accepting what the reference checker rejects is always a disagreement,
+        -- whatever the reference checker's message says
+        check (isDisagree (rejectionVerdict none (some unguardedDescription))) "a reference-only rejection was excused"
+        check (isDisagree (rejectionVerdict none (some "type mismatch"))) "a reference-only rejection was excused"
+        -- any other kernel-only rejection is a disagreement
+        check (isDisagree (rejectionVerdict (some "type mismatch") none)) "an unrelated kernel-only rejection was excused"
+        check (rejectionVerdict (some unguardedDescription) (some "x") == some .reject) "both reject is not `reject`"
+        check (rejectionVerdict none none == none) "both accept was decided without comparing types"
+        -- end to end on the samples: μ X. X is the guard outcome, the guarded μ types are not
+        let sg ← match refSig with | .ok sg => pure sg | .error e => throw (IO.userError e)
+        let g := leanGlobals ()
+        let unguarded := MTm.mus 0 (MTm.unit 0) (MTm.drec MTm.star (MTm.dret MTm.star)) MTm.star MTm.szInf
+        match vote g sg unguarded with
+        | .guard => pure ()
+        | o => throw (IO.userError s!"μ X. X: expected `guard`, got {repr o}")
+        for (t, ok) in MTm.muSize do
+          if ok then
+            match vote g sg t with
+            | .guard => throw (IO.userError s!"an accepted μ/ν sample counted as `guard`: {t.pretty 0}")
+            | .disagree w => throw (IO.userError s!"{w}: {t.pretty 0}")
+            | _ => pure () },
     { name := "the same with the levelled rule for Π ≡ Π (the corpus does not tell the variants apart)", run := fun _ => do
         match tally (diffTerms 400) { kernelOpts with eqTyLevelled := true } with
         | .error e => throw (IO.userError e)
