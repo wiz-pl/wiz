@@ -2,7 +2,16 @@
 
 The generated [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every library
 module and declaration, with signatures and doc summaries, and searches names, doc
-comments and signatures.
+comments and signatures. The
+[reference manual](https://wiz-pl.github.io/wiz/docs/reference.html) is the library as one
+document: per module, every public declaration's full signature (implicit arguments
+included), its doc comment, the instances of each class (and for each type), and a
+notation table with each operator's precedence and associativity and what it expands to.
+It is generated from the elaborated modules and not committed: the flake's `reference`
+package runs `wiz doc --lib --reference` with the packaged `wiz` (`nix build .#reference`;
+`result/index.md` is the Markdown, a Cachix hit while the compiler and `lib/` are
+unchanged), and the published site has it as `/docs/reference.html` (every module page
+links to it) and `/docs/reference.md`.
 
 ## H0c: vectors and bit vectors
 

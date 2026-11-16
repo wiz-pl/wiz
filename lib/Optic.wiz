@@ -5,7 +5,7 @@ import Logic
 # Optic
 
 Optics for borrows (RD11): the target library of Feral's lowering of mutable borrows.
-See /workspace/wiz-notes/borrows-as-optics.md.
+See wiz-notes/borrows-as-optics.md.
 
 A Feral function that returns `&mut A` borrowed from a lender `S` lowers (Aeneas
 style) to a forward value and a backward closure: `S → Result (A × (A → S))`. That
