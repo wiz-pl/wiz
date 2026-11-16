@@ -577,7 +577,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
-* **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
+* **Trust ledger** (a step in the `build` job, before any shard):
+  `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
   `.github/trust-baseline.tsv`: a new `axiom`, `sorry`, `native_refl` or SMT axiom,

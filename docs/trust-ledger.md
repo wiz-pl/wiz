@@ -186,8 +186,8 @@ is an elaboration fence, not recursion) and has a reason.
 Every row has a review date; a row is expired when that date is before today, so a
 review is due at least every 180 days and `--check` fails until it is renewed with
 `--update --review YYYY-MM-DD`. A new row defaults to today + 180 days. The migration
-marker cannot come back: `--strict-legacy` is now enforced in CI (the `trust-ledger`
-job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
+marker cannot come back: `--strict-legacy` is now enforced in CI (the ledger step of
+the `build` job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
 checks the same ledger.
 
 ### `partial` and `mutual`: a reviewed design choice
@@ -249,8 +249,8 @@ rows, the same row, a reasoned row against a legacy one, two reasoned rows (must
 refuse), comments, CRLF, and 100 pseudo-random rows. Its last case installs the driver
 with `scripts/setup-trust-merge.sh` in a throwaway repository and runs a real
 `git merge`, so it also checks the `.gitattributes` registration. CI runs it in the
-`trust-ledger` job.
+ledger step of the `build` job.
 
-CI runs `scripts/trust-ledger.sh --check --strict-legacy` (see the `trust-ledger` job in
+CI runs `scripts/trust-ledger.sh --check --strict-legacy` (a step in the `build` job of
 `.github/workflows/ci.yml`), so both the new-entry gate and the end of the migration
 are enforced before any test shard starts.
