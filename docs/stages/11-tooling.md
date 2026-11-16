@@ -97,6 +97,86 @@ counts and prints (`cache prune: would remove 12 files (… .wizc, … .wizm, �
 be at least 1, and a read-only layer cannot be pruned even if it is passed with `--cache-ro`
 (the command says so).
 
+**Output manifests (`--cache-verify`, integrity only).** A cache key is an *input* hash;
+until this stage the bytes an entry returns (its *output*) were trusted because they were
+in the cache. `wiz` now writes a manifest with a SHA-256 of each entry's bytes and checks
+it before applying the effect: a truncated, rewritten or swapped entry is a **miss** (the
+text entry, the next layer, or re-elaboration answers), never a wrong result. There is no
+signature yet — see P3 below.
+
+The layout is one manifest per module (the note's P2) plus a per-layer generation index
+(P1):
+
+```
+<cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
+<cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
+```
+
+**Strong cache keys.** The 64-bit `hash`/`mixHash` keys are indexes, not collision-resistant
+digests. A `Cache.Key` therefore carries a fast half (the old key, used by in-memory
+tables, `.wizc` names and Lean's maps) and a SHA-256 half (used by region and manifest names,
+manifest entries and verification). The SHA-256 half is domain-separated and
+length-prefixed (`Wiz.Smt.Sha256.framed`): `["ab", "c"]` and `["a", "bc"]`, or a module key
+and a toolchain id, cannot share a preimage. Module keys hash the exact text, headers,
+`include_str` contents (under an `includeKey-v1` domain), imports and trust flag; command
+keys chain the previous SHA-256 key and the command text;
+`Toolchain.tag` and `Toolchain.targetTag` are the strong toolchain and target namespaces
+(the 64-bit `Toolchain.id` remains the build/job index). A manifest or region requires both
+halves, so a 64-bit collision is a miss (the text path or elaboration answers), never a
+wrong effect. Format 1 manifests and format 2 regions are ignored by the new names and
+regenerated; no unmigrated file is read under a strong key.
+
+A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `key-sha`,
+`file`, `size`, `sha256` and `format` (`salt` for text, `regionFormat` for a region), plus
+`module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
+`target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
+`valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
+entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+generation number, the previous root, the optional expiry and one record per module (fast
+key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
+**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
+because the number of writing processes (and `-j`) is not an input; a manifest that is
+extended keeps the base it started from rather than chaining to an intermediate partial
+write. Only the write cache is ever written; a
+`--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
+still checked first: a corrupt region never reaches the type-erased reader even when no
+manifest exists.
+
+The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works):
+
+* `off` — no manifests are read or written; the cache is exactly as before.
+* `warn` (default) — a manifested key is served only if its bytes match. A new key has a
+  SHA-256 half, so an unlisted write-cache entry is a miss (nothing binds its bytes to the
+  strong input key); an old fast-only key still falls through, and `--cache-verify off`
+  restores the old lookup. An old local cache is one cold pass, then it is rewritten with
+  manifests. A `--cache-ro` layer is **strict**: an entry there is used only through a
+  manifest, so deleting a manifest cannot downgrade a read-only layer to unverified. When
+  a read-only layer has bytes for a module but no manifest, `wiz` warns once per layer (an
+  empty layer is silent).
+* `strict` (alias `require`) — only manifested entries are used anywhere; an unlisted key
+  is a miss. A cold run writes the manifests, so it becomes strict-warm in one pass.
+
+A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
+has passed, or whose entry digest does not match is a miss: it is not repaired in a
+read-only layer. `wiz cache verify [--strict]` scans every layer's manifests against the
+bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
+`--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
+index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
+prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
+
+Compatibility default: with no manifest (or `--cache-verify off`) existing caches keep
+their old behaviour; the write cache's old unverified path is still available in `warn`.
+Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
+so an unmanifested cache is byte-identical and no key or salt changes.
+
+**Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
+a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
+and can delete it (in `warn`, for the write cache). The missing half is an external
+signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
+revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
+not read these manifests as provenance: they are integrity, not authenticity.
+
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
 
@@ -125,7 +205,7 @@ after it).
   imports, *add the missing import*, and `@f` / dropping the `@` when the argument count
   is off by the implicit parameters.
 
-```
+```wiz no-check
 def k : Nat → Bool → Nat := by
   intro n         -- wiz/plainGoal here:  n : Nat ⊢ Bool → Nat
   intro b
@@ -259,12 +339,26 @@ against the real `wiz lsp` on `tests/fixture/Goals.wiz`: the goal after `intro n
 argument's expected type, constants highlighted, `K` on `Bool` giving `Bool : Type`,
 the view following an edit. It is skipped without `nvim`.
 
+The harness separates the two ways the case can fail. A test failure prints `N passed,
+M failed` and the `✗` case; `run.sh` then exits 1 and names the case again on a
+`harness: failed case(s): …` line. Neovim itself can also exit nonzero *after* a clean
+summary (a libuv handle, job or language server still alive while it tears down); that
+is an environment anomaly, not a test result, so `run.sh` prints
+`harness: nvim exited N after P passed, 0 failed`, keeps the end of nvim's raw output
+(progress lines included) and its `NVIM_LOG_FILE`, and exits 2. When that log says
+`uv_loop_close() hang?` (libuv could not close its event loop within the 2 seconds nvim
+allows, which is the known silent 0→1 exit), the harness adds
+`harness: cause: nvim/libuv teardown could not close its event loop`. A future flake
+therefore reads as a `harness:` anomaly rather than as a failing test. `editors/nvim/tests/run.sh
+--self-check` pins all of these paths against fixture output, without nvim or a build;
+the `nvim` group runs it as its second case.
+
 ## 11q: go to definition and the infoview for syntax, binders, imports and instances
 
 Hovers, go to definition and the infoview used to know only about terms. Now (as in
 Lean) they also know about syntax:
 
-```
+```wiz no-check
 syntax (name := twice) "twice" term:max : term       -- declaration of `twice`
 macro_rules
   | `(term| twice $x) => `(term| Nat.add $x $x)      -- definition of `twice`
@@ -320,7 +414,9 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
 messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
 
-```
+```wiz
+import Logic
+
 #check fun (n : Nat) => n + 1        -- fun n => n + 1 : Nat → Nat
 #check [1, 2, 3]                     -- [1, 2, 3] : List Nat
 #check fun (b c : Bool) => b && !c   -- fun b c => b && !c : Bool → Bool → Bool
@@ -440,11 +536,13 @@ package's `lib` targets with its module roots (dependencies included), into
   plain HTML (and `wiz doc` says so).
 * **CI** builds the library's documentation on `master` and publishes it: the `docs` job
   runs `wiz doc --lib` on a push (never a pull request), with source links to the
-  commit and the Wasm module, and uploads it as the artifact `wiz-docs` (3 days, for
-  debugging); `deploy-docs` deploys that artifact to GitHub Pages at
-  <https://wiz-pl.github.io/wiz/>. The docs pages are the site root (`index.html`,
-  `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm files) and
-  every link is relative.
+  commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
+  site root and the static playground (11ab) under `doc-site/playground`
+  (`web/build-site.sh`), checks the tree (`web/check-site.sh`), and uploads it as the
+  artifact `wiz-docs` (3 days, for debugging); `deploy-docs` deploys that artifact to
+  GitHub Pages. The URLs are `/` (the landing page), `/docs/` (the docs pages:
+  `index.html`, `api.html`, `api.json`, `A.B.html`, `A.B.json`, `search.js` and the Wasm
+  files) and `/playground/`; every link is relative.
   A repository has one Pages site and each deployment replaces the whole tree, so a
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
@@ -523,7 +621,7 @@ package's `lib` targets with its module roots (dependencies included), into
   loaded) turns on Neovim 0.11's own LSP completion (after `.`, and `<C-Space>` in insert
   mode); the README lists what completion and the code actions offer.
 
-```
+```wiz no-check
 def foo (n : Nat) (pt : Point) : Nat := Nat.add n pt.‸   -- pt.px : Nat, pt.py : Nat, pt.norm
 def p : Point := _                                     -- [Fill with an anonymous constructor] ⟨?px, ?py⟩
 ```
@@ -540,7 +638,7 @@ it (named arguments `(x := e)` aside) say which explicit binder comes next. A gl
 binders come from its declaration; a local function's type from the info tree of the
 text cut after it, with its open brackets closed. In Neovim 0.11, `<C-s>` in insert mode.
 
-```
+```wiz no-check
 def b (xs : List Nat) : Nat := List.length ‸    -- List.length {A : Type} [(_ : List A)] : Nat
 ```
 
@@ -661,10 +759,10 @@ page runs.
   runtime change: `web/playground-exports.wiz` exports
   `wiz_playground_eval : String → String`, the text in and `selfhost/Frontend.wiz`'s
   `checkFile` lines out. The page calls it, frees the returned string, and renders it.
-  Its parser needs the Lean parser's tables, which only Lean can make;
-  `web/selfhost-tables.wiz` holds them (generated by
-  `lake env lean --run web/gen-selfhost-tables.lean`, checked in, 38 KB), so building
-  the module needs no Lean step beyond the `lake build wiz` every checkout needs.
+  Its parser needs the parser's tables; `selfhost/Tables.wiz` holds them (the same
+  checked-in file the self-hosted toolchain reads, generated by
+  `scripts/GenSelfhostTables.lean`, 39 KB), so building the module needs no Lean step
+  beyond the `lake build wiz` every checkout needs.
 * **What it runs.** The self-hosted frontend's embedded Prelude (Nat, Bool, List,
   Option, Prod, arithmetic, `String`), definitions with patterns and `match`, inductive
   types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
@@ -675,8 +773,14 @@ page runs.
   keeping the raw form in the line's tooltip. Anything else is shown as it comes.
 * **Build and serve** (from a checkout after `lake build wiz`):
 
-      web/build-playground.sh                  # → web/out/wiz-playground.mjs (+ the page)
-      python3 -m http.server -d web/out 8000   # then http://127.0.0.1:8000/playground.html
+      web/build-playground.sh web/out             # → web/out/wiz-playground.mjs (+ the page)
+      python3 -m http.server -d web/out 8000      # then http://127.0.0.1:8000/playground.html
+
+  The published site puts it at `/playground/`: `web/build-site.sh doc-site web/out`
+  copies the page (as `playground/index.html`), its scripts and the module there, beside
+  the landing page at `/` and the documentation at `/docs/` (11s; docs/building.md,
+  "Documentation site"). The page's own links to the rest of the site are relative, so
+  serving `doc-site` (`python3 -m http.server -d doc-site 8000`) shows the whole tree.
 
   `WIZ=...` picks another toolchain; `--gmp-src` is `web/build.sh`'s option for builds
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
@@ -686,6 +790,18 @@ page runs.
   definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
   error. `web/test.sh` now builds both Wasm modules and runs this test beside the
   infoview's Node and Chromium tests.
+* **Goals, optionally.** With `?lsp=ws://host:port` the page is also a language client:
+  `web/lsp-client.js` speaks JSON-RPC 2.0 over a WebSocket (one message per text frame,
+  no `Content-Length`), and `web/playground-lsp.js` shows the tactic state in a Goals
+  pane beside the output (`web/goals.js` renders the tagged text with the infoview's
+  markup). It asks `wiz/interactiveGoals`/`wiz/interactiveTermGoal` at the caret, falls
+  back to `wiz/plainGoal`/`wiz/plainTermGoal`, and keeps the Wasm checker working with
+  no endpoint or a failed connection. Clicking a hypothesis or subterm selects its source
+  span; `web/tagged.js`'s `delegate` is the infoview's highlighting code. The protocol a
+  server must serve — methods, UTF-16 positions, fallbacks and the optional fields that
+  make highlighting precise — is [playground-lsp.md](../playground-lsp.md). The mock
+  server (`web/mock_lsp_server.mjs`) and `node web/playground_lsp_test.mjs` test it with
+  no Wiz build.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
   call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
   modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.

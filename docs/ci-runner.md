@@ -33,7 +33,12 @@ self-hosted runner executes that pull request's code on the machine. So:
   60 GB of disk (the Nix store: `wiz` is ~1.8 GB with its closure; the test driver's
   output is ~165 MB but its closure includes `wiz`, so ~2.0 GB; plus cache.nixos.org's
   dev shell, the Wiz caches under `~/.cache/wiz`, `.grail` and `/tmp/wiz-selfhost-*`).
-  There is no `.lake` build any more.
+  There is no `.lake` build any more. The opt-in nightly fixpoint
+  (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the self-compiles peak near
+  5.4 GiB); it checks `MemAvailable` before the run and fails clearly on a smaller
+  runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
+  and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
+  to all but two CPUs).
 * **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means
