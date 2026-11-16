@@ -56,7 +56,7 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
           let isNat := match A with
             | .const c _ => c == N
             | _ => match whnf (eval g env A) with
-              | .mu _ _ _ _ _ (some (T, _, _)) => T == N
+              | .mu _ _ _ _ _ (some (T, _, _)) _ => T == N
               | _ => false
           if isNat then
             match whnf (eval g env (args.foldl .app h)) with
