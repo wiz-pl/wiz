@@ -786,3 +786,6 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
 Tests: `calc` (the mixed chains at `Nat`, `Int` and `Q`, `↔` and propositional `=`, `_`
 and explicit intermediates, a user-registered relation, and the three errors). The
 unrelated `calc_e` syntax category in the `language` group is untouched.
+
+The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
+request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).

@@ -162,11 +162,13 @@ def runWizC (program : String) : IO Got := do
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") program
+    -- (`build`, not the one-shot mode: flags without a command are the host's usage, so
+    -- a module root needs a command; `--no-cache` keeps the run out of `$HOME/.cache`)
     let comp ← IO.Process.output
-      { cmd := "timeout", args := #["300", exe.toString, "-I", "lib"], cwd := dir }
+      { cmd := "timeout", cwd := dir,
+        args := #["300", exe.toString, "build", "input.wiz", "-I", "lib", "--no-cache", "-o", "out.c"] }
     if comp.exitCode != 0 then
-      return .failed s!"selfhost frontend: {comp.stderr.take 2000}"
-    IO.FS.writeFile (dir / "out.c") comp.stdout
+      return .failed s!"selfhost frontend: {comp.stdout.take 1000}{comp.stderr.take 2000}"
     let rt := (← IO.currentDir) / "selfhost"
     let args := #["-O1", "-w", s!"-I{rt}"] ++ tc.gcCflags.toArray ++
       #[(dir / "out.c").toString, "-o", (dir / "prog").toString] ++ tc.gcLdflags.toArray
