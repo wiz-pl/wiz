@@ -9,12 +9,36 @@ the measurements wanted, and none of the numbers here are mine to claim.
 Legend: **now** = on master at the audit commit. **after stack** = implemented on a branch, PR or
 stack that is not on master yet; the workstream starts only after that merges.
 
+**Reading this note later.** It is a snapshot. Every `file:line` reference below is a line of
+the audit commit `aeaa34ef`, not of today's `master`; the code has moved since (for example
+`preludeText` and `Scope.lookup` in `selfhost/Frontend.wiz`), so look a definition up by the
+name given beside the reference. Checked against `master` at `d23473da` (2026-11-16), these
+items have landed since the audit:
+
+| item in this note | on `master` now |
+|---|---|
+| `calc` + `Trans` (inventory; top 10 #1, W1) | **landed** (13s, `257c1b33`; `term.calc` in `Wiz/Parser/Builtin.lean`). `Trans` instances in `lib/Logic.wiz`, `IntOrder` and `Rat`; proofs use `calc` in `lib/Nat.wiz`, `Ring` and `IntRing`, not yet in `BitVecShift`, `BitBlast` or `Rat`. |
+| `include_str` | **landed**, in the self-hosted parser too (`term.includeStr`). `preludeText` is still an inline string in `selfhost/Frontend.wiz` (W7's extraction is open). |
+| `wiz fmt` | **landed** (11aa, `Wiz/Format.lean`, `b818b94a`). |
+| `wiz lint` | not on `master` (no `Wiz/Lint.lean`, no `lint` command). |
+| `--split N` (top 10 #6) | **landed** in `wiz build` (`666b4437`); `scripts/fixpoint.sh` does not pass it yet. |
+| `ResultQ`/`ResultH` (W4) | **landed** in `lib/Region.wiz` (`60cd8ec9`); `lib/HeapBorrow.wiz` and `lib/Optic.wiz` do not use `ResultH` yet. |
+| `PMap`/`PSet` | **landed** (`lib/PMap.wiz`). |
+| scry stack (`lib/Scry/*`, `scry/`) | **landed**; `Store`/`Egraph` are still the list models (top 10 #10, W6 open). |
+| Grail region cache (top 10 #8, W2) | **landed**: `tc.regionCache` in `Grail/Elab.lean`, `--region-cache` in `Grail/Cli.lean` (`d5841ca4`). |
+| Nix package with a warmed read-only cache (top 10 #7) | **landed**: `flake.nix` warms `share/wiz/cache` and both wrappers pass `--cache-ro` (`f480155a`). |
+| duplicated Text helpers in `Json`/`Feral` (top 10 #3) | **done** (`ef67c6cf`: `Json` and `Feral` use `lib/Text.wiz`, `Json.divMod` is native `Nat.div`/`Nat.mod`, and `Fe.splitGo`/`Fe.wordsOf` accumulate in reverse). |
+| `do` blocks in the I/O library (top 10 #4) | partly: 10 lines of `lib/Sys.wiz` still call `IO.bind`/`EIO.bind` (31 binds at the audit). |
+
+The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL helpers and
+`HTrie` hash, the selfhost lookups) were still open at `d23473da`.
+
 ## 0. Feature inventory: what is on master, what is not
 
 | feature | status | where it lives / what is missing |
 |---|---|---|
 | `--cache-ro` (read-only cache layers) | **now** | `Wiz/Toolchain.lean:29-31,104-111`; grail passes it to jobs (`Grail/Elab.lean:67`); `docs/building.md:258`. CI never passes it; the Nix package ships no store cache. |
-| `--region-cache`, `--region-stats` | **now, `wiz` only** | `Main.lean:148-157,223-227,309-311`; `Wiz/Cache.lean:603-853`. Grail never builds a `RegionStore` (`Grail/Elab.lean:90-95`). |
+| `--region-cache`, `--region-stats` | **now, `wiz` only** | `Main.lean:148-157,223-227,309-311`; `Wiz/Cache.lean:603-853`. Grail never builds a `RegionStore` (`elaborate` in `Grail/Elab.lean`). |
 | `--split N` for `wiz build` | **after stack** | `wiz-notes/parallel-build.md` §4.2, `wiz-notes/perf-queue.md` ("parallel-build split"). CI's shard `"split"` is a different feature (`.github/test-shards.json`). |
 | Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; measured 262.3 s → 160.7 s in `wiz-notes/parallel-build.md` §3. |
 | tower / Nix packaging | **now** | `tower/`, `flake.nix:83-109`. No warmed cache; `source nix` and `toolchain link` are in `docs/building.md`. |
@@ -54,7 +78,7 @@ the workstreams' main prizes and should not be read as rejected.
 | 5 | Modernize the HDL examples and drop the local list helpers (**now**) | `examples/hdl-gaps.wiz:145-154`, `examples/hdl-mem.wiz:65-72`, `examples/hdl-sim.wiz:62`, `examples/hdl-compose.wiz:67,115-116`; `lib/Hdl/Core.wiz:63-70` (`Hdl.map`/`Hdl.rev`), `:81` (`Hdl.natsEq`), `:948` (`Hdl.wEq`) | 1 | a `Circuit.RstEn`/`HwTy.rstEn` alias next to `withResetEnable` (`Core.wiz:1771`) removes the 3-line `prod (named "rst") (prod (named "en") …)` from 5 files; `BEq` for `List Nat`/triples removes 3 hand-written equalities (~40 lines) | 10.0 |
 | 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | stage-1 selfhost compile 146.9 → 85.8 s at `--split 8` (1.71×), net −48 s for the fixpoint after the built binary's +12.5 s regression (`wiz-notes/perf-queue.md`, informal heavy probes) | 9.0 |
 | 7 | Ship the Nix package with a warmed read-only cache (**after stack**) | `flake.nix:88-103` (installPhase), plus `--cache-ro $out/share/wiz/cache` in the wrappers | 1 | clean-`HOME` `grail build` of a one-target package 3.2 → 0.9 s, 437 store entries hit (`wiz-notes/perf-queue.md`, nix-cache, informal) | 8.0 |
-| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:67-95`; `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; `wiz-notes/module-mmap.md`), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
+| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; `wiz-notes/module-mmap.md`), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
 | 9 | Thread the hash through `HTrie`, cheapen `NatList.hash` (**now**) | `lib/Hdl/Core.wiz:761-766` (hash), `:785-810` (find/insert: 20 × `Nat.testBit h d`, each a division by `2^d`) | 1 | one shift per level instead of 20 `div`+`pow` per emitted node; est. 5–15% off `Circuit.netlist` on big designs (measure `examples/hdl-temporal.wiz`) | 6.0 |
 | 10 | Native store and array-backed e-graph for scry (**after stack**) | `lib/Scry/Store.wiz:30-95` (`memRow`/`insert` linear), `lib/Scry/Egraph.wiz:177-250` (`List.append g.parent [id]` per node, linear `find`); `scry/src/Scry/CstStore.wiz` (already `U32Array`/`U64Array`) | 4 | the Wiz-side copy into the model is ~85% of parse wall time (0.53–0.91 MB/s vs the shim's 3.3–6.5; `wiz-notes/scry-bench.md`); store/e-graph go from O(n²) to near-linear | 5.0 (6.25 if the native store lands as designed) |
 
@@ -63,7 +87,7 @@ the workstreams' main prizes and should not be read as rejected.
 * **CAF caching of closed top-level definitions**: the OLED demo's value simulation rebuilds
   `RomT` tables every cycle and spends ~60% of its time in malloc/RC (`wiz-notes/wishful/compiled-closed-constants.md`);
   compiler work (`Wiz/Compiler/{Reuse,C}.lean`), not a library change. Impact 5, confidence 2, effort 5 → 2.0.
-* **Selfhost `StrMap` keys**: `selfhost/Frontend.wiz:43-49` converts the Wiz `String` to a native key
+* **Selfhost `StrMap` keys**: `selfhost/Frontend.wiz:43-49` (`Scope.lookup`) converts the Wiz `String` to a native key
   with `Str.ofString` on every global lookup, and `selfhost/Backend.wiz:445,2465` does the same per
   `arity`/inlining lookup; intern once (`lib/Intern.wiz`) and key a `U64Map`, or hash the chars
   directly. Impact 3, confidence 2, effort 3 → 2.0. Measure `=selfhost`/selfcheck.
@@ -103,7 +127,7 @@ Goal: make warm builds and the fixpoint use what the toolchain already has.
 
 * `Wiz/Toolchain.lean`: add `regionCache : Bool` (and optionally `regionStats`) to `Toolchain`;
   `toFlags` gains `--region-cache`/`--region-stats`.
-* `Grail/Elab.lean:67-95`: build a `RegionStore` like `Main.lean:223-227` (the command state is
+* `Grail/Elab.lean:66-69` (`elaborate`): build a `RegionStore` like `Main.lean:223-227` (the command state is
   already `ZeroOneMany`) and pass it to `Cache.elaborateCached`; `Grail/Cli.lean` parses the flags;
   the job process owns it (elaboration happens in the job, not in the scheduler); the job report
   can carry the `--region-stats` counters back to the scheduler.
@@ -218,7 +242,7 @@ the e-graph benchmarks (`wiz-notes/scry-bench.md`, `wiz-notes/scry-egraph.md`).
   shadows in `Eq.subst`/`Eq.substBack` (`wiz-notes/ward.md`); fix those 2 and run lint over `lib/`
   in CI (the import-shadowing bug is a frontend error already, so lint's shadow rule is the one
   that pays).
-* After `include_str` merges: extract `selfhost/Frontend.wiz:4650` (`preludeText`, a 6.7 kB
+* After `include_str` merges: extract `preludeText` (`selfhost/Frontend.wiz:4650` at the audit, a 6.7 kB
   single-line string that duplicates `lib/Prelude.wiz` and already differs definitionally, e.g.
   the embedded `Nat.sub` recurses on its second argument) to `selfhost/prelude.wiz` and embed it.
   This is the biggest single readability/maintenance win in `selfhost` and removes a silent
@@ -232,7 +256,7 @@ and a selfhost prelude that cannot drift.
 * `selfhost/Frontend.wiz:43-49`: `Scope.lookup` walks the local-binder list linearly and converts
   every global name with `Str.ofString`; keep a `StrMap` on the `String` (it already is one) but
   avoid the conversion by keeping `Str` in the scope, or intern names and key a `U64Map`.
-* `selfhost/Kernel.wiz:572-576`: `lookup` walks the de Bruijn environment per variable; a
+* `selfhost/Kernel.wiz:572-576` (`lookup`): walks the de Bruijn environment per variable; a
   random-access structure (the `Hdl.RList` pattern, `lib/Hdl/Core.wiz:1230-1260`, or a trie)
   would make it O(log n). This is the stage-2 hot path; measure before changing (array copies on
   `bind` can lose).
@@ -266,7 +290,7 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 | `Region`/`Result`/`Eff`/`IO` | `Region.wiz:133-215` nests `match` on the handle inside the result match; `Sys.wiz` uses 31 explicit binds | region scopes are `[inline]` and unboxed (`Region.wiz:73-76`); `Eff` interprets a tree (no native path), unused outside `EffHeap` | `Region` has 6 documented lifetime axioms; `Result1` and `Outlives` are the only unsafe surface; `IO1`/`Monad1` are the linear I/O story |
 | `Grail` | one-job is in (`Graph.lean:51-56`); `addCheck` and `addCheckImports` (`:102-124`) read and parse the same imports twice | region cache not used (main gap); `-j` default `min(cores,4)` (`Cli.lean:107`) is deliberate: 8 jobs only bought 1.27× (`wiz-notes/parallel-build.md` §2) | scheduler is serial for keys but measured at 1.3 s for a 59-node no-op build (`parallel-build.md` P5), not a bottleneck |
 | `tower` | 613-line CLI with a few `List.length (String.splitOn …)` idioms (`Cli.wiz:373,490,580`); fine | file sizes are tiny (settings/toolchain files); `git ls-remote` dominates installs | the port follows the Lean reference definition by definition; `tower/tests/pure.wiz` covers settings parsing, while `update`/`install` need git/nix and have no unit tests |
-| `selfhost` | embedded prelude at `Frontend.wiz:4650` duplicates `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps in `wiz-notes/selfhost-parity.md`; the embedded prelude is the drift risk (W7) |
+| `selfhost` | embedded prelude (`preludeText`, `Frontend.wiz:4650` at the audit) duplicates `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps in `wiz-notes/selfhost-parity.md`; the embedded prelude is the drift risk (W7) |
 | `scry` | the stack's modules are documented and tested; `Store`/`Egraph` are deliberately pure list models | store/e-graph are O(n²); the native columns are already used in CstStore; the Wiz-side copy is 85% of parse time | native store/egraph work is in progress; no axioms beyond the documented natives |
 | `wiz-rv`/`wiz-reals`/`wiz-cats` | wiz-rv already derives `Bundle` everywhere (43-field `CoreSt`, `src/Rv/Core.wiz:61-105`) and has no `.1/.2` chains; wiz-reals has 4 `Eq.trans` (`QSeq.wiz:31-35`); wiz-cats carries `Cats/Eq.wiz` because of G1 | wiz-rv's emulator/sim uses `Hdl.Sim`; no list hot spots found; the pinned toolchain (`wiz-toolchain: … master-50cd3e7`) predates the newest lib | wiz-cats `FINDINGS.md` G1–G8 are the best source of library papercuts (G1 fixed by W1/W7; G2 proof-usage, G3 implicit quantities, G4 transp-computed equations remain language-level) |
 
