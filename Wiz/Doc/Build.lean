@@ -23,11 +23,16 @@ def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Ru
   if let some w := o.web then
     if ← (w / "wiz-infoview.mjs").pathExists then
       for f in ["wiz-infoview.mjs", "wiz-infoview.wasm"] do
-        discard <| copyIf (w / f) (o.out / f)
+        discard <| copyFirst [w] f o.out
       wasm := true
-  if let some a := o.assets then
-    for f in ["scroll.css", "scroll.js", "tagged.js", "scroll-search.js"] do
-      discard <| copyIf (a / f) (o.out / f)
+  for f in ["scroll.css", "scroll.js", "tagged.js", "scroll-search.js"] do
+    discard <| copyFirst o.assets f o.out
+  -- (11s) the live client: only with --serve, so a plain site is unchanged
+  if o.serve then
+    for f in ["lsp-client.js", "goals.js", "doc-live.js", "doc-live.css"] do
+      unless ← copyFirst o.assets f o.out do
+        throw (IO.userError s!"wiz doc: --serve: {f} is not in the web assets: give --web DIR \
+          (a release's share/wiz/web) or run in a checkout")
   let mut rows : Array Json := #[]
   let mut summaries : Array (String × Option String) := #[]
   let mut apiSections : Array String := #[]

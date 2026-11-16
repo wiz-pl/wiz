@@ -41,9 +41,15 @@ structure Options where
   title : String := "Wiz documentation"
   /-- the Wasm module and its JS (`web/build.sh`'s output) -/
   web : Option System.FilePath := none
-  /-- the site's own files (scroll.css, scroll.js, tagged.js): `web/` of the checkout,
-  or share/wiz/web -/
-  assets : Option System.FilePath := none
+  /-- where the site's own files are (scroll.css, scroll.js, tagged.js, and with
+  `--serve` lsp-client.js, goals.js, doc-live.js, doc-live.css): searched in order,
+  `web/` of a checkout or share/wiz/web of a release -/
+  assets : List System.FilePath := []
+  /-- (11s) `--serve`: the pages carry the live documentation client, which asks a
+  `wiz lsp --ws` for a declaration's type and doc in a panel -/
+  serve : Bool := false
+  /-- the port of the language server (`--lsp PORT`); `none`: the client stays inert -/
+  lsp : Option Nat := none
   /-- write the reference manual (`Reference.markdown`) to this directory (`--reference`) -/
   reference : Option System.FilePath := none
   /-- with `--reference`: write nothing, and report the files that differ (`--check`) -/
@@ -74,6 +80,9 @@ structure Entry where
   kind : String
   doc : Option String
   line : Nat
+  /-- where the declaration's name is: 0-based line and column, for the live client -/
+  line0 : Nat
+  col : Nat
   /-- the DOM id of its signature (`sig-N`), and the signature as JSON (`sig`, `subs`) -/
   sigId : String
   data : Json
@@ -156,6 +165,18 @@ def instanceTypes (t : Term ZeroOneMany) : List Name :=
     | .mu _ _ _ _ _ (some (n, _, _)) _ | .nu _ _ _ _ _ (some (n, _, _)) => some n
     | _ => none
 
+/-- The character offset of the declaration's name in the command at `site`: the last
+component of the name as written (`Shape.area` → `area`, `Point.x` → `x`), or the
+command's start when it is not there (a constructor, whose name is generated). -/
+def identOffset (src : String) (site : SourceInfo) (n : Name) : Nat :=
+  let stop := if site.stop > site.start then site.stop else site.start
+  let text := String.ofList ((src.toList.drop site.start).take (stop - site.start))
+  let name := s!"{n}"
+  let last := ((name.splitOn ".").getLast?).getD name
+  if last.isEmpty then site.start else
+  let before := (text.splitOn last).headD ""
+  if before.length < text.length then site.start + before.length else site.start
+
 /-- Make the entry of declaration `n`; `counter` numbers the signatures. -/
 def entry (c : Ctx) (src : String) (n : Name) (counter : Nat) : Option Entry := do
   let d ← c.st.globals.find? n
@@ -168,7 +189,9 @@ def entry (c : Ctx) (src : String) (n : Name) (counter : Nat) : Option Entry := 
   let start := match dd with
     | some d => if d.start > 0 then d.start else site.start
     | none => site.start
-  pure { name := n, kind := kindOf c.st n, doc := dd.bind (·.doc), line := (lineCol src start).1 + 1,
+  let (line0, _) := lineCol src start
+  let col := (lineCol src (identOffset src site n)).2
+  pure { name := n, kind := kindOf c.st n, doc := dd.bind (·.doc), line := line0 + 1, line0, col,
          sigId, data, sigHtml := fallbackHtml c subs tt, tt, subs, sigText := tt.flatten }
 
 /-- The documented declarations of the module (in source order), with their
@@ -236,17 +259,23 @@ def sigBlock (c : Ctx) (e : Entry) (short : String) : String :=
     | none => e.name
   s!"<pre class=\"sig\"><code><span class=\"decl-name\">{htmlEscape shown}</span> : <span class=\"sig-type\" id=\"{e.sigId}\">{e.sigHtml}</span></code></pre>"
 
+/-- (11s) With `--serve`, where the declaration's name is in its module's source: the
+live client asks the language server about that position. Empty otherwise, so a plain
+`wiz doc` page is exactly the static one. -/
+def declAttrs (o : Options) (e : Entry) : String :=
+  if o.serve then s!" data-doc-line=\"{e.line0}\" data-doc-col=\"{e.col}\"" else ""
+
 def entryHtml (c : Ctx) (o : Options) (m : Module) (e : Entry) : String :=
   let kids := if e.children.isEmpty then "" else
     let items := e.children.toList.map fun k =>
       let short := match k.name.splitOn "." |>.getLast? with
         | some s => s
         | none => k.name
-      s!"<li class=\"{htmlEscape k.kind}\" id=\"{htmlEscape k.name}\">{sigBlock c k short}{docHtml c k.doc}</li>"
+      s!"<li class=\"{htmlEscape k.kind}\" id=\"{htmlEscape k.name}\"{declAttrs o k}>{sigBlock c k short}{docHtml c k.doc}</li>"
     let what := if e.children.all (·.kind == "field") then "Fields" else
       if e.children.all (·.kind == "constructor") then "Constructors" else "Constructors and fields"
     s!"<div class=\"children\"><div class=\"children-title\">{what}</div><ul>{String.join items}</ul></div>"
-  s!"<div class=\"decl\" id=\"{htmlEscape e.name}\" data-kind=\"{htmlEscape e.kind}\">" ++
+  s!"<div class=\"decl\" id=\"{htmlEscape e.name}\" data-kind=\"{htmlEscape e.kind}\"{declAttrs o e}>" ++
   s!"<div class=\"decl-head\"><span class=\"kind\">{htmlEscape e.kind}</span> <a class=\"anchor\" href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a>" ++
   s!"<a class=\"ref\" href=\"reference.html#{htmlEscape e.name}\">reference</a>{sourceLink o m e.line}</div>" ++
   sigBlock c e "" ++ docHtml c e.doc ++ kids ++ instancesHtml c e.instances ++ "</div>\n"
@@ -300,10 +329,11 @@ def apiRows (m : Module) (es : Array Entry) : Array Json :=
 /-- JSON inside `<script>`: `</` can't end the element. -/
 def scriptJson (j : Json) : String := (j.compress.replace "</" "<\\/")
 
-def head (o : Options) (title : String) (wasm : Bool) : String :=
+def head (o : Options) (title : String) (wasm : Bool) (live : Bool := false) : String :=
   s!"<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">" ++
   s!"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
   s!"<title>{htmlEscape title}</title><link rel=\"stylesheet\" href=\"scroll.css\">" ++
+  (if live then "<link rel=\"stylesheet\" href=\"doc-live.css\">" else "") ++
   -- the search (a classic script: it works from file:// too), and with the Wasm module
   -- the interactive signatures (a module script: needs http)
   "<script src=\"search.js\" defer></script><script src=\"scroll-search.js\" defer></script>" ++
@@ -323,7 +353,11 @@ def nav (mods : List String) (current : String) : String :=
 def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : Bool) : String :=
   let data := Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]
   let toc := es.toList.map fun e => s!"<li><a href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a></li>"
-  head o s!"{m.name} — {o.title}" wasm ++ nav c.modules m.name ++
+  -- (11s) the live client: where it asks, and the source it opens in the server
+  let live := o.serve
+  let serveData := Json.mkObj [("module", m.name), ("src", s!"sources/{m.name}.wiz"),
+    ("lsp", match o.lsp with | some p => Json.str s!"ws://127.0.0.1:{p}" | none => Json.null)]
+  head o s!"{m.name} — {o.title}" wasm live ++ nav c.modules m.name ++
   s!"<main><h1>{htmlEscape m.name}</h1>" ++
   s!"<div class=\"module-src\"><a class=\"ref\" href=\"reference.html#module-{htmlEscape m.name}\">reference</a> " ++
   s!"{sourceLink o m 1}</div>" ++
@@ -332,7 +366,12 @@ def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : B
   String.join (es.toList.map (entryHtml c o m)) ++
   s!"</main><aside class=\"toc\"><div class=\"nav-title\">On this page</div><ul>{String.join toc}</ul></aside>" ++
   "<div id=\"info\" hidden></div>" ++
-  s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n</body></html>\n"
+  s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n" ++
+  (if live then
+    s!"<script type=\"application/json\" id=\"wiz-doc-serve\">{scriptJson serveData}</script>\n" ++
+    "<script type=\"module\" src=\"doc-live.js\"></script>\n"
+   else "") ++
+  "</body></html>\n"
 
 def indexPage (o : Options) (mods : List (String × Option String)) : String :=
   let items := mods.map fun (m, doc) =>
@@ -372,10 +411,12 @@ signatures. -/
 def searchJs (rows : Array Json) : String :=
   s!"window.wizSearchIndex = {(Json.arr rows).compress};\n"
 
-/-- Copy a file if it exists; whether it did. -/
-def copyIf (src dst : System.FilePath) : IO Bool := do
-  if ← src.pathExists then
-    IO.FS.writeBinFile dst (← IO.FS.readBinFile src); pure true
-  else pure false
+/-- Copy `f` from the first of `dirs` that has it; whether one did. -/
+def copyFirst (dirs : List System.FilePath) (f : String) (out : System.FilePath) : IO Bool := do
+  for d in dirs do
+    if ← (d / f).pathExists then
+      IO.FS.writeBinFile (out / f) (← IO.FS.readBinFile (d / f))
+      return true
+  pure false
 
 end Wiz.Doc

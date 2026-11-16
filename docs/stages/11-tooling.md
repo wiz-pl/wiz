@@ -556,6 +556,20 @@ package's `lib` targets with its module roots (dependencies included), into
   copies the site's scripts and `scroll.css`; `wiz doc` takes them from `share/wiz/web`
   of a release, `web/out` of a checkout, or `--web DIR`. Without them the pages are
   plain HTML (and `wiz doc` says so).
+* **Live documentation (`wiz doc --serve`, with `--lsp PORT`).** The site is static by
+  default. `--serve` serves the output tree over HTTP on `127.0.0.1` (`--port N`,
+  default 8000) and adds `web/doc-live.js` to the module pages only: with `--lsp PORT`,
+  hovering or clicking a declaration asks a separate `wiz lsp --ws PORT` for its
+  `textDocument/hover` (the real type and doc comment) and for the goals, expected type
+  and diagnostics at that position, rendered by the playground's `web/goals.js`; the
+  client is the playground's `web/lsp-client.js`. The server also serves each module's
+  source at `/sources/A.B.wiz`, which the page opens with `didOpen`, so the positions
+  are the generated ones. Without `--lsp` the client is inert (no socket, no fetch) and
+  the page is the static documentation; `index.html` and `api.html` never carry it.
+  `wiz doc`'s own output is unchanged without `--serve` (byte for byte). The server is
+  a development one: loopback, `GET`, no caching. Search stays static; code actions need
+  an editor's cursor and are not live here. See `docs/building.md`, "Live
+  documentation".
 * **CI** builds the library's documentation on `master` and publishes it: the `docs` job
   runs `wiz doc --lib` on a push (never a pull request), with source links to the
   commit and the Wasm module, into `doc-site/docs`, assembles the landing page at the
