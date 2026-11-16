@@ -100,7 +100,7 @@ instance : Sized Pair := Sized.mk (fun _ => 2)
 instance : Sized Nat := Sized.mk (fun n => n)
 
 /-- A made-up operator, to show the notation table. -/
-infixl:33 " +? " => HAdd.hAdd
+infixl:33 \" +? \" => HAdd.hAdd
 "
 
 def refEmpty : String := "import Prelude

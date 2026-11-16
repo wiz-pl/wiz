@@ -264,7 +264,9 @@ def entryMarkdown (d : Data) (m : Module) (e : Entry) : String :=
   s!"<a id=\"{htmlEscape e.name}\"></a>\n" ++
   s!"### {mdCode e.name}\n\n" ++
   s!"{e.kind} · `{mdEscape m.rel}:{e.line}`\n\n" ++
-  s!"```wiz\n{e.sigText}\n```\n" ++
+  -- (a signature is a type, not a Wiz file: a plain block, which the docs-examples
+  -- check does not try to `wiz check`)
+  s!"```text\n{e.sigText}\n```\n" ++
   d.docHtml e.doc ++ "\n" ++ kids ++ instancesMarkdown d e ++ "\n"
 
 /-- The manual as one Markdown file: header, contents, notation table, then a section per
