@@ -1,11 +1,18 @@
 [
   {"name": "selfhost", "split": 6, "heavy": true,
-   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
-    "=audit-kernels"
+    "=audit-kernels",
+    "=selfhost-macro"
+  ]},
+  {"name": "selfhost-parse-diff", "heavy": true,
+   "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
+   "select": [
+    "=selfhost-parse-diff"
   ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
@@ -47,7 +54,9 @@
     "=grail-commands",
     "=grail-deps",
     "=grail-hygiene",
+    "=grail-index",
     "=grail-jobs",
+    "=grail-vendor",
     "=hdl",
     "infoview",
     "=json",
@@ -61,6 +70,7 @@
     "optic",
     "persistent",
     "phantom",
+    "=plot",
     "regions",
     "=scry-wil",
     "=scry-c2wil",

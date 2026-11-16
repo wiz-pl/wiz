@@ -118,7 +118,7 @@ the board; its findings G1–G10 are the requirements). Design notes:
 `wiz-notes/hdl-usability.md`. Everything is in `lib/Hdl/Core.wiz`; examples and
 tests in `examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
 
-```
+```wiz no-check
 structure Tx (r : HwTy → Type) where      -- a bundle: a structure of signals
   line : r Bit
   left : r B4
@@ -241,7 +241,7 @@ SVA. `lib/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Tr
 examples and tests in `examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
 `wiz-notes/hdl-temporal.md`.
 
-```
+```wiz no-check
 def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, for ever
     TL.always (TL.nowB (fun o => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
   Mealy.always_settled_const loopM (onlyByte 165) loopback.init (sendOnce 165) quiet F (loopIdle 165)
@@ -612,7 +612,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
   `⌈log₂ #constructors⌉` bits (Clash's encoding):
-  ```
+  ```wiz no-check
   inductive Phase where | idle | start | data | stop  deriving BitPack
   -- Phase.width = 2, Phase.code = HwTy.bits 2, Phase.toNat, Phase.ofNat (out of range:
   -- the first constructor), Phase.pack : Phase → HwTy.El Phase.code, Phase.unpack,
@@ -648,7 +648,8 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
 
 Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
 inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on an enumeration signal (staged `match`, hdl-staging-research S3), asynchronous
+`match` on an enumeration signal (a case tree over the `Hw` ops — wishful
+`hdl-match-signals`; the workaround is an `if` chain on `Phase.lit`), asynchronous
 reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
@@ -1017,7 +1018,54 @@ interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
 agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
 `check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH; without yosys
 the case is marked skipped with the reason `no yosys`, never silently passed. The test
-group has two cases (the APB/Wishbone/AXI4-Lite one and this one).
+group has four cases: APB/Wishbone/AXI4-Lite, AXI4 bursts, AXI4-Stream and SPI (the
+last two run their value/netlist checks even when yosys is absent, and add the yosys
+check when it is on PATH).
+
+## AXI4-Stream (`lib/Hdl/AxiStream.wiz`)
+
+`lib/Hdl/AxiStream.wiz` (`import Hdl.AxiStream`) is the AXI4-Stream handshake subset: a
+beat is `tdata`, `tvalid`, `tlast`, `tkeep`, `tuser` and `tready`, width-parameterised by
+`dw`, with one `tkeep` bit per byte (`AxiStream.keepW dw = dw / 8`). `AxiStream.Beat dw`
+is the full bundle, `AxiStream.Tx dw` the source-driven half (no `tready`), and
+`AxiStream.noTx`/`AxiStream.beatOf` build quiet beats. A beat is accepted exactly in a
+cycle with `tvalid && tready`; `AxiStream.Law.accepted` is the resulting payload
+sequence.
+
+* `AxiStream.sourceC dw n` emits `n` beats (data `0 … n-1`, `tlast` on the last, all
+  keeps set) and advances only on an accepted beat; `AxiStream.sinkC dw period` is a sink
+  whose `tready` is one cycle in `period` (`AxiStream.readySinkC` is always ready).
+  `AxiStream.pairC dw n period` closes the loop between them.
+* `AxiStream.sliceC dw` is a one-beat register slice with full throughput: an empty
+  buffer passes a beat through, a stalled output buffers one beat, and a buffered beat
+  leaving the same cycle a new one arrives is replaced without a bubble.
+* `AxiStream.upC dw ratio` groups `ratio` beats of `dw` bits into one beat of
+  `dw * ratio` bits (the first narrow beat is the high part) and
+  `AxiStream.downC dw ratio` splits one `dw * ratio`-bit beat into `ratio` narrow beats
+  (low part first). Both preserve `tkeep` bit for bit; upsize ORs the group's `tlast`
+  and `tuser`, downsize raises `tlast` on the group's last beat and repeats `tuser`.
+  `AxiStream.sliceInReady`, `AxiStream.upInReady` and `AxiStream.downInReady` expose the
+  input-ready term to wire back to a source.
+
+`lib/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
+`AxiStream.Law.Stable` (a stalled beat is held unchanged and stays valid),
+`NoLoss`/`NoDup`/`Order` (the accepted output payloads are exactly the accepted input
+payloads: same count, each once, in order), `Backpressure` (the three together) and
+`SliceNoLoss`. The kernel checks the small facts (`accepted_nil`,
+`keepW_8`, the slice/source/sink initial values); the rest are Boolean checks over
+generated traces, **tested, not proved**.
+
+`examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
+always-ready, a 2-cycle and a 3-cycle stall pattern, the slice with a stalling sink
+(10 beats, checking that the accepted sequence is exactly `0 … 9`), and 8→16 and 16→8
+conversion with the grouping, `tkeep` split/merge and `tlast` placement checked against
+the expected payloads. Every circuit's value simulation, `Netlist.simulate` and
+`Circuit.simFast` agree cycle for cycle, and the netlists are `Netlist.wellFormed`; yosys
+runs on the emitted Verilog when it is on PATH. **Limits:** the converters group a fixed
+`ratio` of beats (no early flush of a short packet when `tlast` arrives before the group
+is full, and a downsize always emits all `ratio` narrow beats), `tuser` is carried but
+never interpreted, there are no `TID`/`TDEST`/`TSTRB` attributes or null-byte
+suppression, and the slice is one beat deep (compose slices for a deeper pipeline).
 
 ## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
 
@@ -1114,7 +1162,7 @@ repository's controller are the origins, with the board-specific parts removed.
 | module | what | configuration |
 |---|---|---|
 | `Hdl.Uart` | `Uart.baudC n` (counter, `ce` in, `tick` out), `Uart.txC n` (8N1, `start`/`data` in, `line`/`busy` out), `Uart.rxC n` (`line` in, `valid`/`data`/`busy` out, two-flip-flop input synchroniser), `Uart.loopbackC n` (the line wired from TX to RX); the `…w` forms (`Uart.baudCw`, `Uart.txCw`, `Uart.rxCw`, `Uart.loopbackCw`, whose first argument is the counter width) and the named 7-bit (`Uart.tx7C`, …) and 10-bit (`Uart.tx10C`, …) configurations | `n` clocks per bit, 1 … 2^w; the default `Uart.cntW` is 16 bits (1 … 65536), `Uart.cntW7` is the iCEstick's 7 bits (1 … 128), `Uart.cntW10` is the Arty/OLED 10 bits (1 … 1024) |
-| `Hdl.Spi` | `Spi.masterC div` (mode 0, CPOL = 0, CPHA = 0: sample on the rising edge, shift on the falling edge), `Spi.loopC div` (`mosi` wired to `miso`); the generic `Spi.masterCW w cw ncs div` / `Spi.loopCW w cw ncs div` (`w`-bit transfer, `cw`-bit half-period counter, `ncs` chip selects, input `sel`), and `Spi.master8C` / `Spi.loop8C` for 8 bits with the default counter | `div` clocks per half period, 1 … 2^`cw` (the original is `cw = 16`); `w ≥ 1` bits a transfer; `ncs ≥ 1` selects |
+| `Hdl.Spi` | `Spi.masterC div`/`Spi.loopC div` (the original mode 0, 8 bits, one select); the generic `Spi.masterCW w cw ncs div`/`Spi.loopCW w cw ncs div`; the all-modes `Spi.masterModeCW w cw ncs mode div`, `Spi.masterModeC mode div`, `Spi.masterPhaseStepW`, `Spi.loopModeCW`/`Spi.loopModeC` (`mode = 0 … 3`, the CPOL/CPHA table below); the mock slave `Spi.slaveCW w mode`/`Spi.slaveC mode` (samples `mosi`, shifts out a `reply` byte) and the master+slave link `Spi.linkCW w cw mode div`/`Spi.linkC mode div`; the byte-level models `Spi.bitsOf`, `Spi.receiveBits`, `Spi.transfer`, `Spi.transferLoop` | `div` clocks per half period, 1 … 2^`cw` (the original is `cw = 16`); `w ≥ 1` bits a transfer; `ncs ≥ 1` selects; mode 0 … 3 |
 | `Hdl.Ddr` | the native port of a DDR3 controller (`Ddr.Req`: `valid`/`we`/`addr` 24/`wdata` 128/`wmask` 16; `Ddr.Resp`: `ready`/`rvalid`/`rdata` 128), and `Ddr.modelC`, a 64K-word model with the same valid/ready handshake and byte-masked writes | the real controller is `Ddr3.Ctrl` in wiz-ddr3 (see the module header for the field mapping) |
 
 The UART counter width is a meta-level parameter: only the clocks-per-bit counter (and
@@ -1125,7 +1173,8 @@ because its two synchroniser flip-flops delay the start edge. Both UART parts ar
 synchronous circuits with a plain state, so `Circuit.withReset`/`Circuit.withResetEnable`
 wrap an instantiation unchanged (the example runs the receiver under a reset with a line
 whose phase is not aligned to the clock). The SPI master's pins are registers (no
-glitches), and its first (most significant) bit is on `mosi` in the cycle `cs` goes low.
+glitches); in CPHA = 0 its first (most significant) bit is on `mosi` in the cycle `cs`
+goes low, and in CPHA = 1 it is driven on the first leading edge.
 The DDR module is a documented stub for the handshake: it has no timing parameters and no
 PHY, and a design on another clock needs a CDC wrapper around the port.
 
@@ -1136,8 +1185,30 @@ output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while 
 transfer runs. `Spi.StW`/`Spi.InW`/`Spi.OutW`/`Spi.CmdW` are the generic bundles;
 `Spi.master8C` and `Spi.loop8C` fix `w = 8` and `cw = Spi.cntW = 16`. The original
 `Spi.masterC`/`Spi.loopC` (8 bits, 16-bit counter, one select, `Spi.In`/`Spi.Out`) keep
-their names and definitions, and the example checks the generic master against them
-cycle for cycle. Both receivers now shift most significant bit first (`x << 1 | b`):
+their names and definitions, and the example checks the generic mode-0 master against
+them cycle for cycle.
+
+All four CPOL/CPHA modes share `Spi.masterPhaseStepW`: `sclk` idles at CPOL, the first
+half of each bit is at CPOL and the second at `1 - CPOL`; CPHA = 0 samples on the leading
+edge and shifts on the trailing one, CPHA = 1 shifts on the leading edge and samples on
+the trailing one. The divider and bit counter are unchanged, so every mode takes exactly
+`2 * div * w` cycles for a `w`-bit transfer.
+
+| mode | CPOL | CPHA | sample edge | shift edge |
+|---|---|---|---|---|
+| 0 | 0 | 0 | leading (rising) | trailing (falling) |
+| 1 | 0 | 1 | trailing (falling) | leading (rising) |
+| 2 | 1 | 0 | leading (falling) | trailing (rising) |
+| 3 | 1 | 1 | trailing (rising) | leading (falling) |
+
+`Spi.sampleLevel cpol cpha` and `Spi.shiftLevel cpol cpha` are the levels of those
+edges. `Spi.slaveCW w mode` is a mock slave for tests: a `cs` falling edge captures
+`reply`, sample edges shift `mosi` into its received byte, shift edges move `reply` out
+(MSB first, with the first leading edge of CPHA = 1 already presenting the MSB), and it
+reports `done`/`busy`/`data`. `Spi.linkCW` wires one master to it, one select, so a byte
+round-trips through the pins without a board. `Spi.transfer mode tx miso` is the
+byte-level model (the first eight `miso` bits, MSB first) and `Spi.transferLoop mode tx`
+is its loopback: `tx` again, in every mode. Both receivers now shift most significant bit first (`x << 1 | b`):
 `Spi.shiftIn8` had shifted the other way (`cat b (slice 1 7 x)`), which reversed the
 received byte, but its old loopback data (0xA5, 0x3C) were palindromes and hid it. The
 fix is intentional and changes only the two receive-shift wires in the Verilog of
@@ -1153,9 +1224,29 @@ counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr
 value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
 the chip-select patterns, the DDR handshake and masked write.
 
-What remains is in `wiz-notes/rune.md`: SPI modes 1 … 3 and a chip-select decoder or
-per-slave timing, the real DDR controller's wrapper and timing, and clock-domain
-crossing for the ports.
+`lib/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
+`Spi.Law.SampleStable` (`mosi` does not change on a sample edge),
+`Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
+`Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done` exactly
+`16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master receives the
+reply and the slave the sent byte). The mode table, the sample/shift levels, `divN` and
+concrete loopback bytes are kernel-checked; the trace laws are **tested, not proved**.
+`examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
+the mock-slave link, checks the timing and divider laws, exercises `Spi.transferLoop` on
+all 256 bytes in every mode, and compares the value simulation, `Netlist.simulate` and
+`Circuit.simFast`; its netlists are `Netlist.wellFormed` and yosys runs on the emitted
+Verilog when it is on PATH.
+
+**Limits.** The master selects one slave at a time (`sel` is a one-hot index over the
+`ncs` chip selects): there is no multi-slave arbitration, no per-slave timing/baud and no
+queued transfers. There is no DMA engine and no FIFO: the CPU (or another circuit) must
+write `start`/`data` and read `done`/`data`. The mock slave is a test part, not a
+full SPI peripheral (no command decoding or memory); a real `miso` from another clock
+domain still needs a two-flip-flop synchroniser before the master, and the divider's
+`div` is a meta-level constant, not a run-time register.
+
+What remains is in `wiz-notes/rune.md`: a chip-select decoder or per-slave timing, the
+real DDR controller's wrapper and timing, and clock-domain crossing for the ports.
 
 ## Hdl.Display: the OLED command, data and window layer
 
@@ -1386,7 +1477,9 @@ library gives an `Add` instance and gets `+`; it may also give a mixed one (`HMu
   instead of `.negSucc 9` (a printing hint, not an axiom: `#print axioms` lists nothing
   for it). Division truncates (`-7 / 2 = -3`, `-7 % 2 = -1`), like `IntN` and C. Also
   `Int.natAbs`, `Int.toNat` (negatives to 0), `Int.lt`/`le`/`beq`, and lemmas
-  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.natAbs_neg`, `Int.lt_irrefl`, `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
+  `Int.neg_neg`, `Int.add_zero`, `Int.zero_add`, `Int.mul_one`, `Int.one_mul`,
+  `Int.mul_zero`, `Int.zero_mul`, `Int.sub_zero`, `Int.natAbs_neg`, `Int.lt_irrefl`,
+  `Int.abs` with `Int.abs_mul`, `Int.abs_neg`. The ring laws, `int_ring!` and the order
   are in lib/IntRing.wiz and lib/IntOrder.wiz ("Arithmetic", below).
 * **Words.** One set of instances at `UIntN w` serves `U8 … U64` and `BitVec n` (aliases
   are seen through). `UIntN w` and `IntN w` have the same shape but are sealed, different
@@ -1413,7 +1506,7 @@ and doc comments; std's tests check one example of each.
 | `lib/Rat.wiz` | `Q`: unreduced fractions with `≈`, an ordered field up to `≈` (`Q.inv`, `Q.mul_inv`, `Q.abs_add`, `Q.lt_ceil`); `q_ring! lhs ≈ rhs` |
 | `lib/RingTactic.wiz` | `by ring`: the three normalisers as a tactic that reads the goal |
 
-```
+```wiz
 import Rat
 
 def t (a b c : Nat) : (a + b) * c = c * b + a * c := nat_ring! (a + b) * c = c * b + a * c
@@ -1449,6 +1542,91 @@ def v (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q :=
   integer identity and `q_ring!` is `int_ring!` on numerators and denominators. Use the
   congruences (`Q.add_congr`, `Q.le_congr`, …) to rewrite under `≈`.
 * `Vec.wiz` and `Hoare.wiz` import `Nat` for the lemmas they used to define themselves.
+
+## Simp lemmas: normal forms for rewriting (`lib/SimpLemmas.wiz`)
+
+The rewrite library: equations oriented left to right, towards the normal form `simp`
+(stage 6h) computes. Each rule is registered with `attribute [simp]` in the module that
+defines it, so importing that module alone is enough; `import SimpLemmas` is the
+umbrella that brings them all, and it also keeps the lemmas that are deliberately not
+registered. `simp` uses the registered set without a list; `simp only [...]` and `rw`
+use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
+
+| module | registered rules (left to right) |
+|--------|----------------------------------|
+| `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
+| `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
+| `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
+| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
+
+* **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
+  `Bool.not` in the prelude. For a variable first argument the `&&`/`||` match is *not*
+  the same stuck term as `Bool.and`/`Bool.or` applied (`Bool.and` matches on both
+  arguments, so its stuck form carries the second match in a lambda). The three
+  notation identities (`b && true`, `b && false`, `b || false`) are therefore stated
+  with the notation, while the other `Bool.and`/`Bool.or` laws are for goals that
+  contain the functions themselves; both live in `lib/Logic.wiz`. `!` *is* `Bool.not`,
+  so `Bool.not_not` fires on `!(!b)`.
+* **What is not registered, and why.** A rule must be `∀ x₁ … xₙ, lhs = rhs` with no
+  premise (dischargers are S3) and a left side that still appears in a goal. So several
+  lemmas are explicit-only:
+  * identities whose left side computes to a variable or a data value — `Nat.zero_add`,
+    `Nat.zero_mul`, `Nat.pow_zero`, `List.nil_append`, `Bool.true_and`,
+    `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
+    `Bool.not_false`, `Option.map_none`, `Prod.fst_mk`, `Prod.snd_mk`,
+    `Bool.if_true`, `Bool.if_false`;
+  * patterns that compute to a constructor carrying rule variables — `List.map_nil`,
+    `List.map_cons`, `Option.map_some`;
+  * commutativity and associativity (`Nat.add_comm`, `Bool.and_comm`,
+    `List.append_assoc`, …), which have no normal form to aim at, and distributivity,
+    which expands;
+  * the `↔` lemmas (`List.mem_append`, `List.mem_map`, `Bool.and_eq_true`, …), which
+    are not equations;
+  * conditional equations (`List.filter_cons_true`, `List.any_cons_true`, `Eq.symm`,
+    `propext`, …), which need a discharger.
+
+  Each library file lists its own exclusions with the reason.
+* **Orientation.** Rewriting goes from the left column (the term with the neutral
+  operation) to the smaller one: `n + 0 → n`, `n * 1 → n`, `b ^ 0 → 1`,
+  `b ^ (n+1) → b * b^n`, `xs ++ [] → xs`, `b && true → b`,
+  `reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`. Rules that
+  would loop are deliberately absent: commutativity, associativity, distributivity, and
+  the other directions of the identities above. `Nat.add_zero` and `Int.add_zero` are
+  stated for an explicit argument (`rw (Nat.add_zero n)`), so a rewrite chain names the
+  instance.
+* **`rw` and definitional equations.** `rw` needs the elaborated type of its lemma to be
+  an equation. When both sides are definitionally equal (`Nat.zero_add`,
+  `Nat.zero_mul`, `Nat.pow_zero`, `Nat.pow_succ`, `List.nil_append`, `List.map_nil`,
+  `List.map_cons`, `Option.map_none`, `Option.map_some`, `Prod.fst_mk`, `Prod.snd_mk`,
+  `Bool.if_true`, `Bool.if_false`), the kernel computes that type to `True` (or to the
+  payload equation of the constructors), so `rw` rejects the lemma even though it is
+  true. The `std` tests therefore check those by direct application and the rest by
+  `rw`; `simp` uses the registered safe subset and the others explicitly. This is a
+  limitation of `rw`, not of the lemma set.
+
+`simp` rewrites and the user closes the goal, so a normal form is `simp; rfl`:
+
+```
+import SimpLemmas
+
+def t (n : Nat) : (n + 0) * 1 = n := by
+  simp
+  rfl
+def u {A : Type} (xs : List A) : xs ++ [] = xs := by
+  simp
+  rfl
+def v {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
+  rfl
+```
+
+`v` is the case the registrations were for: by `rw` it needs
+`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`; `simp`
+finds both occurrences and restarts after each rewrite. The same annotations make the
+`List.reverse`, `List.filter`, `List.any` and `List.all` lemmas usable as normal forms
+instead of one `rw` per step.
+
 ## Native structures: word arrays, word maps, interned strings
 
 `lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
@@ -1588,3 +1766,60 @@ expected `(rule, function, callee, argument)` tuples, and computes:
 (`scry/src/Scry/BenchCmd.wiz`); the S0/S2 corpus and its manifest are in
 `scry/bench/corpus/`, and the policy is in `scry/bench/corpus/README.md`.
 `wiz-notes/scry-bench.md` records the baseline, the corpus size and the limitations.
+
+## Plot: data plots as deterministic SVG (`lib/Plot.wiz`)
+
+`import Plot` draws a `Frame` of named `Series` (`line`, `scatter`, `bar`, `step`) and
+optional error `Band`s on a linear or base-10 log x/y scale, and returns one SVG
+document:
+
+```
+import Plot
+
+def sales : Plot.Frame := Plot.frame [
+  Plot.line "2024" [Plot.ptNat 0 12, Plot.ptNat 1 14, Plot.ptNat 2 15],
+  Plot.scatter "2025" [Plot.ptNat 0 12, Plot.ptNat 1 16, Plot.ptNat 2 17]]
+
+def chart : Plot.Chart :=
+  Plot.labels "quarter" "units" (Plot.size 480 300 (Plot.chart "Sales" sales))
+
+#eval Plot.svg chart                     -- the SVG document
+#eval Json.render (Plot.toJson chart)    -- data, domains and ticks for a JS renderer
+#eval Json.render (Plot.render chart)    -- a Jupyter mime bundle
+```
+
+`Plot.chart title frame` gives 640 × 400 with linear axes; `Plot.size`, `Plot.labels`
+and `Plot.scales Plot.Scale.linear Plot.Scale.log` set the fixed layout. Points are
+exact rationals: `Plot.frac 3 2` is 3/2, `Plot.fracInt (-1) 4` is −1/4, and `(3 : Q)`
+works too. `Plot.boundsOf`/`Plot.logBoundsOf` pad a domain by 5% (all-equal data, one
+point and zero are handled without a degenerate axis); `Plot.niceRange` widens a domain
+to whole multiples of its step, and `Plot.niceStep` / `Plot.linearTicks` /
+`Plot.logTicks` generate ticks of the form `1/2/5 × 10^k` inside the domain, increasing
+and integer multiples of the chosen step. (`Plot.svg` keeps the padded domain and draws
+the ticks inside it; a renderer that wants the axis to end exactly on a tick calls
+`Plot.niceRange`.)
+
+![A two-series plot with an error band, drawn by lib/Plot.wiz](assets/plot-example.svg)
+
+**Arithmetic and determinism.** The library is exact: `Q` from `lib/Rat.wiz` over
+`Int`, with every coordinate rounded once to an integer pixel (half away from zero).
+`Float64` is an axiom of `lib/IO.wiz` (opaque to the kernel and to `#eval`), so it is not
+used in the core: that is what lets the whole library be checked and `#eval`'d, and what
+makes the SVG byte-stable. There is no NaN or infinity in `Q`; log scales drop
+non-positive values (and fall back to `[1, 10]` when there is no positive data) rather
+than emitting a NaN coordinate. Log positions use a fixed-point `log10` (six decimals,
+an integer algorithm), not the host's `libm`. The SVG has no timestamps, ids or random
+values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; the
+`plot` test group compares four drawings byte for byte (`Tests/data/plot/*.svg`).
+
+`Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
+`x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
+`series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
+`upper`), all numbers as decimal strings. `Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
+kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
+bundle (the `tools/jupyter` hook), with no other coupling to this module.
+
+Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
+stacked bars (several bar series are drawn at the same positions; grouping is a layout
+policy), and text metrics (labels use fixed offsets, not measured widths).

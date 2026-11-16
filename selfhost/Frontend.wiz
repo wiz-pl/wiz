@@ -131,11 +131,21 @@ def privOwner : List PrivName → String → String → Option String
   | .cons (.mk y m) rest, x, cur => match Bool.and (strEq y x) (Bool.not (strEq m cur)) with
     | .true => .some m
     | .false => privOwner rest x cur
+-- (A12 hygiene) a macro-introduced identifier is `x✝N`; `stripScope` is the `x` a
+-- global is looked up as, as the Leans host's `Elab.stripScope` (a local variable keeps
+-- its scope, so a template's binders cannot capture a user's)
+def stripScopeChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 10013 with
+    | .true => .nil
+    | .false => .cons c (stripScopeChars cs)
+def stripScope (n : String) : String := match n with
+  | .mk cs => .mk (stripScopeChars cs)
 -- a name as written: a local binder, else the current module's private declaration of
 -- it, else the public one (so a public name shadows another module's private name).
 -- A kernel name written out (`_private.M._0.x`, from a term's constant) is visible only
 -- to module M.
-def Scope.lookupV (sc : Scope) (x : String) : Lookup := match sc with
+def lookupExact (sc : Scope) (x : String) : Lookup := match sc with
   | .mk ls d gs _ pvs cur n => match indexOf ls x 0 with
     | .some i => .ok i
     | .none => match StrMap.findD gs (Str.ofString (privName cur x)) 0 with
@@ -149,6 +159,12 @@ def Scope.lookupV (sc : Scope) (x : String) : Lookup := match sc with
         | .zero => match privOwner pvs x cur with
           | .some m => .privTo m
           | .none => .missing
+def Scope.lookupV (sc : Scope) (x : String) : Lookup := match lookupExact sc x with
+  | .missing => match strEq (stripScope x) x with
+    -- (a macro's template introduced `x`; the scope-free name is the global it means)
+    | .true => .missing
+    | .false => lookupExact sc (stripScope x)
+  | r => r
 -- a name's index (none for another module's private name): a local binder's, or past
 -- them a global's (the latest is the nearest)
 def Scope.lookup (sc : Scope) (x : String) : Option Nat := match Scope.lookupV sc x with
@@ -160,11 +176,19 @@ inductive Elab where
   | err (msg : String)
 
 -- the names a binder introduces, and its type (if any)
+-- the non-atom children (a `sepBy` list without its separators)
+def nonAtomsS : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons s rest => match s with
+    | .atom _ => nonAtomsS rest
+    | _ => .cons s (nonAtomsS rest)
 def identNames : List Syntax → List String
   | .nil => .nil
   | .cons s rest => .cons (match s with
       | .ident n => n
       | _ => "_") (identNames rest)
+-- (A11) the names of a `sepBy1` list (`C₁, C₂`): the `,` atoms are separators, not names
+def sepIdentNames (xs : List Syntax) : List String := identNames (nonAtomsS xs)
 -- (A10) a binder's kind, as the Lean frontend's `BinderInfo`: explicit, implicit
 -- (`{x : A}`), or instance (`[i : C A]`, resolved by `resolveInstances`). The mask of a
 -- global is one kind per parameter, and an `inst` binder inserts a class problem.
@@ -474,8 +498,11 @@ inductive CField where
 -- (21x) and each field's quantity, and whether it is implicit
 inductive Ctor where
   | mk (name : String) (fields : List CField) (res : Tm) (qs : List Q) (impl : List Bool)
+-- (`params`: the parameter binders as written, for a deriver: the reflection
+-- `getInductive` hands a Lean macro its `ParamView`s. Syntax, so a derived instance can
+-- re-use the types exactly; the `A11` derivers re-elaborate them.)
 inductive IndInfo where
-  | mk (np : Nat) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm)
+  | mk (np : Nat) (I D DI : Tm) (ctors : List Ctor) (fixed : Option Tm) (fam : Tm) (params : List Syntax)
 structure Header where
   name : String
   text : String
@@ -504,52 +531,65 @@ inductive Foreign where
   -- text (an include, a glue function) the backend puts before the wrappers
   | cfunc (name : String) (params : List String) (res : String)
   | code (text : String)
+-- (A11) the deriver of each class the frontend implements (`deriving C` runs it): the
+-- Lean toolchain registers these with `attribute [deriver C] f` on import of
+-- `lib/Deriving.wiz`, and the self-hosted prelude has no classes, so the five are
+-- pre-registered here. The value is the deriver's name (`deriveBEq`, …), as
+-- `attribute [deriver C] f` records it: dispatch is by **name**, like the host's table
+-- (`CommandState.derivers`), not by the class's method shape.
+def builtinDerivers : StrMap (Option String) :=
+  StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert StrMap.empty
+    (Str.ofString "Inhabited") (.some "deriveInhabited"))
+    (Str.ofString "BEq") (.some "deriveBEq"))
+    (Str.ofString "Repr") (.some "deriveRepr"))
+    (Str.ofString "DecidableEq") (.some "deriveDecidableEq"))
+    (Str.ofString "Compare") (.some "deriveCompare")
 -- the globals so far: by position (the first is `0`), their names in scope, the
--- instances (the latest first), and the preprocessed header texts (`import_c`; the
--- driver reads them, since the frontend is pure)
+-- instances (the latest first), the preprocessed header texts (`import_c`; the driver
+-- reads them, since the frontend is pure), and the derivers by class
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false
+       (priv : Bool) (ders : StrMap (Option String))
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ => sc
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => .mk all (Scope.setModule sc m) inds ffi cls ins hs p
+  | .mk all sc inds ffi cls ins hs p d => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ => .mk all sc inds ffi cls ins hs p
+  | .mk all sc inds ffi cls ins hs _ d => .mk all sc inds ffi cls ins hs p d
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p => match p with
+  | .mk _ sc _ _ _ _ _ p _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => match g with
+  | .mk all sc inds ffi cls ins hs p d => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p =>
+  | .mk all sc inds ffi cls ins hs p d =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => .mk all sc inds (.cons f ffi) cls ins hs p
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds (.cons f ffi) cls ins hs p d
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -558,26 +598,33 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p => .mk all sc inds ffi cls ins hs p
+  | .mk all sc inds ffi cls ins _ p d => .mk all sc inds ffi cls ins hs p d
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d
+-- (A11) the deriver registered for a class (`deriving C` runs it), by class name
+def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
+  | .mk _ _ _ _ _ _ _ _ ders => match StrMap.findD ders (Str.ofString C) .none with
+    | .some f => .some f
+    | .none => .none
+def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f))
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => .mk all sc inds ffi cls (.cons i ins) hs p
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls (.cons i ins) hs p d
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -586,13 +633,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -604,7 +651,7 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
@@ -639,7 +686,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -1319,10 +1366,10 @@ def inductiveCmdS0 (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := m
                 match addCtors T ps pts nidx I (.const Tn .nil .nil val ty) valI k (isStructCmd stx0) gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
-                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty)))
+                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty) (kids (kid stx 3))))
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
-                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty)))
+                    (Globals.addInd gs2 T (.mk np I (mkD ds) (mkD dsI) cs .none (.const Tn .nil .nil val ty) (kids (kid stx 3))))
   | _ => errStep gs "an inductive type needs a name"
 
 -- (U1) a data type's universe lives in its description (`descr l` takes a number), so
@@ -1984,22 +2031,23 @@ def appOf : List Syntax → Syntax
   | .cons f rest => match rest with
     | .nil => f
     | .cons _ _ => mkNode "term.app" (.cons f (one (mkNull rest)))
--- `if c then a else b` (an application of `if`: the grammar has no `if`) is
--- `match c with | .true => a | .false => b` (stage 19a)
-def ifMatch (s : Syntax) : Option Syntax := match Bool.and (strEq (kindOf s) "term.app") (strEq (identOf (kid s 0)) "if") with
-  | .false => .none
-  | .true => match splitIf (kids (kid s 1)) with
-    | .some (.mk cs as bs) => match Bool.and (Bool.not (isNilS cs)) (Bool.and (Bool.not (isNilS as)) (Bool.not (isNilS bs))) with
-      | .true =>
-        let c := appOf cs;
-        let a := appOf as;
-        let b := appOf bs;
-        let alt := fun (ctor : String) (rhs : Syntax) => mkNode "match.alt" (.cons (.atom "|")
-          (.cons (mkNull (one (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident ctor)))))) (.cons (.atom "=>") (one rhs))));
-        .some (mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one c)) (.cons (.atom "with")
-          (one (mkNull (.cons (alt "true" a) (one (alt "false" b)))))))))
-      | .false => .none
-    | _ => .none
+-- `if c then a else b` is `match c with | .true => a | .false => b` (stage 19a)
+def iteMatch (c a b : Syntax) : Syntax :=
+  let alt := fun (ctor : String) (rhs : Syntax) => mkNode "match.alt" (.cons (.atom "|")
+    (.cons (mkNull (one (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident ctor)))))) (.cons (.atom "=>") (one rhs))));
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one c)) (.cons (.atom "with")
+    (one (mkNull (.cons (alt "true" a) (one (alt "false" b))))))))
+-- The grammar's `if` (`term.ite`: `"if" term "then" term "else" term`), and the older
+-- application form (when the surface rule is not in the tables), are both accepted.
+def ifMatch (s : Syntax) : Option Syntax := match strEq (kindOf s) "term.ite" with
+  | .true => .some (iteMatch (kid s 1) (kid s 3) (kid s 5))
+  | .false => match Bool.and (strEq (kindOf s) "term.app") (strEq (identOf (kid s 0)) "if") with
+    | .false => .none
+    | .true => match splitIf (kids (kid s 1)) with
+      | .some (.mk cs as bs) => match Bool.and (Bool.not (isNilS cs)) (Bool.and (Bool.not (isNilS as)) (Bool.not (isNilS bs))) with
+        | .true => .some (iteMatch (appOf cs) (appOf as) (appOf bs))
+        | .false => .none
+      | _ => .none
 -- a string literal's text (the first atom inside)
 partial def strValue (s : Syntax) : String := match s with
   | .atom v => v
@@ -2211,11 +2259,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -2630,7 +2678,7 @@ def ihLetsB (gs : Globals) (MB0 MB : Tm) (md d0 F np L : Nat) (args : Tms) (I id
     -- tag)
     let jD : Tm := match headOf fty .tnil with
       | .mk nm as => match Globals.ind gs nm with
-        | .some (.mk _ _ _ _ _ (.some f) _) => f
+        | .some (.mk _ _ _ _ _ (.some f) _ _) => f
         | _ => lastTm (shiftTms (D - l) as)
       | .none => .star;
     let ID := nfAt D (tApps (tLams np I) (shiftTms (D - L) args));
@@ -2781,6 +2829,8 @@ def sameLit (a b : Syntax) : Bool := match Bool.and (is a "term.num") (is b "ter
     | .true => strEq (strValue a) (strValue b)
     | .false => .false
 def boolPat (b : String) : Syntax := mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident b)))
+-- a boolean as a *term* (it infers without an expected type, as the host's macros use)
+def boolVal (b : String) : Syntax := mkNode "term.ident" (one (.ident (String.append "Bool." b)))
 -- the clauses with the test's column in front of column `k`, for the literal `l`
 def litClauses (l : Syntax) (k : Nat) : List Clause → List Clause
   | .nil => .nil
@@ -2837,14 +2887,14 @@ def cfieldNames : List CField → List String
   | .nil => .nil
   | .cons (.mk x _ _ _) rest => .cons x (cfieldNames rest)
 def structFieldsOf (info : IndInfo) : Option (List String) := match info with
-  | .mk _ _ _ _ ctors _ _ => match ctors with
+  | .mk _ _ _ _ ctors _ _ _ => match ctors with
     | .cons (.mk _ fs _ _ _) _ => .some (cfieldNames fs)
     | .nil => .some .nil
 -- a structure's fields; `T` is a source name, or a term's kernel name (then its module
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ =>
+    | .mk _ _ inds _ _ _ _ _ _ =>
       match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
@@ -2932,6 +2982,35 @@ def headImplicit : List BKind → Bool
 def descFn : Tm → Tm
   | .darg _ _ f => f
   | t => t
+-- `(a, b, c)` is `(a, (b, c))`, as the host's pattern reader nests it
+def nestTuple : List Syntax → Syntax
+  | .nil => holeStx
+  | .cons x .nil => x
+  | .cons x rest => mkNode "term.tuple" (.cons (.atom "(") (.cons x (.cons (.atom ",")
+      (one (mkNull (one (nestTuple rest)))))))
+-- the clauses of a pair-pattern split: column `k`'s `(a, b)` becomes the two columns
+-- `a` and `b`; a variable (or `_`) in another clause becomes two holes (a variable also
+-- keeps its binding to the whole pair, which is still in the context)
+def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
+  | .nil => .some .nil
+  | .cons (.mk pats binds rhs) rest =>
+    let p := unparen (nthSyntax pats k);
+    let tuple := strEq (kindOf p) "term.tuple";
+    match Bool.or tuple (isVarPat p) with
+    | .false => .none
+    | .true =>
+      let two : List Syntax := match tuple with
+        | .true => match tupleItems p with
+          | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
+          | _ => .cons holeStx (.cons holeStx .nil)
+        | .false => .cons holeStx (.cons holeStx .nil);
+      let binds' : List Bind := match Bool.and (Bool.not tuple) (Bool.not (strEq (identOf p) "_")) with
+        | .true => List.append binds (.cons (Bind.mk (identOf p) col) .nil)
+        | .false => binds;
+      match tupleClauses col k rest with
+      | .some r => .some (.cons (.mk (List.append (takeL k pats) (List.append two (dropL (k + 1) pats)))
+          binds' rhs) r)
+      | .none => .none
 -- a global at its declaration's level parameters: fresh level metavariables (inferred by
 -- unification), or the explicitly written ones. The constant carries its level
 -- instantiation, and its type is evaluated with it.
@@ -3936,18 +4015,50 @@ def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let p0 := patAt k cls;
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
-  match nthCol cols k with
-  | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
-    | .mk T _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
-      | .true => litTest gs mc es cx expected cols top ihLvls cls k
-      | .false => match Globals.ind gs T with
-        | .some _ => match litSplitErr T k cls with
-          | .some m => .err m
+  match strEq (kindOf p0) "term.tuple" with
+  | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
+  | .false => match nthCol cols k with
+    | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
+      | .mk T _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
+        | .true => litTest gs mc es cx expected cols top ihLvls cls k
+        | .false => match Globals.ind gs T with
+          | .some _ => match litSplitErr T k cls with
+            | .some m => .err m
+            | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
           | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
-        | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
-    | .none => match lit with
-      | .true => litTest gs mc es cx expected cols top ihLvls cls k
-      | .false => splitCtors gs mc es cx expected cols top ihLvls cls k
+      | .none => match lit with
+        | .true => litTest gs mc es cx expected cols top ihLvls cls k
+        | .false => splitCtors gs mc es cx expected cols top ihLvls cls k
+-- a pair pattern `(a, b)` in column `k`: project the pair into two `let`-bound columns
+-- (`fst✝`, `snd✝`) and compile the clauses with `a` and `b` there; a pair is a Σ, so this
+-- is not a constructor split and never the structural one
+def splitTuple (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
+    (cols : List Col) (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
+  let d := Cx.lvl cx;
+  let env := TCtx.env (Cx.c cx);
+  match nthCol cols k with
+  | .mk L ty0 tyI q =>
+    let x : Tm := .var (d - 1 - L);
+    let xA := shiftTm (d - L) 0 ty0;
+    match whnf (force es (eval env xA)) with
+    | .vsigma _ _ _ A envB B =>
+      let v1 := vfst (eval env x);
+      let v2 := vsnd (eval env x);
+      let ty2 := eval (.cons v1 envB) B;
+      let AQ := quote d A;
+      let BQ := quote (d + 1) ty2;
+      let cx1 := Cx.define cx "fst✝" v1 A;
+      let cx2 := Cx.define cx1 "snd✝" v2 ty2;
+      let col1 : Col := .mk d AQ AQ q;
+      let col2 : Col := .mk (d + 1) BQ BQ q;
+      let cols' := List.append (takeL k cols) (.cons col1 (.cons col2 (dropL (k + 1) cols)));
+      match tupleClauses (.mk L ty0 tyI q) k cls with
+      | .none => .err "a tuple pattern needs a pair: every clause in the column must be a tuple, a variable or _"
+      | .some cls' => match compileM gs mc es cx2 expected cols' .false ihLvls cls' with
+        | .ok body es' => .ok (.letE AQ (.fst (.var (d - 1 - L)))
+            (.letE BQ (.snd (.var (d - L))) body)) es'
+        | e => e
+    | _ => .err "a tuple pattern needs a pair"
 -- (13q) the test `T.beq x l` for the literal `l` in the first row of column `k`, `let`
 -- bound (`lit✝` for `x`, `test✝`), and the clauses with the test's column (`litClauses`)
 def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
@@ -4003,7 +4114,7 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
     | .none => .err "a pattern on a value that isn't of an inductive type"
     | .mk T args => match Globals.ind gs T with
       | .none => .err (String.append "not an inductive type: " T)
-      | .some (.mk np I D _ ctors fixed fam) => match mc with
+      | .some (.mk np I D _ ctors fixed fam _) => match mc with
         | .mk _ params p n v R _ pts _ _ =>
           -- the parameters and the index (`tt` without one) of the scrutinee's type
           let pargs := tmsTake np args;
@@ -4584,9 +4695,9 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
             (List.append (impls np) (fieldKinds (fieldImpl fs0))) .nil)) (ci + 1) rest with
           | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0)) cs)
           | e => e
-def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (m : Nat) : Globals → Nat → List String → Globals
+def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (params : List Syntax) (m : Nat) : Globals → Nat → List String → Globals
   | gs, _, .nil => gs
-  | gs, j, .cons n rest => addMemberInds np I D DI cs fam m (Globals.addInd gs n (.mk np I D DI cs (.some (.tag m j)) fam)) (j + 1) rest
+  | gs, j, .cons n rest => addMemberInds np I D DI cs fam params m (Globals.addInd gs n (.mk np I D DI cs (.some (.tag m j)) fam params)) (j + 1) rest
 def memberLines (ty : String) : List String → String
   | .nil => ""
   | .cons n rest => match rest with
@@ -4632,7 +4743,7 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
           match addMCtors members ps pts m k gs2 0 mcs with
           | .err e => errStep gs e
           | .ok gs3 cs => .mk (memberLines (String.append " : " (show .nil 0 (piTele pts (.univ 0)))) members)
-              (addMemberInds np I (mkD ds) (mkD dsI) cs Fc m gs3 0 members)
+              (addMemberInds np I (mkD ds) (mkD dsI) cs Fc (kids (kid (nthSyntax defs 0) 3)) m gs3 0 members)
 def anyUnivParams : List Syntax → Bool
   | .nil => .false
   | .cons d rest => Bool.or (hasUnivParams (univParamsOf d)) (anyUnivParams rest)
@@ -5018,7 +5129,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -5364,8 +5475,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -5432,7 +5543,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -6203,60 +6314,133 @@ def glueCmd (gs : Globals) (stx : Syntax) : Step :=
           .mk "" (Globals.addFFI gs2 (.fn name cname "" ks rk io ""))
 def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
 
--- Infix operators (stage 19b): `infixl:p " op " => f` (also `infixr`, `infix`) adds a
--- trailing term parser `a op b` (kind `term.infix op`) and the token `op`; each later
--- command is expanded before it is elaborated, `a op b` standing for `f a b`. The left
--- operand of `infixl` is at precedence `p` and the right one at `p + 1`, and the
--- other way round for `infixr`.
+-- Notation and macros (stage 19b; A12). `notation`, `infixl`/`infixr`/`infix`, `syntax`
+-- and `macro_rules` all become parser-table changes and *macro rules*: a pattern tree, a
+-- template, and the argument names `notation` binds. A rule rewrites a node of its kind
+-- before the node is elaborated: the pattern's children bind `$x` antiquotations (and a
+-- `notation`'s arguments), and the template is instantiated with them. This is the Lean
+-- host's `notationRule`/`expandMacroRule?` (`Wiz/Elab/{Command,Macro}.lean`) applied to
+-- the same node kinds, so both frontends produce the same terms.
+--
+-- Hygiene: an identifier the template introduces gets a fresh scope, `x✝N`. A local
+-- variable only matches the same spelling, so a template's binders can't capture the
+-- user's; globals are found with the scope stripped (`stripScope`), so a template can
+-- still refer to `Nat.add`. (The host suffixes every plain identifier of a template;
+-- `Scope.lookupV` here falls back to the stripped name for the same effect.)
 inductive Note where
-  | mk (kind : String) (f : Syntax)
-def dropSp : List Char → List Char
-  | .nil => .nil
-  | .cons c rest => match Nat.beq (Char.code c) 32 with
-    | .true => dropSp rest
-    | .false => .cons c rest
-def trimStr (s : String) : String := match s with
-  | .mk cs => .mk (List.reverseOf (dropSp (List.reverseOf (dropSp cs) .nil)) .nil)
-def addTrailingTo (cat : String) (t : Trailing) : List Cat → List Cat
-  | .nil => .nil
-  | .cons (.mk n ls ts) rest => match strEq n cat with
-    | .true => .cons (.mk n ls (List.append ts (.cons t .nil))) rest
-    | .false => .cons (.mk n ls ts) (addTrailingTo cat t rest)
-inductive Infix where
-  | mk (cats : List Cat) (tokens : List String) (note : Note)
--- **Exercise 19.1.** `infixl:p " op " => f`: the parser tables with the trailing term
--- parser `op` then a term (kind `term.infix op`; left operand at `p`, right at `p + 1`,
--- swapped for `infixr`, both `p + 1` for `infix`), the token `op` (spaces trimmed), and
--- the notation (the kind and `f`, the command's last argument).
-def infixCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Infix :=
-  --<sol
-  let kw := match kid stx 0 with
-    | .atom v => v
-    | _ => "infix";
-  let p := numValue (kid stx 2);
-  let op := trimStr (strValue (kid stx 3));
-  let lp := match strEq kw "infixl" with
-    | .true => p
-    | .false => p + 1;
-  let rp := match strEq kw "infixr" with
-    | .true => p
-    | .false => p + 1;
-  let kind := String.append "term.infix " op;
-  .mk (addTrailingTo "term" (.mk kind p lp 0 (.seq (.atom op) (.cat "term" rp))) cats) (.cons op tokens) (.mk kind (kid stx 5))
-  --|ex
-  --| .mk cats tokens (.mk "" (kid stx 5))
-  --sol>
-def identOf'' (s : Syntax) : String := match s with
-  | .ident n => n
-  | _ => "_"
-def noteFor : List Note → String → Option Syntax
+  | mk (kind : String) (pat : Syntax) (tmpl : Syntax) (vars : List String)
+def noteKind : Note → String
+  | .mk k _ _ _ => k
+-- a pattern variable's binding
+inductive MBind where
+  | mk (name : String) (s : Syntax)
+def containsStr : List String → String → Bool
+  | .nil, _ => .false
+  | .cons y ys, x => match strEq x y with
+    | .true => .true
+    | .false => containsStr ys x
+def lookupBind : List MBind → String → Option Syntax
   | .nil, _ => .none
-  | .cons (.mk k f) rest, k' => match strEq k k' with
-    | .true => .some f
-    | .false => noteFor rest k'
+  | .cons (.mk y v) rest, x => match strEq x y with
+    | .true => .some v
+    | .false => lookupBind rest x
+-- `$x` (the quotation parser's `antiquot` node)
+def antiquotName (s : Syntax) : Option String := match s with
+  | .node k _ => match strEq k "antiquot" with
+    | .true => match kid s 1 with
+      | .ident n => .some n
+      | _ => .none
+    | .false => .none
+  | _ => .none
+-- the pattern matches a node structurally; `$x` binds a whole subtree
+mutual
+partial def matchPat (pat stx : Syntax) (acc : List MBind) : Option (List MBind) :=
+  match antiquotName pat with
+  | .some x => .some (.cons (.mk x stx) acc)
+  | .none => match pat with
+    | .node k as => match stx with
+      | .node k2 bs => match Bool.and (strEq k k2) (Nat.beq (List.length (argsOf as)) (List.length (argsOf bs))) with
+        | .true => matchPatArgs (argsOf as) (argsOf bs) acc
+        | .false => .none
+      | _ => .none
+    | .atom v => match stx with
+      | .atom v2 => match strEq v v2 with
+        | .true => .some acc
+        | .false => .none
+      | _ => .none
+    | .ident n => match stx with
+      | .ident n2 => match strEq n n2 with
+        | .true => .some acc
+        | .false => .none
+      | _ => .none
+    | .missing => match stx with
+      | .missing => .some acc
+      | _ => .none
+    | _ => .none
+partial def matchPatArgs : List Syntax → List Syntax → List MBind → Option (List MBind)
+  | .nil, .nil, acc => .some acc
+  | .cons p ps, .cons s ss, acc => match matchPat p s acc with
+    | .some acc1 => matchPatArgs ps ss acc1
+    | .none => .none
+  | _, _, _ => .none
+end
+def scopeName (n : String) (scope : Nat) : String := n +++ "✝" +++ Nat.toString scope
+def hasDotChar : List Char → Bool
+  | .nil => .false
+  | .cons c cs => match Nat.beq (Char.code c) 46 with
+    | .true => .true
+    | .false => hasDotChar cs
+def hasDot (s : String) : Bool := match s with
+  | .mk cs => hasDotChar cs
+-- node kinds whose identifiers are not references (the host's `unscopedParents`)
+def unscopedParent (k : String) : Bool := Bool.or (Bool.or (strEq k "term.dotIdent") (strEq k "term.field"))
+  (Bool.or (strEq k "level.param") (strEq k "term.syntheticHole"))
+mutual
+partial def instTmpl (binds : List MBind) (vars : List String) (scope : Nat) (parent : String) (t : Syntax) : Syntax :=
+  match antiquotName t with
+  | .some x => match lookupBind binds x with
+    | .some v => v
+    | .none => t
+  | .none => match t with
+    | .node k as => match strEq k "term.ident" with
+      | .true => match kid t 0 with
+        | .ident n => match containsStr vars n with
+          | .true => match lookupBind binds n with
+            | .some v => v
+            | .none => t
+          | .false => .node k (toArgs (one (instTmpl binds vars scope "term.ident" (kid t 0))))
+        | _ => .node k (instTmplArgs binds vars scope k as)
+      | .false => .node k (instTmplArgs binds vars scope k as)
+    | .ident n => match containsStr vars n with
+      | .true => match lookupBind binds n with
+        | .some v => v
+        | .none => t
+      | .false => match Bool.or (unscopedParent parent) (hasDot n) with
+        | .true => t
+        | .false => .ident (scopeName n scope)
+    | s => s
+partial def instTmplArgs (binds : List MBind) (vars : List String) (scope : Nat) (parent : String) : SyntaxF .false → SyntaxF .false
+  | .nil => .nil
+  | .cons s rest => .cons (instTmpl binds vars scope parent s) (instTmplArgs binds vars scope parent rest)
+end
+-- the latest rule of `notes` whose kind and pattern match, and its expansion
+inductive ERule where
+  | mk (s : Syntax) (n : Note)
+def expandRule (notes : List Note) (stx : Syntax) (scope : Nat) : Option ERule :=
+  match notes with
+  | .nil => .none
+  | .cons n rest => match strEq (noteKind n) (kindOf stx) with
+    | .false => expandRule rest stx scope
+    | .true => match n with
+      | .mk _ pat tmpl vars => match matchPat pat stx .nil with
+        | .some binds => .some (ERule.mk (instTmpl binds vars scope "" tmpl) n)
+        | .none => expandRule rest stx scope
 -- `do` (stage 19c, for `IO` only: there are no type classes): `do x ← e; rest` is
 -- `IO.bind e (fun x => do rest)`, `do e; rest` is `IO.bind e (fun _ => do rest)`,
 -- `do let x := v; rest` is `IO.bind (IO.pure v) (fun x => do rest)`, `do e` is `e`
+def identOf'' (s : Syntax) : String := match s with
+  | .ident n => n
+  | _ => "_"
 def ioBind (e : Syntax) (x : String) (rest : Syntax) : Syntax :=
   mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "IO.bind"))) (one (mkNull (.cons e
     (one (mkNode "term.fun" (.cons (.atom "fun") (.cons (mkNull (one (.ident x))) (.cons (.atom "=>") (one rest))))))))))
@@ -6270,27 +6454,483 @@ partial def expandDo (s : Syntax) : Syntax :=
       | .true => ioBind (mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "IO.pure"))) (one (mkNull (one (kid s 3))))))
           (identOf'' (kid s 1)) (expandDo (kid s 5))
       | .false => kid s 0
+-- rewrite `s` while a rule matches it (a template may introduce a rule head); `fuel`
+-- only bounds a rewrite loop at one position, so restructuring a subtree never runs out
+partial def expandTop (notes : List Note) (fuel : Nat) (scope : Nat) (s : Syntax) : Syntax :=
+  match fuel with
+  | .zero => s
+  | .succ f => match expandRule notes s scope with
+    | .some (.mk s' _) => expandTop notes f (scope + 1) s'
+    | .none => s
+-- expand every node, outermost first; each node is rewritten to a fixed point, then its
+-- children are expanded (so a spliced argument is expanded like any other node)
 mutual
-def expandNotes (notes : List Note) (s : Syntax) : Syntax := match s with
-  | .node k args =>
-    let s' : Syntax := .node k (expandArgs notes args);
-    match strEq k "term.do" with
-    | .true => expandDo (kid s' 1)
-    | .false => match noteFor notes k with
-      | .some f => mkNode "term.app" (.cons f (one (mkNull (.cons (kid s' 0) (one (kid s' 2))))))
-      | .none => s'
-  | s => s
-def expandArgs (notes : List Note) : SyntaxF .false → SyntaxF .false
+partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax :=
+  match s with
+  | .node k args => match expandTop notes 64 scope s with
+    | .node k2 args2 =>
+      let s' : Syntax := .node k2 (expandNotesArgs notes (scope + 1) args2);
+      match strEq k2 "term.do" with
+      | .true => expandDo (kid s' 1)
+      | .false => match strEq k2 "term.boolAnd" with
+        -- `a && b` and `a || b` are the short-circuiting `if`s the host's macros make
+        | .true => iteMatch (kid s' 0) (kid s' 2) (boolVal "false")
+        | .false => match strEq k2 "term.boolOr" with
+          | .true => iteMatch (kid s' 0) (boolVal "true") (kid s' 2)
+          | .false => match strEq k2 "term.!" with
+            | .true => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Bool.not")))
+                (one (mkNull (one (kid s' 1)))))
+            | .false => s'
+    | other => other
+  | _ => s
+partial def expandNotesArgs (notes : List Note) (scope : Nat) : SyntaxF .false → SyntaxF .false
   | .nil => .nil
-  | .cons s rest => .cons (expandNotes notes s) (expandArgs notes rest)
+  | .cons s rest => .cons (expandNotes notes scope s) (expandNotesArgs notes scope rest)
 end
-
--- the `do` grammar: a category `doSeq`, and `do doSeq` a term
-def addLeadingTo (cat : String) (l : Leading) : List Cat → List Cat
+def dropSp : List Char → List Char
   | .nil => .nil
-  | .cons (.mk n ls ts) rest => match strEq n cat with
-    | .true => .cons (.mk n (List.append ls (.cons l .nil)) ts) rest
-    | .false => .cons (.mk n ls ts) (addLeadingTo cat l rest)
+  | .cons c rest => match Nat.beq (Char.code c) 32 with
+    | .true => dropSp rest
+    | .false => .cons c rest
+def trimStr (s : String) : String := match s with
+  | .mk cs => .mk (List.reverseOf (dropSp (List.reverseOf (dropSp cs) .nil)) .nil)
+def declareCat (c : String) : List Cat → List Cat
+  | .nil => .cons (.mk c .nil .nil) .nil
+  | .cons (.mk n ls ts) rest => match strEq n c with
+    | .true => .cons (.mk n ls ts) rest
+    | .false => .cons (.mk n ls ts) (declareCat c rest)
+def leadingKinds : List Leading → List String
+  | .nil => .nil
+  | .cons (.mk k _ _ _) rest => .cons k (leadingKinds rest)
+def trailingKinds : List Trailing → List String
+  | .nil => .nil
+  | .cons (.mk k _ _ _ _) rest => .cons k (trailingKinds rest)
+def catKinds : List Cat → List String
+  | .nil => .nil
+  | .cons (.mk _ ls ts) rest => List.append (leadingKinds ls) (List.append (trailingKinds ts) (catKinds rest))
+-- the host's `mkKindName`: a fresh kind from the category and the rule's atoms
+partial def freshKind (cats : List Cat) (base : String) (i : Nat) (fuel : Nat) : String :=
+  let n := base +++ "_" +++ Nat.toString i;
+  match fuel with
+  | .zero => n
+  | .succ f => match containsStr (catKinds cats) n with
+    | .true => freshKind cats base (i + 1) f
+    | .false => n
+def pdTokens : PD → List String
+  | .atom t => .cons t .nil
+  -- (the host's `ParserDescr.tokens`: a non-reserved keyword is an identifier, so it is
+  -- not added to the token table)
+  | .nonReserved _ => .nil
+  | .ident => .nil
+  | .num => .nil
+  | .str => .nil
+  | .cat _ _ => .nil
+  | .empty => .nil
+  | .seq p q => List.append (pdTokens p) (pdTokens q)
+  | .many p => pdTokens p
+  | .many1 p => pdTokens p
+  | .optional p => pdTokens p
+  | .sepBy p s _ => .cons s (pdTokens p)
+  | .sepBy1 p s _ => .cons s (pdTokens p)
+  | .orelse p q => List.append (pdTokens p) (pdTokens q)
+  | .node _ p => pdTokens p
+  | .withPosition p => pdTokens p
+  | .withoutPosition p => pdTokens p
+  | .colGt => .nil
+  | .colGe => .nil
+  | .noWs => .nil
+  | .checkPrec _ => .nil
+def mkKindName (cats : List Cat) (cat : String) (p : PD) : String :=
+  let toks := pdTokens p;
+  let base := cat +++ "." +++ (match toks with
+    | .nil => "syntax"
+    | .cons _ _ => joinUnder toks);
+  match containsStr (catKinds cats) base with
+  | .false => base
+  | .true => freshKind cats base 1 (List.length (catKinds cats) + 1)
+def isWordStart (c : Nat) : Bool := Bool.or (Bool.and (Nat.le 65 c) (Nat.le c 90))
+  (Bool.or (Bool.and (Nat.le 97 c) (Nat.le c 122)) (Nat.beq c 95))
+def isWordChar (c : Nat) : Bool := Bool.or (isWordStart c) (Bool.and (Nat.le 48 c) (Nat.le c 57))
+def allWordChars : List Char → Bool
+  | .nil => .true
+  | .cons c cs => match isWordChar (Char.code c) with
+    | .true => allWordChars cs
+    | .false => .false
+-- a keyword spelled like an identifier is not reserved outside `term`/`command`
+def identLike (t : String) : Bool := match t with
+  | .mk cs => match cs with
+    | .nil => .false
+    | .cons c rest => match isWordStart (Char.code c) with
+      | .true => allWordChars rest
+      | .false => .false
+def pdUnreserve : PD → PD
+  | .atom t => match identLike t with
+    | .true => .nonReserved t
+    | .false => .atom t
+  | .nonReserved t => .nonReserved t
+  | .ident => .ident
+  | .num => .num
+  | .str => .str
+  | .cat c p => .cat c p
+  | .empty => .empty
+  | .seq p q => .seq (pdUnreserve p) (pdUnreserve q)
+  | .many p => .many (pdUnreserve p)
+  | .many1 p => .many1 (pdUnreserve p)
+  | .optional p => .optional (pdUnreserve p)
+  | .sepBy p s tr => .sepBy (pdUnreserve p) s tr
+  | .sepBy1 p s tr => .sepBy1 (pdUnreserve p) s tr
+  | .orelse p q => .orelse (pdUnreserve p) (pdUnreserve q)
+  | .node k p => .node k (pdUnreserve p)
+  | .withPosition p => .withPosition (pdUnreserve p)
+  | .withoutPosition p => .withoutPosition (pdUnreserve p)
+  | .colGt => .colGt
+  | .colGe => .colGe
+  | .noWs => .noWs
+  | .checkPrec p => .checkPrec p
+def reservesKeywords (c : String) : Bool := Bool.or (strEq c "term") (strEq c "command")
+def addTokenL (tokens : List String) (t : String) : List String := match containsStr tokens t with
+  | .true => tokens
+  | .false => List.append tokens (.cons t .nil)
+partial def addTokensL (tokens : List String) : List String → List String
+  | .nil => tokens
+  | .cons t ts => addTokensL (addTokenL tokens t) ts
+-- the tokens of a rule, unreserved outside `term`/`command`
+def addTokensPD (tokens : List String) (cat : String) (p : PD) : List String :=
+  addTokensL tokens (pdTokens (match reservesKeywords cat with
+    | .true => p
+    | .false => pdUnreserve p))
+def addLeadingU (cat : String) (l : Leading) : List Cat → List Cat :=
+  match l with
+  | .mk k pr prio p => addLeadingTo cat (.mk k pr prio (match reservesKeywords cat with
+      | .true => p
+      | .false => pdUnreserve p))
+def addTrailingU (cat : String) (t : Trailing) : List Cat → List Cat :=
+  match t with
+  | .mk k pr lp prio p => addTrailingTo cat (.mk k pr lp prio (match reservesKeywords cat with
+      | .true => p
+      | .false => pdUnreserve p))
+-- `$x` inside a category (an antiquotation), and the quotation `` `(c| …) ``
+def addMetaParsers (c : String) (cats : List Cat) : List Cat :=
+  let plain : PD := .seq (.atom "$") (.seq .noWs .ident);
+  let annotated : PD := .seq (.atom "$") (.seq .noWs (.seq .ident (.seq .noWs (.seq (.atom ":") (.seq .noWs (.nonReserved c))))));
+  let cats := addLeadingU c (.mk "antiquot" 1024 1000 plain) cats;
+  let cats := addLeadingU c (.mk "antiquot" 1024 1000 annotated) cats;
+  addLeadingU "term" (.mk ("quote." +++ c) 1024 0
+    (.seq (.atom "`(") (.seq (.nonReserved c) (.seq (.atom "|") (.seq (.withoutPosition (.cat c 0)) (.atom ")")))))) cats
+-- `prec := num | max | arg | lead | min`
+def precName (n : String) : Option Nat := match strEq n "max" with
+  | .true => .some 1024
+  | .false => match strEq n "arg" with
+    | .true => .some 1023
+    | .false => match strEq n "lead" with
+      | .true => .some 1022
+      | .false => match strEq n "min" with
+        | .true => .some 10
+        | .false => .none
+def precValue (s : Syntax) : Option Nat := match kid s 0 with
+  | .ident n => precName n
+  | _ => .some (numValue s)
+def seqOf : List PD → PD
+  | .nil => .empty
+  | .cons p rest => match rest with
+    | .nil => p
+    | .cons _ _ => .seq p (seqOf rest)
+-- the `stx` item grammar (`Wiz/Parser/SyntaxCmd.lean`'s `stxToDescr`)
+inductive SR where
+  | ok (p : PD)
+  | err (msg : String)
+inductive SRs where
+  | ok (ps : List PD)
+  | err (msg : String)
+mutual
+partial def stxToDescr (cats : List Cat) (s : Syntax) : SR :=
+  let k := kindOf s;
+  match strEq k "stx.atom" with
+  | .true => .ok (.atom (trimStr (strValue (kid s 0))))
+  | .false => match strEq k "stx.cat" with
+    | .true => match kid s 0 with
+      | .ident c => let pr := match isNilS (kids (kid s 1)) with
+          | .true => 0
+          | .false => match precValue (kid (kid s 1) 1) with
+            | .some q => q
+            | .none => 0;
+        match strEq c "ident" with
+          | .true => .ok .ident
+          | .false => match strEq c "num" with
+            | .true => .ok .num
+            | .false => match strEq c "str" with
+              | .true => .ok .str
+              | .false => match strEq c "colGt" with
+                | .true => .ok .colGt
+                | .false => match strEq c "colGe" with
+                  | .true => .ok .colGe
+                  | .false => match strEq c "noWs" with
+                    | .true => .ok .noWs
+                    | .false => match findCat cats c with
+                      | .none => .err ("unknown syntax category " +++ c)
+                      | .some _ => .ok (.cat c pr)
+      | _ => .err "malformed stx.cat"
+    | .false => match strEq k "stx.group" with
+      | .true => match stxItems cats (kids (kid s 1)) with
+        | .err e => .err e
+        | .ok ps => .ok (seqOf ps)
+      | .false => match strEq k "stx.sepBy" with
+        | .true => stxSep cats s .false
+        | .false => match strEq k "stx.sepBy1" with
+          | .true => stxSep cats s .true
+          | .false => match strEq k "stx.withPosition" with
+            | .true => match stxItems cats (kids (kid s 2)) with
+              | .err e => .err e
+              | .ok ps => .ok (.withPosition (seqOf ps))
+            | .false => match strEq k "stx.many" with
+              | .true => match stxToDescr cats (kid s 0) with
+                | .ok p => .ok (.many p)
+                | .err e => .err e
+              | .false => match strEq k "stx.many1" with
+                | .true => match stxToDescr cats (kid s 0) with
+                  | .ok p => .ok (.many1 p)
+                  | .err e => .err e
+                | .false => match strEq k "stx.optional" with
+                  | .true => match stxToDescr cats (kid s 0) with
+                    | .ok p => .ok (.optional p)
+                    | .err e => .err e
+                  | .false => .err ("unexpected syntax item of kind " +++ k)
+partial def stxItems (cats : List Cat) : List Syntax → SRs
+  | .nil => .ok .nil
+  | .cons s rest => match stxToDescr cats s with
+    | .err e => .err e
+    | .ok p => match stxItems cats rest with
+      | .err e => .err e
+      | .ok ps => .ok (.cons p ps)
+partial def stxSep (cats : List Cat) (s : Syntax) (one1 : Bool) : SR :=
+  match stxItems cats (kids (kid s 2)) with
+  | .err e => .err e
+  | .ok ps => match one1 with
+    | .true => .ok (.sepBy1 (seqOf ps) (trimStr (strValue (kid s 4))) (Bool.not (isNilS (kids (kid s 5)))))
+    | .false => .ok (.sepBy (seqOf ps) (trimStr (strValue (kid s 4))) (Bool.not (isNilS (kids (kid s 5)))))
+end
+-- a `notation` item: an atom, or an argument with an optional precedence
+inductive NItem where
+  | atom (s : String)
+  | arg (v : String) (p : Option Nat)
+inductive NRes where
+  | ok (items : List NItem)
+  | err (msg : String)
+def nItemDescr : NItem → PD
+  | .atom s => .atom (trimStr s)
+  | .arg _ p => .cat "term" (match p with
+    | .none => 0
+    | .some q => q)
+def nItemPat : NItem → Syntax
+  | .atom s => .atom (trimStr s)
+  | .arg v _ => mkNode "antiquot" (.cons (.atom "$") (one (.ident v)))
+def nItemVars : List NItem → List String
+  | .nil => .nil
+  | .cons (.atom _) rest => nItemVars rest
+  | .cons (.arg v _) rest => .cons v (nItemVars rest)
+def nItemDescrAll : List NItem → List PD
+  | .nil => .nil
+  | .cons it rest => .cons (nItemDescr it) (nItemDescrAll rest)
+def nItemPatAll : List NItem → List Syntax
+  | .nil => .nil
+  | .cons it rest => .cons (nItemPat it) (nItemPatAll rest)
+partial def notationItems : List Syntax → NRes
+  | .nil => .ok .nil
+  | .cons it rest => match kid it 0 with
+    | .ident n => match isNilS (kids (kid it 1)) with
+      | .true => match notationItems rest with
+        | .err e => .err e
+        | .ok its => .ok (.cons (.arg n .none) its)
+      | .false => match precValue (kid (kid it 1) 1) with
+        | .none => .err "invalid precedence"
+        | .some q => match notationItems rest with
+          | .err e => .err e
+          | .ok its => .ok (.cons (.arg n (.some q)) its)
+    | .node sk _ => match strEq sk "str" with
+      | .true => match notationItems rest with
+        | .err e => .err e
+        | .ok its => .ok (.cons (.atom (strValue it)) its)
+      | .false => match notationItems rest with
+        | .err e => .err e
+        | .ok its => .ok (.cons (.arg "_" .none) its)
+    | _ => match notationItems rest with
+      | .err e => .err e
+      | .ok its => .ok (.cons (.arg "_" .none) its)
+-- a table-changing command's result (`tabStep`): the tables, the rules it adds, and an
+-- error (which drops its changes, as the host does)
+inductive Tab0 where
+  | mk (cats : List Cat) (tokens : List String) (notes : List Note) (err : Option String)
+-- the `notation` command (`Wiz/Elab/Command.lean`'s `notationRule`)
+def notationCmd (cats : List Cat) (tokens : List String) (cmd : Syntax) : Tab0 :=
+  match (match isNilS (kids (kid cmd 1)) with
+      | .true => .some 1024
+      | .false => precValue (kid (kid cmd 1) 1)) with
+  | .none => .mk cats tokens .nil (.some "invalid precedence")
+  | .some pr => match notationItems (kids (kid cmd 2)) with
+    | .err e => .mk cats tokens .nil (.some e)
+    | .ok items => match items with
+      | .nil => .mk cats tokens .nil (.some "empty notation")
+      | .cons first rest => match first with
+        -- (the host's `notationRule`: a *first item that is an argument* is the rule's
+        -- left-hand side, so the rule is trailing; its precedence is the item's, else
+        -- the notation's. `notation:max P:max " !" => fac P` is postfix `P !`.)
+        | .arg _ lpOpt =>
+          let lhsPrec := match lpOpt with
+            | .none => pr
+            | .some q => q;
+          let pdesc := seqOf (nItemDescrAll rest);
+          let kind := mkKindName cats "term" pdesc;
+          let note := Note.mk kind (mkNode kind (nItemPatAll items)) (kid cmd 4) (nItemVars items);
+          .mk (addTrailingU "term" (.mk kind pr lhsPrec 0 pdesc) cats) (addTokensPD tokens "term" pdesc) (.cons note .nil) .none
+        | _ =>
+          let pdesc := seqOf (nItemDescrAll items);
+          let kind := mkKindName cats "term" pdesc;
+          let note := Note.mk kind (mkNode kind (nItemPatAll items)) (kid cmd 4) (nItemVars items);
+          .mk (addLeadingU "term" (.mk kind pr 0 pdesc) cats) (addTokensPD tokens "term" pdesc) (.cons note .nil) .none
+-- the `syntax` command (`Wiz/Parser/SyntaxCmd.lean`'s `addSyntax`)
+def addSyntaxCmd (cats : List Cat) (tokens : List String) (cmd : Syntax) : Tab0 :=
+  match kid cmd 6 with
+  | .ident cat => match findCat cats cat with
+    | .none => .mk cats tokens .nil (.some ("unknown syntax category " +++ cat))
+    | .some _ => match (match isNilS (kids (kid cmd 1)) with
+        | .true => .some 1024
+        | .false => precValue (kid (kid cmd 1) 1)) with
+      | .none => .mk cats tokens .nil (.some "invalid precedence")
+      | .some pr => match kids (kid cmd 4) with
+        | .nil => .mk cats tokens .nil (.some "empty syntax rule")
+        | .cons first rawRest =>
+          let isTrailing : Bool := match kid first 0 with
+            | .ident c => strEq c cat
+            | _ => .false;
+          let rawItems : List Syntax := match isTrailing with
+            | .true => rawRest
+            | .false => kids (kid cmd 4);
+          match stxItems cats rawItems with
+          | .err e => .mk cats tokens .nil (.some e)
+          | .ok ps =>
+            let p := seqOf ps;
+            let nameOpt : Syntax := match kid cmd 2 with
+              | .node _ _ => kid (kid cmd 2) 3
+              | _ => .missing;
+            let prio := match kid cmd 3 with
+              | .node _ _ => numValue (kid (kid cmd 3) 3)
+              | _ => 0;
+            let kind := match nameOpt with
+              | .ident n => cat +++ "." +++ n
+              | _ => mkKindName cats cat p;
+            match isTrailing with
+            | .true => let lp := match isNilS (kids (kid first 1)) with
+                | .true => 0
+                | .false => match precValue (kid (kid first 1) 1) with
+                  | .some q => q
+                  | .none => 0;
+              .mk (addTrailingU cat (.mk kind pr lp prio p) cats) (addTokensPD tokens cat p) .nil .none
+            | .false => .mk (addLeadingU cat (.mk kind pr prio p) cats) (addTokensPD tokens cat p) .nil .none
+  | _ => .mk cats tokens .nil (.some "malformed syntax command")
+-- `macro_rules | `(c| pattern) => `(c| template)` (the host's `command.macroRules`): one
+-- rule per alternative, the latest first
+inductive QP where
+  | mk (pat tmpl : Syntax)
+inductive QPRes where
+  | ok (q : QP)
+  | err (msg : String)
+def strPrefix (p s : String) : Bool := match p with
+  | .mk pc => match s with
+    | .mk sc => match matchPrefix pc sc with
+      | .some _ => .true
+      | .none => .false
+def quoteIs (s : Syntax) : Bool := strPrefix "quote." (kindOf s)
+def quoteBody (lhs rhs : Syntax) : QPRes := match quoteIs lhs with
+  | .false => .err "a macro rule is `| `(cat| pattern) => `(cat| template)`"
+  | .true => match quoteIs rhs with
+    | .false => .err "a macro rule is `| `(cat| pattern) => `(cat| template)`"
+    | .true => .ok (.mk (kid lhs 3) (kid rhs 3))
+inductive NRes0 where
+  | ok (notes : List Note)
+  | err (msg : String)
+def macroRuleNotes : List Syntax → List Note → NRes0
+  | .nil, acc => .ok acc
+  | .cons alt rest, acc => match kids (kid alt 1) with
+    | .cons lhs .nil => match quoteBody lhs (kid alt 3) with
+      | .err e => .err e
+      | .ok (.mk pat tmpl) => macroRuleNotes rest (.cons (Note.mk (kindOf pat) pat tmpl .nil) acc)
+    | _ => .err "a macro rule is `| `(cat| pattern) => `(cat| template)`"
+def macroRulesCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
+  match macroRuleNotes (kids (kid stx 1)) .nil with
+  | .err e => .mk cats tokens .nil (.some e)
+  | .ok notes => .mk cats tokens notes .none
+-- the `infixl:p " op " => f` command (also `infixr`, `infix`): a trailing `a op b` whose
+-- operands are at `p`/`p + 1` (`infixl`), `p + 1`/`p` (`infixr`), or both `p + 1`
+def infixCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
+  let kw := match kid stx 0 with
+    | .atom v => v
+    | _ => "infix";
+  let p := numValue (kid stx 2);
+  let op := trimStr (strValue (kid stx 3));
+  let lp := match strEq kw "infixl" with
+    | .true => p
+    | .false => p + 1;
+  let rp := match strEq kw "infixr" with
+    | .true => p
+    | .false => p + 1;
+  let kind := mkKindName cats "term" (.seq (.atom op) (.cat "term" rp));
+  let pat := mkNode kind (.cons (mkNode "antiquot" (.cons (.atom "$") (one (.ident "a"))))
+    (.cons (.atom op) (one (mkNode "antiquot" (.cons (.atom "$") (one (.ident "b")))))));
+  let tmpl := mkNode "term.app" (.cons (kid stx 5) (one (mkNull (.cons (mkNode "term.ident" (one (.ident "a")))
+    (one (mkNode "term.ident" (one (.ident "b"))))))));
+  .mk (addTrailingU "term" (.mk kind p lp 0 (.seq (.atom op) (.cat "term" rp))) cats) (addTokenL tokens op)
+    (.cons (Note.mk kind pat tmpl (.cons "a" (.cons "b" .nil))) .nil) .none
+-- a declaration name exists (the `[macro]`/`[tactic]` registrations check their function;
+-- its body is not run: see the A12 note in docs/stages/21-bootstrap.md)
+def declExists (gs : Globals) (f : String) : Bool := match Scope.lookup (Globals.scope gs) f with
+  | .some _ => .true
+  | .none => .false
+def declareSyntaxCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 := match kid stx 1 with
+  | .ident c => match findCat cats c with
+    | .some _ => .mk cats tokens .nil .none
+    | .none => .mk (addMetaParsers c (declareCat c cats)) tokens .nil .none
+  | _ => .mk cats tokens .nil (.some "malformed declare_syntax_cat")
+def attrRegCmd (gs : Globals) (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
+  match kid stx 5 with
+  | .ident f => match declExists gs f with
+    | .true => .mk cats tokens .nil .none
+    | .false => .mk cats tokens .nil (.some ("unknown declaration " +++ f))
+  | _ => .mk cats tokens .nil (.some "an attribute needs a name")
+def setOptionCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
+  match kid stx 1 with
+  | .ident o => match Bool.or (strEq o "pp.notation") (strEq o "pp.all") with
+    | .true => .mk cats tokens .nil .none
+    | .false => .mk cats tokens .nil (.some ("unknown option " +++ o))
+  | _ => .mk cats tokens .nil (.some "a set_option needs an option name")
+def unwrapLocal (s : Syntax) : Syntax := match strEq (kindOf s) "command.local" with
+  | .true => kid s 1
+  | .false => s
+-- the grammar-changing commands (`Wiz/Frontend/Parse.lean`'s `updateTables`) plus the
+-- registrations, whose expansion functions the self-hosted frontend checks but cannot run
+def tabStep (gs : Globals) (cats : List Cat) (tokens : List String) (stx : Syntax) : Option Tab0 :=
+  let k := kindOf stx;
+  match strEq k "command.infix" with
+  | .true => .some (infixCmd cats tokens stx)
+  | .false => match strEq k "command.notation" with
+    | .true => .some (notationCmd cats tokens stx)
+    | .false => match strEq k "command.syntax" with
+      | .true => .some (addSyntaxCmd cats tokens stx)
+      | .false => match strEq k "command.declareSyntaxCat" with
+        | .true => .some (declareSyntaxCmd cats tokens stx)
+        | .false => match strEq k "command.macroRules" with
+          | .true => .some (macroRulesCmd cats tokens stx)
+          | .false => match strEq k "command.attrMacro" with
+            | .true => .some (attrRegCmd gs cats tokens stx)
+            | .false => match strEq k "command.attrTactic" with
+              | .true => .some (attrRegCmd gs cats tokens stx)
+              | .false => match strEq k "command.appUnexpander" with
+                | .true => .some (.mk cats tokens .nil .none)
+                | .false => match strEq k "command.attrUnexpander" with
+                  | .true => .some (.mk cats tokens .nil .none)
+                  | .false => match strEq k "command.setOption" with
+                    | .true => .some (setOptionCmd cats tokens stx)
+                    | .false => .none
+-- the `do` grammar: a category `doSeq`, and `do doSeq` a term
 def thenRest (p : PD) : PD := .seq p (.seq (.atom ";") (.cat "doSeq" 0))
 def doCats (cats : List Cat) : List Cat :=
   addLeadingTo "term" (.mk "term.do" 1024 0 (.seq (.atom "do") (.cat "doSeq" 0)))
@@ -6302,6 +6942,62 @@ def doCats (cats : List Cat) : List Cat :=
 def unwrapPrivate (s : Syntax) : Syntax := match strEq (kindOf s) "command.private" with
   | .true => kid s 1
   | .false => s
+-- (A11) the deriver table. `attribute [deriver C] f` records `f` as `C`'s deriver
+-- (`CommandState.derivers` in the host); `deriving C` runs the one the table names.
+-- `p` is a prefix of `s`
+def strPrefix (p s : String) : Bool := match p with
+  | .mk ps => match s with
+    | .mk cs => strEq (String.mk (takeL (List.length ps) cs)) p
+-- a deriver's name without the `Derive.` namespace (the derivers may be imported under
+-- it): `Derive.deriveBEq` and `deriveBEq` are the same deriver
+def deriverBase (f : String) : String := match f with
+  | .mk cs => match strPrefix "Derive." f with
+    | .true => String.mk (dropL 7 cs)
+    | .false => f
+-- the deriver a name stands for: 1 `Inhabited`, 2 `BEq`, 3 `Repr`, 4 `DecidableEq`,
+-- 5 `Compare` (the names `lib/Deriving.wiz` gives its derivers), 0 a deriver this
+-- frontend cannot run
+def deriverKind (f : String) : Nat := match strEq (deriverBase f) "deriveInhabited" with
+  | .true => 1
+  | .false => match strEq (deriverBase f) "deriveBEq" with
+    | .true => 2
+    | .false => match strEq (deriverBase f) "deriveRepr" with
+      | .true => 3
+      | .false => match strEq (deriverBase f) "deriveDecidableEq" with
+        | .true => 4
+        | .false => match strEq (deriverBase f) "deriveCompare" with
+          | .true => 5
+          | .false => 0
+def isBuiltinDeriver (f : String) : Bool := match deriverKind f with
+  | .zero => .false
+  | _ => .true
+-- a type's leading Πs (its parameters, and an index)
+partial def piArity : Tm → Nat
+  | .pi _ _ _ _ b => Nat.succ (piArity b)
+  | _ => 0
+-- a class's arity: the parameters of its type former
+def classArity (gs : Globals) (C : String) : Nat := match globalTyOf gs C with
+  | .some ty => piArity ty
+  | .none => 0
+-- (A11) `attribute [deriver C] f`: register `f` as `C`'s deriver, as the host's
+-- `command.attrDeriver` does. A built-in deriver's name (`deriveBEq`, …) is the
+-- frontend's own and needs no declaration; another `f` must be declared with one
+-- argument (`String → MacroM (List Syntax)`), the arity the host checks by unifying its
+-- type with `Deriver`. A declared `f` is recorded even though this frontend cannot run
+-- it: `deriving C` reports that, with the command's position.
+def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
+  let C := identOf' (kid stx 3);
+  let f := identOf' (kid stx 5);
+  match Scope.lookup (Globals.scope gs) f with
+  | .none => match isBuiltinDeriver f with
+    | .true => LinkR.mk .none (Globals.addDeriver gs C (deriverBase f))
+    | .false => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+  | .some i => match globalTyOf gs f with
+    | .none => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+    | .some ty => match piArity ty with
+      | .succ (.zero) => LinkR.mk .none (Globals.addDeriver gs C f)
+      | n => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: it takes " +++ Nat.toString n
+          +++ " arguments, expected one (String → MacroM (List Syntax))")) gs
 -- (stage 21u) `attribute [inline] f`: a hint to the Lean compiler, checked as the Lean
 -- frontend does (`f` must have a definition); it changes nothing here
 def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attrInline" with
@@ -6314,7 +7010,9 @@ def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf
           | .true => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
         | _ => LinkR.mk (.some (String.append "error: " (String.append f " has no definition to inline"))) gs
     | _ => LinkR.mk (.some "error: attribute [inline] needs a name") gs)
-  | .false => .none
+  | .false => match strEq (kindOf stx) "command.attrDeriver" with
+    | .true => .some (deriverCmd gs stx)
+    | .false => .none
 -- `link_c`, `link_lib`, `export` (stage 21o) and `implemented_by` (21t): no output line
 -- unless an error
 def linkStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.linkC" with
@@ -6326,6 +7024,506 @@ def linkStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf
       | .false => match strEq (kindOf stx) "command.attrImplementedBy" with
         | .true => .some (implementedByCmd gs stx)
         | .false => attrStep gs stx
+-- (A11) `deriving`. `inductive T … deriving C₁, C₂` (and `structure`),
+-- `deriving instance C₁, C₂ for T₁, T₂` run a **deriver** for each (class, type) pair:
+-- the class's deriver is looked up in a table (as the host's `CommandState.derivers`
+-- is), the type's shape comes from its `IndInfo` (parameters, constructors, fields,
+-- recursion -- the reflection a Lean macro gets from `MacroM.getInductive`), and the
+-- deriver emits ordinary `def`/`instance` commands, which this elaborator and the
+-- kernel check exactly like a hand-written instance (so no axioms, no new trust).
+--
+-- The table is keyed by the class **name**: `attribute [deriver C] f` registers `f`,
+-- and the dispatcher picks the deriver by `f`'s name (`deriveInhabited`, `deriveBEq`,
+-- `deriveRepr`, `deriveDecidableEq`, `deriveCompare` -- the names `lib/Deriving.wiz`
+-- gives them). The five are pre-registered under the canonical class names, because
+-- the self-hosted prelude has no `import Deriving`. A registered deriver of another
+-- name is recorded and reported as unrunnable when it is used: there is no
+-- elaboration-time evaluation of Wiz code here (no `MacroM`, no quotations), so a
+-- user's `Deriver := String → MacroM (List Syntax)` cannot be run (a pinned
+-- difference; see docs/stages/30-selfhost-typeclasses.md, 30b).
+
+inductive DerivedR where
+  | ok (gs : Globals) (line : String)
+  | err (msg : String)
+-- the classes written in a `deriving` clause (its optional wraps `deriving` and the
+-- `sepBy1` of names in a `null`), or none
+def derivingNames (stx : Syntax) : List String := match kids (kid stx 7) with
+  | .cons _ (.cons ids _) => sepIdentNames (kids ids)
+  | _ => .nil
+-- the error a deriver reports, in the host's shape (`deriving C for T: reason`, the
+-- reason being the deriver's message): `report` in `Elab/Command.lean`'s expansion
+def deriveErr (C T reason : String) : DerivedR :=
+  .err ("error: deriving " +++ C +++ " for " +++ T +++ ": " +++ reason)
+-- the checks every deriver makes first: the type has no index (an indexed family's
+-- equations would have to generalise it, as `lib/Deriving.wiz` says; a `mutual` member
+-- *is* one -- its `fixed` tag is the index), and its parameters are its Π binders
+def deriveShape (gs : Globals) (T : String) (np : Nat) (fixed : Option Tm) : Option String :=
+  match fixed with
+  -- (a `mutual` member: the host's `getInductive` has no view of it, only of the family)
+  | .some _ => .some ("not an inductive type or structure: " +++ T)
+  | .none => match globalTyOf gs T with
+    | .none => .some ("not an inductive type or structure: " +++ T)
+    | .some tyT => match Nat.beq (piArity tyT) np with
+      | .false => .some "indexed families are not supported"
+      | .true => .none
+-- the parameters and instance arguments of a derived instance, as binders plus their
+-- names in order (a type parameter gets `[b✝i : C p]`, as lib/Deriving.wiz's
+-- `Derive.instBinder`): the parameter itself is implicit, and an instance parameter is
+-- kept as one. `i` numbers the instance binders so each name is fresh.
+inductive DBuild where
+  | mk (bs : List Syntax) (names : List String) (i : Nat)
+def deriveInstName (i : Nat) : String := "b✝" +++ Nat.toString i
+def deriveBinder1 (C x : String) (b : Syntax) (i : Nat) : DBuild :=
+  let ty : Syntax := match binderType b with
+    | .some t => t
+    | .none => .missing;
+  let main := match isInstB b with
+    | .true => binderStx "[" "]" x ty
+    | .false => binderStx "{" "}" x ty;
+  let extra : List Syntax := match isInstB b with
+    | .true => .nil
+    -- (`isType` in lib/Deriving.wiz: a `Type`/`Type u` parameter gets an instance)
+    | .false => match strEq (kindOf ty) "term.type" with
+      | .true => .cons (binderStx "[" "]" (deriveInstName i)
+          (mkNode "term.app" (.cons (identStx C) (one (mkNull (one (identStx x))))))) .nil
+      | .false => .nil;
+  let ns : List String := match extra with
+    | .nil => .cons x .nil
+    | .cons _ _ => .cons x (.cons (deriveInstName i) .nil);
+  .mk (.cons main extra) ns (i + 1)
+def deriveBinderGroup (C : String) (b : Syntax) : Nat → List String → DBuild
+  | i, .nil => .mk .nil .nil i
+  | i, .cons x xs => match deriveBinder1 C x b i with
+    | .mk bs ns i1 => match deriveBinderGroup C b i1 xs with
+      | .mk bs' ns' i2 => .mk (List.append bs bs') (List.append ns ns') i2
+def deriveBindersGo (C : String) : Nat → List Syntax → DBuild
+  | i, .nil => .mk .nil .nil i
+  | i, .cons b rest => match deriveBinderGroup C b i (binderNames b) with
+    | .mk bs ns i1 => match deriveBindersGo C i1 rest with
+      | .mk bs' ns' i2 => .mk (List.append bs bs') (List.append ns ns') i2
+def deriveBinders (C : String) (params : List Syntax) : DBuild := deriveBindersGo C 0 params
+-- `h a₁ … aₙ`
+def appStx (h : Syntax) (args : List Syntax) : Syntax := match args with
+  | .nil => h
+  | _ => mkNode "term.app" (.cons h (one (mkNull args)))
+def appIdents (n : String) (args : List String) : Syntax := appStx (identStx n) (strIdents args)
+def arrowStx (a b : Syntax) : Syntax := mkNode "term.arrow" (.cons a (.cons (.atom "→") (one b)))
+-- `.c`: a constructor pattern (the dot keeps it a constructor rather than a variable)
+-- or a constructor's value, by where it is used
+def dotStx (c : String) : Syntax := mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident c)))
+-- the constructor pattern `.c p₁ … pₙ` (no arguments: `.c`)
+def ctorPatStx (c : String) (subs : List Syntax) : Syntax := match subs with
+  | .nil => dotStx c
+  | _ => mkNode "term.app" (.cons (dotStx c) (one (mkNull subs)))
+-- `match s₁, …, sₙ with alts`
+def matchStx (scruts alts : List Syntax) : Syntax :=
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull scruts) (.cons (.atom "with") (one (mkNull alts)))))
+def alt1 (p : Syntax) (rhs : Syntax) : Syntax :=
+  mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one p)) (.cons (.atom "=>") (one rhs))))
+def alt2 (p q : Syntax) (rhs : Syntax) : Syntax :=
+  mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (.cons p (one q))) (.cons (.atom "=>") (one rhs))))
+-- a dummy value for each of the `d` binders a field's type is over: the sorts are what
+-- a proof test reads (`isProp`), and a stuck value of the right shape does for that
+def dummyEnv : Nat → Env
+  | .zero => .nil
+  | .succ k => .cons .vtt (dummyEnv k)
+def fieldIsProof (np i : Nat) (f : CField) : Bool := match f with
+  | .mk _ _ ty _ => isProp empty (eval (dummyEnv (np + i)) ty)
+def nthQ : List Q → Nat → Q
+  | .nil, _ => .qw
+  | .cons q _, .zero => q
+  | .cons _ rest, .succ k => nthQ rest k
+def nthBool : List Bool → Nat → Bool
+  | .nil, _ => .false
+  | .cons b _, .zero => b
+  | .cons _ rest, .succ k => nthBool rest k
+def fieldIsRec (f : CField) : Bool := match f with
+  | .mk _ r _ _ => r
+-- the variable of field `i` in the equations' x/y patterns (`a✝i`, `b✝i`), for each
+-- explicit field; an implicit field has no subpattern (the compiler fills its hole)
+def patVars (base : String) : Nat → List Bool → List Syntax
+  | _, .nil => .nil
+  | i, .cons b bs => match b with
+    | .true => patVars base (i + 1) bs
+    | .false => .cons (identStx (base +++ Nat.toString i)) (patVars base (i + 1) bs)
+-- `_` for each explicit field (a pattern that binds nothing)
+def holeVars : Nat → List Bool → List Syntax
+  | _, .nil => .nil
+  | i, .cons b bs => match b with
+    | .true => holeVars (i + 1) bs
+    | .false => .cons holeStx (holeVars (i + 1) bs)
+def explicitCount : List Bool → Nat
+  | .nil => 0
+  | .cons b bs => match b with
+    | .true => explicitCount bs
+    | .false => Nat.succ (explicitCount bs)
+-- `Bool.and c₁ (Bool.and c₂ … Bool.true)`
+def andAll : List Syntax → Syntax
+  | .nil => identStx "Bool.true"
+  | .cons c rest => appStx (identStx "Bool.and") (.cons c (one (andAll rest)))
+-- the data fields compared: the explicit ones, except proofs (all proofs of a
+-- proposition are equal) and fields at quantity 0 (erased); `C.m a✝i b✝i`, or the
+-- helper for a recursive field (a recursive call the equation compiler turns into the
+-- recursor's induction hypothesis)
+def eqCmps (C m helper : String) (np : Nat) : Nat → List CField → List Q → List Bool → List Syntax
+  | _, .nil, _, _ => .nil
+  | i, .cons f fs, qs, impl => match nthBool impl i with
+    | .true => eqCmps C m helper np (i + 1) fs qs impl
+    | .false =>
+      let here : Option Syntax := match qEq (nthQ qs i) .qz with
+        | .true => .none
+        | .false => match fieldIsProof np i f with
+          | .true => .none
+          | .false =>
+            let x := identStx ("a✝" +++ Nat.toString i);
+            let y := identStx ("b✝" +++ Nat.toString i);
+            match fieldIsRec f with
+            | .true => .some (appStx (identStx helper) (.cons x (one y)))
+            | .false => .some (appStx (identStx (C +++ "." +++ m)) (.cons x (one y)));
+      match here with
+      | .none => eqCmps C m helper np (i + 1) fs qs impl
+      | .some c => .cons c (eqCmps C m helper np (i + 1) fs qs impl)
+-- one constructor's equation: `| c a✝… , c b✝… => Bool.and …`
+def eqAlt (C m helper : String) (np : Nat) (c : Ctor) : Syntax := match c with
+  | .mk cn fs res qs impl =>
+    let px := ctorPatStx cn (patVars "a✝" 0 impl);
+    let py := ctorPatStx cn (patVars "b✝" 0 impl);
+    alt2 px py (andAll (eqCmps C m helper np 0 fs qs impl))
+def eqAlts (C m helper : String) (np : Nat) : List Ctor → List Syntax
+  | .nil => .nil
+  | .cons c cs => .cons (eqAlt C m helper np c) (eqAlts C m helper np cs)
+def fallbackAlt : Syntax := mkNode "match.alt" (.cons (.atom "|")
+  (.cons (mkNull (.cons holeStx (one holeStx))) (.cons (.atom "=>") (one (identStx "Bool.false")))))
+-- `def f bs : ty` followed by equations
+def defEqnsStx (f : String) (bs : List Syntax) (ty : Syntax) (alts : List Syntax) : Syntax :=
+  mkNode "command.defEqns" (.cons (.atom "def") (.cons (.ident f) (.cons (mkNull .nil) (.cons (mkNull bs)
+    (.cons (mkNull (.cons (.atom ":") (one ty))) (one (mkNull alts)))))))
+-- `instance bs : ty where field := v`
+def instanceStx (bs : List Syntax) (ty : Syntax) (field : String) (v : Syntax) : Syntax :=
+  let fld := mkNode "instance.field" (.cons (.ident field) (.cons (.atom ":=") (one v)));
+  mkNode "command.instance" (.cons (.atom "instance") (.cons (mkNull .nil) (.cons (mkNull .nil) (.cons (mkNull bs)
+    (.cons (.atom ":") (.cons ty (.cons (.atom "where") (one (mkNull (.cons fld .nil))))))))))
+def stepFailed : String → Bool
+  | line => match line with
+    | .mk cs => strEq (String.mk (takeL 6 cs)) "error:"
+-- the instance whose method `m` is the helper: `instance bs : C (T p…) where m := @helper p… b✝…`
+def deriveInstance (gs : Globals) (C m : String) (tapp : Syntax) (bs : List Syntax)
+    (allNames : List String) (helper : String) : DerivedR :=
+  let instTy := appStx (identStx C) (.cons tapp .nil);
+  let val := appStx (mkNode "term.explicit" (.cons (.atom "@") (one (.ident helper)))) (strIdents allNames);
+  match instanceCmd gs (instanceStx bs instTy m val) with
+  | .mk line gs1 => match stepFailed line with
+    | .true => .err line
+    | .false => .ok gs1 line
+-- `BEq`: compare the same constructor's explicit data fields, `Bool.false` otherwise.
+-- A definition by structural recursion, then an instance whose method is that
+-- definition. The definition's name contains `✝`, so no source can capture it.
+def deriveBEq (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
+  | .mk np I D DI ctors fixed fam params =>
+    match deriveShape gs T np fixed with
+    | .some r => deriveErr C T r
+    | .none => match ctors with
+      | .nil => deriveErr C T "it has no constructors"
+      | _ => match deriveBinders C params with
+        | .mk bs allNames _ =>
+          let helper := T +++ ".beq✝";
+          let ps := binderParamNames params;
+          let tapp := appIdents T ps;
+          let ty := arrowStx tapp (arrowStx tapp (identStx "Bool"));
+          let fb : List Syntax := match ctors with
+            | .cons _ (.cons _ _) => .cons fallbackAlt .nil
+            | _ => .nil;
+          let alts := List.append (eqAlts C m helper np ctors) fb;
+          match defStep gs (defEqnsStx helper bs ty alts) with
+          | .mk line gs1 => match stepFailed line with
+            | .true => .err line
+            | .false => deriveInstance gs1 C m tapp bs allNames helper
+-- `Inhabited`: the first constructor without recursive or proof fields (there is no
+-- `default` proof), at `default` for each explicit field.
+def plainFields (np : Nat) : Nat → List CField → List Q → List Bool → Bool
+  | i, .nil, _, _ => .true
+  | i, .cons f fs, qs, impl => match Bool.or (fieldIsRec f) (fieldIsProof np i f) with
+    | .true => .false
+    | .false => plainFields np (i + 1) fs qs impl
+def ctorPlain (np : Nat) (c : Ctor) : Bool := match c with
+  | .mk _ fs _ qs impl => plainFields np 0 fs qs impl
+def firstPlain (np : Nat) : List Ctor → Option Ctor
+  | .nil => .none
+  | .cons c cs => match ctorPlain np c with
+    | .true => .some c
+    | .false => firstPlain np cs
+def defaultArgs (dv : String) : Nat → List Syntax
+  | .zero => .nil
+  | .succ k => .cons (identStx dv) (defaultArgs dv k)
+def deriveInhabited (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
+  | .mk np I D DI ctors fixed fam params =>
+    match deriveShape gs T np fixed with
+    | .some r => deriveErr C T r
+    | .none => match firstPlain np ctors with
+      | .none => deriveErr C T ("every constructor of " +++ T +++ " is recursive or has a proof field")
+      | .some (.mk cn fs res qs impl) =>
+        match deriveBinders C params with
+        | .mk bs _ _ =>
+          let ps := binderParamNames params;
+          let tapp := appIdents T ps;
+          let val := appStx (identStx (T +++ "." +++ cn)) (defaultArgs (C +++ "." +++ m) (explicitCount impl));
+          match instanceCmd gs (instanceStx bs (appStx (identStx C) (.cons tapp .nil)) m val) with
+          | .mk line gs1 => match stepFailed line with
+            | .true => .err line
+            | .false => .ok gs1 line
+-- `DecidableEq`: an enumeration (every constructor is a constant) or a
+-- single-constructor record with no recursive field -- a recursive field's comparison
+-- would need the instance being defined (as in `lib/Deriving.wiz`)
+def noFields : List CField → Bool
+  | .nil => .true
+  | .cons _ _ => .false
+def allNoFields : List Ctor → Bool
+  | .nil => .true
+  | .cons (.mk _ fs _ _ _) cs => match noFields fs with
+    | .true => allNoFields cs
+    | .false => .false
+def noRecFields : List CField → Bool
+  | .nil => .true
+  | .cons f fs => match fieldIsRec f with
+    | .true => .false
+    | .false => noRecFields fs
+def isRecordType : List Ctor → Bool
+  | .cons (.mk _ fs _ _ _) .nil => noRecFields fs
+  | _ => .false
+def deriveDecidableEq (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
+  | .mk np I D DI ctors fixed fam params =>
+    match deriveShape gs T np fixed with
+    | .some r => deriveErr C T r
+    | .none => match Bool.or (allNoFields ctors) (isRecordType ctors) with
+      | .false => deriveErr C T (C +++ " is derived for an enumeration or a single-constructor record only, and " +++ T)
+      | .true => match deriveBinders C params with
+        | .mk bs allNames _ =>
+          let helper := T +++ ".dec✝";
+          let ps := binderParamNames params;
+          let tapp := appIdents T ps;
+          let ty := arrowStx tapp (arrowStx tapp (identStx "Bool"));
+          let fb : List Syntax := match ctors with
+            | .cons _ (.cons _ _) => .cons fallbackAlt .nil
+            | _ => .nil;
+          let alts := List.append (eqAlts C m helper np ctors) fb;
+          match defStep gs (defEqnsStx helper bs ty alts) with
+          | .mk line gs1 => match stepFailed line with
+            | .true => .err line
+            | .false => deriveInstance gs1 C m tapp bs allNames helper
+-- `Compare`: lexicographic on the fields of the same constructor, and `.lt`/`.gt` by
+-- the constructors' declaration order (the first is least). A recursive field compares
+-- through the helper, as `BEq` does.
+def cmpFields (C m helper : String) (np : Nat) : Nat → List CField → List Q → List Bool → List Syntax
+  | _, .nil, _, _ => .nil
+  | i, .cons f fs, qs, impl => match nthBool impl i with
+    | .true => cmpFields C m helper np (i + 1) fs qs impl
+    | .false =>
+      let here : Option Syntax := match qEq (nthQ qs i) .qz with
+        | .true => .none
+        | .false => match fieldIsProof np i f with
+          | .true => .none
+          | .false =>
+            let x := identStx ("a✝" +++ Nat.toString i);
+            let y := identStx ("b✝" +++ Nat.toString i);
+            match fieldIsRec f with
+            | .true => .some (appStx (identStx helper) (.cons x (one y)))
+            | .false => .some (appStx (identStx (C +++ "." +++ m)) (.cons x (one y)));
+      match here with
+      | .none => cmpFields C m helper np (i + 1) fs qs impl
+      | .some c => .cons c (cmpFields C m helper np (i + 1) fs qs impl)
+-- `match c with | .lt => Ordering.lt | .eq => rest | .gt => Ordering.gt`
+def ordStx (c : String) : Syntax := identStx ("Ordering." +++ c)
+def cmpAfter (c rest : Syntax) : Syntax := matchStx (one c)
+  (.cons (alt1 (dotStx "lt") (ordStx "lt")) (.cons (alt1 (dotStx "eq") rest)
+    (.cons (alt1 (dotStx "gt") (ordStx "gt")) .nil)))
+def cmpLex : List Syntax → Syntax
+  | .nil => ordStx "eq"
+  | .cons c .nil => c
+  | .cons c rest => cmpAfter c (cmpLex rest)
+def cmpAlt (C m helper : String) (np : Nat) (c : Ctor) : Syntax := match c with
+  | .mk cn fs res qs impl =>
+    let px := ctorPatStx cn (patVars "a✝" 0 impl);
+    let py := ctorPatStx cn (patVars "b✝" 0 impl);
+    alt2 px py (cmpLex (cmpFields C m helper np 0 fs qs impl))
+def cmpAlts (C m helper : String) (np : Nat) : List Ctor → List Syntax
+  | .nil => .nil
+  | .cons c cs => .cons (cmpAlt C m helper np c) (cmpAlts C m helper np cs)
+-- two different constructors, in declaration order
+def ctorNameOf (c : Ctor) : String := match c with
+  | .mk cn _ _ _ _ => cn
+def ctorHoles (c : Ctor) : List Syntax := match c with
+  | .mk _ _ _ _ impl => holeVars 0 impl
+def crossAlt (c d : Ctor) (less : Bool) : Syntax :=
+  let rhs := match less with
+    | .true => ordStx "lt"
+    | .false => ordStx "gt";
+  alt2 (ctorPatStx (ctorNameOf c) (ctorHoles c)) (ctorPatStx (ctorNameOf d) (ctorHoles d)) rhs
+def crossRow (i : Nat) (c : Ctor) : Nat → List Ctor → List Syntax
+  | j, .nil => .nil
+  | j, .cons d ds => match Nat.beq i j with
+    | .true => crossRow i c (j + 1) ds
+    | .false => .cons (crossAlt c d (Nat.lt i j)) (crossRow i c (j + 1) ds)
+def crossAltsGo (all : List Ctor) : Nat → List Ctor → List Syntax
+  | i, .nil => .nil
+  | i, .cons c cs => List.append (crossRow i c 0 all) (crossAltsGo all (i + 1) cs)
+def crossAlts (ctors : List Ctor) : List Syntax := crossAltsGo ctors 0 ctors
+def deriveCompare (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
+  | .mk np I D DI ctors fixed fam params =>
+    match deriveShape gs T np fixed with
+    | .some r => deriveErr C T r
+    | .none => match ctors with
+      | .nil => deriveErr C T "it has no constructors"
+      | _ => match deriveBinders C params with
+        | .mk bs allNames _ =>
+          let helper := T +++ ".cmp✝";
+          let ps := binderParamNames params;
+          let tapp := appIdents T ps;
+          let ty := arrowStx tapp (arrowStx tapp (identStx "Ordering"));
+          let alts := List.append (cmpAlts C m helper np ctors) (crossAlts ctors);
+          match defStep gs (defEqnsStx helper bs ty alts) with
+          | .mk line gs1 => match stepFailed line with
+            | .true => .err line
+            | .false => deriveInstance gs1 C m tapp bs allNames helper
+-- `Repr`: `T.c a b` at the top level, `(T.c a b)` at argument position (p ≥ 1024),
+-- every data field through `C.m`/the deriver at 1024, an explicit proof field as `_`.
+def strStx (s : String) : Syntax := mkNode "term.str" (one (.atom s))
+def numStx (n : Nat) : Syntax := mkNode "term.num" (one (.atom (Nat.toString n)))
+def reprConcat : List Syntax → Syntax
+  | .nil => strStx ""
+  | .cons x rest => appStx (identStx "String.append") (.cons x (one (reprConcat rest)))
+def reprSpaced : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons x rest => .cons (strStx " ") (.cons x (reprSpaced rest))
+def reprBody (name : String) (fields : List Syntax) : Syntax :=
+  reprConcat (.cons (strStx name) (reprSpaced fields))
+-- `if c then a else b` (the grammar has no `if`: `ifMatch` reads the spine)
+def ifStx (c a b : Syntax) : Syntax :=
+  appStx (identStx "if") (.cons c (.cons (identStx "then") (.cons a (.cons (identStx "else") (one b)))))
+def parenStx (s : Syntax) : Syntax :=
+  appStx (identStx "String.append") (.cons (strStx "(")
+    (.cons (appStx (identStx "String.append") (.cons s (one (strStx ")")))) .nil))
+def reprFields (C m helper : String) (np : Nat) : Nat → List CField → List Q → List Bool → List Syntax
+  | _, .nil, _, _ => .nil
+  | i, .cons f fs, qs, impl => match nthBool impl i with
+    | .true => reprFields C m helper np (i + 1) fs qs impl
+    | .false =>
+      let here : Option Syntax := match qEq (nthQ qs i) .qz with
+        | .true => .none
+        | .false => match fieldIsProof np i f with
+          | .true => .some (strStx "_")
+          | .false =>
+            let x := identStx ("a✝" +++ Nat.toString i);
+            let at := numStx 1024;
+            match fieldIsRec f with
+            | .true => .some (appStx (identStx helper) (.cons x (one at)))
+            | .false => .some (appStx (identStx (C +++ "." +++ m)) (.cons x (one at)));
+      match here with
+      | .none => reprFields C m helper np (i + 1) fs qs impl
+      | .some c => .cons c (reprFields C m helper np (i + 1) fs qs impl)
+def reprAlt (C m T helper : String) (np : Nat) (c : Ctor) : Syntax := match c with
+  | .mk cn fs res qs impl =>
+    let parts := reprFields C m helper np 0 fs qs impl;
+    let body := reprBody (T +++ "." +++ cn) parts;
+    let rhs := match parts with
+      | .nil => body
+      | _ => ifStx (appStx (identStx "Nat.lt") (.cons (identStx "p✝") (one (numStx 1024))))
+          body (parenStx body);
+    let pat := ctorPatStx cn (patVars "a✝" 0 impl);
+    mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (.cons pat (one (identStx "p✝")))) (.cons (.atom "=>") (one rhs))))
+def reprAlts (C m T helper : String) (np : Nat) : List Ctor → List Syntax
+  | .nil => .nil
+  | .cons c cs => .cons (reprAlt C m T helper np c) (reprAlts C m T helper np cs)
+def deriveRepr (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
+  | .mk np I D DI ctors fixed fam params =>
+    match deriveShape gs T np fixed with
+    | .some r => deriveErr C T r
+    | .none => match ctors with
+      | .nil => deriveErr C T "it has no constructors"
+      | _ => match deriveBinders C params with
+        | .mk bs allNames _ =>
+          let helper := T +++ ".repr✝";
+          let ps := binderParamNames params;
+          let tapp := appIdents T ps;
+          let ty := arrowStx tapp (arrowStx (identStx "Nat") (identStx "String"));
+          let alts := reprAlts C m T helper np ctors;
+          match defStep gs (defEqnsStx helper bs ty alts) with
+          | .mk line gs1 => match stepFailed line with
+            | .true => .err line
+            | .false => deriveInstance gs1 C m tapp bs allNames helper
+-- (30b) the dispatch: the deriver the class's entry names, run for `T`
+def deriveClassOn (gs : Globals) (C T : String) : DerivedR := match Globals.deriver gs C with
+  | .none => .err ("error: no deriver for " +++ C +++ " (register one with `attribute [deriver " +++ C +++ "] f`)")
+  | .some f => match deriverKind f with
+    | .zero => .err ("error: deriving " +++ C +++ " for " +++ T +++ ": the deriver " +++ f
+        +++ " cannot be run (this frontend has no elaboration-time evaluator; the derivers it runs are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)")
+    | _ => match Globals.class gs C with
+      | .none => deriveErr C T (C +++ " is not a class (declare it with `class`)")
+      | .some (.mk methods) => match Nat.beq (classArity gs C) 1 with
+        | .false => deriveErr C T ("the class takes " +++ Nat.toString (classArity gs C)
+            +++ " parameters; a derived instance is for a class of one type parameter")
+        | .true => match Globals.ind gs T with
+          | .none => deriveErr C T ("not an inductive type or structure: " +++ T)
+          | .some info => match methods with
+            | .nil => deriveErr C T "the class has no methods"
+            | .cons m _ => match deriverKind f with
+              | .succ (.zero) => deriveInhabited gs C m T info
+              | .succ (.succ (.zero)) => deriveBEq gs C m T info
+              | .succ (.succ (.succ (.zero))) => deriveRepr gs C m T info
+              | .succ (.succ (.succ (.succ (.zero)))) => deriveDecidableEq gs C m T info
+              | .succ (.succ (.succ (.succ (.succ (.zero))))) => deriveCompare gs C m T info
+              | _ => deriveErr C T ("no deriver for " +++ C)
+def deriveEach (T : String) : List String → Globals → DerivedR
+  | .nil, gs => .ok gs ""
+  | .cons C cs, gs => match deriveClassOn gs C T with
+    | .err m => .err m
+    | .ok gs1 line => match deriveEach T cs gs1 with
+      | .err m => .err m
+      | .ok gs2 line2 =>
+        let out := match strEq line2 "" with
+          | .true => line
+          | .false => line2;
+        .ok gs2 out
+def deriveForTypes (classes : List String) : List String → Globals → DerivedR
+  | .nil, gs => .ok gs ""
+  | .cons T ts, gs => match deriveEach T classes gs with
+    | .err m => .err m
+    | .ok gs1 line => match deriveForTypes classes ts gs1 with
+      | .err m => .err m
+      | .ok gs2 line2 =>
+        let out := match strEq line2 "" with
+          | .true => line
+          | .false => line2;
+        .ok gs2 out
+-- the deriving clause of an `inductive`/`structure` command, after its own step: the
+-- derived instances add no output line (as in the Lean toolchain)
+def withDeriving (gs : Globals) (stx : Syntax) (step : Step) : Step := match step with
+  | .mk line gs1 => match stepFailed line with
+    | .true => .mk line gs1
+    | .false => match derivingNames stx with
+      | .nil => .mk line gs1
+      | classes => match kid stx 1 with
+        | .ident T => match deriveEach T classes gs1 with
+          | .ok gs2 _ => .mk line gs2
+          | .err m => .mk m gs1
+        | _ => .mk line gs1
+-- `deriving instance C₁, C₂ for T₁, T₂`: the cross product, in source order
+def derivingCmd (gs : Globals) (stx : Syntax) : Step :=
+  let classes := sepIdentNames (kids (kid stx 2));
+  let types := sepIdentNames (kids (kid stx 4));
+  match deriveForTypes classes types gs with
+  | .ok gs1 _ => .mk "" gs1
+  | .err m => .mk m gs
+-- (A11) `deriving C` on a `mutual` inductive block: the host derives for the joint
+-- family (`A_B t`, an indexed family) so that one instance covers every member; this
+-- frontend's derivers reject indexed families, and a member's recursive fields point at
+-- its siblings, so the form is rejected here rather than half-derived
+def mutualDeriving : List Syntax → Option String
+  | .nil => .none
+  | .cons d rest => match derivingNames d with
+    | .nil => mutualDeriving rest
+    | .cons C _ => .some ("deriving " +++ C +++ " for " +++ identOf' (kid d 1)
+        +++ ": a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand")
+
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
@@ -6373,13 +7571,20 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       | .false => .next .none stop gs cats tokens notes
       | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes (String.codes preludeText) 0 gs .nil with
         | .mk _ gs' cats' tokens' notes' => .next .none stop gs' cats' tokens' notes'
-    | .false => match strEq (kindOf stx0) "command.infix" with
-    | .true => match infixCmd cats tokens stx0 with
-      | .mk cats' tokens' note => .next .none stop gs cats' tokens' (.cons note notes)
     | .false =>
-      let stx1 := match notes with
-        | .nil => stx0
-        | _ => expandNotes notes stx0;
+      -- (A12) the grammar-changing commands: `syntax`, `notation`, `infixl`/`infixr`/
+      -- `infix`, `macro_rules`, `declare_syntax_cat`, and the macro/tactic registrations
+      -- (which this frontend checks but does not run). They change the tables the next
+      -- command is parsed with, and add macro rules.
+      let stx0a := unwrapLocal stx0;
+      match tabStep gs cats tokens stx0a with
+      | .some (.mk cats' tokens' notes' err) => match err with
+        | .some e => .next (atLine start (.some (String.append "error: " e))) stop gs cats tokens notes
+        | .none => .next .none stop gs cats' tokens' (List.append notes' notes)
+      | .none =>
+      -- (A12) expand the command's macro rules (term and command rules) before it is
+      -- elaborated; 64 expansions are plenty for a rule that rewrites into another
+      let stx1 := expandNotes notes 0 stx0a;
       -- (stage 21n) `private def …` declares the same names in the current module, and
       -- they are private to it: `Globals.add` gives them the module's kernel names
       -- (`privName`), and `stepCommand` clears the flag again after this command
@@ -6393,10 +7598,12 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
         | .true => partialCmd gs0 (one stx)
         | .false => match strEq (kindOf stx) "command.mutual" with
           | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
-            | .true => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
+            | .true => match mutualDeriving (nonAtoms (kids (kid stx 1))) with
+              | .some m => errStep gs0 m
+              | .none => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
             | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
           | .false => match strEq (kindOf stx) "command.structure" with
-            | .true => structCmd gs0 stx
+            | .true => withDeriving gs0 stx (structCmd gs0 stx)
             | .false => match strEq (kindOf stx) "command.class" with
               | .true => classCmd gs0 stx
               | .false => match strEq (kindOf stx) "command.instance" with
@@ -6416,15 +7623,22 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                   | .true => cStructCmd gs0 stx
                   | .false => match strEq (kindOf stx) "command.sealed" with
                     | .true => sealedCmd gs0 stx
-                    | .false => match knownCommand (kindOf stx) with
-                      | .true => defStep gs0 stx
+                    | .false => match strEq (kindOf stx) "command.deriving" with
+                      | .true => derivingCmd gs0 stx
+                      | .false => match knownCommand (kindOf stx) with
+                      | .true => match strEq (kindOf stx) "command.inductive" with
+                        | .true => withDeriving gs0 stx (defStep gs0 stx)
+                        | .false => defStep gs0 stx
                       -- (an unknown command, or a modifier this frontend doesn't know, is
                       -- an error naming it, never ignored)
                       | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
         | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
-        | .none => .next (atLine start (.some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
+        -- (A11) `deriving instance` prints no line, as in the Lean toolchain
+        | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
+            | .true => .none
+            | .false => .some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports cats tokens notes input pos gs with
@@ -6499,7 +7713,8 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  match runCommands .true cats tokens .nil (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
@@ -6720,7 +7935,8 @@ end
 -- output lines, globals and tables (the load order is in `order`)
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers) cats tokens .nil) StrMap.empty .nil .nil) roots
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)

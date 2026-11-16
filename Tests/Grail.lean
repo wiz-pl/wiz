@@ -1676,6 +1676,63 @@ def buildDeps (dir : System.FilePath) (tc : Toolchain) : IO (Except String (Grai
       let ok ← r.build pkg.targets pkg.targets
       pure (.ok (← r.stats.get, ok, ← log.get))
 
+/-- Run a command in `dir`; its trimmed stdout. Fails if it fails. -/
+def runIn (dir : System.FilePath) (cmd : String) (args : List String) : IO String := do
+  let o ← IO.Process.output { cmd, args := args.toArray, cwd := dir }
+  if o.exitCode != 0 then throw (IO.userError s!"{cmd} {args}: {o.stderr}")
+  pure o.stdout.trimAscii.toString
+
+/-- A package's archive (`NAME-VERSION/` under a tarball) and its sha256. -/
+def tarballOf (dir : System.FilePath) (name version : String) (files : List (String × String)) :
+    IO (System.FilePath × String) := do
+  let work ← mkTree (files.map fun (p, c) => (s!"{name}-{version}/{p}", c))
+  let out := dir / s!"{name}-{version}.tar.gz"
+  let _ ← runIn work "tar" ["-czf", out.toString, s!"{name}-{version}"]
+  let sha := ((← runIn dir "sha256sum" [out.toString]).splitOn " ").head!
+  pure (out, sha)
+
+/-- The readPkg of the tests: a package directory's manifest. -/
+def readPkg (tc : Toolchain) (d : System.FilePath) : IO (Except String Grail.Package) := do
+  pure ((← Grail.readConfig tc (← binId tc) "lib" d).map (·.1))
+
+/-- A package directory with an index, a fetched archive and a lock: `greet` 1.2.0,
+whose module the app imports. -/
+def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain) := do
+  let root ← IO.FS.createTempDir
+  let idx := root / "index"
+  IO.FS.createDirAll idx
+  let cache := root / "cache"
+  let (tar, sha) ← tarballOf root "greet" "1.2.0"
+    [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.2.0\"\n  |> Package.toolchain \">=0.1.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+     ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 41\n")]
+  IO.FS.writeFile (idx / "greet.sexpr")
+    s!"(index (package \"greet\" (version \"1.2.0\" (source \"file://{tar}\") (sha256 \"{sha}\") (toolchain \">=0.1.0\") (deps))))\n"
+  let dir ← mkTree [
+    ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
+    ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
+  pure (root, dir, sha, { cacheDir := some cache })
+
+/-- The checked-in local index fixture (`tests/fixtures/grail-index`): one `index/`
+directory of S-expressions, relative `source` paths and their archives. Hermetic: no git,
+no network, no generated tarballs. -/
+def indexFixture : IO System.FilePath := do
+  let p ← IO.FS.realPath "tests/fixtures/grail-index"
+  unless ← (p / "index").isDir do
+    throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
+  pure p
+
+/-- The checked-in example index (`examples/grail-index`): the `grail-index` repository
+layout (23m), with `index.wiz`, three packages and their deterministic archives. -/
+def exampleIndex : IO System.FilePath := do
+  let p ← IO.FS.realPath "examples/grail-index"
+  unless ← (p / "index").isDir do
+    throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
+  pure p
+
+/-- A module conflict the checker reports for `checkDir`. -/
+def hasModuleConflict (r : Grail.CheckResult) : Bool :=
+  r.errors.any fun e => (e.splitOn "module conflict").length > 1
+
 def grailDepsGroup : Group where
   name := "grail-deps"
   exercise := "Stage 23h"
@@ -1754,7 +1811,736 @@ def grailDepsGroup : Group where
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
         match ← updateDeps dir tc with
         | .error e => check ((e.splitOn "two commits of greet").length > 1) e
-        | .ok ls => throw (IO.userError s!"resolved: {repr ls}") }
+        | .ok ls => throw (IO.userError s!"resolved: {repr ls}") },
+    { name := "a registry package: the lock, `fetch`, and the build imports it", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let .ok lock ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        checkEq 1 lock.pkgs.length
+        checkEq sha lock.pkgs.head!.sha256
+        let text := Grail.Lock.render lock
+        IO.FS.writeFile (dir / "grail.lock") text
+        check ((Grail.Lock.parse text).toOption.isSome) text
+        let .ok lines ← Grail.Registry.fetch cache dir lock | throw (IO.userError "fetch failed")
+        check ((lines.head!.splitOn "fetched").length > 1) lines.head!
+        checkEq (some sha) (← Grail.Registry.stamp (dir / ".grail/packages/greet"))
+        -- a second fetch unpacks nothing
+        let .ok lines ← Grail.Registry.fetch cache dir lock | throw (IO.userError "second fetch failed")
+        check ((lines.head!.splitOn "up to date").length > 1) lines.head!
+        -- the build gets the package's lib root and checks the import
+        let .ok roots ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun _ => pure ())
+          | throw (IO.userError "lockedRoots failed")
+        checkEq 1 roots.length
+        let log ← IO.mkRef ""
+        let r ← runner dir tc pkg 2 log
+        let r := { r with ctx := { r.ctx with libRoots := r.ctx.libRoots ++ roots } }
+        let ok ← r.build pkg.targets pkg.targets
+        check ok (← log.get)
+        check (((← log.get).splitOn "app.wiz:2:1: info: 42").length == 2) (← log.get) },
+    { name := "a wrong sha256 is refused before anything is unpacked; a stale lock too", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let .ok lock ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        let bad := { lock with pkgs := lock.pkgs.map fun p => { p with sha256 := String.ofList (List.replicate 64 '0') } }
+        match ← Grail.Registry.fetch cache dir bad with
+        | .error e => check ((e.splitOn "sha256").length > 1) e
+        | .ok _ => throw (IO.userError "fetched an archive with a wrong hash")
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "something was unpacked"
+        -- a requirement the lock does not satisfy
+        checkEq sha lock.pkgs.head!.sha256
+        let stale := s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.require \"greet\" \"^2\"\n"
+        IO.FS.writeFile (dir / "grail.wiz") stale
+        let .ok (pkg2, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        match Grail.Registry.checkLocked lock pkg2 with
+        | .error e => check ((e.splitOn "run `grail update`").length > 1) e
+        | .ok _ => throw (IO.userError "a stale lock passed") },
+    { name := "the resolver: highest version, yanks, conflicts, the toolchain", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        let index := s!"(index (package \"p\" (version \"1.0.0\" (source \"x\") (sha256 \"{sha}\")) (version \"1.2.0\" (source \"y\") (sha256 \"{sha}\") (deps (dep \"q\" \"^1\"))) (version \"2.0.0\" (source \"z\") (sha256 \"{sha}\")) (version \"2.1.0\" (source \"w\") (sha256 \"{sha}\") (toolchain \">=9.0\")) (yanked \"2.0.0\" \"broken\")) (package \"q\" (version \"1.1.0\" (source \"q1\") (sha256 \"{sha}\")) (version \"1.5.0\" (source \"q2\") (sha256 \"{sha}\"))))"
+        let .ok ps := Grail.Index.parse index | throw (IO.userError "bad index")
+        let idx := ps.foldl (fun m p => m.insert p.name p) {}
+        let resolved (roots : List Grail.Req) : Except String (List Grail.Resolved) :=
+          Grail.Resolve.resolve idx roots "0.1.0-dev"
+        -- highest satisfying, transitively
+        let .ok rs := resolved [⟨"p", "^1"⟩] | throw (IO.userError "resolve failed")
+        checkEq 2 rs.length
+        checkEq "1.2.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        checkEq "1.5.0" ((rs.find? (·.name == "q")).map (Grail.Version.render ·.version) |>.getD "?")
+        -- another requirement on p narrows it (1.0.0 satisfies both)
+        let .ok rs := resolved [⟨"p", "^1"⟩, ⟨"p", "1.0"⟩] | throw (IO.userError "resolve failed")
+        checkEq "1.0.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        -- `~1` is `>=1.0.0 <2.0.0`; `~1.0` is `>=1.0.0 <1.1.0`
+        let .ok rs := resolved [⟨"p", "~1"⟩] | throw (IO.userError "resolve failed")
+        checkEq "1.2.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        let .ok rs := resolved [⟨"p", "~1.0"⟩] | throw (IO.userError "resolve failed")
+        checkEq "1.0.0" ((rs.find? (·.name == "p")).map (Grail.Version.render ·.version) |>.getD "?")
+        -- `^0` and `^0.0` follow Cargo/npm's leftmost-non-zero rule: `^0` is <1.0.0,
+        -- `^0.0` is <0.1.0 (the prototype used to treat both as <0.0.1)
+        let zeros := s!"(index (package \"p0\" (version \"0.0.3\" (source \"z0\") (sha256 \"{sha}\")) (version \"0.1.0\" (source \"z1\") (sha256 \"{sha}\")) (version \"0.2.0\" (source \"z2\") (sha256 \"{sha}\")) (version \"1.0.0\" (source \"z3\") (sha256 \"{sha}\"))))"
+        let .ok zps := Grail.Index.parse zeros | throw (IO.userError "bad zero index")
+        let zidx := zps.foldl (fun m p => m.insert p.name p) {}
+        let zresolved (req : String) : Except String (List Grail.Resolved) :=
+          Grail.Resolve.resolve zidx [⟨"p0", req⟩] "0.1.0-dev"
+        let zver (rs : List Grail.Resolved) : String :=
+          (rs.find? (·.name == "p0")).map (Grail.Version.render ·.version) |>.getD "?"
+        let .ok z := zresolved "^0" | throw (IO.userError "^0 failed")
+        checkEq "0.2.0" (zver z)
+        let .ok z := zresolved "^0.0" | throw (IO.userError "^0.0 failed")
+        checkEq "0.0.3" (zver z)
+        let .ok z := zresolved "^0.1" | throw (IO.userError "^0.1 failed")
+        checkEq "0.1.0" (zver z)
+        let .ok z := zresolved "^0.0.3" | throw (IO.userError "^0.0.3 failed")
+        checkEq "0.0.3" (zver z)
+        -- 2.0.0 is yanked; 2.1.0 needs a newer toolchain
+        match resolved [⟨"p", "^2"⟩] with
+        | .error e => check ((e.splitOn "no version satisfies").length > 1) e
+        | .ok _ => throw (IO.userError "a yanked/incompatible version was chosen")
+        -- a requirement no version satisfies
+        match resolved [⟨"p", "3"⟩] with
+        | .error e => check ((e.splitOn "no version satisfies").length > 1) e
+        | .ok _ => throw (IO.userError "resolved a missing version") },
+    { name := "the CLI: update/fetch --locked and --offline", run := fun _ => do
+        let (root, dir, sha, _tc) ← registryTree
+        let idx := root / "index"
+        let std ← IO.FS.realPath "lib"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", (root / "cache").toString, "--index", idx.toString] ++ args)
+        -- no lock yet: `update --locked` and `fetch --locked` fail; update writes one
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 0 (← run ["update"])
+        checkEq 0 (← run ["update", "--locked"])
+        -- a manifest requirement the lock does not satisfy
+        let req2 := s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^2\"\n"
+        IO.FS.writeFile (dir / "grail.wiz") req2
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 1 (← run ["fetch", "--locked"])
+        -- back to ^1: update repairs the lock
+        let req1 := s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n"
+        IO.FS.writeFile (dir / "grail.wiz") req1
+        checkEq 0 (← run ["update"])
+        -- fetch: --offline refuses to download an archive that is not cached
+        checkEq 1 (← run ["fetch", "--locked", "--offline"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "an offline fetch unpacked something"
+        checkEq 0 (← run ["fetch", "--locked"])
+        let stamp := (← IO.FS.readFile (dir / ".grail/packages/greet/.grail-pkg")).trimAscii.toString
+        checkEq sha stamp
+        -- with the archive cached, an offline fetch works even after `.grail` is gone
+        IO.FS.removeDirAll (dir / ".grail")
+        checkEq 0 (← run ["fetch", "--locked", "--offline"])
+        check (← (dir / ".grail/packages/greet/src/Greet/Hello.wiz").pathExists) "not unpacked"
+        -- a package with no dependencies and no lock: both succeed and do nothing
+        let empty ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"empty\"\n")]
+        let runEmpty (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", empty.toString, "--std", std.toString] ++ args)
+        checkEq 0 (← runEmpty ["fetch", "--locked"])
+        checkEq 0 (← runEmpty ["update", "--locked"])
+        check (!(← (empty / "grail.lock").pathExists)) "a lock was written for an empty package" },
+    { name := "a git-backed index: the clone, --offline, and the lock's commit", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let cache := root / "cache"
+        let idxWork ← IO.FS.createTempDir
+        let idxBare := root / "index.git"
+        let _ ← gitIn idxWork ["init", "--quiet"]
+        IO.FS.createDirAll (idxWork / "index")
+        let writeGreet (v tar sha : String) : IO Unit :=
+          IO.FS.writeFile (idxWork / "index/greet.sexpr")
+            s!"(index (package \"greet\" (version \"{v}\" (source \"file://{tar}\") (sha256 \"{sha}\") (toolchain \">=0.1.0\") (deps))))\n"
+        let (tar1, sha1) ← tarballOf root "greet" "1.0.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        writeGreet "1.0.0" tar1.toString sha1
+        IO.FS.writeFile (idxWork / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+        let _ ← gitIn idxWork ["add", "."]
+        let _ ← gitIn idxWork ["commit", "--quiet", "-m", "v1"]
+        let _ ← runIn root "git" ["clone", "--quiet", "--bare", idxWork.toString, idxBare.toString]
+        let _ ← gitIn idxBare ["symbolic-ref", "HEAD", "refs/heads/main"]
+        let _ ← gitIn idxWork ["push", "--quiet", idxBare.toString, "HEAD:refs/heads/main"]
+        let commit1 ← gitIn idxWork ["rev-parse", "HEAD"]
+        -- a local git index is a URL: a plain path is a directory index
+        let idxUrl := s!"file://{idxBare}"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idxUrl}\"\n  |> Package.require \"greet\" \"^1\"\n"),
+          ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
+        let tc : Toolchain := { cacheDir := some cache }
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        -- no cache yet: --offline cannot clone
+        match ← Grail.Registry.resolveLock cache idxUrl true (readPkg tc) dir pkg with
+        | .error e => check ((e.splitOn "--offline").length > 1) e
+        | .ok _ => throw (IO.userError "resolved from an uncached git index offline")
+        let .ok lock ← Grail.Registry.resolveLock cache idxUrl false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve from a git index failed")
+        checkEq commit1 lock.indexCommit
+        checkEq idxUrl lock.indexUrl
+        checkEq "1.0.0" lock.pkgs.head!.version
+        -- a bare repository path works too (it is cloned, not read as a directory index)
+        let .ok viaPath ← Grail.Registry.resolveLock (root / "cache-path") idxBare.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve from a bare repository path failed")
+        checkEq commit1 viaPath.indexCommit
+        -- a new version upstream; an offline resolve reads the cached clone (commit1)
+        let (tar2, sha2) ← tarballOf root "greet" "1.2.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.2.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 41\n")]
+        writeGreet "1.2.0" tar2.toString sha2
+        let _ ← gitIn idxWork ["commit", "--quiet", "-am", "v2"]
+        let _ ← gitIn idxWork ["push", "--quiet", idxBare.toString, "HEAD:refs/heads/main"]
+        let commit2 ← gitIn idxWork ["rev-parse", "HEAD"]
+        let .ok offline ← Grail.Registry.resolveLock cache idxUrl true (readPkg tc) dir pkg
+          | throw (IO.userError "an offline resolve from the cached index failed")
+        checkEq commit1 offline.indexCommit
+        checkEq "1.0.0" offline.pkgs.head!.version
+        let .ok online ← Grail.Registry.resolveLock cache idxUrl false (readPkg tc) dir pkg
+          | throw (IO.userError "the second online resolve failed")
+        checkEq commit2 online.indexCommit
+        checkEq "1.2.0" online.pkgs.head!.version },
+    { name := "a yanked version is skipped by update but kept by an existing lock", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        let cache := root / "cache"
+        let (tar1, sha1) ← tarballOf root "greet" "1.0.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let (tar2, sha2) ← tarballOf root "greet" "1.2.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.2.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 41\n")]
+        let writeIndex (yanked : Bool) : IO Unit :=
+          IO.FS.writeFile (idx / "greet.sexpr")
+            s!"(index (package \"greet\" (version \"1.0.0\" (source \"file://{tar1}\") (sha256 \"{sha1}\") (toolchain \">=0.1.0\") (deps)) (version \"1.2.0\" (source \"file://{tar2}\") (sha256 \"{sha2}\") (toolchain \">=0.1.0\") (deps)){if yanked then " (yanked \"1.2.0\" \"wrong tarball\")" else ""}))\n"
+        writeIndex false
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
+          ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
+        let tc : Toolchain := { cacheDir := some cache }
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let .ok old ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        checkEq "1.2.0" old.pkgs.head!.version
+        -- yank 1.2.0: a new resolution moves to 1.0.0; the old lock is still fetchable
+        writeIndex true
+        let .ok fresh ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "the post-yank resolve failed")
+        checkEq "1.0.0" fresh.pkgs.head!.version
+        match Grail.Registry.checkLocked old pkg with
+        | .ok () => pure ()
+        | .error e => throw (IO.userError s!"a lock on a yanked version was refused: {e}")
+        let .ok lines ← Grail.Registry.fetch cache dir old | throw (IO.userError "fetch of the yanked lock failed")
+        checkEq 1 lines.length
+        checkEq (some sha2) (← Grail.Registry.stamp (dir / ".grail/packages/greet")) },
+    { name := "transitive resolution: the lock is the closure, fetch and build use it", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        let cache := root / "cache"
+        let mkPkg (name version hello : String) : IO (System.FilePath × String) :=
+          tarballOf root name version
+            [("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"{name}\"\n  |> Package.version \"{version}\"\n  |> Package.lib \"{name}\" \"src\"\n"),
+             (s!"src/{name}/Hello.wiz", s!"import Prelude\ndef {name}Value : Nat := {hello}\n")]
+        let (tarLeaf, shaLeaf) ← mkPkg "leaf" "1.0.0" "40"
+        let (tarMid, shaMid) ← mkPkg "mid" "1.0.0" "41"
+        let (tarTop, shaTop) ← mkPkg "top" "1.0.0" "42"
+        IO.FS.writeFile (idx / "leaf.sexpr")
+          s!"(index (package \"leaf\" (version \"1.0.0\" (source \"file://{tarLeaf}\") (sha256 \"{shaLeaf}\") (deps))))\n"
+        IO.FS.writeFile (idx / "mid.sexpr")
+          s!"(index (package \"mid\" (version \"1.0.0\" (source \"file://{tarMid}\") (sha256 \"{shaMid}\") (deps (dep \"leaf\" \"^1\")))))\n"
+        IO.FS.writeFile (idx / "top.sexpr")
+          s!"(index (package \"top\" (version \"1.0.0\" (source \"file://{tarTop}\") (sha256 \"{shaTop}\") (deps (dep \"mid\" \"^1\")))))\n"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"top\" \"^1\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
+          ("app.wiz", "import top.Hello\nimport mid.Hello\nimport leaf.Hello\n#eval leafValue\n")]
+        let tc : Toolchain := { cacheDir := some cache }
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let .ok lock ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        checkEq ["leaf", "mid", "top"] (lock.pkgs.map (·.name))
+        -- the lock round-trips (v2: the index and every pkg with its deps)
+        let text := Grail.Lock.render lock
+        let .ok parsed := Grail.Lock.parse text | throw (IO.userError s!"could not parse the lock: {text}")
+        let pkgsText : List Grail.PkgLock → String := fun ps =>
+          "\n".intercalate (ps.map fun p =>
+            s!"{p.name} {p.version} {p.source} {p.sha256} " ++
+              " ".intercalate (p.deps.map fun d => s!"{d.name}={d.req}"))
+        checkEq (pkgsText lock.pkgs) (pkgsText parsed.pkgs)
+        checkEq lock.indexUrl parsed.indexUrl
+        checkEq lock.indexCommit parsed.indexCommit
+        IO.FS.writeFile (dir / "grail.lock") text
+        -- a missing member of the closure is refused before anything is fetched
+        let incomplete := { lock with pkgs := lock.pkgs.filter (·.name != "leaf") }
+        match Grail.Registry.checkLocked incomplete pkg with
+        | .error e => check ((e.splitOn "incomplete").length > 1) e
+        | .ok _ => throw (IO.userError "an incomplete lock passed checkLocked")
+        let .ok lines ← Grail.Registry.fetch cache dir lock | throw (IO.userError "fetch failed")
+        checkEq 3 lines.length
+        let roots ← match ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun _ => pure ()) with
+          | .ok roots => pure roots
+          | .error e => throw (IO.userError s!"lockedRoots failed: {e}")
+        checkEq 3 roots.length
+        let log ← IO.mkRef ""
+        let r ← runner dir tc pkg 2 log
+        let r := { r with ctx := { r.ctx with libRoots := r.ctx.libRoots ++ roots } }
+        let ok ← r.build pkg.targets pkg.targets
+        check ok (← log.get)
+        check (((← log.get).splitOn "app.wiz:4:1: info: 40").length == 2) (← log.get) },
+    { name := "a corrupt archive cache is re-fetched; --offline refuses a missing one", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let .ok lock ← Grail.Registry.resolveLock cache idx.toString false (readPkg tc) dir pkg
+          | throw (IO.userError "resolve failed")
+        -- a cache entry with the right name but the wrong bytes is re-fetched and verified
+        let f := cache / "grail" / "downloads" / sha
+        if let some d := f.parent then IO.FS.createDirAll d
+        IO.FS.writeFile f "not the archive"
+        let .ok _ ← Grail.Registry.fetch cache dir lock | throw (IO.userError "fetch did not repair the cache")
+        let .ok h ← Grail.Registry.sha256File f | throw (IO.userError "could not hash the cache entry")
+        checkEq sha h
+        -- offline: a cached archive unpacks, a missing one is an error and nothing is written
+        Grail.Registry.removePath (dir / ".grail/packages/greet")
+        Grail.Registry.removePath (cache / "grail" / "packages" / sha)
+        IO.FS.removeFile f
+        match ← Grail.Registry.fetch cache dir lock true with
+        | .error e => check ((e.splitOn "--offline").length > 1) e
+        | .ok _ => throw (IO.userError "an offline fetch downloaded an archive")
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "an offline fetch unpacked something"
+        let .ok _ ← Grail.Registry.fetch cache dir lock false | throw (IO.userError "the online fetch failed")
+        Grail.Registry.removePath (dir / ".grail/packages/greet")
+        let .ok _ ← Grail.Registry.fetch cache dir lock true | throw (IO.userError "the cached offline fetch failed")
+        check (← (dir / ".grail/packages/greet/src/Greet/Hello.wiz").pathExists) "not unpacked offline" },
+    { name := "a deterministic archive and the publish entry", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let work ← mkTree [
+          ("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.toolchain \">=0.1 <0.3\"\n  |> Package.require \"std\" \"^0.1\"\n  |> Package.lib \"greet\" \"src\"\n"),
+          ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let _ ← gitIn work ["init", "--quiet"]
+        let _ ← gitIn work ["add", "."]
+        let _ ← gitIn work ["commit", "--quiet", "-m", "release"]
+        let archive (name : String) : IO System.FilePath := do
+          let out := root / name
+          let _ ← runIn work "sh" ["-c", s!"git archive --format=tar --prefix=greet-1.0.0/ HEAD | gzip -n > {out}"]
+          pure out
+        let a1 ← archive "a.tar.gz"
+        let a2 ← archive "b.tar.gz"
+        let sha1 ← runIn root "sha256sum" [a1.toString] |>.map (·.splitOn " " |>.head!)
+        let sha2 ← runIn root "sha256sum" [a2.toString] |>.map (·.splitOn " " |>.head!)
+        checkEq sha1 sha2
+        let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work | throw (IO.userError "bad manifest")
+        -- the publish entry hashes the archive and records the manifest's toolchain and deps
+        let .ok entry ← Grail.Registry.publish (some a1) "https://example.org/greet-1.0.0.tar.gz" pkg
+          | throw (IO.userError "publish failed")
+        check ((entry.splitOn "1.0.0").length > 1) entry
+        check ((entry.splitOn sha1).length > 1) entry
+        check ((entry.splitOn ">=0.1 <0.3").length > 1) entry
+        let .ok ps := Grail.Index.parse s!"(index (package \"greet\" {entry}))"
+          | throw (IO.userError s!"the publish entry does not parse: {entry}")
+        checkEq 1 ps.length
+        checkEq "1.0.0" (Grail.Version.render ps.head!.versions.head!.version)
+        checkEq sha1 ps.head!.versions.head!.sha256
+        checkEq ["std ^0.1"] ((ps.head!.versions.head!.deps).map fun d => s!"{d.name} {d.req}")
+        -- a version is immutable once in the index
+        match Grail.Index.addVersion ps ps.head! ps.head!.versions.head! with
+        | .error e => check ((e.splitOn "immutable").length > 1) e
+        | .ok _ => throw (IO.userError "addVersion replaced an existing version")
+        -- the archive layout is checked: one top directory, with grail.wiz in it
+        let bad := root / "bad.tar.gz"
+        let _ ← runIn work "tar" ["-czf", bad.toString, "."]
+        match ← Grail.Registry.publish (some bad) "https://example.org/bad.tar.gz" pkg with
+        | .error e => check ((e.splitOn "layout").length > 1 || (e.splitOn "top directory").length > 1) e
+        | .ok _ => throw (IO.userError "publish accepted the wrong archive layout") },
+    { name := "the local index fixture: exact, ranges, transitive deps, missing packages", run := fun _ => do
+        let fixture ← indexFixture
+        let cache ← IO.FS.createTempDir
+        let .ok src ← Grail.Registry.loadIndex cache fixture.toString false
+          | throw (IO.userError "the fixture index did not load")
+        let resolve (reqs : List Grail.Req) := Grail.Resolve.resolve src.pkgs reqs "0.1.0-dev"
+        let ver (rs : List Grail.Resolved) (n : String) : String :=
+          (rs.find? (·.name == n)).map (fun r => Grail.Version.render r.version) |>.getD "?"
+        -- an exact version
+        let .ok exact := resolve [⟨"greet", "1.0.0"⟩] | throw (IO.userError "exact resolve failed")
+        checkEq 3 exact.length
+        checkEq "1.0.0" (ver exact "greet")
+        checkEq "1.0.0" (ver exact "text")
+        checkEq "0.1.0" (ver exact "std")
+        -- relative `source`s are resolved against the index directory
+        let some greetExact := exact.find? (·.name == "greet") | throw (IO.userError "no greet")
+        check (greetExact.source.endsWith "packages/greet-1.0.0.tar.gz") greetExact.source
+        check (← (System.FilePath.mk greetExact.source).pathExists) greetExact.source
+        -- a caret range picks the highest 1.x and its transitive closure
+        let .ok caret := resolve [⟨"greet", "^1"⟩] | throw (IO.userError "caret resolve failed")
+        checkEq "1.2.0" (ver caret "greet")
+        checkEq "1.1.0" (ver caret "text")
+        checkEq "0.1.0" (ver caret "std")
+        -- a tilde range stops at the next minor, which narrows the transitive dep too
+        let .ok tilde := resolve [⟨"greet", "~1.0"⟩] | throw (IO.userError "tilde resolve failed")
+        checkEq "1.0.0" (ver tilde "greet")
+        checkEq "1.0.0" (ver tilde "text")
+        -- `*` and `^2` pick the no-dependency release
+        let .ok any := resolve [⟨"greet", "*"⟩] | throw (IO.userError "* resolve failed")
+        checkEq "2.0.0" (ver any "greet")
+        checkEq 1 any.length
+        -- a package the index does not have, and a version no release satisfies
+        match resolve [⟨"missing", "^1"⟩] with
+        | .error e => check ((e.splitOn "no package missing").length > 1) e
+        | .ok _ => throw (IO.userError "resolved a package that is not in the index")
+        match resolve [⟨"greet", "1.1.0"⟩] with
+        | .error e => check ((e.splitOn "no version satisfies").length > 1) e
+        | .ok _ => throw (IO.userError "resolved a version that is not in the index") },
+    { name := "fetch --locked against the fixture: a cold cache, a warm cache, repair", run := fun _ => do
+        let fixture ← indexFixture
+        let cache ← IO.FS.createTempDir
+        let std ← IO.FS.realPath "lib"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{fixture}\"\n  |> Package.require \"greet\" \"^1\"\n"),
+          ("app.wiz", "import Greet.Hello\n#eval greetValue\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        -- no lock yet: --locked refuses to write one; a plain update writes it
+        checkEq 1 (← run ["fetch", "--locked"])
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 0 (← run ["update"])
+        checkEq 0 (← run ["update", "--locked"])
+        -- (R10) `update --locked` reads only the lock: a missing/unreachable index does not
+        -- make it re-resolve (a new publication upstream must not fail CI)
+        checkEq 0 (← run ["update", "--locked", "--index", "/nonexistent/grail-index"])
+        -- a cold archive cache: offline fetches nothing
+        checkEq 1 (← run ["fetch", "--locked", "--offline"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "a cold offline fetch unpacked something"
+        -- a cold online fetch downloads all three packages, into one content-addressed cache
+        checkEq 0 (← run ["fetch", "--locked"])
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq 3 lock.pkgs.length
+        for p in lock.pkgs do
+          check (← (cache / "grail" / "downloads" / p.sha256).pathExists) s!"no cache file for {p.name}"
+          checkEq (some p.sha256) (← Grail.Registry.stamp (dir / ".grail/packages" / p.name))
+        check ((← IO.FS.readFile (dir / ".grail/packages/greet/src/Greet/Hello.wiz")).contains "120") "the 1.2.0 archive was not unpacked"
+        -- a warm cache: the tree can be rebuilt with no network at all
+        IO.FS.removeDirAll (dir / ".grail")
+        checkEq 0 (← run ["fetch", "--locked", "--offline"])
+        check (← (dir / ".grail/packages/text/src/Text/Value.wiz").pathExists) "not unpacked offline"
+        -- a corrupt cache entry: offline refuses, online re-downloads and verifies
+        let some greet := lock.pkgs.find? (·.name == "greet") | throw (IO.userError "no greet in the lock")
+        IO.FS.writeFile (cache / "grail" / "downloads" / greet.sha256) "corrupt"
+        if ← (dir / ".grail").pathExists then IO.FS.removeDirAll (dir / ".grail")
+        IO.FS.removeDirAll (cache / "grail" / "packages")
+        checkEq 1 (← run ["fetch", "--locked", "--offline"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "unpacked a corrupt archive"
+        checkEq 0 (← run ["fetch", "--locked"])
+        checkEq (some greet.sha256) (← Grail.Registry.stamp (dir / ".grail/packages/greet")) },
+    { name := "an outdated lock and a hash mismatch: clear errors, nothing half-unpacked", run := fun _ => do
+        let fixture ← indexFixture
+        let cache ← IO.FS.createTempDir
+        let std ← IO.FS.realPath "lib"
+        let manifest (req : String) : String :=
+          s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{fixture}\"\n  |> Package.require \"greet\" \"{req}\"\n"
+        let dir ← mkTree [("grail.wiz", manifest "^1")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        -- the manifest moves to ^2 but the lock still pins 1.x
+        IO.FS.writeFile (dir / "grail.wiz") (manifest "^2")
+        checkEq 1 (← run ["fetch", "--locked"])
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 0 (← run ["update"])
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq ["greet"] (lock.pkgs.map (·.name))
+        checkEq "2.0.0" lock.pkgs.head!.version
+        -- a wrong hash (a hand-edited lock): refused before anything is unpacked
+        let zero := String.ofList (List.replicate 64 '0')
+        let bad := { lock with pkgs := lock.pkgs.map fun p => { p with sha256 := zero } }
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render bad)
+        checkEq 1 (← run ["fetch", "--locked"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "a bad hash unpacked a package"
+        check (!(← (cache / "grail" / "downloads" / zero).pathExists)) "a bad archive reached the cache"
+        if ← (cache / "grail" / "downloads").isDir then
+          let temps := (← (cache / "grail" / "downloads").readDir).filter fun e => e.fileName.contains ".tmp"
+          checkEq 0 temps.size
+        -- the same lock verifies once the hash is right
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render lock)
+        checkEq 0 (← run ["fetch", "--locked"])
+        checkEq (some lock.pkgs.head!.sha256) (← Grail.Registry.stamp (dir / ".grail/packages/greet")) },
+    { name := "an index commit pin: update resolves from the chosen index revision", run := fun _ => do
+        let fixture ← indexFixture
+        let root ← IO.FS.createTempDir
+        let work := root / "index-work"
+        IO.FS.createDirAll work
+        let _ ← runIn root "cp" ["-a", (fixture / "index").toString, (fixture / "packages").toString, work.toString]
+        let _ ← gitIn work ["init", "--quiet"]
+        let _ ← gitIn work ["add", "."]
+        let _ ← gitIn work ["commit", "--quiet", "-m", "index v1"]
+        let c1 ← gitIn work ["rev-parse", "HEAD"]
+        let bare := root / "index.git"
+        let _ ← runIn root "git" ["clone", "--quiet", "--bare", work.toString, bare.toString]
+        let _ ← gitIn bare ["symbolic-ref", "HEAD", "refs/heads/main"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        -- commit 2 yanks greet 2.0.0, so the latest index resolves less than c1 does
+        let greet := ← IO.FS.readFile (work / "index/greet.sexpr")
+        let yanked := greet.replace "(deps))))" "(deps)) (yanked \"2.0.0\" \"test\")))"
+        check (yanked != greet) "the fixture's greet entry did not look as expected"
+        IO.FS.writeFile (work / "index/greet.sexpr") yanked
+        let _ ← gitIn work ["commit", "--quiet", "-am", "yank"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        let c2 ← gitIn work ["rev-parse", "HEAD"]
+        let url := s!"file://{bare}"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{url}\"\n  |> Package.require \"greet\" \"*\"\n")]
+        let tc : Toolchain := { cacheDir := some (root / "cache") }
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        -- latest: 2.0.0 is yanked, so 1.2.0
+        let .ok latest ← Grail.Registry.resolveLock (root / "cache") url false (readPkg tc) dir pkg
+          | throw (IO.userError "latest resolve failed")
+        checkEq c2 latest.indexCommit
+        checkEq "1.2.0" latest.pkgs.head!.version
+        -- pinned to c1: 2.0.0 is still published there
+        let .ok pinned ← Grail.Registry.resolveLock (root / "cache") s!"{url}#{c1}" false (readPkg tc) dir pkg
+          | throw (IO.userError "pinned resolve failed")
+        checkEq c1 pinned.indexCommit
+        checkEq "2.0.0" pinned.pkgs.head!.version
+        -- the project's `index-commit` setting is checked against the lock
+        IO.FS.writeFile (dir / "grail.wiz")
+          s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{url}\"\n  |> Package.set \"index-commit\" \"{c1}\"\n  |> Package.require \"greet\" \"*\"\n"
+        let .ok (pkgPinned, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad pinned manifest")
+        match Grail.Registry.checkLocked latest pkgPinned with
+        | .error e => check ((e.splitOn "pins").length > 1) e
+        | .ok _ => throw (IO.userError "a lock from another index commit passed the pin check")
+        match Grail.Registry.checkLocked pinned pkgPinned with
+        | .error e => throw (IO.userError s!"the pinned lock was refused: {e}")
+        | .ok () => pure () },
+    { name := "the resolver retracts requirements of a version it replaced", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        -- `a 2.0` needs `z`; `b` narrows `a` to <=1, so `a 1.5` is chosen next and the
+        -- constraint on `z` (which only `a 2.0` introduced) must disappear with it.
+        let index := s!"(index (package \"a\" (version \"1.5.0\" (source \"a15\") (sha256 \"{sha}\")) (version \"2.0.0\" (source \"a20\") (sha256 \"{sha}\") (deps (dep \"z\" \"^1\")))) (package \"b\" (version \"1.0.0\" (source \"b10\") (sha256 \"{sha}\") (deps (dep \"a\" \"<2\")))) (package \"z\" (version \"1.0.0\" (source \"z10\") (sha256 \"{sha}\"))))"
+        let .ok ps := Grail.Index.parse index | throw (IO.userError "bad index")
+        let idx := ps.foldl (fun m p => m.insert p.name p) {}
+        let .ok rs := Grail.Resolve.resolve idx [⟨"a", "*"⟩, ⟨"b", "*"⟩] "0.1.0-dev"
+          | throw (IO.userError "resolve failed")
+        checkEq 2 rs.length
+        checkEq "1.5.0" ((rs.find? (·.name == "a")).map (Grail.Version.render ·.version) |>.getD "?")
+        checkEq "1.0.0" ((rs.find? (·.name == "b")).map (Grail.Version.render ·.version) |>.getD "?")
+        check (!rs.any (·.name == "z")) "the retracted `a 2.0` dependency `z` is still in the selection" },
+    { name := "lock v3 round-trips: toolchain, size/tree/commands, flat deps, sorted", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        let tree := String.ofList (List.replicate 64 'b')
+        let cmds := String.ofList (List.replicate 64 'c')
+        let lock : Grail.Lock :=
+          { format := 3, toolchain := "0.1.0-dev", revision := "abcdef",
+            indexUrl := "https://example.org/grail-index", indexCommit := "123456",
+            git := [
+              { name := "zeta", url := "https://example.org/z.git", rev := "v1", commit := "c1", content := "d1" },
+              { name := "alpha", url := "https://example.org/a.git", rev := "main", commit := "c2", content := "d2" } ],
+            pkgs := [
+              { name := "text", version := "1.0.0", source := "https://example.org/text.tgz",
+                sha256 := sha, size := some 123, tree := tree, commands := cmds,
+                deps := [{ name := "std", req := ">=0.1 <0.3" }, { name := "base", req := "~0.2" }] },
+              { name := "alpha", version := "0.2.0", source := "https://example.org/a.tgz", sha256 := sha } ],
+            overrides := [{ name := "local", path := "../local", hash := tree }] }
+        let text := Grail.Lock.render lock
+        -- the v3 header and fields are present, and dependencies are flat
+        check ((text.splitOn "(version 3)").length > 1) text
+        check ((text.splitOn "(toolchain 0.1.0-dev abcdef)").length > 1) text
+        check ((text.splitOn "(size 123)").length > 1) text
+        check ((text.splitOn s!"(tree {tree})").length > 1) text
+        check ((text.splitOn s!"(commands {cmds})").length > 1) text
+        check ((text.splitOn "(deps \"base ~0.2\" \"std >=0.1 <0.3\")").length > 1) text
+        check ((text.splitOn "(override local \"../local\"").length > 1) text
+        -- stable: the entries are sorted and a second render is byte-identical
+        let .ok parsed := Grail.Lock.parse text | throw (IO.userError s!"could not parse v3: {text}")
+        checkEq ["alpha", "text"] (parsed.pkgs.map (·.name))
+        checkEq ["alpha", "zeta"] (parsed.git.map (·.name))
+        checkEq ["local"] (parsed.overrides.map (·.name))
+        checkEq text (Grail.Lock.render parsed)
+        let some p := parsed.pkgs.find? (·.name == "text") | throw (IO.userError "no text package")
+        checkEq (some 123) p.size
+        checkEq tree p.tree
+        checkEq cmds p.commands
+        checkEq ["base ~0.2", "std >=0.1 <0.3"] (p.deps.map fun d => s!"{d.name} {d.req}")
+        checkEq "0.1.0-dev" parsed.toolchain
+        checkEq "abcdef" parsed.revision },
+    { name := "old locks: v1 and v2 parse; a newer format is refused", run := fun _ => do
+        let sha := String.ofList (List.replicate 64 'a')
+        let v1 := "(lock\n  (dep \"greet\" \"https://example.org/greet.git\" \"v1\" \"abc\" \"def\"))\n"
+        let .ok l1 := Grail.Lock.parse v1 | throw (IO.userError "v1 did not parse")
+        checkEq 1 l1.format
+        checkEq "greet" (l1.git.head!.name)
+        -- a git-only lock written by `grail update` is v3 too
+        let v1v3 := Grail.renderLock l1.git
+        check ((v1v3.splitOn "(version 3)").length > 1) v1v3
+        let .ok up := Grail.Lock.parse v1v3 | throw (IO.userError "the upgraded v1 lock did not parse")
+        checkEq 3 up.format
+        checkEq "greet" up.git.head!.name
+        let v2 := s!"(lock\n  (index \"https://example.org/i\" \"abc\")\n  (pkg \"text\" \"1.0.0\" \"https://example.org/t.tgz\" \"{sha}\" (deps (dep \"std\" \"^1\")))\n  (pkg \"std\" \"0.1.0\" \"https://example.org/s.tgz\" \"{sha}\" (deps)))\n"
+        let .ok l2 := Grail.Lock.parse v2 | throw (IO.userError "v2 did not parse")
+        checkEq 2 l2.format
+        checkEq "https://example.org/i" l2.indexUrl
+        checkEq "text" l2.pkgs.head!.name
+        checkEq "std ^1" (l2.pkgs.head!.deps.head!.name ++ " " ++ l2.pkgs.head!.deps.head!.req)
+        -- a v2 lock still renders without the v3 header (a build/update may keep it)
+        let v2Text := Grail.Lock.render l2
+        let header := "(version"
+        checkEq 1 (v2Text.splitOn header).length
+        -- a lock from a newer grail is refused, never partly understood
+        match Grail.Lock.parse "(lock (version 4) (dep \"x\" \"u\" \"r\" \"c\" \"h\"))" with
+        | .error e => check ((e.splitOn "newer").length > 1) e
+        | .ok _ => throw (IO.userError "a v4 lock was accepted") },
+    { name := "an old lock is upgraded to v3 by update, and --locked still reads it", run := fun _ => do
+        let fixture ← indexFixture
+        let cache ← IO.FS.createTempDir
+        let std ← IO.FS.realPath "lib"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{fixture}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        let text ← IO.FS.readFile (dir / "grail.lock")
+        check ((text.splitOn "(version 3)").length > 1) text
+        let .ok v3 := Grail.Lock.parse text | throw (IO.userError "the written lock did not parse")
+        checkEq Wiz.version v3.toolchain
+        let some greet := v3.pkgs.find? (·.name == "greet") | throw (IO.userError "no greet")
+        -- pretend the project committed a v2 lock (no version header, nested deps)
+        let v2 := s!"(lock\n  (index \"{v3.indexUrl}\" \"{v3.indexCommit}\")\n  (pkg \"greet\" \"{greet.version}\" \"{greet.source}\" \"{greet.sha256}\" (deps)))\n"
+        IO.FS.writeFile (dir / "grail.lock") v2
+        checkEq 0 (← run ["update", "--locked"])
+        checkEq v2 (← IO.FS.readFile (dir / "grail.lock"))
+        checkEq 0 (← run ["update"])
+        let upgraded ← IO.FS.readFile (dir / "grail.lock")
+        check (upgraded != v2) upgraded
+        check ((upgraded.splitOn "(version 3)").length > 1) upgraded
+        check ((upgraded.splitOn "(toolchain").length > 1) upgraded
+        let .ok again := Grail.Lock.parse upgraded | throw (IO.userError "the upgraded lock did not parse")
+        checkEq 3 again.format
+        checkEq "greet" (again.pkgs.head!.name)
+        -- (R20) a tree hash that does not match the archive is refused before the stamp
+        let zero := String.ofList (List.replicate 64 '0')
+        let badTree := { again with pkgs := again.pkgs.map fun p => { p with tree := zero } }
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render badTree)
+        checkEq 1 (← run ["fetch", "--locked"])
+        check (!(← (dir / ".grail/packages/greet").pathExists)) "a bad tree hash unpacked a package" },
+    { name := "a grail.local.wiz override: the lock records it, --locked refuses it", run := fun _ => do
+        let (root, dir, _sha, tc) ← registryTree
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let localPkg ← mkTree [
+          ("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.lib \"greet\" \"src\"\n"),
+          ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 7\n")]
+        IO.FS.writeFile (dir / "grail.local.wiz")
+          s!"import Grail\ndef settings : Settings := Settings.empty\n  |> Package.override \"greet\" \"{localPkg}\"\n"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        let text ← IO.FS.readFile (dir / "grail.lock")
+        check ((text.splitOn "(override greet \"").length > 1) text
+        let .ok lock := Grail.Lock.parse text | throw (IO.userError "the override lock did not parse")
+        checkEq 0 lock.pkgs.length
+        checkEq 1 lock.overrides.length
+        checkEq localPkg.toString lock.overrides.head!.path
+        checkEq 64 lock.overrides.head!.hash.length
+        -- --locked refuses a machine-local override: it is not reproducible
+        checkEq 1 (← run ["update", "--locked"])
+        checkEq 1 (← run ["fetch", "--locked"])
+        -- a plain fetch checks the path and says nothing is downloaded
+        checkEq 0 (← run ["fetch"])
+        -- a build uses the path's roots and says so
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let note ← IO.mkRef ""
+        let .ok roots ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun s => note.modify (· ++ s))
+          | throw (IO.userError "the override build did not resolve")
+        checkEq 1 roots.length
+        check (((← note.get).splitOn "using override greet from").length > 1) (← note.get)
+        -- an edited override no longer matches the lock
+        IO.FS.writeFile (localPkg / "src/Greet/Hello.wiz") "import Prelude\ndef hello : Nat := 8\n"
+        match ← Grail.Registry.lockedRoots cache (readPkg tc) dir pkg (fun _ => pure ()) with
+        | .error e => check ((e.splitOn "differs from").length > 1) e
+        | .ok _ => throw (IO.userError "an edited override passed the lock check") },
+    { name := "the index decoder is tolerant; the lock decoder is strict", run := fun _ => do
+
+        let sha := String.ofList (List.replicate 64 'a')
+        -- a newer publisher's unknown fields (`license`, `size`, `maintainer`) must not
+        -- make an older grail reject the whole package/index
+        let index := s!"(index (package \"u\" (maintainer \"someone\") (license \"MIT\") (version \"1.0.0\" (source \"x\") (sha256 \"{sha}\") (size 12) (license \"MIT\") (deps))))"
+        let .ok ps := Grail.Index.parse index | throw (IO.userError "the tolerant index decoder rejected unknown fields")
+        checkEq 1 ps.length
+        checkEq "1.0.0" (Grail.Version.render ps.head!.versions.head!.version)
+        checkEq sha ps.head!.versions.head!.sha256
+        -- a lock is a local trust anchor: an unknown entry is a hard error, not ignored
+        match Grail.Lock.parse "(lock (wat \"x\"))" with
+        | .error _ => pure ()
+        | .ok _ => throw (IO.userError "the strict lock decoder accepted an unknown entry")
+        match Grail.Lock.parse "(lock (pkg \"u\" \"1.0.0\" \"x\" \"not-a-hash\" (deps)))" with
+        | .error _ => pure ()
+        | .ok l => match Grail.Registry.checkLocked l { name := "app", targets := [], settings := [] } with
+          | .error _ => pure ()
+          | .ok () => throw (IO.userError "checkLocked accepted a malformed lock") },
+    { name := "the index reader sees scoped packages in index/@org/name.sexpr", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let dir := root / "index" / "@acme"
+        IO.FS.createDirAll dir
+        let sha := String.ofList (List.replicate 64 'b')
+        IO.FS.writeFile (dir / "tool.sexpr")
+          s!"(index (package \"tool\" (version \"0.1.0\" (source \"../../packages/tool-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
+        -- a scoped package literally named `snapshot` is not the root snapshot file
+        IO.FS.writeFile (dir / "snapshot.sexpr")
+          s!"(index (package \"snapshot\" (version \"0.1.0\" (source \"../../packages/snapshot-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
+        let .ok src ← Grail.Registry.loadIndex (root / "cache") root.toString false
+          | throw (IO.userError "the scoped index did not load")
+        check (src.pkgs.contains "@acme/tool") "the scoped package is not keyed by its path"
+        check (src.pkgs.contains "@acme/snapshot") "a scoped package named snapshot was skipped"
+        checkEq "@acme/tool" (src.pkgs["@acme/tool"]?.map (·.name) |>.getD "?")
+        let .ok rs := Grail.Resolve.resolve src.pkgs [⟨"@acme/tool", "^0.1"⟩] "0.1.0-dev"
+          | throw (IO.userError "resolve of the scoped package failed")
+        checkEq "0.1.0" ((rs.find? (·.name == "@acme/tool")).map (Grail.Version.render ·.version) |>.getD "?") },
+    { name := "index rollback: a rewritten index history is refused unless --allow-rewind", run := fun _ => do
+        let fixture ← indexFixture
+        let root ← IO.FS.createTempDir
+        let work := root / "work"
+        IO.FS.createDirAll work
+        let _ ← runIn root "cp" ["-a", (fixture / "index").toString, (fixture / "packages").toString, work.toString]
+        let _ ← gitIn work ["init", "--quiet"]
+        let _ ← gitIn work ["add", "."]
+        let _ ← gitIn work ["commit", "--quiet", "-m", "index v1"]
+        let bare := root / "index.git"
+        let _ ← runIn root "git" ["clone", "--quiet", "--bare", work.toString, bare.toString]
+        let _ ← gitIn bare ["symbolic-ref", "HEAD", "refs/heads/main"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        let url := s!"file://{bare}"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{url}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let cache := root / "cache"
+        let tc : Toolchain := { cacheDir := some cache }
+        let .ok (pkg, _) ← Grail.readConfig tc (← binId tc) "lib" dir | throw (IO.userError "bad manifest")
+        let .ok c1 ← Grail.Registry.resolveLock cache url false (readPkg tc) dir pkg
+          | throw (IO.userError "the first resolve failed")
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render c1)
+        -- a normal fast-forward is accepted
+        IO.FS.writeFile (work / "index/greet.sexpr")
+          ((← IO.FS.readFile (work / "index/greet.sexpr")).replace "\"Hello, in Wiz\"" "\"Hello, again\"")
+        let _ ← gitIn work ["commit", "--quiet", "-am", "index v2"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        let .ok c2 ← Grail.Registry.resolveLock cache url false (readPkg tc) dir pkg
+          | throw (IO.userError "the fast-forward resolve failed")
+        check (c1.indexCommit != c2.indexCommit) "the fast-forward did not move the index commit"
+        IO.FS.writeFile (dir / "grail.lock") (Grail.Lock.render c2)
+        -- an unrelated (force-pushed) history is a rollback and is refused
+        let work2 := root / "work2"
+        IO.FS.createDirAll work2
+        let _ ← runIn root "cp" ["-a", (fixture / "index").toString, (fixture / "packages").toString, work2.toString]
+        let _ ← gitIn work2 ["init", "--quiet"]
+        let _ ← gitIn work2 ["add", "."]
+        let _ ← gitIn work2 ["commit", "--quiet", "-m", "rewritten index"]
+        let _ ← gitIn work2 ["push", "--quiet", "--force", bare.toString, "HEAD:refs/heads/main"]
+        match ← Grail.Registry.resolveLock cache url false (readPkg tc) dir pkg with
+        | .error e => check ((e.splitOn "history was rewritten").length > 1) e
+        | .ok _ => throw (IO.userError "a rewritten index history was accepted")
+        match ← Grail.Registry.resolveLock cache url false (readPkg tc) dir pkg true with
+        | .error e => throw (IO.userError s!"--allow-rewind still failed: {e}")
+        | .ok l => check (l.indexCommit != c2.indexCommit) "the rewrite did not change the index commit" }
   ]
 
 /-- Run `grail test` in-process on a package directory. -/
@@ -1830,6 +2616,28 @@ def testRunnerGroup : Group where
         let some two := res.find? (·.file == "tests/two.wiz") | throw (IO.userError "no test two")
         check (!two.ok) "two passed"
         check ((two.message.splitOn "-- test:").length == 1) two.message },
+    { name := "-- test: skip reports a skip and needs no .expected", run := fun _ => do
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          ("tests/on-demand.wiz", "-- test: skip needs --trust-native\nimport Prelude\ndef x : Nat := 1\n")]
+        let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
+        for update in [false, true] do
+          let (res, _) ← runTests dir tc update
+          let some t := res.find? (·.file == "tests/on-demand.wiz") | throw (IO.userError "no result for the skipped test")
+          check t.ok s!"the skipped test failed: {t.message}"
+          check t.skipped "the skipped test was not reported as skipped"
+          check ((t.message.splitOn "needs --trust-native").length > 1) t.message
+          check (!(← (dir / "tests/on-demand.expected").pathExists)) "--update wrote a skipped test's .expected" },
+    { name := "a nested package under the tests root is not a test", run := fun _ => do
+        -- examples/grail-index/sources/*: packages with their own grail.wiz (and a
+        -- directory name with dots), whose modules import each other's packages
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          ("tests/one.wiz", "import Prelude\ndef x : Nat := 1\n"), ("tests/one.expected", ""),
+          ("tests/fixture/pkg-0.1.0/grail.wiz", "import Grail\ndef package : Package := Package.new \"p\" |> Package.lib \"p\" \"src\"\n"),
+          ("tests/fixture/pkg-0.1.0/src/P.wiz", "import Missing\ndef y : Nat := missing\n")]
+        let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
+        let (res, _) ← runTests dir tc false
+        check (res.size == 1) s!"expected one test, got {res.toList.map (·.file)}"
+        check (res.all (·.ok)) s!"{res.toList.map (·.message)}" },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),
@@ -2267,6 +3075,479 @@ def grailHygieneGroup : Group where
         check (← goneWithin pid 5000) s!"the job's process {pid} outlived its time limit" }
   ]
 
+def grailVendorGroup : Group where
+  name := "grail-vendor"
+  exercise := "Stage 23n"
+  cases := [
+    { name := "grail vendor: content-addressed files, a stable lock, and one archive", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let std ← IO.FS.realPath "lib"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", cache.toString, "--index", idx.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        let lock0 ← IO.FS.readFile (dir / "grail.lock")
+        checkEq 0 (← run ["vendor"])
+        let vend := dir / "vendor"
+        let file := vend / (sha ++ ".tar.gz")
+        check (← file.pathExists) s!"no {file}"
+        let vidx ← IO.FS.readFile (vend / "index.sexpr")
+        check ((vidx.splitOn sha).length > 1) vidx
+        check ((vidx.splitOn "greet").length > 1) vidx
+        -- vendoring never rewrites the lock: its `source` stays the published URL
+        checkEq lock0 (← IO.FS.readFile (dir / "grail.lock"))
+        checkEq 0 (← run ["vendor"])
+        let archives := (← vend.readDir).filter (fun e => e.fileName != "index.sexpr")
+        checkEq 1 archives.size
+        let .ok h ← Grail.Registry.sha256File file | throw (IO.userError "could not hash the vendored archive")
+        checkEq sha h },
+    { name := "an offline --locked fetch from the vendor directory, through the shared store", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let std ← IO.FS.realPath "lib"
+        -- the manifest names vendor/ (so the offline fetch needs no flag)
+        IO.FS.writeFile (dir / "grail.wiz")
+          s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.set \"vendor\" \"vendor\"\n  |> Package.require \"greet\" \"^1\"\n  |> Package.check \"app\" \"app.wiz\"\n"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", cache.toString, "--index", idx.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        checkEq 0 (← run ["vendor"])
+        let lock0 ← IO.FS.readFile (dir / "grail.lock")
+        -- no .grail, no download cache, no source archive: the vendor directory is enough
+        if ← (dir / ".grail").pathExists then IO.FS.removeDirAll (dir / ".grail")
+        IO.FS.removeDirAll (cache / "grail" / "downloads")
+        IO.FS.removeFile (root / "greet-1.2.0.tar.gz")
+        checkEq 0 (← run ["fetch", "--locked", "--offline"])
+        check (← (dir / ".grail/packages/greet/src/Greet/Hello.wiz").pathExists) "not unpacked"
+        let localTree ← IO.FS.realPath (dir / ".grail/packages/greet")
+        let shared ← IO.FS.realPath (cache / "grail" / "packages" / sha)
+        checkEq shared localTree
+        checkEq lock0 (← IO.FS.readFile (dir / "grail.lock"))
+        -- without the vendor directory, the cache and the shared store, --offline refuses
+        if ← (dir / ".grail").pathExists then IO.FS.removeDirAll (dir / ".grail")
+        IO.FS.removeDirAll (cache / "grail" / "downloads")
+        IO.FS.removeDirAll (cache / "grail" / "packages")
+        IO.FS.removeDirAll (dir / "vendor")
+        checkEq 1 (← run ["fetch", "--locked", "--offline"]) },
+    { name := "one archive, two packages: one download and one unpack", run := fun _ => do
+        let (root, dir, sha, _tc) ← registryTree
+        let cache := root / "cache"
+        let src := root / "greet-1.2.0.tar.gz"
+        let mk (name : String) : Grail.PkgLock :=
+          { name, version := "1.2.0", source := src.toString, sha256 := sha, deps := [] }
+        let .ok _ ← Grail.Registry.fetch cache dir { pkgs := [mk "alpha"] }
+          | throw (IO.userError "the first fetch failed")
+        -- a second download would fail now; the content-addressed cache and store have it
+        IO.FS.removeFile src
+        let .ok lines ← Grail.Registry.fetch cache dir { pkgs := [mk "alpha", mk "beta"] }
+          | throw (IO.userError "a duplicate download was attempted")
+        checkEq 2 lines.length
+        let archives := (← (cache / "grail" / "downloads").readDir).filter
+          (fun e => !e.fileName.contains ".tmp")
+        checkEq 1 archives.size
+        let stores := (← (cache / "grail" / "packages").readDir).filter
+          (fun e => !e.fileName.contains ".tmp")
+        checkEq 1 stores.size
+        let a ← IO.FS.realPath (dir / ".grail/packages/alpha")
+        let b ← IO.FS.realPath (dir / ".grail/packages/beta")
+        checkEq a b
+        -- the vendor directory has the bytes once too, for both names
+        let .ok vlines ← Grail.Registry.vendor cache (dir / "vendor")
+          { pkgs := [mk "alpha", mk "beta"] }
+          | throw (IO.userError "vendoring two packages failed")
+        checkEq 2 vlines.length
+        let vfiles := (← (dir / "vendor").readDir).filter (fun e => e.fileName != "index.sexpr")
+        checkEq 1 vfiles.size },
+    { name := "grail cache: path, list and verify (a corrupt archive is an error)", run := fun _ => do
+        let (root, dir, sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let std ← IO.FS.realPath "lib"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", cache.toString, "--index", idx.toString] ++ args)
+        checkEq 0 (← run ["update"])
+        checkEq 0 (← run ["fetch", "--locked"])
+        let lines ← Grail.Registry.cacheList cache
+        check (lines.any fun l =>
+          (l.splitOn "archive\t").length > 1 && (l.splitOn sha).length > 1) s!"no archive in {lines}"
+        check (lines.any fun l =>
+          (l.splitOn "package\t").length > 1 && (l.splitOn sha).length > 1) s!"no package in {lines}"
+        let cacheMain (args : List String) : IO UInt32 :=
+          Grail.cliMain (["--cache", cache.toString, "cache"] ++ args)
+        checkEq 0 (← cacheMain ["path"])
+        checkEq 0 (← cacheMain ["list"])
+        checkEq 0 (← cacheMain ["verify"])
+        IO.FS.writeFile (cache / "grail" / "downloads" / sha) "not the archive"
+        checkEq 1 (← cacheMain ["verify"])
+        -- the next fetch repairs the archive (once the unpacked trees are gone too)
+        Grail.Registry.removePath (dir / ".grail" / "packages" / "greet")
+        Grail.Registry.removePath (cache / "grail" / "packages" / sha)
+        checkEq 0 (← run ["fetch", "--locked"])
+        checkEq 0 (← cacheMain ["verify"]) },
+    { name := "vendor --locked needs a lock; --offline needs the archive cache", run := fun _ => do
+        let (root, dir, _sha, tc) ← registryTree
+        let idx := root / "index"
+        let cache := tc.cacheDir.getD "."
+        let std ← IO.FS.realPath "lib"
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString,
+            "--cache", cache.toString, "--index", idx.toString] ++ args)
+        checkEq 1 (← run ["vendor", "--locked"])
+        checkEq 1 (← run ["vendor", "--offline"])
+        checkEq 0 (← (dir / "vendor").readDir).size
+        checkEq 0 (← run ["vendor"])
+        checkEq 0 (← run ["vendor", "--locked"])
+        checkEq 0 (← run ["vendor", "--locked", "--offline"])
+        -- an explicit --vendor DIR is relative to -C, and needs neither cache nor store
+        if ← (dir / ".grail").pathExists then IO.FS.removeDirAll (dir / ".grail")
+        if ← (cache / "grail" / "downloads").pathExists then
+          IO.FS.removeDirAll (cache / "grail" / "downloads")
+        if ← (cache / "grail" / "packages").pathExists then
+          IO.FS.removeDirAll (cache / "grail" / "packages")
+        checkEq 0 (← run ["fetch", "--locked", "--offline", "--vendor", "vendor"]) }
+  ]
+
+/-- `ssh-keygen` signs and verifies the index snapshots; a machine without it skips the
+signed-index cases (as the toolchain cases skip without a C compiler). -/
+def haveSshKeygen : IO Bool := do
+  try
+    let _ ← IO.Process.output { cmd := "ssh-keygen", args := #["-h"] }
+    pure true
+  catch _ => pure false
+
+/-- `SHA256:…` fingerprint of a public key file (`ssh-keygen -lf -E sha256`). -/
+def fingerprintOf (pub : System.FilePath) : IO String := do
+  let out ← runIn (pub.parent.getD ".") "ssh-keygen" ["-lf", pub.toString, "-E", "sha256"]
+  match out.splitOn " " with
+  | _ :: fp :: _ => pure fp
+  | _ => throw (IO.userError s!"ssh-keygen -lf {pub}: {out}")
+
+/-- Write an index snapshot; `pkgs` are `(name, version, sha256, size)` (size 0: unknown).
+The tests write it directly (the CLI's `index snapshot` is covered separately). -/
+def writeSnapshot (idx : System.FilePath) (name : String) (seq : Nat) (updated expires fp : String)
+    (pkgs : List (String × String × String × UInt64)) : IO Unit := do
+  let entry (n v sha : String) (size : UInt64) : String :=
+    s!"  (package \"{n}\" \"{v}\" \"{sha}\"" ++ (if size == 0 then ")" else s!" (size {size}))")
+  let text := "(snapshot\n" ++
+    s!"  (name \"{name}\")\n  (seq {seq})\n  (updated \"{updated}\")\n  (key \"{fp}\")\n  (expires \"{expires}\")\n" ++
+    "\n".intercalate (pkgs.map fun (n, v, sha, size) => entry n v sha size) ++ ")\n"
+  IO.FS.writeFile (idx / "index" / "snapshot.sexpr") text
+
+/-- Sign `index/snapshot.sexpr` with `key` (removing an old signature first, since
+`ssh-keygen` would otherwise ask before overwriting it). -/
+def signSnapshot (idx key : System.FilePath) : IO Unit := do
+  let _ ← runIn idx "rm" ["-f", (idx / "index" / "snapshot.sexpr.sig").toString]
+  let _ ← runIn idx "ssh-keygen" ["-Y", "sign", "-q", "-n", "grail-index", "-f", key.toString,
+    (idx / "index" / "snapshot.sexpr").toString]
+
+/-- A one-package index (`greet` 1.0.0) with a snapshot signed by a throwaway Ed25519 key.
+Returns `(index dir, private key, allowed_signers, archive sha256, key fingerprint)`. -/
+def signedGreetIndex (root : System.FilePath) (seq : Nat)
+    (expires : String := "2030-01-01T00:00:00Z") :
+    IO (System.FilePath × System.FilePath × System.FilePath × String × String) := do
+  IO.FS.createDirAll (root / "index")
+  let (tar, sha) ← tarballOf root "greet" "1.0.0"
+    [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+     ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+  IO.FS.writeFile (root / "index" / "greet.sexpr")
+    s!"(index (package \"greet\" (version \"1.0.0\" (source \"file://{tar}\") (sha256 \"{sha}\") (toolchain \">=0.1.0\") (deps))))\n"
+  IO.FS.writeFile (root / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+  let key := root / "key"
+  let _ ← runIn root "ssh-keygen"
+    ["-q", "-t", "ed25519", "-N", "", "-C", "grail index test", "-f", key.toString]
+  let pub : System.FilePath := System.FilePath.mk (key.toString ++ ".pub")
+  let fp ← fingerprintOf pub
+  let size := (← tar.metadata).byteSize
+  writeSnapshot root "test/grail-index" seq "2026-11-15T00:00:00Z" expires fp
+    [("greet", "1.0.0", sha, size)]
+  signSnapshot root key
+  let allowed := root / "allowed_signers"
+  IO.FS.writeFile allowed s!"test {(← IO.FS.readFile pub)}"
+  pure (root, key, allowed, sha, fp)
+
+def grailIndexGroup : Group where
+  name := "grail-index"
+  exercise := "Stage 23m"
+  cases := [
+    { name := "the example grail-index validates offline", run := fun _ => do
+        let ex ← exampleIndex
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" ex.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 3 r.packages
+          checkEq 4 r.versions
+          checkEq 4 r.archives
+          checkEq 0 r.remote
+          checkEq ([] : List String) r.errors
+          checkEq ([] : List String) r.warnings },
+    { name := "grail index check: offline by default, and an error exits 1", run := fun _ => do
+        let ex ← exampleIndex
+        let cache ← IO.FS.createTempDir
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["--cache", cache.toString, "index", "check"] ++ args)
+        checkEq 0 (← run [ex.toString])
+        -- a non-local spec is refused without --fetch, so a CI run cannot clone by accident
+        checkEq 1 (← run ["https://example.invalid/grail-index"])
+        -- a malformed entry exits 1
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        IO.FS.writeFile (idx / "bad.sexpr")
+          "(index (package \"bad\" (version \"1.0.0\" (source \"x\") (sha256 \"short\") (deps))))\n"
+        checkEq 1 (← run [root.toString]) },
+    { name := "a changed archive, a bad requirement and a missing entry are errors", run := fun _ => do
+        let ex ← exampleIndex
+        let root ← IO.FS.createTempDir
+        let work := root / "idx"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "index.wiz", "registry.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        IO.FS.writeFile (work / "packages/text-1.1.0.tar.gz") "not a tarball"
+        let hello := ← IO.FS.readFile (work / "index/hello.sexpr")
+        IO.FS.writeFile (work / "index/hello.sexpr") (hello.replace "^1" "^^1")
+        IO.FS.removeFile (work / "index/base.sexpr")
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" work.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          check r.hasErrors "the broken index passed"
+          check (r.errors.any fun e => (e.splitOn "sha256").length > 1) s!"no hash error: {r.errors}"
+          check (r.errors.any fun e =>
+            (e.splitOn "requirement").length > 1 || (e.splitOn "not a version").length > 1) s!"no requirement error: {r.errors}"
+          check (r.errors.any fun e => (e.splitOn "base.sexpr is missing").length > 1) s!"no missing-entry error: {r.errors}" },
+    { name := "module-prefix conflicts are an index error and a resolver error", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let idx := root / "index"
+        IO.FS.createDirAll idx
+        let sha := String.ofList (List.replicate 64 'a')
+        IO.FS.writeFile (idx / "alpha.sexpr")
+          s!"(index (package \"alpha\" (version \"1.0.0\" (source \"packages/alpha-1.0.0.tar.gz\") (sha256 \"{sha}\") (modules \"Ddr3\" \"Ddr3.Ctrl\") (deps))))\n"
+        IO.FS.writeFile (idx / "beta.sexpr")
+          s!"(index (package \"beta\" (version \"1.0.0\" (source \"packages/beta-1.0.0.tar.gz\") (sha256 \"{sha}\") (modules \"Ddr3.Ctrl\" \"Ddr3.Mem\") (deps))))\n"
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" root.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r => check (hasModuleConflict r) s!"no module conflict: {r.errors}"
+        let .ok src ← Grail.Registry.loadIndex cache root.toString true
+          | throw (IO.userError "the index did not load")
+        match Grail.Resolve.resolve src.pkgs [⟨"alpha", "^1"⟩, ⟨"beta", "^1"⟩] "0.1.0-dev" with
+        | .error e =>
+          check ((e.splitOn "module conflict").length > 1) e
+          check ((e.splitOn "alpha").length > 1 && (e.splitOn "beta").length > 1) e
+        | .ok _ => throw (IO.userError "resolved two packages that both own Ddr3") },
+    { name := "index.wiz lists exactly the packages on disk", run := fun _ => do
+        let ex ← exampleIndex
+        let root ← IO.FS.createTempDir
+        let work := root / "idx"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "index.wiz", "registry.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        IO.FS.removeFile (work / "index/hello.sexpr")
+        let sha := String.ofList (List.replicate 64 'b')
+        IO.FS.writeFile (work / "index/extra.sexpr")
+          s!"(index (package \"extra\" (version \"1.0.0\" (source \"packages/base-0.1.0.tar.gz\") (sha256 \"{sha}\") (deps))))\n"
+        let cache ← IO.FS.createTempDir
+        match ← Grail.checkDir cache {} 7 "lib" work.toString false with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          check (r.errors.any fun e =>
+            (e.splitOn "hello").length > 1 && (e.splitOn "missing").length > 1) s!"no missing-package error: {r.errors}"
+          check (r.errors.any fun e =>
+            (e.splitOn "extra").length > 1 && (e.splitOn "not listed").length > 1) s!"no unlisted-package error: {r.errors}" },
+    { name := "grail update reads the example index as a directory, a file and a git URL", run := fun _ => do
+        let ex ← exampleIndex
+        let std ← IO.FS.realPath "lib"
+        let cache ← IO.FS.createTempDir
+        let mkApp (spec : String) : IO System.FilePath := mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{spec}\"\n  |> Package.require \"hello\" \"^1\"\n"),
+          ("app.wiz", "import Hello.Main\n#eval helloValue\n")]
+        let grailIn (dir : System.FilePath) (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let names (dir : System.FilePath) : IO (List String) := do
+          let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+            | throw (IO.userError "bad grail.lock")
+          pure (lock.pkgs.map (·.name))
+        let d1 ← mkApp ex.toString
+        checkEq 0 (← grailIn d1 ["update"])
+        checkEq ["base", "hello", "text"] (← names d1)
+        -- one file holding every package
+        let d2 ← mkApp (ex / "index.sexpr").toString
+        checkEq 0 (← grailIn d2 ["update"])
+        checkEq ["base", "hello", "text"] (← names d2)
+        -- a git URL: a bare clone of the example
+        let root ← IO.FS.createTempDir
+        let work := root / "work"
+        IO.FS.createDirAll work
+        for f in ["index", "packages", "entries", "sources", "index.wiz", "registry.sexpr", "index.sexpr"] do
+          let _ ← runIn work "cp" ["-a", (ex / f).toString, (work / f).toString]
+        let _ ← gitIn work ["init", "--quiet"]
+        let _ ← gitIn work ["add", "."]
+        let _ ← gitIn work ["commit", "--quiet", "-m", "index"]
+        let bare := root / "index.git"
+        let _ ← runIn root "git" ["clone", "--quiet", "--bare", work.toString, bare.toString]
+        let _ ← gitIn bare ["symbolic-ref", "HEAD", "refs/heads/main"]
+        let _ ← gitIn work ["push", "--quiet", bare.toString, "HEAD:refs/heads/main"]
+        let d3 ← mkApp s!"file://{bare}"
+        checkEq 0 (← grailIn d3 ["update"])
+        checkEq ["base", "hello", "text"] (← names d3)
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (d3 / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq "1.1.0" ((lock.pkgs.find? (·.name == "text")).map (·.version) |>.getD "?")
+        checkEq 40 lock.indexCommit.length
+        -- `index check --fetch` on the same URL (a local clone: still no network)
+        match ← Grail.checkDir cache {} 7 "lib" s!"file://{bare}" true with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 3 r.packages
+          checkEq 4 r.archives
+          checkEq ([] : List String) r.errors },
+    { name := "publish records the archive's module names", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let files : List (String × String) :=
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
+        let work ← mkTree files
+        let (tar, _) ← tarballOf root "greet" "1.0.0" files
+        let .ok (pkg, _) ← Grail.readConfig {} 7 "lib" work | throw (IO.userError "bad manifest")
+        let .ok entry ← Grail.Registry.publish (some tar) "https://example.org/greet-1.0.0.tar.gz" pkg
+          | throw (IO.userError "publish failed")
+        check ((entry.splitOn "(modules Greet.Hello)").length > 1) entry },
+    { name := "a signed index snapshot is verified offline and pinned in the lock", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, _key, allowed, _sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update", "--require-signature", "--allowed-signers", allowed.toString])
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        let some sig := lock.indexSignature | throw (IO.userError "the lock has no index signature")
+        checkEq fp sig.fingerprint
+        checkEq 1 sig.seq
+        check (sig.key.startsWith "ssh-ed25519") sig.key
+        -- `--locked` validates the recorded signature fields without reading the index
+        checkEq 0 (← run ["update", "--locked", "--require-signature"])
+        -- and a registry lock whose index/signature lines were stripped is not signed
+        let lockText ← IO.FS.readFile (dir / "grail.lock")
+        let kept := (lockText.splitOn "\n").filter fun l => !l.startsWith "  (index"
+        IO.FS.writeFile (dir / "grail.lock") ("\n".intercalate kept)
+        checkEq 1 (← run ["update", "--locked", "--require-signature"])
+        IO.FS.writeFile (dir / "grail.lock") lockText
+        -- the lock's pinned key makes verification offline on the next run
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"])
+        -- a first use needs a trust root from outside the index; without one, refuse
+        checkEq 1 (← run ["index", "verify", idx.toString])
+        checkEq 0 (← run ["index", "verify", idx.toString, "--allowed-signers", allowed.toString])
+        match ← Grail.checkDir cache {} 7 "lib" idx.toString false true (some allowed.toString) with
+        | .error e => throw (IO.userError e)
+        | .ok r =>
+          checkEq 1 r.signatures
+          checkEq ([] : List String) r.errors
+        -- the generator writes the document the helper above wrote by hand
+        let gen := root / "gen"
+        IO.FS.createDirAll (gen / "index")
+        IO.FS.writeFile (gen / "index" / "greet.sexpr") (← IO.FS.readFile (idx / "index" / "greet.sexpr"))
+        checkEq 0 (← Grail.cliMain ["--cache", cache.toString, "index", "snapshot", gen.toString,
+          "--seq", "7", "--updated", "2026-11-15T00:00:00Z", "--key", fp,
+          "--expires", "2030-01-01T00:00:00Z"])
+        let generated ← IO.FS.readFile (gen / "index" / "snapshot.sexpr")
+        check ((generated.splitOn "(seq 7)").length > 1) generated
+        check ((generated.splitOn "(package greet 1.0.0").length > 1) generated
+        -- without a snapshot, --require-signature refuses (a fresh app, so no lock pins one)
+        IO.FS.removeFile (idx / "index" / "snapshot.sexpr")
+        IO.FS.removeFile (idx / "index" / "snapshot.sexpr.sig")
+        let dir2 ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app2\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run2 (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir2.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 1 (← run2 ["update", "--require-signature", "--allowed-signers", allowed.toString]) },
+    { name := "an edited entry, snapshot or expiry is refused", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let updated := ["update", "--require-signature", "--allowed-signers", allowed.toString]
+        checkEq 0 (← run updated)
+        -- an edited entry no longer matches the signed snapshot
+        let entryPath := idx / "index" / "greet.sexpr"
+        let entry ← IO.FS.readFile entryPath
+        let zeros := String.ofList (List.replicate 64 '0')
+        IO.FS.writeFile entryPath (entry.replace sha zeros)
+        checkEq 1 (← run updated)
+        IO.FS.writeFile entryPath entry
+        -- an edited snapshot without a new signature
+        let snapPath := idx / "index" / "snapshot.sexpr"
+        let snap ← IO.FS.readFile snapPath
+        IO.FS.writeFile snapPath (snap.replace "(seq 1)" "(seq 2)")
+        checkEq 1 (← run updated)
+        -- re-signing a snapshot that disagrees with the index is still refused
+        IO.FS.writeFile snapPath (snap.replace sha zeros)
+        signSnapshot idx key
+        checkEq 1 (← run updated)
+        -- an expired key
+        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2020-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run updated)
+        checkEq 1 (← run ["index", "verify", idx.toString, "--allowed-signers", allowed.toString])
+        match ← Grail.checkDir cache {} 7 "lib" idx.toString false true (some allowed.toString) with
+        | .error e => throw (IO.userError e)
+        | .ok r => check r.hasErrors s!"the expired snapshot passed: {r.errors}" },
+    { name := "a lower snapshot seq is a rollback; a same-seq rewrite is refused", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, key, allowed, sha, fp) ← signedGreetIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        let updated := ["update", "--require-signature", "--allowed-signers", allowed.toString]
+        checkEq 0 (← run updated)
+        -- seq 2 is an ordinary update
+        writeSnapshot idx "test/grail-index" 2 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 0 (← run updated)
+        let .ok lock := Grail.Lock.parse (← IO.FS.readFile (dir / "grail.lock"))
+          | throw (IO.userError "bad grail.lock")
+        checkEq 2 (lock.indexSignature.map (·.seq) |>.getD 0)
+        -- seq 1 is a rollback: refused, unless deliberately accepted
+        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        checkEq 1 (← run updated)
+        checkEq 0 (← run (updated ++ ["--allow-rewind"]))
+        -- a rewrite at the same sequence is refused even with --allow-rewind
+        writeSnapshot idx "test/grail-index" 1 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+          [("greet", "1.0.0", sha, 0)]
+        signSnapshot idx key
+        checkEq 1 (← run (updated ++ ["--allow-rewind"])) }
+  ]
+
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
 needs a shard in `.github/test-shards.json` (CI checks). -/
@@ -2275,8 +3556,10 @@ def groups : List Group :=
   grailDepsGroup ::
   grailGroup ::
   grailHygieneGroup ::
+  grailIndexGroup ::
   grailJobsGroup ::
   grailSelfhostGroup ::
+  grailVendorGroup ::
   modulesGroup ::
   testRunnerGroup ::
   toolchainGroup ::
