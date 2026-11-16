@@ -979,7 +979,8 @@ need an editor's document and its cursor.
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
 slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Both web
 builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
-are compiled without `-pthread`: the runtime then has one thread, nothing is ever
+are compiled without `-pthread` (the header also turns it on by itself for Emscripten
+without `-pthread`): the runtime then has one thread, nothing is ever
 marked shared (so every count operation is plain), `main` runs on the calling thread,
 and `Chan.fork`, or a wait that no other thread could end (taking from an empty `MVar`,
 putting into a full one, acquiring a held `Lock`, receiving on an empty channel), stops

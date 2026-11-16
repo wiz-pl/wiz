@@ -134,6 +134,8 @@ rows = list(csv.DictReader(open(f"{out}/stage1.tsv"), delimiter="\t"))
 med = {v: statistics.median(float(r["wall_s"]) for r in rows if r["variant"] == v) for v in ("mt", "st", "atomic")}
 print("stage 1 self-compile, median wall (s):", ", ".join(f"{v} {t:.2f}" for v, t in med.items()))
 print(f"  mt/st {med['mt'] / med['st']:.4f}  (the sign-bit cost)   atomic/st {med['atomic'] / med['st']:.4f}")
+print("  (caveat: st keeps __thread for the live counter, so mt/st measures counts, CAF CAS and")
+print("   mark_mt, not the cost of thread-local storage)")
 for v in ("st", "atomic"):
     j = json.load(open(f"{out}/stdlib-{v}.json"))
     ab = j["ab"]["results"]
