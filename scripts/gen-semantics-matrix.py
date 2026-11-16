@@ -5,9 +5,13 @@ data its test reads (`Tests/Semantics/cells.tsv`).
 The matrix pins what a *value* is at the boundaries of every numeric and textual
 type: the expected column is computed here, from the definitions in the stage docs
 (not from the implementation), so a bug shared by the model and the natives is not
-hidden.  Run from the repository root:
+hidden.  Neither output is committed: the test generates the TSV when it runs, and
+`nix build .#semantics-matrix` builds both (`result/cells.tsv`,
+`result/semantics-matrix.md`).
 
-    python3 scripts/gen-semantics-matrix.py
+    python3 scripts/gen-semantics-matrix.py --out DIR     # DIR/cells.tsv, DIR/semantics-matrix.md
+    python3 scripts/gen-semantics-matrix.py --tsv -       # the TSV on stdout (the test)
+    python3 scripts/gen-semantics-matrix.py --md FILE     # the document only
 
 Cell channels:
   nat  -- a Wiz expression of type `Nat` (the value is observed directly)
@@ -20,6 +24,7 @@ self-hosted compiler's own Prelude (no `import Word`/`Int`/`Text`, a 63-bit `Nat
 can run it.
 """
 
+import argparse
 import math
 import sys
 from pathlib import Path
@@ -1000,19 +1005,21 @@ def gen_docs():
     w("## Running it")
     w("")
     w("```sh")
-    w("python3 scripts/gen-semantics-matrix.py          # regenerate this file and the TSV")
+    w("nix build .#semantics-matrix                     # this file and the TSV, in result/")
+    w("python3 scripts/gen-semantics-matrix.py --out DIR # the same, without Nix")
     w("lake build wiz tests")
     w(".lake/build/bin/tests '=semantics'               # all cells, all available backends")
     w("```")
     w("")
-    w("The test reads `Tests/Semantics/cells.tsv` (the same data this document is")
-    w("generated from), builds one program per backend and compares every value. A")
+    w("Neither this document nor the TSV is committed. The test runs the generator")
+    w("(`--tsv -`, so it needs `python3`) and reads the cells from its output, builds one")
+    w("program per backend and compares every value. A")
     w("mismatch is printed as a table with the cell id, the expected value and each")
     w("backend's value, and fails the case. It has its own heavy shard (`semantics`,")
     w("`.github/test-shards.json`); the C cases skip without a C toolchain and the")
     w("`[S]` case skips without the collector (`--gc-cflags`). The expected values are")
     w("computed by the generator, never read back from the implementation: change a")
-    w("rule in the docs, then regenerate.")
+    w("rule in the docs, then the generator.")
     w("")
     return "\n".join(lines) + "\n"
 
@@ -1026,22 +1033,47 @@ def gen_tsv():
     return "\n".join(out) + "\n"
 
 
-def main():
+def write(path, text):
+    if path == "-":
+        sys.stdout.write(text)
+    else:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Generate the value-level semantics matrix and its TSV.")
+    parser.add_argument("--out", metavar="DIR",
+                        help="write DIR/cells.tsv and DIR/semantics-matrix.md")
+    parser.add_argument("--tsv", metavar="FILE", help="write the TSV (- for stdout)")
+    parser.add_argument("--md", metavar="FILE", help="write the document (- for stdout)")
+    args = parser.parse_args(argv)
+    if not (args.out or args.tsv or args.md):
+        parser.error("nothing to write: give --out DIR, --tsv FILE or --md FILE")
+    if args.tsv == "-" and args.md == "-":
+        parser.error("--tsv - and --md - cannot both write to stdout")
     uintn_cells()
     intn_cells()
     nat_cells()
     int_cells()
     float_cells()
     text_cells()
-    root = Path(__file__).resolve().parent.parent
-    (root / "Tests" / "Semantics").mkdir(parents=True, exist_ok=True)
-    (root / "Tests" / "Semantics" / "cells.tsv").write_text(gen_tsv())
-    (root / "docs" / "semantics-matrix.md").write_text(gen_docs())
+    tsv, md = gen_tsv(), gen_docs()
+    if args.out:
+        write(Path(args.out) / "cells.tsv", tsv)
+        write(Path(args.out) / "semantics-matrix.md", md)
+    if args.tsv:
+        write(args.tsv, tsv)
+    if args.md:
+        write(args.md, md)
     fams = {}
     for c in cells:
         fams[c["family"]] = fams.get(c["family"], 0) + 1
     print("%d cells: %s" % (len(cells),
-                            ", ".join("%s %d" % (k, fams[k]) for k in sorted(fams))))
+                            ", ".join("%s %d" % (k, fams[k]) for k in sorted(fams))),
+          file=sys.stderr)
 
 
 if __name__ == "__main__":

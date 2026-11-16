@@ -1,10 +1,10 @@
 """The guided tour as a notebook: its export and its live run.
 
-The notebook in ``docs/notebooks/tour.ipynb`` is the source; ``tour.html`` is the
-checked-in export.  The first test needs no Jupyter and holds the export
-deterministic and current.  The second executes every code cell with the Wiz
-kernel and checks that the stored outputs (and so the page) are what a fresh run
-produces.  It skips cleanly when ``nbclient``/``nbformat`` or a Wiz executable
+The notebook in ``docs/notebooks/tour.ipynb`` is the source; ``tour.html`` is its
+export, generated for the site (``tools/jupyter/export-notebooks.sh``), not
+committed.  The first test needs no Jupyter and holds the export deterministic.
+The second executes every code cell with the Wiz kernel and checks that the
+stored outputs (and so the page) are what a fresh run produces.  It skips cleanly when ``nbclient``/``nbformat`` or a Wiz executable
 is missing.
 """
 
@@ -29,7 +29,6 @@ from wiz_kernel import export  # noqa: E402
 from wiz_kernel.backends import find_wiz  # noqa: E402
 
 NOTEBOOK = ROOT / "docs" / "notebooks" / "tour.ipynb"
-HTML = NOTEBOOK.with_suffix(".html")
 
 try:  # the run test is the only part that needs Jupyter
     import nbformat
@@ -44,11 +43,6 @@ class TourExportTest(unittest.TestCase):
         first = export.render(export.load_notebook(NOTEBOOK), "html")
         second = export.render(export.load_notebook(NOTEBOOK), "html")
         self.assertEqual(first, second)
-
-    def test_committed_page_matches_the_notebook(self):
-        notebook = export.load_notebook(NOTEBOOK)
-        self.assertEqual(export.render(notebook, "html"),
-                         HTML.read_text(encoding="utf-8"))
 
     def test_every_section_is_a_chapter(self):
         notebook = export.load_notebook(NOTEBOOK)
@@ -137,12 +131,12 @@ class TourNotebookRunTest(unittest.TestCase):
                 self.assertEqual(stored.execution_count, fresh.execution_count)
                 self.assertEqual(stored.outputs, fresh.outputs)
 
-    def test_the_checked_in_page_matches_a_fresh_run(self):
+    def test_the_exported_page_matches_a_fresh_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / NOTEBOOK.name
             nbformat.write(self.fresh, path)
             page = export.render(export.load_notebook(path), "html")
-        self.assertEqual(HTML.read_text(encoding="utf-8"), page)
+        self.assertEqual(export.render(export.load_notebook(NOTEBOOK), "html"), page)
 
 
 if __name__ == "__main__":  # pragma: no cover

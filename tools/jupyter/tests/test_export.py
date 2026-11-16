@@ -5,9 +5,9 @@ Run from a checkout::
     python3 -m unittest discover -s tools/jupyter/tests -v
 
 These tests are pure Python: they read checked-in fixture notebooks and compare
-the rendered text.  The ``--check`` case on the example in ``docs/notebooks/``
-is the same command the docs build can run, so a committed export that drifts
-from its notebook fails here too.
+the rendered text.  The ``--check`` case exports the tour in ``docs/notebooks/``
+(its page is generated for the site, not committed) and checks it against a
+second render.
 """
 
 from __future__ import annotations
@@ -227,7 +227,13 @@ class CommandTest(unittest.TestCase):
         notebook = ROOT / "docs" / "notebooks" / "tour.ipynb"
         if not notebook.is_file():  # pragma: no cover - the checkout always has it
             self.skipTest("the example notebook is not in this tree")
-        status, stdout, stderr = self.run_main(["export", str(notebook), "--check"])
+        # the page is generated, not committed: export it, then --check against it
+        with tempfile.TemporaryDirectory() as tmp:
+            page = str(Path(tmp) / "tour.html")
+            status, _, stderr = self.run_main(["export", str(notebook), "--out", page])
+            self.assertEqual(status, 0, stderr)
+            status, stdout, stderr = self.run_main(
+                ["export", str(notebook), "--out", page, "--check"])
         self.assertEqual(status, 0, stderr)
         self.assertIn("up to date", stdout)
 

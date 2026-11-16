@@ -260,19 +260,21 @@ and does not dispatch to `tools/jupyter/`, so the command is the wrapper above
 (the alias `wiz nb export` is not installed).
 
 The output is **deterministic**: no timestamps, no random ids and no absolute
-paths are added, so an exported page can be committed and diffed. `--check`
-renders the notebook in memory and exits 1 when the committed file differs
-(printing a short unified diff); it is how the docs notebook is kept from
-rotting:
+paths are added, so two exports of the same notebook are byte-identical. `--check`
+renders the notebook in memory and exits 1 when an existing file differs
+(printing a short unified diff):
 
 ```sh
-tools/jupyter/wiz-nb export docs/notebooks/tour.ipynb --check
-tools/jupyter/check-notebooks.sh          # every docs/notebooks/*.ipynb
+tools/jupyter/wiz-nb export docs/notebooks/tour.ipynb --out tour.html --check
+tools/jupyter/export-notebooks.sh OUT     # every docs/notebooks/*.ipynb → OUT/*.html
+tools/jupyter/check-notebooks.sh          # export twice, compare, check the index links
+nix build .#notebook-pages                # the same pages, in result/
 ```
 
-The example is `docs/notebooks/tour.ipynb` with its page `tour.html`; both are
-checked in, and the docs site copies the HTML to `/notebooks/` (see
-`web/build-site.sh`). The fixture notebooks in `tools/jupyter/tests/fixtures/`
+The notebooks are `docs/notebooks/tour.ipynb` and `example.ipynb`. Only the notebooks
+and the hand-written `index.html` are committed: the exported pages are generated,
+and the docs site exports them into `/notebooks/` (`web/build-site.sh` runs
+`export-notebooks.sh`). The fixture notebooks in `tools/jupyter/tests/fixtures/`
 cover markdown, stdout, `execute_result`, errors, widgets and a cell with no
 output.
 

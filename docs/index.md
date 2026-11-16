@@ -15,7 +15,7 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
   programming; [`notebooks/tour.ipynb`](notebooks/tour.ipynb)
-  ([exported page](notebooks/tour.html)) is the same tour as a runnable notebook
+  ([exported page](https://wiz-pl.github.io/wiz/notebooks/tour.html)) is the same tour as a runnable notebook
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
@@ -95,8 +95,10 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
-* [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
-  boundary, with the value the spec asks for and which backends were compared
+* The value-level semantics matrix: every numeric and textual boundary, with the value
+  the spec asks for and which backends were compared (test `=semantics`). It is
+  generated, not committed: `nix build .#semantics-matrix` writes
+  `result/semantics-matrix.md` (or run `python3 scripts/gen-semantics-matrix.py --out DIR`)
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
 

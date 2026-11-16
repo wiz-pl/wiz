@@ -1,25 +1,30 @@
 #!/bin/sh
-# Re-export every checked-in notebook and fail when an export is stale.
+# Export every notebook in docs/notebooks/ twice and fail unless both exports are
+# byte-identical and every link of the notebooks' index page resolves.
 #
-# The notebooks in docs/notebooks/ and their exported pages are committed
-# together: `--check` renders the notebook in memory and compares it with the
-# file, so the docs cannot keep a page that no longer matches its notebook.
-# No kernel or network is needed, only Python 3.
+# The exported pages are not committed (tools/jupyter/export-notebooks.sh builds them
+# for the site and `nix build .#notebook-pages`), so what keeps them from rotting is
+# that they are regenerated from the notebook every time; this checks that the export
+# stays deterministic. No kernel or network is needed, only Python 3.
 #
 #   usage: tools/jupyter/check-notebooks.sh
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+sh "$ROOT/tools/jupyter/export-notebooks.sh" "$tmp/a"
+sh "$ROOT/tools/jupyter/export-notebooks.sh" "$tmp/b"
+if ! diff -r "$tmp/a" "$tmp/b" >/dev/null; then
+  echo "check-notebooks: two exports of docs/notebooks differ (the export is not deterministic)" >&2
+  diff -r "$tmp/a" "$tmp/b" | head -40 >&2
+  exit 1
+fi
 status=0
-found=0
-for notebook in "$ROOT"/docs/notebooks/*.ipynb; do
-  [ -f "$notebook" ] || continue
-  found=1
-  if ! python3 "$ROOT/tools/jupyter/export.py" export "$notebook" --check; then
+for href in $(sed -n 's/.*href="\([^"#:]*\)".*/\1/p' "$tmp/a/index.html"); do
+  if [ ! -f "$tmp/a/$href" ]; then
+    echo "check-notebooks: index.html links $href, which no notebook exports" >&2
     status=1
   fi
 done
-if [ "$found" -eq 0 ]; then
-  echo "check-notebooks: no notebooks in docs/notebooks" >&2
-  exit 1
-fi
+[ "$status" -eq 0 ] && echo "check-notebooks: $(ls "$tmp/a" | wc -l | tr -d ' ') pages, deterministic"
 exit "$status"
