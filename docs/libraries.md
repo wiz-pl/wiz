@@ -1609,7 +1609,13 @@ state machine (with `false-positive` and reopen edges); the local JSON record/st
 shape; and the CWE tier names from
 `wiz-notes/prior-art/symbolic-execution.md` §11.5.
 
-`scry/src/Scry/WorkflowCmd.wiz` is `scry findings scan|list|show|triage|repro|verify`.
+`scry/src/Scry/WorkflowCmd.wiz` is
+`scry findings scan|list|show|triage|suppress|unsuppress|repro|verify`. A suppression
+is a policy record with a reason, owner, absolute expiry and a finding/rule/path/range
+scope; it is not evidence and not a triage state. `scan`/`list` report suppressed
+findings separately with counts (`--include-suppressed` inlines them), an expired
+suppression is never applied and is reported as an error naming the entry and owner,
+and `--fail-on-expired` makes it exit non-zero. There is no whole-project scope.
 `scan` calls `Scry.analyzeFile` — the same pipeline as `scry taint`, no second analysis —
 and writes `scry-workflow/findings.json` plus `scry-workflow/<id>/` (`static.json`,
 certificate, assumptions, boundaries, `finding.json`). `repro`

@@ -84,7 +84,35 @@ def group : Group where
         "  | .error _ => 0\n" ++
         "#eval match Scry.wfStoreOfText \"{\\\"schema\\\":\\\"other\\\",\\\"findings\\\":[]}\" with | .error _ => 1 | .ok _ => 0\n" ++
         "#eval Nat.add (Nat.mul (if String.eq (Scry.wfCweTier \"command-injection\") \"T1\" then 1 else 0) 100) (Nat.add (Nat.mul (if String.eq (Scry.wfCweTier \"use-after-free\") \"T2\" then 1 else 0) 10) (if String.eq (Scry.wfCweTier \"gets-overflow\") \"N/A\" then 1 else 0))")
-        [11, 1, 111] }
+        [11, 1, 111] },
+    { name := "suppress: date validation, expiry boundary, whole-project refusal",
+      run := fun _ => evalNats (prelude ++
+        "#eval match Scry.wfParseDate \"2024-02-29\" with | .some _ => 1 | .none => 0\n" ++
+        "#eval match Scry.wfParseDate \"2025-02-29\" with | .some _ => 0 | .none => 1\n" ++
+        "#eval match Scry.wfParseDate \"2026-1-01\" with | .some _ => 0 | .none => 1\n" ++
+        "def sup : Scry.WfSuppression := Scry.WfSuppression.mk \"s_x\" \"why\" \"alice\" \"2026-11-15\" (Scry.WfScope.mk .finding \"f_a\" 0 0) 1\n" ++
+        "#eval Nat.add (if Scry.wfSuppressionExpired (Scry.wfDaysFromCivil (Scry.WfDate.mk 2026 11 15)) sup then 0 else 100) (if Scry.wfSuppressionExpired (Scry.wfDaysFromCivil (Scry.WfDate.mk 2026 11 16)) sup then 10 else 0)\n" ++
+        "#eval match Scry.wfMakeSuppression \"why\" \"alice\" \"2027-01-01\" (Scry.WfScope.mk .rule \"*\" 0 0) 1 with | .error _ => 1 | .ok _ => 0\n" ++
+        "#eval match Scry.wfMakeSuppression \"why\" \"alice\" \"2026-02-30\" (Scry.WfScope.mk .finding \"f_a\" 0 0) 1 with | .error _ => 1 | .ok _ => 0")
+        [1, 1, 1, 110, 1, 1] },
+    { name := "suppress: glob/range scopes, hidden-but-counted, JSON determinism",
+      run := fun _ => evalNats (prelude ++
+        "def recAt (id rule src : String) (ln : Nat) : Scry.WfRecord :=\n" ++
+        "  Scry.WfRecord.mk id \"k\" \"h\" .new [] src .none .false (Json.mkObj [(\"rule\", Json.mkStr rule), (\"location\", Json.mkObj [(\"startLine\", Json.ofNat ln)])]) \"art\" .none .none .none 1 1\n" ++
+        "def ra := recAt \"f_a\" \"gets-overflow\" \"src/a.c\" 9\n" ++
+        "def rb := recAt \"f_b\" \"gets-overflow\" \"src/b.c\" 3\n" ++
+        "def rc := recAt \"f_c\" \"strcpy-overflow\" \"other/c.c\" 1\n" ++
+        "def g := Scry.WfScope.mk .path \"src/*.c\" 0 0\n" ++
+        "#eval List.length (List.filter (Scry.wfScopeMatches g) [ra, rb, rc])\n" ++
+        "#eval Nat.add (if Scry.wfScopeMatches (Scry.WfScope.mk .range \"src/a.c\" 9 12) ra then 10 else 0) (if Scry.wfScopeMatches (Scry.WfScope.mk .range \"src/a.c\" 9 12) rb then 1 else 0)\n" ++
+        "def sup : Scry.WfSuppression := Scry.WfSuppression.mk \"s_x\" \"why\" \"alice\" \"2026-11-15\" (Scry.WfScope.mk .finding \"f_a\" 0 0) 1\n" ++
+        "def p0 := Scry.wfPartitionSuppressed [sup] (Scry.wfDaysFromCivil (Scry.WfDate.mk 2026 11 15)) [ra, rb]\n" ++
+        "def p1 := Scry.wfPartitionSuppressed [sup] (Scry.wfDaysFromCivil (Scry.WfDate.mk 2026 11 16)) [ra, rb]\n" ++
+        "#eval Nat.add (Nat.mul (List.length p0.1) 10) (List.length p0.2)\n" ++
+        "#eval Nat.add (Nat.mul (List.length p1.1) 10) (List.length p1.2)\n" ++
+        "def st := Scry.wfUpsertSuppression (Scry.wfUpsert Scry.wfEmptyStore ra) sup\n" ++
+        "#eval match Scry.wfStoreOfText (Scry.wfStoreText st) with | .ok s2 => Nat.add (if String.eq (Scry.wfStoreText s2) (Scry.wfStoreText st) then 10 else 0) (List.length s2.suppressions) | .error _ => 0")
+        [2, 10, 11, 20, 11] }
   ]
 
 builtin_initialize registerGroup group

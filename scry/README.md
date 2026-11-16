@@ -478,6 +478,10 @@ grail run scry -- findings scan FILE.c --db scry-workflow/findings.json \
 grail run scry -- findings list --state confirmed
 grail run scry -- findings show f_0123456789abcdef
 grail run scry -- findings triage f_0123456789abcdef --state confirmed --reason 'ASAN repro'
+grail run scry -- findings suppress f_0123456789abcdef \
+  --reason 'vendor false positive; filed upstream' --owner alice --expires 2027-01-31
+grail run scry -- findings list --include-suppressed
+grail run scry -- findings unsuppress s_0123456789abcdef
 grail run scry -- findings repro f_0123456789abcdef --sanitize both
 grail run scry -- findings verify f_0123456789abcdef
 ```
@@ -490,6 +494,25 @@ GitHub-compatible primary-line identity. The **triage machine** is
 `new -> triaged -> confirmed -> fixed`, with `false-positive` and reopen edges; an
 illegal edge is an error. `fixed` is a triage decision, never an automatic result of
 `verify`.
+
+A **suppression is a policy decision with an expiry, not evidence.** It lives in the
+same local JSON as the findings (`suppressions`, one `scry-workflow-suppression/1`
+record each) and carries a `reason`, an `owner`, an absolute `expires` date
+(`YYYY-MM-DD`) and a `scope`: one finding id, one rule, a `*` path glob, or a file plus
+an inclusive line range. It is not a fourth triage state, it does not make a finding
+false, and it never appears in `evidenceItems`. There is no whole-project scope: a `*`
+rule, a bare path glob, and an empty scope are refused, because silence for everything
+is not a reviewable decision.
+
+`scan` and `list` report hidden findings **separately and with counts** —
+`counts: 5 finding(s), 3 shown, 2 suppressed, 0 expired` — and `--include-suppressed`
+prints them inline with the `s_…` id, owner and expiry. Expiry is enforced when the
+store is read: an expired suppression is never applied (the finding is reported again),
+and an `error: suppression s_… (owner …) expired …` line names the entry and the owner.
+`--fail-on-expired` makes that a non-zero exit for CI. `suppress` refuses a missing
+reason/owner, a malformed or non-`YYYY-MM-DD` date, and a scope that matches no stored
+finding; `unsuppress` removes one record by suppression id (or every finding-scoped
+record for a finding id).
 
 `repro` selects or generates a deterministic harness/input, builds with
 `-fsanitize=address,undefined` when the compiler accepts it (and records a fallback to an

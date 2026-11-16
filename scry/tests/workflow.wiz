@@ -24,6 +24,16 @@ def lineFinding : Scry.RuleFinding :=
   Scry.RuleFinding.mk "gets-overflow" Scry.Severity.error "m" Scry.FindingKind.forbidden
     "main" 2 "gets" 0 (path Scry.PathKind.sink "main" 2)
 
+-- A store record whose snapshot carries the rule and the sink's start line, which is
+-- what a rule/glob/range suppression matches.
+def recAt (id rule src : String) (ln : Nat) : Scry.WfRecord :=
+  Scry.WfRecord.mk id "k" "h" .new .nil src .none .false
+    (Json.mkObj
+      [ ("rule", Json.mkStr rule)
+      , ("location", Json.mkObj
+          [("startLine", Json.ofNat ln), ("startColumn", Json.ofNat 1)]) ])
+    "art" .none .none .none 1 1
+
 def main : IO Unit := EIO.toIO (do
   -- identity: line moves and whitespace keep the id; the line hash sees content
   let f := taintFinding "command-injection"
@@ -91,6 +101,67 @@ def main : IO Unit := EIO.toIO (do
   check "tier: buffer overflow is T3" (String.eq (Scry.wfCweTier "buffer-overflow") "T3");
   check "tier: gets is N/A" (String.eq (Scry.wfCweTier "gets-overflow") "N/A");
 
+  -- suppression policy: an absolute expiry, a named owner, a scope, and no
+  -- whole-project silence
+  check "suppress: a leap-day expiry is valid"
+    (match Scry.wfParseDate "2024-02-29" with | .some _ => .true | .none => .false);
+  check "suppress: 2025-02-29 is not a date"
+    (match Scry.wfParseDate "2025-02-29" with | .some _ => .false | .none => .true);
+  check "suppress: a one-digit month is rejected"
+    (match Scry.wfParseDate "2026-1-01" with | .some _ => .false | .none => .true);
+  check "suppress: a malformed date is refused by wfMakeSuppression"
+    (match Scry.wfMakeSuppression "why" "alice" "2026-02-30"
+      (Scry.WfScope.mk .finding "f_a" 0 0) 1 with
+      | .error _ => .true | .ok _ => .false);
+  check "suppress: a reason and an owner are required"
+    (match Scry.wfMakeSuppression "" "alice" "2027-01-01"
+      (Scry.WfScope.mk .finding "f_a" 0 0) 1 with
+      | .error _ => .true | .ok _ => .false);
+  check "suppress: a whole-project rule scope is refused"
+    (match Scry.wfMakeSuppression "why" "alice" "2027-01-01"
+      (Scry.WfScope.mk .rule "*" 0 0) 1 with
+      | .error _ => .true | .ok _ => .false);
+  check "suppress: a bare path glob is refused"
+    (match Scry.wfMakeSuppression "why" "alice" "2027-01-01"
+      (Scry.WfScope.mk .path "**/*" 0 0) 1 with
+      | .error _ => .true | .ok _ => .false);
+  let recA := recAt "f_a" "gets-overflow" "src/a.c" 9;
+  let recB := recAt "f_b" "gets-overflow" "src/b.c" 3;
+  let recC := recAt "f_c" "strcpy-overflow" "other/c.c" 1;
+  let glob := Scry.WfScope.mk .path "src/*.c" 0 0;
+  check "suppress: a glob scope matches two findings"
+    (Nat.beq (List.length (List.filter (Scry.wfScopeMatches glob) [recA, recB, recC])) 2);
+  let range := Scry.WfScope.mk .range "src/a.c" 9 12;
+  check "suppress: a file+line range matches"
+    (Bool.and (Scry.wfScopeMatches range recA)
+      (Bool.not (Scry.wfScopeMatches range recB)));
+  match Scry.wfMakeSuppression "test policy" "alice" "2026-11-15"
+      (Scry.WfScope.mk .finding "f_a" 0 0) 1 with
+  | .error e => EIO.fail e
+  | .ok sup => do
+    let day0 := Scry.wfDaysFromCivil (Scry.WfDate.mk 2026 11 15);
+    check "suppress: the expiry day is still active"
+      (Bool.not (Scry.wfSuppressionExpired day0 sup));
+    check "suppress: the next day is expired"
+      (Scry.wfSuppressionExpired (Nat.succ day0) sup);
+    let p0 := Scry.wfPartitionSuppressed [sup] day0 [recA, recB];
+    check "suppress: hidden but counted"
+      (Bool.and (Nat.beq (List.length p0.1) 1) (Nat.beq (List.length p0.2) 1));
+    let p1 := Scry.wfPartitionSuppressed [sup] (Nat.succ day0) [recA, recB];
+    check "suppress: expired is visible again"
+      (Bool.and (Nat.beq (List.length p1.1) 2) (Nat.beq (List.length p1.2) 0));
+    let st := Scry.wfUpsertSuppression (Scry.wfUpsert Scry.wfEmptyStore recA) sup;
+    match Scry.wfStoreOfText (Scry.wfStoreText st) with
+    | .error e => EIO.fail e
+    | .ok st2 => do
+      check "suppress: the store round-trips the record"
+        (Bool.and (Nat.beq (List.length st2.suppressions) 1)
+          (Nat.beq (List.length st2.findings) 1));
+      check "suppress: the JSON is deterministic"
+        (String.eq (Scry.wfStoreText st2) (Scry.wfStoreText st));
+      check "suppress: re-suppressing the same policy keeps one canonical record"
+        (Nat.beq (List.length (Scry.wfUpsertSuppression st2 sup).suppressions) 1);
+
   -- witness slot: a future concolic witness is accepted only when it says L2/L3 and
   -- validated; the prototype does not produce one.
   dir ← FS.createTempDir;
@@ -137,4 +208,63 @@ def main : IO Unit := EIO.toIO (do
       | .error _ => .false);
   check "verify: clean/not-reported is an accepted exit" (Nat.beq (Scry.wfVerdictExit "not-reported-and-repro-clean") 0);
   check "verify: still-reported is a failing exit" (Nat.beq (Scry.wfVerdictExit "still-reported") 1);
+
+  -- end-to-end policy: scan -> suppress a glob (two findings) -> hidden but counted ->
+  -- expire -> visible again with an error; --fail-on-expired turns that into exit 1.
+  let cfile := Path.join dir "two-gets.c";
+  stepE1 ← FS.writeFile cfile
+    "char *gets(char *);\nvoid f(void) { char a[8]; gets(a); }\nvoid g(void) { char b[8]; gets(b); }\n";
+  let edb := Path.join dir "findings.json";
+  let eart := Path.join dir "artifacts";
+  e0 ← Scry.scanCmd [cfile, "--db", edb, "--artifacts", eart, "--quiet"];
+  check "suppress e2e: scan exits 0" (Nat.beq e0 0);
+  est ← Scry.wfLoadStore edb;
+  check "suppress e2e: two findings were scanned" (Nat.beq (List.length est.findings) 2);
+  match est.findings with
+  | .cons first _ =>
+    let eglob := String.append dir "/*.c";
+    s0 ← Scry.suppressCmd [first.id, "--scope", "path", "--value", eglob,
+      "--reason", "test policy", "--owner", "alice", "--expires", "2027-01-01",
+      "--db", edb, "--quiet"];
+    check "suppress e2e: suppress exits 0" (Nat.beq s0 0);
+    est2 ← Scry.wfLoadStore edb;
+    check "suppress e2e: one suppression record"
+      (Nat.beq (List.length est2.suppressions) 1);
+    t1 ← FS.readFile edb;
+    s1 ← Scry.suppressCmd [first.id, "--scope", "path", "--value", eglob,
+      "--reason", "test policy", "--owner", "alice", "--expires", "2027-01-01",
+      "--db", edb, "--quiet"];
+    t2 ← FS.readFile edb;
+    check "suppress e2e: re-suppressing is byte-identical"
+      (Bool.and (Nat.beq s1 0) (String.eq t1 t2));
+    match est2.suppressions with
+    | .cons sup _ =>
+      nsE ← EIO.lift Clock.wall;
+      let dE := Scry.wfDaysNow nsE.ns;
+      let partE := Scry.wfPartitionSuppressed est2.suppressions dE est2.findings;
+      check "suppress e2e: the glob hides both and counts them"
+        (Bool.and (Nat.beq (List.length partE.1) 0) (Nat.beq (List.length partE.2) 2));
+      l0 ← Scry.listCmd ["--db", edb, "--fail-on-expired", "--quiet"];
+      check "suppress e2e: a live suppression does not fail CI" (Nat.beq l0 0);
+      let expiredSup := Scry.WfSuppression.mk sup.sid sup.reason sup.owner
+        "2020-01-01" sup.scope sup.created;
+      let estExp := Scry.wfUpsertSuppression est2 expiredSup;
+      stepSE ← Scry.wfSaveStore edb estExp;
+      let partX := Scry.wfPartitionSuppressed estExp.suppressions dE estExp.findings;
+      check "suppress e2e: an expired suppression is visible again"
+        (Bool.and (Nat.beq (List.length partX.1) 2) (Nat.beq (List.length partX.2) 0));
+      lx ← Scry.listCmd ["--db", edb, "--fail-on-expired", "--quiet"];
+      check "suppress e2e: list --fail-on-expired exits non-zero" (Nat.beq lx 1);
+      sx ← Scry.scanCmd [cfile, "--db", edb, "--artifacts", eart,
+        "--fail-on-expired", "--quiet"];
+      check "suppress e2e: scan --fail-on-expired exits non-zero" (Nat.beq sx 1);
+      s0x ← Scry.scanCmd [cfile, "--db", edb, "--artifacts", eart, "--quiet"];
+      check "suppress e2e: without --fail-on-expired scan still exits 0" (Nat.beq s0x 0);
+      u0 ← Scry.unsuppressCmd [sup.sid, "--db", edb, "--quiet"];
+      check "suppress e2e: unsuppress removes the record" (Nat.beq u0 0);
+      est3 ← Scry.wfLoadStore edb;
+      check "suppress e2e: the record is gone"
+        (Nat.beq (List.length est3.suppressions) 0)
+    | .nil => check "suppress e2e: one suppression record (found none)" .false
+  | .nil => check "suppress e2e: two findings were scanned (found none)" .false;
   FS.removeAll dir)

@@ -328,15 +328,89 @@ def Scry.wfRecordJson (r : Scry.WfRecord) : Json :=
     , ("firstSeen", Json.ofNat r.firstSeen)
     , ("lastSeen", Json.ofNat r.lastSeen) ]
 
+-- ## Suppressions: a policy decision with an expiry
+
+/-- What a suppression names. A finding id is one finding; a rule is every finding of
+that rule; a path is a shell-style glob over normalized source paths (`*` only); a range
+is one path plus an inclusive 1-based line range. There is deliberately no "project"
+case: a suppression cannot express whole-project silence. -/
+inductive Scry.WfScopeKind where
+  | finding
+  | rule
+  | path
+  | range
+
+def Scry.WfScopeKind.show : Scry.WfScopeKind → String
+  | .finding => "finding"
+  | .rule => "rule"
+  | .path => "path"
+  | .range => "range"
+
+def Scry.WfScopeKind.parse (s : String) : Option Scry.WfScopeKind :=
+  match s with
+  | "finding" => .some .finding
+  | "rule" => .some .rule
+  | "path" => .some .path
+  | "range" => .some .range
+  | _ => .none
+
+structure Scry.WfScope where
+  kind : Scry.WfScopeKind
+  /-- The finding id, rule id, path glob, or the range's path. -/
+  value : String
+  /-- Inclusive 1-based lines; only `range` uses them. -/
+  startLine : Nat
+  endLine : Nat
+
+/-- A stable rendering used in messages, the store and the suppression id. -/
+def Scry.wfScopeKey (s : Scry.WfScope) : String :=
+  String.intercalate ":"
+    [ Scry.WfScopeKind.show s.kind, Scry.wfNormalizePath s.value
+    , Nat.repr s.startLine, Nat.repr s.endLine ]
+
+/-- A suppression is a *policy* record: it says "we choose not to report this, until
+`expires`", naming an owner and a reason. It is not evidence, not a triage state and
+never a proof that the finding is false. -/
+structure Scry.WfSuppression where
+  /-- `s_<16 hex>`, deterministic over the scope, owner, expiry and reason. -/
+  sid : String
+  reason : String
+  owner : String
+  /-- An absolute ISO date, `YYYY-MM-DD` (1970–9999). Inclusive: valid through this day. -/
+  expires : String
+  scope : Scry.WfScope
+  /-- Wall clock, nanoseconds since the epoch, first written. -/
+  created : Nat
+
 structure Scry.WfStore where
   findings : List Scry.WfRecord
+  suppressions : List Scry.WfSuppression
 
-def Scry.wfEmptyStore : Scry.WfStore := Scry.WfStore.mk .nil
+def Scry.wfEmptyStore : Scry.WfStore := Scry.WfStore.mk .nil .nil
+
+def Scry.wfScopeJson (s : Scry.WfScope) : Json :=
+  Json.mkObj
+    [ ("kind", Json.mkStr (Scry.WfScopeKind.show s.kind))
+    , ("value", Json.mkStr (Scry.wfNormalizePath s.value))
+    , ("start", Json.ofNat s.startLine)
+    , ("end", Json.ofNat s.endLine) ]
+
+def Scry.wfSuppressionJson (s : Scry.WfSuppression) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-suppression/1")
+    , ("id", Json.mkStr s.sid)
+    , ("policy", Json.mkBool .true)
+    , ("reason", Json.mkStr s.reason)
+    , ("owner", Json.mkStr s.owner)
+    , ("expires", Json.mkStr s.expires)
+    , ("scope", Scry.wfScopeJson s.scope)
+    , ("created", Json.ofNat s.created) ]
 
 def Scry.wfStoreJson (st : Scry.WfStore) : Json :=
   Json.mkObj
     [ ("schema", Json.mkStr "scry-workflow-store/1")
-    , ("findings", Json.mkArr (List.map Scry.wfRecordJson st.findings)) ]
+    , ("findings", Json.mkArr (List.map Scry.wfRecordJson st.findings))
+    , ("suppressions", Json.mkArr (List.map Scry.wfSuppressionJson st.suppressions)) ]
 
 def Scry.wfStoreText (st : Scry.WfStore) : String :=
   String.append (Json.render (Scry.wfStoreJson st)) "\n"
@@ -347,11 +421,11 @@ def Scry.wfFind (st : Scry.WfStore) (id : String) : Option Scry.WfRecord :=
 /-- Replace the record with the same id, or append it. -/
 def Scry.wfUpsert (st : Scry.WfStore) (r : Scry.WfRecord) : Scry.WfStore :=
   match Scry.wfFind st r.id with
-  | .none => Scry.WfStore.mk (List.append st.findings (List.cons r .nil))
+  | .none => { st with findings := List.append st.findings (List.cons r .nil) }
   | .some _ =>
-    Scry.WfStore.mk (List.map (fun x => match String.eq x.id r.id with
+    { st with findings := List.map (fun x => match String.eq x.id r.id with
       | .true => r
-      | .false => x) st.findings)
+      | .false => x) st.findings }
 
 -- ## JSON parsing (lenient, but the schema and id are checked)
 
@@ -401,6 +475,23 @@ partial def Scry.wfFilterMap {A B : Type} (f : A → Option B) : List A → List
     | .some y => List.cons y (Scry.wfFilterMap f xs)
     | .none => Scry.wfFilterMap f xs
 
+/-- Read a scope; a malformed scope has no kind and is skipped with its suppression. -/
+def Scry.wfScopeOfJson (j : Json) : Option Scry.WfScope :=
+  match Json.get j "scope" with
+  | .some sc => match Scry.WfScopeKind.parse (Json.getStr sc "kind") with
+    | .some k => .some (Scry.WfScope.mk k (Json.getStr sc "value")
+        (Scry.wfGetNatD sc "start" 0) (Scry.wfGetNatD sc "end" 0))
+    | .none => .none
+  | .none => .none
+
+def Scry.wfSuppressionOfJson (j : Json) : Option Scry.WfSuppression :=
+  match Json.getStr j "id", Scry.wfScopeOfJson j with
+  | "", _ => .none
+  | _, .none => .none
+  | sid, .some scope =>
+    .some (Scry.WfSuppression.mk sid (Json.getStr j "reason") (Json.getStr j "owner")
+      (Json.getStr j "expires") scope (Scry.wfGetNatD j "created" 0))
+
 def Scry.wfStoreOfText (text : String) : Except String Scry.WfStore :=
   match Json.parse text with
   | .error e => .error (String.append "findings store: " e)
@@ -408,7 +499,8 @@ def Scry.wfStoreOfText (text : String) : Except String Scry.WfStore :=
     match Json.getStr j "schema" with
     | "scry-workflow-store/1" =>
       .ok (Scry.WfStore.mk
-        (Scry.wfFilterMap Scry.wfRecordOfJson (Json.getList j "findings")))
+        (Scry.wfFilterMap Scry.wfRecordOfJson (Json.getList j "findings"))
+        (Scry.wfFilterMap Scry.wfSuppressionOfJson (Json.getList j "suppressions")))
     | other => .error (String.append "findings store: unsupported schema \"" (String.append other "\""))
 
 /-- Append a triage history entry and move the state, or return the machine's error. -/
@@ -450,3 +542,232 @@ partial def Scry.wfTakeGo (n : Nat) : List String → List String
 the dynamic "trace" the bundle keeps; it is a pointer to the log, not the whole log. -/
 def Scry.wfInteresting (n : Nat) (s : String) : List String :=
   Scry.wfTakeGo n (List.filter Scry.wfInterestingLine (Scry.wfLines s))
+
+-- ## Suppression scope, expiry and matching
+
+/-- A parsed absolute date. Only `YYYY-MM-DD` in 1970–9999 is accepted; the lower bound
+keeps the epoch-day arithmetic below a `Nat` subtraction. -/
+structure Scry.WfDate where
+  year : Nat
+  month : Nat
+  day : Nat
+
+def Scry.wfLeap (y : Nat) : Bool :=
+  Bool.or (Nat.beq (Nat.mod y 400) 0)
+    (Bool.and (Nat.beq (Nat.mod y 4) 0) (Bool.not (Nat.beq (Nat.mod y 100) 0)))
+
+def Scry.wfDaysInMonth (y m : Nat) : Nat :=
+  match m with
+  | 1 => 31
+  | 2 => match Scry.wfLeap y with | .true => 29 | .false => 28
+  | 3 => 31
+  | 4 => 30
+  | 5 => 31
+  | 6 => 30
+  | 7 => 31
+  | 8 => 31
+  | 9 => 30
+  | 10 => 31
+  | 11 => 30
+  | 12 => 31
+  | _ => 0
+
+/-- Parse a strict absolute date: four digits, two digits, two digits, a real calendar
+day. `2026-1-1`, `2026-02-30` and `2025-02-29` are all rejected. -/
+def Scry.wfParseDate (s : String) : Option Scry.WfDate :=
+  match String.splitOn s "-" with
+  | .cons ys (.cons ms (.cons ds .nil)) =>
+    match String.parseNat ys, String.parseNat ms, String.parseNat ds with
+    | .some y, .some m, .some d =>
+      let shape := Bool.and (Nat.beq (String.length ys) 4)
+        (Bool.and (Nat.beq (String.length ms) 2) (Nat.beq (String.length ds) 2));
+      let range := Bool.and (Nat.le 1970 y)
+        (Bool.and (Nat.le y 9999) (Bool.and (Nat.le 1 m)
+          (Bool.and (Nat.le m 12)
+            (Bool.and (Nat.le 1 d) (Nat.le d (Scry.wfDaysInMonth y m))))));
+      match Bool.and shape range with
+      | .true => .some (Scry.WfDate.mk y m d)
+      | .false => .none
+    | _, _, _ => .none
+  | _ => .none
+
+/-- Days since 1970-01-01 (Howard Hinnant's `days_from_civil`, non-negative branch). -/
+def Scry.wfDaysFromCivil (d : Scry.WfDate) : Nat :=
+  let y := match Nat.le d.month 2 with | .true => Nat.sub d.year 1 | .false => d.year;
+  let era := Nat.div y 400;
+  let yoe := Nat.sub y (Nat.mul era 400);
+  let mp := match Nat.le d.month 2 with | .true => Nat.add d.month 9 | .false => Nat.sub d.month 3;
+  let doy := Nat.add (Nat.div (Nat.add (Nat.mul 153 mp) 2) 5) (Nat.sub d.day 1);
+  let doe := Nat.add (Nat.sub (Nat.add (Nat.mul yoe 365) (Nat.div yoe 4))
+    (Nat.div yoe 100)) doy;
+  Nat.sub (Nat.add (Nat.mul era 146097) doe) 719468
+
+/-- Wall clock nanoseconds since the epoch to a day number (UTC). -/
+def Scry.wfDaysNow (ns : Nat) : Nat := Nat.div ns 86400000000000
+
+/-- The expiry as an epoch day, if it parses. -/
+def Scry.wfExpiryDays (s : Scry.WfSuppression) : Option Nat :=
+  match Scry.wfParseDate s.expires with
+  | .some d => .some (Scry.wfDaysFromCivil d)
+  | .none => .none
+
+/-- An expired suppression is never applied: the finding is reported again. A date that
+does not parse is also treated as expired (a bad policy record must not silence
+anything). The expiry day itself is still valid. -/
+def Scry.wfSuppressionExpired (today : Nat) (s : Scry.WfSuppression) : Bool :=
+  match Scry.wfExpiryDays s with
+  | .some d => Nat.lt d today
+  | .none => .true
+
+def Scry.wfRecordLineNo (r : Scry.WfRecord) : Nat :=
+  match Json.get r.finding "location" with
+  | .some loc => Scry.wfGetNatD loc "startLine" 0
+  | .none => 0
+
+/-- Does a scope match a finding? `path` is a `*` glob over the normalized source path;
+`range` is the same path with inclusive 1-based lines. -/
+def Scry.wfScopeMatches (sc : Scry.WfScope) (r : Scry.WfRecord) : Bool :=
+  match sc.kind with
+  | .finding => String.eq sc.value r.id
+  | .rule => String.eq sc.value (Json.getStr r.finding "rule")
+  | .path =>
+    Scry.nameMatches (Scry.wfNormalizePath sc.value) (Scry.wfNormalizePath r.source)
+  | .range =>
+    Bool.and (String.eq (Scry.wfNormalizePath sc.value) (Scry.wfNormalizePath r.source))
+      (Bool.and (Nat.le sc.startLine (Scry.wfRecordLineNo r))
+        (Nat.le (Scry.wfRecordLineNo r) sc.endLine))
+
+/-- True when the path/rule would match every finding of the project. A suppression
+cannot express whole-project silence; it must name a finding, a rule, a path or a range
+with some content. -/
+def Scry.wfGlobIsWhole (p : String) : Bool :=
+  List.isEmpty (List.filter
+    (fun c => Bool.not (Bool.or (Char.eq c (Char.mk 42)) (Char.eq c (Char.mk 47))))
+    (String.chars (Scry.wfNormalizePath p)))
+
+def Scry.wfWholeProjectScope (sc : Scry.WfScope) : Bool :=
+  match sc.kind with
+  | .finding => .false
+  | .rule => String.eq sc.value "*"
+  | .path => Scry.wfGlobIsWhole sc.value
+  | .range => Bool.or (String.eq sc.value "*") (Scry.wfGlobIsWhole sc.value)
+
+/-- Why a scope is not usable, if it is not. -/
+def Scry.wfScopeProblem (sc : Scry.WfScope) : Option String :=
+  match sc.kind with
+  | .finding =>
+    match String.eq sc.value "" with
+    | .true => .some "suppress: --scope finding needs a finding id"
+    | .false => .none
+  | .rule =>
+    match String.eq sc.value "" with
+    | .true => .some "suppress: --scope rule needs --value RULE"
+    | .false => match Scry.wfWholeProjectScope sc with
+      | .true => .some "suppress: a rule scope of \"*\" would silence the whole project; name a rule (whole-project silence is not expressible)"
+      | .false => .none
+  | .path =>
+    match String.eq sc.value "" with
+    | .true => .some "suppress: --scope path needs --value GLOB"
+    | .false => match Scry.wfWholeProjectScope sc with
+      | .true => .some "suppress: that path glob matches the whole project; name a path (whole-project silence is not expressible)"
+      | .false => .none
+  | .range =>
+    match String.eq sc.value "" with
+    | .true => .some "suppress: --scope range needs --value PATH"
+    | .false => match Scry.wfWholeProjectScope sc with
+      | .true => .some "suppress: that range path is the whole project; name a path"
+      | .false => match Bool.or (Nat.beq sc.startLine 0) (Nat.lt sc.endLine sc.startLine) with
+        | .true => .some "suppress: --scope range needs 1 <= --start <= --end"
+        | .false => .none
+
+/-- The first *active* suppression that matches `r`, in stable (insertion) order. -/
+def Scry.wfActiveSuppression (supps : List Scry.WfSuppression) (today : Nat)
+    (r : Scry.WfRecord) : Option Scry.WfSuppression :=
+  List.find (fun s => Bool.and (Bool.not (Scry.wfSuppressionExpired today s))
+    (Scry.wfScopeMatches s.scope r)) supps
+
+/-- Every expired suppression, whether or not it still matches a finding. Stale policy is
+an error even when the finding disappeared: the record still claims an expiry. -/
+def Scry.wfExpiredSuppressions (supps : List Scry.WfSuppression) (today : Nat) :
+    List Scry.WfSuppression :=
+  List.filter (Scry.wfSuppressionExpired today) supps
+
+/-- Partition records into visible ones and suppressed ones (with the suppression that
+hid each), preserving store order. -/
+partial def Scry.wfPartitionSuppressed (supps : List Scry.WfSuppression) (today : Nat) :
+    List Scry.WfRecord → List Scry.WfRecord × List (Scry.WfRecord × Scry.WfSuppression)
+  | .nil => (.nil, .nil)
+  | .cons r rest =>
+    let p := Scry.wfPartitionSuppressed supps today rest;
+    match Scry.wfActiveSuppression supps today r with
+    | .some s => (p.1, List.cons (r, s) p.2)
+    | .none => (List.cons r p.1, p.2)
+
+/-- Build a suppression record, rejecting a missing reason/owner, a malformed date and a
+scope that would silence the whole project. -/
+def Scry.wfMakeSuppression (reason owner expires : String) (scope : Scry.WfScope)
+    (now : Nat) : Except String Scry.WfSuppression :=
+  match String.eq reason "" with
+  | .true => .error "suppress: --reason is required (a suppression is a policy decision, so it must say why)"
+  | .false => match String.eq owner "" with
+    | .true => .error "suppress: --owner is required (a suppression must name who owns the decision)"
+    | .false => match Scry.wfParseDate expires with
+      | .none => .error (String.append "suppress: malformed expiry date \""
+          (String.append expires "\" (want an absolute YYYY-MM-DD date, 1970–9999)"))
+      | .some _ => match Scry.wfScopeProblem scope with
+        | .some e => .error e
+        | .none =>
+          let sid := String.append "s_" (Scry.wfHex (Scry.wfFnv
+            (String.intercalate "|" [Scry.wfScopeKey scope, owner, expires, reason])));
+          .ok (Scry.WfSuppression.mk sid reason owner expires scope now)
+
+def Scry.wfScopeText (sc : Scry.WfScope) : String :=
+  match sc.kind with
+  | .finding => String.append "finding " sc.value
+  | .rule => String.append "rule " sc.value
+  | .path => String.append "path " sc.value
+  | .range => String.intercalate ""
+      [String.append "range " sc.value, ":", Nat.repr sc.startLine, "-", Nat.repr sc.endLine]
+
+def Scry.wfSuppressionText (s : Scry.WfSuppression) : String :=
+  String.intercalate ""
+    [ s.sid, "  owner ", s.owner, "  expires ", s.expires, "  ", Scry.wfScopeText s.scope
+    , "  -- ", s.reason ]
+
+/-- Lexicographic order on strings, used only to keep the store canonical. -/
+partial def Scry.wfStrLt : List Char → List Char → Bool
+  | .nil, .nil => .false
+  | .nil, .cons _ _ => .true
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs =>
+    match Char.eq a b with
+    | .true => Scry.wfStrLt as bs
+    | .false => Nat.lt (Char.code a) (Char.code b)
+
+partial def Scry.wfInsertSupp (s : Scry.WfSuppression) :
+    List Scry.WfSuppression → List Scry.WfSuppression
+  | .nil => [s]
+  | .cons x rest =>
+    match Scry.wfStrLt (String.chars s.sid) (String.chars x.sid) with
+    | .true => List.cons s (List.cons x rest)
+    | .false => List.cons x (Scry.wfInsertSupp s rest)
+
+/-- Replace a suppression with the same id, or insert it in canonical order. -/
+def Scry.wfUpsertSuppression (st : Scry.WfStore) (s : Scry.WfSuppression) : Scry.WfStore :=
+  { st with suppressions := Scry.wfInsertSupp s
+      (List.filter (fun x => Bool.not (String.eq x.sid s.sid)) st.suppressions) }
+
+/-- Remove by suppression id. Returns the store and whether one was removed. -/
+def Scry.wfRemoveSuppression (st : Scry.WfStore) (sid : String) : Scry.WfStore × Bool :=
+  match List.find (fun s => String.eq s.sid sid) st.suppressions with
+  | .none => (st, .false)
+  | .some _ => ({ st with suppressions := List.filter
+      (fun s => Bool.not (String.eq s.sid sid)) st.suppressions }, .true)
+
+/-- Remove every suppression whose scope is this exact finding id. Returns the store and
+the number removed. -/
+def Scry.wfRemoveSuppressionFor (st : Scry.WfStore) (id : String) : Scry.WfStore × Nat :=
+  let isTarget := fun s => Bool.and (String.eq (Scry.WfScopeKind.show s.scope.kind) "finding")
+    (String.eq s.scope.value id);
+  let n := List.length (List.filter isTarget st.suppressions);
+  ({ st with suppressions := List.filter (fun s => Bool.not (isTarget s)) st.suppressions }, n)
