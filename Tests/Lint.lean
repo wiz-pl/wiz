@@ -179,7 +179,7 @@ def termClassify : String → Option (List Nat)
   | "Level" | "Option Level" => some [0, 1]
   | "List Level" | "BinderSorts" => some [0, 2]
   | "Option (Name × List Level × List (Term R))" => some [2, 2]
-  | "Name" | "Nat" | "BinderInfo" | "R" | "List Name" => some [0, 0]
+  | "Name" | "Nat" | "Bool" | "BinderInfo" | "R" | "List Name" => some [0, 0]
   | _ => none
 
 /-- One row per constructor of `Term`, in the order of `Wiz/Core/Term.lean`. -/
@@ -220,9 +220,9 @@ def termTable : List TermRow := [
   ⟨"drec", [0, 0, 0], 0, fun c _ => .drec (c 0) (c 1) (c 2)⟩,
   ⟨"dhrec", [0, 0, 0, 0], 0, fun c _ => .dhrec (c 0) (c 1) (c 2) (c 3)⟩,
   ⟨"delim", [0, 0, 0, 0, 0, 0], 1, fun c l => .delim (l 0) (c 0) (c 1) (c 2) (c 3) (c 4) (c 5)⟩,
-  ⟨"mu", [0, 0, 0, 0, 0, 0], 3, fun c l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
+  ⟨"mu", [0, 0, 0, 0, 0, 0], 3, fun c l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5])) false⟩,
   ⟨"con", [0], 0, fun c _ => .con (c 0)⟩,
-  ⟨"ind", [0, 0, 0, 0, 0, 0], 2, fun c l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5)⟩,
+  ⟨"ind", [0, 0, 0, 0, 0, 0], 2, fun c l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) false⟩,
   ⟨"nu", [0, 0, 0, 0, 0, 0], 3, fun c l => .nu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
   ⟨"out", [0], 0, fun c _ => .out (c 0)⟩,
   ⟨"size", [], 0, fun _ _ => .size⟩,
@@ -422,7 +422,7 @@ def valClassify : String → Option (List Nat)
   -- fields describe (an unfolding, a proof's value); an `ecase`'s branches and a
   -- suspended proof's term are closed by the environment next to them
   | "Head R" | "Array (Elim R)" | "Thunk (Val R)" | "List (Term R)" | "Term R" => some [0, 0, 0]
-  | "Name" | "Nat" | "Lvl" | "BinderInfo" | "R" | "List Name" => some [0, 0, 0]
+  | "Name" | "Nat" | "Bool" | "Lvl" | "BinderInfo" | "R" | "List Name" => some [0, 0, 0]
   | _ => none
 
 def thunk (v : Val R) : Thunk (Val R) := Thunk.mk fun _ => v
@@ -447,7 +447,7 @@ def valTable : List ValRow := [
   ⟨"darg", 3, [], 0, fun c _ _ => .darg (c 0) (c 1) (c 2)⟩,
   ⟨"drec", 3, [], 0, fun c _ _ => .drec (c 0) (c 1) (c 2)⟩,
   ⟨"dhrec", 4, [], 0, fun c _ _ => .dhrec (c 0) (c 1) (c 2) (c 3)⟩,
-  ⟨"mu", 6, [], 3, fun c _ l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
+  ⟨"mu", 6, [], 3, fun c _ l => .mu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5])) false⟩,
   ⟨"con", 1, [], 0, fun c _ _ => .con (c 0)⟩,
   ⟨"nu", 6, [], 3, fun c _ l => .nu (l 0) (c 0) (c 1) (c 2) (c 3) (some ("T", [l 1, l 2], [c 4, c 5]))⟩,
   ⟨"size", 0, [], 0, fun _ _ _ => .size⟩,
@@ -461,7 +461,7 @@ def valTable : List ValRow := [
   ⟨"ulift", 1, [], 2, fun c _ l => .ulift (l 0) (l 1) (c 0)⟩,
   ⟨"up", 1, [], 0, fun c _ _ => .up (c 0)⟩,
   ⟨"unfold", 0, [], 2, fun _ _ l => .unfold "f" [l 0, l 1] #[] (thunk stuck)⟩,
-  ⟨"lazyInd", 6, [], 2, fun c _ l => .lazyInd (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) #[] (thunk stuck)⟩
+  ⟨"lazyInd", 6, [], 2, fun c _ l => .lazyInd (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5) false #[] (thunk stuck)⟩
 ]
 
 def headTable : List ValRow := [
@@ -495,7 +495,7 @@ def elimTable : List ElimRow := [
   -- one branch, `var 0`, in the environment `[c 0]`
   ⟨"ecase", 1, [1], 0, fun c k _ => .ecase "z" (k 0) [c 0] [.var 0]⟩,
   ⟨"delim", 5, [], 1, fun c _ l => .delim (l 0) (c 0) (c 1) (c 2) (c 3) (c 4)⟩,
-  ⟨"ind", 5, [], 2, fun c _ l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4)⟩,
+  ⟨"ind", 5, [], 2, fun c _ l => .ind (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) false⟩,
   ⟨"sfix", 6, [], 2, fun c _ l => .sfix (l 0) (c 0) (c 1) (l 1) (c 2) (c 3) (c 4) (c 5)⟩,
   ⟨"scase", 7, [], 2, fun c _ l => .scase (l 0) (c 0) (c 1) (c 2) (l 1) (c 3) (c 4) (c 5) (c 6)⟩,
   ⟨"out", 0, [], 0, fun _ _ _ => .out⟩,
@@ -907,7 +907,7 @@ def panicSites : List (String × Term R) := [
   ("vEcase", .ecase "z" .tt .tt []),
   ("vEcase-tag", .ecase "z" .tt (.tag [] 0) []),
   ("vDelim", .delim .zero .tt .tt .tt .tt .tt .tt),
-  ("vInd", .ind .zero .tt .tt .zero .tt .tt .tt .tt),
+  ("vInd", .ind .zero .tt .tt .zero .tt .tt .tt .tt false),
   ("vSfix", .sfix .zero .tt .tt .zero .tt .tt .tt .tt .tt),
   ("vScase", .scase .zero .tt .tt .tt .zero .tt .tt .tt .tt .tt),
   ("vOut", .out .tt),
@@ -917,7 +917,7 @@ def panicSites : List (String × Term R) := [
 def hintCarrier (X : Term R) : Decl R :=
   { name := "carrier", value := none
     type := .pi "x" .default (.qlit .one)
-      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X]))) (.unit 1) ⟨1, 1⟩ }
+      (.mu 0 (.unit 1) (.dret .tt) .tt .szInf (some ("hint", [], [X])) false) (.unit 1) ⟨1, 1⟩ }
 
 /-- `tests --panic-probe MODE SITE`: check `hintCarrier` of the site's term (`eval`: just
 evaluate `fst ()` and print the constructor of the value; `eval:SITE`: evaluate the site's
@@ -997,7 +997,7 @@ def lintGroup : Group where
           -- a lazyInd's spine is read back only for app/fst/snd/down (`quote`'s default
           -- arm drops the rest): so no eliminator may push anything else onto it. Apply
           -- each elimination to a lazyInd, as the evaluator does, and read the result back.
-          let lz : Val R := .lazyInd .zero plainV plainV .zero plainV plainV plainV plainV #[] (thunk stuck)
+          let lz : Val R := .lazyInd .zero plainV plainV .zero plainV plainV plainV plainV false #[] (thunk stuck)
           checkValRows "Elim (applied to a lazyInd)" (elimTable.map (·.toValRow fun e => vElims (semGlobals false) lz #[e])) },
     { name := "type equality: `T = T` never computes to False, for any value constructor", run := fun _ =>
         -- (`vEqType`'s last case answers `False` for two canonical types that no case
