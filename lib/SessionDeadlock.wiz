@@ -1,0 +1,469 @@
+import Nat
+import Session
+
+def Ex1 {A : Type 1} (P : A → Prop) : Prop := (0 R : Prop) → ((a : A) → P a → R) → R
+def Ex1.intro {A : Type 1} (0 P : A → Prop) (a : A) (h : P a) : Ex1 P := fun R k => k a h
+
+def subst1 {A : Type 1} (0 P : A → Prop) {a b : A} (e : a = b) (pa : P a) : P b :=
+  (@congrArg A Prop P b a (transp (fun b _ => b = a) (refl a) e)).2 pa
+
+inductive Ctx : Type 1 where
+  | nil
+  | cons (c : Nat) (p : Proto) (rest : Ctx)
+
+def Ctx.app : Ctx → Ctx → Ctx
+  | .nil, d => d
+  | .cons c p r, d => .cons c p (Ctx.app r d)
+
+def Ctx.names : Ctx → List Nat
+  | .nil => []
+  | .cons c _ r => List.cons c (Ctx.names r)
+
+def Here (K : Ctx → Type 1) (pre post : Ctx) (c : Nat) : Proto → Type 1
+  | .send A k => (a : A) × K (Ctx.app pre (.cons c (k a) post))
+  | .recv A k => (a : A) → K (Ctx.app pre (.cons c (k a) post))
+  | .done => K (Ctx.app pre post)
+
+def Ctx.toChild : List Bool → Ctx → Ctx
+  | .cons .true m, .cons c p r => .cons c p (Ctx.toChild m r)
+  | .cons .false m, .cons c p r => Ctx.toChild m r
+  | .nil, _ => .nil
+  | .cons _ _, .nil => .nil
+
+def Ctx.toParent : List Bool → Ctx → Ctx
+  | .cons .true m, .cons c p r => Ctx.toParent m r
+  | .cons .false m, .cons c p r => .cons c p (Ctx.toParent m r)
+  | .nil, r => r
+  | .cons _ _, .nil => .nil
+
+inductive Act (K : Ctx → Type 1) (Γ : Ctx) : Type 1 where
+  | ret (0 h : Γ = Ctx.nil)
+  | fork (p : Proto) (m : List Bool) (child : (c : Nat) → K (.cons c (Proto.dual p) (Ctx.toChild m Γ)))
+      (parent : (c : Nat) → K (.cons c p (Ctx.toParent m Γ)))
+  | act (pre post : Ctx) (c : Nat) (p : Proto) (0 h : Γ = Ctx.app pre (.cons c p post)) (x : Here K pre post c p)
+
+inductive Halt (Γ : Ctx) : Type 1 where
+  | mk (0 h : Γ = Ctx.nil)
+
+def Th : Nat → Ctx → Type 1
+  | .zero => fun Γ => Halt Γ
+  | .succ n => fun Γ => Act (Th n) Γ
+
+inductive Thread : Type 1 where
+  | mk (n : Nat) (Γ : Ctx) (t : Th n Γ)
+
+
+def Thread.names : Thread → List Nat
+  | .mk _ Γ _ => Ctx.names Γ
+
+inductive Cfg : Type 1 where
+  | nil
+  | cons (t : Thread) (rest : Cfg)
+
+def Cfg.len : Cfg → Nat
+  | .nil => 0
+  | .cons _ r => Nat.succ (Cfg.len r)
+
+def Cfg.set : Cfg → Nat → Thread → Cfg
+  | .nil, _, _ => .nil
+  | .cons _ r, .zero, u => .cons u r
+  | .cons t r, .succ i, u => .cons t (Cfg.set r i u)
+
+def Cfg.snoc : Cfg → Thread → Cfg
+  | .nil, u => .cons u .nil
+  | .cons t r, u => .cons t (Cfg.snoc r u)
+
+def IsAt : Cfg → Nat → Thread → Prop
+  | .nil, _, _ => False
+  | .cons t _, .zero, u => t = u
+  | .cons _ r, .succ i, u => IsAt r i u
+
+def Mem (x : Nat) : List Nat → Prop
+  | .nil => False
+  | .cons y ys => x = y ∨ Mem x ys
+
+def Holds : Cfg → Nat → Nat → Prop
+  | .nil, _, _ => False
+  | .cons t _, .zero, c => Mem c (Thread.names t)
+  | .cons _ r, .succ i, c => Holds r i c
+
+def maxL : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => Nat.max x (maxL xs)
+
+def Cfg.maxName : Cfg → Nat
+  | .nil => 0
+  | .cons t r => Nat.max (maxL (Thread.names t)) (Cfg.maxName r)
+
+def Cfg.fresh (C : Cfg) : Nat := Nat.succ (Cfg.maxName C)
+
+def castT {A B : Type} (0 e : A = B) (a : A) : B := cast e a
+
+inductive Step : Cfg → Cfg → Prop where
+  | fork (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool)
+      (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ)))
+      (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ)))
+      (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) :
+      Step C (Cfg.snoc (Cfg.set C i (.mk n _ (pa (Cfg.fresh C)))) (.mk n _ (ch (Cfg.fresh C))))
+  | comm (C : Cfg) (i j c1 c2 n1 n2 : Nat) (Γ1 Γ2 pre1 post1 pre2 post2 : Ctx)
+      (A B : Type) (k : A → Proto) (g : B → Proto)
+      (h1 : Γ1 = Ctx.app pre1 (.cons c1 (.send A k) post1))
+      (h2 : Γ2 = Ctx.app pre2 (.cons c2 (.recv B g) post2))
+      (x : (a : A) × Th n1 (Ctx.app pre1 (.cons c1 (k a) post1)))
+      (f : (b : B) → Th n2 (Ctx.app pre2 (.cons c2 (g b) post2)))
+      (e : A = B) (ne : Not (i = j)) (ec : c1 = c2)
+      (hi : IsAt C i (.mk (.succ n1) Γ1 (Act.act pre1 post1 c1 (.send A k) h1 x)))
+      (hj : IsAt C j (.mk (.succ n2) Γ2 (Act.act pre2 post2 c2 (.recv B g) h2 f))) :
+      Step C (Cfg.set (Cfg.set C i (.mk n1 _ x.2)) j (.mk n2 _ (f (castT e x.1))))
+  | close (C : Cfg) (i j c1 c2 n1 n2 : Nat) (Γ1 Γ2 pre1 post1 pre2 post2 : Ctx)
+      (h1 : Γ1 = Ctx.app pre1 (.cons c1 .done post1))
+      (h2 : Γ2 = Ctx.app pre2 (.cons c2 .done post2))
+      (t1 : Th n1 (Ctx.app pre1 post1)) (t2 : Th n2 (Ctx.app pre2 post2))
+      (ne : Not (i = j)) (ec : c1 = c2)
+      (hi : IsAt C i (.mk (.succ n1) Γ1 (Act.act pre1 post1 c1 .done h1 t1)))
+      (hj : IsAt C j (.mk (.succ n2) Γ2 (Act.act pre2 post2 c2 .done h2 t2))) :
+      Step C (Cfg.set (Cfg.set C i (.mk n1 _ t1)) j (.mk n2 _ t2))
+
+def HasStep (C : Cfg) : Prop := Ex1 (fun D => Step C D)
+
+-- typing
+def DualR : Proto → Proto → Prop
+  | .send A k, .recv B g => (e : A = B) × ((a : A) → DualR (k a) (g (castT e a)))
+  | .recv A k, .send B g => (e : B = A) × ((b : B) → DualR (k (castT e b)) (g b))
+  | .done, .done => True
+  | .send _ _, .send _ _ => False
+  | .send _ _, .done => False
+  | .recv _ _, .recv _ _ => False
+  | .recv _ _, .done => False
+  | .done, .send _ _ => False
+  | .done, .recv _ _ => False
+
+def InCtx (c : Nat) (p : Proto) : Ctx → Prop
+  | .nil => False
+  | .cons c' p' r => (c = c' ∧ p = p') ∨ InCtx c p r
+
+def Thread.ctx : Thread → Ctx
+  | .mk _ Γ _ => Γ
+
+def HasEnd : Cfg → Nat → Nat → Proto → Prop
+  | .nil, _, _, _ => False
+  | .cons t _, .zero, c, p => InCtx c p (Thread.ctx t)
+  | .cons _ r, .succ i, c, p => HasEnd r i c p
+
+def Typed (C : Cfg) : Prop :=
+  (i j c : Nat) → (p q : Proto) → Not (i = j) → HasEnd C i c p → HasEnd C j c q → DualR p q
+
+-- thread views
+def Act.isDone {K : Ctx → Type 1} {Γ : Ctx} : Act K Γ → Prop
+  | .ret _ => True
+  | .fork _ _ _ _ => False
+  | .act _ _ _ _ _ _ => False
+def Act.isFork {K : Ctx → Type 1} {Γ : Ctx} : Act K Γ → Prop
+  | .ret _ => False
+  | .fork _ _ _ _ => True
+  | .act _ _ _ _ _ _ => False
+def Act.readyOn {K : Ctx → Type 1} {Γ : Ctx} (c : Nat) (p : Proto) : Act K Γ → Prop
+  | .ret _ => False
+  | .fork _ _ _ _ => False
+  | .act _ _ c' p' _ _ => c = c' ∧ p = p'
+
+def Thread.isDone : Thread → Prop
+  | .mk .zero _ _ => True
+  | .mk (.succ n) Γ t => Act.isDone t
+def Thread.isFork : Thread → Prop
+  | .mk .zero _ _ => False
+  | .mk (.succ n) Γ t => Act.isFork t
+def Thread.readyOn (c : Nat) (p : Proto) : Thread → Prop
+  | .mk .zero _ _ => False
+  | .mk (.succ n) Γ t => Act.readyOn c p t
+
+def ReadyEx (T : Thread) : Prop := Ex (fun c => Ex1 (fun p => Thread.readyOn c p T))
+
+def readyEx (T : Thread) (c : Nat) (p : Proto) (h : Thread.readyOn c p T) : ReadyEx T :=
+  Ex.intro (fun c0 => Ex1 (fun p0 => Thread.readyOn c0 p0 T)) c (Ex1.intro (fun p0 => Thread.readyOn c p0 T) p h)
+
+def Thread.classify : (T : Thread) → Thread.isDone T ∨ (Thread.isFork T ∨ ReadyEx T)
+  | .mk .zero _ _ => Or.inl True.intro
+  | .mk (.succ n) Γ (.ret _) => Or.inl True.intro
+  | .mk (.succ n) Γ (.fork _ _ _ _) => Or.inr (Or.inl True.intro)
+  | .mk (.succ n) Γ (.act pr po cc pp hh xx) =>
+      Or.inr (Or.inr (readyEx (Thread.mk (Nat.succ n) Γ (Act.act pr po cc pp hh xx)) cc pp (refl cc, refl pp)))
+
+def tr1 {A : Type 1} (0 P : A → Prop) (a b : A) (e : a = b) (pa : P a) : P b := subst1 P e pa
+
+def sym1 {A : Type 1} {a b : A} (e : a = b) : b = a := transp (fun b _ => b = a) (refl a) e
+
+def Nat.decEq : (m n : Nat) → (m = n) ∨ Not (m = n)
+  | .zero, .zero => Or.inl (refl 0)
+  | .zero, .succ _ => Or.inr (fun h => absurd h.1)
+  | .succ _, .zero => Or.inr (fun h => absurd h.1)
+  | .succ m, .succ n => Or.elim (Nat.decEq m n) (fun e => Or.inl (congrArg Nat.succ e)) (fun ne => Or.inr (fun e => ne (Nat.succ_inj e)))
+
+def memOfInCtx (c : Nat) (p : Proto) : (Γ : Ctx) → InCtx c p Γ → Mem c (Ctx.names Γ)
+  | .nil, h => h
+  | .cons c' p' r, h => Or.elim h (fun e => Or.inl e.1) (fun h' => Or.inr (memOfInCtx c p r h'))
+
+def inCtxMid (c cc : Nat) (p pp : Proto) (ec : c = cc) (ep : p = pp) (po : Ctx) : (pr : Ctx) → InCtx c p (Ctx.app pr (.cons cc pp po))
+  | .nil => Or.inl (ec, ep)
+  | .cons _ _ r => Or.inr (inCtxMid c cc p pp ec ep po r)
+
+def Thread.readyEnd (c : Nat) (p : Proto) : (T : Thread) → Thread.readyOn c p T → InCtx c p (Thread.ctx T)
+  | .mk .zero _ _, h => absurd h
+  | .mk (.succ n) Γ (.ret _), h => absurd h
+  | .mk (.succ n) Γ (.fork _ _ _ _), h => absurd h
+  | .mk (.succ n) Γ (.act pr po cc pp hh xx), h =>
+      subst1 (fun D => InCtx c p D) (sym1 hh) (inCtxMid c cc p pp h.1 h.2 po pr)
+
+def Thread.doneNoHold (c : Nat) : (T : Thread) → Thread.isDone T → Mem c (Thread.names T) → False
+  | .mk .zero Γ (.mk hh), _, m => tr1 (fun (D : Ctx) => Mem c (Ctx.names D)) Γ Ctx.nil hh m
+  | .mk (.succ n) Γ (.ret hh), _, m => tr1 (fun (D : Ctx) => Mem c (Ctx.names D)) Γ Ctx.nil hh m
+  | .mk (.succ n) Γ (.fork _ _ _ _), h, _ => absurd h
+  | .mk (.succ n) Γ (.act _ _ _ _ _ _), h, _ => absurd h
+
+def hasEndOfAt (c : Nat) (p : Proto) : (C : Cfg) → (i : Nat) → (T : Thread) → IsAt C i T → InCtx c p (Thread.ctx T) → HasEnd C i c p
+  | .nil, _, _, h, _ => absurd h
+  | .cons t _, .zero, T, h, m => tr1 (fun (U : Thread) => InCtx c p (Thread.ctx U)) T t (sym1 h) m
+  | .cons _ r, .succ i, T, h, m => hasEndOfAt c p r i T h m
+
+def holdsOfAt (c : Nat) : (C : Cfg) → (i : Nat) → (T : Thread) → IsAt C i T → Mem c (Thread.names T) → Holds C i c
+  | .nil, _, _, h, _ => absurd h
+  | .cons t _, .zero, T, h, m => tr1 (fun (U : Thread) => Mem c (Thread.names U)) T t (sym1 h) m
+  | .cons _ r, .succ i, T, h, m => holdsOfAt c r i T h m
+
+def AtHolding (C : Cfg) (i c : Nat) : Prop := Ex1 (fun T => IsAt C i T ∧ Mem c (Thread.names T))
+
+def atOfHolds (c : Nat) : (C : Cfg) → (i : Nat) → Holds C i c → AtHolding C i c
+  | .nil, _, h => absurd h
+  | .cons t _, .zero, h => Ex1.intro (fun T => IsAt (Cfg.cons t _) 0 T ∧ Mem c (Thread.names T)) t (refl t, h)
+  | .cons _ r, .succ i, h => atOfHolds c r i h
+
+def pairAct (C : Cfg) (i j c1 c2 n1 n2 : Nat) (Γ1 Γ2 pre1 post1 pre2 post2 : Ctx) (ne : Not (i = j)) (ec : c1 = c2) :
+    (p q : Proto) → (h1 : Γ1 = Ctx.app pre1 (.cons c1 p post1)) → (h2 : Γ2 = Ctx.app pre2 (.cons c2 q post2)) →
+    (x1 : Here (Th n1) pre1 post1 c1 p) → (x2 : Here (Th n2) pre2 post2 c2 q) → DualR p q →
+    IsAt C i (.mk (.succ n1) Γ1 (Act.act pre1 post1 c1 p h1 x1)) →
+    IsAt C j (.mk (.succ n2) Γ2 (Act.act pre2 post2 c2 q h2 x2)) → HasStep C
+  | .send A k, .recv B g, h1, h2, x1, x2, w, hi, hj =>
+      Ex1.intro (fun D => Step C D) _
+        (Step.comm C i j c1 c2 n1 n2 Γ1 Γ2 pre1 post1 pre2 post2 A B k g h1 h2 x1 x2 w.1 ne ec hi hj)
+  | .recv A k, .send B g, h1, h2, x1, x2, w, hi, hj =>
+      Ex1.intro (fun D => Step C D) _
+        (Step.comm C j i c2 c1 n2 n1 Γ2 Γ1 pre2 post2 pre1 post1 B A g k h2 h1 x2 x1 w.1
+          (fun e => ne (Eq.symm e)) (Eq.symm ec) hj hi)
+  | .done, .done, h1, h2, x1, x2, w, hi, hj =>
+      Ex1.intro (fun D => Step C D) _
+        (Step.close C i j c1 c2 n1 n2 Γ1 Γ2 pre1 post1 pre2 post2 h1 h2 x1 x2 ne ec hi hj)
+  | .send _ _, .send _ _, _, _, _, _, w, _, _ => absurd w
+  | .send _ _, .done, _, _, _, _, w, _, _ => absurd w
+  | .recv _ _, .recv _ _, _, _, _, _, w, _, _ => absurd w
+  | .recv _ _, .done, _, _, _, _, w, _, _ => absurd w
+  | .done, .send _ _, _, _, _, _, w, _, _ => absurd w
+  | .done, .recv _ _, _, _, _, _, w, _, _ => absurd w
+
+def pairT2 (C : Cfg) (i j c n1 : Nat) (Γ1 pre1 post1 : Ctx) (c1 : Nat) (p1 : Proto)
+    (h1 : Γ1 = Ctx.app pre1 (.cons c1 p1 post1)) (x1 : Here (Th n1) pre1 post1 c1 p1) (ne : Not (i = j)) (ec1 : c = c1)
+    (q : Proto) (hi : IsAt C i (.mk (.succ n1) Γ1 (Act.act pre1 post1 c1 p1 h1 x1))) :
+    (T : Thread) → IsAt C j T → Thread.readyOn c q T → DualR p1 q → HasStep C
+  | .mk .zero _ _, _, r, _ => absurd r
+  | .mk (.succ n) Γ (.ret _), _, r, _ => absurd r
+  | .mk (.succ n) Γ (.fork _ _ _ _), _, r, _ => absurd r
+  | .mk (.succ n) Γ (.act pr po cc qq hh xx), hj, r, w =>
+      pairAct C i j c1 cc n1 n Γ1 Γ pre1 post1 pr po ne (Eq.trans (Eq.symm ec1) r.1) p1 qq h1 hh x1 xx
+        (tr1 (fun (s : Proto) => DualR p1 s) q qq r.2 w) hi hj
+
+def pairT (C : Cfg) (i j c : Nat) (p q : Proto) (ne : Not (i = j)) (T2 : Thread) (hj : IsAt C j T2)
+    (r2 : Thread.readyOn c q T2) : (T : Thread) → IsAt C i T → Thread.readyOn c p T → DualR p q → HasStep C
+  | .mk .zero _ _, _, r, _ => absurd r
+  | .mk (.succ n) Γ (.ret _), _, r, _ => absurd r
+  | .mk (.succ n) Γ (.fork _ _ _ _), _, r, _ => absurd r
+  | .mk (.succ n) Γ (.act pr po cc pp hh xx), hi, r, w =>
+      pairT2 C i j c n Γ pr po cc pp hh xx ne r.1 q hi T2 hj r2 (tr1 (fun (s : Proto) => DualR s q) p pp r.2 w)
+
+def forkStep (C : Cfg) (i : Nat) : (T : Thread) → IsAt C i T → Thread.isFork T → HasStep C
+  | .mk .zero _ _, _, r => absurd r
+  | .mk (.succ n) Γ (.ret _), _, r => absurd r
+  | .mk (.succ n) Γ (.act _ _ _ _ _ _), _, r => absurd r
+  | .mk (.succ n) Γ (.fork p m ch pa), hi, _ =>
+      Ex1.intro (fun D => Step C D) _ (Step.fork C i n Γ p m ch pa hi)
+
+def Ex1.elim {A : Type 1} {P : A → Prop} {0 R : Prop} (h : Ex1 P) (k : (a : A) → P a → R) : R := h R k
+
+-- ## The connectivity graph
+
+def Closed (C : Cfg) : Prop := (i c : Nat) → Holds C i c → Ex (fun j => Not (i = j) ∧ Holds C j c)
+
+def Nodup : List Nat → Prop
+  | .nil => True
+  | .cons x xs => Not (Mem x xs) ∧ Nodup xs
+
+def Orient (C : Cfg) (rk par : Nat → Nat) : Prop :=
+  (i j c : Nat) → Holds C i c → Holds C j c → Not (i = j) →
+    (par c = i ∧ Nat.Lt (rk i) (rk j)) ∨ (par c = j ∧ Nat.Lt (rk j) (rk i))
+def OneUp (C : Cfg) (par : Nat → Nat) : Prop :=
+  (i c d : Nat) → Holds C i c → Holds C i d → Not (par c = i) → Not (par d = i) → c = d
+def NoLoops (C : Cfg) : Prop := (i : Nat) → (T : Thread) → IsAt C i T → Nodup (Thread.names T)
+
+def Good (C : Cfg) (rk par : Nat → Nat) : Prop := Orient C rk par ∧ (OneUp C par ∧ NoLoops C)
+
+def Acyclic (C : Cfg) : Prop := Ex (fun (rk : Nat → Nat) => Ex (fun (par : Nat → Nat) => Good C rk par))
+
+def Final (C : Cfg) : Prop := (i : Nat) → (T : Thread) → IsAt C i T → Thread.isDone T
+
+-- ## Progress
+
+def ReadyAt (C : Cfg) (i c : Nat) (p : Proto) : Prop := Ex1 (fun T => IsAt C i T ∧ Thread.readyOn c p T)
+
+def Thread.memNames (c : Nat) : (T : Thread) → Mem c (Ctx.names (Thread.ctx T)) → Mem c (Thread.names T)
+  | .mk _ _ _, m => m
+
+def readyHolds (C : Cfg) (i c : Nat) (p : Proto) (r : ReadyAt C i c p) : Holds C i c :=
+  Ex1.elim r (fun T h => holdsOfAt c C i T h.1
+    (Thread.memNames c T (memOfInCtx c p (Thread.ctx T) (Thread.readyEnd c p T h.2))))
+
+def readyHasEnd (C : Cfg) (i c : Nat) (p : Proto) (r : ReadyAt C i c p) : HasEnd C i c p :=
+  Ex1.elim r (fun T h => hasEndOfAt c p C i T h.1 (Thread.readyEnd c p T h.2))
+
+def pairAt (C : Cfg) (ty : Typed C) (i j c : Nat) (p q : Proto) (ri : ReadyAt C i c p) (rj : ReadyAt C j c q)
+    (ne : Not (i = j)) : HasStep C :=
+  Ex1.elim ri (fun T1 h1 => Ex1.elim rj (fun T2 h2 =>
+    pairT C i j c p q ne T2 h2.1 h2.2 T1 h1.1 h1.2
+      (ty i j c p q ne (readyHasEnd C i c p ri) (readyHasEnd C j c q rj))))
+
+def StatusAt (C : Cfg) (i : Nat) : Prop := Ex (fun c => Ex1 (fun p => ReadyAt C i c p))
+
+def statusAt (C : Cfg) (i c0 : Nat) (h : Holds C i c0) : HasStep C ∨ StatusAt C i :=
+  Ex1.elim (atOfHolds c0 C i h) (fun T hT =>
+    Or.elim (Thread.classify T)
+      (fun d => absurd (Thread.doneNoHold c0 T d hT.2))
+      (fun r => Or.elim r
+        (fun f => Or.inl (forkStep C i T hT.1 f))
+        (fun ex => Or.inr (Ex.elim ex (fun (c : Nat) (ex1 : Ex1 (fun p => Thread.readyOn c p T)) => Ex1.elim ex1 (fun (p : Proto) (rp : Thread.readyOn c p T) =>
+          Ex.intro (fun (c' : Nat) => Ex1 (fun (p' : Proto) => ReadyAt C i c' p')) c
+            (Ex1.intro (fun (p' : Proto) => ReadyAt C i c p') p
+              (Ex1.intro (fun (U : Thread) => IsAt C i U ∧ Thread.readyOn c p U) T (hT.1, rp)))))))))
+
+-- ## Ranks are bounded
+
+def mx : Nat → Nat → Nat
+  | .zero, n => n
+  | .succ m, .zero => .succ m
+  | .succ m, .succ n => .succ (mx m n)
+
+def le_mx_l : (m n : Nat) → Nat.Le m (mx m n)
+  | .zero, n => Nat.zero_le n
+  | .succ m, .zero => Nat.le_refl (Nat.succ m)
+  | .succ m, .succ n => le_mx_l m n
+
+def le_mx_r : (m n : Nat) → Nat.Le n (mx m n)
+  | .zero, n => Nat.le_refl n
+  | .succ m, .zero => Nat.zero_le (Nat.succ m)
+  | .succ m, .succ n => le_mx_r m n
+
+def maxRk (rk : Nat → Nat) : Nat → Nat
+  | .zero => 0
+  | .succ n => mx (rk n) (maxRk rk n)
+
+def lt_of_le_ne : (i n : Nat) → Nat.Le i n → Not (i = n) → Nat.Lt i n
+  | .zero, .zero, _, ne => absurd (ne (refl 0))
+  | .zero, .succ n, _, _ => rfl
+  | .succ i, .zero, h, _ => absurd (Nat.not_succ_le_zero i h)
+  | .succ i, .succ n, h, ne => lt_of_le_ne i n h (fun e => ne (congrArg Nat.succ e))
+
+def rkLe (rk : Nat → Nat) : (n i : Nat) → Nat.Lt i n → Nat.Le (rk i) (maxRk rk n)
+  | .zero, i, h => absurd (Nat.not_succ_le_zero i h)
+  | .succ n, i, h => Or.elim (Nat.decEq i n)
+      (fun e => Eq.substProp (fun (x : Nat) => Nat.Le (rk x) (maxRk rk (Nat.succ n))) (Eq.symm e) (le_mx_l (rk n) (maxRk rk n)))
+      (fun ne => Nat.le_trans (rk i) (maxRk rk n) (maxRk rk (Nat.succ n)) (rkLe rk n i (lt_of_le_ne i n h ne)) (le_mx_r (rk n) (maxRk rk n)))
+
+def holdsLt (c : Nat) : (C : Cfg) → (i : Nat) → Holds C i c → Nat.Lt i (Cfg.len C)
+  | .nil, _, h => absurd h
+  | .cons _ _, .zero, _ => rfl
+  | .cons _ r, .succ i, h => holdsLt c r i h
+
+def addSuccSwap (a k : Nat) : a + Nat.succ k = Nat.succ a + k :=
+  Nat.add_succ a k
+
+def Bound (C : Cfg) (rk : Nat → Nat) (M : Nat) : Prop := (i c : Nat) → Holds C i c → Nat.Le (rk i) M
+
+def childLt (C : Cfg) (rk par : Nat → Nat) (g : Good C rk par) (x y c : Nat) (e : par c = x)
+    (hx : Holds C x c) (hy : Holds C y c) (ne : Not (x = y)) : Nat.Lt (rk x) (rk y) :=
+  Or.elim (g.1 x y c hx hy ne) (fun h => h.2) (fun h => absurd (ne (Eq.trans (Eq.symm e) h.1)))
+
+def downCore (C : Cfg) (rk par : Nat → Nat) (ty : Typed C) (cl : Closed C) (g : Good C rk par)
+    (x c0 : Nat) (hx : Holds C x c0) (np : Not (par c0 = x))
+    (child : (c y : Nat) → (p : Proto) → ReadyAt C x c p → Not (x = y) → Holds C y c → Not (par c = y) →
+      Nat.Lt (rk x) (rk y) → HasStep C) :
+    HasStep C ∨ Ex1 (fun (p : Proto) => ReadyAt C x c0 p) :=
+  Or.elim (statusAt C x c0 hx) (fun s => Or.inl s) (fun st =>
+    Ex.elim st (fun (c : Nat) (ex1 : Ex1 (fun (p : Proto) => ReadyAt C x c p)) =>
+      Ex1.elim ex1 (fun (p : Proto) (r : ReadyAt C x c p) =>
+        Or.elim (Nat.decEq (par c) x)
+          (fun (e : par c = x) => Ex.elim (cl x c (readyHolds C x c p r))
+            (fun (y : Nat) (hy : Not (x = y) ∧ Holds C y c) =>
+              Or.inl (child c y p r hy.1 hy.2 (fun e' => hy.1 (Eq.trans (Eq.symm e) e'))
+                (childLt C rk par g x y c e (readyHolds C x c p r) hy.2 hy.1))))
+          (fun (ne : Not (par c = x)) => Or.inr (Ex1.intro (fun (q : Proto) => ReadyAt C x c0 q) p
+            (Eq.substProp (fun (d : Nat) => ReadyAt C x d p) (g.2.1 x c c0 (readyHolds C x c p r) hx ne np) r))))))
+
+def down (C : Cfg) (rk par : Nat → Nat) (M : Nat) (ty : Typed C) (cl : Closed C) (g : Good C rk par)
+    (bd : Bound C rk M) : (k x c0 : Nat) → Holds C x c0 → Not (par c0 = x) → Nat.Le M (rk x + k) →
+    HasStep C ∨ Ex1 (fun (p : Proto) => ReadyAt C x c0 p)
+  | .zero, x, c0, hx, np, hM => downCore C rk par ty cl g x c0 hx np
+      (fun c y p r ne hy npy lt => absurd (Nat.lt_irrefl (rk x)
+        (Nat.lt_of_lt_of_le (rk x) (rk y) (rk x) lt (Nat.le_trans (rk y) M (rk x) (bd y c hy)
+          (Eq.substProp (fun (z : Nat) => Nat.Le M z) (Nat.add_zero (rk x)) hM)))))
+  | .succ k, x, c0, hx, np, hM => downCore C rk par ty cl g x c0 hx np
+      (fun c y p r ne hy npy lt => Or.elim
+        (down C rk par M ty cl g bd k y c hy npy
+          (Nat.le_trans M (Nat.succ (rk x) + k) (rk y + k)
+            (Eq.substProp (fun (z : Nat) => Nat.Le M z)
+              (addSuccSwap (rk x) k) hM)
+            (Nat.add_le_add_right k (Nat.succ (rk x)) (rk y) lt)))
+        (fun s => s)
+        (fun ry => Ex1.elim ry (fun (q : Proto) (rq : ReadyAt C y c q) => pairAt C ty x y c p q r rq ne)))
+
+def upCore (C : Cfg) (rk par : Nat → Nat) (M : Nat) (ty : Typed C) (cl : Closed C) (g : Good C rk par)
+    (bd : Bound C rk M) (u c0 : Nat) (hu : Holds C u c0)
+    (parent : (c y : Nat) → Holds C y c → Nat.Lt (rk y) (rk u) → HasStep C) : HasStep C :=
+  Or.elim (statusAt C u c0 hu) (fun s => s) (fun st =>
+    Ex.elim st (fun (c : Nat) (ex1 : Ex1 (fun (p : Proto) => ReadyAt C u c p)) =>
+      Ex1.elim ex1 (fun (p : Proto) (r : ReadyAt C u c p) =>
+        Ex.elim (cl u c (readyHolds C u c p r)) (fun (y : Nat) (hy : Not (u = y) ∧ Holds C y c) =>
+          Or.elim (g.1 u y c (readyHolds C u c p r) hy.2 hy.1)
+            (fun (o : par c = u ∧ Nat.Lt (rk u) (rk y)) => Or.elim
+              (down C rk par M ty cl g bd M y c hy.2 (fun e' => hy.1 (Eq.trans (Eq.symm o.1) e'))
+                (Nat.le_add_left M (rk y)))
+              (fun s => s)
+              (fun ry => Ex1.elim ry (fun (q : Proto) (rq : ReadyAt C y c q) => pairAt C ty u y c p q r rq hy.1)))
+            (fun (o : par c = y ∧ Nat.Lt (rk y) (rk u)) => parent c y hy.2 o.2)))))
+
+def up (C : Cfg) (rk par : Nat → Nat) (M : Nat) (ty : Typed C) (cl : Closed C) (g : Good C rk par)
+    (bd : Bound C rk M) : (k u c0 : Nat) → Holds C u c0 → Nat.Le (rk u) k → HasStep C
+  | .zero, u, c0, hu, hk => upCore C rk par M ty cl g bd u c0 hu
+      (fun c y hy lt => absurd (Nat.not_succ_le_zero (rk y) (Nat.le_trans (Nat.succ (rk y)) (rk u) 0 lt hk)))
+  | .succ k, u, c0, hu, hk => upCore C rk par M ty cl g bd u c0 hu
+      (fun c y hy lt => up C rk par M ty cl g bd k y c hy (Nat.le_trans (Nat.succ (rk y)) (rk u) (Nat.succ k) lt hk))
+
+def finalCons (t : Thread) (r : Cfg) (dt : Thread.isDone t) (fr : Final r) : Final (Cfg.cons t r)
+  | .zero, T, h => tr1 (fun (U : Thread) => Thread.isDone U) t T h dt
+  | .succ i, T, h => fr i T h
+
+def allOr (0 R : Prop) : (D : Cfg) → ((i : Nat) → (T : Thread) → IsAt D i T → Thread.isDone T ∨ R) → Final D ∨ R
+  | .nil, _ => Or.inl (fun i T h => absurd h)
+  | .cons t r, f => Or.elim (f 0 t (refl t))
+      (fun dt => Or.elim (allOr R r (fun i T h => f (Nat.succ i) T h))
+        (fun fr => Or.inl (finalCons t r dt fr)) (fun x => Or.inr x))
+      (fun x => Or.inr x)
+
+/-- **Progress.** -/
+def progress (C : Cfg) (ty : Typed C) (cl : Closed C) (ac : Acyclic C) : Final C ∨ HasStep C :=
+  Ex.elim ac (fun (rk : Nat → Nat) (ex : Ex (fun (par : Nat → Nat) => Good C rk par)) =>
+    Ex.elim ex (fun (par : Nat → Nat) (g : Good C rk par) =>
+      allOr (HasStep C) C (fun (i : Nat) (T : Thread) (hT : IsAt C i T) =>
+        Or.elim (Thread.classify T) (fun d => Or.inl d) (fun r => Or.inr (Or.elim r
+          (fun f => forkStep C i T hT f)
+          (fun ex2 => Ex.elim ex2 (fun (c : Nat) (ex1 : Ex1 (fun (p : Proto) => Thread.readyOn c p T)) =>
+            Ex1.elim ex1 (fun (p : Proto) (rp : Thread.readyOn c p T) =>
+              up C rk par (maxRk rk (Cfg.len C)) ty cl g
+                (fun i' c' h' => rkLe rk (Cfg.len C) i' (holdsLt c' C i' h'))
+                (rk i) i c (holdsOfAt c C i T hT (Thread.memNames c T (memOfInCtx c p (Thread.ctx T) (Thread.readyEnd c p T rp))))
+                (Nat.le_refl (rk i))))))))))
