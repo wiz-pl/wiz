@@ -583,20 +583,20 @@ is said rather than unfolded; `partial` for a partial definition, opaque with a
 witness), `native` (the implementation compiled code runs instead, if any), its universe
 parameters, where it is declared, the axioms it depends on (unless `axioms` is false),
 and (`raw`) the core syntax trees. `null` for an unknown name. -/
-def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (notation raw axioms : Bool) : Json :=
+def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (useNotation withRaw withAxioms : Bool) : Json :=
   let st := doc.state
   match st.globals.find? n with
   | none => Json.null
   | some d =>
-    let pp (t : Term ZeroOneMany) : String := t.pretty [] (if notation then some st.globals else none)
+    let pp (t : Term ZeroOneMany) : String := t.pretty [] (if useNotation then some st.globals else none)
     let kind := if d.value.isSome then "definition" else if d.witness.isSome then "partial" else "opaque"
     let native : List (String × Json) := match d.nativeImpl? with
       | some g => [("native", Json.str g)]
       | none => []
     let ax : List (String × Json) :=
-      if axioms then [("axioms", Json.arr ((st.globals.axiomsOf n).map Json.str).toArray)] else []
+      if withAxioms then [("axioms", Json.arr ((st.globals.axiomsOf n).map Json.str).toArray)] else []
     let rawF : List (String × Json) :=
-      if raw then [("raw", Json.mkObj [("type", Json.str (reprStr d.type)),
+      if withRaw then [("raw", Json.mkObj [("type", Json.str (reprStr d.type)),
         ("value", match d.value with | some v => Json.str (reprStr v) | none => Json.null)])] else []
     Json.mkObj ([("name", Json.str n), ("type", Json.str (pp d.type)),
       ("value", match d.value with | some v => Json.str (pp v) | none => Json.null),
@@ -651,13 +651,13 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
     let flag (k : String) : Option Bool := match get? msg ["params", k] with
       | some (.bool b) => some b
       | _ => none
-    let (notation, raw, axioms) := ((flag "notation").getD false, (flag "raw").getD false, (flag "axioms").getD true)
+    let (useNotation, withRaw, withAxioms) := ((flag "notation").getD false, (flag "raw").getD false, (flag "axioms").getD true)
     let name := match get? msg ["params", "name"] with
       | some (.str n) => some n
       | _ => if (get? msg ["params", "position"]).isSome then coreTermTarget st off else none
     match name with
     | none => pure (doc, Json.null)
-    | some n => pure (memo s!"core {n} {notation} {raw} {axioms}" (doc, coreTermJson srv uri doc n notation raw axioms))
+    | some n => pure (memo s!"core {n} {useNotation} {withRaw} {withAxioms}" (doc, coreTermJson srv uri doc n useNotation withRaw withAxioms))
   | _ => -- wiz/subtermInfo
     let some session := (get? msg ["params", "session"]).bind (·.getNat?.toOption) | throw (-32602, "missing session")
     let some r := (get? msg ["params", "ref"]).bind (·.getNat?.toOption) | throw (-32602, "missing ref")
