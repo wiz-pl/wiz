@@ -1,0 +1,189 @@
+import Wiz
+import Tests.Harness
+
+/-!
+# Tests for scry's C# frontend (`Scry.CsParse`, `Scry.CsLower`)
+
+The design is `wiz-notes/scry-csharp.md`. The fixtures are hand-written C# files under
+`scry/corpus/csharp/`; no .NET toolchain and no tree-sitter build are needed.
+
+* **Lexer golden**: `parse/tokens.cs` against `parse/tokens.tokens` (offset, kind, text,
+  interpolation holes).
+* **Parser goldens**: each `parse/*.cs` against its `*.sexp`, a tree-sitter-style
+  S-expression with field names; `error-*.cs` goldens are the error line
+  (`path:line:col: error: …`).
+* **Lowering golden**: `lower/*.cs` against `*.wil` (every lowered function and the
+  warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
+  and returns the value C# would.
+* **End-to-end taint**: `taint/cwe78-process-unsafe.cs` (console input reaches
+  `Process.Start` through string concatenation) fires the `command-injection` rule of
+  `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
+  more unsafe fixtures cover interpolation plus a `ProcessStartInfo` object, and an
+  instance helper method (interprocedural parameter/return flow).
+
+A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
+text over the expected file **and still fails the case**, so a regenerated golden is
+always reviewed in the diff and never passes silently.
+-/
+
+open Wiz
+
+namespace Tests.ScryCSharp
+
+/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
+def loader : IO (Name → Option String) := do
+  let mut m : List (Name × String) := []
+  for e in ← System.FilePath.readDir "lib" do
+    if e.path.extension == some "wiz" then
+      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
+    else if ← e.path.isDir then
+      for f in ← System.FilePath.readDir e.path do
+        if f.path.extension == some "wiz" then
+          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
+  for e in ← System.FilePath.readDir "scry/src/Scry" do
+    if e.path.extension == some "wiz" then
+      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
+  pure fun n => m.lookup n
+
+/-- A Wiz string literal for `s`. -/
+def wizStr (s : String) : String :=
+  "\"" ++ s.foldl (fun acc c => acc ++ match c with
+    | '"' => "\\\""
+    | '\\' => "\\\\"
+    | '\n' => "\\n"
+    | '\t' => "\\t"
+    | c => c.toString) "" ++ "\""
+
+/-- Undo `#eval`'s quoting of a string result (`"…"` with `\"`, `\\`, `\n`, `\t`). -/
+def unquote (s : String) : String := Id.run do
+  let cs := s.toList
+  let cs := if cs.head? == some '"' then cs.drop 1 else cs
+  let cs := if cs.getLast? == some '"' then cs.dropLast else cs
+  let mut out := ""
+  let mut esc := false
+  for c in cs do
+    if esc then
+      out := out.push (match c with
+        | 'n' => '\n'
+        | 't' => '\t'
+        | c => c)
+      esc := false
+    else if c == '\\' then esc := true
+    else out := out.push c
+  pure out
+
+/-- Run `body` (after the imports) and return the `#eval` message texts. -/
+def runProbe (imports body : String) : IO (List String) := do
+  let src := imports ++ body ++ "\n"
+  let loader ← loader
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do
+    throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  pure (s.messages.toList.map (·.text))
+
+def parseImports : String := "import Scry.CsParse\n"
+def lowerImports : String := "import Scry.CsLower\n"
+def taintImports : String :=
+  "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\nimport Scry.Interproc\n"
+
+/-- The single string an `#eval` of `expr` prints. -/
+def evalString (imports : String) (expr : String) : IO String := do
+  match ← runProbe imports s!"#eval {expr}\n" with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
+def golden (path : String) (actual : String) : IO Unit := do
+  let actual := actual.trimRight ++ "\n"
+  if (← IO.getEnv "SCRY_CS_WRITE").isSome then
+    IO.FS.writeFile path actual
+    throw (IO.userError s!"SCRY_CS_WRITE: wrote {path}; review the diff and rerun without it")
+  let expected ← (try IO.FS.readFile path catch _ => pure "")
+  unless expected == actual do
+    throw (IO.userError s!"golden {path} differs; actual:\n{actual}")
+
+def parseGolden (name : String) : IO Unit := do
+  let path := s!"scry/corpus/csharp/parse/{name}.cs"
+  let src ← IO.FS.readFile path
+  let out ← evalString parseImports s!"Scry.Cs.parseRender {wizStr (name ++ ".cs")} {wizStr src}"
+  golden s!"scry/corpus/csharp/parse/{name}.sexp" out
+
+def lowerGolden (name : String) : IO Unit := do
+  let path := s!"scry/corpus/csharp/lower/{name}.cs"
+  let src ← IO.FS.readFile path
+  let out ← evalString lowerImports s!"Scry.Cs.lowerRender {wizStr (name ++ ".cs")} {wizStr src}"
+  golden s!"scry/corpus/csharp/lower/{name}.wil" out
+
+/-- The findings of the C# rule pack on a taint fixture, one `rule func arg` line each. -/
+def taintFindings (name : String) : IO (List String) := do
+  let src ← IO.FS.readFile s!"scry/corpus/csharp/taint/{name}.cs"
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  let body :=
+    s!"def src : String := {wizStr src}\n" ++
+    s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
+    s!"def prog : Wil.Program := Scry.Cs.programOf {wizStr (name ++ ".cs")} src\n" ++
+    "def line (f : Scry.RuleFinding) : String := f.rule ++ \" \" ++ f.func ++ \" \" ++ f.name ++ \" arg \" ++ Nat.repr f.arg\n" ++
+    "#eval List.length prog.funcs\n" ++
+    "#eval String.intercalate \"|\" (List.map line (Scry.programFindings (Scry.analyze prog pack)))\n"
+  match ← runProbe taintImports body with
+  | [nf, fs] =>
+    if nf == "0" then throw (IO.userError s!"{name}: the frontend produced no functions")
+    let fs := unquote fs
+    pure (if fs.isEmpty then [] else fs.splitOn "|")
+  | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
+
+def group : Group where
+  name := "scry-csharp"
+  exercise := "scry C# frontend (lexer, parser, lowering, taint)"
+  cases := [
+    { name := "lexer: tokens, verbatim/interpolated strings, numbers, comments, preprocessor lines",
+      run := fun _ => do
+        let src ← IO.FS.readFile "scry/corpus/csharp/parse/tokens.cs"
+        let out ← evalString parseImports s!"Scry.Cs.renderToks (Scry.Cs.lex {wizStr src})"
+        golden "scry/corpus/csharp/parse/tokens.tokens" out },
+    { name := "parse: using, namespace, static class, Main, conditional, interpolation",
+      run := fun _ => parseGolden "hello" },
+    { name := "parse: file-scoped namespace, generics, fields, properties, constructor, enum, struct, interface",
+      run := fun _ => parseGolden "members" },
+    { name := "parse: for/foreach/while/do/if/switch/try-catch-finally/using/throw",
+      run := fun _ => parseGolden "statements" },
+    { name := "parse: precedence, shifts from '>' '>', casts, is/as, new forms, lambdas, generic calls, interpolation",
+      run := fun _ => parseGolden "expressions" },
+    { name := "parse: an unsupported statement (goto) is refused with its position",
+      run := fun _ => parseGolden "error-goto" },
+    { name := "parse: a syntax error is refused with its position",
+      run := fun _ => parseGolden "error-syntax" },
+    { name := "lower: classes, fields, constructors, calls, strings, control flow, try/catch to Wil",
+      run := fun _ => lowerGolden "basic" },
+    { name := "lower: a lowered C# loop runs under Wil.runFunction (Sum(10) = 45, Fact(5) = 120)",
+      run := fun _ => do
+        let src ← IO.FS.readFile "scry/corpus/csharp/lower/basic.cs"
+        let body :=
+          s!"def prog : Wil.Program := Scry.Cs.programOf \"basic.cs\" {wizStr src}\n" ++
+          "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Sum\" [Wil.Val.ofNat 32 .true 10])\n" ++
+          "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
+        let ms ← runProbe lowerImports body
+        checkEq ["\"ok 45\"", "\"ok 120\""] ms },
+    { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-process-unsafe"
+        checkEq ["command-injection Fixtures.Runner.Main System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 sanitised twin (int.Parse before Process.Start) has no finding",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-process-safe"
+        checkEq ([] : List String) fs },
+    { name := "taint: CWE-78 through interpolation and a ProcessStartInfo object (constructor and receiver)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-startinfo-unsafe"
+        checkEq ["command-injection Fixtures.Pinger.Ping System.Diagnostics.ProcessStartInfo..ctor arg 1",
+          "command-injection Fixtures.Pinger.Ping System.Diagnostics.Process.Start arg 0"] fs },
+    { name := "taint: CWE-78 across an instance helper (parameter and return summary)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-helper-unsafe"
+        checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs }
+  ]
+
+builtin_initialize registerGroup group
+
+end Tests.ScryCSharp
