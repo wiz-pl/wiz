@@ -243,3 +243,39 @@ def MList' (p : Nat) : HProp Nat := ∃ʰ (n : Nat), p ↦ n ⋆ ⌜n = 0⌝
 Not covered: implicit arguments outside notation still print (`Prog.read Nat l`, 11r's
 limitation), and `wp c Q` has no notation. Conventions: docs/dsls.md. Tests: group
 `seplogic`.
+
+## 24g: separation algebras
+
+```wiz no-check
+import SepAlg
+structure PCM (A : Type) where
+  op : A → A → A;  unit : A;  valid : A → Prop
+  assoc, comm, unit_l, valid_unit, valid_l   -- the laws, as fields
+```
+
+`lib/SepAlg.wiz` is the algebra that ghost state and resource splitting live in (plan
+stage S-a; concurrent separation logic, S-b, and the deadlock-freedom proof, D4, build on
+it). A `PCM A` is a commutative monoid with a validity predicate closed under taking parts:
+Iris's unital resource algebras, with a discrete order and no core. Composition is total,
+and an impossible composite (two owners of one cell) is *invalid* instead of undefined, so
+the laws are plain equations.
+
+* **Inclusion** `PCM.Incl M a b` (`b = a ⋅ c` for a frame `c`): reflexive, transitive, the
+  unit at the bottom, parts of valid elements valid.
+* **Frame-preserving updates** `PCM.Update M a b`: every frame compatible with `a` stays
+  compatible with `b`. Reflexive, transitive, closed under framing (`update_frame`), they
+  keep validity, and an *exclusive* element (only the unit fits beside it) may be updated
+  to anything valid (`update_exclusive`).
+* **Instances**: `unitPCM`, `natAdd` (counting), `exclPCM A` (`Excl A`: `none`, `ex a`,
+  `bot`), `prodPCM`, `funPCM` (pointwise, families of resources), and `heapPCM V` =
+  `funPCM Nat (exclPCM V)`.
+* **Heaps of 24b are an instance**: `Heap.toExcl` maps `Heap.union` of disjoint heaps to
+  `op` (`Heap.toExcl_union`), and the composite is valid exactly when the heaps are
+  disjoint (`Heap.valid_iff_disj`).
+* **Resource predicates** `RProp A := A → Prop` with `RProp.star M` and `RProp.own M a`:
+  `⋆` is commutative, associative and monotone, and `own (a ⋅ b) = own a ⋆ own b`
+  (`RProp.own_op`, an equation: predicate equality is pointwise `↔`).
+
+Every law is proved, with no axiom. Equations of functions and of propositions compute
+(observational equality), so `funPCM`'s laws are `funext` of the pointwise ones and
+`own_op` is a pair of entailments. Tests: group `verif`.

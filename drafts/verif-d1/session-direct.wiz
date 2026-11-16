@@ -1,0 +1,28 @@
+-- ## 4. Direct style (stage 25g, plan D1)
+--
+-- The same channels, with the endpoint handed back as the result of an `IO1` action
+-- instead of to a continuation. Sequence the steps with `do1`: `c ⇐ Chan.sendD c a;`
+-- binds the next endpoint at quantity 1, and `(a, c) ⇐ Chan.recvD c;` the value
+-- received (ω) and the next endpoint (1). The natives are the same; only the shape of
+-- the API differs, so the deadlock-freedom claim (25c) covers both styles.
+
+/-- Make a channel following `p`: a new thread runs `child` on the dual end, and this
+thread gets the other end.
+
+```
+c ⇐ Chan.forkD (.send Nat (fun _ => .done)) (fun c => Chan.recv c (fun n c' => Chan.close c' (IO.pure ())));
+``` -/
+def Chan.forkD (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → IO Unit) : IO1 (Chan p) := fun w =>
+  let 1 (c, w') := Chan.forkRaw child w; (c, w')
+/-- Send `a`; the result is the endpoint at `k a`. Never blocks. -/
+def Chan.sendD {A : Type} {k : A → Proto} (1 c : Chan (Proto.send A k)) (a : A) : IO1 (Chan (k a)) := fun w =>
+  let 1 (c', w') := Chan.sendRaw c a w; (c', w')
+/-- Wait for a value; the result is the value (unrestricted) and the endpoint at `k a`
+(linear). -/
+def Chan.recvD {A : Type} {k : A → Proto} (1 c : Chan (Proto.recv A k)) : IO1 ((a : A) × Chan (k a)) := fun w =>
+  let 1 (r, w') := Chan.recvRaw c w; (r, w')
+/-- Close a finished channel. -/
+def Chan.closeD (1 c : Chan Proto.done) : IO Unit := fun w => Chan.closeRaw c w
+/-- Cancel at a send point of a cancellable protocol: tell the peer, and close. -/
+def Chan.cancelD {A : Type} {k : A → Proto} (1 c : Chan (Proto.sendC A k)) : IO Unit := fun w =>
+  let 1 (c', w') := Chan.sendRaw c Msg.cancel w; Chan.closeRaw c' w'

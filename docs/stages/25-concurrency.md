@@ -174,3 +174,30 @@ differential test; structured scopes (C4); a concurrency effect with a pure sche
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
 proof (C7); `selfhost/rt.c` threads.
+
+## 25h: MVars with invariants
+
+```wiz no-check
+import MVarInv
+MVar.Inv.put    : (m : MVar.Inv I) → (a : A) → (0 ok : I a) → IO Unit
+MVar.Inv.take   : (m : MVar.Inv I) → IO (Good I)        -- the value, with a ghost proof of I
+MVar.Inv.modify : (m : MVar.Inv I) → (f : A → A) → (0 pres : (a : A) → I a → I (f a)) → IO A
+```
+
+The first concurrent specifications (plan stage S-c). `MVar.Inv I` is an `MVar` (25d) whose
+contents always satisfy `I : A → Prop`: `put`, `newFull` and `fill` need a proof that the
+value satisfies `I`, and `take`, `read` and `borrow` return one. The proofs are **ghost**,
+at quantity 0 (`Ghost P := (0 _ : P) × Unit`): the kernel checks them and the compiler
+erases them, so `MVar.Inv I` is an `MVar` at run time, on the same natives, with no new
+trusted declaration.
+
+It is sound under any interleaving because an invariant of *values* needs no ownership:
+values are immutable, and every value that enters the cell carries its proof. The file
+states this for the erased cells too: `Op.run_holds` says that along any trace of
+`put`/`take`/`read` steps (the order in which the natives, each atomic under the cell's
+mutex, ran) whose puts all satisfy `I`, every value taken or read satisfies `I`. `MVar.Inv`
+makes the premise hold by typing.
+
+Not covered: deadlock freedom (unchanged from 25d), and invariants that relate several
+cells or the heap. Those need concurrent separation logic over 24g's algebras (plan S-b).
+Tests: group `verif`.

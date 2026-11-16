@@ -91,6 +91,7 @@
     "result-q",
     "=rune",
     "seplogic",
+    "verif",
     "=sat",
     "=scry-datalog",
     "=scry-cert",
