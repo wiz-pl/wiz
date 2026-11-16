@@ -1030,7 +1030,7 @@ def serverGroup : Group where
           pure out[0]!
         -- each: (what, an offset in the declaring name, an offset in a use, the name as written
         -- where it is declared, its line and column there)
-        let cases : List (String × Nat × Nat × String × Nat × Nat) := [
+        let sites : List (String × Nat × Nat × String × Nat × Nat) := [
           ("a def (the issue's example: line 2, character 5)", offAfter src "def dou" (-2), offAfter src ":= dou", "double", 1, 4),
           ("an inductive", offAfter src "inductive Co", offAfter src "Bool) : Co", "Col", 4, 10),
           ("a constructor", offAfter src "  | re" (-1), offAfter src "Col.re", "red", 5, 4),
@@ -1038,28 +1038,28 @@ def serverGroup : Group where
           ("a structure", offAfter src "structure Poi", offAfter src "(p : Poi", "Point", 9, 10),
           ("a structure field", offAfter src "  px" (-1), offAfter src "Point.p", "px", 10, 2)]
         let mut srv := srv
-        for (what, decl, use, written, line, col) in cases do
+        for (what, declOff, useOff, written, line, col) in sites do
           -- references: the same from both places, the declaration among them
-          let (srv', atDecl) ← ask srv "textDocument/references" src decl
-          let (srv', atUse) ← ask srv' "textDocument/references" src use
+          let (srv', atDecl) ← ask srv "textDocument/references" src declOff
+          let (srv', atUse) ← ask srv' "textDocument/references" src useOff
           srv := srv'
           check (atDecl != Lean.Json.null && atDecl.compress == atUse.compress)
             s!"{what}: references\n  at the declaration: {atDecl.compress}\n  at a use: {atUse.compress}"
           check (has atDecl s!"\"start\":\{\"character\":{col},\"line\":{line}}") s!"{what}: no declaration site in {atDecl.compress}"
           -- document highlights
-          let (srv', hDecl) ← ask srv "textDocument/documentHighlight" src decl
-          let (srv', hUse) ← ask srv' "textDocument/documentHighlight" src use
+          let (srv', hDecl) ← ask srv "textDocument/documentHighlight" src declOff
+          let (srv', hUse) ← ask srv' "textDocument/documentHighlight" src useOff
           srv := srv'
           check (hDecl != Lean.Json.null && hDecl.compress == hUse.compress) s!"{what}: highlights\n  {hDecl.compress}\n  {hUse.compress}"
           -- prepareRename: the declaring name itself
-          let (srv', p) ← ask srv "textDocument/prepareRename" src decl
+          let (srv', p) ← ask srv "textDocument/prepareRename" src declOff
           srv := srv'
           checkEq written (LSP.getStr p ["placeholder"])
           checkEq line (LSP.getNat p ["range", "start", "line"])
           checkEq col (LSP.getNat p ["range", "start", "character"])
           -- rename: the same edits from both places
-          let rDecl ← rename srv decl "Renamed"
-          let rUse ← rename srv use "Renamed"
+          let rDecl ← rename srv declOff "Renamed"
+          let rUse ← rename srv useOff "Renamed"
           check (has rDecl "\"result\"" && rDecl.compress == rUse.compress) s!"{what}: rename\n  {rDecl.compress}\n  {rUse.compress}"
         -- renaming a def and a constructor from where they are declared gives a program that checks
         let r ← rename srv (offAfter src "def dou" (-2)) "twice"
