@@ -150,14 +150,21 @@
             };
           };
           # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
-          # build as wiz and grail (so `nix build .#wiz` builds it too).
+          # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
+          # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
+          # the wrapped binaries are installed here too: their flags carry the packaged
+          # library, cache and C toolchain, exactly what a `.lake/build/bin/wiz` in a
+          # checkout has.
           tests = pkgs.stdenv.mkDerivation {
             pname = "wiz-tests";
             inherit (unwrapped) version;
             dontUnpack = true;
             installPhase = ''
               runHook preInstall
-              install -Dm755 ${unwrapped}/bin/tests $out/bin/tests
+              mkdir -p $out/bin
+              install -m755 ${unwrapped}/bin/tests $out/bin/tests
+              install -m755 ${wiz}/bin/wiz $out/bin/wiz
+              install -m755 ${wiz}/bin/grail $out/bin/grail
               runHook postInstall
             '';
             meta = {
@@ -281,9 +288,12 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat` groups
-          # (stage 28b: `sat_decide` finds it on PATH)
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical ];
+          # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat`
+          # groups (stage 28b: `sat_decide` finds it on PATH); yosys: the synthesis cases
+          # (the `hdl` group and the HDL protocol hooks), so CI runs them instead of
+          # skipping; nodejs: the WebAssembly backend's modules run under Node with
+          # web/wasm-host.mjs (stage 8f) and skip without it
+          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.yosys pkgs.nodejs ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.

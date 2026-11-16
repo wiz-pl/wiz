@@ -1,0 +1,212 @@
+import Hdl.Spi
+/-!
+# Hdl.SpiLaw
+
+The obligations of the SPI master and the mock slave in `Hdl.Spi`, stated over value
+traces of the link circuit, plus the mode table and the small lemmas the model proves by
+computation.
+
+The timing law is stated on `sclk` edges rather than on absolute cycles:
+
+* `Spi.Law.SampleStable`: `mosi` does not change on a sample edge: the data is stable
+  when the master samples it. The sample edge is the leading edge for CPHA = 0 and the
+  trailing edge for CPHA = 1, at level `Spi.sampleLevel`.
+* `Spi.Law.MosiOnShift`: whenever `mosi` changes after the start cycle, `sclk` is on a
+  shift edge (the trailing edge for CPHA = 0, the leading edge for CPHA = 1, at level
+  `Spi.shiftLevel`). Together with `SampleStable` this is the specified relationship
+  between the clock edges and the data.
+* `Spi.Law.SampleCount`: a transfer has exactly eight sample edges.
+* `Spi.Law.Divider`: `done` is high exactly `16 * div` cycles after `start` (the
+  transfer is `8` bits times `2 * div` clocks per bit).
+* `Spi.Law.ByteRoundTrip`: at `done`, the master's `data` is the slave's `reply` and the
+  slave's `data` is the byte sent; `Spi.transferLoop` is the same statement at the
+  byte level, for every mode.
+
+`examples/hdl-spi.wiz` (test group `bus-protocol`) runs all four modes, a divider sweep
+and the loopback, checks these Boolean forms and compares the value simulation,
+`Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**; the lemmas at
+the end are kernel-checked.
+-/
+
+/-- A `LinkOutW` field view. -/
+def Spi.Law.out {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Spi.LinkOutW w HwTy.El :=
+  Spi.LinkOutW.unpack w x
+/-- `sclk`, as a Boolean. -/
+def Spi.Law.sclk {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Bool :=
+  BitVec.isTrue (Spi.Law.out x).sclk
+/-- `mosi`, as a Boolean. -/
+def Spi.Law.mosi {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Bool :=
+  BitVec.isTrue (Spi.Law.out x).mosi
+/-- `cs`, as a Boolean. -/
+def Spi.Law.cs {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Bool :=
+  BitVec.isTrue (Spi.Law.out x).cs
+/-- `done`, as a Boolean. -/
+def Spi.Law.done {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Bool :=
+  BitVec.isTrue (Spi.Law.out x).done
+/-- The master's received byte (`data`). -/
+def Spi.Law.data {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Nat :=
+  BitVec.toNat (Spi.Law.out x).data
+/-- The slave's received byte (`rx`). -/
+def Spi.Law.rx {ω w : Nat} (x : HwTy.El (Spi.LinkOutW.code w)) : Nat :=
+  BitVec.toNat (Spi.Law.out x).rx
+
+/-- The previous and current `sclk` levels differ: an edge of the SPI clock. -/
+def Spi.Law.edge (prev cur : Nat) : Bool := Bool.not (Nat.beq prev cur)
+
+/-- A sample edge in a mode: an edge that arrives at `Spi.sampleLevel`. -/
+def Spi.Law.sampleEdge (cpol cpha prev cur : Nat) : Bool :=
+  Bool.and (Spi.Law.edge prev cur) (Nat.beq cur (Spi.sampleLevel cpol cpha))
+
+/-- A shift edge in a mode: an edge that arrives at `Spi.shiftLevel`. -/
+def Spi.Law.shiftEdge (cpol cpha prev cur : Nat) : Bool :=
+  Bool.and (Spi.Law.edge prev cur) (Nat.beq cur (Spi.shiftLevel cpol cpha))
+
+------------------------------------------------------------------------------------
+-- Checkable trace forms
+
+/-- No data change on a sample edge: for every adjacent pair after the first cycle,
+`mosi` is unchanged when `sclk` is on a sample edge. -/
+def Spi.Law.SampleStableGo {ω w : Nat} (cpol cpha : Nat) :
+    (prev : HwTy.El (Spi.LinkOutW.code w)) → List (HwTy.El (Spi.LinkOutW.code w)) → Bool
+  | _, .nil => .true
+  | prev, .cons y ys =>
+    Bool.and
+      (Bool.or (Bool.not (Spi.Law.sampleEdge cpol cpha (BitVec.toNat (Spi.Law.out prev).sclk)
+          (BitVec.toNat (Spi.Law.out y).sclk)))
+        (Bool.or (Bool.and (Spi.Law.mosi prev) (Spi.Law.mosi y))
+          (Bool.and (Bool.not (Spi.Law.mosi prev)) (Bool.not (Spi.Law.mosi y)))))
+      (Spi.Law.SampleStableGo cpol cpha y ys)
+
+/-- Data changes only on shift edges (after the start cycle). -/
+def Spi.Law.MosiOnShiftGo {ω w : Nat} (cpol cpha : Nat) :
+    (prev : HwTy.El (Spi.LinkOutW.code w)) → List (HwTy.El (Spi.LinkOutW.code w)) → Bool
+  | _, .nil => .true
+  | prev, .cons y ys =>
+    let changed := Bool.not (Bool.or (Bool.and (Spi.Law.mosi prev) (Spi.Law.mosi y))
+      (Bool.and (Bool.not (Spi.Law.mosi prev)) (Bool.not (Spi.Law.mosi y))));
+    Bool.and
+      (Bool.or (Bool.not changed)
+        (Spi.Law.shiftEdge cpol cpha (BitVec.toNat (Spi.Law.out prev).sclk)
+          (BitVec.toNat (Spi.Law.out y).sclk)))
+      (Spi.Law.MosiOnShiftGo cpol cpha y ys)
+
+/-- Count the sample edges of a trace. -/
+def Spi.Law.sampleCount {ω w : Nat} (cpol cpha : Nat) :
+    (prev : HwTy.El (Spi.LinkOutW.code w)) → List (HwTy.El (Spi.LinkOutW.code w)) → Nat
+  | _, .nil => 0
+  | prev, .cons y ys =>
+    let n := if Spi.Law.sampleEdge cpol cpha (BitVec.toNat (Spi.Law.out prev).sclk)
+      (BitVec.toNat (Spi.Law.out y).sclk) then 1 else 0;
+    Nat.add n (Spi.Law.sampleCount cpol cpha y ys)
+
+/-- The sample-edge count of a whole trace (0 for an empty trace). -/
+def Spi.Law.SampleCountN {ω w : Nat} (cpol cpha : Nat) :
+    List (HwTy.El (Spi.LinkOutW.code w)) → Nat
+  | .nil => 0
+  | .cons x xs => Spi.Law.sampleCount cpol cpha x xs
+
+/-- `SampleStableGo` on a whole trace (the first element is the initial level). -/
+def Spi.Law.sampleStableTrace {ω w : Nat} (cpol cpha : Nat) : List (HwTy.El (Spi.LinkOutW.code w)) → Bool
+  | .nil => .true
+  | .cons x xs => Spi.Law.SampleStableGo cpol cpha x xs
+
+/-- `MosiOnShiftGo` on a whole trace. -/
+def Spi.Law.mosiOnShiftTrace {ω w : Nat} (cpol cpha : Nat) : List (HwTy.El (Spi.LinkOutW.code w)) → Bool
+  | .nil => .true
+  | .cons x xs => Spi.Law.MosiOnShiftGo cpol cpha x xs
+
+/-- The index of the first `done` in a trace, or 99 if there is none. -/
+def Spi.Law.firstDone : Nat → List (HwTy.El (Spi.LinkOutW.code 8)) → Nat
+  | _, .nil => 99
+  | k, .cons x xs => if Spi.Law.done x then k else Spi.Law.firstDone (Nat.succ k) xs
+
+/-- The `done` cycle's observations: `data` is the reply and `rx` is the sent byte. (The
+mock slave's `slaveDone` can be one half-period earlier for CPHA = 0, where the last
+sample is on the leading edge; `Spi.Law.SlaveDoneSeen` checks that it happened.) -/
+def Spi.Law.byteOk (reply sent : Nat) (x : HwTy.El (Spi.LinkOutW.code 8)) : Bool :=
+  Bool.and (Spi.Law.done x)
+    (Bool.and (Nat.beq (Spi.Law.data x) reply) (Nat.beq (Spi.Law.rx x) sent))
+
+/-- Whether the mock slave raised `done` somewhere in the trace. -/
+def Spi.Law.slaveDoneSeen : List (HwTy.El (Spi.LinkOutW.code 8)) → Bool
+  | .nil => .false
+  | .cons x xs =>
+    Bool.or (BitVec.isTrue (Spi.Law.out x).slaveDone) (Spi.Law.slaveDoneSeen xs)
+
+------------------------------------------------------------------------------------
+-- The laws, as predicates over traces
+
+/-- `mosi` is stable on every sample edge: the master sees the bit it samples. -/
+def Spi.Law.SampleStable {ω w : Nat} (cpol cpha : Nat)
+    (xs : Trace (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
+  (t : Nat) →
+    Spi.Law.sampleEdge cpol cpha (BitVec.toNat (Spi.Law.out (xs t)).sclk)
+      (BitVec.toNat (Spi.Law.out (xs (Nat.succ t))).sclk) = .true →
+    Spi.Law.mosi (xs (Nat.succ t)) = Spi.Law.mosi (xs t)
+
+/-- Data changes only on a shift edge (after the start cycle). -/
+def Spi.Law.MosiOnShift {ω w : Nat} (cpol cpha : Nat)
+    (xs : Trace (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
+  (t : Nat) → ¬ (Spi.Law.mosi (xs (Nat.succ t)) = Spi.Law.mosi (xs t)) →
+    Spi.Law.shiftEdge cpol cpha (BitVec.toNat (Spi.Law.out (xs t)).sclk)
+      (BitVec.toNat (Spi.Law.out (xs (Nat.succ t))).sclk) = .true
+
+/-- A transfer has eight sample edges. -/
+def Spi.Law.SampleCount {ω w : Nat} (cpol cpha : Nat)
+    (xs : List (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
+  Spi.Law.SampleCountN cpol cpha xs = 8
+
+/-- `done` is at cycle `16 * div` of a trace whose first cycle is `start`. -/
+def Spi.Law.Divider (div : Nat) (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Prop :=
+  Spi.Law.firstDone 0 xs = Nat.mul 16 div
+
+/-- The byte round-trips: the trace's first `done` is at `k`, and at that cycle the
+master receives the reply and the slave receives the sent byte. -/
+def Spi.Law.ByteRoundTrip (reply sent k : Nat)
+    (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Prop :=
+  Spi.Law.firstDone 0 xs = k ∧
+  Spi.Law.byteOk reply sent
+    (Hdl.nthD (HwTy.unpack (Spi.LinkOutW.code 8) 0) xs k) = .true
+
+------------------------------------------------------------------------------------
+-- Kernel-checked lemmas: the mode table and the pure transfer model
+
+/-- Mode 0 is CPOL = 0. -/
+def Spi.Law.modeCpol_0 : Spi.modeCpol 0 = 0 := rfl
+/-- Mode 1 is CPOL = 0. -/
+def Spi.Law.modeCpol_1 : Spi.modeCpol 1 = 0 := rfl
+/-- Mode 2 is CPOL = 1. -/
+def Spi.Law.modeCpol_2 : Spi.modeCpol 2 = 1 := rfl
+/-- Mode 3 is CPOL = 1. -/
+def Spi.Law.modeCpol_3 : Spi.modeCpol 3 = 1 := rfl
+
+/-- Mode 0 is CPHA = 0. -/
+def Spi.Law.modeCpha_0 : Spi.modeCpha 0 = 0 := rfl
+/-- Mode 1 is CPHA = 1. -/
+def Spi.Law.modeCpha_1 : Spi.modeCpha 1 = 1 := rfl
+/-- Mode 2 is CPHA = 0. -/
+def Spi.Law.modeCpha_2 : Spi.modeCpha 2 = 0 := rfl
+/-- Mode 3 is CPHA = 1. -/
+def Spi.Law.modeCpha_3 : Spi.modeCpha 3 = 1 := rfl
+
+/-- Mode 0 samples on the high level (the rising edge). -/
+def Spi.Law.sampleLevel_0 : Spi.sampleLevel 0 0 = 1 := rfl
+/-- Mode 1 samples on the low level (the falling edge). -/
+def Spi.Law.sampleLevel_1 : Spi.sampleLevel 0 1 = 0 := rfl
+/-- Mode 2 samples on the low level (the falling edge). -/
+def Spi.Law.sampleLevel_2 : Spi.sampleLevel 1 0 = 0 := rfl
+/-- Mode 3 samples on the high level (the rising edge). -/
+def Spi.Law.sampleLevel_3 : Spi.sampleLevel 1 1 = 1 := rfl
+
+/-- `divN` reads 0 as 1. -/
+def Spi.Law.divN_0 : Spi.divN 0 = 1 := rfl
+/-- `divN` keeps a positive divider. -/
+def Spi.Law.divN_3 : Spi.divN 3 = 3 := rfl
+
+/-- The loopback transfer model is the identity on a concrete byte. -/
+def Spi.Law.transferLoop_165 :
+    Spi.transferLoop 0 (U8.ofNat 165) = U8.ofNat 165 := rfl
+
+/-- The loopback transfer model is the identity on all-ones in mode 3. -/
+def Spi.Law.transferLoop_ff :
+    Spi.transferLoop 3 (U8.ofNat 255) = U8.ofNat 255 := rfl

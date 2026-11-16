@@ -1,0 +1,40 @@
+import Scry.Eval
+-- Transitive closure (`scry-datalog-tc`): the smallest recursive Datalog program, and a
+-- provenance query. `main` is the test group's digest: the number of `reach` pairs, a
+-- membership bit for `(1, 4)`, and the size of its derivation witness.
+
+def tcOps : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- 0 = edge (a, b), 1 = reach (a, b)
+def tcBase : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 1])
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+def tcStep : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 1 [Scry.Term.var 0, Scry.Term.var 2])
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1],
+     Scry.Atom.pos 0 [Scry.Term.var 1, Scry.Term.var 2]]
+def tc : Scry.Program Nat := Scry.Program.mk tcOps [2, 2] [] [] [tcBase, tcStep]
+
+def u (n : Nat) : U64 := U64.ofNat n
+def ed (st : Scry.State Nat) (a b : Nat) : Scry.State Nat :=
+  Scry.State.addTuple st 0 [u a, u b]
+
+def tcDb : Scry.State Nat :=
+  ed (ed (ed (ed Scry.State.empty 1 2) 2 3) 3 4) 1 2
+
+def tcMain : Nat :=
+  match Scry.eval tc tcDb with
+  | .none => 999
+  | .some st =>
+    let pairs := Scry.Db.relSize st.db 1;
+    let hit := if Scry.Db.memTuple st.db 1 [u 1, u 4] then 100 else 0;
+    let why := match st.whyTuple tcOps 1 [u 1, u 4] with
+      | .none => 0
+      | .some root =>
+        let w := st.expandWitness root;
+        let ok := if w.wellFormed then 1 else 0;
+        Scry.Witness.size w * 100000 + ok;
+    pairs + hit + why
+
+def main : Nat := tcMain

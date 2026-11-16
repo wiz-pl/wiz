@@ -454,7 +454,8 @@ def ioFails (src : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
 /-- (9f) Elaborate `main.wiz` in a fresh directory holding `files` (modules under it are
-importable), resolving `link_c` files as `wiz` does, relative to each file. -/
+importable), resolving `link_c` files as `wiz` does, relative to each file, and
+(include_str) `include_str` files too. -/
 def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany × String × System.FilePath) := do
   let dir ← IO.FS.createTempDir
   for (p, text) in files do
@@ -464,8 +465,10 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
   let src ← IO.FS.readFile (dir / "main.wiz")
   let mods ← Module.loadClosure ["lib", dir] src
   let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
   let s := runFrontend (R := ZeroOneMany) src
-    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources) }
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
 /-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
@@ -1738,10 +1741,13 @@ def markerSamples : List (MTm × Bool) :=
       (pi pfalse (eq (univ 0) (app (exfalso (pi (enum 2) (univ 0)) (var 0)) (tag 2 0))
         (app (exfalso (pi (enum 2) (univ 0)) (prf z (letE pfalse (var 0) (var 0)))) (tag 2 0)))), true) ]
 
-/-- (P1) Regularity at inert types, decided by conversion (InReg_conv): the probes of
+/-- (P1, PF-C) Regularity at inert types, decided by conversion (InReg_conv): the probes of
 `wiz-notes/p1-stable.md` as core terms, for both kernels. `F i` is an inert family over
 `Enum 2` (one constructor, at index `#0`), so `F i` for a variable `i` has an open index.
-Each term is `fun … => refl k` at a type that states an equation; `true`: accepted. -/
+Each term is `fun … => refl k` at a type that states an equation; `true`: accepted. `t5`
+is no longer a control: PF-C applies Cast-Refl at every type while comparing an equation
+type, and `tv` is the control it does not cover (the same cast compared in a *type*
+position). -/
 def convSamples : List (String × MTm × Bool) :=
   let F (i : MTm) : MTm := mu 0 (enum 2) (dret (tag 2 0)) i
   -- a type computed by induction: `T i x : U0`, stuck on `x`
@@ -1771,9 +1777,22 @@ def convSamples : List (String × MTm × Bool) :=
     ("ne", ann (lams 2 (refl (F (tag 2 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1))))
       (pi (F (tag 2 0)) (pi (eqTy (F (tag 2 0)) (F (tag 2 1)))
         (eq (F (tag 2 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1)) (cast (F (tag 2 0)) (F (tag 2 1)) (var 0) (var 1))))), true),
-    -- t5, the control: no regularity at a type variable
+    -- t5: PF-C (Cast-Refl at every type *inside* a proposition): the equation's type is a
+    -- proposition, so while the checker compares its two sides the stuck cast at the type
+    -- variable `A` is its argument. Accepted by both kernels under PF-C (D1); no longer a
+    -- control.
     ("t5", ann (lams 3 (refl (var 2) (var 1)))
-      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1)) (eq (var 2) (cast (var 2) (var 2) (var 0) (var 1)) (var 1))))), false) ]
+      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1)) (eq (var 2) (cast (var 2) (var 2) (var 0) (var 1)) (var 1))))), true),
+    -- tv, the control PF-C does *not* cover: the same cast at a type variable, compared in a
+    -- *type* position (`F (cast A A e t)` against `F t`, as a λ's body type), not under a
+    -- proposition. `convTy` of two data types keeps the inert-only rule, and `A` is not
+    -- inert. (`castL` in `Tests/Groups/Ott.lean` is this cast as a term; its value equation
+    -- PF-C accepts, so the type-position comparison is what still controls the rule.)
+    ("tv", ann (lams 5 (var 0))
+      (pi (univ 0) (pi (var 0) (pi (eqTy (var 1) (var 1))
+        (pi (pi (var 1) (univ 0)) (pi (var 2)
+          (pi (app (var 1) (cast (var 3) (var 3) (var 2) (var 0)))
+            (app (var 2) (var 1)))))))), false) ]
 
 end MTm
 
@@ -1927,6 +1946,48 @@ def selfhostOutput (file : String) : IO (Option String) := do
     let out ← IO.Process.output { cmd := "timeout", args := #["900", exe.toString], cwd := dir }
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
+
+/-- The self-hosted checker's output for `file`, and its child process's peak resident set
+size in MB; fails if that exceeds `boundMB`. The checker holds the elaborated globals for
+the whole input, so a regression in retention (the `mutual`/`partial` inline cache made
+the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
+def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
+  match ← selfhostChecker with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      pure none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") file
+    let outFile := dir / "out"
+    let errFile := dir / "err"
+    let child ← IO.Process.spawn
+      { cmd := "sh",
+        args := #["-c", "exec \"$0\" > \"$1\" 2> \"$2\"", exe.toString, outFile.toString, errFile.toString],
+        cwd := dir, stdout := .null, stderr := .null }
+    let mut code : Option UInt32 := none
+    let mut peak := 0
+    while code.isNone do
+      match ← child.tryWait with
+      | some c => code := some c
+      | none =>
+        try
+          let s ← IO.FS.readFile s!"/proc/{child.pid}/status"
+          for l in s.splitOn "\n" do
+            if l.startsWith "VmHWM:" then
+              let kb := ((l.drop 6).trimAscii.toString.takeWhile Char.isDigit).toNat!
+              peak := max peak (kb / 1024)
+        catch _ => pure ()
+        IO.sleep 20
+    let exitCode := code.getD 1
+    let out ← IO.FS.readFile outFile
+    let err ← IO.FS.readFile errFile
+    unless exitCode == 0 do throw (IO.userError s!"the checker failed ({exitCode}): {err}")
+    unless peak ≤ boundMB do
+      throw (IO.userError s!"the checker used {peak} MB (bound: {boundMB} MB)")
+    pure (some out)
 
 /-- (A14) The self-hosted checker's output for a set of module files: `input.wiz` is the
 root module, the others are modules (written beside it, subdirectories included). `args`

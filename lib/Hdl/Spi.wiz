@@ -1,0 +1,540 @@
+import Hdl.Core
+/-!
+# Hdl.Spi
+
+An SPI master (`import Hdl.Spi`) in all four CPOL/CPHA modes, with a configurable
+divider, an 8-bit transfer, and the generic width/select/counter forms below. Mode 0 is
+CPOL = 0 (the clock idles low) and CPHA = 0 (data is sampled on the rising edge and
+shifted out on the falling edge); `Spi.masterModeCW` selects mode 0 … 3 (`Spi.modeCpol`,
+`Spi.modeCpha`, `Spi.sampleLevel`, `Spi.shiftLevel`, `Spi.modeName`). One bit takes
+`2 * div` clock cycles: `div` at CPOL, then `div` at `1 - CPOL`. `div` is a meta-level
+`Nat` (1 … 65536) and only reaches the netlist as the constant the half-period counter is
+compared with.
+
+The signals are a bundle (`Spi.Out`), so the module's ports are `sclk`, `mosi`, `cs`,
+`busy`, `done` and `data`; the input is `Spi.In` (`miso`, `start`, `data`). The outputs
+are registers, so the pins cannot glitch. `start` with `data` is taken when idle and
+ignored otherwise; `busy` is high from that cycle until the last trailing edge; `done` is
+high for one cycle then (in the same cycle `data` is the byte shifted in from `miso`).
+In CPHA = 0 the first (most significant) bit is on `mosi` in the cycle `cs` goes low, so
+the slave sees it before the first leading edge; in CPHA = 1 it is driven on the first
+leading edge.
+
+Clock domains: the master is a synchronous circuit in one clock domain. For a MISO pin
+from another domain, put a two-flip-flop synchroniser in front of it (as `Uart.rxC` does
+for its line); the SPI clock is generated in this domain, so `sclk` is not a clock here:
+no logic is clocked by it, which keeps the whole master on one clock.
+
+The all-modes path is `Spi.masterPhaseStepW`/`Spi.masterModeCW`/`Spi.masterModeC` (with
+`Spi.loopModeCW`/`Spi.loopModeC` for the loopback). `Spi.slaveCW`/`Spi.slaveC` is a mock
+slave for tests (it samples `mosi`, shifts out a `reply` byte and reports the received
+byte), `Spi.linkCW`/`Spi.linkC` wires one master to it through the pins, and
+`Spi.transfer`/`Spi.transferLoop` are the byte-level transfer and loopback models.
+
+`Spi.loopC div` is the loopback example: `mosi` is wired to `miso`, so the byte received
+is the byte sent. That checks the shift order and the sampling edges without a slave.
+
+The generic master (`Spi.masterCW w cw ncs div`) keeps the same protocol but makes
+three things meta-level parameters: the transfer width `w` (8 bits below), the width
+`cw` of the half-period counter (16 bits below) and the number of chip selects `ncs`
+(one below). Its input `Spi.InW` adds `sel`, the index of the selected slave, and its
+output `Spi.OutW.cs` is `ncs` lines, all high when idle and bit `sel` low while a
+transfer runs. The original `masterC`/`loopC` API names are unchanged. One behaviour
+changed intentionally: `Spi.shiftIn8` used to shift a received bit in at the top
+(`cat b (slice 1 7 x)`), which reverses the byte; it now shifts like the generic path
+(`x << 1 | b`), so the first (most significant) bit sampled ends at the top. The old
+8-bit loopback did not show the reversal because its test bytes 0xA5 and 0x3C are
+palindromes; `examples/rune-spi.wiz` now uses 0x81 and 0x01, which distinguishes them.
+
+Limits: one selected slave at a time (`sel` over the `ncs` chip selects; no arbitration,
+no per-slave baud/timing, no queued transfers), no DMA/FIFO, no run-time divider register,
+and the mock slave is a test part, not a full peripheral. What remains (see
+`wiz-notes/rune.md`): a `cs` decoder with active-high selects or per-slave timing, and a
+`miso` input synchroniser as a separate part.
+-/
+
+def Spi.Bit : HwTy := HwTy.bits 1
+def Spi.B4 : HwTy := HwTy.bits 4
+def Spi.B8 : HwTy := HwTy.bits 8
+
+/-- The half-period counter's width: a 16-bit counter covers 1 … 65536 cycles. -/
+def Spi.cntW : Nat := 16
+
+/-- The divider, with 0 read as 1 (a half period is at least one cycle). -/
+def Spi.divN (div : Nat) : Nat := Nat.max 1 div
+
+/-- Shift a bit in at the bottom of an 8-bit register (`x << 1 | b`), so the first bit
+sampled (mode 0 samples the most significant bit first) ends at the top. This is the
+same order as the generic `Spi.shiftIn`. -/
+def Spi.shiftIn8 {r : HwTy → Type} [Hw r] (x : r Spi.B8) (b : r Spi.Bit) : r Spi.B8 :=
+  Hw.cat (Hw.slice 0 7 x) b
+
+/-- The master's state: the pins are registers, plus the transfer's phase, its
+half-period counter, the number of bits left and the two shift registers. -/
+structure Spi.St (r : HwTy → Type) where
+  busy : r Spi.Bit
+  phase : r Spi.Bit
+  cnt : r (HwTy.bits Spi.cntW)
+  bits : r Spi.B4
+  tx : r Spi.B8
+  rx : r Spi.B8
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r Spi.Bit
+  deriving Bundle
+
+/-- The master at rest: the clock low, `cs` high, not busy. -/
+def Spi.St.init : Spi.St HwTy.El :=
+  Spi.St.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat Spi.cntW 0) (BitVec.ofNat 4 0)
+    (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1)
+
+/-- The master's input: the slave's data line, and a start pulse with the byte to send. -/
+structure Spi.In (r : HwTy → Type) where
+  miso : r Spi.Bit
+  start : r Spi.Bit
+  data : r Spi.B8
+  deriving Bundle
+
+/-- The master's output: the pins, the busy and done flags, and the byte received. -/
+structure Spi.Out (r : HwTy → Type) where
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r Spi.Bit
+  busy : r Spi.Bit
+  done : r Spi.Bit
+  data : r Spi.B8
+  deriving Bundle
+
+/-- One cycle of the mode 0 master. -/
+def Spi.masterStep {r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.In r) :
+    r (HwTy.prod Spi.St.code Spi.Out.code) :=
+  let last := s.cnt === Hw.ofNat (Spi.divN div - 1);
+  let lowEnd := s.busy &&& (~~~s.phase &&& last);
+  let highEnd := s.busy &&& (s.phase &&& last);
+  let go := ~~~s.busy &&& x.start;
+  let fin := highEnd &&& (s.bits === 1);
+  let busy := if go then 1 else if fin then 0 else s.busy;
+  let phase := if go then 0 else if lowEnd then 1 else if highEnd then 0 else s.phase;
+  let cnt := if go ||| (lowEnd ||| highEnd) then 0 else s.cnt + 1;
+  let bits := if go then 8 else if highEnd then s.bits - 1 else s.bits;
+  let tx := if go then x.data else if highEnd then Hw.shl s.tx 1 else s.tx;
+  let rx := if go then 0 else if lowEnd then Spi.shiftIn8 s.rx x.miso else s.rx;
+  let sclk := if go then 0 else if lowEnd then 1 else if highEnd then 0 else s.sclk;
+  let mosi := if go then Hw.slice 7 1 x.data
+    else if highEnd &&& ~~~fin then Hw.slice 6 1 s.tx else s.mosi;
+  let cs := if go then 0 else if fin then 1 else s.cs;
+  Hw.pair (Spi.St.pack (Spi.St.mk busy phase cnt bits tx rx sclk mosi cs))
+    (Spi.Out.pack (Spi.Out.mk sclk mosi cs busy fin s.rx))
+
+/-- A mode 0 SPI master as a circuit, with `div` clocks in each half period. -/
+def Spi.masterC (div : Nat) : Circuit Spi.In.code Spi.Out.code :=
+  Circuit.bundled Spi.St.bundle Spi.In.bundle Spi.Out.bundle Spi.St.init
+    (fun s x => Spi.masterStep div s x)
+
+/-- The loopback's input: no `miso`, which the loopback wires from `mosi`. -/
+structure Spi.Cmd (r : HwTy → Type) where
+  start : r Spi.Bit
+  data : r Spi.B8
+  deriving Bundle
+
+/-- One cycle of the master with its `mosi` fed back into `miso`. -/
+def Spi.loopStep {r : HwTy → Type} [Hw r] (div : Nat) (s : Spi.St r) (x : Spi.Cmd r) :
+    r (HwTy.prod Spi.St.code Spi.Out.code) :=
+  Circuit.inst (Spi.masterC div) (Spi.St.pack s) (Spi.In.pack (Spi.In.mk s.mosi x.start x.data))
+
+/-- The loopback as a circuit: `mosi` wired to `miso`, so `data` comes back equal to the
+byte sent. -/
+def Spi.loopC (div : Nat) : Circuit Spi.Cmd.code Spi.Out.code :=
+  Circuit.bundled Spi.St.bundle Spi.Cmd.bundle Spi.Out.bundle Spi.St.init
+    (fun s x => Spi.loopStep div s x)
+
+--------------------------------------------------------------------------------
+-- The generic master: a transfer of `w` bits, a half-period counter of `cw` bits and
+-- `ncs` chip selects. The original `masterC`/`loopC` above are the 8-bit, 16-bit
+-- counter, one-select configuration; they keep their own definitions (and therefore
+-- their netlists and Verilog) and the example checks that the generic master at those
+-- parameters agrees with them cycle for cycle.
+
+/-- The width of the counter for the bits still to send: it must hold `w` (and 0), so
+`Spi.bitsW 8 = 4`, `Spi.bitsW 16 = 5`, `Spi.bitsW 1 = 1`. -/
+def Spi.bitsW (w : Nat) : Nat := Nat.log2 w + 1
+
+/-- The width of the slave index for `ncs` chip selects (at least one bit, so `ncs = 1`
+has a one-bit `sel` that is always 0). -/
+def Spi.selW (ncs : Nat) : Nat := Nat.log2 (ncs - 1) + 1
+
+/-- All chip selects high: `2^ncs - 1`, the idle value of `Spi.OutW.cs`. -/
+def Spi.allCS (ncs : Nat) : Nat := Nat.pow 2 ncs - 1
+
+/-- Shift a bit in at the bottom of a `w`-bit register: `x << 1 | b`, so the first bit
+sampled (the most significant of the word) ends at the top. `Spi.shiftIn8` uses the
+same order for 8 bits. -/
+def Spi.shiftIn {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r (HwTy.bits w))
+    (b : r Spi.Bit) : r (HwTy.bits w) :=
+  Hw.or (Hw.shl x 1) (Hw.mux b (Hw.lit w 1) (Hw.lit w 0))
+
+/-- The generic master's state: as `Spi.St`, with `w`-bit shift registers, a `cw`-bit
+counter, and one register per chip select. -/
+structure Spi.StW (w cw ncs : Nat) (r : HwTy → Type) where
+  busy : r Spi.Bit
+  phase : r Spi.Bit
+  cnt : r (HwTy.bits cw)
+  bits : r (HwTy.bits (Spi.bitsW w))
+  tx : r (HwTy.bits w)
+  rx : r (HwTy.bits w)
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r (HwTy.bits ncs)
+  deriving Bundle
+
+/-- The generic master at rest: clock low, every chip select high, not busy. -/
+def Spi.StW.init (w cw ncs : Nat) : Spi.StW w cw ncs HwTy.El :=
+  Spi.StW.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat cw 0)
+    (BitVec.ofNat (Spi.bitsW w) 0) (BitVec.ofNat w 0) (BitVec.ofNat w 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat ncs (Spi.allCS ncs))
+
+/-- The generic master's input: `miso`, `start` and the `w`-bit `data`, plus the slave
+index `sel` (low selects chip select 0). -/
+structure Spi.InW (w ncs : Nat) (r : HwTy → Type) where
+  miso : r Spi.Bit
+  start : r Spi.Bit
+  data : r (HwTy.bits w)
+  sel : r (HwTy.bits (Spi.selW ncs))
+  deriving Bundle
+
+/-- The generic master's output: the pins (with `ncs` chip selects), the flags and the
+received `w`-bit word. -/
+structure Spi.OutW (w ncs : Nat) (r : HwTy → Type) where
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r (HwTy.bits ncs)
+  busy : r Spi.Bit
+  done : r Spi.Bit
+  data : r (HwTy.bits w)
+  deriving Bundle
+
+/-- One cycle of the generic mode 0 master. On `start` the selected chip select goes low
+and the top bit of `data` goes out; the last falling edge raises every chip select and
+pulses `done`, with the received word in `data`. -/
+def Spi.masterStepW (w cw ncs div : Nat) {r : HwTy → Type} [Hw r]
+    (s : Spi.StW w cw ncs r) (x : Spi.InW w ncs r) :
+    r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
+  let last := s.cnt === Hw.ofNat (Spi.divN div - 1);
+  let lowEnd := s.busy &&& (~~~s.phase &&& last);
+  let highEnd := s.busy &&& (s.phase &&& last);
+  let go := ~~~s.busy &&& x.start;
+  let fin := highEnd &&& (s.bits === 1);
+  let busy := if go then 1 else if fin then 0 else s.busy;
+  let phase := if go then 0 else if lowEnd then 1 else if highEnd then 0 else s.phase;
+  let cnt := if go ||| (lowEnd ||| highEnd) then 0 else s.cnt + 1;
+  let bits := if go then Hw.ofNat w else if highEnd then s.bits - 1 else s.bits;
+  let tx := if go then x.data else if highEnd then Hw.shl s.tx 1 else s.tx;
+  let rx := if go then 0 else if lowEnd then Spi.shiftIn s.rx x.miso else s.rx;
+  let sclk := if go then 0 else if lowEnd then 1 else if highEnd then 0 else s.sclk;
+  let mosi := if go then Hw.slice (w - 1) 1 x.data
+    else if highEnd &&& ~~~fin then Hw.slice (w - 2) 1 s.tx else s.mosi;
+  let cs := if go then ~~~ (Hw.shlBy (Hw.lit ncs 1) x.sel)
+    else if fin then Hw.lit ncs (Spi.allCS ncs)
+    else s.cs;
+  Hw.pair (Spi.StW.pack w cw ncs (Spi.StW.mk busy phase cnt bits tx rx sclk mosi cs))
+    (Spi.OutW.pack w ncs (Spi.OutW.mk sclk mosi cs busy fin s.rx))
+
+/-- A generic mode 0 master as a circuit: `w` bits a transfer, `cw` bits in the
+half-period counter (`div` clocks in each half period), `ncs` chip selects. -/
+def Spi.masterCW (w cw ncs div : Nat) :
+    Circuit (Spi.InW.code w ncs) (Spi.OutW.code w ncs) :=
+  Circuit.bundled (Spi.StW.bundle w cw ncs) (Spi.InW.bundle w ncs) (Spi.OutW.bundle w ncs)
+    (Spi.StW.init w cw ncs) (fun s x => Spi.masterStepW w cw ncs div s x)
+
+/-- The generic loopback's input: `start`, `data` and the slave index, with `mosi` fed
+back into `miso`. -/
+structure Spi.CmdW (w ncs : Nat) (r : HwTy → Type) where
+  start : r Spi.Bit
+  data : r (HwTy.bits w)
+  sel : r (HwTy.bits (Spi.selW ncs))
+  deriving Bundle
+
+/-- One cycle of the generic master with its `mosi` fed back into `miso`. -/
+def Spi.loopStepW (w cw ncs div : Nat) {r : HwTy → Type} [Hw r]
+    (s : Spi.StW w cw ncs r) (x : Spi.CmdW w ncs r) :
+    r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
+  Circuit.inst (Spi.masterCW w cw ncs div) (Spi.StW.pack w cw ncs s)
+    (Spi.InW.pack w ncs (Spi.InW.mk s.mosi x.start x.data x.sel))
+
+/-- The generic loopback as a circuit: `mosi` wired to `miso`, so the word received is
+the word sent. -/
+def Spi.loopCW (w cw ncs div : Nat) :
+    Circuit (Spi.CmdW.code w ncs) (Spi.OutW.code w ncs) :=
+  Circuit.bundled (Spi.StW.bundle w cw ncs) (Spi.CmdW.bundle w ncs) (Spi.OutW.bundle w ncs)
+    (Spi.StW.init w cw ncs) (fun s x => Spi.loopStepW w cw ncs div s x)
+
+/-- The 8-bit generic master with the default 16-bit half-period counter. -/
+def Spi.master8C (ncs div : Nat) : Circuit (Spi.InW.code 8 ncs) (Spi.OutW.code 8 ncs) :=
+  Spi.masterCW 8 Spi.cntW ncs div
+
+/-- The 8-bit generic loopback with the default 16-bit half-period counter. -/
+def Spi.loop8C (ncs div : Nat) : Circuit (Spi.CmdW.code 8 ncs) (Spi.OutW.code 8 ncs) :=
+  Spi.loopCW 8 Spi.cntW ncs div
+
+------------------------------------------------------------------------------------
+-- CPOL/CPHA: all four SPI modes.
+--
+-- Mode 0 is CPOL = 0, CPHA = 0; mode 1 is CPOL = 0, CPHA = 1; mode 2 is CPOL = 1,
+-- CPHA = 0; mode 3 is CPOL = 1, CPHA = 1. `Spi.masterPhaseStepW` is the mode-0 step
+-- generalised: `sclk` idles at `CPOL`, the first half of each bit is at `CPOL`, the
+-- second half at `1 - CPOL`. CPHA = 0 samples on the leading edge (the end of the first
+-- half) and shifts on the trailing edge; CPHA = 1 shifts on the leading edge and samples
+-- on the trailing edge. The divider and the counter are unchanged, so every mode takes
+-- exactly `2 * div * w` cycles for a `w`-bit transfer.
+
+/-- The CPOL bit of a mode number (2 and 3 are CPOL = 1). -/
+def Spi.modeCpol (mode : Nat) : Nat :=
+  if Nat.beq mode 2 then 1 else if Nat.beq mode 3 then 1 else 0
+
+/-- The CPHA bit of a mode number (1 and 3 are CPHA = 1). -/
+def Spi.modeCpha (mode : Nat) : Nat :=
+  if Nat.beq mode 1 then 1 else if Nat.beq mode 3 then 1 else 0
+
+/-- The level sampled in a mode: the leading edge for CPHA = 0, the trailing edge for
+CPHA = 1. (The leading level is `1 - CPOL`, the trailing level `CPOL`.) -/
+def Spi.sampleLevel (cpol cpha : Nat) : Nat :=
+  if Nat.beq cpha 1 then cpol else Nat.sub 1 cpol
+
+/-- The level on which data changes in a mode: the trailing edge for CPHA = 0, the
+leading edge for CPHA = 1. -/
+def Spi.shiftLevel (cpol cpha : Nat) : Nat :=
+  if Nat.beq cpha 1 then Nat.sub 1 cpol else cpol
+
+/-- A human-readable mode name (`"0 (CPOL=0, CPHA=0)"`, …). -/
+def Spi.modeName (mode : Nat) : String :=
+  if Nat.beq mode 0 then "0 (CPOL=0, CPHA=0)"
+  else if Nat.beq mode 1 then "1 (CPOL=0, CPHA=1)"
+  else if Nat.beq mode 2 then "2 (CPOL=1, CPHA=0)"
+  else if Nat.beq mode 3 then "3 (CPOL=1, CPHA=1)"
+  else "invalid"
+
+/-- One cycle of the generic master in a CPOL/CPHA mode. The transfer is the same
+`w`-bit MSB-first shift as `Spi.masterStepW`; only when the sample and shift happen move. -/
+def Spi.masterPhaseStepW (w cw ncs cpol cpha div : Nat) {r : HwTy → Type} [Hw r]
+    (s : Spi.StW w cw ncs r) (x : Spi.InW w ncs r) :
+    r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
+  let pha := Nat.beq cpha 1;
+  let last := s.cnt === Hw.ofNat (Spi.divN div - 1);
+  let lead := s.busy &&& (~~~s.phase &&& last);
+  let trail := s.busy &&& (s.phase &&& last);
+  let go := ~~~s.busy &&& x.start;
+  let fin := trail &&& (s.bits === 1);
+  let sample := if pha then trail else lead;
+  let shift := if pha then lead else trail;
+  let idleLevel : r Spi.Bit := Hw.lit 1 cpol;
+  let activeLevel : r Spi.Bit := Hw.lit 1 (Nat.sub 1 cpol);
+  let busy := if go then 1 else if fin then 0 else s.busy;
+  let phase := if go then 0 else if lead then 1 else if trail then 0 else s.phase;
+  let cnt := if go ||| (lead ||| trail) then 0 else s.cnt + 1;
+  let bits := if go then Hw.ofNat w else if trail then s.bits - 1 else s.bits;
+  let tx := if go then x.data else if shift then Hw.shl s.tx 1 else s.tx;
+  let rx := if go then 0 else if sample then Spi.shiftIn s.rx x.miso else s.rx;
+  let sclk := if go then idleLevel else if lead then activeLevel else if trail then idleLevel else s.sclk;
+  let mosi := if go then (if pha then Hw.lit 1 0 else Hw.slice (w - 1) 1 x.data)
+    else if shift &&& ~~~fin then
+      (if pha then Hw.slice (w - 1) 1 s.tx else Hw.slice (w - 2) 1 s.tx)
+    else s.mosi;
+  let cs := if go then ~~~ (Hw.shlBy (Hw.lit ncs 1) x.sel)
+    else if fin then Hw.lit ncs (Spi.allCS ncs)
+    else s.cs;
+  let dataOut := if pha then rx else s.rx;
+  Hw.pair (Spi.StW.pack w cw ncs (Spi.StW.mk busy phase cnt bits tx rx sclk mosi cs))
+    (Spi.OutW.pack w ncs (Spi.OutW.mk sclk mosi cs busy fin dataOut))
+
+/-- A generic master in SPI mode `mode` (0 … 3), `w` bits a transfer, a `cw`-bit
+half-period counter, `ncs` selects, and `div` clocks in each half period. -/
+def Spi.masterModeCW (w cw ncs mode div : Nat) :
+    Circuit (Spi.InW.code w ncs) (Spi.OutW.code w ncs) :=
+  Circuit.bundled (Spi.StW.bundle w cw ncs) (Spi.InW.bundle w ncs) (Spi.OutW.bundle w ncs)
+    (Spi.StW.init w cw ncs)
+    (fun s x => Spi.masterPhaseStepW w cw ncs (Spi.modeCpol mode) (Spi.modeCpha mode) div s x)
+
+/-- The 8-bit mode master with the default 16-bit half-period counter and one select. -/
+def Spi.masterModeC (mode div : Nat) : Circuit (Spi.InW.code 8 1) (Spi.OutW.code 8 1) :=
+  Spi.masterModeCW 8 Spi.cntW 1 mode div
+
+/-- One cycle of a generic master with `mosi` fed back into `miso`, in mode `mode`. -/
+def Spi.loopModeStepW (w cw ncs mode div : Nat) {r : HwTy → Type} [Hw r]
+    (s : Spi.StW w cw ncs r) (x : Spi.CmdW w ncs r) :
+    r (HwTy.prod (Spi.StW.code w cw ncs) (Spi.OutW.code w ncs)) :=
+  Circuit.inst (Spi.masterModeCW w cw ncs mode div) (Spi.StW.pack w cw ncs s)
+    (Spi.InW.pack w ncs (Spi.InW.mk s.mosi x.start x.data x.sel))
+
+/-- The generic loopback in mode `mode`: `mosi` wired to `miso`. -/
+def Spi.loopModeCW (w cw ncs mode div : Nat) :
+    Circuit (Spi.CmdW.code w ncs) (Spi.OutW.code w ncs) :=
+  Circuit.bundled (Spi.StW.bundle w cw ncs) (Spi.CmdW.bundle w ncs) (Spi.OutW.bundle w ncs)
+    (Spi.StW.init w cw ncs) (fun s x => Spi.loopModeStepW w cw ncs mode div s x)
+
+/-- The 8-bit mode loopback with the default counter and one select. -/
+def Spi.loopModeC (mode div : Nat) : Circuit (Spi.CmdW.code 8 1) (Spi.OutW.code 8 1) :=
+  Spi.loopModeCW 8 Spi.cntW 1 mode div
+
+------------------------------------------------------------------------------------
+-- A mock slave for tests: it samples `mosi` on the mode's sample edges, shifts out
+-- `reply` on the mode's shift edges (MSB first) and reports the byte it received.
+
+/-- The mock slave's state: the reply shift register, the received byte, the bits left,
+the previous `sclk` (for edge detection) and whether a transfer is active. -/
+structure Spi.SlaveW (w : Nat) (r : HwTy → Type) where
+  sh : r (HwTy.bits w)
+  rx : r (HwTy.bits w)
+  bits : r (HwTy.bits (Spi.bitsW w))
+  prev : r Spi.Bit
+  active : r Spi.Bit
+  csPrev : r Spi.Bit
+  deriving Bundle
+
+/-- The mock slave at rest: no transfer, previous `sclk` low and `cs` high. -/
+def Spi.SlaveW.init (w : Nat) : Spi.SlaveW w HwTy.El :=
+  Spi.SlaveW.mk (BitVec.ofNat w 0) (BitVec.ofNat w 0) (BitVec.ofNat (Spi.bitsW w) w)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1)
+
+/-- The mock slave's input: the three pins it sees and the byte to shift out. -/
+structure Spi.SlaveInW (w : Nat) (r : HwTy → Type) where
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r Spi.Bit
+  reply : r (HwTy.bits w)
+  deriving Bundle
+
+/-- The mock slave's output: `miso`, the byte received, and the done/busy flags. -/
+structure Spi.SlaveOutW (w : Nat) (r : HwTy → Type) where
+  miso : r Spi.Bit
+  data : r (HwTy.bits w)
+  done : r Spi.Bit
+  busy : r Spi.Bit
+  deriving Bundle
+
+/-- One cycle of the mock slave. `cs` low starts a transfer and captures `reply`; a
+sample edge shifts `mosi` into `rx`; a shift edge shifts `reply` out, except on the first
+leading edge of CPHA = 1 (where the MSB is already presented). -/
+def Spi.slaveStepW (w cpol cpha : Nat) {r : HwTy → Type} [Hw r]
+    (s : Spi.SlaveW w r) (x : Spi.SlaveInW w r) :
+    r (HwTy.prod (Spi.SlaveW.code w) (Spi.SlaveOutW.code w)) :=
+  let sampleLvl : r Spi.Bit := Hw.lit 1 (Spi.sampleLevel cpol cpha);
+  let shiftLvl : r Spi.Bit := Hw.lit 1 (Spi.shiftLevel cpol cpha);
+  let start := s.csPrev &&& ~~~x.cs;
+  let edge := Hw.not (s.prev === x.sclk);
+  let activeEdge := s.active &&& edge;
+  let sampleEdge := activeEdge &&& (x.sclk === sampleLvl);
+  let shiftEdge := activeEdge &&& (x.sclk === shiftLvl);
+  let last := s.bits === 1;
+  let finish := sampleEdge &&& last;
+  let doneCs := s.active &&& x.cs;
+  let rx := if start then 0 else if sampleEdge then Spi.shiftIn s.rx x.mosi else s.rx;
+  let bits := if start then Hw.ofNat w else if sampleEdge then s.bits - 1 else s.bits;
+  let notFirst := Hw.not (s.bits === Hw.ofNat w);
+  let sh := if start then x.reply
+    else if shiftEdge &&& notFirst then Hw.shl s.sh 1 else s.sh;
+  let active := if start then 1 else if finish ||| doneCs then 0 else s.active;
+  let miso := Hw.slice (w - 1) 1 sh;
+  Hw.pair
+    (Spi.SlaveW.pack w (Spi.SlaveW.mk sh rx bits x.sclk active x.cs))
+    (Spi.SlaveOutW.pack w (Spi.SlaveOutW.mk miso rx finish active))
+
+/-- The mock slave as a circuit, in mode `mode` (CPOL/CPHA of the master it listens to). -/
+def Spi.slaveCW (w mode : Nat) : Circuit (Spi.SlaveInW.code w) (Spi.SlaveOutW.code w) :=
+  Circuit.bundled (Spi.SlaveW.bundle w) (Spi.SlaveInW.bundle w) (Spi.SlaveOutW.bundle w)
+    (Spi.SlaveW.init w)
+    (fun s x => Spi.slaveStepW w (Spi.modeCpol mode) (Spi.modeCpha mode) s x)
+
+/-- The 8-bit mock slave. -/
+def Spi.slaveC (mode : Nat) : Circuit (Spi.SlaveInW.code 8) (Spi.SlaveOutW.code 8) :=
+  Spi.slaveCW 8 mode
+
+------------------------------------------------------------------------------------
+-- Master and mock slave wired together: the test bench in one circuit.
+
+/-- The link's input: the master's `start`/`data` and the byte the mock slave replies. -/
+structure Spi.LinkInW (w : Nat) (r : HwTy → Type) where
+  start : r Spi.Bit
+  data : r (HwTy.bits w)
+  reply : r (HwTy.bits w)
+  deriving Bundle
+
+/-- The link's output: the pins, the master's flags and received byte, and the slave's
+received byte and done flag. -/
+structure Spi.LinkOutW (w : Nat) (r : HwTy → Type) where
+  sclk : r Spi.Bit
+  mosi : r Spi.Bit
+  cs : r Spi.Bit
+  busy : r Spi.Bit
+  done : r Spi.Bit
+  data : r (HwTy.bits w)
+  rx : r (HwTy.bits w)
+  slaveDone : r Spi.Bit
+  deriving Bundle
+
+/-- The link's state: a one-select master and the mock slave. -/
+structure Spi.LinkStW (w cw : Nat) (r : HwTy → Type) where
+  m : Spi.StW w cw 1 r
+  s : Spi.SlaveW w r
+  deriving Bundle
+
+/-- One cycle of the master + mock-slave link. The master's `cs` is the slave's `cs`
+(one select), its `sclk` and `mosi` are the slave's pins, and its `miso` is the slave's
+output. -/
+def Spi.linkStepW (w cw mode div : Nat) {r : HwTy → Type} [Hw r]
+    (st : Spi.LinkStW w cw r) (x : Spi.LinkInW w r) :
+    r (HwTy.prod (Spi.LinkStW.code w cw) (Spi.LinkOutW.code w)) :=
+  let ms := Circuit.inst (Spi.masterModeCW w cw 1 mode div) (Spi.StW.pack w cw 1 st.m)
+    (Spi.InW.pack w 1 (Spi.InW.mk (w := w) (ncs := 1) (Hw.slice (w - 1) 1 st.s.sh) x.start x.data
+      (Hw.lit (Spi.selW 1) 0)));
+  let mo := Spi.OutW.unpack w 1 (Hw.snd ms);
+  let ss := Circuit.inst (Spi.slaveCW w mode) (Spi.SlaveW.pack w st.s)
+    (Spi.SlaveInW.pack w (Spi.SlaveInW.mk (w := w) mo.sclk mo.mosi mo.cs x.reply));
+  let so := Spi.SlaveOutW.unpack w (Hw.snd ss);
+  let m' := Spi.StW.unpack w cw 1 (Hw.fst ms);
+  let s' := Spi.SlaveW.unpack w (Hw.fst ss);
+  Hw.pair (Spi.LinkStW.pack w cw (Spi.LinkStW.mk m' s'))
+    (Spi.LinkOutW.pack w (Spi.LinkOutW.mk mo.sclk mo.mosi mo.cs mo.busy mo.done mo.data
+      so.data so.done))
+
+/-- The master + mock-slave link as a circuit (`w` bits, `cw`-bit counter, mode `mode`,
+`div` clocks per half period). -/
+def Spi.linkCW (w cw mode div : Nat) :
+    Circuit (Spi.LinkInW.code w) (Spi.LinkOutW.code w) :=
+  Circuit.bundled (Spi.LinkStW.bundle w cw) (Spi.LinkInW.bundle w) (Spi.LinkOutW.bundle w)
+    (Spi.LinkStW.mk (Spi.StW.init w cw 1) (Spi.SlaveW.init w))
+    (fun st x => Spi.linkStepW w cw mode div st x)
+
+/-- The 8-bit link with the default 16-bit half-period counter. -/
+def Spi.linkC (mode div : Nat) : Circuit (Spi.LinkInW.code 8) (Spi.LinkOutW.code 8) :=
+  Spi.linkCW 8 Spi.cntW mode div
+
+------------------------------------------------------------------------------------
+-- A byte-level transfer model, for tests and documentation: `Spi.bitsOf` is the
+-- MSB-first bit sequence of a byte, `Spi.receiveBits` shifts the first eight bits in
+-- (MSB first), and `Spi.transfer mode tx miso` is the byte a master receives when the
+-- slave drives `miso` on the sample edges. `Spi.transferLoop` is the loopback model:
+-- `miso = mosi`, so the received byte is the sent byte, in every mode.
+
+/-- The MSB-first bit sequence of a byte. -/
+def Spi.bitsOf (x : U8) : List Bool :=
+  Hdl.map (fun (k : Nat) => BitVec.getBit x (Nat.sub 7 k)) (Hdl.upto 8 0)
+
+/-- Shift the first `k` bits of `bs` into `acc`, MSB first. -/
+def Spi.receiveGo : Nat → Nat → List Bool → Nat
+  | .zero, acc, _ => acc
+  | .succ k, acc, .nil => acc
+  | .succ k, acc, .cons b bs =>
+    Spi.receiveGo k (Nat.add (Nat.mul 2 acc) (if b then 1 else 0)) bs
+
+/-- The byte shifted in from a bit sequence, MSB first (the first eight bits). -/
+def Spi.receiveBits (bs : List Bool) : U8 := U8.ofNat (Spi.receiveGo 8 0 bs)
+
+/-- The byte-level transfer model: the byte received when `miso` presents `bs` on the
+sample edges, MSB first. The mode does not change the bit order; it changes only when
+the sample edges occur. -/
+def Spi.transfer (mode : Nat) (tx : U8) (bs : List Bool) : U8 := Spi.receiveBits bs
+
+/-- The loopback transfer model: the slave's `miso` is the master's `mosi`, so the byte
+received is the byte sent. -/
+def Spi.transferLoop (mode : Nat) (tx : U8) : U8 :=
+  Spi.transfer mode tx (Spi.bitsOf tx)

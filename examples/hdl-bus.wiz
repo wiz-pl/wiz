@@ -1,0 +1,148 @@
+-- The generic valid/ready bus (`import Hdl.Bus`): the request/response records, the
+-- two-master round-robin arbiter, the decode/route helper and the behavioural RAM. The
+-- value simulation, `Netlist.simulate` and `Circuit.simFast` (`Hdl.Sim`) agree cycle for
+-- cycle on every circuit; the arbiter's grants alternate when both masters ask, and hold
+-- while the slave is not ready. Run by the `bus-crc` test group.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Bus
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def shows : List Nat → String
+  | .nil => ""
+  | .cons x xs => match xs with
+    | .nil => Hdl.show x
+    | .cons _ _ => Hdl.show x <+> " " <+> shows xs
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+-- value simulation = netlist simulation (hash-consed and naive) = fast simulation
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (leavesEq v (Circuit.simFast c ins))
+    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+
+def lastNat : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => match xs with
+    | .nil => x
+    | .cons _ _ => lastNat xs
+
+------------------------------------------------------------------------------------
+-- A word request and a response, as values of their bundles.
+
+def reqE (aw dw : Nat) (valid we addr wdata : Nat) : HwTy.El (Bus.Req.code aw dw) :=
+  Bundle.toEl (Bus.Req.bundle aw dw)
+    (Bus.Req.mk (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+      (BitVec.ofNat aw addr) (BitVec.ofNat dw wdata))
+
+def respE (dw : Nat) (ready rvalid err rdata : Nat) : HwTy.El (Bus.Resp.code dw) :=
+  Bundle.toEl (Bus.Resp.bundle dw)
+    (Bus.Resp.mk (BitVec.ofNat 1 ready) (BitVec.ofNat 1 rvalid)
+      (BitVec.ofNat dw rdata) (BitVec.ofNat 1 err))
+
+------------------------------------------------------------------------------------
+-- The RAM: write 42 at word 5, read it, read an unwritten word, write 99 and read it.
+
+def ramC : Circuit (Bus.Req.code 8 8) (Bus.Resp.code 8) := Bus.ramC 0 8 6 8
+
+def ramIn (valid we addr wdata : Nat) : HwTy.El (Bus.Req.code 8 8) := reqE 8 8 valid we addr wdata
+
+def ramIns : List (HwTy.El (Bus.Req.code 8 8)) :=
+  .cons (ramIn 1 1 5 42) (.cons (ramIn 1 1 5 42) (.cons (ramIn 1 1 5 42) (.cons (ramIn 0 0 0 0)
+  (.cons (ramIn 1 0 5 0) (.cons (ramIn 1 0 5 0) (.cons (ramIn 1 0 5 0) (.cons (ramIn 0 0 0 0)
+  (.cons (ramIn 1 0 3 0) (.cons (ramIn 1 0 3 0) (.cons (ramIn 1 0 3 0) (.cons (ramIn 0 0 0 0)
+  (.cons (ramIn 1 1 5 99) (.cons (ramIn 1 1 5 99) (.cons (ramIn 1 1 5 99) (.cons (ramIn 0 0 0 0)
+  (.cons (ramIn 1 0 5 0) (.cons (ramIn 1 0 5 0) (.cons (ramIn 1 0 5 0) (.cons (ramIn 0 0 0 0)
+  .nil)))))))))))))))))))
+
+def ramOuts : List (HwTy.El (Bus.Resp.code 8)) := Circuit.run ramC ramIns
+
+def readData : List (HwTy.El (Bus.Resp.code 8)) → List Nat
+  | .nil => .nil
+  | .cons p ps =>
+    let q := Bus.Resp.unpack 8 p;
+    if BitVec.isTrue q.rvalid then .cons (BitVec.toNat q.rdata) (readData ps) else readData ps
+
+def ramReads : List Nat := readData ramOuts
+
+------------------------------------------------------------------------------------
+-- The arbiter. Fast slave: both masters always ask and the slave always takes the
+-- request, so the grants alternate (master 1 first: `last` starts at 0). Slow slave: the
+-- grant must stay with its owner until the answer, then the other master goes.
+
+def arbIn (aw dw : Nat) (av bv aa ba sr sv se sd : Nat) : HwTy.El (Bus.ArbIn.code aw dw) :=
+  Bundle.toEl (Bus.ArbIn.bundle aw dw)
+    (Bus.ArbIn.mk (Bus.Req.unpack aw dw (reqE aw dw av 0 aa 0))
+      (Bus.Req.unpack aw dw (reqE aw dw bv 0 ba 0))
+      (Bus.Resp.unpack dw (respE dw sr sv se sd)))
+
+def arbAddr : HwTy.El (Bus.ArbOut.code 8 8) → Nat
+  | p => BitVec.toNat (Bus.ArbOut.unpack 8 8 p).req.addr
+
+def arbC : Circuit (Bus.ArbIn.code 8 8) (Bus.ArbOut.code 8 8) := Bus.arbC 8 8
+
+def arbFastIns : List (HwTy.El (Bus.ArbIn.code 8 8)) :=
+  Hdl.map (fun (k : Nat) => arbIn 8 8 1 1 1 2 1 0 0 0) (Hdl.upto 8 0)
+
+def arbFastGrants : List Nat := Hdl.map arbAddr (Circuit.run arbC arbFastIns)
+
+-- cycles 0–3: the slave holds the first grant; cycles 4–5: it answers and the other goes
+def arbHoldIns : List (HwTy.El (Bus.ArbIn.code 8 8)) :=
+  .cons (arbIn 8 8 1 1 3 4 0 0 0 0) (.cons (arbIn 8 8 1 1 3 4 0 0 0 0)
+  (.cons (arbIn 8 8 1 1 3 4 0 0 0 0) (.cons (arbIn 8 8 1 1 3 4 1 0 0 0)
+  (.cons (arbIn 8 8 1 1 3 4 1 0 0 0) (.cons (arbIn 8 8 1 1 3 4 1 0 0 0) .nil)))))
+
+def arbHoldGrants : List Nat := Hdl.map arbAddr (Circuit.run arbC arbHoldIns)
+
+------------------------------------------------------------------------------------
+-- Decode/route: a hit forwards the request and the slave's answer; a miss forwards no
+-- request and answers at once with `err` and zero data (and `rvalid` for a read).
+
+def routeIn (valid we addr wdata sr sv se sd : Nat) : HwTy.El (Bus.RouteIn.code 8 8) :=
+  Bundle.toEl (Bus.RouteIn.bundle 8 8)
+    (Bus.RouteIn.mk (Bus.Req.unpack 8 8 (reqE 8 8 valid we addr wdata))
+      (Bus.Resp.unpack 8 (respE 8 sr sv se sd)))
+
+def routeC : Circuit (Bus.RouteIn.code 8 8) (Bus.RouteOut.code 8 8) := Bus.routeC 8 8 16 16
+
+def routeIns : List (HwTy.El (Bus.RouteIn.code 8 8)) :=
+  .cons (routeIn 1 0 20 0 1 1 0 77)   -- in range, read: forwarded, slave's answer
+  (.cons (routeIn 1 1 21 5 1 0 0 0)   -- in range, write: forwarded
+  (.cons (routeIn 1 0 40 0 1 1 0 77)  -- out of range, read: err at once
+  (.cons (routeIn 1 1 7 5 1 0 0 0)    -- out of range, write: err at once
+  .nil)))
+
+def routeErr (p : HwTy.El (Bus.RouteOut.code 8 8)) : Nat :=
+  let q := Bus.RouteOut.unpack 8 8 p;
+  BitVec.toNat q.resp.err
+
+def routeFwd (p : HwTy.El (Bus.RouteOut.code 8 8)) : Nat :=
+  BitVec.toNat (Bus.RouteOut.unpack 8 8 p).req.valid
+
+def routeErrs : List Nat := Hdl.map routeErr (Circuit.run routeC routeIns)
+def routeFwds : List Nat := Hdl.map routeFwd (Circuit.run routeC routeIns)
+
+------------------------------------------------------------------------------------
+
+def main : IO Unit := do
+  IO.println ("ram: value = simulate = simFast " <+> yes (agree ramC ramIns)
+    <+> ", reads " <+> shows ramReads
+    <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ram" ramC)));
+  IO.println ("arb fast: value = simulate = simFast " <+> yes (agree arbC arbFastIns)
+    <+> ", grants " <+> shows arbFastGrants);
+  IO.println ("arb hold: value = simulate = simFast " <+> yes (agree arbC arbHoldIns)
+    <+> ", grants " <+> shows arbHoldGrants);
+  IO.println ("route: value = simulate = simFast " <+> yes (agree routeC routeIns)
+    <+> ", errs " <+> shows routeErrs
+    <+> ", forwarded " <+> shows routeFwds)
