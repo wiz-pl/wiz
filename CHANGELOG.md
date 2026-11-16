@@ -10,6 +10,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* `=selfhost-libdiff` checks its files N at a time under the driver's `--jobs N` (and
+  `tests --libdiff --jobs N`), capped by the CPUs and by the free memory (cgroup-aware) at
+  `--mem` per file; each file once, records in file order, the same verdicts (exit 3
+  stays `bounded`). A case of a group that runs its cases one at a time now receives
+  `--jobs` (`Tests.caseJobs`). The records carry each side's `ms`, the summary the
+  slowest runs (21ae).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
