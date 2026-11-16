@@ -769,6 +769,49 @@ the elan toolchain, so the setup action keeps the elan cache for those
   without it. Without a queue (a user-owned repository), `--auto` waits for the required
   check and merges, and "require branches to be up to date" serialises merges instead.
 
+### Before you push
+
+`scripts/pre-commit.sh` runs the cheap gates CI would run first, in one command, so a
+formatting, ledger or docs problem is found in seconds instead of in CI. It needs no
+build for the fast tier:
+
+```sh
+scripts/pre-commit.sh --fast           # before a commit
+scripts/pre-commit.sh --full           # before a push
+scripts/pre-commit.sh --fast --staged  # only the files in `git diff --cached`
+scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
+```
+
+| tier | checks |
+|---|---|
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
+
+Without `--staged`, the changed files are what the branch adds since its merge base with
+`origin/master` plus the working tree's unstaged, staged and untracked files. `--staged`
+restricts the file-driven checks (`wiz fmt`) to the index. The docs-style check, the
+fixture suites and the ledger are repo-wide either way.
+
+Every check whose tool is missing is skipped with a reason: no `python3`, no PyYAML, no
+`wiz` (or an older `wiz` without `fmt --check`), no test driver, no `cc`. A skip is not a
+pass. The last line is one summary line. The exit status is 0 when at least one check ran
+and none failed, 1 on a real failure, and 3 when every check was skipped (so a hook can
+tell "nothing could run" from "all good"). The fast tier took about 6 s on a warm
+checkout with the test driver built and one `.wiz` file changed (under 1 s with nothing
+built); `--full` took about 8 minutes, almost all of it `check-repro.sh`.
+
+`scripts/install-hooks.sh` writes `.git/hooks/pre-commit` (fast tier, staged files) and
+`.git/hooks/pre-push` (full tier); both call the script from the work tree, so editing
+the tiers needs no reinstall. It never overwrites a different hook without `--force`, and
+running it twice leaves the hooks byte-for-byte unchanged. The same two hooks are
+available to the pre-commit framework as the `wiz-fast` and `wiz-full` entries in
+`.pre-commit-hooks.yaml`.
+
+What it cannot check: the test suite beyond the formatter group, generated C or LLVM
+outside the reproducibility corpus, the docs site, the release workflow, sharding
+(`scripts/ci.py check-shards`), or behaviour on another OS or architecture. It is a
+local subset of CI, not a replacement for it.
+
 ### Golden diffs
 
 A golden failure in CI is a test case whose output no longer matches its `.expected`
