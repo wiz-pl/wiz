@@ -2,16 +2,18 @@ import Wiz
 import Tests.Harness
 
 /-!
-# Tests for scry's C# frontend (`Scry.CsParse`, `Scry.CsLower`)
+# Tests for scry's C# frontend (`Scry.CsCst`, `Scry.CsLower`)
 
-The design is `wiz-notes/scry-csharp.md`. The fixtures are hand-written C# files under
-`scry/corpus/csharp/`; no .NET toolchain and no tree-sitter build are needed.
+The design is `scry/CSHARP.md`. C# is parsed by the vendored **tree-sitter-c-sharp**
+(`scry/native/README.md`) through the shim; every fixture under `scry/corpus/csharp/`
+has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regenerated with
+`scry-cst FILE.cs > FILE.cst`), so the tests need no native build, like `scry-c2wil`.
 
-* **Lexer golden**: `parse/tokens.cs` against `parse/tokens.tokens` (offset, kind, text,
-  interpolation holes).
-* **Parser goldens**: each `parse/*.cs` against its `*.sexp`, a tree-sitter-style
-  S-expression with field names; `error-*.cs` goldens are the error line
-  (`path:line:col: error: …`).
+* **Spills**: each spill is a `c_sharp` store whose root spans its `.cs` text (a stale
+  spill fails here first).
+* **View goldens**: each `parse/*.cs` through `Scry.Cs.ofStore` against its `*.sexp`, a
+  tree-sitter-style S-expression with field names: the grammar's tree as the lowering
+  sees it (named nodes, field tokens, and the normalised fields of `Scry.CsCst`).
 * **Lowering golden**: `lower/*.cs` against `*.wil` (every lowered function and the
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
   and returns the value C# would.
@@ -82,16 +84,26 @@ def runProbe (imports body : String) : IO (List String) := do
     throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   pure (s.messages.toList.map (·.text))
 
-def parseImports : String := "import Scry.CsParse\n"
+def parseImports : String := "import Scry.CsCst\nimport Scry.CstStore\n"
 def lowerImports : String := "import Scry.CsLower\n"
 def taintImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\nimport Scry.Interproc\n"
 
-/-- The single string an `#eval` of `expr` prints. -/
-def evalString (imports : String) (expr : String) : IO String := do
-  match ← runProbe imports s!"#eval {expr}\n" with
-  | [m] => pure (unquote m)
-  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+/-- A fixture's C# text and its checked-in spill (`dir/name.cs`, `dir/name.cst`). -/
+def fixture (dir name : String) : IO (String × String) := do
+  let src ← IO.FS.readFile s!"scry/corpus/csharp/{dir}/{name}.cs"
+  let spill ← IO.FS.readFile s!"scry/corpus/csharp/{dir}/{name}.cst"
+  pure (src, spill)
+
+/-- The Wiz definitions `src` and `spill` of a fixture. -/
+def fixtureDefs (src spill : String) : String :=
+  s!"def src : String := {wizStr src}\n" ++ s!"def spill : String := {wizStr spill}\n"
+
+/-- Every fixture, as `(dir, name)`. -/
+def fixtures : List (String × String) :=
+  [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
+   ("lower", "basic"), ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
+   ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -104,25 +116,41 @@ def golden (path : String) (actual : String) : IO Unit := do
     throw (IO.userError s!"golden {path} differs; actual:\n{actual}")
 
 def parseGolden (name : String) : IO Unit := do
-  let path := s!"scry/corpus/csharp/parse/{name}.cs"
-  let src ← IO.FS.readFile path
-  let out ← evalString parseImports s!"Scry.Cs.parseRender {wizStr (name ++ ".cs")} {wizStr src}"
-  golden s!"scry/corpus/csharp/parse/{name}.sexp" out
+  let (src, spill) ← fixture "parse" name
+  match ← runProbe parseImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.renderSpill {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => golden s!"scry/corpus/csharp/parse/{name}.sexp" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
 def lowerGolden (name : String) : IO Unit := do
-  let path := s!"scry/corpus/csharp/lower/{name}.cs"
-  let src ← IO.FS.readFile path
-  let out ← evalString lowerImports s!"Scry.Cs.lowerRender {wizStr (name ++ ".cs")} {wizStr src}"
-  golden s!"scry/corpus/csharp/lower/{name}.wil" out
+  let (src, spill) ← fixture "lower" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => golden s!"scry/corpus/csharp/lower/{name}.wil" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- A spill's language and whether its root spans the text (only whitespace after it). -/
+def spillCheck (dir name : String) : IO String := do
+  let (src, spill) ← fixture dir name
+  let body := fixtureDefs src spill ++
+    "def ws (cs : List Char) : Bool := List.all (fun ch => Bool.or (Nat.beq (Char.code ch) 32) (Bool.or (Nat.beq (Char.code ch) 10) (Nat.beq (Char.code ch) 13))) cs\n" ++
+    "#eval match Scry.CstStore.ofText spill with\n" ++
+    "  | .error e => e\n" ++
+    "  | .ok s => match String.eq s.language \"c_sharp\", Nat.beq (Scry.CstStore.spanOf s 0).start 0, ws (String.chars (String.drop (Scry.CstStore.spanOf s 0).stop src)) with\n" ++
+    "    | .true, .true, .true => \"ok\"\n" ++
+    "    | _, _, _ => \"stale: \" ++ s.language ++ \" root \" ++ Nat.repr (Scry.CstStore.spanOf s 0).stop ++ \" of \" ++ Nat.repr (String.length src)\n"
+  match ← runProbe parseImports body with
+  | [m] => pure s!"{dir}/{name}: {unquote m}"
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
 /-- The findings of the C# rule pack on a taint fixture, one `rule func arg` line each. -/
 def taintFindings (name : String) : IO (List String) := do
-  let src ← IO.FS.readFile s!"scry/corpus/csharp/taint/{name}.cs"
+  let (src, spill) ← fixture "taint" name
   let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
   let body :=
-    s!"def src : String := {wizStr src}\n" ++
+    fixtureDefs src spill ++
     s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
-    s!"def prog : Wil.Program := Scry.Cs.programOf {wizStr (name ++ ".cs")} src\n" ++
+    s!"def prog : Wil.Program := Scry.Cs.programOf {wizStr (name ++ ".cs")} src spill\n" ++
     "def line (f : Scry.RuleFinding) : String := f.rule ++ \" \" ++ f.func ++ \" \" ++ f.name ++ \" arg \" ++ Nat.repr f.arg\n" ++
     "#eval List.length prog.funcs\n" ++
     "#eval String.intercalate \"|\" (List.map line (Scry.programFindings (Scry.analyze prog pack)))\n"
@@ -135,32 +163,30 @@ def taintFindings (name : String) : IO (List String) := do
 
 def group : Group where
   name := "scry-csharp"
-  exercise := "scry C# frontend (lexer, parser, lowering, taint)"
+  exercise := "scry C# frontend (tree-sitter-c-sharp view, lowering, taint)"
   cases := [
-    { name := "lexer: tokens, verbatim/interpolated strings, numbers, comments, preprocessor lines",
+    { name := "spills: every fixture's spill is tree-sitter-c-sharp and spans its text",
       run := fun _ => do
-        let src ← IO.FS.readFile "scry/corpus/csharp/parse/tokens.cs"
-        let out ← evalString parseImports s!"Scry.Cs.renderToks (Scry.Cs.lex {wizStr src})"
-        golden "scry/corpus/csharp/parse/tokens.tokens" out },
-    { name := "parse: using, namespace, static class, Main, conditional, interpolation",
+        let mut rs := []
+        for (d, n) in fixtures do
+          rs := rs ++ [← spillCheck d n]
+        checkEq (fixtures.map fun (d, n) => s!"{d}/{n}: ok") rs },
+    { name := "view: using, namespace, static class, Main, conditional, interpolation",
       run := fun _ => parseGolden "hello" },
-    { name := "parse: file-scoped namespace, generics, fields, properties, constructor, enum, struct, interface",
+    { name := "view: file-scoped namespace, generics, fields, properties, constructor, enum, struct, interface",
       run := fun _ => parseGolden "members" },
-    { name := "parse: for/foreach/while/do/if/switch/try-catch-finally/using/throw",
+    { name := "view: for/foreach/while/do/if/switch/try-catch-finally/using/throw",
       run := fun _ => parseGolden "statements" },
-    { name := "parse: precedence, shifts from '>' '>', casts, is/as, new forms, lambdas, generic calls, interpolation",
+    { name := "view: precedence, casts, is/as, new forms, lambdas, generic calls, ref/out, interpolation",
       run := fun _ => parseGolden "expressions" },
-    { name := "parse: an unsupported statement (goto) is refused with its position",
-      run := fun _ => parseGolden "error-goto" },
-    { name := "parse: a syntax error is refused with its position",
-      run := fun _ => parseGolden "error-syntax" },
     { name := "lower: classes, fields, constructors, calls, strings, control flow, try/catch to Wil",
       run := fun _ => lowerGolden "basic" },
     { name := "lower: a lowered C# loop runs under Wil.runFunction (Sum(10) = 45, Fact(5) = 120)",
       run := fun _ => do
-        let src ← IO.FS.readFile "scry/corpus/csharp/lower/basic.cs"
+        let (src, spill) ← fixture "lower" "basic"
         let body :=
-          s!"def prog : Wil.Program := Scry.Cs.programOf \"basic.cs\" {wizStr src}\n" ++
+          fixtureDefs src spill ++
+          "def prog : Wil.Program := Scry.Cs.programOf \"basic.cs\" src spill\n" ++
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Sum\" [Wil.Val.ofNat 32 .true 10])\n" ++
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body

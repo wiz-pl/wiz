@@ -1,7 +1,9 @@
 # scry C# frontend
 
-Status: **design + first slice** (2026-11-16; the working copy of this note is
-`wiz-notes/scry-csharp.md`). The branch is based on `agent/scry-integrate` (PR #376), because
+Status: **design + first slice, parsing on vendored tree-sitter-c-sharp** (2026-11-16;
+the working copy of this note is `wiz-notes/scry-csharp.md`). The user chose option B
+of §1 on 2026-11-16: the hand-written parser of the first draft is gone, and
+`native/tree-sitter-c-sharp/` (v0.23.5) parses C# through the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
 the pieces the frontend plugs into exist only there: `Scry.Cst` (the read-only CST view
 the C lowering walks), `Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every
 statement, and the rule-pack taint engine (`Scry.RuleTaint`, `Scry.Interproc`,
@@ -23,27 +25,28 @@ Three candidates. None may need the network at analysis time.
 | trust | all in Wiz; the lowering's `Scry.Cst` is the same interface as C's | the shim is already trusted for C; one more grammar | Roslyn is a big trusted base, and the JSON schema is ours to keep in sync |
 | speed | interpreted lists today (fine for fixtures, slow for a repo) | C speed, threads | fast, but process start + JSON parse per project |
 
-**Recommendation: A now, behind the `Scry.Cst` interface, so that B can replace the
-parser later without touching the lowering. C only as an optional precision oracle.**
+**Decision (user, 2026-11-16): B.** The first draft shipped A (a hand-written lexer and
+recursive-descent parser in Wiz whose rows used tree-sitter-c-sharp's vocabulary, behind
+`Scry.Cst`); it was replaced by B in the same PR:
 
-* A unblocks the frontend immediately with no vendoring and no download: the brief
-  forbids large downloads, and the grammar is not in the tree or the Nix store.
-* The parser emits a `Scry.Cst` whose **node kinds and field names follow
-  tree-sitter-c-sharp's vocabulary** (`class_declaration`, `method_declaration`,
-  `invocation_expression`, fields `name`/`type`/`body`/`parameters`/`function`/
-  `arguments`/`left`/`right`/`operator`/`condition`/`consequence`/`alternative`…). The
-  names are from memory of that grammar and must be checked against its
-  `node-types.json` when it is vendored; a mismatch is a rename table in the adapter,
-  not a lowering change. The lowering only uses `Scry.Cst`'s `kindOf`/`fieldOf`/
-  `childrenOf`/`spanOf`/`textOf`, exactly like the C lowering.
-* When B lands (a later milestone, needs the user's OK for the vendoring size), the
-  hand-written parser stays as the dependency-free fallback and as a differential
-  oracle on the corpus (same CST shape on the supported subset).
-* C is worth it only for **name resolution** on real projects (overloads, extension
-  methods, `var` through generic returns), where A/B can only approximate. If wanted,
-  it is an offline step (`scry csharp-symbols` writes a symbol table JSON next to the
-  sources) that the analysis reads like `compile_commands.json`; no network, but a .NET
-  SDK. Decision for the user later, not needed for the first milestones.
+* `native/tree-sitter-c-sharp/` is the upstream generated `parser.c` + `scanner.c` of
+  tag v0.23.5 (`native/README.md`: licence, commit, hash). `parser.c` is 29.7 MB on disk,
+  about 1.3 MB compressed in git, and compiles at `-O2` in about 1.5 s. It was not
+  regenerated: the copy came from the Nix binary cache's source of that tag.
+* `ts_shim.c`'s `scry_parse` takes `"c_sharp"`; `Scry.Native.parseFile` picks the
+  language by extension, so `scry-cst FILE.cs` spills a C# store.
+* `Scry.CsCst` is the adapter: the store's view as the `Scry.Cst` the lowering reads,
+  with the few fields the grammar leaves unnamed normalised (its module doc has the
+  table). The lowering itself did not change: `lower/basic.wil` is byte-identical
+  between the two parsers, and the four taint fixtures give the same findings.
+* As for C, the Lean tests read checked-in spills (`*.cst` next to each `.cs`), so they
+  need no native build; the compiled CLI parses directly.
+* The hand-written parser is **not** kept as a fallback: nothing needs it (the
+  interpreter reads spills, the compiled tools have the shim), and keeping two parsers
+  in sync would be its own cost. It is in this PR's history (`12f29f45`) if a
+  dependency-free parser is ever wanted again.
+* C (Roslyn) remains an option for exact name resolution later (offline symbol tables),
+  not for parsing.
 
 ## 2. The first subset
 
@@ -149,9 +152,9 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
 
 ## 4. Test corpus plan
 
-* `scry/corpus/csharp/parse/*.cs` + `*.sexp`: golden CST renderings (tree-sitter-style
-  S-expressions with field names), one fixture per construct family; small and
-  hand-written.
+* `scry/corpus/csharp/parse/*.cs` + `*.cst` + `*.sexp`: the tree-sitter spill and the
+  golden rendering of the lowering's view of it (S-expressions with field names), one
+  fixture per construct family; small and hand-written.
 * `scry/corpus/csharp/taint/*.cs`: paired unsafe/safe fixtures per CWE (78 first, then
   89, 22), named like the C corpus (`cwe78-process-unsafe.cs`,
   `cwe78-process-safe.cs`), with a `manifest.json` row each once `scry bench` reads C#.
@@ -171,7 +174,7 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
 | M4 | rule pack `csharp.scry` (78/89/22), models for `String.Concat`/`Format`/`StringBuilder`, `scry taint` accepting `.cs` (SARIF ids `scry/cs/…`) | 2 d |
 | M5 | exceptions/`using`/`foreach` desugarings complete; lambdas as functions; nullability facts + the null-dereference check on the nullness domain | 4 d |
 | M6 | bounds checks on arrays/`List<T>` via the interval domain | 2 d |
-| M7 | vendored tree-sitter-c-sharp behind the same `Scry.Cst` (needs the vendoring decision); differential CST check against the hand-written parser | 3 d |
+| M7 | ~~vendored tree-sitter-c-sharp behind the same `Scry.Cst`~~ done early (user chose B, 2026-11-16); left: a `scry-cst --recover` mode so the interpreter tests can also pin syntax-error reporting | 1 d |
 
 Total ≈ 4 weeks, in line with §4.8.
 
@@ -179,19 +182,29 @@ Total ≈ 4 weeks, in line with §4.8.
 
 | file | contents |
 |---|---|
-| `scry/src/Scry/CsParse.wiz` | lexer (`Scry.Cs.lex`, interpolation holes re-lexed at their offsets), recursive-descent parser emitting postorder rows (`Scry.Cs.parse`), S-expression golden renderer |
-| `scry/src/Scry/CsLower.wiz` | `Scry.Cs.toCst` (rows → `Scry.Cst`), class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf` |
-| `scry/corpus/csharp/parse/` | `tokens.cs`/`.tokens`, `hello`, `members`, `statements`, `expressions`, `error-goto`, `error-syntax` (`.cs` + `.sexp`) |
-| `scry/corpus/csharp/lower/basic.cs` + `.wil` | classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed (`Sum`, `Fact`) under `Wil.runFunction` |
-| `scry/corpus/csharp/taint/cwe78-process-{unsafe,safe}.cs` | the end-to-end pair |
+| `scry/native/tree-sitter-c-sharp/` | the vendored grammar (v0.23.5, MIT) |
+| `scry/native/ts_shim.c`, `scry/src/Scry/Native.wiz` | `scry_parse "c_sharp"`; `languageOf` picks C# for `*.cs`; `toCstStoreIn` records the spill's language |
+| `scry/tools/CstMain.wiz` | `scry-cst FILE.cs` spills a C# store (refuses a tree with `ERROR`/`MISSING` nodes, as for C) |
+| `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
+| `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
+| `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions` (`.cs` + `.cst` spill + `.sexp` view golden) |
+| `scry/corpus/csharp/lower/basic.{cs,cst,wil}` | classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed (`Sum`, `Fact`) under `Wil.runFunction` |
+| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
-| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): lexer, 6 parser goldens, lowering golden + execution, 2 taint cases |
+| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 4 view goldens, lowering golden + execution, 4 taint cases |
 
-Goldens are regenerated with `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files
-**and fails**, so a new golden is always reviewed in the diff.
+A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
+`wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
+toolchain's `--cflags`/`--ldflags`; this host's `grail` link of executables fails on a
+pre-existing `__isoc23_strtol` glibc/gmp mismatch). The freshness case fails when a
+spill's root does not span its `.cs` text. Goldens are regenerated with
+`SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
+golden is always reviewed in the diff.
 
 Known approximations in slice 1 (all listed in `CsLower`'s module doc): `X.Y.M()` where
 `X` is a type and `Y` a static property (`Console.Error.WriteLine`) resolves as a type
 path `System.Console.Error.WriteLine`; overloads share a name; `return` inside `try`
-skips `finally`; `using var` does not call `Dispose`; `switch` labels are not compared;
-field initialisers are not run by constructors (each one gets a warning); lambdas are opaque.
+skips `finally`; `using var` does not call `Dispose`; `switch` labels are not compared
+(tree-sitter gives `case 1: case 2:` as two sections; every section is reachable
+anyway); field initialisers are not run by constructors (each one gets a warning);
+lambdas are opaque.

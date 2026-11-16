@@ -2,14 +2,15 @@ import Text
 import WordArray
 import Scry.Wil
 import Scry.Lower
-import Scry.CsParse
+import Scry.CstStore
+import Scry.CsCst
 /-!
 # Scry.CsLower: C# to Wil
 
-The lowering half of scry's first C# slice (design `wiz-notes/scry-csharp.md` §3). It
-takes a `Scry.Cs.Tree` from `Scry.CsParse`, views it as a `Scry.Cst` (the interface the C
-lowering walks, so a tree-sitter-c-sharp store can replace the hand-written parser
-later), and lowers every method, constructor and property accessor to a `Wil.Func`.
+The lowering half of scry's C# frontend (design `CSHARP.md` §3). It takes a
+tree-sitter-c-sharp store (the shim's, or a checked-in `scry-cst` spill) through the
+`Scry.Cst` view of `Scry.CsCst` (the interface the C lowering walks) and lowers every
+method, constructor and property accessor to a `Wil.Func`.
 
 The conventions that rules depend on:
 
@@ -41,38 +42,6 @@ What is not modelled is **havoc plus a warning** (`Scry.Warning`, with the node'
 origin): lambdas, `out`/`ref` targets (havoc'd after the call), `is` tests (a havoc'd
 bit), floating point arithmetic, field initialisers, and calls through delegates.
 -/
-
--- ## The CST view
-
-/-- A tree's text between two offsets. -/
-def Scry.Cs.slice (text : String) (start stop : Nat) : String :=
-  String.take (Nat.sub stop start) (String.drop start text)
-
-/-- Line starts are not precomputed: the slice's fixtures are small. -/
-def Scry.Cs.spanOfRow (t : Scry.Cs.Tree) (i : Nat) : Wil.Span :=
-  let r := Scry.Cs.Tree.row t i;
-  match Scry.Cs.lineCol t.text r.start with
-  | (l, c) => Wil.Span.mk 0 r.start r.stop i l c
-
-/-- The parent of node `i` (a scan; the lowering does not need it). -/
-def Scry.Cs.parentOfRow (t : Scry.Cs.Tree) (i : Nat) : Option Nat :=
-  List.find (fun p => List.any (Nat.beq i) (Scry.Cs.Tree.kids t p)) (Scry.schemaRange (Scry.Cs.Tree.count t))
-
-/-- The `Scry.Cst` view of a parsed C# file (one file, index 0). -/
-def Scry.Cs.toCst (t : Scry.Cs.Tree) : Scry.Cst :=
-  Scry.Cst.mk (Scry.Cs.Tree.count t)
-    (fun i => (Scry.Cs.Tree.row t i).kind)
-    (fun i => (Scry.Cs.Tree.row t i).field)
-    (fun i => Scry.Cs.spanOfRow t i)
-    (fun i => Scry.Cs.parentOfRow t i)
-    (fun i => Scry.Cs.Tree.kids t i)
-    (fun _ => t.text)
-    (fun _ => t.path)
-    1
-    (fun i => let r := Scry.Cs.Tree.row t i;
-      match String.isEmpty r.text with
-      | .false => r.text
-      | .true => Scry.Cs.slice t.text r.start r.stop)
 
 -- ## Types
 
@@ -673,7 +642,10 @@ partial def Scry.Cs.binop (c : Scry.Cst) (n : Nat) (op : String) (a b : Scry.Cs.
         | .false => Scry.Cs.havoc c n Wil.Ty.unknown ("operator " ++ op ++ " on " ++ a.ty ++ " and " ++ b.ty)
     | .none => Scry.Cs.havoc c n Wil.Ty.unknown ("operator " ++ op)
 
-/-- An integer literal's value (decimal only; suffixes dropped). -/
+/-- Is the code point `c` an ASCII digit? -/
+def Scry.Cs.isDigit (c : Nat) : Bool := Bool.and (Bool.not (Nat.lt c 48)) (Nat.lt c 58)
+
+/-- An integer literal's value (decimal only; suffixes and `_` separators dropped). -/
 partial def Scry.Cs.intValue (text : String) : Option Nat :=
   String.parseNat (String.ofChars (List.filter (fun ch => Scry.Cs.isDigit (Char.code ch)) (String.chars text)))
 
@@ -863,14 +835,14 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
       | .none => "?[]";
     sizes ← (match Scry.childF c n "type" with
       | .some t => match Scry.childF c t "rank" with
-        | .some rk => Scry.Cs.lowerArgs c (Scry.kids c rk)
-        | .none => Scry.Cs.pure ((.nil : List Wil.Var), (.nil : List Nat))
-      | .none => Scry.Cs.pure ((.nil : List Wil.Var), (.nil : List Nat)));
+        | .some rk => Scry.Cs.lowerExprs c (Scry.kids c rk)
+        | .none => Scry.Cs.pure (.nil : List Wil.Var)
+      | .none => Scry.Cs.pure (.nil : List Wil.Var));
     elems ← (match Scry.childF c n "initializer" with
       | .some ini => Scry.Cs.lowerExprs c (Scry.kids c ini)
       | .none => Scry.Cs.pure (.nil : List Wil.Var));
     t0 ← Scry.Cs.canonM ty;
-    Scry.Cs.call c n "System.Array.$new" (List.append sizes.1 elems) t0
+    Scry.Cs.call c n "System.Array.$new" (List.append sizes elems) t0
   else if String.eq k "implicit_object_creation_expression" then
     Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "target-typed new()"
   else if String.eq k "await_expression" then match Scry.childF c n "expression" with
@@ -1629,9 +1601,8 @@ def Scry.Cs.initWarnings (c : Scry.Cst) (u : Scry.Cs.Unit) (decls : List (String
         | _, _ => .nil
       else .nil) ms)) decls))
 
-/-- Lower a parsed C# file. -/
-def Scry.Cs.lowerTree (t : Scry.Cs.Tree) : Scry.Cs.Lowered :=
-  let c := Scry.Cs.toCst t;
+/-- Lower a parsed C# file (`c` is its `Scry.Cs.ofStore` view). -/
+def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lowered :=
   let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
   let raw := List.map (fun d => Scry.Cs.scanClass c d.1 d.2) decls;
   let u0 := Scry.Cs.Unit.mk raw (Scry.Cs.enumsOf c "" 0) (List.append ["System"] (Scry.Cs.usingsOf c 0));
@@ -1645,21 +1616,22 @@ def Scry.Cs.lowerTree (t : Scry.Cs.Tree) : Scry.Cs.Lowered :=
       | .none => .nil;
     let r1 := Scry.Cs.lowerMembers c u k acc.1 ms;
     (r1.1, List.append acc.2 r1.2)) (Scry.emptyState, (.nil : List Wil.Func)) decls;
-  Scry.Cs.Lowered.mk t.path t.text r.2 (List.append (Scry.Cs.initWarnings c u decls) r.1.warnings)
+  Scry.Cs.Lowered.mk path text r.2 (List.append (Scry.Cs.initWarnings c u decls) r.1.warnings)
 
-/-- The result of the frontend on a source text: lowered, or a parse error. -/
+/-- The result of the frontend on a spill: lowered, or an unreadable spill. -/
 inductive Scry.Cs.FrontResult where
   | ok (l : Scry.Cs.Lowered)
   | err (msg : String)
 
-def Scry.Cs.frontend (path : String) (src : String) : Scry.Cs.FrontResult :=
-  match Scry.Cs.parse path src with
-  | .err m p => .err (Scry.Cs.render path src (.err m p))
-  | .ok t => .ok (Scry.Cs.lowerTree t)
+/-- Lower the `scry-cst` spill `spill` of the C# file `path`, whose text is `text`. -/
+def Scry.Cs.frontend (path : String) (text : String) (spill : String) : Scry.Cs.FrontResult :=
+  match Scry.CstStore.ofText spill with
+  | .error e => .err (path ++ ": error: bad spill: " ++ e)
+  | .ok s => .ok (Scry.Cs.lowerCst path text (Scry.Cs.ofStore text s))
 
-/-- The functions of a source, empty on a parse error (for tests and the CLI). -/
-def Scry.Cs.programOf (path : String) (src : String) : Wil.Program :=
-  match Scry.Cs.frontend path src with
+/-- The functions of a spill, empty when it cannot be read (for tests). -/
+def Scry.Cs.programOf (path : String) (text : String) (spill : String) : Wil.Program :=
+  match Scry.Cs.frontend path text spill with
   | .ok l => Wil.program l.funcs
   | .err _ => Wil.program .nil
 
@@ -1739,7 +1711,7 @@ def Scry.Cs.loweredText (l : Scry.Cs.Lowered) : String :=
     "warning: " ++ w.func ++ ":" ++ Nat.repr w.span.line ++ ": " ++ w.message) (List.reverse l.warnings);
   String.intercalate "\n" (List.append fs ws)
 
-def Scry.Cs.lowerRender (path : String) (src : String) : String :=
-  match Scry.Cs.frontend path src with
+def Scry.Cs.lowerRender (path : String) (text : String) (spill : String) : String :=
+  match Scry.Cs.frontend path text spill with
   | .ok l => Scry.Cs.loweredText l
   | .err m => m
