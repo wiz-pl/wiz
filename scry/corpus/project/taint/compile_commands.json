@@ -1,0 +1,5 @@
+[
+  {"directory": ".", "file": "app.c", "arguments": ["cc", "-I.", "-c", "app.c", "-o", "app.o"]},
+  {"directory": ".", "file": "io.c", "arguments": ["cc", "-I.", "-c", "io.c", "-o", "io.o"]},
+  {"directory": ".", "file": "util.c", "command": "cc -I. -c util.c -o util.o"}
+]

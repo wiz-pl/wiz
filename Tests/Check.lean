@@ -229,7 +229,7 @@ def elimsAt (l k : Nat) : List (String × Term Q) :=
   let lams (xs : List Name) (b : Term Q) : Term Q := xs.foldr .lam b
   let P := lams ["i", "x"] (.unit 1)
   let S := lams ["i"] (.unit (Level.ofNat (l + 1)))
-  [("ind", .ind l' I uD 1 P (lams ["i", "xs", "ih"] .tt) .tt x),
+  [("ind", .ind l' I uD 1 P (lams ["i", "xs", "ih"] .tt) .tt x false),
    ("sfix", .sfix l' I uD 1 P (lams ["s", "rec", "i", "x"] .tt) .szInf .tt x),
    ("scase", .scase l' (.qlit .many) I uD 1 P (lams ["j", "i", "xs"] .tt) .szInf .tt x),
    ("coit", .coit l' I sD S (lams ["i", "s"] (.pair .tt (.pair .tt .tt))) .tt .tt),
@@ -262,7 +262,7 @@ def hintCase : IO Unit := do
     | .ok g => pure g
     | .error e => throw (IO.userError s!"setup rejected: {e}")
   let ty (former : Bool) (h : Name × List Level × List (Term Q)) : Term Q :=
-    if former then .mu 0 (.unit 1) (.dret .tt) .tt .szInf (some h) else .nu 0 (.unit 1) (.dret .tt) .tt .szInf (some h)
+    if former then .mu 0 (.unit 1) (.dret .tt) .tt .szInf (some h) false else .nu 0 (.unit 1) (.dret .tt) .tt .szInf (some h)
   let omega : Term Q := .app (.lam "x" (.app (.var 0) (.var 0))) (.lam "x" (.app (.var 0) (.var 0)))
   let bad : List (String × (Name × List Level × List (Term Q))) := [
     ("an application of tt (the evaluator would panic)", ("T", [], [.app .tt .tt])),
@@ -454,6 +454,54 @@ def structGroup : Group where
         rejects (R := Unit) [Raw.defn "bad" (.empty 1) .tt] (fun _ => true) "an error" }
   ]
 
+/-! ## Inductive propositions (issue #252) -/
+
+/-- A description with two constructors and no fields: not a subsingleton. -/
+def twoCtorDesc : Term Q :=
+  .darg (.qlit .many) (.enum ["a", "b"]) (.lam "t" (.dret .tt))
+
+/-- A proposition with one constructor and no fields: a subsingleton. -/
+def oneCtorDesc : Term Q :=
+  .darg (.qlit .many) (.enum ["a"]) (.lam "t" (.dret .tt))
+
+/-- `μ D i` at `Prop` (`prop := true`). -/
+def propMu (D : Term Q) : Term Q := .mu 0 (.unit 1) D .tt .szInf none true
+
+def isLargeElim : TypeError → Bool
+  | .other m => (m.splitOn "large elimination").length > 1
+  | _ => false
+
+def propGroup : Group where
+  name := "check: inductive propositions"
+  parallel := true
+  exercise := "issue #252"
+  cases := [
+    { name := "a prop-flagged μ has sort Prop", run := fun _ =>
+        accepts [{ name := "P", type := .sort 0, value := some (propMu twoCtorDesc) }] },
+    { name := "a prop-flagged μ is not a Type", run := fun _ =>
+        rejects [{ name := "P", type := .sort 1, value := some (propMu twoCtorDesc) }]
+          isMismatch "a type mismatch" },
+    { name := "large elimination of a non-singleton inductive proposition is rejected",
+      run := fun _ =>
+        let T := propMu twoCtorDesc
+        let motive : Term Q := .lam "i" (.lam "x" (.unit 1))
+        let d : Decl Q :=
+          { name := "bad", type := .pi "h" .default (.qlit 0) T (.unit 1) .hole,
+            value := some (.lam "h" (.ind 0 (.unit 1) twoCtorDesc 1 motive .tt .tt (.var 0) true)) }
+        rejects [d] isLargeElim "a large-elimination error" },
+    { name := "a singleton inductive proposition may eliminate into Type",
+      run := fun _ =>
+        -- (`Unit` is a singleton, so the description is a subsingleton; the kernel lets
+        -- the motive be in Type. The method is checked for its *type*, not its value.)
+        let T := propMu oneCtorDesc
+        let motive : Term Q := .lam "i" (.lam "x" (.unit 1))
+        let method : Term Q := .lam "i" (.lam "xs" (.lam "ih" .tt))
+        let d : Decl Q :=
+          { name := "ok", type := .pi "h" .default (.qlit 0) T (.unit 1) .hole,
+            value := some (.lam "h" (.ind 0 (.unit 1) oneCtorDesc 1 motive method .tt (.var 0) true)) }
+        accepts [d] }
+  ]
+
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
 needs a shard in `.github/test-shards.json` (CI checks). -/
@@ -461,6 +509,7 @@ def groups : List Group :=
   mlttGroup ::
   qttGroup ::
   structGroup ::
+  propGroup ::
   []
 
 end Tests.Check

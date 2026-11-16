@@ -1,3 +1,4 @@
+-- test: skip on demand: about ten minutes, and needs --trust-native
 -- Verified circuit optimisation, the two largest checks (docs/libraries.md, H14 V1). Not
 -- in the test suite (about ten minutes); run on demand:
 --     wiz check --trust-native examples/hdl-verified-full.wiz

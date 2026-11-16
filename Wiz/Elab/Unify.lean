@@ -100,7 +100,7 @@ ready to match on. (`forceMeta` keeps glued heads, for unification.) -/
 partial def force (v : Val R) : ElabM R (Val R) := do
   match ← forceMeta v with
   | .unfold _ _ _ v => force v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => force v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => force v.get
   | v => pure v
 
 /-- An equation stuck on a metavariable (its type or a side) computes once the
@@ -181,10 +181,10 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
   -- (given) a glued value keeps its name in the solution
   if let .unfold n us sp _ ← forceMeta v then return ← rename m p (.neutral (.global n us) sp)
   -- (given) and glued induction on a numeral keeps its folded form
-  if let .lazyInd lv I D w P mt i x sp val ← forceMeta v then
+  if let .lazyInd lv I D w P mt i x pr sp val ← forceMeta v then
     -- (on a constructor, `ind` is lazy for speed alone: renamed as what it computes)
     if (whnf x matches .con _) then return ← rename m p val.get
-    let t := Term.ind lv (← rename m p I) (← rename m p D) w (← rename m p P) (← rename m p mt) (← rename m p i) (← rename m p x)
+    let t := Term.ind lv (← rename m p I) (← rename m p D) w (← rename m p P) (← rename m p mt) (← rename m p i) (← rename m p x) pr
     return ← sp.foldlM (fun t e => match e with
       | .app a => return .app t (← rename m p a)
       | .fst => pure (.fst t)
@@ -211,8 +211,8 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
         pure (.ecase z mo' acc bs')
       | .delim v P a b c h =>
         return .delim v (← rename m p P) (← rename m p a) (← rename m p b) (← rename m p c) (← rename m p h) acc
-      | .ind l I D v P mt i =>
-        return .ind l (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p mt) (← rename m p i) acc
+      | .ind l I D v P mt i pr =>
+        return .ind l (← rename m p I) (← rename m p D) v (← rename m p P) (← rename m p mt) (← rename m p i) acc pr
       | .out => pure (.out acc)
       | .down => pure (.down acc)
       | .scase l q I D v P mt s i =>
@@ -304,14 +304,14 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
   | .darg q S D => return .darg (← rename m p q) (← rename m p S) (← rename m p D)
   | .drec q j D => return .drec (← rename m p q) (← rename m p j) (← rename m p D)
   | .dhrec q H j D => return .dhrec (← rename m p q) (← rename m p H) (← rename m p j) (← rename m p D)
-  | .mu l I D i s h => return .mu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
+  | .mu l I D i s h pr => return .mu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h) pr
   | .nu l I D i s h => return .nu l (← rename m p I) (← rename m p D) (← rename m p i) (← rename m p s) (← renameHint h)
   | .con x => return .con (← rename m p x)
   | .ulift k l A => return .ulift k l (← rename m p A)
   | .up a => return .up (← rename m p a)
   | .natLit n => return .natLit n
   | .unfold n us sp _ => goSp (.const n us) sp
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => rename m p v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => rename m p v.get
   | .coit l I D S st i s =>
     return .coit l (← rename m p I) (← rename m p D) (← rename m p S) (← rename m p st) (← rename m p i) (← rename m p s)
 where
@@ -572,9 +572,30 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
     | t, u => pure (t, u)
   -- an equation against something that isn't one: it may compute further
   let isEq (v : Val R) : Bool := v matches .neutral (.eq ..) _
+  -- a data type's computed equation carries its original sides on its payload Σ
+  -- (`markDataEq`, #256): against a stuck equation, unify those sides, so a hole in the
+  -- stuck equation learns the side the computation hid (`Eq.trans h e1`: the expected
+  -- `L = ?c` against `e1`'s computed `L = L2`, #257). Equal sides make the stuck equation
+  -- compute to the same Σ (`vEq` is a function of them), so this is the equation's
+  -- congruence; a failure undoes and falls through to the general comparison.
+  let eqSides (eq : Val R) (v : Val R) : ElabM R Bool := do
+    let .neutral (.eq A a b) #[] := eq | return false
+    let some (A', a', b') := eqDataSides? v | return false
+    let s ← get
+    try
+      unify l A A'
+      unify l a a'
+      unify l b b'
+      pure true
+    catch _ =>
+      set s
+      pure false
   if isEq t != isEq u then
     if let some t' ← recomputeEq? t then return ← unify l t' u
     if let some u' ← recomputeEq? u then return ← unify l t u'
+    if isEq t then
+      if ← eqSides t u then return ()
+    else if ← eqSides u t then return ()
   -- a stuck `cast A B e x` (computed while a hole in `A` or `B` was unsolved) against
   -- something else: if `A` and `B` are now the same (equal without solving anything),
   -- it is `x` (regularity; evaluated again, it would compute to `x`)
@@ -615,7 +636,10 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
   | .dret i, .dret j => unify l i j
   | .darg q S D, .darg q' S' D' | .drec q S D, .drec q' S' D' => unify l q q'; unify l S S'; unify l D D'
   | .dhrec q H j D, .dhrec q' H' j' D' => unify l q q'; unify l H H'; unify l j j'; unify l D D'
-  | .mu u I D i s _, .mu u' I' D' i' s' _ | .nu u I D i s _, .nu u' I' D' i' s' _ =>
+  | .mu u I D i s _ pr, .mu u' I' D' i' s' _ pr' =>
+    unless pr == pr' do throwAt {} "inductive proposition mismatch"
+    unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
+  | .nu u I D i s _, .nu u' I' D' i' s' _ =>
     unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
   | .con x, .con y => unify l x y
   | .ulift _ u A, .ulift _ u' A' => unifyLevel u u'; unify l A A'
@@ -708,7 +732,7 @@ partial def unifyGlued (l : Lvl) (t u : Val R) : ElabM R Bool := do
     let s ← get
     try x; pure true catch e => set s; keepLearnt e; pure false
   match t, u with
-  | .lazyInd _ _ _ _ _ _ _ x _ _, .lazyInd _ _ _ _ _ _ _ y _ _ =>
+  | .lazyInd _ _ _ _ _ _ _ x _ _ _, .lazyInd _ _ _ _ _ _ _ y _ _ _ =>
     -- (on a constructor, `ind` is lazy for speed alone: compared by what it computes)
     if (whnf x matches .con _) || (whnf y matches .con _) then return false
     let g ← getGlobals
@@ -902,7 +926,8 @@ partial def unifySpine (l : Lvl) (sp sp' : Array (Elim R)) : ElabM R Unit := do
     | .delim v P a b c h, .delim v' P' a' b' c' h' =>
       unifyLevel v v'
       for (x, y) in [(P, P'), (a, a'), (b, b'), (c, c'), (h, h')] do unify l x y
-    | .ind u I D v P mt i, .ind u' I' D' v' P' mt' i' =>
+    | .ind u I D v P mt i pr, .ind u' I' D' v' P' mt' i' pr' =>
+      unless pr == pr' do throwAt {} "inductive proposition mismatch"
       unifyLevel u u'; unifyLevel v v'
       for (x, y) in [(I, I'), (D, D'), (P, P'), (mt, mt'), (i, i')] do unify l x y
     | .out, .out | .down, .down => pure ()

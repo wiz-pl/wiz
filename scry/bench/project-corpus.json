@@ -1,0 +1,1394 @@
+{
+  "harness": "scry/scripts/project-corpus.sh",
+  "note": "wall time is informational on a shared machine; not a perf-run measurement",
+  "limit_seconds": 600,
+  "analysis": "scry project --taint --json --sarif --allow-errors --cache --cache-stats",
+  "totals": {
+    "groups": 3,
+    "units": 13,
+    "functions": 268,
+    "findings": 4,
+    "checked": 4,
+    "boundary": 1898,
+    "memory": 118,
+    "ms": 1796376,
+    "failed": 0,
+    "missing": 0,
+    "cache_hit": 0,
+    "cache_miss": 13,
+    "cache_write": 13
+  },
+  "groups": [
+    {
+      "group": "synthetic",
+      "root": "/workspace/wt/scry-multifile/scry/corpus/project/taint",
+      "status": "ok",
+      "ms": 73,
+      "counts": {
+        "findings": 2,
+        "checked": 2,
+        "unchecked": 0,
+        "boundary": 5,
+        "memory": 0
+      },
+      "files": [
+        {
+          "file": "app.c",
+          "counts": {
+            "file": "app.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 1,
+            "memory": 0
+          }
+        },
+        {
+          "file": "io.h",
+          "counts": {
+            "file": "io.h",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 0,
+            "memory": 0
+          }
+        },
+        {
+          "file": "io.c",
+          "counts": {
+            "file": "io.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 2,
+            "memory": 0
+          }
+        },
+        {
+          "file": "util.c",
+          "counts": {
+            "file": "util.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 2,
+            "memory": 0
+          }
+        }
+      ],
+      "findings": [
+        {
+          "rule": "command-injection",
+          "file": "io.c",
+          "function": "run_cmd",
+          "line": 5,
+          "checked": "checked",
+          "message": "Attacker-controlled data reaches a command interpreter"
+        },
+        {
+          "rule": "command-injection",
+          "file": "util.c",
+          "function": "util_unsafe",
+          "line": 6,
+          "checked": "checked",
+          "message": "Attacker-controlled data reaches a command interpreter"
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "dir": "/workspace/wt/scry-multifile/scry/build/project-corpus/cache/synthetic",
+        "hit": 0,
+        "miss": 3,
+        "write": 3,
+        "corrupt": 0,
+        "files": 3,
+        "reason": "cold"
+      },
+      "callgraph": {
+        "edges": 4,
+        "unresolved": [
+          {
+            "caller": 1,
+            "callee": "getenv"
+          },
+          {
+            "caller": 1,
+            "callee": "escape_shell"
+          },
+          {
+            "caller": 1,
+            "callee": "maybe"
+          },
+          {
+            "caller": 2,
+            "callee": "system"
+          },
+          {
+            "caller": 3,
+            "callee": "system"
+          },
+          {
+            "caller": 6,
+            "callee": "getenv"
+          },
+          {
+            "caller": 6,
+            "callee": "system"
+          }
+        ],
+        "duplicates": []
+      },
+      "units": 3,
+      "functions": 7
+    },
+    {
+      "group": "wiz-lang",
+      "root": "/workspace/wt/scry-multifile",
+      "status": "ok",
+      "ms": 171803,
+      "counts": {
+        "findings": 1,
+        "checked": 1,
+        "unchecked": 0,
+        "boundary": 1407,
+        "memory": 111
+      },
+      "files": [
+        {
+          "file": "c/proc.c",
+          "counts": {
+            "file": "c/proc.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 24,
+            "memory": 0
+          }
+        },
+        {
+          "file": "c/sockets.c",
+          "counts": {
+            "file": "c/sockets.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 196,
+            "memory": 0
+          }
+        },
+        {
+          "file": "lib/serial.c",
+          "counts": {
+            "file": "lib/serial.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 121,
+            "memory": 0
+          }
+        },
+        {
+          "file": "infoview/term.c",
+          "counts": {
+            "file": "infoview/term.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 264,
+            "memory": 0
+          }
+        },
+        {
+          "file": "selfhost/rt.c",
+          "counts": {
+            "file": "selfhost/rt.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 802,
+            "memory": 111
+          }
+        }
+      ],
+      "findings": [
+        {
+          "rule": "strcpy-overflow",
+          "file": "infoview/term.c",
+          "function": "static:3:iv_addr",
+          "line": 100,
+          "checked": "checked",
+          "message": "strcpy does not bound the copy; use strlcpy or a checked length"
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "dir": "/workspace/wt/scry-multifile/scry/build/project-corpus/cache/wiz-lang",
+        "hit": 0,
+        "miss": 5,
+        "write": 5,
+        "corrupt": 0,
+        "files": 5,
+        "reason": "cold"
+      },
+      "callgraph": {
+        "edges": 157,
+        "unresolved": [
+          {
+            "caller": 0,
+            "callee": "fflush"
+          },
+          {
+            "caller": 0,
+            "callee": "_exit"
+          },
+          {
+            "caller": 1,
+            "callee": "grail_ok_unit"
+          },
+          {
+            "caller": 2,
+            "callee": "grail_ok_unit"
+          },
+          {
+            "caller": 3,
+            "callee": "stat"
+          },
+          {
+            "caller": 3,
+            "callee": "grail_ok_bool"
+          },
+          {
+            "caller": 4,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 4,
+            "callee": "lean_decode_io_error"
+          },
+          {
+            "caller": 4,
+            "callee": "wiz_sock_error"
+          },
+          {
+            "caller": 5,
+            "callee": "memset"
+          },
+          {
+            "caller": 5,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 6,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 6,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 7,
+            "callee": "fcntl"
+          },
+          {
+            "caller": 7,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 7,
+            "callee": "close"
+          },
+          {
+            "caller": 7,
+            "callee": "fdopen"
+          },
+          {
+            "caller": 7,
+            "callee": "_ZN4lean14io_wrap_handleEP8_IO_FILE"
+          },
+          {
+            "caller": 7,
+            "callee": "fclose"
+          },
+          {
+            "caller": 8,
+            "callee": "signal"
+          },
+          {
+            "caller": 8,
+            "callee": "lstat"
+          },
+          {
+            "caller": 8,
+            "callee": "unlink"
+          },
+          {
+            "caller": 8,
+            "callee": "socket"
+          },
+          {
+            "caller": 8,
+            "callee": "bind"
+          },
+          {
+            "caller": 8,
+            "callee": "listen"
+          },
+          {
+            "caller": 8,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 8,
+            "callee": "close"
+          },
+          {
+            "caller": 8,
+            "callee": "wiz_sock_ok_fd"
+          },
+          {
+            "caller": 9,
+            "callee": "signal"
+          },
+          {
+            "caller": 9,
+            "callee": "socket"
+          },
+          {
+            "caller": 9,
+            "callee": "setsockopt"
+          },
+          {
+            "caller": 9,
+            "callee": "memset"
+          },
+          {
+            "caller": 9,
+            "callee": "htonl"
+          },
+          {
+            "caller": 9,
+            "callee": "htons"
+          },
+          {
+            "caller": 9,
+            "callee": "bind"
+          },
+          {
+            "caller": 9,
+            "callee": "listen"
+          },
+          {
+            "caller": 9,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 9,
+            "callee": "close"
+          },
+          {
+            "caller": 9,
+            "callee": "wiz_sock_ok_fd"
+          },
+          {
+            "caller": 10,
+            "callee": "getsockname"
+          },
+          {
+            "caller": 10,
+            "callee": "wiz_sock_ok_fd"
+          },
+          {
+            "caller": 11,
+            "callee": "signal"
+          },
+          {
+            "caller": 11,
+            "callee": "socket"
+          },
+          {
+            "caller": 11,
+            "callee": "memset"
+          },
+          {
+            "caller": 11,
+            "callee": "htonl"
+          },
+          {
+            "caller": 11,
+            "callee": "htons"
+          },
+          {
+            "caller": 11,
+            "callee": "connect"
+          },
+          {
+            "caller": 11,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 11,
+            "callee": "close"
+          },
+          {
+            "caller": 11,
+            "callee": "wiz_sock_ok_handles"
+          },
+          {
+            "caller": 12,
+            "callee": "shutdown"
+          },
+          {
+            "caller": 12,
+            "callee": "close"
+          },
+          {
+            "caller": 12,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 13,
+            "callee": "wiz_sock_ok_conn"
+          },
+          {
+            "caller": 14,
+            "callee": "signal"
+          },
+          {
+            "caller": 14,
+            "callee": "socket"
+          },
+          {
+            "caller": 14,
+            "callee": "connect"
+          },
+          {
+            "caller": 14,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 14,
+            "callee": "close"
+          },
+          {
+            "caller": 14,
+            "callee": "wiz_sock_ok_handles"
+          },
+          {
+            "caller": 15,
+            "callee": "signal"
+          },
+          {
+            "caller": 15,
+            "callee": "socketpair"
+          },
+          {
+            "caller": 15,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 15,
+            "callee": "close"
+          },
+          {
+            "caller": 15,
+            "callee": "wiz_sock_ok_pair"
+          },
+          {
+            "caller": 16,
+            "callee": "shutdown"
+          },
+          {
+            "caller": 16,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 17,
+            "callee": "shutdown"
+          },
+          {
+            "caller": 17,
+            "callee": "close"
+          },
+          {
+            "caller": 17,
+            "callee": "unlink"
+          },
+          {
+            "caller": 17,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 18,
+            "callee": "lean_set_exit_on_panic"
+          },
+          {
+            "caller": 18,
+            "callee": "wiz_sock_ok_unit"
+          },
+          {
+            "caller": 20,
+            "callee": "tcgetattr"
+          },
+          {
+            "caller": 20,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 20,
+            "callee": "cfmakeraw"
+          },
+          {
+            "caller": 20,
+            "callee": "cfsetispeed"
+          },
+          {
+            "caller": 20,
+            "callee": "cfsetospeed"
+          },
+          {
+            "caller": 20,
+            "callee": "tcsetattr"
+          },
+          {
+            "caller": 20,
+            "callee": "cfgetospeed"
+          },
+          {
+            "caller": 21,
+            "callee": "tcgetattr"
+          },
+          {
+            "caller": 21,
+            "callee": "cfgetospeed"
+          },
+          {
+            "caller": 23,
+            "callee": "tcdrain"
+          },
+          {
+            "caller": 23,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 25,
+            "callee": "posix_openpt"
+          },
+          {
+            "caller": 25,
+            "callee": "grantpt"
+          },
+          {
+            "caller": 25,
+            "callee": "unlockpt"
+          },
+          {
+            "caller": 25,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 25,
+            "callee": "close"
+          },
+          {
+            "caller": 26,
+            "callee": "ptsname_r"
+          },
+          {
+            "caller": 27,
+            "callee": "write"
+          },
+          {
+            "caller": 27,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 28,
+            "callee": "strlen"
+          },
+          {
+            "caller": 28,
+            "callee": "tcsetattr"
+          },
+          {
+            "caller": 29,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 30,
+            "callee": "signal"
+          },
+          {
+            "caller": 30,
+            "callee": "raise"
+          },
+          {
+            "caller": 31,
+            "callee": "isatty"
+          },
+          {
+            "caller": 31,
+            "callee": "tcgetattr"
+          },
+          {
+            "caller": 31,
+            "callee": "tcsetattr"
+          },
+          {
+            "caller": 31,
+            "callee": "atexit"
+          },
+          {
+            "caller": 31,
+            "callee": "pipe"
+          },
+          {
+            "caller": 31,
+            "callee": "fcntl"
+          },
+          {
+            "caller": 31,
+            "callee": "memset"
+          },
+          {
+            "caller": 31,
+            "callee": "sigaction"
+          },
+          {
+            "caller": 31,
+            "callee": "signal"
+          },
+          {
+            "caller": 31,
+            "callee": "strlen"
+          },
+          {
+            "caller": 32,
+            "callee": "ioctl"
+          },
+          {
+            "caller": 32,
+            "callee": "getenv"
+          },
+          {
+            "caller": 33,
+            "callee": "ioctl"
+          },
+          {
+            "caller": 33,
+            "callee": "getenv"
+          },
+          {
+            "caller": 34,
+            "callee": "strlen"
+          },
+          {
+            "caller": 35,
+            "callee": "memset"
+          },
+          {
+            "caller": 35,
+            "callee": "strlen"
+          },
+          {
+            "caller": 35,
+            "callee": "strcpy"
+          },
+          {
+            "caller": 36,
+            "callee": "socket"
+          },
+          {
+            "caller": 36,
+            "callee": "connect"
+          },
+          {
+            "caller": 36,
+            "callee": "close"
+          },
+          {
+            "caller": 37,
+            "callee": "socket"
+          },
+          {
+            "caller": 37,
+            "callee": "unlink"
+          },
+          {
+            "caller": 37,
+            "callee": "bind"
+          },
+          {
+            "caller": 37,
+            "callee": "listen"
+          },
+          {
+            "caller": 37,
+            "callee": "close"
+          },
+          {
+            "caller": 38,
+            "callee": "accept"
+          },
+          {
+            "caller": 39,
+            "callee": "close"
+          },
+          {
+            "caller": 40,
+            "callee": "poll"
+          },
+          {
+            "caller": 40,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 40,
+            "callee": "read"
+          },
+          {
+            "caller": 41,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 41,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 45,
+            "callee": "strlen"
+          },
+          {
+            "caller": 45,
+            "callee": "write"
+          },
+          {
+            "caller": 45,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 46,
+            "callee": "clock_gettime"
+          },
+          {
+            "caller": 47,
+            "callee": "fopen"
+          },
+          {
+            "caller": 47,
+            "callee": "fread"
+          },
+          {
+            "caller": 47,
+            "callee": "fclose"
+          },
+          {
+            "caller": 50,
+            "callee": "socketpair"
+          },
+          {
+            "caller": 50,
+            "callee": "fork"
+          },
+          {
+            "caller": 50,
+            "callee": "close"
+          },
+          {
+            "caller": 50,
+            "callee": "dup2"
+          },
+          {
+            "caller": 50,
+            "callee": "open"
+          },
+          {
+            "caller": 50,
+            "callee": "execl"
+          },
+          {
+            "caller": 50,
+            "callee": "_exit"
+          },
+          {
+            "caller": 52,
+            "callee": "exit"
+          },
+          {
+            "caller": 53,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 53,
+            "callee": "exit"
+          },
+          {
+            "caller": 54,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 54,
+            "callee": "exit"
+          },
+          {
+            "caller": 72,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 122,
+            "callee": "snprintf"
+          },
+          {
+            "caller": 126,
+            "callee": "strlen"
+          },
+          {
+            "caller": 128,
+            "callee": "fflush"
+          },
+          {
+            "caller": 128,
+            "callee": "exit"
+          },
+          {
+            "caller": 130,
+            "callee": "puts"
+          },
+          {
+            "caller": 132,
+            "callee": "fputs"
+          },
+          {
+            "caller": 134,
+            "callee": "fflush"
+          },
+          {
+            "caller": 134,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 136,
+            "callee": "fopen"
+          },
+          {
+            "caller": 136,
+            "callee": "fclose"
+          },
+          {
+            "caller": 143,
+            "callee": "strlen"
+          },
+          {
+            "caller": 143,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 155,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 163,
+            "callee": "strcmp"
+          },
+          {
+            "caller": 180,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 181,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 186,
+            "callee": "strdup"
+          },
+          {
+            "caller": 189,
+            "callee": "GC_register_finalizer"
+          },
+          {
+            "caller": 190,
+            "callee": "GC_gcollect"
+          },
+          {
+            "caller": 190,
+            "callee": "GC_invoke_finalizers"
+          },
+          {
+            "caller": 190,
+            "callee": "fflush"
+          },
+          {
+            "caller": 205,
+            "callee": "snprintf"
+          },
+          {
+            "caller": 209,
+            "callee": "GC_init"
+          },
+          {
+            "caller": 209,
+            "callee": "GC_set_free_space_divisor"
+          },
+          {
+            "caller": 213,
+            "callee": "fopen"
+          },
+          {
+            "caller": 213,
+            "callee": "strlen"
+          },
+          {
+            "caller": 213,
+            "callee": "fwrite"
+          },
+          {
+            "caller": 213,
+            "callee": "fclose"
+          },
+          {
+            "caller": 214,
+            "callee": "getrlimit"
+          },
+          {
+            "caller": 214,
+            "callee": "getenv"
+          },
+          {
+            "caller": 214,
+            "callee": "setrlimit"
+          },
+          {
+            "caller": 214,
+            "callee": "setenv"
+          },
+          {
+            "caller": 214,
+            "callee": "execv"
+          }
+        ],
+        "duplicates": []
+      },
+      "units": 5,
+      "functions": 215
+    },
+    {
+      "group": "wiz-rv",
+      "root": "/workspace/wiz-rv",
+      "status": "ok",
+      "ms": 484113,
+      "counts": {
+        "findings": 1,
+        "checked": 1,
+        "unchecked": 0,
+        "boundary": 486,
+        "memory": 7
+      },
+      "files": [
+        {
+          "file": "sw/ctest/ctest.c",
+          "counts": {
+            "file": "sw/ctest/ctest.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 36,
+            "memory": 2
+          }
+        },
+        {
+          "file": "sw/iss/iss.c",
+          "counts": {
+            "file": "sw/iss/iss.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 265,
+            "memory": 3
+          }
+        },
+        {
+          "file": "sw/iss/mustest.c",
+          "counts": {
+            "file": "sw/iss/mustest.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 41,
+            "memory": 0
+          }
+        },
+        {
+          "file": "sw/mus_synth.c",
+          "counts": {
+            "file": "sw/mus_synth.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 62,
+            "memory": 0
+          }
+        },
+        {
+          "file": "sw/syscalls.c",
+          "counts": {
+            "file": "sw/syscalls.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 79,
+            "memory": 2
+          }
+        },
+        {
+          "file": "sw/hw.h",
+          "counts": {
+            "file": "sw/hw.h",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 3,
+            "memory": 0
+          }
+        }
+      ],
+      "findings": [
+        {
+          "rule": "strcpy-overflow",
+          "file": "sw/ctest/ctest.c",
+          "function": "main",
+          "line": 20,
+          "checked": "checked",
+          "message": "strcpy does not bound the copy; use strlcpy or a checked length"
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "dir": "/workspace/wt/scry-multifile/scry/build/project-corpus/cache/wiz-rv",
+        "hit": 0,
+        "miss": 5,
+        "write": 5,
+        "corrupt": 0,
+        "files": 5,
+        "reason": "cold"
+      },
+      "callgraph": {
+        "edges": 29,
+        "unresolved": [
+          {
+            "caller": 3,
+            "callee": "strcpy"
+          },
+          {
+            "caller": 3,
+            "callee": "strncpy"
+          },
+          {
+            "caller": 3,
+            "callee": "strlen"
+          },
+          {
+            "caller": 3,
+            "callee": "strcmp"
+          },
+          {
+            "caller": 3,
+            "callee": "memmove"
+          },
+          {
+            "caller": 6,
+            "callee": "strtol"
+          },
+          {
+            "caller": 7,
+            "callee": "snprintf"
+          },
+          {
+            "caller": 7,
+            "callee": "fopen"
+          },
+          {
+            "caller": 7,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 7,
+            "callee": "fclose"
+          },
+          {
+            "caller": 7,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 11,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 12,
+            "callee": "fopen"
+          },
+          {
+            "caller": 12,
+            "callee": "perror"
+          },
+          {
+            "caller": 12,
+            "callee": "exit"
+          },
+          {
+            "caller": 12,
+            "callee": "fclose"
+          },
+          {
+            "caller": 13,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 13,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 13,
+            "callee": "fseek"
+          },
+          {
+            "caller": 13,
+            "callee": "fwrite"
+          },
+          {
+            "caller": 13,
+            "callee": "fclose"
+          },
+          {
+            "caller": 21,
+            "callee": "fprintf"
+          },
+          {
+            "caller": 21,
+            "callee": "fopen"
+          },
+          {
+            "caller": 21,
+            "callee": "fread"
+          },
+          {
+            "caller": 21,
+            "callee": "fclose"
+          },
+          {
+            "caller": 21,
+            "callee": "memcmp"
+          },
+          {
+            "caller": 21,
+            "callee": "fwrite"
+          },
+          {
+            "caller": 29,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 32,
+            "callee": "strcmp"
+          },
+          {
+            "caller": 32,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 34,
+            "callee": "memcpy"
+          },
+          {
+            "caller": 34,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 35,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 36,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 37,
+            "callee": "memset"
+          },
+          {
+            "caller": 42,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 43,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 44,
+            "callee": "__errno_location"
+          },
+          {
+            "caller": 45,
+            "callee": "__errno_location"
+          }
+        ],
+        "duplicates": [
+          {
+            "name": "main",
+            "definitions": 3
+          }
+        ]
+      },
+      "units": 5,
+      "functions": 46
+    },
+    {
+      "group": "tree-sitter",
+      "root": "/workspace/wt/scry-multifile/scry/native/tree-sitter/lib/src",
+      "status": "timeout",
+      "ms": 900139,
+      "counts": {},
+      "files": [],
+      "findings": [],
+      "cache": {},
+      "callgraph": {}
+    },
+    {
+      "group": "generated:old-wizard.c",
+      "root": "/workspace/wizard-test",
+      "status": "timeout",
+      "ms": 120048,
+      "counts": {},
+      "files": [],
+      "findings": [],
+      "cache": {},
+      "callgraph": {}
+    },
+    {
+      "group": "generated:droste.c",
+      "root": "/workspace/soyjack",
+      "status": "timeout",
+      "ms": 120146,
+      "counts": {},
+      "files": [],
+      "findings": [],
+      "cache": {},
+      "callgraph": {}
+    },
+    {
+      "group": "synthetic-warm",
+      "root": "/workspace/wt/scry-multifile/scry/corpus/project/taint",
+      "status": "ok",
+      "ms": 54,
+      "counts": {
+        "findings": 2,
+        "checked": 2,
+        "unchecked": 0,
+        "boundary": 5,
+        "memory": 0
+      },
+      "files": [
+        {
+          "file": "app.c",
+          "counts": {
+            "file": "app.c",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 1,
+            "memory": 0
+          }
+        },
+        {
+          "file": "io.h",
+          "counts": {
+            "file": "io.h",
+            "findings": 0,
+            "checked": 0,
+            "boundary": 0,
+            "memory": 0
+          }
+        },
+        {
+          "file": "io.c",
+          "counts": {
+            "file": "io.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 2,
+            "memory": 0
+          }
+        },
+        {
+          "file": "util.c",
+          "counts": {
+            "file": "util.c",
+            "findings": 1,
+            "checked": 1,
+            "boundary": 2,
+            "memory": 0
+          }
+        }
+      ],
+      "findings": [
+        {
+          "rule": "command-injection",
+          "file": "io.c",
+          "function": "run_cmd",
+          "line": 5,
+          "checked": "checked",
+          "message": "Attacker-controlled data reaches a command interpreter"
+        },
+        {
+          "rule": "command-injection",
+          "file": "util.c",
+          "function": "util_unsafe",
+          "line": 6,
+          "checked": "checked",
+          "message": "Attacker-controlled data reaches a command interpreter"
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "dir": "build/project-corpus/cache/synthetic",
+        "hit": 3,
+        "miss": 0,
+        "write": 0,
+        "corrupt": 0,
+        "files": 3,
+        "reason": "hit"
+      },
+      "callgraph": {
+        "edges": 4,
+        "unresolved": [
+          {
+            "caller": 1,
+            "callee": "getenv"
+          },
+          {
+            "caller": 1,
+            "callee": "escape_shell"
+          },
+          {
+            "caller": 1,
+            "callee": "maybe"
+          },
+          {
+            "caller": 2,
+            "callee": "system"
+          },
+          {
+            "caller": 3,
+            "callee": "system"
+          },
+          {
+            "caller": 6,
+            "callee": "getenv"
+          },
+          {
+            "caller": 6,
+            "callee": "system"
+          }
+        ],
+        "duplicates": []
+      },
+      "units": 3,
+      "functions": 7
+    }
+  ],
+  "synthetic": {
+    "project": "synthetic",
+    "tp": 2,
+    "fn": 0,
+    "fp": 0,
+    "fp_on_safe_file": 0,
+    "precision": 100.0,
+    "recall": 100.0,
+    "expected": 2,
+    "actual": 2
+  }
+}

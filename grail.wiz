@@ -5,6 +5,8 @@ import Grail
 def package : Package := Package.new "wiz"
   |> Package.set "libs" "-lm"
   |> Package.lib "std" "lib"
+  -- Feral's runtime stand-ins (FeralCore), which examples/resources.wiz imports
+  |> Package.lib "feral-core" "drafts/feral/lib"
   |> Package.tests "examples" "examples"
   |> Package.exe "io" "examples/io.wiz"
   |> Package.exe "std-demo" "examples/std.wiz"

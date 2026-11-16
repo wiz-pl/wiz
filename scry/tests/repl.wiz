@@ -1,0 +1,22 @@
+-- test: run
+import Sys
+import Scry.Repl
+
+-- A scripted Scry session: load once, then query the loaded unit as ordinary Wiz
+-- values. Errors (a missing file, a bad rule pack) are printed and the session goes on.
+def main : IO Unit := do
+  Scry.Repl.load "tests/fixtures/taint-unsafe.c";
+  Scry.Repl.facts;
+  ns ← Scry.Repl.kindNodes "function_definition";
+  IO.println ("query kind function_definition: " ++ Nat.repr (List.length ns) ++ " node(s)");
+  Scry.Repl.functions;
+  Scry.Repl.calls "system";
+  Scry.Repl.taint;
+  Scry.Repl.taintPaths;
+  Scry.Repl.findings;
+  Scry.Repl.triage "f_7d8634735dbe1cdb" "confirmed";
+  Scry.Repl.load "tests/fixtures/does-not-exist.c";
+  Scry.Repl.jsonOn;
+  Scry.Repl.facts;
+  Scry.Repl.jsonOff;
+  IO.println "repl session continued"

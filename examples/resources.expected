@@ -1,0 +1,2 @@
+examples/resources.wiz:45:1: info: .ok (2, 1)
+examples/resources.wiz:77:1: info: .some ((), .cons .none (.cons (.some (20, ())) (.cons (.some (10, ())) (.cons (.some (30, ())) .nil))))
