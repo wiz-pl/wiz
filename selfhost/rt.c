@@ -334,6 +334,15 @@ static V flat3(V a, V b, V t) { V fs[3] = {a, b, t}; return mkobj(0, 3, fs); }
 static V flat4(V a, V b, V c, V t) { V fs[4] = {a, b, c, t}; return mkobj(0, 4, fs); }
 /* `Prod.mk a b`: the payload `(tag 0, (a, (b, ◾)))` */
 static V prodv(V a, V b) { return flat4(BOX(0), a, b, BOX(0)); }
+/* `IO`'s pair `(a, w)`, as the `IO` natives return it: the payload of `Prod.mk a w` for
+   the embedded prelude's `IO A := World → Prod A World`, a Σ pair for lib/IO.wiz's
+   `(1 w : World) → A × World` (the backend then defines `WIZ_IO_PAIR`: Backend.wiz,
+   `ioShapeOf`) */
+#ifdef WIZ_IO_PAIR
+#define IOV(a, w) pair(a, w)
+#else
+#define IOV(a, w) prodv(a, w)
+#endif
 static V nilv(void) {
 #ifdef WIZ_RC
   return nul(0);
@@ -608,37 +617,37 @@ NATIVE(Nat_46_log2, 1, uintptr_t x = UNBOX(a[0]); return BOX(x ? 63 - __builtin_
 NATIVE(Nat_46_toString, 1, char b[32]; int n = snprintf(b, sizeof b, "%lu", (unsigned long)UNBOX(a[0])); return wstr(b, (size_t)n);)
 /* the program's arguments, without its name (stage 21k; `rt_start` saves them) */
 static int rt_argc; static char **rt_argv;
-NATIVE(IO_46_argCount, 1, return prodv(BOX((uintptr_t)(rt_argc > 1 ? rt_argc - 1 : 0)), a[0]);)
+NATIVE(IO_46_argCount, 1, return IOV(BOX((uintptr_t)(rt_argc > 1 ? rt_argc - 1 : 0)), a[0]);)
 NATIVE(IO_46_arg, 2,
   uintptr_t i = UNBOX(a[0]);
   const char *s = i + 1 < (uintptr_t)rt_argc ? rt_argv[i + 1] : "";
-  return prodv(wstr(s, strlen(s)), a[1]);)
+  return IOV(wstr(s, strlen(s)), a[1]);)
 /* end the program with an exit code (as `Process.exit` of lib/Sys.wiz: no leak check) */
 NATIVE(Process_46_exit, 2, fflush(stdout); exit((int)UNBOX(a[0])); return a[1];)
 #ifndef WIZ_RC
 /* IO: `String → World → Prod Unit World` */
-NATIVE(IO_46_println, 2, puts(cstr(a[0])); return prodv(BOX(0), a[1]);)
-NATIVE(IO_46_print, 2, fputs(cstr(a[0]), stdout); return prodv(BOX(0), a[1]);)
-NATIVE(IO_46_ePrintln, 2, fflush(stdout); fprintf(stderr, "%s\n", cstr(a[0])); return prodv(BOX(0), a[1]);)
+NATIVE(IO_46_println, 2, puts(cstr(a[0])); return IOV(BOX(0), a[1]);)
+NATIVE(IO_46_print, 2, fputs(cstr(a[0]), stdout); return IOV(BOX(0), a[1]);)
+NATIVE(IO_46_ePrintln, 2, fflush(stdout); fprintf(stderr, "%s\n", cstr(a[0])); return IOV(BOX(0), a[1]);)
 NATIVE(IO_46_readFile, 2,
   FILE *f = fopen(cstr(a[0]), "rb");
-  if (!f) return prodv(wstr("", 0), a[1]);
+  if (!f) return IOV(wstr("", 0), a[1]);
   size_t cap = 4096, len = 0; char *buf = (char *)GC_MALLOC_ATOMIC(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
     if (len == cap) { char *nb = (char *)GC_MALLOC_ATOMIC(cap * 2); memcpy(nb, buf, len); buf = nb; cap *= 2; }
   }
   fclose(f);
-  return prodv(wstr(buf, len), a[1]);)
+  return IOV(wstr(buf, len), a[1]);)
 #else
-NATIVE(IO_46_println, 2, char *s = cstr(a[0]); dec(a[0]); puts(s); free(s); return prodv(BOX(0), a[1]);)
-NATIVE(IO_46_print, 2, char *s = cstr(a[0]); dec(a[0]); fputs(s, stdout); free(s); return prodv(BOX(0), a[1]);)
-NATIVE(IO_46_ePrintln, 2, char *s = cstr(a[0]); dec(a[0]); fflush(stdout); fprintf(stderr, "%s\n", s); free(s); return prodv(BOX(0), a[1]);)
+NATIVE(IO_46_println, 2, char *s = cstr(a[0]); dec(a[0]); puts(s); free(s); return IOV(BOX(0), a[1]);)
+NATIVE(IO_46_print, 2, char *s = cstr(a[0]); dec(a[0]); fputs(s, stdout); free(s); return IOV(BOX(0), a[1]);)
+NATIVE(IO_46_ePrintln, 2, char *s = cstr(a[0]); dec(a[0]); fflush(stdout); fprintf(stderr, "%s\n", s); free(s); return IOV(BOX(0), a[1]);)
 NATIVE(IO_46_readFile, 2,
   char *p = cstr(a[0]); dec(a[0]);
   FILE *f = fopen(p, "rb");
   free(p);
-  if (!f) return prodv(wstr("", 0), a[1]);
+  if (!f) return IOV(wstr("", 0), a[1]);
   size_t cap = 4096, len = 0; char *buf = (char *)malloc(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
@@ -647,7 +656,7 @@ NATIVE(IO_46_readFile, 2,
   fclose(f);
   V s = wstr(buf, len);
   free(buf);
-  return prodv(s, a[1]);)
+  return IOV(s, a[1]);)
 #endif
 
 /* `memo f` and the backend's suspended `let`s: a `T_THUNK` (`wiz_thunk`), forced by
@@ -1252,6 +1261,81 @@ uint64_t wiz_sys_write_file(const char *p, const char *s, int append) {
   int ok = fwrite(s, 1, n, f) == n;
   if (fclose(f) != 0) ok = 0;
   return ok ? 0 : 1;
+}
+
+/* (library prelude) The runtime functions lib's `extern`s name (`IO`, `Std`), with
+   the signatures of `runtime/wiz_rt.h` and the behaviour of `runtime/rt_data.inc`. A Wiz
+   value (`Str`) is the callee's (released here under reference counting); a returned
+   text is copied by the caller (`rt_out_str`), so it lives until the next call. */
+static char *rt_scratch = NULL;
+const char *wiz_nat_show(uint64_t a) {
+  static char b[32];
+  snprintf(b, sizeof b, "%llu", (unsigned long long)a);
+  return b;
+}
+#ifdef WIZ_RC
+#define STR_DROP(v) dec(v)
+#else
+#define STR_DROP(v) ((void)(v))
+#endif
+static Str *strAlloc(size_t n) {
+#ifndef WIZ_RC
+  Str *t = (Str *)GC_MALLOC_ATOMIC(sizeof(Str) + n + 1);
+#else
+  Str *t = (Str *)rt_alloc(sizeof(Str) + n + 1);
+#endif
+  t->h.rc = 1; t->h.tag = T_STR; t->h.size = 0; t->len = n; t->data[n] = 0;
+  return t;
+}
+const char *wiz_str_to_cstr(V v) {
+  Str *t = (Str *)v;
+  free(rt_scratch);
+  rt_scratch = (char *)malloc(t->len + 1);
+  memcpy(rt_scratch, t->data, t->len + 1);
+  STR_DROP(v);
+  return rt_scratch;
+}
+V wiz_str_append(V a, V b) {
+  Str *x = (Str *)a, *y = (Str *)b;
+  Str *t = strAlloc(x->len + y->len);
+  memcpy(t->data, x->data, x->len);
+  memcpy(t->data + x->len, y->data, y->len);
+  STR_DROP(a); STR_DROP(b);
+  return (V)t;
+}
+uint64_t wiz_str_size(V v) { uint64_t n = ((Str *)v)->len; STR_DROP(v); return n; }
+uint64_t wiz_str_byte(V v, uint64_t i) {
+  Str *t = (Str *)v;
+  uint64_t r = i < t->len ? (unsigned char)t->data[i] : 0;
+  STR_DROP(v);
+  return r;
+}
+V wiz_str_slice(V v, uint64_t from, uint64_t to) {
+  Str *t = (Str *)v;
+  if (to > t->len) to = t->len;
+  if (from > to) from = to;
+  Str *r = strAlloc(to - from);
+  memcpy(r->data, t->data + from, to - from);
+  STR_DROP(v);
+  return (V)r;
+}
+int wiz_str_eq(V a, V b) {
+  Str *x = (Str *)a, *y = (Str *)b;
+  int r = x->len == y->len && memcmp(x->data, y->data, x->len) == 0;
+  STR_DROP(a); STR_DROP(b);
+  return r;
+}
+int wiz_str_lt(V a, V b) {
+  Str *x = (Str *)a, *y = (Str *)b;
+  size_t n = x->len < y->len ? x->len : y->len;
+  int c = memcmp(x->data, y->data, n);
+  int r = c < 0 || (c == 0 && x->len < y->len);
+  STR_DROP(a); STR_DROP(b);
+  return r;
+}
+void wiz_io_write_file(const char *path, const char *text) {
+  FILE *f = fopen(path, "wb");
+  if (f) { fputs(text, f); fclose(f); }
 }
 
 /* The driver's `$HOME` (`selfhost/Cli.wiz`: the default cache directory): the same

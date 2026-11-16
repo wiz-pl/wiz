@@ -379,6 +379,89 @@ def mangle (n : String) : String := match n with
 
 def isNative (n : String) : Bool := elemStr n nativeNames
 
+-- **The library prelude** (`--prelude-from-roots`: `lib/Prelude.wiz`, `IO`, `Std`). Its
+-- one mark is that it registers native operations (`builtin KEY := C`; the embedded
+-- prelude registers none), and everything the backend does differently for it is keyed
+-- on this predicate (`libPrelude`), so that a program on the embedded prelude (the
+-- bootstrap) compiles to the same C as before:
+-- * only the definitions reachable from `main` and the exports are compiled, as on the
+--   host (`compileReachable`), with the foreign functions they reach (`eraseProgram`);
+-- * `IO`'s pair is whatever its definition says (`ioShapeOf`: a `Σ` in `lib/IO.wiz`, the
+--   embedded prelude's `Prod`), and anything else is refused.
+-- On either prelude, a constant registered for a native key is native (`nativeIn`, an
+-- alias to the runtime's native when it is named otherwise: `builtinAliases`), an
+-- `extern` of a native's name is the native when their shapes agree and an error
+-- otherwise, and an `extern` of a `wiz_…` function the runtime (`rt.c`) doesn't define
+-- is an error naming it (`ffiLower`).
+def libPrelude (gs : Globals) : Bool := match Globals.builtins gs with
+  | .nil => .false
+  | .cons _ _ => .true
+-- the runtime's native behind a builtin key (`nat.add` is rt.c's `Nat.add`, `nat.blt` its
+-- `Nat.blt`, `memo` its `memo`); the type keys (`nat`, `string`, `int`) have no code
+def keyNative (key : String) : Option String := match strEq key "memo" with
+  | .true => .some "memo"
+  | .false => match dropPrefix (strChars "nat.") (strChars key) with
+    | .some rest => .some ("Nat." +++ String.mk rest)
+    | .none => .none
+-- the runtime native a global is (its own name, or its registration's), if it is one
+def nativeRt (regs : List BuiltinReg) (n : String) : Option String := match isNative n with
+  | .true => .some n
+  | .false => match builtinOfName n regs with
+    | .some key => keyNative key
+    | .none => .none
+def nativeIn (regs : List BuiltinReg) (n : String) : Bool := match nativeRt regs n with
+  | .some _ => .true
+  | .none => .false
+-- the natives' shapes (rt.c's `NATIVE`s): the arity, and whether the result is in `IO`
+-- (the world the last argument). A new native in `nativeNames` needs its row here, or an
+-- `extern` of its name is refused.
+def natives1 : List String :=
+  .cons "Nat.succ" (.cons "Nat.pred" (.cons "Nat.toString" (.cons "Nat.log2" (.cons "IO.argCount"
+  (.cons "Str.ofString" (.cons "Array.empty" (.cons "StrMap.empty" .nil)))))))
+def natives2 : List String :=
+  .cons "Nat.add" (.cons "Nat.sub" (.cons "Nat.mul" (.cons "Nat.beq" (.cons "Nat.blt" (.cons "Nat.lt"
+  (.cons "Nat.le" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow" (.cons "Nat.land" (.cons "Nat.lor"
+  (.cons "Nat.xor" (.cons "Nat.shiftLeft" (.cons "Nat.shiftRight" (.cons "memo" (.cons "IO.ePrintln"
+  (.cons "Process.exit" (.cons "IO.println" (.cons "IO.print" (.cons "IO.readFile" (.cons "IO.arg"
+  (.cons "Array.size" (.cons "StrMap.size" .nil)))))))))))))))))))))))
+def natives4 : List String :=
+  .cons "Array.getD" (.cons "Array.set" (.cons "StrMap.insert" (.cons "StrMap.findD" .nil)))
+def nativesIO : List String :=
+  .cons "IO.argCount" (.cons "IO.ePrintln" (.cons "Process.exit" (.cons "IO.println" (.cons "IO.print"
+  (.cons "IO.readFile" (.cons "IO.arg" .nil))))))
+def nativeArity (r : String) : Option Nat := match strEq r "Nat.zero" with
+  | .true => .some 0
+  | .false => match elemStr r natives1 with
+    | .true => .some 1
+    | .false => match elemStr r natives2 with
+      | .true => .some 2
+      | .false => match strEq r "Array.push" with
+        | .true => .some 3
+        | .false => match elemStr r natives4 with
+          | .true => .some 4
+          | .false => .none
+def boolEq (a b : Bool) : Bool := match a with
+  | .true => b
+  | .false => Bool.not b
+def nativeAgrees (r : String) (k : Nat) (io : Bool) : Bool := match nativeArity r with
+  | .some a => Bool.and (Nat.beq a k) (boolEq io (elemStr r nativesIO))
+  | .none => .false
+def shapeText (k : Nat) (io : Bool) : String :=
+  Nat.toString k +++ " argument" +++ (match Nat.beq k 1 with
+    | .true => ""
+    | .false => "s") +++ (match io with
+    | .true => " (the world last), in IO"
+    | .false => ", not in IO")
+-- the `wiz_…` functions of the self-hosted runtime (`rt.c`) an `extern` may name
+def rtProvides : List String :=
+  .cons "wiz_u64_id" (.cons "wiz_u64_add" (.cons "wiz_u64_sub" (.cons "wiz_u64_mul" (.cons "wiz_u64_div"
+  (.cons "wiz_u64_mod" (.cons "wiz_u64_lt" (.cons "wiz_u64_eq" (.cons "wiz_f64_of_nat" (.cons "wiz_f64_add"
+  (.cons "wiz_f64_sub" (.cons "wiz_f64_mul" (.cons "wiz_f64_div" (.cons "wiz_f64_lt" (.cons "wiz_f64_show"
+  (.cons "wiz_sys_getenv" (.cons "wiz_sys_write_file" (.cons "wiz_proof_start" (.cons "wiz_proof_tick"
+  (.cons "wiz_proof_end" (.cons "wiz_nat_show" (.cons "wiz_str_to_cstr" (.cons "wiz_str_append"
+  (.cons "wiz_str_size" (.cons "wiz_str_byte" (.cons "wiz_str_slice" (.cons "wiz_str_eq" (.cons "wiz_str_lt"
+  (.cons "wiz_io_write_file" .nil))))))))))))))))))))))))))))
+
 -- the free variables of a term (indices at its top, each once)
 def addVar (i : Nat) : List Nat → List Nat
   | .nil => .cons i .nil
@@ -1817,23 +1900,118 @@ def implOf (n : String) : List Foreign → Option String
       | .true => .some g
       | .false => implOf n rest
     | _ => implOf n rest
-partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
+partial def eraseGlobals (sl : Bool) (regs : List BuiltinReg) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
   | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
-    | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
-      | .true => eraseGlobals sl ffi all seen acc k
+    | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (nativeIn regs n) with
+      | .true => eraseGlobals sl regs ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with
-      | .some g => eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
+      | .some g => eraseGlobals sl regs ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
       | .none => match v with
-        | .axiomC _ _ => eraseGlobals sl ffi all (.cons n seen) acc k
+        | .axiomC _ _ => eraseGlobals sl regs ffi all (.cons n seen) acc k
         | _ => match eraseCheck empty v (eval .nil ty) with
           | .err m => .err (n +++ ": " +++ m)
           | .ok e =>
             let e' := match sl with
               | .true => markLets e
               | .false => lazyLets .false e;
-            eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n e') acc) k
+            eraseGlobals sl regs ffi all (.cons n seen) (.cons (.mk n e') acc) k
+-- (the erasure of one definition, as `eraseGlobals` does it)
+def eraseDef (sl : Bool) (ty v : Tm) : ER := match eraseCheck empty v (eval .nil ty) with
+  | .ok e => .ok (match sl with
+    | .true => markLets e
+    | .false => lazyLets .false e)
+  | r => r
+-- (library prelude) **Only what is reached** from the roots (`main`, the exports) is
+-- compiled, as the host's `compileReachable`: `lib/Prelude.wiz` alone has a tactic
+-- framework no program runs. A worklist: each name, once, is a native or has no code
+-- here (an axiom, an `extern`: `.some .none`), or is erased (`.some (.some e)`, an
+-- `implemented_by` its target), and the globals its code names are visited after it.
+mutual
+def globsE : ETm → List String → List String
+  | .glob n, acc => .cons n acc
+  | .lam b, acc => globsE b acc
+  | .app f a, acc => globsE f (globsE a acc)
+  | .letE v b, acc => globsE v (globsE b acc)
+  | .obj _ fs, acc => globsEs fs acc
+  | .proj _ t, acc => globsE t acc
+  | .case s bs, acc => globsE s (globsEs bs acc)
+  | .prim _ as, acc => globsEs as acc
+  | _, acc => acc
+def globsEs : ETms → List String → List String
+  | .nil, acc => acc
+  | .cons t rest, acc => globsE t (globsEs rest acc)
+end
+-- the latest global of each name: its index (`eraseGlobals` keeps the latest too)
+def latestIdx (all : Array Global) : Nat → StrMap (Option Nat) → StrMap (Option Nat)
+  | .zero, m => m
+  | .succ k, m => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ _ _ _ _ _ => match StrMap.findD m (Str.ofString n) .none with
+      | .some _ => latestIdx all k m
+      | .none => latestIdx all k (StrMap.insert m (Str.ofString n) (.some k))
+inductive Reach where
+  | ok (seen : StrMap (Option (Option ETm)))
+  | err (msg : String)
+def noCode (seen : StrMap (Option (Option ETm))) (n : String) : StrMap (Option (Option ETm)) :=
+  StrMap.insert seen (Str.ofString n) (.some .none)
+def withCode (seen : StrMap (Option (Option ETm))) (n : String) (e : ETm) : StrMap (Option (Option ETm)) :=
+  StrMap.insert seen (Str.ofString n) (.some (.some e))
+partial def reachGo (sl : Bool) (regs : List BuiltinReg) (ffi : List Foreign) (all : Array Global)
+    (idx : StrMap (Option Nat)) (seen : StrMap (Option (Option ETm))) : List String → Reach
+  | .nil => .ok seen
+  | .cons n rest => match StrMap.findD seen (Str.ofString n) .none with
+    | .some _ => reachGo sl regs ffi all idx seen rest
+    | .none => match nativeIn regs n with
+      | .true => reachGo sl regs ffi all idx (noCode seen n) rest
+      | .false => match implOf n ffi with
+        | .some g => reachGo sl regs ffi all idx (withCode seen n (.glob g)) (.cons g rest)
+        | .none => match StrMap.findD idx (Str.ofString n) .none with
+          | .none => reachGo sl regs ffi all idx (noCode seen n) rest
+          | .some k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+            | .mk _ _ ty v _ _ _ => match v with
+              | .axiomC _ _ => reachGo sl regs ffi all idx (noCode seen n) rest
+              | _ => match eraseDef sl ty v with
+                | .err m => .err (n +++ ": " +++ m)
+                | .ok e => reachGo sl regs ffi all idx (withCode seen n e) (globsE e rest)
+-- the definitions reached, in the order `eraseGlobals` gives (the earliest first)
+partial def reachedList (all : Array Global) (seen : StrMap (Option (Option ETm))) (done : StrMap (Option Nat))
+    (acc : List Erased) : Nat → List Erased
+  | .zero => acc
+  | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ _ _ _ _ _ => match StrMap.findD done (Str.ofString n) .none with
+      | .some _ => reachedList all seen done acc k
+      | .none =>
+        let done' := StrMap.insert done (Str.ofString n) (.some 0);
+        match StrMap.findD seen (Str.ofString n) .none with
+        | .some c => (match c with
+          | .some e => reachedList all seen done' (.cons (.mk n e) acc) k
+          | .none => reachedList all seen done' acc k)
+        | .none => reachedList all seen done' acc k
+-- the roots: `main` (not for a library), and the exported definitions
+def exportRoots : List Foreign → List String
+  | .nil => .nil
+  | .cons f rest => match f with
+    | .exported n _ _ _ _ => .cons n (exportRoots rest)
+    | _ => exportRoots rest
+-- the program's erased definitions, and (library prelude) the names reached
+inductive EraseP where
+  | ok (es : List Erased) (reach : Option (StrMap (Option (Option ETm))))
+  | err (msg : String)
+def eraseProgram (sl lib : Bool) (gs : Globals) : EraseP := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ =>
+    let regs := Globals.builtins gs;
+    match libPrelude gs with
+    | .false => (match eraseGlobals sl regs ffi all .nil .nil (Array.size all) with
+      | .ok es => EraseP.ok es .none
+      | .err m => EraseP.err m)
+    | .true =>
+      let roots : List String := match lib with
+        | .true => exportRoots ffi
+        | .false => .cons "main" (exportRoots ffi);
+      match reachGo sl regs ffi all (latestIdx all (Array.size all) StrMap.empty) StrMap.empty roots with
+      | .err m => .err m
+      | .ok seen => .ok (reachedList all seen StrMap.empty .nil (Array.size all)) (.some seen)
 def arities : StrMap Nat → List Erased → StrMap Nat
   | ar, .nil => ar
   | ar, .cons (.mk n e) rest => arities (StrMap.insert ar (Str.ofString n) (lamsOf e)) rest
@@ -2182,7 +2360,7 @@ def exportResult (k : String) : String := match strEq k "v" with
   | .false => match strEq k "w" with
   | .true => "return r; "
   | .false => "return rt_in_nat(r); "
-def callIntoWiz (rc : Bool) (f : String) (ps : List String) (r : String) (io : Bool) : String :=
+def callIntoWiz (rc iop : Bool) (f : String) (ps : List String) (r : String) (io : Bool) : String :=
   let args := List.append (exportArgs 0 ps) (match io with
     | .true => .cons "BOX(0)" .nil
     | .false => .nil);
@@ -2190,7 +2368,9 @@ def callIntoWiz (rc : Bool) (f : String) (ps : List String) (r : String) (io : B
     | .nil => f
     | .cons _ _ => "apn(" +++ f +++ ", " +++ Nat.toString (lenL args) +++ ", (V[]){" +++ commaSep args +++ "})";
   let res := match io with
-    | .true => "V pr = " +++ call +++ "; V r = fld(fld(pr, 1), 0); " +++ (match rc with
+    | .true => "V pr = " +++ call +++ "; V r = " +++ (match iop with
+      | .true => "fld(pr, 0)"
+      | .false => "fld(fld(pr, 1), 0)") +++ "; " +++ (match rc with
       | .true => "inc(r); dec(pr); "
       | .false => "")
     | .false => "V r = " +++ call +++ "; ";
@@ -2202,18 +2382,18 @@ def cbKinds : List Foreign → List String
   | .cons f rest => match f with
     | .fn _ _ _ ps _ _ _ => List.append ps (cbKinds rest)
     | _ => cbKinds rest
-partial def cbDocs (rc : Bool) (seen : List String) : List String → List Doc
+partial def cbDocs (rc iop : Bool) (seen : List String) : List String → List Doc
   | .nil => .nil
   | .cons k rest => match cbOf k with
-    | .none => cbDocs rc seen rest
+    | .none => cbDocs rc iop seen rest
     | .some c => match elemS (cbName c) seen with
-      | .true => cbDocs rc seen rest
+      | .true => cbDocs rc iop seen rest
       | .false => match c with
         | .mk _ ps r io => .cons (.t ("static " +++ ffiCTypeOut r +++ " " +++ cbName c +++ "(" +++ commaSep (.cons "void *ctx" (exportParams 0 ps)) +++
-            ") { rt_dup((V)ctx); " +++ callIntoWiz rc "(V)ctx" ps r io +++ "}")) (cbDocs rc (.cons (cbName c) seen) rest)
+            ") { rt_dup((V)ctx); " +++ callIntoWiz rc iop "(V)ctx" ps r io +++ "}")) (cbDocs rc iop (.cons (cbName c) seen) rest)
 -- each foreign function's wrapper, `get_g` its curried closure (a constant computed
 -- once, for arity 0)
-def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
+def ffiWrappers (ffi : List Foreign) (rc iop : Bool) : List Foreign → List Doc
   | .nil => .nil
   | .cons f rest => match f with
     | .fn n cname _ ps r io fin =>
@@ -2226,16 +2406,18 @@ def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
       | .mk pre cargs post =>
         let body := pre +++ ffiOut ffi r fin (cname +++ "(" +++ commaSep cargs +++ ")") +++ post;
         let ret := match io with
-          | .true => "return prodv(r, p" +++ Nat.toString (k - 1) +++ "); "
+          | .true => "return " +++ (match iop with
+            | .true => "pair"
+            | .false => "prodv") +++ "(r, p" +++ Nat.toString (k - 1) +++ "); "
           | .false => "return r; ";
         match k with
         | .zero => .cons (.t ("V get_" +++ g +++ "(void) { static V c = 0; static int i = 0; if (!i) { i = 1; c = ({ " +++ body +++ "r; }); " +++
-            keep +++ "return c; }")) (ffiWrappers ffi rc rest)
+            keep +++ "return c; }")) (ffiWrappers ffi rc iop rest)
         | .succ _ => .cons (.t ("V d_" +++ g +++ "(" +++ paramDecls 0 k +++ ") { " +++ body +++ ret +++ "} " +++
             "static V w_" +++ g +++ "(V *a) { return d_" +++ g +++ "(" +++ argList 0 k +++ "); } " +++
             "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); " +++ keep +++ "return c; }"))
-          (ffiWrappers ffi rc rest)
-    | _ => ffiWrappers ffi rc rest
+          (ffiWrappers ffi rc iop rest)
+    | _ => ffiWrappers ffi rc iop rest
 -- (stage 21o) The C files and libraries of `link_c`/`link_lib`, as lines at the top of the
 -- C the compiler prints: the C file is one translation unit with the runtime, so the
 -- files are compiled and linked by whoever compiles it (`cc out.c f.c -lm`; the tests
@@ -2249,15 +2431,15 @@ def linkDocs : List Foreign → List Doc
     | _ => linkDocs rest
 -- (stage 21o) An `export`: a C function `cname` that applies the definition's closure
 -- (`callIntoWiz`). (21s) It starts the runtime if nothing has (a library has no `main`).
-def exportDocs (rc : Bool) : List Foreign → List Doc
+def exportDocs (rc iop : Bool) : List Foreign → List Doc
   | .nil => .nil
   | .cons f rest => match f with
     | .exported n cname ps r io =>
       let ps' := exportParams 0 ps;
       .cons (.t (ffiCTypeOut r +++ " " +++ cname +++ "(" +++ (match ps' with
         | .nil => "void"
-        | .cons _ _ => commaSep ps') +++ ") { rt_ensure(); " +++ callIntoWiz rc ("get_" +++ mangle n +++ "()") ps r io +++ "}")) (exportDocs rc rest)
-    | _ => exportDocs rc rest
+        | .cons _ _ => commaSep ps') +++ ") { rt_ensure(); " +++ callIntoWiz rc iop ("get_" +++ mangle n +++ "()") ps r io +++ "}")) (exportDocs rc iop rest)
+    | _ => exportDocs rc iop rest
 -- (stage 21s) The header of a library's exports (`--header`), as `exportHeader` in
 -- `C.lean`: the handle functions and a prototype per export.
 def headerParams : Nat → List String → List String
@@ -2279,9 +2461,86 @@ def headerProtos : List Foreign → List Doc
 def headerDocs (ffi : List Foreign) : List Doc :=
   (.cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */") (.cons (.t "/* ABI v1 (wiz-notes/prior-art/compilers-runtime-ffi.md, 2.2): kinds are explicit.") (.cons (.t "   n/u=uint64_t, f=double, s=const char* (borrowed in, caller-owned out), b=int,") (.cons (.t "   p=void* (+1 wrapped, borrowed for a call), w=wiz_val (+0 in, +1 out); e/v are omitted.") (.cons (.t "   Structs by value only through c_struct; native reps only on sealed types. */") (.cons (.t "#define WIZ_ABI_MAJOR 1") (.cons (.t "#define WIZ_ABI_MINOR 0") (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED") (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);") (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil)))))))))))))))))
 -- the C of a program's foreign functions (after the runtime)
-def ffiDocs (rc : Bool) (ffi : List Foreign) : List Doc :=
+def ffiDocs (rc iop : Bool) (ffi : List Foreign) : List Doc :=
   let fs := List.reverseOf ffi .nil;
-  List.append (ffiDecls ffi .nil fs) (List.append (cbDocs rc .nil (cbKinds fs)) (ffiWrappers ffi rc fs))
+  List.append (ffiDecls ffi .nil fs) (List.append (cbDocs rc iop .nil (cbKinds fs)) (ffiWrappers ffi rc iop fs))
+-- the foreign functions compiled (the latest first, as `Globals.ffi`): an `extern` of a
+-- native's name is the native (no wrapper) when their shapes agree, and an error
+-- otherwise; (library prelude) one not reached is dropped; one of a `wiz_…` function
+-- the runtime lacks is an error naming it. The other entries are kept.
+inductive FfiL where
+  | ok (ffi : List Foreign)
+  | err (msg : String)
+def reachedName (reach : Option (StrMap (Option (Option ETm)))) (n : String) : Bool := match reach with
+  | .none => .true
+  | .some m => match StrMap.findD m (Str.ofString n) .none with
+    | .some _ => .true
+    | .none => .false
+def ffiLower (regs : List BuiltinReg) (reach : Option (StrMap (Option (Option ETm)))) : List Foreign → FfiL
+  | .nil => .ok .nil
+  | .cons f rest => match ffiLower regs reach rest with
+    | .err m => .err m
+    | .ok fs => match f with
+      | .fn n cname _ ps _ io _ => match nativeRt regs n with
+        | .some r =>
+          let k := ffiArity ps io;
+          match nativeAgrees r k io with
+          | .true => .ok fs
+          | .false => .err ("extern \"" +++ cname +++ "\" " +++ n +++ " takes " +++ shapeText k io +++
+              ", but " +++ n +++ " is the runtime's native " +++ r +++ (match nativeArity r with
+                | .some a => " of " +++ shapeText a (elemStr r nativesIO)
+                | .none => ", whose shape the backend does not record (natives1 … in Backend.wiz)") +++
+              ": the self-hosted backend can't use either")
+        | .none => match reachedName reach n with
+          | .false => .ok fs
+          | .true => match Bool.and (strStarts "wiz_" cname) (Bool.not (elemStr cname rtProvides)) with
+            | .true => .err ("extern \"" +++ cname +++ "\" " +++ n +++ ": the self-hosted runtime (selfhost/rt.c) has no " +++
+                cname +++ ", so a program that uses " +++ n +++ " can't be compiled by the self-hosted backend yet")
+            | .false => .ok (.cons f fs)
+      | _ => .ok (.cons f fs)
+-- each registered constant named otherwise than its native: `get_C` is the native's
+def builtinAliases : List String → List BuiltinReg → List Doc
+  | _, .nil => .nil
+  | seen, .cons (.mk key n) rest => match keyNative key with
+    | .none => builtinAliases seen rest
+    | .some r => match Bool.or (isNative n) (elemStr n seen) with
+      | .true => builtinAliases seen rest
+      | .false => .cons (.t ("V get_" +++ mangle n +++ "(void) { return get_" +++ mangle r +++ "(); }"))
+          (builtinAliases (.cons n seen) rest)
+-- **`IO`'s pair** (library prelude). The runtime's `IO` natives and the foreign
+-- functions return `(a, w)`: the embedded prelude's `IO A := World → Prod A World` is a
+-- `Prod.mk` payload (`prodv`), `lib/IO.wiz`'s `(1 w : World) → A × World` a `Σ` pair
+-- (`pair`; the C gets `#define WIZ_IO_PAIR 1`, which rt.c's natives follow). Read from
+-- `IO`'s definition; any other shape is refused rather than guessed.
+inductive IOShape where
+  | prod
+  | sigma
+  | bad (msg : String)
+partial def stripLams : Tm → Tm
+  | .lam b => stripLams b
+  | .ann t _ => stripLams t
+  | t => t
+def ioShapeBad : IOShape := .bad "IO's definition is neither `World → Prod A World` nor `(w : World) → A × World` (a Σ): the self-hosted backend doesn't know how its actions return"
+def ioShapeOf (gs : Globals) : IOShape := match libPrelude gs with
+  | .false => .prod
+  | .true => match Scope.lookup (Globals.scope gs) "IO" with
+    | .none => .prod
+    | .some i => match globalTm .false gs i with
+      | .const _ _ _ v _ => match stripLams v with
+        | .pi _ _ _ _ cod => match cod with
+          | .sigma _ _ _ _ _ => .sigma
+          | _ => match tmHeadName cod with
+            | .some h => match strEq h "Prod" with
+              | .true => .prod
+              | .false => ioShapeBad
+            | .none => ioShapeBad
+        | _ => ioShapeBad
+      | _ => ioShapeBad
+-- what the program's C starts with, after its `link_c` lines: (`WIZ_IO_PAIR`) the
+-- runtime, and the aliases of the registered natives
+def ioDefine (iop : Bool) : List Doc := match iop with
+  | .true => .cons (.t "#define WIZ_IO_PAIR 1") .nil
+  | .false => .nil
 -- **Applications pushed into `case`s** (reference counting mode). A match is a method
 -- applied to the payload, and the method is chosen by a `case`: `(case s [bᵢ]) a⃗`
 -- built a closure for the chosen branch and applied it. With cheap arguments
@@ -2328,20 +2587,36 @@ def decideGlobals : List Erased → List Erased
 def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .true => .nil
   | .false => .cons (.t m) .nil
+-- what both backends start from: the erased definitions, the foreign functions compiled
+-- (`ffiLower`) and whether `IO`'s pair is a `Σ` (`ioShapeOf`); or why the program can't
+-- be compiled
+inductive Prog where
+  | ok (es : List Erased) (ffi : List Foreign) (iop : Bool)
+  | err (msg : String)
+def prepWith (iop sl lib : Bool) (gs : Globals) : Prog := match eraseProgram sl lib gs with
+  | .err m => .err m
+  | .ok es reach => match ffiLower (Globals.builtins gs) reach (Globals.ffi gs) with
+    | .err m => .err m
+    | .ok ffi => .ok es ffi iop
+def prepProgram (sl lib : Bool) (gs : Globals) : Prog := match ioShapeOf gs with
+  | .bad m => .err m
+  | .sigma => prepWith .true sl lib gs
+  | .prod => prepWith .false sl lib gs
 -- the program's C text, one `Doc` per line
-def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
-    | .err m => .cons (.t ("#error " +++ m)) .nil
-    | .ok es0 =>
-      -- (applications pushed into `case`s, as under reference counting: a match is then
-      -- no closure, and its recursive calls are in tail position)
-      let es := pushGlobals es0;
-      match genCode (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
-      | .mk protos defs st => match st with
-        | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false ffi) (List.append protos
-            (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .false (List.reverseOf ffi .nil))
-              (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); ap(get_main(), BOX(0)); rt_finishGC(); return 0; }")))))))
+def genProgram (lib : Bool) (gs : Globals) : List Doc := match prepProgram .false lib gs with
+  | .err m => .cons (.t ("#error " +++ m)) .nil
+  | .ok es0 ffiC iop =>
+    let ffi := Globals.ffi gs;
+    -- (applications pushed into `case`s, as under reference counting: a match is then
+    -- no closure, and its recursive calls are in tail position)
+    let es := pushGlobals es0;
+    match genCode (.mk .nil 0 (arities (ffiArities StrMap.empty ffiC) es) .idle .nil) .nil .nil es with
+    | .mk protos defs st => match st with
+      | .mk fns _ _ _ _ =>
+        List.append (linkDocs (List.reverseOf ffi .nil)) (List.append (ioDefine iop) (.cons (.t "#include \"rt.c\"")
+          (List.append (builtinAliases .nil (Globals.builtins gs)) (List.append (ffiDocs .false iop ffiC) (List.append protos
+          (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .false iop (List.reverseOf ffi .nil))
+            (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); ap(get_main(), BOX(0)); rt_finishGC(); return 0; }")))))))))
 
 -- **Constructors inlined** (reference counting mode): a global whose body, under its
 -- `λ`s, only builds an object from its parameters and constants (a constructor, as
@@ -2847,21 +3122,22 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
             (.t ("static V w_" +++ g +++ "(V *a) { V r = d_" +++ g +++ "(" +++ argList 0 k +++ "); " +++ wrapDecs 0 sig +++ "return r; } " +++
              "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
              "); rt_root(&c); } inc(c); return c; }")) defs)) rest
-def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
-    | .err m => .cons (.t ("#error " +++ m)) .nil
-    | .ok es0 =>
-      let es1 := pushGlobals es0;
-      let es := indvGlobals (decideGlobals (inlGlobals (caseMap (consMap StrMap.empty es1) es1) es1));
-      let sigs : StrMap (List Bool) := match borrow with
-        | .true => sigsFix (sigsInit StrMap.empty es) 0 es
-        | .false => StrMap.empty;
-      match genCodeRC sigs (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
-      | .mk protos defs st => match st with
-        | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true ffi) (List.append protos
-            (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .true (List.reverseOf ffi .nil))
-              (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); dec(ap(get_main(), BOX(0))); rt_finish(); return 0; }"))))))))
+def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match prepProgram .true lib gs with
+  | .err m => .cons (.t ("#error " +++ m)) .nil
+  | .ok es0 ffiC iop =>
+    let ffi := Globals.ffi gs;
+    let es1 := pushGlobals es0;
+    let es := indvGlobals (decideGlobals (inlGlobals (caseMap (consMap StrMap.empty es1) es1) es1));
+    let sigs : StrMap (List Bool) := match borrow with
+      | .true => sigsFix (sigsInit StrMap.empty es) 0 es
+      | .false => StrMap.empty;
+    match genCodeRC sigs (.mk .nil 0 (arities (ffiArities StrMap.empty ffiC) es) .idle .nil) .nil .nil es with
+    | .mk protos defs st => match st with
+      | .mk fns _ _ _ _ =>
+        List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (List.append (ioDefine iop) (.cons (.t "#include \"rt.c\"")
+          (List.append (builtinAliases .nil (Globals.builtins gs)) (List.append (ffiDocs .true iop ffiC) (List.append protos
+          (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .true iop (List.reverseOf ffi .nil))
+            (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); dec(ap(get_main(), BOX(0))); rt_finish(); return 0; }"))))))))))
 
 -- The backend a program asks for: reference counting if its first line is `-- wiz: rc`,
 -- else the garbage collector. (A command-line flag, once programs can read their
