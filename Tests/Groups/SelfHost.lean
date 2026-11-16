@@ -1231,7 +1231,7 @@ def bytesEncExpected : String :=
 scrutinee in full while it compiles (`scrutLets` binds its value), and the `let`-bound
 form below does not; the host compiles both at once. -/
 def closedScrutFib : String :=
-  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, _ => 0\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
+  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
 
 def closedScrutInline : String :=
   closedScrutFib ++ "def main : IO Unit := IO.println (match Nat.beq (fib 18 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\")\n"
