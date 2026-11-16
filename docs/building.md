@@ -217,7 +217,7 @@ Adding a test group touches no shared file:
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
   that group's module; `Tests/Elab.lean` holds the helpers several groups use (`ok`,
   `fails`, the library loaders, the self-hosted programs, …).
-* The older modules (`Tests/Grail.lean`, `Tests/Lint.lean`, …) still list their groups
+* The older modules (`Tests/Lint.lean`, `Tests/LSP.lean`, …) still list their groups
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
 
@@ -526,7 +526,7 @@ critical path runs `lake build` directly or saves a `.lake` Actions cache. The s
 Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
-`grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
+`grail` beside itself, which `Tests/Groups/Grail*.lean` look for). The dev shell (`nix develop`)
 is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 

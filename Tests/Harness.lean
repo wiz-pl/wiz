@@ -254,7 +254,7 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
       try l.kill catch _ => pure ()
   pure (← results.get)
 
-/-- Cases with known outcomes for the test driver's own tests (`Tests/Grail.lean`,
+/-- Cases with known outcomes for the test driver's own tests (`Tests/Groups/GrailTestRunner.lean`,
 `testrunner`): `--run` finds this group, but no selector picks it, so it is never part
 of a suite run. -/
 def driverFixtures : Group where
