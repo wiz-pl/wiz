@@ -1,9 +1,9 @@
 # The self-hosted toolchain chain
 
-Status: **design, not active.** Nothing here runs in CI, no commit pins a toolchain, and
-no release or attestation has been published. The chain starts when its root is
-declared (see "The start condition"). Until then the pieces exist to be built and
-measured locally: `scripts/repro-fixpoint.sh`, `scripts/check-toolchain-pin.py` and the
+Status: **design; checked in CI, not pinned.** CI builds the release on every master
+push and runs the chain's step checks nightly (see "Continuous integration"), but no
+commit pins a toolchain and no `toolchain-*` release or attestation has been published.
+The chain starts when its root is declared (see "The start condition"). The pieces: `scripts/repro-fixpoint.sh`, `scripts/check-toolchain-pin.py` and the
 Nix prototype in `nix/bootstrap-chain.nix` (`packages.wizc`, `packages.wizc-release`,
 `legacyPackages.SYSTEM.bootstrapChain`).
 
@@ -167,6 +167,10 @@ A commit `R` may be declared the root when all of these hold at `R`:
 7. **Lean stays buildable at the root.** `nix build .#wiz` (the Lean host) keeps
    building at `R` for as long as anyone wants to re-derive the root; the root's
    attestation names it as the input toolchain.
+8. **The nightly chain check passed at `R`.** The `chain` job of
+   `.github/workflows/bootstrap-chain.yml` ran on `R` with `chain-step-check: PASS` in
+   self mode and, when a previous release existed, in cross mode. A `DIFFER` there
+   blocks declaring a root at that commit (it does not block merges).
 
 The root is declared by a commit that adds the chain's first pin file and a line to
 this document naming `R`, the release's sha256 and the two builders' run links.
@@ -176,13 +180,26 @@ this document naming `R`, the release's sha256 and the two builders' run links.
 Nothing is switched on until the root exists. Concretely, until the commit described
 above is merged:
 
-* no workflow runs on push or pull request for the chain (any workflow added for it is
-  `workflow_dispatch` only and says it is inactive);
+* the only chain workflow is `.github/workflows/bootstrap-chain.yml` (below): it builds
+  and compares, keeps nightly tarballs as workflow artifacts and in Cachix, and gates
+  nothing but the root's declaration;
 * no `toolchain-*` GitHub release, no attestation and no Cachix pin is published;
 * `wizc-toolchain.json` does not exist in the repository, and `flake.nix` does not read
   one.
 
-This keeps CI cost at zero until the chain has something to anchor to.
+## Continuous integration
+
+Adopted 2026-11-16. `.github/workflows/bootstrap-chain.yml`, separate from `ci.yml` and
+not a merge gate:
+
+| when | job | what | cost (estimate) |
+|---|---|---|---|
+| after each CI run of a master push (`workflow_run`, so the Lean host is already in Cachix; a run cancelled by a newer push is skipped) | `release` | `nix build .#wizc-release .#wizc .#wizc-seed`: seed, static `wizc`, the fixpoint `cmp`, the tarball; sha256 and MANIFEST in the job summary; the paths pushed to Cachix; the tarball as artifact `wizc-release-SHA` (14 days) | a substitution when `selfhost/`, the Lean host and nixpkgs are unchanged; else about 15 min, about 3 GB |
+| nightly 05:17 UTC on master, and from "Run workflow" | `chain` | `scripts/chain-step-check.sh` in self mode; then in cross mode with `--pred` the newest earlier `wizc-nightly` artifact of master (skipped on the first night or when it is of the same commit); this night's tarball kept as `wizc-nightly` (90 days) and its fixed-output path `wizc-SYSTEM-COMMIT.tar.gz` pushed to Cachix, so `fetchToolchain` finds it by `(commit, hash)` | about 30 min per mode, about 3 GB |
+
+Nothing generated is committed. A `DIFFER` fails the `chain` job and blocks declaring a
+root at that commit (requirement 8); the three-stage collector fixpoint stays in
+`fixpoint.yml` (nightly, self-hosted runner, 7 GiB).
 
 ## The flake interface
 
@@ -470,8 +487,8 @@ master `d23473da` plus this branch's `scripts/`:
 **6 of 6 byte-identical**, and each build reached the fixpoint (`self1.c = self2.c`).
 Per build: Lean `wiz build` of the compiler 199–204 s (2.6 GB), stage 1's self-compile
 40–45 s (0.7 GB), cc 150–175 s (2.6 GB), stage 2's self-compile 825–834 s with a
-**peak of 6.3 GB**. Declare **7G** for a fixpoint job, not 6G (the scripts' comments
-and `fixpoint.yml` still say 6).
+**peak of 6.3 GB**. Declare **7G** for a fixpoint job, not 6G (`fixpoint.yml`
+and the scripts declare 7 GiB since 2026-11-16).
 
 Caveats: both builds ran on one machine as one user (the Nix sandbox build below
 varies the user), and build B's Lake step replayed modules from the shared Lake cache
