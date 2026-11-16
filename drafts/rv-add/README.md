@@ -46,8 +46,8 @@ Proof shape (same normal form as `lib/BitVecShift.wiz`): everything is a `Bits.l
 (`Bits.div_low_succ`), and the last step is `(2q+1)/2 = q` or `(2q)/2 = q`. For the
 borrow form, `~b + 1 = 2^32 - b` (`Bits.sub_pow` + `Bits.wnot_val`), which is
 `BitVec.sub`'s `toNat`. No step relies on a `Nat` identity that the kernel's normalizer
-closes (those are `True` and cannot be `Eq.trans` links: `wiz-notes/rv-shift-lemmas.md`
-§4/§7); the polynomial reshapes are `nat_ring!` equations and the `+ 0` of a `cat` is
+closes (the kernel turns an equation whose sides are convertible into `True`, so it cannot be
+an `Eq.trans` link); the polynomial reshapes are `nat_ring!` equations and the `+ 0` of a `cat` is
 removed by an explicit `Nat.add_zero` (a stuck `q + 0` and `q` are **not** convertible,
 so it cannot be left to the conversion check under a `low`).
 

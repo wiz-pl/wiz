@@ -18,8 +18,10 @@ system takes one. What each gives up:
   with the rest unless the rest is `ret`; **any other field takes the Σ rule, also when
   its type is neutral**. A substitution can turn a neutral field type into `Enum k`, and
   then the other rule applies, with a result that is equivalent but not convertible. So a
-  substitution instance of a well-typed term can be ill typed (model-memo row E5b; probe
-  `wiz-notes/soundness-probes/wm-e5b-payload-substitution.md`). The premise "not a tag
+  substitution instance of a well-typed term can be ill typed (E5b: `λ A a b h. h.1`, with
+  `h` an equation of two one-field constructors at a field of type `A`, is accepted, and
+  its instance at `A := Enum 2` is not; the regression is the case "E5b: …" of the group
+  *meta* in `Tests/Meta.lean`, which pins all three variants). The premise "not a tag
   type" is negative (it has to hold of a weak-head normal form, including a neutral one),
   which is why this file takes the notion of weak-head normal type as a parameter.
 * *Stuck.* The same, but the Σ rule only at a canonical field type; at a neutral one the
@@ -28,7 +30,7 @@ system takes one. What each gives up:
 * *Uniform.* No shortcut. Stable, and no injectivity is lost, but every equation between
   constructors carries a cast of the remaining fields along the tags' equation. That cast
   is between convertible types; whether it goes away is exactly regularity. With
-  regularity decided by conversion (`InReg.lean`; `wiz-notes/conv-regularity.md`) it does
+  regularity decided by conversion (`InReg.lean`; `docs/design/conv-regularity.md`) it does
   at inert types, so there the uniform rule is as usable as the shortcut (`succ m = succ
   n` gives `m = n` up to conversion of the *terms*, though the two *types* are still
   different propositions). At a polymorphic type the cast is at a neutral type, where no

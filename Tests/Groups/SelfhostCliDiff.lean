@@ -16,7 +16,10 @@ namespace Tests.Elab
 toolchains over the same input tree in a fresh directory and compares what a user sees:
 the exit code, standard output, standard error, the cache entries and the artifacts.
 The cases are picked by what a user hits first — `check` on a bad file, `build` on a good
-one, the cache flags — and by D2–D7 of `wiz-notes/selfhost-parity.md`. The host's newer
+one, the cache flags — and by the driver items of the self-hosting parity audit, whose
+labels the cases cite: D2 subcommands, D3 flags, D4 build artifacts, D5 the elaboration
+cache, D6 diagnostics, D7 exit codes (and, for the skips, A14 modules, C5 the LLVM/IR
+backends, C9 `--lib`/`--no-main`, C12 the native operations, D8 LSP/doc). The host's newer
 flags are covered too: `--target c` works in both, `--target llvm|wasm` and
 `--cache-verify strict` are the host's backend/manifest features the self-hosted
 toolchain has not got (C5, D5), and each is an asserted skip rather than a silent pass.
