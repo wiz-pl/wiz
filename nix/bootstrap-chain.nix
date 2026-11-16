@@ -117,7 +117,9 @@ let
         (cd run && ${pred}/bin/wizc ${modeFlag}) > $out
       '';
       s1 = stage { name = "wizc-stage1-${version}"; c = c1; inherit selfWiz; };
-    in fixpoint { c = "${s1}/self.c"; inherit selfWiz; };
+      # c1, s1 and c2 (= s1/self.c) are attributes of the result, so a check can compare
+      # them (scripts/chain-step-check.sh); `//` on a derivation keeps its drvPath.
+    in fixpoint { c = "${s1}/self.c"; inherit selfWiz; } // { inherit c1 s1; };
 
   fromLean = fixpoint { c = "${seed}/seed.c"; selfWiz = "${seed}/self.wiz"; };
 
