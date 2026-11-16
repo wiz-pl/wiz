@@ -780,7 +780,7 @@ def dupNamesExpected : String :=
   "error: 'Q.fst' has already been declared\nerror: 'ev' has already been declared\nfine : Nat\n"
 
 /-- The self-hosted checker accepts `file`: no `error` or `parse error` line. -/
-def selfhostAccepts (file : String) : IO Unit := do
+def selfhostChecks (file : String) : IO Unit := do
   let some out ← selfhostOutput file | return
   let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
   unless bad.isEmpty do
@@ -2105,7 +2105,7 @@ def selfHostGroup : Group where
         unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
         if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") },
     { name := "layout: an if branch may start on the next line with match or let, and long chains parse", run := fun _ =>
-        selfhostAccepts "import Prelude\ndef branch (b : Bool) (n : Nat) : Nat :=\n  if b then 1 else\n  match n with\n  | .zero => 0\n  | .succ k => k\ndef nested (b c : Bool) : Nat :=\n  if b then 2 else\n  if c then\n    match b with\n    | .true => 3\n    | .false => 4\n  else 5\ndef letBranch (b : Bool) : Nat :=\n  if b then 1 else\n  let x := 2;\n  x\ndef chain (a b c d e f g h : Bool) : Nat :=\n  if a then 1 else\n  if b then 2 else\n  if c then 3 else\n  if d then 4 else\n  if e then 5 else\n  if f then 6 else\n  if g then 7 else\n  if h then 8 else\n  9\n#check branch\n#check letBranch\n#check chain\n" },
+        selfhostChecks "import Prelude\ndef branch (b : Bool) (n : Nat) : Nat :=\n  if b then 1 else\n  match n with\n  | .zero => 0\n  | .succ k => k\ndef nested (b c : Bool) : Nat :=\n  if b then 2 else\n  if c then\n    match b with\n    | .true => 3\n    | .false => 4\n  else 5\ndef letBranch (b : Bool) : Nat :=\n  if b then 1 else\n  let x := 2;\n  x\ndef chain (a b c d e f g h : Bool) : Nat :=\n  if a then 1 else\n  if b then 2 else\n  if c then 3 else\n  if d then 4 else\n  if e then 5 else\n  if f then 6 else\n  if g then 7 else\n  if h then 8 else\n  9\n#check branch\n#check letBranch\n#check chain\n" },
     { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
         selfhostCompileRun ("import Prelude\npartial def boom : Bool := boom\ndef fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\ndef pairHead : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, b) _ => a\ndef main : IO Unit := do\n  IO.println (if Bool.true && Bool.false then \"and-t\" else \"and-f\");\n  IO.println (if Bool.false && boom then \"and-boom\" else \"and-short\");\n  IO.println (if Bool.true || boom then \"or-short\" else \"or-boom\");\n  IO.println (if !Bool.false then \"not-t\" else \"not-f\");\n  IO.println (if Bool.true || Bool.false && Bool.false then \"prec-ok\" else \"prec-bad\");\n  IO.println (Nat.toString (fstP (3, 4)));\n  IO.println (Nat.toString (pairHead (.cons (5, 6) .nil)))\n")
           "and-f\nand-short\nor-short\nnot-t\nprec-ok\n3\n5\n" },
