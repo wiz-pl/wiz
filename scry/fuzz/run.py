@@ -52,8 +52,13 @@ BASE_CFLAGS = [
     "-Wall",
     "-Wextra",
 ]
+# ts_shim.c is the production shim, which links both grammars (`scry_parse` takes "c"
+# or "c_sharp"), so the target links both too. Each grammar's parser.c/scanner.c finds
+# its own `tree_sitter/*.h` beside it (quoted includes), so no per-grammar -I is needed.
 SOURCES = ["ts_shim_fuzz.c", "../native/tree-sitter/lib/src/lib.c",
-           "../native/tree-sitter-c/src/parser.c"]
+           "../native/tree-sitter-c/src/parser.c",
+           "../native/tree-sitter-c-sharp/src/parser.c",
+           "../native/tree-sitter-c-sharp/src/scanner.c"]
 
 TARGET = BUILD / "ts_shim_fuzz"
 FRAME_RE = re.compile(
