@@ -296,6 +296,11 @@ structure ElabState (R : Type) where
   solution `?m x := t` found under a binder `n` is `fun n => t`, not `fun x7 => t`, so a
   goal a tactic makes from it shows (and `intro` takes) the name the user wrote -/
   binderNames : List (Lvl × Name) := []
+  /-- the names of the context a unification problem was posed in (innermost first), when
+  its caller knows them (`unifyAt0`): a message unification writes itself
+  (`checkGuessTypes`) names the free variables with them, and with `binderNames` under the
+  binders it went under. Messages only: nothing else reads it -/
+  unifyCtxNames : List Name := []
   /-- the kernel's type inference, for complete terms (supplied by the command elaborator) -/
   kernelInfer : Ctx R → Term R → Except String (VTy R) := fun _ _ => .error "no kernel here"
   /-- set when unification meets an unsolved (term or level) metavariable. A failure that

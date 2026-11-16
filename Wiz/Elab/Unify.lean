@@ -643,6 +643,34 @@ def constArgType? (n : Name) (us : List Level) (args : List (Val R)) : ElabM R (
   | .pi _ _ _ dom _ _ => return some dom
   | _ => return none
 
+/-- The last line of a forging guess's error (`checkGuessTypes`). `unifyAt0` knows the
+error by it and passes it on as it is, instead of nesting it under a type mismatch. -/
+def forgingGuessTail : String :=
+  "(a hole solved by shape would take a look-alike of a private type)"
+
+/-- The names of the variables of a context of `l` levels, innermost first, for a message
+unification writes itself: a binder unification went under (`ElabState.binderNames`), else
+the caller's context (`ElabState.unifyCtxNames`, for the levels it has), else `#i`, as
+`Term.pretty` shows a variable it has no name for. -/
+def unifyNames (l : Lvl) : ElabM R (List Name) := do
+  let st ← get
+  let base := st.unifyCtxNames
+  let nameAt (i : Nat) : Name :=
+    match st.binderNames.find? (·.1 == i) with
+    | some (_, x) => x
+    | none => if i < base.length then base[base.length - 1 - i]! else s!"#{l - 1 - i}"
+  pure ((List.range l).reverse.map nameAt)
+
+/-- A hole, by what it was made for (`MetaEntry.desc`), at the head of a message: "the
+implicit argument F", "the hole ?x", "the hole `_`". -/
+def holePhrase (desc : String) : String :=
+  if desc == "_" then "the hole `_`"
+  else if desc.startsWith "?" then s!"the hole {desc}"
+  else if desc.startsWith "a " || desc.startsWith "an " || desc.startsWith "the " then desc
+  else if desc == "by" then "the goal of a `by` block"
+  else if desc.contains ' ' || desc == "goal" || desc == "type" then s!"the {desc}"
+  else s!"the hole made for `{desc}`"
+
 mutual
 
 /-- **Exercise 3.5.** Unify two values in a context of `l` variables, throwing on
@@ -996,13 +1024,18 @@ partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected :
       if equalIn { g with decls := g.decls.insert n d, hidden := g.hidden.erase n } then n :: acc else acc
     let used := if alone.isEmpty then g.hidden.toList.map (·.1) else alone
     let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
-    let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty [] (some g))
+    -- (#412) the free variables by the names they were written with (`unifyNames`)
+    let names ← unifyNames l
+    let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty names (some g))
     let desc := (← lookupMeta m).desc
     let hole := pretty (.neutral (.mvar m) sp) ++ (if desc == "_" then "" else s!" ({desc})")
-    throwAt {} (s!"a hole solved by shape would take a look-alike of a private type\n" ++
+    -- (#412) the reason first, with the hole named by what it was made for; then the hole,
+    -- the guess and both types, as a type mismatch shows them
+    throwAt {} (s!"{holePhrase desc} can't be {pretty guess}: the two types agree only through " ++
+      s!"the definition of {", ".intercalate (used.map show1)}, " ++
+      "hidden outside its module (it has private parts)\n" ++
       s!"  hole: {hole}\n  expected: {pretty expected}\n  guess: {pretty guess}\n  its type: {pretty inferred}\n" ++
-      s!"the two types agree only through the definition of {", ".intercalate (used.map show1)}, " ++
-      "hidden outside its module (it has private parts)") ErrorCode.private_
+      forgingGuessTail) ErrorCode.private_
 
 /-- The first-order approximation (see `unifyGlued`). -/
 partial def unifyFirstOrder (l : Lvl) (m : Nat) (sp : Array (Elim R)) (v : Val R) : ElabM R Bool := do
