@@ -5,7 +5,7 @@ import Hdl.Core
 A reusable 8N1 UART (`import Hdl.Uart`): a baud generator, a transmitter and a receiver
 with a configurable number of clock cycles per bit, and a loopback circuit that wires the
 transmitter's line into the receiver. It is the UART of the iCEstick project
-(`/workspace/wiz-icestick-uart/src/Icestick/Uart.wiz`) with the board-specific parts
+(`wiz-icestick-uart/src/Icestick/Uart.wiz`) with the board-specific parts
 removed, so that other designs can instantiate it: every part is a `Circuit` over bundles,
 polymorphic in the representation like the rest of the HDL, so the same definition
 simulates at values and synthesises to a netlist.

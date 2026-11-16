@@ -743,6 +743,13 @@ def serverGroup : Group where
         checkEq 1 (line r)
         let (_, r) ← ask srv "textDocument/hover" src (offAfter src "Nat.add $x" (-5))
         checkEq Lean.Json.null r },
+    { name := "11s: hovering a declaration's own name shows its type and doc", run := fun _ => do
+        let src := "import Prelude\n/-- the answer -/\ndef answer : Nat := 42\n"
+        let (srv, _) ← openDoc src
+        let (_, r) ← ask srv "textDocument/hover" src (offAfter src "def answer" (-6))
+        let md := LSP.getStr r ["contents", "value"]
+        check ((md.splitOn "answer : Nat").length > 1) s!"no type in the declaration's hover:\n{md}"
+        check ((md.splitOn "the answer").length > 1) s!"no doc comment in the declaration's hover:\n{md}" },
     { name := "11q: Prelude notation, syntax categories and imports", run := fun _ => do
         let src := "import Prelude\ndeclare_syntax_cat greeting\nsyntax \"hi\" : greeting\nsyntax \"greet\" greeting : term\ndef three : Nat := 1 + 2\n"
         let (srv, _) ← openDoc src

@@ -8,7 +8,7 @@ import Deriving
 The HDL library (`import Hdl.Core`): describe digital circuits in Wiz, simulate them,
 prove things about them, and synthesise them to a netlist, Verilog, a test bench, a VCD
 waveform and pin constraints. docs/libraries.md ("H14 S0", "H14 S1") describes it; design
-notes are in drafts/hdl/Synth.wiz and /workspace/wiz-notes/hdl-usability.md.
+notes are in drafts/hdl/Synth.wiz and wiz-notes/hdl-usability.md.
 
 Combinational logic is *tagless-final* code, polymorphic in its representation
 `r : HwTy → Type` (the class `Hw`), with two instances: values (`HwTy.El`, for simulation
