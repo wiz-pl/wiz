@@ -176,6 +176,30 @@ def selfhostC (file : String) (flags : Array String := #[]) : IO (Option String)
     unless out.exitCode == 0 do throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}")
     return some out.stdout
 
+/-- (A14) The C the self-hosted compiler's driver writes for a set of module files
+(`build input.wiz -o out.c`): `input.wiz` is the root module, the others are written
+beside it (subdirectories included); `args` go to the driver after the command (`-I DIR`,
+`--rc`, …). Without a command the compiler is the one-shot mode, which takes no roots: its
+flags alone are the host's usage (`SelfhostCliDiff`). -/
+def selfhostModuleC (files : List (String × String)) (args : Array String := #[]) :
+    IO (Option String) := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      return none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let cmdArgs := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"] ++ args
+    let out ← IO.Process.output { cmd := "timeout", args := cmdArgs, cwd := dir }
+    unless out.exitCode == 0 do
+      throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}{out.stdout}")
+    return some (← IO.FS.readFile (dir / "out.c"))
+
 /-- The self-hosted compiler rejects a program: exit code 1, the errors on standard
 error, and no C (15g). -/
 def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
@@ -2361,6 +2385,35 @@ def selfHostGroup : Group where
         -- without the root, B is not found; with it, it is
         selfhostCheckModules files "error: cannot find module B\n"
         selfhostCheckModules files "one : Nat\n" (args := #["-I", "sub"]) },
+    { name := "modules: a dotted import is a path (A.B.C is A/B/C.wiz)", run := fun _ =>
+        selfhostCheckModules
+          [("A/B/C.wiz", "import Prelude\ndef deep : Nat := 3\n"),
+           ("input.wiz", "import Prelude\nimport A.B.C\ndef one : Nat := deep\n")]
+          "deep : Nat\none : Nat\n" },
+    { name := "modules: the -I roots are searched in order", run := fun _ => do
+        let files := [("r1/B.wiz", "import Prelude\ndef one : Nat := 1\n"),
+                      ("r2/B.wiz", "import Prelude\ndef one : Bool := Bool.true\n"),
+                      ("input.wiz", "import Prelude\nimport B\n#check one\n")]
+        -- the first root with the file wins
+        selfhostCheckModules files "one : Nat\nNat\n" (args := #["-I", "r1", "-I", "r2"])
+        selfhostCheckModules files "one : Bool\nBool\n" (args := #["-I", "r2", "-I", "r1"])
+        -- a root without the file is skipped, not a failure
+        let fallthrough := [("r2/A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                            ("input.wiz", "import Prelude\nimport A\ndef two : Nat := a\n")]
+        selfhostCheckModules fallthrough "a : Nat\ntwo : Nat\n" (args := #["-I", "r1", "-I", "r2"]) },
+    { name := "modules: an import cycle through three modules names the whole path", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import Prelude\nimport C\n"),
+           ("C.wiz", "import Prelude\nimport D\n"),
+           ("D.wiz", "import Prelude\nimport B\n"),
+           ("input.wiz", "import Prelude\nimport B\n")]
+          "error: import cycle: B -> C -> D -> B\n" },
+    { name := "modules: a duplicate name in two imported modules is rejected", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import Prelude\ndef x : Nat := 1\n"),
+           ("C.wiz", "import Prelude\ndef x : Nat := 2\n"),
+           ("input.wiz", "import Prelude\nimport B\nimport C\n")]
+          "x : Nat\nerror: 'x' has already been declared\n" },
     { name := "modules: the cache key includes the module graph", run := fun _ => do
         let root := "import Prelude\nimport B\ndef two : Nat := one\n"
         let files1 := [("B.wiz", "import Prelude\ndef one : Nat := 1\n"), ("input.wiz", root)]
@@ -2370,6 +2423,40 @@ def selfHostGroup : Group where
         let some k2 ← selfhostModuleOutput files2 #["--key"] | return
         unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
         if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") },
+    { name := "modules: the cache key includes a transitive module's text", run := fun _ => do
+        let root := "import Prelude\nimport B\ndef two : Nat := one\n"
+        let b := "import Prelude\nimport C\ndef one : Nat := c\n"
+        let files1 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 1\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 0\n")]
+        let files2 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 2\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 0\n")]
+        let files3 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 1\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 9\n")]
+        let some k1 ← selfhostModuleOutput files1 #["--key"] | return
+        let some k1' ← selfhostModuleOutput files1 #["--key"] | return
+        let some k2 ← selfhostModuleOutput files2 #["--key"] | return
+        let some k3 ← selfhostModuleOutput files3 #["--key"] | return
+        unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
+        if k1 == k2 then throw (IO.userError s!"the key ignores an imported module's text: {k1}")
+        unless k1 == k3 do throw (IO.userError s!"the key depends on a module outside the graph: {k1} / {k3}") },
+    { name := "modules: IO, Std and Sys load the embedded Prelude once", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import IO\nimport Std\ndef y : Nat := 1\n"),
+           ("input.wiz", "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n")]
+          "y : Nat\nx : Nat\n" },
+    { name := "modules: the CLI root spellings (-Idir, --include DIR, --include=DIR)", run := fun _ => do
+        let files := [("sub/B.wiz", "import Prelude\ndef one : Nat := 1\n"),
+                      ("input.wiz", "import Prelude\nimport B\ndef two : Nat := one\n")]
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["-Isub"])
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["--include", "sub"])
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["--include=sub"]) },
+    { name := "modules: the compiler driver resolves its -I and --include roots", run := fun _ => do
+        let files := [("sub/B.wiz", "import Prelude\ndef one : Nat := 41\n"),
+                      ("input.wiz", "import Prelude\nimport B\ndef main : IO Unit := IO.println (Nat.toString (one + 1))\n")]
+        for args in [#["-I", "sub"], #["-Isub"], #["--include", "sub"], #["--include=sub"]] do
+          let some c ← selfhostModuleC files args | return
+          unless (c.splitOn "/* one : Nat */\n").length > 1 do
+            throw (IO.userError s!"the module is missing from the C ({args}): {c.take 300}") },
     { name := "layout: an if branch may start on the next line with match or let, and long chains parse", run := fun _ =>
         selfhostChecks "import Prelude\ndef branch (b : Bool) (n : Nat) : Nat :=\n  if b then 1 else\n  match n with\n  | .zero => 0\n  | .succ k => k\ndef nested (b c : Bool) : Nat :=\n  if b then 2 else\n  if c then\n    match b with\n    | .true => 3\n    | .false => 4\n  else 5\ndef letBranch (b : Bool) : Nat :=\n  if b then 1 else\n  let x := 2;\n  x\ndef chain (a b c d e f g h : Bool) : Nat :=\n  if a then 1 else\n  if b then 2 else\n  if c then 3 else\n  if d then 4 else\n  if e then 5 else\n  if f then 6 else\n  if g then 7 else\n  if h then 8 else\n  9\n#check branch\n#check letBranch\n#check chain\n" },
     { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
