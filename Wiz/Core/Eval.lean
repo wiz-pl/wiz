@@ -216,6 +216,18 @@ partial def sizePred? : Val R → Option (Val R)
 space), so no user term evaluates to a closure that carries it. -/
 def eqReductMark : Val R := .neutral (.global " eq-reduct" []) #[]
 
+/-- The original sides `(A, a, b)` of a **data type's** computed equation: the payload Σ
+that `markDataEq` carries them on, at the end of its environment after `eqDataMark`.
+(The structural Σ rule's equation carries `eqReductMark` instead; `eqSigmaSides?` reads
+both.) The unifier uses this narrow form: a data Σ's sides are what a stuck equation
+has lost when its type computed (`Eq.trans h e1`, #257). -/
+def eqDataSides? : Val R → Option (Val R × Val R × Val R)
+  | .sigma _ _ _ (.mk env _) _ =>
+    match env.reverse with
+    | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
+    | _ => none
+  | _ => none
+
 /-- The equation `a =_A b` that `vEq` computed to this Σ, read back from its closure:
 `(A, a, b)`. A structural Σ carries `eqReductMark`; a data type's payload Σ carries
 `eqDataMark` at the end of its environment. With `Globals.quoteEqs` (the elaborator),
@@ -226,11 +238,7 @@ def eqSigmaSides? : Val R → Option (Val R × Val R × Val R)
   | .sigma "e" _ _ (.mk [b, a, _, _, A, .neutral (.global " eq-reduct" []) #[]] _) _ => some (A, a, b)
   -- a data type's equation (`vEq` at a `μ`): the original sides ride at the end of the
   -- outermost Σ's environment, after `eqDataMark`
-  | .sigma _ _ _ (.mk env _) _ =>
-    match env.reverse with
-    | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
-    | _ => none
-  | _ => none
+  | v => eqDataSides? v
 
 /-- The mark a data type's computed equation carries (as `eqReductMark` does for a
 structural Σ). The name cannot be written, so no user term builds a closure with it. -/
