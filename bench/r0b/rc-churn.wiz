@@ -1,0 +1,51 @@
+-- R0(b) of the runtime convergence (wiz-notes' runtime-convergence-plan): a program whose
+-- time is mostly the runtime's reference counting: build a list, map it (each cell freed
+-- as the map consumes it), sum it; build and fold a tree; share a list and walk it twice
+-- (every step an inc and a dec). Run as `rc-churn N` (default 200); prints a checksum.
+import Prelude
+import IO
+import Text
+
+def Churn.range : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ n, acc => Churn.range n (.cons n acc)
+
+def Churn.map : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => .cons (Nat.mod (x * 7 + 3) 1009) (Churn.map xs)
+
+def Churn.sum : List Nat → Nat → Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => Churn.sum xs (Nat.mod (acc + x) 1000000007)
+
+inductive Churn.Tree where
+  | leaf (v : Nat)
+  | node (l : Churn.Tree) (r : Churn.Tree)
+
+def Churn.tree : Nat → Nat → Churn.Tree
+  | .zero, v => .leaf v
+  | .succ d, v => .node (Churn.tree d (v * 2)) (Churn.tree d (v * 2 + 1))
+
+def Churn.fold : Churn.Tree → Nat
+  | .leaf v => Nat.mod v 1009
+  | .node l r => Nat.mod (Churn.fold l + Churn.fold r) 1000000007
+
+-- one round: about 20000 list cells and 2^12 tree nodes allocated and freed
+def Churn.round (i : Nat) : Nat :=
+  let xs := Churn.range 10000 .nil
+  let a := Churn.sum (Churn.map xs) 0
+  let b := Churn.sum xs i
+  let c := Churn.fold (Churn.tree 12 i)
+  Nat.mod (a + b + c) 1000000007
+
+def Churn.loop : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ n, acc => Churn.loop n (Nat.mod (acc + Churn.round n) 1000000007)
+
+def Churn.arg : List String → Nat
+  | .cons s _ => match String.parseNat s with
+    | .some n => n
+    | .none => 200
+  | .nil => 200
+
+def main : IO Unit := IO.bind IO.args (fun as => IO.println (Nat.toString (Churn.loop (Churn.arg as) 0)))
