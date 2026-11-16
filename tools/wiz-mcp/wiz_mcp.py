@@ -15,7 +15,7 @@ runs the tools a Wiz agent needs:
   goals      {path,text?,line,character}  the tactic state (`wiz/interactiveGoals`)
 
 The text tools are one `wiz` process per call. The three language-server tools
-share **one** lazily started `wiz lsp --ws 127.0.0.1:0 --no-stdio` daemon,
+share **one** lazily started `wiz lsp` daemon on its own stdin/stdout (no socket),
 belonging to this process and therefore to this workspace. It is killed after
 `--idle` seconds (default 600) and on exit. A daemon is never shared between
 worktrees: its module roots and `lib/` are fixed at startup, and documents are
@@ -31,23 +31,20 @@ toolchain's library or an `--allow-root` directory; `build` is listed only with
 `--allow-build` and writes only inside the workspace; children get an
 allowlisted environment with secret-looking names removed.
 
-Run with --help for the options. No third-party packages are used; the small
-WebSocket client below implements the client half of RFC 6455 with the stdlib.
+Run with --help for the options. No third-party packages are used; the
+language server is spoken to with `Content-Length` framing over pipes.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import collections
-import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
-import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -72,8 +69,8 @@ DEFAULT_TIMEOUT = 300.0
 MAX_TEXT = 64 * 1024
 #: A JSON `result` is clipped to this many characters of serialized JSON.
 MAX_RESULT = 64 * 1024
-#: WebSocket messages above this are rejected (Wiz's own limit is 256 MiB).
-MAX_WS_MESSAGE = 64 * 1024 * 1024
+#: Language-server messages above this are rejected.
+MAX_LSP_MESSAGE = 64 * 1024 * 1024
 
 TRUNCATION_MARK = "\n… [truncated: {n} characters omitted]"
 
@@ -388,34 +385,7 @@ def reply_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# A minimal RFC 6455 WebSocket client (the client half only: masked frames)
-
-
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-
-
-def ws_accept_key(key: str) -> str:
-    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
-
-
-def ws_frame(op: int, payload: bytes, mask: bool = True) -> bytes:
-    """Encode one client frame (FIN set), masked by default as RFC 6455 requires."""
-    header = bytearray([0x80 | (op & 0x0F)])
-    n = len(payload)
-    mbit = 0x80 if mask else 0
-    if n < 126:
-        header.append(mbit | n)
-    elif n < 65536:
-        header.append(mbit | 126)
-        header += struct.pack("!H", n)
-    else:
-        header.append(mbit | 127)
-        header += struct.pack("!Q", n)
-    if not mask:
-        return bytes(header) + payload
-    mask_bytes = os.urandom(4)
-    body = bytes(byte ^ mask_bytes[i % 4] for i, byte in enumerate(payload))
-    return bytes(header) + mask_bytes + body
+# The language server's transport: LSP over the daemon's own stdin/stdout
 
 
 class LSPError(Exception):
@@ -430,139 +400,111 @@ class LSPClosed(LSPError):
     """The daemon's connection is gone."""
 
 
-class WebSocket:
-    """A blocking client connection to `wiz lsp --ws`."""
+class StdioLSP:
+    """A `Content-Length` framed LSP connection over a child's stdin/stdout pipes.
 
-    def __init__(self, host: str, port: int, deadline: float) -> None:
-        self.sock = socket.create_connection((host, port), timeout=max(0.001, deadline - time.monotonic()))
+    The daemon is a plain `wiz lsp` on stdio: it opens no socket, so no other
+    process on the machine can connect to it (the `--ws` port it used before had
+    no authentication). Writes and reads use the raw file descriptors with
+    `select`, so both honour a deadline; a daemon that stops reading its input
+    cannot block a call forever.
+    """
+
+    def __init__(self, writer: Any, read_fd: int) -> None:
+        # `writer` is the daemon's stdin as an unbuffered file object: it owns the
+        # descriptor, so closing it twice is harmless (a bare fd could be reused).
+        self.writer = writer
+        self.write_fd = writer.fileno()
+        self.read_fd = read_fd
+        os.set_blocking(self.write_fd, False)
+        self._buf = bytearray()
         self._closed = False
         self._send_lock = threading.Lock()
-        self.key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = (
-            "GET / HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {self.key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
-        )
-        self._send_all(request.encode("ascii"), deadline)
-        head = self._read_http_head(deadline)
-        lines = head.split("\r\n")
-        if not lines or " 101 " not in f" {lines[0]} ":
-            raise LSPError(f"WebSocket handshake failed: {lines[0] if lines else 'empty response'}")
-        headers: dict[str, str] = {}
-        for line in lines[1:]:
-            if ":" in line:
-                name, value = line.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
-        if headers.get("sec-websocket-accept") != ws_accept_key(self.key):
-            raise LSPError("WebSocket handshake failed: wrong Sec-WebSocket-Accept")
 
-    def _send_all(self, payload: bytes, deadline: Optional[float]) -> None:
+    @staticmethod
+    def _remaining(deadline: Optional[float], what: str) -> Optional[float]:
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LSPTimeout(what)
+        return remaining
+
+    def _send_all(self, data: bytes, deadline: Optional[float]) -> None:
         if self._closed:
-            raise LSPClosed("the WebSocket is closed")
+            raise LSPClosed("the language server's input is closed")
         with self._send_lock:
-            if deadline is not None:
-                self.sock.settimeout(max(0.001, deadline - time.monotonic()))
-            self.sock.sendall(payload)
+            view = memoryview(data)
+            while view:
+                remaining = self._remaining(deadline, "the language server is not reading its input")
+                _, writable, _ = select.select([], [self.write_fd], [], remaining)
+                if not writable:
+                    continue
+                try:
+                    view = view[os.write(self.write_fd, view):]
+                except BlockingIOError:
+                    continue
+                except OSError as exc:  # EPIPE: the daemon exited
+                    raise LSPClosed(f"cannot send to the language server: {exc}") from exc
 
-    def _recv_exact(self, n: int, deadline: Optional[float]) -> bytes:
-        """Exactly n bytes; a deadline of None blocks until the peer acts."""
-        out = bytearray()
-        while len(out) < n:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise LSPTimeout("the language server did not answer in time")
-                self.sock.settimeout(max(0.001, remaining))
-            else:
-                self.sock.settimeout(None)
-            chunk = self.sock.recv(n - len(out))
-            if not chunk:
-                raise LSPClosed("the language server closed the connection")
-            out += chunk
-        return bytes(out)
-
-    def _read_http_head(self, deadline: float) -> str:
-        buf = bytearray()
-        while b"\r\n\r\n" not in buf:
-            buf += self._recv_exact(1, deadline)
-            if len(buf) > 65536:
-                raise LSPError("WebSocket handshake response is too large")
-        return buf.decode("iso-8859-1")
-
-    def _read_frame(self, deadline: Optional[float]) -> tuple[bool, int, bytes]:
-        first, second = self._recv_exact(2, deadline)
-        fin = bool(first & 0x80)
-        op = first & 0x0F
-        masked = bool(second & 0x80)
-        length = second & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", self._recv_exact(2, deadline))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._recv_exact(8, deadline))[0]
-        if length > MAX_WS_MESSAGE:
-            raise LSPError(f"WebSocket message too large ({length} bytes)")
-        mask = self._recv_exact(4, deadline) if masked else None
-        payload = self._recv_exact(length, deadline)
-        if mask is not None:
-            payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-        return fin, op, payload
+    def _fill(self, deadline: Optional[float]) -> None:
+        remaining = self._remaining(deadline, "the language server did not answer in time")
+        readable, _, _ = select.select([self.read_fd], [], [], remaining)
+        if not readable:
+            return
+        try:
+            chunk = os.read(self.read_fd, 65536)
+        except OSError as exc:
+            raise LSPClosed(f"cannot read from the language server: {exc}") from exc
+        if not chunk:
+            raise LSPClosed("the language server closed its output")
+        self._buf += chunk
 
     def send_text(self, text: str, deadline: Optional[float] = None) -> None:
-        self._send_all(ws_frame(0x1, text.encode("utf-8"), mask=True), deadline)
+        body = text.encode("utf-8")
+        self._send_all(b"Content-Length: %d\r\n\r\n" % len(body) + body, deadline)
 
     def recv_text(self, deadline: Optional[float] = None) -> str:
-        fragments = bytearray()
-        started = False
         while True:
-            fin, op, payload = self._read_frame(deadline)
-            if op == 0x8:  # close: answer and report it
+            end = self._buf.find(b"\r\n\r\n")
+            if end >= 0:
+                break
+            if len(self._buf) > 65536:
+                raise LSPError("the language server sent an oversized header")
+            self._fill(deadline)
+        header = bytes(self._buf[:end]).decode("ascii", "replace")
+        del self._buf[: end + 4]
+        length: Optional[int] = None
+        for line in header.split("\r\n"):
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
                 try:
-                    self._send_all(ws_frame(0x8, payload[:2], mask=True), deadline)
-                except Exception:
-                    pass
-                raise LSPClosed("the language server sent a close frame")
-            if op == 0x9:  # ping
-                self._send_all(ws_frame(0xA, payload, mask=True), deadline)
-                continue
-            if op == 0xA:  # pong
-                continue
-            if op in (0x1, 0x2):
-                fragments = bytearray(payload)
-                started = True
-            elif op == 0x0 and started:
-                fragments += payload
-            else:
-                raise LSPError(f"unexpected WebSocket opcode {op}")
-            if len(fragments) > MAX_WS_MESSAGE:
-                raise LSPError("WebSocket message too large")
-            if fin:
-                try:
-                    return fragments.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise LSPError(f"the language server sent invalid UTF-8: {exc}") from exc
+                    length = int(value.strip())
+                except ValueError as exc:
+                    raise LSPError(f"bad Content-Length: {value.strip()!r}") from exc
+        if length is None or length < 0:
+            raise LSPError("the language server sent a message without Content-Length")
+        if length > MAX_LSP_MESSAGE:
+            raise LSPError(f"language server message too large ({length} bytes)")
+        while len(self._buf) < length:
+            self._fill(deadline)
+        body = bytes(self._buf[:length])
+        del self._buf[:length]
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LSPError(f"the language server sent invalid UTF-8: {exc}") from exc
 
     def close(self) -> None:
+        """Close the daemon's stdin (it exits on EOF). The read side belongs to the process."""
         if self._closed:
             return
         self._closed = True
-        try:
-            self.sock.settimeout(1.0)
-            with self._send_lock:
-                self.sock.sendall(ws_frame(0x8, b"", mask=True))
-        except Exception:
-            pass
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
+        with self._send_lock:
+            try:
+                self.writer.close()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -592,13 +534,14 @@ def daemon_command(cmd: list[str]) -> list[str]:
 
 
 class LSPDaemon:
-    """One `wiz lsp --ws` process, owned by one bridge/workspace.
+    """One `wiz lsp` process on stdio, owned by one bridge/workspace.
 
     Lifecycle: started on the first LSP-backed call, used under `op` (one call
     at a time, matching the server's single event loop), killed after `idle`
     seconds without a call, and killed on bridge exit. There is deliberately no
     way to attach to someone else's daemon: worktrees have different `lib/`
-    roots, and documents collide by URI.
+    roots, and documents collide by URI. The daemon talks only over its own
+    pipes and listens on no socket.
     """
 
     def __init__(self, config: Config) -> None:
@@ -606,45 +549,36 @@ class LSPDaemon:
         self.life = threading.RLock()
         self.op = threading.Lock()
         self.cv = threading.Condition()
-        self.ws: Optional[WebSocket] = None
-        self.proc: Optional[subprocess.Popen[str]] = None
-        self.port: Optional[int] = None
+        self.conn: Optional[StdioLSP] = None
+        self.proc: Optional[subprocess.Popen[bytes]] = None
         self.dead = True
         self.pending: dict[int, dict[str, Any]] = {}
         self.inbox: list[dict[str, Any]] = []
         self.next_id = 0
         self.version = 0
         self.last_use = 0.0
-        self._ready = threading.Event()
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
-        self.host = "127.0.0.1"
+        self._stderr_done = threading.Event()
+        self._reader_thread: Optional[threading.Thread] = None
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _pump_stderr(self, proc: subprocess.Popen[str], ready: threading.Event, state: dict[str, Any]) -> None:
-        tail: collections.deque[str] = state["tail"]
-        self._stderr_tail = tail
+    def _pump_stderr(self, proc: subprocess.Popen[bytes], tail: collections.deque[str], done: threading.Event) -> None:
         try:
             assert proc.stderr is not None
-            for line in proc.stderr:
-                tail.append(line.rstrip())
-                match = re.search(r"WebSocket on port (\d+)", line)
-                if match:
-                    state["port"] = int(match.group(1))
-                    self.port = state["port"]
-                    ready.set()
+            for raw in proc.stderr:
+                tail.append(raw.decode("utf-8", "replace").rstrip())
         except Exception:
             pass
         finally:
-            ready.set()
+            done.set()
 
     def _kill_locked(self) -> None:
-        ws, proc = self.ws, self.proc
-        self.ws = None
+        conn, proc = self.conn, self.proc
+        self.conn = None
         self.proc = None
-        self.port = None
-        if ws is not None:
-            ws.close()
+        if conn is not None:
+            conn.close()
         if proc is not None:
             try:
                 if proc.poll() is None:
@@ -656,11 +590,20 @@ class LSPDaemon:
                     proc.wait(timeout=2)
             except Exception:
                 pass
-            if proc.stderr is not None:
-                try:
-                    proc.stderr.close()
-                except Exception:
-                    pass
+            # The reader sees EOF once the daemon is gone; let it finish before its
+            # descriptor is closed (a closed fd number can be reused under a select).
+            reader, self._reader_thread = self._reader_thread, None
+            if reader is not None and reader is not threading.current_thread():
+                reader.join(timeout=2)
+            streams = [proc.stdin, proc.stderr]
+            if reader is None or not reader.is_alive():
+                streams.append(proc.stdout)
+            for stream in streams:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         with self.cv:
             self.dead = True
             self.pending.clear()
@@ -671,9 +614,21 @@ class LSPDaemon:
         with self.life:
             self._kill_locked()
 
+    def _startup_error(self, proc: subprocess.Popen[bytes], reason: str) -> ToolError:
+        """`lsp_startup` with the daemon's exit status and the tail of its stderr."""
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        self._stderr_done.wait(timeout=2)
+        code = proc.poll()
+        tail = "\n".join(self._stderr_tail)[-2000:]
+        detail = f" (exit {code})" if code is not None else ""
+        return ToolError("lsp_startup", f"`wiz lsp` {reason}{detail}" + (f":\n{tail}" if tail else ""))
+
     def ensure(self, deadline: float) -> None:
         with self.life:
-            if self.ws is not None:
+            if self.conn is not None:
                 return
             self._kill_locked()  # a stale process from a dead connection
             wiz = resolve_wiz(self.config.workspace, self.config.wiz)
@@ -681,51 +636,37 @@ class LSPDaemon:
                 raise ToolError("wiz_not_found", _wiz_missing_message(self.config.workspace, self.config.wiz))
             if deadline - time.monotonic() <= 0:
                 raise LSPTimeout("no time left to start the language server")
-            args = ["lsp", "--ws", "127.0.0.1:0", "--no-stdio"]
-            cmd = daemon_command(_wiz_command(wiz, self.config.cache, args))
+            cmd = daemon_command(_wiz_command(wiz, self.config.cache, ["lsp"]))
             try:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=self.config.workspace,
                     env=child_env(extra=self.config.pass_env),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
+                    bufsize=0,
                 )
             except OSError as exc:
                 raise ToolError("lsp_startup", f"cannot start the language server: {exc}") from exc
+            assert proc.stdin is not None and proc.stdout is not None
             self.proc = proc
-            self.port = None
-            self._ready = threading.Event()
-            state: dict[str, Any] = {"port": None, "tail": collections.deque(maxlen=40)}
-            threading.Thread(target=self._pump_stderr, args=(proc, self._ready, state), daemon=True).start()
-            # Startup is bounded by the call deadline, with a generous cap.
+            self._stderr_tail = collections.deque(maxlen=40)
+            self._stderr_done = threading.Event()
+            threading.Thread(
+                target=self._pump_stderr, args=(proc, self._stderr_tail, self._stderr_done), daemon=True
+            ).start()
+            conn = StdioLSP(proc.stdin, proc.stdout.fileno())
+            self.conn = conn
+            with self.cv:
+                self.dead = False
+                self.pending.clear()
+                self.inbox.clear()
+            self._reader_thread = threading.Thread(target=self._reader, args=(conn,), daemon=True)
+            self._reader_thread.start()
+            # Startup (the initialize round trip) is bounded by the call deadline, with a cap.
             startup_deadline = min(deadline, time.monotonic() + 120.0)
-            while not self._ready.wait(timeout=min(0.2, max(0.0, startup_deadline - time.monotonic()))):
-                if time.monotonic() >= startup_deadline:
-                    break
-                if proc.poll() is not None:
-                    self._ready.set()
-            if state["port"] is None:
-                code = proc.poll()
-                tail = "\n".join(state["tail"])[-2000:]
-                self._kill_locked()
-                detail = f" (exit {code})" if code is not None else ""
-                raise ToolError(
-                    "lsp_startup",
-                    f"`wiz lsp --ws` did not report a port{detail}"
-                    + (f":\n{tail}" if tail else ""),
-                )
             try:
-                ws = WebSocket(self.host, state["port"], deadline)
-                self.ws = ws
-                with self.cv:
-                    self.dead = False
-                    self.pending.clear()
-                    self.inbox.clear()
-                threading.Thread(target=self._reader, args=(ws,), daemon=True).start()
                 self._request_locked(
                     "initialize",
                     {
@@ -737,8 +678,16 @@ class LSPDaemon:
                         ],
                         "capabilities": {},
                     },
-                    deadline,
+                    startup_deadline,
                 )
+                self._send({"jsonrpc": "2.0", "method": "initialized", "params": {}}, startup_deadline)
+            except LSPTimeout:
+                self._kill_locked()
+                raise
+            except LSPError as exc:
+                error = self._startup_error(proc, f"exited before answering initialize ({exc})")
+                self._kill_locked()
+                raise error from exc
             except Exception:
                 self._kill_locked()
                 raise
@@ -753,7 +702,7 @@ class LSPDaemon:
             return  # a call is in flight; it just touched last_use
         try:
             with self.life:
-                if self.ws is not None or self.proc is not None:
+                if self.conn is not None or self.proc is not None:
                     log("wiz-mcp: unloading the idle language server")
                     self._kill_locked()
         finally:
@@ -761,10 +710,10 @@ class LSPDaemon:
 
     # -- JSON-RPC over the daemon -----------------------------------------
 
-    def _reader(self, ws: WebSocket) -> None:
+    def _reader(self, conn: StdioLSP) -> None:
         try:
             while True:
-                raw = ws.recv_text(deadline=None)
+                raw = conn.recv_text(deadline=None)
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
@@ -781,12 +730,12 @@ class LSPDaemon:
             pass
         finally:
             try:
-                ws.close()
+                conn.close()
             except Exception:
                 pass
             with self.cv:
-                if self.ws is ws:
-                    self.ws = None
+                if self.conn is conn:
+                    self.conn = None
                     self.dead = True
                 self.cv.notify_all()
 
@@ -796,11 +745,11 @@ class LSPDaemon:
             return self.next_id
 
     def _send(self, message: dict[str, Any], deadline: Optional[float]) -> None:
-        ws = self.ws
-        if ws is None:
+        conn = self.conn
+        if conn is None:
             raise LSPClosed("the language server is not running")
         try:
-            ws.send_text(json.dumps(message), deadline)
+            conn.send_text(json.dumps(message), deadline)
         except LSPError:
             raise
         except OSError as exc:
@@ -811,7 +760,7 @@ class LSPDaemon:
         self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}, deadline)
         with self.cv:
             while rid not in self.pending:
-                if self.dead or self.ws is None:
+                if self.dead or self.conn is None:
                     raise LSPClosed("the language server closed the connection")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -871,7 +820,7 @@ class LSPDaemon:
                 if found is not None:
                     self.inbox = remaining_messages
                     return list((found.get("params") or {}).get("diagnostics") or [])
-                if self.dead or self.ws is None:
+                if self.dead or self.conn is None:
                     raise LSPClosed("the language server closed the connection")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
