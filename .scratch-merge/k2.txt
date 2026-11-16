@@ -1,0 +1,6 @@
+  | c, ty, a, b => match (match isGluedEq ty with
+      | .true => Bool.true
+      | .false => match whnf ty with
+        | .vpi _ _ _ _ _ _ => Bool.false
+        | .vsigma _ _ _ _ _ _ => Bool.false
+        | w => isPropW c w) with

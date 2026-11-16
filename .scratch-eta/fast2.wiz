@@ -1,0 +1,39 @@
+import Prelude
+def Trace (A : Type) : Type := Nat → A
+def Mealy (S I O : Type) : Type := S → I → S × O
+def Mealy.stateAt {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) : Nat → S
+  | .zero => s0
+  | .succ t => (m (Mealy.stateAt m s0 xs t) (xs t)).1
+structure Bits8 where
+  b0 : Bool
+  b1 : Bool
+  b2 : Bool
+  b3 : Bool
+  b4 : Bool
+  b5 : Bool
+  b6 : Bool
+  b7 : Bool
+def Bits8.zero : Bits8 := Bits8.mk .false .false .false .false .false .false .false .false
+-- FAST: the same machine with the state as a one-constructor inductive (no η)
+inductive S where
+  | mk (l : Nat) (c : Nat) (d : Bits8)
+def S.l : S → Nat
+  | .mk l c d => l
+def S.c : S → Nat
+  | .mk l c d => c
+def S.d : S → Bits8
+  | .mk l c d => d
+def spec (s : S) (x : Bool × Bits8) : S × Bool :=
+  (match Nat.beq s.l 0 with
+    | .true => (match x.1 with
+      | .true => S.mk 10 0 x.2
+      | .false => (match Nat.beq s.c 3 with
+        | .true => S.mk 0 0 s.d
+        | .false => S.mk 0 (Nat.succ s.c) s.d))
+    | .false => (match Nat.beq s.c 3 with
+      | .true => S.mk (Nat.sub s.l 1) 0 s.d
+      | .false => S.mk s.l (Nat.succ s.c) s.d),
+   s.d.b0)
+def s0 : S := S.mk 0 0 Bits8.zero
+def tFast (xs : Trace (Bool × Bits8)) (t : Nat) :
+    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl

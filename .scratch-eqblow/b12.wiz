@@ -1,0 +1,11 @@
+import Int
+def ins (x : Nat) : List Nat → List Nat
+  | .nil => .cons x .nil
+  | .cons y ys => if Nat.le x y then .cons x (.cons y ys) else .cons y (ins x ys)
+def sort : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => ins x (sort xs)
+def mk : Nat → List Nat
+  | .zero => .nil
+  | .succ n => .cons (Nat.mod (n * 7) 13) (mk n)
+def chk : sort (mk 12) = List.append (sort (mk 12)) .nil := rfl

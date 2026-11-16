@@ -1,0 +1,5 @@
+import Cats.Category
+def Category.op'.{u, v} (C : Category.{u, v}) : Category.{u, v} :=
+  Category.mk C.Obj (fun X Y => C.Hom Y X) C.id (fun f g => C.comp g f)
+    (fun f => C.comp_id f) (fun f => C.id_comp f) (fun f g h => eqSymm.{v} (C.assoc h g f))
+def slow.{u, v} (C : Category.{u, v}) : Category.op' (Category.op' C) = C := rfl

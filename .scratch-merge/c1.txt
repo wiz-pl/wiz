@@ -1,0 +1,27 @@
+partial def check (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) := do
+  -- (given) P2: inside a proof, a term that is not a proof is a relevant term again. A
+  -- sort that can't be computed is an error here as it is in relevant mode (`requireMarker`),
+  -- for a term the requirement would apply to, not a silent "proof mode" (review F4)
+  if ctx.proof && ({ ctx with proof := false }).wantsMarker t && (ctx.sortOf? ty).isNone then
+    let _ ← ctx.sortOf ty
+  let ctx := ctx.modeAt ty
+  -- (given) P2: outside a proof, a proof is marked or neutral-shaped
+  ctx.requireMarker t ty
+  -- (the exemption of a marked term goes on to the body of a marked `fun`: `Sort (imax a l)`
+  -- is `0` exactly when `Sort l` is, so where the body's sort is `0` the whole `fun` is a
+  -- suspended proof, and the body is never evaluated)
+  checkCore (if ctx.marked && !(t matches .lam ..) then { ctx with marked := false } else ctx) t ty
+
+/-- The rules of `check` (which adds the proof marker's requirement). -/
+partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
+  -- (glued equations) only the introduction forms look at what an equation computes to
+  -- (`fun` for funext, a pair for a Σ, `()`); anything else is inferred and compared with
+  -- the glued type, side by side
+  let ty' := match ty, t with
+    | .lazyEq .., .lam .. | .lazyEq .., .pair .. | .lazyEq .., .tt => whnf ty
+    | .lazyEq .., _ => ty
+    | _, _ => whnf ty
+  match t, ty' with
+  -- (given) P2: a marked term. The level must be the sort of the type: at level `0` the
+  -- evaluator suspends the term, and conversion takes any two suspended proofs as equal
+  | .prf l t, _ => do check (← ctx.underMarker l ty) t ty

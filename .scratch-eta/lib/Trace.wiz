@@ -1,0 +1,108 @@
+import Logic
+-- Traces and Mealy machines (`import Trace`): the common semantics of the HDL's circuits
+-- (lib/Hdl/Core.wiz, `Circuit.trace`), the temporal logic over them, and anything else
+-- that runs step by step. Design: /workspace/wiz-notes/cohesion-hardware.md, 2.1.
+--
+-- * A trace is a function `Nat → A`, not a ν-stream: equality at ν is stuck, while
+--   equality of functions is pointwise and computes (funext is a definition).
+-- * A Mealy machine is a step `S → I → S × O`; `stateAt`/`outAt` run it along an input
+--   trace. A finite simulation of `n` cycles sees `Trace.take n` of the trace.
+
+------------------------------------------------------------------------------------
+-- Traces
+
+def Trace (A : Type) : Type := Nat → A
+
+def Trace.head {A : Type} (σ : Trace A) : A := σ 0
+def Trace.tail {A : Type} (σ : Trace A) : Trace A := fun (t : Nat) => σ (Nat.succ t)
+def Trace.map {A B : Type} (f : A → B) (σ : Trace A) : Trace B := fun (t : Nat) => f (σ t)
+def Trace.zip {A B : Type} (σ : Trace A) (τ : Trace B) : Trace (A × B) := fun (t : Nat) => (σ t, τ t)
+-- `x` now, then `σ`
+def Trace.cons {A : Type} (x : A) (σ : Trace A) : Trace A := fun (t : Nat) => match t with
+  | .zero => x
+  | .succ u => σ u
+-- the same element at every time
+def Trace.const {A : Type} (x : A) : Trace A := fun (t : Nat) => x
+-- the first `n` elements (what a simulation of `n` cycles sees)
+def Trace.take {A : Type} : Nat → Trace A → List A
+  | .zero, σ => .nil
+  | .succ n, σ => .cons (σ 0) (Trace.take n (Trace.tail σ))
+-- a finite list, then `d` for ever (an input trace from a test vector)
+def Trace.ofList {A : Type} (d : A) : List A → Trace A
+  | .nil => Trace.const d
+  | .cons x xs => Trace.cons x (Trace.ofList d xs)
+-- `x` at time 0, `y` ever after (a single event)
+def Trace.once {A : Type} (x y : A) : Trace A := fun (t : Nat) => match t with
+  | .zero => x
+  | .succ _ => y
+
+------------------------------------------------------------------------------------
+-- Mealy machines along traces
+
+def Mealy (S I O : Type) : Type := S → I → S × O
+
+def Mealy.stateAt {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) : Nat → S
+  | .zero => s0
+  | .succ t => (m (Mealy.stateAt m s0 xs t) (xs t)).1
+def Mealy.outAt {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (t : Nat) : O :=
+  (m (Mealy.stateAt m s0 xs t) (xs t)).2
+
+-- one step, then the rest: the run from `s0` at `t + 1` is the run from the next state
+-- on the rest of the inputs at `t`
+def Mealy.stateAt_succ {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) :
+    (t : Nat) → Mealy.stateAt m s0 xs (Nat.succ t) = Mealy.stateAt m (m s0 (xs 0)).1 (Trace.tail xs) t
+  | .zero => rfl
+  | .succ t => Eq.congrArg (fun (s : S) => (m s (xs (Nat.succ t))).1) (Mealy.stateAt_succ m s0 xs t)
+def Mealy.outAt_succ {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (t : Nat) :
+    Mealy.outAt m s0 xs (Nat.succ t) = Mealy.outAt m (m s0 (xs 0)).1 (Trace.tail xs) t :=
+  Eq.congrArg (fun (s : S) => (m s (xs (Nat.succ t))).2) (Mealy.stateAt_succ m s0 xs t)
+
+-- The finite run: the outputs of the first `n` inputs, structurally (for proofs).
+def Mealy.run {S I O : Type} (m : Mealy S I O) : S → List I → List O
+  | _, .nil => .nil
+  | s, .cons x xs => List.cons (m s x).2 (Mealy.run m (m s x).1 xs)
+
+-- The finite run is a prefix of the infinite one.
+def Mealy.run_take {S I O : Type} (m : Mealy S I O) :
+    (n : Nat) → (s : S) → (xs : Trace I) →
+    Mealy.run m s (Trace.take n xs) = Trace.take n (Mealy.outAt m s xs)
+  | .zero, s, xs => rfl
+  | .succ n, s, xs =>
+    Eq.congrArg (List.cons (m s (xs 0)).2)
+      (Eq.trans (Mealy.run_take m n (m s (xs 0)).1 (Trace.tail xs))
+        (Eq.congrArg (Trace.take n) (funext (fun (t : Nat) =>
+          Eq.symm (Mealy.outAt_succ m s xs t)))))
+
+-- The trace of observations: the state and the input at each cycle (temporal formulas
+-- about a machine are formulas over this trace).
+def Mealy.obs {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) : Trace (S × I) :=
+  fun (t : Nat) => (Mealy.stateAt m s0 xs t, xs t)
+
+-- Invariance (assume-guarantee): an inductive invariant `inv` of the step, for inputs
+-- that satisfy the environment assumption `env`, holds of every state of the run.
+def Mealy.invariant {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (env : I → Prop) (inv : S → Prop)
+    (h0 : inv s0) (hs : (s : S) → (x : I) → env x → inv s → inv (m s x).1) (henv : (t : Nat) → env (xs t)) :
+    (t : Nat) → inv (Mealy.stateAt m s0 xs t)
+  | .zero => h0
+  | .succ t => hs (Mealy.stateAt m s0 xs t) (xs t) (henv t) (Mealy.invariant m s0 xs env inv h0 hs henv t)
+
+-- Refinement by a representation map: the implementation, started in the image of the
+-- specification's state and driven by the image of its inputs, stays in the image of
+-- its states and outputs the image of its outputs, for ever. The premise is one step.
+def Mealy.simulates {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
+    (embS : T → S) (embI : J → I) (embO : P → O)
+    (h : (s : T) → (x : J) → impl (embS s) (embI x) = (embS (spec s x).1, embO (spec s x).2))
+    (s0 : T) (xs : Trace J) :
+    (t : Nat) → Mealy.stateAt impl (embS s0) (Trace.map embI xs) t = embS (Mealy.stateAt spec s0 xs t)
+  | .zero => rfl
+  | .succ t => Eq.trans
+      (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).1) (Mealy.simulates impl spec embS embI embO h s0 xs t))
+      (Eq.congrArg (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)))
+def Mealy.simulatesOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
+    (embS : T → S) (embI : J → I) (embO : P → O)
+    (h : (s : T) → (x : J) → impl (embS s) (embI x) = (embS (spec s x).1, embO (spec s x).2))
+    (s0 : T) (xs : Trace J) (t : Nat) :
+    Mealy.outAt impl (embS s0) (Trace.map embI xs) t = embO (Mealy.outAt spec s0 xs t) :=
+  Eq.trans
+    (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).2) (Mealy.simulates impl spec embS embI embO h s0 xs t))
+    (Eq.congrArg (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)))

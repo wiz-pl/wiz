@@ -1,0 +1,5 @@
+    let σ := σ.fill lA lB
+    (.sigma x (term tys env q) A B σ, if σ.hasHole then none else some σ.sigmaSort)
+  -- an equation is a proposition: no need to evaluate it (which computes its sides, the
+  -- whole of a `refl` proof's computation; the kernel checks every sort note anyway)
+  | t@(.eq ..) | t@(.eqTy ..) => (term tys env t, some 0)

@@ -1,0 +1,3 @@
+    let vb := ctx.evalAt b vA
+    let _ ← check { ctx with proof := true } e (vEqL g vA va vb)
+    pure (vApp g (vApp g vP vb) (suspend g ctx.env e), Usage.zeros ctx.lvl)

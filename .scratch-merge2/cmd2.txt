@@ -1,0 +1,4 @@
+        let addP := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addPartialDecl g')
+        match (do
+            unless g.hidden.isEmpty do throw (.other s!"internal error: {pd.name} checked against the elaborator's view")
+            let g' ← addP g pd; privacyCheck g pd addP; pure g' : TCM (Globals R)) with

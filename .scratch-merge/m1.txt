@@ -1,0 +1,5 @@
+default never evaluates them; it also implies --eager-eqs),
+--eager-eqs (an equation's type is computed when it is evaluated, as before glued
+equations; the default computes it only when it is looked at),
+--inert ground|conv (P1: regularity at inert types, decided by conversion (conv, the
+default) or only by the evaluator's fast path (ground))

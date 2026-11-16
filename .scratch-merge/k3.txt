@@ -1,0 +1,3 @@
+              let vb := evalAt c b vA;
+              match check (TCtx.inProof c) e (vEqG vA va vb) with
+              | .ok _ _ => .ok (vapp (vapp vP vb) (suspend (TCtx.env c) e)) (uZeros (TCtx.lvl c))

@@ -1,0 +1,6 @@
+      globals := { regularity, predicativeProp, lazyProofs, lazyEqs, inertReg, unboxStructs, proofSteps, traceProofSteps,
+                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
+      trustedModule := own.contains }
+  -- the cache doesn't know the experimental options
+  let cache := if regularity == .off && !predicativeProp && lazyProofs && lazyEqs && inertReg == .conv && !unboxStructs &&
+      proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)

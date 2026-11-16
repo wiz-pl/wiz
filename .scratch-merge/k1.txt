@@ -1,0 +1,22 @@
+  | l, .vne h sp => match Bool.and qm (Bool.and kernelLazyProofs (proofHead h)) with
+    -- (P2) the other proof heads (`refl`, `transp`, a stuck cast between propositions)
+    -- read back marked too, up to their last `absurd`
+    | .true => match fromAbsurd sp with
+      | .none => markTm (quoteSpine qm l (quoteHead qm l h) sp)
+      | .some r => quoteSpine qm l (markTm (quoteSpine qm l (quoteHead qm l h) (toAbsurd sp))) r
+    -- (erased, every proof head reads back as `()`, like a suspended proof: the same proof
+    -- can be a `refl` head in one value and a suspension in another, and two types that
+    -- differ only so must not compare as different)
+    | .false => match Bool.and (Bool.not qm) (Bool.and kernelLazyProofs (proofHead h)) with
+      | .true => (match fromAbsurd sp with
+        | .none => .star
+        | .some r => quoteSpine qm l .star r)
+      | .false => quoteSpine qm l (quoteHead qm l h) sp
+  | l, .vglued h sp g => match qm with
+    | .true => quoteSpine qm l (quoteHead qm l h) sp
+    -- (glued equations) the kernel's own syntactic comparisons (`sameVal`) read back what
+    -- an equation computes, as before it was glued
+    | .false => match isGluedEq (.vglued h sp g) with
+      | .true => quoteM qm l (whnf (g ()))
+      | .false => quoteSpine qm l (quoteHead qm l h) sp
+  | l, .vulift k u A => .ulift k u (quoteM qm l A)

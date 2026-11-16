@@ -1,0 +1,7 @@
+/-- `propSort?` of a type not yet in weak head normal form: a glued equation is a
+proposition without computing it; anything else is forced first. -/
+def propSortW? (v : Val R) : Option Bool :=
+  match v with
+  | .lazyEq .. => some true
+  | v => propSort? (whnf v)
+

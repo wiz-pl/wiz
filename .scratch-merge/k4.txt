@@ -1,0 +1,24 @@
+-- (and with the proof marker's requirement)
+def check (c0 : TCtx) (t : Tm) (ty : Val) : TyRes := match unknownSortInProof c0 t ty with
+  | .some m => .err m
+  | .none => checkM (modeAt c0 ty) t ty
+-- inside a proof, a sort that can't be computed is an error as in relevant mode
+-- (`requireMarker`), for a term the requirement would apply to (review F4)
+def unknownSortInProof (c : TCtx) (t : Tm) (ty : Val) : Option String := match Nat.beq (TCtx.pm c) 1 with
+  | .false => .none
+  | .true => match Bool.and kernelLazyProofs (Bool.not (neutralShaped t)) with
+    | .false => .none
+    | .true => match sortOf c ty with
+      | .none => .some (String.append "internal error: cannot compute the sort of " (showVal c ty))
+      | .some _ => .none
+-- (the mode is decided by the type: `modeAt`)
+def checkM (c : TCtx) (t : Tm) (ty : Val) : TyRes := match requireMarker c t ty with
+  | .some m => .err m
+  -- (the exemption of a marked term goes on to the body of a marked `λ`: `Sort (imax a l)`
+  -- is `0` exactly when `Sort l` is, so where the body's sort is `0` the whole `λ` is a
+  -- suspended proof, and the body is never evaluated)
+  | .none => match checkW (match t with
+      | .lam _ => c
+      | _ => TCtx.belowMarked c) t (checkTy t ty) with
+    | .ok _ u => .ok ty u
+    | r => r

@@ -1,0 +1,4 @@
+Lazy places: glued globals, `ind` on numerals and equations (thunks); `coit`/`scofix` values (until
+`out`); `ecase` branches (evaluated only when the tag is known); and proofs, which are
+never evaluated: the proof positions of `cast` and `transp`, and marked proofs (§8.6,
+§8.6a). Ill-typed situations
