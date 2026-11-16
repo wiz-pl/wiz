@@ -87,8 +87,13 @@ macro_rules
 /-- Unsigned 64-bit machine integers: opaque to the kernel, native at runtime (through
 the FFI). Arithmetic wraps around modulo 2⁶⁴. -/
 axiom UInt64 : Type
-/-- The `UInt64` for a `Nat` (modulo 2⁶⁴). -/
-extern "wiz_u64_id" UInt64.ofNat : Nat → UInt64
+/-- The raw conversion (`wiz_u64_id`): the C argument is a `uint64_t`, so the `Nat` must
+already be below 2⁶⁴. -/
+private extern "wiz_u64_id" UInt64.ofNatRaw : Nat → UInt64
+/-- The `UInt64` for a `Nat` (modulo 2⁶⁴): `UInt64.ofNat (2^64) = 0`. The reduction is in
+Wiz, before the call: the C function takes a `uint64_t`, and the marshalling rejects a
+larger `Nat` (`wiz_in_nat`: "a number is too big for a C integer"). -/
+def UInt64.ofNat (n : Nat) : UInt64 := UInt64.ofNatRaw (Nat.mod n (Nat.pow 2 64))
 /-- The `Nat` of a `UInt64`. -/
 extern "wiz_u64_id" UInt64.toNat : UInt64 → Nat
 /-- Addition, wrapping around. -/
