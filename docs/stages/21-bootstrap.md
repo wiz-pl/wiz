@@ -878,3 +878,116 @@ and carries the ownership table as comments. Deferred (documented, not implement
 a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
 `Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
 automatic struct/pointer import for `import_c`.
+
+## 21ac: notation and macros in the self-hosted frontend (A12, first milestone)
+
+The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
+with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
+registrations were "unsupported command". `lib/` uses them: counting declarations at the
+start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib/Hdl/`,
+2026-11-15 at `24218ce4`) gives
+
+| form                            | declarations | files |
+|---------------------------------|-------------:|------:|
+| `syntax`                        | 123 | 13 |
+| `attribute [tactic …]`          |  37 |  5 |
+| `macro_rules`                   |  27 |  5 |
+| `infix` (plain)                 |  18 |  4 |
+| `infixr`                        |  17 |  8 |
+| `infixl`                        |  13 |  3 |
+| `declare_syntax_cat`            |  14 |  3 |
+| `attribute [macro …]`           |  11 |  6 |
+| `notation`                      |   9 |  4 |
+| `app_unexpander`                |   6 |  5 |
+| `attribute [app_unexpander …]`  |   2 |  1 |
+| `prefix` / `postfix`            |   0 | 0 |
+| `macro` (a declaration)         |   0 | 0 |
+
+17 files use at least one of the forms (12 use `macro_rules`/`notation`/
+`attribute [macro]`; 15 without the plain infix operators). The `syntax` rules target
+`tactic` 39 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
+categories. `prefix`/`postfix` and a `macro` command do not exist in the Lean host
+either (a prefix operator is a `notation` whose first item is an atom; the host has only
+`macro_rules`), so there is nothing to mirror.
+
+**Implemented.** The frontend's `Note` is now a real macro rule — a node kind, a pattern
+tree, a template and the argument names `notation` binds — and:
+* `notation:p items => rhs` registers a leading rule (or, if the first item is an
+  argument with a precedence, a trailing one, the host's `notationRule`); the pattern
+  is the item list with `antiquot`s for the arguments, and the template substitutes them
+  (`term.ident x` nodes for a `notation`'s `vars`, `$x` nodes for a `macro_rules`).
+* `infixl`/`infixr`/`infix` build the same trailing rule and rule shape as the host
+  (`a op b => f a b`), with `p`/`p+1` operand precedences; the kind comes from the
+  host's `mkKindName` (`term.+`, `term.+_1`, …).
+* `declare_syntax_cat`, `syntax` (with `(name := …)`, `(priority := …)`, `p`, the `stx`
+  item grammar: atoms, categories with a precedence, `(...)`, `sepBy`/`sepBy1`,
+  `withPosition`, `* + ?`), the meta parsers (antiquotations and `` `(c| …) `` for a new
+  category) and `Wiz/Parser/SyntaxCmd.lean`'s leading/trailing split. Atoms are
+  unreserved outside `term`/`command`, and a rule's atoms are added to the token table
+  as the host's `ParserTables.addTokens` does.
+* `macro_rules` with quotations, `$x` pattern variables, structural matching and
+  hygiene: a template identifier the rule introduces gets a fresh `x✝N` scope, and
+  `Scope.lookupV` falls back to the scope-stripped name for a global (the host's
+  `stripScope`). The host has **no repetition** in patterns (`$[…]`), so neither has
+  this.
+* command macros written as `macro_rules` (a rule whose pattern is a `command` node
+  expands before dispatch, so `def_one x` can stand for a `def`).
+* `attribute [macro K] f` / `[tactic K] f` check that `f` is declared and record nothing
+  (see below); `app_unexpander`, `attribute [app_unexpander …]` and
+  `set_option pp.notation`/`pp.all` are parsed and accepted (their printing is the
+  remaining half).
+
+Expansion is outermost first: a node is rewritten to a fixed point (bounded per
+position), then its children are expanded, so an argument a rule splices is expanded
+like any other node. Tables change command by command, as they do in the host: the next
+command is parsed with the rules declared by the previous ones.
+
+**Not done.** The macro and tactic registrations name a *function* the host executes at
+elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
+DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
+`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
+an "unsupported syntax" error. That is A12's other half, and it depends on the
+elaborator-time evaluation that A11 and A13 also need. Printing notation
+(`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
+host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
+(`declare_syntax_cat c (keywords := s)`) are accepted and the category is declared, but
+the scope's reserved words are not tracked (only `lib/Feral.wiz` uses them, with a
+procedural macro). `local notation`/`local macro_rules` are unwrapped and stay visible
+to importers (A14's module-local dropping is not wired to the new rules).
+
+**Tests** (new group `selfhost-macro`, 13 cases, added to the `selfhost` shard):
+* notation/infix differential: `selfhostSameNats` compares what the Lean frontend's
+  `#eval` and the self-hosted one's `#reduce` compute for `10 − 3 − 2` (5), `10 ⊖ 3 ⊖ 2`
+  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4), `⌜⌜3⌝⌝` (5), the postfix `5 !` (10) and
+  `5 ! !` (20), and the prefix `~3` (2) and `~ ~3` (3) — left/right associativity,
+  precedence, a leading notation with a default and with an explicit argument
+  precedence, and a trailing (postfix) rule.
+* `macro_rules` differential: a `syntax:lead` rule, pattern variables, hygiene (`under e`
+  = `let y := 3; e + y`, so `hyg 5` is 9 with hygiene and 7 without), a declared
+  category with a rule of its own (`get ⟨7⟩` = 70, via a second expansion), and a
+  command macro (`def_one one`).
+* a `syntax` rule whose items are a `sepBy(term, ",")` and the macro rule that matches
+  the `null` node and splices both elements (`pair(1, 2)` = 3).
+* `syntax ... : tactic` rules (39 of the 123 in `lib/` target `tactic`), a `tactic`
+  reference and a `(keywords := …)` category, accepted by both frontends.
+* a second `infixl` on the Prelude's `+`: a fresh kind (`term.+_1`), and the later rule
+  wins (`3 + 1` is 2 both places); `infix` (both operands `p + 1`) does not parse a
+  chain (`1 ? 2 ? 3`) in either frontend.
+* pinned diagnostics: a malformed rule, an unknown syntax category and an unknown
+  registration name.
+* the declarations a macro file produces in the self-hosted frontend (names and types).
+* `app_unexpander`/`set_option` accepted by both frontends; the macro/tactic
+  registrations accepted by the self-hosted one.
+* two pinned differences (`selfhostVerdicts`): the host rejects a registration whose
+  function has the wrong type and an unexpander whose pattern is not an application,
+  while the self-hosted frontend only checks that the name exists.
+* the same macro-using program compiled and run by **both** toolchains (`ioRun` and
+  `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
+  compute identically.
+
+**Verification (2026-11-15).** The groups run on these sources: `=selfhost-macro`
+**13 passed, 0 failed** (417 s) and `=selfhost` **143 passed, 0 failed** (2195 s),
+including the self-check (28.3 s) and the repinned `#67`, which matches its new
+expected output. The same cases were also exercised case by case with light probes
+(`wiz check`/`wiz run` for the Lean frontend, the checker and compiler for the
+Wiz-hosted one), and the macro-using program prints `25 2 1 9 71` from both toolchains.
