@@ -11,8 +11,8 @@
 # without an invariant; --print lists the uses found.
 Grail/Exec.lean	exitNow	extern	c/proc.c `_exit(code)`: ends the supervisor process; touches no Lean object, runs only as the job's last action
 Grail/Exec.lean	pathClear	extern	c/proc.c: clears the C path buffer; IO, single-threaded use by `isExecutable` (documented not thread-safe)
-Grail/Exec.lean	pathPush	extern	c/proc.c: appends one byte to the C path buffer; IO, no Lean object crosses the boundary
 Grail/Exec.lean	pathExecutableRaw	extern	c/proc.c `stat` of the buffered path: returns a Bool through the exported `grail_ok_bool`; IO, reads only the file's mode
+Grail/Exec.lean	pathPush	extern	c/proc.c: appends one byte to the C path buffer; IO, no Lean object crosses the boundary
 Tests/Groups/Prop.lean	memoFind	implemented_by	opaque over memoFindImpl: a miss is always a correct answer (the interpreter and kernel see one), so the memo can only save work
 Tests/Groups/Prop.lean	memoFindImpl	unsafe,unsafeBaseIO	reads the test memo: keys compared structurally (BEq on the full key), reset per case, so a hit equals recomputing; test driver only
 Tests/Groups/Prop.lean	memoPut	implemented_by	opaque over memoPutImpl: returns its argument unchanged, the write only fills the memo
