@@ -1168,7 +1168,12 @@ def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
 included; the decoder checks overlong forms and surrogates), `ofString`/`toString`
 (through a C string: they stop at a NUL) and `ofLatin1`/`toLatin1` (one byte per
 character, an error above 255). The strings are observed through `Bytes` only (a text
-module is not in the self-hosted Prelude). Prints the list below. -/
+module is not in the self-hosted Prelude). Prints the list below.
+
+Every `match` scrutinee is `let`-bound first: the self-hosted compiler evaluates a closed
+scrutinee in full while it compiles (`scrutLets` binds its value; #422), and the
+Prelude's `Bytes.toUtf8` model on `"𝄞"` alone took over 200 s and 3.4 GB there. The
+case "a closed match scrutinee is evaluated at compile time" pins that pattern. -/
 def bytesEncProgram : String :=
   "import Std\ndef main : IO Unit := do\n" ++
   "  let u := Bytes.ofUtf8 \"a\\x00b\";\n" ++
@@ -1178,17 +1183,37 @@ def bytesEncProgram : String :=
   "  IO.println (if Bytes.eq (Bytes.ofString (Bytes.toString u)) (Bytes.ofList (List.cons 97 .nil)) then \"eq\" else \"ne\");\n" ++
   "  IO.println (Nat.toString (Bytes.size (Bytes.ofUtf8 \"𝄞\")));\n" ++
   "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"𝄞\")));\n" ++
-  "  IO.println (match Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\") with\n    | .ok t => if Bytes.eq (Bytes.ofUtf8 t) (Bytes.ofUtf8 \"𝄞\") then \"eq\" else \"ne\"\n    | .error _ => \"err\");\n" ++
-  "  IO.println (match Bytes.ofLatin1 \"é\" with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
-  "  IO.println (match Bytes.ofLatin1 (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil))) with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
-  "  IO.println (match Bytes.ofLatin1 \"\\u{100}\" with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
-  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 128 .nil)) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
-  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 192 (List.cons 128 .nil))) with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
-  "  IO.println (match Bytes.toUtf8 (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil)))) with\n    | .ok _ => \"ok\"\n    | .error e => e)\n"
+  "  let e1 := Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\");\n" ++
+  "  IO.println (match e1 with\n    | .ok t => if Bytes.eq (Bytes.ofUtf8 t) (Bytes.ofUtf8 \"𝄞\") then \"eq\" else \"ne\"\n    | .error _ => \"err\");\n" ++
+  "  let e2 := Bytes.ofLatin1 \"é\";\n" ++
+  "  IO.println (match e2 with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
+  "  let e3 := Bytes.ofLatin1 (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil)));\n" ++
+  "  IO.println (match e3 with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
+  "  let e4 := Bytes.ofLatin1 \"\\u{100}\";\n" ++
+  "  IO.println (match e4 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e5 := Bytes.toUtf8 (Bytes.ofList (List.cons 128 .nil));\n" ++
+  "  IO.println (match e5 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e6 := Bytes.toUtf8 (Bytes.ofList (List.cons 192 (List.cons 128 .nil)));\n" ++
+  "  IO.println (match e6 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e7 := Bytes.toUtf8 (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil))));\n" ++
+  "  IO.println (match e7 with\n    | .ok _ => \"ok\"\n    | .error e => e)\n"
 
 def bytesEncExpected : String :=
   "3\n1\n[97]\neq\n4\n4\neq\n[233]\n[233]\nnot Latin-1: character 0 is U+256\n" ++
   "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
+
+/-- (#422) A closed `match` scrutinee that is expensive to evaluate: `fib k n` doubles
+`n` `k` times by recursion (2^18 calls here). The self-hosted compiler evaluates such a
+scrutinee in full while it compiles (`scrutLets` binds its value), and the `let`-bound
+form below does not; the host compiles both at once. -/
+def closedScrutFib : String :=
+  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, _ => 0\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
+
+def closedScrutInline : String :=
+  closedScrutFib ++ "def main : IO Unit := IO.println (match Nat.beq (fib 18 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\")\n"
+
+def closedScrutLet : String :=
+  closedScrutFib ++ "def main : IO Unit := do\n  let r := Nat.beq (fib 18 1) 0;\n  IO.println (match r with\n  | .true => \"z\"\n  | .false => \"nz\")\n"
 
 /-- (21ag) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
 `Bytes.slice`/`append`/`eq`/`get`/`push` boundaries the semantics matrix pins: a slice
@@ -1861,6 +1886,19 @@ def selfHostGroup : Group where
         selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
     { name := "Bytes (21ag): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
         ffiAgrees bytesEncProgram bytesEncExpected },
+    -- (#422, expected slow) the pattern `bytesEncProgram` works around: a closed `match`
+    -- scrutinee is evaluated while the self-hosted compiler compiles (about 2 s at
+    -- `fib 16` and four times that per two more levels, against 0.4 s let-bound). Both
+    -- must still compile within `selfhostCompileRun`'s 300 s; the note keeps the gap
+    -- visible until #422 is fixed, when the two times should match
+    { name := "a closed match scrutinee is evaluated at compile time (expected slow, #422)", run := fun _ => do
+        ioRun closedScrutInline "nz\n"
+        let t0 ← IO.monoMsNow
+        selfhostCompileRun closedScrutInline "nz\n"
+        let t1 ← IO.monoMsNow
+        selfhostCompileRun closedScrutLet "nz\n"
+        let t2 ← IO.monoMsNow
+        note s!"#422: inline scrutinee {t1 - t0} ms, let-bound {t2 - t1} ms" },
     { name := "Bytes (21ag): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
         ffiAgrees bytesArrayProgram bytesArrayExpected },
     { name := "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
