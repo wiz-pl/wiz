@@ -200,6 +200,48 @@ def selfhostModuleC (files : List (String × String)) (args : Array String := #[
       throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}{out.stdout}")
     return some (← IO.FS.readFile (dir / "out.c"))
 
+/-- (21af) The self-hosted CLI's `check` on a set of files (`input.wiz` the root), with
+`args` before the file: exit code, standard output and standard error (`none`: no
+toolchain). -/
+def selfhostCliCheck (files : List (String × String)) (args : Array String) :
+    IO (Option (UInt32 × String × String)) := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      return none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let cmdArgs := #["300", exe.toString, "check"] ++ args ++ #["input.wiz"]
+    let out ← IO.Process.output { cmd := "timeout", args := cmdArgs, cwd := dir }
+    return some (out.exitCode, out.stdout, out.stderr)
+
+/-- (21af) Stand-ins for `lib/Word.wiz`'s `UIntN`/`IntN` and the operations its numeric
+instances use. The real types have a proof field (`isLt : … = .true`) that this frontend
+cannot elaborate yet (constructor-field `=`; fixed on agent/sh-prelude-blk), so they
+cannot be loaded. TODO(agent/sh-prelude-blk): once it lands, import `Word` itself
+instead of these stand-ins. Sealed, as Word's are: two structures of one shape are one
+type here, and their instances would be duplicates. -/
+def wordStandIns : String := Id.run do
+  let mut s := "sealed inductive UIntN (w : Nat) where\n  | mk (toNat : Nat)\n" ++
+    "sealed inductive IntN (w : Nat) where\n  | mk (toNat : Nat)\n" ++
+    "def UIntN.toNat {w : Nat} : UIntN w → Nat\n  | .mk n => n\n" ++
+    "def IntN.toNat {w : Nat} : IntN w → Nat\n  | .mk n => n\n" ++
+    "def UIntN.ofNat (w n : Nat) : UIntN w := UIntN.mk n\n" ++
+    "def IntN.ofNat (w n : Nat) : IntN w := IntN.mk n\n"
+  for T in ["UIntN", "IntN"] do
+    for op in ["add", "sub", "mul", "div", "mod", "rem", "land", "lor", "xor"] do
+      s := s ++ s!"def {T}.{op} \{w : Nat} (a b : {T} w) : {T} w := {T}.mk (Nat.add a.toNat b.toNat)\n"
+    for op in ["neg", "not"] do
+      s := s ++ s!"def {T}.{op} \{w : Nat} (a : {T} w) : {T} w := a\n"
+    for op in ["shiftLeft", "shiftRight"] do
+      s := s ++ s!"def {T}.{op} \{w : Nat} (a : {T} w) (k : Nat) : {T} w := a\n"
+  return s
+
 /-- The self-hosted compiler rejects a program: exit code 1, the errors on standard
 error, and no C (15g). -/
 def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
@@ -2444,6 +2486,77 @@ def selfHostGroup : Group where
           [("B.wiz", "import IO\nimport Std\ndef y : Nat := 1\n"),
            ("input.wiz", "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n")]
           "y : Nat\nx : Nat\n" },
+    { name := "--prelude-from-roots: lib/Prelude.wiz's classes, and lib/Word.wiz:413-452's instances check (21af)", run := fun _ => do
+        let lib := ((← IO.currentDir) / "lib").toString
+        let word ← IO.FS.readFile "lib/Word.wiz"
+        let insts := "\n".intercalate (((word.splitOn "\n").drop 412).take 40)
+        unless (insts.splitOn "instance").length == 21 do
+          throw (IO.userError s!"lib/Word.wiz:413-452 is no longer the numeric instances:\n{insts.take 400}")
+        let src := "import Prelude\n" ++ wordStandIns ++ insts ++ "\ndef two : Nat := 1 + 1\n"
+        let mine (err : String) := (err.splitOn "\n").filter (·.startsWith "input.wiz:")
+        -- the embedded prelude has no numeric classes
+        let some (_, _, err0) ← selfhostCliCheck [("input.wiz", src)] #["-I", lib] | return
+        unless (mine err0).any (fun l => (l.splitOn "Add is not a class").length > 1) do
+          throw (IO.userError s!"expected `Add is not a class` without the flag:\n{err0.take 1500}")
+        -- with the flag, `import Prelude` is lib/Prelude.wiz: the instances and `1 + 1`
+        -- (HAdd through the default instance instHAdd) check. (lib/Prelude.wiz's own
+        -- remaining errors are reported at lib/Prelude.wiz and are not this file's.)
+        let some (_, out, err) ← selfhostCliCheck [("input.wiz", src)] #["--prelude-from-roots", "--types", "-I", lib] | return
+        unless (mine err).isEmpty do
+          throw (IO.userError s!"errors in input.wiz with --prelude-from-roots:\n{"\n".intercalate (mine err)}")
+        unless (out.splitOn "info: two : Nat").length > 1 do
+          throw (IO.userError s!"`two` is missing from the --types output:\n{out.takeRight 1500}") },
+    { name := "--prelude-from-roots: without roots the embedded prelude, as before; without the flag a root's Prelude.wiz is not read (21af)", run := fun _ => do
+        let files := [("B.wiz", "import IO\nimport Std\ndef y : Nat := 1\n"),
+                      ("input.wiz", "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n")]
+        selfhostCheckModules files "y : Nat\nx : Nat\n" (args := #["--prelude-from-roots"])
+        let sub := [("sub/Prelude.wiz", "inductive Nat where\n  | zero\n  | succ (n : Nat)\n"),
+                    ("input.wiz", "import Prelude\ndef two : Nat := 1 + 1\n#check two\n")]
+        selfhostCheckModules sub "two : Nat\nNat\n" (args := #["-I", "sub"])
+        -- (with the flag the root's prelude is the one read: an ordinary module, so its
+        -- declarations print, and it has no `+`)
+        let some out ← selfhostModuleOutput sub #["-I", "sub", "--prelude-from-roots"] | return
+        unless out.startsWith "Nat : U0\n" && (out.splitOn "error").length > 1 do
+          throw (IO.userError s!"the root's Prelude.wiz was not the one loaded:\n{out}") },
+    { name := "--prelude-from-roots: Prelude, IO, Std and Sys from the roots load once each (21af)", run := fun _ => do
+        let prel := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n#check Nat.zero\n"
+        let root := "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n"
+        -- (IO, Std and Sys are not in the root: each stands for the root's Prelude)
+        selfhostCheckModules
+          [("sub/Prelude.wiz", prel), ("sub/B.wiz", "import IO\nimport Std\ndef y : Nat := .zero\n"), ("input.wiz", root)]
+          "Nat : U0\nNat\ny : Nat\nx : Nat\n" (args := #["-I", "sub", "--prelude-from-roots"])
+        -- (a root's IO.wiz is an ordinary module)
+        selfhostCheckModules
+          [("sub/Prelude.wiz", prel), ("sub/IO.wiz", "import Prelude\ndef z : Nat := .zero\n"),
+           ("sub/B.wiz", "import IO\nimport Std\ndef y : Nat := .zero\n"), ("input.wiz", root)]
+          "Nat : U0\nNat\nz : Nat\ny : Nat\nx : Nat\n" (args := #["-I", "sub", "--prelude-from-roots"]) },
+    { name := "default instances: a stuck problem takes its class's default; a class without one is stuck at once (21af)", run := fun _ => do
+        selfhostCheckModules
+          [("input.wiz", "import Prelude\nclass Sh (A : Type) where\n  sv : A\ninstance instShNat : Sh Nat := Sh.mk 7\n" ++
+            "class Df (A : Type) where\n  dv : A\ninstance instDfNat : Df Nat := Df.mk 2\nattribute [default_instance] instDfNat\n" ++
+            "#reduce (let v := Df.dv; v)\n#reduce (let v := Sh.sv; v)\n" ++
+            "def notInst : Df Nat := Df.mk 1\nattribute [default_instance] notInst\nattribute [binop] Df.dv\nattribute [binop] Nat.add\n")]
+          ("Sh : (x0 : U0) → U0\nSh.sv : (x0 :0 U0) → (x1 : (Sh x0)) → x0\ninstShNat : (Sh Nat)\n" ++
+           "Df : (x0 : U0) → U0\nDf.dv : (x0 :0 U0) → (x1 : (Df x0)) → x0\ninstDfNat : (Df Nat)\n" ++
+           "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\n" ++
+           "error: type class problem is stuck: (Sh ?m0)\n" ++
+           "notInst : (Df Nat)\nerror: notInst is not an instance\nerror: Nat.add is not a method of a class\n") },
+    { name := "builtin: the registrations and the host's checks (21af)", run := fun _ => do
+        selfhostCheckModules
+          [("input.wiz", "import Prelude\nbuiltin nat := Nat\nbuiltin nat.zero := Nat.zero\nbuiltin nat.succ := Nat.succ\n" ++
+            "builtin nat.add := Nat.add\nbuiltin nat.beq := Nat.beq\nbuiltin memo := memo\nbuiltin string := String\n#check Nat.add\n")]
+          "(x0 : Nat) → (x1 : Nat) → Nat\n"
+        selfhostCheckModules
+          [("input.wiz", "import Prelude\nbuiltin nat.add := Nat.add\nbuiltin nat := Nat\nbuiltin nat := Bool\nbuiltin bogus := Nat\n" ++
+            "builtin nat.sub := Nat.add\nbuiltin nat.mul := nope\nbuiltin nat.pred := Nat.add\nbuiltin nat.zero := Nat.pred\n" ++
+            "builtin nat.blt := Nat.lt\nbuiltin string := Nat.add\n")]
+          ("error: builtin nat.add := Nat.add: register `builtin nat := …` first\n" ++
+           "error: builtin nat is already registered (as Nat); a builtin can be registered only once\n" ++
+           "error: unknown builtin bogus; known: [nat, nat.zero, nat.succ, nat.pred, nat.add, nat.sub, nat.mul, nat.beq, nat.blt, string, memo, int, nat.div, nat.mod, nat.pow, nat.land, nat.lor, nat.xor, nat.shiftLeft, nat.shiftRight, nat.log2]\n" ++
+           "error: unknown declaration nope\n" ++
+           "error: Nat.add is already registered as builtin nat.sub\n" ++
+           "error: builtin nat.zero := Nat.pred: it must take 0 arguments of type Nat\n" ++
+           "error: Nat.add is already registered as builtin nat.sub\n") },
     { name := "modules: the CLI root spellings (-Idir, --include DIR, --include=DIR)", run := fun _ => do
         let files := [("sub/B.wiz", "import Prelude\ndef one : Nat := 1\n"),
                       ("input.wiz", "import Prelude\nimport B\ndef two : Nat := one\n")]
