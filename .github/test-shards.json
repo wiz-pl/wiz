@@ -9,6 +9,11 @@
     "=audit-kernels",
     "=selfhost-macro"
   ]},
+  {"name": "selfhost-parse-diff", "heavy": true,
+   "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
+   "select": [
+    "=selfhost-parse-diff"
+  ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
   ]},
@@ -65,6 +70,7 @@
     "optic",
     "persistent",
     "phantom",
+    "=plot",
     "regions",
     "=scry-wil",
     "=scry-c2wil",
