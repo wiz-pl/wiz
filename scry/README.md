@@ -602,6 +602,33 @@ Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
 
+## Real CVE corpus (opt-in)
+
+`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
+416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
+result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
+runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
+RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
+`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
+
+```sh
+cd scry
+scripts/cve-bench.sh                       # build/cve/summary.{json,md}
+scripts/cve-bench.sh --case cve-2020-1752  # one case
+```
+
+**No third-party code is checked in.** Each case directory holds our `harness.c` (the
+reduction) and `upstream.json`, which pins every source (tags resolved to commits, a
+SHA-256 per file) and the line ranges of the few spans that are verbatim upstream code;
+`scripts/cve-fetch.py assemble` fetches them into a content-addressed cache and writes
+the compilable `case.c` files under `build/cve-src/`. The bench drivers run it first.
+Of the 38 case files (v1 and v2), 8 contain upstream spans (214 lines in all); the other
+30 are rewritten reductions and fetch nothing.
+
+The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
+the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
+synthetic `scry bench` rates as a regression corpus, not as real-world recall.
+
 ## `scry findings`: exploration → triage → repro → verify
 
 `scry findings` is the workflow/evidence layer over the existing analysis. `scan` calls
@@ -642,22 +669,3 @@ A concolic-witness slot is reserved for the future S6a slice
 `scry-workflow-witness/1` document only when its `authority` is L2/L3 and it is
 `validated`, uses its `input` as the deterministic input, and records its path condition
 and model. The prototype does **not** run symbolic execution.
-
-## Real CVE corpus (opt-in)
-
-`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
-416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
-result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
-runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
-RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
-`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
-
-```sh
-cd scry
-scripts/cve-bench.sh                       # build/cve/summary.{json,md}
-scripts/cve-bench.sh --case cve-2020-1752  # one case
-```
-
-The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
-the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
-synthetic `scry bench` rates as a regression corpus, not as real-world recall.

@@ -1010,15 +1010,18 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
-      (List.append
-        (Scry.concatLists (fun r => r.plan.memWarnings) results)
-        (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)));
+    let bounds := Scry.boundsCheck prog pt pack results;
+    let warnings := Scry.dedupWarnings (List.append
+      (List.filter (Scry.keepMemWarning hasLifetime)
+        (List.append
+          (Scry.concatLists (fun r => r.plan.memWarnings) results)
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
+      bounds.warnings);
     /-- `--null-deref` appends the opt-in S5 nullness pass. -/
     let warnings := match o.nullDeref with
       | .true => Scry.dedupWarnings (List.append warnings (Scry.nullDerefWarnings prog))
       | .false => warnings;
-    let memoryFindings := Scry.lifetimeFindings prog pt pack;
+    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
     let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
       ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"

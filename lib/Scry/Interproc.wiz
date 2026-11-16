@@ -5,6 +5,7 @@ import Scry.Rules
 import Scry.Models
 import Scry.Lifetime
 import Scry.Nullness
+import Scry.Bounds
 import Text
 /-!
 # Scry.Interproc
@@ -384,15 +385,18 @@ def Scry.analyzeCore (p : Wil.Program) (pack0 : Scry.RulePack)
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let baseWarnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
-    (List.append
-      (Scry.concatLists (fun r => r.plan.memWarnings) results)
-      (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)));
+  let bounds := Scry.boundsCheck p pt pack results;
+  let baseWarnings := Scry.dedupWarnings (List.append
+    (List.filter (Scry.keepMemWarning hasLifetime)
+      (List.append
+        (Scry.concatLists (fun r => r.plan.memWarnings) results)
+        (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
+    bounds.warnings);
   let nulls : List Scry.MemWarning := match withNull with
     | .true => Scry.nullDerefWarnings p
     | .false => .nil;
   let warnings := Scry.dedupWarnings (List.append baseWarnings nulls);
-  let memoryFindings := Scry.lifetimeFindings p pt pack;
+  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The bounded analysis without the nullness pass. -/

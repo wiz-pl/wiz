@@ -2013,9 +2013,11 @@ def Scry.fnPtrRet (t : Wil.Ty) : Option Wil.Ty :=
 
 /-- Cells an allocation request covers (`malloc`/`calloc`'s size argument): a
 `sizeof(T)`/`sizeof x` of a known type is exact in the analysis layout; a literal byte
-count is rounded up to whole 8-byte words; anything else is one cell. Points-to does not
-use this bound (locations have unbounded offsets), so it only affects a concrete run of a
-lowered fixture. -/
+count is rounded up to whole 8-byte words; anything else is **0**, the marker for "the
+size is not statically known". Points-to does not use this bound (locations have
+unbounded offsets); the concrete semantics treats 0 as an empty block, which is the
+honest result for a runtime size anyway. `Scry.Bounds` reads 0 as unknown and reports an
+`unknown-memory` boundary instead of claiming an extent. -/
 def Scry.sizeCells (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Nat :=
   match Scry.ekindOf (c.kindOf n) with
   | .sizeofE => match Scry.childF c n "type" with
@@ -2026,13 +2028,13 @@ def Scry.sizeCells (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Nat :=
           | .some b => match b.kind with
             | .slot ty _ => Scry.cellsOf s.structs ty
             | .reg => Scry.cellsOf s.structs b.var.ty
-          | .none => 1
-        | _ => 1
-      | .none => 1
+          | .none => 0
+        | _ => 0
+      | .none => 0
   | .number => match Scry.constInt c n with
-    | .some v => Nat.add 1 (Nat.div v 8)
-    | .none => 1
-  | _ => 1
+    | .some v => Nat.max 1 (Nat.div (Nat.add v 7) 8)
+    | .none => 0
+  | _ => 0
 
 /-- Emit `Wil.alloc` (a heap object) for `malloc`/`calloc`, with the declared return type
 when the unit declares the function. -/
@@ -2048,9 +2050,14 @@ def Scry.allocCall (c : Scry.Cst) (n : Nat) (name : String) (sizeN : Nat) (count
   let c0 := Nat.mul (match Nat.beq count 0 with
     | .true => 1
     | .false => count) one;
-  let cells := match Nat.beq c0 0 with
-    | .true => 1
-    | .false => c0;
+  -- `one = 0` means the size expression is not a constant: keep the unknown marker
+  -- rather than pretending the object is one cell. A genuinely empty request is still
+  -- rounded to one cell so an allocation names a block.
+  let cells := match Nat.beq one 0 with
+    | .true => 0
+    | .false => match Nat.beq c0 0 with
+      | .true => 1
+      | .false => c0;
   v ← Scry.fresh retTy;
   Scry.emitAt c n (Wil.alloc v cells);
   Scry.lret v
