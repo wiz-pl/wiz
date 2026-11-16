@@ -195,7 +195,12 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
 in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
-(for auditing a group's isolation, not for CI). -/
+(for auditing a group's isolation, not for CI).
+
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE]` runs the self-hosted
+compiler and the Lean frontend over every `lib/` and `scry/` file and reports where they
+disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
+documents the format). -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
@@ -205,7 +210,7 @@ def main (args : List String) : IO UInt32 := do
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -259,6 +264,10 @@ def main (args : List String) : IO UInt32 := do
   | "--probe-reuse-ir" :: files => Scaling.probeReuseIR files
   -- allocation counts and IR of definitions of a file (`Tests/Allocs.lean`)
   | "--allocs" :: rest => Allocs.allocsMain rest
+  -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
+  -- of one file (a bounded child of the sweep), and the sweep itself
+  | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
+  | "--libdiff" :: rest => Elab.libDiffMain rest
   -- the trust ledger (`Tests/Native.lean`, scripts/trust-ledger.sh)
   | "--trust-ledger" :: rest => Native.trustLedgerMain rest
   | ["--list"] => do
