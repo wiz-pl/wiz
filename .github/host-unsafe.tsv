@@ -11,8 +11,8 @@
 # without an invariant; --print lists the uses found.
 Grail/Exec.lean	exitNow	extern	c/proc.c `_exit(code)`: ends the supervisor process; touches no Lean object, runs only as the job's last action
 Grail/Exec.lean	pathClear	extern	c/proc.c: clears the C path buffer; IO, single-threaded use by `isExecutable` (documented not thread-safe)
-Grail/Exec.lean	pathPush	extern	c/proc.c: appends one byte to the C path buffer; IO, no Lean object crosses the boundary
 Grail/Exec.lean	pathExecutableRaw	extern	c/proc.c `stat` of the buffered path: returns a Bool through the exported `grail_ok_bool`; IO, reads only the file's mode
+Grail/Exec.lean	pathPush	extern	c/proc.c: appends one byte to the C path buffer; IO, no Lean object crosses the boundary
 Tests/Groups/Prop.lean	memoFind	implemented_by	opaque over memoFindImpl: a miss is always a correct answer (the interpreter and kernel see one), so the memo can only save work
 Tests/Groups/Prop.lean	memoFindImpl	unsafe,unsafeBaseIO	reads the test memo: keys compared structurally (BEq on the full key), reset per case, so a hit equals recomputing; test driver only
 Tests/Groups/Prop.lean	memoPut	implemented_by	opaque over memoPutImpl: returns its argument unchanged, the write only fills the memo
@@ -27,6 +27,8 @@ Wiz/Core/Term.lean	tick	implemented_by	opaque over tickImpl: decrements this rea
 Wiz/Core/Term.lean	tickImpl	unsafe,unsafeBaseIO	mutates only the counter of the budget it is given (owned by one Budget.run); never_extract/noinline keep each tick
 Wiz/Core/Value.lean	memoThunk	implemented_by	opaque over memoThunkImpl: a Thunk whose value is f (); memoisation only saves recomputation
 Wiz/Core/Value.lean	memoThunkImpl	unsafe,unsafeBaseIO	the cell is owned by one thunk and f is pure over persistent Globals, so forcing it twice gives the same value
+Wiz/Elab/Command.lean	traceGuessesOn	implemented_by	opaque over traceGuessesOnImpl: gates only the --trace-guess-fallback dbgTrace; never what is accepted, rechecked or cached in a run without the flag
+Wiz/Elab/Command.lean	traceGuessesOnImpl	unsafe,unsafeBaseIO	reads a process-wide flag set once before elaboration (false without --trace-guess-fallback); the name argument only prevents closed-term extraction
 Wiz/Frontend/Frontend.lean	isoGet	implemented_by	opaque over isoGetImpl: a hit is what elaborating again gives (the key determines the module's elaboration), so runFrontend stays a function of its arguments
 Wiz/Frontend/Frontend.lean	isoGetImpl	unsafe,unsafeBaseIO	reads the per-process isolation memo (per rig), keyed by isoKey, which hashes everything a module's elaboration depends on
 Wiz/Frontend/Frontend.lean	isoPut	implemented_by	opaque over isoPutImpl: returns v unchanged; the write only fills the memo
