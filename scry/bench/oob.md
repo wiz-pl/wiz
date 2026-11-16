@@ -56,8 +56,9 @@ it changes neither that report's 2x2 nor the `scry bench` baseline. Measured wit
 branch's build and the opt-in pack:
 
 ```sh
+scripts/cve-fetch.py assemble        # the cases, from pinned upstream source
 for c in cve-2021-23017 cve-2018-1000001 cve-2014-0160; do
-  scry taint bench/cases/$c/case.c --rules ../lib/Scry/rules/oob.scry
+  scry taint build/cve-src/cases/$c/case.c --rules ../lib/Scry/rules/oob.scry
 done
 ```
 
