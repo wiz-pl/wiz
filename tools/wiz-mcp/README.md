@@ -104,11 +104,11 @@ claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
 | MCP tool (OpenCode name) | arguments | backend |
 | --- | --- | --- |
 | `version` (`wiz_version`) | – | `wiz --version` |
-| `check` (`wiz_check`) | `path` | `wiz check PATH`; the workhorse |
+| `check` (`wiz_check`) | `path`, `source?`, `text?` | `wiz check PATH` (or the daemon with `source: "lsp"`); structured diagnostics; the workhorse |
 | `parse` (`wiz_parse`) | `path` | `wiz parse PATH` |
 | `fmt` (`wiz_fmt`) | `path`, `check?`, `width?` | `wiz fmt PATH [--check] [--width N]` |
 | `build` (`wiz_build`) | `path`, `out`, `lib?` | `wiz build PATH -o OUT [--lib]`; **only with `--allow-build`** |
-| `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose` |
+| `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose`; `check`'s result shape, LSP objects under `raw` |
 | `hover` (`wiz_hover`) | `path`, `text?`, `line`, `character` | `textDocument/hover` |
 | `goals` (`wiz_goals`) | `path`, `text?`, `line`, `character` | `wiz/interactiveGoals` |
 
@@ -186,6 +186,38 @@ failure:
 * `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,
   `wiz_not_found`, `io_error`, `timeout`, `lsp_startup`, `lsp_closed`,
   `lsp_error`, `internal`.
+
+### `check`: structured diagnostics
+
+`check` returns the raw `stdout`/`stderr` as before and, in `result`, every
+message as data:
+
+```json
+{"source":"cli","counts":{"error":1,"warning":0,"info":1},"unparsed":[],
+ "diagnostics":[{"file":"/w/a.wiz","line":4,"column":16,
+   "range":{"start":{"line":3,"character":15},"end":{"line":3,"character":15}},
+   "severity":"error","code":null,"message":"type mismatch\n  expected: Nat\n  inferred: Bool"}]}
+```
+
+* `line`/`column` are 1-based, as Wiz prints them; `range` is 0-based, as in
+  LSP (the same numbers the `diagnostics`, `hover` and `goals` tools take).
+  Columns count Unicode code points.
+* `source: "cli"` (the default) parses `wiz check`'s output: a message is
+  `PATH:LINE:COLUMN: SEVERITY: TEXT` and continues on the following lines (a
+  type mismatch's expected/inferred lines, an import's indented error list).
+  The CLI prints neither the end of a range (`end` equals `start`) nor the
+  error code (`code` is null). Lines that belong to no message (another file's,
+  `region cache:` statistics, a crash) go to `unparsed`.
+* `source: "lsp"` asks this worktree's daemon instead and accepts unsaved
+  `text`. It has the same messages and positions, plus each range's end and the
+  stable error `code` (`type-mismatch`, `parse-error`, `unknown-identifier`, …;
+  see `docs/error-codes.md`). `exit` is null and `ok` is "no errors".
+* Messages are sorted by position. `counts` has every severity, zeros included.
+
+The `diagnostics` tool returns the same object (`source: "lsp"`) with one more
+field, `raw`: the language server's `Diagnostic` objects exactly as it sent
+them (with `data` for code actions). Until 2026-11-17 `result` *was* that list;
+a client that read it should read `result.raw` now.
 
 No `wiz` in the workspace is a normal error envelope, not a broken server:
 `initialize` still succeeds, the tools return `wiz_not_found` with the path it

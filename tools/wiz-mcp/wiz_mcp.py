@@ -77,7 +77,8 @@ TRUNCATION_MARK = "\n… [truncated: {n} characters omitted]"
 INSTRUCTIONS = (
     "Wiz toolchain tools for this workspace. Paths are relative to the workspace and must "
     "stay inside it (or the toolchain library); others are refused with path_denied. "
-    "Call check after editing a .wiz file (it prints the same messages as `wiz check`); "
+    "Call check after editing a .wiz file: result.diagnostics lists its messages with positions "
+    "(source=lsp adds range ends and error codes, and checks unsaved text); "
     "use fmt --check before committing, and diagnostics/hover/goals when you need the "
     "language server's view. diagnostics, hover and goals share one lazy `wiz lsp` "
     "daemon for this worktree and can be slow on a cold cache."
@@ -877,6 +878,92 @@ def _optional_bool(args: dict[str, Any], key: str) -> bool:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Structured diagnostics for `check`
+
+SEVERITIES = ("error", "warning", "info")
+#: LSP DiagnosticSeverity numbers (Wiz uses 1–3; 4, hint, is reported as info).
+LSP_SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "info"}
+#: stderr lines `wiz check` may print that are not part of a message.
+NOT_A_MESSAGE = ("region cache:", "cache verify:", "uncaught exception:", "INTERNAL PANIC", "wiz check:")
+
+
+def _diagnostic(path: str, line: int, column: int, severity: str, message: str,
+                code: Optional[str] = None, end: Optional[tuple[int, int]] = None) -> dict[str, Any]:
+    """One diagnostic: `line`/`column` 1-based as Wiz prints them, `range` 0-based as LSP.
+
+    Columns count Unicode code points, as in Wiz's messages and its language server.
+    """
+    start = {"line": line - 1, "character": column - 1}
+    stop = {"line": end[0], "character": end[1]} if end is not None else dict(start)
+    return {
+        "file": path,
+        "line": line,
+        "column": column,
+        "range": {"start": start, "end": stop},
+        "severity": severity,
+        "code": code or None,
+        "message": message,
+    }
+
+
+def parse_check_output(path: str, stdout: str, stderr: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """The messages of `wiz check PATH`, and the lines that are not part of one.
+
+    `wiz check` prints each message as `PATH:LINE:COLUMN: SEVERITY: TEXT` (errors on
+    stderr, warnings and info on stdout); a parse error has no severity
+    (`PATH:LINE:COLUMN: TEXT`) and is an error. TEXT may continue on later lines
+    (an import's errors are listed indented under it), so a line that does not
+    start a message belongs to the one before it. Matching on the checked path
+    itself keeps a `:` in the path from confusing the parser.
+    """
+    prefix = path + ":"
+    head = re.compile(r"(\d+):(\d+): (?:(error|warning|info): )?(.*)\Z", re.DOTALL)
+    diagnostics: list[dict[str, Any]] = []
+    unparsed: list[str] = []
+    for stream in (stdout, stderr):
+        current: Optional[dict[str, Any]] = None
+        for raw in stream.splitlines():
+            match = head.match(raw[len(prefix):]) if raw.startswith(prefix) else None
+            if match:
+                line, column, severity, text = match.groups()
+                current = _diagnostic(path, int(line), int(column), severity or "error", text)
+                diagnostics.append(current)
+            elif current is not None and not raw.startswith(NOT_A_MESSAGE):
+                current["message"] += "\n" + raw
+            elif raw.strip():
+                unparsed.append(raw)
+                current = None
+    diagnostics.sort(key=lambda d: (d["line"], d["column"]))  # stable: stdout before stderr at a tie
+    return diagnostics, unparsed
+
+
+def lsp_diagnostic(path: str, diagnostic: dict[str, Any]) -> dict[str, Any]:
+    """A language-server Diagnostic in the same shape as a parsed `wiz check` message."""
+    rng = diagnostic.get("range") or {}
+    start = rng.get("start") or {}
+    end = rng.get("end") or start
+    line = int(start.get("line", 0))
+    character = int(start.get("character", 0))
+    code = diagnostic.get("code")
+    return _diagnostic(
+        path,
+        line + 1,
+        character + 1,
+        LSP_SEVERITY.get(diagnostic.get("severity"), "error"),
+        str(diagnostic.get("message", "")),
+        code=str(code) if code not in (None, "") else None,
+        end=(int(end.get("line", line)), int(end.get("character", character))),
+    )
+
+
+def check_result(source: str, diagnostics: list[dict[str, Any]], unparsed: Optional[list[str]] = None) -> dict[str, Any]:
+    counts = {severity: 0 for severity in SEVERITIES}
+    for diagnostic in diagnostics:
+        counts[diagnostic["severity"]] += 1
+    return {"source": source, "diagnostics": diagnostics, "counts": counts, "unparsed": unparsed or []}
+
+
 def _position_arg(args: dict[str, Any], key: str) -> int:
     value = args.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -894,10 +981,19 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "check",
         "annotations": {"title": "Type check a Wiz file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-        "description": "Type check a Wiz file (`wiz check`) and return its messages and exit status.",
+        "description": (
+            "Type check a Wiz file and return structured diagnostics in `result.diagnostics` "
+            "(file, 1-based line/column, 0-based LSP range, severity, code, message) with counts, "
+            "plus the raw output. source=cli (default) runs `wiz check`; source=lsp asks the "
+            "language server, which adds range ends and error codes and accepts unsaved `text`."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "file path, relative to the workspace"}},
+            "properties": {
+                "path": {"type": "string", "description": "file path, relative to the workspace"},
+                "source": {"type": "string", "enum": ["cli", "lsp"], "description": "default cli"},
+                "text": {"type": "string", "description": "buffer text (source=lsp only); defaults to the file"},
+            },
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -946,7 +1042,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "diagnostics",
         "annotations": {"title": "Language-server diagnostics", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-        "description": "Diagnostics from the language server for a file (or for `text`), from this worktree's daemon.",
+        "description": (
+            "Diagnostics from this worktree's language server for a file (or for unsaved `text`), "
+            "in the same shape as check's result (diagnostics, counts), with the LSP objects under `raw`."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1109,8 +1208,24 @@ class Server:
             )
         path = confine(resolve_path(self.config.workspace, _require_str(args, "path")), self.read_roots())
         if name == "check":
+            source = args.get("source", "cli")
+            if source not in ("cli", "lsp"):
+                raise ToolError("invalid_args", "`source` must be \"cli\" or \"lsp\"")
+            if source == "lsp":
+                deadline = time.monotonic() + timeout
+                raw = self.daemon.diagnostics(path_to_uri(path), self._text_of(args, path), deadline)
+                diagnostics = [lsp_diagnostic(path, d) for d in raw if isinstance(d, dict)]
+                result = check_result("lsp", diagnostics)
+                return make_envelope(name, ok=result["counts"]["error"] == 0, path=path, result=result)
+            if "text" in args:
+                raise ToolError("invalid_args", "`text` needs source=lsp (`wiz check` reads the file)")
             run = self._run(["check", path], timeout)
-            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+            diagnostics, unparsed = parse_check_output(path, run["stdout"], run["stderr"])
+            result = check_result("cli", diagnostics, unparsed)
+            return make_envelope(
+                name, ok=run["exit"] == 0, path=path, exit_code=run["exit"],
+                stdout=run["stdout"], stderr=run["stderr"], result=result,
+            )
         if name == "parse":
             run = self._run(["parse", path], timeout)
             return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
@@ -1141,7 +1256,10 @@ class Server:
         uri = path_to_uri(path)
         if name == "diagnostics":
             text = self._text_of(args, path)
-            result = self.daemon.diagnostics(uri, text, deadline)
+            raw = self.daemon.diagnostics(uri, text, deadline)
+            diagnostics = [lsp_diagnostic(path, d) for d in raw if isinstance(d, dict)]
+            # The normalized shape `check` returns, with the LSP objects kept under `raw`.
+            result = dict(check_result("lsp", diagnostics), raw=raw)
             return make_envelope(name, path=path, result=result)
         if name in ("hover", "goals"):
             line = _position_arg(args, "line")

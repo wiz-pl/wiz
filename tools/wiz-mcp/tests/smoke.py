@@ -213,9 +213,10 @@ def run(argv: list[str]) -> int:
             first_ms = (time.monotonic() - started) * 1000
             if not diagnostics["ok"] or diagnostics["error"]:
                 raise RuntimeError(f"diagnostics failed: {diagnostics}")
-            if not isinstance(diagnostics["result"], list):
-                raise RuntimeError(f"diagnostics result is not a list: {diagnostics['result']!r}")
-            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(diagnostics['result'])} messages")
+            result = diagnostics["result"]
+            if not isinstance(result, dict) or not isinstance(result.get("diagnostics"), list) or not isinstance(result.get("raw"), list):
+                raise RuntimeError(f"diagnostics result is not the normalized shape: {result!r}")
+            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(result['diagnostics'])} messages")
 
             daemons = daemon_pids(bridge)
             if not daemons:
@@ -251,6 +252,23 @@ def run(argv: list[str]) -> int:
             if "Nat" not in json.dumps(hover["result"]):
                 raise RuntimeError(f"hover did not mention Nat: {hover['result']!r}")
             print(f"hover: ok ({second_ms:.0f} ms), {json.dumps(hover['result'])[:120]}")
+
+            # Structured diagnostics from both sources, on a buffer with one type error.
+            bad = "import Prelude\n\ndef answer : Nat := Bool.true\n"
+            (Path(workspace) / "bad.wiz").write_text(bad, encoding="utf-8")
+            found = {}
+            for source in ("cli", "lsp"):
+                check = envelope_of(
+                    bridge.rpc("tools/call", {"name": "check", "arguments": {"path": "bad.wiz", "source": source}})
+                )
+                result = check["result"] or {}
+                if check["ok"] or check["error"] or result.get("counts", {}).get("error") != 1:
+                    raise RuntimeError(f"check ({source}) did not report exactly one error: {check}")
+                d = result["diagnostics"][0]
+                found[source] = (d["line"], d["column"], d["severity"], d["message"])
+                print(f"check ({source}): {d['line']}:{d['column']} {d['severity']} code={d['code']} {d['message'].splitlines()[0]!r}")
+            if found["cli"] != found["lsp"]:
+                raise RuntimeError(f"check sources disagree: {found}")
 
             shutdown = bridge.rpc("shutdown", {})
             if "error" in shutdown:

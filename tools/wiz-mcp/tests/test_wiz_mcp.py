@@ -499,7 +499,14 @@ class StdioDaemonTests(unittest.TestCase):
         server = self.server()
         envelope = server.call_tool("diagnostics", {"path": "probe.wiz", "text": "abc"})
         self.assertTrue(envelope["ok"], envelope)
-        self.assertEqual(envelope["result"][0]["message"], "fake: 3 chars")
+        result = envelope["result"]
+        self.assertEqual(result["diagnostics"][0]["message"], "fake: 3 chars")
+        self.assertEqual(result["counts"], {"error": 1, "warning": 0, "info": 0})
+        self.assertEqual(result["source"], "lsp")
+        # The language server's own objects stay available, unchanged.
+        self.assertEqual(result["raw"][0]["message"], "fake: 3 chars")
+        self.assertEqual(result["raw"][0]["severity"], 1)
+        self.assertEqual(result["diagnostics"][0]["range"], result["raw"][0]["range"])
         proc = server.daemon.proc
         envelope = server.call_tool("hover", {"path": "probe.wiz", "line": 0, "character": 4})
         self.assertTrue(envelope["ok"], envelope)
@@ -545,6 +552,143 @@ class StdioDaemonTests(unittest.TestCase):
         self.assertFalse(envelope["ok"])
         self.assertEqual(envelope["error"]["kind"], "timeout")
         self.assertIsNone(server.daemon.proc)
+
+    def test_check_with_source_lsp_uses_the_daemon(self) -> None:
+        server = self.server()
+        envelope = server.call_tool("check", {"path": "probe.wiz", "source": "lsp", "text": "abcd"})
+        self.assertFalse(envelope["ok"], envelope)  # the fake reports one error
+        self.assertIsNone(envelope["exit"])
+        self.assertIsNone(envelope["error"])
+        result = envelope["result"]
+        self.assertEqual(result["source"], "lsp")
+        self.assertEqual(result["counts"], {"error": 1, "warning": 0, "info": 0})
+        (diagnostic,) = result["diagnostics"]
+        self.assertEqual(diagnostic["message"], "fake: 4 chars")
+        self.assertEqual(diagnostic["file"], os.path.join(self.workspace, "probe.wiz"))
+        self.assertEqual((diagnostic["line"], diagnostic["column"]), (1, 1))
+        self.assertEqual(diagnostic["range"]["end"], {"line": 0, "character": 1})
+
+
+# Real `wiz check` output (master d23473da), with PATH standing for the checked file.
+REAL_STDOUT = "PATH:3:1: info: a : Nat\n"
+REAL_STDERR = (
+    "PATH:4:16: error: type mismatch\n"
+    "  expected: Nat\n"
+    "  inferred: Bool\n"
+    "PATH:6:6: error: unexpected 'λ'; expected '.{', '(', '{', '[', ':' or ':='\n"
+    "PATH:7:1: error: unexpected 'theorem'; expected command\n"
+)
+
+
+class CheckDiagnosticsTests(unittest.TestCase):
+    """`check`'s structured diagnostics: the CLI parser, the LSP normalizer, the tool."""
+
+    path = "/w/dir:with colon/errs.wiz"
+
+    def parse(self, stdout: str, stderr: str = "") -> tuple[list, list]:
+        return wiz_mcp.parse_check_output(
+            self.path, stdout.replace("PATH", self.path), stderr.replace("PATH", self.path)
+        )
+
+    def test_real_output_is_parsed_in_position_order(self) -> None:
+        diagnostics, unparsed = self.parse(REAL_STDOUT, REAL_STDERR)
+        self.assertEqual(unparsed, [])
+        self.assertEqual(
+            [(d["line"], d["column"], d["severity"]) for d in diagnostics],
+            [(3, 1, "info"), (4, 16, "error"), (6, 6, "error"), (7, 1, "error")],
+        )
+        self.assertEqual(diagnostics[1]["message"], "type mismatch\n  expected: Nat\n  inferred: Bool")
+        self.assertEqual(diagnostics[1]["range"], {"start": {"line": 3, "character": 15}, "end": {"line": 3, "character": 15}})
+        self.assertTrue(all(d["file"] == self.path and d["code"] is None for d in diagnostics))
+
+    def test_a_colon_in_the_path_does_not_confuse_the_parser(self) -> None:
+        diagnostics, _ = self.parse("", "PATH:1:9: error: unknown identifier 'Nat'\n")
+        self.assertEqual((diagnostics[0]["line"], diagnostics[0]["column"]), (1, 9))
+        self.assertEqual(diagnostics[0]["message"], "unknown identifier 'Nat'")
+
+    def test_a_message_without_severity_is_an_error(self) -> None:
+        diagnostics, _ = self.parse("", "PATH:2:1: unexpected end of input\n")
+        self.assertEqual(diagnostics[0]["severity"], "error")
+        self.assertEqual(diagnostics[0]["message"], "unexpected end of input")
+
+    def test_an_import_error_keeps_its_indented_list(self) -> None:
+        stderr = "PATH:1:1: error: module Foo has errors:\n  Foo:3:4: error: unknown identifier 'x'\nimported module Foo → bad\n"
+        diagnostics, unparsed = self.parse("", stderr)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(unparsed, [])
+        self.assertIn("  Foo:3:4: error: unknown identifier 'x'", diagnostics[0]["message"])
+        self.assertTrue(diagnostics[0]["message"].endswith("imported module Foo → bad"))
+
+    def test_lines_that_are_not_messages_are_kept_apart(self) -> None:
+        stderr = "warming up\nPATH:1:1: error: boom\nregion cache: 3 modules from a region\nuncaught exception: oops\n"
+        diagnostics, unparsed = self.parse("", stderr)
+        self.assertEqual([d["message"] for d in diagnostics], ["boom"])
+        self.assertEqual(unparsed, ["warming up", "region cache: 3 modules from a region", "uncaught exception: oops"])
+
+    def test_another_files_messages_are_not_this_files(self) -> None:
+        diagnostics, unparsed = self.parse("", "/w/other.wiz:1:1: error: elsewhere\n")
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(unparsed, ["/w/other.wiz:1:1: error: elsewhere"])
+
+    def test_lsp_diagnostics_are_normalized(self) -> None:
+        got = wiz_mcp.lsp_diagnostic(
+            "/w/a.wiz",
+            {"range": {"start": {"line": 3, "character": 15}, "end": {"line": 3, "character": 24}},
+             "severity": 1, "source": "wiz", "message": "type mismatch", "code": "type-mismatch", "data": {"x": 1}},
+        )
+        self.assertEqual(
+            got,
+            {"file": "/w/a.wiz", "line": 4, "column": 16,
+             "range": {"start": {"line": 3, "character": 15}, "end": {"line": 3, "character": 24}},
+             "severity": "error", "code": "type-mismatch", "message": "type mismatch"},
+        )
+        self.assertEqual(wiz_mcp.lsp_diagnostic("/w/a.wiz", {"severity": 2, "message": "w"})["severity"], "warning")
+        self.assertEqual(wiz_mcp.lsp_diagnostic("/w/a.wiz", {"severity": 3, "message": "i", "code": ""})["code"], None)
+
+    def test_counts_cover_every_severity(self) -> None:
+        diagnostics, _ = self.parse(REAL_STDOUT, REAL_STDERR)
+        self.assertEqual(wiz_mcp.check_result("cli", diagnostics)["counts"], {"error": 3, "warning": 0, "info": 1})
+        self.assertEqual(wiz_mcp.check_result("cli", [])["counts"], {"error": 0, "warning": 0, "info": 0})
+
+    def test_the_check_tool_returns_them_with_the_raw_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wiz-mcp-check-") as tmp:
+            workspace = os.path.realpath(tmp)
+            Path(workspace, "errs.wiz").write_text("x\n")
+            out = Path(workspace, "out.txt")
+            err = Path(workspace, "err.txt")
+            target = os.path.join(workspace, "errs.wiz")
+            out.write_text(REAL_STDOUT.replace("PATH", target))
+            err.write_text(REAL_STDERR.replace("PATH", target))
+            wiz = write_exe(workspace, "wiz", f'cat "{out}"; cat "{err}" >&2; exit 1')
+            server = wiz_mcp.Server(wiz_mcp.Config(workspace=workspace, wiz=wiz, idle=0, timeout=5))
+            try:
+                envelope = server.call_tool("check", {"path": "errs.wiz"})
+                bad_source = server.call_tool("check", {"path": "errs.wiz", "source": "both"})
+                text_without_lsp = server.call_tool("check", {"path": "errs.wiz", "text": "x"})
+            finally:
+                server.close()
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["exit"], 1)
+        self.assertIsNone(envelope["error"])
+        self.assertIn("type mismatch", envelope["stderr"])
+        self.assertEqual(envelope["result"]["source"], "cli")
+        self.assertEqual(envelope["result"]["counts"], {"error": 3, "warning": 0, "info": 1})
+        self.assertEqual(envelope["result"]["diagnostics"][0]["file"], target)
+        self.assertEqual(bad_source["error"]["kind"], "invalid_args")
+        self.assertEqual(text_without_lsp["error"]["kind"], "invalid_args")
+
+    def test_a_clean_check_has_an_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wiz-mcp-check-") as tmp:
+            workspace = os.path.realpath(tmp)
+            Path(workspace, "ok.wiz").write_text("x\n")
+            wiz = write_exe(workspace, "wiz", "exit 0")
+            server = wiz_mcp.Server(wiz_mcp.Config(workspace=workspace, wiz=wiz, idle=0, timeout=5))
+            try:
+                envelope = server.call_tool("check", {"path": "ok.wiz"})
+            finally:
+                server.close()
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["result"], {"source": "cli", "diagnostics": [], "counts": {"error": 0, "warning": 0, "info": 0}, "unparsed": []})
 
 
 class ArgumentTests(unittest.TestCase):
