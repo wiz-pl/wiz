@@ -173,15 +173,15 @@ def toolingGroup : Group where
         check ((out.splitOn "1").length == 1) s!"the session ran anyway:\n{out}\n{err}" },
     { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath
-        let (code, out, err) := ← runWiz ["test-driver", "--list"] #[("WIZ_TESTS", some self.toString)]
+        let (code, out, err) := ← runWiz ["test-driver", "--driver", self.toString, "--list"] #[]
         checkEq 0 code
         check ((out.splitOn "tooling").length > 1) s!"no tooling group in --list:\n{out}\n{err}"
         -- the cheapest group, through the wrapper: each case is one child process
-        let (code, out, err) := ← runWiz ["test-driver", "=rig", "--jobs", "2"] #[("WIZ_TESTS", some self.toString)]
+        let (code, out, err) := ← runWiz ["test-driver", "=rig", s!"--driver={self}", "--jobs", "2"] #[]
         checkEq 0 code
         check ((out.splitOn "── rig").length > 1 && (out.splitOn "0 failed").length > 1) s!"not the rig group's result:\n{out}\n{err}"
         let missing := "/nonexistent/wiz-tests"
-        let (code, out, err) := ← runWiz ["test-driver", "--list"] #[("WIZ_TESTS", some missing)]
+        let (code, out, err) := ← runWiz ["test-driver", "--driver", missing, "--list"] #[]
         checkEq 2 code
         check ((err.splitOn "no test driver").length > 1) s!"no clear error:\n{out}\n{err}" }
   ]

@@ -24,8 +24,8 @@ def usage : String := "usage:
   wiz repl [--llvm] [--prelude M]  read one command per line, keeping definitions (`:help`;
                                    a pipe: one command per line, no prompt; `:type EXPR`,
                                    `:load FILE`; `--prelude M` imports M at the start)
-  wiz test-driver [GROUPS…] [--jobs N] [--list]
-                                   run the test driver (`.lake/build/bin/tests`, or WIZ_TESTS)
+  wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]
+                                   run the test driver (`.lake/build/bin/tests`, or PATH)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -708,24 +708,33 @@ def takePrelude : List String → Except String (List String × List String)
       pure ((a.drop 2).toString :: ps, rest)
     else pure (ps, a :: rest)
 
-/-- The test driver: `WIZ_TESTS` (when it is a file), else beside this binary (a
-checkout's `.lake/build/bin/tests`), else `.lake/build/bin/tests` under the current
-directory. -/
-def testDriver : IO (Option System.FilePath) := do
-  if let some p ← IO.getEnv "WIZ_TESTS" then
-    let p := System.FilePath.mk p
+/-- The test driver: the `--driver PATH` flag (when it is a file), else beside this
+binary (a checkout's `.lake/build/bin/tests`), else `.lake/build/bin/tests` under the
+current directory. A flag, not an environment variable: `wiz` reads none (23a). -/
+def testDriver (explicit : Option System.FilePath) : IO (Option System.FilePath) := do
+  if let some p := explicit then
     return (if (← p.pathExists) && !(← p.isDir) then some p else none)
   let beside := (← IO.appPath).parent.getD "." / "tests"
   if (← beside.pathExists) && !(← beside.isDir) then return some beside
   let localPath : System.FilePath := ".lake/build/bin/tests"
   return (if (← localPath.pathExists) && !(← localPath.isDir) then some localPath else none)
 
-/-- `wiz test-driver [GROUPS…] [--jobs N] [--list]`: run the test driver with these
-arguments (`lake build wiz tests` builds it). A convenience wrapper: the driver is the
-runner. (`wiz test FILE` is the single-file form, stage 11ah.) -/
+/-- `--driver PATH` / `--driver=PATH`, taken out of the arguments (the rest go to the
+driver unchanged). -/
+def takeDriver : List String → Option System.FilePath × List String
+  | [] => (none, [])
+  | "--driver" :: p :: rest => let (_, r) := takeDriver rest; (some (System.FilePath.mk p), r)
+  | a :: rest =>
+    let (d, r) := takeDriver rest
+    if a.startsWith "--driver=" then (some (System.FilePath.mk (a.drop 9).toString), r) else (d, a :: r)
+
+/-- `wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]`: run the test driver
+with the other arguments (`lake build wiz tests` builds it). A convenience wrapper: the
+driver is the runner. (`wiz test FILE` is the single-file form, stage 11ah.) -/
 def testDriverCmd (args : List String) : IO UInt32 := do
-  let some driver ← testDriver
-    | IO.eprintln "wiz test-driver: no test driver: build it with `lake build wiz tests`, or set WIZ_TESTS to its path"
+  let (explicit, args) := takeDriver args
+  let some driver ← testDriver explicit
+    | IO.eprintln "wiz test-driver: no test driver: build it with `lake build wiz tests`, or pass --driver PATH"
       return 2
   let child ← IO.Process.spawn { cmd := driver.toString, args := args.toArray }
   child.wait
