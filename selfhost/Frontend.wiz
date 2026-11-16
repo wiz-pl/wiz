@@ -2000,22 +2000,23 @@ def appOf : List Syntax → Syntax
   | .cons f rest => match rest with
     | .nil => f
     | .cons _ _ => mkNode "term.app" (.cons f (one (mkNull rest)))
--- `if c then a else b` (an application of `if`: the grammar has no `if`) is
--- `match c with | .true => a | .false => b` (stage 19a)
-def ifMatch (s : Syntax) : Option Syntax := match Bool.and (strEq (kindOf s) "term.app") (strEq (identOf (kid s 0)) "if") with
-  | .false => .none
-  | .true => match splitIf (kids (kid s 1)) with
-    | .some (.mk cs as bs) => match Bool.and (Bool.not (isNilS cs)) (Bool.and (Bool.not (isNilS as)) (Bool.not (isNilS bs))) with
-      | .true =>
-        let c := appOf cs;
-        let a := appOf as;
-        let b := appOf bs;
-        let alt := fun (ctor : String) (rhs : Syntax) => mkNode "match.alt" (.cons (.atom "|")
-          (.cons (mkNull (one (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident ctor)))))) (.cons (.atom "=>") (one rhs))));
-        .some (mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one c)) (.cons (.atom "with")
-          (one (mkNull (.cons (alt "true" a) (one (alt "false" b)))))))))
-      | .false => .none
-    | _ => .none
+-- `if c then a else b` is `match c with | .true => a | .false => b` (stage 19a)
+def iteMatch (c a b : Syntax) : Syntax :=
+  let alt := fun (ctor : String) (rhs : Syntax) => mkNode "match.alt" (.cons (.atom "|")
+    (.cons (mkNull (one (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident ctor)))))) (.cons (.atom "=>") (one rhs))));
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one c)) (.cons (.atom "with")
+    (one (mkNull (.cons (alt "true" a) (one (alt "false" b))))))))
+-- The grammar's `if` (`term.ite`: `"if" term "then" term "else" term`), and the older
+-- application form (when the surface rule is not in the tables), are both accepted.
+def ifMatch (s : Syntax) : Option Syntax := match strEq (kindOf s) "term.ite" with
+  | .true => .some (iteMatch (kid s 1) (kid s 3) (kid s 5))
+  | .false => match Bool.and (strEq (kindOf s) "term.app") (strEq (identOf (kid s 0)) "if") with
+    | .false => .none
+    | .true => match splitIf (kids (kid s 1)) with
+      | .some (.mk cs as bs) => match Bool.and (Bool.not (isNilS cs)) (Bool.and (Bool.not (isNilS as)) (Bool.not (isNilS bs))) with
+        | .true => .some (iteMatch (appOf cs) (appOf as) (appOf bs))
+        | .false => .none
+      | _ => .none
 -- a string literal's text (the first atom inside)
 partial def strValue (s : Syntax) : String := match s with
   | .atom v => v
@@ -2797,6 +2798,8 @@ def sameLit (a b : Syntax) : Bool := match Bool.and (is a "term.num") (is b "ter
     | .true => strEq (strValue a) (strValue b)
     | .false => .false
 def boolPat (b : String) : Syntax := mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident b)))
+-- a boolean as a *term* (it infers without an expected type, as the host's macros use)
+def boolVal (b : String) : Syntax := mkNode "term.ident" (one (.ident (String.append "Bool." b)))
 -- the clauses with the test's column in front of column `k`, for the literal `l`
 def litClauses (l : Syntax) (k : Nat) : List Clause → List Clause
   | .nil => .nil
@@ -2948,6 +2951,35 @@ def headImplicit : List BKind → Bool
 def descFn : Tm → Tm
   | .darg _ _ f => f
   | t => t
+-- `(a, b, c)` is `(a, (b, c))`, as the host's pattern reader nests it
+def nestTuple : List Syntax → Syntax
+  | .nil => holeStx
+  | .cons x .nil => x
+  | .cons x rest => mkNode "term.tuple" (.cons (.atom "(") (.cons x (.cons (.atom ",")
+      (one (mkNull (one (nestTuple rest)))))))
+-- the clauses of a pair-pattern split: column `k`'s `(a, b)` becomes the two columns
+-- `a` and `b`; a variable (or `_`) in another clause becomes two holes (a variable also
+-- keeps its binding to the whole pair, which is still in the context)
+def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
+  | .nil => .some .nil
+  | .cons (.mk pats binds rhs) rest =>
+    let p := unparen (nthSyntax pats k);
+    let tuple := strEq (kindOf p) "term.tuple";
+    match Bool.or tuple (isVarPat p) with
+    | .false => .none
+    | .true =>
+      let two : List Syntax := match tuple with
+        | .true => match tupleItems p with
+          | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
+          | _ => .cons holeStx (.cons holeStx .nil)
+        | .false => .cons holeStx (.cons holeStx .nil);
+      let binds' : List Bind := match Bool.and (Bool.not tuple) (Bool.not (strEq (identOf p) "_")) with
+        | .true => List.append binds (.cons (Bind.mk (identOf p) col) .nil)
+        | .false => binds;
+      match tupleClauses col k rest with
+      | .some r => .some (.cons (.mk (List.append (takeL k pats) (List.append two (dropL (k + 1) pats)))
+          binds' rhs) r)
+      | .none => .none
 -- a global at its declaration's level parameters: fresh level metavariables (inferred by
 -- unification), or the explicitly written ones. The constant carries its level
 -- instantiation, and its type is evaluated with it.
@@ -3952,18 +3984,50 @@ def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let p0 := patAt k cls;
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
-  match nthCol cols k with
-  | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
-    | .mk T _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
-      | .true => litTest gs mc es cx expected cols top ihLvls cls k
-      | .false => match Globals.ind gs T with
-        | .some _ => match litSplitErr T k cls with
-          | .some m => .err m
+  match strEq (kindOf p0) "term.tuple" with
+  | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
+  | .false => match nthCol cols k with
+    | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
+      | .mk T _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
+        | .true => litTest gs mc es cx expected cols top ihLvls cls k
+        | .false => match Globals.ind gs T with
+          | .some _ => match litSplitErr T k cls with
+            | .some m => .err m
+            | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
           | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
-        | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
-    | .none => match lit with
-      | .true => litTest gs mc es cx expected cols top ihLvls cls k
-      | .false => splitCtors gs mc es cx expected cols top ihLvls cls k
+      | .none => match lit with
+        | .true => litTest gs mc es cx expected cols top ihLvls cls k
+        | .false => splitCtors gs mc es cx expected cols top ihLvls cls k
+-- a pair pattern `(a, b)` in column `k`: project the pair into two `let`-bound columns
+-- (`fst✝`, `snd✝`) and compile the clauses with `a` and `b` there; a pair is a Σ, so this
+-- is not a constructor split and never the structural one
+def splitTuple (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
+    (cols : List Col) (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
+  let d := Cx.lvl cx;
+  let env := TCtx.env (Cx.c cx);
+  match nthCol cols k with
+  | .mk L ty0 tyI q =>
+    let x : Tm := .var (d - 1 - L);
+    let xA := shiftTm (d - L) 0 ty0;
+    match whnf (force es (eval env xA)) with
+    | .vsigma _ _ _ A envB B =>
+      let v1 := vfst (eval env x);
+      let v2 := vsnd (eval env x);
+      let ty2 := eval (.cons v1 envB) B;
+      let AQ := quote d A;
+      let BQ := quote (d + 1) ty2;
+      let cx1 := Cx.define cx "fst✝" v1 A;
+      let cx2 := Cx.define cx1 "snd✝" v2 ty2;
+      let col1 : Col := .mk d AQ AQ q;
+      let col2 : Col := .mk (d + 1) BQ BQ q;
+      let cols' := List.append (takeL k cols) (.cons col1 (.cons col2 (dropL (k + 1) cols)));
+      match tupleClauses (.mk L ty0 tyI q) k cls with
+      | .none => .err "a tuple pattern needs a pair: every clause in the column must be a tuple, a variable or _"
+      | .some cls' => match compileM gs mc es cx2 expected cols' .false ihLvls cls' with
+        | .ok body es' => .ok (.letE AQ (.fst (.var (d - 1 - L)))
+            (.letE BQ (.snd (.var (d - L))) body)) es'
+        | e => e
+    | _ => .err "a tuple pattern needs a pair"
 -- (13q) the test `T.beq x l` for the literal `l` in the first row of column `k`, `let`
 -- bound (`lit✝` for `x`, `test✝`), and the clauses with the test's column (`litClauses`)
 def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
@@ -6373,9 +6437,19 @@ mutual
 partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax :=
   match s with
   | .node k args => match expandTop notes 64 scope s with
-    | .node k2 args2 => match strEq k2 "term.do" with
-      | .true => expandDo (kid (.node k2 (expandNotesArgs notes (scope + 1) args2)) 1)
-      | .false => .node k2 (expandNotesArgs notes (scope + 1) args2)
+    | .node k2 args2 =>
+      let s' : Syntax := .node k2 (expandNotesArgs notes (scope + 1) args2);
+      match strEq k2 "term.do" with
+      | .true => expandDo (kid s' 1)
+      | .false => match strEq k2 "term.boolAnd" with
+        -- `a && b` and `a || b` are the short-circuiting `if`s the host's macros make
+        | .true => iteMatch (kid s' 0) (kid s' 2) (boolVal "false")
+        | .false => match strEq k2 "term.boolOr" with
+          | .true => iteMatch (kid s' 0) (boolVal "true") (kid s' 2)
+          | .false => match strEq k2 "term.!" with
+            | .true => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Bool.not")))
+                (one (mkNull (one (kid s' 1)))))
+            | .false => s'
     | other => other
   | _ => s
 partial def expandNotesArgs (notes : List Note) (scope : Nat) : SyntaxF .false → SyntaxF .false
@@ -6389,16 +6463,6 @@ def dropSp : List Char → List Char
     | .false => .cons c rest
 def trimStr (s : String) : String := match s with
   | .mk cs => .mk (List.reverseOf (dropSp (List.reverseOf (dropSp cs) .nil)) .nil)
-def addTrailingTo (cat : String) (t : Trailing) : List Cat → List Cat
-  | .nil => .nil
-  | .cons (.mk n ls ts) rest => match strEq n cat with
-    | .true => .cons (.mk n ls (List.append ts (.cons t .nil))) rest
-    | .false => .cons (.mk n ls ts) (addTrailingTo cat t rest)
-def addLeadingTo (cat : String) (l : Leading) : List Cat → List Cat
-  | .nil => .nil
-  | .cons (.mk n ls ts) rest => match strEq n cat with
-    | .true => .cons (.mk n (List.append ls (.cons l .nil)) ts) rest
-    | .false => .cons (.mk n ls ts) (addLeadingTo cat l rest)
 def declareCat (c : String) : List Cat → List Cat
   | .nil => .cons (.mk c .nil .nil) .nil
   | .cons (.mk n ls ts) rest => match strEq n c with
@@ -7051,7 +7115,8 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  match runCommands .true cats tokens .nil (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
@@ -7272,7 +7337,8 @@ end
 -- output lines, globals and tables (the load order is in `order`)
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers) cats tokens .nil) StrMap.empty .nil .nil) roots
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)
