@@ -240,21 +240,25 @@ old association lists made every lookup linear in the whole state, so a function
 tens of thousands of registers spent quadratic time per pass. A hash collision merges
 keys; both maps are may-analyses, so the result stays sound (see `Scry.vkKey`). -/
 structure Scry.PtState where
-  pt : U64Map (List Scry.Loc)
+  /-- hash → `(register, its locations)`. The register is kept (as `mem` keeps the
+  location) so a reader can list the registers without inverting the hash. -/
+  pt : U64Map (Scry.VarKey × List Scry.Loc)
   /-- hash → `(location, the pointer values stored in it)`. The location is kept so the
   table and state comparisons do not have to invert the hash. -/
   mem : U64Map (Scry.Loc × List Scry.Loc)
   freed : List Scry.Loc
 
 def Scry.ptEmpty : Scry.PtState :=
-  Scry.PtState.mk (U64Map.empty : U64Map (List Scry.Loc))
+  Scry.PtState.mk (U64Map.empty : U64Map (Scry.VarKey × List Scry.Loc))
     (U64Map.empty : U64Map (Scry.Loc × List Scry.Loc)) .nil
 
 def Scry.ptGet (st : Scry.PtState) (k : Scry.VarKey) : List Scry.Loc :=
-  U64Map.findD st.pt (Scry.vkKey k) .nil
+  match U64Map.find st.pt (Scry.vkKey k) with
+  | .none => List.nil
+  | .some p => p.2
 
 def Scry.ptPut (st : Scry.PtState) (k : Scry.VarKey) (ls : List Scry.Loc) : Scry.PtState :=
-  { st with pt := U64Map.insert st.pt (Scry.vkKey k) ls }
+  { st with pt := U64Map.insert st.pt (Scry.vkKey k) (k, ls) }
 
 /-- Union `ls` into the set of `k`. -/
 def Scry.ptAdd (st : Scry.PtState) (k : Scry.VarKey) (ls : List Scry.Loc) : Scry.PtState :=
@@ -276,11 +280,13 @@ def Scry.freedAdd (st : Scry.PtState) (ls : List Scry.Loc) : Scry.PtState :=
   { st with freed := Scry.locUnion ls st.freed }
 
 /-- Equality of two location maps: same key count, and every key's set matches. -/
-def Scry.locMapEq (a b : U64Map (List Scry.Loc)) : Bool :=
+def Scry.locMapEq (a b : U64Map (Scry.VarKey × List Scry.Loc)) : Bool :=
   match Nat.beq (U64Map.size a) (U64Map.size b) with
   | .false => .false
-  | .true => U64Map.foldl (fun acc k vs =>
-      Bool.and acc (Scry.locSetEq vs (U64Map.findD b k .nil))) .true a
+  | .true => U64Map.foldl (fun acc k v =>
+      Bool.and acc (Scry.locSetEq v.2 (match U64Map.find b k with
+        | .none => List.nil
+        | .some w => w.2))) .true a
 
 /-- Equality of two memory maps (the stored pointer sets; the key entry keeps the
 location for the table, which is the same if the hashes agree and the sets agree). -/
@@ -631,7 +637,7 @@ def Scry.ptSolveBounded (p : Wil.Program) (maxRounds : Option Nat) :
 
 /-- Every location the solution mentions, deduplicated. -/
 def Scry.locTable (st : Scry.PtState) : List Scry.Loc :=
-  let fromPt := List.concat (List.map (fun p => p.2) (U64Map.toList st.pt));
+  let fromPt := List.concat (List.map (fun p => p.2.2) (U64Map.toList st.pt));
   let fromMem := List.concat (List.map (fun m => List.cons m.2.1 m.2.2) (U64Map.toList st.mem));
   let m := Scry.locSetBuild U64Map.empty
     (List.append (List.append fromPt fromMem) st.freed);
@@ -783,7 +789,7 @@ def Scry.indirectAt (r : Scry.PtResult) (func : String) (point : Nat) : Scry.Ind
 
 /-- How many registers have a non-empty location set. -/
 def Scry.ptVarCount (r : Scry.PtResult) : Nat :=
-  List.length (List.filter (fun p => Bool.not (List.isEmpty p.2)) (U64Map.toList r.state.pt))
+  List.length (List.filter (fun p => Bool.not (List.isEmpty p.2.2)) (U64Map.toList r.state.pt))
 
 def Scry.ptLocCount (r : Scry.PtResult) : Nat := List.length r.locs
 
