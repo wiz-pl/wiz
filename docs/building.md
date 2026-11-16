@@ -51,6 +51,18 @@ file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
 driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
 after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
+**The host-side unsafe ledger.** The trust ledger covers the Wiz sources; the Lean that
+implements Wiz has its own escapes from Lean's guarantees (a mutable cell behind a pure
+interface, a C function, a value whose type is erased). `scripts/host-unsafe-ledger.py`
+finds every declaration under `Wiz/`, `Tests/`, `Grail/` and the root `.lean` files whose
+code (not comments or strings) uses `unsafe`, `unsafeBaseIO`, `unsafeIO`, `unsafeEIO`,
+`unsafeCast`, or an `implemented_by` or `extern` attribute, and compares them with
+`.github/host-unsafe.tsv`: one row per use, with the invariant that keeps it from changing
+a result (what is accepted, rechecked or cached). `--check` fails on an unlisted use, a
+stale row or a row without an invariant; `--print` lists the uses as rows to fill in.
+It needs no build: `scripts/pre-commit.sh --fast` runs it with its fixtures
+(`Tests/host-unsafe-ledger/run.sh`).
+
 ### The REPL (`wiz repl`)
 
 `wiz repl` reads one Wiz command per line on standard input and elaborates it into one
@@ -810,7 +822,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with
