@@ -1,0 +1,3 @@
+import Prelude
+import A
+def bad : String := "x" +++ "y"

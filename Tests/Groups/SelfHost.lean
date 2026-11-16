@@ -247,6 +247,45 @@ def selfhostAgrees (header : String) (decls : List (String × Bool)) : IO Unit :
     unless errs.isEmpty == ok do
       throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
+/-- (A14) The Lean frontend's error texts for a module tree whose root is `input.wiz`,
+the file the self-hosted checker reads, so a differential case can compare the two
+frontends on the same tree. -/
+def leanTreeErrors (files : List (String × String)) : IO (List String) := do
+  let dir ← IO.FS.createTempDir
+  for (p, text) in files do
+    let f := dir / p
+    if let some d := f.parent then IO.FS.createDirAll d
+    IO.FS.writeFile f text
+  let src ← IO.FS.readFile (dir / "input.wiz")
+  let mods ← Module.loadClosure ["lib", dir] src
+  let s := runFrontend (R := ZeroOneMany) src
+    { loader := fun m => (mods[m]?).map (·.2), trustedModule := Tests.libModule }
+  pure (((s.messages.filter (·.severity == .error)).map (·.text)).toList)
+
+/-- (A14) Both frontends accept a module tree. -/
+def bothAcceptTree (files : List (String × String)) : IO Unit := do
+  let leanErrs ← leanTreeErrors files
+  unless leanErrs.isEmpty do
+    throw (IO.userError s!"the Lean frontend rejects the tree:\n{"\n".intercalate leanErrs}")
+  let some out ← selfhostModuleOutput files | return
+  let errs := (out.splitOn "\n").filter (·.startsWith "error")
+  unless errs.isEmpty do
+    throw (IO.userError s!"the self-hosted frontend rejects the tree:\n{out}")
+
+/-- (A14) Both frontends reject a module tree, and each one's messages mention every
+fragment (so the verdicts agree and the reason is the same). -/
+def selfhostRejectsAlike (files : List (String × String)) (fragments : List String) : IO Unit := do
+  let leanErrs ← leanTreeErrors files
+  if leanErrs.isEmpty then throw (IO.userError "the Lean frontend accepts the tree")
+  let some out ← selfhostModuleOutput files | return
+  let errs := (out.splitOn "\n").filter (·.startsWith "error")
+  if errs.isEmpty then throw (IO.userError s!"the self-hosted frontend accepts the tree:\n{out}")
+  for f in fragments do
+    unless leanErrs.any (fun e => (e.splitOn f).length > 1) do
+      throw (IO.userError s!"the Lean error does not mention '{f}':\n{"\n".intercalate leanErrs}")
+    unless errs.any (fun e => (e.splitOn f).length > 1) do
+      throw (IO.userError s!"the self-hosted error does not mention '{f}':\n{out}")
+
 /-- (stage 21m) Pinned differences between the frontends: each declaration after `header`
 is accepted or rejected by the Lean frontend (`leanOk`) and by the self-hosted one
 (`selfOk`) as given, which for the pinned ones differ. -/
@@ -2105,6 +2144,32 @@ def selfHostGroup : Group where
            ("B.wiz", "import Prelude\ndef x : Nat := 2\n"),
            ("input.wiz", "import Prelude\nimport A\nimport B\n#check x\n#check a\n")]
           "x : Bool\na : Bool\nx : Nat\nNat\nBool\n" },
+    -- (13m) `local` syntax stays in its module: `local infix…` is usable in the commands
+    -- after it, and an importer does not see it (the host's `command.local`)
+    { name := "the self-hosted frontend: a `local infix` is usable in its module (13m)", run := fun _ => do
+        let body := "local infixr:60 \" +++ \" => String.append\ndef a : String := \"x\" +++ \"y\"\n#check a\n"
+        selfhostAgrees "" [(body, true)]
+        selfhostCheckFile ("import Prelude\n" ++ body) "a : String\nString\n" },
+    { name := "modules: a `local infix` stays in its module and a global one is imported (13m)", run := fun _ => do
+        let files := [
+          ("A.wiz", "import Prelude\nlocal infixr:60 \" +++ \" => String.append\n" ++
+             "def localUse : String := \"a\" +++ \"b\"\ninfixr:60 \" *** \" => String.append\n" ++
+             "def exportedUse : String := \"c\" *** \"d\"\n"),
+          ("input.wiz", "import Prelude\nimport A\ndef top : String := \"e\" *** \"f\"\n")]
+        bothAcceptTree files
+        selfhostCheckModules files "localUse : String\nexportedUse : String\ntop : String\n" },
+    { name := "modules: a `local infix` is not visible to an importer, as in the Lean frontend (13m)", run := fun _ =>
+        selfhostRejectsAlike
+          [("A.wiz", "import Prelude\nlocal infixr:60 \" +++ \" => String.append\n" ++
+             "def a : String := \"x\" +++ \"y\"\n"),
+           ("input.wiz", "import Prelude\nimport A\ndef bad : String := \"x\" +++ \"y\"\n")]
+          ["unexpected"] },
+    -- (A14) the scoping commands the Lean host does not have: both frontends reject them
+    { name := "modules: `namespace`/`open`/`section`/`variable` are rejected by both frontends (A14)", run := fun _ =>
+        selfhostRejectsAlike
+          [("input.wiz", "import Prelude\nnamespace Foo\ndef x : Nat := 1\nend Foo\n" ++
+             "open Foo\nsection\nvariable (n : Nat)\ndef y : Nat := x\n")]
+          [] },
     { name := "the one-shot path (checkFile) is one module, input (21n)", run := fun _ =>
         selfhostCheckModules
           [("input.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef use : Nat := secret\n#check use\n")]

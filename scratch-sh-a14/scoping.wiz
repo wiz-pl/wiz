@@ -1,0 +1,8 @@
+import Prelude
+namespace Foo
+def x : Nat := 1
+end Foo
+open Foo
+section
+variable (n : Nat)
+def y : Nat := x

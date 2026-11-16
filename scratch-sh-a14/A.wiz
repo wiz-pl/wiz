@@ -1,0 +1,3 @@
+import Prelude
+local infixr:60 " +++ " => String.append
+def a : String := "x" +++ "y"

@@ -6373,6 +6373,14 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       | .false => .next .none stop gs cats tokens notes
       | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes (String.codes preludeText) 0 gs .nil with
         | .mk _ gs' cats' tokens' notes' => .next .none stop gs' cats' tokens' notes'
+    -- (13m) `local infix…` adds the rule for this module's later commands only; the
+    -- loader drops it at the module's end (`modInfixes`/`modReinfix`). Every other
+    -- `local` command is still unsupported, as before.
+    | .false => match strEq (kindOf stx0) "command.local" with
+    | .true => match strEq (kindOf (kid stx0 1)) "command.infix" with
+      | .true => match infixCmd cats tokens (kid stx0 1) with
+        | .mk cats' tokens' note => .next .none stop gs cats' tokens' (.cons note notes)
+      | .false => .next (atLine start (.some (String.append "unsupported command " (kindOf stx0)))) stop gs cats tokens notes
     | .false => match strEq (kindOf stx0) "command.infix" with
     | .true => match infixCmd cats tokens stx0 with
       | .mk cats' tokens' note => .next .none stop gs cats' tokens' (.cons note notes)
@@ -6671,6 +6679,42 @@ def modCycleMsg (stack : List String) (name : String) : String :=
 inductive ModLoad where
   | mk (run : Run) (vis : StrMap Nat) (stack : List String) (order : List String)
 
+-- (13m) The infix rules a module *exports*. `local infix…` is usable in the commands
+-- after it but stays in its module, so the loader restores the tables at the module's
+-- end to the tables it started with plus these rules. The scan applies the local ones
+-- too, so a command that uses one parses exactly as it did in the module.
+partial def modInfixAt (cats : List Cat) (tokens : List String) (input : Array Nat)
+    (pos : Nat) : List Syntax :=
+  match Nat.lt (skipWs input pos) (Array.size input) with
+  | .false => .nil
+  | .true => match parseCommandAt cats tokens input pos with
+    | .err _ => .nil
+    | .ok stx stop => match strEq (kindOf stx) "command.local" with
+      | .true => match strEq (kindOf (kid stx 1)) "command.infix" with
+        | .true => match infixCmd cats tokens (kid stx 1) with
+          | .mk c t _ => modInfixAt c t input stop
+        | .false => modInfixAt cats tokens input stop
+      | .false => match strEq (kindOf stx) "command.infix" with
+        | .true => match infixCmd cats tokens stx with
+          | .mk c t _ => .cons stx (modInfixAt c t input stop)
+        | .false => modInfixAt cats tokens input stop
+def modInfixes (cats : List Cat) (tokens : List String) (text : String) : List Syntax :=
+  modInfixAt cats tokens (String.codes text) 0
+inductive ModTables where
+  | mk (cats : List Cat) (tokens : List String) (notes : List Note)
+def modReinfix (cats : List Cat) (tokens : List String) (notes : List Note) :
+    List Syntax → ModTables
+  | .nil => .mk cats tokens notes
+  | .cons stx rest => match infixCmd cats tokens stx with
+    | .mk c t n => modReinfix c t (.cons n notes) rest
+-- the Prelude's `do` grammar and `←` token are part of every module that imports it
+def modBaseCats (name : String) (cats : List Cat) : List Cat := match strEq name "Prelude" with
+  | .true => doCats cats
+  | .false => cats
+def modBaseTokens (name : String) (tokens : List String) : List String := match strEq name "Prelude" with
+  | .true => .cons "←" (.cons "do" tokens)
+  | .false => tokens
+
 -- one module's commands, its imports already loaded (skipped); the Prelude needs the `do`
 -- grammar and the `←` token, as the inline import did, and its output is silent (it
 -- declares the ambient names, it is not part of the program's output). A module's lines
@@ -6679,16 +6723,21 @@ inductive ModLoad where
 def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- (21n) the module's commands run with `name` as the current module: its `private`
   -- declarations are private to it, and every name it declares is marked in its name
+  let cats0 := modBaseCats name (Run.catsOf r);
+  let tokens0 := modBaseTokens name (Run.tokensOf r);
+  let notes0 := Run.notesOf r;
   let gs0 := Globals.setModule (Run.gs r) name;
   let r' := match strEq name "Prelude" with
-    | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
-        (Run.notesOf r) (String.codes text) 0 gs0 .nil with
-      | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
-    | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
-        (String.codes text) 0 gs0 (Run.out r);
+    -- the Prelude's own output is silent: the `do` grammar declares no names
+    | .true => match runCommands .false cats0 tokens0 notes0 (String.codes text) 0 gs0 .nil with
+      | .mk _ gs' _ _ _ => .mk (Run.out r) gs' cats0 tokens0 notes0
+    | .false => runCommands .false cats0 tokens0 notes0 (String.codes text) 0 gs0 (Run.out r);
   match r' with
-  | .mk out gs' cats' tokens' notes' =>
-    .mk (tagFirst name (Nat.sub (List.length out) (List.length (Run.out r))) out) gs' cats' tokens' notes'
+  | .mk out gs' _ _ _ =>
+    -- (13m) importers see this module's globals and its global infixes, not its locals
+    match modReinfix cats0 tokens0 notes0 (modInfixes cats0 tokens0 text) with
+    | .mk catsF tokensF notesF =>
+      .mk (tagFirst name (Nat.sub (List.length out) (List.length (Run.out r))) out) gs' catsF tokensF notesF
 
 mutual
 def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
