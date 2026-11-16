@@ -19,6 +19,9 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
+* [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that
+  gives an MCP client (OpenCode, Claude Code, Zed) type checking, formatting, building,
+  and the language server's diagnostics, hover and tactic state
 * [bench/README.md](../bench/README.md): the standard-library benchmark harness, its
   modes and how to compare two builds; the published page is generated from the JSON
   the harness writes (web/build-bench.py)
@@ -30,6 +33,7 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
 * [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
+* [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback) and the `%%scry` taint cell magic
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 

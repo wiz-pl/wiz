@@ -61,7 +61,7 @@ in the lowered program, by the kernel ([22j](stages/22-numbers.md)).
 `#lower` shows what `swap` is: a function of two linear borrow handles (`Uniq1`: used
 once, handed back on every path, `Result1`) that hands both back.
 
-```
+```wiz no-check
 def swap {ρa ρb : Region} (1 x : (Uniq1 ρa U64)) (1 y : (Uniq1 ρb U64)) : Result1 Unit ((1 _ : (Uniq1 ρa U64)) × (Uniq1 ρb U64)) :=
   let 1 (d_2, x) := Uniq1.peek x;
   let t := d_2;
@@ -76,7 +76,7 @@ so no handle outlives it. There is no heap here: a `&mut` is a value passed in a
 back (the Aeneas reading), so the specification is about values, and is proved by
 computation:
 
-```
+```wiz no-check
 feral
   …
   spec swap ensures (final x = old y) ensures (final y = old x)
@@ -95,7 +95,7 @@ reachable by consuming it with `Uniq1.peek`/`end`), so `Spec` takes the `&mut` a
 clauses on the values the scopes hand back (`final x` is the lender's final value, so no
 prophecy is needed). `swap.Spec a b` is
 
-```
+```wiz no-check
 def swap.Spec (x : U64) (y : U64) : Prop :=
   Result.Holds (fun (r : ((Unit × U64) × U64)) => (r.2 = y) × (r.1.2 = x)) (
     Uniq1.borrow Region.static x (fun ρ1 h1 l1 x =>
@@ -111,7 +111,7 @@ On a heap whose cells `p` and `q` hold the two numbers, calling the function is:
 cells, run it, write the final values back. `lib/HeapBorrow.wiz` names that
 (`Prog.borrowMut`, `Prog.borrowMut2`, and `Prog.borrowShr` for a `&`):
 
-```
+```wiz no-check
 def swapCells (p q : Nat) : Prog U64 Unit :=
   Prog.borrowMut2 p q (fun a b => Result.map (fun (r : U64 × U64) => ((), r)) (swap_vals a b))
 ```
@@ -119,7 +119,7 @@ def swapCells (p q : Nat) : Prog U64 Unit :=
 It can be verified two ways. The `x`-tactics ([24d](stages/24-separation-logic.md)) step
 through it, computing the Feral function as they go:
 
-```
+```wiz no-check
 def swapCells_spec (p q : Nat) (a b : U64) :
     Triple ((p ↦ a) ⋆ (q ↦ b)) (swapCells p q) (fun _ => (p ↦ b) ⋆ (q ↦ a)) := by
   xgo
