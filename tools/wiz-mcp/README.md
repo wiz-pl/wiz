@@ -121,6 +121,8 @@ claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
 | `inlay_hints` (`wiz_inlay_hints`) | `path`, `text?`, `start_line?`, `end_line?` | `textDocument/inlayHint` (whole file by default) |
 | `code_actions` (`wiz_code_actions`) | `path`, `text?`, `line`, `character`, `end_line?`, `end_character?` | `textDocument/codeAction`; edits **proposed, never applied** |
 | `rename` (`wiz_rename`) | `path`, `text?`, `line`, `character`, `new_name` | `textDocument/rename`; the edit **proposed, never applied** |
+| `search` (`wiz_search`) | `query`, `by?`, `scope?`, `kinds?`, `limit?` | the bridge's library index: by name, by type pattern, or by text |
+| `doc` (`wiz_doc`) | `name` or `module`, `scope?` | the same index: a declaration's or a module's documentation |
 
 `text` sends a buffer that is not saved to disk. When it is omitted the file is
 read. Positions are 0-based; Wiz's LSP treats `character` as a Unicode code
@@ -163,6 +165,54 @@ elaborate, ask, and close it. Positions are 0-based, as for `hover`.
   "lsp_refused"`; the daemon keeps running.
 * `workspace_symbols` searches the declarations of `path` and everything it
   imports (the server has no index of files you have not opened); at most 300.
+  `search` covers the whole library without opening anything.
+
+### Library search, docs and resources
+
+`search` and `doc` read an index of the toolchain's library (`scope: "library"`,
+the default), of the workspace's own `.wiz` files (`"workspace"`) or of both
+(`"all"`). The index is built from the sources by the bridge itself, in well
+under a second for the whole library, and is re-read only for files whose size
+or mtime changed. No `wiz` process runs.
+
+* `search {query, by?, scope?, kinds?, limit?}`:
+  * `by: "name"` (the default) ranks an exact last component, then a prefix,
+    then a substring, then a subsequence.
+  * `by: "type"` takes a pattern such as `List α → Nat` or
+    `(α → β) → List α → List β`. Single letters and Greek letters are type
+    variables, bound consistently. `_` and `?x` are wildcards. Arguments in
+    another order and a suffix of the type rank lower.
+  * `by: "text"` also matches doc comments and signatures.
+
+  Each result has `name`, `kind` (`def`, `inductive`, `constructor`,
+  `structure`, `field`, `class`, `instance`, `axiom`, `extern`), `module`,
+  `signature`, `type` (an arrow type, with implicit and instance binders
+  dropped), the doc's first paragraph, `file`, `line` and `score`. `total`
+  counts every match.
+* `doc {name}` returns the full doc comment, signature, type and position of a
+  declaration. The name is exact, or, failing that, every declaration whose last
+  component matches (`exact: false`).
+* `doc {module}` returns a module's `/-! … -/` doc and its declarations.
+
+The source index uses each header as written, so the types are the ones in the
+header, not the elaborated ones. For elaborated types, give `--doc-index` the
+`api.json` (or its directory) that `wiz doc --lib -o DIR` writes. Its
+signatures and docs then override the source's, and results say `"index":
+"elaborated"`. Building that index takes minutes, so the bridge never builds it.
+
+The resources are read from the workspace only. A resource whose file the
+workspace lacks is not listed. They are never written.
+
+| URI | contents |
+|---|---|
+| `wiz://trust-ledger` | `.github/trust-baseline.tsv` as is |
+| `wiz://trust-ledger.json`, `wiz://trust-ledger/{module}` | its rows as objects: `module`, `declaration`, `item`, `reason`, `owner`, `review` |
+| `wiz://error-codes` | `docs/error-codes.md` |
+| `wiz://error-codes/{code}` | one code's row: `error`, `example`, `quick_fixes` |
+| `wiz://stages`, `wiz://stages/{name}` | the list of `docs/stages/*.md` (name, title), and one stage |
+
+A stage name must be a plain file name: no `..`, no hidden files, and no symlink
+out of the workspace.
 
 ## Safety
 
@@ -223,7 +273,7 @@ failure:
   `structuredContent` carry the same object.
 * `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,
   `wiz_not_found`, `io_error`, `timeout`, `lsp_startup`, `lsp_closed`,
-  `lsp_error`, `lsp_refused`, `internal`.
+  `lsp_error`, `lsp_refused`, `not_found` (`doc`), `internal`.
 
 ### `check`: structured diagnostics
 
@@ -373,6 +423,8 @@ sh tools/wiz-mcp/run-tests.sh
 --allow-root DIR  another directory tools may read (repeatable; never written)
 --pass-env NAME   pass another variable to wiz (repeatable; credential-like names
                   are still dropped)
+--doc-index PATH  an elaborated index for search/doc: `wiz doc --lib -o DIR`'s
+                  api.json, or DIR (optional; never built by the bridge)
 ```
 
 Environment: `WIZ_BIN` is the default for `--wiz`; `WIZ_MCP_CACHE` for `--cache`.
@@ -409,6 +461,9 @@ All logs go to stderr; stdout is the MCP transport.
   given and shells out to `wiz fmt`.
 * Calls are sequential; MCP cancellation notifications cannot interrupt a call
   in flight. The per-call deadline is the bound.
-* No resources or prompts; only the tools above (17, 18 with `--allow-build`).
+* No prompts. There are 19 tools (20 with `--allow-build`) and the read-only
+  resources above.
+* Type search is a heuristic over arrow types, not unification. Without
+  `--doc-index`, types are the ones written in the headers.
 * The daemon's cache is content-addressed and safe to share, but cold worktrees
   duplicate elaboration work. A warm `~/.cache/wiz` avoids most of it.

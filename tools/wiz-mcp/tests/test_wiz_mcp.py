@@ -33,6 +33,7 @@ DEFAULT_TOOLS = {
     "version", "check", "parse", "fmt", "diagnostics", "hover", "goals",
     "definition", "references", "document_symbols", "workspace_symbols", "term_goal",
     "completion", "signature_help", "inlay_hints", "code_actions", "rename",
+    "search", "doc",
 }
 
 
@@ -190,7 +191,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(responses[0]["error"]["code"], -32602)
 
     def test_unknown_method_is_a_jsonrpc_error(self) -> None:
-        responses, _ = self.dispatch({"jsonrpc": "2.0", "id": 4, "method": "resources/list", "params": {}})
+        responses, _ = self.dispatch({"jsonrpc": "2.0", "id": 4, "method": "prompts/list", "params": {}})
         self.assertEqual(responses[0]["error"]["code"], -32601)
 
     def test_version_runs_the_configured_binary(self) -> None:
