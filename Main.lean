@@ -11,12 +11,14 @@ def usage : String := "usage:
                           module root (a package's src/), before or after FILE
   wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
-                                   (default 1: one unit; a split build is faster but the
-                                   generated program runs somewhat slower, stage 15k)
+                                   (N = 1: one unit, the default; 0: automatic for a
+                                   large program, capped at 8 units; a split build is
+                                   faster but the generated program runs somewhat
+                                   slower, stage 15k; WIZ_SPLIT sets the default)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz run FILE [--llvm] [--split N] build and run `main`, printing its value
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                    documentation: a static site (one page per module,
                                    index, search); --lib: the toolchain's library;
@@ -44,6 +46,8 @@ default never evaluates them),
 default) or only by the evaluator's fast path (ground))
 compiler option (turns the cache off): --unbox-structs (22i: a structure's last field is
 unboxed; not stable under substitution, so off by default)
+--split N (15k; build and run: N C units compiled in parallel; 0 or auto: choose from the
+  program's size; default 1, or WIZ_SPLIT=N when the flag is absent)
 --strict-privacy (13b, an experiment; turns the cache off): check each declaration again with
   the definitions of other modules' types with private parts hidden
 --pp-all (11r; turns the cache off): print terms without notation (as `set_option pp.all true`)
@@ -157,13 +161,17 @@ initialize regionStatsOpt : IO.Ref Bool ← IO.mkRef false
 initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
 
 /-- (15k) `--split N`: compile a large program as `N` C translation units in parallel
-(0: automatically, for a large program; 1: one unit). -/
-initialize splitOpt : IO.Ref Nat ← IO.mkRef 0
+(0 or `auto`: automatically, for a large program; 1: one unit). Unset means one unit. -/
+initialize splitOpt : IO.Ref (Option Nat) ← IO.mkRef none
+
+/-- A `--split` value: a count, or `auto` for 0. -/
+def parseSplitValue (s : String) : Option Nat :=
+  if s == "auto" then some 0 else s.toNat?
 
 /-- Take `--split N` out of the arguments. -/
 def takeSplitOpt : List String → Except String (Option Nat × List String)
   | "--split" :: n :: rest => do
-    let some k := n.toNat? | throw s!"bad --split {n}"
+    let some k := parseSplitValue n | throw s!"bad --split {n}"
     let (_, rest) ← takeSplitOpt rest
     return (some k, rest)
   | a :: rest => do
@@ -319,13 +327,13 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) : IO UInt32 := do
+    (split : Nat := 1) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   match ← Build.build tc s "main" out llvm lib noMain split with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
-def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
+def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 1) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal tc s "main" dir llvm (split := split) with
@@ -388,7 +396,13 @@ def main (args : List String) : IO UInt32 := do
   -- a `panic!` (a kernel-internal failure) ends a batch command with status 1 instead of
   -- going on with a default value; the language server keeps running
   unless args.head? == some "lsp" do exitOnPanic
-  let split ← splitOpt.get
+  let split ← match ← splitOpt.get with
+    | some k => pure k
+    | none =>
+      -- (an optional default; release/default builds stay single when it is unset)
+      match ← IO.getEnv "WIZ_SPLIT" with
+      | some s => pure ((parseSplitValue s).getD 1)
+      | none => pure 1
   match args with
   | ["parse", path] => parseCmd path
   | ["check", path] => checkCmd tc path

@@ -494,13 +494,23 @@ def splitHeader (decls : Array IR.Decl) (exports : List RVal.ExternSig) : String
     "\n/* ---- exported functions ---- */\n" ++
     String.join (exports.map fun sig => s!"wiz_val {mangle (exportEntry sig.cname)}(void);\n"))
 
+/-- The C text of each generated declaration, in declaration order (`lowerProgram` sorts
+by name): the input of the split's partition and size estimate. -/
+def declTexts (decls : Array IR.Decl) : Array String :=
+  let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
+  let cafs := IR.cafs decls
+  decls.map fun d => decl arities cafs d true
+
+/-- The bytes of generated declaration C (what splitting balances, and what `--split 0`
+measures to choose a part count). -/
+def declBytes (decls : Array IR.Decl) : Nat :=
+  (declTexts decls).foldl (fun a s => a + s.utf8ByteSize) 0
+
 /-- The generated declarations cut into at most `n` contiguous parts, balanced by their
 C text, in declaration order (which `lowerProgram` sorts by name): deterministic, and
 functions that call each other usually stay together. -/
 def splitParts (decls : Array IR.Decl) (n : Nat) : Array String := Id.run do
-  let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
-  let cafs := IR.cafs decls
-  let texts := decls.map fun d => decl arities cafs d true
+  let texts := declTexts decls
   let total := texts.foldl (fun a s => a + s.utf8ByteSize) 0
   let target := max 1 (total / max 1 n)
   let mut parts : Array String := #[]

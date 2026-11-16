@@ -70,6 +70,9 @@ structure Runner where
   err : String → IO Unit := IO.eprint
   /-- how many jobs run at once -/
   jobs : Nat := 1
+  /-- (15k) C translation units per program: 1 (single), 0 (automatic), or N; passed to
+  the `build`/`ir` job and the `obj`/`link` nodes -/
+  split : Nat := 1
   /-- the program that runs a job (`<self> --grail-job …`): grail, or the test driver -/
   self : System.FilePath := "grail"
   /-- a job's time limit, in milliseconds; tests have their own -/

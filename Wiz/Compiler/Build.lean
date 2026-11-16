@@ -89,6 +89,72 @@ def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
     pure (if out.exitCode == 0 then .ok () else .error s!"{cmd} failed:\n{out.stderr}")
   catch e => pure (.error s!"{cmd}: {e}")
 
+/-- The automatic part count (`--split 0`): a deterministic function of the generated
+declaration C alone, so every machine and cache sees the same partition. Below 128
+declarations or 1 MB of generated C it stays single; then 2 up to 4 MB, 4 up to 16 MB,
+and 8 above (a small cap: the measured gains flatten out, and cross-unit inlining is
+lost; docs/stages/15-performance.md, 15k). -/
+def autoPartsFor (decls bytes : Nat) : Nat :=
+  if decls < 128 || bytes < 1000000 then 1
+  else if bytes < 4000000 then 2
+  else if bytes < 16000000 then 4
+  else 8
+
+/-- The automatic part count for a program (see `autoPartsFor`). -/
+def autoParts (decls : Array IR.Decl) : Nat :=
+  autoPartsFor decls.size (C.declBytes decls)
+
+/-- `--split N`: `0` chooses automatically (deterministically, from the generated
+declarations), `1` is one unit (the default when the flag is not given), and `N ≥ 2`
+asks for `N` units. -/
+def resolveSplit (split : Nat) (decls : Array IR.Decl) : Nat :=
+  if split == 0 then autoParts decls else split
+
+/-- The split C of a program: the shared header and the units (name, text, whether it is
+the support unit, compiled with `-DWIZ_API=`). -/
+structure SplitCode where
+  header : String
+  /-- `(name, C text, is support)`, support first -/
+  units : Array (String × String × Bool)
+
+def splitCode (decls : Array IR.Decl) (io : Bool) (extra : String) (unbox : Bool)
+    (exports : List RVal.ExternSig) (noMain : Bool) (n : Nat) : SplitCode :=
+  let header := C.splitHeader decls exports
+  let parts := C.splitParts decls n
+  { header
+    units := #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
+      parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText "wiz_split.h" p.1, false) }
+
+/-- Run `f` on `xs` with at most `k` tasks at once, in order. The C compiler is the
+heavy step: `--split 8` on a 4-core machine must not start 8 `cc` processes. -/
+def runBounded (k : Nat) (xs : Array α) (f : α → IO β) : IO (Array β) := do
+  let k := max 1 k
+  let mut out : Array β := #[]
+  let mut i := 0
+  while i < xs.size do
+    let j := min xs.size (i + k)
+    let ts ← (xs.extract i j).mapM fun x => IO.asTask (prio := .dedicated) (f x)
+    for t in ts do
+      match t.get with
+      | .ok v => out := out.push v
+      | .error e => throw e
+    i := j
+  pure out
+
+/-- Compile the split units in `srcDir` to objects in `outDir`, at most
+`min(units, cores)` C compilers at once. -/
+def compileUnitObjects (tc : Toolchain) (srcDir outDir : System.FilePath)
+    (units : Array (String × Bool)) : IO (Except String Unit) := do
+  let cc := tc.cc
+  let cflags := tc.cflags.toArray
+  let width := min units.size (max 1 (System.Platform.Internal.getHardwareConcurrency ()).toNat)
+  let results ← runBounded width units fun (name, api) =>
+    runCC cc (#["-O2", "-w", "-c", "-o", (outDir / (name ++ ".o")).toString,
+      (srcDir / (name ++ ".c")).toString] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags)
+  match results.find? (fun r => match r with | .error _ => true | _ => false) with
+  | some (.error e) => pure (.error e)
+  | _ => pure (.ok ())
+
 /-- Compile the C of a program. One translation unit by default; with `--split N` a
 support unit (`-DWIZ_API=`: the runtime and glue are exported) and `N` units of generated
 functions are compiled by `cc -c` in parallel (stage 15k), then linked. `--lib` stays one
@@ -96,21 +162,19 @@ object file. The split is opt-in: it makes the build faster but the C compiler c
 inline across unit boundaries, so the generated program runs slower (see 15k). -/
 def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : String)
     (unbox : Bool) (exports : List RVal.ExternSig) (link : Link) (lib noMain : Bool)
-    (out : System.FilePath) (split : Nat := 0) : IO (Except String Unit) := do
+    (out : System.FilePath) (split : Nat := 1) : IO (Except String Unit) := do
   let src := C.program decls io extra unbox exports noMain
-  let n := split
+  let n := resolveSplit split decls
   if lib || n < 2 || decls.size < 2 then
     return ← compileC tc src out link lib
   let dir := (out.parent.getD ".") / ((out.fileName.getD "wiz") ++ ".split")
   IO.FS.createDirAll dir
-  let header := "wiz_split.h"
-  let headerText := C.splitHeader decls exports
-  IO.FS.writeFile (dir / header) headerText
-  let parts := C.splitParts decls n
-  -- (deterministic inputs; a part whose text and flags are unchanged reuses its object)
-  let inputs : Array (String × String × Bool) :=
-    #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
-    parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
+  -- (the whole program's C is written every build, split or not: the generated code is
+  -- the same, and a build can be compared with the single-unit one)
+  IO.FS.writeFile (out.withExtension "c") src
+  let sc := splitCode decls io extra unbox exports noMain n
+  IO.FS.writeFile (dir / "wiz_split.h") sc.header
+  let inputs : Array (String × String × Bool) := sc.units
   let cc := tc.cc
   let cflags := tc.cflags.toArray
   let keyOf (text : String) (api : Bool) : String :=
@@ -118,7 +182,6 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
     runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
       (if api then #["-DWIZ_API="] else #[]) ++ cflags)
-  let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
     let stamp := keyOf text api
@@ -128,18 +191,16 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
     unless hit do
       IO.FS.writeFile (dir / (name ++ ".c")) text
       todo := todo.push (name, api, stamp)
-  let tasks ← todo.mapM fun (name, api, stamp) =>
-    IO.asTask (prio := .dedicated) do
+  -- (the partition is deterministic; only the number of cc processes at once is bounded
+  -- by the machine, not by the output)
+  let width := min todo.size (max 1 (System.Platform.Internal.getHardwareConcurrency ()).toNat)
+  let results ← runBounded width todo fun (name, api, stamp) => do
       match ← ccOne (name ++ ".c") (name ++ ".o") api with
-      | .ok () => IO.FS.writeFile (dir / (name ++ ".stamp")) stamp; pure (.ok ())
+      | .ok () => IO.FS.writeFile (dir / (name ++ ".stamp")) stamp; pure (Except.ok () : Except String Unit)
       | .error e => pure (.error e)
-  let collect (t : Task (Except IO.Error (Except String Unit))) : IO Unit := do
-    match t.get with
-    | .ok (.ok ()) => pure ()
-    | .ok (.error e) => if (← err.get).isNone then err.set (some e)
-    | .error e => if (← err.get).isNone then err.set (some (toString e))
-  for t in tasks do collect t
-  if let some e ← err.get then return .error e
+  match results.find? (fun r => match r with | .error _ => true | _ => false) with
+  | some (.error e) => return .error e
+  | _ => pure ()
   let objs := inputs.map fun (name, _, _) => (dir / (name ++ ".o")).toString
   let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
   runCC cc (#["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
@@ -178,7 +239,7 @@ an object file, with a header `OUT.h` for them; with `noMain`, the exports linke
 a program but without a `main` (a Wasm module, a shared library: the toolchain's flags
 say which). -/
 def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePath) (llvm lib : Bool)
-    (noMain : Bool := false) (split : Nat := 0) : IO (Except String (Term R)) := do
+    (noMain : Bool := false) (split : Nat := 1) : IO (Except String (Term R)) := do
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)
@@ -222,7 +283,7 @@ where
 with its type. With `timeout`, the program is stopped after that many seconds (by
 coreutils' `timeout`). -/
 def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.FilePath) (llvm : Bool := false)
-    (timeout : Option Nat := none) (args : Array String := #[]) (split : Nat := 0) :
+    (timeout : Option Nat := none) (args : Array String := #[]) (split : Nat := 1) :
     IO (Except String String) := do
   let exe := dir / "wiz_main"
   match ← build tc s n exe llvm false (split := split) with

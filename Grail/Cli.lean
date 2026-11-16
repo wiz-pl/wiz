@@ -47,6 +47,9 @@ def usage : String := "usage:
 options: -C DIR (the package directory), --dir DIR (with `new`: where to write the
   package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
+  --split N (build/run: compile a program as N C units in parallel; 0 or auto: choose
+    from the program's size; default 1, or WIZ_SPLIT=N when the flag is absent; a
+    split build is faster, the program runs somewhat slower, stage 15k),
   --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
@@ -68,15 +71,22 @@ structure Opts where
   jobs : Option Nat := none
   timeout : Option Nat := none
   testTimeout : Option Nat := none
+  /-- (15k) `--split N`: C units per program (0: automatic; default 1, or `WIZ_SPLIT`) -/
+  split : Option Nat := none
   /-- `grail lsp`: the `wiz` to run -/
   wiz : Option String := none
 
-/-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
+/-- A `--split` value: a count, or `auto` for 0. -/
+def parseSplitValue (s : String) : Option Nat :=
+  if s == "auto" then some 0 else s.toNat?
+
+/-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--split N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
   | "-C" :: d :: rest => grailOpts { o with dir := some d } rest
   | "--dir" :: d :: rest => grailOpts { o with newDir := some d } rest
   | "--std" :: d :: rest => grailOpts { o with std := some d } rest
   | "-j" :: n :: rest => grailOpts { o with jobs := n.toNat? } rest
+  | "--split" :: n :: rest => grailOpts { o with split := parseSplitValue n } rest
   | "--timeout" :: n :: rest => grailOpts { o with timeout := n.toNat? } rest
   | "--test-timeout" :: n :: rest => grailOpts { o with testTimeout := n.toNat? } rest
   | "--wiz" :: w :: rest => grailOpts { o with wiz := some w } rest
@@ -116,8 +126,14 @@ def cliMain (args : List String) : IO UInt32 := do
   let dir : System.FilePath := opts.dir.getD "."
   let std ← findStd opts.std
   let jobs := opts.jobs.getD (max 1 (min 4 (System.Platform.Internal.getHardwareConcurrency ()).toNat))
+  let split ← match opts.split with
+    | some k => pure k
+    | none =>
+      match ← IO.getEnv "WIZ_SPLIT" with
+      | some s => pure ((parseSplitValue s).getD 1)
+      | none => pure 1
   let mkRunner (ctx : Ctx) : IO Runner := do
-    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
+    pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, split, self := ← IO.appPath,
            timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs := 1000 * opts.testTimeout.getD 300 }
   -- the flags win over the build files; read them now, apply them last
   let raw := args

@@ -632,25 +632,26 @@ def binId (tc : Toolchain) : IO UInt64 := Cache.binaryId tc.cacheDir
 /-- A runner for a package directory; its jobs run as `<this test driver> --grail-job …`,
 and its report goes to `log`. -/
 def runner (dir : System.FilePath) (tc : Toolchain) (pkg : Grail.Package) (jobs : Nat := 1)
-    (log : IO.Ref String) : IO Grail.Runner := do
+    (log : IO.Ref String) (split : Nat := 1) : IO Grail.Runner := do
   pure { ctx := { dir, std := "lib", tc, binId := ← binId tc, libRoots := Grail.libRootsOf dir pkg.targets },
-         stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
+         stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, split, self := ← IO.appPath,
          out := fun s => log.modify (· ++ s), err := fun s => log.modify (· ++ s) }
 
 /-- Run grail's build on a package directory; also returns the report. -/
 def buildLog (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (jobs : Nat := 1)
-    (timeoutMs : Option Nat := none) : IO (Grail.Stats × Bool × String) := do
+    (timeoutMs : Option Nat := none) (split : Nat := 1) : IO (Grail.Stats × Bool × String) := do
   match ← Grail.readConfig tc (← binId tc) "lib" dir with
   | .error e => throw (IO.userError e)
   | .ok (pkg, _) =>
     let log ← IO.mkRef ""
-    let r ← runner dir tc pkg jobs log
+    let r ← runner dir tc pkg jobs log split
     let r := { r with timeoutMs := timeoutMs.getD r.timeoutMs }
     let ok ← r.build pkg.targets (pkg.targets.filter fun t => only.isEmpty || only.contains t.name)
     pure (← r.stats.get, ok, ← log.get)
 
-def build (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (jobs : Nat := 1) : IO (Grail.Stats × Bool) := do
-  let (s, ok, _) ← buildLog dir tc only jobs
+def build (dir : System.FilePath) (tc : Toolchain) (only : List String := []) (jobs : Nat := 1)
+    (split : Nat := 1) : IO (Grail.Stats × Bool) := do
+  let (s, ok, _) ← buildLog dir tc only jobs (split := split)
   pure (s, ok)
 
 /-- Every `.lean` file under a directory. -/
@@ -665,11 +666,13 @@ def toolchainGroup : Group where
   name := "toolchain"
   exercise := "Stage 23a"
   cases := [
-    { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
+    { name := "wiz, grail and the test driver read no environment variables (except WIZ_SPLIT)", run := fun _ => do
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
         for f in files do
           let text ← IO.FS.readFile f
-          check ((text.splitOn "getEnv \"WIZ").length == 1) s!"{f} reads a WIZ_ variable" },
+          -- (`WIZ_SPLIT` is the one optional default: --split when the flag is absent)
+          for after in (text.splitOn "getEnv \"WIZ").drop 1 do
+            check (after.startsWith "_SPLIT\"") s!"{f} reads a WIZ_ variable other than WIZ_SPLIT" },
     { name := "wiz: an unknown flag or command is an error (exit 2), the usage alone is not", run := fun _ => do
         let wiz := ".lake/build/bin/wiz"
         let run (args : Array String) := IO.Process.output { cmd := wiz, args }
@@ -858,6 +861,22 @@ def grailLspCase : Case :=
         let some ds ← grailLspDiagnostics dir "main.wiz" | return
         check (ds.any (· == "5")) s!"diagnostics with a broken grail.wiz: {ds}" }
 
+/-- Every file named `name` under `root`. -/
+partial def filesNamed (root : System.FilePath) (name : String) : IO (Array System.FilePath) := do
+  let mut out : Array System.FilePath := #[]
+  for e in ← root.readDir do
+    if ← e.path.isDir then out := out ++ (← filesNamed e.path name)
+    else if e.fileName == name then out := out.push e.path
+  pure out
+
+/-- Every file under `root` whose name ends with `suffix`. -/
+partial def filesEnding (root : System.FilePath) (suffix : String) : IO (Array System.FilePath) := do
+  let mut out : Array System.FilePath := #[]
+  for e in ← root.readDir do
+    if ← e.path.isDir then out := out ++ (← filesEnding e.path suffix)
+    else if e.fileName.endsWith suffix then out := out.push e.path
+  pure out
+
 def grailGroup : Group where
   name := "grail"
   exercise := "Stage 23d"
@@ -945,6 +964,49 @@ def grailGroup : Group where
         checkEq 1 s.ran
         checkEq 2 s.upToDate },
     linkCCase,
+    { name := "--split 4: the same C and program as one unit, and split objects", run := fun _ => do
+        let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
+        let files : List (String × String) :=
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"p\" |> Package.exe \"hello\" \"hello.wiz\"\n"),
+           ("hello.wiz", "import IO\n" ++
+             String.join ((List.range 32).map fun i => s!"def f{i} : Nat := {i} + 1\n") ++
+             "def main : IO Unit := IO.println (Nat.toString (" ++
+             String.intercalate " + " ((List.range 32).map fun i => s!"f{i}") ++ "))\n")]
+        let d1 ← mkTree files
+        let d4 ← mkTree files
+        let (s1, ok1, log1) ← buildLog d1 tc (split := 1)
+        let (s4, ok4, log4) ← buildLog d4 tc (split := 4)
+        if !ok1 || !ok4 then
+          if ((log1 ++ log4).splitOn "gmp.h").length > 1 then
+            skip "no toolchain"
+            return
+          else throw (IO.userError s!"split 1:\n{log1}\nsplit 4:\n{log4}")
+        checkEq 3 s1.ran
+        checkEq 3 s4.ran
+        -- the generated C is the single-unit one
+        let c1 ← filesNamed (d1 / ".grail" / "build") "main.c"
+        let c4 ← filesNamed (d4 / ".grail" / "build") "main.c"
+        checkEq 1 c1.size
+        checkEq 1 c4.size
+        checkEq (← IO.FS.readFile c1[0]!) (← IO.FS.readFile c4[0]!)
+        -- and the program prints the same
+        let o1 ← IO.Process.output { cmd := (d1 / ".grail" / "bin" / "hello").toString }
+        let o4 ← IO.Process.output { cmd := (d4 / ".grail" / "bin" / "hello").toString }
+        checkEq "528\n" o1.stdout
+        checkEq o1.stdout o4.stdout
+        -- the split job wrote units, and `obj` compiled more than one object
+        let manifests ← filesNamed (d4 / ".grail" / "build") "split.txt"
+        checkEq 1 manifests.size
+        let objs ← filesEnding (d4 / ".grail" / "build") ".o"
+        check (objs.size > 1) s!"one object: {objs.map (·.fileName)}"
+        -- a second split build runs nothing
+        let (s, ok) ← build d4 tc (split := 4)
+        check ok "the second split build failed"
+        checkEq 0 s.ran },
+    { name := "--split parses a count or auto, and defaults to single", run := fun _ => do
+        checkEq (some 4) (Grail.grailOpts {} ["--split", "4"]).1.split
+        checkEq (some 0) (Grail.grailOpts {} ["--split", "auto"]).1.split
+        checkEq none (Grail.grailOpts {} ["build"]).1.split },
     grailLspCase
   ]
 

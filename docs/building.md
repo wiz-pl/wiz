@@ -151,7 +151,8 @@ LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, 
 compiler, and elan, which installs the Lean in `lean-toolchain`. Entered at the
 repository root, it writes this machine's paths to the uncommitted `grail.local.wiz`,
 which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- …` win);
-`wiz` takes flags. Nothing reads environment variables.
+`wiz` takes flags. The one environment variable read is `WIZ_SPLIT` (the optional
+default for `--split N`/`grail --split N`; unset means single).
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. Every job runs in that dev shell (with the Cachix cache, when
@@ -190,6 +191,11 @@ cached between runs.
   `scripts/trust-ledger.sh --update`. The `native` and `hdl-verified` groups check the
   same ledger in the shards; this job runs the whole of it without a shard's path
   filter to skip it, and `CI result` requires it when code changed.
+* **Split smoke** (the `split-smoke` job, non-blocking: `continue-on-error`): builds
+  `examples/closed-table-bench.wiz` once as one C unit and once with `--split 4`,
+  compares the generated `OUT.c` files and the programs' output, and reports a fast
+  signal on the split path. It never gates a merge; the `backends` shard's `=c` group has
+  the blocking split cases (identical C and output, object reuse, automatic mode).
 * **Split shards.** A shard with `"split": N` runs as N jobs `NAME-1` … `NAME-N`, each a
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the

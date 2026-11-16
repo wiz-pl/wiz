@@ -335,17 +335,33 @@ runtime with `-DWIZ_API=`, the foreign glue, the exports and `main`) plus `N` un
 generated declarations, each a `cc -c -O2` task, then links. On the same 18.8 MB
 program (12934 declarations, cold cache): single **146.9 s**, `--split 2` 103.5 s,
 `--split 4` 91.6 s, `--split 8` **85.8 s** (1.71×; its `cc` stage 16.2 s against 87 s
-for one unit); warm cache 144.0 -> 81.1 s. The generated C each build prints is
-identical. The cost is that `cc` cannot inline across unit boundaries: the program
-built with `--split 8` runs 50.5 s against 38.0 s (1.33× slower). A one-unit program
-against the split runtime runs 42.3 s, so ~11% is runtime calls and ~16% generated
-cross-unit calls. `-fvisibility=hidden` does not help; `-flto` recovers the run time
-(40.5 s) but its link costs 84.2 s, so the build is no faster than single
-(`-flto=8`: 88.1 s / 43.2 s). The split is therefore **opt-in** (`--split N`,
-default 1), for fast iteration rather than release builds. The partition is
-deterministic (declaration order, balanced by C text), and each part keeps its object
-in `<out>.split/` with a stamp of its text and flags, so a rebuild to the same output
-compiles only the parts that changed (an example: 3.3 s -> 0.5 s on a second build).
+for one unit); warm cache 144.0 -> 81.1 s. The whole program's C is written in either
+mode (`OUT.c`), so the single and split builds can be compared byte for byte. The cost is
+that `cc` cannot inline across unit boundaries: the program built with `--split 8` runs
+50.5 s against 38.0 s (1.33× slower). A one-unit program against the split runtime runs
+42.3 s, so ~11% is runtime calls and ~16% generated cross-unit calls.
+`-fvisibility=hidden` does not help; `-flto` recovers the run time (40.5 s) but its link
+costs 84.2 s, so the build is no faster than single (`-flto=8`: 88.1 s / 43.2 s). The
+split is therefore **opt-in** for fast iteration rather than release builds. `--split 1`
+is one unit, and the default when the flag is absent is single; `WIZ_SPLIT=N` sets that
+default (so a package build can opt in without editing its recipes), still single when
+unset.
+
+`--split 0` (also `--split auto`) is the automatic mode: a deterministic function of the
+**generated declaration C**, not of the machine, so the partition is the same
+everywhere. It is single below 128 declarations or 1,000,000 bytes of generated C, 2 up
+to 4,000,000, 4 up to 16,000,000 and 8 above (a small cap: the measured gains flatten
+out and cross-unit inlining is lost).
+The partition itself is by declaration order (which `lowerProgram` sorts by name),
+balanced by C text, and each part keeps its object in `<out>.split/` with a stamp of its
+text and flags, so a rebuild to the same output compiles only the parts that changed (an
+example: 3.3 s -> 0.5 s on a second build). Only the number of `cc` processes running at
+once depends on the machine: it is `min(parts, cores)`, while the part count and their
+contents do not. `grail build` and `grail run` take the same `--split N` (and
+`WIZ_SPLIT`), through their `build`/`ir`, `obj` and `link` jobs; package command
+recipes that use an `exe` target inherit it. A non-blocking CI lane (`split smoke`)
+builds `examples/closed-table-bench.wiz` both ways, compares the C and the output, and
+never gates a merge.
 
 What is left:
 

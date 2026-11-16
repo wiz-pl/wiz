@@ -45,6 +45,23 @@ def readLink (f : System.FilePath) : IO Build.Link := do
     else if line.startsWith "lib " then l := { l with libs := l.libs.push (line.drop 4).toString }
   pure l
 
+/-- (15k) The split units a `build`/`ir` job wrote, as `(name, is support)`; empty when
+the job wrote one `main.c`. -/
+def readSplitManifest (f : System.FilePath) : IO (Array (String × Bool)) := do
+  if !(← f.pathExists) then return #[]
+  let mut us : Array (String × Bool) := #[]
+  for line in (← IO.FS.readFile f).splitOn "\n" do
+    if let [n, api] := line.splitOn "\t" then
+      if !n.isEmpty then us := us.push (n, api == "1")
+  pure us
+
+/-- The object files in a job's output directory, sorted (the split parts, or `main.o`). -/
+def objectsIn (dir : System.FilePath) : IO (Array String) := do
+  let mut ns : Array String := #[]
+  for e in ← dir.readDir do
+    if e.fileName.endsWith ".o" then ns := ns.push e.fileName
+  pure (ns.qsort (· < ·))
+
 /-- What a node of the build graph does. -/
 inductive Action where
   | check (file : String)
@@ -258,7 +275,7 @@ def Runner.outDir (r : Runner) (key : UInt64) : System.FilePath := r.ctx.grailDi
 
 def Runner.jobSx (r : Runner) (out : System.FilePath) (job : Sx) : Sx :=
   node "job" [str r.ctx.dir.toString, str r.ctx.std.toString, str (toString r.ctx.binId.toNat),
-    list (r.ctx.libRoots.map (str ·.toString)), str out.toString, job]
+    list (r.ctx.libRoots.map (str ·.toString)), str (toString r.split), str out.toString, job]
 
 def indent (s : String) : String :=
   "  " ++ (s.trimAsciiEnd.toString.replace "\n" "\n  ")
@@ -355,20 +372,35 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
   let tc := r.ctx.tc
   match n.action with
   | .check file => pure (.job { key := ← r.checkKey file, how := .grail (node "check" [str file]), timeoutMs := r.timeoutMs })
-  | .build file => pure (.job { key := mixHash (hash "build") (← r.checkKey file), how := .grail (node "build" [str file]), timeoutMs := r.timeoutMs })
+  | .build file => pure (.job { key := mixHash (hash "build") (mixHash (hash r.split) (← r.checkKey file)), how := .grail (node "build" [str file]), timeoutMs := r.timeoutMs })
   -- (`ir` also writes the C: its key is new, so an old `ir` directory (without main.c) is not reused)
-  | .ir file => pure (.job { key := mixHash (hash "ir+c") (d 0).key, how := .grail (node "ir" [str file]), timeoutMs := r.timeoutMs })
+  | .ir file => pure (.job { key := mixHash (hash "ir+c") (mixHash (hash r.split) (d 0).key), how := .grail (node "ir" [str file]), timeoutMs := r.timeoutMs })
   | .obj _ =>
-    let cFile := (d 0).out / "main.c"
-    let cText ← IO.FS.readFile cFile
-    let key := mixHash (hash "obj") (hash (toString [cText, tc.cc, " ".intercalate tc.cflags]))
-    pure (.job {
-      key := key, timeoutMs := r.timeoutMs, how := .cmd tc.cc fun out =>
-      #["-O2", "-w", "-c", "-o", (out / "main.o").toString, cFile.toString] ++ tc.cflags.toArray })
+    let b := d 0
+    let units ← readSplitManifest (b.out / "split.txt")
+    if !units.isEmpty then
+      -- (the split units: keyed by their text, compiled at min(units, cores) at once)
+      let manifest ← IO.FS.readFile (b.out / "split.txt")
+      let mut texts : Array String := #[manifest]
+      for (name, _) in units do texts := texts.push (← IO.FS.readFile (b.out / (name ++ ".c")))
+      let key := mixHash (hash "obj-split") (hash (toString [toString texts.toList, tc.cc, " ".intercalate tc.cflags]))
+      pure (.job {
+        key := key, timeoutMs := r.timeoutMs,
+        how := .here fun out => Build.compileUnitObjects tc b.out out units })
+    else
+      let cFile := b.out / "main.c"
+      let cText ← IO.FS.readFile cFile
+      let key := mixHash (hash "obj") (hash (toString [cText, tc.cc, " ".intercalate tc.cflags]))
+      pure (.job {
+        key := key, timeoutMs := r.timeoutMs, how := .cmd tc.cc fun out =>
+        #["-O2", "-w", "-c", "-o", (out / "main.o").toString, cFile.toString] ++ tc.cflags.toArray })
   | .link name _ bin =>
     let o := d 0
     -- (9f) the `link_c` files (compiled here, with `cflags`) and `link_lib` libraries
     let link ← readLink ((d 1).out / "link.txt")
+    let objects ← objectsIn o.out
+    let objPaths := if objects.isEmpty then #[(o.out / "main.o").toString]
+      else objects.map fun (f : String) => (o.out / f).toString
     let mut contents : Array String := #[]
     for f in link.sources do
       contents := contents.push (← try pure (toString (hash (← IO.FS.readBinFile f))) catch _ => pure "missing")
@@ -382,7 +414,7 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     pure (.job {
       key := key, timeoutMs := r.timeoutMs,
       how := .cmd tc.cc fun out =>
-        #["-o", (out / name).toString, (o.out / "main.o").toString] ++ srcArgs ++ tc.gmp.toArray ++
+        #["-o", (out / name).toString] ++ objPaths ++ srcArgs ++ tc.gmp.toArray ++
           tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags,
       onOk := fun _ out => do
         if bin then install (out / name) (r.ctx.grailDir / "bin" / name)
@@ -684,14 +716,25 @@ def Runner.tests (r : Runner) (targets : List Target) (filters : List String) (u
 /-! ## A job, in its own process -/
 
 /-- The IR, C and link text of a checked program. One job writes all three, so a file
-is elaborated once instead of once per job. -/
-def writeCode (out : System.FilePath) (s : CommandState ZeroOneMany) : IO (Except String Unit) :=
+is elaborated once instead of once per job. With `--split N`, it also writes the split
+units (`wiz_split.h`, `support.c`, `part0.c` …) and `split.txt`, which the `obj` and
+`link` nodes compile and link. -/
+def writeCode (r : Runner) (out : System.FilePath) (s : CommandState ZeroOneMany) : IO (Except String Unit) :=
   match mainDecls s with
   | .error e => pure (.error e)
   | .ok (ds, io) => do
     IO.FS.writeFile (out / "main.ir") ("\n".intercalate (ds.toList.map (·.toString)))
-    IO.FS.writeFile (out / "main.c") (C.program ds io (Build.extraC s) s.globals.unboxStructs)
+    let extra := Build.extraC s
+    let unbox := s.globals.unboxStructs
+    IO.FS.writeFile (out / "main.c") (C.program ds io extra unbox)
     IO.FS.writeFile (out / "link.txt") (renderLink (Build.linkOf s))
+    let n := Build.resolveSplit r.split ds
+    if n >= 2 && ds.size >= 2 then
+      let sc := Build.splitCode ds io extra unbox [] false n
+      IO.FS.writeFile (out / "wiz_split.h") sc.header
+      for (name, text, _) in sc.units do IO.FS.writeFile (out / (name ++ ".c")) text
+      IO.FS.writeFile (out / "split.txt")
+        (String.join (sc.units.toList.map fun (name, _, api) => s!"{name}\t{if api then "1" else "0"}\n"))
     pure (.ok ())
 
 /-- Run one job (`(KIND ARGS…)`), writing into `out`. -/
@@ -713,8 +756,8 @@ def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except Strin
     if hasErrors s then return .error msgs
     IO.print msgs
     IO.FS.writeFile (out / "messages.txt") msgs
-    writeCode out s
-  | .l #[.a "ir", .a file] => do writeCode out (← r.elab file)
+    writeCode r out s
+  | .l #[.a "ir", .a file] => do writeCode r out (← r.elab file)
   | .l #[.a "run-on", .a exe, .a input, .a file] => do
     runOn exe (← IO.FS.readFile input) out file
   | .l #[.a "test", .a file, .a kind, .a exe] => do
@@ -726,14 +769,14 @@ def Runner.runJob (r : Runner) (out : System.FilePath) : Sx → IO (Except Strin
     | .error e => pure (.error e)
   | x => pure (.error s!"unknown job {x.render}")
 
-/-- `<self> --grail-job JOB TOOLCHAIN-FLAGS`: `JOB` is `(job DIR STD BINID (ROOTS…) OUT (KIND ARGS…))`.
+/-- `<self> --grail-job JOB TOOLCHAIN-FLAGS`: `JOB` is `(job DIR STD BINID (ROOTS…) SPLIT OUT (KIND ARGS…))`.
 Exit code 0 when the job succeeded; its report on stdout, its error on stderr. -/
 def jobMain (tc : Toolchain) (arg : String) : IO UInt32 := do
-  let some (.l #[.a "job", .a dir, .a std, .a bin, .l roots, .a out, job]) := Sx.parse arg
+  let some (.l #[.a "job", .a dir, .a std, .a bin, .l roots, .a split, .a out, job]) := Sx.parse arg
     | IO.eprintln s!"bad job {arg}"; return 2
   let r : Runner := { ctx := { dir, std, tc, binId := bin.toNat!.toUInt64,
                                libRoots := roots.toList.filterMap fun x => (atom? x).map System.FilePath.mk },
-                      stats := ← IO.mkRef {}, memo := ← IO.mkRef {} }
+                      stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, split := split.toNat! }
   match ← (try r.runJob out job catch e => pure (.error (toString e))) with
   | .ok () => pure 0
   | .error e => IO.eprint e; pure 1
