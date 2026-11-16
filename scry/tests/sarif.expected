@@ -1,0 +1,41 @@
+schema is the OASIS 2.1.0 schema: ok
+version 2.1.0: ok
+one run: ok
+driver name: ok
+category is taint: ok
+columnKind is utf16: ok
+artifact has %SRCROOT%: ok
+taxonomy is CWE: ok
+taxonomy has CWE-78 with text and help: ok
+two rule descriptors: ok
+rule id is namespaced: ok
+rule name is the human name: ok
+rule has fullDescription and help: ok
+rule CWE tag is external/cwe/cwe-078: ok
+rule security-severity: ok
+rule precision: ok
+rule CWE relationship: ok
+built-in fallback fills a metadata-free rule: ok
+partialFingerprints has both keys: ok
+fingerprints are 16 hex digits: ok
+primary line hash is over the normalized line: ok
+line hash ignores whitespace-only changes: ok
+line hash changes with the line's content: ok
+line hash does not use the line number: ok
+composite fingerprint is stable across a path-free rerun: ok
+composite fingerprint normalizes the URI: ok
+composite fingerprint changes with the callee: ok
+one code flow with three events: ok
+flow starts at the source and ends at the sink: ok
+event executionOrder is 1-based and consecutive: ok
+event location has a physical span and a message: ok
+relatedLocations still list the path before the sink: ok
+logical result has only the semantic fingerprint: ok
+logical result says the fingerprint scope is semantic: ok
+boundary result has its own rule id: ok
+boundary result has the UAF CWE tag: ok
+boundary result has fingerprints: ok
+taxonomy includes the boundary rule's CWE: ok
+rule metadata round-trips: ok
+the rendered pack keeps the CWE line: ok
+the rendered pack keeps the security severity: ok

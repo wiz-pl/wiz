@@ -8,6 +8,13 @@
 #     kind taint | forbidden
 #     severity error | warning | note
 #     message TEXT
+#     name TEXT                     (short human name for SARIF)
+#     description TEXT              (long description for SARIF)
+#     cwe N                         (repeatable; CWE taxonomy id)
+#     help-uri URL
+#     security-severity 0.0-10.0    (GitHub code scanning)
+#     precision high | medium | low
+#     tag TEXT                      (repeatable)
 #     source NAME result | arg K
 #     sanitise NAME result | arg K
 #     sink NAME arg K
@@ -20,6 +27,14 @@ rule command-injection
   kind taint
   severity error
   message Attacker-controlled data reaches a command interpreter
+  name Command injection
+  description Attacker-controlled data reaches a command interpreter such as system or popen without a sanitiser
+  cwe 78
+  help-uri https://cwe.mitre.org/data/definitions/78.html
+  security-severity 9.8
+  precision high
+  tag security
+  tag injection
   source getenv result
   source recv result
   source read arg 1
@@ -33,6 +48,14 @@ rule format-string
   kind taint
   severity warning
   message Attacker-controlled data is used as a format string
+  name Format string
+  description Attacker-controlled data reaches the format argument of printf or fprintf
+  cwe 134
+  help-uri https://cwe.mitre.org/data/definitions/134.html
+  security-severity 8.1
+  precision high
+  tag security
+  tag format
   source getenv result
   source recv result
   sanitise escape_shell result
@@ -44,6 +67,14 @@ rule gets-overflow
   kind forbidden
   severity error
   message gets cannot bound its write; use fgets with a size
+  name Unbounded gets
+  description gets reads a line without a bound; it cannot be used safely
+  cwe 242
+  cwe 120
+  help-uri https://cwe.mitre.org/data/definitions/242.html
+  security-severity 9.8
+  precision high
+  tag security
   call gets
 end
 
@@ -51,6 +82,14 @@ rule strcpy-overflow
   kind forbidden
   severity warning
   message strcpy does not bound the copy; use strlcpy or a checked length
+  name Unbounded strcpy
+  description strcpy and strcat copy without a bound; use strlcpy, strlcat or a checked length
+  cwe 120
+  cwe 787
+  help-uri https://cwe.mitre.org/data/definitions/120.html
+  security-severity 7.5
+  precision high
+  tag security
   call strcpy
   call strcat
 end

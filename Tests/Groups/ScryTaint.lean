@@ -422,6 +422,22 @@ def group : Group where
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "SARIF: CWE taxonomy, rule metadata, fingerprints and code flows",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
+          "def sar : Json := Scry.sarifFor \"scry\" \"taint\" \"demo source\\nline 2\\n\" originMap Scry.demoRules (List.map (fun f => (f, .false)) (Scry.programFindings prI)) []\n" ++
+          "#eval match Scry.packRuleFind Scry.demoRules \"command-injection\" with | .some r => List.length (Scry.effectiveInfo r).cwe | .none => 0\n" ++
+          "#eval match Json.getList sar \"runs\" with | .cons run _ => (match Json.getList run \"taxonomies\" with | .cons tax _ => List.length (Json.getList tax \"taxa\") | .nil => 0) | .nil => 0\n" ++
+          "#eval match Json.getList sar \"runs\" with | .cons run _ => (match Json.getList run \"results\" with | .cons res _ => (match Json.get (firstResult sar) \"partialFingerprints\" with | .some fps => Nat.add (match Json.get fps \"primaryLocationLineHash\" with | .some _ => 10 | .none => 0) (match Json.get fps \"scry/v1\" with | .some _ => 1 | .none => 0) | .none => 0) | .nil => 0) | .nil => 0\n" ++
+          "#eval match Json.getList sar \"runs\" with | .cons run _ => (match Json.getList run \"results\" with | .cons res _ => (match Json.get (firstResult sar) \"codeFlows\" with | .some cf => (match Json.asList cf with | .cons flow _ => (match Json.get flow \"threadFlows\" with | .some tfs => (match Json.asList tfs with | .cons tf _ => List.length (Json.getList tf \"locations\") | .nil => 0) | .none => 0) | .nil => 0) | .none => 0) | .nil => 0) | .nil => 0\n" ++
+          "#eval match Json.get (sarifRun sar) \"automationDetails\" with | .some a => (if String.eq (Json.getStr a \"id\") \"scry/taint\" then 1 else 0) | .none => 0") [1, 5, 11, 3, 1]
+        evalRuleTexts (rulePrelude ++
+          "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
+          "def sar : Json := Scry.sarifFor \"scry\" \"taint\" \"\" originMap Scry.demoRules (List.map (fun f => (f, .false)) (Scry.programFindings prI)) []\n" ++
+          "#eval match Scry.packRuleFind Scry.demoRules \"command-injection\" with | .some r => (Scry.effectiveInfo r).name | .none => \"\"\n" ++
+          "#eval Json.getStr (sarifRun sar) \"columnKind\"")
+          ["\"Command injection\"", "\"utf16CodeUnits\""] },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"

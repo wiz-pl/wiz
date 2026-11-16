@@ -90,17 +90,23 @@ mem-indirect-unknown: an unknown location: ok
 macro errors: refused without --allow-errors: ok
 macro errors: recovered with --allow-errors: ok
 sarif: version 2.1.0: ok
+sarif: OASIS schema: ok
 sarif: one run: ok
 sarif: driver name: ok
 sarif: four rule descriptors: ok
+sarif: category: ok
 sarif: one result: ok
 sarif: rule id: ok
 sarif: namespaced rule descriptor: ok
+sarif: rule carries the CWE tag: ok
+sarif: taxonomy has CWE-78: ok
 sarif: utf16 column kind: ok
 sarif: derivation checked: ok
+sarif: both fingerprints present: ok
 sarif: one primary location: ok
 sarif: primary span line: ok
 sarif: related spans present: ok
+sarif: code flow source to sink: ok
 {"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":4,"parseErrors":0,"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"memory":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":0}}
 cli --sarif: exit 0: ok
 cli --sarif: file parses: ok

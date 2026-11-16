@@ -6,9 +6,13 @@ import Text
 # Scry.Sarif
 
 **SARIF 2.1.0 output** for `Scry.RuleFinding`s (`import Scry.Sarif`): rule metadata,
-severity, message, the primary sink location, and the related locations of the source ->
-sink path. `Scry.renderSarif` is the library JSON writer; a `scry taint` command can
-call it once S2's C frontend supplies locations.
+severity, message, the primary sink location, the related locations of the source ->
+sink path, a `codeFlows` thread flow, GitHub-compatible `partialFingerprints`, and a
+CWE taxonomy.
+
+`Scry.sarifFor` is the full writer; `Scry.renderSarifFor` renders it. The older
+`Scry.sarif`/`Scry.renderSarifWith` entry points stay and call the full writer with a
+`taint` category and no source text (so they emit the semantic fingerprint only).
 
 ## Origins
 
@@ -19,19 +23,44 @@ an origin is still emitted: its location carries a `logicalLocation` naming the 
 and a `properties.programPoint` instead of a `physicalLocation`. S2 replaces the map with
 the origin-carrying statement type; the writer's shape does not change.
 
+## GitHub code scanning
+
+* `partialFingerprints.primaryLocationLineHash` is the key code scanning reads. It is a
+  64-bit FNV-1a hash of the rule id and the normalized text of the primary line, with
+  **no line number**: a line move keeps the alert, a content change creates a new one.
+* `partialFingerprints.scry/v1` is the semantic fingerprint: rule id, normalized relative
+  URI, function, callee and sink argument, and the path's role sequence. It survives a
+  sink moving within a function as long as the source -> sink shape is unchanged. The
+  key is versioned because a change to its inputs must be a new key.
+* A finding without a physical location omits `primaryLocationLineHash` rather than
+  inventing one; it keeps `scry/v1` and says `properties.fingerprintScope: semantic`.
+* `runs[0].automationDetails.id` is `scry/<category>` (the SARIF-native category;
+  `upload-sarif`'s `category` input sets the same thing at upload time).
+* `runs[0].taxonomies` is a CWE taxonomy, and each rule descriptor has
+  `relationships` to its CWE ids and `properties.tags` with
+  `external/cwe/cwe-NNN`. The CWE text lives in the taxonomy, not in every rule.
+* `runs[0].artifacts` lists the source URIs with `uriBaseId: %SRCROOT%`, so a code
+  scanning service can resolve a path relative to the repository root.
+
+Rule metadata comes from the `.scry` pack (`name`, `description`, `cwe`, `help-uri`,
+`security-severity`, `precision`, `tag`), with a built-in table for the default rule
+ids, and finally the rule id and message as a fallback. A custom pack therefore never
+needs a Scry change to be reported with a CWE mapping.
+
 ## Shape
 
 ```
-{ "$schema": "…sarif-schema-2.1.0.json", "version": "2.1.0",
-  "runs": [ { "tool": { "driver": { "name": "scry", "rules": [ … ] } },
-              "results": [ { "ruleId": …, "level": …,
-                             "locations": [ … ], "relatedLocations": [ … ] } ] } ] }
+{ "$schema": ".../sarif-schema-2.1.0.json", "version": "2.1.0",
+  "runs": [ { "tool": { "driver": { "name": "scry", "rules": [ ... ] } },
+              "automationDetails": { "id": "scry/taint" },
+              "taxonomies": [ { "name": "CWE", "taxa": [ ... ] } ],
+              "artifacts": [ ... ],
+              "results": [ { "ruleId": ..., "level": ...,
+                             "locations": [ ... ],
+                             "relatedLocations": [ ... ],
+                             "codeFlows": [ ... ],
+                             "partialFingerprints": { ... } } ] } ] }
 ```
-
-Related locations are the origin-carrying path nodes (the sink is `locations`), numbered
-from 1; each names its `PathKind` in the message and keeps the program point in
-`properties`. A path with no origins still lists its length and function in the result's
-properties, so a caller can see the evidence even before spans exist.
 -/
 
 -- ## Origins
@@ -56,6 +85,229 @@ def Scry.originAt (m : Scry.OriginMap) (func : String) (point : Nat) : Option Sc
   | .none => .none
   | .some e => .some e.origin
 
+-- ## Text, hashing and fingerprints
+
+/-- A NUL byte, the field separator of the fingerprint inputs (it cannot appear in a
+path or a rule id). -/
+def Scry.nul : String := String.singleton (Json.chr 0)
+
+/-- Collapse a whitespace run to one space and drop trailing whitespace. -/
+def Scry.collapseSpace : List Char → List Char
+  | .nil => .nil
+  | .cons c rest =>
+    if Char.isSpace c then
+      match Scry.collapseSpace rest with
+      | .nil => .nil
+      | r => List.cons (Json.chr 32) r
+    else List.cons c (Scry.collapseSpace rest)
+
+/-- A line with leading and trailing whitespace stripped and internal whitespace runs
+collapsed, so a whitespace-only edit keeps a finding. -/
+def Scry.normalizeLine (s : String) : String :=
+  String.trim (String.ofChars (Scry.collapseSpace (String.chars s)))
+
+/-- The text of a 1-based line, without its line ending. -/
+def Scry.lineText (text : String) (line : Nat) : String :=
+  match List.drop (Nat.sub line 1) (String.splitOn text "\n") with
+  | .cons l _ => l
+  | .nil => ""
+
+/-- `s` with `\` turned into `/` and a leading `./` removed, for a stable relative URI. -/
+def Scry.normalizeUri (s : String) : String :=
+  let s := String.replace s "\\" "/";
+  match String.stripPrefix s "./" with
+  | .some rest => rest
+  | .none => s
+
+/-- 64-bit exclusive or, on the low `k` bits (Wiz's `Nat.xor` takes fuel equal to the
+operands, so it is unusable on a 64-bit state). -/
+def Scry.xorBits : Nat → Nat → Nat → Nat
+  | .zero, _, _ => .zero
+  | .succ k, a, b =>
+    let rest := Scry.xorBits k a b;
+    match Bool.xor (Nat.testBit a k) (Nat.testBit b k) with
+    | .true => Nat.add (Nat.pow 2 k) rest
+    | .false => rest
+
+/-- FNV-1a over a string's code points, modulo 2^64. It is deterministic and independent
+of the Lean/Wiz build (`Hashable` is not), which is what a fingerprint needs. -/
+def Scry.fnv1a (s : String) : Nat :=
+  List.foldl (fun h c =>
+    Nat.mod (Nat.mul (Scry.xorBits 64 h (Char.code c)) 1099511628211)
+      18446744073709551616) 14695981039346656037 (String.chars s)
+
+/-- A `Nat` as 16 lowercase hex digits (most significant first). -/
+def Scry.hexDigits : Nat → Nat → List Char
+  | .zero, _ => .nil
+  | .succ k, n =>
+    List.cons (Json.hexDigit (Nat.mod (Nat.div n (Nat.pow 16 k)) 16))
+      (Scry.hexDigits k n)
+
+def Scry.hex16 (n : Nat) : String := String.ofChars (Scry.hexDigits 16 n)
+
+/-- The fingerprint key GitHub code scanning reads. -/
+def Scry.fingerprintKey : String := "primaryLocationLineHash"
+
+/-- The versioned semantic fingerprint's key. -/
+def Scry.compositeFingerprintKey : String := "scry/v1"
+
+/-- `primaryLocationLineHash`: the rule id and the normalized primary line. The line
+number is deliberately absent. -/
+def Scry.primaryLocationLineHash (rule line : String) : String :=
+  Scry.hex16 (Scry.fnv1a (String.append (String.append rule Scry.nul)
+    (Scry.normalizeLine line)))
+
+/-- The coarse role sequence of a path (`source@f,flow@f,sink@f`); program points are
+excluded so a re-ordering of the same roles does not create a second alert. -/
+def Scry.pathShape (path : List Scry.PathNode) : String :=
+  String.intercalate "," (List.map (fun p =>
+    String.append (String.append (Scry.PathKind.show p.kind) "@") p.func) path)
+
+/-- `scry/v1`: rule id, normalized URI, function, sink callee and argument, and path
+shape. Absolute paths, line/column, timestamps and program-point ids are excluded. -/
+def Scry.compositeFingerprint (rule uri func callee arg shape : String) : String :=
+  Scry.hex16 (Scry.fnv1a (String.join
+    [ rule, Scry.nul, Scry.normalizeUri uri, Scry.nul, func, Scry.nul,
+      callee, Scry.nul, arg, Scry.nul, shape ]))
+
+def Scry.originLine (m : Scry.OriginMap) (func : String) (point : Nat) : Option Nat :=
+  match Scry.originAt m func point with
+  | .some o => .some o.line
+  | .none => .none
+
+-- ## CWE taxonomy
+
+structure Scry.CweInfo where
+  id : Nat
+  name : String
+  description : String
+
+/-- The CWE entries Scry's rule metadata uses. The taxonomy is emitted with only the
+entries a run needs; this table supplies the human text. -/
+def Scry.cweTable : List Scry.CweInfo :=
+  [ Scry.CweInfo.mk 78 "OS Command Injection"
+      "The software constructs a command from externally influenced data without neutralizing it."
+  , Scry.CweInfo.mk 120 "Buffer Copy without Checking Size of Input"
+      "The software copies a buffer without ensuring that the destination is large enough."
+  , Scry.CweInfo.mk 134 "Use of Externally-Controlled Format String"
+      "The software uses externally-controlled input as a format string."
+  , Scry.CweInfo.mk 242 "Use of Inherently Dangerous Function"
+      "The software calls a function that cannot be used safely, such as gets."
+  , Scry.CweInfo.mk 416 "Use After Free"
+      "The software dereferences memory after it has been freed."
+  , Scry.CweInfo.mk 787 "Out-of-bounds Write"
+      "The software writes past the end of a buffer."
+  ]
+
+def Scry.cweInfo (n : Nat) : Scry.CweInfo :=
+  match List.find (fun c => Nat.beq c.id n) Scry.cweTable with
+  | .some c => c
+  | .none => Scry.CweInfo.mk n (String.append "CWE-" (Nat.repr n)) ""
+
+def Scry.pad3 (n : Nat) : String :=
+  match Nat.lt n 10 with
+  | .true => String.append "00" (Nat.repr n)
+  | .false => match Nat.lt n 100 with
+    | .true => String.append "0" (Nat.repr n)
+    | .false => Nat.repr n
+
+def Scry.cweTag (n : Nat) : String := String.append "external/cwe/cwe-" (Scry.pad3 n)
+
+def Scry.cweUri (n : Nat) : String :=
+  String.append (String.append "https://cwe.mitre.org/data/definitions/" (Nat.repr n)) ".html"
+
+def Scry.dedupStrings (xs : List String) : List String :=
+  List.foldl (fun acc x =>
+    match List.find (fun y => String.eq x y) acc with
+    | .some _ => acc
+    | .none => List.append acc (List.cons x .nil)) .nil xs
+
+def Scry.dedupNats (xs : List Nat) : List Nat :=
+  List.foldl (fun acc n =>
+    match List.find (fun k => Nat.beq n k) acc with
+    | .some _ => acc
+    | .none => List.append acc (List.cons n .nil)) .nil xs
+
+-- ## Rule metadata
+
+/-- The built-in table for the default pack's ids (short) and the non-pack result ids
+(lowering/memory). A pack's own metadata wins over this; the table only fills gaps. -/
+def Scry.builtinMetaTable : List (String × Scry.RuleInfo) :=
+  [ ("command-injection",
+      Scry.RuleInfo.mk "Command injection"
+        "Attacker-controlled data reaches a command interpreter such as system or popen without a sanitiser"
+        [78] "https://cwe.mitre.org/data/definitions/78.html" "9.8" "high" ["security", "injection"])
+  , ("format-string",
+      Scry.RuleInfo.mk "Format string"
+        "Attacker-controlled data reaches the format argument of printf or fprintf"
+        [134] "https://cwe.mitre.org/data/definitions/134.html" "8.1" "high" ["security", "format"])
+  , ("gets-overflow",
+      Scry.RuleInfo.mk "Unbounded gets"
+        "gets reads a line without a bound; it cannot be used safely"
+        [242, 120] "https://cwe.mitre.org/data/definitions/242.html" "9.8" "high" ["security"])
+  , ("strcpy-overflow",
+      Scry.RuleInfo.mk "Unbounded strcpy"
+        "strcpy and strcat copy without a bound; use strlcpy, strlcat or a checked length"
+        [120, 787] "https://cwe.mitre.org/data/definitions/120.html" "7.5" "high" ["security"])
+  , ("scry/lowering/boundary",
+      Scry.RuleInfo.mk "Lowering boundary"
+        "A construct the Wil lowering could not model; the value is havoc, so a finding through it is conditional"
+        .nil "" "" "medium" ["lowering", "soundy"])
+  , ("scry/memory/unknown-memory",
+      Scry.RuleInfo.mk "Unknown memory"
+        "A store or load through memory the points-to analysis could not bound; the taint still propagates"
+        .nil "" "" "low" ["memory", "soundy"])
+  , ("scry/memory/use-after-free",
+      Scry.RuleInfo.mk "Use after free"
+        "A store or load through a location that was freed"
+        [416] "https://cwe.mitre.org/data/definitions/416.html" "7.5" "medium" ["security", "memory"])
+  , ("scry/memory/unknown-indirect",
+      Scry.RuleInfo.mk "Unknown indirect call"
+        "An indirect call whose target the points-to analysis could not resolve; the callee is unknown"
+        .nil "" "" "low" ["memory", "soundy"])
+  ]
+
+def Scry.builtinMeta (id : String) : Scry.RuleInfo :=
+  match List.find (fun p => String.eq p.1 id) Scry.builtinMetaTable with
+  | .some p => p.2
+  | .none => match List.find (fun p => String.eq (String.append "scry/c/" p.1) id)
+      Scry.builtinMetaTable with
+    | .some p => p.2
+    | .none => Scry.RuleInfo.empty id
+
+/-- A rule's effective metadata: pack fields, then the built-in table, then the id and
+pack message as the last resort. `precision` defaults to SARIF's `medium`. -/
+def Scry.effectiveInfo (r : Scry.PackRule) : Scry.RuleInfo :=
+  let merged := Scry.RuleInfo.merge (Scry.PackRule.info r) (Scry.builtinMeta (Scry.PackRule.id r));
+  let name := match String.isEmpty merged.name with
+    | .true => Scry.PackRule.id r
+    | .false => merged.name;
+  let description := match String.isEmpty merged.description with
+    | .true => Scry.PackRule.message r
+    | .false => merged.description;
+  let precision := match String.isEmpty merged.precision with
+    | .true => "medium"
+    | .false => merged.precision;
+  Scry.RuleInfo.mk name description merged.cwe merged.helpUri merged.securitySeverity precision
+    merged.tags
+
+def Scry.packRuleFind (pack : Scry.RulePack) (id : String) : Option Scry.PackRule :=
+  List.find (fun r => String.eq (Scry.PackRule.id r) id) pack.rules
+
+def Scry.effectiveInfoById (pack : Scry.RulePack) (id : String) : Scry.RuleInfo :=
+  match Scry.packRuleFind pack id with
+  | .some r => Scry.effectiveInfo r
+  | .none => Scry.builtinMeta id
+
+def Scry.cwesOfPackGo (pack : Scry.RulePack) : List Nat :=
+  Scry.dedupNats (Scry.rulePackConcat (fun r => (Scry.effectiveInfo r).cwe) pack.rules)
+
+/-- The CWEs of the pack's rules plus the extra (boundary/memory) rule ids, in first
+appearance order. -/
+def Scry.cwesOfRun (pack : Scry.RulePack) (extraRules : List String) : List Nat :=
+  Scry.dedupNats (List.append (Scry.cwesOfPackGo pack)
+    (Scry.rulePackConcat (fun id => (Scry.builtinMeta id).cwe) extraRules))
+
 -- ## JSON pieces
 
 def Scry.regionJson (o : Scry.Origin) : Json :=
@@ -65,11 +317,21 @@ def Scry.regionJson (o : Scry.Origin) : Json :=
     , ("endLine", Json.ofNat o.endLine)
     , ("endColumn", Json.ofNat o.endColumn) ]
 
+def Scry.uriBaseId : String := "%SRCROOT%"
+
+def Scry.artifactLocationJson (uri : String) : Json :=
+  Json.mkObj
+    [ ("uri", Json.mkStr uri)
+    , ("uriBaseId", Json.mkStr Scry.uriBaseId) ]
+
+def Scry.physicalLocationInnerJson (o : Scry.Origin) : Json :=
+  Json.mkObj
+    [ ("artifactLocation", Scry.artifactLocationJson o.uri)
+    , ("region", Scry.regionJson o) ]
+
 def Scry.physicalLocationJson (o : Scry.Origin) : Json :=
   Json.mkObj
-    [ ("physicalLocation", Json.mkObj
-        [ ("artifactLocation", Json.mkObj [("uri", Json.mkStr o.uri)])
-        , ("region", Scry.regionJson o) ]) ]
+    [ ("physicalLocation", Scry.physicalLocationInnerJson o) ]
 
 def Scry.logicalLocationJson (func : String) (point : Nat) : Json :=
   Json.mkObj
@@ -108,26 +370,62 @@ one dashboard, and the id does not encode an array index or a version. Findings 
 short pack id in `properties.packRuleId`, so the human line and the JSON stay readable. -/
 def Scry.sarifRuleId (id : String) : String := String.append "scry/c/" id
 
-/-- A rule's SARIF metadata (`reportingDescriptor`). -/
-def Scry.ruleJson (r : Scry.PackRule) : Json :=
-  let props := match r with
-    | .taint t =>
-      Json.mkObj
-        [ ("kind", Json.mkStr "taint")
-        , ("sinks", Scry.sinkListJson t)
-        , ("sources", Scry.sourceListJson t)
-        , ("sanitisers", Scry.sanListJson t) ]
-    | .forbidden f =>
-      Json.mkObj
-        [ ("kind", Json.mkStr "forbidden")
-        , ("calls", Scry.callListJson f) ];
+def Scry.relationshipJson (n : Nat) : Json :=
   Json.mkObj
+    [ ("target", Json.mkObj
+        [ ("id", Json.mkStr (Nat.repr n))
+        , ("toolComponent", Json.mkObj
+            [("name", Json.mkStr "CWE"), ("index", Json.ofNat 0)]) ])
+    , ("kinds", Json.mkArr [Json.mkStr "superset"]) ]
+
+/-- The `tags` of a rule: the tool and category, `security` when it has a CWE, the
+`external/cwe/cwe-NNN` spellings GitHub filters on, and the pack's own tags (deduped). -/
+def Scry.ruleTags (i : Scry.RuleInfo) (category : String) : List String :=
+  let security := match i.cwe with
+    | .nil => (.nil : List String)
+    | _ => ["security"];
+  Scry.dedupStrings (List.append ["scry", category]
+    (List.append security (List.append (List.map Scry.cweTag i.cwe) i.tags)))
+
+/-- A rule's SARIF metadata (`reportingDescriptor`). -/
+def Scry.ruleJsonFor (category : String) (r : Scry.PackRule) : Json :=
+  let i := Scry.effectiveInfo r;
+  let baseProps := match r with
+    | .taint t =>
+      [ ("kind", Json.mkStr "taint")
+      , ("sinks", Scry.sinkListJson t)
+      , ("sources", Scry.sourceListJson t)
+      , ("sanitisers", Scry.sanListJson t) ]
+    | .forbidden f =>
+      [ ("kind", Json.mkStr "forbidden")
+      , ("calls", Scry.callListJson f) ];
+  let security := match String.isEmpty i.securitySeverity with
+    | .true => (.nil : List (String × Json))
+    | .false => [("security-severity", Json.mkStr i.securitySeverity)];
+  let props := Json.mkObj (List.append baseProps (List.append security
+    [ ("packRuleId", Json.mkStr (Scry.PackRule.id r))
+    , ("precision", Json.mkStr i.precision)
+    , ("tags", Json.mkArr (List.map Json.mkStr (Scry.ruleTags i category)))
+    , ("cwe", Json.mkArr (List.map Json.ofNat i.cwe)) ]));
+  let relationships := match i.cwe with
+    | .nil => (.nil : List (String × Json))
+    | _ => [("relationships", Json.mkArr (List.map Scry.relationshipJson i.cwe))];
+  let helpUri := match String.isEmpty i.helpUri with
+    | .true => (.nil : List (String × Json))
+    | .false => [("helpUri", Json.mkStr i.helpUri)];
+  Json.mkObj (List.append
     [ ("id", Json.mkStr (Scry.sarifRuleId (Scry.PackRule.id r)))
-    , ("name", Json.mkStr (Scry.PackRule.id r))
+    , ("name", Json.mkStr i.name)
     , ("shortDescription", Json.mkObj [("text", Json.mkStr (Scry.PackRule.message r))])
+    , ("fullDescription", Json.mkObj [("text", Json.mkStr i.description)])
+    , ("help", Json.mkObj [("text", Json.mkStr i.description)])
     , ("defaultConfiguration", Json.mkObj
-        [("level", Json.mkStr (Scry.Severity.sarif (Scry.PackRule.severity r)))])
+        [ ("level", Json.mkStr (Scry.Severity.sarif (Scry.PackRule.severity r)))
+        , ("enabled", Json.mkBool .true) ])
     , ("properties", props) ]
+    (List.append helpUri relationships))
+
+def Scry.ruleJson (r : Scry.PackRule) : Json := Scry.ruleJsonFor "taint" r
 
 def Scry.ruleIndexFrom (rs : List Scry.PackRule) (id : String) (i : Nat) : Nat :=
   match rs with
@@ -137,6 +435,32 @@ def Scry.ruleIndexFrom (rs : List Scry.PackRule) (id : String) (i : Nat) : Nat :
 
 def Scry.ruleIndexOf (pack : Scry.RulePack) (id : String) : Nat :=
   Scry.ruleIndexFrom pack.rules id 0
+
+/-- The CWE taxonomy component for the CWEs a run uses. -/
+def Scry.taxonomyJson (cwes : List Nat) : Json :=
+  Json.mkObj
+    [ ("name", Json.mkStr "CWE")
+    , ("version", Json.mkStr "4.13")
+    , ("organization", Json.mkStr "MITRE")
+    , ("informationUri", Json.mkStr "https://cwe.mitre.org/")
+    , ("shortDescription", Json.mkObj
+        [("text", Json.mkStr "The MITRE Common Weakness Enumeration")])
+    , ("taxa", Json.mkArr (List.map (fun n =>
+        let c := Scry.cweInfo n;
+        Json.mkObj
+          [ ("id", Json.mkStr (Nat.repr n))
+          , ("name", Json.mkStr c.name)
+          , ("shortDescription", Json.mkObj [("text", Json.mkStr c.description)])
+          , ("helpUri", Json.mkStr (Scry.cweUri n)) ]) cwes)) ]
+
+/-- Every source URI with an origin, in first-appearance order. -/
+def Scry.originUris (m : Scry.OriginMap) : List String :=
+  Scry.dedupStrings (List.map (fun e => e.origin.uri) m)
+
+def Scry.artifactJson (uri : String) : Json :=
+  Json.mkObj [("location", Scry.artifactLocationJson uri)]
+
+-- ## Paths, code flows and fingerprints
 
 /-- The related locations of a path: every step with a known origin, numbered from 1. -/
 def Scry.relatedGo (m : Scry.OriginMap) : List Scry.PathNode → Nat → List Json
@@ -150,7 +474,7 @@ def Scry.relatedGo (m : Scry.OriginMap) : List Scry.PathNode → Nat → List Js
         , ("message", Json.mkObj
             [("text", Json.mkStr (String.append (String.append (Scry.PathKind.show p.kind)
                 " in ") p.func))])
-        , ("physicalLocation", Scry.physicalLocationJson o)
+        , ("physicalLocation", Scry.physicalLocationInnerJson o)
         , ("properties", Json.mkObj
             [ ("programPoint", Json.ofNat p.point)
             , ("function", Json.mkStr p.func) ]) ])
@@ -166,6 +490,48 @@ origin, numbered from 1. -/
 def Scry.relatedLocations (m : Scry.OriginMap) (path : List Scry.PathNode) : List Json :=
   Scry.relatedGo m (Scry.dropLast path) 1
 
+/-- One `threadFlowLocation`: the path step's span (or logical location), its role and a
+1-based `executionOrder`. The first event is the source and the last the sink. The
+message belongs to the `location` object (SARIF's `threadFlowLocation` has no message
+field); `kinds` carries the role. -/
+def Scry.threadFlowGo (m : Scry.OriginMap) : List Scry.PathNode → Nat → List Json
+  | .nil, _ => .nil
+  | .cons p rest, i =>
+    let message := Json.mkObj
+      [("text", Json.mkStr (String.append (String.append (Scry.PathKind.show p.kind)
+        " in ") p.func))];
+    let loc := match Scry.originAt m p.func p.point with
+      | .some o => Json.mkObj (List.append [("message", message)]
+          [("physicalLocation", Scry.physicalLocationInnerJson o)])
+      | .none => Json.mkObj (List.append [("message", message)]
+          [ ("logicalLocations", Json.mkArr
+              [ Json.mkObj
+                  [ ("name", Json.mkStr p.func)
+                  , ("kind", Json.mkStr "function")
+                  , ("fullyQualifiedName", Json.mkStr p.func) ] ]) ]);
+    List.cons (Json.mkObj
+      [ ("location", loc)
+      , ("kinds", Json.mkArr [Json.mkStr (Scry.PathKind.show p.kind)])
+      , ("executionOrder", Json.ofNat i)
+      , ("properties", Json.mkObj
+          [ ("programPoint", Json.ofNat p.point)
+          , ("function", Json.mkStr p.func)
+          , ("variable", Json.ofNat p.var)
+          , ("role", Json.mkStr (Scry.PathKind.show p.kind)) ]) ])
+      (Scry.threadFlowGo m rest (Nat.succ i))
+
+/-- `codeFlows` for a finding's path, or no array when there is no path. GitHub expands
+the first thread flow in the result; `relatedLocations` stay for message references. -/
+def Scry.codeFlowsJson (m : Scry.OriginMap) (path : List Scry.PathNode) : List Json :=
+  match path with
+  | .nil => .nil
+  | _ =>
+    [ Json.mkObj
+        [ ("message", Json.mkObj [("text", Json.mkStr "source to sink")])
+        , ("threadFlows", Json.mkArr
+            [ Json.mkObj
+                [ ("locations", Json.mkArr (Scry.threadFlowGo m path 1)) ] ]) ] ]
+
 def Scry.pathLengthJson (path : List Scry.PathNode) : Json :=
   Json.ofNat (List.length path)
 
@@ -176,74 +542,181 @@ def Scry.derivationText (checked : Bool) : String :=
   | .true => "checked"
   | .false => "unchecked"
 
-def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (f : Scry.RuleFinding) (checked : Bool) : Json :=
-  Json.mkObj
+def Scry.fingerprintScopeJson (scope : String) : Json :=
+  Json.mkObj [("fingerprintScope", Json.mkStr scope)]
+
+/-- The fingerprints of a finding. `primaryLocationLineHash` is omitted when the primary
+location is logical: a hash of a line Scry cannot see would be a fabricated identity. -/
+def Scry.fingerprintsJson (m : Scry.OriginMap) (text : String)
+    (f : Scry.RuleFinding) : Json :=
+  let ruleId := Scry.sarifRuleId f.rule;
+  let lineHash := match Scry.originAt m f.func f.sink with
+    | .some o =>
+      [ (Scry.fingerprintKey, Json.mkStr
+          (Scry.primaryLocationLineHash ruleId (Scry.lineText text o.line))) ]
+    | .none => (.nil : List (String × Json));
+  let uri := match Scry.originAt m f.func f.sink with
+    | .some o => o.uri
+    | .none => "";
+  let composite := Scry.compositeFingerprint ruleId uri f.func f.name (Nat.repr f.arg)
+    (Scry.pathShape f.path);
+  Json.mkObj (List.append lineHash
+    [(Scry.compositeFingerprintKey, Json.mkStr composite)])
+
+def Scry.boundaryFingerprintsJson (text : String) (rule : String)
+    (origin : Option Scry.Origin) (func : String) (message : String) : Json :=
+  let lineHash := match origin with
+    | .some o =>
+      [ (Scry.fingerprintKey, Json.mkStr
+          (Scry.primaryLocationLineHash rule (Scry.lineText text o.line))) ]
+    | .none => (.nil : List (String × Json));
+  let uri := match origin with
+    | .some o => o.uri
+    | .none => "";
+  let composite := Scry.compositeFingerprint rule uri func "boundary" "0"
+    (Scry.normalizeLine message);
+  Json.mkObj (List.append lineHash
+    [(Scry.compositeFingerprintKey, Json.mkStr composite)])
+
+-- ## Results
+
+def Scry.resultJsonFor (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (category : String) (text : String) (f : Scry.RuleFinding) (checked : Bool) : Json :=
+  let i := Scry.effectiveInfoById pack f.rule;
+  let lineKnown := match Scry.originAt m f.func f.sink with
+    | .some _ => .true
+    | .none => (.false : Bool);
+  let scope := match lineKnown with
+    | .true => "line"
+    | .false => "semantic";
+  let props :=
+    [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
+    , ("category", Json.mkStr category)
+    , ("categories", Json.mkArr [Json.mkStr category])
+    , ("function", Json.mkStr f.func)
+    , ("sink", Json.ofNat f.sink)
+    , ("callee", Json.mkStr f.name)
+    , ("sinkArgument", Json.ofNat f.arg)
+    , ("pathLength", Scry.pathLengthJson f.path)
+    , ("derivation", Json.mkStr (Scry.derivationText checked))
+    , ("packRuleId", Json.mkStr f.rule)
+    , ("precision", Json.mkStr i.precision)
+    , ("tags", Json.mkArr (List.map Json.mkStr (Scry.ruleTags i category)))
+    , ("cwe", Json.mkArr (List.map Json.ofNat i.cwe))
+    , ("fingerprintScope", Json.mkStr scope) ];
+  let flows := Scry.codeFlowsJson m f.path;
+  Json.mkObj (List.append
     [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
     , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
     , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
     , ("message", Json.mkObj [("text", Json.mkStr f.message)])
     , ("locations", Json.mkArr [Scry.locationJson m f.func f.sink])
     , ("relatedLocations", Json.mkArr (Scry.relatedLocations m f.path))
-    , ("properties", Json.mkObj
-        [ ("kind", Json.mkStr (Scry.FindingKind.show f.kind))
-        , ("function", Json.mkStr f.func)
-        , ("sink", Json.ofNat f.sink)
-        , ("callee", Json.mkStr f.name)
-        , ("sinkArgument", Json.ofNat f.arg)
-        , ("pathLength", Scry.pathLengthJson f.path)
-        , ("derivation", Json.mkStr (Scry.derivationText checked))
-        , ("packRuleId", Json.mkStr f.rule) ]) ]
+    , ("partialFingerprints", Scry.fingerprintsJson m text f)
+    , ("properties", Json.mkObj props) ]
+    (match flows with
+      | .nil => .nil
+      | _ => [("codeFlows", Json.mkArr flows)]))
 
 /-- A finding without a status (the default of `Scry.sarif`). -/
 def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) : Json :=
-  Scry.resultJsonWith m pack f .false
+  Scry.resultJsonFor m pack "taint" "" f .false
 
 /-- A warning result with its own rule id: a lowering-boundary warning (what S2 could not
 model: a havoc'd or skipped construct) or a points-to memory warning (`unknown-memory`,
 `use-after-free`, `unknown-indirect`). It has no rule descriptor; the location is the
 offending statement's span, or a logical location when no origin is known. -/
-def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
-    (point : Nat) (message : String) : Json :=
+def Scry.boundaryResultJsonFor (category : String) (text : String) (rule : String)
+    (origin : Option Scry.Origin) (func : String) (point : Nat) (message : String) : Json :=
   let loc := match origin with
     | .some o => Scry.physicalLocationJson o
     | .none => Scry.logicalLocationJson func point;
+  let i := Scry.builtinMeta rule;
+  let scope := match origin with
+    | .some _ => "line"
+    | .none => "semantic";
+  let props :=
+    [ ("kind", Json.mkStr "boundary")
+    , ("category", Json.mkStr category)
+    , ("categories", Json.mkArr [Json.mkStr category])
+    , ("function", Json.mkStr func)
+    , ("programPoint", Json.ofNat point)
+    , ("derivation", Json.mkStr "unchecked")
+    , ("precision", Json.mkStr (match String.isEmpty i.precision with
+        | .true => "low"
+        | .false => i.precision))
+    , ("tags", Json.mkArr (List.map Json.mkStr (Scry.ruleTags i category)))
+    , ("cwe", Json.mkArr (List.map Json.ofNat i.cwe))
+    , ("fingerprintScope", Json.mkStr scope) ];
   Json.mkObj
     [ ("ruleId", Json.mkStr rule)
     , ("level", Json.mkStr "warning")
     , ("message", Json.mkObj [("text", Json.mkStr message)])
     , ("locations", Json.mkArr [loc])
-    , ("properties", Json.mkObj
-        [ ("kind", Json.mkStr "boundary")
-        , ("function", Json.mkStr func)
-        , ("programPoint", Json.ofNat point)
-        , ("derivation", Json.mkStr "unchecked") ]) ]
+    , ("partialFingerprints", Scry.boundaryFingerprintsJson text rule origin func message)
+    , ("properties", Json.mkObj props) ]
+
+def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)
+    (point : Nat) (message : String) : Json :=
+  Scry.boundaryResultJsonFor "taint" "" rule origin func point message
+
+-- ## The log
 
 /-- The SARIF log for findings with their derivation status, plus extra results
-(boundary warnings). `tool` names the driver ("scry"). -/
-def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
-    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
-  let rules := Json.mkArr (List.map Scry.ruleJson pack.rules);
+(boundary warnings). `category` names the analysis (`taint`, `ci`, `lint`, …) and becomes
+`automationDetails.id` and the result/rule property `category`; `text` is the analysed
+source, used for `primaryLocationLineHash`; `extraRules` are the rule ids of the extra
+results, so their CWE ids join the taxonomy. -/
+def Scry.sarifForRules (tool category text : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List (Scry.RuleFinding × Bool))
+    (extra : List Json) (extraRules : List String) : Json :=
+  let cwes := Scry.cwesOfRun pack extraRules;
+  let rules := Json.mkArr (List.map (Scry.ruleJsonFor category) pack.rules);
   let driver := Json.mkObj [ ("name", Json.mkStr tool)
     , ("version", Json.mkStr "0.1.0")
     , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
     , ("rules", rules) ];
   let toolObj := Json.mkObj [("driver", driver)];
   let results := Json.mkArr (List.append
-    (List.map (fun p => Scry.resultJsonWith m pack p.1 p.2) findings) extra);
+    (List.map (fun p => Scry.resultJsonFor m pack category text p.1 p.2) findings) extra);
+  let artifacts := Json.mkArr (List.map Scry.artifactJson (Scry.originUris m));
+  let taxonomies := match cwes with
+    | .nil => (.nil : List (String × Json))
+    | _ => [("taxonomies", Json.mkArr [Scry.taxonomyJson cwes])];
   /-- SARIF regions are 1-based line/column pairs; the default `columnKind` is UTF-16 code
   units. The C frontend's slice is ASCII (see `wiz-notes/scry-c2wil.md`), where a byte
   column is a UTF-16 column, so the declaration is exact for the supported subset; a
   non-ASCII source would need a byte -> UTF-16 conversion here (documented gap). -/
-  let run := Json.mkObj
+  let run := Json.mkObj (List.append
     [ ("tool", toolObj)
     , ("columnKind", Json.mkStr "utf16CodeUnits")
-    , ("results", results) ];
+    , ("automationDetails", Json.mkObj
+        [("id", Json.mkStr (String.append "scry/" category))])
+    , ("artifacts", artifacts)
+    , ("invocations", Json.mkArr
+        [Json.mkObj [("executionSuccessful", Json.mkBool .true)]])
+    , ("properties", Json.mkObj
+        [ ("category", Json.mkStr category)
+        , ("analysis", Json.mkStr "taint")
+        , ("fingerprintVersion", Json.mkStr Scry.compositeFingerprintKey) ])
+    , ("results", results) ]
+    taxonomies);
   Json.mkObj
-    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
+    [ ("$schema", Json.mkStr "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json")
     , ("version", Json.mkStr "2.1.0")
     , ("runs", Json.mkArr [run]) ]
+
+/-- `Scry.sarifForRules` without extra rule ids. -/
+def Scry.sarifFor (tool category text : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List (Scry.RuleFinding × Bool))
+    (extra : List Json) : Json :=
+  Scry.sarifForRules tool category text m pack findings extra (.nil : List String)
+
+/-- `Scry.sarifFor` with the default category (`taint`) and no source text. -/
+def Scry.sarifWith (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
+    (findings : List (Scry.RuleFinding × Bool)) (extra : List Json) : Json :=
+  Scry.sarifFor tool "taint" "" m pack findings extra
 
 /-- The SARIF log for these findings. `tool` names the driver ("scry"). -/
 def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
@@ -251,6 +724,16 @@ def Scry.sarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
   Scry.sarifWith tool m pack (List.map (fun f => (f, .false)) findings) .nil
 
 /-- The SARIF JSON as text (compact; SARIF does not require pretty-printing). -/
+def Scry.renderSarifForRules (tool category text : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List (Scry.RuleFinding × Bool))
+    (extra : List Json) (extraRules : List String) : String :=
+  Json.render (Scry.sarifForRules tool category text m pack findings extra extraRules)
+
+def Scry.renderSarifFor (tool category text : String) (m : Scry.OriginMap)
+    (pack : Scry.RulePack) (findings : List (Scry.RuleFinding × Bool))
+    (extra : List Json) : String :=
+  Json.render (Scry.sarifFor tool category text m pack findings extra)
+
 def Scry.renderSarif (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.RuleFinding) : String :=
   Json.render (Scry.sarif tool m pack findings)

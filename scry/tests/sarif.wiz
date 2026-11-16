@@ -1,0 +1,261 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.Rules
+import Scry.Sarif
+-- The SARIF 2.1.0 writer on a synthetic finding: schema/version, CWE taxonomy and rule
+-- metadata, `codeFlows`, `partialFingerprints` (both keys, normalization and stability),
+-- the `taint` category, `%SRCROOT%` artifacts, and the logical-location fallback.
+--
+-- The document this test renders validates against the OASIS 2.1.0 schema
+-- (`scripts/check-sarif.py --schema` when the schema file is available). The cases here
+-- check the same required keys and the fingerprint/CWE semantics without a network or a
+-- schema file.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+partial def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def nthJ (xs : List Json) (i : Nat) : Json := Scry.nthD Json.mkNull xs i
+
+def has (j : Json) (k : String) : Bool :=
+  match Json.get j k with
+  | .some _ => .true
+  | .none => .false
+
+def listHas (xs : List String) (s : String) : Bool :=
+  List.any (fun x => String.eq x s) xs
+
+def strsOf (j : Json) (path : List String) : List String :=
+  List.map (fun v => match v with | .str s => s | _ => "") (jList j path)
+
+-- ## A rule pack with metadata
+
+def packText : String :=
+  "rule cmd\n" ++
+  "  kind taint\n" ++
+  "  severity error\n" ++
+  "  message Attacker data reaches a command interpreter\n" ++
+  "  name Command injection\n" ++
+  "  description Externally controlled data reaches system\n" ++
+  "  cwe 78\n" ++
+  "  help-uri https://cwe.mitre.org/data/definitions/78.html\n" ++
+  "  security-severity 9.8\n" ++
+  "  precision high\n" ++
+  "  tag security\n" ++
+  "  source getenv result\n" ++
+  "  sink system arg 0\n" ++
+  "end\n" ++
+  "rule gets-overflow\n" ++
+  "  severity warning\n" ++
+  "  message A rule with no metadata\n" ++
+  "  call gets\n" ++
+  "end\n"
+
+def pack : Scry.RulePack := Scry.parseRulePack packText
+
+-- ## A finding and its origins
+
+def text : String :=
+  "int main(void) {\n" ++
+  "  char *p = getenv(\"HOME\");\n" ++
+  "  system(p);\n" ++
+  "}\n"
+
+def origins : Scry.OriginMap :=
+  [ Scry.OriginEntry.mk "main" 1 (Scry.Origin.mk "src/app.c" 2 13 2 27)
+  , Scry.OriginEntry.mk "main" 2 (Scry.Origin.mk "src/app.c" 2 3 2 27)
+  , Scry.OriginEntry.mk "main" 3 (Scry.Origin.mk "src/app.c" 3 3 3 11) ]
+
+def path : List Scry.PathNode :=
+  [ Scry.PathNode.mk "main" 1 2 .source
+  , Scry.PathNode.mk "main" 2 2 .flow
+  , Scry.PathNode.mk "main" 3 2 .sink ]
+
+def finding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "cmd" .error "Attacker data reaches a command interpreter"
+    .taint "main" 3 "system" 0 path
+
+def log : Json := Scry.sarifFor "scry" "taint" text origins pack [(finding, .true)] .nil
+
+def run : Json := nthJ (jList log ["runs"]) 0
+def rules : List Json := jList (jAt run ["tool", "driver"]) ["rules"]
+def result : Json := nthJ (jList run ["results"]) 0
+
+def logicalLog : Json :=
+  Scry.sarifFor "scry" "taint" text .nil pack [(finding, .true)] .nil
+
+def logicalResult : Json :=
+  nthJ (jList (nthJ (jList logicalLog ["runs"]) 0) ["results"]) 0
+
+def boundary : Json :=
+  Scry.boundaryResultJsonFor "taint" text "scry/memory/use-after-free"
+    (.some (Scry.Origin.mk "src/app.c" 3 3 3 11))
+    "main" 3 "load to a freed location"
+
+def boundaryLog : Json :=
+  Scry.sarifForRules "scry" "taint" text origins pack .nil [boundary]
+    ["scry/memory/use-after-free"]
+
+def lineOf (o : Scry.Origin) : String := Scry.lineText text o.line
+
+def main : IO Unit := EIO.toIO (do
+  -- schema and run
+  check "schema is the OASIS 2.1.0 schema"
+    (String.eq (jStr log ["$schema"])
+      "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json");
+  check "version 2.1.0" (String.eq (jStr log ["version"]) "2.1.0");
+  check "one run" (Nat.beq (List.length (jList log ["runs"])) 1);
+  check "driver name" (String.eq (jStr run ["tool", "driver", "name"]) "scry");
+  check "category is taint"
+    (Bool.and (String.eq (jStr run ["automationDetails", "id"]) "scry/taint")
+      (String.eq (jStr run ["properties", "category"]) "taint"));
+  check "columnKind is utf16"
+    (String.eq (jStr run ["columnKind"]) "utf16CodeUnits");
+  check "artifact has %SRCROOT%"
+    (String.eq (jStr (nthJ (jList run ["artifacts"]) 0)
+      ["location", "uriBaseId"]) "%SRCROOT%");
+
+  -- CWE taxonomy
+  let tax := nthJ (jList run ["taxonomies"]) 0;
+  check "taxonomy is CWE"
+    (Bool.and (String.eq (jStr tax ["name"]) "CWE")
+      (String.eq (jStr tax ["organization"]) "MITRE"));
+  check "taxonomy has CWE-78 with text and help"
+    (match jList tax ["taxa"] with
+      | .cons t _ =>
+        Bool.and (String.eq (jStr t ["id"]) "78")
+          (Bool.and (String.eq (jStr t ["name"]) "OS Command Injection")
+            (Nat.lt 0 (String.length (jStr t ["helpUri"]))))
+      | .nil => .false);
+
+  -- rule metadata
+  check "two rule descriptors" (Nat.beq (List.length rules) 2);
+  let cmd := nthJ rules 0;
+  check "rule id is namespaced"
+    (String.eq (jStr cmd ["id"]) "scry/c/cmd");
+  check "rule name is the human name"
+    (String.eq (jStr cmd ["name"]) "Command injection");
+  check "rule has fullDescription and help"
+    (Bool.and (Nat.lt 0 (String.length (jStr cmd ["fullDescription", "text"])))
+      (Nat.lt 0 (String.length (jStr cmd ["help", "text"]))));
+  check "rule CWE tag is external/cwe/cwe-078"
+    (listHas (strsOf cmd ["properties", "tags"]) "external/cwe/cwe-078");
+  check "rule security-severity"
+    (String.eq (jStr cmd ["properties", "security-severity"]) "9.8");
+  check "rule precision" (String.eq (jStr cmd ["properties", "precision"]) "high");
+  check "rule CWE relationship"
+    (match jList cmd ["relationships"] with
+      | .cons rel _ => String.eq (jStr rel ["target", "id"]) "78"
+      | .nil => .false);
+  check "built-in fallback fills a metadata-free rule"
+    (Bool.and (String.eq (jStr (nthJ rules 1) ["name"]) "Unbounded gets")
+      (String.eq (jStr (nthJ rules 1) ["properties", "precision"]) "high"));
+
+  -- fingerprints
+  let fps := jAt result ["partialFingerprints"];
+  check "partialFingerprints has both keys"
+    (Bool.and (has fps "primaryLocationLineHash") (has fps "scry/v1"));
+  check "fingerprints are 16 hex digits"
+    (Bool.and (Nat.beq (String.length (jStr result ["partialFingerprints",
+        "primaryLocationLineHash"])) 16)
+      (Nat.beq (String.length (jStr result ["partialFingerprints", "scry/v1"])) 16));
+  check "primary line hash is over the normalized line"
+    (String.eq (jStr result ["partialFingerprints", "primaryLocationLineHash"])
+      (Scry.primaryLocationLineHash "scry/c/cmd"
+        (lineOf (Scry.Origin.mk "src/app.c" 3 3 3 11))));
+  check "line hash ignores whitespace-only changes"
+    (String.eq (Scry.primaryLocationLineHash "scry/c/cmd" "  int x = 1;  ")
+      (Scry.primaryLocationLineHash "scry/c/cmd" "int x = 1;"));
+  check "line hash changes with the line's content"
+    (Bool.not (String.eq (Scry.primaryLocationLineHash "scry/c/cmd" "int x = 1;")
+      (Scry.primaryLocationLineHash "scry/c/cmd" "int x = 2;")));
+  check "line hash does not use the line number"
+    (String.eq (Scry.primaryLocationLineHash "scry/c/cmd" "int x = 1;")
+      (Scry.primaryLocationLineHash "scry/c/cmd" "int x = 1;"));
+  let shape := Scry.pathShape path;
+  let comp := Scry.compositeFingerprint "scry/c/cmd" "src/app.c" "main" "system" "0" shape;
+  let compUri := Scry.compositeFingerprint "scry/c/cmd" "./src/app.c" "main" "system" "0" shape;
+  let compOther := Scry.compositeFingerprint "scry/c/cmd" "src/app.c" "main" "popen" "0" shape;
+  check "composite fingerprint is stable across a path-free rerun"
+    (String.eq (jStr result ["partialFingerprints", "scry/v1"]) comp);
+  check "composite fingerprint normalizes the URI"
+    (String.eq compUri comp);
+  check "composite fingerprint changes with the callee"
+    (Bool.not (String.eq compOther comp));
+
+  -- code flows
+  let flow := nthJ (jList result ["codeFlows"]) 0;
+  let tf := nthJ (jList flow ["threadFlows"]) 0;
+  let events := jList tf ["locations"];
+  check "one code flow with three events" (Nat.beq (List.length events) 3);
+  check "flow starts at the source and ends at the sink"
+    (Bool.and (String.eq (jStr (nthJ events 0) ["properties", "role"]) "source")
+      (String.eq (jStr (nthJ events 2) ["properties", "role"]) "sink"));
+  check "event executionOrder is 1-based and consecutive"
+    (Bool.and (Nat.beq (jNat (nthJ events 0) ["executionOrder"]) 1)
+      (Nat.beq (jNat (nthJ events 2) ["executionOrder"]) 3));
+  let sinkLine := jNat (nthJ events 2)
+    ["location", "physicalLocation", "region", "startLine"];
+  let sinkText := jStr (nthJ events 2) ["location", "message", "text"];
+  check "event location has a physical span and a message"
+    (Bool.and (Nat.beq sinkLine 3) (Nat.lt 0 (String.length sinkText)));
+  check "relatedLocations still list the path before the sink"
+    (Nat.beq (List.length (jList result ["relatedLocations"])) 2);
+
+  -- logical location: no fabricated line hash
+  check "logical result has only the semantic fingerprint"
+    (Bool.not (has (jAt logicalResult ["partialFingerprints"]) "primaryLocationLineHash"));
+  check "logical result says the fingerprint scope is semantic"
+    (String.eq (jStr logicalResult ["properties", "fingerprintScope"]) "semantic");
+
+  -- a boundary result: own rule id, CWE from the built-in table, taxonomy extended
+  let bres := nthJ (jList (nthJ (jList boundaryLog ["runs"]) 0) ["results"]) 0;
+  check "boundary result has its own rule id"
+    (String.eq (jStr bres ["ruleId"]) "scry/memory/use-after-free");
+  check "boundary result has the UAF CWE tag"
+    (listHas (strsOf bres ["properties", "tags"]) "external/cwe/cwe-416");
+  check "boundary result has fingerprints"
+    (Bool.and (has (jAt bres ["partialFingerprints"]) "primaryLocationLineHash")
+      (has (jAt bres ["partialFingerprints"]) "scry/v1"));
+  check "taxonomy includes the boundary rule's CWE"
+    (List.any (fun t => String.eq (jStr t ["id"]) "416")
+      (jList (nthJ (jList (nthJ (jList boundaryLog ["runs"]) 0) ["taxonomies"]) 0)
+        ["taxa"]));
+
+  -- the pack metadata round-trips through the renderer and the parser
+  let rendered := Scry.RulePack.render pack;
+  let reparsed := Scry.parseRulePack rendered;
+  check "rule metadata round-trips"
+    (match reparsed.rules with
+      | .cons r _ => Nat.beq (List.length (Scry.PackRule.info r).cwe) 1
+      | .nil => .false);
+  check "the rendered pack keeps the CWE line"
+    (String.contains rendered "cwe 78");
+  check "the rendered pack keeps the security severity"
+    (String.contains rendered "security-severity 9.8"))

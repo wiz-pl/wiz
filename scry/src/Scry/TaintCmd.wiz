@@ -60,9 +60,13 @@ structure Scry.TaintOpts where
   failOnFinding : Bool
   /-- `--origin-map`: print the point -> span table. -/
   showOriginMap : Bool
+  /-- `--category NAME`: the code-scanning category (`automationDetails.id`, default
+  `taint`). Use a distinct value per analysis so alerts from different runs do not
+  replace each other. -/
+  category : String
 
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
-  Scry.TaintOpts.mk file .none .none .false .false .false .false
+  Scry.TaintOpts.mk file .none .none .false .false .false .false "taint"
 
 /-- Print a line on stdout (the CLI's `say`; `Scry.say` lives in `Scry.Cli`, which
 imports this module, so it cannot be used here). -/
@@ -70,7 +74,8 @@ def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
-  ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
+  ++ "                      [--category NAME] [--allow-errors]\n"
+  ++ "                      [--fail-on-finding] [--origin-map]\n"
 
 /-- Parse the flags after `scry taint`. Flags may come in any order; the first
 non-flag argument is the C source. -/
@@ -86,6 +91,9 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--sarif" => match rest with
       | .cons p more => Scry.taintArgsGo file { o with sarif := .some p } more
       | .nil => .error "--sarif needs an output file"
+    | "--category" => match rest with
+      | .cons c more => Scry.taintArgsGo file { o with category := c } more
+      | .nil => .error "--category needs a name"
     | "--json" => Scry.taintArgsGo file { o with json := .true } rest
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
@@ -330,6 +338,8 @@ def Scry.checkedCount (flags : List Bool) : Nat :=
 test can check the pipeline without depending on stdout. -/
 structure Scry.TaintReport where
   file : String
+  /-- The analysed source, kept for the primary-line fingerprint. -/
+  text : String
   /-- `ERROR`/`MISSING` nodes the parser recovered from. -/
   parseErrors : Nat
   pack : Scry.RulePack
@@ -366,7 +376,7 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     let boundaries := Scry.boundaryFindings o.file text tu;
     let memory := Scry.memoryFindings origins pr.warnings;
     let checks := List.map (fun f => Scry.findingChecked pr f) findings;
-    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks origins boundaries
+    EIO.pure (Scry.TaintReport.mk o.file text errs pack tu findings checks origins boundaries
       memory pr.pointsTo)
 
 /-- `(finding, checked)` pairs in the findings' order. -/
@@ -399,6 +409,7 @@ def Scry.printBoundaries (bs : List Scry.BoundaryFinding) : EIO Unit :=
 def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
   rep ← Scry.analyzeFile o;
   let errs := rep.parseErrors;
+  let sourceText := rep.text;
   let findings := rep.findings;
   let checks := rep.checks;
   let origins := rep.origins;
@@ -440,14 +451,17 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
     EIO.pure ());
   unit4 ← (match o.sarif with
   | .some out => do
-    let sarifText := Scry.renderSarifWith "scry" origins pack
+    let extra := List.append boundaries memory;
+    let sarifText := Scry.renderSarifForRules "scry" o.category sourceText origins pack
       (Scry.zipFindings findings checks)
-      (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
-        (List.append boundaries memory));
+      (List.map (fun b => Scry.boundaryResultJsonFor o.category sourceText b.rule b.origin
+        b.func b.point b.message) extra)
+      (List.map (fun b => b.rule) extra);
     FS.writeFile out sarifText;
     EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
       ++ Nat.repr (List.length findings) ++ " result(s), "
-      ++ Nat.repr (List.length boundaries) ++ " boundary)"))
+      ++ Nat.repr (List.length boundaries) ++ " boundary, category "
+      ++ o.category ++ ")"))
   | .none => EIO.pure ());
   let failing := Bool.and o.failOnFinding
     (Bool.or (Nat.lt 0 (List.length findings))

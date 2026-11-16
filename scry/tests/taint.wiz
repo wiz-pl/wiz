@@ -53,6 +53,12 @@ def jList (j : Json) (path : List String) : List Json :=
   | .arr xs => Jsons.toList xs
   | _ => .nil
 
+def listHas (xs : List String) (s : String) : Bool :=
+  List.any (fun x => String.eq x s) xs
+
+def strsOf (j : Json) (path : List String) : List String :=
+  List.map (fun v => match v with | .str s => s | _ => "") (jList j path)
+
 def firstFunc : List Scry.PathNode → String
   | .nil => ""
   | .cons p _ => p.func
@@ -263,34 +269,59 @@ def main : IO Unit := EIO.toIO (do
   rep6 ← Scry.analyzeFile o6a;
   check "macro errors: recovered with --allow-errors" (Nat.lt 0 rep6.parseErrors);
 
-  -- SARIF 2.1.0 shape, derivation status, primary span and related spans
-  let sarifText := Scry.renderSarifWith "scry" rep1.origins rep1.pack
+  -- SARIF 2.1.0 shape, derivation status, primary span, related spans, fingerprints,
+  -- code flows, the CWE taxonomy and the category
+  let sarifText := Scry.renderSarifForRules "scry" "taint" rep1.text rep1.origins rep1.pack
     (Scry.zipFindings rep1.findings rep1.checks)
-    (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
-      rep1.boundaries);
+    (List.map (fun b => Scry.boundaryResultJsonFor "taint" rep1.text b.rule b.origin
+      b.func b.point b.message) rep1.boundaries)
+    (List.map (fun b => b.rule) rep1.boundaries);
   match Json.parse sarifText with
   | .error e => check ("sarif: parses (" ++ e ++ ")") .false
   | .ok j => do
     check "sarif: version 2.1.0" (String.eq (Json.getStr j "version") "2.1.0");
+    check "sarif: OASIS schema"
+      (String.contains (Json.getStr j "$schema") "oasis-open.org");
     check "sarif: one run" (Nat.beq (List.length (Json.getList j "runs")) 1);
     let run := nthJ (Json.getList j "runs") 0;
     check "sarif: driver name" (String.eq (jStr run ["tool", "driver", "name"]) "scry");
     check "sarif: four rule descriptors"
       (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 4);
+    check "sarif: category"
+      (String.eq (jStr run ["automationDetails", "id"]) "scry/taint");
     check "sarif: one result" (Nat.beq (List.length (Json.getList run "results")) 1);
     let res := nthJ (Json.getList run "results") 0;
     check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "scry/c/command-injection");
     check "sarif: namespaced rule descriptor"
       (String.eq (jStr (nthJ (jList (jAt run ["tool", "driver"]) ["rules"]) 0) ["id"])
         "scry/c/command-injection");
+    check "sarif: rule carries the CWE tag"
+      (listHas (strsOf (nthJ (jList (jAt run ["tool", "driver"]) ["rules"]) 0)
+        ["properties", "tags"]) "external/cwe/cwe-078");
+    check "sarif: taxonomy has CWE-78"
+      (match jList (nthJ (jList run ["taxonomies"]) 0) ["taxa"] with
+        | .cons t _ => String.eq (jStr t ["id"]) "78"
+        | .nil => .false);
     check "sarif: utf16 column kind"
       (String.eq (Json.getStr run "columnKind") "utf16CodeUnits");
     check "sarif: derivation checked" (String.eq (jStr res ["properties", "derivation"]) "checked");
+    check "sarif: both fingerprints present"
+      (Bool.and (Nat.lt 0 (String.length (jStr res ["partialFingerprints",
+          "primaryLocationLineHash"])))
+        (Nat.lt 0 (String.length (jStr res ["partialFingerprints", "scry/v1"]))));
     let locs := jList res ["locations"];
     check "sarif: one primary location" (Nat.beq (List.length locs) 1);
     check "sarif: primary span line"
       (Nat.lt 0 (jNat (nthJ locs 0) ["physicalLocation", "region", "startLine"]));
     check "sarif: related spans present" (Nat.lt 0 (List.length (jList res ["relatedLocations"])));
+    check "sarif: code flow source to sink"
+      (match jList (nthJ (jList res ["codeFlows"]) 0) ["threadFlows"] with
+        | .cons tf _ => (match jList tf ["locations"] with
+          | .cons src (.cons _ (.cons sink _)) =>
+            Bool.and (String.eq (jStr src ["properties", "role"]) "source")
+              (String.eq (jStr sink ["properties", "role"]) "sink")
+          | _ => .false)
+        | .nil => .false);
 
   -- CLI: --sarif writes a parseable file; --fail-on-finding is the gate
   buildOk ← EIO.lift (FS.exists "build");

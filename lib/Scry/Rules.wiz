@@ -149,6 +149,77 @@ structure Scry.RuleSink where
   name : String
   arg : Nat
 
+/-- Optional reporting metadata for a rule (`name`, description, CWE ids, help URI,
+security severity, precision and tags). It is emitted as the SARIF reporting descriptor's
+`shortDescription`/`fullDescription`/`helpUri`/`properties`. Every field may be empty:
+`Scry.Sarif` then falls back to its built-in table for the default rule ids, and finally
+to the rule id and pack message, so an old pack without metadata still produces a valid
+descriptor. -/
+structure Scry.RuleInfo where
+  /-- A short human name (`Command injection`), not the id. -/
+  name : String
+  /-- The long description; `""` means "use the pack message". -/
+  description : String
+  /-- CWE ids (`[78]`). An empty list means no CWE mapping. -/
+  cwe : List Nat
+  /-- A documentation URL. -/
+  helpUri : String
+  /-- GitHub's `security-severity`, a 0.0-10.0 score as text (`"9.8"`). -/
+  securitySeverity : String
+  /-- `high`, `medium`, `low` or `""` (the SARIF default, `medium`). -/
+  precision : String
+  /-- Extra tags; `Scry.Sarif` adds `security` and the `external/cwe/cwe-NNN` tags. -/
+  tags : List String
+
+def Scry.RuleInfo.empty (id : String) : Scry.RuleInfo :=
+  Scry.RuleInfo.mk "" "" .nil "" "" "" .nil
+
+def Scry.RuleInfo.setName (name : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with name := name }
+
+def Scry.RuleInfo.setDescription (description : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with description := description }
+
+def Scry.RuleInfo.addCwe (n : Nat) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with cwe := List.append i.cwe (List.cons n .nil) }
+
+def Scry.RuleInfo.setHelpUri (uri : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with helpUri := uri }
+
+def Scry.RuleInfo.setSecuritySeverity (s : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with securitySeverity := s }
+
+def Scry.RuleInfo.setPrecision (s : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with precision := s }
+
+def Scry.RuleInfo.addTag (t : String) (i : Scry.RuleInfo) : Scry.RuleInfo :=
+  { i with tags := List.append i.tags (List.cons t .nil) }
+
+/-- Fill the empty fields of `primary` from `fallback` (a built-in table entry). A field
+the pack sets always wins; CWE ids and tags are only taken from the fallback when the
+pack has none of its own. -/
+def Scry.RuleInfo.merge (primary fallback : Scry.RuleInfo) : Scry.RuleInfo :=
+  let name := match String.isEmpty primary.name with
+    | .true => fallback.name
+    | .false => primary.name;
+  let description := match String.isEmpty primary.description with
+    | .true => fallback.description
+    | .false => primary.description;
+  let cwe := match primary.cwe with
+    | .nil => fallback.cwe
+    | _ => primary.cwe;
+  let helpUri := match String.isEmpty primary.helpUri with
+    | .true => fallback.helpUri
+    | .false => primary.helpUri;
+  let securitySeverity := match String.isEmpty primary.securitySeverity with
+    | .true => fallback.securitySeverity
+    | .false => primary.securitySeverity;
+  let precision := match String.isEmpty primary.precision with
+    | .true => fallback.precision
+    | .false => primary.precision;
+  Scry.RuleInfo.mk name description cwe helpUri securitySeverity precision
+    (List.append primary.tags fallback.tags)
+
 structure Scry.TaintRule where
   id : String
   severity : Scry.Severity
@@ -158,12 +229,15 @@ structure Scry.TaintRule where
   /-- `(callee pattern, part cleaned by the call)`. -/
   sanitisers : List (String × Scry.ArgRef)
   sinks : List Scry.RuleSink
+  /-- Human name, CWE ids, help URI and tags for the SARIF descriptor. -/
+  info : Scry.RuleInfo
 
 structure Scry.ForbiddenRule where
   id : String
   severity : Scry.Severity
   message : String
   calls : List String
+  info : Scry.RuleInfo
 
 inductive Scry.PackRule where
   | taint (r : Scry.TaintRule)
@@ -184,6 +258,10 @@ def Scry.PackRule.message : Scry.PackRule → String
 def Scry.PackRule.kind : Scry.PackRule → Scry.FindingKind
   | .taint _ => .taint
   | .forbidden _ => .forbidden
+
+def Scry.PackRule.info : Scry.PackRule → Scry.RuleInfo
+  | .taint r => r.info
+  | .forbidden r => r.info
 
 structure Scry.RulePack where
   rules : List Scry.PackRule
@@ -253,15 +331,16 @@ structure Scry.PartialRule where
   sanitisers : List (String × Scry.ArgRef)
   sinks : List Scry.RuleSink
   calls : List String
+  info : Scry.RuleInfo
 
 def Scry.PartialRule.fresh (id : String) : Scry.PartialRule :=
-  Scry.PartialRule.mk id "taint" .warning "" .nil .nil .nil .nil
+  Scry.PartialRule.mk id "taint" .warning "" .nil .nil .nil .nil (Scry.RuleInfo.empty id)
 
 def Scry.PartialRule.finish (r : Scry.PartialRule) : Scry.PackRule :=
   if String.eq r.kind "forbidden" then
-    .forbidden (Scry.ForbiddenRule.mk r.id r.severity r.message r.calls)
+    .forbidden (Scry.ForbiddenRule.mk r.id r.severity r.message r.calls r.info)
   else
-    .taint (Scry.TaintRule.mk r.id r.severity r.message r.sources r.sanitisers r.sinks)
+    .taint (Scry.TaintRule.mk r.id r.severity r.message r.sources r.sanitisers r.sinks r.info)
 
 structure Scry.PackState where
   cur : Option Scry.PartialRule
@@ -308,6 +387,37 @@ def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry
     else if String.eq kw "call" then
       match rest with
       | .cons name _ => { r with calls := List.cons name r.calls }
+      | .nil => r
+    else if String.eq kw "name" then
+      match rest with
+      | .cons _ _ => { r with info := Scry.RuleInfo.setName (String.intercalate " " rest) r.info }
+      | .nil => r
+    else if String.eq kw "description" then
+      match rest with
+      | .cons _ _ =>
+        { r with info := Scry.RuleInfo.setDescription (String.intercalate " " rest) r.info }
+      | .nil => r
+    else if String.eq kw "cwe" then
+      match rest with
+      | .cons n _ => match String.parseNat (String.trim n) with
+        | .some k => { r with info := Scry.RuleInfo.addCwe k r.info }
+        | .none => r
+      | .nil => r
+    else if Bool.or (String.eq kw "help-uri") (String.eq kw "help") then
+      match rest with
+      | .cons uri _ => { r with info := Scry.RuleInfo.setHelpUri uri r.info }
+      | .nil => r
+    else if String.eq kw "security-severity" then
+      match rest with
+      | .cons s _ => { r with info := Scry.RuleInfo.setSecuritySeverity s r.info }
+      | .nil => r
+    else if String.eq kw "precision" then
+      match rest with
+      | .cons s _ => { r with info := Scry.RuleInfo.setPrecision s r.info }
+      | .nil => r
+    else if String.eq kw "tag" then
+      match rest with
+      | .cons t _ => { r with info := Scry.RuleInfo.addTag t r.info }
       | .nil => r
     else r
   | .nil => r
@@ -361,23 +471,47 @@ def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) : String :=
 def Scry.RuleSink.render (s : Scry.RuleSink) : String :=
   String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr s.arg)
 
+def Scry.RuleInfo.render (i : Scry.RuleInfo) : String :=
+  let name := match String.isEmpty i.name with
+    | .true => ""
+    | .false => String.append (String.append "  name " i.name) "\n";
+  let description := match String.isEmpty i.description with
+    | .true => ""
+    | .false => String.append (String.append "  description " i.description) "\n";
+  let cwes := String.join (List.map (fun n => String.append (String.append "  cwe "
+    (Nat.repr n)) "\n") i.cwe);
+  let helpUri := match String.isEmpty i.helpUri with
+    | .true => ""
+    | .false => String.append (String.append "  help-uri " i.helpUri) "\n";
+  let severity := match String.isEmpty i.securitySeverity with
+    | .true => ""
+    | .false => String.append (String.append "  security-severity " i.securitySeverity) "\n";
+  let precision := match String.isEmpty i.precision with
+    | .true => ""
+    | .false => String.append (String.append "  precision " i.precision) "\n";
+  let tags := String.join (List.map (fun t => String.append (String.append "  tag " t) "\n")
+    i.tags);
+  String.join [name, description, cwes, helpUri, severity, precision, tags]
+
 def Scry.PackRule.render (r : Scry.PackRule) : String :=
   match r with
   | .taint t =>
     let head := String.append (String.append (String.append (String.append
       (String.append (String.append "rule " t.id) "\n  kind taint\n  severity ")
       (Scry.Severity.show t.severity)) "\n  message ") t.message) "\n";
+    let meta := Scry.RuleInfo.render t.info;
     let sources := String.join (List.map (fun p => Scry.renderSourceLine "source" p.1 p.2) t.sources);
     let sans := String.join (List.map (fun p => Scry.renderSourceLine "sanitise" p.1 p.2) t.sanitisers);
     let sinks := String.join (List.map Scry.RuleSink.render t.sinks);
-    String.append (String.append (String.append head (String.append sources sans)) "\n")
+    String.append (String.append (String.append (String.append head meta) (String.append sources sans)) "\n")
       (String.append sinks "\nend")
   | .forbidden f =>
     let head := String.append (String.append (String.append (String.append
       (String.append (String.append "rule " f.id) "\n  kind forbidden\n  severity ")
       (Scry.Severity.show f.severity)) "\n  message ") f.message) "\n";
+    let meta := Scry.RuleInfo.render f.info;
     let calls := String.join (List.map (fun c => String.append "  call " c) f.calls);
-    String.append (String.append head calls) "\nend"
+    String.append (String.append (String.append head meta) calls) "\nend"
 
 def Scry.RulePack.render (p : Scry.RulePack) : String :=
   String.join (List.map (fun r => String.append (Scry.PackRule.render r) "\n") p.rules)
