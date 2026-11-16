@@ -187,8 +187,20 @@ class DispatchTests(unittest.TestCase):
         )
         self.assertEqual(responses[0]["result"]["protocolVersion"], wiz_mcp.PROTOCOL_VERSION)
 
-    def test_tools_list_has_the_eight_tools(self) -> None:
+    def test_tools_list_has_seven_read_only_tools_by_default(self) -> None:
         responses, _ = self.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        names = {tool["name"] for tool in responses[0]["result"]["tools"]}
+        self.assertEqual(
+            names,
+            {"version", "check", "parse", "fmt", "diagnostics", "hover", "goals"},
+        )
+
+    def test_tools_list_has_build_with_allow_build(self) -> None:
+        server = wiz_mcp.Server(wiz_mcp.Config(workspace=self.workspace, wiz=self.wiz, idle=0, timeout=5, allow_build=True))
+        try:
+            responses, _ = server.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        finally:
+            server.close()
         names = {tool["name"] for tool in responses[0]["result"]["tools"]}
         self.assertEqual(
             names,
@@ -286,6 +298,10 @@ class DispatchTests(unittest.TestCase):
         self.assertIn("boom", envelope["error"]["message"])
 
     def test_build_out_is_resolved_against_the_workspace(self) -> None:
+        self.server.close()
+        self.server = wiz_mcp.Server(
+            wiz_mcp.Config(workspace=self.workspace, wiz=self.wiz, idle=0, timeout=5, allow_build=True)
+        )
         responses, _ = self.dispatch(
             {
                 "jsonrpc": "2.0",
@@ -359,6 +375,222 @@ class ArgumentTests(unittest.TestCase):
     def test_bad_timeout_is_a_usage_error(self) -> None:
         with self.assertRaises(SystemExit):
             wiz_mcp.parse_args(["--workspace", "/tmp", "--timeout", "0"])
+
+    def test_safety_flags_default_off(self) -> None:
+        config = wiz_mcp.parse_args(["--workspace", "/tmp"])
+        self.assertFalse(config.allow_build)
+        self.assertEqual(config.extra_roots, ())
+        self.assertEqual(config.pass_env, ())
+
+    def test_safety_flags_parse(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wiz-mcp-unit-") as tmp:
+            os.mkdir(os.path.join(tmp, "extra"))
+            config = wiz_mcp.parse_args(
+                ["--workspace", tmp, "--allow-build", "--allow-root", "extra", "--pass-env", "FOO"]
+            )
+            self.assertTrue(config.allow_build)
+            self.assertEqual(config.extra_roots, (os.path.realpath(os.path.join(tmp, "extra")),))
+            self.assertEqual(config.pass_env, ("FOO",))
+            with self.assertRaises(SystemExit):
+                wiz_mcp.parse_args(["--workspace", tmp, "--allow-root", "missing"])
+
+
+class PolicyTests(unittest.TestCase):
+    """Path confinement, the build gate, the child environment and annotations."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="wiz-mcp-policy-")
+        base = os.path.realpath(self.tmp.name)
+        self.workspace = os.path.join(base, "ws")
+        self.outside = os.path.join(base, "outside")
+        os.makedirs(os.path.join(self.workspace, "sub"))
+        os.makedirs(self.outside)
+        Path(self.workspace, "probe.wiz").write_text("def x : Nat := 1\n")
+        Path(self.workspace, "sub", "inner.wiz").write_text("def y : Nat := 2\n")
+        Path(self.outside, "secret.wiz").write_text("def s : Nat := 3\n")
+        # The stand-in wiz lives outside the workspace, like a tower toolchain.
+        tc = os.path.join(base, "toolchain")
+        os.makedirs(os.path.join(tc, "bin"))
+        os.makedirs(os.path.join(tc, "share", "wiz", "lib"))
+        Path(tc, "share", "wiz", "lib", "Prelude.wiz").write_text("-- prelude\n")
+        Path(tc, "README").write_text("not library\n")
+        self.toolchain = tc
+        self.wiz = write_exe(os.path.join(tc, "bin"), "wiz", 'echo "ARGS $*"; env')
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def server(self, **overrides) -> wiz_mcp.Server:
+        options = {"workspace": self.workspace, "wiz": self.wiz, "idle": 0, "timeout": 5}
+        options.update(overrides)
+        server = wiz_mcp.Server(wiz_mcp.Config(**options))
+        self.addCleanup(server.close)
+        return server
+
+    def assertDenied(self, envelope: dict, kind: str = "path_denied") -> None:
+        self.assertFalse(envelope["ok"], envelope)
+        self.assertEqual(envelope["error"]["kind"], kind, envelope)
+        # The tool must not have run at all.
+        self.assertNotIn("ARGS", envelope["stdout"])
+
+    # -- reads -----------------------------------------------------------
+
+    def test_relative_and_absolute_paths_inside_the_workspace_run(self) -> None:
+        server = self.server()
+        for path in ("probe.wiz", "sub/inner.wiz", "sub/../probe.wiz", os.path.join(self.workspace, "probe.wiz")):
+            envelope = server.call_tool("check", {"path": path})
+            self.assertTrue(envelope["ok"], (path, envelope))
+            self.assertIn("ARGS check", envelope["stdout"])
+
+    def test_absolute_path_outside_is_refused(self) -> None:
+        server = self.server()
+        for path in (os.path.join(self.outside, "secret.wiz"), "/etc/passwd"):
+            for tool in ("check", "parse", "fmt"):
+                self.assertDenied(server.call_tool(tool, {"path": path}))
+
+    def test_dotdot_escape_is_refused(self) -> None:
+        server = self.server()
+        self.assertDenied(server.call_tool("check", {"path": "../outside/secret.wiz"}))
+        self.assertDenied(server.call_tool("check", {"path": "sub/../../outside/secret.wiz"}))
+
+    def test_home_expansion_outside_is_refused(self) -> None:
+        self.assertDenied(self.server().call_tool("check", {"path": "~/.bashrc"}))
+
+    def test_symlink_out_of_the_workspace_is_refused(self) -> None:
+        os.symlink(os.path.join(self.outside, "secret.wiz"), os.path.join(self.workspace, "link.wiz"))
+        os.symlink(self.outside, os.path.join(self.workspace, "linkdir"))
+        server = self.server()
+        self.assertDenied(server.call_tool("check", {"path": "link.wiz"}))
+        self.assertDenied(server.call_tool("check", {"path": "linkdir/secret.wiz"}))
+
+    def test_symlink_within_the_workspace_is_allowed(self) -> None:
+        os.symlink(os.path.join(self.workspace, "sub", "inner.wiz"), os.path.join(self.workspace, "alias.wiz"))
+        envelope = self.server().call_tool("check", {"path": "alias.wiz"})
+        self.assertTrue(envelope["ok"], envelope)
+
+    def test_lsp_tools_are_confined_before_the_daemon_starts(self) -> None:
+        server = self.server()
+        outside = os.path.join(self.outside, "secret.wiz")
+        self.assertDenied(server.call_tool("diagnostics", {"path": outside, "text": "def z : Nat := 0\n"}))
+        self.assertDenied(server.call_tool("hover", {"path": "../outside/secret.wiz", "line": 0, "character": 4}))
+        self.assertDenied(server.call_tool("goals", {"path": outside, "line": 0, "character": 4}))
+        self.assertIsNone(server.daemon.proc)
+
+    def test_toolchain_library_is_readable_but_not_the_rest_of_the_prefix(self) -> None:
+        server = self.server()
+        lib = os.path.join(self.toolchain, "share", "wiz", "lib", "Prelude.wiz")
+        self.assertTrue(server.call_tool("check", {"path": lib})["ok"])
+        self.assertDenied(server.call_tool("check", {"path": os.path.join(self.toolchain, "README")}))
+
+    def test_checkout_build_reads_its_checkout_lib(self) -> None:
+        checkout = os.path.join(os.path.dirname(self.workspace), "checkout")
+        os.makedirs(os.path.join(checkout, ".lake", "build", "bin"))
+        os.makedirs(os.path.join(checkout, "lib"))
+        Path(checkout, "lib", "Nat.wiz").write_text("-- nat\n")
+        Path(checkout, "notes.txt").write_text("not library\n")
+        wiz = write_exe(os.path.join(checkout, ".lake", "build", "bin"), "wiz", 'echo "ARGS $*"')
+        server = self.server(wiz=wiz)
+        self.assertTrue(server.call_tool("check", {"path": os.path.join(checkout, "lib", "Nat.wiz")})["ok"])
+        self.assertDenied(server.call_tool("check", {"path": os.path.join(checkout, "notes.txt")}))
+
+    def test_allow_root_adds_a_readable_directory(self) -> None:
+        server = self.server(extra_roots=(self.outside,))
+        self.assertTrue(server.call_tool("check", {"path": os.path.join(self.outside, "secret.wiz")})["ok"])
+
+    # -- the build gate and writes -----------------------------------------
+
+    def test_build_is_off_by_default(self) -> None:
+        envelope = self.server().call_tool("build", {"path": "probe.wiz", "out": "probe"})
+        self.assertDenied(envelope, kind="not_enabled")
+        self.assertIn("--allow-build", envelope["error"]["message"])
+        self.assertFalse(os.path.exists(os.path.join(self.workspace, "probe")))
+
+    def test_build_is_off_by_default_over_the_wire_too(self) -> None:
+        responses, _ = self.server().dispatch(
+            {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+             "params": {"name": "build", "arguments": {"path": "probe.wiz", "out": "probe"}}}
+        )
+        result = responses[0]["result"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(result["structuredContent"]["error"]["kind"], "not_enabled")
+
+    def test_build_output_inside_the_workspace_is_allowed(self) -> None:
+        envelope = self.server(allow_build=True).call_tool("build", {"path": "probe.wiz", "out": "sub/probe"})
+        self.assertTrue(envelope["ok"], envelope)
+        self.assertIn("-o " + os.path.join(self.workspace, "sub", "probe"), envelope["stdout"])
+
+    def test_build_output_escapes_are_refused(self) -> None:
+        os.symlink(self.outside, os.path.join(self.workspace, "outdir"))
+        os.symlink(os.path.join(self.outside, "victim"), os.path.join(self.workspace, "dangling"))
+        server = self.server(allow_build=True)
+        for out in (
+            os.path.join(self.outside, "probe"),  # absolute
+            "../outside/probe",  # ..
+            "outdir/probe",  # a symlinked directory
+            "dangling",  # a symlink to a file that does not exist yet
+        ):
+            self.assertDenied(server.call_tool("build", {"path": "probe.wiz", "out": out}))
+        self.assertEqual(os.listdir(self.outside), ["secret.wiz"])
+
+    def test_build_will_not_write_through_a_symlink_inside_the_workspace(self) -> None:
+        os.symlink(os.path.join(self.workspace, "probe.wiz"), os.path.join(self.workspace, "out-link"))
+        envelope = self.server(allow_build=True).call_tool("build", {"path": "probe.wiz", "out": "out-link"})
+        self.assertDenied(envelope)
+
+    def test_build_output_may_not_go_to_the_toolchain_or_an_extra_root(self) -> None:
+        server = self.server(allow_build=True, extra_roots=(self.outside,))
+        self.assertDenied(server.call_tool("build", {"path": "probe.wiz", "out": os.path.join(self.outside, "x")}))
+        lib = os.path.join(self.toolchain, "share", "wiz", "lib", "x")
+        self.assertDenied(server.call_tool("build", {"path": "probe.wiz", "out": lib}))
+
+    # -- environment -------------------------------------------------------
+
+    def test_child_env_is_an_allowlist_without_secrets(self) -> None:
+        environ = {
+            "PATH": "/bin", "HOME": "/home/u", "LC_ALL": "C.UTF-8",
+            "WIZ_CFLAGS": "-I/x", "NIX_CFLAGS_COMPILE": "-I/y",
+            "GH_TOKEN": "t", "CACHIX_AUTH_TOKEN": "t", "WIZ_NTFY_TOKEN_FILE": "/t",
+            "ANTHROPIC_API_KEY": "k", "AWS_SECRET_ACCESS_KEY": "k", "SSH_AUTH_SOCK": "/s",
+            "NIX_GITHUB_PRIVATE_USERNAME": "u", "DBUS_SESSION_BUS_ADDRESS": "x", "FOO": "bar",
+        }
+        env = wiz_mcp.child_env(environ)
+        self.assertEqual(
+            set(env), {"PATH", "HOME", "LC_ALL", "WIZ_CFLAGS", "NIX_CFLAGS_COMPILE"}
+        )
+        self.assertEqual(set(wiz_mcp.child_env(environ, extra=("FOO", "GH_TOKEN"))) - set(env), {"FOO"})
+
+    def test_wiz_runs_with_the_filtered_environment(self) -> None:
+        saved = {name: os.environ.get(name) for name in ("GH_TOKEN", "WIZ_MCP_TEST_PLAIN")}
+        os.environ["GH_TOKEN"] = "do-not-leak"
+        os.environ["WIZ_MCP_TEST_PLAIN"] = "kept"
+
+        def restore() -> None:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+        envelope = self.server().call_tool("check", {"path": "probe.wiz"})
+        self.assertTrue(envelope["ok"], envelope)
+        self.assertNotIn("do-not-leak", envelope["stdout"])
+        self.assertNotIn("GH_TOKEN", envelope["stdout"])
+        self.assertIn("WIZ_MCP_TEST_PLAIN=kept", envelope["stdout"])
+
+    # -- annotations -------------------------------------------------------
+
+    def test_every_tool_is_annotated(self) -> None:
+        for tool in wiz_mcp.TOOLS:
+            annotations = tool["annotations"]
+            self.assertIs(annotations["openWorldHint"], False, tool["name"])
+            self.assertIsInstance(annotations["title"], str)
+            if tool["name"] == "build":
+                self.assertIs(annotations["readOnlyHint"], False)
+                self.assertIs(annotations["destructiveHint"], True)
+            else:
+                self.assertIs(annotations["readOnlyHint"], True, tool["name"])
+                self.assertIs(annotations["destructiveHint"], False, tool["name"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,11 @@ Paths are relative to the workspace (the directory the client spawns us in),
 not to this script. `--wiz` defaults to `./.lake/build/bin/wiz`, so a worktree
 gets its own build unless another binary is named explicitly.
 
+Safety: a path must resolve (symlinks followed) inside the workspace, the
+toolchain's library or an `--allow-root` directory; `build` is listed only with
+`--allow-build` and writes only inside the workspace; children get an
+allowlisted environment with secret-looking names removed.
+
 Run with --help for the options. No third-party packages are used; the small
 WebSocket client below implements the client half of RFC 6455 with the stdlib.
 """
@@ -73,7 +78,8 @@ MAX_WS_MESSAGE = 64 * 1024 * 1024
 TRUNCATION_MARK = "\n… [truncated: {n} characters omitted]"
 
 INSTRUCTIONS = (
-    "Wiz toolchain tools for this workspace. Paths are relative to the workspace. "
+    "Wiz toolchain tools for this workspace. Paths are relative to the workspace and must "
+    "stay inside it (or the toolchain library); others are refused with path_denied. "
     "Call check after editing a .wiz file (it prints the same messages as `wiz check`); "
     "use fmt --check before committing, and diagnostics/hover/goals when you need the "
     "language server's view. diagnostics, hover and goals share one lazy `wiz lsp` "
@@ -117,16 +123,93 @@ class Config:
     cache: Optional[str] = None
     idle: float = DEFAULT_IDLE
     timeout: float = DEFAULT_TIMEOUT
+    #: `build` writes a file and runs the host C toolchain: off unless asked for.
+    allow_build: bool = False
+    #: More directories tools may read (besides the workspace and the toolchain).
+    extra_roots: tuple[str, ...] = ()
+    #: More environment variables to pass to children (secret-looking names never pass).
+    pass_env: tuple[str, ...] = ()
 
 
 def resolve_path(workspace: str, path: str) -> str:
-    """Resolve a tool path against the workspace (not this process's cwd)."""
+    """Resolve a tool path against the workspace (not this process's cwd).
+
+    This only normalizes; `confine` decides whether the result may be used.
+    """
     if not isinstance(path, str) or not path.strip():
         raise ToolError("invalid_args", "`path` must be a non-empty string")
     path = os.path.expanduser(path)
     if not os.path.isabs(path):
         path = os.path.join(workspace, path)
     return os.path.normpath(os.path.abspath(path))
+
+
+def _is_under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def toolchain_roots(wiz_path: Optional[str]) -> list[str]:
+    """The library directories of the toolchain `wiz_path` belongs to.
+
+    A release or Nix toolchain keeps its library in `PREFIX/share/wiz`; a
+    checkout build (`CHECKOUT/.lake/build/bin/wiz`) uses `CHECKOUT/lib`. Only
+    those directories are allowed, never the whole prefix (which could be /usr).
+    """
+    if not wiz_path:
+        return []
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(wiz_path)))
+    roots = [os.path.join(prefix, "share", "wiz")]
+    if os.path.basename(prefix) == "build" and os.path.basename(os.path.dirname(prefix)) == ".lake":
+        roots.append(os.path.join(os.path.dirname(os.path.dirname(prefix)), "lib"))
+    return [os.path.realpath(root) for root in roots if os.path.isdir(root)]
+
+
+def confine(path: str, roots: Iterable[str], what: str = "path") -> str:
+    """`path` itself if its real path (all symlinks followed) is under one of `roots`.
+
+    The check uses the real path, so an absolute path, `..` and a symlink that
+    leads out of the workspace are all refused. The normalized path (symlinks
+    kept) is what the tools see, so messages keep the caller's spelling.
+    """
+    real = os.path.realpath(path)
+    roots = list(roots)
+    if any(_is_under(real, root) for root in roots):
+        return path
+    shown = path if real == path else f"{path} (really {real})"
+    raise ToolError(
+        "path_denied",
+        f"{what} {shown} is outside the workspace and the toolchain library; "
+        "only those may be used (start the server with --allow-root DIR to add one)",
+    )
+
+
+#: Variables passed to `wiz` and its children: the toolchain, the C compiler
+#: (a Nix dev shell's `cc` wrapper reads `NIX_*`), locale and temp dirs.
+ENV_ALLOW = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+        "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+        "CC", "CXX", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH",
+        "LIBRARY_PATH", "LD_LIBRARY_PATH", "PKG_CONFIG_PATH",
+    }
+)
+ENV_ALLOW_PREFIXES = ("LC_", "WIZ_", "NIX_")
+#: A name that looks like a credential never reaches a child, even when allowed.
+ENV_SECRET = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|API_?KEY|PRIVATE|COOKIE|SESSION", re.IGNORECASE)
+
+
+def child_env(environ: Optional[dict[str, str]] = None, extra: Iterable[str] = ()) -> dict[str, str]:
+    """The environment for a child process: an allowlist, minus anything secret-looking."""
+    source = os.environ if environ is None else environ
+    allowed = set(ENV_ALLOW) | set(extra)
+    return {
+        name: value
+        for name, value in source.items()
+        if (name in allowed or name.startswith(ENV_ALLOW_PREFIXES)) and not ENV_SECRET.search(name)
+    }
 
 
 def path_to_uri(path: str) -> str:
@@ -604,6 +687,7 @@ class LSPDaemon:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=self.config.workspace,
+                    env=child_env(extra=self.config.pass_env),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
@@ -854,11 +938,13 @@ def _position_arg(args: dict[str, Any], key: str) -> int:
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "version",
+        "annotations": {"title": "Wiz version", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Print the Wiz toolchain version (`wiz --version`).",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "check",
+        "annotations": {"title": "Type check a Wiz file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Type check a Wiz file (`wiz check`) and return its messages and exit status.",
         "inputSchema": {
             "type": "object",
@@ -869,6 +955,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "parse",
+        "annotations": {"title": "Parse a Wiz file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Print the syntax tree of a Wiz file (`wiz parse`).",
         "inputSchema": {
             "type": "object",
@@ -879,6 +966,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "fmt",
+        "annotations": {"title": "Format a Wiz file (prints, does not rewrite)", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Reprint a Wiz file from its syntax tree (`wiz fmt`); check=true only reports whether it differs.",
         "inputSchema": {
             "type": "object",
@@ -893,6 +981,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "build",
+        "annotations": {"title": "Build a Wiz program (writes OUT, runs cc; needs --allow-build)", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
         "description": "Compile `main` of a Wiz file (`wiz build FILE -o OUT [--lib]`).",
         "inputSchema": {
             "type": "object",
@@ -907,6 +996,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "diagnostics",
+        "annotations": {"title": "Language-server diagnostics", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Diagnostics from the language server for a file (or for `text`), from this worktree's daemon.",
         "inputSchema": {
             "type": "object",
@@ -920,6 +1010,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "hover",
+        "annotations": {"title": "Type at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "The type of the identifier at a position (0-based line and character).",
         "inputSchema": {
             "type": "object",
@@ -935,6 +1026,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "goals",
+        "annotations": {"title": "Tactic goals at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "The tactic state at a position (`wiz/interactiveGoals`).",
         "inputSchema": {
             "type": "object",
@@ -950,6 +1042,14 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
+#: Tools that write files or run the host toolchain, and the flag that enables each.
+GATED_TOOLS = {"build": "--allow-build"}
+
+
+def visible_tools(config: Config) -> list[dict[str, Any]]:
+    """The tools this server lists: gated tools only when their flag was given."""
+    enabled = {"build": config.allow_build}
+    return [tool for tool in TOOLS if enabled.get(tool["name"], True)]
 
 
 class Server:
@@ -975,6 +1075,19 @@ class Server:
         self._reaper_stop.set()
         self.daemon.close()
 
+    # -- path policy ---------------------------------------------------------
+
+    def read_roots(self) -> list[str]:
+        """Where tools may read: the workspace, --allow-root dirs, the toolchain library."""
+        roots = [os.path.realpath(self.config.workspace)]
+        roots += [os.path.realpath(root) for root in self.config.extra_roots]
+        roots += toolchain_roots(resolve_wiz(self.config.workspace, self.config.wiz))
+        return roots
+
+    def write_roots(self) -> list[str]:
+        """Where tools may write: the workspace only."""
+        return [os.path.realpath(self.config.workspace)]
+
     # -- tool implementations ---------------------------------------------
 
     def _run(self, args: list[str], timeout: float, use_cache: bool = True) -> dict[str, Any]:
@@ -991,6 +1104,7 @@ class Server:
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.config.workspace,
+                env=child_env(extra=self.config.pass_env),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1038,7 +1152,13 @@ class Server:
             run = self._run(["--version"], timeout, use_cache=False)
             return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
 
-        path = resolve_path(self.config.workspace, _require_str(args, "path"))
+        if name in GATED_TOOLS and not any(tool["name"] == name for tool in visible_tools(self.config)):
+            raise ToolError(
+                "not_enabled",
+                f"`{name}` writes files and runs the host toolchain; it is off unless the server "
+                f"is started with {GATED_TOOLS[name]}",
+            )
+        path = confine(resolve_path(self.config.workspace, _require_str(args, "path")), self.read_roots())
         if name == "check":
             run = self._run(["check", path], timeout)
             return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
@@ -1058,7 +1178,9 @@ class Server:
             return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
         if name == "build":
             out = _require_str(args, "out")
-            out = resolve_path(self.config.workspace, out)
+            out = confine(resolve_path(self.config.workspace, out), self.write_roots(), what="output")
+            if os.path.islink(out):
+                raise ToolError("path_denied", f"output {out} is a symlink; build will not write through it")
             extra = ["build", path, "-o", out]
             if _optional_bool(args, "lib"):
                 extra.append("--lib")
@@ -1147,7 +1269,7 @@ class Server:
         if method == "ping":
             return [reply(msg_id, {})], False
         if method == "tools/list":
-            return [reply(msg_id, {"tools": TOOLS})], False
+            return [reply(msg_id, {"tools": visible_tools(self.config)})], False
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments") or {}
@@ -1248,6 +1370,25 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         default=DEFAULT_TIMEOUT,
         help="per-call timeout in seconds (default: 300)",
     )
+    parser.add_argument(
+        "--allow-build",
+        action="store_true",
+        help="list and allow `build` (writes an output file in the workspace and runs the host C toolchain)",
+    )
+    parser.add_argument(
+        "--allow-root",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="another directory tools may read (repeatable); writes stay in the workspace",
+    )
+    parser.add_argument(
+        "--pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="pass another environment variable to wiz (repeatable); secret-looking names are still dropped",
+    )
     args = parser.parse_args(argv)
     workspace = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(workspace):
@@ -1262,13 +1403,33 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         if not os.path.isabs(cache):
             cache = os.path.join(workspace, cache)
         cache = os.path.normpath(os.path.abspath(cache))
-    return Config(workspace=workspace, wiz=args.wiz, cache=cache, idle=args.idle, timeout=args.timeout)
+    extra_roots = []
+    for root in args.allow_root:
+        root = os.path.expanduser(root)
+        if not os.path.isabs(root):
+            root = os.path.join(workspace, root)
+        if not os.path.isdir(root):
+            parser.error(f"--allow-root is not a directory: {root}")
+        extra_roots.append(os.path.realpath(root))
+    return Config(
+        workspace=workspace,
+        wiz=args.wiz,
+        cache=cache,
+        idle=args.idle,
+        timeout=args.timeout,
+        allow_build=args.allow_build,
+        extra_roots=tuple(extra_roots),
+        pass_env=tuple(args.pass_env),
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     config = parse_args(argv)
     wiz = resolve_wiz(config.workspace, config.wiz)
-    log(f"wiz-mcp: workspace={config.workspace} wiz={wiz or config.wiz} idle={config.idle:g}s timeout={config.timeout:g}s")
+    log(
+        f"wiz-mcp: workspace={config.workspace} wiz={wiz or config.wiz} idle={config.idle:g}s "
+        f"timeout={config.timeout:g}s build={'on' if config.allow_build else 'off'}"
+    )
     if wiz is None:
         log(f"wiz-mcp: warning: {_wiz_missing_message(config.workspace, config.wiz)}")
 
