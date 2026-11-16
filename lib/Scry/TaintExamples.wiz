@@ -145,6 +145,103 @@ def Scry.fnFn : Wil.Func :=
 
 def Scry.taintFn : Wil.Program := Wil.program [Scry.fnFn]
 
+-- ## The memory corpus (points-to and taint through memory)
+
+/-- Two heap objects: the tainted store goes into the first and the sink reads the
+**second**. The location sets are disjoint, so this is a *known no-alias*: no finding and
+no warning. Points: 0 source, 1 alloc a, 2 alloc b, 3 store a, 4 load b, 5 sink, 6 ret. -/
+def Scry.distinctFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let pa := Wil.var 1 (.ptr Wil.i32);
+  let pb := Wil.var 2 (.ptr Wil.i32);
+  let x := Scry.tv 3;
+  Wil.func "distinct" [] [r, pa, pb, x]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.alloc pa 1
+        , Wil.alloc pb 1
+        , Wil.store pa r
+        , Wil.load x pb
+        , Wil.call .none "system" [x] ]
+        (Wil.ret .none) ]
+
+def Scry.taintDistinct : Wil.Program := Wil.program [Scry.distinctFn]
+
+/-- Field sensitivity: the tainted store is cell 0, the first sink reads cell 1 (no
+flow), the second reads cell 0 (flow). Points: 0 source, 1 alloc, 2 gep 0, 3 store,
+4 gep 1, 5 load, 6 clean sink, 7 load cell 0, 8 tainted sink, 9 ret. -/
+def Scry.fieldFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let p := Wil.var 1 (.ptr Wil.i32);
+  let q0 := Wil.var 2 (.ptr Wil.i32);
+  let q1 := Wil.var 3 (.ptr Wil.i32);
+  let y := Scry.tv 4;
+  let z := Scry.tv 5;
+  Wil.func "fields" [] [r, p, q0, q1, y, z]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.alloc p 2
+        , Wil.gep q0 p 0
+        , Wil.store q0 r
+        , Wil.gep q1 p 1
+        , Wil.load y q1
+        , Wil.call .none "system" [y]
+        , Wil.load z q0
+        , Wil.call .none "system" [z] ]
+        (Wil.ret .none) ]
+
+def Scry.taintFields : Wil.Program := Wil.program [Scry.fieldFn]
+
+/-- An indirect call whose function pointer holds a **known** function: the argument
+taint reaches the callee's sink. -/
+def Scry.indirectKnownCallee : Wil.Func :=
+  let v := Scry.tv 0;
+  Wil.func "knownSink" [v] []
+    [ Wil.block [Wil.call .none "system" [v]] (Wil.ret .none) ]
+
+/-- `t = getenv(); f = &knownSink; f(t)`.
+Points: 0 source, 1 function address, 2 indirect call, 3 ret. -/
+def Scry.indirectKnownMain : Wil.Func :=
+  let f := Wil.var 0 (.ptr (.fn 1 Wil.i32));
+  let t := Scry.tv 1;
+  Wil.func "indirectKnown" [] [f, t]
+    [ Wil.block
+        [ Wil.call (.some t) "getenv" []
+        , Wil.fnptr f "knownSink"
+        , Wil.callIndirect .none f [t] ]
+        (Wil.ret .none) ]
+
+def Scry.indirectKnownProgram : Wil.Program :=
+  Wil.program [Scry.indirectKnownMain, Scry.indirectKnownCallee]
+
+/-- Memory across calls: `memWriter(p)` stores the source through its parameter,
+`memReader(q)` loads through its own and sinks it, and `memMain` passes the same object.
+The location taint is program-wide (a summary), so the reader's evaluation sees the
+writer's store. -/
+def Scry.memWriterFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let r := Scry.tv 1;
+  Wil.func "memWriter" [p] [r]
+    [ Wil.block [Wil.call (.some r) "getenv" [], Wil.store p r] (Wil.ret .none) ]
+
+def Scry.memReaderFn : Wil.Func :=
+  let q := Wil.var 0 (.ptr Wil.i32);
+  let x := Scry.tv 1;
+  Wil.func "memReader" [q] [x]
+    [ Wil.block [Wil.load x q, Wil.call .none "system" [x]] (Wil.ret .none) ]
+
+def Scry.memMainFn : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  Wil.func "memMain" [] [p]
+    [ Wil.block
+        [ Wil.alloc p 1
+        , Wil.call .none "memWriter" [p]
+        , Wil.call .none "memReader" [p] ]
+        (Wil.ret .none) ]
+
+def Scry.memAcrossProgram : Wil.Program :=
+  Wil.program [Scry.memMainFn, Scry.memWriterFn, Scry.memReaderFn]
+
 /-- The demo spec used by the tests and the notes. -/
 def Scry.demoSpec : Scry.TaintSpec :=
   Scry.TaintSpec.mk ["getenv", "recv"]

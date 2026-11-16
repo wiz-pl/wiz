@@ -1,0 +1,148 @@
+import Scry.Interproc
+import Scry.Lifetime
+import Scry.Rules
+/-!
+# A CWE-416 corpus for `Scry.Lifetime`
+
+Hand-built Wil programs for the memory-lifetime rule, plus the rule pack text used by the
+tests. Each program isolates one transfer or one summary:
+
+* `uafDangling` — `p = alloc; free p; x = *p`, a load after free;
+* `uafAlias` — `q = p; free p; *q = v`, an alias after free;
+* `uafDoubleFree` — the second `free p`;
+* `uafConditional` — `free` on one branch, use after the merge (may use-after-free);
+* `uafSafeNull` — free-then-null, then a store through the cleared pointer;
+* `uafSafeRealloc` — `p = realloc(p, n)` reassigns the result, so `p` is not dangling;
+* `uafInterproc` — `release(p)` frees the caller's object, then the caller uses it.
+
+Point numbering is the usual statement-then-terminator one.
+-/
+
+def Scry.uafPackText : String :=
+  "rule use-after-free\n" ++
+  "  kind memory\n" ++
+  "  severity error\n" ++
+  "  message Memory is used after it was freed\n" ++
+  "  check use-after-free\n" ++
+  "end\n"
+
+def Scry.uafRules : Scry.RulePack := Scry.parseRulePack Scry.uafPackText
+
+def Scry.uafPtr (n : Nat) : Wil.Var := Wil.var n (.ptr Wil.i32)
+
+/-- `p = alloc 1; free p; x = *p`. Points: 0 alloc, 1 free, 2 load, 3 return. -/
+def Scry.uafDangling : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let x := Wil.var 1 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, x]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.free p
+            , Wil.load x p ]
+            (Wil.retV x) ] ]
+
+/-- `p = alloc; q = p; free p; *q = v`. Points: 0 alloc, 1 copy, 2 free, 3 store. -/
+def Scry.uafAlias : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let q := Scry.uafPtr 1;
+  let v := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, q, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.copy q p
+            , Wil.free p
+            , Wil.store q v ]
+            (Wil.ret .none) ] ]
+
+/-- `p = alloc; free p; free p`. Points: 0 alloc, 1 first free, 2 second free. -/
+def Scry.uafDoubleFree : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  Wil.program
+    [ Wil.func "main" [] [p]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.free p
+            , Wil.free p ]
+            (Wil.ret .none) ] ]
+
+/-- `p = alloc; if (c) free p; *p = v`. Points: 0 alloc, 1 const, 2 branch,
+3 free, 4 jump, 5 jump, 6 store, 7 return. -/
+def Scry.uafConditional : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let c := Wil.var 1 Wil.i32;
+  let zero := Wil.var 2 Wil.i32;
+  let v := Wil.var 3 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, c, zero, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.num c 1
+            , Wil.num zero 0 ]
+            (Wil.branch (Wil.condLt zero c) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+        , Wil.block [Wil.free p] (Wil.jump (Wil.mkBlockId 3))
+        , Wil.block [] (Wil.jump (Wil.mkBlockId 3))
+        , Wil.block [Wil.store p v] (Wil.ret .none) ] ]
+
+/-- `p = alloc; free p; p = NULL; *p = v`. Points: 0 alloc, 1 free, 2 null,
+3 store, 4 return. -/
+def Scry.uafSafeNull : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let v := Wil.var 1 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.free p
+            , Wil.cst p .nul
+            , Wil.store p v ]
+            (Wil.ret .none) ] ]
+
+/-- `p = alloc; r = realloc(p, 8); p = r; *p = v; free p`. Points: 0 alloc,
+1 call, 2 copy, 3 store, 4 free, 5 return. -/
+def Scry.uafSafeRealloc : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let r := Scry.uafPtr 1;
+  let v := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, r, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.call (.some r) "realloc" [p]
+            , Wil.copy p r
+            , Wil.store p v
+            , Wil.free p ]
+            (Wil.ret .none) ] ]
+
+/-- `p = alloc; q = p; free p; q = alloc; *q = v`. The reassignment of `q` kills the
+old alias, so the store is safe. Points: 0 alloc, 1 copy, 2 free, 3 alloc, 4 store. -/
+def Scry.uafSafeReassignAlias : Wil.Program :=
+  let p := Scry.uafPtr 0;
+  let q := Scry.uafPtr 1;
+  let v := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, q, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.copy q p
+            , Wil.free p
+            , Wil.alloc q 1
+            , Wil.store q v ]
+            (Wil.ret .none) ] ]
+
+/-- `release(p) { free p }`; `main { p = alloc; release(p); *p = v }`.
+`release`: 0 free, 1 return. `main`: 0 alloc, 1 call, 2 store, 3 return. -/
+def Scry.uafInterproc : Wil.Program :=
+  let rp := Scry.uafPtr 0;
+  let p := Scry.uafPtr 0;
+  let v := Wil.var 1 Wil.i32;
+  Wil.program
+    [ Wil.func "release" [rp] []
+        [ Wil.block [Wil.free rp] (Wil.ret .none) ]
+    , Wil.func "main" [] [p, v]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.call .none "release" [p]
+            , Wil.store p v ]
+            (Wil.ret .none) ] ]

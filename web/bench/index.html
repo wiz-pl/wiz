@@ -143,44 +143,45 @@ pre code{white-space:pre}
 <dl class="meta"><dt>A</dt><dd><code>bench/stdlib-baseline.json</code></dd><dt>B</dt><dd><code>bench/stdlib-bench.json</code></dd></dl>
 <h2 id="scry">Scry taint benchmark</h2>
 <p class="lede">The C taint corpus: for each case, the expected outcome is compared with the findings, and the ratios are computed in integer basis points so the file is stable. These are counts and detection rates, not timings. The baseline records no runtime for this run.</p>
-<dl class="meta"><dt>corpus</dt><dd>bench/corpus</dd><dt>format</dt><dd>scry-bench-baseline</dd><dt>version</dt><dd>1</dd><dt>cases recorded</dt><dd>34</dd><dt>run date</dt><dd>not recorded</dd><dt>machine</dt><dd>not recorded</dd></dl>
+<dl class="meta"><dt>corpus</dt><dd>bench/corpus</dd><dt>format</dt><dd>scry-bench-baseline</dd><dt>version</dt><dd>1</dd><dt>cases recorded</dt><dd>52</dd><dt>run date</dt><dd>not recorded</dd><dt>machine</dt><dd>not recorded</dd></dl>
 <p class="caption">Paths in the file are relative to <code>scry/</code>. The case metrics are produced by the Scry checker’s <code>bench</code> command over the checked-in corpus manifest. The baseline records no date and no machine. Its git history is the only record of when it changed. It says nothing about the machine it ran on.</p>
 <h3>Overall</h3>
 <p class="caption">TP/FN/TN/FP are cases, not alerts; a case is a true positive only when every expected finding is matched with valid evidence. No variance is recorded: the analysis is deterministic, and each case is one run.</p>
 <div class="table-wrap"><table class="">
 <thead><tr><th>metric</th><th>value</th></tr></thead>
 <tbody>
-<tr><td>true positives</td><td>18</td></tr>
-<tr><td>false negatives</td><td>2</td></tr>
-<tr><td>true negatives</td><td>11</td></tr>
+<tr><td>true positives</td><td>32</td></tr>
+<tr><td>false negatives</td><td>0</td></tr>
+<tr><td>true negatives</td><td>17</td></tr>
 <tr><td>false positives</td><td>1</td></tr>
 <tr><td>unknown</td><td>2</td></tr>
 <tr><td>errors</td><td>0</td></tr>
 <tr><td>skipped</td><td>0</td></tr>
-<tr><td>TPR</td><td>90.00%</td></tr>
-<tr><td>FPR</td><td>8.33%</td></tr>
-<tr><td>Youden J</td><td>81.67%</td></tr>
-<tr><td>precision</td><td>94.74%</td></tr>
-<tr><td>F1</td><td>92.30%</td></tr>
+<tr><td>TPR</td><td>100.00%</td></tr>
+<tr><td>FPR</td><td>5.56%</td></tr>
+<tr><td>Youden J</td><td>94.44%</td></tr>
+<tr><td>precision</td><td>96.97%</td></tr>
+<tr><td>F1</td><td>98.46%</td></tr>
 </tbody></table></div>
 <h3>Evidence</h3>
 <div class="table-wrap"><table class="">
 <thead><tr><th>measure</th><th>value</th></tr></thead>
 <tbody>
-<tr><td>boundary warnings</td><td>40 (14 blocking in 7 cases)</td></tr>
-<tr><td>paths that reach the sink</td><td>20 / 20</td></tr>
-<tr><td>certificates checked</td><td>20 / 20</td></tr>
+<tr><td>boundary warnings</td><td>62 (4 blocking in 3 cases)</td></tr>
+<tr><td>paths that reach the sink</td><td>44 / 44</td></tr>
+<tr><td>certificates checked</td><td>44 / 44</td></tr>
 </tbody></table></div>
 <h3>Per CWE</h3>
 <p class="caption">A CWE with no safe case has no defined FPR (shown as —); recall figures on a single case are anecdotal.</p>
 <div class="table-wrap"><table class="">
 <thead><tr><th>CWE</th><th>cases</th><th>TP</th><th>FN</th><th>TN</th><th>FP</th><th>unknown</th><th>TPR</th><th>FPR</th><th>J</th><th>precision</th><th>findings</th><th>paths</th><th>checked</th></tr></thead>
 <tbody>
-<tr><td>CWE-78</td><td>22</td><td>10</td><td>2</td><td>7</td><td>1</td><td>2</td><td>83.33%</td><td>12.50%</td><td>70.83%</td><td>90.91%</td><td>12</td><td>12</td><td>12</td></tr>
-<tr><td>CWE-134</td><td>5</td><td>3</td><td>0</td><td>2</td><td>0</td><td>0</td><td>100.00%</td><td>0.00%</td><td>100.00%</td><td>100.00%</td><td>3</td><td>3</td><td>3</td></tr>
+<tr><td>CWE-78</td><td>36</td><td>21</td><td>0</td><td>12</td><td>1</td><td>2</td><td>100.00%</td><td>7.69%</td><td>92.31%</td><td>95.45%</td><td>32</td><td>32</td><td>32</td></tr>
+<tr><td>CWE-134</td><td>6</td><td>4</td><td>0</td><td>2</td><td>0</td><td>0</td><td>100.00%</td><td>0.00%</td><td>100.00%</td><td>100.00%</td><td>4</td><td>4</td><td>4</td></tr>
 <tr><td>CWE-242</td><td>3</td><td>2</td><td>0</td><td>1</td><td>0</td><td>0</td><td>100.00%</td><td>0.00%</td><td>100.00%</td><td>100.00%</td><td>2</td><td>2</td><td>2</td></tr>
-<tr><td>CWE-120</td><td>3</td><td>2</td><td>0</td><td>1</td><td>0</td><td>0</td><td>100.00%</td><td>0.00%</td><td>100.00%</td><td>100.00%</td><td>2</td><td>2</td><td>2</td></tr>
+<tr><td>CWE-120</td><td>5</td><td>3</td><td>0</td><td>2</td><td>0</td><td>0</td><td>100.00%</td><td>0.00%</td><td>100.00%</td><td>100.00%</td><td>4</td><td>4</td><td>4</td></tr>
 <tr><td>CWE-121</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>100.00%</td><td>—</td><td>—</td><td>100.00%</td><td>1</td><td>1</td><td>1</td></tr>
+<tr><td>CWE-787</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>100.00%</td><td>—</td><td>—</td><td>100.00%</td><td>1</td><td>1</td><td>1</td></tr>
 </tbody></table></div>
 <dl class="meta"><dt>file</dt><dd><code>scry/bench/baseline.json</code></dd></dl>
   <h2 id="reproduce">How to reproduce</h2>

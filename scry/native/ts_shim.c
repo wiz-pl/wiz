@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <signal.h>
 
 #include "tree-sitter/lib/include/tree_sitter/api.h"
 
@@ -362,8 +364,42 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
   if (!s->ok) {
     /* `build_edges` failed; the block is still freeable and `storeError` says why. */
   }
+  free(bad); /* the success path did not use the pre-allocated error store */
   return s;
 }
+
+/* ---- Hard wall-clock guard ----------------------------------------------
+   `--timeout` is a contract even when a single pure stage (one enormous
+   function's rule evaluation) is running and cannot poll the clock. `alarm`
+   delivers SIGALRM wherever the program is; the handler writes a preformatted
+   message with `write` (async-signal-safe) and `_exit(124)` (the `timeout(1)`
+   convention). The cooperative checks in `Scry.TaintCmd` still produce nicer
+   stage messages on the normal path. */
+
+static char scry_alarm_msg[256];
+static size_t scry_alarm_len;
+
+static void scry_alarm_handler(int sig) {
+  (void)sig;
+  ssize_t ignored = write(2, scry_alarm_msg, scry_alarm_len);
+  (void)ignored;
+  _exit(124);
+}
+
+void scry_install_timeout(uint64_t secs) {
+  if (secs == 0) { alarm(0); return; }
+  /* `alarm` takes an unsigned int; clamp instead of wrapping to a tiny limit. */
+  unsigned limit = secs > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned)secs;
+  int n = snprintf(scry_alarm_msg, sizeof scry_alarm_msg,
+    "scry: timeout after %llu s (--timeout); no analysis result was produced\n"
+    "scry: raise --timeout, or bound the work with --max-nodes/--max-rounds\n",
+    (unsigned long long)secs);
+  scry_alarm_len = (n > 0 && (size_t)n < sizeof scry_alarm_msg) ? (size_t)n : 0;
+  signal(SIGALRM, scry_alarm_handler);
+  alarm(limit);
+}
+
+void scry_cancel_timeout(void) { alarm(0); }
 
 /* ---- Scalars ------------------------------------------------------------ */
 
