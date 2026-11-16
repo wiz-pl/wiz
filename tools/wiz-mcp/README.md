@@ -110,7 +110,17 @@ claude -p 'call mcp__wiz__version' --mcp-config .mcp.json --strict-mcp-config \
 | `build` (`wiz_build`) | `path`, `out`, `lib?` | `wiz build PATH -o OUT [--lib]`; **only with `--allow-build`** |
 | `diagnostics` (`wiz_diagnostics`) | `path`, `text?` | `didOpen` → `publishDiagnostics` → `didClose`; `check`'s result shape, LSP objects under `raw` |
 | `hover` (`wiz_hover`) | `path`, `text?`, `line`, `character` | `textDocument/hover` |
-| `goals` (`wiz_goals`) | `path`, `text?`, `line`, `character` | `wiz/interactiveGoals` |
+| `goals` (`wiz_goals`) | `path`, `text?`, `line`, `character`, `plain?` | `wiz/interactiveGoals`, or `wiz/plainGoal` (compact text) with `plain` |
+| `term_goal` (`wiz_term_goal`) | `path`, `text?`, `line`, `character` | `wiz/plainTermGoal`: the expected type at a position |
+| `definition` (`wiz_definition`) | `path`, `text?`, `line`, `character`, `declaration?` | `textDocument/definition` (or `declaration`) → `{locations, withheld}` |
+| `references` (`wiz_references`) | `path`, `text?`, `line`, `character` | `textDocument/references` → `{locations, withheld}` |
+| `document_symbols` (`wiz_document_symbols`) | `path`, `text?` | `textDocument/documentSymbol`, with `kindName` |
+| `workspace_symbols` (`wiz_workspace_symbols`) | `path`, `query`, `text?` | `workspace/symbol` over the file and its imports → `{symbols, withheld}` |
+| `completion` (`wiz_completion`) | `path`, `text?`, `line`, `character`, `limit?` | `textDocument/completion`, compact, at most `limit` (50) |
+| `signature_help` (`wiz_signature_help`) | `path`, `text?`, `line`, `character` | `textDocument/signatureHelp` |
+| `inlay_hints` (`wiz_inlay_hints`) | `path`, `text?`, `start_line?`, `end_line?` | `textDocument/inlayHint` (whole file by default) |
+| `code_actions` (`wiz_code_actions`) | `path`, `text?`, `line`, `character`, `end_line?`, `end_character?` | `textDocument/codeAction`; edits **proposed, never applied** |
+| `rename` (`wiz_rename`) | `path`, `text?`, `line`, `character`, `new_name` | `textDocument/rename`; the edit **proposed, never applied** |
 
 `text` sends a buffer that is not saved to disk. When it is omitted the file is
 read. Positions are 0-based; Wiz's LSP treats `character` as a Unicode code
@@ -125,6 +135,34 @@ module roots are found beside the binary). `build` additionally needs the host
 C toolchain (`cc`, GMP) on the environment the bridge inherits; start the MCP
 client from the dev shell (`nix develop`) or an equivalent shell if you use it.
 The bridge does not invent compiler flags.
+
+### Navigation, completion and proposed edits
+
+All of these open the file (or `text`) in the worktree's daemon, wait for it to
+elaborate, ask, and close it. Positions are 0-based, as for `hover`.
+
+* **Locations** (`definition`, `references`, `workspace_symbols`) come back as
+  `{file, line, column, range}` (1-based `line`/`column`, 0-based LSP `range`),
+  the same shape as diagnostics. A location outside the workspace, the
+  toolchain library and `--allow-root` directories, or one that is not a local
+  file, is **withheld**: left out, with a `withheld` count, so a result never
+  names a file the tools could not read.
+* **Edits are proposals.** `rename` and `code_actions` return
+  `{applied: false, files: [{file, edits: [{range, newText}]}], edit_count}`.
+  The bridge never writes: apply the edits with your own editing tool if you
+  want them. Every file an edit touches must be inside the workspace; a rename
+  that would touch any file outside it, or create, rename or delete files, is
+  refused whole (`path_denied`), and a code action with such an edit is
+  withheld. A `text` buffer's edits are positions in that buffer.
+* `references` and `rename` cover the open file and the package's own modules
+  (not the toolchain's library, whose names `rename` refuses). Wiz finds the
+  target at a *use* of a name; at the name in its own declaration it may answer
+  "nothing to rename here".
+* A request the language server refuses (`nothing to rename here`, a name
+  declared in the toolchain, `'x y' is not a name`) is `error.kind =
+  "lsp_refused"`; the daemon keeps running.
+* `workspace_symbols` searches the declarations of `path` and everything it
+  imports (the server has no index of files you have not opened); at most 300.
 
 ## Safety
 
@@ -185,7 +223,7 @@ failure:
   `structuredContent` carry the same object.
 * `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,
   `wiz_not_found`, `io_error`, `timeout`, `lsp_startup`, `lsp_closed`,
-  `lsp_error`, `internal`.
+  `lsp_error`, `lsp_refused`, `internal`.
 
 ### `check`: structured diagnostics
 
@@ -226,7 +264,9 @@ does not restart a crashed local MCP server).
 
 ## One daemon per worktree
 
-`diagnostics`, `hover` and `goals` share **one** lazily started process:
+The language-server tools (`diagnostics`, `hover`, `goals`, `term_goal`,
+navigation, completion, `code_actions`, `rename`, and `check` with
+`source: "lsp"`) share **one** lazily started process:
 
 ```sh
 wiz lsp          # LSP on its stdin/stdout, Content-Length framing; no socket
@@ -369,6 +409,6 @@ All logs go to stderr; stdout is the MCP transport.
   given and shells out to `wiz fmt`.
 * Calls are sequential; MCP cancellation notifications cannot interrupt a call
   in flight. The per-call deadline is the bound.
-* No resources or prompts; only the tools above (seven, eight with `--allow-build`).
+* No resources or prompts; only the tools above (17, 18 with `--allow-build`).
 * The daemon's cache is content-addressed and safe to share, but cold worktrees
   duplicate elaboration work. A warm `~/.cache/wiz` avoids most of it.

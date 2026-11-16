@@ -28,6 +28,14 @@ sys.path.insert(0, str(HERE.parent))
 import wiz_mcp  # noqa: E402
 
 
+#: The tools a server lists without --allow-build (all read-only).
+DEFAULT_TOOLS = {
+    "version", "check", "parse", "fmt", "diagnostics", "hover", "goals",
+    "definition", "references", "document_symbols", "workspace_symbols", "term_goal",
+    "completion", "signature_help", "inlay_hints", "code_actions", "rename",
+}
+
+
 def write_exe(directory: str, name: str, body: str) -> str:
     path = Path(directory) / name
     path.write_text("#!/bin/sh\nset -eu\n" + body + "\n", encoding="utf-8")
@@ -157,13 +165,10 @@ class DispatchTests(unittest.TestCase):
         )
         self.assertEqual(responses[0]["result"]["protocolVersion"], wiz_mcp.PROTOCOL_VERSION)
 
-    def test_tools_list_has_seven_read_only_tools_by_default(self) -> None:
+    def test_tools_list_has_only_read_only_tools_by_default(self) -> None:
         responses, _ = self.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {tool["name"] for tool in responses[0]["result"]["tools"]}
-        self.assertEqual(
-            names,
-            {"version", "check", "parse", "fmt", "diagnostics", "hover", "goals"},
-        )
+        self.assertEqual(names, DEFAULT_TOOLS)
 
     def test_tools_list_has_build_with_allow_build(self) -> None:
         server = wiz_mcp.Server(wiz_mcp.Config(workspace=self.workspace, wiz=self.wiz, idle=0, timeout=5, allow_build=True))
@@ -172,10 +177,7 @@ class DispatchTests(unittest.TestCase):
         finally:
             server.close()
         names = {tool["name"] for tool in responses[0]["result"]["tools"]}
-        self.assertEqual(
-            names,
-            {"version", "check", "parse", "fmt", "build", "diagnostics", "hover", "goals"},
-        )
+        self.assertEqual(names, DEFAULT_TOOLS | {"build"})
 
     def test_notifications_get_no_reply(self) -> None:
         self.assertEqual(self.dispatch({"jsonrpc": "2.0", "method": "notifications/initialized"}), ([], False))
@@ -461,6 +463,59 @@ while True:
               "params": {"uri": doc["uri"], "diagnostics": diags}})
     elif method == "textDocument/hover":
         send({"jsonrpc": "2.0", "id": mid, "result": {"contents": "Nat"}})
+    elif method in ("textDocument/definition", "textDocument/declaration", "textDocument/references"):
+        uri = message["params"]["textDocument"]["uri"]
+        rng = {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 10}}
+        outside = os.environ.get("FAKE_OUTSIDE", "/nonexistent")
+        send({"jsonrpc": "2.0", "id": mid, "result": [
+            {"uri": uri, "range": rng},
+            {"targetUri": uri, "targetRange": rng, "targetSelectionRange": rng},
+            {"uri": "file://" + outside + "/secret.wiz", "range": rng},
+            {"uri": "https://example.com/x.wiz", "range": rng},
+            {"uri": "file://" + os.environ.get("FAKE_LIB", "/nonexistent") + "/Prelude.wiz", "range": rng},
+        ]})
+    elif method == "textDocument/documentSymbol":
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"name": "S", "kind": 23, "children": [{"name": "f", "kind": 8}]}]})
+    elif method == "workspace/symbol":
+        uri = "file://" + os.getcwd() + "/probe.wiz"
+        send({"jsonrpc": "2.0", "id": mid, "result": [
+            {"name": "mine", "kind": 12, "location": {"uri": uri, "range": {"start": {"line": 0, "character": 0}}}},
+            {"name": "theirs", "kind": 12, "location": {"uri": "file://" + os.environ.get("FAKE_OUTSIDE", "/x") + "/s.wiz"}},
+            {"name": "q=" + message["params"]["query"], "kind": 13, "location": None},
+        ]})
+    elif method in ("wiz/plainTermGoal", "wiz/plainGoal", "textDocument/signatureHelp"):
+        send({"jsonrpc": "2.0", "id": mid, "result": {"method": method, "position": message["params"]["position"]}})
+    elif method == "textDocument/completion":
+        items = [{"label": "c%d" % i, "kind": 3, "detail": "Nat", "documentation": {"kind": "markdown", "value": "doc"},
+                  "textEdit": {"newText": "c%d" % i}} for i in range(120)]
+        send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": True, "items": items}})
+    elif method == "textDocument/inlayHint":
+        send({"jsonrpc": "2.0", "id": mid, "result": [{"position": {"line": 0, "character": 1}, "label": ": Nat", "range": message["params"]["range"]}]})
+    elif method == "textDocument/codeAction":
+        uri = message["params"]["textDocument"]["uri"]
+        outside = os.environ.get("FAKE_OUTSIDE", "/nonexistent")
+        edit = lambda u: {"changes": {u: [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "y"}]}}
+        send({"jsonrpc": "2.0", "id": mid, "result": [
+            {"title": "fix here", "kind": "quickfix", "edit": edit(uri),
+             "diagnostics": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": "m", "code": "c"}]},
+            {"title": "fix elsewhere", "kind": "quickfix", "edit": edit("file://" + outside + "/secret.wiz")},
+            {"title": "no edit", "kind": "refactor"},
+        ]})
+    elif method == "textDocument/rename":
+        uri = message["params"]["textDocument"]["uri"]
+        new = message["params"]["newName"]
+        outside = os.environ.get("FAKE_OUTSIDE", "/nonexistent")
+        te = [{"range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 10}}, "newText": new}]
+        if new == "nothing":
+            send({"jsonrpc": "2.0", "id": mid, "result": None})
+        elif new == "refused":
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32803, "message": "declared in the toolchain"}})
+        elif new == "outside":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"changes": {uri: te, "file://" + outside + "/secret.wiz": te}}})
+        elif new == "create":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"documentChanges": [{"kind": "create", "uri": uri + ".new"}]}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": {"documentChanges": [{"textDocument": {"uri": uri, "version": 1}, "edits": te}]}})
     elif method == "fake/selfcheck":
         links = []
         for fd in os.listdir("/proc/self/fd"):
@@ -567,6 +622,222 @@ class StdioDaemonTests(unittest.TestCase):
         self.assertEqual(diagnostic["file"], os.path.join(self.workspace, "probe.wiz"))
         self.assertEqual((diagnostic["line"], diagnostic["column"]), (1, 1))
         self.assertEqual(diagnostic["range"]["end"], {"line": 0, "character": 1})
+
+
+#: Every language-server tool with the smallest valid arguments (besides `path`).
+LSP_TOOL_ARGS = {
+    "diagnostics": {},
+    "hover": {"line": 0, "character": 0},
+    "goals": {"line": 0, "character": 0},
+    "definition": {"line": 0, "character": 0},
+    "references": {"line": 0, "character": 0},
+    "document_symbols": {},
+    "workspace_symbols": {"query": "x"},
+    "term_goal": {"line": 0, "character": 0},
+    "completion": {"line": 0, "character": 0},
+    "signature_help": {"line": 0, "character": 0},
+    "inlay_hints": {},
+    "code_actions": {"line": 0, "character": 0},
+    "rename": {"line": 0, "character": 0, "new_name": "y"},
+}
+
+
+class NavigationToolTests(unittest.TestCase):
+    """P1c: the read-only language-server tools, against the fake stdio server."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="wiz-mcp-nav-")
+        base = os.path.realpath(self.tmp.name)
+        self.workspace = os.path.join(base, "ws")
+        self.outside = os.path.join(base, "outside")
+        self.lib = os.path.join(base, "toolchain", "share", "wiz", "lib")
+        for d in (self.workspace, self.outside, self.lib, os.path.join(base, "toolchain", "bin")):
+            os.makedirs(d)
+        Path(self.outside, "secret.wiz").write_text("secret\n")
+        Path(self.lib, "Prelude.wiz").write_text("-- prelude\n")
+        Path(self.workspace, "probe.wiz").write_text("def x : Nat := 1\n")
+        script = os.path.join(base, "fake_lsp.py")
+        Path(script).write_text(FAKE_LSP, encoding="utf-8")
+        # The child environment is filtered, so the fake's settings live in the wrapper.
+        self.wiz = write_exe(
+            os.path.join(base, "toolchain", "bin"),
+            "wiz",
+            f'FAKE_OUTSIDE="{self.outside}" FAKE_LIB="{self.lib}" exec "{sys.executable}" "{script}" "$@"',
+        )
+        self.server = wiz_mcp.Server(wiz_mcp.Config(workspace=self.workspace, wiz=self.wiz, idle=0, timeout=10))
+        self.probe = os.path.join(self.workspace, "probe.wiz")
+
+    def tearDown(self) -> None:
+        self.server.close()
+        self.tmp.cleanup()
+
+    def call(self, name: str, **args) -> dict:
+        envelope = self.server.call_tool(name, dict({"path": "probe.wiz"}, **args))
+        return envelope
+
+    def ok(self, name: str, **args):
+        envelope = self.call(name, **args)
+        self.assertTrue(envelope["ok"], envelope)
+        return envelope["result"]
+
+    def test_every_new_tool_is_listed_read_only(self) -> None:
+        responses, _ = self.server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        tools = {tool["name"]: tool for tool in responses[0]["result"]["tools"]}
+        for name in LSP_TOOL_ARGS:
+            self.assertIn(name, tools)
+            self.assertIs(tools[name]["annotations"]["readOnlyHint"], True, name)
+            self.assertIs(tools[name]["annotations"]["destructiveHint"], False, name)
+
+    def test_every_lsp_tool_refuses_an_input_path_outside(self) -> None:
+        for name, args in LSP_TOOL_ARGS.items():
+            for path in (os.path.join(self.outside, "secret.wiz"), "../outside/secret.wiz"):
+                envelope = self.server.call_tool(name, dict(args, path=path))
+                self.assertFalse(envelope["ok"], (name, envelope))
+                self.assertEqual(envelope["error"]["kind"], "path_denied", (name, envelope))
+        self.assertIsNone(self.server.daemon.proc)  # nothing reached the daemon
+
+    def test_definition_keeps_workspace_and_toolchain_locations_and_withholds_the_rest(self) -> None:
+        result = self.ok("definition", line=0, character=4)
+        files = [loc["file"] for loc in result["locations"]]
+        self.assertEqual(files, [self.probe, self.probe, os.path.join(self.lib, "Prelude.wiz")])
+        self.assertEqual(result["withheld"], 2)  # the outside file and the https: URI
+        self.assertNotIn(self.outside, json.dumps(result))
+        first = result["locations"][0]
+        self.assertEqual((first["line"], first["column"]), (3, 5))
+        self.assertEqual(first["range"]["end"], {"line": 2, "character": 10})
+
+    def test_declaration_and_references_use_their_methods(self) -> None:
+        self.assertEqual(self.ok("definition", line=0, character=4, declaration=True)["withheld"], 2)
+        self.assertEqual(len(self.ok("references", line=0, character=4)["locations"]), 3)
+
+    def test_document_symbols_have_kind_names(self) -> None:
+        result = self.ok("document_symbols")
+        self.assertEqual(result[0]["kindName"], "struct")
+        self.assertEqual(result[0]["children"][0]["kindName"], "field")
+
+    def test_workspace_symbols_withhold_outside_locations(self) -> None:
+        result = self.ok("workspace_symbols", query="mi")
+        names = [symbol["name"] for symbol in result["symbols"]]
+        self.assertEqual(names, ["mine", "q=mi"])
+        self.assertEqual(result["withheld"], 1)
+        self.assertEqual(result["symbols"][0]["location"]["file"], self.probe)
+        self.assertIsNone(result["symbols"][1]["location"])
+        self.assertNotIn(self.outside, json.dumps(result))
+        self.assertEqual(self.call("workspace_symbols")["error"]["kind"], "invalid_args")
+
+    def test_goal_and_signature_tools_use_their_methods(self) -> None:
+        self.assertEqual(self.ok("term_goal", line=1, character=2)["method"], "wiz/plainTermGoal")
+        self.assertEqual(self.ok("goals", line=1, character=2, plain=True)["method"], "wiz/plainGoal")
+        self.assertEqual(self.ok("signature_help", line=1, character=2)["position"], {"line": 1, "character": 2})
+
+    def test_completion_is_limited_and_compact(self) -> None:
+        result = self.ok("completion", line=0, character=1, limit=5)
+        self.assertEqual(len(result["items"]), 5)
+        self.assertEqual(result["total"], 120)
+        self.assertTrue(result["incomplete"])
+        self.assertEqual(result["items"][0], {"label": "c0", "kind": "function", "detail": "Nat", "documentation": "doc", "insert": "c0"})
+        self.assertEqual(len(self.ok("completion", line=0, character=1)["items"]), 50)
+        self.assertEqual(self.call("completion", line=0, character=1, limit=0)["error"]["kind"], "invalid_args")
+
+    def test_inlay_hints_default_to_the_whole_file(self) -> None:
+        result = self.ok("inlay_hints")
+        self.assertEqual(result[0]["range"], {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 0}})
+        result = self.ok("inlay_hints", start_line=1, end_line=1)
+        self.assertEqual(result[0]["range"]["start"]["line"], 1)
+
+    def test_code_actions_are_proposals_confined_to_the_workspace(self) -> None:
+        before = Path(self.probe).read_text()
+        result = self.ok("code_actions", line=0, character=0)
+        self.assertIs(result["applied"], False)
+        self.assertEqual([action["title"] for action in result["actions"]], ["fix here", "no edit"])
+        self.assertEqual(result["withheld"], 1)
+        fix = result["actions"][0]
+        self.assertEqual(fix["edit"]["files"][0]["file"], self.probe)
+        self.assertIs(fix["edit"]["applied"], False)
+        self.assertEqual(fix["fixes"][0]["code"], "c")
+        self.assertIsNone(result["actions"][1]["edit"])
+        self.assertNotIn(self.outside, json.dumps(result))
+        self.assertEqual(Path(self.probe).read_text(), before)  # nothing applied
+
+    def test_rename_is_a_proposal(self) -> None:
+        before = Path(self.probe).read_text()
+        result = self.ok("rename", line=2, character=5, new_name="twice")
+        self.assertEqual(result, {
+            "applied": False,
+            "files": [{"file": self.probe, "edits": [{"range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 10}}, "newText": "twice"}]}],
+            "edit_count": 1,
+        })
+        self.assertEqual(Path(self.probe).read_text(), before)
+
+    def test_rename_touching_a_file_outside_is_refused_whole(self) -> None:
+        envelope = self.call("rename", line=2, character=5, new_name="outside")
+        self.assertEqual(envelope["error"]["kind"], "path_denied")
+        self.assertIsNone(envelope["result"])
+        self.assertNotIn(self.outside, json.dumps(envelope))
+
+    def test_rename_creating_files_is_refused(self) -> None:
+        self.assertEqual(self.call("rename", line=2, character=5, new_name="create")["error"]["kind"], "path_denied")
+
+    def test_rename_refusals_keep_the_daemon(self) -> None:
+        self.assertEqual(self.call("rename", line=2, character=5, new_name="nothing")["error"]["kind"], "lsp_refused")
+        proc = self.server.daemon.proc
+        envelope = self.call("rename", line=2, character=5, new_name="refused")
+        self.assertEqual(envelope["error"]["kind"], "lsp_refused")
+        self.assertIn("declared in the toolchain", envelope["error"]["message"])
+        self.assertIs(self.server.daemon.proc, proc)
+        self.assertIsNone(proc.poll())
+
+
+class LocationHelperTests(unittest.TestCase):
+    def test_uri_to_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wiz-mcp-uri-") as tmp:
+            plain = os.path.join(tmp, "a b%20c.wiz")
+            Path(plain).write_text("")
+            # Wiz writes library URIs unescaped: a literal "%20" in a name must survive.
+            self.assertEqual(wiz_mcp.uri_to_path("file://" + plain), plain)
+        self.assertEqual(wiz_mcp.uri_to_path("file:///no/such/a%20b.wiz"), "/no/such/a b.wiz")
+        self.assertEqual(wiz_mcp.uri_to_path("file://localhost/x.wiz"), "/x.wiz")
+        self.assertEqual(wiz_mcp.uri_to_path("file:///x/../y.wiz"), "/y.wiz")
+        for bad in ("https://example.com/x", "untitled:1", "file://host/x", None, 3):
+            self.assertIsNone(wiz_mcp.uri_to_path(bad))
+        self.assertEqual(wiz_mcp.uri_to_path("file:///enc%23", {"file:///enc%23": "/w/enc#"}), "/w/enc#")
+
+    def test_confine_locations_accepts_one_many_or_none(self) -> None:
+        roots = ["/w"]
+        loc = {"uri": "file:///w/a.wiz", "range": {"start": {"line": 1, "character": 2}}}
+        self.assertEqual(wiz_mcp.confine_locations(None, roots), ([], 0))
+        one, hidden = wiz_mcp.confine_locations(loc, roots)
+        self.assertEqual((one[0]["line"], one[0]["column"], hidden), (2, 3, 0))
+        self.assertEqual(one[0]["range"]["end"], {"line": 1, "character": 2})
+        self.assertEqual(wiz_mcp.confine_locations([loc, {"uri": "file:///etc/passwd"}, "junk"], roots)[1], 1)
+
+    def test_a_symlink_out_of_a_root_is_withheld(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wiz-mcp-uri-") as tmp:
+            base = os.path.realpath(tmp)
+            os.makedirs(os.path.join(base, "w"))
+            os.makedirs(os.path.join(base, "o"))
+            Path(base, "o", "s.wiz").write_text("")
+            os.symlink(os.path.join(base, "o", "s.wiz"), os.path.join(base, "w", "link.wiz"))
+            locations, hidden = wiz_mcp.confine_locations({"uri": "file://" + os.path.join(base, "w", "link.wiz")}, [os.path.join(base, "w")])
+            self.assertEqual((locations, hidden), ([], 1))
+            with self.assertRaises(wiz_mcp.ToolError) as caught:
+                wiz_mcp.propose_edit({"changes": {"file://" + os.path.join(base, "w", "link.wiz"): []}}, [os.path.join(base, "w")])
+            self.assertEqual(caught.exception.kind, "path_denied")
+
+    def test_propose_edit_merges_changes_and_document_changes(self) -> None:
+        te = {"range": {}, "newText": "z"}
+        got = wiz_mcp.propose_edit(
+            {"changes": {"file:///w/b.wiz": [te]},
+             "documentChanges": [{"textDocument": {"uri": "file:///w/a.wiz"}, "edits": [te, te]}]},
+            ["/w"],
+        )
+        self.assertEqual(got["applied"], False)
+        self.assertEqual([f["file"] for f in got["files"]], ["/w/a.wiz", "/w/b.wiz"])
+        self.assertEqual(got["edit_count"], 3)
+        for bad in (None, {"documentChanges": [{"kind": "delete", "uri": "file:///w/a.wiz"}]},
+                    {"changes": {"untitled:1": [te]}}):
+            with self.assertRaises(wiz_mcp.ToolError):
+                wiz_mcp.propose_edit(bad, ["/w"])
 
 
 # Real `wiz check` output (master d23473da), with PATH standing for the checked file.

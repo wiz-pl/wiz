@@ -13,8 +13,11 @@ runs the tools a Wiz agent needs:
   diagnostics {path,text?} diagnostics from `wiz lsp`
   hover      {path,text?,line,character}  the type at a position
   goals      {path,text?,line,character}  the tactic state (`wiz/interactiveGoals`)
+  definition, references, document_symbols, workspace_symbols, term_goal,
+  completion, signature_help, inlay_hints     read-only language-server queries
+  code_actions, rename     edits proposed, never applied
 
-The text tools are one `wiz` process per call. The three language-server tools
+The text tools are one `wiz` process per call. The language-server tools
 share **one** lazily started `wiz lsp` daemon on its own stdin/stdout (no socket),
 belonging to this process and therefore to this workspace. It is killed after
 `--idle` seconds (default 600) and on exit. A daemon is never shared between
@@ -79,8 +82,10 @@ INSTRUCTIONS = (
     "stay inside it (or the toolchain library); others are refused with path_denied. "
     "Call check after editing a .wiz file: result.diagnostics lists its messages with positions "
     "(source=lsp adds range ends and error codes, and checks unsaved text); "
-    "use fmt --check before committing, and diagnostics/hover/goals when you need the "
-    "language server's view. diagnostics, hover and goals share one lazy `wiz lsp` "
+    "use fmt --check before committing. definition/references/workspace_symbols navigate "
+    "(locations outside the workspace and toolchain are withheld); rename and code_actions only "
+    "propose edits, which you apply yourself. Use diagnostics/hover/goals when you need the "
+    "language server's view. The language-server tools share one lazy `wiz lsp` "
     "daemon for this worktree and can be slow on a cold cache."
 )
 
@@ -399,6 +404,13 @@ class LSPTimeout(LSPError):
 
 class LSPClosed(LSPError):
     """The daemon's connection is gone."""
+
+
+class LSPRefused(LSPError):
+    """The language server answered a request with an error (nothing to rename, …).
+
+    The daemon is healthy, so unlike the other LSP errors this one keeps it running.
+    """
 
 
 class StdioLSP:
@@ -839,25 +851,33 @@ class LSPDaemon:
                 self._did_close(uri, deadline)
                 self.last_use = time.monotonic()
 
-    def at(self, method: str, uri: str, text: str, line: int, character: int, deadline: float) -> Any:
+    def query(self, method: str, uri: str, text: str, params: dict[str, Any], deadline: float,
+              with_document: bool = True) -> Any:
+        """Open `uri` with `text`, wait for its elaboration, ask `method`, close it.
+
+        `params` get `textDocument` added unless `with_document` is false (for
+        `workspace/symbol`, which searches the open documents and their imports).
+        """
         with self.op:
             self.ensure(deadline)
             self.last_use = time.monotonic()
             self._did_open(uri, text, deadline)
             try:
                 self.wait_diagnostics(uri, deadline)  # elaboration finished
-                response = self._request_locked(
-                    method,
-                    {"textDocument": {"uri": uri}, "position": {"line": line, "character": character}},
-                    deadline,
-                )
+                full = dict(params)
+                if with_document:
+                    full["textDocument"] = {"uri": uri}
+                response = self._request_locked(method, full, deadline)
                 if "error" in response:
                     error = response.get("error") or {}
-                    raise LSPError(f"{error.get('code')}: {error.get('message')}")
+                    raise LSPRefused(f"{error.get('message')} (LSP error {error.get('code')})")
                 return response.get("result")
             finally:
                 self._did_close(uri, deadline)
                 self.last_use = time.monotonic()
+
+    def at(self, method: str, uri: str, text: str, line: int, character: int, deadline: float) -> Any:
+        return self.query(method, uri, text, {"position": {"line": line, "character": character}}, deadline)
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +896,144 @@ def _optional_bool(args: dict[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ToolError("invalid_args", f"`{key}` must be a boolean")
     return value
+
+
+# ---------------------------------------------------------------------------
+# Language-server results: locations and edits, confined like tool inputs
+
+#: LSP SymbolKind numbers, by name, for agents that do not know the table.
+SYMBOL_KINDS = {
+    1: "file", 2: "module", 3: "namespace", 4: "package", 5: "class", 6: "method", 7: "property",
+    8: "field", 9: "constructor", 10: "enum", 11: "interface", 12: "function", 13: "variable",
+    14: "constant", 15: "string", 16: "number", 17: "boolean", 18: "array", 19: "object", 20: "key",
+    21: "null", 22: "enum-member", 23: "struct", 24: "event", 25: "operator", 26: "type-parameter",
+}
+#: LSP CompletionItemKind numbers, by name.
+COMPLETION_KINDS = {
+    1: "text", 2: "method", 3: "function", 4: "constructor", 5: "field", 6: "variable", 7: "class",
+    8: "interface", 9: "module", 10: "property", 11: "unit", 12: "value", 13: "enum", 14: "keyword",
+    15: "snippet", 16: "color", 17: "file", 18: "reference", 19: "folder", 20: "enum-member",
+    21: "constant", 22: "struct", 23: "event", 24: "operator", 25: "type-parameter",
+}
+
+
+def uri_to_path(uri: Any, known: Optional[dict[str, str]] = None) -> Optional[str]:
+    """The local path of a `file:` URI, or None.
+
+    The bridge's own URIs are percent-escaped (`path_to_uri`); Wiz writes a
+    library module's as `file://` + the plain path. So a URI the bridge sent maps
+    back exactly (`known`), and otherwise the plain path is tried before the
+    unescaped one.
+    """
+    if not isinstance(uri, str):
+        return None
+    if known and uri in known:
+        return known[uri]
+    if not uri.startswith("file://"):
+        return None
+    raw = uri[len("file://"):]
+    if raw.startswith("localhost/"):
+        raw = raw[len("localhost"):]
+    if not raw.startswith("/"):
+        return None
+    if os.path.exists(raw):
+        return os.path.normpath(raw)
+    return os.path.normpath(urllib.parse.unquote(raw))
+
+
+def _allowed(path: Optional[str], roots: Iterable[str]) -> bool:
+    if path is None:
+        return False
+    real = os.path.realpath(path)
+    return any(_is_under(real, root) for root in roots)
+
+
+def _location(path: str, rng: Any) -> dict[str, Any]:
+    rng = rng if isinstance(rng, dict) else {}
+    start = rng.get("start") or {"line": 0, "character": 0}
+    end = rng.get("end") or start
+    return {
+        "file": path,
+        "line": int(start.get("line", 0)) + 1,
+        "column": int(start.get("character", 0)) + 1,
+        "range": {"start": start, "end": end},
+    }
+
+
+def confine_locations(result: Any, roots: Iterable[str], known: Optional[dict[str, str]] = None) -> tuple[list[dict[str, Any]], int]:
+    """LSP `Location`s / `LocationLink`s (one, a list, or null) as readable locations.
+
+    A location outside the read roots (or not a local file) is withheld, not
+    shown: the count says how many.
+    """
+    roots = list(roots)
+    items = result if isinstance(result, list) else ([] if result is None else [result])
+    out: list[dict[str, Any]] = []
+    withheld = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        uri = item.get("uri", item.get("targetUri"))
+        rng = item.get("range", item.get("targetSelectionRange", item.get("targetRange")))
+        path = uri_to_path(uri, known)
+        if path is None or not _allowed(path, roots):
+            withheld += 1
+            continue
+        out.append(_location(path, rng))
+    return out, withheld
+
+
+def propose_edit(edit: Any, roots: Iterable[str], known: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """A `WorkspaceEdit` as a proposal: files and their text edits, never applied.
+
+    Every file it touches must be inside the write roots (the workspace); one
+    outside, a file creation/rename/deletion, or a non-file URI refuses the
+    whole edit (`path_denied`), since applying part of a rename is wrong.
+    """
+    roots = list(roots)
+    per_file: dict[str, list[Any]] = {}
+    outside = 0
+    if not isinstance(edit, dict):
+        raise ToolError("lsp_error", "the language server returned no edit")
+    for uri, edits in (edit.get("changes") or {}).items():
+        path = uri_to_path(uri, known)
+        if path is None or not _allowed(path, roots):
+            outside += 1
+            continue
+        per_file.setdefault(path, []).extend(edits if isinstance(edits, list) else [])
+    for change in edit.get("documentChanges") or []:
+        if not isinstance(change, dict) or "kind" in change:
+            raise ToolError("path_denied", "the edit creates, renames or deletes files; only text edits are proposed")
+        path = uri_to_path((change.get("textDocument") or {}).get("uri"), known)
+        if path is None or not _allowed(path, roots):
+            outside += 1
+            continue
+        per_file.setdefault(path, []).extend(change.get("edits") or [])
+    if outside:
+        raise ToolError(
+            "path_denied",
+            f"the edit touches {outside} file(s) outside the workspace; it is not proposed",
+        )
+    files = [
+        {"file": path, "edits": [e for e in edits if isinstance(e, dict)]}
+        for path, edits in sorted(per_file.items())
+    ]
+    return {"applied": False, "files": files, "edit_count": sum(len(f["edits"]) for f in files)}
+
+
+def _named_symbols(symbols: Any) -> Any:
+    """Document symbols with `kindName` beside each numeric `kind`, recursively."""
+    if not isinstance(symbols, list):
+        return []
+    out = []
+    for symbol in symbols:
+        if not isinstance(symbol, dict):
+            continue
+        named = dict(symbol, kindName=SYMBOL_KINDS.get(symbol.get("kind"), "unknown"))
+        if "children" in symbol:
+            named["children"] = _named_symbols(symbol["children"])
+        out.append(named)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1075,7 +1233,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "goals",
         "annotations": {"title": "Tactic goals at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-        "description": "The tactic state at a position (`wiz/interactiveGoals`).",
+        "description": "The tactic state at a position: plain=true gives compact text (`wiz/plainGoal`), otherwise the interactive structure (`wiz/interactiveGoals`).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1083,8 +1241,173 @@ TOOLS: list[dict[str, Any]] = [
                 "text": {"type": "string"},
                 "line": {"type": "integer", "minimum": 0},
                 "character": {"type": "integer", "minimum": 0},
+                "plain": {"type": "boolean", "description": "compact text instead of the interactive structure"},
             },
             "required": ["path", "line", "character"],
+            "additionalProperties": False,
+        },
+    },
+]
+TOOLS += [
+    {
+        "name": "definition",
+        "annotations": {"title": "Go to definition", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'Where the name at a position is defined (declaration=true: declared). Locations outside the workspace and toolchain library are withheld (counted).',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+                "declaration": {"type": "boolean"},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "references",
+        "annotations": {"title": "Find references", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": "Every use of the name at a position, in the open file and the package's modules. Locations outside the readable roots are withheld (counted).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "document_symbols",
+        "annotations": {"title": "Outline of a file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'The declarations of a file as a tree (name, kind, kindName, range).',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+            },
+            "required": ['path'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "workspace_symbols",
+        "annotations": {"title": "Search declarations by name", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'Declarations whose name contains `query` (case-insensitive), from the file at `path` and everything it imports; at most 300.',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "query": {"type": "string"},
+            },
+            "required": ['path', 'query'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "term_goal",
+        "annotations": {"title": "Expected type at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'The expected type (term goal) at a position, as text (`wiz/plainTermGoal`).',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "completion",
+        "annotations": {"title": "Completions at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'Completion items at a position (label, kind, detail, documentation, the text to insert); at most `limit` (default 50).',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 300},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "signature_help",
+        "annotations": {"title": "Signature at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'The signature of the application around a position and the active parameter.',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "inlay_hints",
+        "annotations": {"title": "Inlay hints", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'Inferred types and implicit arguments the editor would show inline, for the whole file or lines start_line..end_line (0-based).',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "start_line": {"type": "integer", "minimum": 0},
+                "end_line": {"type": "integer", "minimum": 0},
+            },
+            "required": ['path'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "code_actions",
+        "annotations": {"title": "Proposed fixes (not applied)", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": 'Code actions at a position or range, each with its edit as a proposal (files and text edits). Nothing is applied: apply an edit yourself if you want it.',
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+                "end_line": {"type": "integer", "minimum": 0},
+                "end_character": {"type": "integer", "minimum": 0},
+            },
+            "required": ['path', 'line', 'character'],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "rename",
+        "annotations": {"title": "Propose a rename (not applied)", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "description": "The edits that would rename the name at a position to `new_name` across the file and the package's modules, as a proposal. Nothing is applied; an edit outside the workspace is refused.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "text": {"type": "string", "description": "buffer text; defaults to the file on disk"},
+                "line": {"type": "integer", "minimum": 0},
+                "character": {"type": "integer", "minimum": 0},
+                "new_name": {"type": "string"},
+            },
+            "required": ['path', 'line', 'character', 'new_name'],
             "additionalProperties": False,
         },
     },
@@ -1261,13 +1584,127 @@ class Server:
             # The normalized shape `check` returns, with the LSP objects kept under `raw`.
             result = dict(check_result("lsp", diagnostics), raw=raw)
             return make_envelope(name, path=path, result=result)
-        if name in ("hover", "goals"):
-            line = _position_arg(args, "line")
-            character = _position_arg(args, "character")
-            text = self._text_of(args, path)
-            method = "textDocument/hover" if name == "hover" else "wiz/interactiveGoals"
+        text = self._text_of(args, path)
+        known = {uri: path}
+        if name == "document_symbols":
+            result = self.daemon.query("textDocument/documentSymbol", uri, text, {}, deadline)
+            return make_envelope(name, path=path, result=_named_symbols(result))
+        if name == "workspace_symbols":
+            query = args.get("query")
+            if not isinstance(query, str):
+                raise ToolError("invalid_args", "`query` must be a string")
+            result = self.daemon.query("workspace/symbol", uri, text, {"query": query}, deadline, with_document=False)
+            symbols, withheld = [], 0
+            for symbol in result if isinstance(result, list) else []:
+                if not isinstance(symbol, dict):
+                    continue
+                locations, hidden = confine_locations(symbol.get("location"), self.read_roots(), known)
+                withheld += hidden
+                if hidden:
+                    continue
+                symbols.append({
+                    "name": symbol.get("name"),
+                    "kind": symbol.get("kind"),
+                    "kindName": SYMBOL_KINDS.get(symbol.get("kind"), "unknown"),
+                    "location": locations[0] if locations else None,
+                })
+            return make_envelope(name, path=path, result={"symbols": symbols, "withheld": withheld})
+        if name == "inlay_hints":
+            lines = text.count("\n") + 1
+            start = args.get("start_line", 0)
+            end = args.get("end_line", lines)
+            for key, value in (("start_line", start), ("end_line", end)):
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ToolError("invalid_args", f"`{key}` must be a non-negative integer")
+            params = {"range": {"start": {"line": start, "character": 0}, "end": {"line": end, "character": 0}}}
+            result = self.daemon.query("textDocument/inlayHint", uri, text, params, deadline)
+            return make_envelope(name, path=path, result=result if isinstance(result, list) else [])
+
+        # The rest are at a position.
+        line = _position_arg(args, "line")
+        character = _position_arg(args, "character")
+        position = {"line": line, "character": character}
+        if name in ("hover", "goals", "term_goal", "signature_help"):
+            method = {
+                "hover": "textDocument/hover",
+                "goals": "wiz/plainGoal" if _optional_bool(args, "plain") else "wiz/interactiveGoals",
+                "term_goal": "wiz/plainTermGoal",
+                "signature_help": "textDocument/signatureHelp",
+            }[name]
             result = self.daemon.at(method, uri, text, line, character, deadline)
             return make_envelope(name, path=path, result=result)
+        if name in ("definition", "references"):
+            if name == "definition":
+                method = "textDocument/declaration" if _optional_bool(args, "declaration") else "textDocument/definition"
+                params: dict[str, Any] = {"position": position}
+            else:
+                method = "textDocument/references"
+                params = {"position": position, "context": {"includeDeclaration": True}}
+            result = self.daemon.query(method, uri, text, params, deadline)
+            locations, withheld = confine_locations(result, self.read_roots(), known)
+            return make_envelope(name, path=path, result={"locations": locations, "withheld": withheld})
+        if name == "completion":
+            limit = args.get("limit", 50)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 300:
+                raise ToolError("invalid_args", "`limit` must be an integer between 1 and 300")
+            result = self.daemon.query("textDocument/completion", uri, text, {"position": position}, deadline)
+            raw_items = result.get("items", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
+            items = []
+            for item in raw_items[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                documentation = item.get("documentation")
+                if isinstance(documentation, dict):
+                    documentation = documentation.get("value")
+                text_edit = item.get("textEdit") if isinstance(item.get("textEdit"), dict) else {}
+                items.append({
+                    "label": item.get("label"),
+                    "kind": COMPLETION_KINDS.get(item.get("kind"), None),
+                    "detail": item.get("detail"),
+                    "documentation": documentation,
+                    "insert": text_edit.get("newText", item.get("insertText", item.get("label"))),
+                })
+            return make_envelope(name, path=path, result={
+                "items": items,
+                "total": len(raw_items),
+                "incomplete": bool(result.get("isIncomplete")) if isinstance(result, dict) else False,
+            })
+        if name == "code_actions":
+            end_line = args.get("end_line", line)
+            end_character = args.get("end_character", character)
+            for key, value in (("end_line", end_line), ("end_character", end_character)):
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ToolError("invalid_args", f"`{key}` must be a non-negative integer")
+            params = {
+                "range": {"start": position, "end": {"line": end_line, "character": end_character}},
+                "context": {"diagnostics": []},
+            }
+            result = self.daemon.query("textDocument/codeAction", uri, text, params, deadline)
+            actions, withheld = [], 0
+            for action in result if isinstance(result, list) else []:
+                if not isinstance(action, dict):
+                    continue
+                proposal = None
+                if action.get("edit") is not None:
+                    try:
+                        proposal = propose_edit(action["edit"], self.write_roots(), known)
+                    except ToolError:
+                        withheld += 1
+                        continue
+                actions.append({
+                    "title": action.get("title"),
+                    "kind": action.get("kind"),
+                    "fixes": [lsp_diagnostic(path, d) for d in action.get("diagnostics") or [] if isinstance(d, dict)],
+                    "edit": proposal,
+                })
+            return make_envelope(name, path=path, result={"actions": actions, "withheld": withheld, "applied": False})
+        if name == "rename":
+            new_name = _require_str(args, "new_name")
+            params = {"position": position, "newName": new_name}
+            result = self.daemon.query("textDocument/rename", uri, text, params, deadline)
+            if result is None:
+                raise ToolError("lsp_refused", "there is nothing to rename at this position")
+            return make_envelope(name, path=path, result=propose_edit(result, self.write_roots(), known))
         raise ProtocolError(-32602, f"unknown tool {name!r}")
 
     def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -1292,6 +1729,8 @@ class Server:
                 stdout=exc.stdout,
                 stderr=exc.stderr,
             )
+        except LSPRefused as exc:
+            return error_envelope(name, "lsp_refused", str(exc), path=path)
         except LSPTimeout as exc:
             self.daemon.close()
             return error_envelope(name, "timeout", str(exc), path=path)
