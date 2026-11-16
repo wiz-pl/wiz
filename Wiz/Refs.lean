@@ -81,7 +81,7 @@ partial def firstIdent (args : Array Syntax) : Option (SourceInfo × Name) :=
   args.findSome? fun
     | .ident i n => some (i, n)
     | .node _ k xs =>
-      if k == Syntax.nullKind && !((xs[0]? matches some (.atom _ "(")) || (xs[0]? matches some (.atom _ ".{"))) then
+      if k == Syntax.nullKind && !((xs[0]? matches some (Wiz.Syntax.atom _ "(")) || (xs[0]? matches some (Wiz.Syntax.atom _ ".{"))) then
         firstIdent xs
       else none
     | _ => none
@@ -92,8 +92,8 @@ by an identifier (a `theorem`-like command a macro declares). -/
 partial def declIdents : Syntax → Array (SourceInfo × Name)
   | .node _ k args =>
     let inner := args.foldl (fun acc a => acc ++ declIdents a) #[]
-    let keywordIdent := k.startsWith "command." && (args[0]? matches some (.atom ..)) &&
-      (args[1]? matches some (.ident ..))
+    let keywordIdent := k.startsWith "command." && (args[0]? matches some (Wiz.Syntax.atom ..)) &&
+      (args[1]? matches some (Wiz.Syntax.ident ..))
     if declaringKinds.contains k || keywordIdent then
       match firstIdent args with
       | some x => if x.1.synthetic then inner else #[x] ++ inner
