@@ -1,0 +1,29 @@
+added: matched: ok
+added: one hunk: ok
+added: two changed lines: ok
+added: ranges 6-7: ok
+added: line 6 changed: ok
+added: line 8 unchanged: ok
+context: only the + line: ok
+context: a context line is unchanged: ok
+context 2: expanded either side: ok
+delete: no new line is changed: ok
+delete context 1: both sides of the gap: ok
+delete with context: no + line, no change: ok
+delete with context: the anchor is the last consumed line: ok
+rename: new path matched: ok
+rename: old path recorded: ok
+rename: no changed lines: ok
+rename: the old path also matches: ok
+rename+edit: matched: ok
+rename+edit: one hunk: ok
+rename+edit: line 13: ok
+binary: marked: ok
+binary: the text file after it still parses: ok
+crlf: matched: ok
+crlf: one added line at 3: ok
+paths: a suffix matches from a subdirectory: ok
+paths: a short URI matches a deep diff path: ok
+paths: no false suffix: ok
+paths: duplicate entries are ambiguous: ok
+paths: no match is reported: ok

@@ -1,0 +1,1323 @@
+import Sys
+import Json
+import Text
+import Scry.Sarif
+/-!
+# Scry.Dynamic: dynamic execution evidence (ASAN/UBSAN/coverage)
+
+`scry dynamic FILE.c` compiles and runs a C file under AddressSanitizer,
+UndefinedBehaviorSanitizer and (when available) LLVM coverage, then maps what happened
+back to Scry source spans and correlates it with the static findings. This module is the
+engine; `Scry.DynamicCmd` is the command line.
+
+## Evidence, not a verdict
+
+Dynamic evidence is deliberately **separate** from the static findings:
+
+* a `dynamic` event is `crash`, `ub` or `leak`; it is **validated** when the sanitizer
+  named it *and* a stack frame resolves to a source line in the analysed file. An event
+  without such a frame is kept as `unvalidated` and is not a fact about the program.
+* a clean run says "no dynamic event on this input". It is **not** a proof of absence:
+  no fuzzing, no input generation, no path enumeration is done here. The report carries
+  `claim: none` and `absence: false`, and every renderer says so.
+* correlation is a *link* between an event's source line and a static finding's sink
+  line (or function). It never edits, removes or upgrades a static finding.
+
+## Toolchain
+
+The compiler is probed, not assumed: `--cc`, `$SCRY_CC`, `clang`, `cc`, `gcc`, then the
+Nix store's compiler wrappers. Each candidate must compile and run a tiny program under
+`-fsanitize=address` (or, failing that, `-fsanitize=undefined`). No working
+compiler/sanitizer is a **clean skip** (`status: skipped`), not an error. Coverage needs
+`llvm-profdata` and `llvm-cov`; without them coverage is `unavailable` while the
+sanitizer run still happens.
+
+The optional witness hook (`--witness FILE.json`) is a **data contract**, not a solver
+of its own: the S6a concolic slice (`Trace` + `PathCond` + `Flip` + `Witness`) can hand
+this command a path condition, a decoded/validated model, its assumptions and its budget.
+Dynamic records that object next to the correlated events; it does not solve, validate,
+prune or promote anything. No solver plumbing lives here.
+-/
+
+-- ## Types
+
+/-- One symbolized stack frame. `file` is empty when the frame has no source location. -/
+structure Scry.DynFrame where
+  index : Nat
+  function : String
+  file : String
+  line : Nat
+  column : Nat
+
+/-- One dynamic event. `kind` is `crash`, `ub` or `leak` (or `error` for a nonzero exit
+with no sanitizer report). `validated` means the signature was recognised and a frame
+resolved into the analysed file. -/
+structure Scry.DynEvent where
+  kind : String
+  /-- `address`, `undefined`, `leak`, or `unknown`. -/
+  sanitizer : String
+  summary : String
+  frames : List Scry.DynFrame
+  /-- The first frame in the analysed file, as a Scry source span. -/
+  site : Option Scry.Origin
+  validated : Bool
+
+/-- Per-line coverage. `lines` is `(line, hit count)` for executable lines only. -/
+structure Scry.DynCoverage where
+  /-- `ok`, `unavailable`, `skipped` or `error`. -/
+  status : String
+  reason : String
+  lines : List (Nat × Nat)
+  executable : Nat
+  covered : Nat
+
+/-- A static finding site, as the dynamic layer needs it: identity plus a source line.
+Built from `Scry.TaintReport` by `Scry.DynamicCmd`. -/
+structure Scry.DynSite where
+  rule : String
+  func : String
+  kind : String
+  line : Nat
+  column : Nat
+
+/-- A correlation between one dynamic event and one static finding. `relation` is
+`same-line`, `same-function` or `unmatched`. -/
+structure Scry.DynLink where
+  event : Nat
+  rule : String
+  func : String
+  line : Nat
+  relation : String
+
+/-- Whether a static finding's sink line was executed by the dynamic run. -/
+structure Scry.DynExercise where
+  rule : String
+  func : String
+  line : Nat
+  hits : Nat
+  covered : Bool
+
+/-- A concolic witness supplied by the future S6a slice. This is a record, not a
+verification: `validation` is the producer's label (`pcChecked`/`traceChecked`), the
+dynamic layer does not re-run the checker and never turns it into a finding claim. -/
+structure Scry.DynWitness where
+  /-- The input, as the producer renders it (argv/env/bytes). -/
+  input : String
+  /-- `none`, `pcChecked` or `traceChecked` (the producer's label). -/
+  validation : String
+  /-- SMT-LIB path condition, if the producer supplies one. -/
+  pathCond : String
+  /-- The decoded model, if any. -/
+  model : Option String
+  assumptions : List String
+  solver : String
+  budget : String
+  /-- Replaying this witness is S6a's job; this flag stays false. -/
+  revalidated : Bool
+
+/-- A probed compiler and the sanitizers that actually worked. -/
+structure Scry.DynTool where
+  cc : String
+  version : String
+  /-- `address`, `undefined`, or both. -/
+  sanitizers : List String
+  symbolizer : Option String
+
+/-- The result of probing: the tool (if any) and every candidate tried. -/
+structure Scry.DynToolchain where
+  tool : Option Scry.DynTool
+  tried : List String
+
+structure Scry.DynOpts where
+  file : String
+  cc : Option String
+  /-- Wall-clock limit for the compiled program, in seconds. -/
+  timeoutSecs : Nat
+  coverage : Bool
+  /-- An S6a witness JSON file (optional; recorded, never applied). -/
+  witnessFile : Option String
+  /-- Keep the temporary build directory. -/
+  keep : Bool
+  /-- Use this directory instead of a fresh temporary one. -/
+  workDir : Option String
+
+def Scry.dynDefaultOpts (file : String) : Scry.DynOpts :=
+  Scry.DynOpts.mk file .none 10 .true .none .false .none
+
+/-- Everything one dynamic run produces. `staticSites`, `links` and `exercises` are
+filled by the command line, which owns the static analysis. -/
+structure Scry.DynReport where
+  file : String
+  /-- `ok`, `skipped` or `error`. -/
+  status : String
+  reason : String
+  cc : String
+  ccVersion : String
+  sanitizers : List String
+  coverageTool : String
+  events : List Scry.DynEvent
+  coverage : Scry.DynCoverage
+  links : List Scry.DynLink
+  exercises : List Scry.DynExercise
+  witness : Option Scry.DynWitness
+  buildLog : String
+  runLog : String
+  workDir : String
+  staticSites : List Scry.DynSite
+  staticStatus : String
+  staticReason : String
+
+-- ## Small helpers
+
+def Scry.dynEmptyCoverage : Scry.DynCoverage :=
+  Scry.DynCoverage.mk "skipped" "no dynamic run" .nil 0 0
+
+def Scry.dynTruncate (n : Nat) (s : String) : String :=
+  match Nat.lt n (String.length s) with
+  | .true => String.append (String.take n s) "\n… (truncated)"
+  | .false => s
+
+def Scry.dynNotEmpty (s : String) : Bool := Bool.not (String.isEmpty (String.trim s))
+
+def Scry.dynLast {A : Type} : List A → Option A
+  | .nil => .none
+  | .cons x .nil => .some x
+  | .cons _ xs => Scry.dynLast xs
+
+def Scry.dynFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .none => Scry.dynFilterMap f xs
+    | .some y => .cons y (Scry.dynFilterMap f xs)
+
+def Scry.dynFirstSome {A B : Type} (f : A → Option B) : List A → Option B
+  | .nil => .none
+  | .cons x xs => match f x with
+    | .some y => .some y
+    | .none => Scry.dynFirstSome f xs
+
+def Scry.dynBasename (p : String) : String :=
+  match Scry.dynLast (String.splitOn p "/") with
+  | .some s => s
+  | .none => p
+
+def Scry.dynSameFile (a b : String) : Bool :=
+  Bool.and (Scry.dynNotEmpty a) (String.eq (Scry.dynBasename a) (Scry.dynBasename b))
+
+def Scry.dynMemStr (x : String) : List String → Bool
+  | .nil => .false
+  | .cons y ys => Bool.or (String.eq x y) (Scry.dynMemStr x ys)
+
+partial def Scry.dynDedupGo (seen : List String) : List String → List String
+  | .nil => .nil
+  | .cons x xs => match Scry.dynMemStr x seen with
+    | .true => Scry.dynDedupGo seen xs
+    | .false => .cons x (Scry.dynDedupGo (.cons x seen) xs)
+
+def Scry.dynDedup (xs : List String) : List String := Scry.dynDedupGo .nil xs
+
+def Scry.dynApplyEnv (env : List (String × String)) (o : SpawnOptions) : SpawnOptions :=
+  List.foldl (fun acc p => SpawnOptions.setEnv p.1 p.2 acc) o env
+
+def Scry.dynAfter (s marker : String) : Option String :=
+  match String.splitOn s marker with
+  | .cons _ rest => match rest with
+    | .nil => .none
+    | _ => .some (String.intercalate marker rest)
+  | .nil => .none
+
+def Scry.dynStatusText (s : ExitStatus) : String := ExitStatus.toString s
+
+-- ## Source locations in sanitizer text
+
+/-- Parse `file:line:col` (the last two `:`-separated fields), if the line number is a
+number. A sanitizer may print only `file:line` (gcc's AddressSanitizer does); that is
+accepted with column 1, so a frame still resolves to the analysed file. -/
+def Scry.dynParseLoc (tok : String) : Option Scry.Origin :=
+  let parts := List.reverse (String.splitOn (String.trim tok) ":");
+  match parts with
+  | .cons colS (.cons lineS rest) => match String.parseNat (String.trim colS), String.parseNat (String.trim lineS) with
+    | .some col, .some line =>
+      match Nat.beq line 0 with
+      | .true => .none
+      | .false =>
+        let file := String.intercalate ":" (List.reverse rest);
+        .some (Scry.Origin.mk file line col line (Nat.add col 1))
+    | .some line, .none =>
+      match Nat.beq line 0 with
+      | .true => .none
+      | .false =>
+        let file := String.intercalate ":" (List.reverse (List.cons lineS rest));
+        .some (Scry.Origin.mk file line 1 line 2)
+    | _, _ => .none
+  | _ => .none
+
+/-- A frame line: `    #1 0x… in main /tmp/x.c:4:3`. Frames without a source location
+(libc, interceptors) keep the function name and an empty file. -/
+def Scry.dynFrameIndex (tok : String) : Option Nat :=
+  match String.stripPrefix tok "#" with
+  | .some s => String.parseNat s
+  | .none => .none
+
+def Scry.dynRightOf (t : String) : Option String :=
+  match String.splitOn t " in " with
+  | .cons _ (.cons x rest) =>
+    .some (String.trim (String.intercalate " in " (.cons x rest)))
+  | .cons _ .nil => .none
+  | .nil => .none
+
+def Scry.dynFrameOfParts (idx : Nat) (right : String) : Option Scry.DynFrame :=
+  let toks := List.reverse (String.splitOn right " ");
+  match toks with
+  | .cons lastS initRev =>
+    let func := String.trim (String.intercalate " " (List.reverse initRev));
+    match Scry.dynParseLoc lastS with
+    | .some o => .some (Scry.DynFrame.mk idx func o.uri o.line o.column)
+    | .none => .some (Scry.DynFrame.mk idx right "" 0 0)
+  | .nil => .some (Scry.DynFrame.mk idx right "" 0 0)
+
+def Scry.dynFrameSplit (line : String) : Option (Nat × String) :=
+  let t := String.trim line;
+  match String.splitOn t " " with
+  | .cons hash (.cons _more _rest) => match Scry.dynFrameIndex hash with
+    | .some idx => .some (idx, t)
+    | .none => .none
+  | .cons _ _ => .none
+  | .nil => .none
+
+def Scry.dynFrameWith (idx : Nat) (t : String) : Option Scry.DynFrame :=
+  match Scry.dynRightOf t with
+  | .some right => Scry.dynFrameOfParts idx right
+  | .none => .some (Scry.DynFrame.mk idx t "" 0 0)
+
+def Scry.dynParseFrame (line : String) : Option Scry.DynFrame :=
+  match Scry.dynFrameSplit line with
+  | .some p => Scry.dynFrameWith p.1 p.2
+  | .none => .none
+
+def Scry.dynFramesOf (text : String) : List Scry.DynFrame :=
+  Scry.dynFilterMap Scry.dynParseFrame (String.splitOn text "\n")
+
+/-- A location in the summary line, used when the sanitizer printed no stack frame. -/
+def Scry.dynLocInText (target : String) (text : String) : Option Scry.Origin :=
+  Scry.dynFirstSome (fun tok => match Scry.dynParseLoc tok with
+    | .some o => match Scry.dynSameFile o.uri target with
+      | .true => .some o
+      | .false => .none
+    | .none => .none) (String.splitOn text " ")
+
+def Scry.dynSiteOfFrames (target : String) (fs : List Scry.DynFrame) : Option Scry.Origin :=
+  Scry.dynFirstSome (fun f => match Scry.dynSameFile f.file target with
+    | .true => match Nat.beq f.line 0 with
+      | .true => .none
+      | .false => .some (Scry.Origin.mk target f.line f.column f.line
+          (Nat.add f.column 1))
+    | .false => .none) fs
+
+-- ## Parsing sanitizer output
+
+/-- `(kind, sanitizer, summary)` for a marker line, `none` for anything else. -/
+def Scry.dynAfterOr (s marker d : String) : String :=
+  match Scry.dynAfter s marker with
+  | .some x => x
+  | .none => d
+
+def Scry.dynMarker (line : String) : Option (String × String × String) :=
+  let t := String.trim line;
+  if String.startsWith t "SUMMARY:" then .none
+  else if String.contains t "ERROR: LeakSanitizer:" then .some ("leak", "leak", t)
+  else if String.contains t "ERROR: AddressSanitizer:" then
+    .some ("crash", "address", Scry.dynAfterOr t "AddressSanitizer: " t)
+  else if String.contains t "AddressSanitizer:DEADLYSIGNAL" then
+    .some ("crash", "address", "deadly signal")
+  else if String.contains t "ERROR: UndefinedBehaviorSanitizer:" then
+    .some ("ub", "undefined", Scry.dynAfterOr t "UndefinedBehaviorSanitizer: " t)
+  else if String.contains t "runtime error:" then
+    .some ("ub", "undefined", String.append "runtime error:" (Scry.dynAfterOr t "runtime error:" t))
+  else .none
+
+def Scry.dynPushEvent (cur : Option Scry.DynEvent) (acc : List Scry.DynEvent) :
+    List Scry.DynEvent :=
+  match cur with
+  | .some e => List.cons e acc
+  | .none => acc
+
+/-- Parse stderr into events. Frames after a marker belong to that event (including the
+"allocated by"/"freed by" sections; the first frame in the analysed file is the site). -/
+partial def Scry.dynEventsGo (cur : Option Scry.DynEvent) (acc : List Scry.DynEvent) :
+    List String → List Scry.DynEvent
+  | .nil => List.reverse (Scry.dynPushEvent cur acc)
+  | .cons line rest => match Scry.dynMarker line with
+    | .some m =>
+      let acc' := Scry.dynPushEvent cur acc;
+      let e := Scry.DynEvent.mk m.1 m.2.1 m.2.2 .nil .none .false;
+      Scry.dynEventsGo (.some e) acc' rest
+    | .none => (match String.startsWith (String.trim line) "SUMMARY:" with
+      | .true =>
+        let summary := String.trim (String.drop 8 (String.trim line));
+        let cur' : Option Scry.DynEvent := (match cur with
+          | .some e => .some { e with summary := summary }
+          | .none => .none);
+        Scry.dynEventsGo cur' acc rest
+      | .false => (match Scry.dynParseFrame line with
+        | .some f => (match cur with
+          | .some e => Scry.dynEventsGo
+              (.some { e with frames := List.append e.frames (.cons f .nil) }) acc rest
+          | .none => Scry.dynEventsGo cur acc rest)
+        | .none => Scry.dynEventsGo cur acc rest))
+
+/-- Fill the site and the validation flag. A recognised sanitizer event with a
+target-file frame is validated; an `error`/`timeout` is never validated. -/
+def Scry.dynFinalizeEvent (target : String) (e : Scry.DynEvent) : Scry.DynEvent :=
+  let frameSite := Scry.dynSiteOfFrames target e.frames;
+  let site := match frameSite with
+    | .some o => .some o
+    | .none => Scry.dynLocInText target e.summary;
+  let recognised := Bool.or (String.eq e.kind "crash")
+    (Bool.or (String.eq e.kind "ub") (String.eq e.kind "leak"));
+  let validated := Bool.and recognised (match site with
+    | .some _ => .true
+    | .none => .false);
+  { e with site := site, validated := validated, summary := Scry.dynTruncate 400 (String.trim e.summary) }
+
+def Scry.dynEventsOfText (target stderr : String) : List Scry.DynEvent :=
+  List.map (Scry.dynFinalizeEvent target)
+    (Scry.dynEventsGo .none .nil (String.splitOn stderr "\n"))
+
+-- ## Coverage
+
+/-- One `llvm-cov show --format=text` line: `(line, hits)` for an executable line. -/
+def Scry.dynCoverageLine (line : String) : Option (Nat × Nat) :=
+  match String.splitOn line "|" with
+  | .cons lnS rest => match rest with
+    | .cons hitS _ => (match String.parseNat (String.trim lnS) with
+      | .none => .none
+      | .some ln =>
+        let h := String.trim hitS;
+        if String.isEmpty h then .none
+        else (match String.parseNat h with
+          | .some hits => .some (ln, hits)
+          | .none => .none))
+    | .nil => .none
+  | .nil => .none
+
+/-- Parse `llvm-cov show --format=text` lines (`    4|      1|code`). -/
+def Scry.dynCoverageLines (text : String) : List (Nat × Nat) :=
+  Scry.dynFilterMap Scry.dynCoverageLine (String.splitOn text "\n")
+
+/-- Coverage status from a profile file and the tool run. -/
+def Scry.dynCoverageOf (text : String) (err : String) (ok : Bool) : Scry.DynCoverage :=
+  match ok with
+  | .false => Scry.DynCoverage.mk "unavailable" (Scry.dynTruncate 300 (String.trim err)) .nil 0 0
+  | .true =>
+    let lines := Scry.dynCoverageLines text;
+    let covered := List.length (List.filter (fun p => Nat.lt 0 p.2) lines);
+    Scry.DynCoverage.mk "ok" "" lines (List.length lines) covered
+
+def Scry.dynHitAt (c : Scry.DynCoverage) (line : Nat) : Nat :=
+  match List.find (fun p => Nat.beq p.1 line) c.lines with
+  | .some p => p.2
+  | .none => 0
+
+-- ## Correlation (pure)
+
+def Scry.dynSiteOfOrigin (rule func kind : String) (o : Scry.Origin) : Scry.DynSite :=
+  Scry.DynSite.mk rule func kind o.line o.column
+
+/-- Same source line first, then same function, else unmatched. -/
+def Scry.dynCorrelateEvent (sites : List Scry.DynSite) (idx : Nat) (e : Scry.DynEvent) :
+    Scry.DynLink :=
+  match e.site with
+  | .none => Scry.DynLink.mk idx "" "" 0 "unmatched"
+  | .some o =>
+    let sameLine := List.find (fun s => Nat.beq s.line o.line) sites;
+    match sameLine with
+    | .some s => Scry.DynLink.mk idx s.rule s.func s.line "same-line"
+    | .none =>
+      let fn := match e.frames with
+        | .cons f _ => f.function
+        | .nil => "";
+      let sameFunc := List.find (fun s => String.eq s.func fn) sites;
+      match sameFunc with
+      | .some s => Scry.DynLink.mk idx s.rule s.func s.line "same-function"
+      | .none => Scry.DynLink.mk idx "" fn o.line "unmatched"
+
+partial def Scry.dynLinksGo (sites : List Scry.DynSite) (es : List Scry.DynEvent)
+    (i : Nat) : List Scry.DynLink :=
+  match es with
+  | .nil => .nil
+  | .cons e rest => List.cons (Scry.dynCorrelateEvent sites i e)
+      (Scry.dynLinksGo sites rest (Nat.succ i))
+
+def Scry.dynLinks (sites : List Scry.DynSite) (es : List Scry.DynEvent) : List Scry.DynLink :=
+  Scry.dynLinksGo sites es 0
+
+def Scry.dynExercises (sites : List Scry.DynSite) (c : Scry.DynCoverage) :
+    List Scry.DynExercise :=
+  List.map (fun s =>
+    let hits := Scry.dynHitAt c s.line;
+    Scry.DynExercise.mk s.rule s.func s.line hits (Nat.lt 0 hits)) sites
+
+def Scry.dynAttachStatic (sites : List Scry.DynSite) (status reason : String)
+    (r : Scry.DynReport) : Scry.DynReport :=
+  { r with staticSites := sites, staticStatus := status, staticReason := reason,
+    links := Scry.dynLinks sites r.events, exercises := Scry.dynExercises sites r.coverage }
+
+-- ## Process helpers
+
+/-- A compiled program's outcome. -/
+structure Scry.DynExec where
+  status : ExitStatus
+  stdout : String
+  stderr : String
+  timedOut : Bool
+
+partial def Scry.dynWaitGo (c : Child) (t0 : Duration) (limitMs : Nat) (fuel : Nat) :
+    EIO (Option ExitStatus) :=
+  match fuel with
+  | .zero => EIO.pure .none
+  | .succ k => do
+    st ← Child.tryWait c;
+    match st with
+    | .some s => EIO.pure (.some s)
+    | .none => do
+      now ← EIO.lift Clock.monotonic;
+      let ms := Duration.toMillis (Duration.sub now t0);
+      match Nat.lt limitMs ms with
+      | .true => EIO.pure .none
+      | .false => do
+        EIO.lift (Clock.sleep (Duration.millis 10));
+        Scry.dynWaitGo c t0 limitMs k
+
+def Scry.dynWaitLimit (c : Child) (limitMs : Nat) : EIO (Option ExitStatus) := do
+  t0 ← EIO.lift Clock.monotonic;
+  Scry.dynWaitGo c t0 limitMs (Nat.add (Nat.div limitMs 10) 200)
+
+/-- Spawn, wait with a wall-clock limit, then collect the streams. `none` in the result
+means the deadline fired (the child is killed). -/
+def Scry.dynExec (exe : String) (env : List (String × String)) (limitMs : Nat) :
+    EIO Scry.DynExec := do
+  let opts := Scry.dynApplyEnv env (SpawnOptions.default |> SpawnOptions.withStdio .null .piped .piped);
+  c ← Process.spawnWith exe .nil opts;
+  st ← Scry.dynWaitLimit c limitMs;
+  match st with
+  | .some s => do
+    out ← Child.readStdout c;
+    err ← Child.readStderr c;
+    EIO.pure (Scry.DynExec.mk s out err .false)
+  | .none => do
+    Child.kill c 9;
+    s ← Child.wait c;
+    out ← Child.readStdout c;
+    err ← Child.readStderr c;
+    EIO.pure (Scry.DynExec.mk s out err .true)
+
+-- ## Toolchain discovery
+
+def Scry.dynShell (script : String) : EIO String := do
+  out ← Process.output "sh" (.cons "-c" (.cons script .nil)) "";
+  EIO.pure out.stdout
+
+def Scry.dynQuote (s : String) : String :=
+  String.append "'" (String.append (String.replace s "'" "'\\''") "'")
+
+def Scry.dynShellCmd (cmd : String) (args : List String) : String :=
+  String.intercalate " " (List.map Scry.dynQuote (.cons cmd args))
+
+def Scry.dynShellStatus (cmdline : String) : EIO Scry.DynExec := do
+  out ← Process.output "sh" (.cons "-c" (.cons cmdline .nil)) "";
+  EIO.pure (Scry.DynExec.mk out.status out.stdout out.stderr .false)
+
+def Scry.dynCandidateScript : String :=
+  "for c in \"$SCRY_CC\" clang cc gcc; do p=$(command -v \"$c\" 2>/dev/null) && [ -n \"$p\" ] && echo \"$p\"; done; "
+  ++ "for p in /nix/store/*clang-wrapper-*/bin/clang /nix/store/*gcc-wrapper-*/bin/gcc; do [ -x \"$p\" ] && echo \"$p\"; done"
+
+def Scry.dynCandidates : EIO (List String) := do
+  text ← Scry.dynShell Scry.dynCandidateScript;
+  EIO.pure (Scry.dynDedup (List.filter Scry.dynNotEmpty
+    (List.map String.trim (String.splitOn text "\n"))))
+
+def Scry.dynVersionOf (cc : String) : EIO (Option String) := do
+  out ← Scry.dynShellStatus (String.append (Scry.dynQuote cc) " --version");
+  match out.status with
+  | .exited code => match Nat.beq code 0 with
+    | .true => EIO.pure (match List.map String.trim (String.splitOn out.stdout "\n") with
+      | .cons first _ => match String.isEmpty first with
+        | .true => .none
+        | .false => .some first
+      | .nil => .none)
+    | .false => EIO.pure .none
+  | .signaled _ => EIO.pure .none
+
+def Scry.dynSymbolizerScript : String :=
+  "for p in \"$SCRY_SYMBOLIZER\" $(command -v llvm-symbolizer 2>/dev/null) /nix/store/*llvm-*/bin/llvm-symbolizer; do [ -x \"$p\" ] && { echo \"$p\"; break; }; done"
+
+def Scry.dynSymbolizer : EIO (Option String) := do
+  text ← Scry.dynShell Scry.dynSymbolizerScript;
+  let xs := List.filter Scry.dynNotEmpty (List.map String.trim (String.splitOn text "\n"));
+  match xs with
+  | .cons p _ => EIO.pure (.some p)
+  | .nil => EIO.pure .none
+
+def Scry.dynSanitizeFlag (sans : List String) : String :=
+  match sans with
+  | .cons a (.cons b _) => String.append "-fsanitize=" (String.append a (String.append "," b))
+  | .cons a _ => String.append "-fsanitize=" a
+  | .nil => "-fsanitize=undefined"
+
+def Scry.dynProbeFlags (sans : List String) : List String :=
+  .cons (Scry.dynSanitizeFlag sans)
+    (.cons "-fno-sanitize-recover=all"
+      (.cons "-fno-omit-frame-pointer" (.cons "-g" (.cons "-O0" .nil))))
+
+/-- Probe one compiler with a sanitizer subset: a tiny program must compile and exit 0.
+This also rejects a store path built for another architecture, or a wrapper whose
+runtime is broken. -/
+def Scry.dynProbeCompiler (cc : String) (sans : List String) (dir : String) :
+    EIO Bool := do
+  let src := Path.join dir "probe.c";
+  let exe := Path.join dir "probe.out";
+  FS.writeFile src "int main(void){return 0;}\n";
+  out ← Scry.dynShellStatus (Scry.dynShellCmd cc
+    (List.append (Scry.dynProbeFlags sans) (.cons src (.cons "-o" (.cons exe .nil)))));
+  match out.status with
+  | .exited code => match Nat.beq code 0 with
+    | .false => EIO.pure .false
+    | .true => do
+      r ← Scry.dynExec exe .nil 5000;
+      match r.status, r.timedOut with
+      | .exited c, .false => EIO.pure (Nat.beq c 0)
+      | _, _ => EIO.pure .false
+  | .signaled _ => EIO.pure .false
+
+/-- Try a candidate and return the sanitizers that worked. Address is preferred (it also
+carries LeakSanitizer); undefined is the fallback. -/
+def Scry.dynProbeTool (cc : String) (dir : String) : EIO (Option Scry.DynTool) := do
+  v ← Scry.dynVersionOf cc;
+  match v with
+  | .none => EIO.pure .none
+  | .some version => do
+    okBoth ← Scry.dynProbeCompiler cc (.cons "address" (.cons "undefined" .nil)) dir;
+    match okBoth with
+    | .true => do
+      sym ← Scry.dynSymbolizer;
+      EIO.pure (.some (Scry.DynTool.mk cc version (.cons "address" (.cons "undefined" .nil)) sym))
+    | .false => do
+      okAddr ← Scry.dynProbeCompiler cc (.cons "address" .nil) dir;
+      match okAddr with
+      | .true => do
+        sym ← Scry.dynSymbolizer;
+        EIO.pure (.some (Scry.DynTool.mk cc version (.cons "address" .nil) sym))
+      | .false => do
+        okUb ← Scry.dynProbeCompiler cc (.cons "undefined" .nil) dir;
+        match okUb with
+        | .true => do
+          sym ← Scry.dynSymbolizer;
+          EIO.pure (.some (Scry.DynTool.mk cc version (.cons "undefined" .nil) sym))
+        | .false => EIO.pure .none
+
+/-- Resolve the compiler: the requested one first, then `$SCRY_CC`, `clang`, `cc`, `gcc`
+and the Nix store wrappers. Probing uses `dir` for scratch files. -/
+partial def Scry.dynResolveGo (dir : String) (tried : List String) :
+    List String → EIO Scry.DynToolchain
+  | .nil => EIO.pure (Scry.DynToolchain.mk .none (List.reverse tried))
+  | .cons c rest => do
+    t ← Scry.dynProbeTool c dir;
+    match t with
+    | .some tool => EIO.pure (Scry.DynToolchain.mk (.some tool) (List.reverse (.cons c tried)))
+    | .none => Scry.dynResolveGo dir (.cons c tried) rest
+
+def Scry.dynResolve (requested : Option String) (dir : String) : EIO Scry.DynToolchain := do
+  envCc ← EIO.lift (Env.get "SCRY_CC");
+  let explicit := match requested with
+    | .some c => .some c
+    | .none => envCc;
+  found ← Scry.dynCandidates;
+  let cands := match explicit with
+    | .some c => .cons c .nil
+    | .none => found;
+  Scry.dynResolveGo dir .nil cands
+
+def Scry.dynFindTool (name : String) : EIO (Option String) := do
+  let script := "for p in $(command -v " ++ name ++ " 2>/dev/null) /nix/store/*llvm-*/bin/"
+    ++ name ++ "; do [ -x \"$p\" ] && { echo \"$p\"; break; }; done";
+  text ← Scry.dynShell script;
+  match List.filter Scry.dynNotEmpty (List.map String.trim (String.splitOn text "\n")) with
+  | .cons p _ => EIO.pure (.some p)
+  | .nil => EIO.pure .none
+
+-- ## The S6a witness contract (recorded, never applied)
+
+def Scry.dynJsonStrD (j : Json) (k : String) (d : String) : String :=
+  match Json.get j k with
+  | .some v => match Json.asString v with
+    | .some s => s
+    | .none => d
+  | .none => d
+
+def Scry.dynJsonStrs (j : Json) (k : String) : List String :=
+  List.map (fun x => match Json.asString x with
+    | .some s => s
+    | .none => "") (match Json.get j k with
+      | .some v => Json.asList v
+      | .none => .nil)
+
+/-- Read a witness object from the S6a slice. Unknown/missing fields are empty; a
+`validation` other than `pcChecked`/`traceChecked` is kept as text but never presented as
+a witness claim. -/
+def Scry.dynWitnessOfJson (j : Json) : Scry.DynWitness :=
+  Scry.DynWitness.mk
+    (Scry.dynJsonStrD j "input" "")
+    (Scry.dynJsonStrD j "validation" "none")
+    (Scry.dynJsonStrD j "pathCond" "")
+    (match Json.get j "model" with
+      | .some v => match Json.asString v with
+        | .some s => .some s
+        | .none => .none
+      | .none => .none)
+    (Scry.dynJsonStrs j "assumptions")
+    (Scry.dynJsonStrD j "solver" "")
+    (Scry.dynJsonStrD j "budget" "")
+    .false
+
+def Scry.dynLoadWitness (path : String) : EIO (Option Scry.DynWitness) := do
+  ok ← EIO.lift (FS.exists path);
+  match ok with
+  | .false => EIO.pure .none
+  | .true => do
+    text ← FS.readFile path;
+    match Json.parse text with
+    | .error _ => EIO.pure .none
+    | .ok j => match Json.get j "witness" with
+      | .some w => EIO.pure (.some (Scry.dynWitnessOfJson w))
+      | .none => EIO.pure (.some (Scry.dynWitnessOfJson j))
+
+-- ## The run
+
+def Scry.dynSanitizerText (sans : List String) : String :=
+  String.intercalate "+" sans
+
+/-- Run a build command, collecting stdout/stderr (no timeout: a compiler hang is a
+toolchain bug, and the caller can stop the process). -/
+def Scry.dynExecBuild (cmd : String) (args : List String) (input : String) :
+    EIO Scry.DynExec := do
+  out ← Process.output cmd args input;
+  EIO.pure (Scry.DynExec.mk out.status out.stdout out.stderr .false)
+
+def Scry.dynCompile (cc : String) (flags : List String) (src out : String) :
+    EIO Scry.DynExec :=
+  Scry.dynExecBuild cc (List.append flags (.cons src (.cons "-o" (.cons out .nil)))) ""
+
+def Scry.dynEmptyReport (file status reason : String) : Scry.DynReport :=
+  Scry.DynReport.mk file status reason "" "" .nil "" .nil (Scry.dynEmptyCoverage)
+    .nil .nil .none "" "" "" .nil "skipped" ""
+
+def Scry.dynEnvFor (tool : Scry.DynTool) : List (String × String) :=
+  let sym : List (String × String) := match tool.symbolizer with
+    | .some s => (.cons ("ASAN_SYMBOLIZER_PATH", s)
+        (.cons ("UBSAN_SYMBOLIZER_PATH", s) .nil))
+    | .none => .nil;
+  List.append (.cons ("ASAN_OPTIONS", "detect_leaks=1:abort_on_error=0:symbolize=1")
+    (.cons ("UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1") .nil)) sym
+
+/-- Compile and run, then parse the sanitizer stream and (optionally) coverage. `sites`
+are attached afterwards by `Scry.dynAttachStatic`. -/
+def Scry.dynCoverageRun (tool : Scry.DynTool) (dir base src : String) :
+    EIO Scry.DynCoverage := do
+  profdata ← Scry.dynFindTool "llvm-profdata";
+  cov ← Scry.dynFindTool "llvm-cov";
+  match profdata with
+  | .none => EIO.pure (Scry.DynCoverage.mk "unavailable"
+      "llvm-profdata/llvm-cov not found" .nil 0 0)
+  | .some pd => match cov with
+  | .none => EIO.pure (Scry.DynCoverage.mk "unavailable"
+      "llvm-profdata/llvm-cov not found" .nil 0 0)
+  | .some cv => do
+    let cexe := Path.join dir (String.append base ".cov");
+    out ← Scry.dynExecBuild tool.cc (.cons "-O0" (.cons "-g"
+      (.cons "-fprofile-instr-generate" (.cons "-fcoverage-mapping"
+        (.cons src (.cons "-o" (.cons cexe .nil))))))) "";
+    match out.status with
+    | .exited code => match Nat.beq code 0 with
+      | .false => EIO.pure (Scry.DynCoverage.mk "unavailable"
+          (Scry.dynTruncate 500 out.stderr) .nil 0 0)
+      | .true => do
+        let raw := Path.join dir (String.append base ".profraw");
+        let prof := Path.join dir (String.append base ".profdata");
+        r ← Scry.dynExec cexe (.cons ("LLVM_PROFILE_FILE", raw) .nil) 15000;
+        has ← EIO.lift (FS.exists raw);
+        match has with
+        | .false => EIO.pure (Scry.DynCoverage.mk "unavailable"
+            "no profile written (the run aborted before exit)" .nil 0 0)
+        | .true => do
+          m ← Scry.dynExecBuild pd (.cons "merge" (.cons "-o" (.cons prof
+            (.cons raw .nil)))) "";
+          match m.status with
+          | .exited mc => match Nat.beq mc 0 with
+            | .false => EIO.pure (Scry.DynCoverage.mk "unavailable"
+                (Scry.dynTruncate 500 m.stderr) .nil 0 0)
+            | .true => do
+              s ← Scry.dynExecBuild cv (.cons "show" (.cons "--format=text"
+                (.cons cexe (.cons (String.append "-instr-profile=" prof) .nil)))) "";
+              match s.status with
+              | .exited sc => match Nat.beq sc 0 with
+                | .true => EIO.pure (Scry.dynCoverageOf s.stdout "" .true)
+                | .false => EIO.pure (Scry.dynCoverageOf "" s.stderr .false)
+              | .signaled _ => EIO.pure (Scry.DynCoverage.mk "unavailable"
+                  "llvm-cov failed" .nil 0 0)
+          | .signaled _ => EIO.pure (Scry.DynCoverage.mk "unavailable"
+              "llvm-profdata failed" .nil 0 0)
+    | .signaled _ => EIO.pure (Scry.DynCoverage.mk "unavailable"
+        "coverage compile failed" .nil 0 0)
+
+/-- A nonzero exit or a timeout with no sanitizer report is still recorded (as
+`timeout`/`error`, never validated), so a crash is not silently a clean run. -/
+def Scry.dynFallbackEvents (opts : Scry.DynOpts) (run : Scry.DynExec) :
+    List Scry.DynEvent → List Scry.DynEvent := fun events =>
+  match events with
+  | .cons _ _ => events
+  | .nil => match run.timedOut with
+    | .true => .cons (Scry.DynEvent.mk "timeout" "unknown"
+        (String.append "no event before the " (String.append (Nat.repr opts.timeoutSecs)
+          "-second limit")) .nil .none .false) .nil
+    | .false => match run.status with
+      | .exited c => match Nat.beq c 0 with
+        | .true => .nil
+        | .false => .cons (Scry.DynEvent.mk "error" "unknown"
+            (String.append "exit code " (Nat.repr c)) .nil .none .false) .nil
+      | .signaled s => .cons (Scry.DynEvent.mk "error" "unknown"
+          (String.append "signal " (Nat.repr s)) .nil .none .false) .nil
+
+def Scry.dynExecuteTool (tool : Scry.DynTool) (opts : Scry.DynOpts) (dir : String) :
+    EIO Scry.DynReport := do
+  let base := Scry.dynBasename opts.file;
+  let exe := Path.join dir (String.append base ".dyn");
+  build ← Scry.dynCompile tool.cc (Scry.dynProbeFlags tool.sanitizers) opts.file exe;
+  match build.status with
+  | .exited code => match Nat.beq code 0 with
+    | .false => do
+      match Bool.not opts.keep with
+      | .true => FS.removeAll dir
+      | .false => EIO.pure ();
+      EIO.pure { Scry.dynEmptyReport opts.file "error" "compile failed"
+          with cc := tool.cc, ccVersion := tool.version, sanitizers := tool.sanitizers,
+               workDir := dir,
+               buildLog := Scry.dynTruncate 4000 (String.append build.stdout build.stderr) }
+    | .true => do
+      run ← Scry.dynExec exe (Scry.dynEnvFor tool) (Nat.mul opts.timeoutSecs 1000);
+      let events := Scry.dynFallbackEvents opts run (Scry.dynEventsOfText opts.file run.stderr);
+      cov ← match opts.coverage with
+        | .false => EIO.pure (Scry.DynCoverage.mk "skipped" "coverage disabled" .nil 0 0)
+        | .true => Scry.dynCoverageRun tool dir base opts.file;
+      wit ← match opts.witnessFile with
+        | .some q => Scry.dynLoadWitness q
+        | .none => EIO.pure (.none : Option Scry.DynWitness);
+      let report := Scry.DynReport.mk opts.file "ok" "" tool.cc tool.version
+        tool.sanitizers (match cov.status with | "ok" => "llvm-cov" | _ => "")
+        events cov .nil .nil wit (Scry.dynTruncate 2000 build.stderr)
+        (Scry.dynTruncate 12000 (String.append run.stdout run.stderr)) dir .nil "skipped" "";
+      match Bool.not opts.keep with
+      | .true => FS.removeAll dir
+      | .false => EIO.pure ();
+      EIO.pure report
+  | .signaled _ => EIO.pure { Scry.dynEmptyReport opts.file "error"
+        "compiler terminated by a signal"
+      with cc := tool.cc, ccVersion := tool.version, sanitizers := tool.sanitizers }
+
+def Scry.dynExecute (chain : Scry.DynToolchain) (opts : Scry.DynOpts) :
+    EIO Scry.DynReport := do
+  existsFile ← EIO.lift (FS.exists opts.file);
+  match existsFile with
+  | .false => EIO.pure (Scry.dynEmptyReport opts.file "error"
+      (String.append opts.file ": no such file"))
+  | .true => do
+    dir ← match opts.workDir with
+      | .some d => do
+        ok ← EIO.lift (FS.exists d);
+        match ok with
+        | .true => EIO.pure d
+        | .false => do FS.createDir d; EIO.pure d
+      | .none => FS.createTempDir;
+    match chain.tool with
+    | .none => do
+      match Bool.not opts.keep with
+      | .true => FS.removeAll dir
+      | .false => EIO.pure ();
+      EIO.pure { Scry.dynEmptyReport opts.file "skipped"
+          ("no working compiler with AddressSanitizer or UndefinedBehaviorSanitizer (tried: "
+           ++ String.intercalate ", " chain.tried ++ ")") with workDir := dir }
+    | .some tool => Scry.dynExecuteTool tool opts dir
+
+-- ## Rendering
+
+def Scry.dynEventLabel (e : Scry.DynEvent) : String :=
+  String.append e.kind (String.append "/" e.sanitizer)
+
+def Scry.dynOriginText (o : Scry.Origin) : String :=
+  o.uri ++ ":" ++ Nat.repr o.line ++ ":" ++ Nat.repr o.column
+
+def Scry.dynRenderEvent (links : List Scry.DynLink) (idx : Nat) (e : Scry.DynEvent) : String :=
+  let loc : String := match e.site with
+    | .some o => Scry.dynOriginText o
+    | .none => "(no source frame)";
+  let corr : String := match List.find (fun l => Nat.beq l.event idx) links with
+    | .some l => match String.eq l.relation "unmatched" with
+      | .true => "unmatched"
+      | .false => l.relation ++ " " ++ l.rule ++ "@" ++ l.func
+    | .none => "unmatched";
+  let status := match e.validated with
+    | .true => "validated"
+    | .false => "unvalidated";
+  "dynamic: " ++ Scry.dynEventLabel e ++ " (" ++ status ++ "): " ++ e.summary
+    ++ "\n  at " ++ loc ++ " -> static: " ++ corr
+
+partial def Scry.dynRenderEventsGo (links : List Scry.DynLink) (es : List Scry.DynEvent)
+    (i : Nat) : List String :=
+  match es with
+  | .nil => .nil
+  | .cons e rest => List.cons (Scry.dynRenderEvent links i e)
+      (Scry.dynRenderEventsGo links rest (Nat.succ i))
+
+def Scry.dynRenderEvents (links : List Scry.DynLink) (es : List Scry.DynEvent) :
+    List String := Scry.dynRenderEventsGo links es 0
+
+def Scry.dynRender (r : Scry.DynReport) : String :=
+  let header := "dynamic: " ++ r.file ++ " (" ++ r.status ++ ")"
+    ++ (match String.eq r.cc "" with
+      | .true => ""
+      | .false => " [" ++ r.ccVersion ++ ", " ++ Scry.dynSanitizerText r.sanitizers ++ "]");
+  let reason := match String.eq r.reason "" with
+    | .true => .nil
+    | .false => [String.append "dynamic: " r.reason];
+  let events := Scry.dynRenderEvents r.links r.events;
+  let cov : String := match r.coverage.status with
+    | "ok" => "dynamic: coverage " ++ Nat.repr r.coverage.covered ++ "/"
+        ++ Nat.repr r.coverage.executable ++ " executable lines"
+    | s => "dynamic: coverage " ++ s
+        ++ (match String.eq r.coverage.reason "" with
+          | .true => ""
+          | .false => " (" ++ r.coverage.reason ++ ")");
+  let exercises := match r.staticSites with
+    | .nil => "dynamic: no static findings to correlate"
+    | _ =>
+      let n := List.length r.staticSites;
+      let c := List.length (List.filter (fun x => x.covered) r.exercises);
+      "dynamic: static sites " ++ Nat.repr n ++ ", line executed " ++ Nat.repr c;
+  let wit : List String := match r.witness with
+    | .none => .nil
+    | .some w => ["witness: " ++ w.validation ++ " from the S6a slice (recorded, not revalidated; assumptions "
+        ++ Nat.repr (List.length w.assumptions) ++ ")"];
+  let footer := ["dynamic: observed evidence at L1/L2 (concrete run); a clean run is not a proof of absence"];
+  String.intercalate "\n" (List.append (List.append [header] reason)
+    (List.append events (List.append [cov, exercises] (List.append wit footer))))
+
+-- ## JSON
+
+def Scry.dynOriginJson (o : Option Scry.Origin) : Json :=
+  match o with
+  | .some x => Json.mkObj
+      [ ("uri", Json.mkStr x.uri)
+      , ("startLine", Json.ofNat x.line)
+      , ("startColumn", Json.ofNat x.column)
+      , ("endLine", Json.ofNat x.endLine)
+      , ("endColumn", Json.ofNat x.endColumn) ]
+  | .none => Json.mkNull
+
+def Scry.dynFrameJson (f : Scry.DynFrame) : Json :=
+  Json.mkObj
+    [ ("index", Json.ofNat f.index)
+    , ("function", Json.mkStr f.function)
+    , ("file", Json.mkStr f.file)
+    , ("line", Json.ofNat f.line)
+    , ("column", Json.ofNat f.column) ]
+
+def Scry.dynSiteJson (s : Scry.DynSite) : Json :=
+  Json.mkObj
+    [ ("rule", Json.mkStr s.rule)
+    , ("function", Json.mkStr s.func)
+    , ("kind", Json.mkStr s.kind)
+    , ("line", Json.ofNat s.line)
+    , ("column", Json.ofNat s.column) ]
+
+def Scry.dynEventJson (links : List Scry.DynLink) (idx : Nat) (e : Scry.DynEvent) : Json :=
+  let corr : Json := match List.find (fun l => Nat.beq l.event idx) links with
+    | .some l => Json.mkObj
+        [ ("relation", Json.mkStr l.relation)
+        , ("rule", Json.mkStr l.rule)
+        , ("function", Json.mkStr l.func)
+        , ("line", Json.ofNat l.line) ]
+    | .none => Json.mkObj [("relation", Json.mkStr "unmatched")];
+  Json.mkObj
+    [ ("kind", Json.mkStr e.kind)
+    , ("sanitizer", Json.mkStr e.sanitizer)
+    , ("summary", Json.mkStr e.summary)
+    , ("validated", Json.mkBool e.validated)
+    , ("evidenceKind", Json.mkStr "dynamic")
+    , ("claim", Json.mkStr "none")
+    , ("location", Scry.dynOriginJson e.site)
+    , ("frames", Json.mkArr (List.map Scry.dynFrameJson e.frames))
+    , ("static", corr) ]
+
+def Scry.dynCoverageJson (c : Scry.DynCoverage) : Json :=
+  Json.mkObj
+    [ ("status", Json.mkStr c.status)
+    , ("reason", Json.mkStr c.reason)
+    , ("executable", Json.ofNat c.executable)
+    , ("covered", Json.ofNat c.covered)
+    , ("lines", Json.mkArr (List.map (fun p => Json.mkObj
+        [("line", Json.ofNat p.1), ("hits", Json.ofNat p.2)]) c.lines)) ]
+
+def Scry.dynWitnessJson (w : Scry.DynWitness) : Json :=
+  Json.mkObj
+    [ ("input", Json.mkStr w.input)
+    , ("validation", Json.mkStr w.validation)
+    , ("pathCond", Json.mkStr w.pathCond)
+    , ("model", match w.model with
+        | .some m => Json.mkStr m
+        | .none => Json.mkNull)
+    , ("assumptions", Json.mkArr (List.map Json.mkStr w.assumptions))
+    , ("solver", Json.mkStr w.solver)
+    , ("budget", Json.mkStr w.budget)
+    , ("revalidated", Json.mkBool w.revalidated)
+    , ("claim", Json.mkStr "none") ]
+
+partial def Scry.dynEventsJsonGo (links : List Scry.DynLink) (es : List Scry.DynEvent)
+    (i : Nat) : List Json :=
+  match es with
+  | .nil => .nil
+  | .cons e rest => List.cons (Scry.dynEventJson links i e)
+      (Scry.dynEventsJsonGo links rest (Nat.succ i))
+
+def Scry.dynEventsJson (links : List Scry.DynLink) (es : List Scry.DynEvent) : List Json :=
+  Scry.dynEventsJsonGo links es 0
+
+def Scry.dynReportJson (r : Scry.DynReport) : Json :=
+  let events := Scry.dynEventsJson r.links r.events;
+  let validated := List.length (List.filter (fun e => e.validated) r.events);
+  let crashes := List.length (List.filter (fun e => String.eq e.kind "crash" && e.validated) r.events);
+  let ubs := List.length (List.filter (fun e => String.eq e.kind "ub" && e.validated) r.events);
+  let leaks := List.length (List.filter (fun e => String.eq e.kind "leak" && e.validated) r.events);
+  let exercised := List.length (List.filter (fun x => x.covered) r.exercises);
+  Json.mkObj
+    [ ("tool", Json.mkStr "scry")
+    , ("file", Json.mkStr r.file)
+    , ("status", Json.mkStr r.status)
+    , ("reason", Json.mkStr r.reason)
+    , ("evidenceKind", Json.mkStr "dynamic")
+    , ("authority", Json.mkStr "observed")
+    , ("level", Json.mkStr (match Nat.lt 0 validated with
+        | .true => "L2-observed"
+        | .false => "L1-observed"))
+    , ("claim", Json.mkStr "none")
+    , ("absence", Json.mkBool .false)
+    , ("compiler", Json.mkObj
+        [ ("path", Json.mkStr r.cc)
+        , ("version", Json.mkStr r.ccVersion)
+        , ("sanitizers", Json.mkArr (List.map Json.mkStr r.sanitizers))
+        , ("coverageTool", Json.mkStr r.coverageTool) ])
+    , ("events", Json.mkArr events)
+    , ("coverage", Scry.dynCoverageJson r.coverage)
+    , ("static", Json.mkObj
+        [ ("status", Json.mkStr r.staticStatus)
+        , ("reason", Json.mkStr r.staticReason)
+        , ("sites", Json.mkArr (List.map Scry.dynSiteJson r.staticSites))
+        , ("exercised", Json.ofNat exercised)
+        , ("notExercised", Json.ofNat (Nat.sub (List.length r.exercises) exercised)) ])
+    , ("links", Json.mkArr (List.map (fun l => Json.mkObj
+        [ ("event", Json.ofNat l.event)
+        , ("relation", Json.mkStr l.relation)
+        , ("rule", Json.mkStr l.rule)
+        , ("function", Json.mkStr l.func)
+        , ("line", Json.ofNat l.line) ]) r.links))
+    , ("witness", match r.witness with
+        | .some w => Scry.dynWitnessJson w
+        | .none => Json.mkNull)
+    , ("counts", Json.mkObj
+        [ ("events", Json.ofNat (List.length r.events))
+        , ("validated", Json.ofNat validated)
+        , ("unvalidated", Json.ofNat (Nat.sub (List.length r.events) validated))
+        , ("crashes", Json.ofNat crashes)
+        , ("ub", Json.ofNat ubs)
+        , ("leaks", Json.ofNat leaks)
+        , ("clean", Json.mkBool (Nat.beq (List.length r.events) 0))
+        , ("skipped", Json.mkBool (String.eq r.status "skipped")) ])
+    , ("buildLog", Json.mkStr r.buildLog)
+    , ("runLog", Json.mkStr r.runLog) ]
+
+def Scry.dynSarifLoc (site : Option Scry.Origin) : Json :=
+  match site with
+  | .some o => Scry.physicalLocationJson o
+  | .none => Json.mkObj [("logicalLocations", Json.mkArr
+      [Json.mkObj [("name", Json.mkStr "runtime"), ("kind", Json.mkStr "function")]])]
+
+def Scry.dynSarifLevel (validated : Bool) : String :=
+  match validated with
+  | .true => "error"
+  | .false => "note"
+
+def Scry.dynLinkAt (links : List Scry.DynLink) (i : Nat) : Scry.DynLink :=
+  match List.find (fun l => Nat.beq l.event i) links with
+  | .some l => l
+  | .none => Scry.DynLink.mk i "" "" 0 "unmatched"
+
+/-- One dynamic SARIF result. -/
+def Scry.dynSarifResultOf (links : List Scry.DynLink) (i : Nat) (e : Scry.DynEvent) : Json :=
+  let validText : String := match e.validated with
+    | .true => " (validated by a source frame)"
+    | .false => " (unvalidated)";
+  let msg : String := "dynamic " ++ Scry.dynEventLabel e ++ ": " ++ e.summary ++ validText;
+  let fields : List (String × Json) :=
+    [ ("ruleId", Json.mkStr (String.append "scry/dynamic/" e.kind))
+    , ("level", Json.mkStr (Scry.dynSarifLevel e.validated))
+    , ("message", Json.mkObj [("text", Json.mkStr msg)])
+    , ("locations", Json.mkArr [Scry.dynSarifLoc e.site])
+    , ("properties", Json.mkObj
+        [ ("kind", Json.mkStr "dynamic")
+        , ("evidenceKind", Json.mkStr "dynamic")
+        , ("claim", Json.mkStr "none")
+        , ("validated", Json.mkBool e.validated)
+        , ("sanitizer", Json.mkStr e.sanitizer)
+        , ("correlation", Json.mkStr (Scry.dynLinkAt links i).relation)
+        , ("staticRule", Json.mkStr (Scry.dynLinkAt links i).rule)
+        , ("staticFunction", Json.mkStr (Scry.dynLinkAt links i).func) ]) ];
+  Json.mkObj fields
+
+/-- Dynamic SARIF results. They carry `properties.kind = dynamic`,
+`properties.evidenceKind = dynamic` and `properties.claim = none`, so a consumer cannot
+mistake them for static findings. -/
+partial def Scry.dynSarifResultsGo (links : List Scry.DynLink) (es : List Scry.DynEvent)
+    (i : Nat) : List Json :=
+  match es with
+  | .nil => .nil
+  | .cons e rest => List.cons (Scry.dynSarifResultOf links i e)
+      (Scry.dynSarifResultsGo links rest (Nat.succ i))
+
+/-- The SARIF results of a dynamic report. -/
+def Scry.dynSarifResults (r : Scry.DynReport) : List Json :=
+  Scry.dynSarifResultsGo r.links r.events 0
+
+-- ## The dynamic corpus (the bench manifest format)
+
+/-- A `dynamic` expectation in a corpus case. `expect` is `event` or `clean`; `kind` is
+`crash`/`ub`/`leak` for an event. `line` is optional and must match the event's source
+frame. -/
+structure Scry.DynExpect where
+  expect : String
+  kind : String
+  sanitizer : String
+  line : Option Nat
+  tier : String
+  cwe : String
+
+def Scry.dynJsonNatOpt (j : Json) (k : String) : Option Nat :=
+  match Json.get j k with
+  | .some v => Json.asNat v
+  | .none => .none
+
+def Scry.dynExpectOfJson (j : Json) : Option Scry.DynExpect :=
+  match Json.get j "dynamic" with
+  | .none => .none
+  | .some d => .some (Scry.DynExpect.mk
+      (Scry.dynJsonStrD d "expect" "clean")
+      (Scry.dynJsonStrD d "kind" "")
+      (Scry.dynJsonStrD d "sanitizer" "")
+      (Scry.dynJsonNatOpt d "line")
+      (Scry.dynJsonStrD j "tier" "")
+      (Scry.dynJsonStrD j "cwe" ""))
+
+structure Scry.DynCaseResult where
+  id : String
+  cwe : String
+  tier : String
+  file : String
+  expect : String
+  /-- `matched`, `missed`, `clean`, `unexpected`, `skipped` or `error`. -/
+  outcome : String
+  events : Nat
+  validated : Nat
+  /-- `covered/executable`, or `-` when coverage is unavailable. -/
+  coverage : String
+  reason : String
+
+structure Scry.DynBenchRun where
+  status : String
+  reason : String
+  root : String
+  /-- The probed compiler and sanitizers, or `none`. -/
+  toolchain : String
+  cases : List Scry.DynCaseResult
+
+def Scry.dynEventMatches (e : Scry.DynExpect) (ev : Scry.DynEvent) : Bool :=
+  Bool.and (String.eq ev.kind e.kind)
+    (Bool.and (match String.isEmpty e.sanitizer with
+        | .true => .true
+        | .false => String.eq ev.sanitizer e.sanitizer)
+      (match e.line with
+        | .none => .true
+        | .some ln => match ev.site with
+          | .some o => Nat.beq o.line ln
+          | .none => .false))
+
+def Scry.dynCaseOutcome (e : Scry.DynExpect) (r : Scry.DynReport) : String :=
+  match r.status with
+  | "skipped" => "skipped"
+  | "error" => "error"
+  | _ =>
+    let valid := List.filter (fun ev => ev.validated) r.events;
+    match e.expect with
+    | "clean" => match valid with
+      | .nil => "clean"
+      | _ => "unexpected"
+    | _ => match List.find (Scry.dynEventMatches e) valid with
+      | .some _ => "matched"
+      | .none => "missed"
+
+def Scry.dynCaseCoverage (c : Scry.DynCoverage) : String :=
+  match c.status with
+  | "ok" => Nat.repr c.covered ++ "/" ++ Nat.repr c.executable
+  | s => "-"
+
+def Scry.dynCaseResultOf (id cwe tier file expect : String) (e : Scry.DynExpect)
+    (r : Scry.DynReport) : Scry.DynCaseResult :=
+  let valid := List.length (List.filter (fun ev => ev.validated) r.events);
+  Scry.DynCaseResult.mk id cwe tier file expect (Scry.dynCaseOutcome e r)
+    (List.length r.events) valid (Scry.dynCaseCoverage r.coverage) r.reason
+
+def Scry.dynBenchCaseWith (chain : Scry.DynToolchain) (root : String)
+    (coverage : Bool) (j : Json) : EIO (Option Scry.DynCaseResult) :=
+  match Scry.dynExpectOfJson j with
+  | .none => EIO.pure .none
+  | .some e => do
+    let id := Scry.dynJsonStrD j "id" "";
+    let file := Scry.dynJsonStrD j "file" "";
+    let opts := { Scry.dynDefaultOpts (Path.join root file) with coverage := coverage };
+    rep ← Scry.dynExecute chain opts;
+    let case := Scry.dynCaseResultOf id (Scry.dynJsonStrD j "cwe" "")
+      (Scry.dynJsonStrD j "tier" "") file e.expect e rep;
+    EIO.pure (.some case)
+
+partial def Scry.dynBenchCasesWith (chain : Scry.DynToolchain) (root : String)
+    (coverage : Bool) : List Json → EIO (List Scry.DynCaseResult)
+  | .nil => EIO.pure .nil
+  | .cons j rest => do
+    one ← Scry.dynBenchCaseWith chain root coverage j;
+    rs ← Scry.dynBenchCasesWith chain root coverage rest;
+    match one with
+    | .none => EIO.pure rs
+    | .some c => EIO.pure (.cons c rs)
+
+def Scry.dynResolveRoot (root : String) : IO String := do
+  ok ← FS.exists (Path.join root "manifest.json");
+  match ok with
+  | .true => IO.pure root
+  | .false => do
+    let alt := String.append "scry/" root;
+    ok2 ← FS.exists (Path.join alt "manifest.json");
+    IO.pure (match ok2 with
+      | .true => alt
+      | .false => root)
+
+def Scry.dynBenchRun (root0 : String) (cc : Option String) (coverage : Bool) :
+    EIO Scry.DynBenchRun := do
+  root ← EIO.lift (Scry.dynResolveRoot root0);
+  let manifest := Path.join root "manifest.json";
+  ok ← EIO.lift (FS.exists manifest);
+  match ok with
+  | .false => EIO.pure (Scry.DynBenchRun.mk "skipped"
+      ("no manifest at " ++ manifest) root "none" .nil)
+  | .true => do
+    text ← FS.readFile manifest;
+    match Json.parse text with
+    | .error e => EIO.pure (Scry.DynBenchRun.mk "error" e root "none" .nil)
+    | .ok j => do
+      tmp ← FS.createTempDir;
+      chain ← Scry.dynResolve cc tmp;
+      FS.removeAll tmp;
+      let toolchain := match chain.tool with
+        | .some t => String.append t.cc (String.append " (" (String.append t.version ")"))
+        | .none => "none";
+      let cases : List Json := match Json.get j "cases" with
+        | .some v => Json.asList v
+        | .none => .nil;
+      rs ← Scry.dynBenchCasesWith chain root coverage cases;
+      let allSkipped := Bool.and (Bool.not (List.isEmpty rs))
+        (List.all (fun r => String.eq r.outcome "skipped") rs);
+      EIO.pure (Scry.DynBenchRun.mk
+        (match allSkipped with | .true => "skipped" | .false => "ok")
+        (match allSkipped with
+          | .true => "no compiler with ASAN/UBSAN (clean skip)"
+          | .false => "")
+        root toolchain rs)
+
+def Scry.dynBenchOutcomeLabel (o : String) : String :=
+  match o with
+  | "matched" => "event"
+  | "missed" => "MISSED"
+  | "clean" => "clean"
+  | "unexpected" => "UNEXPECTED"
+  | "skipped" => "skipped"
+  | "error" => "error"
+  | _ => o
+
+def Scry.dynBenchCount (r : Scry.DynBenchRun) (o : String) : Nat :=
+  List.length (List.filter (fun c => String.eq c.outcome o) r.cases)
+
+def Scry.dynBenchJson (r : Scry.DynBenchRun) : Json :=
+  let caseJson : Scry.DynCaseResult → Json := fun c => Json.mkObj
+    [ ("id", Json.mkStr c.id)
+    , ("cwe", Json.mkStr c.cwe)
+    , ("tier", Json.mkStr c.tier)
+    , ("file", Json.mkStr c.file)
+    , ("expect", Json.mkStr c.expect)
+    , ("outcome", Json.mkStr c.outcome)
+    , ("events", Json.ofNat c.events)
+    , ("validated", Json.ofNat c.validated)
+    , ("coverage", Json.mkStr c.coverage)
+    , ("reason", Json.mkStr c.reason) ];
+  Json.mkObj
+    [ ("status", Json.mkStr r.status)
+    , ("reason", Json.mkStr r.reason)
+    , ("root", Json.mkStr r.root)
+    , ("toolchain", Json.mkStr r.toolchain)
+    , ("evidenceKind", Json.mkStr "dynamic")
+    , ("claim", Json.mkStr "none")
+    , ("absence", Json.mkBool .false)
+    , ("counts", Json.mkObj
+        [ ("cases", Json.ofNat (List.length r.cases))
+        , ("matched", Json.ofNat (Scry.dynBenchCount r "matched"))
+        , ("missed", Json.ofNat (Scry.dynBenchCount r "missed"))
+        , ("clean", Json.ofNat (Scry.dynBenchCount r "clean"))
+        , ("unexpected", Json.ofNat (Scry.dynBenchCount r "unexpected"))
+        , ("skipped", Json.ofNat (Scry.dynBenchCount r "skipped"))
+        , ("error", Json.ofNat (Scry.dynBenchCount r "error")) ])
+    , ("cases", Json.mkArr (List.map caseJson r.cases)) ]
+
+def Scry.dynJoinLines (ls : List String) : String :=
+  String.append (String.intercalate "\n" ls) "\n"
+
+def Scry.dynBenchMarkdown (r : Scry.DynBenchRun) : String :=
+  let header :=
+    [ "## Dynamic evidence"
+    , ""
+    , "Corpus: `" ++ r.root ++ "` (status `" ++ r.status ++ "`, toolchain `"
+        ++ r.toolchain ++ "`)."
+    , ""
+    , "| case | tier | CWE | expect | outcome | events | validated | coverage |"
+    , "|---|---|---|---|---|---:|---:|---|" ];
+  let rows := List.map (fun c => "| " ++ c.id ++ " | " ++ c.tier ++ " | " ++ c.cwe
+    ++ " | " ++ c.expect ++ " | " ++ Scry.dynBenchOutcomeLabel c.outcome
+    ++ " | " ++ Nat.repr c.events ++ " | " ++ Nat.repr c.validated
+    ++ " | " ++ c.coverage ++ " |") r.cases;
+  let footer :=
+    [ ""
+    , "Counts: " ++ Nat.repr (Scry.dynBenchCount r "matched") ++ " event(s) matched, "
+      ++ Nat.repr (Scry.dynBenchCount r "missed") ++ " missed, "
+      ++ Nat.repr (Scry.dynBenchCount r "unexpected") ++ " unexpected, "
+      ++ Nat.repr (Scry.dynBenchCount r "clean") ++ " clean, "
+      ++ Nat.repr (Scry.dynBenchCount r "skipped") ++ " skipped."
+    , ""
+    , "A clean run is **not** a proof of absence: no fuzzing or input generation is done."
+    , "Tiers: T1 CWE-78/134, T2 CWE-22/416/476, T3 CWE-190/787/121; CWE-120/242/362 are"
+    , "out of scope for a witness (forbidden-call / concurrency)."
+    ];
+  Scry.dynJoinLines (List.append header (List.append rows footer))

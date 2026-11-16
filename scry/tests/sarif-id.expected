@@ -1,0 +1,9 @@
+semantic id ignores the sink point: ok
+semantic id normalizes ./: ok
+semantic id changes with the file: ok
+semantic id changes with the path shape: ok
+semantic id has the f_ prefix and 16 hex digits: ok
+the boundary id is stable and b_-prefixed: ok
+sarif: partialFingerprints is present: ok
+sarif: baselineState new is present: ok
+sarif: baselineState unchanged is present: ok
