@@ -279,24 +279,33 @@ def Scry.memAdd (st : Scry.PtState) (l : Scry.Loc) (ls : List Scry.Loc) : Scry.P
 def Scry.freedAdd (st : Scry.PtState) (ls : List Scry.Loc) : Scry.PtState :=
   { st with freed := Scry.locUnion ls st.freed }
 
-/-- Equality of two location maps: same key count, and every key's set matches. -/
-def Scry.locMapEq (a b : U64Map (Scry.VarKey × List Scry.Loc)) : Bool :=
-  match Nat.beq (U64Map.size a) (U64Map.size b) with
-  | .false => .false
-  | .true => U64Map.foldl (fun acc k v =>
-      Bool.and acc (Scry.locSetEq v.2 (match U64Map.find b k with
-        | .none => List.nil
-        | .some w => w.2))) .true a
+/-- Every key of `a` has the same set in `b`, a missing key reading as the empty set. -/
+def Scry.locMapCovers (a b : U64Map (Scry.VarKey × List Scry.Loc)) : Bool :=
+  U64Map.foldl (fun acc k v =>
+    Bool.and acc (Scry.locSetEq v.2 (match U64Map.find b k with
+      | .none => List.nil
+      | .some w => w.2))) .true a
 
-/-- Equality of two memory maps (the stored pointer sets; the key entry keeps the
-location for the table, which is the same if the hashes agree and the sets agree). -/
+/-- Equality of two location maps as maps to **sets**: a key bound to the empty set and
+a missing key are the same (both read as empty through `Scry.ptGet`). Comparing key
+counts instead would count the first round's empty entries (a statement whose
+contribution is empty still inserts its key) as a change, and run one extra round on a
+pointer-free unit. -/
+def Scry.locMapEq (a b : U64Map (Scry.VarKey × List Scry.Loc)) : Bool :=
+  Bool.and (Scry.locMapCovers a b) (Scry.locMapCovers b a)
+
+/-- `Scry.locMapCovers` for memory maps. -/
+def Scry.memMapCovers (a b : U64Map (Scry.Loc × List Scry.Loc)) : Bool :=
+  U64Map.foldl (fun acc k v =>
+    Bool.and acc (Scry.locSetEq v.2 (match U64Map.find b k with
+      | .none => List.nil
+      | .some w => w.2))) .true a
+
+/-- Equality of two memory maps as maps to sets (the stored pointer sets; the key entry
+keeps the location for the table, which is the same if the hashes agree and the sets
+agree). Missing and empty agree, as in `Scry.locMapEq`. -/
 def Scry.memMapEq (a b : U64Map (Scry.Loc × List Scry.Loc)) : Bool :=
-  match Nat.beq (U64Map.size a) (U64Map.size b) with
-  | .false => .false
-  | .true => U64Map.foldl (fun acc k v =>
-      Bool.and acc (match U64Map.find b k with
-        | .none => .false
-        | .some w => Scry.locSetEq v.2 w.2)) .true a
+  Bool.and (Scry.memMapCovers a b) (Scry.memMapCovers b a)
 
 /-- Set equality of two states: every key of either side has the same set. -/
 def Scry.stateEq (a b : Scry.PtState) : Bool :=
