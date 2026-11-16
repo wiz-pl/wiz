@@ -205,7 +205,7 @@ after it).
   imports, *add the missing import*, and `@f` / dropping the `@` when the argument count
   is off by the implicit parameters.
 
-```
+```wiz no-check
 def k : Nat → Bool → Nat := by
   intro n         -- wiz/plainGoal here:  n : Nat ⊢ Bool → Nat
   intro b
@@ -358,7 +358,7 @@ the `nvim` group runs it as its second case.
 Hovers, go to definition and the infoview used to know only about terms. Now (as in
 Lean) they also know about syntax:
 
-```
+```wiz no-check
 syntax (name := twice) "twice" term:max : term       -- declaration of `twice`
 macro_rules
   | `(term| twice $x) => `(term| Nat.add $x $x)      -- definition of `twice`
@@ -414,7 +414,9 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
 messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
 
-```
+```wiz
+import Logic
+
 #check fun (n : Nat) => n + 1        -- fun n => n + 1 : Nat → Nat
 #check [1, 2, 3]                     -- [1, 2, 3] : List Nat
 #check fun (b c : Bool) => b && !c   -- fun b c => b && !c : Bool → Bool → Bool
@@ -619,7 +621,7 @@ package's `lib` targets with its module roots (dependencies included), into
   loaded) turns on Neovim 0.11's own LSP completion (after `.`, and `<C-Space>` in insert
   mode); the README lists what completion and the code actions offer.
 
-```
+```wiz no-check
 def foo (n : Nat) (pt : Point) : Nat := Nat.add n pt.‸   -- pt.px : Nat, pt.py : Nat, pt.norm
 def p : Point := _                                     -- [Fill with an anonymous constructor] ⟨?px, ?py⟩
 ```
@@ -636,7 +638,7 @@ it (named arguments `(x := e)` aside) say which explicit binder comes next. A gl
 binders come from its declaration; a local function's type from the info tree of the
 text cut after it, with its open brackets closed. In Neovim 0.11, `<C-s>` in insert mode.
 
-```
+```wiz no-check
 def b (xs : List Nat) : Nat := List.length ‸    -- List.length {A : Type} [(_ : List A)] : Nat
 ```
 
