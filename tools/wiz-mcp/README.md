@@ -11,8 +11,11 @@ server's diagnostics, hover and tactic state.
   is not on the default dev shell's path. Add the MCP configuration to one
   worktree or to your global client config when you want it.
 * **Scry is separate.** [`tools/scry-mcp`](../scry-mcp/README.md) is its own
-  read-only server (`scry` in `.mcp.json`). It reuses this bridge's transport
-  and policy.
+  server (`scry` in `.mcp.json`), read-only unless its runner flags are given.
+  It reuses this bridge's transport, policy and runners (`wiz_runners.py`).
+* **Runners are opt-in.** Test groups, the live trust ledger and `run` exist
+  only with `--allow-tests`/`--allow-run`, and go through `heavy` in a sandbox
+  (see [Runners](#runners-opt-in)).
 
 ## Why MCP and not the `lsp` config
 
@@ -217,6 +220,81 @@ workspace lacks is not listed. They are never written.
 A stage name must be a plain file name: no `..`, no hidden files, and no symlink
 out of the workspace.
 
+## Runners (opt-in)
+
+Phase 3 of the MCP plan adds tools that execute code. Each is **off unless its
+flag is given**, and an unflagged server does not even list it:
+
+| tool | flag | runs |
+| --- | --- | --- |
+| `test_groups` | `--allow-tests` | `tests --list`, or `tests --list-cases SELECTORS` (group, index, name), under `light` |
+| `test_group` | `--allow-tests` | `tests SELECTORS [--jobs N]` under `heavy`; the summary, per-group counts, failed and skipped cases |
+| `trust_ledger_live` | `--allow-tests` | `tests --trust-ledger --print [--lib-only]` under `heavy`, compared with `.github/trust-baseline.tsv` |
+| `run` | `--allow-run` | `wiz run FILE [--target c\|llvm]` under `heavy` |
+| `job_status`, `job_cancel` | either | follow or stop a job |
+
+`tests` is the built driver (`--tests`, default `./.lake/build/bin/tests`). The
+server never builds it; without it the tools return `tests_not_found`.
+
+How a heavy runner runs:
+
+* **Through the scheduler.** The command is
+  `heavy --mem MEM timeout -k 30 TIMEOUT bwrap … -- CMD`. The time limit is
+  inside `heavy`, so time spent in its queue does not count. `mem` (default 7G
+  for tests, 6G for the ledger, 4G for `run`) may not exceed `--max-mem`
+  (default 8G), and `timeout` may not exceed `--max-runtime` (default 3600 s).
+  When `heavy` or `light` is missing (`--heavy`, `--light`) the call fails with
+  `scheduler_not_found`. Nothing ever runs outside the scheduler.
+* **Admission first.** `heavy --status` is read before anything is queued.
+  * An open measurement window is `measurement_window`.
+  * A job that heavy would not start now is `heavy_busy`, with the status in
+    `result.heavy`: waiters already queued, or the budget and the measured
+    headroom both too small.
+  * With `queue: true` the job starts anyway and waits in heavy's FIFO queue.
+    The call returns at once, and `job_status` shows `queued` with
+    `queue_position`.
+* **Jobs, not blocking calls.** A call waits `wait` seconds (default 20, at
+  most `--timeout`) and then returns the job: `job`, `state`, `exit`, the output
+  tail in `stdout`/`stderr` and, once it ended, the parsed `result`.
+  * The states are `queued`, `running`, `done`, `failed`, `timeout` (124),
+    `killed` (137, over its `mem`), `terminated` (143; heavy stops a job this
+    way after an OOM kill), `refused` (75) and `cancelled`.
+  * There is one job per server at a time; another call returns `busy`.
+  * `job_cancel` and the server's exit signal the job's whole session: `heavy`,
+    coreutils `timeout` (which has a process group of its own) and the sandbox.
+* **In a sandbox.** `bwrap` gives the job no network, no shared IPC, UTS or PID
+  namespace, a read-only root and a private `/tmp`. A missing `bwrap`
+  (`--bwrap`) is `sandbox_unavailable`; nothing runs unsandboxed.
+  * The test driver may write the workspace and the `wiz`/`grail` caches.
+    `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.local/state`, `~/.netrc` and other
+    credential locations are masked.
+  * `trust_ledger_live` and `test_groups` see the workspace read-only.
+  * `run` hides the whole home directory. Only the `wiz` cache is writable,
+    and the toolchain is re-exposed read-only.
+* **Values, not command lines.** Selectors must be exact (`=NAME` or
+  `=NAME#0,3`), because a prefix such as `s` would select half the suite. `mem`
+  is a whole number of M or G. Unknown arguments are refused. No shell is
+  involved anywhere.
+* **Environment.** The usual allowlist applies, minus every `WIZ_HEAVY_*`,
+  `WIZ_LIGHT_*` and `WIZ_LOCK*` variable, so a job cannot raise its own budget
+  or claim a held lock. `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` are
+  added, because `systemd-run --user` inside heavy needs them.
+
+Results:
+
+* `test_group` returns `result.summary` (`passed`, `failed` and `skipped`),
+  `groups`, and the `failed` and `skipped` cases with up to 40 lines of output
+  each. `all_passed` is false when anything was skipped: a skipped case is not
+  a pass, and `ok` follows it.
+* `trust_ledger_live` returns `unreviewed` (live sources with no ledger row)
+  and `stale` (rows with no live source; `null` with `lib_only`, since the
+  examples are then not checked), with `sources` and `by_module`. It never
+  updates the ledger.
+
+The shipped configurations (`.mcp.json`, the OpenCode example) enable no
+runner. An agent's own server can opt in:
+`sh tools/wiz-mcp/wiz-mcp.sh --allow-tests --max-mem 8G`.
+
 ## Safety
 
 The default server is read-only: it reads files and writes nothing but the
@@ -276,7 +354,9 @@ failure:
   `structuredContent` carry the same object.
 * `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,
   `wiz_not_found`, `io_error`, `timeout`, `lsp_startup`, `lsp_closed`,
-  `lsp_error`, `lsp_refused`, `not_found` (`doc`), `internal`.
+  `lsp_error`, `lsp_refused`, `not_found` (`doc`, an unknown job), `internal`;
+  and for the runners `tests_not_found`, `heavy_busy`, `measurement_window`,
+  `busy`, `scheduler_not_found`, `scheduler_error` and `sandbox_unavailable`.
 
 ### `check`: structured diagnostics
 
@@ -394,6 +474,21 @@ fake stdio language server):
 python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
 ```
 
+`test_wiz_runners.py` covers the runners with stand-in `heavy`, `light`,
+`bwrap` and `tests` scripts that record their arguments. It checks:
+
+* the gating, and that bad arguments, a busy heavy or a missing scheduler or
+  sandbox never reach the scheduler;
+* that `queue` returns a queue position instead of blocking;
+* the exact `heavy`/`timeout`/`bwrap` argument vectors, and that the scheduler
+  overrides are dropped;
+* one job at a time, and that cancelling kills the whole session;
+* the parsers (test output, the ledger, `heavy --status`).
+
+One case runs the real `bwrap` when it can create namespaces: only `lo` is
+visible, the workspace is read-only and the home directory is hidden. Without
+`bwrap` it reports a skip, which is not a pass.
+
 The end-to-end smoke test needs a built toolchain. It starts the bridge, runs
 `diagnostics` then `hover` (so the real daemon starts), records the daemon's
 RSS, checks that it holds no socket, shuts down, and checks that the daemon is
@@ -428,6 +523,14 @@ sh tools/wiz-mcp/run-tests.sh
                   are still dropped)
 --doc-index PATH  an elaborated index for search/doc: `wiz doc --lib -o DIR`'s
                   api.json, or DIR (optional; never built by the bridge)
+--allow-tests     list and allow test_groups, test_group, trust_ledger_live
+--allow-run       list and allow run
+--tests PATH      the built test driver (default: ./.lake/build/bin/tests)
+--heavy PATH      the heavy scheduler (default: /workspace/wiz-tools/heavy)
+--light PATH      the light scheduler (default: /workspace/wiz-tools/light)
+--bwrap PATH      bubblewrap for the runners' sandbox (default: bwrap on PATH)
+--max-mem SIZE    the largest `mem` a runner may declare (default: 8G)
+--max-runtime S   the longest runner `timeout` (default: 3600)
 ```
 
 Environment: `WIZ_BIN` is the default for `--wiz`; `WIZ_MCP_CACHE` for `--cache`.
@@ -444,7 +547,11 @@ All logs go to stderr; stdout is the MCP transport.
 * **`path_denied`** — the path resolves outside the workspace and the
   toolchain library. Use a path inside the worktree, or start the server with
   `--allow-root DIR` for a read-only extra directory.
-* **`not_enabled`** — `build` needs `--allow-build` on the server command.
+* **`not_enabled`** — `build` needs `--allow-build` on the server command, the
+  runners `--allow-tests`/`--allow-run`.
+* **`heavy_busy`** — heavy would not start the job now (`result.heavy` has the
+  numbers). Retry later, or pass `queue: true` and follow the job with
+  `job_status`.
 * **`build` cannot find `cc` flags** — they come from the environment; a
   variable outside the allowlist needs `--pass-env NAME`.
 * **First LSP call is slow** — the daemon elaborates imported modules. With a
