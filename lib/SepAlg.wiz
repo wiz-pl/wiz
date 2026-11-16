@@ -130,7 +130,7 @@ def PCM.Exclusive {A : Type} (M : PCM A) (a : A) : Prop :=
 /-- An exclusive element may be updated to any valid one: no frame can observe it. -/
 def PCM.update_exclusive {A : Type} (M : PCM A) {a b : A} (x : PCM.Exclusive M a) (vb : M.valid b) :
     PCM.Update M a b :=
-  fun c v => Eq.substProp (fun y => M.valid (M.op b y)) (Eq.symm (x c v))
+  fun c v => Eq.substProp (fun y => M.valid (M.op b y)) (a := M.unit) (b := c) (Eq.symm (x c v))
     (Eq.substProp M.valid (Eq.symm (PCM.unit_r M b)) vb)
 
 -- ## 4. Instances
@@ -207,7 +207,7 @@ def Excl.exclusive {A : Type} (a : A) :
   | .bot, v => Bool.falseNeTrue v
 /-- The owner of a whole value may replace it by any other. -/
 def Excl.update {A : Type} (a b : A) : PCM.Update (exclPCM A) (Excl.ex a) (Excl.ex b) :=
-  PCM.update_exclusive (exclPCM A) (a := Excl.ex a) (Excl.exclusive a) rfl
+  PCM.update_exclusive (exclPCM A) (a := Excl.ex a) (b := Excl.ex b) (Excl.exclusive a) rfl
 /-- Two whole values never compose validly. -/
 def Excl.clash {A : Type} (a b : A) : ¬ Excl.Valid (Excl.op (Excl.ex a) (Excl.ex b)) :=
   fun v => Bool.falseNeTrue v
@@ -349,7 +349,7 @@ def RProp.own_join {A : Type} (M : PCM A) (a b : A) :
 /-- `own (a ⋅ b)` and `own a ⋆ own b` are the same assertion. -/
 def RProp.own_op {A : Type} (M : PCM A) (a b : A) :
     RProp.own M (M.op a b) = RProp.star M (RProp.own M a) (RProp.own M b) :=
-  funext (fun r => Iff.toEq (Iff.intro (RProp.own_split M a b r) (RProp.own_join M a b r)))
+  funext (f := RProp.own M (M.op a b)) (g := RProp.star M (RProp.own M a) (RProp.own M b)) (fun r => Iff.toEq (Iff.intro (RProp.own_split M a b r) (RProp.own_join M a b r)))
 /-- Everything owns the unit. -/
 def RProp.own_unit {A : Type} (M : PCM A) (r : A) : RProp.own M M.unit r := PCM.unit_incl M r
 /-- What a valid resource owns is valid. -/
