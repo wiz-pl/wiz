@@ -224,6 +224,30 @@ Adding a test group touches no shared file:
   deterministically; a branch that still edits the old file replays its changes with it
   (AGENTS.md, "Test layout").
 
+### The rejection corpus (`=reject`)
+
+The suite is mostly about programs that must be accepted; `Tests/Groups/Reject.lean` is
+the other side: programs the elaborator must turn down, with the diagnostic they must
+produce. It covers universe- and level-escapes, `Sort` misuse, missing and looping
+instances (an overlapping instance is accepted by design, and an `accept:` case pins
+that), ill-typed `implemented_by`, non-structural recursion, missing pattern coverage,
+quantity and linearity violations, foreign-function and `glue` mistakes, duplicate
+declarations and module names, malformed attributes, bad `deriving`, and private and
+opaque-type escapes. A case names the stable error code (or that the error has
+none yet) and a fragment of the source its span must cover, so a rejection for the wrong
+reason does not pass.
+
+`Tests/Reject.lean` elaborates each program in process through the shared cache
+(`/tmp/wiz-reject-corpus-cache`, warmed by the first case) and checks the code, the span
+and that no `panic!` was reached. A representative case per class also runs `wiz check`
+and requires a nonzero exit (an accepted neighbour requires zero); running it on every
+case would add about a second per case. `accept:` cases are neighbours that must stay
+accepted, so the corpus cannot be gamed by over-rejection. An `xfail:` case records a
+program that is currently accepted but should not be: the reason is in a `Tests.note`
+(visible with `--timings`), and the case fails once the elaborator starts rejecting it,
+which is when it becomes a `rejected` case. Run the group alone with
+`lake test -- '=reject'` (build `wiz` too: `lake build wiz tests`).
+
 ## The grail package registry (23m)
 
 `grail update` resolves `Package.require` lines through a **static index** (a directory,

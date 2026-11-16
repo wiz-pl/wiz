@@ -1254,6 +1254,15 @@ uint64_t wiz_sys_write_file(const char *p, const char *s, int append) {
   return ok ? 0 : 1;
 }
 
+/* The driver's `$HOME` (`selfhost/Cli.wiz`: the default cache directory): the same
+   interface as the Lean runtime's `wiz_sys_getenv` (`runtime/rt_sys.inc`), which is ""
+   for a variable that is not set. The result is static (or the environment's), so the
+   caller copies it (`rt_out_str`). */
+const char *wiz_sys_getenv(const char *k) {
+  const char *v = getenv(k);
+  return v ? v : "";
+}
+
 /* the program needs a big stack (deep recursion): raise the limit and start again (a
    thread with a big stack would do, but the collector's stopping of the world lost
    its signals) */

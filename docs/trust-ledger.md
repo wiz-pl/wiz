@@ -37,10 +37,10 @@ that date is before today, and `--check` fails.
 
 A row from before the gate still has all six columns, but its reason is `legacy:
 pre-gate baseline; not individually reviewed` and its owner is `unassigned`. It is
-accepted, counted in the check's summary, and still expires on its review date.
-`--strict-legacy` fails on those rows too. Such a row gains a real review when its
-reason and owner are replaced (use `--strict-legacy` to list them). New rows may not use
-the migration marker: a bare three-column row is an error.
+accepted by a plain `--check`, counted in the summary, and still expires on its review
+date; `--strict-legacy` fails on it too, and that is what CI runs. Such a row gains a
+real review when its reason and owner are replaced. New rows may not use the migration
+marker: a bare three-column row is an error. No row in this ledger carries the marker.
 
 A row with any of reason/owner/review must have all three, non-empty; otherwise the
 check fails with "missing a reason", "missing an owner" or "missing a review date".
@@ -75,8 +75,9 @@ sources). Review the diff before committing: a new `axiom` is a proof obligation
 formality.
 
 The migration gave the 753 pre-gate rows the reason `legacy: pre-gate baseline; not
-individually reviewed`, owner `unassigned`, and review date `2027-05-14`: they are
-accepted now, but will fail on 2027-05-14 unless individually reviewed or renewed.
+individually reviewed`, owner `unassigned`, and review date `2027-05-14`. That
+migration is **complete**: every row now has a declaration-specific reason and a named
+owner, so no row carries the marker and `--strict-legacy` passes.
 
 ## Merging the ledger
 
@@ -116,10 +117,8 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The migration's 753 rows are not a renewal list: the reviewed base is now 680 rows
-(24 still carrying the migration marker), 73 fewer (9.7%). The reduction is no longer
-over 10%: the signed shift/compare exception below is a correctness fix for the native
-IR. The removals are all structural, not a loosening of the gate:
+The reviewed base is 680 rows, 73 fewer than the migration's 753, and the removals are
+all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
 | --- | --- | --- |
@@ -137,18 +136,16 @@ bodies allocate (`IntN.not`/`IntN.below`, `IntN.isNeg`/`IntN.toNat`), so their
 representation or delegate to a retained `UIntN` native and the IR has no word
 constructor or projection.
 
-The remaining rows fall into five groups, with the plan for each:
+The reviewed base falls into these groups:
 
 * **FFI, 210 declarations (420 rows).** Each `extern` contributes an axiom (the C
-  function) and a `builtin extern:` row (the marshalling). These are the mechanical
-  bulk and the next review unit: audit by C symbol against `runtime/` and `c/`, then
-  replace the two `legacy:` rows with one reason naming the symbol and its contract.
-  Do not bulk-renew them. Both FFI audits are done: the OS/runtime modules (147
-  declarations, 290 rows) and the word/array/map modules (66 declarations, 198
-  rows) now carry symbol-specific reasons. `UInt64.ofNat` reduces mod 2^64 in Wiz
-  (the marshalling used to panic above 2^64 while the doc promised modulo), and
-  `Float64.ofNat` rounds for every `Nat` on top of the `Float64.ofNatU64` extern.
-  The remaining legacy rows are outside the `partial` group (below).
+  function) and a `builtin extern:` row (the marshalling). Both FFI audits are done:
+  the OS/runtime modules (147 declarations, 290 rows) and the word/array/map modules
+  (66 declarations, 198 rows) carry symbol-specific reasons, naming the C function,
+  the property that makes it the definition, and the marshalling's kind string. Do not
+  bulk-renew them. `UInt64.ofNat` reduces mod 2^64 (the marshalling used to panic above
+  2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
+  compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
 * **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
   `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
   `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
@@ -156,31 +153,42 @@ The remaining rows fall into five groups, with the plan for each:
   (2), `Prelude` (2), `Text` (3) and `IO` (1). Wiz's kernel treats a `partial`
   definition as opaque: the definition is justified by an inhabited witness of its
   type (22f), never by a termination proof, so a row is not a claim that the recursion
-  terminates. The 134 rows are accepted as one reviewed group, deliberately not
+  terminates. The 132 rows are accepted as one reviewed group, deliberately not
   de-mutualised: each reason names its block and what would remove the row —
   de-mutualising into structural recursion over the syntax or data tree, or a checked
-  measure (fuel, a decreasing counter, or a worklist/visited-set measure). Two small
-  fuel loops are structural and are now total (`Scry.rdLoop`, `Scry.domLoop`: the only
-  recursive argument is the `Nat` predecessor of `fuel`), so 2 rows are gone and 132
-  remain. A `mutual`/`partial` row is therefore a documented design choice, not an
-  unreviewed gap: a new one still needs a reason, and `--strict-legacy` still lists any
-  that has not been through this review.
+  measure (fuel, a decreasing counter, or a worklist/visited-set measure). A
+  `mutual`/`partial` row is therefore a documented design choice, not an unreviewed
+  gap: a new one still needs a reason, and `--strict-legacy` still lists any that has
+  not been through this review.
 * **`implemented_by`, 56 rows.** The remaining ones are the performance-critical
   `UIntN`, array, map, intern and channel fast paths. They are covered by the
-  differential `=word`/`=natives` tests; review each against the C function it names.
-* **`builtin`, 30 rows and `repr:`, 7 rows.** Ten seals (opaque native
-  representations) and the twenty `Prelude` numerals/operations/`memo` registrations
-  are load-bearing: numerals and compiled arithmetic do not work without them. They
-  should be reviewed as a group, not removed.
+  differential `=word`/`=natives`/`=conc` tests; each reason names the Wiz model it
+  replaces and the group that compares the two.
+* **`builtin`, 30 rows and `repr:`, 7 rows.** The seals (opaque native
+  representations) and the twenty `Prelude` numeral/operation/`memo` registrations are
+  load-bearing: numerals, string literals and compiled arithmetic do not work without
+  them. They are reviewed individually: each reason says what the registration makes
+  native, why the Wiz definition is the specification, and what would remove it
+  (unsealing the type, or deleting the registration and falling back to the definition
+  that `=audit` already checks).
 
 The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
-`Prelude.castRefl`) now carry a specific reason and the owner `Reuben Steenekamp`; so
-do the kept `UInt64.toNat` native (the word tests pin it in the compiled IR) and the six
-signed shift/compare rows. The 24 rows that still say `legacy:` are outside the group:
-the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals, and
-`Proc.runLinked`. `--strict-legacy` lists them, and the 2027-05-14 expiry is their
-deadline. `Json.sub` is partial by intent (it is an elaboration fence, not recursion)
-and has a reason.
+`Prelude.castRefl`) carry a specific reason and the owner `Reuben Steenekamp`; so do
+the kept `UIntN.toNat` native (the word tests pin it in the compiled IR) and the six
+signed shift/compare rows. The last migration rows are gone: `Float64.ofNat` was
+renamed `Float64.ofNatU64` when the rounding moved into Wiz and is reasoned under the
+new name; the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals
+and `Proc.runLinked` now have their own reasons. `Json.sub` is partial by intent (it
+is an elaboration fence, not recursion) and has a reason.
+
+## Review cadence
+
+Every row has a review date; a row is expired when that date is before today, so a
+review is due at least every 180 days and `--check` fails until it is renewed with
+`--update --review YYYY-MM-DD`. A new row defaults to today + 180 days. The migration
+marker cannot come back: `--strict-legacy` is now enforced in CI (the `trust-ledger`
+job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
+checks the same ledger.
 
 ### `partial` and `mutual`: a reviewed design choice
 
@@ -243,5 +251,6 @@ with `scripts/setup-trust-merge.sh` in a throwaway repository and runs a real
 `git merge`, so it also checks the `.gitattributes` registration. CI runs it in the
 `trust-ledger` job.
 
-CI runs `scripts/trust-ledger.sh --check` (see the `trust-ledger` job in
-`.github/workflows/ci.yml`); the gate is inside `--check`, so no new flag is needed.
+CI runs `scripts/trust-ledger.sh --check --strict-legacy` (see the `trust-ledger` job in
+`.github/workflows/ci.yml`), so both the new-entry gate and the end of the migration
+are enforced before any test shard starts.
