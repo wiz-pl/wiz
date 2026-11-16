@@ -1,0 +1,30 @@
+# Entries for the pre-commit framework (https://pre-commit.com):
+#
+#   repos:
+#     - repo: https://github.com/wiz-pl/wiz
+#       rev: master
+#       hooks:
+#         - id: wiz-fast
+#         - id: wiz-full
+#
+# `wiz-fast` is the pre-commit tier on the staged files; `wiz-full` is the pre-push
+# tier. Both accept exit 3 from scripts/pre-commit.sh as "nothing could run here".
+- id: wiz-fast
+  name: wiz pre-commit (fast)
+  description: Docs style, `wiz fmt` on changed files, ledger fixtures, skip lint, YAML.
+  entry: scripts/pre-commit.sh --fast --staged
+  language: script
+  pass_filenames: false
+  always_run: true
+  require_serial: true
+  stages: [pre-commit]
+
+- id: wiz-full
+  name: wiz pre-push (full)
+  description: The fast checks plus the trust ledger, reproducibility and formatter tests.
+  entry: scripts/pre-commit.sh --full
+  language: script
+  pass_filenames: false
+  always_run: true
+  require_serial: true
+  stages: [pre-push]

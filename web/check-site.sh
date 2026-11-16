@@ -35,6 +35,7 @@ need playground/playground-lsp.js
 need playground/tagged.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
+need notebooks/index.html
 
 # Every local ES import of the playground's scripts resolves: a page whose module graph
 # is broken would load and then do nothing, which an HTTP check would not see.
@@ -106,9 +107,12 @@ fi
 if [ -f "$SITE/playground/index.html" ]; then
   check_links "$SITE/playground/index.html" "$SITE/playground"
 fi
+if [ -f "$SITE/notebooks/index.html" ]; then
+  check_links "$SITE/notebooks/index.html" "$SITE/notebooks"
+fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "check-site: ok ($SITE: landing, docs, benchmarks, playground)"
+  echo "check-site: ok ($SITE: landing, docs, benchmarks, playground, notebooks)"
 else
   echo "check-site: FAILED" >&2
 fi
