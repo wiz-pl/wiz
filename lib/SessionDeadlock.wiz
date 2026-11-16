@@ -942,3 +942,133 @@ def orientF (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (
               (Eq.substProp (fun (z : Nat) => OD C i m Γ rk par pf rN (Cfg.len C) z c) (Eq.symm bi.1)
                 (odSwap (parF C i m Γ par pf c) (rkF C rk rN (Cfg.len C)) (rkF C rk rN i) (Cfg.len C) i (odIN C i n Γ p m ch pa h rk par g pf rN cs c bi.2 aN.2))))
           (fun (bN : b = (Cfg.len C) ∧ (c = (Cfg.fresh C) ∨ Mem c (Ctx.names (Ctx.toChild m Γ)))) => absurd (ne (Eq.trans aN.1 (Eq.symm bN.1)))))))
+
+-- ### Fork: one parent channel per thread, no self-loops
+
+def parNeOld (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (a c : Nat) (na : Not (a = i)) (ha : Holds C a c) (nc : Not ((parF C i m Γ par pf c) = a)) : Not (par c = a) :=
+  fun e => Or.elim (memDec c (Ctx.names (Ctx.toChild m Γ)))
+    (fun mc => Or.elim (Nat.decEq (par c) i)
+      (fun ei => na (Eq.trans (Eq.symm e) ei))
+      (fun ni => nc (Eq.trans (parF_mo C i m Γ par pf c (neFresh C a c ha) mc ni) e)))
+    (fun nm => nc (Eq.trans (parF_o C i m Γ par pf c (neFresh C a c ha) nm) e))
+
+def parNeP (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (c : Nat) (mp : Mem c (Ctx.names (Ctx.toParent m Γ))) (nc : Not ((parF C i m Γ par pf c) = i)) : Not (par c = i) :=
+  fun e => nc (Eq.trans (parF_o C i m Γ par pf c
+      (fun ef => freshNotP C i n Γ p m ch pa h (Eq.substProp (fun (z : Nat) => Mem z (Ctx.names (Ctx.toParent m Γ))) ef mp))
+      (fun mc => disjF C i n Γ p m ch pa h rk par g c mc mp)) e)
+
+def parNeC (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (c : Nat) (mc : Mem c (Ctx.names (Ctx.toChild m Γ))) (nc : Not ((parF C i m Γ par pf c) = (Cfg.len C))) : Not (par c = i) :=
+  fun e => nc (parF_mi C i m Γ par pf c
+      (fun ef => freshNotC C i n Γ p m ch pa h (Eq.substProp (fun (z : Nat) => Mem z (Ctx.names (Ctx.toChild m Γ))) ef mc)) mc e)
+
+-- in case A the new channel is the forking thread's child channel; in case B its parent channel
+def fNotUpI (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (d : Nat) (md : Mem d (Ctx.names (Ctx.toParent m Γ))) (nf : Not ((parF C i m Γ par pf (Cfg.fresh C)) = i)) (nd : Not ((parF C i m Γ par pf d) = i)) : False :=
+  Or.elim cs
+    (fun (A : pf = i ∧ (rN = Nat.succ (Nat.succ (dbl (rk i))) ∧ ((c' : Nat) → Mem c' (Ctx.names (Ctx.toChild m Γ)) → par c' = i))) =>
+      nf (Eq.trans (parF_f C i m Γ par pf) A.1))
+    (fun (B : pf = (Cfg.len C) ∧ (rN = dbl (rk i) ∧ Ex (fun (c0 : Nat) => Mem c0 (Ctx.names (Ctx.toChild m Γ)) ∧ Not (par c0 = i)))) =>
+      Ex.elim B.2.2 (fun (c0 : Nat) (hc0 : Mem c0 (Ctx.names (Ctx.toChild m Γ)) ∧ Not (par c0 = i)) =>
+        disjF C i n Γ p m ch pa h rk par g d
+          (Eq.substProp (fun (z : Nat) => Mem z (Ctx.names (Ctx.toChild m Γ)))
+            (g.2.1 i c0 d (holdsI C i n Γ p m ch pa h c0 (memChild c0 m Γ hc0.1)) (holdsI C i n Γ p m ch pa h d (memParent d m Γ md))
+              hc0.2 (parNeP C i n Γ p m ch pa h rk par g pf rN cs d md nd)) hc0.1)
+          md))
+
+def fNotUpN (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (d : Nat) (md : Mem d (Ctx.names (Ctx.toChild m Γ))) (nf : Not ((parF C i m Γ par pf (Cfg.fresh C)) = (Cfg.len C))) (nd : Not ((parF C i m Γ par pf d) = (Cfg.len C))) : False :=
+  Or.elim cs
+    (fun (A : pf = i ∧ (rN = Nat.succ (Nat.succ (dbl (rk i))) ∧ ((c' : Nat) → Mem c' (Ctx.names (Ctx.toChild m Γ)) → par c' = i))) =>
+      parNeC C i n Γ p m ch pa h rk par g pf rN cs d md nd (A.2.2 d md))
+    (fun (B : pf = (Cfg.len C) ∧ (rN = dbl (rk i) ∧ Ex (fun (c0 : Nat) => Mem c0 (Ctx.names (Ctx.toChild m Γ)) ∧ Not (par c0 = i)))) =>
+      nf (Eq.trans (parF_f C i m Γ par pf) B.1))
+
+def oneUpI (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (c d : Nat) (x : c = (Cfg.fresh C) ∨ Mem c (Ctx.names (Ctx.toParent m Γ))) (y : d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toParent m Γ)))
+    (nc : Not ((parF C i m Γ par pf c) = i)) (nd : Not ((parF C i m Γ par pf d) = i)) : c = d :=
+  Or.elim x
+    (fun (ec : c = (Cfg.fresh C)) => Or.elim y
+      (fun (ed : d = (Cfg.fresh C)) => Eq.trans ec (Eq.symm ed))
+      (fun md => absurd (fNotUpI C i n Γ p m ch pa h rk par g pf rN cs d md (Eq.substProp (fun (z : Nat) => Not ((parF C i m Γ par pf z) = i)) ec nc) nd)))
+    (fun mc => Or.elim y
+      (fun (ed : d = (Cfg.fresh C)) => absurd (fNotUpI C i n Γ p m ch pa h rk par g pf rN cs c mc (Eq.substProp (fun (z : Nat) => Not ((parF C i m Γ par pf z) = i)) ed nd) nc))
+      (fun md => g.2.1 i c d (holdsI C i n Γ p m ch pa h c (memParent c m Γ mc)) (holdsI C i n Γ p m ch pa h d (memParent d m Γ md))
+        (parNeP C i n Γ p m ch pa h rk par g pf rN cs c mc nc) (parNeP C i n Γ p m ch pa h rk par g pf rN cs d md nd)))
+
+def oneUpN (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) (c d : Nat) (x : c = (Cfg.fresh C) ∨ Mem c (Ctx.names (Ctx.toChild m Γ))) (y : d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toChild m Γ)))
+    (nc : Not ((parF C i m Γ par pf c) = (Cfg.len C))) (nd : Not ((parF C i m Γ par pf d) = (Cfg.len C))) : c = d :=
+  Or.elim x
+    (fun (ec : c = (Cfg.fresh C)) => Or.elim y
+      (fun (ed : d = (Cfg.fresh C)) => Eq.trans ec (Eq.symm ed))
+      (fun md => absurd (fNotUpN C i n Γ p m ch pa h rk par g pf rN cs d md (Eq.substProp (fun (z : Nat) => Not ((parF C i m Γ par pf z) = (Cfg.len C))) ec nc) nd)))
+    (fun mc => Or.elim y
+      (fun (ed : d = (Cfg.fresh C)) => absurd (fNotUpN C i n Γ p m ch pa h rk par g pf rN cs c mc (Eq.substProp (fun (z : Nat) => Not ((parF C i m Γ par pf z) = (Cfg.len C))) ed nd) nc))
+      (fun md => g.2.1 i c d (holdsI C i n Γ p m ch pa h c (memChild c m Γ mc)) (holdsI C i n Γ p m ch pa h d (memChild d m Γ md))
+        (parNeC C i n Γ p m ch pa h rk par g pf rN cs c mc nc) (parNeC C i n Γ p m ch pa h rk par g pf rN cs d md nd)))
+
+def oneUpF (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) : OneUp (DF C i n Γ p m ch pa) (parF C i m Γ par pf) :=
+  fun a c d hc hd nc nd => Or.elim (holdsF C i n Γ p m ch pa h a c hc)
+    (fun (oc : Not (a = i) ∧ (Not (a = (Cfg.len C)) ∧ Holds C a c)) => Or.elim (holdsF C i n Γ p m ch pa h a d hd)
+      (fun (od : Not (a = i) ∧ (Not (a = (Cfg.len C)) ∧ Holds C a d)) =>
+        g.2.1 a c d oc.2.2 od.2.2 (parNeOld C i n Γ p m ch pa h rk par g pf rN cs a c oc.1 oc.2.2 nc) (parNeOld C i n Γ p m ch pa h rk par g pf rN cs a d oc.1 od.2.2 nd))
+      (fun od => Or.elim od
+        (fun (di : a = i ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toParent m Γ)))) => absurd (oc.1 di.1))
+        (fun (dN : a = (Cfg.len C) ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toChild m Γ)))) => absurd (oc.2.1 dN.1))))
+    (fun oc => Or.elim oc
+      (fun (ci : a = i ∧ (c = (Cfg.fresh C) ∨ Mem c (Ctx.names (Ctx.toParent m Γ)))) => Or.elim (holdsF C i n Γ p m ch pa h a d hd)
+        (fun (od : Not (a = i) ∧ (Not (a = (Cfg.len C)) ∧ Holds C a d)) => absurd (od.1 ci.1))
+        (fun od => Or.elim od
+          (fun (di : a = i ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toParent m Γ)))) =>
+            oneUpI C i n Γ p m ch pa h rk par g pf rN cs c d ci.2 di.2 (fun e => nc (Eq.trans e (Eq.symm ci.1))) (fun e => nd (Eq.trans e (Eq.symm ci.1))))
+          (fun (dN : a = (Cfg.len C) ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toChild m Γ)))) =>
+            absurd (ltNe i (Cfg.len C) (iLtN C i n Γ p m ch pa h) (Eq.trans (Eq.symm ci.1) dN.1)))))
+      (fun (cN : a = (Cfg.len C) ∧ (c = (Cfg.fresh C) ∨ Mem c (Ctx.names (Ctx.toChild m Γ)))) => Or.elim (holdsF C i n Γ p m ch pa h a d hd)
+        (fun (od : Not (a = i) ∧ (Not (a = (Cfg.len C)) ∧ Holds C a d)) => absurd (od.2.1 cN.1))
+        (fun od => Or.elim od
+          (fun (di : a = i ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toParent m Γ)))) =>
+            absurd (ltNe i (Cfg.len C) (iLtN C i n Γ p m ch pa h) (Eq.trans (Eq.symm di.1) cN.1)))
+          (fun (dN : a = (Cfg.len C) ∧ (d = (Cfg.fresh C) ∨ Mem d (Ctx.names (Ctx.toChild m Γ)))) =>
+            oneUpN C i n Γ p m ch pa h rk par g pf rN cs c d cN.2 dN.2 (fun e => nc (Eq.trans e (Eq.symm cN.1))) (fun e => nd (Eq.trans e (Eq.symm cN.1)))))))
+
+def noLoopsF (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) : NoLoops (DF C i n Γ p m ch pa) :=
+  fun k U hU => Or.elim (isAtF C i n Γ p m ch pa h k U hU)
+    (fun (o : Not (k = i) ∧ (Not (k = (Cfg.len C)) ∧ IsAt C k U)) => g.2.2 k U o.2.2)
+    (fun o => Or.elim o
+      (fun (e : k = i ∧ Thread.mk n (.cons (Cfg.fresh C) p (Ctx.toParent m Γ)) (pa (Cfg.fresh C)) = U) =>
+        tr1 (fun (W : Thread) => Nodup (Thread.names W)) _ U e.2
+          (And.intro (fun mf => freshNotP C i n Γ p m ch pa h mf) (nodupParent m Γ (nodupG C i n Γ p m ch pa h rk par g))))
+      (fun (e : k = (Cfg.len C) ∧ Thread.mk n (.cons (Cfg.fresh C) (Proto.dual p) (Ctx.toChild m Γ)) (ch (Cfg.fresh C)) = U) =>
+        tr1 (fun (W : Thread) => Nodup (Thread.names W)) _ U e.2
+          (And.intro (fun mf => freshNotC C i n Γ p m ch pa h mf) (nodupChild m Γ (nodupG C i n Γ p m ch pa h rk par g)))))
+
+def forkGood (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (rk par : Nat → Nat) (g : Good C rk par) (pf rN : Nat) (cs : FCase C i m Γ rk par pf rN) : Good (DF C i n Γ p m ch pa) (rkF C rk rN) (parF C i m Γ par pf) :=
+  (orientF C i n Γ p m ch pa h rk par g pf rN cs, (oneUpF C i n Γ p m ch pa h rk par g pf rN cs, noLoopsF C i n Γ p m ch pa h rk par g))
+
+def forkAcyclic (C : Cfg) (i n : Nat) (Γ : Ctx) (p : Proto) (m : List Bool) (ch : (c : Nat) → Th n (.cons c (Proto.dual p) (Ctx.toChild m Γ))) (pa : (c : Nat) → Th n (.cons c p (Ctx.toParent m Γ))) (h : IsAt C i (.mk (.succ n) Γ (Act.fork p m ch pa))) (ac : Acyclic C) : Acyclic (DF C i n Γ p m ch pa) :=
+  Ex.elim ac (fun (rk : Nat → Nat) (ex : Ex (fun (par : Nat → Nat) => Good C rk par)) =>
+    Ex.elim ex (fun (par : Nat → Nat) (g : Good C rk par) => Or.elim (decPar par i (Ctx.names (Ctx.toChild m Γ)))
+      (fun (up : Ex (fun (c0 : Nat) => Mem c0 (Ctx.names (Ctx.toChild m Γ)) ∧ Not (par c0 = i))) =>
+        Ex.intro (fun (rk' : Nat → Nat) => Ex (fun (par' : Nat → Nat) => Good (DF C i n Γ p m ch pa) rk' par'))
+          (rkF C rk (dbl (rk i)))
+          (Ex.intro (fun (par' : Nat → Nat) => Good (DF C i n Γ p m ch pa) (rkF C rk (dbl (rk i))) par')
+            (parF C i m Γ par (Cfg.len C))
+            (forkGood C i n Γ p m ch pa h rk par g (Cfg.len C) (dbl (rk i)) (Or.inr (refl (Cfg.len C), (refl (dbl (rk i)), up))))))
+      (fun (all : (c : Nat) → Mem c (Ctx.names (Ctx.toChild m Γ)) → par c = i) =>
+        Ex.intro (fun (rk' : Nat → Nat) => Ex (fun (par' : Nat → Nat) => Good (DF C i n Γ p m ch pa) rk' par'))
+          (rkF C rk (Nat.succ (Nat.succ (dbl (rk i)))))
+          (Ex.intro (fun (par' : Nat → Nat) => Good (DF C i n Γ p m ch pa) (rkF C rk (Nat.succ (Nat.succ (dbl (rk i))))) par')
+            (parF C i m Γ par i)
+            (forkGood C i n Γ p m ch pa h rk par g i (Nat.succ (Nat.succ (dbl (rk i)))) (Or.inl (refl i, (refl _, all))))))))
+
+-- ## Preservation of acyclicity under every step
+
+/-- **Acyclicity is preserved** by fork, by a send/receive and by a close. -/
+def stepAcyclic {C D : Cfg} (s : Step C D) : Acyclic C → Acyclic D :=
+  Step.rec (fun (C D : Cfg) (_ : Step C D) => Acyclic C → Acyclic D)
+    (fun C i n Γ p m ch pa h => forkAcyclic C i n Γ p m ch pa h)
+    (fun C i j c1 c2 n1 n2 Γ1 Γ2 pre1 post1 pre2 post2 A B k g h1 h2 x f e ne ec hi hj =>
+      shrinkAcyclic C _ (shrinkTwo C i j ne _ _ _ _ hi hj
+        (nameSubComm n1 (Nat.succ n1) c1 (k x.1) (.send A k) pre1 post1 Γ1 h1 x.2 _)
+        (nameSubComm n2 (Nat.succ n2) c2 (g (castT e x.1)) (.recv B g) pre2 post2 Γ2 h2 (f (castT e x.1)) _)))
+    (fun C i j c1 c2 n1 n2 Γ1 Γ2 pre1 post1 pre2 post2 h1 h2 t1 t2 ne ec hi hj =>
+      shrinkAcyclic C _ (shrinkTwo C i j ne _ _ _ _ hi hj
+        (nameSubClose n1 (Nat.succ n1) c1 .done pre1 post1 Γ1 h1 t1 _)
+        (nameSubClose n2 (Nat.succ n2) c2 .done pre2 post2 Γ2 h2 t2 _)))
+    s
