@@ -74,6 +74,9 @@ class CellResult:
     # when it does, it is used instead of `{"text/plain": result}`.
     data: dict | None = None
     metadata: dict = field(default_factory=dict)
+    # Widget displays opened by this cell: bundles that already carry a `comm_id`.
+    # The kernel publishes a `comm_open` for each before the `execute_result`.
+    comms: list = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +149,15 @@ class Backend:
         raise NotImplementedError
 
     def execute(self, code: str) -> CellResult:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def eval_string(self, expression: str) -> str | None:
+        """Evaluate `expression` in the session and return its printed value.
+
+        `None` means the expression failed to elaborate.  Used by the widget comm
+        path to re-enter the session with a callback expression; the printed value of
+        a Wiz `String` is a quoted literal (see `widgets.decode_eval_text`).
+        """
         raise NotImplementedError
 
     def close(self) -> None:  # pragma: no cover - interface
@@ -335,6 +347,9 @@ class ReplBackend(Backend):
         infos = [m.text for m in messages if m.severity == "info"]
         return infos[-1] if infos else None
 
+    def eval_string(self, expression: str) -> str | None:
+        return self._eval_expression(expression)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -444,6 +459,15 @@ class BatchBackend(Backend):
                         result = infos[-1]
         self._cells.append(code)
         return _messages_to_result(current, backend=self.name, result=result)
+
+    def eval_string(self, expression: str) -> str | None:
+        """`#eval expression` against the accumulated notebook, without storing it."""
+        messages, start, end = self._check(self._cells + [f"#eval {expression}\n"])
+        current = [m for m in messages if m.line is None or start <= m.line <= end]
+        if any(m.severity == "error" for m in current):
+            return None
+        infos = [m.text for m in current if m.severity == "info"]
+        return infos[-1] if infos else None
 
     def close(self) -> None:
         if self._tmpdir is not None:

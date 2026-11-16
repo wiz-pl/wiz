@@ -1,0 +1,24 @@
+# scry's C# rule pack, first slice (design wiz-notes/scry-csharp.md §3).
+#
+# Callee names are the C# frontend's (Scry.CsLower): Namespace.Type.Method, the
+# receiver of an instance call is argument 0, a constructor is Type..ctor, and a
+# property is Type.get_P / Type.set_P. The format is Scry.parseRulePack's.
+
+rule command-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a process command line
+  source System.Console.ReadLine result
+  source System.Environment.GetEnvironmentVariable result
+  source System.IO.StreamReader.ReadLine result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Form result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  sanitise System.Int32.Parse result
+  sanitise System.Int64.Parse result
+  # Process.Start(fileName[, arguments]) and Process.Start(ProcessStartInfo)
+  sink System.Diagnostics.Process.Start args
+  sink System.Diagnostics.ProcessStartInfo..ctor args
+  sink System.Diagnostics.ProcessStartInfo.set_FileName arg 1
+  sink System.Diagnostics.ProcessStartInfo.set_Arguments arg 1
+end
