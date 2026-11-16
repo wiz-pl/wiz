@@ -33,10 +33,11 @@
 -- (`ErrorCode.lean`). A stack trace is never printed: every failure is one line, and a
 -- missing file is checked with `access` first.
 --
--- Cache: `--cache DIR` (default `.wiz-cache`) keys an entry by the toolchain id
+-- Cache: `--cache DIR` (default `~/.cache/wiz`) keys an entry by the toolchain id
 -- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
 -- version), the subcommand's backend flags, the loader's module graph key (every
--- module's name and text, in load order) and the modules' paths. A `.check` entry is the
+-- module's name and text, from the graph before elaboration: `keyOfGraph`), the root's
+-- `import_c` header texts and the modules' paths. A `.check` entry is the
 -- tagged lines and the exit status; a `.c` entry is the C `build` writes (and `run`
 -- prints), so a warm build or run skips elaboration and code generation.
 
@@ -949,32 +950,41 @@ def writeOut (out text : String) : IO Unit := do
   | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
 
 -- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
--- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is
-def buildWith (o : Opts) (out : String) (p : Prepared) : IO Unit := do
-  let key := keyOf o "c" p;
-  cached ← cacheRead o key ".c";
-  match cached with
-  | .some (.mk st ctext) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+-- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is.
+-- The key is the graph's (`keyOfGraph`), so a hit skips elaboration; a miss, or
+-- `--no-cache` (no key at all), elaborates.
+def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String) (p : Prepared) : IO Unit := do
+  c ← cOf o p;
+  match c with
+  | .none => Process.exit 1
+  | .some ctext => do
+    cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
+    cacheWriteIf o useCache cKey ".c" 0 ctext;
     writeOut out ctext
+
+def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
   | .none => do
-    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-    c ← cOf o p;
-    match c with
-    | .none => Process.exit 1
-    | .some ctext => do
-      cacheWrite o (keyOf o "check" p) ".check" 0 (linesPayload (linesOf p.run));
-      cacheWrite o key ".c" 0 ctext;
+    cacheMissMsg o .false "";
+    buildMiss o .false "" "" out (runGraph g)
+  | .some _ => do
+    let key := keyOfGraph o "c" g;
+    cached ← cacheRead o key ".c";
+    match cached with
+    | .some (.mk st ctext) => do
+      if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
       writeOut out ctext
+    | .none => do
+      cacheMissMsg o .true key;
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
   | .none => usageError "build needs -o OUT"
   | .some out => do
-    prep ← prepare o.roots file;
-    match prep with
+    gopt ← loadGraph o.roots file;
+    match gopt with
     | .none => missingFile file
-    | .some p => buildWith o out p
+    | .some g => buildWith o out g
 
 -- ------------------------------------------------------------------------------------
 -- run / eval
