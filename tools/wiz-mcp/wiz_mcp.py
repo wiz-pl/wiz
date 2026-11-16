@@ -15,7 +15,7 @@ runs the tools a Wiz agent needs:
   goals      {path,text?,line,character}  the tactic state (`wiz/interactiveGoals`)
 
 The text tools are one `wiz` process per call. The three language-server tools
-share **one** lazily started `wiz lsp --ws 127.0.0.1:0 --no-stdio` daemon,
+share **one** lazily started `wiz lsp` daemon on its own stdin/stdout (no socket),
 belonging to this process and therefore to this workspace. It is killed after
 `--idle` seconds (default 600) and on exit. A daemon is never shared between
 worktrees: its module roots and `lib/` are fixed at startup, and documents are
@@ -26,23 +26,25 @@ Paths are relative to the workspace (the directory the client spawns us in),
 not to this script. `--wiz` defaults to `./.lake/build/bin/wiz`, so a worktree
 gets its own build unless another binary is named explicitly.
 
-Run with --help for the options. No third-party packages are used; the small
-WebSocket client below implements the client half of RFC 6455 with the stdlib.
+Safety: a path must resolve (symlinks followed) inside the workspace, the
+toolchain's library or an `--allow-root` directory; `build` is listed only with
+`--allow-build` and writes only inside the workspace; children get an
+allowlisted environment with secret-looking names removed.
+
+Run with --help for the options. No third-party packages are used; the
+language server is spoken to with `Content-Length` framing over pipes.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import collections
-import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
-import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -67,13 +69,14 @@ DEFAULT_TIMEOUT = 300.0
 MAX_TEXT = 64 * 1024
 #: A JSON `result` is clipped to this many characters of serialized JSON.
 MAX_RESULT = 64 * 1024
-#: WebSocket messages above this are rejected (Wiz's own limit is 256 MiB).
-MAX_WS_MESSAGE = 64 * 1024 * 1024
+#: Language-server messages above this are rejected.
+MAX_LSP_MESSAGE = 64 * 1024 * 1024
 
 TRUNCATION_MARK = "\n… [truncated: {n} characters omitted]"
 
 INSTRUCTIONS = (
-    "Wiz toolchain tools for this workspace. Paths are relative to the workspace. "
+    "Wiz toolchain tools for this workspace. Paths are relative to the workspace and must "
+    "stay inside it (or the toolchain library); others are refused with path_denied. "
     "Call check after editing a .wiz file (it prints the same messages as `wiz check`); "
     "use fmt --check before committing, and diagnostics/hover/goals when you need the "
     "language server's view. diagnostics, hover and goals share one lazy `wiz lsp` "
@@ -117,16 +120,93 @@ class Config:
     cache: Optional[str] = None
     idle: float = DEFAULT_IDLE
     timeout: float = DEFAULT_TIMEOUT
+    #: `build` writes a file and runs the host C toolchain: off unless asked for.
+    allow_build: bool = False
+    #: More directories tools may read (besides the workspace and the toolchain).
+    extra_roots: tuple[str, ...] = ()
+    #: More environment variables to pass to children (secret-looking names never pass).
+    pass_env: tuple[str, ...] = ()
 
 
 def resolve_path(workspace: str, path: str) -> str:
-    """Resolve a tool path against the workspace (not this process's cwd)."""
+    """Resolve a tool path against the workspace (not this process's cwd).
+
+    This only normalizes; `confine` decides whether the result may be used.
+    """
     if not isinstance(path, str) or not path.strip():
         raise ToolError("invalid_args", "`path` must be a non-empty string")
     path = os.path.expanduser(path)
     if not os.path.isabs(path):
         path = os.path.join(workspace, path)
     return os.path.normpath(os.path.abspath(path))
+
+
+def _is_under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def toolchain_roots(wiz_path: Optional[str]) -> list[str]:
+    """The library directories of the toolchain `wiz_path` belongs to.
+
+    A release or Nix toolchain keeps its library in `PREFIX/share/wiz`; a
+    checkout build (`CHECKOUT/.lake/build/bin/wiz`) uses `CHECKOUT/lib`. Only
+    those directories are allowed, never the whole prefix (which could be /usr).
+    """
+    if not wiz_path:
+        return []
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(wiz_path)))
+    roots = [os.path.join(prefix, "share", "wiz")]
+    if os.path.basename(prefix) == "build" and os.path.basename(os.path.dirname(prefix)) == ".lake":
+        roots.append(os.path.join(os.path.dirname(os.path.dirname(prefix)), "lib"))
+    return [os.path.realpath(root) for root in roots if os.path.isdir(root)]
+
+
+def confine(path: str, roots: Iterable[str], what: str = "path") -> str:
+    """`path` itself if its real path (all symlinks followed) is under one of `roots`.
+
+    The check uses the real path, so an absolute path, `..` and a symlink that
+    leads out of the workspace are all refused. The normalized path (symlinks
+    kept) is what the tools see, so messages keep the caller's spelling.
+    """
+    real = os.path.realpath(path)
+    roots = list(roots)
+    if any(_is_under(real, root) for root in roots):
+        return path
+    shown = path if real == path else f"{path} (really {real})"
+    raise ToolError(
+        "path_denied",
+        f"{what} {shown} is outside the workspace and the toolchain library; "
+        "only those may be used (start the server with --allow-root DIR to add one)",
+    )
+
+
+#: Variables passed to `wiz` and its children: the toolchain, the C compiler
+#: (a Nix dev shell's `cc` wrapper reads `NIX_*`), locale and temp dirs.
+ENV_ALLOW = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+        "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+        "CC", "CXX", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH",
+        "LIBRARY_PATH", "LD_LIBRARY_PATH", "PKG_CONFIG_PATH",
+    }
+)
+ENV_ALLOW_PREFIXES = ("LC_", "WIZ_", "NIX_")
+#: A name that looks like a credential never reaches a child, even when allowed.
+ENV_SECRET = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|API_?KEY|PRIVATE|COOKIE|SESSION", re.IGNORECASE)
+
+
+def child_env(environ: Optional[dict[str, str]] = None, extra: Iterable[str] = ()) -> dict[str, str]:
+    """The environment for a child process: an allowlist, minus anything secret-looking."""
+    source = os.environ if environ is None else environ
+    allowed = set(ENV_ALLOW) | set(extra)
+    return {
+        name: value
+        for name, value in source.items()
+        if (name in allowed or name.startswith(ENV_ALLOW_PREFIXES)) and not ENV_SECRET.search(name)
+    }
 
 
 def path_to_uri(path: str) -> str:
@@ -305,34 +385,7 @@ def reply_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# A minimal RFC 6455 WebSocket client (the client half only: masked frames)
-
-
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-
-
-def ws_accept_key(key: str) -> str:
-    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
-
-
-def ws_frame(op: int, payload: bytes, mask: bool = True) -> bytes:
-    """Encode one client frame (FIN set), masked by default as RFC 6455 requires."""
-    header = bytearray([0x80 | (op & 0x0F)])
-    n = len(payload)
-    mbit = 0x80 if mask else 0
-    if n < 126:
-        header.append(mbit | n)
-    elif n < 65536:
-        header.append(mbit | 126)
-        header += struct.pack("!H", n)
-    else:
-        header.append(mbit | 127)
-        header += struct.pack("!Q", n)
-    if not mask:
-        return bytes(header) + payload
-    mask_bytes = os.urandom(4)
-    body = bytes(byte ^ mask_bytes[i % 4] for i, byte in enumerate(payload))
-    return bytes(header) + mask_bytes + body
+# The language server's transport: LSP over the daemon's own stdin/stdout
 
 
 class LSPError(Exception):
@@ -347,139 +400,111 @@ class LSPClosed(LSPError):
     """The daemon's connection is gone."""
 
 
-class WebSocket:
-    """A blocking client connection to `wiz lsp --ws`."""
+class StdioLSP:
+    """A `Content-Length` framed LSP connection over a child's stdin/stdout pipes.
 
-    def __init__(self, host: str, port: int, deadline: float) -> None:
-        self.sock = socket.create_connection((host, port), timeout=max(0.001, deadline - time.monotonic()))
+    The daemon is a plain `wiz lsp` on stdio: it opens no socket, so no other
+    process on the machine can connect to it (the `--ws` port it used before had
+    no authentication). Writes and reads use the raw file descriptors with
+    `select`, so both honour a deadline; a daemon that stops reading its input
+    cannot block a call forever.
+    """
+
+    def __init__(self, writer: Any, read_fd: int) -> None:
+        # `writer` is the daemon's stdin as an unbuffered file object: it owns the
+        # descriptor, so closing it twice is harmless (a bare fd could be reused).
+        self.writer = writer
+        self.write_fd = writer.fileno()
+        self.read_fd = read_fd
+        os.set_blocking(self.write_fd, False)
+        self._buf = bytearray()
         self._closed = False
         self._send_lock = threading.Lock()
-        self.key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = (
-            "GET / HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {self.key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
-        )
-        self._send_all(request.encode("ascii"), deadline)
-        head = self._read_http_head(deadline)
-        lines = head.split("\r\n")
-        if not lines or " 101 " not in f" {lines[0]} ":
-            raise LSPError(f"WebSocket handshake failed: {lines[0] if lines else 'empty response'}")
-        headers: dict[str, str] = {}
-        for line in lines[1:]:
-            if ":" in line:
-                name, value = line.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
-        if headers.get("sec-websocket-accept") != ws_accept_key(self.key):
-            raise LSPError("WebSocket handshake failed: wrong Sec-WebSocket-Accept")
 
-    def _send_all(self, payload: bytes, deadline: Optional[float]) -> None:
+    @staticmethod
+    def _remaining(deadline: Optional[float], what: str) -> Optional[float]:
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LSPTimeout(what)
+        return remaining
+
+    def _send_all(self, data: bytes, deadline: Optional[float]) -> None:
         if self._closed:
-            raise LSPClosed("the WebSocket is closed")
+            raise LSPClosed("the language server's input is closed")
         with self._send_lock:
-            if deadline is not None:
-                self.sock.settimeout(max(0.001, deadline - time.monotonic()))
-            self.sock.sendall(payload)
+            view = memoryview(data)
+            while view:
+                remaining = self._remaining(deadline, "the language server is not reading its input")
+                _, writable, _ = select.select([], [self.write_fd], [], remaining)
+                if not writable:
+                    continue
+                try:
+                    view = view[os.write(self.write_fd, view):]
+                except BlockingIOError:
+                    continue
+                except OSError as exc:  # EPIPE: the daemon exited
+                    raise LSPClosed(f"cannot send to the language server: {exc}") from exc
 
-    def _recv_exact(self, n: int, deadline: Optional[float]) -> bytes:
-        """Exactly n bytes; a deadline of None blocks until the peer acts."""
-        out = bytearray()
-        while len(out) < n:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise LSPTimeout("the language server did not answer in time")
-                self.sock.settimeout(max(0.001, remaining))
-            else:
-                self.sock.settimeout(None)
-            chunk = self.sock.recv(n - len(out))
-            if not chunk:
-                raise LSPClosed("the language server closed the connection")
-            out += chunk
-        return bytes(out)
-
-    def _read_http_head(self, deadline: float) -> str:
-        buf = bytearray()
-        while b"\r\n\r\n" not in buf:
-            buf += self._recv_exact(1, deadline)
-            if len(buf) > 65536:
-                raise LSPError("WebSocket handshake response is too large")
-        return buf.decode("iso-8859-1")
-
-    def _read_frame(self, deadline: Optional[float]) -> tuple[bool, int, bytes]:
-        first, second = self._recv_exact(2, deadline)
-        fin = bool(first & 0x80)
-        op = first & 0x0F
-        masked = bool(second & 0x80)
-        length = second & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", self._recv_exact(2, deadline))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._recv_exact(8, deadline))[0]
-        if length > MAX_WS_MESSAGE:
-            raise LSPError(f"WebSocket message too large ({length} bytes)")
-        mask = self._recv_exact(4, deadline) if masked else None
-        payload = self._recv_exact(length, deadline)
-        if mask is not None:
-            payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-        return fin, op, payload
+    def _fill(self, deadline: Optional[float]) -> None:
+        remaining = self._remaining(deadline, "the language server did not answer in time")
+        readable, _, _ = select.select([self.read_fd], [], [], remaining)
+        if not readable:
+            return
+        try:
+            chunk = os.read(self.read_fd, 65536)
+        except OSError as exc:
+            raise LSPClosed(f"cannot read from the language server: {exc}") from exc
+        if not chunk:
+            raise LSPClosed("the language server closed its output")
+        self._buf += chunk
 
     def send_text(self, text: str, deadline: Optional[float] = None) -> None:
-        self._send_all(ws_frame(0x1, text.encode("utf-8"), mask=True), deadline)
+        body = text.encode("utf-8")
+        self._send_all(b"Content-Length: %d\r\n\r\n" % len(body) + body, deadline)
 
     def recv_text(self, deadline: Optional[float] = None) -> str:
-        fragments = bytearray()
-        started = False
         while True:
-            fin, op, payload = self._read_frame(deadline)
-            if op == 0x8:  # close: answer and report it
+            end = self._buf.find(b"\r\n\r\n")
+            if end >= 0:
+                break
+            if len(self._buf) > 65536:
+                raise LSPError("the language server sent an oversized header")
+            self._fill(deadline)
+        header = bytes(self._buf[:end]).decode("ascii", "replace")
+        del self._buf[: end + 4]
+        length: Optional[int] = None
+        for line in header.split("\r\n"):
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
                 try:
-                    self._send_all(ws_frame(0x8, payload[:2], mask=True), deadline)
-                except Exception:
-                    pass
-                raise LSPClosed("the language server sent a close frame")
-            if op == 0x9:  # ping
-                self._send_all(ws_frame(0xA, payload, mask=True), deadline)
-                continue
-            if op == 0xA:  # pong
-                continue
-            if op in (0x1, 0x2):
-                fragments = bytearray(payload)
-                started = True
-            elif op == 0x0 and started:
-                fragments += payload
-            else:
-                raise LSPError(f"unexpected WebSocket opcode {op}")
-            if len(fragments) > MAX_WS_MESSAGE:
-                raise LSPError("WebSocket message too large")
-            if fin:
-                try:
-                    return fragments.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise LSPError(f"the language server sent invalid UTF-8: {exc}") from exc
+                    length = int(value.strip())
+                except ValueError as exc:
+                    raise LSPError(f"bad Content-Length: {value.strip()!r}") from exc
+        if length is None or length < 0:
+            raise LSPError("the language server sent a message without Content-Length")
+        if length > MAX_LSP_MESSAGE:
+            raise LSPError(f"language server message too large ({length} bytes)")
+        while len(self._buf) < length:
+            self._fill(deadline)
+        body = bytes(self._buf[:length])
+        del self._buf[:length]
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LSPError(f"the language server sent invalid UTF-8: {exc}") from exc
 
     def close(self) -> None:
+        """Close the daemon's stdin (it exits on EOF). The read side belongs to the process."""
         if self._closed:
             return
         self._closed = True
-        try:
-            self.sock.settimeout(1.0)
-            with self._send_lock:
-                self.sock.sendall(ws_frame(0x8, b"", mask=True))
-        except Exception:
-            pass
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
+        with self._send_lock:
+            try:
+                self.writer.close()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -509,13 +534,14 @@ def daemon_command(cmd: list[str]) -> list[str]:
 
 
 class LSPDaemon:
-    """One `wiz lsp --ws` process, owned by one bridge/workspace.
+    """One `wiz lsp` process on stdio, owned by one bridge/workspace.
 
     Lifecycle: started on the first LSP-backed call, used under `op` (one call
     at a time, matching the server's single event loop), killed after `idle`
     seconds without a call, and killed on bridge exit. There is deliberately no
     way to attach to someone else's daemon: worktrees have different `lib/`
-    roots, and documents collide by URI.
+    roots, and documents collide by URI. The daemon talks only over its own
+    pipes and listens on no socket.
     """
 
     def __init__(self, config: Config) -> None:
@@ -523,45 +549,36 @@ class LSPDaemon:
         self.life = threading.RLock()
         self.op = threading.Lock()
         self.cv = threading.Condition()
-        self.ws: Optional[WebSocket] = None
-        self.proc: Optional[subprocess.Popen[str]] = None
-        self.port: Optional[int] = None
+        self.conn: Optional[StdioLSP] = None
+        self.proc: Optional[subprocess.Popen[bytes]] = None
         self.dead = True
         self.pending: dict[int, dict[str, Any]] = {}
         self.inbox: list[dict[str, Any]] = []
         self.next_id = 0
         self.version = 0
         self.last_use = 0.0
-        self._ready = threading.Event()
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
-        self.host = "127.0.0.1"
+        self._stderr_done = threading.Event()
+        self._reader_thread: Optional[threading.Thread] = None
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _pump_stderr(self, proc: subprocess.Popen[str], ready: threading.Event, state: dict[str, Any]) -> None:
-        tail: collections.deque[str] = state["tail"]
-        self._stderr_tail = tail
+    def _pump_stderr(self, proc: subprocess.Popen[bytes], tail: collections.deque[str], done: threading.Event) -> None:
         try:
             assert proc.stderr is not None
-            for line in proc.stderr:
-                tail.append(line.rstrip())
-                match = re.search(r"WebSocket on port (\d+)", line)
-                if match:
-                    state["port"] = int(match.group(1))
-                    self.port = state["port"]
-                    ready.set()
+            for raw in proc.stderr:
+                tail.append(raw.decode("utf-8", "replace").rstrip())
         except Exception:
             pass
         finally:
-            ready.set()
+            done.set()
 
     def _kill_locked(self) -> None:
-        ws, proc = self.ws, self.proc
-        self.ws = None
+        conn, proc = self.conn, self.proc
+        self.conn = None
         self.proc = None
-        self.port = None
-        if ws is not None:
-            ws.close()
+        if conn is not None:
+            conn.close()
         if proc is not None:
             try:
                 if proc.poll() is None:
@@ -573,11 +590,20 @@ class LSPDaemon:
                     proc.wait(timeout=2)
             except Exception:
                 pass
-            if proc.stderr is not None:
-                try:
-                    proc.stderr.close()
-                except Exception:
-                    pass
+            # The reader sees EOF once the daemon is gone; let it finish before its
+            # descriptor is closed (a closed fd number can be reused under a select).
+            reader, self._reader_thread = self._reader_thread, None
+            if reader is not None and reader is not threading.current_thread():
+                reader.join(timeout=2)
+            streams = [proc.stdin, proc.stderr]
+            if reader is None or not reader.is_alive():
+                streams.append(proc.stdout)
+            for stream in streams:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         with self.cv:
             self.dead = True
             self.pending.clear()
@@ -588,9 +614,21 @@ class LSPDaemon:
         with self.life:
             self._kill_locked()
 
+    def _startup_error(self, proc: subprocess.Popen[bytes], reason: str) -> ToolError:
+        """`lsp_startup` with the daemon's exit status and the tail of its stderr."""
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        self._stderr_done.wait(timeout=2)
+        code = proc.poll()
+        tail = "\n".join(self._stderr_tail)[-2000:]
+        detail = f" (exit {code})" if code is not None else ""
+        return ToolError("lsp_startup", f"`wiz lsp` {reason}{detail}" + (f":\n{tail}" if tail else ""))
+
     def ensure(self, deadline: float) -> None:
         with self.life:
-            if self.ws is not None:
+            if self.conn is not None:
                 return
             self._kill_locked()  # a stale process from a dead connection
             wiz = resolve_wiz(self.config.workspace, self.config.wiz)
@@ -598,50 +636,37 @@ class LSPDaemon:
                 raise ToolError("wiz_not_found", _wiz_missing_message(self.config.workspace, self.config.wiz))
             if deadline - time.monotonic() <= 0:
                 raise LSPTimeout("no time left to start the language server")
-            args = ["lsp", "--ws", "127.0.0.1:0", "--no-stdio"]
-            cmd = daemon_command(_wiz_command(wiz, self.config.cache, args))
+            cmd = daemon_command(_wiz_command(wiz, self.config.cache, ["lsp"]))
             try:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=self.config.workspace,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
+                    env=child_env(extra=self.config.pass_env),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
+                    bufsize=0,
                 )
             except OSError as exc:
                 raise ToolError("lsp_startup", f"cannot start the language server: {exc}") from exc
+            assert proc.stdin is not None and proc.stdout is not None
             self.proc = proc
-            self.port = None
-            self._ready = threading.Event()
-            state: dict[str, Any] = {"port": None, "tail": collections.deque(maxlen=40)}
-            threading.Thread(target=self._pump_stderr, args=(proc, self._ready, state), daemon=True).start()
-            # Startup is bounded by the call deadline, with a generous cap.
+            self._stderr_tail = collections.deque(maxlen=40)
+            self._stderr_done = threading.Event()
+            threading.Thread(
+                target=self._pump_stderr, args=(proc, self._stderr_tail, self._stderr_done), daemon=True
+            ).start()
+            conn = StdioLSP(proc.stdin, proc.stdout.fileno())
+            self.conn = conn
+            with self.cv:
+                self.dead = False
+                self.pending.clear()
+                self.inbox.clear()
+            self._reader_thread = threading.Thread(target=self._reader, args=(conn,), daemon=True)
+            self._reader_thread.start()
+            # Startup (the initialize round trip) is bounded by the call deadline, with a cap.
             startup_deadline = min(deadline, time.monotonic() + 120.0)
-            while not self._ready.wait(timeout=min(0.2, max(0.0, startup_deadline - time.monotonic()))):
-                if time.monotonic() >= startup_deadline:
-                    break
-                if proc.poll() is not None:
-                    self._ready.set()
-            if state["port"] is None:
-                code = proc.poll()
-                tail = "\n".join(state["tail"])[-2000:]
-                self._kill_locked()
-                detail = f" (exit {code})" if code is not None else ""
-                raise ToolError(
-                    "lsp_startup",
-                    f"`wiz lsp --ws` did not report a port{detail}"
-                    + (f":\n{tail}" if tail else ""),
-                )
             try:
-                ws = WebSocket(self.host, state["port"], deadline)
-                self.ws = ws
-                with self.cv:
-                    self.dead = False
-                    self.pending.clear()
-                    self.inbox.clear()
-                threading.Thread(target=self._reader, args=(ws,), daemon=True).start()
                 self._request_locked(
                     "initialize",
                     {
@@ -653,8 +678,16 @@ class LSPDaemon:
                         ],
                         "capabilities": {},
                     },
-                    deadline,
+                    startup_deadline,
                 )
+                self._send({"jsonrpc": "2.0", "method": "initialized", "params": {}}, startup_deadline)
+            except LSPTimeout:
+                self._kill_locked()
+                raise
+            except LSPError as exc:
+                error = self._startup_error(proc, f"exited before answering initialize ({exc})")
+                self._kill_locked()
+                raise error from exc
             except Exception:
                 self._kill_locked()
                 raise
@@ -669,7 +702,7 @@ class LSPDaemon:
             return  # a call is in flight; it just touched last_use
         try:
             with self.life:
-                if self.ws is not None or self.proc is not None:
+                if self.conn is not None or self.proc is not None:
                     log("wiz-mcp: unloading the idle language server")
                     self._kill_locked()
         finally:
@@ -677,10 +710,10 @@ class LSPDaemon:
 
     # -- JSON-RPC over the daemon -----------------------------------------
 
-    def _reader(self, ws: WebSocket) -> None:
+    def _reader(self, conn: StdioLSP) -> None:
         try:
             while True:
-                raw = ws.recv_text(deadline=None)
+                raw = conn.recv_text(deadline=None)
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
@@ -697,12 +730,12 @@ class LSPDaemon:
             pass
         finally:
             try:
-                ws.close()
+                conn.close()
             except Exception:
                 pass
             with self.cv:
-                if self.ws is ws:
-                    self.ws = None
+                if self.conn is conn:
+                    self.conn = None
                     self.dead = True
                 self.cv.notify_all()
 
@@ -712,11 +745,11 @@ class LSPDaemon:
             return self.next_id
 
     def _send(self, message: dict[str, Any], deadline: Optional[float]) -> None:
-        ws = self.ws
-        if ws is None:
+        conn = self.conn
+        if conn is None:
             raise LSPClosed("the language server is not running")
         try:
-            ws.send_text(json.dumps(message), deadline)
+            conn.send_text(json.dumps(message), deadline)
         except LSPError:
             raise
         except OSError as exc:
@@ -727,7 +760,7 @@ class LSPDaemon:
         self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}, deadline)
         with self.cv:
             while rid not in self.pending:
-                if self.dead or self.ws is None:
+                if self.dead or self.conn is None:
                     raise LSPClosed("the language server closed the connection")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -787,7 +820,7 @@ class LSPDaemon:
                 if found is not None:
                     self.inbox = remaining_messages
                     return list((found.get("params") or {}).get("diagnostics") or [])
-                if self.dead or self.ws is None:
+                if self.dead or self.conn is None:
                     raise LSPClosed("the language server closed the connection")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -854,11 +887,13 @@ def _position_arg(args: dict[str, Any], key: str) -> int:
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "version",
+        "annotations": {"title": "Wiz version", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Print the Wiz toolchain version (`wiz --version`).",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "check",
+        "annotations": {"title": "Type check a Wiz file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Type check a Wiz file (`wiz check`) and return its messages and exit status.",
         "inputSchema": {
             "type": "object",
@@ -869,6 +904,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "parse",
+        "annotations": {"title": "Parse a Wiz file", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Print the syntax tree of a Wiz file (`wiz parse`).",
         "inputSchema": {
             "type": "object",
@@ -879,6 +915,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "fmt",
+        "annotations": {"title": "Format a Wiz file (prints, does not rewrite)", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Reprint a Wiz file from its syntax tree (`wiz fmt`); check=true only reports whether it differs.",
         "inputSchema": {
             "type": "object",
@@ -893,6 +930,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "build",
+        "annotations": {"title": "Build a Wiz program (writes OUT, runs cc; needs --allow-build)", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
         "description": "Compile `main` of a Wiz file (`wiz build FILE -o OUT [--lib]`).",
         "inputSchema": {
             "type": "object",
@@ -907,6 +945,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "diagnostics",
+        "annotations": {"title": "Language-server diagnostics", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "Diagnostics from the language server for a file (or for `text`), from this worktree's daemon.",
         "inputSchema": {
             "type": "object",
@@ -920,6 +959,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "hover",
+        "annotations": {"title": "Type at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "The type of the identifier at a position (0-based line and character).",
         "inputSchema": {
             "type": "object",
@@ -935,6 +975,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "goals",
+        "annotations": {"title": "Tactic goals at a position", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "description": "The tactic state at a position (`wiz/interactiveGoals`).",
         "inputSchema": {
             "type": "object",
@@ -950,6 +991,14 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
+#: Tools that write files or run the host toolchain, and the flag that enables each.
+GATED_TOOLS = {"build": "--allow-build"}
+
+
+def visible_tools(config: Config) -> list[dict[str, Any]]:
+    """The tools this server lists: gated tools only when their flag was given."""
+    enabled = {"build": config.allow_build}
+    return [tool for tool in TOOLS if enabled.get(tool["name"], True)]
 
 
 class Server:
@@ -975,6 +1024,19 @@ class Server:
         self._reaper_stop.set()
         self.daemon.close()
 
+    # -- path policy ---------------------------------------------------------
+
+    def read_roots(self) -> list[str]:
+        """Where tools may read: the workspace, --allow-root dirs, the toolchain library."""
+        roots = [os.path.realpath(self.config.workspace)]
+        roots += [os.path.realpath(root) for root in self.config.extra_roots]
+        roots += toolchain_roots(resolve_wiz(self.config.workspace, self.config.wiz))
+        return roots
+
+    def write_roots(self) -> list[str]:
+        """Where tools may write: the workspace only."""
+        return [os.path.realpath(self.config.workspace)]
+
     # -- tool implementations ---------------------------------------------
 
     def _run(self, args: list[str], timeout: float, use_cache: bool = True) -> dict[str, Any]:
@@ -991,6 +1053,7 @@ class Server:
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.config.workspace,
+                env=child_env(extra=self.config.pass_env),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1038,7 +1101,13 @@ class Server:
             run = self._run(["--version"], timeout, use_cache=False)
             return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
 
-        path = resolve_path(self.config.workspace, _require_str(args, "path"))
+        if name in GATED_TOOLS and not any(tool["name"] == name for tool in visible_tools(self.config)):
+            raise ToolError(
+                "not_enabled",
+                f"`{name}` writes files and runs the host toolchain; it is off unless the server "
+                f"is started with {GATED_TOOLS[name]}",
+            )
+        path = confine(resolve_path(self.config.workspace, _require_str(args, "path")), self.read_roots())
         if name == "check":
             run = self._run(["check", path], timeout)
             return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
@@ -1058,7 +1127,9 @@ class Server:
             return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
         if name == "build":
             out = _require_str(args, "out")
-            out = resolve_path(self.config.workspace, out)
+            out = confine(resolve_path(self.config.workspace, out), self.write_roots(), what="output")
+            if os.path.islink(out):
+                raise ToolError("path_denied", f"output {out} is a symlink; build will not write through it")
             extra = ["build", path, "-o", out]
             if _optional_bool(args, "lib"):
                 extra.append("--lib")
@@ -1147,7 +1218,7 @@ class Server:
         if method == "ping":
             return [reply(msg_id, {})], False
         if method == "tools/list":
-            return [reply(msg_id, {"tools": TOOLS})], False
+            return [reply(msg_id, {"tools": visible_tools(self.config)})], False
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments") or {}
@@ -1248,6 +1319,25 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         default=DEFAULT_TIMEOUT,
         help="per-call timeout in seconds (default: 300)",
     )
+    parser.add_argument(
+        "--allow-build",
+        action="store_true",
+        help="list and allow `build` (writes an output file in the workspace and runs the host C toolchain)",
+    )
+    parser.add_argument(
+        "--allow-root",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="another directory tools may read (repeatable); writes stay in the workspace",
+    )
+    parser.add_argument(
+        "--pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="pass another environment variable to wiz (repeatable); secret-looking names are still dropped",
+    )
     args = parser.parse_args(argv)
     workspace = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(workspace):
@@ -1262,13 +1352,33 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         if not os.path.isabs(cache):
             cache = os.path.join(workspace, cache)
         cache = os.path.normpath(os.path.abspath(cache))
-    return Config(workspace=workspace, wiz=args.wiz, cache=cache, idle=args.idle, timeout=args.timeout)
+    extra_roots = []
+    for root in args.allow_root:
+        root = os.path.expanduser(root)
+        if not os.path.isabs(root):
+            root = os.path.join(workspace, root)
+        if not os.path.isdir(root):
+            parser.error(f"--allow-root is not a directory: {root}")
+        extra_roots.append(os.path.realpath(root))
+    return Config(
+        workspace=workspace,
+        wiz=args.wiz,
+        cache=cache,
+        idle=args.idle,
+        timeout=args.timeout,
+        allow_build=args.allow_build,
+        extra_roots=tuple(extra_roots),
+        pass_env=tuple(args.pass_env),
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     config = parse_args(argv)
     wiz = resolve_wiz(config.workspace, config.wiz)
-    log(f"wiz-mcp: workspace={config.workspace} wiz={wiz or config.wiz} idle={config.idle:g}s timeout={config.timeout:g}s")
+    log(
+        f"wiz-mcp: workspace={config.workspace} wiz={wiz or config.wiz} idle={config.idle:g}s "
+        f"timeout={config.timeout:g}s build={'on' if config.allow_build else 'off'}"
+    )
     if wiz is None:
         log(f"wiz-mcp: warning: {_wiz_missing_message(config.workspace, config.wiz)}")
 

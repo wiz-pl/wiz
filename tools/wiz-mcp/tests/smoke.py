@@ -200,7 +200,8 @@ def run(argv: list[str]) -> int:
             print(f"initialize: {info['name']} {info['version']}")
             bridge.notify("notifications/initialized")
             tools = {tool["name"] for tool in bridge.rpc("tools/list", {})["result"]["tools"]}
-            expected = {"version", "check", "parse", "fmt", "build", "diagnostics", "hover", "goals"}
+            # `build` is listed only with --allow-build; the smoke test runs the default (read-only) server.
+            expected = {"version", "check", "parse", "fmt", "diagnostics", "hover", "goals"}
             if tools != expected:
                 raise RuntimeError(f"tools/list mismatch: {sorted(tools)}")
             print(f"tools: {len(tools)} listed")
@@ -221,6 +222,19 @@ def run(argv: list[str]) -> int:
                 raise RuntimeError("no `wiz lsp` child appeared after the first LSP call")
             rss = rss_kib(daemons[0])
             print(f"daemon: pid {daemons[0]}, RSS {rss / 1024:.1f} MiB" if rss else f"daemon: pid {daemons[0]}")
+            # The daemon speaks LSP on its own pipes and must listen on nothing.
+            fd_dir = Path(f"/proc/{daemons[0]}/fd")
+            if fd_dir.is_dir():
+                sockets = []
+                for fd in fd_dir.iterdir():
+                    try:
+                        if os.readlink(fd).startswith("socket:"):
+                            sockets.append(fd.name)
+                    except OSError:
+                        pass
+                if sockets:
+                    raise RuntimeError(f"the daemon has socket descriptors {sockets}; it should use stdio only")
+                print("daemon: no sockets (stdio only)")
 
             started = time.monotonic()
             hover = envelope_of(
