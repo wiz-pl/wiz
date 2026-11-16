@@ -194,8 +194,8 @@ def selfhostModuleC (files : List (String × String)) (args : Array String := #[
     for (name, text) in files do
       if let some parent := (dir / name).parent then IO.FS.createDirAll parent
       IO.FS.writeFile (dir / name) text
-    let out ← IO.Process.output { cmd := "timeout",
-      args := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"] ++ args, cwd := dir }
+    let cmdArgs := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"] ++ args
+    let out ← IO.Process.output { cmd := "timeout", args := cmdArgs, cwd := dir }
     unless out.exitCode == 0 do
       throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}{out.stdout}")
     return some (← IO.FS.readFile (dir / "out.c"))
