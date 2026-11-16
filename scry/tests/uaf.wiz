@@ -60,7 +60,7 @@ def checkUaf (label file freeFunc : String) (arg : Nat) : EIO Unit := do
   match firstFinding rep with
   | .none => check (label ++ ": finding exists") .false
   | .some f => do
-    check (label ++ ": rule") (String.eq f.rule "use-after-free");
+    check (label ++ ": rule") (String.eq f.rule "scry/memory/use-after-free");
     check (label ++ ": kind") (String.eq (Scry.FindingKind.show f.kind) "memory");
     check (label ++ ": severity") (String.eq (Scry.Severity.show f.severity) "error");
     check (label ++ ": path has alloc") (pathHasKind f.path "alloc");

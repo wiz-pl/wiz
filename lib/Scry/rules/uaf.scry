@@ -6,7 +6,7 @@
 #
 #   scry taint FILE.c --rules lib/Scry/rules/uaf.scry
 
-rule use-after-free
+rule scry/memory/use-after-free
   kind memory
   severity error
   message Memory is used after it was freed

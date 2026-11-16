@@ -430,13 +430,14 @@ def Scry.typeOf (c : Scry.Cst) (s : Scry.LState) (n : Nat) : Wil.Ty :=
 skipped)? -/
 def Scry.isDeclaratorK (k : String) : Bool :=
   Bool.or (String.eq k "identifier")
-    (Bool.or (String.eq k "field_identifier")
-      (Bool.or (String.eq k "pointer_declarator")
-        (Bool.or (String.eq k "array_declarator")
-          (Bool.or (String.eq k "function_declarator")
-            (Bool.or (String.eq k "parenthesized_declarator")
-              (Bool.or (String.eq k "init_declarator")
-                (String.eq k "attributed_declarator")))))))
+    (Bool.or (String.eq k "type_identifier")
+      (Bool.or (String.eq k "field_identifier")
+        (Bool.or (String.eq k "pointer_declarator")
+          (Bool.or (String.eq k "array_declarator")
+            (Bool.or (String.eq k "function_declarator")
+              (Bool.or (String.eq k "parenthesized_declarator")
+                (Bool.or (String.eq k "init_declarator")
+                  (String.eq k "attributed_declarator"))))))))
 
 /-- The declarator children of `n` (a parenthesised declarator also has `(`/`)` tokens). -/
 def Scry.declKids (c : Scry.Cst) (n : Nat) : List Nat :=
@@ -456,7 +457,8 @@ after applying its pointers and (for functions) its function type. `declarator`,
 def Scry.declInfo (c : Scry.Cst) (s : Scry.LState) (n : Nat) (base : Wil.Ty) :
     String × Wil.Ty × Bool :=
   match c.kindOf n with
-  | k => match Bool.or (String.eq k "identifier") (String.eq k "field_identifier") with
+  | k => match Bool.or (String.eq k "identifier")
+      (Bool.or (String.eq k "type_identifier") (String.eq k "field_identifier")) with
     | .true => (c.textOf n, base, .false)
     | .false => match String.eq k "pointer_declarator" with
       | .true => match Scry.childF c n "declarator" with
@@ -1722,7 +1724,19 @@ def Scry.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var :=
   | .falseE => do v ← Scry.fresh Wil.i32; Scry.emitAt c n (Wil.num v 0); Scry.lret v
   | .nullE => do v ← Scry.fresh (Wil.Ty.ptr Wil.Ty.unknown); Scry.emitAt c n (Wil.cst v .nul); Scry.lret v
   | .stringLit => Scry.havocAt c n (Wil.Ty.ptr Wil.i8) "string literal"
-  | .castE => Scry.havocAt c n Wil.i32 "cast"
+  | .castE => match Scry.childF c n "value" with
+    | .none => Scry.havocAt c n Wil.i32 "cast without a value"
+    | .some vn => do
+      v ← Scry.lowerExpr c vn;
+      let tn := Scry.childF c n "type";
+      let isVoid := match tn with
+        | .some t => String.contains (c.textOf t) "void"
+        | .none => (.false : Bool);
+      match isVoid with
+      | .true => Scry.lret v
+      | .false => do
+        Scry.warnAt c n "cast not modelled (value preserved)";
+        Scry.lret v
   | .conditional => Scry.havocAt c n Wil.i32 "conditional expression ?:"
   | .field => do
     ap ← Scry.lowerAddr c n;

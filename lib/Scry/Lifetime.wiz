@@ -7,7 +7,7 @@ import Scry.Rules
 This is the lifetime rule behind a `kind memory` pack rule:
 
 ```
-rule use-after-free
+rule scry/memory/use-after-free
   kind memory
   severity error
   message Memory is used after it was freed
@@ -35,15 +35,25 @@ function's transitive frees are a summary, so a free in a callee or in an indire
 callback is visible after the call. `realloc` is a free of its argument plus a fresh
 allocation at the call point, so `p = realloc(p, n)` leaves `p` on the new object.
 
+**Stack frames end at return.** Every `Loc.stack f _` is added to the freed set after a
+call to `f` returns, with `f`'s return point as provenance. This is what makes a pointer
+to automatic storage that a callback published (CVE-2019-7317 stores `&local` into
+`image->opaque`) dangling in the caller even when the heap control block is a different
+object. The location abstraction merges all activations of `f`, so a self-call (direct or
+resolved indirect recursion) is skipped rather than expiring the still-live outer frame;
+that is the documented limit of the smallest sound frame model.
+
 ## Deliberate limits
 
 This is not a heap-shape or typestate model. Allocation sites are abstraction points, not
 dynamic objects: a loop that allocates at one site and frees it is one location, so a
 re-allocation at the same site kills the site from `freed` (a fresh object). An alias of
-the *old* object at the same site is then not distinguished. Stack-frame lifetime
-(use-after-return) and heap objects whose addresses escape a unit are not modelled; the
-`Loc.unknown` may-location still produces the older `unknown-memory` warning instead of a
-UAF claim. Those need a heap/typestate (or shape) analysis, not this may pass.
+the *old* object at the same site is then not distinguished. Stack frames are a single
+site per function activation, so recursion is not modelled and a stack pointer that
+escapes is reported as expired at the callee's first return. Heap objects whose addresses
+escape a unit are not modelled; the `Loc.unknown` may-location still produces the older
+`unknown-memory` warning instead of a UAF claim. Those need a heap/typestate (or shape)
+analysis, not this may pass.
 -/
 
 -- ## State
@@ -234,12 +244,52 @@ def Scry.uCallTargets (p : Wil.Program) (pt : Scry.PtResult) (func : String)
     (callee : Wil.Callee) : List String :=
   (Scry.callTargets p pt.state func callee).names
 
-/-- The frees a call adds: the callee summaries plus the external `realloc` model. -/
+/-- The stack slots owned by `name`: its frame's address-taken locals and aggregate
+locals, as points-to locations. A pointer to one of these is dangling once `name`
+returns. -/
+def Scry.uStackSlots (pt : Scry.PtResult) (name : String) : List Scry.Loc :=
+  List.filter (fun l => match l with
+    | .stack f _ => String.eq f name
+    | _ => .false) pt.locs
+
+/-- The first `ret` point of a function (0 when it has none). Used as the provenance of
+a frame expiry, so the path names the function whose frame ended. -/
+def Scry.uRetPointOf (p : Wil.Program) (name : String) : Nat :=
+  match Wil.findFunc p name with
+  | .none => 0
+  | .some fn =>
+    let g := Scry.flatten fn;
+    match List.find (fun n => match Scry.nodeTerm g n with
+      | .some (.ret _ _) => .true
+      | _ => .false) (Scry.range g.count) with
+    | .some n => n
+    | .none => 0
+
+/-- Stack-frame expiry: after a call returns, every stack slot of the callee is dead
+(its automatic storage no longer exists). A caller can still hold such a pointer — the
+callback in CVE-2019-7317 stores `&local` into an object — so the location joins the
+freed set with the callee's return as provenance.
+
+A recursive call is the one case where the outer frame is still live when the inner one
+returns: the location abstraction cannot distinguish the frames, so the self-call is
+skipped (the documented limit of this smallest sound model). -/
+def Scry.uExpiredStack (p : Wil.Program) (pt : Scry.PtResult) (func : String)
+    (names : List String) : List (Scry.Loc × Scry.PathNode) :=
+  Scry.concatLists (fun name =>
+    match String.eq name func with
+    | .true => .nil
+    | .false =>
+      let node := Scry.PathNode.mk name (Scry.uRetPointOf p name) 0 Scry.PathKind.free;
+      List.map (fun l => (l, node)) (Scry.uStackSlots pt name)) names
+
+/-- The frees a call adds: the callee summaries plus the external `realloc` model and
+the stack frames of every resolved callee that expires when the call returns. -/
 def Scry.uCallFrees (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect)
     (st : Scry.UState) (func : String) (point : Nat) (callee : Wil.Callee)
     (args : List Wil.Var) : List (Scry.Loc × Scry.PathNode) :=
-  let fromCallees := Scry.concatLists (fun name => Scry.effectFrees es name)
-    (Scry.uCallTargets p pt func callee);
+  let targets := Scry.uCallTargets p pt func callee;
+  let fromCallees := Scry.concatLists (fun name => Scry.effectFrees es name) targets;
+  let expired := Scry.uExpiredStack p pt func targets;
   let direct := match callee with
     | .indirect _ => .nil
     | .direct name => match Wil.listNth args 0 with
@@ -249,7 +299,7 @@ def Scry.uCallFrees (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeE
             (Scry.uCurGet st pt func a.index)
         else (.nil : List (Scry.Loc × Scry.PathNode))
       | .none => (.nil : List (Scry.Loc × Scry.PathNode));
-  List.append fromCallees direct
+  List.append (List.append fromCallees direct) expired
 
 def Scry.uCallRetFreed (es : List Scry.FreeEffect) (p : Wil.Program) (pt : Scry.PtResult)
     (func : String) (callee : Wil.Callee) : List Scry.Loc :=
@@ -297,9 +347,11 @@ def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect
       match r with
       | .none => { st1 with freed := freed2, prov := prov }
       | .some rv =>
-        { st1 with cur := Scry.uCurPut st1.cur (Scry.vk fn.name rv.index)
-              (Scry.ptLocs pt fn.name rv.index),
-          dead := Scry.uDeadPut st1.dead (Scry.vk fn.name rv.index) rets,
+        let retLocs := Scry.ptLocs pt fn.name rv.index;
+        let retDead := List.filter (fun l => Scry.uHitsFreed l freed2) retLocs;
+        { st1 with cur := Scry.uCurPut st1.cur (Scry.vk fn.name rv.index) retLocs,
+          dead := Scry.uDeadPut st1.dead (Scry.vk fn.name rv.index)
+            (Scry.locUnion rets retDead),
           freed := freed2, prov := prov }
     | .store _ _ _ => st
     | .assume _ _ => st

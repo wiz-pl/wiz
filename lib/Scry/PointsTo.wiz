@@ -72,9 +72,12 @@ the whole program is one fixpoint: context-insensitive and field-sensitive.
 * A function pointer is a value (`fnptr`); it can be copied, passed to a function and
   stored in memory, and the resolution follows the pointer sets.
 * Not modelled: interprocedural *heap shape* (a linked list through two allocation
-  sites is one set per site, not a shape), external call effects (`strcpy` writing
-  through its argument), `realloc`, and offsets beyond one `anyOff` level. Those widen
-  to `Loc.unknown` where the lowering cannot express them, never to a wrong exact cell.
+  sites is one set per site, not a shape), external memory writes (`strcpy` filling its
+  argument is the taint layer's copy model, not a points-to constraint), and offsets
+  beyond one `anyOff` level. Pointer-returning libc calls are modelled by name
+  (`aliasArg0Calls`: search/copy/`dirname`/`basename`/`strtok` return into argument 0;
+  `strdup`/`strndup` are fresh; `realloc` frees and returns fresh). Anything else widens
+  to `Loc.unknown` where the lowering cannot express it, never to a wrong exact cell.
 -/
 
 -- ## Keys and locations
@@ -365,15 +368,14 @@ def Scry.storeMems (st : Scry.PtState) (func : String) (p v : Wil.Var) :
 the first argument (a substring/byte search, `dirname`) or the destination of a copy.
 Modelling these is what makes `end = strchr(buf, '/')` remain an alias of `buf`. -/
 def Scry.aliasArg0Calls : List String :=
-  .cons "strchr" (.cons "strrchr" (.cons "strstr" (.cons "memchr"
-    (.cons "dirname" (.cons "strcpy" (.cons "strncpy" (.cons "strcat"
-      (.cons "mempcpy" (.cons "memcpy" (.cons "memmove" .nil))))))))))
+  (.cons "strchr" (.cons "strrchr" (.cons "strchrnul" (.cons "strstr" (.cons "strcasestr" (.cons "strpbrk" (.cons "strtok" (.cons "strtok_r" (.cons "memchr" (.cons "memrchr" (.cons "rawmemchr" (.cons "dirname" (.cons "basename" (.cons "index" (.cons "rindex" (.cons "strcpy" (.cons "strncpy" (.cons "strcat" (.cons "stpcpy" (.cons "stpncpy" (.cons "mempcpy" (.cons "memcpy" (.cons "memmove" (.cons "memset" .nil))))))))))))))))))))))))
 
 def Scry.isAliasArg0Call (name : String) : Bool :=
   List.any (fun n => String.eq n name) Scry.aliasArg0Calls
 
-/-- `strdup` returns a fresh heap object; the allocation site is the call point. -/
-def Scry.isFreshAllocCall (name : String) : Bool := String.eq name "strdup"
+/-- `strdup`/`strndup` return a fresh heap object; the allocation site is the call point. -/
+def Scry.isFreshAllocCall (name : String) : Bool :=
+  Bool.or (String.eq name "strdup") (String.eq name "strndup")
 
 /-- `realloc` frees its argument (on success) and returns a fresh object at the call
 site. The old location stays in `freed`; the result is a different location, so
