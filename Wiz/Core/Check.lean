@@ -964,6 +964,8 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     unless lI.equiv (.succ l) do throw (.other "an index type must be in the data type's universe")
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
+    -- (a recursive field must be guarded, a non-recursive field before it: μ X. X is out)
+    unless descGuarded ctx.globals 16 false D do throw (.other unguardedDescription)
     let _ ← check ctx i vI
     pure (if prop then .sort 0 else .sort (.succ l), Usage.zeros ctx.lvl)
   | .nu l I D i s h => do
@@ -973,11 +975,8 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     unless lI.equiv (.succ l) do throw (.other "an index type must be in the data type's universe")
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
-    -- (μ only: a recursive field must be guarded, a non-recursive field before it; μ X. X
-    -- is out. `ν X. X` is a valid coinductive type: its guardedness is `cocon`/`out`)
-    match t with
-    | .mu .. => unless descGuarded ctx.globals 16 false D do throw (.other unguardedDescription)
-    | _ => pure ()
+    -- (no guard here: `ν X. X` is a valid coinductive type, its guardedness is
+    -- `cocon`/`out`'s; the `μ` case checks `descGuarded`)
     let _ ← check ctx i vI
     pure (.sort (.succ l), Usage.zeros ctx.lvl)
   | .ind l I D v P m i x prop => do
