@@ -79,7 +79,7 @@ instances, an infix operator of its own, markup in a doc comment, and a module w
 any doc comments. -/
 def refSrc : String := "/-! # Reference fixture
 
-A module with **markup** and `Ref.A.Sized`, for the `reference` tests. -/
+A module with **markup** and `Sized`, for the `reference` tests. -/
 import Prelude
 
 /-- The identity, at an implicit type. -/
@@ -475,32 +475,33 @@ def docGroup : Group where
         checkHas md "## Contents"
         checkHas md "#notation"
         checkHas md "## Notation and precedence"
-        -- (a declaration with an implicit argument: the elaborated type keeps it)
-        checkHas md "<a id=\"Ref.A.ident\"></a>"
+        -- (a declaration with an implicit argument: the elaborated type keeps it; names
+        -- are global, not module-qualified, so the anchor is the bare name)
+        checkHas md "<a id=\"ident\"></a>"
         checkHas md "def · `Ref/A.wiz:"
         checkHas md "{A : Type} → A → A"
         -- (a class and its two instances, with their types)
-        checkHas md "<a id=\"Ref.A.Sized\"></a>"
+        checkHas md "<a id=\"Sized\"></a>"
         checkHas md "**Instances of this class (2)**"
         checkHas md "Sized Pair"
         checkHas md "Sized Nat"
         -- (its field, with a doc comment)
-        checkHas md "<a id=\"Ref.A.Sized.size\"></a>"
+        checkHas md "<a id=\"Sized.size\"></a>"
         checkHas md "<p>how big it is</p>"
         -- (the module's own infix operator, with precedence and associativity)
         checkHas md "| `+?` | infixl | 33 | left |"
         -- (doc comments are Markdown, links included)
         checkHas md "<strong>markup</strong>"
-        checkHas md "<a href=\"#Ref.A.Sized\"><code>Ref.A.Sized</code></a>"
+        checkHas md "<a href=\"#Sized\"><code>Sized</code></a>"
         -- (a module without doc comments is still a section, with its declaration)
         checkHas md "## Ref.Empty"
-        checkHas md "<a id=\"Ref.Empty.quiet\"></a>"
+        checkHas md "<a id=\"quiet\"></a>"
         -- (the generated page links to the manual, and the manual to the pages)
         let html ← IO.FS.readFile (out / "reference.html")
         checkHas html "id=\"module-Ref.A\""
-        checkHas html "id=\"Ref.A.ident\""
+        checkHas html "id=\"ident\""
         let page ← IO.FS.readFile (out / "Ref.A.html")
-        checkHas page "href=\"reference.html#Ref.A.ident\""
+        checkHas page "href=\"reference.html#ident\""
         checkHas page "href=\"reference.html#module-Ref.A\""
         -- (--check passes on what was just written, and fails when it changes)
         let o ← runOut (← wiz) ["doc", (dir / "src").toString, "-o", (dir / "site2").toString,
