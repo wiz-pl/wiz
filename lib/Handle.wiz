@@ -3,7 +3,7 @@ import Sys
 /-!
 # Handle
 
-Owned handles (`import Handle`; cohesion step M6, /workspace/wiz-notes/cohesion-resources.md;
+Owned handles (`import Handle`; cohesion step M6, wiz-notes/cohesion-resources.md;
 docs/libraries.md).
 
 An OS handle (a `File`, an `Fd`, a `Child`) is an ordinary (ω) value in lib/Sys.wiz,

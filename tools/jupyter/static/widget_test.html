@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Wiz widget front end: browser test</title>
+<!--
+  The small HTML harness for tools/jupyter/static/widget_test.mjs.  It is served over
+  HTTP (ES modules do not load from file://) by the test, which opens it in headless
+  Chrome and reads `globalThis.__widgetTest`.
+
+  `widget_checks.mjs` does the work: it mounts the fixture's SSR through `widget.js`,
+  clicks the button, moves the range slider, and records the serialised DOM.  The
+  assertions are the same ones the Node fallback runs against web/framework/minidom.mjs.
+-->
+<div id="widget"></div>
+<script type="module">
+  import { runBrowserScenario } from "./widget_checks.mjs";
+  try {
+    const response = await fetch("./widget_fixture.json", { cache: "no-store" });
+    if (!response.ok) throw new Error("fixture: HTTP " + response.status);
+    const fixture = await response.json();
+    const result = runBrowserScenario(document.getElementById("widget"), fixture);
+    globalThis.__widgetTest = { ok: true, result };
+  } catch (error) {
+    globalThis.__widgetTest = { ok: false, error: String(error && (error.stack || error)) };
+  }
+</script>

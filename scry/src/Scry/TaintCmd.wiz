@@ -1034,11 +1034,14 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
-      (List.append
-        (Scry.concatLists (fun r => r.plan.memWarnings) results)
-        (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)));
-    let memoryFindings := Scry.lifetimeFindings prog pt pack;
+    let bounds := Scry.boundsCheck prog pt pack results;
+    let warnings := Scry.dedupWarnings (List.append
+      (List.filter (Scry.keepMemWarning hasLifetime)
+        (List.append
+          (Scry.concatLists (fun r => r.plan.memWarnings) results)
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
+      bounds.warnings);
+    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
     let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
       ++ " function(s), " ++ Nat.repr run.rounds ++ " summary round(s)"
