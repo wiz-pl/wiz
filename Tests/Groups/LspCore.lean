@@ -190,18 +190,25 @@ def main : IO Unit := EIO.toIO (do
   Fd.writeUtf8 out (String.join ["\nsteps=", Nat.repr s.steps, "\n"]))
 "##
 
-/-- What `lspStdioSrc` prints. -/
-def lspStdioOut : String := r##"Content-Length: 265
+/-- One frame, as `Lsp.Stdio.frame` writes it: `Content-Length` (given literally here,
+so a wrong length still fails the case) and its body, the header's two lines ending CR LF
+as the protocol's framing requires. -/
+def lspStdioFrame (n : Nat) (body : String) : String :=
+  String.join ["Content-Length: ", Nat.repr n, "\r\n\r\n", body]
 
-{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"textDocumentSync":1,"positionEncoding":"utf-16","hoverProvider":true,"experimental":{"wizInfoview":{"version":"0.1","methods":["wiz/plainGoal","wiz/plainTermGoal"]}}},"serverInfo":{"name":"stdio","version":"0.1"}}}Content-Length: 162
-
-{"jsonrpc":"2.0","id":2,"result":{"contents":{"kind":"plaintext","value":"a : def #1"},"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":5}}}}Content-Length: 388
-
-{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///a.wiz","version":1,"diagnostics":[{"range":{"start":{"line":1,"character":6},"end":{"line":1,"character":7}},"severity":1,"source":"wiz","message":"unknown identifier 'λ'"},{"range":{"start":{"line":2,"character":6},"end":{"line":2,"character":7}},"severity":3,"source":"wiz","message":"a : def #1"}]}}Content-Length: 120
-
-{"jsonrpc":"2.0","id":3,"result":{"goal":"a","range":{"start":{"line":2,"character":6},"end":{"line":2,"character":7}}}}
-steps=3
-"##
+/-- What `lspStdioSrc` prints: the four frames and `steps=3`. This expectation was first
+one raw literal, so the blank line after each header held LF; the case then failed on the
+separator alone, because the driver writes the protocol's `\r\n` (a terminal shows the two
+alike). The driver is right -- a frame is `Content-Length: N\r\n\r\n` and N UTF-8 bytes --
+so the expectation spells the separator out. The lengths stay literal, so a wrong one
+still fails, and the bodies are raw literals (one line each) for a byte-exact compare. -/
+def lspStdioOut : String :=
+  String.join [
+    lspStdioFrame 265 r##"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"textDocumentSync":1,"positionEncoding":"utf-16","hoverProvider":true,"experimental":{"wizInfoview":{"version":"0.1","methods":["wiz/plainGoal","wiz/plainTermGoal"]}}},"serverInfo":{"name":"stdio","version":"0.1"}}}"##,
+    lspStdioFrame 162 r##"{"jsonrpc":"2.0","id":2,"result":{"contents":{"kind":"plaintext","value":"a : def #1"},"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":5}}}}"##,
+    lspStdioFrame 388 r##"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///a.wiz","version":1,"diagnostics":[{"range":{"start":{"line":1,"character":6},"end":{"line":1,"character":7}},"severity":1,"source":"wiz","message":"unknown identifier 'λ'"},{"range":{"start":{"line":2,"character":6},"end":{"line":2,"character":7}},"severity":3,"source":"wiz","message":"a : def #1"}]}}"##,
+    lspStdioFrame 120 r##"{"jsonrpc":"2.0","id":3,"result":{"goal":"a","range":{"start":{"line":2,"character":6},"end":{"line":2,"character":7}}}}"##,
+    "\nsteps=3\n"]
 
 /-- `lib/Lsp/*.wiz` (concurrency plan E1/E2): the pure language-server core, its pure
 event loop and its stdio driver. -/
