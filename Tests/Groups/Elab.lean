@@ -37,9 +37,9 @@ def group : Group where
         fails "def leak {A : Type} (x : A) : Type := A" "quantity"
         fails "def leakP {P : Prop} (x : P) : Prop := P" "quantity"
         ok "def leakW {ω A : Type} (x : A) : Type := A"
-        okLib ("import Prelude\ndef p {P : Prop} {A : Type} {u : Type 1} {h : 1 = 1} {n : Nat} {F : Type → Type} (x : Nat) : Nat := x\n" ++
+        okLib ("import Prelude\ndef p {P : Prop} {A : Type} {u : Type 1} {h : True} {n : Nat} {F : Type → Type} (x : Nat) : Nat := x\n" ++
           "def q {0 n : Nat} {ω A : Type} (x : Nat) : Nat := x\n#check @p\n#check @q")
-          ["p : {P : Prop} → {A : Type} → {u : Type 1} → {h : 1 = 1} → {n : Nat} → {F : Type → Type} → Nat → Nat",
+          ["p : {P : Prop} → {A : Type} → {u : Type 1} → {h : True} → {n : Nat} → {F : Type → Type} → Nat → Nat",
            "q : {0 n : Nat} → {ω A : Type} → Nat → Nat"] },
     { name := "rule (b): an implicit with no written type is data (ω), decided at the binder", run := fun _ =>
         okLib "import Prelude\ndef g {A} (x : A) (y : List A) : A := x\n#check @g" ["g : {ω A : Type} → A → List A → A"] },
