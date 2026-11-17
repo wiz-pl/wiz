@@ -186,6 +186,9 @@ jobs:
           # (on this repository's branches, which have the push token). `packages.wiz` is
           # the default package; `packages.tests` is the test driver, from the same build.
           nix build .#wiz .#tests --no-link -L
+          # the reference manual (wiz doc --lib --reference, with this wiz): a Cachix hit
+          # when the compiler and lib/ are unchanged; the docs job substitutes it
+          nix build .#reference --no-link -L
           wiz=$(nix path-info .#wiz)
           tests=$(nix path-info .#tests)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
@@ -200,9 +203,11 @@ jobs:
         run: |
           mkdir -p .lake/build/bin
           ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
-          scripts/trust-ledger.sh --check
+          scripts/trust-ledger.sh --check --strict-legacy
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
+          python3 scripts/host-unsafe-ledger.py --check
+          Tests/host-unsafe-ledger/run.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
@@ -216,7 +221,7 @@ jobs:
             exit 0
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests)
+            $(nix path-info .#wiz .#tests .#reference)
       - name: Every test case is in exactly one shard
         run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
@@ -413,6 +418,10 @@ jobs:
           "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
             --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
           ls doc-site/docs | head -50
+      - name: The reference manual's Markdown (nix build .#reference, from Cachix)
+        run: |
+          ref=$(nix build .#reference --no-link --print-out-paths)
+          cp "$ref/index.md" doc-site/docs/reference.md
       - name: The landing page and the playground (web/build-site.sh)
         run: sh web/build-site.sh doc-site web/out
       - name: The site has its three entry points and the landing's links resolve

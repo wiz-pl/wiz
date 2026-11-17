@@ -275,7 +275,7 @@ compare_compilers() { # A B label
 copy_compiler_tree() { # src dest
   ( cd "$1" && tar -cf - \
       --exclude='./.git' --exclude='./.lake' --exclude='./.lake-cache' --exclude='./.direnv' \
-      --exclude='./.devenv' --exclude='./grail.local.wiz' . ) | ( cd "$2" && tar -xf - )
+      --exclude='./grail.local.wiz' . ) | ( cd "$2" && tar -xf - )
 }
 
 build_two_compilers() {

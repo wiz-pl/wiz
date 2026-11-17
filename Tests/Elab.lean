@@ -797,9 +797,9 @@ partial def toWiz : MTm → String
   | pair a b => s!"(.pair {a.toWiz} {b.toWiz})"
   | fst p => s!"(.fst {p.toWiz})"
   | snd p => s!"(.snd {p.toWiz})"
-  | unit n => s!"(.unit {n})"
+  | unit n => s!"(.unit (ln {n + 1}))"
   | star => ".star"
-  | empty n => s!"(.empty {n})"
+  | empty n => s!"(.empty (ln {n + 1}))"
   | exfalso m t => s!"(.exfalso {m.toWiz} {t.toWiz})"
   | letUnit u b => s!"(.letUnit {u.toWiz} {b.toWiz})"
   | enum k => s!"(.enum {k})"
@@ -820,15 +820,15 @@ partial def toWiz : MTm → String
     | t => t.toWiz
   | cast A B e t => s!"(.coe {A.toWiz} {B.toWiz} {e.toWiz} {t.toWiz})"
   | transp A a P p b e => s!"(.subst {A.toWiz} {a.toWiz} {P.toWiz} {p.toWiz} {b.toWiz} {e.toWiz})"
-  | desc l I => s!"(.descr {l} {I.toWiz})"
+  | desc l I => s!"(.descr (ln {l}) {I.toWiz})"
   | dret i => s!"(.dret {i.toWiz})"
   | darg S E q => s!"(.darg (.qlit {qWiz q}) {S.toWiz} {E.toWiz})"
   | drec j E q => s!"(.drec (.qlit {qWiz q}) {j.toWiz} {E.toWiz})"
   | dhrec H j E q => s!"(.dhrec (.qlit {qWiz q}) {H.toWiz} {j.toWiz} {E.toWiz})"
-  | delim v P a b c h D => s!"(.delim {v} {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
-  | mu l I D i => s!"(.mu {l} {I.toWiz} {D.toWiz} {i.toWiz})"
+  | delim v P a b c h D => s!"(.delim (ln {v}) {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
+  | mu l I D i => s!"(.mu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz})"
   | con x => s!"(.con {x.toWiz})"
-  | ind l I D v P m i x => s!"(.ind {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
+  | ind l I D v P m i x => s!"(.ind (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
   | const n ls => match globalDefs.find? (·.1 == n) with
     | some (_, ps, some v, ty) =>
       let psW := ps.foldr (fun p acc => s!"(.cons \"{p}\" {acc})") ".nil"
@@ -846,16 +846,16 @@ partial def toWiz : MTm → String
   | szInf => ".szInf"
   | szSuc s => s!"(.szSuc {s.toWiz})"
   | sizeLt s => s!"(.sizeLt {s.toWiz})"
-  | mus l I D i s => s!"(.mus {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
-  | sfix l I D v P f s i x => s!"(.sfix {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | nu l I D i s => s!"(.nu {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | mus l I D i s => s!"(.mus (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | sfix l I D v P f s i x => s!"(.sfix (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | nu l I D i s => s!"(.nu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
   | out x => s!"(.out {x.toWiz})"
   | cocon x => s!"(.cocon {x.toWiz})"
-  | scofix l I D A f s i a => s!"(.scofix {l} {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
-  | coit l I D S st i s => s!"(.coit {l} {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
-  | scaseq q l I D v P m s i x => s!"(.scase {l} {qWiz q} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | scase l I D v P m s i x => s!"(.scase {l} .qw {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | ulift k l A => s!"(.ulift {k} {l} {A.toWiz})"
+  | scofix l I D A f s i a => s!"(.scofix (ln {l}) {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
+  | coit l I D S st i s => s!"(.coit (ln {l}) {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
+  | scaseq q l I D v P m s i x => s!"(.scase (ln {l}) {qWiz q} {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | scase l I D v P m s i x => s!"(.scase (ln {l}) .qw {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | ulift k l A => s!"(.ulift (ln {k}) (ln {l}) {A.toWiz})"
   | up a => s!"(.up {a.toWiz})"
   | down t => s!"(.down {t.toWiz})"
   | prf l t => s!"(.prf {l.toWiz} {t.toWiz})"
@@ -1140,6 +1140,31 @@ def sizeArgs : List MTm :=
   [mus 0 (unit 0) natD star star, streamAt (enum 2),
    natAt szInf, ann (lam (natAt (var 0))) (pi size (univ 0)), ann (lam (streamAt (szSuc (var 0)))) (pi size (univ 0))]
 
+/-- The guarded inductive description: `μ` rejects a description whose recursive field is
+not under a non-recursive (`arg`) field — `μ X. X`, the identity functor, has no
+induction principle. `ν X. X` is a valid coinductive type (guardedness there is
+`cocon`/`out`), so the same description is accepted at `ν`. `Nat`, a list, a binary tree,
+a guarded stream and a bare-observation stream are accepted; a size that is not a `Size`
+and a size variable that escapes its binder are rejected by the size check (K3). -/
+def muSize : List (MTm × Bool) :=
+  let listD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (dret star)))]))
+  let treeD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (darg (enum 2) (lam (drec star (dret star))))))]))
+  [(natTy, true),
+   (mu 0 (unit 0) listD star, true),
+   (mu 0 (unit 0) treeD star, true),
+   (nu 0 (unit 0) streamD star szInf, true),
+   (streamAt (szSuc szInf), true),
+   -- unguarded for μ: a description that is only a recursive field (`μ X. X`); the same
+   -- description is a valid coinductive type (`ν X. X`: one observation, itself)
+   (mus 0 (unit 0) (drec star (dret star)) star szInf, false),
+   (nu 0 (unit 0) (drec star (dret star)) star szInf, true),
+   -- a size that is not a Size, and a size variable that escapes its binder
+   (mus 0 (unit 0) natD star star, false),
+   (mus 0 (unit 0) natD star (var 0), false),
+   (nu 0 (unit 0) streamD star (var 0), false)]
+
 /-- Q4 (fixed): a description field must live exactly in `Sort (l+1)`, the universe
 `Desc.elim`'s `marg` takes it from. It used to be enough for it to fit (`Sort k`,
 `k ≤ l+1`), and universes aren't cumulative, so `Desc.elim` could reduce to a term of the
@@ -1348,7 +1373,7 @@ def transpProp : List MTm :=
 /-- Terms the differential test always checks (well-typed ones the generator rarely
 builds whole), before the random ones. -/
 def samples : List MTm :=
-  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
+  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ muSize.map (·.1) ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
    natTy, natZero, natSucc natZero, natSucc (natSucc natZero), ann natD (desc 0 (unit 0)),
    eq natTy natZero (natSucc natZero), eq natTy (natSucc natZero) (natSucc natZero), refl natTy (natSucc natZero),
    delim 1 (lam (unit 0)) (lam star) (lams 4 star) (lams 4 star) (lams 5 star) (ann natD (desc 0 (unit 0))),

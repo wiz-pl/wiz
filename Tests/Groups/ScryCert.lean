@@ -15,7 +15,8 @@ The group `scry-cert` checks `lib/Scry/Cert.wiz` through
   accepted, and a wrong join is rejected;
 * the same example compiled to C and LLVM.
 
-The checker, its shape and the soundness theorem are in `wiz-notes/scry-derivation.md`.
+The checker, its shape and the soundness theorems are described in `lib/Scry/Cert.wiz`'s
+module doc.
 -/
 
 open Wiz

@@ -5,6 +5,10 @@
 // HTML exactly. Also exercises keyed reorder, removal+insertion, escaping, and event
 // delegation.
 //
+// This is a Node test double, not a browser: it cannot see form-control value
+// properties or real DOM event objects.  tools/jupyter/static/widget_test.mjs runs the
+// same patcher against headless Chrome (and minidom when no browser is installed).
+//
 //   node web/framework/test.mjs FIXTURE.json
 "use strict";
 import { readFileSync } from "node:fs";

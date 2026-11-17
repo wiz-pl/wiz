@@ -5,7 +5,7 @@ import Hdl.Core
 CRC-8/SMBUS (polynomial `x^8 + x^2 + x + 1` = `0x07`, initial value 0, most significant
 bit first, no reflection, no final xor), twice: as hardware, one byte per clock cycle,
 and as a function on numbers, which is what a host computes. It is the CRC of the
-iCEstick project (`/workspace/wiz-icestick-uart/src/Icestick/Crc.wiz`) with the
+iCEstick project (`wiz-icestick-uart/src/Icestick/Crc.wiz`) with the
 board-specific vocabulary removed, so any design can use it.
 
 The specification is `Crc.bit` (one bit), `Crc.iter` (n bits), `Crc.step` (one byte),

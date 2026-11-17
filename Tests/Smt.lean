@@ -101,7 +101,9 @@ def group : Group where
         noErrors ms
         expect ms "info: 'eq4' does not depend on any axioms"
         expect ms "info: 'Sat.dag_sound' does not depend on any axioms" },
-    { name := "sat_decide_native (28e): refused without --trust-native", run := fun _ => do
+    { name := "sat_decide_native (28e): refused without --trust-native", run := fun _ => needs "cadical" do
+        -- the tactic asks the solver first and refuses only when it builds the native check
+        -- (`SatT.checkProof`), so without cadical the message is the solver's
         let ms ← msgs ("import SatTactic\n" ++
           "def demorgan (a b : Bool) : Bool.not (Bool.and a b) = Bool.or (Bool.not a) (Bool.not b) := by sat_decide_native\n")
         expect ms "error: native evaluation is not enabled"

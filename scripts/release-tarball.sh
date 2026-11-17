@@ -69,7 +69,8 @@ if [ -n "$webdir" ]; then
   # (11s) tagged.js is shared by the infoview and the documentation's pages (`wiz doc`,
   # which also copies scroll.*); a web dir from before 11s has none of them
   for f in infoview.html infoview.js wiz-infoview.mjs wiz-infoview.wasm; do cp "$webdir/$f" "$top/share/wiz/web/$f"; done
-  for f in tagged.js scroll.js scroll-search.js scroll.css; do
+  for f in tagged.js scroll.js scroll-search.js scroll.css \
+           lsp-client.js goals.js doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
 fi

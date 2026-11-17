@@ -25,6 +25,12 @@
    "select": [
     "=grail-selfhost"
   ]},
+  {"name": "selfhost-libdiff", "heavy": true,
+   "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
+              "Tests/Main.lean"],
+   "select": [
+    "=selfhost-libdiff"
+  ]},
   {"name": "backends", "jobs": 4, "select": [
     "backend",
     "borrow",
@@ -73,8 +79,10 @@
     "phantom",
     "=plot",
     "regions",
+    "=reject",
     "=scry-wil",
     "=scry-c2wil",
+    "=scry-csharp",
     "=scry-ai",
     "=scry-taint",
     "=scry-uaf",

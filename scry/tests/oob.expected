@@ -1,0 +1,42 @@
+write-heap: one out-of-bounds finding: ok
+write-heap: rule out-of-bounds-write: ok
+write-heap: two memory rules in the pack: ok
+write-heap: kind: ok
+write-heap: severity: ok
+write-heap: path has alloc: ok
+write-heap: path ends at sink: ok
+write-read: one out-of-bounds finding: ok
+write-read: rule out-of-bounds-write: ok
+write-read: two memory rules in the pack: ok
+write-read: kind: ok
+write-read: severity: ok
+write-read: path has alloc: ok
+write-read: path ends at sink: ok
+read-heap: one out-of-bounds finding: ok
+read-heap: rule out-of-bounds-read: ok
+read-heap: two memory rules in the pack: ok
+read-heap: kind: ok
+read-heap: severity: ok
+read-heap: path has alloc: ok
+read-heap: path ends at sink: ok
+read-memcpy: one out-of-bounds finding: ok
+read-memcpy: rule out-of-bounds-read: ok
+read-memcpy: two memory rules in the pack: ok
+read-memcpy: kind: ok
+read-memcpy: severity: ok
+read-memcpy: path has alloc: ok
+read-memcpy: path ends at sink: ok
+safe-write-heap: zero out-of-bounds findings: ok
+safe-write-heap: zero findings: ok
+safe-write-heap: two memory rules in the pack: ok
+safe-write-read: zero out-of-bounds findings: ok
+safe-write-read: zero findings: ok
+safe-write-read: two memory rules in the pack: ok
+safe-read-heap: zero out-of-bounds findings: ok
+safe-read-heap: zero findings: ok
+safe-read-heap: two memory rules in the pack: ok
+safe-read-memcpy: zero out-of-bounds findings: ok
+safe-read-memcpy: zero findings: ok
+safe-read-memcpy: two memory rules in the pack: ok
+unknown-size: zero out-of-bounds findings: ok
+unknown-size: unknown-memory boundary: ok

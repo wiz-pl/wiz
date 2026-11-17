@@ -189,11 +189,15 @@ def magic_checks(results: Results, wiz: str | None, backend: str, cwd: str) -> N
         emitted: list[tuple[str, str]] = []
         result = handle_magic("%%sh\necho out\necho err >&2\nexit 0\n", driver,
                               cwd=cwd, emit=lambda name, text: emitted.append((name, text)))
-        results.check("magic: %%sh streams stdout then stderr and returns status 0",
+        # Each pipe has its own reader thread, so the order *between* stdout and
+        # stderr lines is whichever thread the scheduler runs first (about 1 run in
+        # 100 idle, more under load, had stderr first). Check each stream's lines,
+        # not the interleaving: two pipes carry no order between them.
+        results.check("magic: %%sh streams stdout and stderr and returns status 0",
                       result is not None and not result.errors
                       and result.result == "exit status 0"
-                      and [name for name, _ in emitted] == ["stdout", "stderr"],
-                      repr(result))
+                      and sorted(emitted) == [("stderr", "err\n"), ("stdout", "out\n")],
+                      f"{result!r} emitted={emitted!r}")
         result = handle_magic("%%sh\nexit 7\n", driver, cwd=cwd)
         results.check("magic: %%sh reports a non-zero exit status",
                       result is not None and bool(result.errors)
@@ -372,12 +376,30 @@ class Client:
                     and message.content.get("execution_state") == "idle"):
                 return messages
 
-    def execute(self, code: str):
+    def iopub_until(self, predicate, msg_id: str | None = None,
+                    timeout: float = 120.0) -> list:
+        """Collect iopub messages until `predicate` accepts one (comm messages have no
+        busy/idle bracket, so `iopub_until_idle` cannot be used for them)."""
+        self.iopub.setsockopt(self.zmq.RCVTIMEO, int(timeout * 1000))
+        messages = []
+        while True:
+            try:
+                frames = self.iopub.recv_multipart()
+            except self.zmq.Again:
+                raise TimeoutError("no matching iopub message")
+            message = self.session.deserialize(frames)
+            if msg_id is not None and message.parent_header.get("msg_id") != msg_id:
+                continue
+            messages.append(message)
+            if predicate(message):
+                return messages
+
+    def execute(self, code: str, timeout: float = 120.0):
         msg_id = self.send("execute_request", {
             "code": code, "silent": False, "store_history": True,
             "user_expressions": {}, "allow_stdin": False, "stop_on_error": True})
-        reply = self.reply(msg_id)
-        return reply, self.iopub_until_idle(msg_id)
+        reply = self.reply(msg_id, timeout=timeout)
+        return reply, self.iopub_until_idle(msg_id, timeout=timeout)
 
     def close(self) -> None:
         self.shell.close(0)
