@@ -673,6 +673,9 @@ L8), whatever the `let`'s type: everything else on that path is already lazy.
   additions as long as the list, forced at the end one stack frame per element. So only a
   definition's application keeps an operation glued, and a chain of operations never
   suspends more than one link.
+* An operation whose arguments are all numerals (or stuck, or constructors) is computed as
+  before, so types and messages read back computed (`Vec Nat 3`): only an operation on a
+  glued, not yet computed, value stays glued (user decision 2026-11-17).
 * Not for a normal form (`g.eager`: a normal form has no suspended redex), nor with
   `--eager-proofs` (`!g.lazyProofs`, the evaluator as it was), nor for `nat.succ` (a
   constructor: `vNatOpNow` already builds it from a stuck argument without forcing it). -/

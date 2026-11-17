@@ -834,7 +834,14 @@ def group : Group where
     { name := "a glued `Nat` operation still computes when conversion needs it", run := fun _ =>
         Tests.Elab.okLibs natOpLazySemSrc },
     { name := "a glued `Nat` operation that computes to something else is rejected", run := fun _ =>
-        Tests.Elab.failsLibs natOpLazyFailSrc "rfl" }]
+        Tests.Elab.failsLibs natOpLazyFailSrc "rfl" },
+    -- (user decision 2026-11-17) read-back: an operation on literals only is computed (types
+    -- and messages show `Vec Nat 3`); one on a definition's glued value stays as written
+    { name := "a `Nat` operation on literals reads back computed, one on a glued value as written", run := fun _ =>
+        Tests.Elab.okLibs ("import Vec\ndef two : Nat := 2\n" ++
+          "#check (Vec.replicate (Nat.add 2 1) 0)\n#check (Vec.replicate (Nat.add two 1) 0)\n")
+          ["Vec.replicate Nat (Nat.add 2 1) 0 : Vec Nat 3",
+           "Vec.replicate Nat (Nat.add two 1) 0 : Vec Nat (Nat.add two 1)"] }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends
