@@ -681,6 +681,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
   without running the suite. Adding an allow-list entry needs a real reason: prefer
   putting the tool in the dev shell.
+* **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
+  test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
+  `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
+  library through the host; this is the package's own suite, and no other job ran it
+  (`golden-diff.yml` only *shows* what `--update` would write, after a shard failed for
+  another reason). The workflow never passes `--update`: a non-zero `grail test` fails,
+  and a later step fails if anything rewrote `scry/tests`. Measured on a loaded 32-core
+  box: 11.5 min for `grail build scry` and 14 min for the 26 tests, peak ~220 MiB, so it
+  runs on `ubuntu-latest` with a 60-minute job timeout and needs no memory reservation.
+  It is not part of `CI result` yet: it is its own required-check candidate.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)

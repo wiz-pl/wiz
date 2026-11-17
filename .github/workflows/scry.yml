@@ -1,0 +1,119 @@
+# The Scry tool's own golden suite: `cd scry && grail test`, which runs the
+# `scry/tests/*.expected` goldens (26 today). The Lean-side groups (`=scry-taint`,
+# `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
+# the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
+# `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what
+# `--update` would write, and only after a `test (...)` shard failed for another reason;
+# it never gates. This workflow does: no `--update`, and a non-zero `grail test` fails.
+#
+# Cost and memory (measured on a loaded 32-core Linux box): `grail build scry` 11.5 min,
+# `grail test` 14 min for the 26 goldens; the whole run peaked at ~220 MiB of resident
+# memory (the dev shell's `cc` included). No Lean/Lake build: `grail` and the
+# tree-sitter-c-sharp grammar are substituted from Cachix, so this needs no heavy runner
+# and no 7 GiB reservation; the job timeout is 60 min (about twice the measured cost,
+# with the scale golden, which self-caps at 300 s, as the slowest case).
+#
+# Two inputs are not optional and are set up below:
+# * `scry/native/tree-sitter-c-sharp` (the C# grammar out-link): without it
+#   `src/Scry/Native.wiz` fails `link_c` and 17 goldens cannot build;
+# * `.lake/build/bin/wiz` (the convention the tests use): `tests/repl-prelude.wiz` runs
+#   it, and its "skipped" fallback is not the golden's expected output.
+name: scry goldens
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "scry/**"
+      - "lib/Scry/**"
+      - "Wiz/**"
+      - "selfhost/**"
+      - ".github/workflows/scry.yml"
+  push:
+    branches: [master]
+    paths:
+      - "scry/**"
+      - "lib/Scry/**"
+      - "Wiz/**"
+      - "selfhost/**"
+      - ".github/workflows/scry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scry-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # public binary cache, substituted anonymously (this workflow pushes nothing)
+  CACHIX_NAME: badlydrawnwizards
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+jobs:
+  goldens:
+    name: scry goldens (grail test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # no Lake here: grail is the Nix-built binary and the package is built by it
+          lean: false
+      - name: The scry app's inputs (grail, the C# grammar, the wiz the REPL test uses)
+        id: nix
+        run: |
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          # `grail` is not a dev-shell package: the Nix-built one is what the next steps run
+          echo "$wiz/bin" >> "$GITHUB_PATH"
+          # src/Scry/Native.wiz has `link_c ../../native/tree-sitter-c-sharp/src/…`; the
+          # out-link is gitignored and created here, as scry/native/README.md documents.
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
+          # tests/repl-prelude.wiz runs ../.lake/build/bin/wiz (what `lake test` provides).
+          mkdir -p .lake/build/bin
+          ln -sf "$wiz/bin/wiz" .lake/build/bin/wiz
+          ln -sf "$wiz/bin/grail" .lake/build/bin/grail
+          "$wiz/bin/grail" --version
+      - name: Build the scry app
+        # `grail build` from scry/README.md's quick start; the CLI also gives
+        # tests/scale.wiz's timeout check a .grail/bin/scry to run.
+        run: |
+          cd scry
+          cp ../grail.local.wiz .   # this machine's toolchain, written by the dev shell
+          grail build scry
+      - name: grail test (the *.expected goldens)
+        run: |
+          cd scry
+          # Name the goldens explicitly: `grail test` treats every .wiz under tests/ as a
+          # test, and `tests/ReplPrelude.wiz` is a support module for repl-prelude (it has
+          # no .expected, so running it as a test always fails). A new test with a golden
+          # is picked up automatically.
+          shopt -s nullglob
+          tests=()
+          for e in tests/*.expected; do tests+=("${e%.expected}.wiz"); done
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error title=scry goldens::no scry/tests/*.expected files (bad checkout?)"
+            exit 2
+          fi
+          echo "${#tests[@]} goldens"
+          # --update is deliberately absent: a drifted golden must be red, not rewritten.
+          grail test "${tests[@]}"
+      - name: No golden was rewritten
+        # Belt and braces: if anything in the run writes a .expected (a tool calling
+        # --update, or a test doing it itself), the job fails instead of accepting it.
+        if: always()
+        run: |
+          status=$(git status --porcelain -- scry/tests)
+          if [ -n "$status" ]; then
+            echo "::error title=scry goldens::scry/tests changed during the run (a golden must not be updated here)"
+            printf '%s\n' "$status"
+            git diff -- scry/tests
+            exit 1
+          fi
