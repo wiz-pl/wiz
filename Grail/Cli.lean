@@ -557,7 +557,7 @@ def cliMain (args : List String) : IO UInt32 := do
       let filters := rest.filter (fun a => a != "--update" && a != "--rerun")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
-      let r := { r with rerunTests := rerun }
+      let r : Runner := { r with rerunTests := rerun }
       let results ← r.tests pkg.targets filters update
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size

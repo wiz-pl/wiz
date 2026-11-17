@@ -1185,13 +1185,13 @@ def serverGroup : Group where
         let src' := applyEdit src (LSP.get? r ["result"]).get!
         check ((src'.splitOn "  | red\n").length == 2 && (src'.splitOn "Other.red2").length == 2) s!"renamed:\n{src'}"
         -- a local at its binder still works (`binderOf`): the binder and its two uses
-        let (srv, r) ← ask srv "textDocument/documentHighlight" src (offAfter src "(n" (-1))
+        let (srv1, r) ← ask srv "textDocument/documentHighlight" src (offAfter src "(n" (-1))
         let some (.arr hs) := some r | throw (IO.userError s!"{r.compress}")
         checkEq 3 hs.size
         -- off any name (the `:` of a declaration, a keyword): nothing
-        let (srv, r) ← ask srv "textDocument/references" src (offAfter src "inductiv" (-3))
+        let (srv2, r) ← ask srv1 "textDocument/references" src (offAfter src "inductiv" (-3))
         check (r == Lean.Json.null) s!"in a keyword: {r.compress}"
-        let (_, r) ← ask srv "textDocument/references" src (offAfter src "(n : Nat) " (1))
+        let (_, r) ← ask srv2 "textDocument/references" src (offAfter src "(n : Nat) " (1))
         check (r == Lean.Json.null || r == Lean.Json.arr #[]) s!"at `:`: {r.compress}"
         -- the renaming rule
         checkEq (some "new") (Refs.renameText "old" "new" "old")
