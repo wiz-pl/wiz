@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: the frontend now handles the rest of A18 and A17's list literals and boolean
+  operators — as-patterns (`x@y@p`, in equations, `match`, literal and tuple rows), tuple
+  patterns (pair splitting without the kernel's `split`), `let (x, y)`/`let (x, y, z)`
+  (elaborated as a `match`, so `Kernel.wiz` needs no `split`) and `let () := u; b` (the
+  unit eliminator, also erased by the backend) — and list literals in terms and patterns
+  (`Parse.wiz` adds the host's `term.listLit` rule at precedence 1024; the frontend
+  rewrites the node to `List.cons`/`List.nil`, as the host's `ListLit.expand` does).
+  `&&`/`||`/`!` short-circuit and bind as on the host. Six `selfhost` cases compile one
+  program with the Lean host and with the self-hosted compiler and compare their outputs
+  rather than a literal (149–154). Still missing: `∃`/`¬` and `⟨…⟩`; a written quantity
+  other than ω on `let (x, y)` is refused.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

@@ -3014,7 +3014,17 @@ def headCtor (T : String) (h : Syntax) : Option String := match strEq (kindOf h)
     | .ident c => .some c
     | _ => .none
   | .false => ctorOfName T (identOf h)
-partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf p) "term.paren" with
+-- (A18) `x@y@p`: the names an as-pattern binds, and the pattern under them
+partial def asNames (p : Syntax) : List String := match strEq (kindOf (unparen p)) "term.asPat" with
+  | .true => .cons (identOf (kid (unparen p) 0)) (asNames (kid (unparen p) 2))
+  | .false => .nil
+partial def asInner (p : Syntax) : Syntax := match strEq (kindOf (unparen p)) "term.asPat" with
+  | .true => asInner (kid (unparen p) 2)
+  | .false => unparen p
+-- `x@p` matches `p` and also binds `x` to the scrutinee
+partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
+  | .true => patOf T (kid (unparen p) 2)
+  | .false => match strEq (kindOf p) "term.paren" with
   | .true => patOf T (kid p 1)
   | .false => match strEq (kindOf p) "term.num" with
   -- a numeral: `0` is `.zero`, `n + 1` is `.succ n`
@@ -3042,6 +3052,10 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf p) "ter
 def isVarPat (p : Syntax) : Bool := match strEq (kindOf p) "term.ident" with
   | .true => .true
   | .false => strEq (kindOf p) "term.hole"
+-- (A18) a variable pattern, an as-pattern over one, or `_`
+def isVarPatA (p : Syntax) : Bool := match strEq (kindOf (asInner p)) "term.ident" with
+  | .true => .true
+  | .false => strEq (kindOf (asInner p)) "term.hole"
 
 -- a column: a variable (by level) and its type, with constants and inlined, over the
 -- binders before it
@@ -3050,6 +3064,10 @@ inductive Col where
 -- a name a clause gives a column
 inductive Bind where
   | mk (name : String) (col : Col)
+-- (A18) the bindings of an as-pattern's names to the whole column
+def asBinds : List String → Col → List Bind
+  | .nil, _ => .nil
+  | .cons x rest, col => .cons (.mk x col) (asBinds rest col)
 inductive Clause where
   | mk (pats : List Syntax) (binds : List Bind) (rhs : Syntax)
 def holeStx : Syntax := mkNode "term.hole" (one (.atom "_"))
@@ -3088,14 +3106,16 @@ def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List 
   | .cons (.mk pats binds rhs) rest =>
     let before := takeL k pats;
     let after := dropL (k + 1) pats;
+    -- (A18) `x@p` binds `x` to this column and matches `p` in it
+    let binds0 := List.append binds (asBinds (asNames (nthSyntax pats k)) col);
     match patOf T (nthSyntax pats k) with
     | .ctor c' subs => match strEq c c' with
-      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds rhs) (specialize T c k F impl col rest)
+      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
       | .false => specialize T c k F impl col rest
     | .any x =>
       let binds' := match strEq x "_" with
-        | .true => binds
-        | .false => List.append binds (.cons (Bind.mk x col) .nil);
+        | .true => binds0
+        | .false => List.append binds0 (.cons (Bind.mk x col) .nil);
       .cons (.mk (List.append before (List.append (holes F) after)) binds' rhs) (specialize T c k F impl col rest)
   --|ex
   --| | _ => .nil
@@ -3475,11 +3495,11 @@ partial def preArgs (es : ES) (cx : Cx) (fty : Val) (m : List BKind) (args : Lis
 -- front of it: rows with `l` want `.true` there (and `_` in the column), rows with
 -- another literal `.false` (keeping theirs), and catch-all rows `_`. Literals don't
 -- cover a type, so the column needs a catch-all row.
-def isLitPat (p : Syntax) : Bool := Bool.or (is (unparen p) "term.num") (is (unparen p) "term.str")
-def isPlusPat (p : Syntax) : Bool := Bool.and (is (unparen p) "term.app") (strEq (identOf (kid (unparen p) 0)) "Nat.add")
+def isLitPat (p : Syntax) : Bool := Bool.or (is (asInner p) "term.num") (is (asInner p) "term.str")
+def isPlusPat (p : Syntax) : Bool := Bool.and (is (asInner p) "term.app") (strEq (identOf (kid (asInner p) 0)) "Nat.add")
 -- `p + k` without a numeral `k`
 def plusBad (p : Syntax) : Bool := match isPlusPat p with
-  | .true => match kids (kid (unparen p) 1) with
+  | .true => match kids (kid (asInner p) 1) with
     | .cons _ (.cons b .nil) => Bool.not (is b "term.num")
     | _ => .true
   | .false => .false
@@ -3488,14 +3508,14 @@ def patAt (k : Nat) : List Clause → Syntax
   | .cons (.mk pats _ _) _ => unparen (nthSyntax pats k)
 def anyVarAt (k : Nat) : List Clause → Bool
   | .nil => .false
-  | .cons (.mk pats _ _) rest => Bool.or (isVarPat (unparen (nthSyntax pats k))) (anyVarAt k rest)
+  | .cons (.mk pats _ _) rest => Bool.or (isVarPatA (nthSyntax pats k)) (anyVarAt k rest)
 def litMsg (T : String) : String := String.append "a literal pattern needs Nat, or a type T with literals and an equality test T.beq; "
   (String.append T " is a data type: match on its constructors")
 -- the literal patterns of a column split by constructors (of the inductive type `T`)
 def litSplitErr (T : String) (k : Nat) : List Clause → Option String
   | .nil => .none
   | .cons (.mk pats _ _) rest =>
-    let p := unparen (nthSyntax pats k);
+    let p := asInner (nthSyntax pats k);
     match strEq T "Nat" with
     | .true => match is p "term.str" with
       | .true => .some "a string pattern needs a String, not Nat"
@@ -3515,8 +3535,8 @@ def litSplitErr (T : String) (k : Nat) : List Clause → Option String
 def litColErr (tyStr : String) (k : Nat) : List Clause → Option String
   | .nil => .none
   | .cons (.mk pats _ _) rest =>
-    let p := unparen (nthSyntax pats k);
-    match Bool.or (isLitPat p) (isVarPat p) with
+    let p := asInner (nthSyntax pats k);
+    match Bool.or (isLitPat p) (isVarPatA p) with
     | .true => litColErr tyStr k rest
     | .false => match plusBad p with
       | .true => .some "a pattern `p + k` needs a numeral `k` (as in `n + 2`)"
@@ -3532,17 +3552,20 @@ def sameLit (a b : Syntax) : Bool := match Bool.and (is a "term.num") (is b "ter
 def boolPat (b : String) : Syntax := mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident b)))
 -- a boolean as a *term* (it infers without an expected type, as the host's macros use)
 def boolVal (b : String) : Syntax := mkNode "term.ident" (one (.ident (String.append "Bool." b)))
--- the clauses with the test's column in front of column `k`, for the literal `l`
-def litClauses (l : Syntax) (k : Nat) : List Clause → List Clause
+-- the clauses with the test's column in front of column `k`, for the literal `l`;
+-- `col` is column `k` itself (an as-pattern's names bind to the whole scrutinee)
+def litClauses (col : Col) (l : Syntax) (k : Nat) : List Clause → List Clause
   | .nil => .nil
   | .cons (.mk pats binds rhs) rest =>
-    let p := unparen (nthSyntax pats k);
+    let p0 := unparen (nthSyntax pats k);
+    let p := asInner p0;
+    let binds0 := List.append binds (asBinds (asNames p0) col);
     let two : List Syntax := match isLitPat p with
       | .true => match sameLit p l with
         | .true => List.cons (boolPat "true") (one holeStx)
         | .false => List.cons (boolPat "false") (one p)
       | .false => List.cons holeStx (one p);
-    .cons (.mk (List.append (takeL k pats) (List.append two (dropL (k + 1) pats))) binds rhs) (litClauses l k rest)
+    .cons (.mk (List.append (takeL k pats) (List.append two (dropL (k + 1) pats))) binds0 rhs) (litClauses col l k rest)
 def colsInsert (k : Nat) (c : Col) (cols : List Col) : List Col := List.append (takeL k cols) (.cons c (dropL k cols))
 -- the type `T` of `T.beq` for a column's type (at depth `d`)
 partial def beqHead (gs : Globals) (d : Nat) (ty : Tm) : Option String := match headOf ty .tnil with
@@ -3695,7 +3718,8 @@ def nestTuple : List Syntax → Syntax
 def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
   | .nil => .some .nil
   | .cons (.mk pats binds rhs) rest =>
-    let p := unparen (nthSyntax pats k);
+    let p0 := unparen (nthSyntax pats k);
+    let p := asInner p0;
     let tuple := strEq (kindOf p) "term.tuple";
     match Bool.or tuple (isVarPat p) with
     | .false => .none
@@ -3705,9 +3729,14 @@ def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
           | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
           | _ => .cons holeStx (.cons holeStx .nil)
         | .false => .cons holeStx (.cons holeStx .nil);
-      let binds' : List Bind := match Bool.and (Bool.not tuple) (Bool.not (strEq (identOf p) "_")) with
-        | .true => List.append binds (.cons (Bind.mk (identOf p) col) .nil)
-        | .false => binds;
+      -- (A18) an as-pattern binds its names to the whole pair; the pattern under it
+      -- (a variable, or another tuple) is handled as before
+      let binds0 : List Bind := List.append binds (asBinds (asNames p0) col);
+      let binds' : List Bind := match Bool.and (Bool.not tuple) (strEq (kindOf p) "term.ident") with
+        | .true => match strEq (identOf p) "_" with
+          | .true => binds0
+          | .false => List.append binds0 (.cons (Bind.mk (identOf p) col) .nil)
+        | .false => binds0;
       match tupleClauses col k rest with
       | .some r => .some (.cons (.mk (List.append (takeL k pats) (List.append two (dropL (k + 1) pats)))
           binds' rhs) r)
@@ -4627,6 +4656,14 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
               | e => e
             | .false => match strEq k "term.let" with
               | .true => letT gs es cx s .none
+              | .false => match strEq k "term.letUnit" with
+              | .true => inferLetUnit gs es cx s
+              | .false => match strEq k "term.letPair" with
+              | .true => inferLetPair gs es cx s
+              | .false => match strEq k "term.letTuple" with
+              | .true => inferLetPair gs es cx s
+              | .false => match strEq k "term.asPat" with
+              | .true => .err "an as-pattern `x@p` is only allowed in a pattern"
               | .false => match strEq k "term.field" with
               | .true => match inferT gs es cx (kid s 0) with
                 | .ok t ty es1 => match projT gs es1 cx t ty (match kid s 2 with
@@ -4939,6 +4976,57 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
       | .ok v _ es2 => body A Av v es2
       | e => e
     | e => e
+-- (A18) `let (x₁, …, xₙ) := e; b` as `match e with | (x₁, …, xₙ) => b`, the components
+-- nested as pairs (as the host's pattern reader nests them). The parser's `PD.ident`
+-- yields a bare `.ident` child, while a pattern needs a `term.ident` node (`identOf` and
+-- `isVarPat` read the latter), so each name is wrapped. A written quantity other than ω
+-- is refused: the host takes the pair apart with `split`, which this kernel has no rule
+-- for.
+def termIds : List Syntax → List Syntax
+  | .nil => .nil
+  | .cons x rest => .cons (mkNode "term.ident" (one x)) (termIds rest)
+def letPairAsMatch (s : Syntax) : Syntax :=
+  let pair := strEq (kindOf s) "term.letTuple";
+  let names : List Syntax := match pair with
+    | .true => .cons (mkNode "term.ident" (one (kid s 3)))
+        (.cons (mkNode "term.ident" (one (kid s 5))) (termIds (nonAtoms (kids (kid s 7)))))
+    | .false => .cons (mkNode "term.ident" (one (kid s 3)))
+        (one (mkNode "term.ident" (one (kid s 5))));
+  let scrut := match pair with
+    | .true => kid s 10
+    | .false => kid s 8;
+  let body := match pair with
+    | .true => kid s 12
+    | .false => kid s 10;
+  let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one (nestTuple names)))
+    (.cons (.atom "=>") (one body))));
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one scrut))
+    (.cons (.atom "with") (one (mkNull (one alt))))))
+def letPairT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match writtenQ (kid s 1) with
+  | .dflt => checkT gs es cx (letPairAsMatch s) ty
+  | .is .qw => checkT gs es cx (letPairAsMatch s) ty
+  | _ => .err (String.append "a `let (x, y)` at a quantity is not supported by this frontend (its kernel has no `split`); "
+      "take the pair apart with `match`")
+def inferLetPair (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match writtenQ (kid s 1) with
+  | .dflt => inferT gs es cx (letPairAsMatch s)
+  | .is .qw => inferT gs es cx (letPairAsMatch s)
+  | _ => .err (String.append "a `let (x, y)` at a quantity is not supported by this frontend (its kernel has no `split`); "
+      "take the pair apart with `match`")
+-- (A18) `let () := u; b` is the kernel's unit eliminator: `u` is consumed, then `b`
+def letUnitT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match checkT gs es cx (kid s 4) (.vunit (ln 1)) with
+  | .err m => .err m
+  | .ok u _ es1 => match checkT gs es1 cx (kid s 6) ty with
+    | .ok b _ es2 => .ok (.letUnit u b) ty es2
+    | e => e
+def inferLetUnit (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match checkT gs es cx (kid s 4) (.vunit (ln 1)) with
+  | .err m => .err m
+  | .ok u _ es1 => match inferT gs es1 cx (kid s 6) with
+    | .ok b ty es2 => .ok (.letUnit u b) ty es2
+    | e => e
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
@@ -4961,6 +5049,12 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
       | .true => checkLams gs es cx (binders (kids (kid s 1))) (binderWs (kids (kid s 1))) (kid s 3) ty
       | .false => match strEq k "term.let" with
         | .true => letT gs es cx s (.some ty)
+        | .false => match strEq k "term.letUnit" with
+        | .true => letUnitT gs es cx s ty
+        | .false => match strEq k "term.letPair" with
+        | .true => letPairT gs es cx s ty
+        | .false => match strEq k "term.letTuple" with
+        | .true => letPairT gs es cx s ty
         | .false => match strEq k "term.rfl" with
         | .true => checkRfl gs es cx (force es ty)
         | .false => match (match strEq k "term.app" with
@@ -5092,18 +5186,24 @@ def unfoldTy (gs : Globals) (d : Nat) (ty : Tm) : Tm := match headOf ty .tnil wi
 -- the first column with a constructor pattern
 def firstCtorCol : List Syntax → Nat → Option Nat
   | .nil, _ => .none
-  | .cons p rest, i => match isVarPat p with
+  | .cons p rest, i => match isVarPatA p with
     | .true => firstCtorCol rest (i + 1)
     | .false => .some i
 def varBinds : List Syntax → List Col → List Bind
-  | .cons p ps, .cons c cs => match strEq (identOf p) "_" with
-    | .true => varBinds ps cs
-    | .false => .cons (.mk (identOf p) c) (varBinds ps cs)
+  | .cons p ps, .cons c cs =>
+    let names := asNames p;
+    let core := asInner p;
+    let names' := match strEq (kindOf core) "term.ident" with
+      | .true => match strEq (identOf core) "_" with
+        | .true => names
+        | .false => List.append names (.cons (identOf core) .nil)
+      | .false => names;
+    List.append (asBinds names' c) (varBinds ps cs)
   | _, _ => .nil
 -- (13q) split column `k`: by a literal test (`litTest`), or by constructors
 def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
-  let p0 := patAt k cls;
+  let p0 := asInner (patAt k cls);
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
   match strEq (kindOf p0) "term.tuple" with
   | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
@@ -5154,13 +5254,13 @@ def splitTuple (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
 def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   match nthCol cols k with
-  | .mk L ty0 _ _ =>
+  | .mk L ty0 tyI q =>
     let d := Cx.lvl cx;
     let env := TCtx.env (Cx.c cx);
     let xA := shiftTm (d - L) 0 ty0;
     let xty := eval env xA;
     let tyStr := show (scopeNames (Cx.sc cx)) d xA;
-    let p0 := patAt k cls;
+    let p0 := asInner (patAt k cls);
     match Bool.and (Bool.not (isLitPat p0)) (plusBad p0) with
     | .true => .err "a pattern `p + k` needs a numeral `k` (as in `n + 2`)"
     | .false => match Bool.not (isLitPat p0) with
@@ -5191,7 +5291,7 @@ def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) 
                   | .some tt' =>
                     let B := quote (d + 1) (force es2 bty);
                     let cx2 := Cx.define cx1 "test✝" (eval (TCtx.env (Cx.c cx1)) tt') bty;
-                    match compileM gs mc es2 cx2 expected (colsInsert k (.mk (d + 1) B B .qw) cols) top ihLvls (litClauses p0 k cls) with
+                    match compileM gs mc es2 cx2 expected (colsInsert k (.mk (d + 1) B B .qw) cols) top ihLvls (litClauses (.mk L ty0 tyI q) p0 k cls) with
                     | .ok body es3 => .ok (.letE xA x (.letE B tt' body)) es3
                     | e => e
 def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
@@ -5542,7 +5642,7 @@ def scrutCols (params : List String) (pts ptsI : Tms) : List Syntax → ColsR
 -- the structural column: the leftmost one any clause has a constructor pattern in
 def anyCtorAt (k : Nat) : List Clause → Bool
   | .nil => .false
-  | .cons (.mk pats _ _) rest => Bool.or (Bool.not (isVarPat (nthSyntax pats k))) (anyCtorAt k rest)
+  | .cons (.mk pats _ _) rest => Bool.or (Bool.not (isVarPatA (nthSyntax pats k))) (anyCtorAt k rest)
 def structuralCol (cls : List Clause) : Nat → Nat → Option Nat
   | .zero, _ => .none
   | .succ m, k => match anyCtorAt k cls with
@@ -7627,6 +7727,15 @@ partial def expandDo (s : Syntax) : Syntax :=
       | .true => ioBind (mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "IO.pure"))) (one (mkNull (one (kid s 3))))))
           (identOf'' (kid s 1)) (expandDo (kid s 5))
       | .false => kid s 0
+-- (A17) `[a, b, c]` is `List.cons a (List.cons b (List.cons c List.nil))`: the host
+-- gets this from lib/Prelude.wiz's `term.listLit` macro, which this frontend does not
+-- run (the embedded prelude declares no such macro), so the node is rewritten here. The
+-- children are the `sepBy(term, ",")` list: terms with `,` atoms between them.
+partial def listLitStx (args : List Syntax) : Syntax := match args with
+  | .nil => mkNode "term.ident" (one (.ident "List.nil"))
+  | .cons (.atom _) rest => listLitStx rest
+  | .cons t rest => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "List.cons")))
+      (one (mkNull (.cons t (one (listLitStx rest))))))
 -- rewrite `s` while a rule matches it (a template may introduce a rule head); `fuel`
 -- only bounds a rewrite loop at one position, so restructuring a subtree never runs out
 partial def expandTop (notes : List Note) (fuel : Nat) (scope : Nat) (s : Syntax) : Syntax :=
@@ -7645,7 +7754,9 @@ partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax 
       let s' : Syntax := .node k2 (expandNotesArgs notes (scope + 1) args2);
       match strEq k2 "term.do" with
       | .true => expandDo (kid s' 1)
-      | .false => match strEq k2 "term.boolAnd" with
+      | .false => match strEq k2 "term.listLit" with
+        | .true => listLitStx (kids (kid s' 1))
+        | .false => match strEq k2 "term.boolAnd" with
         -- `a && b` and `a || b` are the short-circuiting `if`s the host's macros make
         | .true => iteMatch (kid s' 0) (kid s' 2) (boolVal "false")
         | .false => match strEq k2 "term.boolOr" with

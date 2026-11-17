@@ -145,6 +145,16 @@ def selfhostCompileRun (file expected : String) (flags : Array String := #[]) (p
     unless run.exitCode == 0 do throw (IO.userError s!"the program failed ({run.exitCode}): {run.stderr}")
     checkEq expected run.stdout
 
+/-- (A17/A18) A program compiled and run by the Lean host and by the self-hosted compiler:
+their outputs must agree (the expected output is the host's, not a literal). The C is
+built at `-O0`: these are output differentials, and the program (with the prelude) is
+large enough that `-O2` only slows them down. -/
+def selfhostAgreesHost (file : String) : IO Unit := do
+  let cell ← IO.mkRef (none : Option String)
+  ioRunWith file fun out => cell.set (some out)
+  let some expected ← cell.get | return
+  selfhostCompileRun file expected (opt := "-O0")
+
 /-- (15j) Reads of a wide structure's fields for the self-hosted backend: every field
 (`sumW`), the root consumed before the last read through a prefix (`early`), the root's
 cell reused by a rebuild while fields read through the prefix are live (`upd`), reads in
@@ -1578,6 +1588,96 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
         throw (IO.userError s!"{label}: exit {out.exitCode} after {t1 - t0} ms (124 is over {secs} s: the closed scrutinees were evaluated while compiling, #422): {out.stderr.take 2000}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+-- ------------------------------------------------------------------------------------
+-- (A17/A18) Surface syntax: list literals, `&&`/`||`, as-patterns, tuple patterns,
+-- `let (x, y)`, `let ()`. The host and the self-hosted frontend compile each program,
+-- and their outputs must agree.
+
+/-- (A17) List literals, including nested and empty lists and a literal pattern. -/
+def surfaceListProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def sum : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + sum xs\n" ++
+  "def sum3 : List (List Nat) → Nat\n  | .nil => 0\n  | .cons l ls => sum l + sum3 ls\n" ++
+  "def two : List Nat → Nat\n  | [x, y] => x * 10 + y\n  | _ => 0\n" ++
+  "def mapS (f : Nat → Nat) : List Nat → List Nat\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapS f xs)\n" ++
+  "def empty : List Nat := []\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (sum [1, 2, 3, 4]));\n" ++
+  "  IO.println (Nat.toString (List.length empty));\n" ++
+  "  IO.println (Nat.toString (sum3 [[1, 2], [], [3, 4, 5]]));\n" ++
+  "  IO.println (Nat.toString (two [6, 7]));\n" ++
+  "  IO.println (Nat.toString (two [8]));\n" ++
+  "  IO.println (Nat.toString (sum (mapS (fun x => x + 1) [1, 2, 3])))\n"
+
+/-- (A17) `&&`/`||` short-circuit and bind as on the host (`!` too). -/
+def surfaceBoolProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "partial def boom : Bool := boom\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (if Bool.true && Bool.false then \"t\" else \"f\");\n" ++
+  "  IO.println (if Bool.false && boom then \"boom\" else \"short\");\n" ++
+  "  IO.println (if Bool.true || boom then \"short\" else \"boom\");\n" ++
+  "  IO.println (if !Bool.false then \"not\" else \"no\");\n" ++
+  "  IO.println (if Bool.true || Bool.false && Bool.false then \"prec\" else \"bad\");\n" ++
+  "  IO.println (if (Bool.false && boom) || Bool.true then \"mixed\" else \"no\");\n" ++
+  "  IO.println (Nat.toString (if Bool.true && Bool.true then 1 else 0))\n"
+
+/-- (A18) As-patterns: over a constructor in equations and in a `match`, in a tuple, and
+`x@y` over a variable. -/
+def surfaceAsProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "inductive T where\n  | leaf (n : Nat)\n  | node (l : T) (r : T)\n" ++
+  "def size : T → Nat\n  | .leaf _ => 1\n" ++
+  "  | t@(.node l r) => size l + size r + (match t with\n" ++
+  "      | .node _ _ => 0\n      | .leaf _ => 0)\n" ++
+  "def headOr (d : Nat) : List Nat → Nat\n" ++
+  "  | xs@(.cons x _) => x + (match xs with\n      | .cons y _ => y\n      | .nil => 0)\n" ++
+  "  | .nil => d\n" ++
+  "def sumP (p : Nat × Nat) : Nat := match p with\n  | (x@a, y@b) => x + y + a + b\n" ++
+  "def dup (n : Nat) : Nat := match n with\n  | k@_ => k + k\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (size (.node (.leaf 1) (.node (.leaf 2) (.leaf 3)))));\n" ++
+  "  IO.println (Nat.toString (headOr 0 (.cons 5 .nil)));\n" ++
+  "  IO.println (Nat.toString (headOr 9 .nil));\n" ++
+  "  IO.println (Nat.toString (sumP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (dup 6))\n"
+
+/-- (A18) Tuple patterns: a pair, a right-nested triple, a tuple rebuilt, and a tuple in
+a list. -/
+def surfaceTupleProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\n" ++
+  "def three : Nat × (Nat × Nat) → Nat\n  | (a, (b, c)) => a * 100 + b * 10 + c\n" ++
+  "def swap : Nat × Nat → Nat × Nat\n  | (a, b) => (b, a)\n" ++
+  "def head : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, _) _ => a\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (fstP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (match swap (5, 6) with\n    | (a, b) => a + b));\n" ++
+  "  IO.println (Nat.toString (head (.cons (7, 8) .nil)))\n"
+
+/-- (A18) `let (x, y) := e; b`, including three components and a nested pair. -/
+def surfaceLetPairProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def addP (p : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  x + y\n" ++
+  "def three (p : Nat × (Nat × Nat)) : Nat :=\n  let (a, b, c) := p;\n  a * 100 + b * 10 + c\n" ++
+  "def nested (p q : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  let (u, v) := q;\n  (x + y) * 10 + (u + v)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (addP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (nested (10, 20) (1, 2)))\n"
+
+/-- (A18) `let () := u; b` (the kernel's unit eliminator). -/
+def surfaceLetUnitProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def use (u : Unit) : Nat :=\n  let () := u;\n  7\n" ++
+  "def twice (n : Nat) : Nat :=\n  let () := ();\n  n + n\n" ++
+  "def through (u : Unit) (n : Nat) : Nat :=\n  let () := u;\n  n * 3\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (use ()));\n" ++
+  "  IO.println (Nat.toString (twice 21));\n" ++
+  "  IO.println (Nat.toString (through () 5))\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -2787,6 +2887,19 @@ def selfHostGroup : Group where
     { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
         selfhostCompileRun ("import Prelude\npartial def boom : Bool := boom\ndef fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\ndef pairHead : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, b) _ => a\ndef main : IO Unit := do\n  IO.println (if Bool.true && Bool.false then \"and-t\" else \"and-f\");\n  IO.println (if Bool.false && boom then \"and-boom\" else \"and-short\");\n  IO.println (if Bool.true || boom then \"or-short\" else \"or-boom\");\n  IO.println (if !Bool.false then \"not-t\" else \"not-f\");\n  IO.println (if Bool.true || Bool.false && Bool.false then \"prec-ok\" else \"prec-bad\");\n  IO.println (Nat.toString (fstP (3, 4)));\n  IO.println (Nat.toString (pairHead (.cons (5, 6) .nil)))\n")
           "and-f\nand-short\nor-short\nnot-t\nprec-ok\n3\n5\n" },
+    -- (A17/A18) The host and the self-hosted compiler agree on the same program
+    { name := "A17: list literals (nested, empty, in a pattern) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceListProgram },
+    { name := "A17: `&&`/`||` short-circuit, bind as on the host and agree with it", run := fun _ =>
+        selfhostAgreesHost surfaceBoolProgram },
+    { name := "A18: as-patterns (in equations, nested, over a variable, in a tuple) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceAsProgram },
+    { name := "A18: tuple patterns (a pair, a nested triple, a tuple in a list) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceTupleProgram },
+    { name := "A18: `let (x, y)` (and three components, nested) agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetPairProgram },
+    { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetUnitProgram },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
