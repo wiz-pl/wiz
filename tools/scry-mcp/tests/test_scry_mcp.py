@@ -250,6 +250,65 @@ class ProjectTests(Base):
         self.assertEqual(self.call("scry_project", {"path": "src"})["error"]["kind"], "invalid_args")
         self.assertEqual(self.call("scry_project", {"path": "store.json"})["error"]["kind"], "invalid_args")
 
+    def test_forbidden_flags_are_refused_by_name(self) -> None:
+        """security-01: a read-only tool must not pass -B/-fplugin/@file to cc -E."""
+        cases = [
+            (["cc", "-Bbin", "a.c"], "-Bbin"),
+            (["cc", "@args.rsp", "a.c"], "@args.rsp"),
+            (["cc", "-fplugin=evil.so", "a.c"], "-fplugin"),
+            (["cc", "-fplugin-arg-x=y", "a.c"], "-fplugin"),
+            (["cc", "-specs=evil.specs", "a.c"], "-specs"),
+            (["cc", "-wrapper", "evil", "a.c"], "-wrapper"),
+            (["cc", "-Xclang", "-load", "evil.so", "a.c"], "-Xclang"),
+            (["cc", "-Wp,-Dfoo", "a.c"], "-Wp,"),
+        ]
+        for args, named in cases:
+            self.compdb([{"directory": str(self.ws / "src"), "file": "a.c", "arguments": args}])
+            out = self.call("scry_project", {"path": "src"})
+            kind = (out.get("error") or {}).get("kind")
+            self.assertEqual(kind, "invalid_args", out)
+            self.assertIn(named, out["error"]["message"], args)
+            self.assertIn("refusing", out["error"]["message"], args)
+        self.assertEqual(self.calls(), [])  # refused before spawning scry
+        self.compdb([{"directory": str(self.ws / "src"), "file": "a.c",
+                      "command": "cc -O2 -Wall -fPIC -I. -DX -std=c11 -c a.c -o a.o -MMD -MP"}])
+        self.assertTrue(self.call("scry_project", {"path": "src"})["ok"])
+
+
+class BoundedOutputTests(Base):
+    def test_a_flooding_child_is_killed_and_clipped(self) -> None:
+        """security-07: the server must not buffer a repo-chosen output size whole.
+
+        The child writes without end, slowly enough that the *old* code buffers it
+        until the call's timeout; the bounded reader must kill it at the byte cap and
+        still return a clipped, `truncated` field.
+        """
+        flood = self.scry.parent / "flood-scry"
+        flood.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "while True:\n"
+            "    sys.stdout.write('x' * 1000)\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.001)\n"
+        )
+        flood.chmod(0o755)
+        saved = getattr(scry_mcp, "MAX_OUTPUT", None)
+        if saved is not None:
+            scry_mcp.MAX_OUTPUT = 1_000_000
+        server = scry_mcp.Server(scry_mcp.Config(workspace=str(self.ws), scry=str(flood), timeout=3))
+        try:
+            out = server.call_tool("scry_version", {})
+        finally:
+            if saved is not None:
+                scry_mcp.MAX_OUTPUT = saved
+            server.close()
+        self.assertIsNotNone(out["exit"], out)
+        self.assertLess(out["exit"], 0, out)  # killed at the cap, not timed out
+        self.assertTrue(out["truncated"], out)
+        self.assertLessEqual(len(out["stdout"]), scry_mcp.MAX_TEXT)
+        self.assertIn("truncated:", out["stdout"])
+
 
 class StoreAndFindingsTests(Base):
     def test_query_explain_facts(self) -> None:

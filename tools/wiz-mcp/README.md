@@ -271,7 +271,10 @@ failure:
 * `stdout` and `stderr` are clipped at 64 KiB each, and a JSON `result` at
   64 KiB. `truncated: true` and an explicit `… [truncated: N characters
   omitted]` marker say so. A clipped `result` becomes
-  `{"_truncated": true, "bytes": N, "preview": "…"}`.
+  `{"_truncated": true, "bytes": N, "preview": "…"}`. The pipes are drained in
+  chunks, never buffered whole: past 8 MiB on either stream the child's process
+  group is killed, so a repository file that makes `wiz` print without bound
+  cannot OOM the server.
 * MCP `isError` is true exactly when `ok` is false. The text content and
   `structuredContent` carry the same object.
 * `error.kind` is one of `invalid_args`, `path_denied`, `not_enabled`,

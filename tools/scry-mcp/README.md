@@ -74,11 +74,19 @@ Every tool is annotated `readOnlyHint: true`, `destructiveHint: false` and
   `path_denied`.
 * **The compile database is checked first.** Before `scry_project` runs, each
   entry's `directory`, `file`, and each `-I`, `-isystem`, `-include`,
-  `-iquote` and `-idirafter` path must be inside those roots. System include
-  directories (`/usr/include`, `/usr/local/include`, `/nix/store`) are also
-  allowed. Scry itself keeps only `-I`/`-D`/`-U`/`-include`/`-isystem` from the
-  database and runs `cc -E -ffreestanding`, the host preprocessor. That is the
-  one host program the server can start besides `scry` and `git diff`.
+  `-iquote`, `-idirafter`, `-isysroot` and `--sysroot` path must be inside those
+  roots. System include directories (`/usr/include`, `/usr/local/include`,
+  `/nix/store`) are also allowed. Scry itself forwards only preprocessing flags
+  (`-I`, `-D`, `-U`, `-std=`, `-include`, `-isystem`, …) and drops the rest. A
+  flag that can execute code or choose a driver (`-B`, `-specs=`, `-wrapper`,
+  `-fplugin`, `@file`, `-Xclang`, `-Wp,`) refuses the database with the flag's
+  name, before `scry` is spawned; a normal `-O2 -Wall -fPIC -c` command still
+  runs. Scry runs `cc -E -ffreestanding`, the one host program the server can
+  start besides `scry` and `git diff`.
+* **Child output is bounded.** `stdout`/`stderr` are drained in chunks and only
+  the first 64 KiB of each is kept; past 8 MiB on either stream the child's
+  process group is killed, so a repository-chosen output size cannot OOM the
+  server.
 * **Outputs are confined.** Findings, SARIF results and findings-database
   records whose file is outside the roots are withheld: counted, never named.
   `show` of such a finding is `path_denied`.
