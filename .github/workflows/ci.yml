@@ -90,8 +90,10 @@ jobs:
           cat "$GITHUB_OUTPUT"
 
   # (seconds, no build) Documentation style: no authoring-environment paths, no
-  # agent roles and no status checkmarks (scripts/check-docs-style.py). Runs on
-  # every pull request too, including docs-only ones, which build and test skip.
+  # agent roles and no status checkmarks (scripts/check-docs-style.py), and every
+  # relative link and anchor in the docs resolves (scripts/check-doc-links.py;
+  # external links are reported but not fetched). Runs on every pull request too,
+  # including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
     if: github.event_name != 'schedule'
@@ -99,11 +101,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      - name: Check the docs, and the checker's fixtures
+      - name: Check the docs, and the checkers' fixtures
         shell: bash
         run: |
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
+          python3 scripts/check-doc-links.py --self-test
+          python3 scripts/check-doc-links.py --quiet
 
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the

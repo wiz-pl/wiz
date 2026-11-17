@@ -1,8 +1,9 @@
 #!/bin/sh
 # The checks CI runs first, in one command, before a commit or a push.
 #
-#   scripts/pre-commit.sh --fast      docs style, `wiz fmt` on changed files, the
-#                                     ledger fixtures, the skip lint and `.github/` YAML
+#   scripts/pre-commit.sh --fast      docs style and links, `wiz fmt` on changed
+#                                     files, the ledger fixtures, the skip lint and
+#                                     `.github/` YAML
 #   scripts/pre-commit.sh --full      the fast checks, then the trust ledger, the
 #                                     reproducibility corpus and the formatter's tests
 #   scripts/pre-commit.sh --staged    only the files in `git diff --cached` (the
@@ -137,6 +138,10 @@ changed_files() {
 
 check_docs_style() {
   python3 "$root/scripts/check-docs-style.py" --root "$root" --quiet
+}
+
+check_doc_links() {
+  python3 "$root/scripts/check-doc-links.py" --root "$root" --quiet
 }
 
 check_format() {
@@ -393,6 +398,15 @@ elif [ ! -f "$root/scripts/check-docs-style.py" ]; then
   skip_check "docs style" "scripts/check-docs-style.py is missing"
 else
   run_check "docs style" check_docs_style
+fi
+
+# docs links and anchors (no build, no network: Python 3 standard library only)
+if ! have python3; then
+  skip_check "docs links" "python3 not found"
+elif [ ! -f "$root/scripts/check-doc-links.py" ]; then
+  skip_check "docs links" "scripts/check-doc-links.py is missing"
+else
+  run_check "docs links" check_doc_links
 fi
 
 # wiz fmt --check, only the changed .wiz files (one file at a time)
