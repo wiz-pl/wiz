@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: `Kernel.wiz` has the host's number literals and registered `Nat` operations
+  (lane E-K, B13): `Tm.nlit`/`Tm.natFn`, `Val.vnat`/`Val.vnatfn`, exact `KNat` numbers
+  (24-bit limbs; not `rt.c`'s 63-bit words), the native rules for `succ`, `pred`, `add`,
+  `sub`, `mul`, `div`, `mod`, `beq` and `blt`, and literal decisions in `vEq`, conversion
+  and `ind`. As in the host after `kernel-vnatop-lazy`, an operation on a definition's
+  glued value stays glued (`whnf` computes it; `nf` still does), an inner operation is
+  computed and kept as its numeral, and `vEq` does not force an expansive
+  `Nat.pow 2 (Nat.pow 2 28)`. The frontend does not emit literals yet (its hook is
+  `natLitDigits`/`natRegistered`).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
