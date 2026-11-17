@@ -2517,7 +2517,7 @@ def selfHostGroup : Group where
         unless (mine err).isEmpty do
           throw (IO.userError s!"errors in input.wiz with --prelude-from-roots:\n{"\n".intercalate (mine err)}")
         unless (out.splitOn "info: two : Nat").length > 1 do
-          throw (IO.userError s!"`two` is missing from the --types output:\n{out.takeRight 1500}") },
+          throw (IO.userError s!"`two` is missing from the --types output:\n{(out.takeEnd 1500).toString}") },
     { name := "--prelude-from-roots: without roots the embedded prelude, as before; without the flag a root's Prelude.wiz is not read (21af)", run := fun _ => do
         let files := [("B.wiz", "import IO\nimport Std\ndef y : Nat := 1\n"),
                       ("input.wiz", "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n")]

@@ -119,22 +119,22 @@ def libPreludeGroup : Group where
     { name := "run: IO, numerals and the binop operators print as on the host", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
-        | some shOpts => withSelfhostCli fun exe =>
+        | some shOpts => withSelfhostCli fun exe => do
           libPreludeRun exe shOpts libPreludeHello "hello\n14\n4\n" },
     { name := "run: the same under reference counting (--rc)", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
-        | some shOpts => withSelfhostCli fun exe =>
+        | some shOpts => withSelfhostCli fun exe => do
           libPreludeRun exe shOpts libPreludeHello "hello\n14\n4\n" #["--rc"] },
     { name := "run: recursion, lists, strings and a native bit operation", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
-        | some shOpts => withSelfhostCli fun exe =>
+        | some shOpts => withSelfhostCli fun exe => do
           libPreludeRun exe shOpts libPreludeData "sum 5050\n6\n8\n" },
     { name := "run: IO.args (lib's IO.argsFrom over the natives)", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
-        | some shOpts => withSelfhostCli fun exe =>
+        | some shOpts => withSelfhostCli fun exe => do
           libPreludeRun exe shOpts libPreludeArgsProg "0\n" },
     { name := "run: Std's Str externs (the runtime's wiz_str_*)", run := fun _ => do
         match ← cliRunOptions with
