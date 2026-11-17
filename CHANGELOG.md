@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's Goals pane is served **in the page by default**
+  (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
+  so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
+  and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
+  still selects an external server and `?lsp=off` disables the pane.
 * tests: CI's wall time is its longest shard. `selfhost-libdiff` was one case of about
   82 min; it now checks files `--jobs` at a time inside that case, building the
   self-hosted compiler once and keeping the records in file order, with the workers
