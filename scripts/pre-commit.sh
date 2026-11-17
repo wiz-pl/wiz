@@ -434,6 +434,16 @@ else
   run_check "skip lint self-test" python3 "$root/scripts/ci.py" check-skips --self-test
 fi
 
+# check-repro's own rules, and its JSON reader, on synthetic input (no compiler needed)
+if ! have python3; then
+  skip_check "repro self-tests" "python3 not found"
+elif [ ! -f "$root/scripts/check-repro.sh" ] || [ ! -f "$root/scripts/check-repro-report.py" ]; then
+  skip_check "repro self-tests" "scripts/check-repro{,-report} is missing"
+else
+  run_check "repro self-tests" bash -c '"$1" --self-test && python3 "$2" --self-test' _ \
+    "$root/scripts/check-repro.sh" "$root/scripts/check-repro-report.py"
+fi
+
 # every .github/*.yml parses (PyYAML is a dev tool, not a hard dependency)
 if ! have python3; then
   skip_check "yaml (.github/)" "python3 not found"

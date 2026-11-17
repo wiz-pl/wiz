@@ -257,10 +257,21 @@ jobs:
       - name: Reproducibility (two absolute paths)
         # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
         # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
+        # The JSON is asserted, not discarded: a run-level skip is exit 2, and a skipped
+        # compiler comparison (this job does not pass --compiler) is a notice. The
+        # nightly repro workflow runs --compiler and requires it.
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: scripts/check-repro.sh --json
+        run: |
+          scripts/check-repro.sh --self-test
+          python3 scripts/check-repro-report.py --self-test
+          status=0
+          out="${RUNNER_TEMP:-/tmp}/repro.json"
+          scripts/check-repro.sh --json > "$out" || status=$?
+          cat "$out"
+          python3 scripts/check-repro-report.py "$out" || status=$?
+          exit $status
       - name: Restore the docs examples cache
         id: docs-cache
         uses: actions/cache/restore@v4

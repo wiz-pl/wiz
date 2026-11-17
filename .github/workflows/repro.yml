@@ -1,0 +1,131 @@
+# The compiler's own reproducibility, nightly on the self-hosted runner.
+#
+# The pull-request corpus gate (`ci.yml`, "Reproducibility (two absolute paths)") runs
+# `scripts/check-repro.sh --json` but does not pass `--compiler`: that is two full Lake
+# builds of wiz and grail under different absolute paths. So in each run the compiler
+# comparison was recorded as `"compiler": {"status": "skip"}` and nothing asserted it.
+# This workflow runs the `--compiler` path on `master`, reads the JSON with
+# `scripts/check-repro-report.py --require-compiler` (a skipped or failed compiler
+# comparison is a failure), and is opt-in on the runner named by the repository variable
+# WIZ_RUNNER_HEAVY (docs/ci-runner.md), like `fixpoint.yml`: unset, the preflight says so
+# and the job is skipped cleanly. It is not part of `CI result`.
+name: repro
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # nightly, after bench's 04:17 slot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repro
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  # two sequential `lake build wiz grail` runs; the reservation leaves room for the
+  # larger of the two (docs/ci-runner.md)
+  WIZ_REPRO_MEM_GIB: "5"
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Is there a heavy runner?
+        id: gate
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ vars.WIZ_RUNNER_HEAVY }}
+        run: |
+          if [ -n "$RUNNER_LABEL" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self-hosted runner: $RUNNER_LABEL (the compiler comparison declares ${WIZ_REPRO_MEM_GIB} GiB)"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=repro skipped::WIZ_RUNNER_HEAVY is unset. The compiler comparison needs a self-hosted runner with ${WIZ_REPRO_MEM_GIB} GiB; set the repository variable to run it (docs/ci-runner.md)."
+          fi
+
+  compiler:
+    name: compiler under two paths (self-hosted, 5 GiB)
+    needs: preflight
+    if: needs.preflight.outputs.run == 'true'
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: true
+      - name: Check the memory requirement
+        shell: bash
+        run: |
+          need_kib=$((WIZ_REPRO_MEM_GIB * 1024 * 1024))
+          avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          echo "MemAvailable: $((avail_kib / 1024)) MiB; the compiler comparison declares ${WIZ_REPRO_MEM_GIB} GiB"
+          if [ "$avail_kib" -lt "$need_kib" ]; then
+            echo "::error title=not enough memory::the compiler comparison needs ${WIZ_REPRO_MEM_GIB} GiB and this runner has $((avail_kib / 1024)) MiB available"
+            exit 1
+          fi
+      - name: The rules themselves
+        # no compiler needed: a skip is not a pass and two empty trees are not equal,
+        # then the JSON reader on synthetic results
+        run: |
+          scripts/check-repro.sh --self-test
+          python3 scripts/check-repro-report.py --self-test
+      - name: nix build wiz (the corpus compiler)
+        id: nix
+        shell: bash
+        run: |
+          # The corpus uses the store's wiz and grail; --compiler then builds the
+          # compiler twice from source under two absolute roots.
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          "$wiz/bin/wiz" --version
+      - name: The corpus and the compiler under two absolute paths
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
+        run: |
+          status=0
+          out="${RUNNER_TEMP:-/tmp}/repro.json"
+          scripts/check-repro.sh --json --compiler > "$out" || status=$?
+          cat "$out"
+          # the assertion CI never made: the compiler comparison must have run, not skipped
+          python3 scripts/check-repro-report.py --require-compiler "$out" || status=$?
+          exit $status
+      - name: Keep the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-compiler
+          path: ${{ runner.temp }}/repro.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          out="${RUNNER_TEMP:-/tmp}/repro.json"
+          {
+            echo "### Compiler reproducibility (two absolute paths, ${WIZ_REPRO_MEM_GIB} GiB)"
+            echo
+            if [ -f "$out" ]; then
+              echo '```json'
+              cat "$out"
+              echo '```'
+            else
+              echo "(no repro.json)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

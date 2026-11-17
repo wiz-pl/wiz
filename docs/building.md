@@ -398,6 +398,8 @@ scripts/check-repro.sh --json          # one JSON object on stdout
 scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
 scripts/check-repro.sh --compiler-a A --compiler-b B
 scripts/check-repro.sh --self-test     # the skip and empty-tree rules (no compiler)
+python3 scripts/check-repro-report.py [--require-compiler] FILE
+                                       # assert a --json result (self-test also)
 ```
 
 A skip is not a pass: when `wiz` is not built, `grail` is missing or `WIZ_LLC` is not
@@ -409,6 +411,14 @@ keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `H
 different compiler input (and a different `RUNPATH` in the executable), not a path
 variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
 source path in them, so they are expected to differ and are skipped by default.
+
+CI reads the JSON instead of discarding it: `ci.yml`'s corpus step runs
+`check-repro.sh --json` and passes the result to `scripts/check-repro-report.py`, which
+fails on a run-level skip, an empty check list or any diff/error, and annotates a
+skipped compiler comparison as a notice. That PR job does not pass `--compiler` (two
+full Lake builds); the nightly `repro.yml` workflow does, on the self-hosted runner, and
+runs the reader with `--require-compiler`, so `"compiler": {"status": "skip"}` is a
+failure there rather than an invisible pass.
 
 The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
 directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
@@ -732,9 +742,11 @@ the elan toolchain, so the setup action keeps the elan cache for those
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
-    `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
-    for and an owner, and may name the one `case` it excuses; the self-host parity
-    entries do, with their `parity` code);
+    `.github/skip-allowlist.json`. Each entry names exactly one `case` (there is no
+    whole-group entry), the reason it may skip for, an owner, and an `expires` date
+    (`YYYY-MM-DD`); the case matches exactly, the reason matches the start of the
+    skip's reason, and an entry past its date is an error until it is renewed with a new
+    reason. The self-host parity entries also carry their `parity` code;
   * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
     nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
@@ -742,15 +754,18 @@ the elan toolchain, so the setup action keeps the elan cache for those
     the allow-list instead;
   * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
     of the group's cases in every shard, so moving cases between shards (a refreshed
-    `.github/test-timings.json`) cannot change the verdict.
+    `.github/test-timings.json`) cannot change the verdict;
+  * the logs parse no records at all: an empty or unreadable log proves nothing, so
+    "No skips: all 0 cases ran" is not a pass.
 
   Explained skips are reported in the summary (with the reason and the allow-list owner)
   and give a warning annotation, never a failure. Skips that are not whole-group and stay
   under the ratio also warn, so a few skipped cases are visible without blocking. The
   step first runs `scripts/ci.py check-skips --self-test`, which checks the rule on
-  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
-  without running the suite. Adding an allow-list entry needs a real reason: prefer
-  putting the tool in the dev shell.
+  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool,
+  an expired or case-less entry, an empty record set) without running the suite. Adding
+  an allow-list entry needs a real reason and an expiry date, and the entry names the one
+  case it excuses: prefer putting the tool in the dev shell.
 * **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
   test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
   `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
@@ -790,6 +805,13 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
+* **The compiler's own reproducibility** (`.github/workflows/repro.yml`) runs
+  `scripts/check-repro.sh --compiler` nightly on `master` on the same self-hosted runner
+  (a clean skip when `WIZ_RUNNER_HEAVY` is unset; 5 GiB free). It builds wiz and grail
+  under two absolute roots and asserts the JSON with
+  `scripts/check-repro-report.py --require-compiler`, so a skipped compiler comparison is
+  a failure; the pull-request corpus step in `ci.yml` runs only the corpus and annotates
+  the skip as a notice. See [Reproducible builds](#reproducible-builds).
 * **The nightly benchmarks** (`.github/workflows/bench.yml`) also run only on
   `master` and from "Run workflow", on the `WIZ_RUNNER_HEAVY` runner (a clean skip
   when it is unset). They use the Nix-built `wiz`/`grail` and need 6 GiB free (the fixpoint's
@@ -920,7 +942,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, the check-repro and check-repro-report self-tests, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with
