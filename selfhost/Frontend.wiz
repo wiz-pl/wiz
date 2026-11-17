@@ -6725,18 +6725,20 @@ partial def erasableTy (ty : Val) : Bool := match whnf ty with
   | .vsizeLt _ => .true
   | .vulift _ _ A => erasableTy A
   | t => isProp empty t
-def dummyEnvN : Nat → Env
+-- a dummy value for each of the `d` binders a field's type is over: the sorts are what
+-- a proof test reads (`isProp`), and a stuck value of the right shape does for that
+def dummyEnv : Nat → Env
   | .zero => .nil
-  | .succ k => .cons .vtt (dummyEnvN k)
-def qAt : List Q → Nat → Q
+  | .succ k => .cons .vtt (dummyEnv k)
+def nthQ : List Q → Nat → Q
   | .nil, _ => .qw
   | .cons q _, .zero => q
-  | .cons _ rest, .succ k => qAt rest k
+  | .cons _ rest, .succ k => nthQ rest k
 -- the index of a constructor's one live field (kept at run time), if exactly one
 def liveField : Nat → Nat → List Q → List CField → Option Nat
   | _, _, _, .nil => .none
   | i, np, qs, .cons (.mk _ _ ty _) fs =>
-    match Bool.or (qEq (qAt qs i) .qz) (erasableTy (eval (dummyEnvN (np + i)) ty)) with
+    match Bool.or (qEq (nthQ qs i) .qz) (erasableTy (eval (dummyEnv (np + i)) ty)) with
     | .true => liveField (i + 1) np qs fs
     | .false => match liveField (i + 1) np qs fs with
       | .some _ => .none
@@ -8389,17 +8391,8 @@ def alt1 (p : Syntax) (rhs : Syntax) : Syntax :=
   mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one p)) (.cons (.atom "=>") (one rhs))))
 def alt2 (p q : Syntax) (rhs : Syntax) : Syntax :=
   mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (.cons p (one q))) (.cons (.atom "=>") (one rhs))))
--- a dummy value for each of the `d` binders a field's type is over: the sorts are what
--- a proof test reads (`isProp`), and a stuck value of the right shape does for that
-def dummyEnv : Nat → Env
-  | .zero => .nil
-  | .succ k => .cons .vtt (dummyEnv k)
 def fieldIsProof (np i : Nat) (f : CField) : Bool := match f with
   | .mk _ _ ty _ => isProp empty (eval (dummyEnv (np + i)) ty)
-def nthQ : List Q → Nat → Q
-  | .nil, _ => .qw
-  | .cons q _, .zero => q
-  | .cons _ rest, .succ k => nthQ rest k
 def nthBool : List Bool → Nat → Bool
   | .nil, _ => .false
   | .cons b _, .zero => b
