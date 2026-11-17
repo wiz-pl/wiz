@@ -172,17 +172,37 @@ def part_cost(items, builds):
     return sum(it[3] for it in items) + sum(builds.get(r, 0.0) for r in uses)
 
 
+# The programs whose users `partition` may split across the parts of a shard. A shard
+# part runs on its own runner, so a program one part builds is not there in another; the
+# compiler's users are the heavy self-hosted pipeline cases, and keeping them in one
+# cluster makes one part of `selfhost` carry all of them (3,141 s with the honest `uses`
+# annotations, 6.6x the median). A split shard may therefore build the compiler in
+# several parts (`balance` reports it);
+# the self-hosted checker stays one cluster.
+SPLIT_PROGRAMS = ("compiler",)
+
+
 def partition(items, n, builds):
     """Split the cases into n parts with the smallest longest part (estimated). The
-    cases that use the same shared programs (the self-hosted checker or compiler: the
-    first case that needs one builds it) stay together, so each program is built by one
-    part only; the other cases fill the parts up. Greedy, longest first, then single
-    moves while they help; deterministic."""
+    cases that use the same shared programs (the self-hosted checker: the first case
+    that needs it builds it) stay together, so each program is built by one part only; a
+    program of `SPLIT_PROGRAMS` (the compiler) is the exception: each of its users is a
+    unit of its own, so several parts may build it. The other cases fill the parts up.
+    Greedy, longest first, then single moves while they help; deterministic."""
     clusters = {}
     for it in items:
         clusters.setdefault(it[4], []).append(it)
-    # the units to place: a cluster per set of programs, and each remaining case
-    units = [c for uses, c in clusters.items() if uses] + [[it] for it in clusters.get((), [])]
+    # the units to place: a cluster per set of programs (or each user of a splittable
+    # program), and each remaining case
+    units = []
+    for uses, c in clusters.items():
+        if not uses:
+            continue
+        if any(r in SPLIT_PROGRAMS for r in uses):
+            units += [[it] for it in c]
+        else:
+            units.append(c)
+    units += [[it] for it in clusters.get((), [])]
     units.sort(key=lambda u: (-part_cost(u, builds), u[0][0], u[0][1]))
     parts = [[] for _ in range(n)]
     cost = lambda us: part_cost([it for u in us for it in u], builds)

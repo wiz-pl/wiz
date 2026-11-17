@@ -1,14 +1,20 @@
 [
-  {"name": "selfhost", "split": 8, "heavy": true,
+  {"name": "selfhost", "split": 7, "heavy": true,
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "lib/Sys.wiz", "lib/Text.wiz",
+              "lib/Deriving.wiz", "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
+   "select": [
+    "=selfhost",
+    "=selfhost-macro"
+  ]},
+  {"name": "kernels", "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "lib/Sys.wiz", "lib/Text.wiz",
               "lib/Deriving.wiz", "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
-    "=false-fuzz",
-    "=selfhost",
     "=audit-kernels",
-    "=selfhost-macro"
+    "=false-fuzz"
   ]},
   {"name": "selfhost-parse-diff", "heavy": true,
    "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
