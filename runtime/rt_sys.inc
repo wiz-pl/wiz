@@ -359,9 +359,9 @@ static char **wiz_sys_child_env(wiz_val changes, int clear) {
   return env;
 }
 static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
-                              const char *cwd, char **envp, uint64_t group);
+                              const char *cwd, char **envp, uint64_t group, int cgfd);
 WIZ_API void *wiz_sys_spawn(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err) {
-  return wiz_sys_spawn_in(cmd, args, in, out, err, "", NULL, 0);
+  return wiz_sys_spawn_in(cmd, args, in, out, err, "", NULL, 0, -1);
 }
 /* (sys-bytes) the same in directory `cwd` (unless ""), with the environment changed
    (`wiz_sys_child_env`), and `group` 0 this program's process group, 1 a new process
@@ -369,7 +369,7 @@ WIZ_API void *wiz_sys_spawn(const char *cmd, wiz_val args, uint64_t in, uint64_t
 WIZ_API void *wiz_sys_spawn_with(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
                                  const char *cwd, wiz_val env, int clear, uint64_t group) {
   char **envp = wiz_sys_child_env(env, clear);
-  void *c = wiz_sys_spawn_in(cmd, args, in, out, err, cwd, envp, group);
+  void *c = wiz_sys_spawn_in(cmd, args, in, out, err, cwd, envp, group, -1);
   wiz_sys_free_strings(envp);
   return c;
 }
@@ -382,12 +382,14 @@ WIZ_API void *wiz_sys_spawn_with(const char *cmd, wiz_val args, uint64_t in, uin
 #define WIZ_SPAWN_ADDCHDIR 1
 #endif
 #endif
-#ifndef WIZ_SPAWN_ADDCHDIR
 /* fork, set up the child as posix_spawn would (signals, group, streams, directory), and
    exec `cmd`, searched in this program's PATH as posix_spawnp does. 0 or the errno of
-   the step that failed (the child reports it through a close-on-exec pipe). */
+   the step that failed (the child reports it through a close-on-exec pipe).
+   (TR2) `cgfd`, unless -1, is a cgroup's `cgroup.procs` opened for writing: the child
+   moves itself into that cgroup (writing "0") before it execs, so everything it starts
+   is inside. Used without WIZ_SPAWN_ADDCHDIR for a directory, and for a cgroup always. */
 static int wiz_sys_fork_spawn(pid_t *pid, const char *cmd, char **argv, char **envp, const uint64_t *modes,
-                              int pipes[3][2], const char *cwd, uint64_t group) {
+                              int pipes[3][2], const char *cwd, uint64_t group, int cgfd) {
   /* everything the child needs is computed here: it must not allocate */
   const char *path = getenv("PATH");
   if (!path) path = "/bin:/usr/bin";
@@ -417,7 +419,8 @@ static int wiz_sys_fork_spawn(pid_t *pid, const char *cmd, char **argv, char **e
         else if (fd != i) { if (dup2(fd, i) < 0) e = errno; close(fd); }
       }
     }
-    if (!e && chdir(cwd) < 0) e = errno;
+    if (!e && cgfd >= 0 && write(cgfd, "0", 1) < 0) e = errno;
+    if (!e && cwd[0] && chdir(cwd) < 0) e = errno;
     if (!e) {
       sigprocmask(SIG_SETMASK, &none, NULL);
       if (slash) { execve(cmd, argv, envp); e = errno; }
@@ -460,9 +463,8 @@ static int wiz_sys_fork_spawn(pid_t *pid, const char *cmd, char **argv, char **e
   close(rep[0]);
   return r;
 }
-#endif
 static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
-                              const char *cwd, char **envp, uint64_t group) {
+                              const char *cwd, char **envp, uint64_t group, int cgfd) {
   static int sigpipe_ignored = 0;
   if (!sigpipe_ignored) { signal(SIGPIPE, SIG_IGN); sigpipe_ignored = 1; }
   char **argv = wiz_sys_strings(args, cmd);
@@ -482,15 +484,18 @@ static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64
     }
   }
   pid_t pid = 0;
+  /* posix_spawn cannot enter a cgroup (before clone3), and without addchdir it cannot
+     change directory: those spawns fork */
 #ifdef WIZ_SPAWN_ADDCHDIR
-  if (r == 0 && cwd[0]) r = posix_spawn_file_actions_addchdir_np(&fa, cwd);
+  int forked = cgfd >= 0;
+  if (r == 0 && cwd[0] && !forked) r = posix_spawn_file_actions_addchdir_np(&fa, cwd);
 #else
-  if (r == 0 && cwd[0]) {
-    fflush(stdout); fflush(stderr);
-    r = wiz_sys_fork_spawn(&pid, cmd, argv, envp ? envp : environ, modes, pipes, cwd, group);
-  } else
+  int forked = cgfd >= 0 || cwd[0];
 #endif
-  if (r == 0) {
+  if (r == 0 && forked) {
+    fflush(stdout); fflush(stderr);
+    r = wiz_sys_fork_spawn(&pid, cmd, argv, envp ? envp : environ, modes, pipes, cwd, group, cgfd);
+  } else if (r == 0) {
     fflush(stdout); fflush(stderr);
     /* the child gets SIGPIPE back (we ignore it), and an empty signal mask */
     posix_spawnattr_t at;
@@ -1015,3 +1020,247 @@ static void wiz_print(wiz_val v) {
 
 /* WIZ_SET as a function, for the LLVM backend */
 WIZ_API void wiz_set(wiz_val o, uint32_t i, wiz_val v) { WIZ_SET(o, i, v); }
+
+/* ---- (TR2) natives for the test runner (lib/TestRun, docs/stages/33-test-runner.md):
+   spawning into a cgroup, rusage, hashing a file, and interrupts as a descriptor ---- */
+
+#include <sys/resource.h>
+
+/* `wiz_sys_spawn_with` with the child placed in the cgroup v2 directory `cgroup` before
+   it execs (it writes "0" to `cgroup/cgroup.procs`, which needs write access there: a
+   delegated scope). NULL with the errno of opening that file or of the spawn. */
+WIZ_API void *wiz_sys_spawn_cgroup(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
+                                   const char *cwd, wiz_val env, int clear, uint64_t group, const char *cgroup) {
+  size_t n = strlen(cgroup);
+  char *procs = (char *)malloc(n + sizeof "/cgroup.procs");
+  memcpy(procs, cgroup, n);
+  memcpy(procs + n, "/cgroup.procs", sizeof "/cgroup.procs");
+  int cgfd = open(procs, O_WRONLY | O_CLOEXEC);
+  int oe = errno;
+  free(procs);
+  char **envp = wiz_sys_child_env(env, clear);
+  void *c = NULL;
+  if (cgfd < 0) {
+    wiz_sys_free_strings(wiz_sys_strings(args, cmd)); /* consumes the list, as a spawn does */
+    wiz_sys_err = oe;
+  } else {
+    c = wiz_sys_spawn_in(cmd, args, in, out, err, cwd, envp, group, cgfd);
+    close(cgfd);
+  }
+  wiz_sys_free_strings(envp);
+  return c;
+}
+
+/* wait4: block (1) or poll (0). [status, peak RSS KiB, user µs, system µs] with the
+   status as `wiz_sys_child_wait` gives it; the empty list while it runs (poll) or on an
+   error (then the errno; ECHILD if it was already reaped by another wait, whose rusage
+   is gone: use this instead of `Child.wait`, not after it). */
+WIZ_API wiz_val wiz_sys_child_wait_rusage(void *p, int block) {
+  wiz_sys_child *c = (wiz_sys_child *)p;
+  if (c->waited) { wiz_sys_err = ECHILD; return WIZ_BOX(0); }
+  struct rusage ru;
+  int st;
+  pid_t r;
+  while ((r = wait4(c->pid, &st, block ? 0 : WNOHANG, &ru)) < 0 && errno == EINTR) {}
+  if (r < 0) { wiz_sys_err = errno; return WIZ_BOX(0); }
+  wiz_sys_err = 0;
+  if (r == 0) return WIZ_BOX(0);
+  c->waited = 1;
+  c->status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 256 + WTERMSIG(st) : 512;
+#ifdef __APPLE__
+  uint64_t rss = (uint64_t)ru.ru_maxrss / 1024; /* bytes there, KiB on Linux */
+#else
+  uint64_t rss = (uint64_t)ru.ru_maxrss;
+#endif
+  uint64_t fs[4] = {(uint64_t)c->status, rss,
+                    (uint64_t)ru.ru_utime.tv_sec * 1000000u + (uint64_t)ru.ru_utime.tv_usec,
+                    (uint64_t)ru.ru_stime.tv_sec * 1000000u + (uint64_t)ru.ru_stime.tv_usec};
+  wiz_val l = WIZ_BOX(0);
+  for (int i = 3; i >= 0; i--) l = wiz_sys_cons(wiz_out_nat(fs[i]), l);
+  return l;
+}
+
+/* BLAKE3 (unkeyed hash, 32-byte output), portable and single-threaded: the reference
+   implementation's structure (chunk state, chaining-value stack, root output). */
+static const uint32_t wiz_b3_iv[8] = {0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+                                      0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u};
+static const uint8_t wiz_b3_perm[16] = {2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8};
+enum { WIZ_B3_CHUNK_START = 1, WIZ_B3_CHUNK_END = 2, WIZ_B3_PARENT = 4, WIZ_B3_ROOT = 8 };
+static uint32_t wiz_b3_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static void wiz_b3_g(uint32_t *s, int a, int b, int c, int d, uint32_t mx, uint32_t my) {
+  s[a] = s[a] + s[b] + mx; s[d] = wiz_b3_rotr(s[d] ^ s[a], 16);
+  s[c] = s[c] + s[d];      s[b] = wiz_b3_rotr(s[b] ^ s[c], 12);
+  s[a] = s[a] + s[b] + my; s[d] = wiz_b3_rotr(s[d] ^ s[a], 8);
+  s[c] = s[c] + s[d];      s[b] = wiz_b3_rotr(s[b] ^ s[c], 7);
+}
+/* the compression function: the full 16-word state */
+static void wiz_b3_compress(const uint32_t cv[8], const uint32_t block[16], uint64_t counter,
+                            uint32_t len, uint32_t flags, uint32_t out[16]) {
+  uint32_t s[16], m[16], t[16];
+  for (int i = 0; i < 8; i++) s[i] = cv[i];
+  for (int i = 0; i < 4; i++) s[8 + i] = wiz_b3_iv[i];
+  s[12] = (uint32_t)counter; s[13] = (uint32_t)(counter >> 32); s[14] = len; s[15] = flags;
+  for (int i = 0; i < 16; i++) m[i] = block[i];
+  for (int r = 0; r < 7; r++) {
+    wiz_b3_g(s, 0, 4, 8, 12, m[0], m[1]);   wiz_b3_g(s, 1, 5, 9, 13, m[2], m[3]);
+    wiz_b3_g(s, 2, 6, 10, 14, m[4], m[5]);  wiz_b3_g(s, 3, 7, 11, 15, m[6], m[7]);
+    wiz_b3_g(s, 0, 5, 10, 15, m[8], m[9]);  wiz_b3_g(s, 1, 6, 11, 12, m[10], m[11]);
+    wiz_b3_g(s, 2, 7, 8, 13, m[12], m[13]); wiz_b3_g(s, 3, 4, 9, 14, m[14], m[15]);
+    if (r < 6) { for (int i = 0; i < 16; i++) t[i] = m[wiz_b3_perm[i]]; for (int i = 0; i < 16; i++) m[i] = t[i]; }
+  }
+  for (int i = 0; i < 8; i++) { out[i] = s[i] ^ s[i + 8]; out[i + 8] = s[i + 8] ^ cv[i]; }
+}
+static void wiz_b3_words(const uint8_t *b, uint32_t w[16]) {
+  for (int i = 0; i < 16; i++)
+    w[i] = (uint32_t)b[4 * i] | (uint32_t)b[4 * i + 1] << 8 | (uint32_t)b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
+}
+/* what is left to compress last: a chunk's final block or a parent node */
+typedef struct { uint32_t cv[8], block[16]; uint64_t counter; uint32_t len, flags; } wiz_b3_output;
+static void wiz_b3_output_cv(const wiz_b3_output *o, uint32_t cv[8]) {
+  uint32_t out[16];
+  wiz_b3_compress(o->cv, o->block, o->counter, o->len, o->flags, out);
+  for (int i = 0; i < 8; i++) cv[i] = out[i];
+}
+typedef struct {
+  uint32_t cv[8];
+  uint64_t chunk;          /* this chunk's index */
+  uint8_t buf[64];
+  uint32_t buf_len, blocks; /* bytes in buf; blocks of this chunk compressed */
+  uint32_t stack[54][8];   /* chaining values of complete subtrees (2^54 chunks at most) */
+  uint32_t depth;
+} wiz_b3;
+static void wiz_b3_init(wiz_b3 *h) {
+  memset(h, 0, sizeof *h);
+  memcpy(h->cv, wiz_b3_iv, sizeof h->cv);
+}
+static wiz_b3_output wiz_b3_chunk_output(const wiz_b3 *h) {
+  wiz_b3_output o;
+  uint8_t last[64] = {0};
+  memcpy(last, h->buf, h->buf_len);
+  memcpy(o.cv, h->cv, sizeof o.cv);
+  wiz_b3_words(last, o.block);
+  o.counter = h->chunk; o.len = h->buf_len;
+  o.flags = WIZ_B3_CHUNK_END | (h->blocks == 0 ? WIZ_B3_CHUNK_START : 0);
+  return o;
+}
+static wiz_b3_output wiz_b3_parent(const uint32_t l[8], const uint32_t r[8]) {
+  wiz_b3_output o;
+  memcpy(o.cv, wiz_b3_iv, sizeof o.cv);
+  for (int i = 0; i < 8; i++) { o.block[i] = l[i]; o.block[8 + i] = r[i]; }
+  o.counter = 0; o.len = 64; o.flags = WIZ_B3_PARENT;
+  return o;
+}
+/* a finished chunk's chaining value joins the stack, merging complete subtrees */
+static void wiz_b3_push(wiz_b3 *h, uint32_t cv[8], uint64_t total) {
+  while ((total & 1) == 0) {
+    wiz_b3_output p = wiz_b3_parent(h->stack[--h->depth], cv);
+    wiz_b3_output_cv(&p, cv);
+    total >>= 1;
+  }
+  memcpy(h->stack[h->depth++], cv, 8 * sizeof(uint32_t));
+}
+static void wiz_b3_update(wiz_b3 *h, const uint8_t *in, size_t n) {
+  while (n > 0) {
+    /* a full chunk with more input coming: finish it */
+    if (h->blocks == 15 && h->buf_len == 64) {
+      uint32_t cv[8];
+      wiz_b3_output o = wiz_b3_chunk_output(h);
+      wiz_b3_output_cv(&o, cv);
+      uint64_t total = h->chunk + 1;
+      wiz_b3_push(h, cv, total);
+      memcpy(h->cv, wiz_b3_iv, sizeof h->cv);
+      h->chunk = total; h->buf_len = 0; h->blocks = 0;
+    }
+    /* a full block with more input coming (not the chunk's last): compress it */
+    if (h->buf_len == 64) {
+      uint32_t w[16], out[16];
+      wiz_b3_words(h->buf, w);
+      wiz_b3_compress(h->cv, w, h->chunk, 64, h->blocks == 0 ? WIZ_B3_CHUNK_START : 0, out);
+      for (int i = 0; i < 8; i++) h->cv[i] = out[i];
+      h->blocks++; h->buf_len = 0;
+    }
+    size_t take = 64 - h->buf_len;
+    if (take > n) take = n;
+    memcpy(h->buf + h->buf_len, in, take);
+    h->buf_len += (uint32_t)take; in += take; n -= take;
+  }
+}
+static void wiz_b3_final(const wiz_b3 *h, uint8_t out[32]) {
+  wiz_b3_output o = wiz_b3_chunk_output(h);
+  for (uint32_t k = h->depth; k > 0; k--) {
+    uint32_t cv[8];
+    wiz_b3_output_cv(&o, cv);
+    o = wiz_b3_parent(h->stack[k - 1], cv);
+  }
+  uint32_t w[16];
+  wiz_b3_compress(o.cv, o.block, 0, o.len, o.flags | WIZ_B3_ROOT, w);
+  for (int i = 0; i < 8; i++)
+    for (int j = 0; j < 4; j++) out[4 * i + j] = (uint8_t)(w[i] >> (8 * j));
+}
+
+/* the BLAKE3 hash of a file's contents, 64 lower-case hex digits (the test runner's
+   cache keys); "" with the errno on an error */
+WIZ_API const char *wiz_sys_hash_file(const char *path) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) { wiz_sys_err = errno; return wiz_sys_keep(NULL); }
+  size_t cap = 1 << 16;
+  uint8_t *buf = (uint8_t *)malloc(cap);
+  wiz_b3 *h = (wiz_b3 *)malloc(sizeof *h);
+  wiz_b3_init(h);
+  int e = 0;
+  for (;;) {
+    ssize_t n = read(fd, buf, cap);
+    if (n < 0) { if (errno == EINTR) continue; e = errno; break; }
+    if (n == 0) break;
+    wiz_b3_update(h, buf, (size_t)n);
+  }
+  close(fd);
+  free(buf);
+  if (e) { free(h); wiz_sys_err = e; return wiz_sys_keep(NULL); }
+  uint8_t d[32];
+  wiz_b3_final(h, d);
+  free(h);
+  static const char hex[] = "0123456789abcdef";
+  char *s = (char *)malloc(65);
+  for (int i = 0; i < 32; i++) { s[2 * i] = hex[d[i] >> 4]; s[2 * i + 1] = hex[d[i] & 15]; }
+  s[64] = 0;
+  wiz_sys_err = 0;
+  return wiz_sys_keep(s);
+}
+
+/* SIGINT and SIGTERM as a descriptor: the first call installs handlers that write the
+   signal's number (one byte) to a pipe, and every call returns its read end (one pipe
+   per program, never closed: the handle does not own it). A driver polls it with its
+   children's pipes (`Fd.poll`) and stops cleanly instead of dying. */
+static int wiz_sys_intr_fds[2] = {-1, -1};
+static void wiz_sys_intr_handler(int sig) {
+  int saved = errno;
+  unsigned char b = (unsigned char)sig;
+  ssize_t w = write(wiz_sys_intr_fds[1], &b, 1); /* non-blocking: a full pipe drops it */
+  (void)w;
+  errno = saved;
+}
+WIZ_API void *wiz_sys_on_interrupt(void) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&lock);
+  int e = 0;
+  if (wiz_sys_intr_fds[0] < 0) {
+    int p[2];
+    if (pipe(p) < 0) e = errno;
+    else {
+      fcntl(p[0], F_SETFD, FD_CLOEXEC); fcntl(p[1], F_SETFD, FD_CLOEXEC);
+      fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL) | O_NONBLOCK);
+      wiz_sys_intr_fds[0] = p[0]; wiz_sys_intr_fds[1] = p[1];
+      struct sigaction sa;
+      memset(&sa, 0, sizeof sa);
+      sa.sa_handler = wiz_sys_intr_handler;
+      sigemptyset(&sa.sa_mask);
+      sa.sa_flags = SA_RESTART;
+      if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) e = errno;
+    }
+  }
+  pthread_mutex_unlock(&lock);
+  if (e) { wiz_sys_err = e; return NULL; }
+  wiz_sys_err = 0;
+  return wiz_sys_fd_wrap(wiz_sys_intr_fds[0], 0);
+}

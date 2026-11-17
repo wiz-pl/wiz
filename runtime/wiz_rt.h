@@ -354,6 +354,11 @@ WIZ_API uint64_t wiz_sys_child_wait(void *p);
 WIZ_API uint64_t wiz_sys_child_kill(void *p, uint64_t sig);
 WIZ_API uint64_t wiz_sys_child_try_wait(void *p);
 WIZ_API uint64_t wiz_sys_child_kill_group(void *p, uint64_t sig);
+/* (TR2) the test runner's natives */
+WIZ_API void *wiz_sys_spawn_cgroup(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err, const char *cwd, wiz_val env, int clear, uint64_t group, const char *cgroup);
+WIZ_API wiz_val wiz_sys_child_wait_rusage(void *p, int block);
+WIZ_API const char *wiz_sys_hash_file(const char *path);
+WIZ_API void *wiz_sys_on_interrupt(void);
 WIZ_API uint64_t wiz_sys_child_take(void *p, uint64_t i);
 WIZ_API uint64_t wiz_sys_exec(const char *cmd, wiz_val args);
 WIZ_API void wiz_sys_exit(uint64_t code);

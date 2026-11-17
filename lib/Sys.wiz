@@ -821,3 +821,52 @@ def Fd.poll (fs : List (Fd × Interest)) (d : Duration) : EIO (List Readiness) :
 def Fd.pollForever (fs : List (Fd × Interest)) : EIO (List Readiness) := do
   l ← Sys.check "poll" (Fd.pollRaw (Fd.pollFds fs) (Fd.pollEvents fs) .false 0);
   EIO.pure (Readiness.decode l)
+
+-- The test runner's natives (TR2; lib/TestRun, docs/stages/33-test-runner.md): spawning
+-- into a cgroup, resource usage, hashing a file, and interrupts as a descriptor.
+
+/-- Raw spawn into a cgroup; use `Process.spawnInCgroup`. -/
+extern "wiz_sys_spawn_cgroup" Process.spawnCgroupRaw : String → List String → Nat → Nat → Nat → String → List String → Bool → Nat → String → IO Child
+/-- `Process.spawnWith`, with the child placed in the cgroup v2 directory `cgroup` before
+it runs `cmd`, so that everything it starts is inside (and limited by its `memory.max`).
+It needs write access to `cgroup/cgroup.procs`: a cgroup under a delegated scope. -/
+def Process.spawnInCgroup (cmd : String) (args : List String) (o : SpawnOptions) (cgroup : String) : EIO Child :=
+  Sys.check cmd (Process.spawnCgroupRaw cmd args (Stdio.toNat o.stdin) (Stdio.toNat o.stdout) (Stdio.toNat o.stderr)
+    (match o.cwd with | .some d => d | .none => "") (EnvChange.encode o.env) o.clearEnv (ProcessGroup.toNat o.group) cgroup)
+
+/-- What a child used: its peak resident memory (KiB) and its user and system CPU time
+(microseconds), from `wait4`. -/
+structure Rusage where
+  maxRssKiB : Nat
+  userUs : Nat
+  systemUs : Nat
+
+/-- Raw `wait4` (blocking or not); use `Child.waitRusage`, `Child.tryWaitRusage`. -/
+extern "wiz_sys_child_wait_rusage" Child.waitRusageRaw : Child → Bool → IO (List Nat)
+/-- The exit status and usage from `[status, rss, user, system]`. -/
+def Rusage.decode : List Nat → Option (ExitStatus × Rusage)
+  | .cons st (.cons rss (.cons u (.cons sy .nil))) => .some (ExitStatus.ofNat st, Rusage.mk rss u sy)
+  | _ => .none
+/-- Wait for the child to end, with what it used. Use it instead of `Child.wait`, not
+after it: once a child is reaped its usage is gone. -/
+def Child.waitRusage (c : Child) : EIO (ExitStatus × Rusage) := do
+  l ← Sys.check "wait" (Child.waitRusageRaw c .true);
+  match Rusage.decode l with
+  | .some r => EIO.pure r
+  | .none => EIO.fail "wait: no status"
+/-- How the child ended and what it used, or `none` while it runs (does not block). -/
+def Child.tryWaitRusage (c : Child) : EIO (Option (ExitStatus × Rusage)) := do
+  l ← Sys.check "wait" (Child.waitRusageRaw c .false);
+  EIO.pure (Rusage.decode l)
+
+/-- Raw file hash; use `FS.hashFile`. -/
+extern "wiz_sys_hash_file" FS.hashFileRaw : String → IO String
+/-- The BLAKE3 hash of a file's contents, as 64 lower-case hex digits (cache keys). -/
+def FS.hashFile (p : String) : EIO String := Sys.check p (FS.hashFileRaw p)
+
+/-- Raw interrupt descriptor; use `Sys.onInterrupt`. -/
+extern "wiz_sys_on_interrupt" Sys.onInterruptRaw : IO Fd
+/-- From now on, `SIGINT` (Ctrl-C) and `SIGTERM` do not end the program: each writes its
+signal number (one byte) to a pipe, and this is the pipe's read end. Poll it with other
+descriptors (`Fd.poll`) to stop cleanly: kill the children, report, exit. -/
+def Sys.onInterrupt : EIO Fd := Sys.check "interrupt handler" Sys.onInterruptRaw
