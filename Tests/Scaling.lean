@@ -457,9 +457,11 @@ def exampleChunk (fs : Array System.FilePath) (k : Nat) : Array System.FilePath 
     if i % descExampleChunks == k then out := out.push fs[i]!
   pure out
 
-/-- The Desc sweep on `lib/` imported at once (all modules but `libApart`), with the
-stuck descriptions, and the check that a wrong variant is caught. The sweep's count
-bound (`> 1000`, once over all three inputs) is asserted on this part alone. -/
+/-- The Desc sweep on `lib/` imported at once (all modules but the apart backends), with
+the stuck descriptions, and the check that a wrong variant is caught. The pre-split case
+asserted one bound over lib, the apart backends and the examples together (`> 1000`);
+since the parts run as separate cases, this part asserts its own floor: it compares 787
+descriptions (measured), and `> 700` catches a loader that stopped early. -/
 def descSweepLib : IO Unit := do
   let loader ← Tests.Elab.libLoader
   let lib := runFrontend (R := ZeroOneMany) (← Tests.Elab.allLibSource) { trustedModule := Tests.libModule, loader }
@@ -477,7 +479,7 @@ def descSweepLib : IO Unit := do
     ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
   let (n, bad) := hypsMismatches lib.globals stuck
   unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
-  check (n > 1000) s!"only {n} cases"
+  check (n > 700) s!"only {n} cases"
 
 /-- The Desc sweep on each alternative backend of `lib/` (`Tests.Elab.libApart`), loaded
 with every other module except the backends it replaces (`Tests.Elab.libSourceExcept`).
