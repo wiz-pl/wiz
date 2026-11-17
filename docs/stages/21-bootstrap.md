@@ -462,8 +462,9 @@ that prints one C file.
 * `--lib` or `--no-main`: the C has no `main`; every export's wrapper starts the runtime
   first if nothing has (`rt_ensure`: the collector, or the static objects of reference
   counting). The C compiler links it with the program that calls it (`cc main.c lib.c
-  -Iselfhost …`). Since this compiler prints C and links nothing, the two flags are the
-  same.
+  -Iselfhost …`). The one-shot mode prints C and links nothing, so there the two flags
+  are the same; the `build` subcommand's `--lib` also compiles the object and writes
+  `OUT.h` (21ah).
 * `--header`: instead of the C, the header of the exports, `exportHeader`'s text in
   `C.lean` (the `wiz_val` type, the handle functions and one prototype per export).
 * **Handles** (`rt.c`): `wiz_retain(v)` and `wiz_release(v)` take and give back a
@@ -1211,3 +1212,36 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: build artifacts in the self-hosted driver (`-o`, `--lib`)
+
+The driver's `build` wrote the generated C at `-o` and nothing else; the Lean host's
+`wiz build` compiles that C. The D4 artifacts now match wherever the flags do:
+
+* **`build FILE -o OUT`** is still the C at OUT (the documented workflow: the caller
+  compiles it). `-o` is required in both (`unknown command: build FILE`, exit 2), and a
+  missing `-o` directory fails in both (exit 1, no artifact; the host's stderr is an
+  uncaught `IO.FS.writeFile` trace, the driver's one line).
+* **`build FILE -o OUT --lib`** matches the host's `Build.build`: the C is written at
+  `OUT`'s `.c` (the host's `withExtension`), the header of the exports at `OUT.h`
+  (`exportHeader`'s shape: `wiz_val`, the handle functions and one prototype per
+  export), and the object at `OUT` (`cc -O2 -w -c` with the toolchain's cflags; the
+  self-hosted runtime directory is an include root because the emitted C includes
+  `rt.c`). A library without an export is the host's error, word for word: a library
+  must export something (`export "name" f`), exit 1, no artifact.
+* **`--no-main`** still writes the C without a `main`; the host links an executable
+  without one on the platforms whose toolchain allows it (a gap, C9).
+* **`--header`** is the driver's own output mode (the header text at OUT, also the
+  one-shot `--header`); the host has no such flag, so the differential case asserts its
+  rejection instead.
+* There is no `--object`: the host's object output is `--lib` itself (an object and
+  `OUT.h`), so the driver follows that rather than adding a flag the host rejects.
+* The library's `.c` and `.h` texts are cached beside the `.c` entry (`--cache`), so a
+  warm `--lib` build re-elaborates nothing.
+
+**Tests** (`selfhost-cli-diff`): `--lib` on an exporting file (the exit code, streams
+and the three artifacts' shapes: an ELF `ET_REL` or Mach-O `MH_OBJECT`, the header's
+`wiz_val` and prototype, the C's export wrapper and no `main`; and a warm rebuild), a
+library without an export (the host's message), a missing `-o` and a missing `-o`
+directory, and `--header` as a driver extension.
+

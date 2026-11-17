@@ -3,7 +3,8 @@
 -- `Wiz/Selfhost.lean` with a real command line:
 --
 --   wiz-selfhost check FILE            elaborate and type check; diagnostics, exit 1
---   wiz-selfhost build FILE -o OUT     write the generated C to OUT
+--   wiz-selfhost build FILE -o OUT     write the generated C to OUT; with `--lib` also
+--                                     OUT.c, the header OUT.h and the object OUT
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
@@ -856,6 +857,7 @@ def usageText : String :=
   "  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on\n" +++
   "                                  standard error; exit 1 if it has errors)\n" +++
   "  wiz-selfhost build FILE -o OUT  write the generated C to OUT\n" +++
+  "                                  (--lib: OUT.c, OUT.h and the object OUT)\n" +++
   "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" +++
   "  wiz-selfhost version            print the version (also --version)\n" +++
   "  wiz-selfhost help               this text (also -h, --help)\n" +++
@@ -937,6 +939,32 @@ def checkCmd (o : Opts) (file : String) : IO Unit := do
 -- ------------------------------------------------------------------------------------
 -- build: the C, to OUT
 
+-- `OUT.c`/`OUT.h`: the Lean host derives them with `System.FilePath.withExtension`
+-- (the generated C goes beside the artifact; a library's header beside the object)
+def dotIf (b : Bool) : List Char := match b with
+  | .true => .cons (ch 46) .nil
+  | .false => .nil
+
+-- the text with its last extension (after the last `/`) dropped: `committed` is the
+-- part before the last dot of the last component, `after` the part since it
+def withExtGo (committed after : List Char) (hasDot : Bool) : List Char → List Char
+  | .nil => match hasDot with
+    | .true => committed
+    | .false => List.append committed after
+  | .cons c cs => match strEqC c 47 with
+    | .true => withExtGo (List.append committed (List.append (List.append (dotIf hasDot) after) (.cons c .nil))) .nil .false cs
+    | .false => match strEqC c 46 with
+      | .true => withExtGo (List.append committed (List.append (dotIf hasDot) after)) .nil .true cs
+      | .false => withExtGo committed (List.append after (.cons c .nil)) hasDot cs
+
+def withExtension (p ext : String) : String :=
+  String.append (String.mk (withExtGo .nil .nil .false (charsOf p))) (String.append "." ext)
+
+-- the C the backend emits for `p` (the frontend's output as comments, then the program)
+def cText (o : Opts) (p : Prepared) (lines : List String) : String :=
+  String.append (commentsOf (mapS (fun l => stripAt l) lines))
+    (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))
+
 def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   let lines := linesOf p.run;
   let ds := diagsOf p.tab lines;
@@ -944,14 +972,72 @@ def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
   | .true => IO.bind (emitErrors ds) (fun u => noneIO)
   | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
     | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
-    | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
-        (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
+    | .nil => someIO (cText o p lines))
 
 def writeOut (out text : String) : IO Unit := do
   ok ← writeFile out text;
   match ok with
   | .true => IO.pure ()
   | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
+
+-- ------------------------------------------------------------------------------------
+-- build --lib: the C (beside OUT), the header `OUT.h` and the object OUT
+
+structure LibText where
+  c : String
+  h : String
+
+def someLib (l : LibText) : IO (Option LibText) := IO.pure (.some l)
+def noneLib : IO (Option LibText) := IO.pure (.none : Option LibText)
+
+-- the header of the exports: the one-shot `--header` output (`headerDocs`)
+def headerTextOf (p : Prepared) : String :=
+  docsText (headerDocs (Globals.ffi (Run.gs p.run)))
+
+-- The library's C and header. The Lean host's `Build.build` refuses a library without
+-- exports (`irProgram`: "a library must export something"), writes `OUT.h` first and
+-- then compiles the C to the object (`cc -c`).
+def libOf (o : Opts) (p : Prepared) : IO (Option LibText) := do
+  let lines := linesOf p.run;
+  let ds := diagsOf p.tab lines;
+  let ffi := Globals.ffi (Run.gs p.run);
+  match hasError ds with
+  | .true => IO.bind (emitErrors ds) (fun u => noneLib)
+  | .false => match hasExport ffi with
+    | .false => IO.bind (IO.ePrintln "a library must export something (`export \"name\" f`)") (fun u => noneLib)
+    | .true => IO.bind (missingLinks (List.reverseOf ffi .nil)) (fun missing => match missing with
+      | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneLib)
+      | .nil => someLib (LibText.mk (cText o p lines) (headerTextOf p)))
+
+-- the host's `compileC` library path: `cc -O2 -w -c -o OUT OUT.c` with the toolchain's
+-- flags (the self-hosted C includes `rt.c`, so the runtime directory is an include root)
+def objectCommand (o : Opts) (src out : String) : String :=
+  String.append o.cc (String.append " -O2 -w -c -o " (String.append out (String.append " "
+    (String.append src (String.append " -I" (String.append o.rt (spacesOf o.cflags)))))))
+
+def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
+  let cFile := withExtension out "c";
+  let hFile := withExtension out "h";
+  okC ← writeFile cFile l.c;
+  match okC with
+  | .false => do IO.ePrintln (String.append "error: cannot write " cFile); Process.exit 1
+  | .true => do
+    okH ← writeFile hFile l.h;
+    match okH with
+    | .false => do IO.ePrintln (String.append "error: cannot write " hFile); Process.exit 1
+    | .true => do
+      st ← cSystem (objectCommand o cFile out);
+      match Nat.beq st 0 with
+      | .true => IO.pure ()
+      | .false => do
+        IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append cFile "):"));
+        IO.ePrintln (objectCommand o cFile out);
+        Process.exit 1
+
+-- (`--lib` builds the object and the header; `--header` alone is the header text, the
+-- driver's one-shot mode, so the two together stay the header only)
+def libMode (o : Opts) : Bool :=
+  Bool.and (listHas "--lib" o.backend) (Bool.not (listHas "--header" o.backend))
 
 -- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
 -- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is.
@@ -981,6 +1067,39 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache w
       cacheMissMsg o .true key;
       buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
 
+-- (`--lib`'s two texts share the C entry's key: the backend flags are in it, so a
+-- non-library C is never served as a library)
+def buildLibMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String)
+    (p : Prepared) : IO Unit := do
+  l ← libOf o p;
+  match l with
+  | .none => Process.exit 1
+  | .some lt => do
+    cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
+    cacheWriteIf o useCache cKey ".c" 0 lt.c;
+    cacheWriteIf o useCache cKey ".h" 0 lt.h;
+    writeLib o out lt
+
+def buildLibWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
+  | .none => do
+    cacheMissMsg o .false "";
+    buildLibMiss o .false "" "" out (runGraph g)
+  | .some _ => do
+    let key := keyOfGraph o "c" g;
+    cachedC ← cacheRead o key ".c";
+    cachedH ← cacheRead o key ".h";
+    match cachedC with
+    | .some (.mk st ctext) => match cachedH with
+      | .some (.mk _ htext) => do
+        if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+        writeLib o out (LibText.mk ctext htext)
+      | .none => do
+        cacheMissMsg o .true key;
+        buildLibMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
+    | .none => do
+      cacheMissMsg o .true key;
+      buildLibMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
+
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
   | .none => usageError "build needs -o OUT"
@@ -988,7 +1107,9 @@ def buildCmd (o : Opts) (file : String) : IO Unit :=
     gopt ← loadGraph o.roots file;
     match gopt with
     | .none => missingFile file
-    | .some g => buildWith o out g
+    | .some g => match libMode o with
+      | .true => buildLibWith o out g
+      | .false => buildWith o out g
 
 -- ------------------------------------------------------------------------------------
 -- run / eval

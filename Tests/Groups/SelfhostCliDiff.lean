@@ -221,6 +221,17 @@ def cliDiffIsExe (b : ByteArray) : Bool :=
     || (byteAt 0 0xfe && byteAt 1 0xed && byteAt 2 0xfa && byteAt 3 0xce) -- Mach-O (64-bit, BE)
     || (byteAt 0 0x23 && byteAt 1 0x21)                                   -- #!
 
+/-- Is the artifact a relocatable object (an ELF `ET_REL`, or a Mach-O `MH_OBJECT`)?
+The host's `--lib` is `cc -c`, the driver's now too. -/
+def cliDiffIsObject (b : ByteArray) : Bool :=
+  let byteAt (i : Nat) (v : UInt8) := i < b.size && b.get! i == v
+  -- ELF: e_type (2 bytes at 16, little-endian) is 1 for ET_REL
+  (byteAt 0 0x7f && byteAt 1 0x45 && byteAt 2 0x4c && byteAt 3 0x46
+    && byteAt 16 0x01 && byteAt 17 0x00)
+    -- Mach-O 64-bit: filetype (4 bytes at 12) is 1 for MH_OBJECT
+    || (byteAt 0 0xcf && byteAt 1 0xfa && byteAt 2 0xed && byteAt 3 0xfe
+      && byteAt 12 0x01 && byteAt 13 0x00 && byteAt 14 0x00 && byteAt 15 0x00)
+
 def cliDiffExists (r : CliDiffRun) (name : String) : IO Bool := (r.dir / name).pathExists
 
 /-- The entries of a directory (0 when it does not exist). -/
@@ -555,30 +566,108 @@ def cliDiffGroup : Group where
         check ((hc.map cliDiffIsExe).getD false) "the host's artifact is not executable"
         check (cliHas (sc.getD "") "int main(") "the driver's artifact is not C"
         skip "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C (D4)" },
-    { name := "build --lib: both accept it and are silent (an object file, or the C)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "build --lib: the object, its header and the C match the host's shapes", run := fun _ => do
+        match ← cliRunOptions with
+        | none => skip "no garbage collector, --gc-cflags"
+        | some shOpts => withSelfhostCli fun exe => do
+          let host ← cliDiffHost
+          let tc ← cliDiffHostToolchain
+          let spec : CliDiffSpec := { files := #[("lib.wiz", cliExports)]
+                                      args := #["build", "lib.wiz", "-o", "out.o", "--lib"]
+                                      hostArgs := tc, shArgs := shOpts }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 0 s.code
+          -- (both write the object at -o, the C at `-o`'s `.c` and the header at `.h`)
+          check (← cliDiffExists h "out.o") "the host wrote no object file"
+          check (← cliDiffExists s "out.o") "the driver wrote no object file"
+          check (← cliDiffExists h "out.h") "the host wrote no header"
+          check (← cliDiffExists s "out.h") "the driver wrote no header"
+          check (← cliDiffExists h "out.c") "the host wrote no C"
+          check (← cliDiffExists s "out.c") "the driver wrote no C"
+          let ho ← cliDiffReadBin h "out.o"
+          let so ← cliDiffReadBin s "out.o"
+          check ((ho.map cliDiffIsObject).getD false) "the host's artifact is not an object"
+          check ((so.map cliDiffIsObject).getD false) "the driver's artifact is not an object"
+          -- the header's shape: the handle functions, and the export's prototype
+          let hh := (← cliDiffRead h "out.h").getD ""
+          let sh := (← cliDiffRead s "out.h").getD ""
+          for hdr in [hh, sh] do
+            cliCheck hdr "uintptr_t wiz_val;" "the header's handle type"
+            cliCheck hdr "void wiz_release(void *v);" "the header's release"
+            cliCheck hdr "void wiz_retain(void *v);" "the header's retain"
+            cliCheck hdr "uint64_t wiz_square(uint64_t a0);" "the export's prototype"
+          -- the C is the library (no `main`) and defines the export's wrapper
+          let hc := (← cliDiffRead h "out.c").getD ""
+          let sc := (← cliDiffRead s "out.c").getD ""
+          for c in [hc, sc] do
+            cliCheck c "wiz_square" "the export's wrapper"
+            unless !(cliHas c "int main(") do throw (IO.userError "the library's C has a `main`")
+          -- a second run is a hit (the cache holds both texts) and writes the same shapes
+          let h2 ← cliDiffExec host h.dir spec.hostArgs spec.args
+          let s2 ← cliDiffExec exe s.dir spec.shArgs spec.args
+          cliDiffSame spec h2 s2
+          checkEq 0 s2.code
+          check (← cliDiffExists s2 "out.o") "the driver's warm build wrote no object"
+          -- `--no-main`: an executable without a `main` (or the C for one; the host links
+          -- without a `main` only where the C toolchain allows it: emcc --no-entry)
+          let spec2 : CliDiffSpec := { files := #[("lib.wiz", cliExports)]
+                                       args := #["build", "lib.wiz", "-o", "nom", "--no-main"]
+                                       hostArgs := tc, shArgs := shOpts }
+          let (h3, s3) ← cliDiffBoth host exe spec2
+          if h3.code != 0 then
+            skip "artifact: --lib's object/header/C match the host's shapes now; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C (D4/C9)"
+          else do
+            cliDiffSame spec2 h3 s3
+            checkEq 0 s3.code
+            skip "artifact: --no-main links an executable without a `main` in the host; the driver writes the C for one (D4/C9)" },
+    { name := "build --lib without an export: the host's error, the same text and exit", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
-        let spec : CliDiffSpec := { files := #[("lib.wiz", cliExports)]
-                                    args := #["build", "lib.wiz", "-o", "out.o", "--lib"]
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliGood)]
+                                    args := #["build", "good.wiz", "-o", "out.o", "--lib"]
                                     hostArgs := tc }
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
+        checkEq 1 s.code
+        checkEq 1 h.code
+        checkEq "a library must export something (`export \"name\" f`)\n" s.err
+        -- (the error comes before the artifacts: nothing is written)
+        unless !(← cliDiffExists h "out.o") do throw (IO.userError "the host wrote an object")
+        unless !(← cliDiffExists s "out.o") do throw (IO.userError "the driver wrote an object")
+        unless !(← cliDiffExists s "out.h") do throw (IO.userError "the driver wrote a header") },
+    { name := "build: -o is required in both (the host's unknown command, exit 2)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliGood)], args := #["build", "good.wiz"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 2 s.code
+        checkEq 2 h.code
+        cliCheck s.err "unknown command: build good.wiz" "the missing -o" },
+    { name := "build -o: a missing directory fails in both (exit 1, no artifact)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliGood)]
+                                    args := #["build", "good.wiz", "-o", "nodir/out"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 1 h.code
+        checkEq 1 s.code
+        unless !(← cliDiffExists h "nodir/out") do throw (IO.userError "the host wrote an artifact")
+        unless !(← cliDiffExists s "nodir/out") do throw (IO.userError "the driver wrote an artifact")
+        skip "message: a missing `-o` directory is an uncaught `IO.FS.writeFile` exception in the host (a machine-dependent trace on stderr); the driver writes one line (`error: cannot write …`). Both exit 1 and write nothing (D4/D7)" },
+    { name := "build --header: the driver's header-only mode (the host has no such flag)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("lib.wiz", cliExports)]
+                                    args := #["build", "lib.wiz", "--header", "-o", "out.h"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 2 h.code
         checkEq 0 s.code
-        check (← cliDiffExists h "out.o") "the host wrote no object file"
-        check (← cliDiffExists h "out.h") "the host wrote no header"
-        check (← cliDiffExists s "out.o") "the driver wrote no C"
-        -- `--no-main`: an executable without a `main`, or the C for one (the host links
-        -- without a `main` only where the C toolchain allows it: emcc --no-entry)
-        let spec2 : CliDiffSpec := { files := #[("lib.wiz", cliExports)]
-                                     args := #["build", "lib.wiz", "-o", "nom", "--no-main"]
-                                     hostArgs := tc }
-        let (h2, s2) ← cliDiffBoth host exe spec2
-        if h2.code != 0 then
-          skip "artifact: --lib's object/header match; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C (D4/C9)"
-        else do
-          cliDiffSame spec2 h2 s2
-          checkEq 0 s2.code
-          skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
+        cliCheck h.err "unknown flag: --header" "the host's rejection"
+        -- (the driver writes the exports' header at OUT; no C and no object)
+        let sh := (← cliDiffRead s "out.h").getD ""
+        cliCheck sh "uint64_t wiz_square(uint64_t a0);" "the export's prototype"
+        unless !(← cliDiffExists s "out.c") do throw (IO.userError "the driver wrote a C file")
+        unless !(← cliDiffExists s "out.o") do throw (IO.userError "the driver wrote an object")
+        skip "artifact: `--header` is the driver's header-only output (the one-shot `--header` mode, reused by `build`); the host has no such flag (`--lib` writes OUT.h itself), so it rejects it (D4)" },
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
