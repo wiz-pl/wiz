@@ -1,0 +1,193 @@
+import Text
+/-!
+# TestRun.Golden
+
+Expected-output tests, the semantics of `grail test` (`Grail/Test.lean`) as pure Wiz
+(`docs/stages/33-test-runner.md`, 33f).
+
+**The header** is the file's first line. Without a `-- test:` line a file is a `check`
+test. Otherwise it is one of
+
+```
+-- test: check [OPTIONS]
+-- test: run [OPTIONS]
+-- test: skip REASON
+```
+
+with the options, in any order, as words: `timeout SECS`, `build-timeout SECS`, `mem SIZE`
+(`512M`, `5G`, or MiB), `tags a,b`, and `args …` (the rest of the line, for `run`). The
+word form extends `agent/grail-test-timeout`'s `timeout SECS`.
+
+**Comparison.** `F.expected` beside `F.wiz` holds the expected output. A missing file
+fails and names `--update`; a difference reports the first line that differs, in
+grail's words. `--update` never writes the output of a failed build or a timeout
+(`Golden.mayUpdate`). Normalisation is explicit: a package lists the replacements
+(`$PKG` for its own path, `$STORE` for the store prefix), and nothing is replaced
+otherwise.
+
+```
+import TestRun.Golden
+
+#eval Golden.firstDifference "a\nb" "a\nc"
+-- "line 2:\n      expected: b\n      actual:   c"
+```
+-/
+
+/-- A golden test's kind. -/
+inductive GKind where
+  | check
+  | run
+  | skip (reason : String)
+
+def GKind.name : GKind → String
+  | .check => "check"
+  | .run => "run"
+  | .skip _ => "skip"
+
+/-- A golden test's header. Times in seconds, memory in MiB. -/
+structure Header where
+  kind : GKind
+  timeoutS : Option Nat
+  buildTimeoutS : Option Nat
+  memMib : Option Nat
+  tags : List String
+  args : List String
+  /-- whether the file had a `-- test:` line (a failing test without one is told so) -/
+  explicit : Bool
+
+/-- A header with no options. -/
+def Header.plain (k : GKind) (explicit : Bool) : Header := Header.mk k .none .none .none .nil .nil explicit
+
+/-- A memory size as MiB: `512M`, `5G`, or a number of MiB. -/
+def Golden.parseMem (s : String) : Option Nat :=
+  match String.stripSuffix s "G" with
+  | .some n => (match String.parseNat n with
+    | .some g => .some (g * 1024)
+    | .none => .none)
+  | .none => match String.stripSuffix s "M" with
+    | .some n => String.parseNat n
+    | .none => String.parseNat s
+
+/-- A positive number of seconds, or an error naming the option. -/
+def Golden.secs (opt n : String) : Except String Nat := match String.parseNat n with
+  | .some 0 => .error (String.join [opt, " must be positive"])
+  | .some k => .ok k
+  | .none => .error (String.join [opt, " wants a number of seconds, not ", n])
+
+/-- The words of a header, without empty ones (several spaces in a row). -/
+def Golden.words (s : String) : List String :=
+  List.filter (fun w => Bool.not (String.isEmpty w)) (String.splitOn (String.trim s) " ")
+
+/-- Set option `w` to `v` in `h`. -/
+def Golden.option (w v : String) (h : Header) : Except String Header :=
+  match String.eq w "timeout" with
+  | .true => (match Golden.secs "timeout" v with
+    | .ok n => .ok (Header.mk h.kind (.some n) h.buildTimeoutS h.memMib h.tags h.args h.explicit)
+    | .error e => .error e)
+  | .false => match String.eq w "build-timeout" with
+  | .true => (match Golden.secs "build-timeout" v with
+    | .ok n => .ok (Header.mk h.kind h.timeoutS (.some n) h.memMib h.tags h.args h.explicit)
+    | .error e => .error e)
+  | .false => match String.eq w "mem" with
+  | .true => (match Golden.parseMem v with
+    | .some m => .ok (Header.mk h.kind h.timeoutS h.buildTimeoutS (.some m) h.tags h.args h.explicit)
+    | .none => .error (String.join ["mem wants a size (512M, 5G), not ", v]))
+  | .false => match String.eq w "tags" with
+  | .true => .ok (Header.mk h.kind h.timeoutS h.buildTimeoutS h.memMib
+      (List.filter (fun t => Bool.not (String.isEmpty t)) (String.splitOn v ",")) h.args h.explicit)
+  | .false => .error (String.join ["unknown option ", w,
+      " (timeout SECS, build-timeout SECS, mem SIZE, tags A,B, args …)"])
+
+/-- Read the options after the kind into `h`; `key` is an option still waiting for its
+value. `args` takes the rest of the line. -/
+def Golden.options : List String → Option String → Header → Except String Header
+  | .nil, .none, h => .ok h
+  | .nil, .some w, _ => .error (String.join ["option ", w, " wants a value"])
+  | .cons w ws, .none, h => (match String.eq w "args" with
+    | .true => .ok (Header.mk h.kind h.timeoutS h.buildTimeoutS h.memMib h.tags ws h.explicit)
+    | .false => Golden.options ws (.some w) h)
+  | .cons v ws, .some w, h => match Golden.option w v h with
+    | .ok h' => Golden.options ws .none h'
+    | .error e => .error e
+
+/-- The text after `skip`, as written (grail keeps it whole). -/
+def Golden.skipReason (rest : String) : String := match String.stripPrefix (String.trim rest) "skip" with
+  | .some r => String.trim r
+  | .none => ""
+
+/-- The header from a file's first line. -/
+def Golden.parseHeader (first : String) : Except String Header :=
+  match String.stripPrefix first "-- test:" with
+  | .none => .ok (Header.plain .check .false)
+  | .some rest => match Golden.words rest with
+    | .cons "skip" _ => .ok (Header.plain (.skip (Golden.skipReason rest)) .true)
+    | .cons "check" ws => Golden.options ws .none (Header.plain .check .true)
+    | .cons "run" ws => Golden.options ws .none (Header.plain .run .true)
+    | _ => .error (String.join ["unknown test kind ", String.trim rest,
+        " (check, run, skip REASON; check and run may take options)"])
+
+/-- The header of a file's source. -/
+def Golden.headerOf (src : String) : Except String Header :=
+  match List.head (String.splitOn src "\n") with
+  | .some l => Golden.parseHeader l
+  | .none => .ok (Header.plain .check .false)
+
+-- ## Comparing
+
+/-- The `i`th line (from 0), or `<end>`. -/
+def Golden.lineAt (ls : List String) (i : Nat) : String := match List.head (List.drop i ls) with
+  | .some l => l
+  | .none => "<end>"
+
+/-- The first line (from `i + 1`) where two line lists differ, looking at `n` more. -/
+def Golden.diffGo (es as : List String) : Nat → Nat → String
+  | .zero, _ => "(the same)"
+  | .succ n, i =>
+    let e := Golden.lineAt es i;
+    let a := Golden.lineAt as i;
+    match String.eq e a with
+    | .true => Golden.diffGo es as n (Nat.succ i)
+    | .false => String.join ["line ", Nat.repr (Nat.succ i), ":\n      expected: ", e, "\n      actual:   ", a]
+
+/-- The first line where two texts differ, as grail reports it. -/
+def Golden.firstDifference (expected actual : String) : String :=
+  let es := String.splitOn expected "\n";
+  let as := String.splitOn actual "\n";
+  Golden.diffGo es as (Nat.max (List.length es) (List.length as)) 0
+
+/-- Apply a package's replacements (e.g. its own path by `$PKG`), in order. -/
+def Golden.normalize (subs : List (String × String)) (text : String) : String :=
+  List.foldl (fun t p => String.replace t p.1 p.2) text subs
+
+/-- A golden comparison's verdict. -/
+inductive Verdict where
+  | same
+  | missing (msg : String)
+  | differ (msg : String)
+
+def Verdict.ok : Verdict → Bool
+  | .same => .true
+  | _ => .false
+
+/-- The note for a failing test that had no `-- test:` line (it was taken for `check`). -/
+def Golden.defaultNote (h : Header) : String := match h.explicit with
+  | .true => ""
+  | .false => String.join ["\n      (no `-- test:` line, so this was a `check` test: the expected output is the ",
+      "messages of checking the file; for what `main` prints, make `-- test: run` the first line)"]
+
+/-- Compare actual output with the expected file's contents (`none`: no file). -/
+def Golden.compare (h : Header) (expectedFile : String) (expected : Option String) (actual : String) : Verdict :=
+  match expected with
+  | .none => .missing (String.join ["no ", expectedFile, " (write it with --update)"])
+  | .some e => match String.eq e actual with
+    | .true => .same
+    | .false => .differ (String.join ["output differs from ", expectedFile, ", ",
+        Golden.firstDifference e actual, Golden.defaultNote h])
+
+/-- Whether `--update` may write the actual output: never for a failed build or a timeout. -/
+def Golden.mayUpdate (buildOk timedOut : Bool) : Bool := Bool.and buildOk (Bool.not timedOut)
+
+/-- `F.expected` for `F.wiz`. -/
+def Golden.expectedPath (file : String) : String := match String.stripSuffix file ".wiz" with
+  | .some stem => String.join [stem, ".expected"]
+  | .none => String.join [file, ".expected"]

@@ -1,0 +1,269 @@
+import Json
+import TestRun.Plan
+/-!
+# TestRun.Report
+
+What the runner prints and records (`docs/stages/33-test-runner.md`, 33e).
+
+**Log lines** are the Lean driver's: `✓` passed, `✗` failed (with its output indented
+underneath), `⊘` skipped (with the reason), each with the case's time in seconds. A
+timeout, a case over its memory budget, a flaky pass and an interrupted case say so on
+the line underneath.
+
+**Timings** are one JSON object per case attempt (JSONL). The record is a **superset**
+of the Lean driver's `--timings` line (`shard`, `group`, `index`, `case`, `seconds`,
+`ok`, `notes`), so `ci.py summary`, `balance` and `check-skips` read it unchanged; it
+adds `id`, `status`, `attempt`, `peak_mib`, `limit`, `enforce` and `queued_s`.
+
+**The baseline** is learned from such records (`Report.learn`): per id, the p95 of the
+time and of the peak over the passing runs. A record without an `id` (from the Lean
+driver) is keyed `group/slug(case)`.
+
+```
+import TestRun.Report
+
+#eval TestRun.showMs 81204          -- "81.204"
+#eval TestRun.percentile 95 [10, 20, 30, 40]   -- 40
+```
+-/
+
+/-- How a case attempt ended. `flaky` is a pass on a retry, never a plain `pass`. -/
+inductive Status where
+  | pass
+  | fail
+  | skip
+  | timeout
+  | oom
+  | cached
+  | interrupted
+  | flaky
+
+def Status.name : Status → String
+  | .pass => "pass"
+  | .fail => "fail"
+  | .skip => "skip"
+  | .timeout => "timeout"
+  | .oom => "oom"
+  | .cached => "cached"
+  | .interrupted => "interrupted"
+  | .flaky => "flaky"
+
+/-- Whether the status counts as a success (`ok` in the record). -/
+def Status.ok : Status → Bool
+  | .pass => .true
+  | .skip => .true
+  | .cached => .true
+  | .flaky => .true
+  | _ => .false
+
+/-- One case attempt's record. -/
+structure Rec where
+  shard : String
+  info : CaseInfo
+  ms : Nat
+  status : Status
+  attempt : Nat
+  peakMib : Nat
+  limits : Limits
+  /-- how the memory limit was enforced: `cgroup`, `poll` or `none` -/
+  enforce : String
+  queuedMs : Nat
+  notes : List String
+  /-- the skip reason, or the failure's output -/
+  detail : String
+
+/-- Milliseconds as seconds with three decimals: `12.345`, `0.007`. -/
+def TestRun.showMs (ms : Nat) : String :=
+  let frac := Nat.repr (ms % 1000);
+  let pad := match Nat.lt (String.length frac) 2 with
+    | .true => "00"
+    | .false => (match Nat.lt (String.length frac) 3 with
+      | .true => "0"
+      | .false => "");
+  String.join [Nat.repr (ms / 1000), ".", pad, frac]
+
+/-- Indent the continuation lines of a detail as the Lean driver does. -/
+def TestRun.indent (s : String) : String := String.replace (String.trim s) "\n" "\n      "
+
+/-- The text under a log line, for statuses that have one. -/
+def Rec.under (r : Rec) : Option String := match r.status with
+  | .fail => .some (TestRun.indent r.detail)
+  | .skip => .some (String.join ["skipped (", r.detail, ")"])
+  | .timeout => .some (String.join ["timed out after ", TestRun.showMs r.limits.timeoutMs, " s (",
+      Source.name r.limits.source, " limit)"])
+  | .oom => .some (String.join ["over its memory budget (peak ", Nat.repr r.peakMib, " MiB of ",
+      Nat.repr r.limits.memMib, " MiB, ", Source.name r.limits.source, ")"])
+  | .flaky => .some (String.join ["flaky: passed on attempt ", Nat.repr r.attempt])
+  | .interrupted => .some "interrupted"
+  | _ => .none
+
+/-- The mark of a log line. -/
+def Status.mark : Status → String
+  | .pass => "✓"
+  | .cached => "✓"
+  | .flaky => "✓"
+  | .skip => "⊘"
+  | .interrupted => "⊘"
+  | _ => "✗"
+
+/-- A case's log line(s), as the suite prints them. -/
+def Rec.line (r : Rec) : String :=
+  let head := match r.status with
+    | .cached => String.join ["  ", Status.mark r.status, " ", r.info.name, " (cached)"]
+    | _ => String.join ["  ", Status.mark r.status, " ", r.info.name, " (", TestRun.showMs r.ms, " s)"];
+  match Rec.under r with
+  | .some u => String.join [head, "\n      ", u]
+  | .none => head
+
+/-- A string as JSON. -/
+def TestRun.jstr (s : String) : Json := Json.mkStr s
+
+/-- A case attempt's timings record. -/
+def Rec.toJson (r : Rec) : Json :=
+  Json.mkObj [
+    ("shard", TestRun.jstr r.shard),
+    ("group", TestRun.jstr r.info.group),
+    ("index", Json.ofNat r.info.index),
+    ("case", TestRun.jstr r.info.name),
+    ("id", TestRun.jstr r.info.id),
+    ("seconds", Json.dec (TestRun.showMs r.ms)),
+    ("ok", Json.mkBool (Status.ok r.status)),
+    ("notes", Json.mkArr (List.map TestRun.jstr r.notes)),
+    ("status", TestRun.jstr (Status.name r.status)),
+    ("attempt", Json.ofNat r.attempt),
+    ("peak_mib", Json.ofNat r.peakMib),
+    ("limit", Json.mkObj [
+      ("timeout", Json.dec (TestRun.showMs r.limits.timeoutMs)),
+      ("mem_mib", Json.ofNat r.limits.memMib),
+      ("source", TestRun.jstr (Source.name r.limits.source))]),
+    ("enforce", TestRun.jstr r.enforce),
+    ("queued_s", Json.dec (TestRun.showMs r.queuedMs))]
+
+/-- The record as one line of JSONL. -/
+def Rec.jsonl (r : Rec) : String := Json.render (Rec.toJson r)
+
+-- ## Summary
+
+/-- Counts by status: passed (incl. cached), failed (fail, timeout, oom), skipped,
+flaky, interrupted. -/
+structure Tally where
+  passed : Nat
+  failed : Nat
+  skipped : Nat
+  flaky : Nat
+  interrupted : Nat
+
+def Tally.zero : Tally := Tally.mk 0 0 0 0 0
+
+def Tally.add (t : Tally) (s : Status) : Tally := match s with
+  | .pass => Tally.mk (Nat.succ t.passed) t.failed t.skipped t.flaky t.interrupted
+  | .cached => Tally.mk (Nat.succ t.passed) t.failed t.skipped t.flaky t.interrupted
+  | .skip => Tally.mk t.passed t.failed (Nat.succ t.skipped) t.flaky t.interrupted
+  | .flaky => Tally.mk t.passed t.failed t.skipped (Nat.succ t.flaky) t.interrupted
+  | .interrupted => Tally.mk t.passed t.failed t.skipped t.flaky (Nat.succ t.interrupted)
+  | _ => Tally.mk t.passed (Nat.succ t.failed) t.skipped t.flaky t.interrupted
+
+/-- The final count of a run's records (a retried case counts once, by its last attempt:
+pass the records in order). -/
+def Tally.ofRecs (rs : List Rec) : Tally := List.foldl (fun t r => Tally.add t r.status) Tally.zero rs
+
+/-- The summary line. -/
+def Tally.line (t : Tally) : String :=
+  String.join [Nat.repr t.passed, " passed, ", Nat.repr t.failed, " failed, ", Nat.repr t.skipped, " skipped",
+    match Nat.beq t.flaky 0 with
+    | .true => ""
+    | .false => String.join [", ", Nat.repr t.flaky, " flaky"],
+    match Nat.beq t.interrupted 0 with
+    | .true => ""
+    | .false => String.join [", ", Nat.repr t.interrupted, " interrupted"]]
+
+-- ## Reading timings back: the baseline
+
+/-- Seconds as milliseconds: `81.204` and `81.2` and `81` (truncated past three decimals). -/
+def TestRun.parseMs (s : String) : Option Nat :=
+  match String.splitOn s "." with
+  | .cons w .nil => (match String.parseNat w with
+    | .some n => .some (n * 1000)
+    | .none => .none)
+  | .cons w (.cons f .nil) =>
+    let f3 := String.take 3 (String.join [f, "000"]);
+    (match String.parseNat w with
+    | .none => .none
+    | .some n => (match String.parseNat f3 with
+      | .some m => .some (n * 1000 + m)
+      | .none => .none))
+  | _ => .none
+
+/-- A JSON number of seconds as milliseconds. -/
+def TestRun.jsonMs : Option Json → Option Nat
+  | .some (.int .false n) => .some (n * 1000)
+  | .some (.dec t) => TestRun.parseMs t
+  | _ => .none
+
+/-- What the baseline takes from one record: id, ms, peak (0 when absent), and whether
+it passed. -/
+structure Sample where
+  id : String
+  ms : Nat
+  peakMib : Nat
+  ok : Bool
+
+/-- The `ok` field (false when absent). -/
+def Report.okOf : Option Json → Bool
+  | .some (.bool b) => b
+  | _ => .false
+
+/-- One record's sample; old records (no `id`) are keyed `group/slug(case)`. -/
+def Sample.ofJson (j : Json) : Option Sample :=
+  let id := match Json.get j "id" with
+    | .some (.str s) => s
+    | _ => String.join [Json.getStr j "group", "/", TestRun.slug (Json.getStr j "case")];
+  let ok := Report.okOf (Json.get j "ok");
+  match TestRun.jsonMs (Json.get j "seconds") with
+  | .none => .none
+  | .some ms => .some (Sample.mk id ms (Json.getNat j "peak_mib") ok)
+
+/-- One JSONL line's sample (blank and malformed lines give none). -/
+def Sample.ofLine (line : String) : Option Sample := match Json.parse line with
+  | .ok j => Sample.ofJson j
+  | .error _ => .none
+
+/-- The samples of some JSONL lines (other lines are passed over). -/
+def Report.samples : List String → List Sample
+  | .nil => .nil
+  | .cons l ls => match Sample.ofLine l with
+    | .some x => .cons x (Report.samples ls)
+    | .none => Report.samples ls
+
+/-- The `p`th percentile (nearest rank) of some numbers; 0 for none. -/
+def TestRun.percentile (p : Nat) (xs : List Nat) : Nat :=
+  let s := TestRun.sortBy Nat.lt xs;
+  let n := List.length s;
+  let rank := (p * n + 99) / 100;
+  match List.head (List.drop (Nat.pred rank) s) with
+  | .some x => x
+  | .none => 0
+
+/-- Group samples by id, keeping first-seen order. -/
+def Report.addSample (x : Sample) : List (String × List Sample) → List (String × List Sample)
+  | .nil => .cons (x.id, .cons x .nil) .nil
+  | .cons (k, xs) rest => match String.eq k x.id with
+    | .true => .cons (k, .cons x xs) rest
+    | .false => .cons (k, xs) (Report.addSample x rest)
+
+/-- The baseline: for every id with a passing run, the p95 of its passing runs' time
+and peak, and how many there were. -/
+def Report.learn (samples : List Sample) : List (String × Learned) :=
+  let byId := List.foldl (fun acc x => Report.addSample x acc) (List.nil : List (String × List Sample))
+    (List.filter (fun x => x.ok) samples);
+  List.map (fun e =>
+    (e.1, Learned.mk (TestRun.percentile 95 (List.map (fun x => x.ms) e.2))
+      (TestRun.percentile 95 (List.map (fun x => x.peakMib) e.2)) (List.length e.2))) byId
+
+/-- A case's learned values, if the baseline has it. -/
+def Report.lookup (id : String) (b : List (String × Learned)) : Option Learned := String.lookup id b
+
+/-- A baseline entry as JSON (`{"id":…,"p95_s":…,"p95_peak_mib":…,"runs":…}`). -/
+def Report.entryJson (e : String × Learned) : Json :=
+  Json.mkObj [("id", TestRun.jstr e.1), ("p95_s", Json.dec (TestRun.showMs e.2.p95Ms)),
+    ("p95_peak_mib", Json.ofNat e.2.p95PeakMib), ("runs", Json.ofNat e.2.runs)]
