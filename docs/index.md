@@ -107,3 +107,4 @@ line below.
 ### Verification
 
 * [Stage 24: separation logic](stages/24-separation-logic.md)
+* [Stage 35: deadlock freedom for a synchronous model](stages/35-deadlock.md): progress and acyclicity for a finite model, not the IO API

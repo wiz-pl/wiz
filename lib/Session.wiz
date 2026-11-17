@@ -27,14 +27,16 @@ The API is in continuation-passing style (decision CS3): every operation takes t
 of the program as a function of the endpoint's next state, so no linear value has to sit
 in a data structure (Σ fields are ω, and `match` can't bind fields linearly yet).
 
-**Deadlock freedom by construction** (decision CS2; the argument and its scope are in
+**The deadlock-freedom argument** (decision CS2; the argument and its scope are in
 docs/stages/25-concurrency.md, 25c): a program that uses only this API — no `MVar`,
-no `Lock` (lib/MVar.wiz), no other blocking primitive, no `partial` definitions — can't
-deadlock: channels form a forest (each `fork` adds one channel between a new thread
+no `Lock` (lib/MVar.wiz), no other blocking primitive, no `partial` definitions — should
+not deadlock: channels form a forest (each `fork` adds one channel between a new thread
 and its parent, and an endpoint moves only into the child a `fork` starts), endpoints
-are linear (nobody waits for an end that was dropped), and every process is total. The
-claim is a meta-theorem from the literature (Wadler 2012, Lindley–Morris 2015, Jacobs–
-Balzer–Krebbers 2022), not a proof in Wiz.
+are linear (nobody waits for an end that was dropped), and every process is total. This
+is argued, not mechanised: the claim is a meta-theorem from the literature (Wadler 2012,
+Lindley–Morris 2015, Jacobs–Balzer–Krebbers 2022), and the machine-checked result
+(stage 35, `lib/SessionDeadlock.wiz`) is only progress plus acyclicity for a synchronous
+model, with `Typed` and `Closed` as hypotheses, not this API claim.
 
 For example, a client that sends a number and receives its double, and the matching
 server, run against each other by the pure semantics:

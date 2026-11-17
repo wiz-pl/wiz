@@ -1,8 +1,9 @@
 # Stage 25: concurrency
 
 Real threads in compiled code, and two peer APIs on top of them (decision CS1):
-session-typed linear channels (`lib/Session.wiz`), deadlock-free by construction, and
-MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guarantees.
+session-typed linear channels (`lib/Session.wiz`), whose deadlock freedom is argued but
+not mechanised for the IO API (25c), and MVars and locks (`lib/MVar.wiz`), which are more
+flexible and give weaker guarantees.
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
 design: `concurrency.md`. Tests: group `conc`.
 
@@ -68,7 +69,7 @@ receiving a Π), and `link p a b : A × B` runs a process against one following 
 `link` is total, by structural recursion on `p` (cut elimination as a program: one
 channel can't get stuck). `#eval (link sumProto (client 100) server).1` gives `5050`.
 
-## 25c: linear channels, deadlock-free by construction
+## 25c: linear channels, and the deadlock-freedom argument
 
 `Chan p` is one end of a channel whose remaining protocol is `p`, an opaque type (an
 axiom: no constructor, nothing makes one at ω). The API is in continuation-passing style
@@ -100,9 +101,10 @@ path (it can't drop the endpoint), so a protocol that may fail says where.
 **The deadlock-freedom claim** (decision CS2). A program whose threads communicate only
 through this API — no `MVar` or `Lock` (25d), no other blocking primitive (reading a
 pipe another thread writes), no `partial` definition and no other non-terminating
-code — does not deadlock: every thread finishes or makes progress. The argument is the
-one for Wadler's GV (Wadler 2012; Lindley & Morris 2015; as a separation-logic proof,
-Jacobs, Balzer & Krebbers 2022, and LinearActris, POPL 2024):
+code — should not deadlock: every thread finishes or makes progress. That is a claim
+about the API, argued below; it is not a theorem about the API in this repository. The
+argument is the one for Wadler's GV (Wadler 2012; Lindley & Morris 2015; as a
+separation-logic proof, Jacobs, Balzer & Krebbers 2022, and LinearActris, POPL 2024):
 
 1. **The channel graph is a forest.** Threads are nodes, channels edges. `fork` adds a new
    node joined by one new edge to its parent; endpoints the child captured move with it,
@@ -117,11 +119,43 @@ Jacobs, Balzer & Krebbers 2022, and LinearActris, POPL 2024):
    that is not blocked on it; following those edges ends at a thread that can step.
 
 This is a meta-theorem about the API, argued from the literature; it is not proved in
-Wiz. A mechanised proof is plan stage C7 (a deep embedding of a GV-like calculus with a
-connectivity-graph progress proof). It does not cover programs that use MVars, locks or
-`partial`, it says nothing about the runtime's own correctness (the natives are trusted,
-`#print axioms` lists them), and it is about deadlock, not fairness or timing. For one
-channel, `link` is the claim as a total program.
+Wiz, and **no theorem in this repository states it**. It does not cover programs that use
+MVars, locks or `partial`, it says nothing about the runtime's own correctness (the
+natives are trusted, `#print axioms` lists them), and it is about deadlock, not fairness
+or timing. For one channel, `link` is total by structural recursion (its own theorem, not
+a deadlock theorem).
+
+**What is mechanised, and what it assumes.** `lib/SessionDeadlock.wiz` (stage 35) proves
+the following for the **finite fragment** of a **pure, synchronous** model of threads and
+channels — not for the IO API above:
+
+* `Deadlock.progress (C) : Typed C → Closed C → Acyclic C → Final C ∨ HasStep C` — a
+  typed, closed, acyclic configuration is final or can step.
+* `Deadlock.stepAcyclic : Step C D → Acyclic C → Acyclic D` — every step keeps
+  acyclicity.
+* `Deadlock.reachableProgress (n) (t) (r : Steps (init n t) D) : Typed D → Closed D →
+  Final D ∨ HasStep D` — along a run from `init`, a configuration that is typed and
+  closed is final or steps.
+* `Deadlock.linkProgress` — the two-`Proc` configuration of `link p a b` is typed, closed
+  and acyclic, so it is final or steps. Only this connection uses an axiom (`castRefl`).
+
+The hypotheses are part of the statement, and the gaps are not hidden in it:
+
+* preservation of `Typed` and `Closed` under steps is **not** proved, so
+  `reachableProgress` carries them as hypotheses; the only concrete instance in the
+  module is the two-thread `linkCfg`;
+* `Acyclic` is a ranking definition, and its equivalence to "the channel graph is a
+  forest" is argued, not proved;
+* the model is synchronous, while `runtime/` channels buffer sends;
+* adequacy to `Chan.forkD`/`sendD`/`recvD`/`closeD` (or to the `Conc` scheduler, stage 32)
+  is **not** proved;
+* recursive protocols, delegation, MVars, locks and `partial` are outside it, as are
+  fairness, timing and the runtime's own correctness.
+
+So no Wiz program is proved deadlock-free by stage 35. The library is not on master at
+the time of writing: it was developed on the unmerged stage-35 branch, and
+`Tests/Groups/VerifDeadlock.lean` there pins each statement above (a type ascription, not
+just an empty `#print axioms`).
 
 **Pure model vs threads.** `Proc.run p proc c` runs a pure process over a real endpoint,
 and `Proc.runLinked p a b : IO (A × B)` is `IO.pure (link p a b)` for the kernel, `#eval`
@@ -158,7 +192,7 @@ output. MVars and locks are ordinary (ω) values, shared freely.
 
 | API | guarantees | not guaranteed |
 |---|---|---|
-| `Chan` (25c) | protocol fidelity, every endpoint closed exactly once, no data races, **deadlock freedom** (tree topologies, total code, no MVars/locks) | fairness |
+| `Chan` (25c) | protocol fidelity, every endpoint closed exactly once, no data races, **deadlock freedom argued, not mechanised** (tree topologies, total code, no MVars/locks) | fairness |
 | `MVar.take`/`put` | no data races (values are immutable and marked shared) | deadlock freedom; that a taken value is put back |
 | `MVar.borrow`/`fill` | the borrower refills the cell exactly once on every path (`Hole m` is linear and unforgeable) | deadlock freedom (another thread may `put` meanwhile, or wait on a cell this one holds) |
 | `Lock` | every acquisition released exactly once, from any thread (`Guard l` is linear and unforgeable; a lock is a binary semaphore, not a pthread mutex) | deadlock freedom (lock order is up to the program) |
@@ -172,5 +206,6 @@ locks) are future work (plan C8).
 Pure parallelism (`Task.spawn`, plan C1) on the same runtime, with a `-j1` vs `-jN`
 differential test; structured scopes (C4); a concurrency effect with a pure scheduler
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
-(sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
-proof (C7); `selfhost/rt.c` threads.
+(sending endpoints) with protocol-level linear payloads; the remaining steps of the
+mechanised proof (preservation of `Typed`/`Closed` and adequacy to the IO API: stage 35,
+C7); `selfhost/rt.c` threads.
