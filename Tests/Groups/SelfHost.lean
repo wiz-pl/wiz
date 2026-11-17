@@ -1479,7 +1479,7 @@ def selfHostGroup : Group where
           "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\n" ++
           "Pair : U0\n(x0 : Nat) → (x1 : Nat) → Pair\n" ++
           "con((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\n" ++
-          s!"error: unknown identifier Bad\nerror: type mismatch: expected Nat, got U1\n") },
+          s!"error: the type being defined may only occur as the type of a recursive field or the result\nerror: type mismatch: expected Nat, got U1\n") },
     { name := "pattern matching and structural recursion, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef two : Nat := Nat.succ (Nat.succ Nat.zero)\ndef add (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => Nat.succ (add k n)\n#reduce add two two\ndef mul (m n : Nat) : Nat := match n with\n  | .zero => Nat.zero\n  | .succ k => add m (mul m k)\n#reduce mul two (Nat.succ (Nat.succ (Nat.succ Nat.zero)))\ndef Code (n : Nat) : Type := match n with\n  | .zero => Nat\n  | _ => Nat → Nat\n#check Code\ndef pred (n : Nat) : Nat := match n with\n  | .succ k => k\n  | x => x\n#reduce pred two\ndef bad (n : Nat) : Nat := match n with\n  | .succ k => k\ndef bad2 (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => add k (bad2 n k)\n"
           "Nat : U0\ntwo : Nat\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmul : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nCode : (x0 : Nat) → U0\n(x0 : Nat) → U0\npred : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nerror: missing case zero\nerror: unknown identifier bad2\n" },
@@ -1790,6 +1790,13 @@ def selfHostGroup : Group where
           ("def bad (x : V 8) : W 8 := x\n", false),
           ("def bad (x : W 8) : W 16 := x\n", false),
           ("sealed structure P where\n  x : Nat\n", false)] },
+    { name := "the self-hosted frontend: inductive recursion is guarded (positivity), as in the Lean frontend", run := fun _ =>
+        selfhostAgrees "" [
+          ("inductive Rose where\n  | leaf\n  | node (l : Rose) (r : Rose)\n", true),
+          ("inductive Bad where\n  | mk (x : Bad)\n", true),
+          ("inductive Bad where\n  | mk (f : Bad → Prop)\n", false),
+          ("inductive Bad where\n  | mk (f : (Bad → Prop) → Prop)\n", false),
+          ("inductive Bad where\n  | mk (xs : List Bad)\n", false)] },
     { name := "the self-hosted frontend: constructor parameters from the expected type (21j)", run := fun _ =>
         selfhostAgrees ("def Code : Bool → Type\n  | .true => Nat\n  | .false => Bool\n" ++
           "structure Tagged (b : Bool) where\n  val : Code b\n")
@@ -1824,6 +1831,11 @@ def selfHostGroup : Group where
         let vs := MTm.sizeArgs.map leanVerdict
         unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") do
           throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)", run := fun _ => do
+        for (t, ok) in MTm.muSize do
+          let v := leanVerdict t
+          unless (v != "error") == ok do
+            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
     { name := "∞ is not below itself (and both kernels agree on it below)", run := fun _ => do
         let vs := MTm.sizeInf.map leanVerdict
         unless vs.take 5 == List.replicate 5 "error" && (vs.drop 5).all (· != "error") do

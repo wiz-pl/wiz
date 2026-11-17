@@ -5,7 +5,7 @@ import Tests.Elab
 /-!
 # A property harness for the kernels: substitution laws
 
-The laws tested (`wiz-notes/metatheory-plan.md` §5.1 M1b; `wiz-notes/prop-harness.md`):
+The laws tested (the laws of the kernel's specification that a test can check on samples):
 
 * **P1** typing is stable under substitution, for term, quantity and level variables;
 * **P2** conversion is an equivalence on the sample and stable under substitution;
@@ -609,10 +609,10 @@ structure World where
   fixed : List (Array Tm) := []
   /-- every generated `Π`/`Σ` carries its sort, and no rewrite drops one: the theory with
   mandatory sorts (N2 of the plan). A finding that goes away under it is an instance of
-  U5 (`p1-stable.md`): the optional annotation decides `vEqType`/`vCast`. -/
+  U5: the optional annotation decides `vEqType`/`vCast`. -/
   strict : Bool := false
   /-- `Size` and `Size< s` as ordinary types (to cast and equate). Off: conversion at
-  them is not reflexive on a stuck size (finding Sz1, `prop-harness.md`). -/
+  them is not reflexive on a stuck size (finding Sz1). -/
   sizeTypes : Bool := false
   /-- sizes at all: size variables, `μ`/`ν` at a size, `scase`, `sfix`, `scofix`
   (`tests --prop-no-sizes` turns them off: Sz1, Sz2) -/
@@ -1708,10 +1708,11 @@ def tyPair (w : World) (ctx : Array Tm) (A B : Tm) (subs : List (Nat × Tm)) (ta
 
 /-! ### A targeted generator: one constant at two levels (W1)
 
-W1 (`wiz-notes/kernel-lint.md`, fixed by #76): `Kernel.wiz`'s `headSame` compared two
-constants by name, so `d.{0}` and `d.{1}` in the spines of two glued values were "the
+W1 (found by a lint of the kernels' traversals, fixed by #76; the regression is the case
+"W1: a constant at two universe levels …" of the group *selfhost*): `Kernel.wiz`'s
+`headSame` compared two constants by name, so `d.{0}` and `d.{1}` in the spines of two glued values were "the
 same", and two stuck cases whose environments differed only in a level instance were
-convertible. The general generator does not build that shape (`prop-harness.md` §6a): it
+convertible. The general generator does not build that shape: it
 needs a level-polymorphic constant as an argument of a glued global or of a variable, the
 whole stuck, compared against itself at another level. This generator builds exactly that:
 a proposition-valued polymorphic constant `c` (a gadget of the world whose type does not
@@ -2008,8 +2009,7 @@ def runWorld (w : World) (b : Budget) (acc : Acc) (seen : List String) : IO (Acc
   return (acc, seen)
 
 /-- The rules of type equality and of casts that the default run must reach (from
-`vEqType` and `vCast` in `Wiz/Core/Eval.lean`; `wiz-notes/prop-harness.md` lists the arms
-that are not here, and why). -/
+`vEqType` and `vCast` in `Wiz/Core/Eval.lean`). -/
 def requiredRules : List String :=
   (["Π = Π  ↦ Σ", "Π = Π  ↦ False", "Π = Π  ↦ stuck", "Σ = Σ  ↦ Σ", "Σ = Σ  ↦ False", "Σ = Σ  ↦ stuck",
     "Πᵖ = Πᵖ  ↦ Σ", "Π? = Π?  ↦ stuck", "Sort = Sort  ↦ True", "Unit = Unit  ↦ True",

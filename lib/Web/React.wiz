@@ -7,8 +7,7 @@ import Tagged
 A React-style UI framework for Wiz: components, local state, typed event handlers,
 keyed lists, a pure virtual DOM, deterministic server-side rendering (HTML strings),
 and a keyed diff that produces small DOM patches. `web/framework/` has the browser
-half (a patch applier and event delegation) and a demo; `wiz-notes/react-framework.md`
-is the design note and the survey this comes from.
+half (a patch applier and event delegation) and a demo.
 
 The model is **VDOM, not fine-grained signals**, and it is chosen for the way the
 existing web pages already work (web/Web.wiz, web/infoview.js):

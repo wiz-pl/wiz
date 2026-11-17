@@ -12,8 +12,11 @@ import WizMeta.Translate
 /-!
 # WizMeta: a declarative spec of the Wiz core theory, and a reference checker
 
-Milestone M1c of the metatheory plan. Design, the differences from the kernels, and
-what is not done: `/workspace/wiz-notes/wiz-meta.md`.
+Milestone M1c of the metatheory plan. The rules are data, and the checker is written
+from them; `Tests/Meta.lean` compares it with the Lean kernel on the terms it can
+translate. Two open design questions are kept as switchable rule files: Π/Σ type
+equality across levels (`Spec/EqTyCross` or `Spec/EqTyLevelled`) and equality of
+constructor payloads (`Spec/PayloadKernel`, `PayloadStuck`, `PayloadUniform`).
 
 * `Syntax`, `Level`: the spec's own terms and levels.
 * `Spec/`: the rules, one file per former; `Spec/Fragments.lean`: T0, T1, Tprog.
