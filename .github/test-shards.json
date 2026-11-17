@@ -74,6 +74,7 @@
     "=natives",
     "=nvim",
     "=react",
+    "=testrun",
     "optic",
     "persistent",
     "phantom",

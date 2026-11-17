@@ -91,6 +91,8 @@ line below.
 * [Stage 11: tooling](stages/11-tooling.md)
 * [Stage 23: grail, a build tool](stages/23-grail.md)
 * [Stage 26: tower, a toolchain manager](stages/26-tower.md)
+* [Stage 33: a Wiz-native test runner](stages/33-test-runner.md): the pure core (ids and selectors,
+  plans, memory admission, the scheduler, records, goldens)
 
 ### Numbers and libraries
 
