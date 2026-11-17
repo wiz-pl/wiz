@@ -273,7 +273,64 @@ def concGroup : Group where
         failsLibs ("import IO\nimport MVar\ndef bad {B : Type} (l : Lock) (b : B) : IO B :=\n" ++
           "  Lock.acquire l (fun g => Lock.release l g (Lock.release l g (IO.pure b)))") "quantity 1"
         failsLibs "import IO\nimport MVar\ndef bad (m : MVar Nat) : IO Nat := MVar.borrow m (fun a h => IO.pure a)" "quantity 1"
-        failsLibs "import IO\nimport MVar\ndef forge (l : Lock) : IO (Lock.Guard l) := Lock.acquireRaw l" "private" }
+        failsLibs "import IO\nimport MVar\ndef forge (l : Lock) : IO (Lock.Guard l) := Lock.acquireRaw l" "private" },
+    -- (conc-05) The harness used to treat *any* error containing "No such file" as a
+    -- missing toolchain: a program that failed at run time with ENOENT (a Handle test, a
+    -- missing fixture, a `Process.output` of a command not on PATH) was recorded as
+    -- `⊘ skipped (no toolchain)`, not as a failure. Only a *build* failure that names the
+    -- compiler or the headers may skip; the program's stderr never can.
+    { name := "a program that fails with ENOENT at run time is a failure, not a missing toolchain", run := fun _ => do
+        let src := "import IO\nimport Sys\n" ++
+          "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => Process.exit 3)\n"
+        match ← cRunLibsOut src with
+        | .ok v => throw (IO.userError s!"the program passed: {v}")
+        | .error e =>
+          if e.isToolchain then skip "no toolchain"
+          else do
+            -- the failure reports the exit code and the program's own stderr
+            check ((e.message.splitOn "the program failed (3)").length > 1) e.message
+            check ((e.message.splitOn "open log.txt: No such file or directory").length > 1) e.message
+            -- and `cRunLibs` fails the case instead of recording a skip
+            let skipped ← try
+                cRunLibs src ""
+                pure true
+              catch _ => pure false
+            check (!skipped) "cRunLibs recorded a run-time failure as a skip" },
+    { name := "a program that writes 'No such file' on stderr and exits 0 still passes", run := fun _ =>
+        cRunLibs ("import IO\nimport Sys\n" ++
+          "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => IO.println \"ok\")\n") "ok\n" },
+    -- The other half: a build that cannot start the compiler is still a genuine "no
+    -- toolchain" skip. Run the passing case above in a child driver whose `--cc` does not
+    -- exist, and check that it is reported SKIPPED (exit 3), not failed.
+    { name := "a build that cannot find the compiler is still a 'no toolchain' skip", run := fun _ => do
+        let self ← IO.appPath
+        let target := "a program that writes 'No such file' on stderr and exits 0 still passes"
+        let listed ← IO.Process.output { cmd := self.toString, args := #["--list-cases", "=conc"] }
+        let some i := (listed.stdout.splitOn "\n").findSome? fun l =>
+            match l.splitOn "\t" with
+            | [g, i, n] => if g == "conc" && n == target then i.toNat? else none
+            | _ => none
+          | throw (IO.userError s!"`--list-cases =conc` has no case named {target}")
+        let args := #["--run", "conc", toString i, "--cc", "/nonexistent/wiz-test-cc"]
+        let r ← IO.Process.output { cmd := self.toString, args }
+        check (r.exitCode == 3) s!"exit {r.exitCode}, not 3 (a skip):\n{r.stdout}{r.stderr}"
+        check ((r.stdout.splitOn "⊘").length > 1) r.stdout
+        check ((r.stdout.splitOn "SKIPPED (no toolchain)").length > 1) r.stdout },
+    -- The classifier itself: a build that cannot start a program, or cannot find GMP's
+    -- header, is a missing toolchain; a compiler that ran and rejected the program (or a
+    -- missing test input file) is not; and no program failure ever is.
+    { name := "only a missing compiler, llc or gmp.h is classified as 'no toolchain'", run := fun _ => do
+        let tc : Wiz.Toolchain := {}
+        check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"
+        check (Build.missingToolchain tc "llc failed:\ncould not execute external process 'llc'") "a missing llc"
+        check (Build.missingToolchain tc "cc: no such file or directory (error code: 2)") "cc could not start"
+        check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
+        check (!Build.missingToolchain tc "cc failed:\ncc: error: c/helper.c: No such file or directory") "a missing link_c file"
+        check (!Build.missingToolchain tc "cc failed:\nmain.c:3:1: error: 'x' undeclared") "a rejected program"
+        check (!(Build.RunError.run 3 "No such file or directory").isToolchain) "a program failure"
+        check (!(Build.RunError.build "cc failed").isToolchain) "a build failure"
+        check (!(Build.RunError.timeout).isToolchain) "a timeout"
+        check (!(Build.RunError.readback "could not read").isToolchain) "a readback failure" }
   ]
 
 builtin_initialize registerGroup concGroup

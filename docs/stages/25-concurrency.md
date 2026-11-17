@@ -4,7 +4,9 @@ Real threads in compiled code, and two peer APIs on top of them (decision CS1):
 session-typed linear channels (`lib/Session.wiz`), deadlock-free by construction, and
 MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guarantees.
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
-design: `concurrency.md`. Tests: group `conc`.
+design: `concurrency.md`. Tests: group `conc`; a test program that fails at run time is a
+failed case, with its exit code and standard error (a program's own "No such file" is never
+read as a missing toolchain; docs/building.md, "Building and testing").
 
 ## 25a: a thread-safe runtime
 

@@ -27,6 +27,17 @@ as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skippe
 not a pass. A selector that picks no group, a case index the group lacks, and an unknown
 flag are errors (exit code 2), not an empty run.
 
+**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
+compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
+program's exit code and standard error, `.timeout`, or `.readback` when the program itself
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
+only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
+program's stderr. Never look for `No such file` in a program's stderr to decide "no
+toolchain": a program may print that itself (a missing fixture, a `File.open`, a
+`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
+has a case for each half.
+
 `tests --run GROUP INDEX` runs one case as `lake test -- '=GROUP#INDEX'` does: in a child
 process, with the toolchain of `grail.local.wiz` (toolchain flags after it override it),
 printing the case's name and result, a failure's output, and a last line

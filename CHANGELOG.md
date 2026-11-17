@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* tests: a compiled program that fails at run time is a **failed case**, not a skipped
+  one. `Build.runGlobal` now returns a `Build.RunError` that says whether the failure was
+  the build (`.build`, or `.toolchain` when the compiler, `llc` or GMP's `gmp.h` could not
+  be found) or the program (`.run` with its exit code and stderr, `.timeout`,
+  `.readback`), and the test helpers in `Tests/Elab.lean` skip only a `.toolchain`
+  failure. Before, any error containing "No such file" was recorded as
+  `⊘ skipped (no toolchain)`, so a `conc`/`Handle` program (or any test program) that
+  failed with ENOENT hid as a missing toolchain. The failure now reports the program's
+  exit code and stderr. New `conc` cases pin a run-time ENOENT failure, a pass whose
+  program writes "No such file" on stderr but exits 0, and the genuine missing-compiler
+  skip.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

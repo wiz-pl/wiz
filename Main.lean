@@ -603,11 +603,16 @@ def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
-  let r ← if target == "wasm" then Build.runWasmGlobal s "main" dir
-    else Build.runGlobal tc s "main" dir (target == "llvm") (split := split)
-  match r with
-  | .error e => IO.eprintln e; pure 1
-  | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+  let print (v : String) : IO UInt32 := do
+    IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+  if target == "wasm" then
+    match ← Build.runWasmGlobal s "main" dir with
+    | .error e => IO.eprintln e; pure 1
+    | .ok v => print v
+  else
+    match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
+    | .error e => IO.eprintln e.message; pure 1
+    | .ok v => print v
 
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
@@ -724,7 +729,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
           | [":run", name] =>
             let dir ← IO.FS.createTempDir
             match ← Build.runGlobal tc state name dir llvm with
-            | .error e => stderr.putStrLn e
+            | .error e => stderr.putStrLn e.message
             | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
             stdout.flush
             return some state
