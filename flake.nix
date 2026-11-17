@@ -391,6 +391,11 @@
         });
 
       devShells = forAll (pkgs: {
+        # CI's publish step: `cachix` from this flake's locked nixpkgs, so no global
+        # registry (`nixpkgs#cachix`) is consulted by a job with the push token.
+        ci = pkgs.mkShell {
+          packages = [ pkgs.cachix ];
+        };
         default = pkgs.mkShell {
           # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat`
           # groups (stage 28b: `sat_decide` finds it on PATH); yosys: the synthesis cases

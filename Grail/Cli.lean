@@ -85,7 +85,9 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   a read-only cache, searched in order after the write cache), --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
-  --require-signature (require a verified signed index snapshot), --allowed-signers FILE
+  --require-signature (require a verified signed index snapshot; CI and the install
+  docs pass it), --allow-unsigned (the explicit escape: accept an index with no signed
+  snapshot), --allowed-signers FILE
   (the trust root for the snapshot; default: the key a grail.lock pinned),
   --allow-rewind (accept a rewritten index history or a lower snapshot seq),
   --offline (never touch the network),
@@ -147,6 +149,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--vendor" :: v :: rest => grailOpts { o with vendor := some v } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--require-signature" :: rest => grailOpts { o with requireSignature := true } rest
+  | "--allow-unsigned" :: rest => grailOpts { o with requireSignature := false } rest
   | "--allowed-signers" :: f :: rest => grailOpts { o with allowedSigners := some f } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest

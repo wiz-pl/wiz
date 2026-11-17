@@ -2,9 +2,10 @@
 #
 # Runs on `master` (the integration branch, with the solutions in it) and on pull
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
-# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and published to Cachix;
-# the test shards substitute those store paths instead of rebuilding (no Lake build and
-# no `.lake` Actions cache on the critical path). The exercise tree
+# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and a push to master
+# publishes it to the trusted Cachix cache (a pull request publishes only to its own
+# untrusted PR cache); the test shards substitute those store paths instead of rebuilding
+# (no Lake build and no `.lake` Actions cache on the critical path). The exercise tree
 # (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
 # `exercise tree` job, which must pass before anything is published (it still builds
 # with Lake, as does the weekly fixpoint).
@@ -43,11 +44,16 @@ permissions:
   contents: read
 
 env:
-  # The Cachix binary cache (empty: none, everything comes from cache.nixos.org). Pushing
-  # to it needs the repository secret CACHIX_AUTH_TOKEN; without the secret (pull
-  # requests from forks) it is pull-only, and those shards rebuild what the build job
-  # could not publish.
+  # The trusted Cachix binary cache (empty: none, everything comes from
+  # cache.nixos.org). Only a push to master publishes to it; pulls (and the docs/tower
+  # path) read it anonymously. A pull request publishes only to its own untrusted cache,
+  # named by the repository variable CACHIX_PR_NAME and authenticated by the secret
+  # CACHIX_PR_AUTH_TOKEN; without that token it publishes nothing, and its shards build
+  # the paths themselves. See docs/ci-runner.md, "Which cache is trusted".
   CACHIX_NAME: badlydrawnwizards
+  # The PR cache's name comes from repository settings (CACHIX_PR_NAME), never a literal
+  # here: it is untrusted and must never be added to trusted-public-keys.
+  CACHIX_PR_NAME: ${{ vars.CACHIX_PR_NAME }}
   # Lake's artifact cache (enableArtifactCache in lakefile.lean) inside .lake rather than
   # under the elan toolchain. Only the jobs that still run Lake use it: the weekly
   # fixpoint (and release.yml, which has its own workflow).
@@ -73,7 +79,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       shards: ${{ steps.filter.outputs.shards }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 2 # a pull request's merge commit and its first parent (the base)
       - name: What changed
@@ -97,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Check the docs, and the checker's fixtures
         shell: bash
         run: |
@@ -106,8 +112,8 @@ jobs:
 
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
-  # same store path `build` publishes) and checks the snippets. A pull request that
-  # changes code runs the same check in `build`, after the build it already has.
+  # same store path `build` publishes) and checks the snippets. A pull request reads
+  # the trusted cache anonymously; it never gets its auth token.
   docs_examples:
     name: docs examples
     needs: changes
@@ -115,11 +121,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
           lean: false
       - name: Cache key
         id: key
@@ -136,7 +142,7 @@ jobs:
           "$wiz/bin/wiz" --version
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -164,12 +170,13 @@ jobs:
       wiz: ${{ steps.nix.outputs.wiz }}
       tests: ${{ steps.nix.outputs.tests }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          # empty in pull requests from forks: Cachix is then pull-only
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token: pulls, merge-queue runs and
+          # dispatch read the public cache anonymously.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
           # no Lake here: nixpkgs' Lean builds the packages (elan is only for the
           # fixpoint)
           lean: false
@@ -182,9 +189,10 @@ jobs:
       - name: nix build (wiz, grail and the test driver)
         id: nix
         run: |
-          # One build for every job: the shards substitute these store paths from Cachix
-          # (on this repository's branches, which have the push token). `packages.wiz` is
-          # the default package; `packages.tests` is the test driver, from the same build.
+          # One build for every job: the shards substitute these store paths (master's
+          # from the trusted cache; a pull request's from its PR cache when published).
+          # `packages.wiz` is the default package; `packages.tests` is the test driver,
+          # from the same build.
           nix build .#wiz .#tests --no-link -L
           # the reference manual (wiz doc --lib --reference, with this wiz): a Cachix hit
           # when the compiler and lib/ are unchanged; the docs job substitutes it
@@ -208,11 +216,10 @@ jobs:
           scripts/trust-ledger-merge_test.sh
           python3 scripts/host-unsafe-ledger.py --check
           Tests/host-unsafe-ledger/run.sh
-      - name: Publish the store paths to Cachix
-        # The shards substitute from here. Explicit (not the action's post-step) so that
-        # exactly this commit's build is published, with the token only in this step's
-        # environment; fork pull requests have no secret and skip it (their shards build).
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+      - name: Publish the store paths to Cachix (master)
+        # Only a push to master writes the trusted cache. The token is in this step's
+        # environment only; nothing on a pull request can reach it.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
@@ -220,7 +227,22 @@ jobs:
             echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the store paths are not published"
             exit 0
           fi
-          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
+            $(nix path-info .#wiz .#tests .#reference)
+      - name: Publish the store paths to the PR cache
+        # A pull request writes only its own untrusted cache, with its own token. If the
+        # repository variable or secret is absent (or this is a fork), nothing is
+        # published: the shards build the paths, and nothing falls back to the trusted
+        # cache or its token.
+        if: github.event_name == 'pull_request'
+        env:
+          CACHIX_PR_AUTH_TOKEN: ${{ secrets.CACHIX_PR_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_PR_NAME" ] || [ -z "$CACHIX_PR_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_PR_AUTH_TOKEN: the store paths are not published (set the CACHIX_PR_NAME variable and the CACHIX_PR_AUTH_TOKEN secret)"
+            exit 0
+          fi
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
             $(nix path-info .#wiz .#tests .#reference)
       - name: Every test case is in exactly one shard
         run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
@@ -264,7 +286,7 @@ jobs:
         run: scripts/check-repro.sh --json
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -278,7 +300,7 @@ jobs:
           python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
       - name: Save the docs examples cache (master)
         if: steps.docs-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -298,17 +320,23 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token: pulls, merge-queue runs and
+          # dispatch read the public cache anonymously.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          # A pull request adds its own untrusted cache as a second substituter for this
+          # job (its key is trusted here only); master never adds it.
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           # the tower group's "from source" case runs Lake, so that one shard needs the
           # elan toolchain (the others run only the store's binaries)
           lean: ${{ contains(toJSON(matrix.shard), 'tower') }}
-      # The build job's store paths, substituted from Cachix (same os/arch). A fork pull
-      # request has no push token, so its build job could not publish them and this
-      # builds them again here.
+      # The build job's store paths, substituted from Cachix (same os/arch): master's
+      # from the trusted cache, a pull request's from its PR cache when it was published.
+      # A fork, or a PR with no PR token, builds them again here.
       - name: nix build (the store paths, from Cachix)
         id: nix
         run: |
@@ -336,7 +364,7 @@ jobs:
       # content-addressed, so a partial hit (other Wiz files) is safe.
       - name: Restore the Wiz build caches
         id: wiz-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cache/wiz
@@ -360,7 +388,7 @@ jobs:
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
         if: always() && steps.wiz-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cache/wiz
@@ -373,7 +401,7 @@ jobs:
           [ -f "logs/${{ matrix.shard.name }}.log" ] || exit 0
           shopt -s nullglob
           python3 scripts/ci.py summary "shard ${{ matrix.shard.name }}" logs/${{ matrix.shard.name }}.log logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: test-log-${{ matrix.shard.name }}
@@ -395,7 +423,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -426,7 +454,7 @@ jobs:
         run: sh web/build-site.sh doc-site web/out
       - name: The site has its three entry points and the landing's links resolve
         run: sh web/check-site.sh doc-site
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wiz-docs
           path: doc-site
@@ -470,17 +498,17 @@ jobs:
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: wiz-docs
           path: doc-site
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: doc-site
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
   # One check for branch protection, and the whole suite's summary.
   result:
@@ -491,12 +519,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           sparse-checkout: |
             scripts
             .github
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           pattern: test-log-*
@@ -529,7 +557,7 @@ jobs:
             exit 1
           fi
           python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           name: test-timings
@@ -556,7 +584,7 @@ jobs:
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
@@ -597,7 +625,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -605,7 +633,7 @@ jobs:
           # the fixpoint still builds with Lake (scripts/fixpoint.sh)
           lean: true
       - name: Cache the Lake build and the elaboration cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .lake

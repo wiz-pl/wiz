@@ -105,7 +105,7 @@ jobs:
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -139,7 +139,7 @@ jobs:
 
       - name: Restore the A-side executable
         id: baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bench/.build/bench-baseline
           key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -147,7 +147,7 @@ jobs:
             ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore the history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bench/history.jsonl
           key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -305,21 +305,21 @@ jobs:
 
       - name: Save the new A side
         if: always() && steps.threshold.outputs.code == '0' && steps.stdlib.outputs.skip != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bench/.build/bench-baseline
           key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save the history
         if: always() && hashFiles('bench/history.jsonl') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bench/history.jsonl
           key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload the run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bench-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -389,7 +389,7 @@ jobs:
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -440,7 +440,7 @@ jobs:
 
       - name: Upload the run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mem-bench-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench-out/mem-bench.json
