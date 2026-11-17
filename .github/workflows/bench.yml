@@ -377,7 +377,7 @@ jobs:
           fi
           exit "$failed"
 
-  # --- memory gate (scripts/mem-bench.py; docs/building.md, "Memory budget") -------
+  # --- memory gate (scripts/mem-bench.py; docs/building.md, "Build time and memory") -
   # Peak RSS, not wall time: the nightly timing job cannot see a build that would be
   # killed by a 4 GiB cgroup. The baseline is checked in, so there is no cache to roll.
   # It runs after `bench` whatever that job's result: on one runner the two would

@@ -1,0 +1,25 @@
+case	engine	round	eval_ms	build_ms	wall_ms	peak_rss_mib	derived
+chain 1000	old	1	220	13	237.5	15.5	{"alerts": 999, "tainted": 1001}
+chain 1000	new	1	9	3	18.3	15.5	{"alerts": 999, "tainted": 1001}
+chain 5000	old	1	5488	321	5817.3	15.3	{"alerts": 4999, "tainted": 5001}
+chain 5000	new	1	49	15	87.6	19.1	{"alerts": 4999, "tainted": 5001}
+tc 20	old	1	63425	11	63454.0	17.2	{"reach": 13601}
+tc 20	new	1	401	3	430.0	16.5	{"reach": 13601}
+naive chain 1000	naive	1	3028	3	3037.1	15.5	{"derived": 2000}
+naive tc 20	naive	1	2426	2	2450.3	58.2	{"derived": 13601}
+chain 1000	new	2	8	3	16.7	15.5	{"alerts": 999, "tainted": 1001}
+chain 1000	old	2	217	14	235.8	15.5	{"alerts": 999, "tainted": 1001}
+chain 5000	new	2	46	16	82.8	19.2	{"alerts": 4999, "tainted": 5001}
+chain 5000	old	2	5680	316	6004.9	15.5	{"alerts": 4999, "tainted": 5001}
+tc 20	new	2	319	2	342.4	16.5	{"reach": 13601}
+tc 20	old	2	71822	11	71845.8	17.2	{"reach": 13601}
+naive chain 1000	naive	2	3161	3	3170.9	15.5	{"derived": 2000}
+naive tc 20	naive	2	4677	3	4727.7	58.1	{"derived": 13601}
+chain 1000	old	3	471	29	507.1	15.5	{"alerts": 999, "tainted": 1001}
+chain 1000	new	3	16	5	30.2	15.5	{"alerts": 999, "tainted": 1001}
+chain 5000	old	3	9567	728	10308.2	15.5	{"alerts": 4999, "tainted": 5001}
+chain 5000	new	3	92	32	171.7	19.2	{"alerts": 4999, "tainted": 5001}
+tc 20	old	3	85302	25	85351.4	17.2	{"reach": 13601}
+tc 20	new	3	563	3	617.2	16.5	{"reach": 13601}
+naive chain 1000	naive	3	4043	5	4057.0	15.5	{"derived": 2000}
+naive tc 20	naive	3	5405	4	5473.4	57.9	{"derived": 13601}

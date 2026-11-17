@@ -7,17 +7,20 @@ import Scry.Eval
 -- Datalog evaluator benchmark (`examples/scry-datalog-bench.wiz`). Two shapes:
 --
 --   chain N   taint-shaped: flow(i,i+1), src(0), sink(i,0), no sanitiser;
---             derives N tainted and N alert facts (joins on bound columns).
+--             derives N+1 tainted and N-1 alert facts (joins on bound columns).
 --             N = 1,100,000 is parser.c's CST node count (S1 parse stats).
 --   tc N     transitive closure on a layered DAG: layer i has 8 nodes, every node
 --             reaches every node one layer later, so the closure is quadratic.
 --
---   wiz build examples/scry-datalog-bench.wiz -o bench --cflags "…" --ldflags "…"
+--   wiz build -I lib examples/scry-datalog-bench.wiz -o bench
 --   ./bench chain 1100000
 --   ./bench tc 100
+--   ./bench dump chain 5000     EDB rows as TSV, for the input hash
+--   ./bench naive chain 1000    round-scan baseline (all rules, whole store)
 --
 -- The counts and the elapsed build/eval milliseconds are printed; counts are
--- deterministic, timings are informational (see wiz-notes/scry-datalog.md §8).
+-- deterministic, timings are informational. The measured comparison and its
+-- pinned input hash are `scry/bench/datalog/` (README, results.json).
 
 def u (n : Nat) : U64 := U64.ofNat n
 
@@ -116,6 +119,55 @@ def runTc (n : Nat) : IO Unit := do
   IO.println (String.append "eval_ms=" (Nat.repr (ms (Duration.sub t1 t0))))
 
 
+def dumpRel (st : Scry.State Nat) (rel : Nat) : List String :=
+  List.map (fun row =>
+    String.append (Nat.repr rel)
+      (List.foldl (fun acc v => String.append acc
+        (String.append "\t" (Nat.repr (UIntN.toNat v)))) "" row))
+    (Scry.Db.tupleAt st.db rel).toList
+
+partial def dumpRels (st : Scry.State Nat) (rel : Nat) (max : Nat) : List String :=
+  if Nat.lt max rel then List.nil
+  else List.append (dumpRel st rel) (dumpRels st (Nat.succ rel) max)
+
+def runDump (which : String) (n : Nat) : IO Unit := do
+  let (db, maxRel) := if String.beq which "tc" then (tcDb n, 1) else (chainDb n, 5);
+  IO.println (String.intercalate "\n" (dumpRels db 0 maxRel))
+
+-- The naive baseline: every rule against the whole store, every round, until no new
+-- fact. It calls the same kernels as the semi-naive engine (`Scry.evalAtoms`,
+-- `Scry.applyMatches`), so the comparison isolates the delta loop.
+def indexedRules : List (Scry.Rule Nat) → Nat → List (Nat × Scry.Rule Nat)
+  | .nil, _ => .nil
+  | .cons r rest, i => .cons (i, r) (indexedRules rest (Nat.succ i))
+
+def naiveRound (p : Scry.Program Nat) (st : Scry.State Nat) : Scry.Round Nat :=
+  List.foldl (fun (acc : Scry.Round Nat) (pair : Nat × Scry.Rule Nat) =>
+    let ms := Scry.evalAtoms p.ops acc.st pair.2.body Scry.Env.empty;
+    Scry.applyMatches p pair.1 pair.2 ms acc)
+    (Scry.Round.empty st) (indexedRules p.rules 0)
+
+partial def naiveLoop (p : Scry.Program Nat) (st : Scry.State Nat) (rounds : Nat) : Scry.State Nat :=
+  match rounds with
+  | .zero => st
+  | .succ k =>
+    let r := naiveRound p st;
+    if List.isEmpty r.newTuples && List.isEmpty r.newLats then r.st
+    else naiveLoop p r.st k
+
+def runNaive (which : String) (n : Nat) : IO Unit := do
+  tb0 ← Clock.monotonic;
+  let (db, p) := if String.beq which "tc" then (tcDb n, benchTc) else (chainDb n, benchTaint);
+  tb1 ← Clock.monotonic;
+  t0 ← Clock.monotonic;
+  let st := naiveLoop p db (Nat.add (Nat.mul n 2) 16);
+  t1 ← Clock.monotonic;
+  let derived := if String.beq which "tc" then count st 1 else Nat.add (count st 4) (count st 5);
+  IO.println (String.append "naive " (String.append which (String.append " n=" (Nat.repr n))));
+  IO.println (String.append "derived=" (Nat.repr derived));
+  IO.println (String.append "build_ms=" (Nat.repr (ms (Duration.sub tb1 tb0))));
+  IO.println (String.append "eval_ms=" (Nat.repr (ms (Duration.sub t1 t0))))
+
 def runInsert (n : Nat) : IO Unit := do
   start ← Clock.monotonic;
   let st := List.foldl (fun (acc : Scry.State Nat) (i : Nat) =>
@@ -136,4 +188,6 @@ def main : IO Unit := IO.bind IO.args (fun as =>
   | .cons "chain" rest => runTaint (parseArg rest)
   | .cons "tc" rest => runTc (parseArg rest)
   | .cons "ins" rest => runInsert (parseArg rest)
-  | _ => IO.println "usage: bench chain N | bench tc N")
+  | .cons "dump" (.cons w rest) => runDump w (parseArg rest)
+  | .cons "naive" (.cons w rest) => runNaive w (parseArg rest)
+  | _ => IO.println "usage: bench chain N | tc N | naive chain N | dump chain N")

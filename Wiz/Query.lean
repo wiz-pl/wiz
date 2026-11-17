@@ -31,14 +31,16 @@ structure Engine (R : Type) where
 
 /-- Elaborate `input` from `init`, reusing memoised commands. `key₀` identifies `init`
 (for example, a hash of the libraries it can import). (include-str) the files the text
-includes enter the chain first, so editing one invalidates every command. -/
-partial def elaborate (eng : Engine R) (input : String) (init : CommandState R) (key₀ : UInt64 := 0) :
+includes enter the chain first, so editing one invalidates every command.
+
+`@[nospecialize]`: see `runFrontend` — this used to be copied into `Wiz.LSP`. -/
+@[nospecialize] partial def elaborate (eng : Engine R) (input : String) (init : CommandState R) (key₀ : UInt64 := 0) :
     CommandState R × Engine R :=
   let includes := init.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")
   let key₀ := mixHash (Module.includesKey includes "" input) key₀
   go input.toList.toArray 0 init key₀ eng
 where
-  go (chars : Array Char) (pos : Nat) (s : CommandState R) (key : UInt64) (eng : Engine R) : CommandState R × Engine R :=
+  @[nospecialize] go (chars : Array Char) (pos : Nat) (s : CommandState R) (key : UInt64) (eng : Engine R) : CommandState R × Engine R :=
     if skipWs chars pos ≥ chars.size then (s, eng) else
     match parseCommand chars s.tables pos with
     | .ok (cmd, stop) =>
