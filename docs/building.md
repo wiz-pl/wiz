@@ -656,13 +656,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
     `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
-    for and an owner);
+    for and an owner, and may name the one `case` it excuses; the self-host parity
+    entries do, with their `parity` code);
   * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
     nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
     that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
     the allow-list instead;
-  * a shard's unexplained skipped ratio is over 25% (`--max-ratio`).
+  * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
+    of the group's cases in every shard, so moving cases between shards (a refreshed
+    `.github/test-timings.json`) cannot change the verdict.
 
   Explained skips are reported in the summary (with the reason and the allow-list owner)
   and give a warning annotation, never a failure. Skips that are not whole-group and stay
