@@ -39,7 +39,7 @@ partial def elaborate (eng : Engine R) (input : String) (init : CommandState R) 
   go input.toList.toArray 0 init key₀ eng
 where
   go (chars : Array Char) (pos : Nat) (s : CommandState R) (key : UInt64) (eng : Engine R) : CommandState R × Engine R :=
-    if skipWs chars pos ≥ chars.size then (s, eng) else
+    if skipWs chars pos ≥ chars.size then (s.checkUnclosedNamespaces, eng) else
     match parseCommand chars s.tables pos with
     | .ok (cmd, stop) =>
       let text := String.ofList (chars.extract pos stop).toList
