@@ -1,7 +1,8 @@
 -- The AXI4-Stream subset (`import Hdl.AxiStream`, `Hdl.AxiStreamLaw`): source/sink,
--- one-beat register slice, up/down width conversion, a stalling sink, and the
--- backpressure law (no beat lost, no beat duplicated, order preserved). Run by the
--- `bus-protocol` test group; yosys runs on the emitted Verilog when it is on PATH.
+-- one-beat register slice, up/down width conversion, a stalling sink, and the two
+-- checks `AxiStream.Law.Stable` and `AxiStream.Law.Order` (no beat lost, duplicated or
+-- reordered at the sink). Run by the `bus-protocol` test group; yosys runs on the
+-- emitted Verilog when it is on PATH.
 import Hdl.Core
 import Hdl.Sim
 import Hdl.AxiStream
@@ -80,20 +81,8 @@ def sourceBeatTrace (n period fuel : Nat) : List (HwTy.El (AxiStream.Beat.code 8
     beatE 8 (BitVec.toNat t.tdata) (BitVec.toNat t.tvalid) (BitVec.toNat t.tlast)
       (BitVec.toNat t.tkeep) (BitVec.toNat t.tuser) r) (units fuel)
 
-def stablePairsGo : Nat → HwTy.El (AxiStream.Beat.code 8) →
-    List (HwTy.El (AxiStream.Beat.code 8)) → Bool
-  | .zero, _, _ => .true
-  | .succ _, _, .nil => .true
-  | .succ f, prev, .cons y ys =>
-    Bool.and (AxiStream.Law.StableStep prev y) (stablePairsGo f y ys)
-
-def stablePairs (xs : List (HwTy.El (AxiStream.Beat.code 8))) : Bool :=
-  match xs with
-  | .nil => .true
-  | .cons x rest => stablePairsGo (List.length rest) x rest
-
 def sourceStable (n period fuel : Nat) : Bool :=
-  stablePairs (sourceBeatTrace n period fuel)
+  AxiStream.Law.Stable (sourceBeatTrace n period fuel)
 
 ------------------------------------------------------------------------------------
 -- 2. The register slice with a stalling sink. The generator holds a beat until the
@@ -137,10 +126,7 @@ def sliceLawOk (n period fuel : Nat) : Bool :=
   let outs := Circuit.run (AxiStream.sliceC 8) ins;
   Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) (sliceRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (sliceExpected n))
-      (Bool.and (Nat.beq (List.length (AxiStream.Law.accepted outs)) n)
-        (Nat.beq (List.length (AxiStream.Law.accepted outs))
-          (List.length (sliceExpected n)))))
+    (AxiStream.Law.Order (sliceExpected n) outs)
 
 def sliceAgree (n period fuel : Nat) : Bool :=
   agree (AxiStream.sliceC 8) (sliceIns n period fuel)
@@ -189,8 +175,7 @@ def upLawOk (n period fuel : Nat) : Bool :=
   let outs := Circuit.run (AxiStream.upC 8 2) ins;
   Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 16)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 16)) (upRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (upExpected n))
-      (Nat.beq (List.length (AxiStream.Law.accepted outs)) (Nat.div n 2)))
+    (AxiStream.Law.Order (upExpected n) outs)
 
 def upAgree (n period fuel : Nat) : Bool :=
   agree (AxiStream.upC 8 2) (upIns n period fuel)
@@ -248,8 +233,7 @@ def downLawOk (n period fuel : Nat) : Bool :=
   let outs := Circuit.run (AxiStream.downC 8 2) ins;
   Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) (downRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (downExpectedFlat n))
-      (Nat.beq (List.length (AxiStream.Law.accepted outs)) (Nat.mul 2 n)))
+    (AxiStream.Law.Order (downExpectedFlat n) outs)
 
 def downAgree (n period fuel : Nat) : Bool :=
   agree (AxiStream.downC 8 2) (downIns n period fuel)
@@ -280,13 +264,13 @@ def main : IO Unit := do
     <+> ", period 2 " <+> yes (pairOk 8 2 24)
     <+> ", stable " <+> yes (sourceStable 8 3 40)
     <+> ", value = simulate = simFast " <+> yes (pairAgree 8 3 32));
-  IO.println ("stream slice: order/no loss period 3 " <+> yes (sliceLawOk 10 3 40)
+  IO.println ("stream slice: Order period 3 " <+> yes (sliceLawOk 10 3 40)
     <+> ", period 2 " <+> yes (sliceLawOk 9 2 32)
     <+> ", value = simulate = simFast " <+> yes (sliceAgree 10 3 40));
-  IO.println ("stream upsize 8->16: grouping/keep/last " <+> yes (upLawOk 8 3 48)
+  IO.println ("stream upsize 8->16: Order/grouping/keep/last " <+> yes (upLawOk 8 3 48)
     <+> ", period 1 " <+> yes (upLawOk 8 1 24)
     <+> ", value = simulate = simFast " <+> yes (upAgree 8 3 48));
-  IO.println ("stream downsize 16->8: grouping/keep/last " <+> yes (downLawOk 4 2 32)
+  IO.println ("stream downsize 16->8: Order/grouping/keep/last " <+> yes (downLawOk 4 2 32)
     <+> ", period 1 " <+> yes (downLawOk 4 1 16)
     <+> ", value = simulate = simFast " <+> yes (downAgree 4 2 32));
   IO.println ("stream bundles " <+> yes streamBundlesOk <+> ", well formed " <+> yes netWellFormed)

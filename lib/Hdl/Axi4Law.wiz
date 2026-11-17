@@ -3,11 +3,12 @@ import Hdl.BusLaw
 /-!
 # Hdl.Axi4Law
 
-The obligations of the AXI4 burst adapters in `Hdl.Axi4`, stated over value traces as in
-`Hdl.BusLaw` and `Hdl.ProtocolLaw`. `examples/hdl-axi4.wiz` (test group `bus-protocol`)
-evaluates the Boolean forms on INCR and WRAP bursts with a stalling bus slave, at the
-same time as it compares the value simulation, `Netlist.simulate` and `Circuit.simFast`.
-They are **tested, not proved**; only the small lemmas at the end are kernel-checked.
+The obligations of the AXI4 burst adapters in `Hdl.Axi4`, as Boolean checks over the
+burst traces `examples/hdl-axi4.wiz` generates, in the style of `Hdl.BusLaw` and
+`Hdl.ProtocolLaw`. The example (test group `bus-protocol`) evaluates every check on INCR
+and WRAP bursts with a stalling bus slave, at the same time as it compares the value
+simulation, `Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**;
+only the small lemmas at the end are kernel-checked.
 
 The laws, by obligation:
 
@@ -16,21 +17,21 @@ The laws, by obligation:
   (`Axi4.legalWrap`, `Axi4.Law.legalLen`).
 * **Address progression.** The `k`-th beat's address is `Axi4.beatAddr`: INCR adds
   `2^SIZE`, WRAP walks its aligned `(LEN + 1) * 2^SIZE` window and wraps at the end,
-  FIXED holds the base. `Axi4.Law.AddressProgression` says the bus addresses of a burst
-  are exactly `Axi4.beatSeq`, and `Axi4.Law.WrBeatOk`/`RdBeatOk` check one beat at the
-  adapter pins.
-* **Beat count.** A burst has `LEN + 1` beats: `Axi4.Law.BeatCount` on the number of
-  bus beats, the number of `W` beats and the number of `R` beats. `WLAST`/`RLAST` are
-  high exactly on beat `LEN` (`Axi4.Law.WLastOk`/`RLastOk`).
+  FIXED holds the base. `Axi4.Law.addrsOk` checks that the bus addresses of a burst are
+  exactly `Axi4.beatSeq`, and `Axi4.Law.WrBeatOk`/`RdBeatOk` check one beat at the
+  adapter pins (address, data and byte strobes).
+* **Beat count.** A burst has `LEN + 1` beats: `Axi4.Law.beatCountOk` on the number of
+  bus beats (and the number of `W`/`R` beats). `WLAST`/`RLAST` are high exactly on beat
+  `LEN` (`Axi4.Law.WLastOk`/`RLastOk`).
 * **Write strobes.** Every `W` beat's `WSTRB` arrives unchanged on the bus request
   (`Axi4.Law.WrBeatOk`), one per beat, in order: no byte strobe is dropped or repeated
   under backpressure.
 * **Response ordering and IDs.** `B` echoes the `AW` ID and `BRESP` is `SLVERR` exactly
   for a bus error; `R` echoes the `AR` ID, carries the bus data and `SLVERR`, and
   `RLAST` marks the last beat (`Axi4.Law.BRespOk`/`RRespOk`). With several IDs in flight
-  the adapters are single outstanding, so responses come back in issue order, the
-  single-ID case of `Axi4.ResponseOrder` (different IDs may overtake each other in the
-  general AXI4 rule, modelled at values by `Axi4.orderOf`).
+  the adapters are single outstanding: each response is the one to the burst at the head
+  of the issue list, which the example checks (the general multi-ID completion order is
+  modelled at values by `Axi4.orderOf`).
 -/
 
 ------------------------------------------------------------------------------------
@@ -93,24 +94,13 @@ def Axi4.Law.legalLen (len burst : Nat) : Bool :=
 ------------------------------------------------------------------------------------
 -- Address progression and beat count
 
-/-- The bus addresses of a burst are `Axi4.beatSeq burst base size len`, in order. -/
-def Axi4.Law.AddressProgression (burst base size len : Nat) (addrs : List Nat) : Prop :=
-  addrs = Axi4.beatSeq burst base size len
-
-/-- The Boolean form of `AddressProgression`. -/
+/-- The Boolean form of address progression: the bus addresses are
+`Axi4.beatSeq burst base size len`, in order. -/
 def Axi4.Law.addrsOk (burst base size len : Nat) (addrs : List Nat) : Bool :=
   Hdl.natsEq addrs (Axi4.beatSeq burst base size len)
 
-/-- A burst has `LEN + 1` beats. -/
-def Axi4.Law.BeatCount (len n : Nat) : Prop := n = Axi4.beats len
-
-/-- The Boolean form of `BeatCount`. -/
+/-- The Boolean form of the beat count: a burst has `LEN + 1` beats. -/
 def Axi4.Law.beatCountOk (len n : Nat) : Bool := Nat.beq n (Axi4.beats len)
-
-/-- The beat address is the `k`-th element of `Axi4.beatSeq`. -/
-def Axi4.Law.beatAddrOk (burst base size len k : Nat) : Bool :=
-  Nat.beq (Axi4.beatAddr burst base size len k)
-    (Hdl.nthD 0 (Axi4.beatSeq burst base size len) k)
 
 ------------------------------------------------------------------------------------
 -- One beat at the adapter pins
@@ -163,11 +153,9 @@ def Axi4.Law.RRespOk {ω aw dw idw : Nat} (ar : HwTy.El (Axi4.Ar.code aw idw))
       (Bool.and (BitVec.beq y.resp (BitVec.ofNat Axi4.respW resp))
         (Axi4.Law.bEq (Bus.Law.bit y.last) last)))
 
-/-- The single-outstanding response-order law: the `B`/`R` responses are in the order
-the bursts were issued, with each ID echoed. `Axi4.ResponseOrder` is the general
-multi-ID form; the adapters satisfy this stronger same-order instance. -/
-def Axi4.Law.ResponsesInOrder (issued done : List Axi4.Burst) : Prop :=
-  Axi4.ResponseOrder issued done ∧ done = issued
+-- The adapter is single outstanding, so a response belongs to the burst that is
+-- currently in flight; `Axi4.Law.BRespOk`/`RRespOk` check that (the ID, data and code),
+-- and the example also checks one `B` per write burst and one `R` list per read burst.
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas

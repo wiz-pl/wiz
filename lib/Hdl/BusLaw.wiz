@@ -3,14 +3,13 @@ import Hdl.Bits
 /-!
 # Hdl.BusLaw
 
-The protocol laws of `Hdl.Bus` (`import Hdl.BusLaw`), stated as predicates over the
+The protocol laws of `Hdl.Bus` (`import Hdl.BusLaw`), as Boolean checks over the finite
 value traces of a circuit, plus the small proofs the HDL model supports. The example
-`examples/hdl-bus-law.wiz` (test group `bus-law`) checks every predicate exhaustively or
-on long pseudo-random traces, and checks the value simulation, `Netlist.simulate` and
+`examples/hdl-bus-law.wiz` (test group `bus-law`) calls every check exhaustively or on
+long pseudo-random traces, and checks the value simulation, `Netlist.simulate` and
 `Circuit.simFast` against each other at the same time. A law checked that way is
-*tested, not proved*: the predicate is a `Prop`, the check is a Boolean function that
-was evaluated on its inputs, and only the lemmas marked as kernel-checked below are
-proved.
+*tested, not proved*: the check is a Boolean function that was evaluated on its inputs,
+and only the lemmas marked as kernel-checked below are proved.
 
 The usual handshake: a source asserts `valid` and holds the request until the sink
 answers (`ready`, or `rvalid` for a read). The laws are
@@ -161,86 +160,183 @@ def Bus.Law.RouteOk {ω aw dw : Nat} (base size : Nat) (x : HwTy.El (Bus.RouteIn
   else Bus.Law.RouteMissOk i y
 
 ------------------------------------------------------------------------------------
--- The laws, as predicates over traces
+-- The laws, as Boolean checks over the finite traces the example generates
 
-/-- `valid` and the whole request are held while stalled. -/
-def Bus.Law.Stable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.stalled (q t) (r t) = .true → q (Nat.succ t) = q t
+/-- An idle packed request and response, for the end of a short trace. -/
+def Bus.Law.noReqE {ω aw dw : Nat} : HwTy.El (Bus.Req.code aw dw) :=
+  Bus.Req.pack aw dw (Bus.noReq : Bus.Req aw dw HwTy.El)
+/-- An idle packed response. -/
+def Bus.Law.noRespE {ω dw : Nat} : HwTy.El (Bus.Resp.code dw) :=
+  Bus.Resp.pack dw (Bus.noResp : Bus.Resp dw HwTy.El)
+
+/-- `valid` and the whole request are held while stalled, at every adjacent pair. -/
+def Bus.Law.StableGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bus.Law.StableStep (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q k)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r k)
+        (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q (Nat.succ k)))
+      (Bus.Law.StableGo q r k)
+
+/-- `Bus.Law.Stable` on a finite pair of traces. -/
+def Bus.Law.Stable {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.StableGo q r (Nat.sub (List.length q) 1)
 
 /-- `valid` stays high while stalled. -/
-def Bus.Law.ValidStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.stalled (q t) (r t) = .true → Bus.Law.valid (q (Nat.succ t)) = .true
+def Bus.Law.ValidStableGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bus.Law.ValidStableStep (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q k)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r k)
+        (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q (Nat.succ k)))
+      (Bus.Law.ValidStableGo q r k)
 
-/-- `we`, `addr` and `wdata` do not change while stalled (the payload law). -/
-def Bus.Law.PayloadStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.stalled (q t) (r t) = .true →
-    let x := Bus.Law.req (q (Nat.succ t));
-    let y := Bus.Law.req (q t);
-    x.we = y.we ∧ x.addr = y.addr ∧ x.wdata = y.wdata
+/-- `Bus.Law.ValidStable` on a finite pair of traces. -/
+def Bus.Law.ValidStable {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.ValidStableGo q r (Nat.sub (List.length q) 1)
 
-/-- The address does not change while stalled (the RAM's obligation). -/
-def Bus.Law.AddressStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.stalled (q t) (r t) = .true →
-    (Bus.Law.req (q (Nat.succ t))).addr = (Bus.Law.req (q t)).addr
+/-- `we`, `addr` and `wdata` do not change while stalled. -/
+def Bus.Law.PayloadStableGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bus.Law.PayloadStableStep (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q k)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r k)
+        (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q (Nat.succ k)))
+      (Bus.Law.PayloadStableGo q r k)
 
-/-- Mutual exclusion: at most one of the two master responses acknowledges in a cycle. -/
-def Bus.Law.AtMostOneAck {ω dw : Nat} (ra rb : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → ¬ (Bus.Law.ack (ra t) = .true ∧ Bus.Law.ack (rb t) = .true)
+/-- `Bus.Law.PayloadStable` on a finite pair of traces. -/
+def Bus.Law.PayloadStable {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.PayloadStableGo q r (Nat.sub (List.length q) 1)
+
+/-- The address does not change while stalled. -/
+def Bus.Law.AddressStableGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bus.Law.AddressStableStep (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q k)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r k)
+        (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q (Nat.succ k)))
+      (Bus.Law.AddressStableGo q r k)
+
+/-- `Bus.Law.AddressStable` on a finite pair of traces. -/
+def Bus.Law.AddressStable {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.AddressStableGo q r (Nat.sub (List.length q) 1)
+
+/-- Mutual exclusion at every cycle: at most one of the two master responses
+acknowledges. -/
+def Bus.Law.AtMostOneAckGo {ω dw : Nat}
+    (ra : List (HwTy.El (Bus.Resp.code dw)))
+    (rb : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bus.Law.AtMostOneAckStep (Hdl.nthD (Bus.Law.noRespE (dw := dw)) ra k)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) rb k))
+      (Bus.Law.AtMostOneAckGo ra rb k)
+
+/-- `Bus.Law.AtMostOneAck` on a finite pair of response traces. -/
+def Bus.Law.AtMostOneAck {ω dw : Nat}
+    (ra : List (HwTy.El (Bus.Resp.code dw)))
+    (rb : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.AtMostOneAckGo ra rb (List.length ra)
 
 /-- Single-master ownership: the forwarded request is held while stalled (so the owner
-does not change) and at most one master is answered. This is the observable form of the
-arbiter's `busy`/`owner` state; the two conjuncts are `Stable` and `AtMostOneAck`. -/
-def Bus.Law.SingleOwner {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (ra rb : Trace (HwTy.El (Bus.Resp.code dw))) (slave : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  Bus.Law.Stable q slave ∧ Bus.Law.AtMostOneAck ra rb
+does not change) and at most one master is answered. -/
+def Bus.Law.SingleOwner {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (ra rb : List (HwTy.El (Bus.Resp.code dw)))
+    (slave : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bool.and (Bus.Law.Stable q slave) (Bus.Law.AtMostOneAck ra rb)
 
-/-- A response at cycle `t` answers a request offered at cycle `t - d`: every answer has
-a request `d` cycles earlier (0 for the combinational router, 2 for the RAM). The
-current cycle must also offer the request (a sink may hold `ready` high otherwise). -/
-def Bus.Law.AnsweredAfter {ω aw dw : Nat} (d : Nat) (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.ack (r t) = .true →
-    Bus.Law.valid (q t) = .true ∧ ∃ u, t = Nat.add u d ∧ Bus.Law.valid (q u) = .true
+/-- `d` cycles after a request is offered, its answer may come: one step of
+`AnsweredAfter`. -/
+def Bus.Law.answeredAfterGo {ω aw dw : Nat} (d : Nat)
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Nat → Bool
+  | .zero => .true
+  | .succ k =>
+    Bool.and
+      (Bool.or (Bool.not (Bus.Law.ack (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r k)))
+        (Bool.and (Bus.Law.valid (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q k))
+          (Bus.Law.valid (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q (Nat.sub k d)))))
+      (Bus.Law.answeredAfterGo d q r k)
 
-/-- No starvation: a master that offers a request at cycle `t` is answered at some cycle
-at or after `t`. This is the liveness law; it needs the sink to answer often enough
-(the tests use an always-ready or a pseudo-random fair sink). -/
-def Bus.Law.NoStarvation {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.Req.code aw dw)))
-    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
-  (t : Nat) → Bus.Law.valid (q t) = .true → ∃ u, Nat.le t u = .true ∧ Bus.Law.answer (q u) (r u) = .true
+/-- A response at cycle `t` answers a request offered at cycle `t - d` (and the current
+cycle offers a request too). -/
+def Bus.Law.AnsweredAfter {ω aw dw : Nat} (d : Nat)
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.answeredAfterGo d q r (List.length r)
+
+/-- Is there an answer to the request at cycle `t` at some cycle `t … t + fuel - 1`? -/
+def Bus.Law.answerFromGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) (t : Nat) : Nat → Bool
+  | .zero => .false
+  | .succ k =>
+    if Bus.Law.answer (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q t)
+        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r t) then .true
+    else Bus.Law.answerFromGo q r (Nat.succ t) k
+
+/-- Every offered request is answered within `k` cycles. -/
+def Bus.Law.noStarveGo {ω aw dw : Nat}
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) (k t : Nat) : Nat → Bool
+  | .zero => .true
+  | .succ fuel =>
+    Bool.and
+      (Bool.or (Bool.not (Bus.Law.valid (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q t)))
+        (Bus.Law.answerFromGo q r t k))
+      (Bus.Law.noStarveGo q r k (Nat.succ t) fuel)
+
+/-- No starvation on a finite trace: every offered request is answered within `k` cycles
+(the example checks the last `k` cycles separately or leaves them out). -/
+def Bus.Law.NoStarvation {ω aw dw : Nat} (k : Nat)
+    (q : List (HwTy.El (Bus.Req.code aw dw)))
+    (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
+  Bus.Law.noStarveGo q r k 0 (Nat.sub (List.length r) k)
 
 /-- The router: a hit forwards the request unchanged and passes the sink's answer; a
 miss forwards no request and answers the master at once with `err`, zero data and
-`rvalid` for a read. -/
-def Bus.Law.RouteCorrect {ω aw dw : Nat} (base size : Nat) (x : HwTy.El (Bus.RouteIn.code aw dw))
-    (o : HwTy.El (Bus.RouteOut.code aw dw)) : Prop :=
-  let i := Bus.Law.routeIn x;
-  let y := Bus.Law.routeOut o;
-  let hit := Bus.Law.bit (Bus.decode base size i.req.addr);
-  (hit = .true → y.req = i.req ∧ y.resp = i.slave) ∧
-  (hit = .false →
-    Bus.Law.bit y.req.valid = .false ∧
-    Bus.Law.bit y.resp.ready = .true ∧
-    Bus.Law.bit y.resp.err = .true ∧
-    Bus.Law.bit y.resp.rvalid = Bool.and (Bus.Law.bit i.req.valid) (Bool.not (Bus.Law.bit i.req.we)) ∧
-    y.resp.rdata = BitVec.ofNat dw 0)
+`rvalid` for a read. This is the Boolean form of `RouteCorrect`. -/
+def Bus.Law.RouteCorrect {ω aw dw : Nat} (base size : Nat)
+    (x : HwTy.El (Bus.RouteIn.code aw dw)) (o : HwTy.El (Bus.RouteOut.code aw dw)) : Bool :=
+  Bus.Law.RouteOk base size x o
 
-/-- The RAM: when a write is answered (`go`), every byte is enabled and the write stored
-`wdata`, then a read of the same address reads `wdata` back. This is the part of the
-byte-enabled RAM's contract the HDL model can state directly; the per-byte merge is
-checked exhaustively in the example ("tested, not proved" there). -/
-def Bus.Law.ReadAfterWrite {ω ab dw : Nat} (shift : Nat) (s : HwTy.El (Bus.Ram.code ab dw))
-    (q : HwTy.El (Bus.ReqW.code 8 dw)) : Prop :=
+/-- A write is answered (`go`) with every byte enabled: the next state reads back
+`wdata`. This is the RAM's step obligation. -/
+def Bus.Law.ReadAfterWrite {ω ab dw : Nat} (shift : Nat)
+    (s : HwTy.El (Bus.Ram.code ab dw)) (q : HwTy.El (Bus.ReqW.code 8 dw)) : Bool :=
   let i := Bus.Law.reqW q;
   let go := Bool.and (Bus.Law.bit i.valid) (Bus.Law.bit (Bus.isK (Bus.Law.ram s).wait 2));
-  go = .true → Bus.Law.bit i.we = .true →
-    i.wstrb = Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1) →
+  let allStrb :=
+    BitVec.beq i.wstrb
+      (BitVec.ofNat (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1));
+  let read :=
     Hw.memRead (Bus.Law.ram (Hw.fst (Bus.ramWStep shift ab dw (Bus.Law.ram s) i))).cells
-      (Hw.slice shift ab i.addr) = i.wdata
+      (Bus.slice shift ab i.addr);
+  Bool.or (Bool.not go)
+    (Bool.or (Bool.not (Bus.Law.bit i.we))
+      (Bool.or (Bool.not allStrb) (BitVec.beq read i.wdata)))
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas

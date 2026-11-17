@@ -2,23 +2,20 @@ import Hdl.AxiStream
 /-!
 # Hdl.AxiStreamLaw
 
-The obligations of the AXI4-Stream parts in `Hdl.AxiStream`, stated over value traces as
-in `Hdl.BusLaw`, plus the small lemmas the HDL model can prove by computation.
-
-The backpressure law is one rule and its three consequences:
+The obligations of the AXI4-Stream parts in `Hdl.AxiStream`, as Boolean checks over the
+value traces the example generates, plus the small lemmas the HDL model proves by
+computation.
 
 * `AxiStream.Law.Stable`: while a beat is offered and not accepted (`tvalid` high,
   `tready` low), the whole source half of the beat is unchanged next cycle and `tvalid`
-  stays high. This is the source's obligation.
-* `AxiStream.Law.NoLoss`, `AxiStream.Law.NoDup` and `AxiStream.Law.Order`: the accepted
-  payloads on the output are exactly the accepted payloads on the input — same number
-  (no lost beat), each one once (no duplicated beat), in the same order.
-* `AxiStream.Law.SliceNoLoss`: the register slice's accepted sequence is the input's
-  accepted sequence, for any input/sink stall pattern. `AxiStream.Law.UpConvert` and
-  `DownConvert` are the grouped-beat forms of the same statement for the width
-  converters, in the fixed-group model documented in `Hdl.AxiStream`.
+  stays high. This is the source's obligation, checked over a finite source trace.
+* `AxiStream.Law.Order`: the sink's accepted payloads are exactly the payloads the
+  source handed over, same count, each once, in order. The example supplies that
+  expected sequence from the generator's own input-ready handshake, for the register
+  slice and both width converters (the converters group a fixed `ratio` of beats; see
+  the limits in `Hdl.AxiStream`).
 
-`examples/hdl-stream.wiz` evaluates the Boolean forms on generated source/sink, slice and
+`examples/hdl-stream.wiz` calls `Stable` and `Order` on generated source/sink, slice and
 converter traces with a stalling sink, at the same time as it compares the value
 simulation, `Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**;
 the lemmas at the end are kernel-checked.
@@ -57,71 +54,33 @@ def AxiStream.Law.accepted {ω dw : Nat} :
       List.cons (AxiStream.Law.payload b) (AxiStream.Law.accepted bs)
     else AxiStream.Law.accepted bs
 
-/-- The number of beats a sink accepted. -/
-def AxiStream.Law.acceptedN {ω dw : Nat}
-    (bs : List (HwTy.El (AxiStream.Beat.code dw))) : Nat :=
-  List.length (AxiStream.Law.accepted bs)
-
-/-- The Boolean form of the order law: the accepted payloads are equal. -/
-def AxiStream.Law.acceptedEq {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
-  Hdl.natsEq (AxiStream.Law.accepted outs) (AxiStream.Law.accepted ins)
-
-/-- The Boolean form of no lost/duplicated beats: the accepted counts are equal. -/
-def AxiStream.Law.acceptedNOk {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
-  Nat.beq (AxiStream.Law.acceptedN outs) (AxiStream.Law.acceptedN ins)
-
 /-- The Boolean form of `Stable`: a stalled beat is the same beat next cycle. -/
 def AxiStream.Law.StableStep {ω dw : Nat} (b b' : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
   Bool.or (Bool.not (Bool.and (AxiStream.Law.valid b) (Bool.not (AxiStream.Law.ready b))))
     (Bool.and (AxiStream.Law.valid b')
       (Nat.beq (AxiStream.Law.payload b') (AxiStream.Law.payload b)))
 
-------------------------------------------------------------------------------------
--- The laws, as predicates over traces
+/-- The source's trace obligation: every adjacent pair of a source beat trace holds a
+stalled beat unchanged. -/
+def AxiStream.Law.stableGo {ω dw : Nat} (prev : HwTy.El (AxiStream.Beat.code dw)) :
+    List (HwTy.El (AxiStream.Beat.code dw)) → Bool
+  | .nil => .true
+  | .cons y ys => Bool.and (AxiStream.Law.StableStep prev y) (AxiStream.Law.stableGo y ys)
 
-/-- The source holds a stalled beat: while `tvalid` is high and `tready` low, the whole
-source half (and `tvalid`) is unchanged next cycle. -/
-def AxiStream.Law.Stable {ω dw : Nat}
-    (bs : Trace (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  (t : Nat) → (AxiStream.Law.valid (bs t) = .true ∧ AxiStream.Law.ready (bs t) = .false) →
-    AxiStream.Law.payload (bs (Nat.succ t)) = AxiStream.Law.payload (bs t) ∧
-    AxiStream.Law.valid (bs (Nat.succ t)) = .true
+/-- `AxiStream.Law.Stable` on a finite beat trace. -/
+def AxiStream.Law.Stable {ω dw : Nat} :
+    List (HwTy.El (AxiStream.Beat.code dw)) → Bool
+  | .nil => .true
+  | .cons x xs => AxiStream.Law.stableGo x xs
 
-/-- No beat is lost: the output accepts as many beats as the input offered and accepted. -/
-def AxiStream.Law.NoLoss {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  Nat.le (AxiStream.Law.acceptedN ins) (AxiStream.Law.acceptedN outs) = .true
-
-/-- No beat is duplicated: the accepted payloads are equal, so each occurs once. -/
-def AxiStream.Law.NoDup {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  Nat.le (AxiStream.Law.acceptedN outs) (AxiStream.Law.acceptedN ins) = .true
-
-/-- Order is preserved: the accepted payload sequence is the same on both sides. -/
-def AxiStream.Law.Order {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  AxiStream.Law.accepted outs = AxiStream.Law.accepted ins
-
-/-- The three halves together: the handshake's backpressure law. -/
-def AxiStream.Law.Backpressure {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  AxiStream.Law.NoLoss ins outs ∧ AxiStream.Law.NoDup ins outs ∧
-  AxiStream.Law.Order ins outs
-
-/-- The register slice preserves the accepted-beat sequence for any input and any sink
-stall pattern. -/
-def AxiStream.Law.SliceNoLoss {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  AxiStream.Law.Backpressure ins outs
-
-/-- The width converters preserve every payload bit, in the fixed-group model: the
-accepted output payloads are the grouped input payloads (the example checks the exact
-grouping; this predicate states that no group is dropped or repeated). -/
-def AxiStream.Law.ConvertNoLoss {ω dw : Nat}
-    (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Prop :=
-  AxiStream.Law.NoLoss ins outs ∧ AxiStream.Law.NoDup ins outs
+/-- The Boolean form of the order law: the sink's accepted payload sequence is exactly
+`expected`, in order. A beat lost, duplicated or reordered at the output fails it. The
+example supplies the payload sequence the generator actually accepted (its input-side
+`inReady` handshake), so this is the no-loss/no-duplication/order statement for the
+circuit under test. -/
+def AxiStream.Law.Order {ω dw : Nat} (expected : List Nat)
+    (outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
+  Hdl.natsEq (AxiStream.Law.accepted outs) expected
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas

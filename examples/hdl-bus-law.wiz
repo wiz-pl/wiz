@@ -2,13 +2,12 @@
 -- while stalled, arbiter mutual exclusion and progress, decode/route correctness, RAM
 -- read-after-write/address stability, and the byte strobes of `Bus.ReqW`.
 --
--- The laws in `Hdl.BusLaw` are propositions over traces. The checks here evaluate a
--- Boolean form of each on generated inputs, and at the same time compare the value
--- simulation, `Netlist.simulate` (hash-consed and naive) and `Circuit.simFast`: a law
--- that passes is therefore *tested*, not proved, on those inputs. The kernel-checked
--- lemmas (`Bus.Law.memWrite_read_same`, the `ReqW` round trip) are checked when
--- `Hdl.BusLaw` is elaborated; the RAM section checks the two-cycle version. Run by the
--- `bus-law` test group.
+-- The laws in `Hdl.BusLaw` are Boolean checks over finite traces. The checks here call
+-- each one on generated inputs, and at the same time compare the value simulation,
+-- `Netlist.simulate` (hash-consed and naive) and `Circuit.simFast`: a law that passes is
+-- therefore *tested*, not proved, on those inputs. The kernel-checked lemmas
+-- (`Bus.Law.memWrite_read_same`, the `ReqW` round trip) are checked when `Hdl.BusLaw` is
+-- elaborated; the RAM section checks the two-cycle version. Run by the `bus-law` group.
 import Hdl.Core
 import Hdl.Sim
 import Hdl.Bus
@@ -115,7 +114,7 @@ def routeOuts : List (HwTy.El (Bus.RouteOut.code 4 8)) := Circuit.run routeC rou
 
 def routeOkAll : Bool :=
   allTrue (zipWith (fun (x : HwTy.El (Bus.RouteIn.code 4 8))
-    (o : HwTy.El (Bus.RouteOut.code 4 8)) => Bus.Law.RouteOk 4 8 x o) routeIns routeOuts)
+    (o : HwTy.El (Bus.RouteOut.code 4 8)) => Bus.Law.RouteCorrect 4 8 x o) routeIns routeOuts)
 
 ------------------------------------------------------------------------------------
 -- 2. The arbiter: mutual exclusion, forwarded-request stability under a compliant
@@ -176,9 +175,23 @@ def outPack (y : HwTy.El (Bus.ArbOut.code 8 8)) : Nat :=
 def genArbMatches : Bool :=
   eqNatList (Hdl.map outPack genArbRun) (Hdl.map outPack genArbOuts)
 
+-- the traces the Bus.Law checks run on: the forwarded request, the sink's responses,
+-- each master's response, and each master's request (both masters always offer)
+def genArbQ : List (HwTy.El (Bus.Req.code 8 8)) :=
+  Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Req.pack 8 8 (Bus.Law.arbOut y).req) genArbRun
+def genArbSlave : List (HwTy.El (Bus.Resp.code 8)) :=
+  Hdl.map (fun (x : HwTy.El (Bus.ArbIn.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbIn x).slave) genArbIns
+def genArbRa : List (HwTy.El (Bus.Resp.code 8)) :=
+  Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).ra) genArbRun
+def genArbRb : List (HwTy.El (Bus.Resp.code 8)) :=
+  Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).rb) genArbRun
+def genArbQa : List (HwTy.El (Bus.Req.code 8 8)) :=
+  Hdl.map (fun (x : HwTy.El (Bus.ArbIn.code 8 8)) => Bus.Req.pack 8 8 (Bus.Law.arbIn x).a) genArbIns
+def genArbQb : List (HwTy.El (Bus.Req.code 8 8)) :=
+  Hdl.map (fun (x : HwTy.El (Bus.ArbIn.code 8 8)) => Bus.Req.pack 8 8 (Bus.Law.arbIn x).b) genArbIns
+
 def arbMutexAll : Bool :=
-  allTrue (Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) =>
-    Bus.Law.AtMostOneAckStepS (Bus.Law.arbOut y).ra (Bus.Law.arbOut y).rb) genArbRun)
+  Bus.Law.AtMostOneAck genArbRa genArbRb
 
 -- one step of "a response to a master means that master offered": same-cycle
 def answeredStep {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) (r : Bus.Resp dw HwTy.El) : Bool :=
@@ -190,41 +203,19 @@ def arbAnswerAll : Bool :=
     let o := Bus.Law.arbOut p.2;
     Bool.and (answeredStep i.a o.ra) (answeredStep i.b o.rb)) genArbPairs)
 
--- the forwarded request is held while the sink stalls
-def arbStableCheck : List (HwTy.El (Bus.ArbIn.code 8 8)) → List (HwTy.El (Bus.ArbOut.code 8 8)) → Bool
-  | .cons x xs, .cons y ys =>
-    match xs, ys with
-    | .cons x' _, .cons y' _ =>
-      let q := Bus.Req.pack 8 8 (Bus.Law.arbOut y).req;
-      let r := Bus.Resp.pack 8 (Bus.Law.arbIn x).slave;
-      let q' := Bus.Req.pack 8 8 (Bus.Law.arbOut y').req;
-      Bool.and
-        (Bool.and (Bus.Law.StableStep q r q')
-          (Bool.and (Bus.Law.ValidStableStep q r q')
-            (Bool.and (Bus.Law.PayloadStableStep q r q') (Bus.Law.AddressStableStep q r q'))))
-        (arbStableCheck xs ys)
-    | _, _ => .true
-  | _, _ => .true
-
-def arbStableAll : Bool := arbStableCheck genArbIns genArbRun
-
--- progress: every window of 16 cycles contains an answer to each master
-def windowAck : Nat → List (HwTy.El (Bus.Resp.code 8)) → Bool
-  | .zero, _ => .false
-  | .succ k, .nil => .false
-  | .succ k, .cons r rs => Bool.or (Bus.Law.ack r) (windowAck k rs)
-
-def everyWindowAux : Nat → List (HwTy.El (Bus.Resp.code 8)) → Bool
-  | _, .nil => .true
-  | w, .cons r rs =>
-    if Nat.le w (Nat.succ (List.length rs)) then
-      Bool.and (windowAck w (.cons r rs)) (everyWindowAux w rs)
-    else .true
+-- the four stability laws, single ownership, and AnsweredAfter 0 on the forwarded
+-- request / sink response; NoStarvation is the liveness law for each master
+def arbStableAll : Bool :=
+  Bool.and (Bus.Law.Stable genArbQ genArbSlave)
+    (Bool.and (Bus.Law.ValidStable genArbQ genArbSlave)
+      (Bool.and (Bus.Law.PayloadStable genArbQ genArbSlave)
+        (Bool.and (Bus.Law.AddressStable genArbQ genArbSlave)
+          (Bool.and (Bus.Law.SingleOwner genArbQ genArbRa genArbRb genArbSlave)
+            (Bus.Law.AnsweredAfter 0 genArbQ genArbSlave)))))
 
 def arbProgressAll : Bool :=
-  let ra := Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).ra) genArbRun;
-  let rb := Hdl.map (fun (y : HwTy.El (Bus.ArbOut.code 8 8)) => Bus.Resp.pack 8 (Bus.Law.arbOut y).rb) genArbRun;
-  Bool.and (everyWindowAux 16 ra) (everyWindowAux 16 rb)
+  Bool.and (Bus.Law.NoStarvation 16 genArbQa genArbRa)
+    (Bus.Law.NoStarvation 16 genArbQb genArbRb)
 
 def arbFastOk : Bool :=
   eqNatList arbFastGrants
@@ -366,26 +357,10 @@ def ramAgreeAll : Bool :=
   allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) => agree ramC (ramTrace a d)) (units 8)) (units 4))
 
 -- a response at cycle t answers the request offered at t - 2
-def nthReq (xs : List (HwTy.El (Bus.Req.code 8 8))) (t : Nat) : HwTy.El (Bus.Req.code 8 8) :=
-  Hdl.nthD (ramInE 0 0 0 0) xs t
-
-def nthResp (xs : List (HwTy.El (Bus.Resp.code 8))) (t : Nat) : HwTy.El (Bus.Resp.code 8) :=
-  Hdl.nthD (respE 8 0 0 0 0) xs t
-
-def answeredAfter2Check (qs : List (HwTy.El (Bus.Req.code 8 8)))
-    (rs : List (HwTy.El (Bus.Resp.code 8))) : Nat → Bool
-  | .zero => .true
-  | .succ k =>
-    Bool.and
-      (Bool.or (Bool.not (Bus.Law.ack (nthResp rs (Nat.succ k))))
-        (Bool.and (Bus.Law.valid (nthReq qs (Nat.succ k)))
-          (Bus.Law.valid (nthReq qs (Nat.sub (Nat.succ k) 2)))))
-      (answeredAfter2Check qs rs k)
-
 def ramAnsweredAll : Bool :=
   allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) =>
     let qs := ramTrace a d;
-    answeredAfter2Check qs (Circuit.run ramC qs) (List.length qs)) (units 4)) (units 8))
+    Bus.Law.AnsweredAfter 2 qs (Circuit.run ramC qs)) (units 4)) (units 8))
 
 -- byte strobes: 16-bit words, two strobe bits. Write `d0` everywhere, then `d1` with
 -- `mask`, then read back; the expected word is the byte merge.
@@ -430,6 +405,15 @@ def ramWAgreeAll : Bool :=
   allTrue (bind (fun (a : Nat) => bind (fun (mask : Nat) =>
     Hdl.map (fun (d1 : Nat) => agree ramWC (ramWTrace a 43690 (Nat.mul 21845 d1) mask)) (units 3)) (units 4)) (units 3))
 
+-- The RAM's step obligation (`Bus.Law.ReadAfterWrite`): a state with the wait counter
+-- at 2 (the cycle a request is answered), an all-strobe write, and the next state's read.
+def ramWait2 : HwTy.El (Bus.Ram.code 6 16) :=
+  Bus.Ram.pack 6 16 (Bus.Ram.mk (Bus.ramInit 6 16).cells (BitVec.ofNat 2 2))
+
+def ramReadAfterWriteAll : Bool :=
+  allTrue (bind (fun (a : Nat) => Hdl.map (fun (d : Nat) =>
+    Bus.Law.ReadAfterWrite 0 ramWait2 (ramWIn 1 1 a d 3)) (units 4)) (units 8))
+
 -- The old word-level `Bus.Req` API still works unchanged (`Bus.ReqW.ofReq` fills every
 -- strobe); `Bus.Law.ofReq_toReq` is the kernel-checked round trip.
 def ramWellFormed : Bool :=
@@ -447,7 +431,7 @@ def main : IO Unit := do
   IO.println ("arb mutex " <+> yes arbMutexAll
     <+> ", answers only requests " <+> yes arbAnswerAll
     <+> ", stable under stall " <+> yes arbStableAll
-    <+> ", windows " <+> yes arbProgressAll
+    <+> ", no starvation " <+> yes arbProgressAll
     <+> ", generated matches " <+> yes genArbMatches
     <+> ", value = simulate = simFast " <+> yes arbAgreeAll);
   IO.println ("arb fast grants " <+> shows arbFastGrants <+> " " <+> yes arbFastOk
@@ -456,6 +440,7 @@ def main : IO Unit := do
   IO.println ("n-master step law n=3 " <+> yes nStepAll);
   IO.println ("n-master fair n=3, 32 starts " <+> yes nFairAll);
   IO.println ("ram read-after-write " <+> yes ramReadAll
+    <+> ", step law " <+> yes ramReadAfterWriteAll
     <+> ", answered after 2 " <+> yes ramAnsweredAll
     <+> ", value = simulate = simFast " <+> yes ramAgreeAll);
   IO.println ("ramw strobes " <+> yes ramWAll

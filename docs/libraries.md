@@ -925,11 +925,15 @@ parameters and no memory map:
   `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
   of the enabled bytes.
 
-`lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
+`lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws as Boolean checks
+over the finite value traces the example generates:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
 payload while stalled), `AnsweredAfter` (a response answers a request `d` cycles
-earlier; 0 for the router, 2 for the RAM), `AtMostOneAck` (arbiter mutual exclusion),
-`NoStarvation` (progress under a fair sink), `RouteCorrect` (hit forwards unchanged, miss
+earlier; 0 for the arbiter's forwarded request, 2 for the RAM), `AtMostOneAck` (arbiter
+mutual exclusion),
+`SingleOwner` (the forwarded request is held and at most one master is answered),
+`NoStarvation` (every offered request is answered within `k` cycles under a fair sink;
+the example uses `k = 16`), `RouteCorrect` (hit forwards unchanged, miss
 answers with `err`) and `ReadAfterWrite` (the RAM reads back a completed write, with byte
 strobes). The kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
 step never acknowledges both masters), `pick_busy` (`pick` grants to the owner while a
@@ -941,9 +945,10 @@ to the value model's response vector: every non-granted master is quiet and an
 acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
 value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
 `memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
-The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
-checks over exhaustively generated or long pseudo-random traces, compared against
-`Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
+Every law above is called by `examples/hdl-bus-law.wiz` on exhaustively generated or
+long pseudo-random traces, compared against `Netlist.simulate` and `Circuit.simFast`:
+**tested, not proved**. The per-cycle and per-input pieces (`StableStep`, `RouteOk`,
+`AtMostOneAckStep`, …) are what those checks call.
 
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
@@ -1033,15 +1038,17 @@ response/request matching, response order and strobe preservation, its value sim
 `Netlist.simulate` and `Circuit.simFast` agree cycle for cycle, and the four bridge
 netlists are `Netlist.wellFormed`.
 
-`lib/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set:
-`Axi4.Law.AddressProgression` (the bus addresses are `Axi4.beatSeq`), `Axi4.Law.BeatCount`
-(`LEN + 1` beats), `Axi4.Law.WrBeatOk`/`RdBeatOk` (one beat's address, data and byte
-strobes at the adapter pins), `Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat
-`LEN`), `Axi4.Law.BRespOk`/`RRespOk` (the response ID, data and `SLVERR`) and
-`Axi4.ResponseOrder`/`Axi4.orderOf` (per-ID completion order). The kernel checks only the
-small facts (`legalWrap` for 2/4/8/16 beats and its rejection of 5, `beats 0 = 1`,
-`bytes 0 = 1`, the quiet channels and the reset phases, and the `respOfErr` codes); the
-rest are Boolean checks over generated traces: **tested, not proved**.
+`lib/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set, as
+Boolean checks over the generated burst traces: `Axi4.Law.addrsOk` (the bus addresses
+are `Axi4.beatSeq`), `Axi4.Law.beatCountOk` (`LEN + 1` beats), `Axi4.Law.WrBeatOk`/
+`RdBeatOk` (one beat's address, data and byte strobes at the adapter pins),
+`Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat `LEN`),
+`Axi4.Law.BRespOk`/`RRespOk` (the response ID, data and `SLVERR`) and `Axi4.orderOf`
+(the per-ID completion order, checked on interleaved completions). The
+kernel checks only the small facts (`legalWrap` for 2/4/8/16 beats and its rejection of
+5, `beats 0 = 1`, `bytes 0 = 1`, the quiet channels and the reset phases, and the
+`respOfErr` codes); every other check is evaluated on generated traces in
+`examples/hdl-axi4.wiz`: **tested, not proved**.
 
 `examples/hdl-axi4.wiz` (test group `bus-protocol`) runs an INCR and a WRAP write burst
 and an INCR and a WRAP read burst, four beats each, through `Axi4.wrC`/`Axi4.rdC` with a
@@ -1050,7 +1057,8 @@ the WRAP write, and one `R` accepted in three for the reads). It checks the `LEN
 (INCR `16 18 20 22`; WRAP `22 16 18 20`), every beat's data and byte strobes, `WLAST`
 only on the last `W`, `RLAST` only on the last `R`, the echoed IDs and one `B` per burst,
 the `SLVERR` mapping for a bus error, and the multi-ID `Axi4.orderOf` model on
-interleaved completions. The `SlaveIn`/`SlaveOut` bundles round-trip through
+interleaved completions; each of the law checks above is evaluated on those traces.
+The `SlaveIn`/`SlaveOut` bundles round-trip through
 `Bundle.toEl`/`Bundle.ofEl`. The value simulation, `Netlist.simulate` and `Circuit.simFast`
 agree cycle for cycle, the two adapter netlists are `Netlist.wellFormed`, and yosys
 `check -assert`/`synth_ice40` runs on their Verilog when yosys is on PATH; without yosys
@@ -1084,13 +1092,14 @@ sequence.
   `AxiStream.sliceInReady`, `AxiStream.upInReady` and `AxiStream.downInReady` expose the
   input-ready term to wire back to a source.
 
-`lib/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
-`AxiStream.Law.Stable` (a stalled beat is held unchanged and stays valid),
-`NoLoss`/`NoDup`/`Order` (the accepted output payloads are exactly the accepted input
-payloads: same count, each once, in order), `Backpressure` (the three together) and
-`SliceNoLoss`. The kernel checks the small facts (`accepted_nil`,
-`keepW_8`, the slice/source/sink initial values); the rest are Boolean checks over
-generated traces, **tested, not proved**.
+`lib/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set, as Boolean
+checks over the traces the example generates: `AxiStream.Law.Stable` (a stalled beat is
+held unchanged and stays valid, over a source trace) and `AxiStream.Law.Order` (the
+sink's accepted payload sequence is exactly the sequence the generator handed over: same
+count, each once, in order; the register slice and both width converters are checked
+this way). The kernel checks the small facts (`accepted_nil`, `keepW_8`, the
+slice/source/sink initial values); `Stable` and `Order` are evaluated on generated
+traces, **tested, not proved**.
 
 `examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
 always-ready, a 2-cycle and a 3-cycle stall pattern, the slice with a stalling sink
@@ -1261,13 +1270,14 @@ counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr
 value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
 the chip-select patterns, the DDR handshake and masked write.
 
-`lib/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
-`Spi.Law.SampleStable` (`mosi` does not change on a sample edge),
-`Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
+`lib/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations as Boolean checks
+on the generated link traces: `Spi.Law.SampleStable` (`mosi` does not change on a sample
+edge), `Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
 `Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done` exactly
 `16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master receives the
 reply and the slave the sent byte). The mode table, the sample/shift levels, `divN` and
-concrete loopback bytes are kernel-checked; the trace laws are **tested, not proved**.
+concrete loopback bytes are kernel-checked; all five trace checks are called by
+`examples/hdl-spi.wiz`'s `linkOk`, and are **tested, not proved**.
 `examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
 the mock-slave link, checks the timing and divider laws, exercises `Spi.transferLoop` on
 all 256 bytes in every mode, and compares the value simulation, `Netlist.simulate` and

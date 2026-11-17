@@ -97,12 +97,12 @@ def hdlProtocolGroup : Group where
     { name := "Hdl AXI4 bursts: INCR/WRAP writes and reads, address progression, beat count, WLAST/RLAST, strobes and response IDs/order", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-axi4.wiz")
           ("axi4 addr model: incr/wrap yes, legal wrap yes, bad yes\n" ++
-           "axi4 write incr: beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 3\n" ++
-           "axi4 write wrap: beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 2\n" ++
-           "axi4 write err: bresp yes\n" ++
-           "axi4 read incr: beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
-           "axi4 read wrap: beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
-           "axi4 read err: rresp yes\n" ++
+           "axi4 write incr: laws yes, beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 3\n" ++
+           "axi4 write wrap: laws yes, beats/strobes/b yes, value = simulate = simFast yes, 4 beats, stalled 2\n" ++
+           "axi4 write err: laws yes, bresp yes\n" ++
+           "axi4 read incr: laws yes, beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
+           "axi4 read wrap: laws yes, beats/r/rlast yes, value = simulate = simFast yes, 4 beats, backpressure\n" ++
+           "axi4 read err: laws yes, rresp yes\n" ++
            "axi4 outstanding id order yes\n" ++
            "axi4 bundles yes\n" ++
            "axi4 well formed yes\n")
@@ -110,9 +110,9 @@ def hdlProtocolGroup : Group where
     { name := "Hdl AxiStream: source/sink backpressure, tlast, register slice and 8<->16 width conversion", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-stream.wiz")
           ("stream pair: 8 beats period 1 yes, period 3 yes, period 2 yes, stable yes, value = simulate = simFast yes\n" ++
-           "stream slice: order/no loss period 3 yes, period 2 yes, value = simulate = simFast yes\n" ++
-           "stream upsize 8->16: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
-           "stream downsize 16->8: grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
+           "stream slice: Order period 3 yes, period 2 yes, value = simulate = simFast yes\n" ++
+           "stream upsize 8->16: Order/grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
+           "stream downsize 16->8: Order/grouping/keep/last yes, period 1 yes, value = simulate = simFast yes\n" ++
            "stream bundles yes, well formed yes\n")
         hdlStreamSynthesis },
     { name := "Hdl SPI: all four CPOL/CPHA modes, divider sweep, sclk/mosi timing, mock slave and loopback", run := fun _ => do

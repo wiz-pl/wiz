@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* HDL laws: the obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw` and
+  `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
+  every one is called by `examples/hdl-stream.wiz`, `examples/hdl-spi.wiz`,
+  `examples/hdl-bus-law.wiz` and `examples/hdl-axi4.wiz`, so a law that fails fails the
+  `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
+  false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
+  predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
+  `Axi4.Law.ResponsesInOrder`/`Axi4.ResponseOrder` are removed; `docs/libraries.md`
+  lists the checks that now run.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

@@ -32,8 +32,8 @@ def hdlArbNSynthesis : IO Unit := do
 
 /-- The protocol laws of `Hdl.Bus`: valid/ready stability, arbiter mutual exclusion and
 progress, decode/route correctness, RAM read-after-write/address stability, and the
-`Bus.ReqW` byte strobes. The example checks a Boolean form of each law on generated
-inputs and compares the value simulation, `Netlist.simulate` and `Circuit.simFast`.
+`Bus.ReqW` byte strobes. The example calls every law on generated inputs and compares
+the value simulation, `Netlist.simulate` and `Circuit.simFast`.
 "Tested, not proved" for everything except the lemmas `Hdl.BusLaw` proves. The N-master
 circuit case also checks the synthesisable `Bus.arbNC` against `Bus.arbNStep` and runs
 yosys on its Verilog when the tool is available. -/
@@ -44,12 +44,12 @@ def hdlBusLawGroup : Group where
     { name := "Hdl.Bus law: stability, arbiter exclusion/progress, route, RAM read-after-write and strobes", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-bus-law.wiz")
           ("route: all laws yes, value = simulate = simFast yes, 4608 inputs\n" ++
-           "arb mutex yes, answers only requests yes, stable under stall yes, windows yes, generated matches yes, value = simulate = simFast yes\n" ++
+           "arb mutex yes, answers only requests yes, stable under stall yes, no starvation yes, generated matches yes, value = simulate = simFast yes\n" ++
            "arb fast grants 2 1 2 1 2 1 2 1 2 1 2 1 2 1 2 1 yes, hold grants 4 4 4 4 3 4 yes\n" ++
            "n-master pick n=1..4 yes\n" ++
            "n-master step law n=3 yes\n" ++
            "n-master fair n=3, 32 starts yes\n" ++
-           "ram read-after-write yes, answered after 2 yes, value = simulate = simFast yes\n" ++
+           "ram read-after-write yes, step law yes, answered after 2 yes, value = simulate = simFast yes\n" ++
            "ramw strobes yes, value = simulate = simFast yes\n" ++
            "well formed yes\n") },
     { name := "Hdl.Bus N-master circuit: value = Netlist.simulate = simFast for n=2,3,4; value = arbNStep; netlist ownership/progress; yosys when available", run := fun _ => do

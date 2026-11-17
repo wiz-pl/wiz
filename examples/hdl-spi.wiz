@@ -81,20 +81,19 @@ def loopData (mode div sent : Nat) : Nat :=
 -- The checks.
 
 def linkDivider (mode div sent reply : Nat) : Bool :=
-  Nat.beq (Spi.Law.firstDone 0 (runLink mode div sent reply)) (Nat.mul 16 div)
+  Spi.Law.Divider div (runLink mode div sent reply)
 
 def linkByte (mode div sent reply : Nat) : Bool :=
   let xs := runLink mode div sent reply;
-  let k := Spi.Law.firstDone 0 xs;
-  Spi.Law.byteOk reply sent (Hdl.nthD (HwTy.unpack (Spi.LinkOutW.code 8) 0) xs k)
+  Spi.Law.ByteRoundTrip reply sent (Spi.Law.firstDone 0 xs) xs
 
 def linkTiming (mode div sent reply : Nat) : Bool :=
   let xs := runLink mode div sent reply;
   let cpol := Spi.modeCpol mode;
   let cpha := Spi.modeCpha mode;
-  Bool.and (Spi.Law.sampleStableTrace cpol cpha xs)
-    (Bool.and (Spi.Law.mosiOnShiftTrace cpol cpha xs)
-      (Nat.beq (Spi.Law.SampleCountN cpol cpha xs) 8))
+  Bool.and (Spi.Law.SampleStable cpol cpha xs)
+    (Bool.and (Spi.Law.MosiOnShift cpol cpha xs)
+      (Spi.Law.SampleCount cpol cpha xs))
 
 def linkOk (mode div sent reply : Nat) : Bool :=
   Bool.and (linkDivider mode div sent reply)
