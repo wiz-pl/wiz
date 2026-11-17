@@ -48,8 +48,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT_FILES = ("README.md", "ROADMAP.md", "CHANGELOG.md")
-
 FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
 SETEXT_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
@@ -468,11 +466,7 @@ class Checker:
         self.report = Report()
 
     def files(self) -> list[Path]:
-        files = [
-            self.root / name
-            for name in ROOT_FILES
-            if (self.root / name).is_file()
-        ]
+        files = [path for path in self.root.glob("*.md") if path.is_file()]
         docs = self.root / "docs"
         if docs.is_dir():
             files.extend(
