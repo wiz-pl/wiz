@@ -14,7 +14,8 @@ another module, or declared in the file itself) is an error at that `import`,
 in, and the module is not brought in. Wiz has no namespaces (`Nat.repr` is one global
 name), and the kernel identifies constants by name, so letting the later declaration win
 would keep everything checked against the earlier one: a theorem about M.A's `b` would
-then be about M.B's (it proved `Empty`, `wiz-notes/soundness-probes/is-import-shadowing`).
+then be about M.B's (it proved `Empty`; the regression is the case "two modules declaring
+one name: …" of the group `modules`).
 One module reached by several paths (a diamond) is the same declaration and fine: a
 module is imported once per file. Two modules with identical declarations still clash,
 as in Lean; put the definition in one module that the others import. A private

@@ -135,7 +135,8 @@ def _stream_process(argv: list[str], *, cwd: str, timeout: float,
 
     Reader threads only put lines on a queue; the caller's thread forwards them,
     so a ZeroMQ socket is never used from two threads.  Returns the exit status
-    and the captured text per stream.
+    and the captured text per stream.  Lines keep their order within a stream;
+    between stdout and stderr there is none (two pipes, two threads).
     """
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,

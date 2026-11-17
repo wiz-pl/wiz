@@ -51,6 +51,44 @@ file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
 driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
 after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
+**The host-side unsafe ledger.** The trust ledger covers the Wiz sources; the Lean that
+implements Wiz has its own escapes from Lean's guarantees (a mutable cell behind a pure
+interface, a C function, a value whose type is erased). `scripts/host-unsafe-ledger.py`
+finds every declaration under `Wiz/`, `Tests/`, `Grail/` and the root `.lean` files whose
+code (not comments or strings) uses `unsafe`, `unsafeBaseIO`, `unsafeIO`, `unsafeEIO`,
+`unsafeCast`, or an `implemented_by` or `extern` attribute, and compares them with
+`.github/host-unsafe.tsv`: one row per use, with the invariant that keeps it from changing
+a result (what is accepted, rechecked or cached). `--check` fails on an unlisted use, a
+stale row or a row without an invariant; `--print` lists the uses as rows to fill in.
+It needs no build: `scripts/pre-commit.sh --fast` runs it with its fixtures
+(`Tests/host-unsafe-ledger/run.sh`).
+
+### The REPL (`wiz repl`)
+
+`wiz repl` reads one Wiz command per line on standard input and elaborates it into one
+persistent `CommandState` with the ordinary frontend (the same command loop as
+`wiz check`), so definitions, `syntax`, `macro`, `instance` and `import` stay in scope for
+later lines; an error is printed and the session continues. The Prelude is imported at the
+start. The REPL's own commands are `:type EXPR` (its type, like `#check`), `:load FILE`
+(elaborate a file into the session: its definitions stay), `:run NAME` (build and run a
+definition, with `--llvm` for LLVM), `:reset`, `:help` and `:quit` (EOF exits too). A
+terminal gets a prompt; a pipe is a script, and its output is only the commands' output.
+`--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
+Prelude and before the first prompt, composing with `-I`; a missing module is a startup
+error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
+it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
+
+Limits: input is one line per command (no continuation, history or line editing, and no
+completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend
+session, not a second evaluator: `#eval` and `:run` are the elaborator's interpreter and
+IR. A `link_c` path (also one inside a `:load`ed file) is resolved relative to the current
+directory: the session has no file of its own. Tests are the `wiz repl:` cases of the
+`tooling` group.
+
+`wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
+(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
+form is `wiz test FILE` (stage 11ah).
+
 ### Running cases in parallel (`--jobs`)
 
 `lake test -- --jobs N` (default 1) runs the cases of a group that opted in N at a time, in
@@ -191,12 +229,9 @@ Adding a test group touches no shared file:
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
   that group's module; `Tests/Elab.lean` holds the helpers several groups use (`ok`,
   `fails`, the library loaders, the self-hosted programs, …).
-* The older modules (`Tests/Grail.lean`, `Tests/Lint.lean`, …) still list their groups
+* The older modules (`Tests/Lint.lean`, `Tests/LSP.lean`, …) still list their groups
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
-* `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
-  deterministically; a branch that still edits the old file replays its changes with it
-  (AGENTS.md, "Test layout").
 
 ### The rejection corpus (`=reject`)
 
@@ -273,7 +308,7 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
@@ -284,7 +319,7 @@ includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; 
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
 expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
@@ -465,16 +500,22 @@ not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corp
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
-The nightly `.github/workflows/bench.yml` runs this as a second job
-(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
-`bench.yml` is owned by its own PR, so the exact diff is in
-`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
-job declares 6 GiB (the preparation builds the checker) and uploads
-`bench-out/mem-bench.json` as an artifact.
+The nightly `.github/workflows/bench.yml` runs this as a second job, `mem`, with
+`--check --markdown "$GITHUB_STEP_SUMMARY"`. It runs after the timing job `bench`,
+whatever that job's result, so the two never share the runner, and it uploads
+`bench-out/mem-bench.json` as an artifact. It declares 3 GiB (`WIZ_MEM_BENCH_GIB`).
+Its largest step is the preparation, building the self-hosted checker, which peaked
+at about 1.8 GB after the `inlineTm` fix. A cold run records that build's peak and
+wall time as `checker_build` in the JSON and in the step summary, so the declaration
+can be checked against each night's number. The build is not gated. The job's Nix
+step only substitutes (`--max-jobs 0`): `wiz` comes from the timing job's build on
+the same runner or from Cachix, and a Lean compile never runs under this budget.
+`--phases` (about 6 GiB, the in-process checker build) is not part of the nightly.
 
 ## Continuous integration
 
-`nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
+`nix develop` (or direnv: `.envrc` is `use flake`) gives the toolchain the tests need
+besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
 compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
 Lean in `lean-toolchain`. Entered at the
@@ -484,11 +525,12 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. The toolchain is built **once**, with Nix: the `build` job runs
-`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes the two
+`nix build .#wiz .#tests .#reference` (nixpkgs' Lean, no Lake artifact cache; `reference`
+is the standard library's reference manual, made with that `wiz`) and publishes the three
 store paths to Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
 ```
 
 with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
@@ -501,7 +543,7 @@ critical path runs `lake build` directly or saves a `.lake` Actions cache. The s
 Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
-`grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
+`grail` beside itself, which `Tests/Groups/Grail*.lean` look for). The dev shell (`nix develop`)
 is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
@@ -551,7 +593,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
-* **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
+* **Trust ledger** (a step in the `build` job, before any shard):
+  `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
   `.github/trust-baseline.tsv`: a new `axiom`, `sorry`, `native_refl` or SMT axiom,
@@ -613,13 +656,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
     `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
-    for and an owner);
+    for and an owner, and may name the one `case` it excuses; the self-host parity
+    entries do, with their `parity` code);
   * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
     nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
     that is only needed on some machines (Icarus Verilog, an ARM toolchain) is excused by
     the allow-list instead;
-  * a shard's unexplained skipped ratio is over 25% (`--max-ratio`).
+  * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
+    of the group's cases in every shard, so moving cases between shards (a refreshed
+    `.github/test-timings.json`) cannot change the verdict.
 
   Explained skips are reported in the summary (with the reason and the allow-list owner)
   and give a warning annotation, never a failure. Skips that are not whole-group and stay
@@ -684,7 +730,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (`nix run "$GITHUB_WORKSPACE#wiz" -- check/build …`, and `#grail` starts), so the
   publication path is exercised before the push. It publishes to the public Cachix cache
   `badlydrawnwizards` from `master` and from this repository's pull requests (which have
-  the token); `packages.tests` is `nix run .#tests -- --list`.
+  the token); `packages.tests` is `nix run .#tests -- --list`, and `packages.reference` is
+the generated reference manual (`result/index.md`, and `result/site`).
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
@@ -784,7 +831,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with
@@ -871,7 +918,10 @@ relative, so the project-site prefix (or a custom domain root) works either way:
 
 The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
 interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
---lib -o doc-site/docs --web web/out` (source links to the commit), assembles the
+--lib -o doc-site/docs --web web/out` (source links to the commit), copies the
+reference manual's Markdown from the flake's `reference` package (`nix build
+.#reference`, a Cachix hit when the build job already built it) to
+`doc-site/docs/reference.md`, assembles the
 landing page, the benchmark page and the playground with `web/build-site.sh doc-site
 web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
 exist and the landing page's and benchmark page's local links resolve; no server), and
@@ -891,8 +941,10 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
 | `docs/api.json` | the same index as data, for tools |
+| `docs/reference.html` | the reference manual: full signatures, doc comments, class instances, the notation table (same data as `docs/reference.md`) |
 | `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
+| `docs/reference.md` | the reference manual as Markdown (`nix build .#reference`'s `index.md`; generated, not committed) |
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
@@ -905,11 +957,41 @@ To build the site locally from a checkout (after `nix develop` and `lake build w
 sh web/build.sh web/out                         # the infoview module, scroll assets
 sh web/build-playground.sh web/out              # the playground module
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
+cp "$(nix build .#reference --no-link --print-out-paths)/index.md" doc-site/docs/reference.md
 sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
 sh web/check-site.sh doc-site                   # the entry points and the links
 sh web/test-bench.sh                            # the generator's fixtures and /bench/
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
+
+**Live documentation (`wiz doc --serve`).** The generated documentation is static by
+default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port
+8000, `--port N`; `0` takes a free one), and `--lsp PORT` makes the module pages ask a
+running `wiz lsp --ws PORT` for a declaration's real type and doc. The panel appears
+when the connection is up; hovering or clicking a signature shows
+
+* its type and doc comment (`textDocument/hover`, with the server's own doc comment),
+* the goals and expected type at the declaration (`wiz/interactiveGoals` /
+  `wiz/interactiveTermGoal`, with the `plainGoal` fallback), and
+* the document's diagnostics.
+
+The page fetches its module's source from the server (`/sources/A.B.wiz`) and opens it
+with `didOpen`, so the positions are the ones the page was generated from. Start the
+language server from the module root, or with `-I` roots, so its imports resolve:
+
+```sh
+.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib &
+.lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --serve --lsp 8765
+# then http://127.0.0.1:8000/
+```
+
+`--serve` without `--lsp` writes the same documentation plus the inert client: there is
+no socket and no fetch, and the pages read without JavaScript. `?lsp=PORT` (or
+`?lsp=ws://HOST:PORT`, or `?lsp=off`) overrides the endpoint for one page. Only module
+pages carry the client; `index.html` and `api.html` stay static in either mode. The
+server is for development: loopback only, `GET` only, one request per connection, no
+TLS or authentication. Live search results and code actions are not part of it — those
+need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
 slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without

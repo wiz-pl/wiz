@@ -39,7 +39,7 @@ interface (a cache, a DMA engine, a memory test) and for checking the handshake,
 timing. Substitute the real controller's circuit when the repo is available; the rest of
 a design sees only `Ddr.Req`/`Ddr.Resp`.
 
-What remains (see `wiz-notes/rune.md`): the real controller's wrapper (hiding `PhyIn`/
+What remains: the real controller's wrapper (hiding `PhyIn`/
 `Dfi`), timing parameters (`Ddr3.Timing`), and a clock-domain-crossing variant of the
 port for a design on another clock.
 -/

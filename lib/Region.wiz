@@ -3,7 +3,7 @@ import Optic
 # Region
 
 Regions (Rust lifetimes) and borrow handles for Feral's lowering (RD12).
-Plan: /workspace/wiz-notes/rust-dsl-plan.md; rules: drafts/feral/LOWERING.md (L1, L3,
+Plan: wiz-notes/rust-dsl-plan.md; rules: drafts/feral/LOWERING.md (L1, L3,
 L4, L12, L17, L20–L22); hand-lowered programs: drafts/feral/lowered/.
 
 A lifetime `'a` lowers to an erased variable `ρ : Region`. Every handle type below is a
@@ -82,7 +82,7 @@ def Shr.weaken {0 ρ ρ' : Region} {A : Type} (0 h : Outlives ρ ρ') (x : Shr �
   Shr.mk x.val
 attribute [inline] Shr.weaken
 
--- ## Mutable borrows (linear handles; cohesion M4a, M4b; /workspace/wiz-notes/cohesion-resources.md §7, §10, §13)
+-- ## Mutable borrows (linear handles; cohesion M4a, M4b; wiz-notes/cohesion-resources.md §7, §10, §13)
 --
 -- `Uniq ρ A` is `&'a mut A` used at quantity 1 (linear-case stage 2: `scase` at 1 for a
 -- linear scrutinee, `T.casesOn1`). It is a one-constructor inductive, not a structure: a

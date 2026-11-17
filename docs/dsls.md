@@ -107,4 +107,4 @@ mismatch: expected Bool, found U64`, E0499 …); an x-tactic's failure starts wi
 
 There is no `dsl` declaration command: each part above is already one command, and the
 grammar tools (go to definition, hovers, the printer) read those commands directly.
-The audit behind these rules: `wiz-notes/dsl-conventions.md`.
+The rules came from an audit of the DSLs in `lib/` in November 2026.

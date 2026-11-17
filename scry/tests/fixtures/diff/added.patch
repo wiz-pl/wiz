@@ -1,0 +1,7 @@
+diff --git a/src/a.c b/src/a.c
+index 303aa04..4385a78 100644
+--- a/src/a.c
++++ b/src/a.c
+@@ -5,0 +6,2 @@ int main(void) {
++  char *p = getenv("X");
++  system(p);

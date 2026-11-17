@@ -237,8 +237,9 @@ def regionsGroup : Group where
           s!"shared: a closure:\n{"\n".intercalate shIR}"
         -- a linear `&mut` scope is its body run in place too: the `match`es on the handle
         -- (`T.casesOn1`) are unfolded and their known tags simplified (`simpKnown`), so
-        -- nothing is lifted. KNOWN COST (/workspace/wiz-notes/linear-scope-cost.md): the
-        -- handle `Uniq` is still a cell (an inductive, not unboxed like a structure).
+        -- nothing is lifted. KNOWN COST: the handle `Uniq` is still a cell (an inductive,
+        -- not unboxed like a structure; it cannot be a structure with a linear field while a
+        -- linear structure cannot be taken apart).
         -- Objects allocated without the scope / with one / with two nested (before: 3 15
         -- 29), and lifted decls (before: 8 23).
         checkEq "3 4 6" s!"{← libsAllocs s "t0"} {← libsAllocs s "t1"} {← libsAllocs s "t2"}"

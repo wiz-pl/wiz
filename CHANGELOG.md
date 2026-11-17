@@ -10,6 +10,24 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
+  binder with no written quantity is `0` only when its type is a sort or a proposition
+  (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index
+  `{n : Nat}` — is `ω`. A written `{0}` (or `(0 x : A)`), `{1}` or `{ω}` is authoritative.
+  The decision is made at the binder from the type known there: `{A}` and `{A : _}` are
+  data (ω) even if a later use solves the metavariable to `Type`; write the type or the
+  quantity to erase it. `lib/` now writes `{0 …}` on the data implicits it used to leave
+  bare, so its erasure is unchanged, but **user code is not migrated**: an existing
+  `{n : Nat}` index is now passed and computed at run time (an unused one is not free:
+  `onlyType ((Nat.add k 5))`, where it used to be `onlyType ◾`), and a recursive
+  definition that passes a `{0 n}` constructor field to such an index must write
+  `{0 n : Nat}` — the bare form is rejected with a quantity error at the binder, not
+  silently erased. The Lean and self-hosted frontends decide identically (`=elab`,
+  `=selfhost`).
+* The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
+  by key: a row one side deleted and the other left unchanged is deleted (a union kept
+  it, so a branch merging master resurrected rows master had removed), and a row one
+  side deleted and the other modified is a conflict the driver refuses (22f).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
@@ -42,7 +60,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -114,6 +132,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* `wiz repl` (11ac): one command per line into one persistent frontend session
+  (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
+  `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
+  script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
+  modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
+  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
+  form, 11ah).
 * [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
   toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
   `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started

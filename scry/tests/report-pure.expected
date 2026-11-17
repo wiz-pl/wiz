@@ -1,0 +1,15 @@
+escape: script tag: ok
+escape: amp and quotes: ok
+escape: closing style: ok
+page: no raw script: ok
+page: escaped script: ok
+page: escaped closing style: ok
+page: escaped ampersand: ok
+page: escaped quote: ok
+page: sink row: ok
+page: source step: ok
+page: sink step: ok
+page: chain: ok
+page: CWE: ok
+page: no remote resource: ok
+page: deterministic: ok

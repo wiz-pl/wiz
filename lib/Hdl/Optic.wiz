@@ -4,7 +4,7 @@ import OpticDerive
 # Hdl.Optic
 
 Optics for HDL bundles (`import Hdl.Optic`). Design:
-/workspace/wiz-notes/cohesion-hardware.md, 2.2; the optics are lib/Optic.wiz's.
+wiz-notes/cohesion-hardware.md, 2.2; the optics are lib/Optic.wiz's.
 
 A bundle `structure Tx (r : HwTy → Type) where …` derives `Lens` as any structure
 does (`deriving Bundle, Lens`): `Tx.lineL : Lens (Tx r) (r Bit)`, one lens at every

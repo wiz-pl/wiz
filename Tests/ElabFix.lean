@@ -344,15 +344,20 @@ def group : Group where
         -- control: a term with a hole of the goal's type (what `apply` does)
         okLib ("import Prelude\n" ++ tac "Expr.app (.const \"Nat.succ\") e" ++ "def three : Nat := by\n  viaHole\n  exact 2\n#eval three") ["3"]
         okLib ("import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n  intro A; intro B; intro f; intro a\n  apply f\n  assumption") },
-    { name := "OPEN (13b): a first-order unification solution forges a value of a private type", run := fun _ => do
-        -- not wanted: this records that the path is open. `?F ?p =?= G x` is solved by
-        -- `?F := G`, `?p := x`; nobody type-checks the solutions, and the kernel takes
-        -- `Look Nat` for `Pos Nat` by shape. When this test fails, the path was closed:
-        -- turn it into a `failsPriv` and update docs/stages/13-language.md, 13b.
-        okPriv privMod ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+    { name := "(13b): a first-order unification solution cannot forge a value of a private type", run := fun _ => do
+        -- `?F ?p =?= G x` is solved by `?F := G`, `?p := x`; the solutions are picked by
+        -- shape, so `G` is checked against `?F`'s type where it is guessed, where opaque
+        -- types have no definition (`Look Nat → Type` is not `Pos Nat → Type` there).
+        failsPriv privMod ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
           "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
           "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
-          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n#eval (forge (Look.mk 11)).val") ["11"] },
+          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)")
+          "hidden outside its module"
+        -- and the same solution where no opaque type is involved stays accepted
+        okPriv "" ("import Prelude\nstructure Look (A : Type) where\n  val : A\n" ++
+          "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+          "def sel {F : Look Nat → Type} (p : Look Nat) (w : F p) : Look Nat := p\n" ++
+          "def forge (x : Look Nat) : Look Nat := sel _ (G.mk x)\n#eval (forge (Look.mk 11)).val") ["11"] },
     { name := "rfl is checked by the elaborator, not left to the kernel (wishful: elab-rfl-unchecked)", run := fun _ => do
         failsLib "import Prelude\ndef w (r a : Nat) : r = Nat.succ a := rfl" "rfl: the two sides are not definitionally equal"
         failsLib "import Prelude\ndef z (a : Nat) : a = a + 0 := rfl" "rfl: the two sides are not definitionally equal"

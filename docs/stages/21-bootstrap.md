@@ -746,11 +746,13 @@ Lean kernel's verdicts.
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
 the input file. The frontend now loads a module graph. A module's name is a path
-(`A.B` is `A/B.wiz`), resolved under the `-I` roots in order and then in the working
-directory; the root module is `Main` (the file `input.wiz`). `Prelude` is still the
-embedded `preludeText`: the self-hosted frontend cannot check `lib/Prelude.wiz` yet
-(A9-A23). The other library imports the corpus uses (`IO`, `Std`, `Sys`) are
-canonicalised to `Prelude` when imports are scanned, since the embedded prelude declares
+(`A.B.C` is `A/B/C.wiz`), resolved under the roots in order and then in the working
+directory; the root module is `Main` (the file `input.wiz`). A root is written `-I DIR`
+(or `-IDIR`) or `--include DIR` (or `--include=DIR`), and the first root with the file
+wins. `Prelude` is still the embedded `preludeText`: the self-hosted frontend cannot
+check `lib/Prelude.wiz` yet (A9-A23). The other library imports the corpus uses (`IO`,
+`Std`, `Sys`) are canonicalised to `Prelude` when imports are scanned, since the
+embedded prelude declares
 the `IO` names and no real `IO.wiz` is checkable yet (without it, every existing
 `import IO` program would be a missing module).
 
@@ -766,9 +768,10 @@ module that cannot be found is `error: cannot find module NAME`. Duplicate names
 rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
-texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version. The checker's `--oneshot` runs the pre-loader
-single-file path (`checkFile`) instead, for the old behaviour's own tests.
+texts in load order; the checker prints it with `--key`. It follows a transitive change
+(a dependency's text) and ignores a file that no module imports. The real cache (D5)
+will key on it, plus the frontend's version. The checker's `--oneshot` runs the
+pre-loader single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
 **Not done.** `private` is module-scoped now (21n), but only at the declaration level:
 constructor- and field-level `private` is stripped, and a type with private parts is not
@@ -779,12 +782,16 @@ classes/instances (A10), universe polymorphism (A15), the proof surface (A16), t
 (A13), macros (A12), `deriving` (A11) and the wider runtime (C11/C12); modules were the
 first dependency, not the last.
 
-**Tests** (group `selfhost`, eight cases): an imported module's declarations in scope, a
+**Tests** (group `selfhost`, sixteen cases): an imported module's declarations in scope, a
 transitive import (A→B→C) with a shared Prelude, a diamond (one module imported twice is
 checked once), a cycle, a missing module, a duplicate name across modules, a `-I` root,
-and the cache key (stable for one graph, different when a module's text changes). `wiz
-check` of the generated self-hosted sources passes, and the self-hosted frontend still
-checks itself.
+and the cache key (stable for one graph, different when a module's text changes); then
+dotted imports (`A.B.C` is `A/B/C.wiz`), `-I` order (the first root with the file wins,
+a root without it is skipped), a cycle through three modules, a duplicate name in two
+imported modules, a transitive cache-key change (and no change for an unimported file),
+`IO`/`Std`/`Sys` loading the embedded Prelude once, the CLI root spellings, and the
+compiler driver resolving its roots too. `wiz check` of the generated self-hosted
+sources passes, and the self-hosted frontend still checks itself.
 
 ## 21z: the proof surface in the self-hosted frontend (A16)
 
@@ -1093,3 +1100,66 @@ written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are n
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
+
+The matrix above counts **features**; this measures the **library**. A new group,
+`selfhost-libdiff`, runs both compilers on every `*.wiz` under `lib/` and `scry/` (the
+file as a root module, its imports under `lib/`, `drafts/feral/lib` and the `scry/`
+package roots) and compares
+
+* **acceptance** (does the frontend report an error at all),
+* the **code** of the first error (`ErrorCode` on the Lean side, the self-hosted
+  driver's table on the other),
+* its **span** (file, line, column),
+* its **message** (whitespace-normalised; the driver's `[code]` suffix moved out), and
+* the **number of declarations** the file produced.
+
+The first divergence is reported per file. A file both compilers accept with the same
+declaration count is `ok`; one both reject is `rejected` (the counts of the same code,
+same span and same message are reported apart, because D6's positioning differs by
+design); one whose verdicts differ is `diverging` — that is the gap list. A run that
+hits the per-file time or memory bound is `bounded`, not a gap. That includes exit
+status 3, the self-hosted runtime giving up (`wiz: out of memory` when an allocation
+fails under the memory bound); the report carries its `wiz:` line.
+
+The host side is the Lean frontend in a child process (`tests --libdiff-host FILE`, the
+same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/
+`cSourceTable`/`preprocessHeaders` as `Main.initState` sets them), so the sweep can
+bound it; its declaration count is the file's `declSites` in module `""` without a
+structure's constructors, fields and projections, plus its `#check` info messages. The
+self-hosted side is the compiler binary `selfhostCompiler` builds, `check FILE --types`:
+its info lines are the per-declaration reports (a structure's projections dropped), so
+the two counts are the same notion.
+
+The files are found by walking the tree (not a list), `--only` takes a path, a path
+suffix or a module name, and `--limit N` the first N — a work list, not a gate. To make
+progress a diff rather than a number, `--baseline FILE` writes the current
+`verdict/divergence/class` per file when the file does not exist, and reports
+`fixed`/`regressed`/`changed`/`new` against it when it does. `--json` writes one record
+per file (both sides: acceptance, exit, errors, decls, first error code/span/message;
+plus the verdict, the first divergence, the missing construct and the note) and a final
+summary record. `--timeout`/`--host-timeout`/`--self-timeout` (seconds) and `--mem`
+(megabytes, the self-hosted side's `ulimit -v`) bound each file.
+
+Usage:
+
+```sh
+heavy --mem 4G .lake/build/bin/tests --libdiff                 # everything
+heavy --mem 4G .lake/build/bin/tests --libdiff --limit 10      # a first look
+heavy --mem 4G .lake/build/bin/tests --libdiff --only lib/Hoare.wiz
+heavy --mem 4G .lake/build/bin/tests --libdiff --json > gap.jsonl
+heavy --mem 4G .lake/build/bin/tests --libdiff --baseline libdiff-baseline.json
+lake test -- '=selfhost-libdiff'                               # the same, as a group
+```
+
+The group skips (a skipped case is not a pass) when there is no C toolchain for the
+self-hosted compiler, and never fails because of a gap; it writes the full report to
+`.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
+case's output. CI runs it as its own shard (`selfhost-libdiff` in
+`.github/test-shards.json`).
+
+`--only` and `--limit` make it usable as the A13 work list: the gap list groups the
+files whose verdicts differ by the construct the self-hosted frontend names
+(`unsupported syntax term.by` is `by`, `unsupported command command.syntax` is `syntax`,
+…), and prints the ten files to start with (most common construct first).

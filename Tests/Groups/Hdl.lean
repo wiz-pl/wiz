@@ -216,6 +216,21 @@ def hdlGroup : Group where
            "((.true, .cons 4 (.cons 42 (.cons 42 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 87 (.cons 87 (.cons 87 (.cons 87 (.cons 42 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 58 (.cons 58 (.cons 58 .nil))))))))))))))))))))))))))))))))))))))))), (.true, .cons 5 (.cons 0 (.cons 0 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 121 (.cons 121 (.cons 121 (.cons 121 (.cons 0 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 5 (.cons 5 (.cons 63 .nil))))))))))))))))))))))))))))))))))))))))), .true, .true)",
            ".true",
            "\"module reg_(input clk, input [0:0] rst, input [0:0] en, input [7:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd42;\\n  always @(posedge clk) if (rst) r <= 8'd42; else if (en) r <= x;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "S4: match on a signal: an enumeration case tree equals the if chain (same netlist), Bool, nested, non-exhaustive rejected", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-match.wiz")
+          [".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           ".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           "(15, 15)",
+           ".true",
+           ".cons 7 (.cons 9 .nil)",
+           ".cons 7 (.cons 9 .nil)",
+           ".cons 10 (.cons 20 .nil)",
+           ".cons 1 (.cons 2 .nil)",
+           ".cons 5 (.cons 6 (.cons 1 (.cons 2 (.cons 3 .nil))))",
+           ".cons 4 (.cons 5 (.cons 6 (.cons 7 .nil)))"]
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ninductive P where | a | b | c\n  deriving BitPack\ndef f {r : HwTy → Type} [Hw r] (p : r P.code) : r B8 := match p with | .a => 0 | .b => 1" "not exhaustive"
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ndef f {r : HwTy → Type} [Hw r] (b : r HwTy.bit) : r B8 := match b with | .true => 1" "not exhaustive"
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ndef f {r : HwTy → Type} [Hw r] (x : r B8) : r B8 := match x with | 0 => 1 | _ => 0" "literal patterns" },
     { name := "S2: if on a condition that is no signal takes the ordinary path (its messages)", run := fun _ => do
         failsLibs "import Prelude\ndef f (n : Nat) : Nat := if n then 1 else 2" "constructor"
         failsLibs "import Prelude\ndef f (A : Type) (a : A) : Nat := if a then 1 else 2" "cannot match on a value of type A"

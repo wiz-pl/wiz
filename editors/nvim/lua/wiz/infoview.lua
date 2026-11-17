@@ -3,7 +3,7 @@
 -- else is there (`wiz/interactiveInfo`: syntax and its expansion, an import, instances,
 -- the command's declarations, messages) at it, as tagged text: every subterm is a range that knows its kind and its ref, so
 -- `K` in the infoview asks the server what the subterm under the cursor is
--- (`wiz/subtermInfo`). Protocol: wiz-notes/infoview-protocol.md.
+-- (`wiz/subtermInfo`). Protocol: docs/design/infoview-protocol.md.
 local config = require 'wiz.config'
 local lsp = require 'wiz.lsp'
 

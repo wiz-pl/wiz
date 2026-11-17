@@ -6,7 +6,7 @@ Bit-level reasoning for circuits (`import Hdl.Bits`): the laws of one-bit signal
 values, so that a proof does not dictate how control logic is written (finding C2 of
 the iCEstick toy CPU: `rfl` reduces a multiplexer on a known select, but not
 `Hw.and (Hw.lit 1 0) x` on a symbolic `x`). Design:
-/workspace/wiz-notes/cohesion-hardware.md, 2.3.
+wiz-notes/cohesion-hardware.md, 2.3.
 
 * `Bit.ind`: a property of every bit is a property of 0 and of 1. With it, every
   law of one-bit logic is two (or four, eight) closed evaluations: `Bit.ind` and `rfl`.

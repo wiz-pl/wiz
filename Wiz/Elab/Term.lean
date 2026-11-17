@@ -121,13 +121,13 @@ partial def insertImplicits (ctx : LocalCtx R) (t : Term R) (ty : VTy R) :
     ElabM R (Term R × VTy R) := do
   -- (given, stage 7) an instance argument: a hole for instance resolution
   if let .pi x .instImplicit _ dom cod _ ← force ty then
-    let m ← freshMeta ctx s!"instance {x}"
+    let m ← freshMeta ctx s!"instance {x}" dom
     addInstProblem ctx m dom
     return ← insertImplicits ctx (.app t m) (← instM cod (← evalIn ctx m))
   --<sol
   match ← force ty with
   | .pi x .implicit _ dom cod _ =>
-    let m ← freshMeta ctx s!"implicit argument {x}"
+    let m ← freshMeta ctx s!"implicit argument {x}" dom
     noteImplicitType ctx t m dom
     insertImplicits ctx (.app t m) (← instM cod (← evalIn ctx m))
   | _ => pure (t, ty)  -- the type as it was (forcing would lose glued names)
@@ -221,7 +221,7 @@ def ofNatLit? (ctx : LocalCtx R) (n : Nat) (A : VTy R) : ElabM R (Option (Term R
   if let .sort l ← force domA then addSortConstraint ctx qA l
   let .pi _ _ _ _ codN _ ← force (← instM codA A) | return none
   let .pi x .instImplicit _ dom _ _ ← force (← instM codN (.natLit n)) | return none
-  let m ← freshMeta ctx s!"instance {x}"
+  let m ← freshMeta ctx s!"instance {x}" dom
   addInstProblem ctx m dom
   -- a numeral that doesn't fit a fixed-width word of lib/Word.wiz wraps around: say so
   -- (outside lib/Word.wiz the word types are opaque, 13b/22k: a constant applied to `w`)
@@ -314,7 +314,7 @@ def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : Ela
       .error { info := (ctx.withInfo stx).info,
                msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++
                  mismatchReason (show' expected) (show' inferred) e.msg,
-               code := if e.code == ErrorCode.nonPattern then e.code else ErrorCode.typeMismatch,
+               code := if e.code == ErrorCode.nonPattern || e.code == ErrorCode.private_ then e.code else ErrorCode.typeMismatch,
                -- what was recorded up to here (the info tree, `trace`s)
                state? := some s }
 
@@ -1111,6 +1111,51 @@ def binderDefaultQty (ctx : LocalCtx R) (bi : BinderInfo) (tyl : Option (Term R 
     | _ => pure ((← instLevel l).equiv 0)
   return .qlit (if erased then dflt else data)
 
+/-- One branch of a `match` on a signal, as `matchMux?` reads it: the constructor tag of
+the pattern (`none` for the default `_`), the type the pattern named (`Phase.idle` names
+`Phase`; a bare `.idle` names none), the branch body, and the pattern's position. -/
+structure HdlBranch where
+  ctor : Option Name
+  ty : Option Name
+  rhs : Syntax
+  info : SourceInfo
+
+/-- The syntax builders `matchMux?` uses to lower a `match` on a signal. -/
+def hdlIdent (i : SourceInfo) (n : Name) : Syntax := .node i "term.ident" #[.ident i n]
+/-- `n` as a numeral. -/
+def hdlNum (i : SourceInfo) (n : Nat) : Syntax :=
+  .node i "term.num" #[.node i "num" #[.atom i (toString n)]]
+/-- `f a₁ … aₙ`. -/
+def hdlApp (i : SourceInfo) (f : Syntax) (args : List Syntax) : Syntax :=
+  if args.isEmpty then f else .node i "term.app" #[f, .node i "null" args.toArray]
+/-- `fun x => body`. -/
+def hdlFun (i : SourceInfo) (x : Name) (body : Syntax) : Syntax :=
+  .node i "term.fun" #[.atom i "fun", .node i "null" #[.ident i x], .atom i "=>", body]
+
+/-- The enumeration a signal's code names, when the argument is literally `T.code`
+(`Phase.code`): the code `T` before `.code`. `none` for `HwTy.bit`, `HwTy.bits n` or a
+code held in a variable. -/
+def hdlCodeEnum? (code : Val R) : Option Name :=
+  let n? : Option Name := match code with
+    | .unfold n _ _ _ => some n
+    | .neutral (.global n _) _ => some n
+    | _ => none
+  n?.bind fun n => if n.endsWith ".code" then some ((n.dropEnd 5).toString) else none
+
+/-- The enumerations (with a `deriving BitPack` code) that have a constructor named `c`,
+in declaration order. -/
+def hdlEnumCandidates (g : Globals R) (c : Name) : List Name := Id.run do
+  let mut out : List Name := []
+  for n in g.order do
+    let parts := n.splitOn "."
+    if let some c' := parts.getLast? then
+      if c' == c then
+        let T := ".".intercalate parts.dropLast
+        if g.contains (T ++ ".code") && g.contains (T ++ ".lit") &&
+            (ctorNames g T).any (ctorSelects c ·) && !out.contains T then
+          out := out ++ [T]
+  return out
+
 mutual
 
 /-- A binder's quantity once its type is elaborated: the written one (`elabQuantity`), or
@@ -1134,8 +1179,8 @@ partial def elabQuantity (ctx : LocalCtx R) (bi : BinderInfo) : Option Syntax �
 metavariable). -/
 partial def checkType (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × Level) := do
   if stx.isOfKind "term.hole" then
-    let m ← freshMeta (ctx.withInfo stx) "type"
     let u ← freshLevelMeta
+    let m ← freshMeta (ctx.withInfo stx) "type" (some (.sort u))
     addSortConstraint ctx m u
     return (m, u)
   let (t, ty) ← infer ctx stx
@@ -1429,8 +1474,8 @@ where
         | some prf => return .absurd (quote g ctx.lvl expected) (quote g ctx.lvl prf)
         | none => throwAt (ctx.withInfo (stx.getArg 1)).info s!"absurd expects a proof of False or Empty, got {← showVal ctx ety}"
       | ety => throwAt (ctx.withInfo (stx.getArg 1)).info s!"absurd expects a proof of False or Empty, got {← showVal ctx ety}"
-    | "term.hole" => freshMeta ctx
-    | "term.syntheticHole" => freshMeta ctx s!"?{((stx.getArg 1).getId?).getD "_"}"
+    | "term.hole" => freshMeta ctx (ty := expected)
+    | "term.syntheticHole" => freshMeta ctx s!"?{((stx.getArg 1).getId?).getD "_"}" expected
     -- (13h) `⟨a, b⟩` and `let ⟨a, b⟩ := s; body`
     | "term.anon" => elabAnon ctx stx expected
     | "term.letPat" => return (← elabLetPat ctx stx (some expected)).1
@@ -1519,7 +1564,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
       if !sizedBase then return some (← check ctx stx' expected)
       -- a sized expected type: the value has size `↑m`, where `m` is the size of its
       -- recursive arguments (the generated constructors themselves return `T^∞`)
-      let m ← freshMeta ctx "a size"
+      let m ← freshMeta ctx "a size" (some .size)
       let vm ← evalIn ctx m
       if stx.isOfKind "term.app" then
         for a in (stx.getArg 1).args do
@@ -2047,7 +2092,7 @@ partial def elabPis (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   | b :: rest =>
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
-      | none => pure (← freshMeta ctx s!"the type of {b.name}", ← freshLevelMeta)
+      | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
     let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2064,7 +2109,7 @@ partial def elabSigmas (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax)
   | b :: rest =>
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
-      | none => pure (← freshMeta ctx s!"the type of {b.name}", ← freshLevelMeta)
+      | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
     let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2391,7 +2436,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
     | .pi x bi _ dom cod _ =>
       -- `@f … _ …` at an instance argument: a problem for instance resolution
       let a ← if explicitMode && bi == .instImplicit && arg.isOfKind "term.hole" then do
-          let m ← freshMeta (ctx.withInfo arg) s!"instance {x}"
+          let m ← freshMeta (ctx.withInfo arg) s!"instance {x}" dom
           addInstProblem ctx m dom
           pure m
         else match ← tryCatch (Except.ok <$> check ctx arg dom) (fun e => pure (.error e)) with
@@ -2477,7 +2522,7 @@ partial def inferAppNamed (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R ×
           | some e =>
             pos := pos + 1
             if explicitMode && bi == .instImplicit && e.isOfKind "term.hole" then do
-              let m ← freshMeta (ctx.withInfo e) s!"instance {x}"
+              let m ← freshMeta (ctx.withInfo e) s!"instance {x}" dom
               addInstProblem ctx m dom
               pure m
             else check ctx e dom
@@ -2488,11 +2533,11 @@ partial def inferAppNamed (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R ×
               throwAt (ctx.withInfo a).info s!"no parameter named '{y}' (the function's type is {← showVal ctx fty})" ErrorCode.unknownParameter
             throwAt (ctx.withInfo a).info s!"named argument '{y}' comes after the explicit parameter '{x}', which has no argument" ErrorCode.namedArgument
         else if bi == .instImplicit then do
-          let m ← freshMeta ctx s!"instance {x}"
+          let m ← freshMeta ctx s!"instance {x}" dom
           addInstProblem ctx m dom
           pure m
         else do
-          let m ← freshMeta ctx s!"implicit argument {x}"
+          let m ← freshMeta ctx s!"implicit argument {x}" dom
           noteImplicitType ctx f m dom
           pure m
     f := .app f a
@@ -3175,8 +3220,9 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
     unifyAt ctx other expected C
     let o ← check ctx other C
     let cls : Name := if op == "AndOp.and" then "AndOp" else "OrOp"
-    let inst ← freshMeta ctx "an instance"
-    addInstProblem ctx inst (vApp g (eval g [] (.const cls [])) C)
+    let instTy := vApp g (eval g [] (.const cls [])) C
+    let inst ← freshMeta ctx "an instance" instTy
+    addInstProblem ctx inst instTy
     return some (.app (.app (.app (.app (.const op []) Ct) inst) c) o)
   -- a branch that is a numeral (or an `if` of numerals) takes its type from the other
   -- one (`if c then 0 else x + 1`), so the other is elaborated first
@@ -3184,10 +3230,165 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
       let e ← check ctx eStx expected
       pure (← check ctx tStx expected, e)
     else pure (← check ctx tStx expected, ← check ctx eStx expected)
-  let inst ← freshMeta ctx "an instance"
+  let inst ← freshMeta ctx "an instance" (mux expected)
   addInstProblem ctx inst (mux expected)
   let At := quote (← getGlobals) ctx.lvl expected
   return some (.app (.app (.app (.app (.app (.app (.const "Mux.mux" []) Ct) At) inst) c) t) e)
+
+/-- `r T` where `r` is a local with an instance `Hw r`: a signal. Returns `(r, T)`. -/
+partial def hdlSignal? (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Val R × Val R)) := do
+  let ty ← force ty
+  match ty with
+  | .neutral (.local l) sp =>
+    match sp with
+    | #[.app C] =>
+      let g ← getGlobals
+      let r := Val.var l
+      let some _ ← (try synthInstance ctx (vApp g (eval g [] (.const "Hw" [])) r) catch _ => pure none)
+        | return none
+      return some (r, C)
+    | _ => return none
+  | _ => return none
+
+/-- (HDL) `match x with | .c => … | _ => …` where `x : r T` is a signal: lower it to a
+case tree over the constructors of an enumeration `T` with `deriving BitPack` (`T.lit c`
+is the constructor's code), or of `Bool` (a `r HwTy.bit` signal).
+
+The scrutinee is shared once (`Hw.share`), each constructor pattern is the comparator
+`Hw.eq x (T.lit c)`, and the branches are a right-nested `Hw.mux` spine in constructor
+order (the last constructor, or the `_` default, is the final else). This is exactly the
+`if` chain on `T.lit`, so it has the same netlist and node count: no eliminator is used,
+and the `Hw` invariant is kept (no wire becomes a `Nat`).
+
+Rejected, with a spanned error: a non-exhaustive match on a multi-constructor signal, a
+constructor pattern that binds fields (a wire has no projection), a literal (`Nat` on
+`bits n`) pattern, and an `as`/tuple pattern. `match` on a `Nat` signal is out of scope;
+compare with `===` and `if` instead. -/
+partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (scrut : Syntax)
+    (scrutTy expected : VTy R) : ElabM R (Option (Term R)) := do
+  let g ← getGlobals
+  let some (_, code) ← hdlSignal? ctx scrutTy | return none
+  unless g.contains "Hw.eq" && g.contains "Hw.mux" && g.contains "Hw.share" do return none
+  unless alts.size > 0 do return none
+  let atInfo := if stx.info.stop > 0 && !stx.info.synthetic then stx.info else ctx.info
+  let mut branches : List HdlBranch := []
+  for a in alts do
+    let ps := (a.getArg 1).args.filter (!· matches .atom ..)
+    let some p0 := ps[0]? | return none
+    let p ← expandPattern p0
+    let rhs := a.getArg 3
+    match patView g p with
+    | .ok (.ctor T c args) =>
+      unless args.isEmpty do
+        throwAt p.info s!"a match on a signal cannot bind the fields of the constructor .{c}: a wire has no projection (this is a case tree over `Hw.eq` and `Hw.mux`)"
+      branches := branches.concat { ctor := some c, ty := T, rhs, info := p.info }
+    | .ok .wild => branches := branches.concat { ctor := none, ty := none, rhs, info := p.info }
+    | .ok (.var n) =>
+      if n == "_" then branches := branches.concat { ctor := none, ty := none, rhs, info := p.info }
+      else throwAt p.info s!"a match on a signal cannot bind the whole wire (`{n}`): write `_` for the default branch"
+    | .ok (.lit _) | .ok (.plusK ..) =>
+      throwAt p.info "a match on a signal with literal patterns (`Nat` on `bits n`) is not supported yet: compare with `===` and `if`"
+    | .ok (.as n _) => throwAt p.info s!"an as-pattern (`{n}@…`) on a signal is not supported"
+    | .ok (.anon _) | .ok (.tuple ..) =>
+      throwAt p.info "a match on a signal takes constructor patterns (`.idle`) or `_`"
+    | .error e => throwAt p.info e
+  let ctorBranches := branches.filterMap fun b => b.ctor.map fun c => (c, b.rhs)
+  -- a match that is only `_`: no test, and nothing observes the signal
+  if ctorBranches.isEmpty then
+    match branches with
+    | [b] => return some (← check ctx b.rhs expected)
+    | _ => throwAt atInfo "a match on a signal needs at least one constructor pattern"
+  let tys ← zonkedTypes ctx
+  let hwTyVal := eval g [] (.const "HwTy" [])
+  let bitCode ← evalIn ctx (.app (.const "HwTy.bits" []) (.natLit 1))
+  let isBit := conv g tys hwTyVal (← force code) (← force bitCode)
+  let ctorNames' := ctorBranches.map (·.1)
+  -- `Bool` is the special two-constructor one-bit type: its bit is `Bool.toBits`, so
+  -- `.true` is `Hw.lit 1 1` and `.false` is `Hw.lit 1 0`
+  let boolLike := isBit && ctorNames'.all fun c => c == "true" || c == "false"
+  let explicitT := branches.findSome? (·.ty)
+  let codeEnum? := hdlCodeEnum? code
+  let candidates : List Name := match explicitT with
+    | some T => [T]
+    | none =>
+      match codeEnum? with
+      | some T => [T]
+      | none =>
+        match ctorBranches with
+        | (c, _) :: _ =>
+          (hdlEnumCandidates g c).filter fun T =>
+            ctorNames'.all fun c' => (ctorNames g T).any (ctorSelects c' ·)
+        | [] => []
+  let mut enums : List Name := []
+  for T in candidates do
+    unless g.contains (T ++ ".code") && g.contains (T ++ ".lit") do continue
+    let codeV ← evalIn ctx (.const (T ++ ".code") [])
+    if conv g tys hwTyVal (← force codeV) (← force code) then
+      unless enums.contains T do enums := enums ++ [T]
+  -- `Bool` is the canonical one-bit type: an unqualified `.true`/`.false` on a one-bit
+  -- signal is `Bool`, even when a user enumeration also has constructors with those
+  -- names (qualify it, `Toggle.true`, to select the enumeration). `Bool` has no
+  -- `BitPack` derivation, so it is not in `enums`.
+  let boolSignal := boolLike && codeEnum?.isNone && (explicitT.isNone || explicitT == some "Bool")
+  let (enumT, boolLike) ← if boolSignal then pure ("Bool", true)
+    else match enums with
+      | [T] => pure (T, false)
+      | [] =>
+        match explicitT with
+        | some T =>
+          throwAt atInfo s!"a match on a signal cannot use the constructors of {T}: its `.code` is not the signal's type, or it has no `.lit` (an enumeration with `deriving BitPack` has both)"
+        | none =>
+          match ctorBranches with
+          | (c, _) :: _ =>
+            throwAt atInfo s!"cannot lower this match on a signal: no enumeration with constructor .{c} and a `deriving BitPack` code matches the signal's type"
+          | [] => throwAt atInfo "internal error: empty constructor list in a signal match"
+      | _ =>
+        throwAt atInfo s!"ambiguous match on a signal: the constructors {", ".intercalate (ctorNames'.map (s!".{·}"))} belong to several enumerations with this code; qualify them (Phase.idle)"
+  let ctors := if boolLike then ["true", "false"] else ctorNames g enumT
+  for b in branches do
+    if let some c := b.ctor then
+      unless ctors.any (ctorSelects c ·) do
+        throwAt b.info s!"{enumT} has no constructor .{c} (its constructors: {", ".intercalate (ctors.map (s!".{·}"))})"
+  let allCovered := ctors.all fun c => ctorBranches.any fun (c', _) => ctorSelects c' c
+  let defaultRhs := (branches.find? fun b => b.ctor.isNone).map (·.rhs)
+  if !allCovered && defaultRhs.isNone then
+    let missing := ctors.filter fun c => !(ctorBranches.any fun (c', _) => ctorSelects c' c)
+    throwAt atInfo s!"this match on a signal is not exhaustive: no branch for {", ".intercalate (missing.map (s!".{·}"))} (add the missing constructors or a `_` branch)"
+  let litOf (c : Name) : Syntax :=
+    if boolLike then
+      -- (`Bool` is not a `BitPack` enumeration: its bit is `Bool.toBits`, `.true` = 1)
+      hdlApp atInfo (hdlIdent atInfo "Hw.lit") [hdlNum atInfo 1, hdlNum atInfo (if c == "true" then 1 else 0)]
+    else
+      hdlApp atInfo (hdlIdent atInfo (enumT ++ ".lit")) [hdlIdent atInfo (ctorConst enumT c)]
+  let x : Name := "s✝"
+  let test (c : Name) (rhs acc : Syntax) : Syntax :=
+    hdlApp atInfo (hdlIdent atInfo "Hw.mux")
+      [hdlApp atInfo (hdlIdent atInfo "Hw.eq") [hdlIdent atInfo x, litOf c], rhs, acc]
+  -- the single-constructor case observes nothing: no test, no share
+  if ctors.length ≤ 1 then do
+    let rhs := if allCovered then (ctorBranches.head!).2 else defaultRhs.get!
+    return some (← check ctx rhs expected)
+  -- (all constructors covered: the last constructor is the final else; otherwise the
+  -- default branch is. Either way the chain is right-nested, exactly the `if` chain.)
+  let body ← if allCovered then
+      let ordered := ctors.filterMap fun c =>
+        (ctorBranches.find? fun (c', _) => ctorSelects c' c).map fun (_, rhs) => (c, rhs)
+      match ordered.reverse with
+      | [] => throwAt atInfo "internal error: no branch for an exhaustive signal match"
+      | (_, lastRhs) :: revInit =>
+        let mut acc : Syntax := lastRhs
+        for (c, rhs) in revInit do acc := test c rhs acc
+        pure acc
+    else
+      let some d := defaultRhs | throwAt atInfo "internal error: no default branch"
+      -- the explicit constructors in declaration order, then the default as the else
+      let ordered := ctors.filterMap fun c =>
+        (ctorBranches.find? fun (c', _) => ctorSelects c' c).map fun (_, rhs) => (c, rhs)
+      let mut acc : Syntax := d
+      for (c, rhs) in ordered.reverse do acc := test c rhs acc
+      pure acc
+  let shareApp := hdlApp atInfo (hdlIdent atInfo "Hw.share") [scrut, hdlFun atInfo x body]
+  return some (← check ctx shareApp expected)
 
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
@@ -3211,6 +3412,8 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     -- (H14 S2) a signal as the condition of `if`: a multiplexer
     if scruts.size == 1 then
       if let some m ← ifMux? ctx alts t ty expected then return m
+      -- (H14 S4) `match` on a signal: a case tree over `Hw.eq` and `Hw.mux`
+      if let some m ← matchMux? ctx stx alts s ty expected then return m
     -- (only a data type with `T.casesOn1`, at size ∞: anything else would bind the
     -- scrutinee at 1 and then take it apart at ω)
     let hasCases1 := match ← force ty with
@@ -3408,7 +3611,8 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
   | "term.hole" | "term.syntheticHole" =>
     let a ← freshMeta ctx "the type of a hole"
     let desc := if stx.isOfKind "term.hole" then "_" else s!"?{((stx.getArg 1).getId?).getD "_"}"
-    return (← freshMeta ctx desc, ← evalIn ctx a)
+    let va ← evalIn ctx a
+    return (← freshMeta ctx desc va, va)
   | "term.app" =>
     if let some r ← inferData? ctx stx then return r
     inferApp ctx stx
@@ -3809,18 +4013,20 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let x ← str (fld 1)
     let .pi _ _ _ dom cod _ ← force gl.ty | throwAt info "intro: the goal is not a function type" ErrorCode.tacticFailed
     let ctx' := gl.ctx.bind x dom
-    let m ← freshMeta ctx' "goal"
+    let ty ← instM cod (Val.var lvl)
+    let m ← freshMeta ctx' "goal" ty
     unifyGoal gl (.lam x m)
-    let (st, id) := addGoal st { ctx := ctx', ty := ← instM cod (Val.var lvl), tm := m }
+    let (st, id) := addGoal st { ctx := ctx', ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
   if tag == TacTag.introFresh then
     let .pi bx _ _ dom cod _ ← force gl.ty | throwAt info "intro: the goal is not a function type" ErrorCode.tacticFailed
     let x := introName gl.ctx.names (← str (fld 1)) bx (isProp g gl.ctx.types.reverse.toArray dom)
       (decodeBool (fld 2) == some true)
     let ctx' := gl.ctx.bind x dom
-    let m ← freshMeta ctx' "goal"
+    let ty ← instM cod (Val.var lvl)
+    let m ← freshMeta ctx' "goal" ty
     unifyGoal gl (.lam x m)
-    let (st, id) := addGoal st { ctx := ctx', ty := ← instM cod (Val.var lvl), tm := m }
+    let (st, id) := addGoal st { ctx := ctx', ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (encodePair (encodeString x) (.nat id)))
   if tag == TacTag.rename then
     let i ← num (fld 1)
@@ -3832,7 +4038,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let ty ← evalIn gl.ctx (← reify st.handles (fld 1) lvl)
     try unify lvl gl.ty ty
     catch e => throwAt info s!"change: the new goal is not convertible with the old one ({e.msg})" ErrorCode.tacticFailed
-    let m ← freshMeta gl.ctx "goal"
+    let m ← freshMeta gl.ctx "goal" ty
     unifyGoal gl m
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
@@ -3882,9 +4088,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let eqn (x y : Term R) : Term R := if rtl then .eqTy y x else .eqTy x y
     let P : Term R := .lam "x" (.lam "_" (eqn (body.lift 1) (Ga.lift 2)))
     let pf : Term R := .transp A a P (.reflTy Ga) b h
-    let m ← freshMeta gl.ctx "goal"
+    let ty ← evalIn gl.ctx newT
+    let m ← freshMeta gl.ctx "goal" ty
     unifyGoal gl (.cast newT goalT pf m)
-    let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
+    let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
   if tag == TacTag.rewriteAt then
     -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
@@ -3982,7 +4189,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     return ← runTac code info st (fld 2)
   if tag == TacTag.newGoal then
     let ty ← evalIn gl.ctx (← reify st.handles (fld 1) lvl)
-    let m ← freshMeta gl.ctx "goal"
+    let m ← freshMeta gl.ctx "goal" ty
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
   if tag == TacTag.normalize then
@@ -4020,7 +4227,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
   let code ← match s.compileCode ("TacticM.run" :: s.tactics.map (·.2)) with
     | .ok c => pure c
     | .error e => throwAt ctx.info e
-  let m ← freshMeta ctx "by"
+  let m ← freshMeta ctx "by" expected
   let mut st : TacState R := { goals := #[{ ctx, ty := expected, tm := m }], «open» := [0] }
   -- each step is `[tactic, [";"?]]`
   let tacs := (stx.getArg 1).args.filterMap fun step => step.args[0]?

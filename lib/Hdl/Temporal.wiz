@@ -6,7 +6,7 @@ import Trace
 
 Temporal logic for circuits (`import Hdl.Temporal`): properties over unbounded time, in
 the style of LTL, SVA and TLA+, with the proof rules to establish them. Design notes:
-docs/libraries.md ("H14 T") and /workspace/wiz-notes/hdl-temporal.md.
+docs/libraries.md ("H14 T") and wiz-notes/hdl-temporal.md.
 
 * A trace is a function `Nat → A` (not a ν-stream: equality at ν is stuck, while
   equality of functions is pointwise). A formula `TL A` is a proposition about a trace
