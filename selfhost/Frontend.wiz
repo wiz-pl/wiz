@@ -8064,11 +8064,24 @@ def attrRegCmd (gs : Globals) (cats : List Cat) (tokens : List String) (stx : Sy
     | .true => .mk cats tokens .nil .none
     | .false => .mk cats tokens .nil (.some ("unknown declaration " +++ f))
   | _ => .mk cats tokens .nil (.some "an attribute needs a name")
+-- (A23) `set_option o v` (`command.setOption` in `Elab/Command.lean`): the two printing
+-- options the host has, with a boolean value. The option is the module's own in the host
+-- (`pp.notation` off, `pp.all` = `pp.notation` off); this frontend's printer has no
+-- notation to switch, so both are accepted and validated, and change nothing.
+def setOptionBool : Syntax → Option Bool
+  | .ident v => match strEq v "true" with
+    | .true => .some .true
+    | .false => match strEq v "false" with
+      | .true => .some .false
+      | .false => .none
+  | _ => .none
 def setOptionCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
   match kid stx 1 with
   | .ident o => match Bool.or (strEq o "pp.notation") (strEq o "pp.all") with
-    | .true => .mk cats tokens .nil .none
-    | .false => .mk cats tokens .nil (.some ("unknown option " +++ o))
+    | .true => match setOptionBool (kid stx 2) with
+      | .some _ => .mk cats tokens .nil .none
+      | .none => .mk cats tokens .nil (.some "expected `true` or `false`")
+    | .false => .mk cats tokens .nil (.some ("unknown option " +++ o +++ " (there are pp.notation and pp.all)"))
   | _ => .mk cats tokens .nil (.some "a set_option needs an option name")
 def unwrapLocal (s : Syntax) : Syntax := match strEq (kindOf s) "command.local" with
   | .true => kid s 1
@@ -8689,6 +8702,149 @@ def mutualDeriving : List Syntax → Option String
     | .cons C _ => .some ("deriving " +++ C +++ " for " +++ identOf' (kid d 1)
         +++ ": a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand")
 
+-- **(A23) `#print axioms f`** (`command.printAxioms`; `Globals.axiomsOf` in
+-- `Core/Check.lean`): the axioms the declaration `f` depends on. As the host, walk the
+-- declaration's type and value, follow every constant, and name each declaration that
+-- has no value (an axiom: here `axiom`, `extern` and a partial definition's signature,
+-- which the host also keeps without a value); an `implemented_by` target is named
+-- `native f := g`, since compiled code runs it. This frontend registers no `builtin`s,
+-- so `builtin k := n` never appears, and its numerals do not unfold through
+-- `nat.zero`/`nat.succ` registrations, so a numeral adds no dependency.
+-- the constants a term mentions, prepended as the host's `consts` prepends them (its
+-- `mapChildrenM` order; leaf forms have none)
+mutual
+partial def tmConsts (t : Tm) (acc : List String) : List String := match t with
+  | .pi _ _ _ dom cod => tmConsts cod (tmConsts dom acc)
+  | .lam b => tmConsts b acc
+  | .app f a => tmConsts a (tmConsts f acc)
+  | .letE ty v b => tmConsts b (tmConsts v (tmConsts ty acc))
+  | .ann x ty => tmConsts ty (tmConsts x acc)
+  | .letq _ ty v b => tmConsts b (tmConsts v (tmConsts ty acc))
+  | .sigma _ _ _ a b => tmConsts b (tmConsts a acc)
+  | .pair a b => tmConsts b (tmConsts a acc)
+  | .fst p => tmConsts p acc
+  | .snd p => tmConsts p acc
+  | .exfalso m x => tmConsts x (tmConsts m acc)
+  | .letUnit u b => tmConsts b (tmConsts u acc)
+  | .ecase m s bs => tmsConsts bs (tmConsts s (tmConsts m acc))
+  | .eq A a b => tmConsts b (tmConsts a (tmConsts A acc))
+  | .eqTy A B => tmConsts B (tmConsts A acc)
+  | .eqRefl A a => tmConsts a (tmConsts A acc)
+  | .tyRefl X => tmConsts X acc
+  | .coe A B e x => tmConsts x (tmConsts e (tmConsts B (tmConsts A acc)))
+  | .subst A a P p b e => tmConsts e (tmConsts b (tmConsts p (tmConsts P (tmConsts a (tmConsts A acc)))))
+  | .sigmaQ q _ _ a b => tmConsts b (tmConsts a (tmConsts q acc))
+  | .descr _ I => tmConsts I acc
+  | .dret i => tmConsts i acc
+  | .darg q S D => tmConsts D (tmConsts S (tmConsts q acc))
+  | .drec q j D => tmConsts D (tmConsts j (tmConsts q acc))
+  | .dhrec q H j D => tmConsts D (tmConsts j (tmConsts H (tmConsts q acc)))
+  | .delim _ P mret marg mrec mhrec D =>
+    tmConsts D (tmConsts mhrec (tmConsts mrec (tmConsts marg (tmConsts mret (tmConsts P acc)))))
+  | .mu _ I D i => tmConsts i (tmConsts D (tmConsts I acc))
+  | .con x => tmConsts x acc
+  | .szSuc s => tmConsts s acc
+  | .sizeLt s => tmConsts s acc
+  | .mus _ I D i s => tmConsts s (tmConsts i (tmConsts D (tmConsts I acc)))
+  | .sfix _ I D _ P f s i x =>
+    tmConsts x (tmConsts i (tmConsts s (tmConsts f (tmConsts P (tmConsts D (tmConsts I acc))))))
+  | .scase _ _ I D _ P m s i x =>
+    tmConsts x (tmConsts i (tmConsts s (tmConsts m (tmConsts P (tmConsts D (tmConsts I acc))))))
+  | .nu _ I D i s => tmConsts s (tmConsts i (tmConsts D (tmConsts I acc)))
+  | .out x => tmConsts x acc
+  | .cocon x => tmConsts x acc
+  | .scofix _ I D A f s i a =>
+    tmConsts a (tmConsts i (tmConsts s (tmConsts f (tmConsts A (tmConsts D (tmConsts I acc))))))
+  | .coit _ I D S step i s =>
+    tmConsts s (tmConsts i (tmConsts step (tmConsts S (tmConsts D (tmConsts I acc)))))
+  | .ind _ I D _ P m i x =>
+    tmConsts x (tmConsts i (tmConsts m (tmConsts P (tmConsts D (tmConsts I acc)))))
+  | .const n _ _ _ _ => .cons n acc
+  -- (an axiom's name is named by the declaration that holds it; its type is walked there)
+  | .axiomC _ _ => acc
+  | .ulift _ _ A => tmConsts A acc
+  | .up a => tmConsts a acc
+  | .down x => tmConsts x acc
+  | .prf _ x => tmConsts x acc
+  | _ => acc
+partial def tmsConsts (ts : Tms) (acc : List String) : List String := match ts with
+  | .tnil => acc
+  | .tcons t rest => tmsConsts rest (tmConsts t acc)
+end
+-- the global with the kernel name `n`, from the latest declaration down
+partial def globalByKeyFrom (all : Array Global) : Nat → String → Option Global
+  | .zero, _ => .none
+  | .succ j, n => match Array.getD all j (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k ps ty v iv im ns => match strEq k n with
+      | .true => .some (.mk k ps ty v iv im ns)
+      | .false => globalByKeyFrom all j n
+def globalByKey (gs : Globals) (n : String) : Option Global :=
+  globalByKeyFrom (Globals.all gs) (Array.size (Globals.all gs)) n
+-- `native f := g` (`attribute [implemented_by g] f`): compiled code runs `g` for `f`
+def nativeIn : List Foreign → String → Option String
+  | .nil, _ => .none
+  | .cons f rest, n => match f with
+    | .impl name target => match strEq name n with
+      | .true => .some target
+      | .false => nativeIn rest n
+    | _ => nativeIn rest n
+def nativeOf (gs : Globals) (n : String) : Option String := nativeIn (Globals.ffi gs) n
+-- the axiom lines for the kernel name `n`, in the host's order: a work list of
+-- `(declaration, isCode)`; `seen` are the declarations walked, `ran` those walked as code
+-- (a partial definition reached as code runs its body, which this frontend keeps as a
+-- separate declaration of the same name, so its constants are seen anyway)
+inductive AxWork where
+  | mk (name : String) (run : Bool)
+def axWorks (run : Bool) : List String → List AxWork
+  | .nil => .nil
+  | .cons x rest => .cons (.mk x run) (axWorks run rest)
+partial def axiomsGo (gs : Globals) (todo : List AxWork) (seen ran : List String)
+    (out : List String) : List String := match todo with
+  | .nil => List.reverseOf out .nil
+  | .cons (.mk c run) rest =>
+      let first := Bool.not (containsStr seen c);
+      let ranHas := containsStr ran c;
+      match Bool.or first (Bool.and run (Bool.not ranHas)) with
+      | .false => axiomsGo gs rest seen ran out
+      | .true =>
+        let seen' : List String := .cons c seen;
+        let ran' : List String := match run with
+          | .true => .cons c ran
+          | .false => ran;
+        match globalByKey gs c with
+        | .none => axiomsGo gs rest seen' ran' out
+        | .some (.mk k _ ty v _ _ _) =>
+            let ax := isAxiomTm v;
+            let out1 : List String := match Bool.and first ax with
+              | .true => .cons k out
+              | .false => out;
+            let nativ := nativeOf gs k;
+            let out2 : List String := match first with
+              | .false => out1
+              | .true => match nativ with
+                | .some t => .cons ("native " +++ k +++ " := " +++ t) out1
+                | .none => out1;
+            let vc : List String := match ax with
+              | .true => .nil
+              | .false => tmConsts v .nil;
+            let tc : List String := tmConsts ty .nil;
+            let impl : List AxWork := match nativ with
+              | .some t => .cons (.mk t .true) .nil
+              | .none => .nil;
+            axiomsGo gs ((axWorks run (vc ++ tc)) ++ (impl ++ rest)) seen' ran' out2
+def axiomsOf (gs : Globals) (n : String) : List String := axiomsGo gs (.cons (.mk n .false) .nil) .nil .nil .nil
+-- `#print axioms f`
+def printAxiomsCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 2 with
+  | .ident n => match Scope.lookup (Globals.scope gs) n with
+    | .none => errStep gs (String.append (String.append "unknown declaration '" n) "'")
+    | .some i => match Array.getD (Globals.all gs) (Array.size (Globals.all gs) - 1 - i)
+        (.mk "?" .nil .star .star .star .nil .nil) with
+      | .mk k _ _ _ _ _ _ => match axiomsOf gs k with
+        | .nil => .mk (String.append (String.append "'" n) "' does not depend on any axioms") gs
+        | .cons _ _ => .mk (String.append (String.append (String.append "'" n) "' depends on axioms: [")
+            (String.append (commaJoin (axiomsOf gs k)) "]")) gs
+  | _ => errStep gs "a #print axioms needs a name"
+
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
@@ -8788,6 +8944,8 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                   | .true => cStructCmd gs0 stx
                   | .false => match strEq (kindOf stx) "command.sealed" with
                     | .true => sealedCmd gs0 stx
+                    | .false => match strEq (kindOf stx) "command.printAxioms" with
+                    | .true => printAxiomsCmd gs0 stx
                     | .false => match strEq (kindOf stx) "command.deriving" with
                       | .true => derivingCmd gs0 stx
                       | .false => match knownCommand (kindOf stx) with
