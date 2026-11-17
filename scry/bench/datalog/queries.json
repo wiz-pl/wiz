@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "harness": "examples/scry-datalog-bench.wiz",
+  "note": "The query set is the Wiz source itself: the deep embedding's rules are constructed in the harness. This file pins the programs, the parameters measured, and the deterministic derived-fact counts the driver checks before timing.",
+  "programs": {
+    "chain": {
+      "shape": "taint-shaped linear flow",
+      "rules": [
+        "tainted(x)  :- src(x)",
+        "tainted(y)  :- tainted(x), flow(x, y), not san(y)",
+        "alert(y, z) :- tainted(x), flow(x, y), sink(y, z)"
+      ],
+      "edb": "flow(i, i+1) for i in [0, N), src(0), sink(i, 0) for i in [0, N)",
+      "derived": "N+1 tainted, N-1 alert"
+    },
+    "tc": {
+      "shape": "layered transitive closure, width 8",
+      "rules": [
+        "path(x, y) :- edge(x, y)",
+        "path(x, z) :- path(x, y), edge(y, z)"
+      ],
+      "edb": "8x8 edges from layer i to i+1 for i in [0, N), plus a spine edge (layer i+1,0) -> (layer i+2,0); the first N-1 spine edges duplicate the j=k=0 edge, so 64N+1 unique rows",
+      "derived": "closure size"
+    },
+    "naive": {
+      "shape": "round-scan baseline",
+      "rules": "every rule against the whole store, every round, until no new fact; same kernels as the semi-naive engine",
+      "scope": "positive programs; the two measured programs have an empty sanitiser relation, so the stratified and naive fixpoints coincide"
+    }
+  },
+  "cases": [
+    {
+      "name": "chain 1000",
+      "args": ["chain", "1000"],
+      "input": ["chain", "1000"],
+      "expect": {"tainted": 1001, "alerts": 999}
+    },
+    {
+      "name": "chain 5000",
+      "args": ["chain", "5000"],
+      "input": ["chain", "5000"],
+      "expect": {"tainted": 5001, "alerts": 4999}
+    },
+    {
+      "name": "tc 20",
+      "args": ["tc", "20"],
+      "input": ["tc", "20"],
+      "expect": {"reach": 13601}
+    }
+  ],
+  "naive_cases": [
+    {
+      "name": "naive chain 1000",
+      "args": ["naive", "chain", "1000"],
+      "against": "chain 1000",
+      "expect": {"derived": 2000}
+    },
+    {
+      "name": "naive tc 20",
+      "args": ["naive", "tc", "20"],
+      "against": "tc 20",
+      "expect": {"derived": 13601}
+    }
+  ]
+}

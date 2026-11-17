@@ -76,7 +76,9 @@ terminal gets a prompt; a pipe is a script, and its output is only the commands'
 `--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
 Prelude and before the first prompt, composing with `-I`; a missing module is a startup
 error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
-it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
+it (`scry repl`, run from `scry/`, is
+`wiz repl -I src -I ../lib --prelude Scry.Repl`; from the repository root,
+`wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 Limits: input is one line per command (no continuation, history or line editing, and no
 completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend
@@ -86,8 +88,8 @@ directory: the session has no file of its own. Tests are the `wiz repl:` cases o
 `tooling` group.
 
 `wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
-(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
-form is `wiz test FILE` (stage 11ah).
+with the other arguments unchanged; build the driver first. There is no single-file
+form yet: `wiz test FILE` is still a proposal, and no stage-11ah section exists.
 
 ### Running cases in parallel (`--jobs`)
 
@@ -100,6 +102,18 @@ its own process's time, not the time it waited in the pool; the totals and the e
 are the same as a sequential run, and a failing case does not stop the others. An
 exception kills the cases still running, and the cases stay in the driver's process
 group, so Ctrl-C reaches them as it did sequentially.
+
+A case of a group that did not opt in is told the driver's `--jobs` when it was given
+(`Tests.caseJobs`), and may use N workers of its own inside its one process.
+`=selfhost-libdiff` is the one that does: it builds the self-hosted compiler once, then
+checks N files at a time (each file still runs its host and self-hosted sides in child
+processes, so the verdicts are the same). With no `--jobs`, N is **auto**: the CPUs
+minus one, capped by the free memory at its `--mem` MB per file (4096 by default,
+`/proc/meminfo` and any cgroup limit). So a 4 vCPU / 16 GiB CI runner gets 3 workers.
+`--jobs N` overrides it (`--jobs 1` is the serial control), and a worker starts its next
+file only while that memory is free; a log's records stay in the files' order, so
+parallel and sequential runs report the same records. The cases of an opted-in group
+get 1 (N already run at once). A file's timeout is per file, not for the pool.
 
 The opt-in is `parallel := true` on a `Group` (`Tests/Harness.lean`). Enable it only for a
 group whose cases share no mutable state: every case's files must be its own (its own temp
@@ -414,12 +428,79 @@ Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean to
 report whichever error finishes first (artifacts are unaffected). The compiler binary,
 the generated C and the linked programs are compared byte for byte by the script.
 
-## Memory budget
+## Build time and memory
+
+### The Lean build (`lake build wiz tests grail`)
+
+The build is 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
+`.lake` and an empty `LAKE_CACHE_DIR` on the 27 GiB, 32-CPU development host, while
+about twenty other agents were building (load average 40–54). The same command with
+the shared artifact cache warm is **12 s**, all 530 jobs replayed, so this is the cost
+of a new commit or toolchain, not of a fresh worktree. What was measured: each C
+compiler invocation was wrapped in a `wait4` recorder (wall time and `ru_maxrss`),
+`lake build -v` gives each Lean job's duration, and the whole process tree's RSS was
+sampled every 20 ms for the peak.
+
+| phase | jobs | sum of job wall times |
+|---|---:|---:|
+| Lean elaboration | 258 | 5110 s |
+| C compilation (`:c.o`) | 258 | 4512 s |
+| link | 3 | 23 s |
+
+The sum is 9646 s over 1680 s of wall: **Lake 5 has no `-j`, but it does not
+serialize** — 43 jobs ran at once at the peak (mean 5.8, because the host, not the
+scheduler, was the limit). The peak of the whole tree was 22.0 GiB, but no single job
+came near it: the largest were the generated C of `Wiz.LSP` (2.10 GiB) and
+`Wiz.Format` (2.02 GiB); the next was 0.78 GiB. The 22 GiB is the sum of roughly
+forty concurrent jobs, mostly Lean elaborations of the test modules (0.5–0.9 GiB
+each), not one large job. **The 7 GiB cap is a per-compile limit, not the build's**;
+a cgroup that small kills the build long before the two big C files.
+
+Those two units were also the tail. They were 29.4 MB and 33.0 MB of C, took 1193 s
+and 1203 s to compile (25 % of all job time), and could only start after their Lean
+elaboration (297 s and 313 s), so the last 1200 s of the 1680 s wall was waiting on
+them. Both hold the same ~630k lines: the compiler specializes the whole elaborator
+(the `runFrontend` body and the `Wiz.Elab.Command.elabCommand` cascade) to
+`ZeroOneMany` in every module that calls the frontend, and `Wiz.Format` and `Wiz.LSP`
+each called it. `@[nospecialize]` on `runFrontend`, its `go`/`go'`/`step`, and
+`Query.elaborate`/`go` leaves **one** copy, in `Wiz.Frontend.Frontend`:
+
+| unit | before | after |
+|---|---:|---:|
+| `Wiz.Format.c` | 29.4 MB, 1193 s, 2.02 GiB | 0.43 MB, 6.4 s, 0.28 GiB |
+| `Wiz.LSP.c` | 33.0 MB, 1203 s, 2.10 GiB | 4.6 MB, 57 s, 0.44 GiB |
+| `Wiz.Frontend.Frontend.c` | 0.40 MB, 7 s | 29.2 MB, 480 s, 2.55 GiB |
+| elaboration of the same modules | 610 s | 379 s |
+
+Two ~30 MB compiles become one, the C of the pair falls from 62.4 MB to 5.0 MB, and
+a change to `Wiz.Format` or `Wiz.LSP` no longer costs a twenty-minute compile
+(editing the frontend itself still costs one). The cost is dictionary arguments in
+the frontend; interleaved A/B of the two binaries on this host, best of five to seven
+runs: `wiz check --no-cache lib/Std.wiz` 2.02 → 2.07 s (+2 %), `lib/Text.wiz`
+1.42 → 1.50 s (+5 %), `wiz fmt --check lib/Std.wiz` 0.92 → 0.98 s (+6 %). The output
+is unchanged: the 25 MB C both binaries emit for the self-hosted compiler (the
+fixpoint's stage 1) is byte-identical (`md5 712ae4ca4bfafc63a01767e06ad33022`), and
+the `format`, `tooling` and `native` groups and the trust ledger pass. Counting the
+changed jobs in the two builds gives 9646 s → about 7600 s (−21 %) of job time; a
+cold build after the change was not re-run under the same load, so treat that as the
+model's estimate, not a measured whole-build number.
+
+Two other changes were considered and rejected. Compiling the units with narrower
+flags (e.g. `-O1`) is the obvious alternative, but Lake gives a module the flags of
+its *library* (`Module.leancArgs` is `self.lib.leancArgs`): there is no per-module
+`moreLeancArgs`, and a second `lean_lib` for those two modules would rename or
+shadow them. Setting `LEAN_CC` to a wrapper would make a plain `lake build` depend
+on the environment, which this repository avoids. With the change above there is
+only one big unit left, and it is the frontend's.
+
+### The `wiz` memory corpus
 
 Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
-4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
-retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
-brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+4 GiB memory cgroup whatever its wall time was. The self-hosted checker has a 1 GiB cap
+because a `mutual`/`partial` inline-cache change once made its self-check retain far
+more; after the `inlineTm` fix `bench/mem-baseline.json` records 412.5 MiB peak in
+31.338 s (`python3 scripts/mem-bench.py --update` re-records it). `scripts/mem-bench.py`
+measures the peak
 resident set of a fixed corpus and gates it two ways:
 
 ```sh
@@ -494,9 +575,10 @@ peak of the recorded samples, ±5 %):
 
 The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
 cap and an order of magnitude above the module checks, which is why it has its own
-entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+entry. The cap exists because of that inline-cache regression; the baseline records
+412.5 MiB (`scripts/mem-bench.py --update` re-records it).
 The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
-not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+not the largest peak. The 164 KiB `hdl-uart-temporal` example is not in the corpus:
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
@@ -610,8 +692,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
   baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
-  `scaling`; the last is a sweep over `lib/` and `examples/`, split 2 with its long case
-  in one part).
+  `scaling`; the last is a sweep over `lib/` and `examples/`, split into cases for `lib/`,
+  `libApart` and six chunks of `examples/`, so its parts can run in different shards).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
@@ -619,11 +701,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
-  opted-in groups run N cases at a time. Only set it on a shard whose groups were
-  verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
-  4 on the 4-core hosted runner. A shard of one long case (`grail-selfhost`,
-  `hdl-verified`) and the shards that build a shared program (`selfhost`) keep 1. A
-  case's `seconds` stays its own process's time, so shard balance is unaffected.
+  opted-in groups run N cases at a time, and a lone case may use N workers itself.
+  Only set it on a shard whose groups were verified (and opted in) to be safe in
+  parallel; `core`, `library` and `backends` use 4 on the 4-core hosted runner.
+  `selfhost-libdiff` needs no `"jobs"`: its one case picks auto (the CPUs minus one,
+  capped by the free memory), so a 4 vCPU / 16 GB runner runs 3 files at `--mem`
+  (4096 MB) and a 20 GB one could run more; a matrix of six heavy shards on 16 GB
+  runners cannot OOM it. A shard of one long case
+  (`grail-selfhost`, `hdl-verified`) and the shards that build a shared program
+  (`selfhost`) keep 1. A case's `seconds` stays its own process's time, so shard
+  balance is unaffected.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's test time is over 1.5× the median shard's**. Every split shard's cases
   have an entry in `.github/test-timings.json`, and no shared program is built by two
@@ -648,9 +735,11 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
   If a shard stays over the limit after the refresh, raise its `"split"` or make it a
   split shard. `scripts/ci.py plan` shows the predicted parts. One case longer than the
-  limit cannot be split: `grail-selfhost` is one case of several minutes, and
-  `scaling`'s sweep over `lib/` and `examples/` is one case of about 14 min (the
-  `scaling` shard's other part holds its 26 shorter cases).
+  limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
+  minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
+  3-worker auto pool (splitting it into cases would make each part build the
+  self-hosted compiler again). `scaling`'s sweep was one case of about 24 min; it is now nine cases
+  over the same inputs, so the shard's parts can each hold one.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
@@ -696,9 +785,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   does not show that the C is correct (it is compiled with `-w`), that the compiled
   toolchain behaves correctly (the test suite covers that), or anything about other
   inputs, flags, C compilers or GC versions.
-  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
-  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
-  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  The self-compile needs about 6 GiB; the script names that requirement if a stage is
+  killed for memory (exit 137). Run it locally with `nix develop -c
   scripts/fixpoint.sh` and a 6 GiB reservation.
   The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on

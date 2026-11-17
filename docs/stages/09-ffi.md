@@ -363,9 +363,10 @@ c_struct "struct pair" Pair where     -- no header: the C definition is generate
 | `struct foo` / `foo_t` by value | a structure `C.struct_foo` / `C.foo_t`, made with `c_struct` from the header's definition (every field must map: numbers, `char *`, `char f[N]` → `Bytes`, nested structs); a struct with bit fields or anonymous members is left out |
 | `struct foo *`, `FILE *`     | a foreign type `C.struct_foo` / `C.FILE` (no finalizer) |
 | `const void *buf, size_t n`  | one `Bytes` argument (the pointer and the length come from the buffer; only when the length parameter right after is named `n`, `len`, `nbytes` or `length`, with or without `__`) |
+| `char *buf, size_t n`, `unsigned char *`, `signed char *`, `uint8_t *` | one `Bytes` argument, by the same rule (a `char *` **with** a length is a buffer; without one it is the NUL-terminated `String`) |
 
-`const char *` stays `String`; other pointers (`int *`, `void *`, output buffers) are
-still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
+`const char *` without a length parameter stays `String`; other pointers (`int *`,
+`void *`, output buffers) are still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
 bodies, array lengths, typedef names of structs and parameter names for this.
 
 Opt-outs:
@@ -507,3 +508,41 @@ clocks) and the new `serial` group (a pseudo-terminal: all 256 values both ways 
 the raw settings read back; a terminal that doesn't answer in time and a discarded
 input queue; every rate, stop bits and flow control read back, and the errors), on both
 backends, no hardware needed.
+
+## 9l: byte buffers through the FFI (kind `y`)
+
+`Bytes` (`lib/IO.wiz`) meets C through one marshalling kind, `y`. It is a *borrowed
+buffer for the call*:
+
+* **In.** A prototype's buffer pointer and its length (a `size_t`/integer parameter
+  right after it, named `n`, `len`, `nbytes` or `length`, with or without `__`) fold
+  into **one** `Bytes` parameter: the runtime passes the buffer's `data` and `len` as
+  the two C arguments. The pointer may be `const void *`, `const char *`/`char *`,
+  `unsigned char *`/`const unsigned char *`, `signed char *` or `uint8_t *` (a typedef
+  for `unsigned char`, resolved by the header parser). A `char *` *without* a length is
+  still the C-string `String`.
+* **Ownership: borrowed, not given.** The pointer stays the Wiz value's storage for the
+  duration of the call only. C must not keep it (in a static, a struct, a callback it
+  registers) and must not `free` it: the reference the call takes is released when it
+  returns. A caller that still uses the buffer keeps it alive
+  (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`). No copy is made, so writing
+  through a non-`const` pointer is only well defined on a buffer the caller built for
+  the call and does not share (`Bytes` is functional: a shared buffer must not change).
+  Returning bytes needs a `foreign_type` or a caller-supplied buffer (below).
+* **Out.** There is no `Bytes` *result* kind. C that produces bytes returns a
+  `foreign_type` pointer, or fills a buffer the caller passes; `FS.readBytes`,
+  `File.readBytes` and `Fd.read` (9k) are the runtime's own.
+* **A `c_struct` field.** `unsigned char f[N]` or `char f[N]` is a `Bytes` field (the
+  `c_struct` needs a header, so the array's length is known): the wrapper copies the
+  buffer into the C array, cut or zero-padded to `N`, and a struct coming back gets a
+  fresh `Bytes` of `N` bytes. `glue` may take and return such a struct, and pass it to C,
+  but cannot read the buffer field (`glueDeclFields` leaves it out, as the Lean
+  frontend's `declared` does). A `Bytes` field without a header is rejected by both
+  frontends (the length would be unknown).
+
+Both toolchains implement the kind: the Lean frontend/backends in `Elab/Command.lean`
+and `Compiler/C.lean`, the self-hosted one in `selfhost/Frontend.wiz`/`Backend.wiz` with
+the same two C arguments (21ag). Tests: `=selfhost` "Bytes (21ag): a
+char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call" and "Bytes
+(21ag): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
+reference counting), plus the `ffi-structs` buffer case.

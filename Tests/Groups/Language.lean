@@ -70,6 +70,7 @@ def r1Header : String := "import Prelude\naxiom Tok : Type\n"
 def languageGroup : Group where
   name := "language"
   exercise := "Stage 13"
+  parallel := true
   cases := [
     { name := "string escapes: \\r, \\t, \\0, \\\\, \\\", \\', \\xHH, \\u{H}; a bad one is reported where it is", run := fun _ => do
         okLib "import Prelude\n#eval \"a\\rb\\t\\0\\'\\x41\\u{3bb}\\\\\\\"\"" ["\"a\\x0db\\t\\x00'Aλ\\\\\\\"\""]
