@@ -258,9 +258,9 @@ end RVal
 so the nine runtime natives (`runtime/rt_data.inc`, `runtime/rt_sys.inc`) are
 implemented here on a `ByteArray`, as `wiz_nat_show` already is; compiled code still
 calls the runtime. `ofCString`/`toCString` mirror the C boundary exactly: a `String` is
-encoded code point by code point (a surrogate or a value above `U+10FFFF` still takes
-three or four bytes, as `wiz_in_string` writes it), the C string stops at the first NUL,
-and the bytes come back as text by `wiz_out_string`'s lenient UTF-8 decode. -/
+encoded code point by code point (a surrogate or a value above `U+10FFFF` is U+FFFD, as
+`wiz_in_string` writes it), the C string stops at the first NUL, and the bytes come back
+as text by `wiz_out_string`'s UTF-8 decode (invalid sequences are U+FFFD). -/
 namespace BytesModel
 
 def push (b : ByteArray) (x : Nat) : ByteArray := b.push (UInt8.ofNat x)
@@ -298,10 +298,19 @@ def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
       (UInt8.ofNat (0x80 ||| ((c >>> 12) &&& 0x3F)))).push
       (UInt8.ofNat (0x80 ||| ((c >>> 6) &&& 0x3F)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
 
-/-- The string's UTF-8 bytes up to the first NUL (a C string). -/
-def ofCString (s : String) : ByteArray :=
-  ByteArray.mk (((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
-    (· != 0)).toArray)
+/-- The string's UTF-8 bytes up to the first NUL (a C string). It walks the Wiz
+`String` value's list of `Char`s itself: a Lean `String` cannot hold a non-scalar
+code point (`Char.ofNat` maps a surrogate to NUL), and the runtime encodes such a
+character as U+FFFD, not as the end of the string. -/
+partial def ofCharsList (l : RVal) (b : ByteArray) (fuel : Nat) : Option ByteArray := do
+  if fuel == 0 then return b
+  if RVal.tagOf l == 0 then return b
+  let c ← ((l.field 0).field 0).toNat?
+  if c == 0 then return b
+  ofCharsList (l.field 1) (pushCp b c) (fuel - 1)
+
+/-- The bytes of a Wiz `String` value (a `String.mk (List Char)`) up to the first NUL. -/
+def ofCString (v : RVal) : Option ByteArray := ofCharsList (v.field 0) ByteArray.empty 1000000
 
 /-- The code point `cp` with the continuation bytes `j … len - 1` of a UTF-8
 sequence folded in (a helper of `decodeFrom`); `none` if one of them is not
@@ -341,16 +350,6 @@ def toCString (b : ByteArray) : String :=
 
 end BytesModel
 
-/-- The characters of a Wiz `String` value (`String.mk (List Char)`, the form
-`wiz_nat_show` builds), for a `Bytes` native that takes text. Defined here rather than
-reused from `RVal.toString?` because the `Bytes` dispatch is above it. -/
-partial def stringChars? (l : RVal) (acc : String) (fuel : Nat) : Option String := do
-  if fuel == 0 || RVal.tagOf l == 0 then return acc
-  let c ← ((l.field 0).field 0).toNat?
-  stringChars? (l.field 1) (acc.push (Char.ofNat c)) (fuel - 1)
-
-partial def stringValue? (v : RVal) : Option String := stringChars? (v.field 0) "" 1000000
-
 /-- The `Bytes` native operations (stage 21ag), by the C name the runtime exports.
 `none` for every other native, and for a `Bytes` operation whose arguments are not
 what the compiler passes (the model stops there instead of inventing a value). -/
@@ -358,15 +357,14 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   let bs (i : Nat) : Option ByteArray := match args[i]? with
     | some (.bytes b) => some b
     | _ => none
-  let str (i : Nat) : Option String := match args[i]? with
-    | some v => stringValue? v
-    | none => none
   match (RVal.ExternSig.ofKey? op).map (·.cname) with
   | some "wiz_bytes_empty" => some (.bytes ByteArray.empty)
   | some "wiz_bytes_push" => (bs 0).map fun b => .bytes (BytesModel.push b (num 1))
   | some "wiz_bytes_size" => (bs 0).map fun b => .nat b.size
   | some "wiz_bytes_get" => (bs 0).map fun b => .nat (BytesModel.get b (num 1))
-  | some "wiz_bytes_of_string" => (str 0).map fun s => .bytes (BytesModel.ofCString s)
+  | some "wiz_bytes_of_string" => match args[0]? with
+    | some v => (BytesModel.ofCString v).map fun b => .bytes b
+    | none => none
   | some "wiz_bytes_to_string" => (bs 0).map fun b =>
       -- (the string a Wiz `String` is: `String.mk (List Char)`, as `wiz_nat_show` builds)
       let chars := (BytesModel.toCString b).toList.foldr

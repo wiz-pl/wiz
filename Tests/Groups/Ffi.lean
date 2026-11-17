@@ -17,7 +17,7 @@ def importCMsgs (src : String) : IO (List String) := do
     if m == "Prelude" then some prelude else if m == "IO" then some ioLib else none
   let headers ← Build.preprocessHeaders (← toolchain) src
   let s := runFrontend (R := ZeroOneMany) src { loader, cHeaders := (headers[·]?) }
-  pure (s.messages.toList.map (·.text))
+  pure (s.messages.filter (·.severity == .info) |>.toList.map (·.text))
 
 /-- (21ag) The header of the `import_c` signature pins: every spelling of a buffer
 pointer with a length, one without, and an integer that is not a length. -/
