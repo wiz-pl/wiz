@@ -1389,22 +1389,24 @@ def bytesPtrHeader : String :=
   "#endif\n"
 
 /-- (21ag) A header of the writable-pointer case: `char *` with a length, writing
-through the pointer (imported without `(pure)`, so the call is an `IO` action). -/
+through the pointer and returning the length (a pure function whose result the program
+prints, so the call cannot be dropped: the copy is what keeps the Wiz buffer intact). -/
 def bytesPtrIoHeader : String :=
   "#ifndef WIZ_BYTES2_IO_H\n#define WIZ_BYTES2_IO_H\n" ++
-  "static inline void wiz_scribble_chars(char *buf, unsigned long n) {\n" ++
-  "  if (n) buf[0] = 'X';\n}\n" ++
+  "static inline unsigned long wiz_scribble_chars(char *buf, unsigned long n) {\n" ++
+  "  if (n) buf[0] = 'X';\n  return n;\n}\n" ++
   "#endif\n"
 
 /-- (21ag) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
 called with one `Bytes` argument; a `const` buffer is **borrowed** for the call (C may
 read it and must not keep it), a writable one is a **copy** (C's writes are discarded),
 so the same Wiz buffer is usable and unchanged after either call. Prints
-`198 258 198 [65, 66, 67] 3 [65, 66, 67]`. -/
+`198 258 198 [65, 66, 67] 3 3 [65, 66, 67]` (the second `3` is the writable call's
+result: it saw the copy). -/
 def bytesPtrProgram (header ioHeader : String) : String :=
   "import IO\n" ++
   s!"import_c \"{header}\" (pure)\n" ++
-  s!"import_c \"{ioHeader}\"\n" ++
+  s!"import_c \"{ioHeader}\" (pure)\n" ++
   "def main : IO Unit := do\n" ++
   "  let b := Bytes.ofString \"ABC\";\n" ++
   "  IO.println (Nat.toString (C.wiz_sum_chars b));\n" ++
@@ -1412,10 +1414,10 @@ def bytesPtrProgram (header ioHeader : String) : String :=
   "  IO.println (Nat.toString (C.wiz_sum_u8c b));\n" ++
   "  IO.println (Bytes.show b);\n" ++
   "  IO.println (Nat.toString (Bytes.size b));\n" ++
-  "  C.wiz_scribble_chars b;\n" ++
+  "  IO.println (Nat.toString (C.wiz_scribble_chars b));\n" ++
   "  IO.println (Bytes.show b)\n"
 
-def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n[65, 66, 67]\n"
+def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n3\n[65, 66, 67]\n"
 
 /-- (21ag) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
 value and comes back by value (the field is copied into the C array and out of it), and
