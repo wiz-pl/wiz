@@ -37,7 +37,7 @@ lean_lib Tests where
 lean_lib WizMeta where
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
--- The F0 specification of the STC track (see /workspace/wiz-notes/stc-m0-spec.md).
+-- The F0 specification of the STC track (see `STC.lean`'s module doc).
 -- A separate library, not a default target: nothing else imports it yet.
 lean_lib STC where
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
@@ -60,6 +60,12 @@ lean_lib WizRuntime where
 lean_exe tests where
   root := `Tests.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
+
+/-- `lake build genSelfhostTables`: rewrite `selfhost/Tables.wiz` from the Lean parser's
+tables (`scripts/GenSelfhostTables.lean`). Not a default target: only the grammar's
+owner runs it. -/
+lean_exe genSelfhostTables where
+  root := `scripts.GenSelfhostTables
 
 @[default_target] lean_exe grail where
   root := `Grail.Main

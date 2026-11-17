@@ -1,0 +1,48 @@
+-- The fixture for tools/jupyter/static/widget_test.mjs: a Wiz widget fragment with a
+-- readout, a button and a range slider.  The test does not run this file (it must not
+-- need wiz or Python); `widget_gen.sh` runs it once and commits
+-- `widget_fixture.json` and the DOM goldens.
+--
+--   .lake/build/bin/wiz run -I lib tools/jupyter/static/widget_gen.wiz
+--
+-- The three display strings are the real kernel values: `Widget.display` for the first
+-- render, then `Widget.handle` for a button click and a slider input.  The front end
+-- test feeds them to `widget.js` through a fake comm, so the patches it applies are the
+-- ones `React.Rendered.diff` produced, not a re-implementation.
+import IO
+import Json
+import Text
+import Web.Widget
+
+-- Set the readout to every event's value, and the widget that fired to its own value.
+def onEvent (e : Widget.Event) (ws : List Widget.Widget) : List Widget.Widget :=
+  List.map (fun w =>
+    match String.eq w.id "readout" with
+    | .true => Widget.setValue w e.value
+    | .false => match String.eq w.id e.widget with
+      | .true => Widget.setValue w e.value
+      | .false => w) ws
+
+def widgets : List Widget.Widget := [
+  Widget.text "readout" "input" "count 0" "onEvent",
+  Widget.buttonValue "inc" "click" "count 1" "+" "onEvent",
+  Widget.sliderRange "level" "input" "1" "onEvent" "0" "3" "1"
+]
+
+def initial : String := Widget.display widgets
+def afterClick : String := Widget.handle onEvent initial "inc" "click" "count 1"
+def afterInput : String := Widget.handle onEvent (Widget.display (Widget.widgetsOf afterClick))
+  "level" "input" "3"
+
+def str (s : String) : Json := Json.mkStr s
+
+def fields : List (String × Json) := [
+  Json.field "target_name" (str "wiz.widgets"),
+  Json.field "comm_id" (str "widget-1"),
+  Json.field "display" (str initial),
+  Json.field "click" (str afterClick),
+  Json.field "input" (str afterInput)
+]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

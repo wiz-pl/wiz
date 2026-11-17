@@ -20,7 +20,7 @@ def main : IO Unit := do
       let types := Scry.readNodeTypes j;
       let concrete := List.filter (fun t => Bool.not t.super) types;
       let supers := List.filter (fun t => t.super) types;
-      let fields := Scry.dedup (Scry.concatMap (fun t =>
+      let fields := Scry.dedup (Scry.codegenConcatMap (fun t =>
         List.map (fun f => f.name) t.fields) concrete);
       IO.println ("schema: " ++ Nat.repr (List.length concrete) ++ " kinds, "
         ++ Nat.repr (List.length fields) ++ " fields, " ++ Nat.repr (List.length supers)

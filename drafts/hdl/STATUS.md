@@ -1,7 +1,7 @@
 # HDL drafts: status
 
-Optimistic Wiz for the Clash-style HDL (`/workspace/wiz-notes/hdl-plan.md`), written against
-the planned surface. Check a file with (through `heavy`):
+Optimistic Wiz for the Clash-style HDL (its design plan is not published), written against
+the planned surface. Check a file with:
 
     .lake/build/bin/wiz check -I drafts/hdl drafts/hdl/<File>.wiz
 
@@ -19,8 +19,8 @@ stand-ins from `Shim` and build `Bits` on lib/BitVec (`Unsigned n` can alias `UI
 not done in S0. `crossDomain` in Signal.wiz is now rejected, as intended (phantom
 parameters, PR #10).
 An error in an imported file makes every importer exit 1 ("module X has errors"); the
-importer's own definitions are still checked. Wishful entries are in
-`/workspace/wiz-notes/wishful/<slug>.md`; uses are marked `-- wishful: <slug>`.
+importer's own definitions are still checked. Uses of features that do not exist yet are
+marked `-- wishful: <slug>`, the slug naming a wish-list item (not published).
 
 Principle: where a workaround spells the *same user-facing surface* (a library body, a
 shim for a library another agent is writing), the draft uses it so the rest checks; where
@@ -50,7 +50,7 @@ only through Bits).
 | Uart.wiz | types, hand-written BitPack instances, `BitPack.ofIso` check | `deriving instance BitPack for …` ("no deriver for BitPack") → deriving-bitpack; `txStep`, `txInit` → numeric-classes-bitvec (cascade: `uartTx`, the samples) |
 | Cpu.wiz | `Instr`, `encode`, `decode`, `Cpu`, `Vec.index/update` check | `deriving instance BitPack` → deriving-bitpack; `attribute [hdl …]` → hdl-commands; `Isa.exec`, `cpu`, `multiply`, `mem0` → numeric-classes-bitvec (cascade: `Isa.step`, `run`) |
 | Synth.wiz | checks | (exits 1 only through Bits). Workarounds marked: numerals-in-class-decls, implicit-lambda-binders, projection-functions |
-| Staged.wiz | fails throughout, by design | `⇑`, `⟨…⟩`, `~` → hdl-staging-2ltt |
+| Staged.wiz | historical sketch, not a target | The staging surface (`⇑`, `⟨…⟩`, `~`) was dropped 2026-11-15: L2 + H14 S2 deliver static synthesisability and the operator surface. The one surviving idea, `match` on a signal, is `wishful/hdl-match-signals`. See `DECISION-2ltt.md`. |
 
 ## Simulation results (`#eval`) vs expectations
 

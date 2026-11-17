@@ -3,7 +3,7 @@ import STC.F0.Reducts
 # Judgments, and rules as data
 
 The architecture is `WizMeta/Spec/Rule.lean`'s, reduced to the four judgments F0 needs
-(`/workspace/wiz-notes/stc-m0-spec.md` §2):
+(see `STC.lean`'s module doc):
 
     ⊢ Γ                    the context is well formed
     Γ ⊢ t ∶ A              typing (types are terms: `Γ ⊢ A ∶ Sort s`)

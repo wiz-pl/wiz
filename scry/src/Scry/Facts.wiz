@@ -139,7 +139,7 @@ def Scry.checkFiles : Nat → List Scry.SourceFile → Except String Unit
         ++ " (ids must be 0, 1, 2, … in order)")
 
 /-- The node rows: ids in order, parent in range, `start ≤ stop`. -/
-def Scry.checkNodes (total : Nat) : Nat → List Scry.Node → Except String Unit
+def Scry.checkFactNodes (total : Nat) : Nat → List Scry.Node → Except String Unit
   | _, .nil => .ok ()
   | i, .cons n rest =>
     match Nat.beq n.id.n i with
@@ -149,9 +149,9 @@ def Scry.checkNodes (total : Nat) : Nat → List Scry.Node → Except String Uni
       | .false => .error ("node " ++ Nat.repr i ++ ": span start "
           ++ Nat.repr n.span.start ++ " is after stop " ++ Nat.repr n.span.stop)
       | .true => match n.parent with
-        | .none => Scry.checkNodes total (Nat.succ i) rest
+        | .none => Scry.checkFactNodes total (Nat.succ i) rest
         | .some p => match Nat.lt p.n total with
-          | .true => Scry.checkNodes total (Nat.succ i) rest
+          | .true => Scry.checkFactNodes total (Nat.succ i) rest
           | .false => .error ("node " ++ Nat.repr i ++ ": parent " ++ Nat.repr p.n
               ++ " is not a node id (node count " ++ Nat.repr total ++ ")")
 
@@ -212,7 +212,7 @@ def Scry.finishFacts (format : String) (version : Nat) (language : String)
   | .true => match String.eq format "scry-facts" with
     | .false => .error ("format \"" ++ format ++ "\" is not \"scry-facts\"")
     | .true => Except.bind (Scry.checkFiles 0 files) (fun _ =>
-      Except.bind (Scry.checkNodes (List.length nodes) 0 nodes) (fun _ =>
+      Except.bind (Scry.checkFactNodes (List.length nodes) 0 nodes) (fun _ =>
       Except.bind (Scry.checkEdges (List.length nodes) 0 edges) (fun _ =>
       Except.bind (Scry.checkRelations (List.length nodes) 0 rels) (fun _ =>
       .ok (Scry.Facts.mk format version language files nodes edges rels

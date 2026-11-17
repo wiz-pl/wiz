@@ -18,8 +18,9 @@ The Datalog group's cases are:
 * the pure list model of the relation store.
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
-compiled (C and LLVM); the transitive-closure case runs both. The design is in
-`wiz-notes/scry-datalog.md`.
+compiled (C and LLVM); the transitive-closure case runs both. The embedding and the
+evaluator are described in the module docs of `lib/Scry/Datalog.wiz` and
+`lib/Scry/Eval.wiz`.
 -/
 
 open Wiz

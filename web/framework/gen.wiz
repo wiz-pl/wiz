@@ -1,0 +1,111 @@
+-- A fixture for web/framework/test.mjs: the same component tree the Lean tests use
+-- (Tests/Groups/React.lean), rendered and diffed, printed as JSON. The Node test parses
+-- `old` with web/framework/minidom.mjs, applies `patches` with runtime.js and checks
+-- that the serialization is exactly `new` -- SSR, diff and the browser half together.
+--
+--   .lake/build/bin/wiz run web/framework/gen.wiz
+import IO
+import Json
+import Optic
+import Web.React
+
+inductive Msg where
+  | inc
+  | dec
+  | toggle (id : Nat)
+
+structure Item where
+  id : Nat
+  name : String
+  done : Bool
+
+structure Model where
+  count : Nat
+  items : List Item
+  show : Bool
+
+def Model.countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n s.items s.show)
+def Model.itemsL : Lens Model (List Item) := fun s => (s.items, fun xs => Model.mk s.count xs s.show)
+def Model.showL : Lens Model Bool := fun s => (s.show, fun b => Model.mk s.count s.items b)
+def Item.doneL (i : Item) : Lens Item Bool := fun x => (x.done, fun b => Item.mk x.id x.name b)
+
+def Item.view (i : Item) : React.VNode Msg :=
+  React.keyed (Nat.toString i.id)
+    (React.el "li" [React.attr "data-done" (match i.done with | .true => "yes" | .false => "no")]
+      [React.on "click" (Msg.toggle i.id)
+        (React.el "span" List.nil [React.text i.name])])
+
+def view (s : Model) : React.VNode Msg :=
+  React.el "div" [React.class "app"]
+    [ React.el "p" List.nil
+        [React.text "count ", React.text (Nat.toString s.count)]
+    , React.on "click" Msg.inc
+        (React.el "button" List.nil [React.text "+"])
+    , match s.show with
+      | .true => React.el "ul" List.nil (React.map Item.view s.items)
+      | .false => React.text "hidden"
+    ]
+
+def app : React.App Model Msg := React.App.mk
+  (Model.mk 0 [Item.mk 1 "a" .false, Item.mk 2 "b" .false] .true)
+  (fun m s => match m with
+    | .inc => React.setState Model.countL Nat.succ s
+    | .dec => React.setState Model.countL (fun n => Nat.sub n 1) s
+    | .toggle id => React.setState Model.itemsL
+        (React.map (fun (i : Item) => match Nat.beq id i.id with
+          | .true => Lens.over (Item.doneL i) (fun b => match b with | .true => .false | .false => .true) i
+          | .false => i)) s)
+  view
+
+def item (n : Nat) (name : String) : Item := Item.mk n name .false
+
+def m0 : Model := app.init
+def m1 : Model := React.App.dispatch app m0 0
+def reordered : Model := Model.mk 0 [item 2 "b", item 1 "a"] .true
+def e0 : Model := Model.mk 0 [item 1 "a", item 2 "b", item 3 "c"] .true
+def rotated : Model := Model.mk 0 [item 2 "b", item 3 "c", item 1 "a"] .true
+def edited : Model := Model.mk 0 [item 1 "a", item 3 "c", item 4 "d"] .true
+def hidden : Model := Model.mk 0 m0.items .false
+
+structure TagModel where
+  n : Nat
+
+def tagApp : React.App TagModel Msg := React.App.mk (TagModel.mk 0) (fun _ s => s)
+  (fun s => match s.n with
+    | .zero => React.el "div" List.nil [React.text "same"]
+    | _ => React.el "section" List.nil [React.text "same"])
+
+def t0 : TagModel := TagModel.mk 0
+def t1 : TagModel := TagModel.mk 1
+
+def escaping : React.VNode Msg :=
+  React.el "p" [React.attr "title" "a\"b<c>d&e'f"]
+    [React.text "<script>alert('x')</script>"]
+
+def jstr (s : String) : Json := Json.mkStr s
+def jbool (b : Bool) : Json := Json.mkBool b
+
+def fields : List (String × Json) :=
+  [ Json.field "old" (jstr (React.App.html app m0))
+  , Json.field "new" (jstr (React.App.html app m1))
+  , Json.field "patches" (jstr (React.App.patches app m0 m1))
+  , Json.field "reorderOld" (jstr (React.App.html app m0))
+  , Json.field "reorderNew" (jstr (React.App.html app reordered))
+  , Json.field "reorderPatches" (jstr (React.App.patches app m0 reordered))
+  , Json.field "rotateOld" (jstr (React.App.html app e0))
+  , Json.field "rotateNew" (jstr (React.App.html app rotated))
+  , Json.field "rotatePatches" (jstr (React.App.patches app e0 rotated))
+  , Json.field "editOld" (jstr (React.App.html app e0))
+  , Json.field "editNew" (jstr (React.App.html app edited))
+  , Json.field "editPatches" (jstr (React.App.patches app e0 edited))
+  , Json.field "tagOld" (jstr (React.App.html tagApp t0))
+  , Json.field "tagNew" (jstr (React.App.html tagApp t1))
+  , Json.field "tagPatches" (jstr (React.App.patches tagApp t0 t1))
+  , Json.field "hidden" (jstr (React.App.html app hidden))
+  , Json.field "escape" (jstr (React.toHtml escaping))
+  , Json.field "handlers" (Json.ofNat (List.length (React.App.render app m0).handlers))
+  , Json.field "deterministic" (jbool (String.eq (React.App.html app m0) (React.App.html app m0)))
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

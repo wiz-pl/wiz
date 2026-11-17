@@ -87,6 +87,14 @@ def Word.pick : Bool → Nat → Nat → Nat
   | .false, _, y => y
 /-- The smaller of two numbers. -/
 def Word.min (x y : Nat) : Nat := Word.pick (Nat.lt x y) x y
+/-- `Word.min x y` is `x` when `x < y` (the `Bool` comparison is true). -/
+def Word.min_left {x y : Nat} (h : Nat.lt x y = .true) : Word.min x y = x :=
+  transp (fun b _ => Word.pick (Nat.lt x y) x y = Word.pick b x y)
+    (refl (Word.pick (Nat.lt x y) x y)) h
+/-- `Word.min x y` is `y` when `x < y` is false. -/
+def Word.min_right {x y : Nat} (h : Nat.lt x y = .false) : Word.min x y = y :=
+  transp (fun b _ => Word.pick (Nat.lt x y) x y = Word.pick b x y)
+    (refl (Word.pick (Nat.lt x y) x y)) h
 /-- `Word.pick` of two numbers below `y + 1` is below `y + 1`. -/
 def Word.pick_lt (x y : Nat) : (b : Bool) → Nat.lt x y = b → Nat.lt (Word.pick b x y) (Nat.succ y) = .true
   | .true, h => Word.lt_succ x y h
@@ -281,8 +289,19 @@ def UIntN.xor {w : Nat} (a b : UIntN w) : UIntN w :=
 /-- Bitwise complement. -/
 def UIntN.not {ω w : Nat} (a : UIntN w) : UIntN w :=
   UIntN.below (Nat.pow 2 w - 1 - a.toNat) (Nat.sub (Nat.pow 2 w) 1) (Word.pow_pred_lt w)
-/-- Shift left by `k` places, wrapping (bits shifted out at the top are lost). -/
-def UIntN.shiftLeft {ω w : Nat} (a : UIntN w) (k : Nat) : UIntN w := UIntN.ofNat w (Nat.shiftLeft a.toNat k)
+/-- Shift left by `k` places, wrapping (bits shifted out at the top are lost). The
+exponent is capped at the width: for `k >= w` the result is `(a * 2^w) mod 2^w = 0`, and
+the cap keeps the model from building `2^k` (which panics at large `k`) for a result
+that is `0`. -/
+def UIntN.shiftLeft {ω w : Nat} (a : UIntN w) (k : Nat) : UIntN w :=
+  UIntN.ofNat w (Nat.shiftLeft a.toNat (Word.min k w))
+/-- `UIntN.shiftLeft` below the width is `ofNat w (a * 2^k)` (the capped exponent is `k`). -/
+def UIntN.shiftLeft_of_lt {ω w : Nat} (a : UIntN w) (k : Nat) (h : Nat.lt k w = .true) :
+    UIntN.shiftLeft a k = UIntN.ofNat w (Nat.shiftLeft a.toNat k) :=
+  transp (fun m _ => UIntN.ofNat w (Nat.shiftLeft a.toNat (Word.min k w))
+      = UIntN.ofNat w (Nat.shiftLeft a.toNat m))
+    (refl (UIntN.ofNat w (Nat.shiftLeft a.toNat (Word.min k w))))
+    (Word.min_left h)
 /-- Logical shift right by `k` places. -/
 def UIntN.shiftRight {w : Nat} (a : UIntN w) (k : Nat) : UIntN w := UIntN.below (Nat.shiftRight a.toNat k) a.toNat a.toNat_lt
 /-- Bit `i` (bit 0 is the least significant). -/
@@ -502,7 +521,6 @@ extern "wiz_word_to_bits" IntN.toBits : {0 w : Nat} → IntN w → NatObj
 attribute [implemented_by UIntN.ofBits UIntN.toBits] UIntN.mk
 attribute [implemented_by IntN.ofBits IntN.toBits] IntN.mk
 attribute [implemented_by UIntN.toBits] UIntN.toNat
-attribute [implemented_by IntN.toBits] IntN.toNat
 
 /-- The native `UIntN.ofNat` for compiled code (`wiz_word_of_nat`, runtime/). -/
 extern "wiz_word_of_nat" UIntN.ofNatNative : (w : Nat) → NatObj → UIntN w
@@ -542,8 +560,12 @@ extern "wiz_word_msb" UIntN.msbNative : {ω w : Nat} → UIntN w → Bool
 extern "wiz_word_zext" UIntN.resizeNative : {w : Nat} → (ω v : Nat) → UIntN w → UIntN v
 /-- The native `UIntN.toIntN` for compiled code (`wiz_word_cast`, runtime/). -/
 extern "wiz_word_cast" UIntN.toIntNNative : {w : Nat} → UIntN w → IntN w
-/-- The native `IntN.toUIntN` for compiled code (`wiz_word_cast`, runtime/). -/
-extern "wiz_word_cast" IntN.toUIntNNative : {w : Nat} → IntN w → UIntN w
+/-- The native `IntN.shiftRight` for compiled code (`wiz_word_ashr`, runtime/): its Wiz
+body allocates through `IntN.not`/`IntN.below`. -/
+extern "wiz_word_ashr" IntN.shiftRightNative : {ω w : Nat} → IntN w → NatObj → IntN w
+/-- The native `IntN.lt` for compiled code (`wiz_word_slt`, runtime/): its Wiz body
+allocates through `IntN.isNeg`/`IntN.toNat`. -/
+extern "wiz_word_slt" IntN.ltNative : {ω w : Nat} → IntN w → IntN w → Bool
 attribute [implemented_by UIntN.ofNatNative] UIntN.ofNat
 attribute [implemented_by UIntN.addNative] UIntN.add
 attribute [implemented_by UIntN.subNative] UIntN.sub
@@ -563,59 +585,6 @@ attribute [implemented_by UIntN.testBitNative] UIntN.testBit
 attribute [implemented_by UIntN.msbNative] UIntN.msb
 attribute [implemented_by UIntN.resizeNative] UIntN.resize
 attribute [implemented_by UIntN.toIntNNative] UIntN.toIntN
-attribute [implemented_by IntN.toUIntNNative] IntN.toUIntN
-
-/-- The native `IntN.ofNat` for compiled code (`wiz_word_of_nat`, runtime/). -/
-extern "wiz_word_of_nat" IntN.ofNatNative : (w : Nat) → NatObj → IntN w
-/-- The native `IntN.ofNeg` for compiled code (`wiz_word_of_neg`, runtime/). -/
-extern "wiz_word_of_neg" IntN.ofNegNative : (w : Nat) → NatObj → IntN w
-/-- The native `IntN.add` for compiled code (`wiz_word_add`, runtime/). -/
-extern "wiz_word_add" IntN.addNative : {ω w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.sub` for compiled code (`wiz_word_sub`, runtime/). -/
-extern "wiz_word_sub" IntN.subNative : {ω w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.mul` for compiled code (`wiz_word_mul`, runtime/). -/
-extern "wiz_word_mul" IntN.mulNative : {ω w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.div` for compiled code (`wiz_word_sdiv`, runtime/). -/
-extern "wiz_word_sdiv" IntN.divNative : {ω w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.rem` for compiled code (`wiz_word_srem`, runtime/). -/
-extern "wiz_word_srem" IntN.remNative : {ω w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.beq` for compiled code (`wiz_word_eq`, runtime/). -/
-extern "wiz_word_eq" IntN.beqNative : {w : Nat} → IntN w → IntN w → Bool
-/-- The native `IntN.land` for compiled code (`wiz_word_and`, runtime/). -/
-extern "wiz_word_and" IntN.landNative : {w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.lor` for compiled code (`wiz_word_or`, runtime/). -/
-extern "wiz_word_or" IntN.lorNative : {w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.xor` for compiled code (`wiz_word_xor`, runtime/). -/
-extern "wiz_word_xor" IntN.xorNative : {w : Nat} → IntN w → IntN w → IntN w
-/-- The native `IntN.not` for compiled code (`wiz_word_not`, runtime/). -/
-extern "wiz_word_not" IntN.notNative : {ω w : Nat} → IntN w → IntN w
-/-- The native `IntN.shiftLeft` for compiled code (`wiz_word_shl`, runtime/). -/
-extern "wiz_word_shl" IntN.shiftLeftNative : {ω w : Nat} → IntN w → NatObj → IntN w
-/-- The native `IntN.shiftRight` for compiled code (`wiz_word_ashr`, runtime/). -/
-extern "wiz_word_ashr" IntN.shiftRightNative : {ω w : Nat} → IntN w → NatObj → IntN w
-/-- The native `IntN.lt` for compiled code (`wiz_word_slt`, runtime/). -/
-extern "wiz_word_slt" IntN.ltNative : {ω w : Nat} → IntN w → IntN w → Bool
-/-- The native `IntN.le` for compiled code (`wiz_word_sle`, runtime/). -/
-extern "wiz_word_sle" IntN.leNative : {ω w : Nat} → IntN w → IntN w → Bool
-/-- The native `IntN.isNeg` for compiled code (`wiz_word_msb`, runtime/). -/
-extern "wiz_word_msb" IntN.isNegNative : {ω w : Nat} → IntN w → Bool
-/-- The native `IntN.resize` for compiled code (`wiz_word_sext`, runtime/). -/
-extern "wiz_word_sext" IntN.resizeNative : {ω w : Nat} → (ω v : Nat) → IntN w → IntN v
-attribute [implemented_by IntN.ofNatNative] IntN.ofNat
-attribute [implemented_by IntN.ofNegNative] IntN.ofNeg
-attribute [implemented_by IntN.addNative] IntN.add
-attribute [implemented_by IntN.subNative] IntN.sub
-attribute [implemented_by IntN.mulNative] IntN.mul
-attribute [implemented_by IntN.divNative] IntN.div
-attribute [implemented_by IntN.remNative] IntN.rem
-attribute [implemented_by IntN.beqNative] IntN.beq
-attribute [implemented_by IntN.landNative] IntN.land
-attribute [implemented_by IntN.lorNative] IntN.lor
-attribute [implemented_by IntN.xorNative] IntN.xor
-attribute [implemented_by IntN.notNative] IntN.not
-attribute [implemented_by IntN.shiftLeftNative] IntN.shiftLeft
+-- The signed operations whose Wiz bodies allocate: keep the native instructions.
 attribute [implemented_by IntN.shiftRightNative] IntN.shiftRight
 attribute [implemented_by IntN.ltNative] IntN.lt
-attribute [implemented_by IntN.leNative] IntN.le
-attribute [implemented_by IntN.isNegNative] IntN.isNeg
-attribute [implemented_by IntN.resizeNative] IntN.resize

@@ -1,0 +1,87 @@
+-- test: run
+import Sys
+import Json
+import Scry.TaintCmd
+import Scry.Rules
+-- CWE-787 (out-of-bounds write) and CWE-125 (out-of-bounds read) over the fixtures in
+-- `fixtures/oob-*.c`.
+--
+--   scry taint FILE.c --rules ../lib/Scry/rules/oob.scry
+--
+-- Four vulnerable fixtures (a heap store and load with an attacker index, a read-sized
+-- copy into a fixed buffer, and a memcpy read whose source is smaller than the tainted
+-- count) must each yield one `out-of-bounds-*` finding whose path is alloc -> access.
+-- Four controls (a dominating `i < 4` on each heap access, a trusted clamp on the read
+-- length, and an explicit `n <= 16` on the copy) must yield no out-of-bounds finding.
+-- One size trap (`malloc(n)`) must yield no finding and an `unknown-memory` diagnostic.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def opts (args : List String) : EIO Scry.TaintOpts :=
+  match Scry.taintArgs args with
+  | .ok o => EIO.pure o
+  | .error e => EIO.fail e
+
+def oobFindings (rep : Scry.TaintReport) : List Scry.RuleFinding :=
+  List.filter (fun f => String.startsWith f.rule "out-of-bounds-") rep.findings
+
+def hasRule (rep : Scry.TaintReport) (rule : String) : Bool :=
+  List.any (fun f => String.eq f.rule rule) (oobFindings rep)
+
+def memRule (rep : Scry.TaintReport) (rule : String) : Bool :=
+  List.any (fun b => String.eq b.rule rule) rep.memory
+
+def pathHasKind (path : List Scry.PathNode) (k : String) : Bool :=
+  List.any (fun p => String.eq (Scry.PathKind.show p.kind) k) path
+
+def checkPack (label : String) (rep : Scry.TaintReport) : EIO Unit :=
+  check (label ++ ": two memory rules in the pack")
+    (Nat.beq (List.length (Scry.RulePack.memoryRules rep.pack)) 2)
+
+def checkVuln (label file rule : String) : EIO Unit := do
+  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  rep ← Scry.analyzeFile o;
+  check (label ++ ": one out-of-bounds finding")
+    (Nat.beq (List.length (oobFindings rep)) 1);
+  check (label ++ ": rule " ++ rule) (hasRule rep rule);
+  checkPack label rep;
+  match oobFindings rep with
+  | .cons f _ => do
+    check (label ++ ": kind") (String.eq (Scry.FindingKind.show f.kind) "memory");
+    check (label ++ ": severity") (String.eq (Scry.Severity.show f.severity) "error");
+    check (label ++ ": path has alloc") (pathHasKind f.path "alloc");
+    check (label ++ ": path ends at sink") (pathHasKind f.path "sink")
+  | .nil => check (label ++ ": finding exists") .false
+
+def checkSafe (label file : String) : EIO Unit := do
+  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  rep ← Scry.analyzeFile o;
+  check (label ++ ": zero out-of-bounds findings")
+    (Nat.beq (List.length (oobFindings rep)) 0);
+  check (label ++ ": zero findings") (Nat.beq (List.length rep.findings) 0);
+  checkPack label rep
+
+def checkUnknown (label file : String) : EIO Unit := do
+  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  rep ← Scry.analyzeFile o;
+  check (label ++ ": zero out-of-bounds findings")
+    (Nat.beq (List.length (oobFindings rep)) 0);
+  check (label ++ ": unknown-memory boundary")
+    (memRule rep "scry/memory/unknown-memory")
+
+def main : IO Unit := EIO.toIO (do
+  checkVuln "write-heap" "tests/fixtures/oob-write-heap.c" "out-of-bounds-write";
+  checkVuln "write-read" "tests/fixtures/oob-write-read.c" "out-of-bounds-write";
+  checkVuln "read-heap" "tests/fixtures/oob-read-heap.c" "out-of-bounds-read";
+  checkVuln "read-memcpy" "tests/fixtures/oob-read-memcpy.c" "out-of-bounds-read";
+
+  checkSafe "safe-write-heap" "tests/fixtures/oob-write-heap-safe.c";
+  checkSafe "safe-write-read" "tests/fixtures/oob-write-read-safe.c";
+  checkSafe "safe-read-heap" "tests/fixtures/oob-read-heap-safe.c";
+  checkSafe "safe-read-memcpy" "tests/fixtures/oob-read-memcpy-safe.c";
+
+  checkUnknown "unknown-size" "tests/fixtures/oob-unknown.c")

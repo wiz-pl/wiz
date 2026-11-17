@@ -1,6 +1,7 @@
 import Wiz
 import Wiz.Version
-import Wiz.Doc.Site
+import Wiz.Doc.Build
+import Wiz.Doc.Serve
 
 open Wiz
 
@@ -9,18 +10,37 @@ def usage : String := "usage:
   wiz parse FILE          print the syntax tree of every command
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz build FILE -o OUT [--llvm]   compile the definition `main` to an executable (via C or LLVM)
+  wiz build FILE -o OUT [--target c|llvm|wasm]  compile the definition `main` to an
+                                   executable (C or LLVM) or a WebAssembly module (stage
+                                   8f: no IO, Nat/Int, closures, arrays; run it with
+                                   web/wasm-host.mjs). `--llvm` and `--wasm` still work.
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--llvm]            build and run `main`, printing its value
+  wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
+                                   (`--llvm` and `--wasm` are aliases)
+  wiz repl [--llvm] [--prelude M] [--script FILE] [--init CMD]
+                                   read one command per line, keeping definitions (`:help`;
+                                   a pipe: one command per line, no prompt; `:type EXPR`,
+                                   `:load FILE`; `--prelude M` imports M at the start,
+                                   `--script` reads FILE, `--init` runs CMD first)
+  wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]
+                                   run the test driver (`.lake/build/bin/tests`, or PATH)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
+                                  [--serve [--port N] [--lsp PORT]]
                                    documentation: a static site (one page per module,
-                                   index, search); --lib: the toolchain's library;
-                                   source links are URL + path in its root + #L<line>
+                                   index, search, reference); --lib: the toolchain's library;
+                                   source links are URL + path in its root + #L<line>;
+                                   --serve: also serve OUT on 127.0.0.1 (default port
+                                   8000); --lsp PORT: the pages ask `wiz lsp --ws PORT`
+                                   for live types and docs in a panel
+  wiz doc … --reference DIR [--check]
+                                   also the reference manual (full signatures, doc comments,
+                                   class instances, notation table) into DIR/index.md;
+                                   --check: change nothing, exit 1 when DIR/index.md differs
   wiz fmt [FILE|-] [--check] [--width N] [--explain]
                                    reprint a file from its syntax tree (stdin/stdout;
                                    --check: change nothing, exit 1 when it differs)
@@ -224,9 +244,30 @@ def takeInertOpt : List String → Except String (Option InertReg × List String
     return (r, a :: rest)
   | [] => return (none, [])
 
+/-- The state every elaboration starts from: the kernel and printing options, the
+`builtin` registrations trusted (the toolchain's own modules), and the hooks the pure
+frontend needs (the loader, the C headers, the `link_c` files, `include_str`). -/
+def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.HashMap String String)
+    (cSources : Option (String → String → Option String))
+    (includes : Option (String → String → Except String String)) (own : List Name)
+    (messages : Array Msg := #[]) : IO (CommandState ZeroOneMany) := do
+  let (regularity, predicativeProp) ← kernelOpts.get
+  let lazyProofs ← lazyProofsOpt.get
+  let inertReg ← inertOpt.get
+  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
+  let unboxStructs ← unboxOpt.get
+  let init : CommandState ZeroOneMany :=
+    { loader := (lib[·]?), cHeaders := (headers[·]?), cSources, includes,
+      messages,
+      globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
+                   strictPrivacy := ← strictPrivacyOpt.get, pp := { useNotation := !(← ppAllOpt.get) } },
+      trustedModule := own.contains, trustNative := tc.trustNative,
+      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }
+  pure init
+
 /-- The initial state the frontend runs from: the module loader (every module the file can
 reach, `import A.B` is `A/B.wiz` under a root, read up front: the frontend is pure), the
-C headers and `link_c` sources, and the kernel/printing options. -/
+C headers, `link_c` sources and `include_str` files, and the kernel/printing options. -/
 def initState (tc : Toolchain) (path : String) (input : String) :
     IO (CommandState ZeroOneMany × Std.HashMap String String) := do
   let roots ← moduleRoots tc
@@ -238,11 +279,6 @@ def initState (tc : Toolchain) (path : String) (input : String) :
   let sources ← Module.cSourceTable ((System.FilePath.mk path).parent.getD ".") input closure
   -- (include-str) the `include_str` files, each relative to its own file
   let includes ← Module.includeTable ((System.FilePath.mk path).parent.getD ".") input closure
-  let (regularity, predicativeProp) ← kernelOpts.get
-  let lazyProofs ← lazyProofsOpt.get
-  let inertReg ← inertOpt.get
-  let (proofSteps, traceProofSteps) ← proofStepsOpt.get
-  let unboxStructs ← unboxOpt.get
   -- `builtin` registrations are trusted only in the toolchain's own library
   let own := Module.fromFirstRoot roots closure
   -- a file that would replace one of them is ignored: say so (loudly: it may be meant
@@ -250,20 +286,8 @@ def initState (tc : Toolchain) (path : String) (input : String) :
   let shadow := (← Module.shadowed roots closure).map fun (n, p) =>
     ({ info := {}, severity := .warning,
        text := s!"{p} is ignored: module {n} is the toolchain's own ({roots.head!}), which a module root cannot replace" } : Msg)
-  let strictP ← strictPrivacyOpt.get
-  let useNotation := !(← ppAllOpt.get)
-  let smt ← tc.smt.resolve
-  let pp : PPTable := { useNotation := useNotation }
-  let loader := fun n => lib[n]?
-  let cHeaders := fun h => headers[h]?
-  let init : CommandState ZeroOneMany :=
-    { loader := loader, cHeaders := cHeaders, cSources := some (Module.cSourceResolver sources),
-      includes := some (Module.includeResolver includes),
-      messages := shadow.toArray,
-      globals := { regularity, predicativeProp, lazyProofs, inertReg, unboxStructs, proofSteps, traceProofSteps,
-                   strictPrivacy := strictP, pp := pp },
-      trustedModule := own.contains, trustNative := tc.trustNative,
-      nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := smt }
+  let init ← initStateOf tc lib headers (some (Module.cSourceResolver sources))
+    (some (Module.includeResolver includes)) own shadow.toArray
   pure (init, headers)
 
 /-- Elaborate a file, through the toolchain's cache (if any). -/
@@ -303,6 +327,13 @@ structure DocArgs where
   sourceUrl : Option String := none
   title : Option String := none
   web : Option String := none
+  /-- (11s) serve the generated site on the loopback -/
+  serve : Bool := false
+  port : Option Nat := none
+  /-- the port of the language server the pages ask (`wiz lsp --ws PORT`) -/
+  lsp : Option Nat := none
+  reference : Option String := none
+  check : Bool := false
   inputs : List String := []
 
 def docArgs (a : DocArgs) : List String → Except String DocArgs
@@ -312,6 +343,17 @@ def docArgs (a : DocArgs) : List String → Except String DocArgs
   | "--source-url" :: u :: rest => docArgs { a with sourceUrl := some u } rest
   | "--title" :: t :: rest => docArgs { a with title := some t } rest
   | "--web" :: w :: rest => docArgs { a with web := some w } rest
+  | "--serve" :: rest => docArgs { a with serve := true } rest
+  | "--port" :: n :: rest => do
+    let some p := n.toNat? | throw s!"wiz doc: --port needs a number, not {n}"
+    if p ≥ 65536 then throw s!"wiz doc: --port must be below 65536, not {n}"
+    docArgs { a with port := some p } rest
+  | "--lsp" :: n :: rest => do
+    let some p := n.toNat? | throw s!"wiz doc: --lsp needs a port number, not {n}"
+    if p ≥ 65536 then throw s!"wiz doc: --lsp port must be below 65536, not {n}"
+    docArgs { a with lsp := some p } rest
+  | "--reference" :: d :: rest => docArgs { a with reference := some d } rest
+  | "--check" :: rest => docArgs { a with check := true } rest
   | x :: rest => if x.startsWith "-" then throw s!"wiz doc: unknown option {x}" else docArgs { a with inputs := x :: a.inputs } rest
 
 /-- The path of `p` relative to `root` (`p` itself if it isn't under it). -/
@@ -326,6 +368,10 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     | .ok a => pure a
     | .error e => do IO.eprintln e; return 2
   let some out := a.out | IO.eprintln "wiz doc: -o OUT is required"; return 2
+  if !a.serve && (a.port.isSome || a.lsp.isSome) then
+    IO.eprintln "wiz doc: --port and --lsp need --serve"; return 2
+  if a.check && a.reference.isNone then
+    IO.eprintln "wiz doc: --check needs --reference DIR"; return 2
   -- every input that is a directory or a file is a module root
   let mut tc := tc
   let mut wanted : Array (String × System.FilePath × System.FilePath) := #[]
@@ -357,13 +403,33 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     | none => do pure ((← webDir).map System.FilePath.mk)
   -- the site's own files: beside the Wasm module (a release), or web/ of the checkout
   let base := lib.parent.getD "."
-  let mut assets : Option System.FilePath := none
-  for d in (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]) do
-    if assets.isNone && (← (d / "scroll.css").pathExists) then assets := some d
-  let o : Doc.Options := { out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web, assets }
-  let n ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
-  IO.println s!"wiz doc: {n} modules, {out}/index.html"
+  let assets : List System.FilePath :=
+    (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
+  -- (the site keeps its title with --reference; the manual has its own)
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference" }
+  let r ← Doc.run (fun m => elaborate tc "<doc>" s!"import {m}\n") mods o
+  IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
+  for f in r.written do IO.println s!"wiz doc: wrote {f}"
   if web.isNone then IO.println "wiz doc: no Wasm module (web/build.sh): the pages are plain HTML"
+  if !r.stale.isEmpty then
+    for f in r.stale do
+      IO.eprintln s!"wiz doc --check: {f} is out of date (regenerate with `wiz doc --lib --reference {a.reference.getD ""}`)"
+    return 1
+  if a.check then IO.println s!"wiz doc --check: {a.reference.getD ""}/index.md is up to date"
+  unless a.serve do return 0
+  -- (11s) serve the tree; the module sources go with it, for the live client to open
+  let site : Doc.Serve.Site :=
+    { root := System.FilePath.mk out,
+      sources := mods.foldl (fun m x => m.insert x.name x.src) (∅ : Std.HashMap String String) }
+  let port : UInt16 := (a.port.getD 8000).toUInt16
+  let (fd, p) ← try Doc.Serve.listen site port catch e => do
+    IO.eprintln s!"wiz doc: cannot listen on 127.0.0.1:{port}: {e}"
+    return 1
+  IO.println s!"wiz doc: serving http://127.0.0.1:{p}/ (Ctrl-C to stop)"
+  match a.lsp with
+  | some lp => IO.println s!"wiz doc: the live panel asks wiz lsp --ws {lp}; start it with `wiz lsp --ws {lp} --no-stdio`"
+  | none => IO.println "wiz doc: static pages; --lsp PORT shows live types and docs from `wiz lsp --ws PORT`"
+  Doc.Serve.acceptLoop fd site
   pure 0
 
 /-- (11aa) `wiz fmt`'s options: the file (or stdin), `--check`, `--width`. -/
@@ -498,19 +564,277 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-def buildCmd (tc : Toolchain) (path out : String) (llvm : Bool) (lib : Bool := false) (noMain : Bool := false)
-    (split : Nat := 0) : IO UInt32 := do
+/-- The backend names `wiz build --target` accepts. -/
+def targets : List String := ["c", "llvm", "wasm"]
+
+/-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
+backend and the rest. A flag and a conflicting `--target` are an error, as is two
+different targets. -/
+def takeTarget : List String → Except String (Option String × List String)
+  | [] => pure (none, [])
+  | "--target" :: [] => throw "--target needs c, llvm or wasm"
+  | "--target" :: t :: rest => do
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm or wasm)"
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
+    | none => pure (some t, rest)
+  | "--llvm" :: rest => do
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some "llvm", rest)
+    | none => pure (some "llvm", rest)
+  | "--wasm" :: rest => do
+    let (other, rest) ← takeTarget rest
+    match other with
+    | some u => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some "wasm", rest)
+    | none => pure (some "wasm", rest)
+  | a :: rest => do
+    let (t, rest) ← takeTarget rest
+    pure (t, a :: rest)
+
+def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
+    (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out llvm lib noMain split with
+  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
-def runCmd (tc : Toolchain) (path : String) (llvm : Bool) (split : Nat := 0) : IO UInt32 := do
+def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal tc s "main" dir llvm (split := split) with
+  let r ← if target == "wasm" then Build.runWasmGlobal s "main" dir
+    else Build.runGlobal tc s "main" dir (target == "llvm") (split := split)
+  match r with
   | .error e => IO.eprintln e; pure 1
   | .ok v => IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+
+/-- The modules the REPL can import, and the hooks the frontend needs: every module under
+the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
+def replInit (tc : Toolchain) : IO (CommandState ZeroOneMany) := do
+  let roots ← moduleRoots tc
+  let all ← Module.loadAll roots
+  let lib : Std.HashMap Name String := all.fold (fun m n (_, src) => m.insert n src) {}
+  let headers ← Build.preprocessHeaders tc (String.join (all.values.map (·.2)))
+  let sources ← Module.cSourceTable "." "" all
+  let includes ← Module.includeTable "." "" all
+  initStateOf tc lib headers (some (Module.cSourceResolver sources))
+    (some (Module.includeResolver includes)) (Module.fromFirstRoot roots all)
+
+/-- `wiz repl [--llvm] [--prelude MODULE]`: read one command per line from stdin,
+elaborate it against the accumulated `CommandState` (definitions persist), print its
+messages and go on after an error. `:quit`/EOF exit, `:reset` forgets every definition,
+`:help` lists the commands; `:type EXPR` prints a type and `:load FILE` elaborates a file
+into the session. With `--llvm`, `:run NAME` builds through LLVM instead of C.
+
+`--prelude`/`-p` (repeatable, comma-separated) imports its modules after the Prelude and
+before the first prompt: a tool can ship a prelude module and be "the ordinary REPL with
+an extra prelude" (`scry repl` is `wiz repl --prelude Scry.Repl`). A module that does not
+resolve is reported at startup (exit 2), not on the first input.
+
+The base state stays pristine, so an `import` is checked in isolation as in a file, then
+elaborated into the session's state. A pipe has one command per line and no prompt. -/
+def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
+    (script : Option String := none) (init : List String := []) : IO UInt32 := do
+  let base ← replInit tc
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  let stderr ← IO.getStderr
+  let tty ← stdin.isTty
+  -- a session starts with the Prelude, as a file's first line would import it
+  let preloaded := match base.loader "Prelude" with
+    | some _ => runFrontend.go "import Prelude" base "import Prelude".toList.toArray 0 base
+    | none => base
+  -- the `--prelude` modules, on top of the Prelude, before the first prompt: an implicit
+  -- `import` each, in the order given (a missing one is a startup error)
+  let extra := preludes.flatMap (fun s => (s.splitOn ",").map (fun m => m.trimAscii.toString))
+    |>.filter (!·.isEmpty)
+  let mut preloaded := preloaded
+  let mut preludeErrors := 0
+  for m in extra do
+    let text := s!"import {m}"
+    let s' := runFrontend.go text base text.toList.toArray 0 preloaded
+    let msgs := s'.messages.extract preloaded.messages.size s'.messages.size
+    for msg in msgs do
+      let line := msg.render text
+      if msg.severity == .error then
+        preludeErrors := preludeErrors + 1
+        stderr.putStrLn line
+      else stdout.putStrLn line
+    preloaded := { s' with messages := #[] }
+  if preludeErrors > 0 then
+    let names := ", ".intercalate extra
+    stderr.putStrLn s!"wiz repl: --prelude {names}: not imported (see the errors above)"
+    return 2
+  let help := "commands:\n" ++
+    "  LINE          elaborate a command (`def`, `#check`, `#eval`, `import`, …)\n" ++
+    "  :type EXPR    print the type of EXPR (like #check)\n" ++
+    "  :load FILE    elaborate FILE into this session (its definitions stay)\n" ++
+    "  :run NAME     build and run the definition NAME (" ++ (if llvm then "LLVM" else "C") ++ ")\n" ++
+    "  :reset        forget every definition\n" ++
+    "  :help         this list\n" ++
+    "  :quit         leave (EOF does too)\n" ++
+    "The Prelude is imported at the start; errors are reported and the session goes on."
+  -- print the messages an input added (with its path, for `:load`), then forget them so
+  -- the next input does not print them again
+  let report (before : Nat) (s' : CommandState ZeroOneMany) (input : String)
+      (path? : Option String) : IO Unit := do
+    for m in s'.messages.extract before s'.messages.size do
+      let text := match path? with
+        | some p => s!"{p}:{m.render input}"
+        | none => m.render input
+      if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+  -- one input line: `none` when it ends the session (`:quit`), else the next state
+  let process (state : CommandState ZeroOneMany) (raw : String) :
+      IO (Option (CommandState ZeroOneMany)) := do
+    let line := raw.trimAscii.toString
+    if line.isEmpty then return some state
+    match line with
+    | ":quit" | ":q" => return none
+    | ":help" | ":h" | ":?" => stdout.putStrLn help; stdout.flush; return some state
+    | ":reset" => stdout.putStrLn "reset"; stdout.flush; return some preloaded
+    | c =>
+      if c.startsWith ":" then
+        if c == ":type" then
+          stderr.putStrLn "usage: :type EXPR"
+          return some state
+        else if c.startsWith ":type " then
+          let text := s!"#check {(c.drop 6).trimAscii.toString}"
+          let s' := runFrontend.go text base text.toList.toArray 0 state
+          report state.messages.size s' text none
+          return some { s' with messages := #[] }
+        else if c == ":load" then
+          stderr.putStrLn "usage: :load FILE"
+          return some state
+        else if c.startsWith ":load " then
+          let path := (c.drop 6).trimAscii.toString
+          let text? ← try
+            pure (some (← IO.FS.readFile path))
+          catch e =>
+            stderr.putStrLn s!"cannot read {path}: {e}"
+            pure none
+          match text? with
+          | none => return some state
+          | some text =>
+            let s' := runFrontend.go text base text.toList.toArray 0 state
+            report state.messages.size s' text (some path)
+            return some { s' with messages := #[] }
+        else
+          match c.splitOn " " with
+          | [":run", name] =>
+            let dir ← IO.FS.createTempDir
+            match ← Build.runGlobal tc state name dir llvm with
+            | .error e => stderr.putStrLn e
+            | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            stdout.flush
+            return some state
+          | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; return some state
+      else
+        -- the line is one command: elaborate it into the session, from the pristine base
+        let s' := runFrontend.go line base line.toList.toArray 0 state
+        report state.messages.size s' line none
+        stdout.flush
+        stderr.flush
+        return some { s' with messages := #[] }
+  let mut state := preloaded
+  let mut reading := true
+  -- `--init CMD`s first, then `--script FILE`'s lines (instead of stdin)
+  for c in init do
+    if reading then
+      match ← process state c with
+      | some s => state := s
+      | none => reading := false
+  if let some f := script then
+    let text? ← try
+      pure (some (← IO.FS.readFile f))
+    catch e =>
+      stderr.putStrLn s!"wiz repl: cannot read {f}: {e}"
+      pure none
+    let some text := text? | return 2
+    for raw in text.splitOn "\n" do
+      if reading then
+        match ← process state raw with
+        | some s => state := s
+        | none => reading := false
+    return 0
+  while reading do
+    if tty then
+      stdout.putStr "wiz> "
+      stdout.flush
+    let raw ← stdin.getLine
+    if raw.isEmpty then
+      -- EOF (an empty line is "\n": `getLine` includes the newline)
+      if tty then IO.println ""
+      reading := false
+    else
+      match ← process state raw with
+      | some s => state := s
+      | none => reading := false
+  return 0
+
+/-- `--prelude MODULE` / `-p MODULE` (`--prelude=MODULE` too; repeatable and
+comma-separated): the modules `wiz repl` imports after the Prelude. Returns them in the
+order given, with the rest of the arguments. -/
+def takePrelude : List String → Except String (List String × List String)
+  | [] => pure ([], [])
+  | "--prelude" :: [] | "-p" :: [] => throw "--prelude needs a module name"
+  | "--prelude" :: m :: rest | "-p" :: m :: rest => do
+    let (ps, rest) ← takePrelude rest
+    pure (m :: ps, rest)
+  | a :: rest => do
+    let (ps, rest) ← takePrelude rest
+    if a.startsWith "--prelude=" then pure ((a.drop 10).toString :: ps, rest)
+    else if a.startsWith "-p" && a.length > 2 && !(a.startsWith "--") then
+      pure ((a.drop 2).toString :: ps, rest)
+    else pure (ps, a :: rest)
+
+/-- `--script FILE` (the commands, one per line, from FILE instead of stdin) and
+`--init CMD` (repeatable: run before the first input) for `wiz repl`, taken out of the
+arguments. -/
+def takeReplScript : List String → Except String (Option String × List String × List String)
+  | [] => pure (none, [], [])
+  | "--script" :: [] => throw "--script needs a file"
+  | "--init" :: [] => throw "--init needs a command"
+  | "--script" :: f :: rest => do
+    let (_, init, rest) ← takeReplScript rest
+    pure (some f, init, rest)
+  | "--init" :: c :: rest => do
+    let (script, init, rest) ← takeReplScript rest
+    pure (script, c :: init, rest)
+  | a :: rest => do
+    let (script, init, rest) ← takeReplScript rest
+    pure (script, init, a :: rest)
+
+/-- The test driver: the `--driver PATH` flag (when it is a file), else beside this
+binary (a checkout's `.lake/build/bin/tests`), else `.lake/build/bin/tests` under the
+current directory. A flag, not an environment variable: `wiz` reads none (23a). -/
+def testDriver (explicit : Option System.FilePath) : IO (Option System.FilePath) := do
+  if let some p := explicit then
+    return (if (← p.pathExists) && !(← p.isDir) then some p else none)
+  let beside := (← IO.appPath).parent.getD "." / "tests"
+  if (← beside.pathExists) && !(← beside.isDir) then return some beside
+  let localPath : System.FilePath := ".lake/build/bin/tests"
+  return (if (← localPath.pathExists) && !(← localPath.isDir) then some localPath else none)
+
+/-- `--driver PATH` / `--driver=PATH`, taken out of the arguments (the rest go to the
+driver unchanged). -/
+def takeDriver : List String → Option System.FilePath × List String
+  | [] => (none, [])
+  | "--driver" :: p :: rest => let (_, r) := takeDriver rest; (some (System.FilePath.mk p), r)
+  | a :: rest =>
+    let (d, r) := takeDriver rest
+    if a.startsWith "--driver=" then (some (System.FilePath.mk (a.drop 9).toString), r) else (d, a :: r)
+
+/-- `wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]`: run the test driver
+with the other arguments (`lake build wiz tests` builds it). A convenience wrapper: the
+driver is the runner. (`wiz test FILE` is the single-file form, stage 11ah.) -/
+def testDriverCmd (args : List String) : IO UInt32 := do
+  let (explicit, args) := takeDriver args
+  let some driver ← testDriver explicit
+    | IO.eprintln "wiz test-driver: no test driver: build it with `lake build wiz tests`, or pass --driver PATH"
+      return 2
+  let child ← IO.Process.spawn { cmd := driver.toString, args := args.toArray }
+  child.wait
 
 /-- The experimental kernel options, taken out of the arguments. -/
 def kernelOpt : List String → Except String (Regularity × Bool × List String)
@@ -582,24 +906,38 @@ def main (args : List String) : IO UInt32 := do
   if let some days ← cachePruneOpt.get then
     if let some dir := tc.cacheDir then IO.eprintln (← Cache.pruneSummary dir days)
   let split ← splitOpt.get
+  let (target?, args) ← match takeTarget args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 1
+  let target := target?.getD "c"
   match args with
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
-  | ["build", path, "-o", out] => buildCmd tc path out false (split := split)
-  | ["build", path, "-o", out, "--llvm"] => buildCmd tc path out true (split := split)
-  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out false true (split := split)
-  | ["build", path, "-o", out, "--lib", "--llvm"] | ["build", path, "-o", out, "--llvm", "--lib"] =>
-    buildCmd tc path out true true (split := split)
-  | ["build", path, "-o", out, "--no-main"] => buildCmd tc path out false false true (split := split)
-  | ["build", path, "-o", out, "--no-main", "--llvm"] | ["build", path, "-o", out, "--llvm", "--no-main"] =>
-    buildCmd tc path out true false true (split := split)
+  | ["build", path, "-o", out] => buildCmd tc path out target (split := split)
+  | ["build", path, "-o", out, "--lib"] => buildCmd tc path out target true (split := split)
+  | ["build", path, "-o", out, "--no-main"] =>
+    buildCmd tc path out target (noMain := true) (split := split)
   | "doc" :: rest => docCmd tc rest
   | "fmt" :: rest => fmtCmd tc rest
-  | ["run", path] => runCmd tc path false (split := split)
-  | ["run", path, "--llvm"] => runCmd tc path true (split := split)
+  | ["run", path] => runCmd tc path target (split := split)
+  -- `--llvm`/`--target llvm` are taken out above (`takeTarget`), so the REPL is LLVM
+  -- when the selected target is; there is no wasm REPL (no `:run` through that backend)
+  | "repl" :: rest => do
+    if target == "wasm" then
+      IO.eprintln "wiz repl: targets are c and llvm (not wasm)"
+      pure 2
+    else match takePrelude rest with
+      | .error e => IO.eprintln e; pure 2
+      | .ok (preludes, rest) => match takeReplScript rest with
+        | .error e => IO.eprintln e; pure 2
+        | .ok (script, init, []) => replCmd tc (target == "llvm") preludes script init
+        | .ok (_, _, a :: _) =>
+          IO.eprintln s!"wiz repl: unknown argument {a}"
+          pure 2
+  | "test-driver" :: rest => testDriverCmd rest
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2

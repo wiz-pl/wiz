@@ -1,0 +1,28 @@
+-- test: run
+import Sys
+import Text
+
+-- The Wiz REPL really is the Scry REPL when Scry.Repl is the prelude: `--script` reads
+-- the session, `#check` sees the façade, and the prompt is absent on a pipe.
+def main : IO Unit := do
+  let wiz := "../.lake/build/bin/wiz";
+  ok ← FS.exists wiz;
+  match ok with
+  | .false => IO.println "repl prelude: skipped (no .lake/build/bin/wiz)"
+  | .true => do
+    resOpt ← IO.bind (Process.outputWith wiz
+      ["-I", "tests", "repl", "--prelude", "ReplPrelude",
+       "--script", "tests/repl-prelude.session"] "" SpawnOptions.default)
+      (fun r => match r with
+        | .ok o => IO.pure (.some o)
+        | .error e => IO.bind (IO.ePrintln e) (fun _ => IO.pure (.none : Option Output)));
+    match resOpt with
+    | .none => IO.println "repl prelude: FAILED"
+    | .some res => do
+      let wants := "replPreludeAnswer : Nat";
+      match String.contains res.stdout wants with
+      | .true => IO.println "repl prelude: ok"
+      | .false => do
+        IO.println "repl prelude: FAILED";
+        IO.println res.stdout;
+        IO.println res.stderr

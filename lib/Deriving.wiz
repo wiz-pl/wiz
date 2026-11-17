@@ -39,6 +39,14 @@ it is an application and `p` is the precedence of an argument (1024). Derivable:
 `T.c a b` (in parentheses at argument position), `T.c` for a constant. -/
 class Repr.{u} (A : Type u) where
   reprPrec : A → Nat → String
+/-- Equality as a `Bool`: `DecidableEq.decide a b` is `.true` when `a` and `b` are equal,
+as `BEq.beq` is. It is the comparison Lean's `DecidableEq` provides for `=`, by the name
+the machine models use; Wiz has no `Decidable` proof object to return, so `decide` is the
+`Bool` itself (what `if` and `&&` test). Derivable for an enumeration (every constructor
+is a constant) and for a single-constructor record (no recursive field); fields are
+compared with their own instances and proof fields are not compared, as in `BEq`. -/
+class DecidableEq.{u} (A : Type u) where
+  decide : A → A → Bool
 
 /-- A value as Wiz source, at the top level (no parentheses): `Repr.repr (Option.some 1)`
 is `"Option.some 1"`. -/
@@ -61,15 +69,30 @@ def List.beqBy {A : Type} (eq : A → A → Bool) : List A → List A → Bool
 instance : Inhabited Nat := Inhabited.mk 0
 /-- `Nat.beq`. -/
 instance : BEq Nat := BEq.mk Nat.beq
+/-- `Nat.beq`, as `DecidableEq`. -/
+instance : DecidableEq Nat := DecidableEq.mk Nat.beq
 /-- A decimal numeral (`Nat.repr`). -/
 instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
 /-- The empty string. -/
 instance : Inhabited String := Inhabited.mk ""
 /-- `String.beq`. -/
 instance : BEq String := BEq.mk String.beq
+/-- `String.beq`, as `DecidableEq`. -/
+instance : DecidableEq String := DecidableEq.mk String.beq
 /-- The string in double quotes (no escaping). -/
 instance : Repr String := Repr.mk (fun s _ =>
   String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
+/-- Componentwise equality of options (there is no deriver for a recursive type). -/
+def Option.decEq {A : Type} [DecidableEq A] (a b : Option A) : Bool := match a, b with
+  | .none, .none => .true
+  | .some x, .some y => DecidableEq.decide x y
+  | _, _ => .false
+/-- `Option.decEq`, as an instance. -/
+instance {A : Type} [DecidableEq A] : DecidableEq (Option A) := DecidableEq.mk Option.decEq
+/-- Elementwise equality of lists (there is no deriver for a recursive type). -/
+def List.decEq {A : Type} [DecidableEq A] (a b : List A) : Bool := List.beqBy DecidableEq.decide a b
+/-- `List.decEq`, as an instance. -/
+instance {A : Type} [DecidableEq A] : DecidableEq (List A) := DecidableEq.mk List.decEq
 
 -- ## Writing derivers
 -- Names a deriver introduces end in `✝` or contain it, so they can't capture the user's.
@@ -343,5 +366,74 @@ def deriveBEq : Deriver := fun n => do
   MacroM.pure (.cons inst .nil)
 attribute [deriver BEq] deriveBEq
 
+-- ## DecidableEq: equality as a `Bool`, for enumerations and single-constructor records
+
+/-- No fields, so the constructor is a constant. -/
+def Derive.noFields : List FieldView → Bool
+  | .nil => .true
+  | .cons _ _ => .false
+/-- Every constructor of the type is a constant. -/
+def Derive.allNoFields : List CtorView → Bool
+  | .nil => .true
+  | .cons c cs => match Derive.noFields (CtorView.fields c) with
+    | .true => Derive.allNoFields cs
+    | .false => .false
+/-- A field that a derived `DecidableEq` compares recursively is not supported. -/
+def Derive.nonRecursive : List FieldView → Bool
+  | .nil => .true
+  | .cons f fs => match FieldView.recursive f with
+    | .true => .false
+    | .false => Derive.nonRecursive fs
+/-- An enumeration: every constructor is a constant. -/
+def Derive.isEnum (v : IndView) : Bool := Derive.allNoFields (IndView.ctors v)
+/-- A single constructor, with no recursive field. -/
+def Derive.isRecord (v : IndView) : Bool := match IndView.ctors v with
+  | .cons c .nil => Derive.nonRecursive (CtorView.fields c)
+  | _ => .false
+
+/-- Field `i` (`f✝i` against `g✝i`) compared with `DecidableEq.decide`. -/
+def Derive.decCmp (i : Nat) : Syntax :=
+  let x := Derive.var "f✝" i;
+  let y := Derive.var "g✝" i;
+  `(term| DecidableEq.decide $x $y)
+/-- Field `i` compared, and the rest: only data fields are compared. -/
+def Derive.decField (i : Nat) (f : FieldView) (rest : Syntax) : Syntax := match Derive.isData f with
+  | .true => let here := Derive.decCmp i; `(term| Bool.and $here $rest)
+  | .false => rest
+/-- All of a constructor's fields compared (`Bool.true` when there are none). -/
+def Derive.decFields : Nat → List FieldView → Syntax
+  | _, .nil => `(term| Bool.true)
+  | i, .cons f fs => Derive.decField i f (Derive.decFields (i + 1) fs)
+/-- The `DecidableEq` method for constructor `c`: an enumeration has no fields, so this is
+`y`'s constructor being `c`; a record's fields are compared through `y`'s projections. -/
+def Derive.decMethod (v : IndView) (c : CtorView) : Syntax :=
+  let y := Syntax.mkIdent "y✝";
+  let yv := Syntax.mkVar "y✝";
+  let pat := Syntax.mkApp (Syntax.mkVar (Derive.ctorName v c)) (Derive.explicitVars "g✝" 0 (CtorView.fields c));
+  let same := Derive.decFields 0 (CtorView.fields c);
+  match IndView.isStructure v with
+  | .true => let ys := Derive.lets "g✝" yv 0 (CtorView.fields c) same; `(term| fun $y => $ys)
+  | .false => match IndView.ctors v with
+    | .cons _ .nil => `(term| fun $y => match $yv with | $pat => $same)
+    | _ => `(term| fun $y => match $yv with | $pat => $same | _ => Bool.false)
+
+/-- The deriver of `DecidableEq`, by `Derive.elim` with `Derive.decMethod`. Only an
+enumeration or a single-constructor record is accepted: a recursive field's comparison
+would need the instance being defined. -/
+def deriveDecidableEq : Deriver := fun n => do
+  v ← Derive.lookup "DecidableEq" n;
+  Derive.noIndices "DecidableEq" v;
+  match Bool.or (Derive.isEnum v) (Derive.isRecord v) with
+  | .true => do
+    let x := Syntax.mkIdent "x✝";
+    let xv := Syntax.mkVar "x✝";
+    let T := Derive.typeApp v;
+    let body := Derive.elim v `(term| fun _ => $T → Bool) (Derive.decMethod v) xv;
+    let inst := Derive.instance (Derive.instanceType "DecidableEq" v) `(term| DecidableEq.mk (fun $x => $body));
+    MacroM.pure (.cons inst .nil)
+  | .false => MacroM.throw (String.append "DecidableEq is derived for an enumeration or a single-constructor record only, and " n)
+attribute [deriver DecidableEq] deriveDecidableEq
+
 -- The prelude's types.
-deriving instance Inhabited, BEq, Repr for Bool, Option, List
+deriving instance Inhabited, BEq, Repr for Option, List
+deriving instance Inhabited, BEq, Repr, DecidableEq for Bool
