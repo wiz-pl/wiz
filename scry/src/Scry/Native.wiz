@@ -201,11 +201,11 @@ def Scry.Native.toCstStoreIn (lang : String) (path : String) (st : ScryStore) : 
       | .true => childId
       | .false => x)) U32Array.empty edgeLabel0;
   let bytes := U64Array.ofList
-    (List.cons (U64.ofNat (Scry.Native.storeBytes st)) .nil);
+    [(U64.ofNat (Scry.Native.storeBytes st))];
   IO.pure (Scry.CstStore.mk lang kinds fields paths kindCol fieldCol flags parent spans
     (U32Array.replicate n (U32.ofNat 0)) nextSib childOff children childField
     edgeSrc edgeDst edgeLabel bytes InternTable.empty U32Array.empty
-    (U32Array.ofList (List.cons (U32.ofNat 0) .nil)) U32Array.empty)
+    (U32Array.ofList [(U32.ofNat 0)]) U32Array.empty)
 
 /-- The `scry-cst` model store for the shim's columns. One file (`path`); no relations
 (the CST layer has none). Edge labels are the field names, with `child` for an arc that

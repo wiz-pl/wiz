@@ -60,7 +60,7 @@ def Option.bind {A B : Type} : Option A → (A → Option B) → Option B
   | .some a, f => f a
 /-- `Option` as a monad: a computation that may fail with no reason given. -/
 instance : Monad Option where
-  pure := fun a => Option.some a
+  pure := fun a => .some a
   bind := Option.bind
 /-- `Option.map` as the functor map (a better one than the generic instance's). -/
 instance : Functor Option where
@@ -94,7 +94,7 @@ def List.flatMap {A B : Type} : List A → (A → List B) → List B
   | .cons x xs, f => List.append (f x) (List.flatMap xs f)
 /-- `List` as the monad of nondeterminism: `bind` tries every element. -/
 instance : Monad List where
-  pure := fun a => List.cons a List.nil
+  pure := fun a => [a]
   bind := List.flatMap
 /-- `List.map` as the functor map. -/
 instance : Functor List where

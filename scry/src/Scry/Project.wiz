@@ -253,8 +253,8 @@ def Scry.addFile (ft : Scry.FileTable) (p text : String) : Scry.FileTable × Nat
   match Scry.pathIndex p ft.paths with
   | .some i => (ft, i)
   | .none =>
-    (Scry.FileTable.mk (List.append ft.paths (List.cons p .nil))
-      (List.append ft.texts (List.cons text .nil)), List.length ft.paths)
+    (Scry.FileTable.mk (List.append ft.paths [p])
+      (List.append ft.texts [text]), List.length ft.paths)
 
 /-- Add the local file table of one unit in order; the second result is the unit's
 `local file → project file` map. -/

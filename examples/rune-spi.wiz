@@ -34,12 +34,12 @@ def bitsOf (d : Nat) : List Nat :=
 -- `mosi` (leaf 1) at every rising edge of `sclk` (leaf 0). The previous cycle is looked
 -- up by index (`Hdl.nthD`), so the recursion carries no extra parameter.
 def edgeAt (outs : List (List Nat)) (k : Nat) : List Nat :=
-  let o := Hdl.nthD List.nil outs k;
+  let o := Hdl.nthD [] outs k;
   let prev := match k with
-    | .zero => List.nil
-    | .succ j => Hdl.nthD List.nil outs j;
+    | .zero => []
+    | .succ j => Hdl.nthD [] outs j;
   match Bool.and (Nat.beq (Hdl.nthD 0 prev 0) 0) (Nat.beq (Hdl.nthD 0 o 0) 1) with
-  | .true => List.cons (Hdl.nthD 0 o 1) .nil
+  | .true => [(Hdl.nthD 0 o 1)]
   | .false => .nil
 
 def sampled (outs : List (List Nat)) : List Nat :=

@@ -292,7 +292,7 @@ def Scry.diffPointRange (p context : Nat) : List (Nat × Nat) :=
   let lo := Nat.max 1 (Nat.sub p context);
   let hi := Nat.add p context;
   match Nat.le lo hi with
-  | .true => List.cons (lo, hi) .nil
+  | .true => [(lo, hi)]
   | .false => .nil
 
 /-- A deletion gap at `anchor` (the new line before the gap) with `context` lines each
@@ -305,7 +305,7 @@ def Scry.diffGapRange (anchor context : Nat) : List (Nat × Nat) :=
     let lo := Nat.max 1 (Nat.add (Nat.sub anchor n) 1);
     let hi := Nat.add anchor n;
     match Nat.le lo hi with
-    | .true => List.cons (lo, hi) .nil
+    | .true => [(lo, hi)]
     | .false => .nil
 
 def Scry.diffConcat {A B : Type} (f : A → List B) : List A → List B
@@ -314,7 +314,7 @@ def Scry.diffConcat {A B : Type} (f : A → List B) : List A → List B
 
 /-- Insert into a list sorted by lower bound. -/
 def Scry.diffIns (r : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
-  | .nil => List.cons r .nil
+  | .nil => [r]
   | .cons x rest => match Nat.lt r.1 x.1 with
     | .true => List.cons r (List.cons x rest)
     | .false => List.cons x (Scry.diffIns r rest)
@@ -323,7 +323,7 @@ def Scry.diffIns (r : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
 def Scry.diffMergeGo : List (Nat × Nat) → List (Nat × Nat) → List (Nat × Nat)
   | .nil, acc => List.reverse acc
   | .cons (a, b) rest, acc => match acc with
-    | .nil => Scry.diffMergeGo rest (List.cons (a, b) .nil)
+    | .nil => Scry.diffMergeGo rest [(a, b)]
     | .cons (c, d) more => match Nat.le a (Nat.succ d) with
       | .true => Scry.diffMergeGo rest (List.cons (c, Nat.max d b) more)
       | .false => Scry.diffMergeGo rest (List.cons (a, b) acc)

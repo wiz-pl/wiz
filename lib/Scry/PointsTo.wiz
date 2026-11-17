@@ -142,7 +142,7 @@ def Scry.locKind : Scry.Loc → String
 
 /-- Is this the merged unknown location? -/
 /-- The singleton set of the unknown location (a may-location and a warning). -/
-def Scry.unknownLocs : List Scry.Loc := List.cons Scry.Loc.unknown List.nil
+def Scry.unknownLocs : List Scry.Loc := [Scry.Loc.unknown]
 
 def Scry.locUnknown : Scry.Loc → Bool
   | .unknown => .true
@@ -397,12 +397,12 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (poin
           | .false => .nil
           | .true => match Scry.isAliasArg0Call name, Wil.listNth args 0 with
             | .true, .some a =>
-              List.cons (Scry.vk func rv.index, Scry.ptGet st (Scry.vk func a.index)) .nil
+              [(Scry.vk func rv.index, Scry.ptGet st (Scry.vk func a.index))]
             | _, _ => match Scry.isFreshAllocCall name with
-              | .true => List.cons (Scry.vk func rv.index, List.cons (.heap func point) .nil) .nil
+              | .true => [(Scry.vk func rv.index, List.cons (.heap func point) .nil)]
               | .false => match Scry.isReallocCall name with
-                | .true => List.cons (Scry.vk func rv.index, List.cons (.heap func point) .nil) .nil
-                | .false => List.cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+                | .true => [(Scry.vk func rv.index, List.cons (.heap func point) .nil)]
+                | .false => [(Scry.vk func rv.index, Scry.unknownLocs)];
   let externalFrees : List Scry.Loc := match callee with
     | .indirect _ => .nil
     | .direct name =>

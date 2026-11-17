@@ -229,21 +229,21 @@ def Scry.rulePackConcat {A B : Type} (f : A → List B) : List A → List B
 
 def Scry.RulePack.taintRules (p : Scry.RulePack) : List Scry.TaintRule :=
   Scry.rulePackConcat (fun r => match r with
-    | .taint t => List.cons t .nil
+    | .taint t => [t]
     | .forbidden _ => .nil
     | .memory _ => .nil) p.rules
 
 def Scry.RulePack.forbiddenRules (p : Scry.RulePack) : List Scry.ForbiddenRule :=
   Scry.rulePackConcat (fun r => match r with
     | .taint _ => .nil
-    | .forbidden f => List.cons f .nil
+    | .forbidden f => [f]
     | .memory _ => .nil) p.rules
 
 def Scry.RulePack.memoryRules (p : Scry.RulePack) : List Scry.MemoryRule :=
   Scry.rulePackConcat (fun r => match r with
     | .taint _ => .nil
     | .forbidden _ => .nil
-    | .memory m => List.cons m .nil) p.rules
+    | .memory m => [m]) p.rules
 
 /-- The first memory rule whose `check` the analysis implements. -/
 def Scry.RulePack.memoryRuleFor (p : Scry.RulePack) (check : String) :

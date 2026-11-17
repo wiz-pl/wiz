@@ -43,7 +43,7 @@ def agree : Bool × Bool × Bool := (same (opsC ops) (opsC ops0), same (cmpC cmp
 #eval agree
 
 -- simulation: the counter wraps at 10; the shifts
-def ins : List (HwTy.El Bit) := Hdl.map (BitVec.ofNat 1) (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 (List.cons 0 List.nil))))))))))))
+def ins : List (HwTy.El Bit) := Hdl.map (BitVec.ofNat 1) [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 #eval Hdl.map (HwTy.pack B4) (Circuit.run (countC count) ins)
 def shifts (a : Nat) (k : Nat) : Nat × Nat :=
   (HwTy.pack B8 (Hw.shl (r := HwTy.El) (HwTy.unpack B8 a) k), HwTy.pack B8 (Hw.lshr (r := HwTy.El) (HwTy.unpack B8 a) k))

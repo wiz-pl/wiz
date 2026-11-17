@@ -104,11 +104,11 @@ def Infoview.isSpaceC (c : Char) : Bool := Nat.beq (Char.code c) 32
 /-- The longest prefix without spaces (`sp = false`) or with only spaces (`sp = true`), and
 the rest. -/
 def Infoview.span (sp : Bool) : List Char → List Char × List Char
-  | .nil => (List.nil, List.nil)
+  | .nil => ([], [])
   | .cons c cs => match Bool.and (Bool.not sp) (Infoview.isSpaceC c) with
-    | .true => (List.nil, List.cons c cs)
+    | .true => ([], List.cons c cs)
     | .false => match Bool.and sp (Bool.not (Infoview.isSpaceC c)) with
-      | .true => (List.nil, List.cons c cs)
+      | .true => ([], List.cons c cs)
       | .false =>
         let r := Infoview.span sp cs;
         (List.cons c r.1, r.2)
@@ -141,9 +141,9 @@ def Infoview.indentLine (indent : Nat) : List Piece := match Nat.beq indent 0 wi
   | .false => .cons (.mk (Infoview.spaces indent) "" .nil) .nil
 /-- The longest prefix of `cs` at most `w` columns wide, and the rest. -/
 def Infoview.takeWidth : Nat → List Char → List Char × List Char
-  | _, .nil => (List.nil, List.nil)
+  | _, .nil => ([], [])
   | w, .cons c cs => match Nat.lt w (Infoview.charWidth (Char.code c)) with
-    | .true => (List.nil, List.cons c cs)
+    | .true => ([], List.cons c cs)
     | .false =>
       let r := Infoview.takeWidth (w - Infoview.charWidth (Char.code c)) cs;
       (List.cons c r.1, r.2)
@@ -286,7 +286,7 @@ def Infoview.hypLines (width : Nat) (h : Hyp) (st : Flat) : List (List Piece) ×
 
 /-- The lines of each hypothesis, tags numbered on. -/
 def Infoview.hypsLines (width : Nat) : List Hyp → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons h hs, st =>
     let a := Infoview.hypLines width h st;
     let b := Infoview.hypsLines width hs a.2;
@@ -304,7 +304,7 @@ def Infoview.goalLines (width : Nat) (g : Goal) (st : Flat) : List (List Piece) 
 
 /-- The lines of each goal, a blank line between goals. -/
 def Infoview.goalsLines (width : Nat) : List Goal → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons g gs, st =>
     let a := Infoview.goalLines width g st;
     let b := Infoview.goalsLines width gs a.2;
@@ -357,7 +357,7 @@ def Infoview.itemLines (width : Nat) (i : InfoItem) (st : Flat) : List (List Pie
       (List.append (Infoview.wrapLines width (.cons (String.chars title) .nil)) body, st)
 /-- The items' lines, with a heading (after a blank line) where the section changes. -/
 partial def Infoview.itemsLines (width : Nat) (sec : String) : List InfoItem → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons i is, st =>
     let s := InfoItem.section i;
     let head : List (List Piece) := match String.eq s sec with
@@ -375,7 +375,7 @@ its messages, the expected type (if there is a term) and the other items, tags n
 across all of them. With nothing to show, one line saying so. -/
 def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : View :=
   let tac0 : List (List Piece) × Flat := match st with
-    | .none => (List.nil, Flat.mk List.nil 0 List.nil)
+    | .none => ([], Flat.mk [] 0 [])
     | .some (.mk gs _) => match gs with
       | .nil => (.cons (Infoview.header "Tactic state") (.cons (.cons (Infoview.str "No goals" "done") .nil) .nil), .mk .nil 0 .nil)
       | .cons _ _ =>

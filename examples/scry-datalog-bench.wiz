@@ -171,7 +171,7 @@ def runNaive (which : String) (n : Nat) : IO Unit := do
 def runInsert (n : Nat) : IO Unit := do
   start ← Clock.monotonic;
   let st := List.foldl (fun (acc : Scry.State Nat) (i : Nat) =>
-    (Scry.State.addDerivedTuple acc 0 List.nil 1 [u i]).1) Scry.State.empty (range n);
+    (Scry.State.addDerivedTuple acc 0 [] 1 [u i]).1) Scry.State.empty (range n);
   stop ← Clock.monotonic;
   IO.println (String.append "insert n=" (Nat.repr n));
   IO.println (String.append "rows=" (Nat.repr (count st 1)));

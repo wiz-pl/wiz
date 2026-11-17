@@ -171,7 +171,7 @@ def lawAux (n : Nat) : Nat →
     List (HwTy.El (Bus.ArbNIn.code n 8 8)) → List (HwTy.El (Bus.ArbNOut.code n 8 8)) → Bool
   | k, .cons x xs, .cons y ys =>
     Bool.and (lawOne n (cycleAck k) x y) (lawAux n (Nat.succ k) xs ys)
-  | _, _, _ => Bool.true
+  | _, _, _ => .true
 
 def lawN (n : Nat) : Bool :=
   lawAux n 0 (insN n) (Circuit.run (Bus.arbNC n 8 8) (insN n))
@@ -184,8 +184,8 @@ def ackAtOut (n : Nat) (y : HwTy.El (Bus.ArbNOut.code n 8 8)) (i : Nat) : Bool :
   Bus.Law.ackS (Hdl.nthD (Bus.noResp : Bus.Resp 8 HwTy.El) (respsOf n y) i)
 
 def ackWithinOut : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) → Nat → Nat → Bool
-  | .nil, _, _ => Bool.false
-  | _, _, .zero => Bool.false
+  | .nil, _, _ => .false
+  | _, _, .zero => .false
   | .cons y rest, i, .succ f =>
     Bool.or (ackAtOut 3 y i) (ackWithinOut rest i f)
 
@@ -193,8 +193,8 @@ def fairStart (ys : List (HwTy.El (Bus.ArbNOut.code 3 8 8))) : Bool :=
   allTrue (Hdl.map (fun (i : Nat) => ackWithinOut ys i 3) (units 3))
 
 def fairStarts : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) → Nat → Bool
-  | .nil, _ => Bool.true
-  | _, .zero => Bool.true
+  | .nil, _ => .true
+  | _, .zero => .true
   | .cons y rest, .succ f => Bool.and (fairStart (.cons y rest)) (fairStarts rest f)
 
 def fairOuts : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) :=
