@@ -333,9 +333,15 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   behaviour) is one module, `input`: private names are visible throughout the file.
 * **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
   key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
-  visibility check is a lookup on every elaboration, so a warm cache hit can only replay
-  the diagnostics of the same graph (the key covers every module's text, and the toolchain
-  id every selfhost source).
+  visibility check is a lookup on every elaboration, so a warm cache hit replays the
+  diagnostics of the same graph (the key covers every module's text, and the toolchain
+  id every selfhost source). The driver builds that key from the loader's discovery
+  table before elaborating (`tabNames`/`keyOfGraph` in `Cli.wiz`, plus the root's
+  `import_c` header texts), so a warm `check`/`run` repeats no command; `--no-cache`
+  does not construct the key at all. Before this, `prepare` elaborated the graph first
+  and the hit only saved the rendering, so a warm check cost the same as a cold one
+  (measured in `bench/selfhost-bench.py`: compiler.wiz warm 10.6 s vs cold 38.3 s after
+  the fix; 1.8x the host's RSS, 1.2x its cold time).
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
@@ -723,11 +729,13 @@ Lean kernel's verdicts.
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
 the input file. The frontend now loads a module graph. A module's name is a path
-(`A.B` is `A/B.wiz`), resolved under the `-I` roots in order and then in the working
-directory; the root module is `Main` (the file `input.wiz`). `Prelude` is still the
-embedded `preludeText`: the self-hosted frontend cannot check `lib/Prelude.wiz` yet
-(A9-A23). The other library imports the corpus uses (`IO`, `Std`, `Sys`) are
-canonicalised to `Prelude` when imports are scanned, since the embedded prelude declares
+(`A.B.C` is `A/B/C.wiz`), resolved under the roots in order and then in the working
+directory; the root module is `Main` (the file `input.wiz`). A root is written `-I DIR`
+(or `-IDIR`) or `--include DIR` (or `--include=DIR`), and the first root with the file
+wins. `Prelude` is still the embedded `preludeText`: the self-hosted frontend cannot
+check `lib/Prelude.wiz` yet (A9-A23). The other library imports the corpus uses (`IO`,
+`Std`, `Sys`) are canonicalised to `Prelude` when imports are scanned, since the
+embedded prelude declares
 the `IO` names and no real `IO.wiz` is checkable yet (without it, every existing
 `import IO` program would be a missing module).
 
@@ -743,9 +751,10 @@ module that cannot be found is `error: cannot find module NAME`. Duplicate names
 rejected across modules as within one (the same `newDuplicate` check).
 
 The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
-texts in load order; the checker prints it with `--key`. The real cache (D5) will key on
-it, plus the frontend's version. The checker's `--oneshot` runs the pre-loader
-single-file path (`checkFile`) instead, for the old behaviour's own tests.
+texts in load order; the checker prints it with `--key`. It follows a transitive change
+(a dependency's text) and ignores a file that no module imports. The real cache (D5)
+will key on it, plus the frontend's version. The checker's `--oneshot` runs the
+pre-loader single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
 **Not done.** `private` is module-scoped now (21n), but only at the declaration level:
 constructor- and field-level `private` is stripped, and a type with private parts is not
@@ -756,12 +765,16 @@ classes/instances (A10), universe polymorphism (A15), the proof surface (A16), t
 (A13), macros (A12), `deriving` (A11) and the wider runtime (C11/C12); modules were the
 first dependency, not the last.
 
-**Tests** (group `selfhost`, eight cases): an imported module's declarations in scope, a
+**Tests** (group `selfhost`, sixteen cases): an imported module's declarations in scope, a
 transitive import (A→B→C) with a shared Prelude, a diamond (one module imported twice is
 checked once), a cycle, a missing module, a duplicate name across modules, a `-I` root,
-and the cache key (stable for one graph, different when a module's text changes). `wiz
-check` of the generated self-hosted sources passes, and the self-hosted frontend still
-checks itself.
+and the cache key (stable for one graph, different when a module's text changes); then
+dotted imports (`A.B.C` is `A/B/C.wiz`), `-I` order (the first root with the file wins,
+a root without it is skipped), a cycle through three modules, a duplicate name in two
+imported modules, a transitive cache-key change (and no change for an unimported file),
+`IO`/`Std`/`Sys` loading the embedded Prelude once, the CLI root spellings, and the
+compiler driver resolving its roots too. `wiz check` of the generated self-hosted
+sources passes, and the self-hosted frontend still checks itself.
 
 ## 21z: the proof surface in the self-hosted frontend (A16)
 
@@ -872,3 +885,264 @@ and carries the ownership table as comments. Deferred (documented, not implement
 a linked `wiz_abi_version` symbol, `_Static_assert`s for `c_struct` layouts, boxed
 `Nat`/`NatObj` by default, callback roots on both collectors, and the preprocessor or
 automatic struct/pointer import for `import_c`.
+
+## 21ac: notation and macros in the self-hosted frontend (A12, first milestone)
+
+The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
+with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
+registrations were "unsupported command". `lib/` uses them: counting declarations at the
+start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib/Hdl/`,
+2026-11-15 at `24218ce4`) gives
+
+| form                            | declarations | files |
+|---------------------------------|-------------:|------:|
+| `syntax`                        | 123 | 13 |
+| `attribute [tactic …]`          |  37 |  5 |
+| `macro_rules`                   |  27 |  5 |
+| `infix` (plain)                 |  18 |  4 |
+| `infixr`                        |  17 |  8 |
+| `infixl`                        |  13 |  3 |
+| `declare_syntax_cat`            |  14 |  3 |
+| `attribute [macro …]`           |  11 |  6 |
+| `notation`                      |   9 |  4 |
+| `app_unexpander`                |   6 |  5 |
+| `attribute [app_unexpander …]`  |   2 |  1 |
+| `prefix` / `postfix`            |   0 | 0 |
+| `macro` (a declaration)         |   0 | 0 |
+
+17 files use at least one of the forms (12 use `macro_rules`/`notation`/
+`attribute [macro]`; 15 without the plain infix operators). The `syntax` rules target
+`tactic` 39 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
+categories. `prefix`/`postfix` and a `macro` command do not exist in the Lean host
+either (a prefix operator is a `notation` whose first item is an atom; the host has only
+`macro_rules`), so there is nothing to mirror.
+
+**Implemented.** The frontend's `Note` is now a real macro rule — a node kind, a pattern
+tree, a template and the argument names `notation` binds — and:
+* `notation:p items => rhs` registers a leading rule (or, if the first item is an
+  argument with a precedence, a trailing one, the host's `notationRule`); the pattern
+  is the item list with `antiquot`s for the arguments, and the template substitutes them
+  (`term.ident x` nodes for a `notation`'s `vars`, `$x` nodes for a `macro_rules`).
+* `infixl`/`infixr`/`infix` build the same trailing rule and rule shape as the host
+  (`a op b => f a b`), with `p`/`p+1` operand precedences; the kind comes from the
+  host's `mkKindName` (`term.+`, `term.+_1`, …).
+* `declare_syntax_cat`, `syntax` (with `(name := …)`, `(priority := …)`, `p`, the `stx`
+  item grammar: atoms, categories with a precedence, `(...)`, `sepBy`/`sepBy1`,
+  `withPosition`, `* + ?`), the meta parsers (antiquotations and `` `(c| …) `` for a new
+  category) and `Wiz/Parser/SyntaxCmd.lean`'s leading/trailing split. Atoms are
+  unreserved outside `term`/`command`, and a rule's atoms are added to the token table
+  as the host's `ParserTables.addTokens` does.
+* `macro_rules` with quotations, `$x` pattern variables, structural matching and
+  hygiene: a template identifier the rule introduces gets a fresh `x✝N` scope, and
+  `Scope.lookupV` falls back to the scope-stripped name for a global (the host's
+  `stripScope`). The host has **no repetition** in patterns (`$[…]`), so neither has
+  this.
+* command macros written as `macro_rules` (a rule whose pattern is a `command` node
+  expands before dispatch, so `def_one x` can stand for a `def`).
+* `attribute [macro K] f` / `[tactic K] f` check that `f` is declared and record nothing
+  (see below); `app_unexpander`, `attribute [app_unexpander …]` and
+  `set_option pp.notation`/`pp.all` are parsed and accepted (their printing is the
+  remaining half).
+
+Expansion is outermost first: a node is rewritten to a fixed point (bounded per
+position), then its children are expanded, so an argument a rule splices is expanded
+like any other node. Tables change command by command, as they do in the host: the next
+command is parsed with the rules declared by the previous ones.
+
+**Not done.** The macro and tactic registrations name a *function* the host executes at
+elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
+DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
+`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
+an "unsupported syntax" error. That is A12's other half, and it depends on the
+elaborator-time evaluation that A11 and A13 also need. Printing notation
+(`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
+host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
+(`declare_syntax_cat c (keywords := s)`) are accepted and the category is declared, but
+the scope's reserved words are not tracked (only `lib/Feral.wiz` uses them, with a
+procedural macro). `local notation`/`local macro_rules` are unwrapped and stay visible
+to importers (A14's module-local dropping is not wired to the new rules).
+
+**Tests** (new group `selfhost-macro`, 13 cases, added to the `selfhost` shard):
+* notation/infix differential: `selfhostSameNats` compares what the Lean frontend's
+  `#eval` and the self-hosted one's `#reduce` compute for `10 − 3 − 2` (5), `10 ⊖ 3 ⊖ 2`
+  (9), `1 ⊕ 2 * 3` (7), `⌜1 + 2⌝` (4), `⌜⌜3⌝⌝` (5), the postfix `5 !` (10) and
+  `5 ! !` (20), and the prefix `~3` (2) and `~ ~3` (3) — left/right associativity,
+  precedence, a leading notation with a default and with an explicit argument
+  precedence, and a trailing (postfix) rule.
+* `macro_rules` differential: a `syntax:lead` rule, pattern variables, hygiene (`under e`
+  = `let y := 3; e + y`, so `hyg 5` is 9 with hygiene and 7 without), a declared
+  category with a rule of its own (`get ⟨7⟩` = 70, via a second expansion), and a
+  command macro (`def_one one`).
+* a `syntax` rule whose items are a `sepBy(term, ",")` and the macro rule that matches
+  the `null` node and splices both elements (`pair(1, 2)` = 3).
+* `syntax ... : tactic` rules (39 of the 123 in `lib/` target `tactic`), a `tactic`
+  reference and a `(keywords := …)` category, accepted by both frontends.
+* a second `infixl` on the Prelude's `+`: a fresh kind (`term.+_1`), and the later rule
+  wins (`3 + 1` is 2 both places); `infix` (both operands `p + 1`) does not parse a
+  chain (`1 ? 2 ? 3`) in either frontend.
+* pinned diagnostics: a malformed rule, an unknown syntax category and an unknown
+  registration name.
+* the declarations a macro file produces in the self-hosted frontend (names and types).
+* `app_unexpander`/`set_option` accepted by both frontends; the macro/tactic
+  registrations accepted by the self-hosted one.
+* two pinned differences (`selfhostVerdicts`): the host rejects a registration whose
+  function has the wrong type and an unexpander whose pattern is not an application,
+  while the self-hosted frontend only checks that the name exists.
+* the same macro-using program compiled and run by **both** toolchains (`ioRun` and
+  `selfhostCompileRun`), printing the same five lines — the terms the macros desugar to
+  compute identically.
+
+**Verification (2026-11-15).** The groups run on these sources: `=selfhost-macro`
+**13 passed, 0 failed** (417 s) and `=selfhost` **143 passed, 0 failed** (2195 s),
+including the self-check (28.3 s) and the repinned `#67`, which matches its new
+expected output. The same cases were also exercised case by case with light probes
+(`wiz check`/`wiz run` for the Lean frontend, the checker and compiler for the
+Wiz-hosted one), and the macro-using program prints `25 2 1 9 71` from both toolchains.
+
+## 21ad: tactics in the self-hosted frontend (A13, core)
+
+`by` and `term.by` are now elaborated by the Wiz-hosted frontend, not rejected. The
+engine is the host's (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean` `runTac`) in the
+self-hosted surface: a goal is a context (`Cx`: names, types and values), an expected
+type (`Val`) and a hole (`Tm`, the `MVarId` analogue — goals are numbered by position,
+as in `TacState`), and a tactic script is an `STac` request tree (`op`, `seq`, `try`,
+`first`, `repeat`) interpreted against a goal list and an elaborator state.
+
+**Surface.** `by tac₁; tac₂ …` in a checking and in an inferring position. The core
+tactics are `intro`, `intros`, `exact`, `apply`, `assumption`, `rfl`, `rw`/`rw ←`
+(syntactic occurrence rewriting of the goal type, as the host's `abstractOcc`),
+`change`, `unfold f, g` (one unfolding per definition; fails when nothing changes),
+`calc`, `have`, `suffices`, `obtain ⟨x, y⟩ := e`, `constructor` (the first constructor
+of the goal's type whose application succeeds), and `try`/`first`/`repeat`/`(…; …)`.
+`constructor`'s siblings `cases`/`induction` are not in this milestone (they need the
+match compiler's motive/recursor surface exposed to tactics). The tactic grammar is
+built into the parser tables (`Wiz/Selfhost.lean` `selfhostTacticRules`, hence
+`selfhost/Tables.wiz`), because the host gets it from `syntax … : tactic` declarations
+in `lib/Prelude.wiz` and the self-hosted frontend does not run macro/tactic
+registrations yet (21ac).
+
+**Solved means solved.** A block makes one metavariable; a tactic's `exact`/`apply`/
+`assumption` either closes its goal (its hole zonks) or replaces it. At the end of the
+block the open list is filtered by zonk: a goal that a later argument's unification
+determined is not reported. If any goal is left the command fails with
+`unsolved goals:` and each goal's context, one hypothesis per line (`n : Nat`) and
+`⊢ type`; a failed tactic additionally appends `remaining goals:` and the state it
+failed in. A term `apply`/`assumption` assigns with holes is kept in an `unchecked`
+list and its type is inferred and compared with its goal at the end of the block (the
+host's `assign` path), so a hole cannot become a proof of the wrong thing; a solved
+block is handed to the kernel as an ordinary term and checked as usual.
+
+**Frequency in `lib/`.** A token scan of the `by` blocks in the 95 `lib/**/*.wiz` files
+at this commit (comments and strings excluded, equation bodies included) finds **40
+blocks / 47 tactic steps in 4 files**. The frequency order is:
+
+| tactic | steps | files | note |
+|---|---:|---:|---|
+| `xgo` | 12 | 3 | Hoare/Eff custom tactic (`syntax … : tactic`) |
+| `xstep` | 10 | 1 | custom |
+| `xunfold` | 8 | 1 | custom |
+| `xapp` | 5 | 1 | custom |
+| `unfold` | 4 | 1 | built in, implemented here |
+| `rw` | 4 | 1 | built in, implemented here |
+| `rfl` | 4 | 1 | built in, implemented here |
+
+The custom four are 35 of 47 steps and are declared with `syntax … : tactic` /
+`macro_rules` and registered with `attribute [tactic …]`; they need the
+elaboration-time evaluator that A12 has not ported, so they parse but have no meaning in
+the self-hosted frontend (the error names the syntax kind). The parity matrix's "46
+`lib` files use `by`" is a raw `\bby\b` grep that also matches the English word in
+comments; the real proof blocks are in `HoareExamples`, `HeapBorrow`, `EffHeap` and
+`ListLemmas`. That is why the top built-in form is `unfold`, and why it and `rw`/`rfl`
+were the first ones implemented; `calc`/`have`/`suffices`/`obtain` are included for the
+proof surface even though `lib/` does not use them as tactics yet.
+
+**Tests.** `=selfhost` gains five cases: a real block (`intro`/`apply`/`assumption`), the
+per-tactic cases (`intros`, `change`, `unfold`, `constructor`, `try`/`first`/`repeat`),
+unsolved goals with their context, a tactic failure with the remaining goals, and the
+differential. The differential case runs the same `ap` proof in the Lean and Wiz-hosted
+frontends, and the same failing `rw` in both, comparing verdicts and the error text
+(`rewrite: the goal does not mention c`). `=tactics` (the Lean host's group) is
+unchanged and remains the host-side regression.
+
+**Verification on this branch** (A12+A11+A13 merged; the self-hosted compiler built from
+the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #147–#151), and
+`=tactics` is 28/28. A full `=selfhost` run reached **112 cases, 0 failures** (and
+#112–#114 also passed) before the machine restarted; the remaining tail was being
+re-run when it restarted again, and the A13 cases were then re-checked individually. The
+fixpoint was not run: `selfhost/*.wiz` does not use `by` yet, and the 6 GiB heavy slot
+was not available; a fixpoint run is the remaining gate for the compiler's own sources.
+
+**Limits.** No `simp`/`simp`-set management, no decision procedures (`decide`,
+`omega`, `linarith`, `ring`, `bv_decide`), no `cases`/`induction` (and `constructor`
+covers ordinary inductives only), no rewriting in hypotheses, no
+`trace_state`/`rename_i`, no unfolding of a hypothesis, and no user tactic functions
+(A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
+type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
+whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
+written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+guaranteed to match the host. The error position is the failed command, as for the rest
+of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
+are not reproduced.
+
+## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
+
+The matrix above counts **features**; this measures the **library**. A new group,
+`selfhost-libdiff`, runs both compilers on every `*.wiz` under `lib/` and `scry/` (the
+file as a root module, its imports under `lib/`, `drafts/feral/lib` and the `scry/`
+package roots) and compares
+
+* **acceptance** (does the frontend report an error at all),
+* the **code** of the first error (`ErrorCode` on the Lean side, the self-hosted
+  driver's table on the other),
+* its **span** (file, line, column),
+* its **message** (whitespace-normalised; the driver's `[code]` suffix moved out), and
+* the **number of declarations** the file produced.
+
+The first divergence is reported per file. A file both compilers accept with the same
+declaration count is `ok`; one both reject is `rejected` (the counts of the same code,
+same span and same message are reported apart, because D6's positioning differs by
+design); one whose verdicts differ is `diverging` — that is the gap list. A run that
+hits the per-file time or memory bound is `bounded`, not a gap. That includes exit
+status 3, the self-hosted runtime giving up (`wiz: out of memory` when an allocation
+fails under the memory bound); the report carries its `wiz:` line.
+
+The host side is the Lean frontend in a child process (`tests --libdiff-host FILE`, the
+same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/
+`cSourceTable`/`preprocessHeaders` as `Main.initState` sets them), so the sweep can
+bound it; its declaration count is the file's `declSites` in module `""` without a
+structure's constructors, fields and projections, plus its `#check` info messages. The
+self-hosted side is the compiler binary `selfhostCompiler` builds, `check FILE --types`:
+its info lines are the per-declaration reports (a structure's projections dropped), so
+the two counts are the same notion.
+
+The files are found by walking the tree (not a list), `--only` takes a path, a path
+suffix or a module name, and `--limit N` the first N — a work list, not a gate. To make
+progress a diff rather than a number, `--baseline FILE` writes the current
+`verdict/divergence/class` per file when the file does not exist, and reports
+`fixed`/`regressed`/`changed`/`new` against it when it does. `--json` writes one record
+per file (both sides: acceptance, exit, errors, decls, first error code/span/message;
+plus the verdict, the first divergence, the missing construct and the note) and a final
+summary record. `--timeout`/`--host-timeout`/`--self-timeout` (seconds) and `--mem`
+(megabytes, the self-hosted side's `ulimit -v`) bound each file.
+
+Usage:
+
+```sh
+heavy --mem 4G .lake/build/bin/tests --libdiff                 # everything
+heavy --mem 4G .lake/build/bin/tests --libdiff --limit 10      # a first look
+heavy --mem 4G .lake/build/bin/tests --libdiff --only lib/Hoare.wiz
+heavy --mem 4G .lake/build/bin/tests --libdiff --json > gap.jsonl
+heavy --mem 4G .lake/build/bin/tests --libdiff --baseline libdiff-baseline.json
+lake test -- '=selfhost-libdiff'                               # the same, as a group
+```
+
+The group skips (a skipped case is not a pass) when there is no C toolchain for the
+self-hosted compiler, and never fails because of a gap; it writes the full report to
+`.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
+case's output. CI runs it as its own shard (`selfhost-libdiff` in
+`.github/test-shards.json`).
+
+`--only` and `--limit` make it usable as the A13 work list: the gap list groups the
+files whose verdicts differ by the construct the self-hosted frontend names
+(`unsupported syntax term.by` is `by`, `unsupported command command.syntax` is `syntax`,
+…), and prints the ten files to start with (most common construct first).

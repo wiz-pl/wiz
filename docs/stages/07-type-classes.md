@@ -26,7 +26,7 @@ The prelude now elaborates about 6× faster.
 
 ## 7b: classes, instances, tabled resolution
 
-```
+```wiz
 class Inhabited (A : Type) where
   default : A
 instance : Inhabited Nat := Inhabited.mk 0
@@ -43,9 +43,10 @@ instance {A : Type} [Inhabited A] : Inhabited (List A) where
   arguments are known, at the latest at the end of the command. Inside a definition,
   instance binders are local instances.
 * `instance (priority := n)? binders : C T := v`, or `where f := …` with the fields
-  by name. The instance is named after its type (`instInhabitedNat`). Instances
-  overlap freely (Lean-style): local instances first, then higher priority, then
-  later declarations.
+  by name (an unknown field is `no-such-field`, a missing one `missing-field`, and one
+  given twice `named-argument`, as in a structure update). The instance is named after
+  its type (`instInhabitedNat`). Instances overlap freely (Lean-style): local instances
+  first, then higher priority, then later declarations.
 * **Resolution** (`Elab/Class.lean`) is tabled, after Selsam, Ullrich & de Moura
   (2020), with generator and consumer nodes and an answer table per normalised goal.
   A subgoal already in the table waits for that goal's answers instead of being
@@ -65,8 +66,11 @@ complete terms; no default instances or coercions yet.
 
 ## 7c: command macros, reflection, `deriving`
 
-```
+```wiz
 import Deriving
+inductive Shape where
+  | circle
+  | square
 inductive Tree (A : Type) where
   | leaf
   | node (l : Tree A) (x : A) (r : Tree A)
@@ -114,7 +118,7 @@ one-element quotations and use `Syntax.mkApp`; the self-hosted frontend has no m
 
 ## 7d: deriving with proof fields and in any universe
 
-```
+```wiz
 import Deriving
 structure Pos where
   n : Nat
@@ -145,7 +149,7 @@ inductive Box.{u} (A : Type u) where          -- Box : Type u → Type u (inferr
 
 ## 7e: numeric classes
 
-```
+```wiz no-check
 class Add (A : Type) where
   add : A → A → A                      -- also Sub, Mul, Div, Mod, Neg
 class OfNat (A : Type) (n : Nat) where
@@ -212,7 +216,7 @@ for a look-alike type applies too; numerals as patterns: see 13q (`docs/stages/1
 
 ## 7f: heterogeneous operators, default instances
 
-```
+```wiz no-check
 class HAdd (A B : Type) (C : outParam Type) where
   hAdd : A → B → C                     -- also HSub, HMul, HDiv, HMod, HPow, HAppend
 instance instHAdd {A : Type} [Add A] : HAdd A A A := HAdd.mk Add.add

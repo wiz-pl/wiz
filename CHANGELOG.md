@@ -10,6 +10,76 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
+  by key: a row one side deleted and the other left unchanged is deleted (a union kept
+  it, so a branch merging master resurrected rows master had removed), and a row one
+  side deleted and the other modified is a conflict the driver refuses (22f).
+* `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
+  (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
+  group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
+  FFI rows (`Word`, `WordArray`, `WordMap`, `Intern`) are reviewed per C symbol, and
+  `scripts/trust-ffi-audit.sh --check` compiles each extern's generated prototype
+  against `runtime/wiz_rt.h` (9g, 22f).
+* runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
+  `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
+  reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
+* trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
+  per block (compiled-only general recursion, an inhabited witness at 22f, no
+  termination claim, and the de-mutualisation or measure that would remove the row), and
+  `docs/trust-ledger.md` states that such a row is a design choice, not an unreviewed
+  gap. The two structural fuel loops `Scry.rdLoop`/`Scry.domLoop` are now total, so the
+  group is 132 rows. The migration is complete: the twenty `Prelude` numeral/`memo`
+  registrations, the `PMap`/`Scry` seals and `Proc.runLinked` have individual reasons
+  too, no `legacy:` row remains, and CI runs `--strict-legacy` (22f, 13a).
+* grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
+  content-addressed vendor directory (`<sha256>.tar.gz` plus `vendor/index.sexpr`) without
+  rewriting `grail.lock`; `--vendor DIR` (or `Package.set "vendor" "DIR"`) lets `fetch`, `build`,
+  `test`, `run`, `lsp` and `doc` resolve archives by SHA-256 before the cache or the
+  network, so `grail fetch --locked --offline --vendor vendor` is hermetic. Unpacked
+  registry packages now live in the shared, content-addressed store
+  `<cache>/grail/packages/<sha256>/`, linked from `.grail/packages/NAME`, so a second
+  project downloads and unpacks nothing; `grail cache path|list|verify` inspects the
+  store (`=grail-vendor`). The index and lock formats are unchanged.
+* grail (23m): a static package registry. `Package.version/toolchain/require`, an
+  S-expression index (`index/NAME.sexpr`, scoped `index/@org/NAME.sexpr`), semver ranges
+  (`^0`/`^0.0` included), a flat resolver that retracts constraints of replaced
+  versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
+  [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
+  over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
+  fixture (`=grail-deps`).
+* grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
+  `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
+  sorted `(deps "NAME REQ" …)` entries; and `Package.override NAME PATH` in
+  `grail.local.wiz` (recorded as `(override NAME PATH HASH)`, refused by `--locked`, used
+  with a note by a plain build). v1/v2 locks still parse and render unchanged, and
+  `grail update` upgrades them. `grail publish` and the index schema record the size,
+  tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
+  locks, upgrade, override).
+* grail (23m), the static index side: a `grail-index` repository layout (static
+  `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
+  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
+  semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
+  module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
+  schema, `grail publish` recording module names, and a resolve-time module-conflict
+  check (`=grail-index`). A signed index snapshot (`index/snapshot.sexpr` with
+  `(seq)`/`(updated)`/key fingerprint/`(expires)`, plus a detached SSH signature),
+  `grail update --require-signature --allowed-signers FILE`, the lock's
+  `(index-signature …)` fields (key, fingerprint, sequence, digest) and an offline
+  `grail index verify`; later updates re-verify from the pinned key and refuse tampering,
+  rollback, a same-sequence rewrite and an expired key. There is no transparency log;
+  the TUF/Sigsum staging, key rotation and the remaining gaps are in
+  `docs/stages/23-grail/index-repository.md`. `update --locked --require-signature`
+  refuses a registry lock with no `(index-signature …)` even when its `(index …)` line
+  is absent; `--locked` reads no index, so it checks the entry's shape only, and
+  `grail index verify --locked` is the command that re-verifies the signature.
+* selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
+  rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
+  current and that its tables accept the same corpus as the Lean parser), and the
+  compiler's entry point is `selfhost/Main.wiz` (the checker's is
+  `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
+  text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
@@ -19,6 +89,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
   length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
   and the rotate composition for `k >= w` (22a, 22c).
+
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
@@ -31,8 +102,36 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   C and LLVM are unchanged, and `--llvm`/`--wasm` remain aliases. The subset boundary is
   checked at compile time and every module is parsed and type-checked before it is
   written (`Wiz/Compiler/WasmValidate.lean`); golden tests compare the module's result
-  with the interpreter's. Limits and the 25-case `wasm` test group are in
+  with the interpreter's. Limits and the 29-case `wasm` test group are in
   `docs/stages/08-backend/wasm.md`.
+* The published site has a `/bench/` page: standard-library timings (with the
+  interleaved A/B ratios and the spread of each run) and the Scry taint metrics,
+  rendered from the checked-in JSON by `web/build-bench.py`. The page is committed, so a
+  JSON change that was not regenerated is a diff, and the docs job refuses it
+  (`web/build-site.sh` runs the generator's `--check`).
+* The WebAssembly target reclaims memory (8f): `dup`/`drop` maintain the object header's
+  reference count, the last drop releases the fields and returns the block to a segregated
+  free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
+  peak live set, not everything it allocated: the fixed workload in
+  `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
+  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
+  iterative (through the dead object's own header), so a long chain does not recurse on
+  the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* `wiz repl` (11ac): one command per line into one persistent frontend session
+  (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
+  `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
+  script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
+  modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
+  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
+  form, 11ah).
+* [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
+  toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
+  `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started
+  `wiz lsp --ws` daemon per bridge and worktree (idle unload, a per-call deadline, and
+  no sharing between worktrees). It is opt-in (not in the dev shell), and
+  `.github/workflows/tools.yml` runs its unit tests on every change under `tools/`,
+  with the end-to-end smoke test on manual dispatch.
 
 ## [0.1.0] - unreleased (draft)
 

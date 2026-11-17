@@ -26,6 +26,35 @@ namespace Wiz
 
 abbrev Lvl := Nat
 
+/-! ### A memoising thunk
+
+Lean's `Thunk` is not memoising in this toolchain (`Thunk.get` is `fun x => x.fn ()`),
+so a glued definition or a lazy induction that kept a plain one would be recomputed on
+every `whnf`: conversion of a value behind a definition then re-evaluates the definition
+at each step, exponentially on a machine's run (issue #256). `memoThunk` is a `Thunk`
+whose function remembers its first result.
+
+The cell is **owned by one thunk** and its function is the pure computation that the
+value denotes: a definition's value term evaluated at the captured levels and globals,
+in the empty environment, or a projection/application of one. Forcing the same thunk
+twice therefore gives the same result, and a cell is never keyed by a name or shared
+between declarations: the captured `Globals` is persistent (insertion keeps the old
+value), so a later declaration cannot change what an existing cell computes. This is
+the invariant that makes the `unsafe` implementation below unobservable; it is the same
+arrangement `Budget` uses for a counter behind a pure interface. -/
+unsafe def memoThunkImpl {α : Type} [Inhabited α] (f : Unit → α) : Thunk α := unsafeBaseIO do
+  let cell ← IO.mkRef (none : Option α)
+  pure (Thunk.mk fun _ => unsafeBaseIO do
+    match ← cell.get with
+    | some v => pure v
+    | none =>
+      let v := f ()
+      cell.set (some v)
+      pure v)
+
+/-- A `Thunk` computed at most once. -/
+@[implemented_by memoThunkImpl] opaque memoThunk {α : Type} [Inhabited α] (f : Unit → α) : Thunk α
+
 mutual
 /-- What a neutral is stuck on. Besides variables, globals and metas, stage 4c adds
 stuck observational constructs: an equality or cast whose type is a neutral, and
@@ -70,6 +99,7 @@ inductive Val (R : Type) where
   | drec (q j D : Val R)
   | dhrec (q H j D : Val R)
   | mu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
+      (prop : Bool)
   | con (x : Val R)
   | nu (l : Level) (I D i : Val R) (sz : Val R) (hint : Option (Name × List Level × List (Val R)))
   | size
@@ -87,7 +117,7 @@ inductive Val (R : Type) where
   | ulift (k l : Level) (A : Val R)
   | up (a : Val R)
   /-- **glued**: the global `name` applied to the eliminations `sp`, together with its
-  unfolding, computed only when needed (a `Thunk` remembers it). Keeping the head
+  unfolding, computed only when needed (a `memoThunk` remembers it). Keeping the head
   lets conversion compare `f a` with `f b` without unfolding `f`, keeps names in error
   messages, and lets type classes see their class and the nominal heads. Use `whnf`
   before matching on a value's shape. -/
@@ -96,7 +126,8 @@ inductive Val (R : Type) where
   the induction hypotheses of a numeral (so that `ind` on `1000000` doesn't compute a
   million of them first), applied to the eliminations `sp` (applications and
   projections, which stay lazy). `whnf` forces it; quoting keeps the folded form. -/
-  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (sp : Array (Elim R)) (val : Thunk (Val R))
+  | lazyInd (l : Level) (I D : Val R) (v : Level) (P m i x : Val R) (prop : Bool) (sp : Array (Elim R))
+      (val : Thunk (Val R))
 
 /-- An elimination stuck on a neutral. -/
 inductive Elim (R : Type) where
@@ -109,7 +140,7 @@ inductive Elim (R : Type) where
   /-- the branches are evaluated in `env` only when the tag is known -/
   | ecase (z : Name) (motive : Closure R) (env : List (Val R)) (branches : List (Term R))
   | delim (v : Level) (P mret marg mrec mhrec : Val R)
-  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R)
+  | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R) (prop : Bool)
   | sfix (l : Level) (I D : Val R) (v : Level) (P f s i : Val R)
   | scase (l : Level) (q : Val R) (I D : Val R) (v : Level) (P m s i : Val R)
   | out
@@ -140,7 +171,7 @@ instance {R : Type} : Inhabited (Val R) := ⟨.neutral (.global kernelPanicName 
 anything else (a stuck computation, or an elaborator metavariable). -/
 partial def Val.toPoly? {R : Type} [QRig R] [DecidableEq R] : Val R → Option (QPoly R)
   | .unfold _ _ _ v => Val.toPoly? v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => Val.toPoly? v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => Val.toPoly? v.get
   | .qlit r => some (QPoly.const r)
   | .neutral (.local l) #[] => some (QPoly.var l)
   | _ => none

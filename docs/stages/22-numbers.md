@@ -117,7 +117,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
 
 ## 22e: phantom parameters
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where
   | mk (toNat : Nat)                     -- no field mentions `w`
 def f (x : UIntN 8) : UIntN 16 := x      -- type mismatch
@@ -214,7 +214,7 @@ Two ways to prove `False` without writing `axiom` are closed.
 
 ## 22g: regions: borrow checking as typing
 
-```
+```wiz no-check
 def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
   | .true => .ok y
@@ -301,7 +301,7 @@ live on after the borrow), and with the second it also has to request the instan
 
 `BitVec n` (`lib/BitVec.wiz`) and `UIntN n` (`lib/Word.wiz`) are one type:
 
-```
+```wiz no-check
 inductive UIntN (w : Nat) where | mk (toNat : Nat)   -- lib/Word.wiz: the model + natives
 def BitVec (n : Nat) : Type := UIntN n               -- lib/BitVec.wiz: the HDL/proof names
 def BitVec.add {ω n : Nat} (a b : BitVec n) : BitVec n := UIntN.add a b
@@ -333,7 +333,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
 
 ## 22i: unboxed newtypes and `attribute [inline]`
 
-```
+```wiz no-check
 structure Uniq (ρ : Region) (A : Type) where
   val : A                                  -- at run time, a Uniq ρ A is its A
 attribute [inline] Uniq.borrow             -- compiled code runs the scope's body in place
@@ -365,8 +365,8 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   over `A × B` sees a variable `B` and keeps the pair, and `B` can be the structure's
   tail. `def first {A B : Type} (p : A × B) : A := p.1`, then `first (S.mk 5)`, reads
   field 0 of a number. So the default keeps pairs, and the unboxed layout is waiting for
-  an encoding that carries it in something generic code also sees (a quantity:
-  `wiz-notes/repr-shape.md`, option B). Group `repr`.
+  an encoding that carries it in something generic code also sees (structures
+  re-encoded by the elaborator so that a quantity says the pair is unboxed). Group `repr`.
 * **`attribute [inline] f`** (`Inline.lean`) substitutes `f`'s erased body where `f` is
   applied to all its arguments, then simplifies: a redex `(λ x. b) a` becomes a `let`,
   and a `let` of a variable, of `◾`, or of a lambda used once (not under a lambda) is
@@ -383,8 +383,7 @@ The region discipline of 22g used to cost at run time: every handle was a cell
   continuation such as `Uniq.end r (λ v. …)`). With `--unbox-structs`, a `Uniq.borrow`
   scope around `push1` went from 15 objects and 8 lifted functions to 4 objects and none,
   and two nested scopes from 29 and 23 to 6 and none (no scope: 3). What remains is the
-  handle's cell: `Uniq` is an inductive, which `--unbox-structs` doesn't unbox
-  (`wiz-notes/linear-scope-cost.md`).
+  handle's cell: `Uniq` is an inductive, which `--unbox-structs` doesn't unbox.
 
 Objects allocated on `#run`'s checked heap (`tests --allocs FILE ENTRY…`, a measuring
 mode of the test driver), before → after (the "unbox" columns are with `--unbox-structs`;
@@ -408,7 +407,7 @@ design). The self-hosted toolchain doesn't have phantom tails at all yet.
 
 ## 22j: Feral, the surface language
 
-```
+```wiz no-check
 import FeralCore
 import Feral
 feral
@@ -440,7 +439,7 @@ loops, `?`, `U64`, and functions that return borrows.
   and elaborated like anything else. `#lower feral … end` also shows that text: the
   function above becomes
 
-  ```
+  ```wiz no-check
   def swap {ρa ρb : Region} (x : (Uniq ρa U64)) (y : (Uniq ρb U64)) : Result (Unit × ((Uniq ρa U64) × (Uniq ρb U64))) :=
     let t := x.val;
     let x := (Uniq.set x y.val);
@@ -573,9 +572,9 @@ was a hole of its own and is gone: 22l.)
 T.mk` requires `sealed inductive T` and a private `T.mk` (an error otherwise). Erasure and readback look for a
 registered seal among the index type's domains (through an indexed family's Σ), not at
 the `μ`'s display name, so the representation is a function of the type up to
-conversion (`repr-shape.md` (I1)); the display name is no longer consulted.
+conversion; the display name is no longer consulted.
 
-**Who keeps a look-alike out** (three layers, `wiz-notes/repr-shape.md` §4C.6):
+**Who keeps a look-alike out** (three layers):
 
 1. *Opacity (13b).* A native type's constructor is private (R5 below), so outside its
    module the type does not unfold for the elaborator, and its description `T.desc` and
@@ -608,9 +607,9 @@ terms) and `selfhost` (the two frontends agree). Kernel rules: none, in either k
 keeps `toNat < 2^w`, the invariant the natives rely on. But the module also exported an
 unchecked builder, `UIntN.ofBitsTrusted {0 w} (n : Nat) : UIntN w`, for `BitVec.concat`
 and `BitVec.ofVec`, whose width was erased: `UIntN.ofBitsTrusted 5 : UIntN 1` had
-`toNat = 5` in the kernel while compiled code computed on other bits
-(`wiz-notes/soundness-probes/a3-word-ofbitstrusted.wiz`), the out-of-range disagreement of
-R5 again, from any module.
+`toNat = 5` in the kernel while compiled code computed on other bits, the out-of-range
+disagreement of R5 again, from any module (the regression is the case "22l: a word
+carries its range: …" of the group `word`).
 
 Now the invariant is a field: `| private mk (toNat : Nat) (0 isLt : Nat.lt toNat (2^w) =
 .true)`. The proof is erased, so a word is still just its bits at runtime (the native

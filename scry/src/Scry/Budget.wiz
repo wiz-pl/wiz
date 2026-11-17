@@ -1,0 +1,89 @@
+import Sys
+import Text
+/-!
+# Scry.Budget: time and node limits, and progress reporting
+
+Large translation units are not uniformly expensive: parsing the 3.9 MB
+`tree-sitter-c/src/parser.c` (1.1 M CST nodes) takes a few seconds, while lowering the
+same tree and evaluating the taint rules on one large function can take much longer.
+Without a contract the command simply appears to hang.
+
+This module is that contract:
+
+* `Scry.RunBudget` carries the user's `--timeout SECS`, `--max-nodes N`,
+  `--max-rounds N` and `--progress` options (zero/`none` means "no limit").
+* `Scry.Budget.stage` prints one `scry: [stage] name elapsed=…ms detail` line on
+  **stderr** (stdout stays machine-readable), so a long run shows where it is.
+* `Scry.Budget.expired` is the cooperative deadline test, polled between stages, rounds
+  and functions. Expiry is a **clear refusal** (no findings, non-zero exit); a
+  `--max-rounds` stop is the **partial** path, marked `truncated` with a
+  `scry/budget/*` note. `Scry.Native.installTimeout` adds a hard `SIGALRM` guard for a
+  single stage that cannot poll.
+
+The clock is monotonic (`Clock.monotonic`), so a deadline never moves backwards.
+-/
+
+/-- The limits of one `scry taint` run. Zero/`none` means unbounded. -/
+structure Scry.RunBudget where
+  /-- `--timeout SECS`: wall-clock limit for the whole run. -/
+  timeoutSecs : Option Nat
+  /-- `--max-nodes N`: refuse a CST larger than this before lowering. -/
+  maxNodes : Option Nat
+  /-- `--max-rounds N`: cap the points-to and summary fixpoints. -/
+  maxRounds : Option Nat
+  /-- `--progress`: print stage lines on stderr. -/
+  progress : Bool
+
+def Scry.RunBudget.default : Scry.RunBudget :=
+  Scry.RunBudget.mk .none .none .none .false
+
+/-- The monotonic clock in milliseconds (the unit the stage lines print). -/
+def Scry.nowMs : IO Nat := IO.bind Clock.monotonic (fun d => IO.pure (Duration.toMillis d))
+
+/-- Print a line on **stderr**; `--progress` controls whether it appears. -/
+def Scry.progress (b : Scry.RunBudget) (s : String) : IO Unit :=
+  match b.progress with
+  | .true => IO.ePrintln s
+  | .false => IO.pure ()
+
+/-- One stage line: `scry: [stage] name elapsed=NNNms detail`. `detail` may be empty. -/
+def Scry.stageLine (name : String) (elapsedMs : Nat) (detail : String) : String :=
+  "scry: [stage] " ++ name ++ " elapsed=" ++ Nat.repr elapsedMs ++ "ms"
+    ++ (match detail with
+      | "" => ""
+      | _ => " " ++ detail)
+
+/-- Announce that `name` finished `elapsedMs` after the run started. -/
+def Scry.Budget.stage (b : Scry.RunBudget) (name : String) (elapsedMs : Nat)
+    (detail : String) : IO Unit :=
+  Scry.progress b (Scry.stageLine name elapsedMs detail)
+
+/-- `--timeout SECS` in milliseconds, or none. `--timeout 0` disables the limit. -/
+def Scry.RunBudget.timeoutSecondsMs (b : Scry.RunBudget) : Option Nat :=
+  match b.timeoutSecs with
+  | .none => .none
+  | .some .zero => .none
+  | .some s => .some (Nat.mul s 1000)
+
+/-- Whether the run's `--timeout` has expired at `nowMs`. -/
+def Scry.Budget.expired (b : Scry.RunBudget) (startMs nowMs : Nat) : Bool :=
+  match Scry.RunBudget.timeoutSecondsMs b with
+  | .none => .false
+  | .some limit => Nat.le limit (Nat.sub nowMs startMs)
+
+/-- The `--max-nodes` refusal message (`none` when the size is allowed). -/
+def Scry.Budget.tooManyNodes (b : Scry.RunBudget) (file : String) (nodes : Nat) :
+    Option String :=
+  match b.maxNodes with
+  | .none => .none
+  | .some .zero => .none
+  | .some limit => match Nat.lt limit nodes with
+    | .true => .some (file ++ ": " ++ Nat.repr nodes ++ " CST nodes exceeds --max-nodes "
+        ++ Nat.repr limit ++ "; refusing to lower (raise --max-nodes explicitly)")
+    | .false => .none
+
+/-- One `scry/budget/*` diagnostic as `(rule, message)`; the command appends these to
+its boundary list so a caller cannot mistake a truncated run for a complete one. -/
+structure Scry.BudgetNote where
+  rule : String
+  message : String

@@ -6,8 +6,10 @@ and is opened as one pull request (an integration PR); its component branches
 stay local and their PRs are closed as folded.  Stacks are serialised: one open
 PR per dependency chain, and only the PR at the head of a chain gets CI.
 
-The ledger is JSON, kept outside the repository (default
-`wiz-notes/stack-ledger.json`, or $WIZ_STACK_LEDGER).  Curated fields -- `order`,
+The ledger is JSON, kept outside the repository: `--ledger FILE`, else
+$WIZ_STACK_LEDGER, else `stack-ledger.json` in the notes directory named by
+`--notes DIR` or $WIZ_NOTES_DIR.  There is no default; without one of these the
+script exits with status 2.  Curated fields -- `order`,
 `chain`, `depends_on`, `after`, `next`, `note` -- are edited by hand; everything
 under `facts` is derived from git and `gh` by this script.
 
@@ -38,19 +40,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-def default_ledger():
-    """$WIZ_STACK_LEDGER, else the wiz-notes beside the checkout or its parent."""
+def resolve_ledger(ledger, notes):
+    """`--ledger`, else $WIZ_STACK_LEDGER, else `stack-ledger.json` in `--notes` or
+    $WIZ_NOTES_DIR; None when none of them is given."""
+    if ledger is not None:
+        return ledger
     env = os.environ.get("WIZ_STACK_LEDGER")
     if env:
         return Path(env)
-    for base in (REPO.parent, REPO.parent.parent):
-        candidate = base / "wiz-notes" / "stack-ledger.json"
-        if candidate.is_file():
-            return candidate
-    return REPO.parent.parent / "wiz-notes" / "stack-ledger.json"
+    notes = notes or os.environ.get("WIZ_NOTES_DIR")
+    if notes:
+        return Path(notes) / "stack-ledger.json"
+    return None
 
-
-DEFAULT_LEDGER = default_ledger()
 GH = os.environ.get("GH", "gh")
 BAD = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 PENDING = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
@@ -378,7 +380,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Print and refresh the merge-stack ledger of wiz-pl/wiz."
     )
-    parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
+    parser.add_argument("--ledger", type=Path, default=None,
+                        help="the ledger file (default: $WIZ_STACK_LEDGER, else stack-ledger.json in the notes directory)")
+    parser.add_argument("--notes", metavar="DIR", default=None,
+                        help="the notes directory that holds stack-ledger.json (default: $WIZ_NOTES_DIR)")
     parser.add_argument("--write", action="store_true", help="update the ledger file")
     parser.add_argument("--json", action="store_true", help="print refreshed JSON")
     parser.add_argument("--next", type=int, metavar="N", help="the next N actions")
@@ -387,6 +392,11 @@ def main(argv=None):
     parser.add_argument("--fetch", action="store_true", help="git fetch origin first")
     args = parser.parse_args(argv)
 
+    args.ledger = resolve_ledger(args.ledger, args.notes)
+    if args.ledger is None:
+        print("stack-status: no ledger given: pass --ledger FILE or --notes DIR, "
+              "or set WIZ_STACK_LEDGER or WIZ_NOTES_DIR", file=sys.stderr)
+        return 2
     if not args.ledger.is_file():
         print(f"stack-status: no ledger at {args.ledger}", file=sys.stderr)
         return 2

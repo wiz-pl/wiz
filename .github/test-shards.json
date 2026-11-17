@@ -1,11 +1,18 @@
 [
   {"name": "selfhost", "split": 6, "heavy": true,
-   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
-    "=audit-kernels"
+    "=audit-kernels",
+    "=selfhost-macro"
+  ]},
+  {"name": "selfhost-parse-diff", "heavy": true,
+   "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
+   "select": [
+    "=selfhost-parse-diff"
   ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
@@ -17,6 +24,12 @@
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz", "lib/Grail.wiz"],
    "select": [
     "=grail-selfhost"
+  ]},
+  {"name": "selfhost-libdiff", "heavy": true,
+   "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
+              "Tests/Main.lean"],
+   "select": [
+    "=selfhost-libdiff"
   ]},
   {"name": "backends", "jobs": 4, "select": [
     "backend",
@@ -47,7 +60,9 @@
     "=grail-commands",
     "=grail-deps",
     "=grail-hygiene",
+    "=grail-index",
     "=grail-jobs",
+    "=grail-vendor",
     "=hdl",
     "infoview",
     "=json",
@@ -58,13 +73,20 @@
     "=native",
     "=natives",
     "=nvim",
+    "=react",
     "optic",
     "persistent",
     "phantom",
+    "=plot",
     "regions",
+    "=reject",
     "=scry-wil",
+    "=scry-c2wil",
+    "=scry-csharp",
     "=scry-ai",
     "=scry-taint",
+    "=scry-uaf",
+    "=scry-workflow",
     "=linear-case",
     "repr",
     "result-q",

@@ -4,6 +4,7 @@
 // server and nothing to install: the module is the checker.
 "use strict";
 import { isValue, renderValue } from "./playground-values.js";
+import { startInfoview } from "./playground-lsp.js";
 
 const editor = document.getElementById("editor");
 const runButton = document.getElementById("run");
@@ -88,6 +89,11 @@ editor.addEventListener("keydown", (e) => {
     run();
   }
 });
+
+// The goals pane is independent of the Wasm engine: with `?lsp=ws://host:port` it is a
+// language client (web/playground-lsp.js); without one it says so and the page stays a
+// local checker. A failed connection is the same as no server.
+startInfoview({ editor, panel: document.getElementById("goals") });
 
 async function start() {
   setStatus("loading the engine…", "running");

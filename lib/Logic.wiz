@@ -28,6 +28,8 @@ notation), the equality lemmas `Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substPr
 the definitional `propext` and `funext`, and the Boolean algebra (`Bool.and_comm`,
 `Bool.or_assoc`, `Bool.and_absorb`, the De Morgan laws, …) with its bridges from
 `b = true` to `∧`, `∨` and `¬` (`Bool.and_eq_true`, `Bool.or_eq_true`, `Bool.not_eq_true`).
+The oriented Boolean identities are registered with `attribute [simp]` at the end of the
+file, so `simp` normalises Boolean goals without a rule list.
 
 ```
 import Logic
@@ -306,20 +308,25 @@ def Bool.or_assoc : (a b c : Bool) → Bool.or (Bool.or a b) c = Bool.or a (Bool
   | .true, b, c => rfl
   | .false, b, c => rfl
 
-/-- `.true` is a right identity of `Bool.and`. -/
-def Bool.and_true : (a : Bool) → Bool.and a .true = a
+/-- `.true` is a right identity of `Bool.and` (`b && true = b`). Stated on the notation:
+the `&&` macro's stuck form is the one a goal written `b && true` contains. A rule stated
+`Bool.and b .true = b` would *not* fire on it (`Bool.and` matches on both arguments), so
+the three notation identities are stated here with the notation. -/
+def Bool.and_true : (a : Bool) → (a && Bool.true) = a
   | .true => rfl
   | .false => rfl
 /-- `.true` is a left identity of `Bool.and`. -/
 def Bool.true_and (a : Bool) : Bool.and .true a = a := rfl
-/-- `.false` is absorbing on the right for `Bool.and`. -/
-def Bool.and_false : (a : Bool) → Bool.and a .false = .false
+/-- `.false` is absorbing on the right for `Bool.and` (`b && false = false`), on the
+notation for the reason above. -/
+def Bool.and_false : (a : Bool) → (a && Bool.false) = Bool.false
   | .true => rfl
   | .false => rfl
 /-- `.false` is absorbing on the left for `Bool.and`. -/
 def Bool.false_and (a : Bool) : Bool.and .false a = .false := rfl
-/-- `.false` is a right identity of `Bool.or`. -/
-def Bool.or_false : (a : Bool) → Bool.or a .false = a
+/-- `.false` is a right identity of `Bool.or` (`b || false = b`), on the notation for the
+reason above. -/
+def Bool.or_false : (a : Bool) → (a || Bool.false) = a
   | .true => rfl
   | .false => rfl
 /-- `.false` is a left identity of `Bool.or`. -/
@@ -439,3 +446,48 @@ def Bool.eq_true_iff : (b : Bool) → ((b = .true) ↔ ¬ (b = .false))
 def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
   | .true => Iff.intro (fun h => absurd h.1) (fun h => absurd (h rfl))
   | .false => Iff.intro (fun h => fun ht => absurd ht.1) (fun h => rfl)
+
+-- ## The default `simp` set
+--
+-- The Boolean algebra above, oriented the way `simp` rewrites
+-- (`docs/stages/06-macros/simp.md`). `Bool.and_true`, `Bool.and_false` and
+-- `Bool.or_false` are stated on the `&&`/`||` notation (the spelling a goal uses); the
+-- rest are stated with `Bool.and`/`Bool.or`/`Bool.not` and fire on goals that contain
+-- those functions (e.g. a `Nat.land`, or a Boolean proof that did not use the notation).
+-- `!` is `Bool.not` itself, so `Bool.not_not` fires on `!(!a)`.
+--
+-- What is **not** registered, and why:
+--
+-- * `Bool.true_and`, `Bool.false_and`, `Bool.false_or`, `Bool.true_or`, `Bool.not_true`,
+--   `Bool.not_false`: the left side computes to a variable or a data value. The goal has
+--   already computed it, so the rule could never match; use the lemma explicitly when a
+--   proof needs the equation as a term.
+-- * `Bool.and_comm`, `Bool.or_comm`, `Bool.and_assoc`, `Bool.or_assoc`: commutativity and
+--   associativity are not oriented. `a && b → b && a` would loop, and the associativity
+--   rules have no normal form to aim at (the same reason `Nat.add_comm` stays out).
+-- * `Bool.and_or_distrib`, `Bool.or_and_distrib`: they expand the term, and with both
+--   registered `simp` could grow a goal without bound.
+-- * `Bool.and_eq_true`, `Bool.and_eq_false`, `Bool.or_eq_true`, `Bool.or_eq_false`,
+--   `Bool.not_eq_true`, `Bool.not_eq_false`, `Bool.not_true_iff`, `Bool.eq_true_iff`,
+--   `Bool.eq_false_iff`: a rule must be an equation; these are `↔`, a pair of
+--   implications, not `=`.
+-- * `Bool.cases`, `Bool.trueNeFalse`, `Bool.and_left`, `Bool.and_right`: a disjunction, a
+--   negation, and two lemmas with a premise before the equation (a rule with a premise
+--   needs a discharger, S3).
+-- * The equality section (`Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substProp`,
+--   `Iff.toEq`, `Iff.ofEq`, `propext`, `funext`, `congrFun`, `Eq.transProp`): every one
+--   has a premise before the equation, so `attribute [simp]` rejects it until S3.
+
+attribute [simp] Bool.not_not
+attribute [simp] Bool.not_and
+attribute [simp] Bool.not_or
+attribute [simp] Bool.and_true
+attribute [simp] Bool.and_false
+attribute [simp] Bool.and_self
+attribute [simp] Bool.and_absorb
+attribute [simp] Bool.and_not_self
+attribute [simp] Bool.or_false
+attribute [simp] Bool.or_true_right
+attribute [simp] Bool.or_self
+attribute [simp] Bool.or_absorb
+attribute [simp] Bool.or_not_self

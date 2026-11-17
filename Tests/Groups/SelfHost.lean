@@ -80,8 +80,8 @@ def termSamples (c : Term ZeroOneMany) (w : Level) : List (Term ZeroOneMany × N
    (.eq c c c, 3, 0), (.eqTy c c, 2, 0), (.refl c c, 2, 0), (.reflTy c, 1, 0), (.cast c c c c, 4, 0),
    (.transp c c c c c c, 6, 0), (.qty, 0, 0), (.qlit .one, 0, 0), (.enum ["a"], 0, 0), (.tag ["a"] 0, 0, 0),
    (.ecase "z" c c [c, c], 4, 0), (.desc w c, 1, 1), (.dret c, 1, 0), (.darg c c c, 3, 0), (.drec c c c, 3, 0),
-   (.dhrec c c c c, 4, 0), (.delim w c c c c c c, 6, 1), (.mu w c c c c (some ("h", [w], [c])), 5, 2),
-   (.con c, 1, 0), (.ind w c c w c c c c, 6, 2), (.nu w c c c c (some ("h", [w], [c])), 5, 2), (.out c, 1, 0),
+   (.dhrec c c c c, 4, 0), (.delim w c c c c c c, 6, 1), (.mu w c c c c (some ("h", [w], [c])) false, 5, 2),
+   (.con c, 1, 0), (.ind w c c w c c c c false, 6, 2), (.nu w c c c c (some ("h", [w], [c])), 5, 2), (.out c, 1, 0),
    (.size, 0, 0), (.szInf, 0, 0), (.szSuc c, 1, 0), (.sizeLt c, 1, 0), (.sfix w c c w c c c c c, 7, 2),
    (.scase w c c c w c c c c c, 8, 2), (.cocon c, 1, 0), (.scofix w c c c c c c c, 7, 1), (.coit w c c c c c c, 6, 1),
    (.natLit 3, 0, 0), (.natOp "nat.add" #[c, c], 2, 0), (.ulift w w c, 1, 2), (.up c, 1, 0), (.down c, 1, 0),
@@ -176,6 +176,30 @@ def selfhostC (file : String) (flags : Array String := #[]) : IO (Option String)
     unless out.exitCode == 0 do throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}")
     return some out.stdout
 
+/-- (A14) The C the self-hosted compiler's driver writes for a set of module files
+(`build input.wiz -o out.c`): `input.wiz` is the root module, the others are written
+beside it (subdirectories included); `args` go to the driver after the command (`-I DIR`,
+`--rc`, …). Without a command the compiler is the one-shot mode, which takes no roots: its
+flags alone are the host's usage (`SelfhostCliDiff`). -/
+def selfhostModuleC (files : List (String × String)) (args : Array String := #[]) :
+    IO (Option String) := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      return none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let cmdArgs := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"] ++ args
+    let out ← IO.Process.output { cmd := "timeout", args := cmdArgs, cwd := dir }
+    unless out.exitCode == 0 do
+      throw (IO.userError s!"the compiler failed ({out.exitCode}): {out.stderr}{out.stdout}")
+    return some (← IO.FS.readFile (dir / "out.c"))
+
 /-- The self-hosted compiler rejects a program: exit code 1, the errors on standard
 error, and no C (15g). -/
 def selfhostCompileFails (file : String) (errors : String) : IO Unit := do
@@ -203,6 +227,34 @@ def selfhostCheckFails (file expected : String) : IO Unit := do
     checkEq (1 : UInt32) out.exitCode
     checkEq expected out.stderr
     checkEq "" out.stdout
+
+/-- (A11) `lib/Deriving.wiz` and the modules it imports, for the `deriving` differential:
+the tests' prelude loader does not include it. -/
+def derivingLoader : IO (Name → Option String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let text ← IO.FS.readFile "lib/Text.wiz"
+  let deriv ← IO.FS.readFile "lib/Deriving.wiz"
+  pure fun m =>
+    if m == "Prelude" then some prelude else if m == "Text" then some text
+    else if m == "Deriving" then some deriv else none
+
+/-- (A11) `deriving` differential, per form: the Lean host (which registers the five
+derivers on `import Deriving`) and the self-hosted frontend (whose prelude has no
+classes, so `selfHeader` declares them) accept or reject each declaration as `expected`
+says. -/
+def derivingAgrees (selfHeader : String) (decls : List (String × Bool)) : IO Unit := do
+  let loader ← derivingLoader
+  for (d, ok) in decls do
+    let hostSrc := "import Deriving\n" ++ d
+    let hs := runFrontend (R := ZeroOneMany) hostSrc { loader, trustedModule := Tests.libModule }
+    let leanOk := (hs.messages.filter (·.severity == .error)).isEmpty
+    unless leanOk == ok do
+      let es := (hs.messages.filter (·.severity == .error)).map (·.text)
+      throw (IO.userError s!"the Lean frontend {if leanOk then "accepts" else "rejects"}:\n{d}\n{es}")
+    let some out ← selfhostOutput ("import Prelude\n" ++ selfHeader ++ d) | return
+    let errs := (out.splitOn "\n").filter (·.startsWith "error")
+    unless errs.isEmpty == ok do
+      throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
 /-- (21l) A program with foreign functions gives the same output compiled by the Lean
 compiler and by the self-hosted one (with the collector unless `gc := false`, and with
@@ -793,6 +845,13 @@ def dupNamesExpected : String :=
   "error: 'loop' has already been declared\nerror: 'P.mk' has already been declared\nQ : U0\nQ.fst : (x0 : Q) → Nat\n" ++
   "error: 'Q.fst' has already been declared\nerror: 'ev' has already been declared\nfine : Nat\n"
 
+/-- The self-hosted checker accepts `file`: no `error` or `parse error` line. -/
+def selfhostChecks (file : String) : IO Unit := do
+  let some out ← selfhostOutput file | return
+  let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+  unless bad.isEmpty do
+    throw (IO.userError s!"the self-hosted checker rejected the file:\n{"\n".intercalate bad}")
+
 def cofProbes : String :=
   "def showBool : Bool → String" ++ "\n" ++
     "  | .true => \"true\"" ++ "\n" ++
@@ -1032,6 +1091,90 @@ def namedArgCases : List (String × Nat) := [
   ("const2 (B := Bool) 7 .true", 7),
   ("mixed (B := Bool) 3 .true", 3)]
 
+/-- The parser differential's corpus (`selfhost` group): the category and the input. The
+Lean parser is the oracle; the tables generated here and the checked-in
+`selfhost/Tables.wiz` must both accept it and produce the same tree. -/
+def parseDiffCorpus : List (Name × String) := [
+  ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
+  ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
+  ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
+  ("command", "def f (x : Nat) : Nat := x"),
+  ("command", "inductive T where\n  | a\n  | b (t : T)"),
+  ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
+
+
+/-- (U2b) Polymorphic declarations: a structure at a level parameter, an inductive whose
+fields are at two different level parameters, a class at a level parameter, and generic
+instances for `List` and `Option`. The `Duo` fields are in smaller universes than
+`Type (max u v)`, so their description fields are `ULift`ed (Q4), as in the Lean
+frontend. -/
+def u2bDecls : String :=
+  "structure Box.{u} (A : Type u) where\n  val : A\n" ++
+  "inductive Duo.{u, v} (A : Type u) (B : Type v) : Type (max u v) where\n  | mk (a : A) (b : B)\n" ++
+  "def unbox.{u} {A : Type u} (b : Box A) : A := b.val\n" ++
+  "def duoSnd.{u, v} {A : Type u} {B : Type v} (d : Duo A B) : B := match d with\n  | .mk _ b => b\n" ++
+  "def duoUp : Duo.{1, 0} (Type 0) Nat := Duo.mk Nat 5\n" ++
+  "def duoBUp : Nat := duoSnd duoUp\n" ++
+  "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+  "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+  "instance instReprType : Repr (Type 0) where\n  repr := fun _ => 0\n" ++
+  "def typeRepr : Nat := Repr.repr Nat\n" ++
+  "def sumRepr {A : Type} [Repr A] : List A → Nat\n" ++
+  "  | .nil => 0\n  | .cons x xs => Repr.repr x + sumRepr xs\n" ++
+  "instance instReprList {A : Type} [Repr A] : Repr (List A) where\n  repr := fun xs => sumRepr xs\n" ++
+  "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+  "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+  "instance instInhabitedOption {A : Type} [Inhabited A] : Inhabited (Option A) where\n" ++
+  "  default := Option.some Inhabited.default\n" ++
+  "instance instInhabitedList {A : Type} [Inhabited A] : Inhabited (List A) where\n" ++
+  "  default := List.cons Inhabited.default List.nil\n" ++
+  "def duoVal : Duo Nat String := Duo.mk 9 \"xy\"\n" ++
+  "def boxVal : Box Nat := Box.mk 7\n" ++
+  "def optDefault : Nat := match (Inhabited.default : Option Nat) with\n  | .some n => n\n  | .none => 0\n" ++
+  "def listDefault : Nat := match (Inhabited.default : List Nat) with\n  | .cons n _ => n\n  | .nil => 0\n"
+
+/-- (U2b) A program with the polymorphic declarations (`u2bDecls`), printing
+`3 xy 42 42 7`: the generic `Repr (List A)` and `Inhabited (Option/List A)` instances,
+a `Duo` at two level parameters, and a `Box` structure. -/
+def u2bProgram : String := "import IO\n" ++ u2bDecls ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (Repr.repr (List.cons 1 (List.cons 2 List.nil))));\n" ++
+  "  IO.println (duoSnd duoVal);\n" ++
+  "  IO.println (Nat.toString optDefault);\n" ++
+  "  IO.println (Nat.toString listDefault);\n" ++
+  "  IO.println (Nat.toString (unbox boxVal))\n"
+
+/-- (U2b) Each declaration after `import Prelude` is a level mistake: both frontends
+reject it on the same line, the Lean one's message contains `phrase`, and the
+self-hosted one is a positioned `file:line:col: error:` line whose message contains the
+same `phrase`. (The self-hosted position is the command's, not the offending token's:
+D6.) -/
+def selfhostLevelErrors (decls : List (String × String)) : IO Unit := do
+  let loader ← preludeLoader
+  match ← selfhostCompiler with
+  | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    for (d, phrase) in decls do
+      let src := "import Prelude\n" ++ d
+      let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+      let hostErrs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+      let some hostErr := hostErrs[0]? | throw (IO.userError s!"the Lean frontend accepts:\n{d}")
+      unless (hostErr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the Lean frontend's message does not say {repr phrase}:\n{hostErr}")
+      let hostLine := hostErr.takeWhile (· != ':')
+      let dir ← IO.FS.createTempDir
+      IO.FS.writeFile (dir / "bad.wiz") src
+      let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+      checkEq (1 : UInt32) out.exitCode
+      checkEq "" out.stdout
+      let lines := (out.stderr.splitOn "\n").filter (!·.isEmpty)
+      let some line := lines[0]? | throw (IO.userError s!"the self-hosted frontend accepts:\n{d}")
+      unless line.startsWith "bad.wiz:" do
+        throw (IO.userError s!"the self-hosted diagnostic has no span:\n{line}")
+      let rest := (line.drop "bad.wiz:".length)
+      checkEq hostLine (rest.takeWhile (· != ':'))
+      unless (line.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the self-hosted message does not say {repr phrase}:\n{line}")
 
 /-- (A11) `deriving`: a `deriving` clause on an inductive/structure and
 `deriving instance … for …`, with the class declared in the file (the self-hosted
@@ -1072,7 +1215,106 @@ def selfhostDeriving : String :=
   "#reduce Nat.beq (String.length (Repr.reprPrec (RT.node RT.leaf 1) 0)) 17\n"
 
 def selfhostDerivingExpected : String :=
-  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\ninstBEq : (BEq Nat)\nBool.beqEq : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq1 : (BEq Bool)\nZero : U0\nOne : U0\nOne.a : (x0 : One) → Nat\nTwo : U0\nTwo.a : (x0 : Two) → Nat\nTwo.b : (x0 : Two) → Bool\nThree : U0\nThree.a : (x0 : Three) → Nat\nThree.b : (x0 : Three) → Bool\nThree.c : (x0 : Three) → Nat\nTree : (x0 : U0) → U0\nBox : (x0 : U0) → U0\nBox.val : (x0 :0 U0) → (x1 : (Box x0)) → x0\ninstBEq7 : (x0 :0 U0) → (x1 : (BEq x0)) → (BEq (Box x0))\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nR2 : U0\nR2.a : (x0 : R2) → Nat\nR2.b : (x0 : R2) → Bool\nRT : U0\nt1 : (Tree Nat)\nt2 : (Tree Nat)\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
+  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\ninstBEq : (BEq Nat)\nBool.beqEq : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq1 : (BEq Bool)\nZero : U0\nOne : U0\nOne.a : (x0 : One) → Nat\nTwo : U0\nTwo.a : (x0 : Two) → Nat\nTwo.b : (x0 : Two) → Bool\nThree : U0\nThree.a : (x0 : Three) → Nat\nThree.b : (x0 : Three) → Bool\nThree.c : (x0 : Three) → Nat\nTree : (x0 : U0) → U0\nBox : (x0 : U0) → U0\nBox.val : (x0 :0 U0) → (x1 : (Box x0)) → x0\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nR2 : U0\nR2.a : (x0 : R2) → Nat\nR2.b : (x0 : R2) → Bool\nRT : U0\nt1 : (Tree Nat)\nt2 : (Tree Nat)\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
+
+/-- (A11) The five classes `lib/Deriving.wiz` gives derivers to, declared in the file:
+the self-hosted prelude has no classes, so a `deriving` case writes them out. -/
+def derivingSelfHeader : String :=
+  "class Inhabited (A : Type) where\n  default : A\n" ++
+  "class BEq (A : Type) where\n  beq : A → A → Bool\n" ++
+  "class Repr (A : Type) where\n  reprPrec : A → Nat → String\n" ++
+  "class DecidableEq (A : Type) where\n  decide : A → A → Bool\n" ++
+  "inductive Ordering where\n  | lt\n  | eq\n  | gt\n" ++
+  "class Compare (K : Type) where\n  compare : K → K → Ordering\n" ++
+  "instance : Inhabited Nat := Inhabited.mk 0\n" ++
+  "instance : Inhabited Bool := Inhabited.mk .false\n" ++
+  "def Bool.beqE : Bool → Bool → Bool\n  | .true, .true => .true\n  | .false, .false => .true\n" ++
+  "  | _, _ => .false\n" ++
+  "instance : BEq Nat := BEq.mk Nat.beq\ninstance : BEq Bool := BEq.mk Bool.beqE\n" ++
+  "instance : DecidableEq Nat := DecidableEq.mk Nat.beq\n" ++
+  "instance : DecidableEq Bool := DecidableEq.mk Bool.beqE\n" ++
+  "instance : Repr Nat := Repr.mk (fun n p => \"n\")\n" ++
+  "instance : Repr Bool := Repr.mk (fun b p => \"b\")\n" ++
+  "def Nat.compare (a b : Nat) : Ordering :=\n  if Nat.lt a b then Ordering.lt else (if Nat.beq a b then Ordering.eq else Ordering.gt)\n" ++
+  "instance : Compare Nat := Compare.mk Nat.compare\n" ++
+  "def Bool.cmp : Bool → Bool → Ordering\n  | .false, .true => Ordering.lt\n  | .true, .false => Ordering.gt\n" ++
+  "  | _, _ => Ordering.eq\n" ++
+  "instance : Compare Bool := Compare.mk Bool.cmp\n"
+
+/-- (A11) The deriver table and the five built-ins, on every form: a `deriving` clause on
+an `inductive` and on a `structure`, `deriving instance C for T`, several classes and
+several types in one instance, and a built-in re-registered for another class with
+`attribute [deriver …]`. Every result is reduced. -/
+def selfhostDerivingTable : String :=
+  "import Prelude\n" ++ derivingSelfHeader ++
+  "def ordIs (o : Ordering) : Nat := match o with\n  | .lt => 1\n  | .eq => 2\n  | .gt => 3\n" ++
+  "inductive Color where\n  | red\n  | green\n  | blue\n  deriving Inhabited, BEq, Repr, DecidableEq, Compare\n" ++
+  "structure Point where\n  x : Nat\n  y : Bool\n  deriving Inhabited, BEq, Repr, DecidableEq, Compare\n" ++
+  "inductive Tree (A : Type) where\n  | leaf\n  | node (l : Tree A) (x : A) (r : Tree A)\n  deriving Inhabited, BEq, Repr, Compare\n" ++
+  "structure Box (A : Type) where\n  val : A\n" ++
+  "deriving instance Inhabited, BEq, Repr for Box\n" ++
+  "structure One where\n  a : Nat\nstructure Two where\n  a : Nat\n  b : Nat\n" ++
+  "deriving instance BEq for One, Two\n" ++
+  "class Eq2 (A : Type) where\n  decide : A → A → Bool\n" ++
+  "instance : Eq2 Nat := Eq2.mk Nat.beq\n" ++
+  "attribute [deriver Eq2] deriveDecidableEq\n" ++
+  "inductive Swatch where\n  | on\n  | off\n  deriving Eq2\n" ++
+  "def t1 : Tree Nat := Tree.node Tree.leaf 1 Tree.leaf\n" ++
+  "def t2 : Tree Nat := Tree.node (Tree.node Tree.leaf 2 Tree.leaf) 1 Tree.leaf\n" ++
+  "#reduce BEq.beq (Inhabited.default : Color) Color.red\n" ++
+  "#reduce BEq.beq (Inhabited.default : Color) Color.blue\n" ++
+  "#reduce BEq.beq Color.red Color.blue\n" ++
+  "#reduce ordIs (Compare.compare Color.green Color.red)\n" ++
+  "#reduce ordIs (Compare.compare Color.red Color.green)\n" ++
+  "#reduce ordIs (Compare.compare Color.green Color.green)\n" ++
+  "#reduce BEq.beq (Point.mk 1 .true) (Point.mk 1 .true)\n" ++
+  "#reduce BEq.beq (Point.mk 1 .true) (Point.mk 1 .false)\n" ++
+  "#reduce DecidableEq.decide (Point.mk 1 .true) (Point.mk 2 .true)\n" ++
+  "#reduce ordIs (Compare.compare (Point.mk 1 .false) (Point.mk 1 .true))\n" ++
+  "#reduce ordIs (Compare.compare (Point.mk 2 .true) (Point.mk 1 .true))\n" ++
+  "#reduce BEq.beq t1 t1\n" ++
+  "#reduce BEq.beq t1 t2\n" ++
+  "#reduce ordIs (Compare.compare t1 t2)\n" ++
+  "#reduce BEq.beq (Box.mk 3) (Box.mk 3)\n" ++
+  "#reduce BEq.beq (One.mk 1) (One.mk 2)\n" ++
+  "#reduce BEq.beq (Two.mk 1 0) (Two.mk 1 0)\n" ++
+  "#reduce Eq2.decide Swatch.on Swatch.on\n" ++
+  "#reduce Eq2.decide Swatch.on Swatch.off\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (Point.mk 1 .true) 0)) 12\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (Point.mk 1 .true) 1024)) 14\n" ++
+  "#reduce Nat.beq (String.length (Repr.reprPrec (Box.mk 7) 0)) 8\n"
+
+def selfhostDerivingTableExpected : String :=
+  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nordIs : (x0 : Ordering) → Nat\nColor : U0\nPoint : U0\nPoint.x : (x0 : Point) → Nat\nPoint.y : (x0 : Point) → Bool\nTree : (x0 : U0) → U0\nBox : (x0 : U0) → U0\nBox.val : (x0 :0 U0) → (x1 : (Box x0)) → x0\nOne : U0\nOne.a : (x0 : One) → Nat\nTwo : U0\nTwo.a : (x0 : Two) → Nat\nTwo.b : (x0 : Two) → Nat\nEq2 : (x0 : U0) → U0\nEq2.decide : (x0 :0 U0) → (x1 : (Eq2 x0)) → (x2 : x0) → (x3 : x0) → Bool\ninstEq2 : (Eq2 Nat)\nSwatch : U0\nt1 : (Tree Nat)\nt2 : (Tree Nat)\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n"
+
+/-- (A11) The deriver table's errors: a class with no deriver, a type a deriver rejects
+(an indexed family, an all-recursive constructor, a recursive field for `DecidableEq`), a
+deriver registered with the wrong arity, a registered deriver this frontend cannot run,
+and `deriving` on a `mutual` block. -/
+def selfhostDerivingNeg : String :=
+  "import Prelude\n" ++ derivingSelfHeader ++
+  "class Size (A : Type) where\n  size : A → Nat\n" ++
+  "deriving instance Size for Nat\n" ++
+  "inductive Vec (A : Type) : Nat → Type where\n" ++
+  "  | vnil : Vec A Nat.zero\n  | vcons (x : A) (xs : Vec A Nat.zero) : Vec A Nat.zero\n  deriving BEq\n" ++
+  "inductive L where\n  | nil\n  | cons (n : Nat) (t : L)\n  deriving DecidableEq\n" ++
+  "inductive R where\n  | mk (r : R)\n  deriving Inhabited\n" ++
+  "def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n" ++
+  "class Bar (A : Type) where\n  bar : A → Nat\n" ++
+  "def myDeriver (n : String) : String := n\nattribute [deriver Bar] myDeriver\n" ++
+  "deriving instance Bar for Nat\n" ++
+  "mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n"
+
+def selfhostDerivingNegExpected : String :=
+  "Inhabited : (x0 : U0) → U0\nInhabited.default : (x0 :0 U0) → (x1 : (Inhabited x0)) → x0\nBEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nRepr : (x0 : U0) → U0\nRepr.reprPrec : (x0 :0 U0) → (x1 : (Repr x0)) → (x2 : x0) → (x3 : Nat) → String\nDecidableEq : (x0 : U0) → U0\nDecidableEq.decide : (x0 :0 U0) → (x1 : (DecidableEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nOrdering : U0\nCompare : (x0 : U0) → U0\nCompare.compare : (x0 :0 U0) → (x1 : (Compare x0)) → (x2 : x0) → (x3 : x0) → Ordering\ninstInhabited : (Inhabited Nat)\ninstInhabited1 : (Inhabited Bool)\nBool.beqE : (x0 : Bool) → (x1 : Bool) → Bool\ninstBEq : (BEq Nat)\ninstBEq1 : (BEq Bool)\ninstDecidableEq : (DecidableEq Nat)\ninstDecidableEq1 : (DecidableEq Bool)\ninstRepr : (Repr Nat)\ninstRepr1 : (Repr Bool)\nNat.compare : (x0 : Nat) → (x1 : Nat) → Ordering\ninstCompare : (Compare Nat)\nBool.cmp : (x0 : Bool) → (x1 : Bool) → Ordering\ninstCompare1 : (Compare Bool)\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\nerror: deriving BEq for Vec: indexed families are not supported\nerror: deriving DecidableEq for L: DecidableEq is derived for an enumeration or a single-constructor record only, and L\nerror: deriving Inhabited for R: every constructor of R is recursive or has a proof field\nmyD : (x0 : String) → (x1 : String) → String\nerror: myD is not a deriver: it takes 2 arguments, expected one (String → MacroM (List Syntax))\nBar : (x0 : U0) → U0\nBar.bar : (x0 :0 U0) → (x1 : (Bar x0)) → (x2 : x0) → Nat\nmyDeriver : (x0 : String) → String\nerror: deriving Bar for Nat: the deriver myDeriver cannot be run (this frontend has no elaboration-time evaluator; the derivers it runs are deriveInhabited, deriveBEq, deriveRepr, deriveDecidableEq and deriveCompare)\nerror: deriving BEq for B: a mutual inductive is not supported (the host derives for the joint family, an indexed family); derive each member's instances by hand\n"
+
+/-- (A11, D6) The self-hosted driver's `check` reports a refused derivation at the
+command's position, in the host's message shape. -/
+def selfhostDerivingSpan : String :=
+  "import Prelude\nclass Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
+
+def selfhostDerivingSpanExpected : String :=
+  "input.wiz:4:1: error: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
 /-- (A11) `deriving` rejects what it cannot do, with the message naming the class and the
 type (the command's offset, as every command's, becomes `file:line:col` in the driver's
@@ -1083,15 +1325,7 @@ def selfhostDerivingBad : String :=
   "class Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
 
 def selfhostDerivingBadExpected : String :=
-  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
-
-/-- (A11) A rejected derivation is the command's diagnostic, with its source position, in
-the driver (`file:line:col`): `deriving instance Size for Nat` on line 4 is rejected. -/
-def selfhostDerivingSpan : String :=
-  "import Prelude\nclass Size (A : Type) where\n  size : A → Nat\nderiving instance Size for Nat\n"
-
-def selfhostDerivingSpanExpected : String :=
-  "input.wiz:4:1: error: cannot derive Size for Nat: no deriver for class Size (the self-hosted frontend derives BEq and Repr)\n"
+  "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -1114,17 +1348,30 @@ def selfHostGroup : Group where
         let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
         let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
         let t := Builtin.tables
-        let cases : List (Name × String) := [
-          ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
-          ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
-          ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
-          ("command", "def f (x : Nat) : Nat := x"),
-          ("command", "inductive T where\n  | a\n  | b (t : T)"),
-          ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
-        let expected := cases.map fun (c, i) => leanParse t c i
-        let calls := cases.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
         let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ wizTables t ++
           s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
+          s!"def main : IO Unit := printAll {wizList calls}\n"
+        ioRun prog ("\n".intercalate expected ++ "\n") },
+    { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
+        -- the checked-in file is what the selfhost builds read; a grammar change that
+        -- does not regenerate it is a stale compiler, so fail here (CI runs this shard
+        -- when `Wiz/Parser/*` changes)
+        let file ← IO.FS.readFile "selfhost/Tables.wiz"
+        unless file == Selfhost.tablesFile do
+          throw (IO.userError s!"selfhost/Tables.wiz is stale: run `lake build genSelfhostTables` and commit it (file {file.length} bytes, the tables now {Selfhost.tablesFile.length})") },
+    { name := "the checked-in tables accept the corpus the Lean parser accepts", run := fun _ => do
+        -- the semantic check of the file: not "the text is the same" but "the tables in
+        -- selfhost/Tables.wiz parse, on the differential's corpus, exactly what the Lean
+        -- parser produces" (the case above does the same with freshly generated tables)
+        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
+        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
+        let tablesSrc ← IO.FS.readFile "selfhost/Tables.wiz"
+        let t := Builtin.tables
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ tablesSrc ++
           s!"def main : IO Unit := printAll {wizList calls}\n"
         ioRun prog ("\n".intercalate expected ++ "\n") },
     { name := "the type checker in Wiz", run := fun _ => do
@@ -1140,7 +1387,7 @@ def selfHostGroup : Group where
           "  IO.println (typeOf (.app idTm cnat));\n  IO.println (typeOf (.app (.app add two) two));\n" ++
           "  IO.println (normalize (.app (.app add two) two));\n  IO.println (typeOf (.app (.univ 0) (.univ 0)));\n" ++
           -- a variable out of scope is an error (it was `Sort 0`, as a type and as a value: `Prop : Prop`)
-          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit 0) .prop)))\n"
+          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit (ln 1)) .prop)))\n"
         ioRun (kernel ++ "\n" ++ defs ++ main) ("(x0 : U0) → (x1 : x0) → x0\n(x0 : U0) → (x1 : x0) → x0\n" ++
           "error: type mismatch: expected U0, got U1\n(x0 : U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\n" ++
           "λx0. λx1. λx2. (x1 (x1 (x1 (x1 x2))))\nerror: not a function: its type is U1\n" ++
@@ -1188,10 +1435,10 @@ def selfHostGroup : Group where
         -- `(True → Unit) = ((True → True) → Unit)` computes to the domains' equivalence: with
         -- the sorts `sortTy` fills in, and (mandatory sorts) with those the sorts pass fills
         -- in where none were written (`normalize` runs it), so both are the same
-        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
-          "def gTy (X : Tm) : Tm := piH X (.unit 0)\n" ++
+          "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
           "def eqn (s : Bool) : Tm := match s with\n" ++
           "  | .true => .eqTy (sortTy (gTy .ptrue)) (sortTy (gTy (piH .ptrue .ptrue)))\n" ++
           "  | .false => .eqTy (gTy .ptrue) (gTy (piH .ptrue .ptrue))\n" ++
@@ -1204,7 +1451,7 @@ def selfHostGroup : Group where
     { name := "a name is declared once: a second declaration is an error (it proved an empty type inhabited)", run := fun _ =>
         selfhostCheckFile dupNames dupNamesExpected },
     { name := "text to checked term, all in Wiz", run := fun _ => do
-        let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
         let t := Builtin.tables
         let bad := "(fun (x : Type) => x"
@@ -1232,7 +1479,7 @@ def selfHostGroup : Group where
           "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\n" ++
           "Pair : U0\n(x0 : Nat) → (x1 : Nat) → Pair\n" ++
           "con((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\n" ++
-          s!"error: unknown identifier Bad\nerror: type mismatch: expected Nat, got U1\n") },
+          s!"error: the type being defined may only occur as the type of a recursive field or the result\nerror: type mismatch: expected Nat, got U1\n") },
     { name := "pattern matching and structural recursion, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef two : Nat := Nat.succ (Nat.succ Nat.zero)\ndef add (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => Nat.succ (add k n)\n#reduce add two two\ndef mul (m n : Nat) : Nat := match n with\n  | .zero => Nat.zero\n  | .succ k => add m (mul m k)\n#reduce mul two (Nat.succ (Nat.succ (Nat.succ Nat.zero)))\ndef Code (n : Nat) : Type := match n with\n  | .zero => Nat\n  | _ => Nat → Nat\n#check Code\ndef pred (n : Nat) : Nat := match n with\n  | .succ k => k\n  | x => x\n#reduce pred two\ndef bad (n : Nat) : Nat := match n with\n  | .succ k => k\ndef bad2 (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => add k (bad2 n k)\n"
           "Nat : U0\ntwo : Nat\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmul : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nCode : (x0 : Nat) → U0\n(x0 : Nat) → U0\npred : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nerror: missing case zero\nerror: unknown identifier bad2\n" },
@@ -1430,10 +1677,10 @@ def selfHostGroup : Group where
         -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
         let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
           "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let dq := "(.ann (.darg (.var 0) (.unit 0) (.lam (.dret .star))) (.descr 0 (.unit 0)))"
-        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit 0) (.unit 0)) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr 0 (.unit 0)) {dq} {dq}) (.unit 0))))"
-        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit 0) .qty) (.mu 0 (.unit 0) " ++
-          "(.app (.ann (.lam (.darg (.var 0) (.unit 0) (.lam (.dret .star)))) (piW .qty (.descr 0 (.unit 0)))) (.app (.var 0) .star)) .star)))"
+        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
+        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
+        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
+          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
     { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
@@ -1455,9 +1702,11 @@ def selfHostGroup : Group where
         selfhostCompileRun quantityProgram "6\n5\n9\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: private declarations, constructors and fields, as in one Lean module (21n)", run := fun _ =>
         selfhostAgrees "" privateDecls },
+    -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
+    -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\nattribute [macro f] f\nattribute [tactic f] f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.attrMacro\nerror: unsupported command command.attrTactic\ng : Nat\n" },
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -1541,6 +1790,13 @@ def selfHostGroup : Group where
           ("def bad (x : V 8) : W 8 := x\n", false),
           ("def bad (x : W 8) : W 16 := x\n", false),
           ("sealed structure P where\n  x : Nat\n", false)] },
+    { name := "the self-hosted frontend: inductive recursion is guarded (positivity), as in the Lean frontend", run := fun _ =>
+        selfhostAgrees "" [
+          ("inductive Rose where\n  | leaf\n  | node (l : Rose) (r : Rose)\n", true),
+          ("inductive Bad where\n  | mk (x : Bad)\n", true),
+          ("inductive Bad where\n  | mk (f : Bad → Prop)\n", false),
+          ("inductive Bad where\n  | mk (f : (Bad → Prop) → Prop)\n", false),
+          ("inductive Bad where\n  | mk (xs : List Bad)\n", false)] },
     { name := "the self-hosted frontend: constructor parameters from the expected type (21j)", run := fun _ =>
         selfhostAgrees ("def Code : Bool → Type\n  | .true => Nat\n  | .false => Bool\n" ++
           "structure Tagged (b : Bool) where\n  val : Code b\n")
@@ -1575,6 +1831,11 @@ def selfHostGroup : Group where
         let vs := MTm.sizeArgs.map leanVerdict
         unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") do
           throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)", run := fun _ => do
+        for (t, ok) in MTm.muSize do
+          let v := leanVerdict t
+          unless (v != "error") == ok do
+            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
     { name := "∞ is not below itself (and both kernels agree on it below)", run := fun _ => do
         let vs := MTm.sizeInf.map leanVerdict
         unless vs.take 5 == List.replicate 5 "error" && (vs.drop 5).all (· != "error") do
@@ -1607,7 +1868,7 @@ def selfHostGroup : Group where
         unless vs[5]? == some "U0" && vs[9]? == some "True" do
           throw (IO.userError s!"unexpected types {vs}") },
     { name := "the self-hosted frontend checks itself (Lex, Parse, Kernel, CParse, CGlue and Frontend.wiz)", run := fun _ => do
-        let srcs ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let srcs ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let src := "\n".intercalate srcs
         let body := "\n".intercalate ((src.splitOn "\n").filter (!·.startsWith "import"))
         -- every declaration is reported, none with an error
@@ -1844,13 +2105,13 @@ def selfHostGroup : Group where
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
           "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
-          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit 0) .ptrue)\n" ++
-          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit 0) (.unit 0))\n" ++
-          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit 0) (.unit 0))\n" ++
-          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit 0))\n" ++
-          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit 0))\n" ++
+          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
+          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
+          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
           "def main : IO Unit := do\n" ++
-          "  IO.println (okT (.pi .qw .lhole .lhole (.unit 0) .ptrue));\n" ++
+          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
           "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
@@ -2028,7 +2289,7 @@ def selfHostGroup : Group where
     { name := "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω", run := fun _ => do
         -- the backend test does not need the CLI driver (which expects the generated
         -- parser tables and toolchain constants): checker + Backend only
-        let src ← (Selfhost.checkerFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
+        let src ← (Selfhost.frontendFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
         let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
         let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
           s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"
@@ -2136,6 +2397,35 @@ def selfHostGroup : Group where
         -- without the root, B is not found; with it, it is
         selfhostCheckModules files "error: cannot find module B\n"
         selfhostCheckModules files "one : Nat\n" (args := #["-I", "sub"]) },
+    { name := "modules: a dotted import is a path (A.B.C is A/B/C.wiz)", run := fun _ =>
+        selfhostCheckModules
+          [("A/B/C.wiz", "import Prelude\ndef deep : Nat := 3\n"),
+           ("input.wiz", "import Prelude\nimport A.B.C\ndef one : Nat := deep\n")]
+          "deep : Nat\none : Nat\n" },
+    { name := "modules: the -I roots are searched in order", run := fun _ => do
+        let files := [("r1/B.wiz", "import Prelude\ndef one : Nat := 1\n"),
+                      ("r2/B.wiz", "import Prelude\ndef one : Bool := Bool.true\n"),
+                      ("input.wiz", "import Prelude\nimport B\n#check one\n")]
+        -- the first root with the file wins
+        selfhostCheckModules files "one : Nat\nNat\n" (args := #["-I", "r1", "-I", "r2"])
+        selfhostCheckModules files "one : Bool\nBool\n" (args := #["-I", "r2", "-I", "r1"])
+        -- a root without the file is skipped, not a failure
+        let fallthrough := [("r2/A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                            ("input.wiz", "import Prelude\nimport A\ndef two : Nat := a\n")]
+        selfhostCheckModules fallthrough "a : Nat\ntwo : Nat\n" (args := #["-I", "r1", "-I", "r2"]) },
+    { name := "modules: an import cycle through three modules names the whole path", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import Prelude\nimport C\n"),
+           ("C.wiz", "import Prelude\nimport D\n"),
+           ("D.wiz", "import Prelude\nimport B\n"),
+           ("input.wiz", "import Prelude\nimport B\n")]
+          "error: import cycle: B -> C -> D -> B\n" },
+    { name := "modules: a duplicate name in two imported modules is rejected", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import Prelude\ndef x : Nat := 1\n"),
+           ("C.wiz", "import Prelude\ndef x : Nat := 2\n"),
+           ("input.wiz", "import Prelude\nimport B\nimport C\n")]
+          "x : Nat\nerror: 'x' has already been declared\n" },
     { name := "modules: the cache key includes the module graph", run := fun _ => do
         let root := "import Prelude\nimport B\ndef two : Nat := one\n"
         let files1 := [("B.wiz", "import Prelude\ndef one : Nat := 1\n"), ("input.wiz", root)]
@@ -2145,6 +2435,45 @@ def selfHostGroup : Group where
         let some k2 ← selfhostModuleOutput files2 #["--key"] | return
         unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
         if k1 == k2 then throw (IO.userError s!"the key ignores a module's text: {k1}") },
+    { name := "modules: the cache key includes a transitive module's text", run := fun _ => do
+        let root := "import Prelude\nimport B\ndef two : Nat := one\n"
+        let b := "import Prelude\nimport C\ndef one : Nat := c\n"
+        let files1 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 1\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 0\n")]
+        let files2 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 2\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 0\n")]
+        let files3 := [("B.wiz", b), ("C.wiz", "import Prelude\ndef c : Nat := 1\n"),
+                       ("input.wiz", root), ("Unused.wiz", "import Prelude\ndef u : Nat := 9\n")]
+        let some k1 ← selfhostModuleOutput files1 #["--key"] | return
+        let some k1' ← selfhostModuleOutput files1 #["--key"] | return
+        let some k2 ← selfhostModuleOutput files2 #["--key"] | return
+        let some k3 ← selfhostModuleOutput files3 #["--key"] | return
+        unless k1 == k1' do throw (IO.userError s!"the key is not stable: {k1} / {k1'}")
+        if k1 == k2 then throw (IO.userError s!"the key ignores an imported module's text: {k1}")
+        unless k1 == k3 do throw (IO.userError s!"the key depends on a module outside the graph: {k1} / {k3}") },
+    { name := "modules: IO, Std and Sys load the embedded Prelude once", run := fun _ =>
+        selfhostCheckModules
+          [("B.wiz", "import IO\nimport Std\ndef y : Nat := 1\n"),
+           ("input.wiz", "import Prelude\nimport IO\nimport Std\nimport Sys\nimport B\ndef x : Nat := y\n")]
+          "y : Nat\nx : Nat\n" },
+    { name := "modules: the CLI root spellings (-Idir, --include DIR, --include=DIR)", run := fun _ => do
+        let files := [("sub/B.wiz", "import Prelude\ndef one : Nat := 1\n"),
+                      ("input.wiz", "import Prelude\nimport B\ndef two : Nat := one\n")]
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["-Isub"])
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["--include", "sub"])
+        selfhostCheckModules files "one : Nat\ntwo : Nat\n" (args := #["--include=sub"]) },
+    { name := "modules: the compiler driver resolves its -I and --include roots", run := fun _ => do
+        let files := [("sub/B.wiz", "import Prelude\ndef one : Nat := 41\n"),
+                      ("input.wiz", "import Prelude\nimport B\ndef main : IO Unit := IO.println (Nat.toString (one + 1))\n")]
+        for args in [#["-I", "sub"], #["-Isub"], #["--include", "sub"], #["--include=sub"]] do
+          let some c ← selfhostModuleC files args | return
+          unless (c.splitOn "/* one : Nat */\n").length > 1 do
+            throw (IO.userError s!"the module is missing from the C ({args}): {c.take 300}") },
+    { name := "layout: an if branch may start on the next line with match or let, and long chains parse", run := fun _ =>
+        selfhostChecks "import Prelude\ndef branch (b : Bool) (n : Nat) : Nat :=\n  if b then 1 else\n  match n with\n  | .zero => 0\n  | .succ k => k\ndef nested (b c : Bool) : Nat :=\n  if b then 2 else\n  if c then\n    match b with\n    | .true => 3\n    | .false => 4\n  else 5\ndef letBranch (b : Bool) : Nat :=\n  if b then 1 else\n  let x := 2;\n  x\ndef chain (a b c d e f g h : Bool) : Nat :=\n  if a then 1 else\n  if b then 2 else\n  if c then 3 else\n  if d then 4 else\n  if e then 5 else\n  if f then 6 else\n  if g then 7 else\n  if h then 8 else\n  9\n#check branch\n#check letBranch\n#check chain\n" },
+    { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
+        selfhostCompileRun ("import Prelude\npartial def boom : Bool := boom\ndef fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\ndef pairHead : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, b) _ => a\ndef main : IO Unit := do\n  IO.println (if Bool.true && Bool.false then \"and-t\" else \"and-f\");\n  IO.println (if Bool.false && boom then \"and-boom\" else \"and-short\");\n  IO.println (if Bool.true || boom then \"or-short\" else \"or-boom\");\n  IO.println (if !Bool.false then \"not-t\" else \"not-f\");\n  IO.println (if Bool.true || Bool.false && Bool.false then \"prec-ok\" else \"prec-bad\");\n  IO.println (Nat.toString (fstP (3, 4)));\n  IO.println (Nat.toString (pairHead (.cons (5, 6) .nil)))\n")
+          "and-f\nand-short\nor-short\nnot-t\nprec-ok\n3\n5\n" },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -2275,14 +2604,225 @@ def selfHostGroup : Group where
           ("def badProp : Prop := Type\n", false),
           ("def badSort : Sort 1 := Type 1\n", false),
           ("def badCast (e : False) (n : Nat) : Nat := cast e n\n", false)] },
+    -- (U2) symbolic levels in an inductive description: the description's level is the
+    -- declaration's universe parameter (no closed numeral), which `Repr.{u}`/`Inhabited.{u}`
+    -- need (Q4 lifts the tag into the data type's universe)
+    { name := "U2: symbolic levels in inductive descriptions (U2/A15): a polymorphic data type, structure and classes", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++
+          "inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n" ++
+          "class Inhabited.{u} (A : Type u) where\n  default : A\n" ++
+          "instance instInhabitedNat : Inhabited Nat where\n  default := 42\n" ++
+          "def unbox.{u} {A : Type u} (b : Box A) : A := match b with\n  | .mk a => a\n" ++
+          "def wget.{u} {A : Type u} (w : Wrap A) : A := w.val\n" ++
+          "def unboxNat (b : Box Nat) : Nat := match b with\n  | .mk a => a\n" ++
+          "def wgetNat (w : Wrap Nat) : Nat := match w with\n  | .mk a => a\n" ++
+          "def reprWrap.{u} {A : Type u} [Repr A] (w : Wrap A) : Nat := Repr.repr w.val\n" ++
+          "def defaultNat : Nat := Inhabited.default\n" ++
+          "def natBox : Box Nat := Box.mk 7\n" ++
+          "def w5 : Wrap Nat := Wrap.mk 5\n" ++
+          "#reduce Nat.beq (unbox natBox) 7\n" ++
+          "#reduce Nat.beq (wget w5) 5\n" ++
+          "#reduce Nat.beq (unboxNat natBox) 7\n" ++
+          "#reduce Nat.beq (wgetNat w5) 5\n" ++
+          "#reduce Nat.beq (reprWrap w5) 5\n" ++
+          "#reduce Nat.beq defaultNat 42\n")
+          ("Box : (x0 : Sort((u)+1)) → Sort((u)+1)\n" ++
+           "Wrap : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Wrap.val : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "Repr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Repr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\n" ++
+           "instReprNat : (Repr.{0} Nat)\n" ++
+           "Inhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\n" ++
+           "Inhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\n" ++
+           "instInhabitedNat : (Inhabited.{0} Nat)\n" ++
+           "unbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\n" ++
+           "wget : (x0 :0 Sort((u)+1)) → (x1 : (Wrap.{u} x0)) → x0\n" ++
+           "unboxNat : (x0 : (Box.{0} Nat)) → Nat\n" ++
+           "wgetNat : (x0 : (Wrap.{0} Nat)) → Nat\n" ++
+           "reprWrap : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : (Wrap.{u} x0)) → Nat\n" ++
+           "defaultNat : Nat\n" ++
+           "natBox : (Box.{0} Nat)\n" ++
+           "w5 : (Wrap.{0} Nat)\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" ++
+           "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n") },
+    { name := "U2: level mismatches in a symbolic data type are rejected, as in the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostAgrees ("inductive Box.{u} (A : Type u) : Type u where\n  | mk (a : A)\n" ++
+          "structure Wrap.{u} (A : Type u) where\n  val : A\n" ++
+          "class Repr.{u} (A : Type u) where\n  repr : A → Nat\n" ++
+          "instance instReprNat : Repr Nat where\n  repr := fun n => n\n") [
+          ("def ok.{u} (A : Type u) (a : A) : Box.{u} A := Box.mk a\n", true),
+          ("def ok2.{u} (A : Type u) (w : Wrap A) : A := w.val\n", true),
+          ("def ok3 : Wrap Nat := Wrap.mk 3\n", true),
+          ("def ok4 : Nat := Repr.repr 5\n", true),
+          ("def bad1 : Box.{1} Nat := Box.mk 7\n", false),
+          ("def bad2.{u} : Wrap.{u} Nat := Wrap.mk 7\n", false),
+          ("def bad3.{u} : Box.{u} Nat := Box.mk 7\n", false),
+          ("def bad4.{u} (A : Type u) : Box A := Box.mk A\n", false),
+          -- an undeclared universe, and a field type above the data type's universe
+          ("inductive Bad : Type u where\n  | mk\n", false),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Type u)\n", false)] },
+    { name := "U2: an undeclared universe in a data type is a positioned error (U2/A15)", run := fun _ => do
+        match ← selfhostCompiler with
+        | .error e => if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+        | .ok exe =>
+          let dir ← IO.FS.createTempDir
+          IO.FS.writeFile (dir / "bad.wiz") "import Prelude\ninductive Bad : Type u where\n  | mk\n"
+          let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString, "check", "bad.wiz"], cwd := dir }
+          checkEq (1 : UInt32) out.exitCode
+          checkEq "" out.stdout
+          checkEq ("bad.wiz:2:1: error: the data type's universe must be a declared universe parameter, not u (declare one: `inductive T.{u}`)\n") out.stderr },
+    -- (U2b) a field at another level: `Duo`'s fields live in `Type u`/`Type v`, below
+    -- `Type (max u v)`, so the description lifts them (Q4); a `structure` at a level
+    -- parameter (the `Box.{u}` shape) and a `Box.{1}` instance
+    { name := "U2b: a structure at a level parameter, and an inductive whose fields are at different levels (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "def boxOfType : Box.{1} (Type 0) := Box.mk Nat\n" ++
+          "#check Box\n#check Duo\n#check unbox\n#check duoSnd\n#check boxOfType\n" ++
+          "#reduce Nat.beq (unbox boxVal) 7\n" ++
+          "#reduce Nat.beq (String.length (duoSnd duoVal)) 2\n" ++
+          "#reduce Nat.beq (String.length (duoSnd (Duo.mk 1 \"abc\"))) 3\n" ++
+          "#reduce Nat.beq duoBUp 5\n")
+          "Box : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nBox.val : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nDuo : (x0 : Sort((u)+1)) → (x1 : Sort((v)+1)) → Sort((max(u, v))+1)\nunbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nduoSnd : (x0 :0 Sort((u)+1)) → (x1 :0 Sort((v)+1)) → (x2 : ((Duo.{u, v} x0) x1)) → x1\nduoUp : ((Duo.{1, 0} U0) Nat)\nduoBUp : Nat\nRepr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nRepr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\ninstReprNat : (Repr.{0} Nat)\ninstReprType : (Repr.{1} U0)\ntypeRepr : Nat\nsumRepr : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (x2 : (List x0)) → Nat\ninstReprList : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\nInhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nInhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\ninstInhabitedNat : (Inhabited.{0} Nat)\ninstInhabitedOption : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\ninstInhabitedList : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\nduoVal : ((Duo.{0, 0} Nat) String)\nboxVal : (Box.{0} Nat)\noptDefault : Nat\nlistDefault : Nat\nboxOfType : (Box.{1} U0)\n(x0 : Sort((?u0)+1)) → Sort((max(0, ?u0))+1)\n(x0 : Sort((?u0)+1)) → (x1 : Sort((?u1)+1)) → Sort((max(?u0, ?u1))+1)\n(x0 :0 Sort((?u0)+1)) → (x1 : (Box.{?u0} x0)) → x0\n(x0 :0 Sort((?u0)+1)) → (x1 :0 Sort((?u1)+1)) → (x2 : ((Duo.{?u0, ?u1} x0) x1)) → x1\n(Box.{1} U0)\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" },
+    -- (U2b) a polymorphic class and generic instances: `Repr (List A)` from `[Repr A]`,
+    -- and `Inhabited` for `Option`/`List` from `[Inhabited A]` (the resolution is at
+    -- level metavariables, U2)
+    { name := "U2b: a polymorphic class and generic instances (Repr (List A), Inhabited for Option/List) (U2/A15)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\n" ++ u2bDecls ++
+          "#check instReprList\n#check instInhabitedOption\n#check instInhabitedList\n" ++
+          "#check instReprType\n#check typeRepr\n" ++
+          "#reduce Nat.beq (Repr.repr (List.cons 1 (List.cons 2 List.nil))) 3\n" ++
+          "#reduce Nat.beq (Repr.repr (List.nil : List Nat)) 0\n" ++
+          "#reduce Nat.beq optDefault 42\n" ++
+          "#reduce Nat.beq listDefault 42\n" ++
+          "#reduce Nat.beq typeRepr 0\n")
+          "Box : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nBox.val : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nDuo : (x0 : Sort((u)+1)) → (x1 : Sort((v)+1)) → Sort((max(u, v))+1)\nunbox : (x0 :0 Sort((u)+1)) → (x1 : (Box.{u} x0)) → x0\nduoSnd : (x0 :0 Sort((u)+1)) → (x1 :0 Sort((v)+1)) → (x2 : ((Duo.{u, v} x0) x1)) → x1\nduoUp : ((Duo.{1, 0} U0) Nat)\nduoBUp : Nat\nRepr : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nRepr.repr : (x0 :0 Sort((u)+1)) → (x1 : (Repr.{u} x0)) → (x2 : x0) → Nat\ninstReprNat : (Repr.{0} Nat)\ninstReprType : (Repr.{1} U0)\ntypeRepr : Nat\nsumRepr : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (x2 : (List x0)) → Nat\ninstReprList : (x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\nInhabited : (x0 : Sort((u)+1)) → Sort((max(0, u))+1)\nInhabited.default : (x0 :0 Sort((u)+1)) → (x1 : (Inhabited.{u} x0)) → x0\ninstInhabitedNat : (Inhabited.{0} Nat)\ninstInhabitedOption : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\ninstInhabitedList : (x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\nduoVal : ((Duo.{0, 0} Nat) String)\nboxVal : (Box.{0} Nat)\noptDefault : Nat\nlistDefault : Nat\n(x0 :0 U0) → (x1 : (Repr.{0} x0)) → (Repr.{max(0, 0)} (List x0))\n(x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (Option x0))\n(x0 :0 U0) → (x1 : (Inhabited.{0} x0)) → (Inhabited.{max(0, 0)} (List x0))\n(Repr.{1} U0)\nNat\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\n" },
+    -- (U2b) the level mistakes the Lean frontend rejects, with the same message and a
+    -- positioned diagnostic (`selfhostLevelErrors`)
+    { name := "U2b: a level escape, a max/imax mismatch and a universe inconsistency are rejected like the Lean frontend (U2/A15)", run := fun _ =>
+        selfhostLevelErrors [
+          ("def bad.{v} (A : Type u) : Type u := A\n", "unknown universe level 'u'"),
+          ("def bad.{u, v} (A : Sort (max u v)) : Sort (imax u v) := A\n", "type mismatch"),
+          ("inductive Bad.{u} : Type u where\n  | mk (a : Sort (u+1))\n", "can't lift")] },
+    -- (U2b) differential: the same polymorphic program (structure, two-level inductive,
+    -- generic class instances) is compiled by the Lean host and by the self-hosted
+    -- compiler (GC and RC) and prints the same values
+    { name := "U2b: the same polymorphic program compiles and runs in both toolchains (U2/A15)", run := fun _ => do
+        ioRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n"
+        selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n" (flags := #["--rc"]) },
 
     { name := "(A11) deriving BEq: 0/1/2/3 fields, a recursive polymorphic inductive, and an after-the-fact instance", run := fun _ =>
         selfhostCheckFile selfhostDeriving selfhostDerivingExpected },
 
     { name := "(A11) deriving rejects a field with no BEq instance and a class with no deriver", run := fun _ =>
         selfhostCheckFile selfhostDerivingBad selfhostDerivingBadExpected },
+    -- (A13) `by`: the core tactic engine. A real block is intro/apply/assumption, an
+    -- equation is rewritten, and `calc`, `have`, `suffices` and `obtain` are exercised.
+    { name := "the self-hosted frontend: `by` and the core tactics (A13)", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def ap : (A B : Type) → (A → B) → A → B := by\n" ++
+          "  intro A; intro B; intro f; intro a\n" ++
+          "  apply f\n" ++
+          "  assumption\n" ++
+          "def k : Nat → Bool → Nat := by intro n; intro b; assumption\n" ++
+          "def two : 1 + 1 = 2 := by rfl\n" ++
+          "def rwL (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by\n" ++
+          "  rw h\n" ++
+          "  exact pb\n" ++
+          "def rwR (a b : Nat) (h : a = b) (P : Nat → Prop) (pa : P a) : P b := by\n" ++
+          "  rw ← h\n" ++
+          "  exact pa\n" ++
+          "def tr (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by\n" ++
+          "  calc a = b := h₁\n" ++
+          "       _ = c := h₂\n" ++
+          "def hv (a b : Nat) (h : a = b) : a = b := by\n" ++
+          "  have h₂ : a = b := h\n" ++
+          "  exact h₂\n" ++
+          "def sf (a b : Nat) (h : a = b) : a = b := by\n" ++
+          "  suffices h₂ : a = b\n" ++
+          "  exact h\n" ++
+          "  exact h₂\n" ++
+          "def ob (p : Nat × Nat) : Nat := by\n" ++
+          "  obtain ⟨x, y⟩ := p\n" ++
+          "  exact x\n" ++
+          "#check ap\n#check tr\n#check ob\n"
+        let some out ← selfhostOutput src | return
+        let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the core tactics:\n{out}") },
+    { name := "(A13) per-tactic cases: intros, change, unfold, constructor, try/first/repeat", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def idn : Nat → Nat := by intro n; exact n\n" ++
+          "def id2 : Nat → Nat → Nat := by intros; assumption\n" ++
+          "def ch : 1 + 1 = 2 := by change 2 = 2; rfl\n" ++
+          "def F (A : Type) : Type := A\n" ++
+          "def un : List (F Nat) := by unfold F; exact List.nil\n" ++
+          "inductive Box where\n" ++
+          "  | mk (n : Nat)\n" ++
+          "def box : Box := by constructor; exact 7\n" ++
+          "def tf : Nat := by first | exact 0 | exact 1\n" ++
+          "def tt (n : Nat) : n = n := by try (exact 0); rfl\n" ++
+          "def rep (a b : Nat) (h : a = b) : a = b := by repeat rw h; rfl\n" ++
+          "#check idn\n#check box\n"
+        let some out ← selfhostOutput src | return
+        let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects a core tactic:\n{out}") },
+    { name := "the self-hosted frontend: unsolved goals are reported with their context (A13)", run := fun _ =>
+        selfhostCheckFile "import Prelude\ndef bad : Nat → Bool := by intro n\n"
+          "error: unsolved goals:\nn : Nat\n⊢ Bool\n" },
+    { name := "the self-hosted frontend: a tactic failure is an error with the goals (A13)", run := fun _ => do
+        let some out ← selfhostOutput "import Prelude\ndef bad : Nat := by assumption\n" | return
+        unless (out.splitOn "assumption: no hypothesis matches the goal").length > 1 do
+          throw (IO.userError s!"the failure does not name the tactic:\n{out}")
+        unless (out.splitOn "remaining goals:").length > 1 do
+          throw (IO.userError s!"the failure does not list the remaining goals:\n{out}") },
+    -- the differential case: the same script, host and selfhost, verdict and error text
+    { name := "the core tactics: the Lean and self-hosted frontends agree (A13)", run := fun _ => do
+        let loader ← preludeLoader
+        let src := "import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n" ++
+          "  intro A; intro B; intro f; intro a\n  apply f\n  assumption\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let errs := s.messages.filter (·.severity == .error)
+        unless errs.isEmpty do throw (IO.userError "the Lean frontend rejects the differential script")
+        let some out ← selfhostOutput src | return
+        let selfErrs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless selfErrs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the differential script:\n{out}")
+        -- and a failing rewrite: the same verdict and the same message
+        let bad := "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n" ++
+          "  rw h\n  exact pc\n"
+        let sBad := runFrontend (R := ZeroOneMany) bad { loader, trustedModule := Tests.libModule }
+        let leanBad := sBad.messages.filter (·.severity == .error)
+        unless !leanBad.isEmpty do throw (IO.userError "the Lean frontend accepts the bad rewrite")
+        let some badOut ← selfhostOutput bad | return
+        let selfBad := (badOut.splitOn "\n").filter (fun l => l.startsWith "error")
+        unless !selfBad.isEmpty do throw (IO.userError s!"the self-hosted frontend accepts the bad rewrite:\n{badOut}")
+        let expected := "error: " ++ (leanBad.toList.head!).text
+        unless selfBad.head! == expected do
+          throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
 
-    { name := "(A11) a rejected derivation is reported at the command's line and column", run := fun _ =>
+    { name := "(A11) the deriver table: the five built-ins on every form (inductive, structure, after the fact, several classes, several types, re-registered)", run := fun _ =>
+        selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },
+
+    { name := "(A11) the deriver table's errors: no deriver, an indexed family, a recursive field, a wrong arity, an unrunnable deriver, a mutual block", run := fun _ =>
+        selfhostCheckFile selfhostDerivingNeg selfhostDerivingNegExpected },
+
+    { name := "(A11) deriving: the Lean host and the self-hosted frontend agree on every form", run := fun _ =>
+        derivingAgrees derivingSelfHeader [
+          ("inductive D1 where\n  | a\n  | b\n  | c\n  deriving BEq\n", true),
+          ("structure D2 where\n  x : Nat\n  deriving BEq\n", true),
+          ("structure D3 where\n  x : Nat\n  b : Bool\nderiving instance BEq, Repr for D3\n", true),
+          ("structure D4 where\n  x : Nat\nstructure D5 where\n  x : Bool\nderiving instance BEq for D4, D5\n", true),
+          ("inductive D6 where\n  | a\n  deriving Inhabited, BEq, Repr, DecidableEq\n", true),
+          ("inductive Vec (A : Type) : Nat → Type where\n  | vnil : Vec A Nat.zero\n  | vcons (x : A) (xs : Vec A Nat.zero) : Vec A Nat.zero\n  deriving BEq\n", false),
+          ("inductive L where\n  | nil\n  | cons (n : Nat) (t : L)\n  deriving DecidableEq\n", false),
+          ("inductive R where\n  | mk (r : R)\n  deriving Inhabited\n", false),
+          ("class Sz (A : Type) where\n  size : A → Nat\nderiving instance Sz for Nat\n", false),
+          ("def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n", false),
+          ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
+
+    { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
 
   ]

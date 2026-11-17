@@ -1,0 +1,390 @@
+import Text
+/-!
+# Scry.Diff: unified diffs and changed lines
+
+`Scry.Diff` is the pure half of `scry taint --diff` (and `--changed-lines`): it parses a
+unified diff (`git diff -U0`, a saved patch, `git diff -U3`, ...) into files and hunks,
+and answers "is this new-file line part of the change?".
+
+The important separation is **added** lines from **context** lines. A unified hunk's
+`+newStart,newCount` counts both the added lines and whatever context the producer asked
+for (`-U3` gives three lines each side). Only lines starting with `+` are changed; a
+context line is unchanged, and a finding there must stay suppressed. `--diff-context N`
+widens the changed ranges around additions (and around deletion gaps) *after* parsing,
+so it means the same thing for a `-U0` patch and a `-U3` one.
+
+Deletions have no new-file line. They are recorded as an anchor (the new line before the
+gap); with context 0 they select nothing, and with `--diff-context N` they select the N
+lines before and after the gap.
+
+Paths are matched leniently: `diff --git a/dir/f.c b/dir/f.c` names `dir/f.c`, and a
+finding's URI may be `dir/f.c`, `./dir/f.c`, or `scry/dir/f.c` when the CLI was run from
+a subdirectory. A suffix match on a path boundary covers those; when several diff files
+match, `DiffSelection.ambiguous` is set and the caller should say so.
+
+Limits: this is a line mapping, not a move detector. An insertion that pushes a sink
+down one line does not mark the sink line itself as changed (git reports the inserted
+line only). A renamed file is a rename only when the patch says so (`rename from`/`to`,
+or `git diff -M`); otherwise it is a delete plus an add.
+-/
+
+-- ## Data
+
+/-- One unified-diff hunk. `additions` are the new-file line numbers of `+` lines;
+`deletions` are the new-file anchors (the line before each deletion gap). -/
+structure Scry.DiffHunk where
+  oldStart : Nat
+  oldCount : Nat
+  newStart : Nat
+  newCount : Nat
+  additions : List Nat
+  deletions : List Nat
+
+/-- One file in a unified diff. `path` is the new-file path; `oldPath` is the old one
+for a rename. `binary` and `deleted` come from the patch's headers. -/
+structure Scry.DiffFile where
+  path : String
+  oldPath : Option String
+  binary : Bool
+  deleted : Bool
+  /-- In patch order. -/
+  hunks : List Scry.DiffHunk
+
+/-- What a diff says about one analysed file: the matched new path, its merged changed
+new-line ranges, and the counts a summary needs. -/
+structure Scry.DiffSelection where
+  /-- The matched diff path (the normalised URI when no file matched). -/
+  path : String
+  /-- A diff file named this path (or a suffix of it). -/
+  matched : Bool
+  /-- More than one diff file matched; `ranges` is the union. -/
+  ambiguous : Bool
+  /-- The matched file is binary in the diff (no line mapping is possible). -/
+  binary : Bool
+  /-- The matched file is deleted in the diff (it has no new lines). -/
+  deleted : Bool
+  /-- The old path of a rename, when it differs from `path`. -/
+  renamedFrom : Option String
+  hunks : Nat
+  /-- Sorted, disjoint, inclusive new-file line ranges (additions plus context). -/
+  ranges : List (Nat × Nat)
+  /-- New-file lines covered by `ranges`, context included. -/
+  changedLines : Nat
+  /-- Raw `+` lines, without the `--diff-context` expansion. -/
+  addedLines : Nat
+
+-- ## Small string helpers
+
+/-- A path with forward slashes and no leading `./`. -/
+def Scry.diffNormPath (p : String) : String :=
+  let q := String.replace p "\\" "/";
+  match String.stripPrefix q "./" with
+  | .some r => r
+  | .none => q
+
+/-- A `diff --git` side (`a/x` or `b/x`) without its one-letter prefix. -/
+def Scry.diffStripSide (p : String) : String :=
+  let q := Scry.diffNormPath p;
+  match String.stripPrefix q "a/" with
+  | .some r => r
+  | .none => match String.stripPrefix q "b/" with
+    | .some r => r
+    | .none => q
+
+/-- A `---`/`+++` path: drop a tab-separated timestamp, the `a/`/`b/` side and `./`. -/
+def Scry.diffHeaderPath (s : String) : String :=
+  let noTab := match String.splitOn s "\t" with
+    | .cons h _ => h
+    | .nil => s;
+  Scry.diffStripSide noTab
+
+/-- Drop a trailing carriage return (a CRLF patch). -/
+def Scry.diffTrimCr (s : String) : String :=
+  match String.stripSuffix s "\r" with
+  | .some r => r
+  | .none => s
+
+/-- A suffix match on a `/` boundary: `tests/a.c` matches `scry/tests/a.c`, but `a.c`
+does not match `src/ba.c`. -/
+def Scry.diffPathSuffix (whole part : String) : Bool :=
+  match String.isEmpty part with
+  | .true => .false
+  | .false => match String.eq whole part with
+    | .true => .true
+    | .false => match String.stripSuffix whole part with
+      | .some pre => String.endsWith pre "/"
+      | .none => .false
+
+/-- Does this diff file name `uri` (new path or old path of a rename)? Both directions
+are tried: a finding may be `tests/a.c` while `git diff` from a subdirectory names it
+`scry/tests/a.c`, or the other way round. -/
+def Scry.diffPathEither (uri p : String) : Bool :=
+  Bool.or (Scry.diffPathSuffix uri p) (Scry.diffPathSuffix p uri)
+
+def Scry.diffFileMatches (uri : String) (f : Scry.DiffFile) : Bool :=
+  let old := match f.oldPath with
+    | .some p => p
+    | .none => "";
+  Bool.or (Scry.diffPathEither uri f.path) (Scry.diffPathEither uri old)
+
+-- ## Parsing
+
+/-- A parsed `+start[,count]` or `-start[,count]` range. -/
+def Scry.diffParseRange (s : String) : Option (Nat × Nat) :=
+  match String.splitOn s "," with
+  | .cons a .nil => match String.parseNat a with
+    | .some n => .some (n, 1)
+    | .none => .none
+  | .cons a (.cons b _) => match String.parseNat a, String.parseNat b with
+    | .some n, .some m => .some (n, m)
+    | _, _ => .none
+  | _ => .none
+
+/-- `@@ -oldStart,oldCount +newStart,newCount @@ text` → the four numbers. -/
+def Scry.diffParseHunkHeader (line : String) : Option (Nat × Nat × Nat × Nat) :=
+  match String.splitOn line " " with
+  | .cons _ (.cons old (.cons new _)) =>
+    match String.stripPrefix old "-", String.stripPrefix new "+" with
+    | .some o, .some n => match Scry.diffParseRange o, Scry.diffParseRange n with
+      | .some p, .some q => .some (p.1, p.2, q.1, q.2)
+      | _, _ => .none
+    | _, _ => .none
+  | _ => .none
+
+/-- The body of one hunk: the added lines, deletion anchors, and the lines after it. -/
+structure Scry.DiffBody where
+  additions : List Nat
+  deletions : List Nat
+  rest : List String
+
+/-- Consume exactly `oldRem` old lines and `newRem` new lines (or stop on a line that is
+not a hunk body line). `cur` is the next new-file line number; a deletion records the
+last new line it saw, which is the line before the deletion gap. -/
+partial def Scry.diffTakeHunk (fuel oldRem newRem cur : Nat) (pureDeletion : Bool)
+    (lines : List String) (body : Scry.DiffBody) : Scry.DiffBody :=
+  match fuel with
+  | .zero => { body with rest := lines }
+  | .succ f => match oldRem, newRem with
+    | .zero, .zero => { body with rest := lines }
+    | _, _ => match lines with
+      | .nil => { body with rest := .nil }
+      | .cons raw rest =>
+        let line := Scry.diffTrimCr raw;
+        if String.startsWith line "+" then match newRem with
+          | .zero => { body with rest := lines }
+          | .succ nr => Scry.diffTakeHunk f oldRem nr (Nat.succ cur) pureDeletion rest
+              { body with additions := List.cons cur body.additions }
+        else if String.startsWith line "-" then match oldRem with
+          | .zero => { body with rest := lines }
+          | .succ or =>
+            -- A `-U0` deletion hunk's `newStart` is the line before the gap; in every
+            -- other hunk `cur` is the next new line, so the last consumed line is
+            -- `cur - 1`.
+            let anchor := match pureDeletion with
+              | .true => cur
+              | .false => Nat.sub cur 1;
+            Scry.diffTakeHunk f or newRem cur pureDeletion rest
+              { body with deletions := List.cons anchor body.deletions }
+        else if String.startsWith line " " then match oldRem, newRem with
+          | .succ or, .succ nr =>
+            Scry.diffTakeHunk f or nr (Nat.succ cur) pureDeletion rest body
+          | _, _ => { body with rest := lines }
+        else if String.startsWith line "\\" then
+          Scry.diffTakeHunk f oldRem newRem cur pureDeletion rest body
+        else { body with rest := lines }
+
+/-- Close the current file into the (reversed) output. -/
+def Scry.diffClose (cur : Option Scry.DiffFile) (out : List Scry.DiffFile) :
+    List Scry.DiffFile :=
+  match cur with
+  | .none => out
+  | .some f => List.cons f out
+
+/-- The last two tokens of a line (`diff --git a/x b/y` → `(a/x, b/y)`). -/
+def Scry.diffLastTwo (line : String) : Option (String × String) :=
+  match List.reverse (String.splitOn line " ") with
+  | .cons b (.cons a _) => .some (a, b)
+  | _ => .none
+
+partial def Scry.diffGo (cur : Option Scry.DiffFile) (out : List Scry.DiffFile)
+    (skipBinary : Bool) (lines : List String) : List Scry.DiffFile :=
+  match lines with
+  | .nil => List.reverse (Scry.diffClose cur out)
+  | .cons raw rest =>
+    let line := Scry.diffTrimCr raw;
+    if String.startsWith line "diff --git " then
+      match Scry.diffLastTwo line with
+      | .some (a, b) =>
+        let nf := Scry.DiffFile.mk (Scry.diffStripSide b) (.some (Scry.diffStripSide a))
+          .false .false .nil;
+        Scry.diffGo (.some nf) (Scry.diffClose cur out) .false rest
+      | .none => Scry.diffGo cur out .false rest
+    else if skipBinary then
+      Scry.diffGo cur out .true rest
+    else if String.startsWith line "--- " then
+      let p := Scry.diffHeaderPath (String.drop 4 line);
+      match cur with
+      | .none => Scry.diffGo (.some (Scry.DiffFile.mk p (.some p) .false .false .nil)) out .false rest
+      | .some f => match f.hunks with
+        | .nil =>
+          let old := match String.eq p "/dev/null" with
+            | .true => .none
+            | .false => Option.some p;
+          let path := match String.isEmpty f.path with
+            | .true => p
+            | .false => f.path;
+          Scry.diffGo (.some { f with oldPath := old, path := path }) out .false rest
+        | _ =>
+          let nf := Scry.DiffFile.mk p (.some p) .false .false .nil;
+          Scry.diffGo (.some nf) (Scry.diffClose cur out) .false rest
+    else if String.startsWith line "+++ " then
+      let p := Scry.diffHeaderPath (String.drop 4 line);
+      match cur with
+      | .none => Scry.diffGo (.some (Scry.DiffFile.mk p .none .false .false .nil)) out .false rest
+      | .some f => match String.eq p "/dev/null" with
+        | .true =>
+          let old := match f.oldPath with
+            | .some o => o
+            | .none => f.path;
+          Scry.diffGo (.some { f with path := old, deleted := .true }) out .false rest
+        | .false => Scry.diffGo (.some { f with path := p, deleted := .false }) out .false rest
+    else if String.startsWith line "rename from " then
+      let p := Scry.diffHeaderPath (String.drop 12 line);
+      match cur with
+      | .some f => Scry.diffGo (.some { f with oldPath := .some p }) out .false rest
+      | .none => Scry.diffGo (.some (Scry.DiffFile.mk p (.some p) .false .false .nil)) out .false rest
+    else if String.startsWith line "rename to " then
+      let p := Scry.diffHeaderPath (String.drop 10 line);
+      match cur with
+      | .some f => Scry.diffGo (.some { f with path := p }) out .false rest
+      | .none => Scry.diffGo (.some (Scry.DiffFile.mk p .none .false .false .nil)) out .false rest
+    else if String.startsWith line "Binary files " then
+      match cur with
+      | .some f => Scry.diffGo (.some { f with binary := .true }) out .false rest
+      | .none => Scry.diffGo cur out .false rest
+    else if String.eq line "GIT binary patch" then
+      match cur with
+      | .some f => Scry.diffGo (.some { f with binary := .true }) out .true rest
+      | .none => Scry.diffGo cur out .true rest
+    else if String.startsWith line "@@ " then
+      match Scry.diffParseHunkHeader line with
+      | .none => Scry.diffGo cur out .false rest
+      | .some (os, oc, ns, nc) =>
+        let body := Scry.diffTakeHunk (Nat.succ (List.length rest)) oc nc ns
+          (Nat.beq nc 0) rest (Scry.DiffBody.mk .nil .nil .nil);
+        let h := Scry.DiffHunk.mk os oc ns nc
+          (List.reverse body.additions) (List.reverse body.deletions);
+        match cur with
+        | .some f =>
+          Scry.diffGo (.some { f with hunks := List.cons h f.hunks }) out .false body.rest
+        | .none =>
+          Scry.diffGo cur out .false body.rest
+    else Scry.diffGo cur out .false rest
+
+/-- Parse a unified diff into its files, in patch order. -/
+def Scry.parseDiff (text : String) : List Scry.DiffFile :=
+  Scry.diffGo .none .nil .false (String.splitOn text "\n")
+
+-- ## Changed lines
+
+/-- A single point `p` with `context` unchanged lines either side. -/
+def Scry.diffPointRange (p context : Nat) : List (Nat × Nat) :=
+  let lo := Nat.max 1 (Nat.sub p context);
+  let hi := Nat.add p context;
+  match Nat.le lo hi with
+  | .true => List.cons (lo, hi) .nil
+  | .false => .nil
+
+/-- A deletion gap at `anchor` (the new line before the gap) with `context` lines each
+side. Context 0 selects nothing: a deleted line has no new-file line. -/
+def Scry.diffGapRange (anchor context : Nat) : List (Nat × Nat) :=
+  match context with
+  | .zero => .nil
+  | .succ c =>
+    let n := Nat.succ c;
+    let lo := Nat.max 1 (Nat.add (Nat.sub anchor n) 1);
+    let hi := Nat.add anchor n;
+    match Nat.le lo hi with
+    | .true => List.cons (lo, hi) .nil
+    | .false => .nil
+
+def Scry.diffConcat {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.diffConcat f xs)
+
+/-- Insert into a list sorted by lower bound. -/
+def Scry.diffIns (r : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | .nil => List.cons r .nil
+  | .cons x rest => match Nat.lt r.1 x.1 with
+    | .true => List.cons r (List.cons x rest)
+    | .false => List.cons x (Scry.diffIns r rest)
+
+/-- Merge sorted, overlapping or touching ranges. -/
+def Scry.diffMergeGo : List (Nat × Nat) → List (Nat × Nat) → List (Nat × Nat)
+  | .nil, acc => List.reverse acc
+  | .cons (a, b) rest, acc => match acc with
+    | .nil => Scry.diffMergeGo rest (List.cons (a, b) .nil)
+    | .cons (c, d) more => match Nat.le a (Nat.succ d) with
+      | .true => Scry.diffMergeGo rest (List.cons (c, Nat.max d b) more)
+      | .false => Scry.diffMergeGo rest (List.cons (a, b) acc)
+
+/-- Sorted, merged, inclusive ranges from a set of ranges. -/
+def Scry.diffMergeRanges (rs : List (Nat × Nat)) : List (Nat × Nat) :=
+  Scry.diffMergeGo (List.foldl (fun acc r => Scry.diffIns r acc) .nil rs) .nil
+
+/-- How many new-file lines the ranges cover. -/
+def Scry.diffCount : List (Nat × Nat) → Nat
+  | .nil => 0
+  | .cons (a, b) rest => Nat.add (Nat.add (Nat.sub b a) 1) (Scry.diffCount rest)
+
+/-- The changed new-file ranges of one diff file, with `context` lines of slop. -/
+def Scry.diffFileRanges (f : Scry.DiffFile) (context : Nat) : List (Nat × Nat) :=
+  let hs := List.reverse f.hunks;
+  let rs := Scry.diffConcat (fun h =>
+      List.append
+        (Scry.diffConcat (fun p => Scry.diffPointRange p context) h.additions)
+        (Scry.diffConcat (fun a => Scry.diffGapRange a context) h.deletions)) hs;
+  Scry.diffMergeRanges rs
+
+/-- Select the diff entry for `uri` and compute its changed ranges. No match gives an
+empty selection (`matched` false), which the CLI reports and treats as unchanged. -/
+def Scry.diffSelect (uri : String) (context : Nat) (fs : List Scry.DiffFile) :
+    Scry.DiffSelection :=
+  let u := Scry.diffNormPath uri;
+  let ms := List.filter (fun f => Scry.diffFileMatches u f) fs;
+  match ms with
+  | .nil => Scry.DiffSelection.mk u .false .false .false .false .none 0 .nil 0 0
+  | .cons f rest =>
+    let all := List.cons f rest;
+    let ranges := Scry.diffMergeRanges
+      (Scry.diffConcat (fun g => Scry.diffFileRanges g context) all);
+    let hunks := List.foldl (fun n g => Nat.add n (List.length g.hunks)) 0 all;
+    let added := List.foldl (fun n g =>
+      List.foldl (fun m h => Nat.add m (List.length h.additions)) n g.hunks) 0 all;
+    let binary := List.any (fun g => g.binary) all;
+    let deleted := List.all (fun g => g.deleted) all;
+    let renamedFrom := match f.oldPath with
+      | .some o => match String.eq o f.path with
+        | .true => Option.none
+        | .false => .some o
+      | .none => Option.none;
+    Scry.DiffSelection.mk f.path .true (Nat.lt 1 (List.length all)) binary deleted
+      renamedFrom hunks ranges (Scry.diffCount ranges) added
+
+/-- Is `line` in the sorted ranges? -/
+def Scry.diffLineInRanges (line : Nat) : List (Nat × Nat) → Bool
+  | .nil => .false
+  | .cons (a, b) rest => match Nat.le a line with
+    | .true => match Nat.le line b with
+      | .true => .true
+      | .false => Scry.diffLineInRanges line rest
+    | .false => .false
+
+/-- A readable form of the ranges, for tests and summaries (`3-4,9-9`). -/
+def Scry.diffRenderRanges : List (Nat × Nat) → String
+  | .nil => "(none)"
+  | .cons (a, b) rest =>
+    let here := Nat.repr a ++ "-" ++ Nat.repr b;
+    match rest with
+    | .nil => here
+    | _ => here ++ "," ++ Scry.diffRenderRanges rest
