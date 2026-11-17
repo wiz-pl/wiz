@@ -2,7 +2,8 @@
 # smoke test from "Run workflow".
 #
 #   * unit  — Python only, no toolchain: the stdlib tests of each tool that has a
-#             tests/ directory (tools/wiz-mcp, and tools/jupyter when it is present).
+#             tests/ directory (tools/wiz-mcp, tools/scry-mcp, and tools/jupyter when
+#             it is present).
 #   * smoke — workflow_dispatch only: builds the toolchain with Nix and runs
 #             tools/wiz-mcp/run-tests.sh, which starts the real `wiz lsp` daemon for
 #             diagnostics and hover and checks that it dies with the bridge. A checkout
@@ -43,6 +44,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: tools/wiz-mcp
         run: python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
+      - name: tools/scry-mcp
+        run: python3 -m unittest discover -s tools/scry-mcp/tests -p 'test_*.py' -v
       - name: tools/jupyter (if present)
         shell: bash
         run: |

@@ -51,6 +51,18 @@ file; the rule and its ambiguity failure are in `docs/trust-ledger.md`). A local
 driver is not cloned and CI cannot set it, so run `scripts/trust-ledger.sh --check`
 after a merge; `scripts/trust-ledger-merge_test.sh` tests the driver without a build.
 
+**The host-side unsafe ledger.** The trust ledger covers the Wiz sources; the Lean that
+implements Wiz has its own escapes from Lean's guarantees (a mutable cell behind a pure
+interface, a C function, a value whose type is erased). `scripts/host-unsafe-ledger.py`
+finds every declaration under `Wiz/`, `Tests/`, `Grail/` and the root `.lean` files whose
+code (not comments or strings) uses `unsafe`, `unsafeBaseIO`, `unsafeIO`, `unsafeEIO`,
+`unsafeCast`, or an `implemented_by` or `extern` attribute, and compares them with
+`.github/host-unsafe.tsv`: one row per use, with the invariant that keeps it from changing
+a result (what is accepted, rechecked or cached). `--check` fails on an unlisted use, a
+stale row or a row without an invariant; `--print` lists the uses as rows to fill in.
+It needs no build: `scripts/pre-commit.sh --fast` runs it with its fixtures
+(`Tests/host-unsafe-ledger/run.sh`).
+
 ### The REPL (`wiz repl`)
 
 `wiz repl` reads one Wiz command per line on standard input and elaborates it into one
@@ -217,12 +229,9 @@ Adding a test group touches no shared file:
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
   that group's module; `Tests/Elab.lean` holds the helpers several groups use (`ok`,
   `fails`, the library loaders, the self-hosted programs, …).
-* The older modules (`Tests/Grail.lean`, `Tests/Lint.lean`, …) still list their groups
+* The older modules (`Tests/Lint.lean`, `Tests/LSP.lean`, …) still list their groups
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
-* `scripts/migrate-tests.py` made this layout from the old single `Tests/Elab.lean`,
-  deterministically; a branch that still edits the old file replays its changes with it
-  (AGENTS.md, "Test layout").
 
 ### The rejection corpus (`=reject`)
 
@@ -299,7 +308,7 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
@@ -310,7 +319,7 @@ includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; 
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
 expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
 
 There is also a complete example **index repository** at `examples/grail-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
@@ -491,16 +500,22 @@ not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corp
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
-The nightly `.github/workflows/bench.yml` runs this as a second job
-(`mem`, after the timing jobs) with `--check --markdown "$GITHUB_STEP_SUMMARY"`;
-`bench.yml` is owned by its own PR, so the exact diff is in
-`bench/mem-bench.bench.yml.diff` for the coordinator to apply after that lands. The
-job declares 6 GiB (the preparation builds the checker) and uploads
-`bench-out/mem-bench.json` as an artifact.
+The nightly `.github/workflows/bench.yml` runs this as a second job, `mem`, with
+`--check --markdown "$GITHUB_STEP_SUMMARY"`. It runs after the timing job `bench`,
+whatever that job's result, so the two never share the runner, and it uploads
+`bench-out/mem-bench.json` as an artifact. It declares 3 GiB (`WIZ_MEM_BENCH_GIB`).
+Its largest step is the preparation, building the self-hosted checker, which peaked
+at about 1.8 GB after the `inlineTm` fix. A cold run records that build's peak and
+wall time as `checker_build` in the JSON and in the step summary, so the declaration
+can be checked against each night's number. The build is not gated. The job's Nix
+step only substitutes (`--max-jobs 0`): `wiz` comes from the timing job's build on
+the same runner or from Cachix, and a Lean compile never runs under this budget.
+`--phases` (about 6 GiB, the in-process checker build) is not part of the nightly.
 
 ## Continuous integration
 
-`nix develop` gives the toolchain the tests need besides Lean (see `flake.nix`): GMP and
+`nix develop` (or direnv: `.envrc` is `use flake`) gives the toolchain the tests need
+besides Lean (see `flake.nix`): GMP and
 LLVM's `llc` for the C and LLVM backends, Boehm GC for the self-hosted backend, a C
 compiler, yosys for synthesis, Node for the Wasm modules, and elan, which installs the
 Lean in `lean-toolchain`. Entered at the
@@ -528,7 +543,7 @@ critical path runs `lake build` directly or saves a `.lake` Actions cache. The s
 Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
-`grail` beside itself, which `Tests/Grail.lean` looks for). The dev shell (`nix develop`)
+`grail` beside itself, which `Tests/Groups/Grail*.lean` look for). The dev shell (`nix develop`)
 is still what puts `cc`, `llc`, z3, cadical, yosys, Node and Neovim on `PATH`, and it writes
 `grail.local.wiz` for the cases that compile C.
 
@@ -578,7 +593,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
-* **Trust ledger** (the `trust-ledger` job): `scripts/trust-ledger.sh --check` runs the
+* **Trust ledger** (a step in the `build` job, before any shard):
+  `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
   `.github/trust-baseline.tsv`: a new `axiom`, `sorry`, `native_refl` or SMT axiom,
@@ -812,7 +828,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with

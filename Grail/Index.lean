@@ -425,7 +425,7 @@ def sortedAsks (m : Std.HashMap String (List Ask)) : List (String × List Ask) :
 
 /-- The constraints implied by the roots and by the *current* selection: every root
 requirement, plus every dependency of every chosen version. Rebuilding this map each round
-(rather than only appending) is R9 in `wiz-notes/prior-art/registries-build-systems.md`:
+(rather than only appending) is R9 in `docs/prior-art/registries-build-systems.md`:
 when a chosen version is replaced, the requirements that only the old version introduced
 are retracted instead of lingering. -/
 def constraintsOf (roots : List Req) (selection : List (String × IxVersion)) :

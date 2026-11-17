@@ -1,9 +1,9 @@
 /-!
 # The three closed sorts of F0
 
-F0 has exactly the three sorts of the design note (`/workspace/wiz-notes/stc-m0-spec.md`
-§2): `prop` (`Sort 0`), `u0` (`Sort 1`) and `u1` (`Sort 2`). `Sort 0 : Sort 1 : Sort 2`,
-and `Sort 2` is a type but not a term: `Srt.succ? .u1 = none`, so no typing rule forms it.
+F0 has exactly three closed sorts (see `STC.lean`'s module doc): `prop` (`Sort 0`),
+`u0` (`Sort 1`) and `u1` (`Sort 2`). `Sort 0 : Sort 1 : Sort 2`, and `Sort 2` is a type
+but not a term: `Srt.succ? .u1 = none`, so no typing rule forms it.
 
 Levels are not part of F0. `WizMeta/Level.lean` stays for the later level-polymorphic
 extension (M5/E2); this file is the closed enum the M0 design asks for.

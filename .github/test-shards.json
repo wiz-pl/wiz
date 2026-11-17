@@ -79,6 +79,7 @@
     "phantom",
     "=plot",
     "regions",
+    "=reject",
     "=scry-wil",
     "=scry-c2wil",
     "=scry-csharp",

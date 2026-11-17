@@ -90,7 +90,8 @@ def wordGroup : Group where
     { name := "compiled: operators at words run natively (C)", run := fun _ =>
         cRun "import Word\ndef main : Nat := ((250 : U8) + 10 * 2).toNat + (-1 / 2 : I8).toNat" "14" },
     { name := "22l: a word carries its range: no unchecked builder, and the constructor needs the proof", run := fun _ => do
-        -- the probe (wiz-notes/soundness-probes/a3-word-ofbitstrusted.wiz)
+        -- the probe: `UIntN.ofBitsTrusted 5 : UIntN 1` had `toNat = 5` in the kernel while
+        -- compiled code computed on other bits; this case is its regression
         for (src, frag) in [("def bad : UIntN 1 := UIntN.ofBitsTrusted 5", "ofBitsTrusted"),
             ("def bad : UIntN 1 := UIntN.mk 5 rfl", "private"), ("def bad : IntN 1 := IntN.mk 5 rfl", "private")] do
           let ms ← msgsLib ("import Word\n" ++ src ++ "\n")

@@ -310,7 +310,7 @@ DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
-              "devenv.*", ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
+              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
 
 
 def matches(path, globs):

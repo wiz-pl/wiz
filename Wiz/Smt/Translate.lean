@@ -11,7 +11,7 @@ constant (two atoms are the same constant when their terms are the same). Abstra
 subterm to a constant is sound (a formula valid for an arbitrary value is valid for this
 one); it only loses completeness.
 
-The fragment (wiz-notes/smt.md §3.2):
+The fragment:
 * Props: `→` between propositions, `¬`, `∧`, `∨`, `↔`, `True`, `False`, `a = b` at a
   sort below; a `∀` over a sort at the goal's top (a fresh constant).
 * `Bool`: `.true`, `.false`, `Bool.and/or/not/xor`, `Nat.lt/le/beq`, word comparisons.
