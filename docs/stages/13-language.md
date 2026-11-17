@@ -851,13 +851,16 @@ end Foo
 * **Errors.** A namespace with no `end` is reported at the `namespace` line
   (`namespace Foo is not closed: add end (or end Foo)`); `end` with no open namespace,
   and `end Bar` that does not name the innermost namespace, are errors at the `end`.
-* **Self-hosting.** The syntax is in the Lean frontend only, like the rest of stage 13:
-  the self-hosted frontend needs the two parser rules (`namespace`, `open`/`end` in its
-  table) and an `elabCommand` walk that keeps the prefix and open lists and applies the
-  same resolution; until then, no file the self-hosted frontend compiles may use it.
+* **Self-hosting.** `selfhost/Frontend.wiz` keeps the same state in its `Globals`
+  (the prefix, the opens and aliases, and the open namespaces with the offset of each
+  `namespace`), prefixes declaration names where a command is elaborated, and resolves
+  terms and pattern constructors through `resolveNameV` with the host's order and
+  ambiguity error. The parser table was regenerated with the grammar; the self-hosted
+  frontend compiles the namespace cases in the `selfhost` group.
 
 Tests: `namespace` (nested namespaces; qualified use with no `open`; `open` then
 unqualified use; the exact ambiguity error; `open … as` for qualification; `open … as`
 not opening unqualified; a private name through an open and through an alias; missing and
-stray `end`; `#check` showing the qualified name; `mutual` under a namespace). The
-self-hosted frontend does not compile these tests.
+stray `end`; `#check` showing the qualified name; `mutual` under a namespace), and the
+`selfhost` group's `(13t)` cases (the same resolution in the self-hosted frontend,
+including a constructor of the matched type and the `end` diagnostics).
