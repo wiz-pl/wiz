@@ -875,7 +875,8 @@ page runs.
   Scry.Repl`). A module that does not resolve is reported at startup and the REPL exits 2
   instead of failing on the first input. That is how a tool becomes "the ordinary Wiz REPL
   with an extra prelude" rather than forking the loop: it ships a prelude module, and e.g.
-  `scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`.
+  `scry repl`, run from `scry/`, is `wiz repl -I src -I ../lib --prelude Scry.Repl`
+  (from the repository root, `wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 * **Limits.** Input is one line per command (`IO.FS.Stream.getLine`): no continuation
   for a definition that spans lines, no readline (history, line editing or completion),
@@ -892,7 +893,8 @@ page runs.
   `.lake/build/bin/tests`), else `.lake/build/bin/tests` in the current directory. Without
   a driver it says how to build one (`lake build wiz tests`) and exits 2. It is not a
   second runner: selectors, `--jobs`, `--list`, `--timings` and the summary are the
-  driver's. (The single-file form `wiz test FILE` is 11ah.)
+  driver's. (The single-file form `wiz test FILE` is still a proposal; there is no
+  11ah section and no `wiz test` command.)
 
 ```
 $ wiz repl

@@ -227,21 +227,18 @@ test group assert a peak of at most 8 pages (512 KiB) as well as the result, and
 algorithms are checked against the module compiled by the previous backend and against the
 interpreter for every other case.
 
-Tail calls and CAF caching, Node 26, best of five runs:
+CAF caching, Node 26, best of five runs:
 
 | workload | feature | peak linear memory | `wiz_main` |
 | --- | --- | --- | --- |
-| 10,000,000 mutual tail calls | `return_call` | 64 KiB (1 page) | 36.6 ms |
 | two live uses of a closed `Tree` of `2^20 - 1` nodes | CAF cached | 257 pages (16.1 MiB) | 23.0 ms |
 | the same two uses, with the tree rebuilt per use (unit argument) | no cache | 513 pages (32.1 MiB) | 44.4 ms |
 
-The tail workload is constant-stack: the engine's stack is not part of linear memory, and
-the 1-page peak is the runtime's scratch/free-list area. The same mutual recursion at
-200,000 (the test case) exhausts the engine's stack with the old non-tail encoding and
-completes with `return_call`. In the CAF row both uses are live at once (`size big +
-size big`), so caching halves the peak as well as removing one of the two builds; a loop
-that rebuilds the tree each iteration shows the same time difference without the peak
-change (`31.3 ms` cached vs `53.7 ms` rebuilt for twenty traversals of a depth-17 tree).
+The committed tail-call test is 200,000-deep mutual recursion and a 200,000-step self
+tail call (below): both are constant-stack, and the engine's stack is not part of linear
+memory. In the CAF row both uses are live at once (`size big + size big`), so caching
+halves the peak as well as removing one of the two builds; a loop that rebuilds the tree
+each iteration shows the same time difference without the peak change.
 
 ## Tests and counts
 

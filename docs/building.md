@@ -76,7 +76,9 @@ terminal gets a prompt; a pipe is a script, and its output is only the commands'
 `--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
 Prelude and before the first prompt, composing with `-I`; a missing module is a startup
 error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
-it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
+it (`scry repl`, run from `scry/`, is
+`wiz repl -I src -I ../lib --prelude Scry.Repl`; from the repository root,
+`wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 Limits: input is one line per command (no continuation, history or line editing, and no
 completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend
@@ -86,8 +88,8 @@ directory: the session has no file of its own. Tests are the `wiz repl:` cases o
 `tooling` group.
 
 `wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
-(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
-form is `wiz test FILE` (stage 11ah).
+with the other arguments unchanged; build the driver first. There is no single-file
+form yet: `wiz test FILE` is still a proposal, and no stage-11ah section exists.
 
 ### Running cases in parallel (`--jobs`)
 
@@ -417,9 +419,11 @@ the generated C and the linked programs are compared byte for byte by the script
 ## Memory budget
 
 Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
-4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
-retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
-brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+4 GiB memory cgroup whatever its wall time was. The self-hosted checker has a 1 GiB cap
+because a `mutual`/`partial` inline-cache change once made its self-check retain far
+more; after the `inlineTm` fix `bench/mem-baseline.json` records 412.5 MiB peak in
+31.338 s (`python3 scripts/mem-bench.py --update` re-records it). `scripts/mem-bench.py`
+measures the peak
 resident set of a fixed corpus and gates it two ways:
 
 ```sh
@@ -494,9 +498,10 @@ peak of the recorded samples, ±5 %):
 
 The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
 cap and an order of magnitude above the module checks, which is why it has its own
-entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+entry. The cap exists because of that inline-cache regression; the baseline records
+412.5 MiB (`scripts/mem-bench.py --update` re-records it).
 The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
-not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+not the largest peak. The 164 KiB `hdl-uart-temporal` example is not in the corpus:
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
@@ -696,9 +701,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   does not show that the C is correct (it is compiled with `-w`), that the compiled
   toolchain behaves correctly (the test suite covers that), or anything about other
   inputs, flags, C compilers or GC versions.
-  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
-  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
-  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  The self-compile needs about 6 GiB; the script names that requirement if a stage is
+  killed for memory (exit 137). Run it locally with `nix develop -c
   scripts/fixpoint.sh` and a 6 GiB reservation.
   The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on

@@ -34,8 +34,8 @@ self-hosted runner executes that pull request's code on the machine. So:
   output is ~165 MB but its closure includes `wiz`, so ~2.0 GB; plus cache.nixos.org's
   dev shell, the Wiz caches under `~/.cache/wiz`, `.grail` and `/tmp/wiz-selfhost-*`).
   There is no `.lake` build any more. The opt-in nightly fixpoint
-  (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the self-compiles peak near
-  5.4 GiB); it checks `MemAvailable` before the run and fails clearly on a smaller
+  (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the fixpoint's declaration);
+  it checks `MemAvailable` before the run and fails clearly on a smaller
   runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
   and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
   to all but two CPUs).

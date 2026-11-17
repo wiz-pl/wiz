@@ -25,7 +25,7 @@
 * **Runtime**: tagged words, objects collected by the Boehm garbage collector (no
   reference counts yet); the program re-executes itself once with a large stack.
 
-**Bootstrap**: the self-hosted compiler (frontend and backend, about 6500 lines of Wiz),
+**Bootstrap**: the self-hosted compiler (frontend and backend, about 12 000 lines of Wiz),
 compiled by the Lean toolchain, compiles itself to C (about 90 000 lines); that program
 (stage 2) produces the same C as stage 1 on the inputs tried. The test suite compiles
 and runs a program with the self-hosted compiler (when `$WIZ_GC_CFLAGS`/`$WIZ_GC_LDFLAGS`
@@ -341,7 +341,8 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   does not construct the key at all. Before this, `prepare` elaborated the graph first
   and the hit only saved the rendering, so a warm check cost the same as a cold one
   (measured in `bench/selfhost-bench.py`: compiler.wiz warm 10.6 s vs cold 38.3 s after
-  the fix; 1.8x the host's RSS, 1.2x its cold time).
+  the fix; 2.0x the host's RSS (`rss_ratio` 1.9765 in `bench/selfhost-bench.json`), 1.2x
+  its cold time).
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
