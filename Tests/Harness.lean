@@ -14,6 +14,14 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+/-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
+`Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
+checks its files N at a time). `Group.run` passes it to each case's process; the cases
+of a parallel group (`Group.runJobs`) get 1, since N of them already run at once. -/
+initialize caseJobsRef : IO.Ref Nat ← IO.mkRef 1
+
+/-- How many workers a case may use (`caseJobsRef`); at least 1. -/
+def caseJobs : IO Nat := do pure (max 1 (← caseJobsRef.get))
 
 def toolchain : IO Wiz.Toolchain := toolchainRef.get
 
@@ -161,13 +169,15 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let stdout ← IO.getStdout
   stdout.flush
   let self ← IO.appPath
+  let n ← caseJobs
+  let jobs : Array String := if n > 1 then #["--jobs", toString n] else #[]
   let mut results := #[]
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
     let start ← IO.monoMsNow
     let out ← IO.Process.output
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ (← flagsRef.get).toArray }
+      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ jobs ++ (← flagsRef.get).toArray }
     let ms := (← IO.monoMsNow) - start
     forwardGuessLines g i out.stderr
     let r := caseResult c i out.exitCode out.stdout out.stderr ms

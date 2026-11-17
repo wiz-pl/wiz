@@ -109,6 +109,9 @@ program another case builds; no case
 may assert on wall time or on the machine's load (a `scaling`-style bound). A case that
 needs a shared program the first case builds (the self-hosted checker, the Wiz `tower` in
 `.lake/build/tower-wiz`) is not parallel-safe: N processes would build it N times.
+A case of a group that did not opt in is told N (`Tests.caseJobs`) and may split
+its own work: the `selfhost-libdiff` sweep builds the self-hosted compiler once and then
+checks N files at a time, capped by the CPUs and the free memory (docs/stages/21-bootstrap.md, 21ae).
 `--jobs-all` also parallelizes the
 groups that did not opt in, for auditing one group's isolation — not for CI. On a 4-core
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
