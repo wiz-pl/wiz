@@ -18,6 +18,8 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
   ([exported page](notebooks/tour.html)) is the same tour as a runnable notebook
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
+* [bootstrap-chain.md](bootstrap-chain.md): the self-hosted toolchain chain (design, not active):
+  pins by commit and hash, the fixpoint release, attestations, reproducibility, the root
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
 * [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that
