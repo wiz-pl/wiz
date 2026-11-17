@@ -13,7 +13,7 @@
 // no unhandled rejection anywhere.
 "use strict";
 import {
-  isSelfhostSearch, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
+  isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
   SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
 } from "./selfhost-lsp-shim.js";
@@ -88,6 +88,13 @@ const countingEval = (src) => { evaluated++; return stubEval(src); };
 check("search: ?lsp=selfhost", isSelfhostSearch("?lsp=selfhost"), true);
 check("search: any case, with a token", isSelfhostSearch("?lsp=SelfHost&token=x"), true);
 check("search: a ws endpoint is not it", isSelfhostSearch("?lsp=ws://127.0.0.1:8765"), false);
+check("default: no lsp parameter is the in-page server", wantsSelfhost(""), true);
+check("default: an unrelated parameter is still the in-page server", wantsSelfhost("?token=x"), true);
+check("default: ?lsp=selfhost names it", wantsSelfhost("?lsp=SelfHost"), true);
+check("default: ?lsp=off disables it", wantsSelfhost("?lsp=off"), false);
+check("default: ?lsp=none disables it", wantsSelfhost("?lsp=none"), false);
+check("default: a port keeps the external client", wantsSelfhost("?lsp=8765"), false);
+check("default: a ws url keeps the external client", wantsSelfhost("?lsp=ws://127.0.0.1:8765"), false);
 check("search: nothing", isSelfhostSearch(""), false);
 check("endpoint: the url", selfhostEndpoint({ evaluate: stubEval }).url, SELFHOST_URL);
 check("endpoint: a WebSocketImpl", typeof selfhostEndpoint({ evaluate: stubEval }).WebSocketImpl, "function");
