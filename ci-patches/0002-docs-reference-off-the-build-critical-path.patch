@@ -1,0 +1,44 @@
+--- a/docs/building.md
++++ b/docs/building.md
+@@ -530,19 +530,23 @@
+ 
+ GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
+ `master`. The toolchain is built **once**, with Nix: the `build` job runs
+-`nix build .#wiz .#tests .#reference` (nixpkgs' Lean, no Lake artifact cache; `reference`
+-is the standard library's reference manual, made with that `wiz`) and publishes the three
++`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes the two
+ store paths to Cachix with
+ 
+ ```sh
+-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
++nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+ ```
+ 
+ with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
+ build has no Lake artifact cache: a commit's first build compiles every module in the
+ sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
+ paths. Pull requests from forks get no secret: they skip the push and their shards build
+-the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
++the paths themselves.
++
++The standard library's reference manual (`.#reference`) is not built by `build`: only the
++`docs` job reads it, and only on a push, so that job builds it from the cached `wiz` while
++the shards run. Building it in `build` put it on every shard's critical path for an output
++no shard uses. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
+ (`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
+ critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
+ Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
+@@ -922,10 +926,9 @@
+ 
+ The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
+ interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
+---lib -o doc-site/docs --web web/out` (source links to the commit), copies the
+-reference manual's Markdown from the flake's `reference` package (`nix build
+-.#reference`, a Cachix hit when the build job already built it) to
+-`doc-site/docs/reference.md`, assembles the
++--lib -o doc-site/docs --web web/out` (source links to the commit), generates the
++reference manual's Markdown from the cached `wiz` (`nix build .#reference`; this job is
++its only consumer) into `doc-site/docs/reference.md`, assembles the
+ landing page, the benchmark page and the playground with `web/build-site.sh doc-site
+ web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
+ exist and the landing page's and benchmark page's local links resolve; no server), and
