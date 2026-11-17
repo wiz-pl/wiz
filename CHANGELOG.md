@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's Goals pane is served **in the page by default**
+  (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
+  so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
+  and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
+  still selects an external server and `?lsp=off` disables the pane.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
