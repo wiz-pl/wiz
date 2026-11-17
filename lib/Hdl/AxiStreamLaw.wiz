@@ -128,7 +128,7 @@ def AxiStream.Law.ConvertNoLoss {ω dw : Nat}
 
 /-- Nothing is accepted from an empty trace. -/
 def AxiStream.Law.accepted_nil {ω dw : Nat} :
-    AxiStream.Law.accepted (dw := dw) List.nil = List.nil := rfl
+    AxiStream.Law.accepted (dw := dw) [] = [] := rfl
 
 /-- The keep of a byte-wide beat is one bit. -/
 def AxiStream.Law.keepW_8 : AxiStream.keepW 8 = 1 := rfl

@@ -133,29 +133,29 @@ def Scry.modelFlat {A B : Type} (f : A → List B) : List A → List B
 
 def Scry.modelSources (m : Scry.FnModel) : List Scry.ArgRef :=
   Scry.modelFlat (fun e => match e with
-    | .source r => List.cons r .nil
+    | .source r => [r]
     | _ => .nil) m.effects
 
 def Scry.modelSans (m : Scry.FnModel) : List Scry.ArgRef :=
   Scry.modelFlat (fun e => match e with
-    | .sanitise r => List.cons r .nil
+    | .sanitise r => [r]
     | _ => .nil) m.effects
 
 def Scry.modelSinkArgs (m : Scry.FnModel) : List (Nat × Scry.SinkClass) :=
   Scry.modelFlat (fun e => match e with
-    | .sink arg c => List.cons (arg, c) .nil
+    | .sink arg c => [(arg, c)]
     | _ => .nil) m.effects
 
 def Scry.modelRangeFrom : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, first => List.append (Scry.modelRangeFrom k first)
-      (List.cons (Nat.add first k) .nil)
+      [(Nat.add first k)]
 
 /-- The `(destination, source)` pairs a model copies into. `arity` is the call's argument
 count, which is what expands a `copyArgs` effect (a format call has no fixed arity). -/
 def Scry.modelCopyPairs (m : Scry.FnModel) (arity : Nat) : List (Nat × Nat) :=
   Scry.modelFlat (fun e => match e with
-    | .copy dst src => List.cons (dst, src) .nil
+    | .copy dst src => [(dst, src)]
     | .copyArgs dst first => List.map (fun src => (dst, src))
         (Scry.modelRangeFrom (Nat.sub arity first) first)
     | _ => .nil) m.effects
@@ -186,7 +186,7 @@ def Scry.modelHasUnknown (m : Scry.FnModel) : Bool :=
 -- ## The table
 
 def Scry.sourceGetenv : Scry.FnModel :=
-  Scry.FnModel.mk "getenv" "libc" (List.cons (.source .result) .nil)
+  Scry.FnModel.mk "getenv" "libc" [(.source .result)]
     "the environment value is attacker-controlled"
 
 def Scry.sourceRead : Scry.FnModel :=
@@ -202,23 +202,23 @@ def Scry.sourceRecv : Scry.FnModel :=
     "fills buffer argument 1; the length argument 2 is a bound"
 
 def Scry.sourceFgets : Scry.FnModel :=
-  Scry.FnModel.mk "fgets" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "fgets" "libc" [(.source (.arg 0))]
     "fills buffer argument 0"
 
 def Scry.sourceGetline : Scry.FnModel :=
-  Scry.FnModel.mk "getline" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "getline" "libc" [(.source (.arg 0))]
     "fills the line buffer argument 0"
 
 def Scry.sourceFread : Scry.FnModel :=
-  Scry.FnModel.mk "fread" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "fread" "libc" [(.source (.arg 0))]
     "fills buffer argument 0"
 
 def Scry.sinkSystem : Scry.FnModel :=
-  Scry.FnModel.mk "system" "libc" (List.cons (.sink 0 .command) .nil)
+  Scry.FnModel.mk "system" "libc" [(.sink 0 .command)]
     "argument 0 is passed to the shell"
 
 def Scry.sinkPopen : Scry.FnModel :=
-  Scry.FnModel.mk "popen" "libc" (List.cons (.sink 0 .command) .nil)
+  Scry.FnModel.mk "popen" "libc" [(.sink 0 .command)]
     "argument 0 is passed to the shell"
 
 /-- `execl`/`execle`/`execlp` are variadic: the path is argument 0 and every argv entry
@@ -227,30 +227,30 @@ is still handled by the lower-ranked positions, and the limit is stated here rat
 silently assuming one position. -/
 def Scry.sinkExec : Scry.FnModel :=
   Scry.FnModel.mk "execl" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path and every variadic argv entry are command sinks (positions 0–7)"
 
 def Scry.sinkExeclp : Scry.FnModel :=
   Scry.FnModel.mk "execlp" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path and every variadic argv entry are command sinks (positions 0–7)"
 
 def Scry.sinkExecle : Scry.FnModel :=
   Scry.FnModel.mk "execle" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path, argv and the environment are command sinks (positions 0–7)"
 
 def Scry.sinkExecv : Scry.FnModel :=
   Scry.FnModel.mk "execv" "libc"
-    (List.cons (.sink 0 .command) (List.cons (.sink 1 .command) .nil))
+    [(.sink 0 .command), (.sink 1 .command)]
     "the path and the argv pointer"
 
 def Scry.sinkExecvp : Scry.FnModel :=
   Scry.FnModel.mk "execvp" "libc"
-    (List.cons (.sink 0 .command) (List.cons (.sink 1 .command) .nil))
+    [(.sink 0 .command), (.sink 1 .command)]
     "the path and the argv pointer"
 
 def Scry.sinkExecvpe : Scry.FnModel :=
@@ -278,16 +278,16 @@ def Scry.sinkPosixSpawnp : Scry.FnModel :=
     "the path (1), argv (4) and environment (5); argument 0 is the pid output"
 
 def Scry.sinkPrintf : Scry.FnModel :=
-  Scry.FnModel.mk "printf" "libc" (List.cons (.sink 0 .format) .nil)
+  Scry.FnModel.mk "printf" "libc" [(.sink 0 .format)]
     "argument 0 is the format string"
 
 def Scry.sinkFprintf : Scry.FnModel :=
-  Scry.FnModel.mk "fprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "fprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkSprintf : Scry.FnModel :=
   Scry.FnModel.mk "sprintf" "libc"
-    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    [(.sink 1 .format), (.copyArgs 0 1)]
     "argument 1 is the format; the formatted arguments are copied into the destination"
 
 def Scry.sinkSnprintf : Scry.FnModel :=
@@ -298,16 +298,16 @@ def Scry.sinkSnprintf : Scry.FnModel :=
     "argument 1 is the bound, argument 2 the format; the formatted arguments are copied"
 
 def Scry.sinkVprintf : Scry.FnModel :=
-  Scry.FnModel.mk "vprintf" "libc" (List.cons (.sink 0 .format) .nil)
+  Scry.FnModel.mk "vprintf" "libc" [(.sink 0 .format)]
     "argument 0 is the format string"
 
 def Scry.sinkVfprintf : Scry.FnModel :=
-  Scry.FnModel.mk "vfprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "vfprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkVsprintf : Scry.FnModel :=
   Scry.FnModel.mk "vsprintf" "libc"
-    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    [(.sink 1 .format), (.copyArgs 0 1)]
     "argument 1 is the format; the formatted arguments are copied into the destination"
 
 def Scry.sinkVsnprintf : Scry.FnModel :=
@@ -318,52 +318,52 @@ def Scry.sinkVsnprintf : Scry.FnModel :=
     "argument 1 is the bound, argument 2 the format; the formatted arguments are copied"
 
 def Scry.sinkSyslog : Scry.FnModel :=
-  Scry.FnModel.mk "syslog" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "syslog" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkDprintf : Scry.FnModel :=
-  Scry.FnModel.mk "dprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "dprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.copyStrcpy : Scry.FnModel :=
-  Scry.FnModel.mk "strcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strcpy" "libc" [(.copy 0 1)]
     "argument 1 is copied into the object argument 0 points at"
 
 def Scry.copyStrncpy : Scry.FnModel :=
-  Scry.FnModel.mk "strncpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strncpy" "libc" [(.copy 0 1)]
     "a bounded copy, still a copy from argument 1 to argument 0"
 
 def Scry.copyStrcat : Scry.FnModel :=
-  Scry.FnModel.mk "strcat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strcat" "libc" [(.copy 0 1)]
     "argument 1 is appended to the object argument 0 points at"
 
 def Scry.copyStrncat : Scry.FnModel :=
-  Scry.FnModel.mk "strncat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strncat" "libc" [(.copy 0 1)]
     "a bounded append, still a copy from argument 1 to argument 0"
 
 def Scry.copyStpcpy : Scry.FnModel :=
-  Scry.FnModel.mk "stpcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "stpcpy" "libc" [(.copy 0 1)]
     "argument 1 is copied into argument 0"
 
 def Scry.copyStrlcpy : Scry.FnModel :=
-  Scry.FnModel.mk "strlcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strlcpy" "libc" [(.copy 0 1)]
     "a size-bounded copy from argument 1 to argument 0"
 
 def Scry.copyStrlcat : Scry.FnModel :=
-  Scry.FnModel.mk "strlcat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strlcat" "libc" [(.copy 0 1)]
     "a size-bounded append from argument 1 to argument 0"
 
 def Scry.copyMemcpy : Scry.FnModel :=
-  Scry.FnModel.mk "memcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "memcpy" "libc" [(.copy 0 1)]
     "argument 1 is copied into argument 0"
 
 def Scry.copyMemmove : Scry.FnModel :=
-  Scry.FnModel.mk "memmove" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "memmove" "libc" [(.copy 0 1)]
     "argument 1 is moved into argument 0"
 
 def Scry.allocMalloc : Scry.FnModel :=
   Scry.FnModel.mk "malloc" "libc"
-    (List.cons (.alloc (.some 0) .none) (List.cons (.sink 0 .size) .nil))
+    [(.alloc (.some 0) .none), (.sink 0 .size)]
     "a fresh object; argument 0 is the byte count"
 
 def Scry.allocCalloc : Scry.FnModel :=
@@ -374,11 +374,11 @@ def Scry.allocCalloc : Scry.FnModel :=
 
 def Scry.allocRealloc : Scry.FnModel :=
   Scry.FnModel.mk "realloc" "libc"
-    (List.cons (.alloc (.some 1) .none) (List.cons (.sink 1 .size) .nil))
+    [(.alloc (.some 1) .none), (.sink 1 .size)]
     "a fresh object; the old object may also be freed (not modelled as a free here, to keep the may-alias result)"
 
 def Scry.freeFree : Scry.FnModel :=
-  Scry.FnModel.mk "free" "libc" (List.cons (.free 0) .nil)
+  Scry.FnModel.mk "free" "libc" [(.free 0)]
     "argument 0 is freed"
 
 -- Policy models: the sanitiser names the default pack trusts. A model supplies the
@@ -386,43 +386,43 @@ def Scry.freeFree : Scry.FnModel :=
 -- function is safe for every use.
 
 def Scry.sanEscapeShell : Scry.FnModel :=
-  Scry.FnModel.mk "escape_shell" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "escape_shell" "policy" [(.sanitise .result)]
     "shell-escapes its argument and returns a new string"
 
 def Scry.sanShellescape : Scry.FnModel :=
-  Scry.FnModel.mk "shellescape" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "shellescape" "policy" [(.sanitise .result)]
     "shell-escapes its argument and returns a new string"
 
 def Scry.sanQuoteArg : Scry.FnModel :=
-  Scry.FnModel.mk "quote_arg" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "quote_arg" "policy" [(.sanitise .result)]
     "quotes one shell argument"
 
 def Scry.sanSanitize : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize" "policy" (List.cons (.sanitise (.arg 0)) .nil)
+  Scry.FnModel.mk "sanitize" "policy" [(.sanitise (.arg 0))]
     "cleans argument 0 in place"
 
 def Scry.sanSanitizeFormat : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize_format" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "sanitize_format" "policy" [(.sanitise .result)]
     "returns a format string with no conversions"
 
 def Scry.sanSanitizePath : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize_path" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "sanitize_path" "policy" [(.sanitise .result)]
     "returns a path with traversal components removed"
 
 def Scry.sanConfinePath : Scry.FnModel :=
-  Scry.FnModel.mk "confine_path" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "confine_path" "policy" [(.sanitise .result)]
     "confines a path to a base directory"
 
 def Scry.sanCheckedSize : Scry.FnModel :=
-  Scry.FnModel.mk "checked_size" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "checked_size" "policy" [(.sanitise .result)]
     "returns a size after an overflow check"
 
 def Scry.sanClampLen : Scry.FnModel :=
-  Scry.FnModel.mk "clamp_len" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "clamp_len" "policy" [(.sanitise .result)]
     "returns a length clamped to a bound"
 
 def Scry.sanClampSize : Scry.FnModel :=
-  Scry.FnModel.mk "clamp_size" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "clamp_size" "policy" [(.sanitise .result)]
     "returns a size clamped to a bound"
 
 -- Pure/read-only calls: an empty effect list is a positive model, not `unknown`.
@@ -512,7 +512,7 @@ def Scry.isUnknownModel (m : Scry.FnModel) : Bool :=
 /-- The explicit fallback: an unmodelled external has an `unknown` effect, never an empty
 effect list. -/
 def Scry.unknownModel (name : String) : Scry.FnModel :=
-  Scry.FnModel.mk name "unknown" (List.cons .unknown .nil)
+  Scry.FnModel.mk name "unknown" [.unknown]
     "unmodelled external: its result and memory effect are unknown"
 
 def Scry.modelFor (name : String) : Scry.FnModel :=
@@ -590,7 +590,7 @@ def Scry.RulePack.withModels (p : Scry.RulePack) : Scry.RulePack :=
   let step : Scry.RulePack → Scry.SinkClass → Scry.RulePack :=
     fun acc c => match acc.hasRule (Scry.SinkClass.ruleId c) with
       | .true => acc
-      | .false => Scry.RulePack.mk (List.append acc.rules (List.cons (Scry.modelRule c) .nil));
+      | .false => Scry.RulePack.mk (List.append acc.rules [(Scry.modelRule c)]);
   List.foldl step p Scry.modelSinkClasses
 
 -- ## Rendering (for diagnostics and docs)

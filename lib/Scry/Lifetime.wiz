@@ -104,7 +104,7 @@ def Scry.uProvAdd (p : List (Scry.Loc × Scry.PathNode)) (l : Scry.Loc)
     (n : Scry.PathNode) : List (Scry.Loc × Scry.PathNode) :=
   match Scry.uProvGet p l with
   | .some _ => p
-  | .none => List.append p (List.cons (l, n) .nil)
+  | .none => List.append p [(l, n)]
 
 def Scry.uProvMerge (a b : List (Scry.Loc × Scry.PathNode)) :
     List (Scry.Loc × Scry.PathNode) :=
@@ -202,10 +202,10 @@ def Scry.uRhsLocs (st : Scry.UState) (pt : Scry.PtResult) (func : String) (point
       (Scry.uCurGet st pt func p.index)
   | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.uCurGet st pt func p.index)
   | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.uCurGet st pt func p.index)
-  | .alloc _ => List.cons (.heap func point) .nil
-  | .slot _ => List.cons (.stack func point) .nil
-  | .globalRef n => List.cons (.glob n) .nil
-  | .fnptr n => List.cons (.fn n) .nil
+  | .alloc _ => [(.heap func point)]
+  | .slot _ => [(.stack func point)]
+  | .globalRef n => [(.glob n)]
+  | .fnptr n => [(.fn n)]
   | .havoc _ => match Scry.ptrLike x.ty with
     | .true => Scry.unknownLocs
     | .false => .nil
@@ -290,7 +290,7 @@ def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect
       let freedLocs := List.map (fun q => q.1) extra;
       let rets := Scry.uCallRetFreed es p pt fn.name callee;
       let st1 := Scry.uMarkAliases st (Scry.locUnion rets freedLocs);
-      let freed := List.foldr (fun q acc => Scry.locUnion (List.cons q.1 .nil) acc)
+      let freed := List.foldr (fun q acc => Scry.locUnion [q.1] acc)
         st1.freed extra;
       let prov := List.foldr (fun q acc => Scry.uProvAdd acc q.1 q.2) st1.prov extra;
       let freed2 := Scry.locUnion rets freed;
@@ -429,7 +429,7 @@ def Scry.uFinding (rule : Scry.MemoryRule) (fn : Wil.Func) (point var : Nat)
       | .none => Scry.PathNode.mk fn.name point var Scry.PathKind.free;
   let use := Scry.PathNode.mk fn.name point var Scry.PathKind.sink;
   Scry.RuleFinding.mk rule.id rule.severity rule.message Scry.FindingKind.memory
-    fn.name point name arg (List.cons alloc (List.cons freeNode (List.cons use .nil)))
+    fn.name point name arg [alloc, freeNode, use]
 
 /-- The accesses at point `n` that use a freed location. -/
 def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Func)
@@ -440,20 +440,20 @@ def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Fun
     | .assign x (.load ptr) _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "load" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "load" 0 l st)]
     | .store ptr _ _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "store" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "store" 0 l st)]
     | .free ptr _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "free (double free)" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "free (double free)" 0 l st)]
     | .call _ callee args _ =>
       let calleeFindings : List Scry.RuleFinding := match callee with
         | .indirect v => match Scry.uFirstFreed st fn.name v.index with
           | .none => .nil
-          | .some l => List.cons (Scry.uFinding rule fn n v.index "indirect call" 0 l st) .nil
+          | .some l => [(Scry.uFinding rule fn n v.index "indirect call" 0 l st)]
         | .direct _ => .nil;
       let argFindings := Scry.concatLists (fun p =>
         let a := p.2;

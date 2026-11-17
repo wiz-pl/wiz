@@ -120,8 +120,8 @@ def Heap.congrUnionL {V : Type} {h₁ h₁' : Heap V} (h₂ : Heap V) (e : h₁ 
   @Eq.congrArg (Heap V) (Heap V) (fun (x : Heap V) => Heap.union x h₂) h₁ h₁' e
 
 /-- `Heap.single l v` holds `v` at `l`. -/
-def Heap.single_at {V : Type} (l : Nat) (v : V) : Heap.single l v l = Option.some v :=
-  transp (fun b _ => Option.when b v = Option.some v) rfl (@Eq.symm Bool (Nat.beq l l) Bool.true (Nat.beq_refl l))
+def Heap.single_at {V : Type} (l : Nat) (v : V) : Heap.single l v l = .some v :=
+  transp (fun b _ => Option.when b v = .some v) rfl (@Eq.symm Bool (Nat.beq l l) .true (Nat.beq_refl l))
 
 /-- The union laws: `Heap.empty` is a left unit of `Heap.union`. -/
 def Heap.union_empty_l {V : Type} (h : Heap V) : Heap.union Heap.empty h = h := Heap.ext (fun l => rfl)
@@ -175,8 +175,8 @@ def Heap.disj_eq_r {V : Type} (h₁ : Heap V) {h h' : Heap V} (e : h = h') (d : 
 /-- Two singletons at one location overlap: they are never disjoint. -/
 def Heap.disj_single {V : Type} (l : Nat) (v w : V) : ¬ Heap.Disj (Heap.single l v) (Heap.single l w) :=
   fun d => Or.elim (d l)
-    (fun f => absurd (@Eq.substProp (Option V) (fun (o : Option V) => Option.Free o) (Heap.single l v l) (Option.some v) (Heap.single_at l v) f).1)
-    (fun f => absurd (@Eq.substProp (Option V) (fun (o : Option V) => Option.Free o) (Heap.single l w l) (Option.some w) (Heap.single_at l w) f).1)
+    (fun f => absurd (@Eq.substProp (Option V) (fun (o : Option V) => Option.Free o) (Heap.single l v l) (.some v) (Heap.single_at l v) f).1)
+    (fun f => absurd (@Eq.substProp (Option V) (fun (o : Option V) => Option.Free o) (Heap.single l w l) (.some w) (Heap.single_at l w) f).1)
 
 -- ## Heap predicates
 

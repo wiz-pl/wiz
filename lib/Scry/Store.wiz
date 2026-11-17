@@ -70,7 +70,7 @@ def Scry.hashRow (row : List U64) : U64 := Scry.rowHash (U64.ofNat 1469598103934
 
 /-- The index key for column `c` holding `v`. -/
 def Scry.colKey (c : Nat) (v : U64) : U64 :=
-  Scry.hashRow (List.cons (U64.ofNat c) (List.cons v .nil))
+  Scry.hashRow [(U64.ofNat c), v]
 
 /-- The first element at index `n`, if any. -/
 def Scry.listGetOpt {A : Type} : List A → Nat → Option A

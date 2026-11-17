@@ -272,7 +272,7 @@ def Scry.resultJsonFull (m : Scry.OriginMap) (pack : Scry.RulePack)
         , ("derivation", Json.mkStr (Scry.derivationText checked))
         , ("packRuleId", Json.mkStr f.rule) ]) ];
   Json.mkObj (List.append base (match baseline with
-    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .some b => [("baselineState", Json.mkStr b)]
     | .none => .nil))
 
 def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
@@ -307,7 +307,7 @@ def Scry.boundaryResultJsonFull (rule : String) (origin : Option Scry.Origin)
         , ("programPoint", Json.ofNat point)
         , ("derivation", Json.mkStr "unchecked") ]) ];
   Json.mkObj (List.append base (match baseline with
-    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .some b => [("baselineState", Json.mkStr b)]
     | .none => .nil))
 
 def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)

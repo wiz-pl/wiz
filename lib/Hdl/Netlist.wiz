@@ -89,18 +89,18 @@ def Netlist.runGo_eq (n : Netlist) : (regs : List Nat) → (inputs : List (List 
     Netlist.runGo_eq n (Netlist.cycle n regs x).2 xs (List.cons (Netlist.cycle n regs x).1 acc)
 
 /-- `Hdl.rev [] xs = xs`. -/
-def Hdl.rev_nil {A : Type} (xs : List A) : Hdl.rev List.nil xs = xs := rfl
+def Hdl.rev_nil {A : Type} (xs : List A) : Hdl.rev [] xs = xs := rfl
 
 /-- A memory list with no memories: `NetMem.storeAll` leaves the (empty) memory state
 empty. -/
 def NetMem.storeAll_nil (vals : Hdl.Vec Nat) :
-    (mems : List NetMem) → mems = List.nil → NetMem.storeAll vals mems List.nil = List.nil
+    (mems : List NetMem) → mems = [] → NetMem.storeAll vals mems [] = []
   | .nil, h => rfl
   | .cons m ms, h => absurd h.1
 
 /-- The initial memory state of a memoryless netlist is empty. -/
-def Netlist.mapMemInit_nil : (mems : List NetMem) → mems = List.nil →
-    Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) mems = List.nil
+def Netlist.mapMemInit_nil : (mems : List NetMem) → mems = [] →
+    Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) mems = []
   | .nil, h => rfl
   | .cons m ms, h => absurd h.1
 
@@ -111,13 +111,13 @@ def Netlist.simulate_eq_go (n : Netlist) (inputs : List (List Nat)) :
     Netlist.simulate n inputs =
       Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty)
         (Hdl.map (fun (r : NetReg) => r.init) n.regs)
-        (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems) inputs List.nil := rfl
+        (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems) inputs [] := rfl
 
 /-- `Netlist.simulateGo` with the initial state is `Netlist.runGo`, when there are no
 memories. -/
-def Netlist.simulateGo_eq_runGo (n : Netlist) (hm : n.mems = List.nil) :
+def Netlist.simulateGo_eq_runGo (n : Netlist) (hm : n.mems = []) :
     (regs : List Nat) → (inputs : List (List Nat)) → (acc : List (List Nat)) →
-    Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) regs List.nil inputs acc =
+    Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) regs [] inputs acc =
       Netlist.runGo n regs inputs acc
   | regs, .nil, acc => rfl
   | regs, .cons x xs, acc =>
@@ -133,18 +133,18 @@ def Netlist.simulateGo_eq_runGo (n : Netlist) (hm : n.mems = List.nil) :
 
 /-- `Netlist.simulate` is `Netlist.runFrom` from the initial registers, for a memoryless
 netlist. -/
-def Netlist.simulate_eq_runFrom (n : Netlist) (hm : n.mems = List.nil)
+def Netlist.simulate_eq_runFrom (n : Netlist) (hm : n.mems = [])
     (inputs : List (List Nat)) :
     Netlist.simulate n inputs =
       Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs :=
   Eq.trans (Eq.trans (Netlist.simulate_eq_go n inputs)
     (Eq.congrArg (fun (ms : List (HTrie Nat)) =>
         Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty)
-          (Hdl.map (fun (r : NetReg) => r.init) n.regs) ms inputs List.nil)
+          (Hdl.map (fun (r : NetReg) => r.init) n.regs) ms inputs [])
       (Netlist.mapMemInit_nil n.mems hm)))
     (Eq.trans (Netlist.simulateGo_eq_runGo n hm
-        (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs List.nil)
-      (Eq.trans (Netlist.runGo_eq n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs List.nil)
+        (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs [])
+      (Eq.trans (Netlist.runGo_eq n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs [])
         (Hdl.rev_nil (Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs))))
 
 /-- `Netlist.simulate = Netlist.run` for a memoryless netlist. -/
@@ -152,7 +152,7 @@ def Netlist.run_eq_runFrom (n : Netlist) (inputs : List (List Nat)) :
     Netlist.run n inputs = Netlist.runFrom n (Hdl.map (fun (r : NetReg) => r.init) n.regs) inputs := rfl
 
 /-- `Netlist.simulate = Netlist.run` for a memoryless netlist. -/
-def Netlist.simulate_eq_run (n : Netlist) (hm : n.mems = List.nil)
+def Netlist.simulate_eq_run (n : Netlist) (hm : n.mems = [])
     (inputs : List (List Nat)) : Netlist.simulate n inputs = Netlist.run n inputs :=
   Eq.trans (Netlist.simulate_eq_runFrom n hm inputs) (Eq.symm (Netlist.run_eq_runFrom n inputs))
 
@@ -172,9 +172,9 @@ netlist's initial register leaves are the circuit's initial state leaves, and on
 cycle implements one `Circuit.stepEl`. -/
 structure Circuit.Simulates {ω i o : HwTy} (c : Circuit i o) (n : Netlist) where
   /-- the netlist has one clock domain (`ClockDomain.sys`) -/
-  oneClock : n.clocks = List.cons ClockDomain.sys List.nil
+  oneClock : n.clocks = [ClockDomain.sys]
   /-- the netlist has no memories -/
-  memFree : n.mems = List.nil
+  memFree : n.mems = []
   /-- the initial registers are the initial state's leaves -/
   initOk : Hdl.map (fun (r : NetReg) => r.init) n.regs = HwTy.leaves c.st c.init
   /-- one netlist cycle is one circuit step -/

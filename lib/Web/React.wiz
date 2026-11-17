@@ -204,17 +204,17 @@ def React.eventAttr (event : String) : String := String.append "data-wiz-on-" ev
 
 /-- The `data-wiz-on-EVENT` value of a handler: its index in the rendered handler table. -/
 def React.eventValue (index : Nat) : String :=
-  String.mk (Json.natChars index List.nil)
+  String.mk (Json.natChars index [])
 
 /-- Attach the handler attribute for `event` (number `index`) to the head of `node`.
 Nested `on`s put more attributes on the same element; a text node is wrapped in a
 `span` so that it has somewhere to carry the attribute. -/
 def React.attach {M : Type} (event : String) (index : Nat) : React.VNode M → React.VNode M
-  | .el t k a cs n => .el t k (List.append a (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil)) cs n
+  | .el t k a cs n => .el t k (List.append a [(React.attr (React.eventAttr event) (React.eventValue index))]) cs n
   | .on e m b n => .on e m (React.attach event index b) n
-  | .text s n => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) (.text s .nil) n
-  | .raw h n => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) (.raw h .nil) n
-  | .nil => .el "span" "" (.cons (React.attr (React.eventAttr event) (React.eventValue index)) List.nil) .nil .nil
+  | .text s n => .el "span" "" [(React.attr (React.eventAttr event) (React.eventValue index))] (.text s .nil) n
+  | .raw h n => .el "span" "" [(React.attr (React.eventAttr event) (React.eventValue index))] (.raw h .nil) n
+  | .nil => .el "span" "" [(React.attr (React.eventAttr event) (React.eventValue index))] .nil .nil
 
 /-- Turn a virtual tree into a rendered tree, numbering handlers in document order
 (pre-order: the node's own handlers, then its children, then its next sibling). -/
@@ -265,8 +265,8 @@ def React.renderRNode : React.RNode → Html → Html
     | .false => React.renderRNode n (React.closeTag t (React.renderRNode cs opened))
 
 /-- A rendered tree as an HTML string. -/
-def React.htmlOf (n : React.RNode) : String := match React.renderRNode n (Html.mk List.nil 0) with
-  | .mk acc _ => String.mk (List.revOnto acc List.nil)
+def React.htmlOf (n : React.RNode) : String := match React.renderRNode n (Html.mk [] 0) with
+  | .mk acc _ => String.mk (List.revOnto acc [])
 
 /-- A rendered view: its tree (for diffing), its HTML, and its handler table
 (`event, message`, in document order). -/
@@ -278,9 +278,9 @@ structure React.Rendered (M : Type) where
 /-- Render a virtual tree: HTML for SSR, handlers for dispatch, and the tree for a
 later `React.Rendered.diff`. Deterministic: no clock, no hashing, no allocation order. -/
 def React.render {M : Type} (v : React.VNode M) : React.Rendered M :=
-  let o : React.Out M := React.Out.mk List.nil 0 List.nil;
+  let o : React.Out M := React.Out.mk [] 0 [];
   let r := React.toR v o;
-  React.Rendered.mk r.1 (React.htmlOf r.1) (List.revOnto r.2.handlers List.nil)
+  React.Rendered.mk r.1 (React.htmlOf r.1) (List.revOnto r.2.handlers [])
 
 /-- A virtual tree as an HTML string (SSR). -/
 def React.toHtml {M : Type} (v : React.VNode M) : String := (React.render v).html
@@ -367,9 +367,9 @@ def React.allKeyed : List React.RNode → Bool
 /-- Whether the parent is the root (whose child paths have no leading dot). -/
 def React.childPath (parent : String) (i : Nat) : String :=
   match String.eq parent "" with
-  | .true => String.mk (Json.natChars i List.nil)
+  | .true => String.mk (Json.natChars i [])
   | .false => String.mk (List.append (String.chars parent)
-      (List.append (String.chars ".") (Json.natChars i List.nil)))
+      (List.append (String.chars ".") (Json.natChars i [])))
 
 /-- An attribute's value by name. -/
 def React.attrValue (name : String) : List React.Attr → Option String
@@ -380,14 +380,14 @@ def React.attrValue (name : String) : List React.Attr → Option String
 
 /-- Remove the attributes of `old` that `new` does not have. -/
 def React.removedAttrs (path : String) : List React.Attr → List React.Attr → List React.Patch
-  | .nil, _ => List.nil
+  | .nil, _ => []
   | .cons a rest, new => match React.attrValue a.1 new with
     | .some _ => React.removedAttrs path rest new
     | .none => .cons (.removeAttr path a.1) (React.removedAttrs path rest new)
 
 /-- Set the attributes of `new` that are absent from `old` or have another value. -/
 def React.setAttrs (path : String) (old : List React.Attr) : List React.Attr → List React.Patch
-  | .nil => List.nil
+  | .nil => []
   | .cons a rest => match React.attrValue a.1 old with
     | .some v => match String.eq v a.2 with
       | .true => React.setAttrs path old rest
@@ -406,21 +406,21 @@ mutual
 /-- Patches turning the node `old` into `new` at `path` (both are single nodes). -/
 partial def React.diffNode (path : String) (old : React.RNode) (new : React.RNode) : List React.Patch :=
   match old, new with
-  | .nil, .nil => List.nil
+  | .nil, .nil => []
   | .text s _, .text s' _ => match String.eq s s' with
-    | .true => List.nil
-    | .false => .cons (.text path s') List.nil
+    | .true => []
+    | .false => [(.text path s')]
   | .raw h _, .raw h' _ => match String.eq h h' with
-    | .true => List.nil
-    | .false => .cons (.replace path h') List.nil
+    | .true => []
+    | .false => [(.replace path h')]
   | .el t k a cs _, .el t' k' a' cs' _ =>
     match String.eq t t' with
-    | .false => .cons (.replace path (React.htmlOf new)) List.nil
+    | .false => [(.replace path (React.htmlOf new))]
     | .true => match String.eq k k' with
-      | .false => .cons (.replace path (React.htmlOf new)) List.nil
+      | .false => [(.replace path (React.htmlOf new))]
       | .true => List.append (React.diffAttrs path a a')
           (React.diffChildren path (React.RNode.siblings cs) (React.RNode.siblings cs'))
-  | _, _ => .cons (.replace path (React.htmlOf new)) List.nil
+  | _, _ => [(.replace path (React.htmlOf new))]
 
 /-- Patches for a children list at `base` (which ends with `.`, or is empty at the
 root): keyed when both lists are fully keyed, positional otherwise. -/
@@ -433,11 +433,11 @@ partial def React.diffChildren (base : String) (old new : List React.RNode) : Li
 
 /-- Positional diff: pair by index, then insert or remove at the tail. -/
 partial def React.diffPositional (base : String) (i : Nat) : List React.RNode → List React.RNode → List React.Patch
-  | .nil, .nil => List.nil
+  | .nil, .nil => []
   | .nil, .cons n ns =>
-    .cons (.insert base i (React.htmlOf n)) (React.diffPositional base (i + 1) List.nil ns)
+    .cons (.insert base i (React.htmlOf n)) (React.diffPositional base (i + 1) [] ns)
   | .cons o os, .nil =>
-    .cons (.remove base i) (React.diffPositional base i os List.nil)
+    .cons (.remove base i) (React.diffPositional base i os [])
   | .cons o os, .cons n ns =>
     List.append (React.diffNode (React.childPath base i) o n)
       (React.diffPositional base (i + 1) os ns)
@@ -446,14 +446,14 @@ partial def React.diffPositional (base : String) (i : Nat) : List React.RNode �
 matching child into place (or inserting it), and finally remove the leftovers. -/
 partial def React.diffKeyed (base : String) (old new : List React.RNode) : List React.Patch :=
   let kept := React.dropMissing base new 0 old;
-  let walked := React.keyedLoop base 0 kept.1 new List.nil;
+  let walked := React.keyedLoop base 0 kept.1 new [];
   List.append kept.2 walked.2
 
 /-- The old children still present in `new`, with `remove` patches for the others.
 `j` is the child's current index (the number kept so far). -/
 def React.dropMissing (base : String) (new : List React.RNode) (j : Nat) :
     List React.RNode → List React.RNode × List React.Patch
-  | .nil => (List.nil, List.nil)
+  | .nil => ([], [])
   | .cons o os =>
     match React.hasKey (React.keyOf o) new with
     | .true => let rest := React.dropMissing base new (j + 1) os; (.cons o rest.1, rest.2)
@@ -474,13 +474,13 @@ partial def React.keyedLoop (base : String) (i : Nat) (cur : List React.RNode) :
             (List.append acc (.cons (.move base j i)
               (React.diffNode (React.childPath base i) (React.atD n j cur) n)))
         | .none => React.keyedLoop base (i + 1) (React.insertAt i n cur) ns
-            (List.append acc (.cons (.insert base i (React.htmlOf n)) List.nil))
+            (List.append acc [(.insert base i (React.htmlOf n))])
     | .none => React.keyedLoop base (i + 1) (React.insertAt i n cur) ns
-        (List.append acc (.cons (.insert base i (React.htmlOf n)) List.nil))
+        (List.append acc [(.insert base i (React.htmlOf n))])
 
 /-- Remove `k` children at index `i` (each removal shifts the next into place). -/
 def React.removeTail (base : String) (i : Nat) : Nat → List React.Patch
-  | .zero => List.nil
+  | .zero => []
   | .succ k => .cons (.remove base i) (React.removeTail base i k)
 end
 
