@@ -119,7 +119,8 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The reviewed base is 680 rows, 73 fewer than the migration's 753, and the removals are
+The ledger now has 730 rows: the migration's 753, minus the 73 removals below, plus 50
+`partial` rows added by later modules (the `partial` group is 182 rows). The removals are
 all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -142,20 +143,21 @@ The reviewed base falls into these groups:
 
 * **FFI, 210 declarations (420 rows).** Each `extern` contributes an axiom (the C
   function) and a `builtin extern:` row (the marshalling). Both FFI audits are done:
-  the OS/runtime modules (147 declarations, 290 rows) and the word/array/map modules
-  (66 declarations, 198 rows) carry symbol-specific reasons, naming the C function,
+  the OS/runtime modules (142 declarations, 208 rows) and the word/array/map modules
+  (68 declarations, 212 rows: `Word`, `WordArray`, `WordMap` and `Intern`) carry
+  symbol-specific reasons, naming the C function,
   the property that makes it the definition, and the marshalling's kind string. Do not
   bulk-renew them. `UInt64.ofNat` reduces mod 2^64 (the marshalling used to panic above
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
-* **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
-  `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
-  `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
-  engines (18), `SatTactic` (7), `BvDecide` (6), `Tagged` (6), `Infoview` (7), `Ring`
-  (2), `Prelude` (2), `Text` (3) and `IO` (1). Wiz's kernel treats a `partial`
+* **Mutual recursion and `partial`, 182 rows.** The rows come from `Feral` (70: 67
+  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.React` (14), the `Scry` modules
+  (49), `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`), `SatTactic` (7),
+  `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3), `Prelude` (3),
+  `Ring` (2) and `IO` (1). Wiz's kernel treats a `partial`
   definition as opaque: the definition is justified by an inhabited witness of its
   type (22f), never by a termination proof, so a row is not a claim that the recursion
-  terminates. The 132 rows are accepted as one reviewed group, deliberately not
+  terminates. The 182 rows are accepted as one reviewed group, deliberately not
   de-mutualised: each reason names its block and what would remove the row —
   de-mutualising into structural recursion over the syntax or data tree, or a checked
   measure (fuel, a decreasing counter, or a worklist/visited-set measure). A
@@ -206,7 +208,7 @@ rewrite is worthwhile only for a block that is small and hot.
 
 ### The numeric/container FFI audit
 
-`Word`, `WordArray`, `WordMap` and `Intern` declare 66 externs (198 rows: each extern's
+`Word`, `WordArray`, `WordMap` and `Intern` declare 68 externs (212 rows: each extern's
 `axiom` and `builtin extern:` pair, plus the `native` registration and the seal
 `builtin`s). All are reviewed with a reason naming the C function, the property that
 makes it the definition, and the marshalling's kind string; the `native` rows name the

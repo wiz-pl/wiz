@@ -294,13 +294,14 @@ to the findings. A capped fixpoint adds a `scry/budget/points-to-incomplete` or
 cannot mistake a truncated run for a complete one. Every reported finding is still a
 real derivation; only recall can be reduced.
 
-Measured on this machine (`grail` build, cold-ish cache; wall time, informational):
+Measured on this machine (`grail` build, cold-ish cache; wall time, informational;
+the table is `scry/bench/scale.md`, "Function-heavy files", on the base commit):
 
-| input | nodes | before | after | peak RSS |
+| input | nodes | before | after (warm / cold) | peak RSS |
 |---|---:|---:|---:|---:|
-| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2 s warm, 6–7.5 s cold** | ≈ 650 MiB |
-| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 79 s | ≈ 48 s | ≈ 650 MiB |
-| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 149 s | ≈ 35 s | ≈ 70 MiB |
+| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2.2 s warm, 6–7.5 s cold** | 654 MiB |
+| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 117.7 s | 50.3 s / 56.4 s | 34 MiB |
+| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 180.7 s | 15.6 s / 35–38 s | 71 MiB |
 
 Parsing and building the store account for ≈ 1.7 s of the 3.9 MB case; the rest is the
 lowering walk. One generated grammar function dominates the two tree-sitter runtime
@@ -376,7 +377,8 @@ function pointers resolve only through the points-to analysis.
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
 compares the findings with the manifest's expectations, and writes stable JSON and
-Markdown. The checked-in corpus is **S0/S2** (52 cases on this branch): the existing
+Markdown. The checked-in corpus is **S0/S2** (52 cases in
+`scry/bench/corpus/manifest.json`): the existing
 `tests/fixtures/taint-*.c` goldens plus hand-authored safe/unsafe pairs for CWE-78
 (command injection), CWE-134 (format string), CWE-242 (`gets`) and CWE-120/121
 (`strcpy`/`strcat`), and the external-model cases. S1/S3/S4 are optional external
@@ -386,8 +388,7 @@ corpora (`--extra DIR`); no third-party corpus is checked in.
 grail run scry -- bench                         # build/bench.json + build/bench.md
 grail run scry -- bench --no-timing --json -    # deterministic report on stdout
 grail run scry -- bench --extra /path/to/subset # an external manifest
-grail run scry -- bench --fail-on-regression    # fail closed if the baseline changed
-grail run scry -- bench --fail-on-regression --baseline-bootstrap  # explicit first run
+grail run scry -- bench --fail-on-regression    # exit 1 if the baseline changed
 grail run scry -- bench --update-baseline bench/baseline.json
 ```
 
@@ -395,25 +396,20 @@ Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, pre
 F1, macro averages, path validity (the path ends at the reported sink; a taint path also
 starts at a source), certificate (`checked`) coverage, boundary warnings, and runtime.
 The ratios are computed in integer basis points, so the checked-in baseline is stable.
-The checked-in baseline on this branch is **52 cases**: TP/FN 32/0, TN/FP 17/1,
-unknown 2, TPR 100.00%, FPR 5.56%, precision 96.97%, 44/44 valid paths and checked
-certificates (the boundary-warning total is in the generated report).
+The checked-in baseline (`scry/bench/baseline.json`, produced by
+`grail run scry -- bench --update-baseline bench/baseline.json`) has **52 cases**:
+TP/FN 32/0, TN/FP 17/1, unknown 2, TPR 100.00%, FPR 5.56%, precision 96.97%, 44/44
+valid paths and checked certificates, and 62 boundary warnings (4 blocking, 3 cases).
 
 Metrics are per **case**, not per alert. An `unsafe` case is TP only when every expected
 finding is matched with valid evidence and no extra finding appears; a `safe` case with a
 finding is FP; a `safe` case with a *blocking* lowering boundary is `unknown`, not TN. A
-missing corpus/manifest is a clean skip (exit 0) only when `--fail-on-regression` is not
-given: with the flag a non-`ok` run exits 1, as do a missing or invalid baseline and a
-baseline case missing from the run (or a new case absent from the baseline). The only
-first-run exception is an explicit `--baseline-bootstrap`, which permits an absent
-baseline and nothing else. A missing individual case file is `skipped`. Runtime is wall
-clock from `Clock.monotonic` and is marked informational: it is not a `perf-run`
-measurement, and the perf agent owns real numbers.
+missing corpus/manifest is a clean skip (exit 0), and a missing individual case file is
+`skipped`. Runtime is wall clock from `Clock.monotonic` and is marked informational: it
+is not a `perf-run` measurement, and the perf agent owns real numbers.
 
 `tests/bench.wiz` checks the metric formulas, the boundary/path/outcome rules, the
-missing-corpus skip, that the corpus still matches `bench/baseline.json`, and that the
-gate fails closed for a deleted/invalid baseline, a non-`ok` run, and a case removed
-from the run (both presence directions and the exit code are covered). The corpus
+missing-corpus skip, and that the corpus still matches `bench/baseline.json`. The corpus
 policy and the external-manifest hook are in `bench/corpus/README.md`.
 
 ## Real C corpus

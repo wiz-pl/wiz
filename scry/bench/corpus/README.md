@@ -1,6 +1,6 @@
 # Scry benchmark corpus
 
-This directory is the checked-in S0/S2 corpus (52 cases on this branch) for `scry bench`:
+This directory is the checked-in S0/S2 corpus (52 cases) for `scry bench`:
 
 * `manifest.json` — the cases: suite, CWE, file, `expect`, and the expected findings.
 * `cwe78/` — CWE-78 command injection.
@@ -113,16 +113,4 @@ grail test
 ```
 
 `tests/bench.wiz` fails when the corpus no longer matches the checked-in baseline; that
-is the regression gate. `scry bench --fail-on-regression` is the same gate on the
-command line and it fails closed:
-
-* a missing or invalid baseline exits 1 (`--baseline-bootstrap` is the explicit
-  first-run exception for an absent baseline; it does not excuse any other failure);
-* a run that is not `ok` (for example a missing corpus/manifest) exits 1;
-* every case present in the baseline and absent from the run (`present→absent`) exits
-  1, naming the cases; a new run case (`absent→present`) also exits 1 until the
-  baseline is reviewed and updated.
-
-The report JSON and Markdown carry both directions (`baseline.missing_from_run`,
-`baseline.new_in_run`, and the `presence` changes); without the flag these are
-informational and the run still exits 0.
+is the regression gate.
