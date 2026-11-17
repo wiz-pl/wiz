@@ -945,10 +945,10 @@ to the value model's response vector: every non-granted master is quiet and an
 acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
 value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
 `memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
-Every law above is called by `examples/hdl-bus-law.wiz` on exhaustively generated or
-long pseudo-random traces, compared against `Netlist.simulate` and `Circuit.simFast`:
-**tested, not proved**. The per-cycle and per-input pieces (`StableStep`, `RouteOk`,
-`AtMostOneAckStep`, …) are what those checks call.
+Every Boolean check above is called by `examples/hdl-bus-law.wiz` on exhaustively
+generated or long pseudo-random traces, compared against `Netlist.simulate` and
+`Circuit.simFast`: **tested, not proved**. The per-cycle and per-input pieces
+(`StableStep`, `RouteOk`, `AtMostOneAckStep`, …) are what those checks call.
 
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
