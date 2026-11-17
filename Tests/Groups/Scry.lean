@@ -101,7 +101,17 @@ def scryEgraphGroup : Group where
     { name := "limits: fixpoint, fuel, node cap and clock cap stop reasons", run := fun _ =>
         interp "scry-egraph-limits" "123415" },
     { name := "extraction: Option costs, a cycle with no finite term, a large weight", run := fun _ =>
-        interp "scry-egraph-extract-opt" "111111" }
+        interp "scry-egraph-extract-opt" "111111" },
+    { name := "Wil terms: constant folding and identities reach 5 and 10", run := fun _ =>
+        interp "scry-egraph-wil-const" "13252025" },
+    { name := "Wil terms: a copy-only function is a one-round no-op fixpoint", run := fun _ =>
+        interp "scry-egraph-wil-noop" "1110200" },
+    { name := "Wil terms: fuel 1 stops before the outer fold, fuel 5 reaches it", run := fun _ =>
+        interp "scry-egraph-wil-fuel" "110113" },
+    { name := "extract back to Wil: 2+3 -> 5, identities -> copies, b+c -> 10, with fuel", run := fun _ =>
+        interp "scry-egraph-extract-wil" "24001111130111" },
+    { name := "extract guard: a redefined operand blocks the second identity", run := fun _ =>
+        interp "scry-egraph-extract-guard" "21101111" }
   ]
 
 def scryGroup : Group where
