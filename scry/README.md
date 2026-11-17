@@ -322,8 +322,12 @@ by `parseChecked` (tree-sitter's recovery tree has 2 `ERROR`/`MISSING` nodes).
 
 `scry project DIR` builds a project from `DIR/compile_commands.json` (or `--compdb
 FILE`), or from every `*.c` under `DIR` when no database exists. Each translation unit is
-preprocessed with **its own** `-I`/`-D`/`-U`/`-include` flags, parsed, line-mapped and
-lowered; the units are then merged:
+preprocessed with **its own** preprocessing flags (`-I`/`-D`/`-U`/`-std=`/`-include`/…);
+every other flag in the database is dropped, and one that can execute code or choose a
+compiler driver (`-B`, `-fplugin`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, …) refuses
+the database with the flag's name. A directory walk does not follow symbolic links (they
+are reported and skipped). Each unit is then parsed, line-mapped and lowered, and the
+units are merged:
 
 * the project file table dedupes a shared header by path and keeps each unit's line map;
 * `static` functions are qualified `static:<tu>:<name>`, so two units' helpers never
@@ -504,7 +508,10 @@ finding shows its rule, severity, CWE, the coarse chain (`source → flow → si
 `certificate (L2, checked)` or `(L0, unchecked)`), the source excerpt with the sink line
 highlighted and every path step numbered, and the diff verdict when filtering is on.
 A directory is a corpus of **independent translation units**, not a project; use
-`scry project DIR --taint` for a cross-TU call graph.
+`scry project DIR --taint` for a cross-TU call graph. The walk does not follow symbolic
+links (it reports them and skips them), and `--out` is refused when it is a symlink, one
+of the files the run reads, or a `*.c` under the corpus directory: a committed
+`report.html -> ~/.bashrc` must not be truncated by opening the page with `O_TRUNC`.
 
 **Escaping is the whole game.** The C source is escaped exactly once (`&`, `<`, `>`, `"`,
 `'`) into a text cell; there is no `innerHTML` and no script. A file containing

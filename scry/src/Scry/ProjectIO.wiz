@@ -253,28 +253,66 @@ partial def Scry.ProjectIO.buildUnits (cc : String) (allowErrors : Bool) (keepSy
 
 -- ## Discovery
 
-/-- Walk `dir` for `*.c`, recursively (hidden directories are skipped). -/
+/-- The files a walk found and the paths it refused to follow (a symbolic link is
+reported, never descended: a repo link to an outside tree would otherwise embed those
+sources in a report, and `ln -s .. src/up` would recurse without bound). -/
+structure Scry.ProjectIO.Walk where
+  files : List String
+  links : List String
+
+/-- Whether `p` is `root` or below it (both are real paths). -/
+def Scry.ProjectIO.underRoot (root p : String) : Bool :=
+  match String.eq root "/" with
+  | .true => String.startsWith p "/"
+  | .false => Bool.or (String.eq p root) (String.startsWith p (String.append root "/"))
+
+/-- Walk `dir` for `*.c`, recursively. `root` is the real path of the directory the
+user named and `visited` the real directories already entered: a directory reached by
+another name cannot be walked twice. Symbolic links and escaping directories are
+returned in `links` and not followed. -/
 mutual
-partial def Scry.ProjectIO.walkNames (dir : String) : List String → EIO (List String)
-  | .nil => EIO.pure .nil
+partial def Scry.ProjectIO.walkNames (root : String) (visited : List String) (dir : String) :
+    List String → EIO Scry.ProjectIO.Walk
+  | .nil => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
   | .cons name rest => do
     let full := Path.join dir name;
-    st ← FS.stat full;
+    st ← FS.linkStat full;
     here ← match st.kind with
+      | .symlink => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
       | .dir => match String.startsWith name "." with
-        | .true => EIO.pure (.nil : List String)
-        | .false => Scry.ProjectIO.walkGo full
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+        | .false => do
+          real ← FS.realPath full;
+          match Bool.and (Scry.ProjectIO.underRoot root real)
+              (Bool.not (List.any (String.eq real) visited)) with
+          | .true => Scry.ProjectIO.walkDir root (List.cons real visited) full
+          | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
       | .file => match String.endsWith name ".c" with
-        | .true => EIO.pure (List.cons full .nil)
-        | .false => EIO.pure (.nil : List String)
-      | _ => EIO.pure (.nil : List String);
-    tail ← Scry.ProjectIO.walkNames dir rest;
-    EIO.pure (List.append here tail)
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk (List.cons full .nil) .nil)
+        | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+      | _ => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil);
+    tail ← Scry.ProjectIO.walkNames root visited dir rest;
+    EIO.pure (Scry.ProjectIO.Walk.mk (List.append here.files tail.files)
+      (List.append here.links tail.links))
 
-partial def Scry.ProjectIO.walkGo (dir : String) : EIO (List String) := do
+partial def Scry.ProjectIO.walkDir (root : String) (visited : List String)
+    (dir : String) : EIO Scry.ProjectIO.Walk := do
   names ← FS.listDir dir;
-  Scry.ProjectIO.walkNames dir names
+  Scry.ProjectIO.walkNames root visited dir names
 end
+
+/-- Walk the directory the user named. The root's own real path is the confinement
+base (a symlink the user named explicitly is theirs to follow once). -/
+def Scry.ProjectIO.walkGo (dir : String) : EIO Scry.ProjectIO.Walk := do
+  real ← FS.realPath dir;
+  Scry.ProjectIO.walkDir real (List.cons real .nil) dir
+
+/-- Say which links a walk skipped (on stderr, so a pipe's stdout stays a file list). -/
+def Scry.ProjectIO.reportSkippedLinks : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons l rest => do
+    EIO.lift (IO.ePrintln ("note: skipped symbolic link " ++ l ++ " (not followed)"))
+    Scry.ProjectIO.reportSkippedLinks rest
 
 /-- Sort strings (insertion sort; a project's source list is small). -/
 def Scry.insertString (x : String) : List String → List String
@@ -315,8 +353,9 @@ partial def Scry.ProjectIO.discover (dir : String) (compdb : Option String)
     match there with
     | .true => Scry.ProjectIO.discover dir (.some p) flags
     | .false => do
-      files ← Scry.ProjectIO.walkGo dir;
-      let files := Scry.sortStrings files;
+      w ← Scry.ProjectIO.walkGo dir;
+      Scry.ProjectIO.reportSkippedLinks w.links;
+      let files := Scry.sortStrings w.files;
       EIO.pure (List.map (fun file =>
         Scry.CompileCommand.mk "" file flags) files)
 
