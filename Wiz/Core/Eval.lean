@@ -655,9 +655,47 @@ partial def natFast? (g : Globals R) (op : Name) (args : Array (Val R)) : Option
   | "nat.pow", #[_, y] => match whnfNumeral g y with | .natLit 0 => some (.natLit 1) | _ => none
   | _, _ => none
 
+/-- A registered operation applied to all its arguments, as `vNatOpNow` computes it, but
+**kept glued** while an argument is the glued (not yet computed) value of a definition: the
+operation is then `.unfold n [] args t`, under its own name `n`, with `t` the value
+`vNatOpNow` gives, computed when something looks at it (`whnf`). Finding out whether an
+argument is a numeral forces it, so `let ok := Nat.beq big 5` (or a scrutinee
+`Nat.beq (fib 30) 0`) ran `big` in full while the `let` was merely checked (wiz-rv FINDINGS
+L8), whatever the `let`'s type: everything else on that path is already lazy.
+
+* The glued value is the operation's own unfolding, as for any other global: `whnf` gives
+  exactly what `vNatOpNow` gives, and `convGlued` compares two of them by the arguments
+  (sound: the same global on convertible arguments), falling back to `whnf` of both sides
+  when they differ (`Nat.add big 5` against `Nat.add 5 big`, or against `big + 5`), so
+  conversion is the same relation (wiz-notes/kernel-lazy-let.md, §8).
+* An argument that is itself a glued *operation* is computed first (`whnf`): otherwise a
+  loop such as `foldl (fun acc x => Nat.add acc (f x))` would build a chain of suspended
+  additions as long as the list, forced at the end one stack frame per element. So only a
+  definition's application keeps an operation glued, and a chain of operations never
+  suspends more than one link.
+* Not for a normal form (`g.eager`: a normal form has no suspended redex), nor with
+  `--eager-proofs` (`!g.lazyProofs`, the evaluator as it was), nor for `nat.succ` (a
+  constructor: `vNatOpNow` already builds it from a stuck argument without forcing it). -/
+partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
+  if g.eager || !g.lazyProofs || op == "nat.succ" then vNatOpNow g op args else
+  let isOp (n : Name) : Bool := match g.builtinKey? n with
+    | some k => k.startsWith "nat."
+    | none => false
+  let args := args.map fun a => match a with
+    | .unfold n _ _ _ => if isOp n then whnf a else a
+    | a => a
+  let glued := args.any fun a => match a with
+    | .unfold .. | .lazyInd .. => true
+    | _ => false
+  if glued then
+    match g.builtins.lookup op with
+    | some n => .unfold n [] (args.map .app) (memoThunk fun _ => vNatOpNow g op args)
+    | none => vNatOpNow g op args
+  else vNatOpNow g op args
+
 /-- A registered operation applied to all its arguments: native arithmetic on literals,
 otherwise the operation's definition. -/
-partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
+partial def vNatOpNow (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   if let some v := natFast? g op args then v else
   -- the arguments as numerals, stopping at the first that isn't one: forcing the rest
   -- could run a numeral's recursion all the way down (`d * 2^64` is `d + d * (2^64 - 1)`,

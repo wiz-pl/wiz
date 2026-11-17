@@ -528,6 +528,39 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- (kernel-vnatop-lazy) `fib k n` doubles `n` `k` times by recursion (2^k calls). -/
+def natOpFib : String := "import Prelude\n" ++
+  "def fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
+
+/-- `let`s of `Nat` operations on `fib k 1`, never needed for typing, and an equation of two
+such operations with the same arguments (compared by them, not computed). -/
+def natOpLazySrc (k : Nat) : String := natOpFib ++
+  s!"def big : Nat := fib {k} 1\n" ++
+  "def l8 : String := let ok := Nat.beq big 5; \"a\"\n" ++
+  "def l8ty : String := let ok : Bool := Nat.beq big 5; \"a\"\n" ++
+  "def natop : String := let n := Nat.add big 5; \"a\"\n" ++
+  s!"def s : String := let x := match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\"\n  x\n" ++
+  "def same : Nat.add big 5 = Nat.add big 5 := rfl\n"
+
+/-- Conversion through glued operations: computed when the arguments differ, a chain of
+operations (one link suspended at a time), `Nat.mul 0 _` without its other argument, and an
+accumulator loop (no chain of suspended additions as long as the list). -/
+def natOpLazySemSrc : String := natOpFib ++
+  "def small : Nat := fib 3 1\n" ++
+  "def t1 : Nat.beq small 8 = Bool.true := rfl\n" ++
+  "def t2 : Nat.add small 5 = Nat.add 5 small := rfl\n" ++
+  "def t3 : Nat.add small 5 = 13 := rfl\n" ++
+  "def t4 : Nat.beq (Nat.add small 1) 9 = Bool.true := rfl\n" ++
+  "def t5 : Nat.mul 0 (fib 40 1) = 0 := rfl\n" ++
+  "def id' (x : Nat) : Nat := x\n" ++
+  "def rep : Nat → List Nat\n  | .zero => .nil\n  | .succ n => .cons 1 (rep n)\n" ++
+  "def sumF : List Nat → Nat → Nat\n  | .nil, acc => acc\n  | .cons x xs, acc => sumF xs (Nat.add acc (id' x))\n" ++
+  "def t6 : sumF (rep 3000) 0 = 3000 := rfl\n"
+
+def natOpLazyFailSrc : String := natOpFib ++
+  "def small : Nat := fib 3 1\n" ++
+  "def bad : Nat.add small 5 = 14 := rfl\n"
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -791,7 +824,17 @@ def group : Group where
         let loader ← Tests.Elab.preludeLoader
         let st := runFrontend (R := ZeroOneMany)
           "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
-        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
+        check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" },
+    -- (kernel-vnatop-lazy) a builtin `Nat` operation forced its arguments to see whether they
+    -- were numerals, so a `let` of `Nat.beq big 5` (wiz-rv FINDINGS L8), of `Nat.add big 5`,
+    -- or of a `match` on `Nat.beq (fib 30) 0` ran `big` while it was checked, in the
+    -- elaborator and again in the kernel. `fib 30 1` is 2^30 calls (hours before).
+    { name := "a `let` of a `Nat` operation on an expensive value is not run when checked (L8, fib 30 match)", run := fun _ =>
+        checksLibsWithin 60 (natOpLazySrc 30) },
+    { name := "a glued `Nat` operation still computes when conversion needs it", run := fun _ =>
+        Tests.Elab.okLibs natOpLazySemSrc },
+    { name := "a glued `Nat` operation that computes to something else is rejected", run := fun _ =>
+        Tests.Elab.failsLibs natOpLazyFailSrc "rfl" }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends

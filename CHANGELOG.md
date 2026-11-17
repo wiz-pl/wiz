@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* kernel: a builtin `Nat` operation applied to the glued (not yet computed) value of a
+  definition stays glued under its own name and computes when something looks at it,
+  instead of forcing the argument to see whether it is a numeral. So `let ok :=
+  Nat.beq big 5`, `let n := Nat.add big 5` or `let x := match Nat.beq (fib 30) 0 with …`
+  is no longer run while the definition is checked, by the elaborator or by the kernel
+  (wiz-rv FINDINGS L8: 4.47 GB). Conversion compares two such operations by their
+  arguments and computes them when those differ; an operation on an operation computes
+  the inner one first. The self-hosted kernel has no native `Nat` operations and was
+  already lazy here.
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
