@@ -1304,7 +1304,7 @@ def utf8Program : String :=
     s!"  IO.println (Bytes.show (Bytes.ofUtf8 (Bytes.toString b{n})));\n" ++
     s!"  let c{n} := Bytes.toUtf8 b{n};\n" ++
     s!"  IO.println (match c{n} with\n    | .ok s => Bytes.show (Bytes.ofUtf8 s)\n" ++
-    s!"    | .error e => String.append \"err \" e)\n")
+    s!"    | .error e => String.append \"err \" e);\n")
   ++
   String.join ((listIdx utf8EncTable).map fun ((label, cp, _), n) =>
     s!"  IO.println \"{label}\";\n" ++
@@ -1313,7 +1313,8 @@ def utf8Program : String :=
     s!"  let t{n} := String.mk (List.cons (Char.mk {cp}) .nil);\n" ++
     s!"  IO.println (Bytes.show (Bytes.ofUtf8 t{n}));\n" ++
     s!"  IO.println (Bytes.show (Bytes.ofString t{n}));\n" ++
-    s!"  IO.println (if Bytes.eq (Bytes.ofUtf8 (Bytes.toString e{n})) e{n} then \"eq\" else \"ne\")\n")
+    s!"  IO.println (if Bytes.eq (Bytes.ofUtf8 (Bytes.toString e{n})) e{n} then \"eq\" else \"ne\");\n") ++
+  "  IO.pure ()\n"
 
 /-- What `utf8Program` prints: each row's label, the two decoders' bytes (or the checked
 error), the three encoders' bytes, and the round trip. -/
