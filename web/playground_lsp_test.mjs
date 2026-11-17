@@ -337,6 +337,26 @@ checkThat("wiring: a squiggle for the diagnostic", app.squiggles() && app.squigg
 check("wiring: the squiggle's range",
   app.squiggles().segments().map((s) => s.start + "-" + s.end).join(","), "0-3");
 
+// An edit reaches the server before the goal refresh. A keyup asks for goals 120 ms
+// later, while didChange used to wait 250 ms, so the server was asked about a position
+// in pre-typing text; `onEdit` now sends didChange at once and debounces only the refresh.
+await sleep(50);   // let the refresh the previous diagnostics scheduled settle
+const typedText = "import Prelude\ndef moved : Nat := 2\n";
+editor.value = typedText;
+editor.selectionStart = typedText.length;
+editor.selectionEnd = typedText.length;
+const beforeGoalTexts = wireMock.stats.goalTexts.length;
+for (const fn of editor.listeners.input || []) fn({ type: "input" });
+for (const fn of editor.listeners.keyup || []) fn({ type: "keyup" });
+checkThat("wiring: a goal after an edit is asked about the text the server has",
+  await waitUntil(() => wireMock.stats.goalTexts.length > beforeGoalTexts),
+  JSON.stringify(wireMock.stats.goalTexts));
+check("wiring: the goal's document is the edited text",
+  wireMock.stats.goalTexts[wireMock.stats.goalTexts.length - 1], typedText);
+checkThat("wiring: its version is the one didChange sent",
+  wireMock.stats.goalVersions[wireMock.stats.goalVersions.length - 1] ===
+    wireMock.documents.get("file:///wire.wiz").version);
+
 // Completions: the popup asks the client at the caret and inserts the chosen item.
 editor.value = "Nat.";
 editor.selectionStart = 4;

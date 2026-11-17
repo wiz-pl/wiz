@@ -55,7 +55,6 @@ export function startInfoview({
   let client = null;
   let generation = 0;
   let refreshTimer = null;
-  let changeTimer = null;
   let settleTimer = null;
   let suppressCursor = false;
   let selected = -1;
@@ -133,10 +132,16 @@ export function startInfoview({
   async function refresh() {
     if (!client || client.state !== "open") return;
     const mine = ++generation;
+    const doc = client.docs.get(documentUri);
+    const version = doc ? doc.version : null;
     const position = positionAt(editor.value, caretOffset(editor));
     view.position = position;
     const state = await readGoalState(client, documentUri, position);
     if (mine !== generation) return;   // a newer cursor/edit won
+    // The text moved while the answer was in flight: the server answered about a
+    // version the page no longer has, so its goals and ranges point at other text.
+    const current = client.docs.get(documentUri);
+    if (version !== null && (!current || current.version !== version)) return;
     lastCursor = position.line + ":" + position.character;
     view.goals = state.goals;
     view.goalsKind = state.goalsKind;
@@ -155,14 +160,18 @@ export function startInfoview({
   }
 
   function onEdit() {
-    clearTimeout(changeTimer);
-    changeTimer = setTimeout(() => {
-      if (!client || client.state !== "open") return;
-      client.changeDocument(documentUri, editor.value);
-      // Diagnostics or `wiz/elaborated` normally arrive first; this is the fallback.
-      clearTimeout(settleTimer);
-      settleTimer = setTimeout(refresh, 400);
-    }, 250);
+    // An edit invalidates a queued and an in-flight refresh, and the server gets the
+    // new text at once: a goal asked 120 ms after a keyup must not be about text the
+    // server has not received (didChange used to wait 250 ms, and continuous typing
+    // reset that timer, so no didChange was sent at all until the user paused).
+    clearTimeout(refreshTimer);
+    generation++;
+    if (!client || client.state !== "open") return;
+    client.changeDocument(documentUri, editor.value);
+    // Diagnostics or `wiz/elaborated` normally arrive first; this is the fallback for a
+    // server that sends neither.
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(refresh, 400);
   }
 
   // The caret moved: ask for the goals there after a short pause. `closePopup` is set by

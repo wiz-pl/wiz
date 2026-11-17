@@ -114,6 +114,9 @@ export async function startMockServer(options = {}) {
     connections: 0, initialize: 0, initialized: 0,
     didOpen: 0, didChange: 0, requests: 0, diagnostics: 0,
     completion: 0, completionArgs: [], goalPositions: [],
+    // The document text/version the server had when each wiz/interactiveGoals arrived:
+    // a goal asked about text that has not been sent yet is visible here.
+    goalTexts: [], goalVersions: [],
   };
   const docs = new Map();
   const clients = new Set();
@@ -181,10 +184,15 @@ export async function startMockServer(options = {}) {
       case "textDocument/didClose":
         docs.delete((params.textDocument || {}).uri);
         return;
-      case "wiz/interactiveGoals":
+      case "wiz/interactiveGoals": {
         stats.goalPositions.push(params.position);
+        const uri = params.textDocument && params.textDocument.uri;
+        const doc = docs.get(uri);
+        stats.goalTexts.push(doc ? doc.text : null);
+        stats.goalVersions.push(doc ? doc.version : null);
         if (mode === "plain") return replyError(client, id, -32601, "MethodNotFound");
         return reply(client, id, goalResult(client.session));
+      }
       case "wiz/plainGoal":
         return reply(client, id, plainGoalResult());
       case "wiz/interactiveTermGoal":
