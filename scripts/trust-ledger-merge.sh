@@ -5,15 +5,17 @@
 # branches that review different declarations have no textual conflict even when
 # their rows are adjacent. This driver merges by that key:
 #
-#   * the result is the union of the rows of ours and theirs; a row deleted on one
-#     side stays unless both sides deleted it;
+#   * rows merge three-way by key against the base: a row added on either side is
+#     kept; a row deleted on one side and unchanged on the other is deleted; a row
+#     deleted on one side and modified on the other is a conflict; a row changed on
+#     one side only takes that side's version;
 #   * header/comment lines are kept once, in base order followed by any new comments;
 #   * rows are sorted by key (byte order, the order `--update` writes);
-#   * when both sides have a key with different contents, the row whose reason is
+#   * when both sides changed a key to different contents, the row whose reason is
 #     not the migration marker (`legacy:`) wins;
-#   * if both rows are reasoned and differ, or both are still legacy and differ, the
-#     merge is ambiguous: exit 1, list the keys, and leave ours untouched for a human
-#     to resolve.
+#   * if both rows are reasoned and differ, both are still legacy and differ, or one
+#     side deleted a row the other modified, the merge is ambiguous: exit 1, list the
+#     keys, and leave ours untouched for a human to resolve.
 #
 # Git invokes a merge driver as `DRIVER %O %A %B`: base, ours, theirs. `%A` is the
 # working-tree copy and receives the result. Install the driver in a checkout with
@@ -53,8 +55,9 @@ cp "$theirs" "$tmp/theirs"
 : > "$tmp/comments"
 : > "$tmp/rows"
 
-# Every row of ours and theirs is kept once, under its key. The base contributes
-# its header comments; a row is taken from ours or theirs, never from the base.
+# A three-way merge by key. The base contributes its header comments and decides
+# deletions (a key it has that one side dropped); a row in the result is always taken
+# from ours or theirs, never from the base.
 LC_ALL=C awk \
   -v ofile="$tmp/base" -v afile="$tmp/ours" -v bfile="$tmp/theirs" \
   -v rowfile="$tmp/rows" -v cmtfile="$tmp/comments" \
@@ -98,7 +101,11 @@ FNR == 1 {
     next
   }
   key = f[1] "\t" f[2] "\t" f[3]
-  if (side == "A") {
+  if (side == "O") {
+    if (key in oline) {
+      if (oline[key] != line) duplicate("base", key, line)
+    } else oline[key] = line
+  } else if (side == "A") {
     if (key in aline) {
       if (aline[key] != line) duplicate("ours", key, line)
     } else aline[key] = line
@@ -118,21 +125,34 @@ END {
   for (k in allkeys) {
     ina = (k in aline)
     inb = (k in bline)
+    ino = (k in oline)
     if (ina && inb) {
       if (aline[k] == bline[k]) {
         result[k] = aline[k]
+      } else if (ino && aline[k] == oline[k]) {
+        result[k] = bline[k]          # only theirs changed it
+      } else if (ino && bline[k] == oline[k]) {
+        result[k] = aline[k]          # only ours changed it
       } else if (reasoned(aline[k]) && !reasoned(bline[k])) {
         result[k] = aline[k]
       } else if (reasoned(bline[k]) && !reasoned(aline[k])) {
         result[k] = bline[k]
       } else {
-        print k > conffile
+        print k "\tboth sides changed the row" > conffile
         conflicts++
       }
     } else if (ina) {
-      result[k] = aline[k]
+      if (!ino) result[k] = aline[k]                  # added by ours
+      else if (aline[k] != oline[k]) {                # theirs deleted, ours modified
+        print k "\tdeleted by theirs, modified by ours" > conffile
+        conflicts++
+      }                                               # else: theirs deleted it
     } else if (inb) {
-      result[k] = bline[k]
+      if (!ino) result[k] = bline[k]                  # added by theirs
+      else if (bline[k] != oline[k]) {                # ours deleted, theirs modified
+        print k "\tdeleted by ours, modified by theirs" > conffile
+        conflicts++
+      }                                               # else: ours deleted it
     }
   }
   if (conflicts) exit 1
@@ -149,7 +169,7 @@ if [ -s "$tmp/conflicts" ]; then
   echo "trust-ledger-merge: conflicting ledger rows; refusing to choose one." >&2
   echo "  A human must pick a row for each key (module | declaration | item):" >&2
   LC_ALL=C sort "$tmp/conflicts" |
-    awk -F'\t' '{ printf "  %s | %s | %s\n", $1, $2, $3 }' >&2
+    awk -F'\t' '{ printf "  %s | %s | %s  (%s)\n", $1, $2, $3, $4 }' >&2
   echo "" >&2
   echo "  Fix .github/trust-baseline.tsv by hand, then run:" >&2
   echo "    scripts/trust-ledger.sh --check" >&2

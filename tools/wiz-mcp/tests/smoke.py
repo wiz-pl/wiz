@@ -200,7 +200,13 @@ def run(argv: list[str]) -> int:
             print(f"initialize: {info['name']} {info['version']}")
             bridge.notify("notifications/initialized")
             tools = {tool["name"] for tool in bridge.rpc("tools/list", {})["result"]["tools"]}
-            expected = {"version", "check", "parse", "fmt", "build", "diagnostics", "hover", "goals"}
+            # `build` is listed only with --allow-build; the smoke test runs the default (read-only) server.
+            expected = {
+                "version", "check", "parse", "fmt", "diagnostics", "hover", "goals",
+                "definition", "references", "document_symbols", "workspace_symbols", "term_goal",
+                "completion", "signature_help", "inlay_hints", "code_actions", "rename",
+                "search", "doc",
+            }
             if tools != expected:
                 raise RuntimeError(f"tools/list mismatch: {sorted(tools)}")
             print(f"tools: {len(tools)} listed")
@@ -212,15 +218,29 @@ def run(argv: list[str]) -> int:
             first_ms = (time.monotonic() - started) * 1000
             if not diagnostics["ok"] or diagnostics["error"]:
                 raise RuntimeError(f"diagnostics failed: {diagnostics}")
-            if not isinstance(diagnostics["result"], list):
-                raise RuntimeError(f"diagnostics result is not a list: {diagnostics['result']!r}")
-            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(diagnostics['result'])} messages")
+            result = diagnostics["result"]
+            if not isinstance(result, dict) or not isinstance(result.get("diagnostics"), list) or not isinstance(result.get("raw"), list):
+                raise RuntimeError(f"diagnostics result is not the normalized shape: {result!r}")
+            print(f"diagnostics: ok ({first_ms:.0f} ms including daemon startup), {len(result['diagnostics'])} messages")
 
             daemons = daemon_pids(bridge)
             if not daemons:
                 raise RuntimeError("no `wiz lsp` child appeared after the first LSP call")
             rss = rss_kib(daemons[0])
             print(f"daemon: pid {daemons[0]}, RSS {rss / 1024:.1f} MiB" if rss else f"daemon: pid {daemons[0]}")
+            # The daemon speaks LSP on its own pipes and must listen on nothing.
+            fd_dir = Path(f"/proc/{daemons[0]}/fd")
+            if fd_dir.is_dir():
+                sockets = []
+                for fd in fd_dir.iterdir():
+                    try:
+                        if os.readlink(fd).startswith("socket:"):
+                            sockets.append(fd.name)
+                    except OSError:
+                        pass
+                if sockets:
+                    raise RuntimeError(f"the daemon has socket descriptors {sockets}; it should use stdio only")
+                print("daemon: no sockets (stdio only)")
 
             started = time.monotonic()
             hover = envelope_of(
@@ -237,6 +257,65 @@ def run(argv: list[str]) -> int:
             if "Nat" not in json.dumps(hover["result"]):
                 raise RuntimeError(f"hover did not mention Nat: {hover['result']!r}")
             print(f"hover: ok ({second_ms:.0f} ms), {json.dumps(hover['result'])[:120]}")
+
+            # Structured diagnostics from both sources, on a buffer with one type error.
+            bad = "import Prelude\n\ndef answer : Nat := Bool.true\n"
+            (Path(workspace) / "bad.wiz").write_text(bad, encoding="utf-8")
+            found = {}
+            for source in ("cli", "lsp"):
+                check = envelope_of(
+                    bridge.rpc("tools/call", {"name": "check", "arguments": {"path": "bad.wiz", "source": source}})
+                )
+                result = check["result"] or {}
+                if check["ok"] or check["error"] or result.get("counts", {}).get("error") != 1:
+                    raise RuntimeError(f"check ({source}) did not report exactly one error: {check}")
+                d = result["diagnostics"][0]
+                found[source] = (d["line"], d["column"], d["severity"], d["message"])
+                print(f"check ({source}): {d['line']}:{d['column']} {d['severity']} code={d['code']} {d['message'].splitlines()[0]!r}")
+            if found["cli"] != found["lsp"]:
+                raise RuntimeError(f"check sources disagree: {found}")
+
+            # Navigation and a rename proposal (P1c): nothing may be written.
+            nav_text = "import Prelude\n\ndef answer : Nat := 42\n\ndef twice : Nat := answer + answer\n"
+            nav = Path(workspace) / "nav.wiz"
+            nav.write_text(nav_text, encoding="utf-8")
+
+            def call(tool: str, **arguments: object) -> dict:
+                envelope = envelope_of(bridge.rpc("tools/call", {"name": tool, "arguments": dict({"path": "nav.wiz"}, **arguments)}))
+                if not envelope["ok"]:
+                    raise RuntimeError(f"{tool} failed: {envelope}")
+                return envelope["result"]
+
+            use = call("definition", line=4, character=20)["locations"]
+            if [(loc["line"], Path(loc["file"]).name) for loc in use] != [(3, "nav.wiz")]:
+                raise RuntimeError(f"definition of `answer` is wrong: {use}")
+            nat = call("definition", line=2, character=14)["locations"]
+            if len(nat) != 1 or not nat[0]["file"].endswith("Prelude.wiz"):
+                raise RuntimeError(f"definition of `Nat` is not in the toolchain's Prelude: {nat}")
+            refs = call("references", line=4, character=20)["locations"]
+            proposal = call("rename", line=4, character=20, new_name="reply")
+            if len(refs) != 3 or proposal["applied"] is not False or proposal["edit_count"] != 3:
+                raise RuntimeError(f"references/rename are wrong: {refs} {proposal}")
+            if nav.read_text(encoding="utf-8") != nav_text:
+                raise RuntimeError("rename changed the file; it must only propose")
+            print(f"navigation: definition, Prelude, {len(refs)} references, rename proposed (3 edits, not applied)")
+
+            # Library search and docs (P2a), over the toolchain's own library.
+            def tool(tool_name: str, **arguments: object) -> dict:
+                envelope = envelope_of(bridge.rpc("tools/call", {"name": tool_name, "arguments": arguments}))
+                if not envelope["ok"]:
+                    raise RuntimeError(f"{tool_name} failed: {envelope}")
+                return envelope["result"]
+
+            by_type = [r["name"] for r in tool("search", query="Nat → Nat → Nat", by="type", limit=100)["results"]]
+            by_name = tool("search", query="Nat.add")["results"]
+            add_doc = tool("doc", name="Nat.add")["declarations"][0]
+            if "Nat.add" not in by_type or by_name[0]["name"] != "Nat.add" or not add_doc["doc"]:
+                raise RuntimeError(f"library search is wrong: {by_type[:10]} {by_name[:1]} {add_doc}")
+            resources = [r["uri"] for r in bridge.rpc("resources/list", {})["result"]["resources"]]
+            if resources:  # the smoke workspace is a temp dir: no ledger, docs or stages
+                raise RuntimeError(f"resources/list offers files the workspace does not have: {resources}")
+            print(f"library: search by type and name, doc for Nat.add, {len(resources)} resources")
 
             shutdown = bridge.rpc("shutdown", {})
             if "error" in shutdown:

@@ -19,8 +19,6 @@ import Prelude
 -- `partial`. The module is deliberately self-contained (only `Prelude`): `Kernel.wiz`
 -- will concatenate it before its own definitions and call these functions from `conv`,
 -- `check` and `force`.
---
--- Design note: `wiz-notes/cubical-selfhost.md` (encoding, Cub-F1 mapping, kernel needs).
 
 -- ## Dimensions
 

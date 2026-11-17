@@ -11,8 +11,8 @@ library artifact, not a compiler feature. Writing it in Wiz hit no new syntax an
 elaborator capability beyond the request; the parts that stayed host-side are the parts
 that need the kernel's `Term` and the unifier (a reflected `Expr` has no metavariable),
 not policy. It also keeps the self-hosted frontend's route open: once its `Tac`/`Expr`
-layer reaches parity, the same source runs there (`wiz-notes/simp-design.md` §6.6,
-P0–P5).
+layer reaches parity, the same source runs there, with only the host requests to
+port.
 
 ```
 import Prelude

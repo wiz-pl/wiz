@@ -1040,6 +1040,24 @@ def ctorName (c : Syntax) : String := match kid c 2 with
   | .ident n => n
   | _ => "_"
 def ctorFields (c : Syntax) : List Field := fieldsOf (kids (kid c 3))
+-- (positivity) does the type being defined occur as an identifier in a field's type?
+-- `T` may only occur as a recursive field (`T args`, which `recField` turns into
+-- `drec`) or in the result; any other occurrence is a negative or non-strictly-positive
+-- one (the Lean frontend's `ctorDesc` message, `Inductive.lean`).
+mutual
+def typeOccurs (T : String) (s : Syntax) : Bool := match s with
+  | .ident n => strEq n T
+  | .node _ args => typeOccursArgs T args
+  | _ => .false
+def typeOccursArgs (T : String) : SyntaxF .false → Bool
+  | .nil => .false
+  | .cons s rest => Bool.or (typeOccurs T s) (typeOccursArgs T rest)
+end
+def typeOccursAny (Ts : List String) (s : Syntax) : Bool := match Ts with
+  | .nil => .false
+  | .cons t rest => Bool.or (typeOccurs t s) (typeOccursAny rest s)
+def positivityError : String :=
+  "the type being defined may only occur as the type of a recursive field or the result"
 
 -- an elaboration context: the kernel's (values, types) and the names
 -- (and the binders' types quoted, latest first, each when first needed: a new
@@ -1117,7 +1135,10 @@ def liftFrom (lv : Lvl) (c : TCtx) (A : Tm) : Option Lvl := match sortOf c (eval
 -- constructor's index `res` (`idxTm`: `tt` for a type without indices). A recursive
 -- field binds no variable. `cx` is the context (the parameters, `t✝` and the fields so
 -- far that are bound) and `d` its depth; a field's type is elaborated in it with types
--- (`fe`, A15), an index is scope-checked (`idxTm`).
+-- (`fe`, A15), an index is scope-checked (`idxTm`). A plain field whose type mentions
+-- `T` is a negative or non-strictly-positive occurrence (`typeOccurs`, the Lean
+-- frontend's `positivityError`); `T` is not in scope while a higher-order field's
+-- domain `H` is elaborated.
 --
 -- (U2b) A field must live exactly in `Sort (lv+1)`, where `lv` is the description's
 -- level (universes aren't cumulative). A field in a smaller universe — a proof field of a
@@ -1148,13 +1169,15 @@ def ctorDesc (inline : Bool) (gs : Globals) (fe : Globals → Cx → Syntax → 
             | .none => match ctorDesc inline gs fe T ps nidx res lv cx d rest with
               | .ok D => .ok (.dhrec (.qlit q) (pickT inline H HI) (.lam jt) D)
               | e => e
-      | .no => match fe gs cx ty with
-        | .err m => .err m
-        | .ok A AI => match ctorDesc inline gs fe T ps nidx res lv (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) (d + 1) rest with
+      | .no => match typeOccurs T ty with
+        | .true => .err positivityError
+        | .false => match fe gs cx ty with
           | .err m => .err m
-          | .ok D => match liftFrom lv (Cx.c cx) A with
-            | .some k => .ok (.darg (.qlit q) (.ulift k (lsucc lv) (pickT inline A AI)) (.lam (downVar0 (d + 1) D)))
-            | .none => .ok (.darg (.qlit q) (pickT inline A AI) (.lam D))
+          | .ok A AI => match ctorDesc inline gs fe T ps nidx res lv (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) (d + 1) rest with
+            | .err m => .err m
+            | .ok D => match liftFrom lv (Cx.c cx) A with
+              | .some k => .ok (.darg (.qlit q) (.ulift k (lsucc lv) (pickT inline A AI)) (.lam (downVar0 (d + 1) D)))
+              | .none => .ok (.darg (.qlit q) (pickT inline A AI) (.lam D))
   --|ex
   --| | _, _, _ => .err "not implemented"
   --sol>
@@ -5865,16 +5888,20 @@ def mctorDesc (inline : Bool) (gs : Globals) (members ps : List String) (m j : N
       | .ok D => .ok (.drec (.qlit q) (.tag m j') D)
       | e => e
     | .none => match hrecMember members ps ty with
-    | .yes H j' => match elab sc H with
-      | .err m' => .err m'
-      | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
-        | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
-        | e => e
-    | .no => match elab sc ty with
-      | .err m' => .err m'
-      | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
-        | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
-        | e => e
+    | .yes H j' => match typeOccursAny members H with
+      | .true => .err positivityError
+      | .false => match elab sc H with
+        | .err m' => .err m'
+        | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
+          | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
+          | e => e
+    | .no => match typeOccursAny members ty with
+      | .true => .err positivityError
+      | .false => match elab sc ty with
+        | .err m' => .err m'
+        | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
+          | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+          | e => e
 -- a member constructor: the member's index and the syntax
 inductive MCtor where
   | mk (j : Nat) (c : Syntax)

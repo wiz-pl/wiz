@@ -87,7 +87,7 @@ files: 1
 nodes: 7
 edges: 6
 relations: 2
-tuples: 2
+tuples: 3
 roots: 1
 max depth: 4
 errors: 1
@@ -132,4 +132,4 @@ edge labels:
   function 1
 csr out: 8 offsets, 6 arcs
 csr in: 8 offsets, 6 arcs
-total: 4 store(s), 83 nodes, 79 edges, 4 relations, 5 tuples, 4 roots, 4 errors, max depth 7
+total: 4 store(s), 83 nodes, 79 edges, 4 relations, 6 tuples, 4 roots, 4 errors, max depth 7
