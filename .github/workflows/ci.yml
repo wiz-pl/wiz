@@ -269,6 +269,10 @@ jobs:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: |
+          # `nix develop --command` does not export the shellHook's WIZ_LLC here, and a
+          # skipped LLVM comparison is now a failure (check-repro-report). Take it from
+          # the dev shell's PATH, which includes pkgs.llvm.
+          export WIZ_LLC="$(command -v llc)"
           scripts/check-repro.sh --self-test
           python3 scripts/check-repro-report.py --self-test
           status=0
