@@ -15,7 +15,8 @@ The group `scry-cert` checks `lib/Scry/Cert.wiz` through
   accepted, and a wrong join is rejected;
 * the same example compiled to C and LLVM.
 
-The checker, its shape and the soundness theorem are in `wiz-notes/scry-derivation.md`.
+The checker, its shape and the soundness theorems are described in `lib/Scry/Cert.wiz`'s
+module doc.
 -/
 
 open Wiz
@@ -41,6 +42,7 @@ def compiled (name expected : String) : IO Unit := do
 def scryCertGroup : Group where
   name := "scry-cert"
   exercise := "S8: lib/Scry/Cert.wiz"
+  parallel := true
   cases := [
     { name := "transitive closure: a valid derivation is accepted (and `main`)", run := fun _ =>
         interp "scry-derivation" "10001011" },

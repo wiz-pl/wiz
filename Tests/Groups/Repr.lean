@@ -10,7 +10,8 @@ namespace Tests.Elab
 
 /-! ### Representations are a function of the type up to conversion (R3)
 
-`wiz-notes/repr-shape.md`. A value keeps its bits when it is converted to an equal type,
+Erasure decides a value's representation from its type, and erased code is untyped, so a
+representation must be invariant under conversion and under substitution. A value keeps its bits when it is converted to an equal type,
 or passed to generic code, so erasure may choose a representation only by what conversion
 (and substitution) can see: never by a binder name, an `Enum` label or the display name
 on a `μ`. -/
@@ -213,6 +214,7 @@ def sealLayer3 (bad : Decl ZeroOneMany) (fragment : Option String) : IO Unit := 
 def reprGroup : Group where
   name := "repr"
   exercise := "Representations and conversion (R3)"
+  parallel := true
   cases := [
     { name := "R3: a hand-written Σ of a structure's shape converts to the structure and back", run := fun _ =>
         reprAll r3Marker "75" },
@@ -279,7 +281,8 @@ def reprGroup : Group where
         sealFails "import Nat8\ninductive Box (A : Type) where\n  | mk (n : Nat)\ndef toBox (x : W) : Box _ := x\n" "type mismatch"
         sealFails "import Nat8\ndef d := W.desc\n" "private" },
     { name := "22k: the words are sealed: UIntN 8 is not IntN 8 or a look-alike, and out-of-range words can't be built (R5)", run := fun _ => do
-        -- audit 2's R5 probe (`wiz-notes/soundness-probes/a2-r5-word-out-of-range.wiz`)
+        -- the R5 probe: `.mk (n + 300) : UIntN 8` built an out-of-range word, on which the
+        -- kernel's definitions and the compiled natives disagreed; this case is its regression
         let errs ← sealErrors ("import Word\ndef big (n : Nat) : UIntN 8 := .mk (n + 300)\n" ++
           "def main : Nat := (big 0).toNat + (UIntN.not (big 0)).toNat\n")
         check (errs.size > 0 && (errs[0]!.splitOn "'UIntN.mk' is private to module Word").length > 1) s!"{errs}"

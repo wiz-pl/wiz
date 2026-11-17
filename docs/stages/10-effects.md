@@ -38,8 +38,7 @@ Effectful code can be written against classes (`MonadState S m`, `MonadReader E 
 `MonadConsole m`) and run two ways: as a tree of operations (`Eff r`, whose instances
 `send` operations to handlers, so resumptions are general), or **fused**, directly in
 a monad (`StateT S IO`, `ReaderT E IO`, `IO`), where every operation is a plain call
-and no tree is built. In a 200,000-step state loop the fused version is about 4.5×
-faster.
+and no tree is built. In a state loop the fused version is faster.
 
 ```wiz no-check
 def prog {m : Type → Type} [Monad m] [MonadState Nat m] [MonadConsole m] : m Nat := …

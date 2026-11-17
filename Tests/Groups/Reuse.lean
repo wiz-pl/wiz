@@ -128,6 +128,7 @@ def onlyParamReset (n : Name) : IO Unit := do
 def reuseGroup : Group where
   name := "reuse"
   exercise := "Stage 8c"
+  parallel := true
   cases := [
     { name := "across one case: the cell is rebuilt in both branches, no allocation", run := fun _ => do
         checkEq [1, 1, 1] (← reuseAllocs ["ta", "fa", "fb"])

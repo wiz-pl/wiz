@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "wiz": {
+      "type": "stdio",
+      "command": "sh",
+      "args": ["tools/wiz-mcp/wiz-mcp.sh", "--idle", "600", "--timeout", "300"],
+      "env": {}
+    },
+    "scry": {
+      "type": "stdio",
+      "command": "sh",
+      "args": ["tools/scry-mcp/scry-mcp.sh", "--timeout", "300"],
+      "env": {}
+    }
+  }
+}

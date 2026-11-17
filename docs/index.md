@@ -68,6 +68,7 @@ line below.
 * [Stage 9: the C FFI](stages/09-ffi.md)
 * [Stage 10: effects](stages/10-effects.md)
 * [Stage 25: concurrency](stages/25-concurrency.md)
+* [Stage 32: concurrency as a model](stages/32-conc-model.md): the `Conc` effect, a pure scheduler, a model checker
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
 * [The trust ledger](trust-ledger.md): the reviewed trusted base of `lib/`, its gate and expiry policy
 * [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)

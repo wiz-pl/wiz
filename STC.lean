@@ -15,7 +15,29 @@ import STC.F0.Sanity
 /-!
 # STC: the F0 specification of the STC track
 
-M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
+F0 is the fragment the first metatheory milestone (M0) is about: T0's rules plus `ULift`,
+with regularity off and nothing of T1/T2. That is Core (contexts, universes, conversion,
+definitional proof irrelevance), Π, Σ, Unit, Empty, Enum, `let`/annotation, closed
+globals, observational `Eq`/`cast`/`transp`, and `ULift`. It keeps T0's hard content
+(impredicative `Prop`, observational equality, η at Π/Σ/Unit/ULift) and leaves out what
+adds risk without being needed for M0: regularity and `Desc`/`μ`. Its deliberate choices:
+
+* **three closed sorts** `Sort 0 : Sort 1 : Sort 2` (no level variables, no level
+  arguments on globals), `Sort 2` a type but not a term;
+* **no quantities** (every binder is `ω`), sizes, `ν`, `Qty`, `split`, numerals, natives;
+* **levelled** Π/Σ type equality: `A ≡ B` forms only between types of one sort, the
+  formation that has a published model and normalisation proof; the kernels'
+  cross-level rule is kept as a variant (`F0Cross`) for comparison;
+* `ULift` and `letUnit` are in (the elaborator emits `letUnit`);
+* four judgments: context formation, typing, conversion, one step of weak-head
+  reduction.
+
+M0 **states** the metatheory as `Prop`s (`F0/Obligations`) rather than proving it:
+soundness/completeness/totality of a checker, consistency for an axiom-free signature,
+weak-head normalisation, and decidability of conversion and typing. Not claimed:
+consistency of full Wiz, soundness of the kernels themselves, strong normalisation.
+
+The files:
 
 * `F0/Sort`, `F0/Syntax`: the closed three sorts and the F0 terms (`letUnit` included);
 * `F0/Spec/`: the four judgments and the rules as data, one file per former; `F0` is
@@ -41,6 +63,5 @@ M0.1 of the design note `/workspace/wiz-notes/stc-m0-spec.md`:
   sorting lemma's supporting statements (`TyUnique`, `ConvInj*`);
 * `F0/Sanity`: small derivations that witness that the rules are inhabited.
 
-Not a default Lake target; nothing imports it yet. The implementation note is
-`/workspace/wiz-notes/stc-m0-impl.md`.
+Not a default Lake target (`lake build STC` builds it); nothing imports it yet.
 -/
