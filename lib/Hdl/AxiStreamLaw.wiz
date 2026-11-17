@@ -60,18 +60,20 @@ def AxiStream.Law.StableStep {ω dw : Nat} (b b' : HwTy.El (AxiStream.Beat.code 
     (Bool.and (AxiStream.Law.valid b')
       (Nat.beq (AxiStream.Law.payload b') (AxiStream.Law.payload b)))
 
-/-- The source's trace obligation: every adjacent pair of a source beat trace holds a
-stalled beat unchanged. -/
-def AxiStream.Law.stableGo {ω dw : Nat} (prev : HwTy.El (AxiStream.Beat.code dw)) :
-    List (HwTy.El (AxiStream.Beat.code dw)) → Bool
+/-- A conjunction of Booleans. -/
+def AxiStream.Law.allTrue : List Bool → Bool
   | .nil => .true
-  | .cons y ys => Bool.and (AxiStream.Law.StableStep prev y) (AxiStream.Law.stableGo y ys)
+  | .cons b bs => Bool.and b (AxiStream.Law.allTrue bs)
 
-/-- `AxiStream.Law.Stable` on a finite beat trace. -/
-def AxiStream.Law.Stable {ω dw : Nat} :
-    List (HwTy.El (AxiStream.Beat.code dw)) → Bool
-  | .nil => .true
-  | .cons x xs => AxiStream.Law.stableGo x xs
+/-- `AxiStream.Law.Stable` on a finite beat trace: every adjacent pair holds a stalled
+beat unchanged. -/
+def AxiStream.Law.Stable {ω dw : Nat}
+    (bs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
+  AxiStream.Law.allTrue (Hdl.map (fun (t : Nat) =>
+    AxiStream.Law.StableStep
+      (Hdl.nthD (HwTy.unpack (AxiStream.Beat.code dw) 0) bs t)
+      (Hdl.nthD (HwTy.unpack (AxiStream.Beat.code dw) 0) bs (Nat.succ t)))
+    (Hdl.upto (Nat.sub (List.length bs) 1) 0))
 
 /-- The Boolean form of the order law: the sink's accepted payload sequence is exactly
 `expected`, in order. A beat lost, duplicated or reordered at the output fails it. The

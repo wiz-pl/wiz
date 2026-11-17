@@ -204,19 +204,18 @@ def wrQs : List (HwTy.El (Axi4.WriteIn.code 8 16 4) × HwTy.El (Axi4.WriteOut.co
       .cons (packQ oo.req) (wrQs rest)
     else wrQs rest
 
-def wrBeatLaws (base len size burst k : Nat) : List (HwTy.El (Axi4.W.code 16)) →
+def wrBeatLaws : List Nat → List (HwTy.El (Axi4.W.code 16)) →
     List (HwTy.El (Bus.ReqW.code 8 16)) → Bool
-  | .nil, _ => .true
-  | .cons _ _, .nil => .false
-  | .cons w ws, .cons q qs =>
-    Bool.and (Axi4.Law.WrBeatOk w q (Axi4.beatAddr burst base size len k))
-      (wrBeatLaws base len size burst (Nat.succ k) ws qs)
+  | .nil, .nil, .nil => .true
+  | .cons a as, .cons w ws, .cons q qs =>
+    Bool.and (Axi4.Law.WrBeatOk w q a) (wrBeatLaws as ws qs)
+  | _, _, _ => .false
 
-def wrLastLaws (len k : Nat) : List (HwTy.El (Axi4.W.code 16)) → Bool
-  | .nil => .true
-  | .cons w ws =>
-    Bool.and (Axi4.Law.WLastOk w (Nat.beq k len))
-      (wrLastLaws len (Nat.succ k) ws)
+def wrLastLaws : List Bool → List (HwTy.El (Axi4.W.code 16)) → Bool
+  | .nil, .nil => .true
+  | .cons b bs, .cons w ws =>
+    Bool.and (Axi4.Law.WLastOk w b) (wrLastLaws bs ws)
+  | _, _ => .false
 
 def wrAddrOkAll (base len size burst : Nat) (beats : List (Nat × Nat × Nat)) : Bool :=
   Axi4.Law.addrsOk burst base size len (Hdl.map (fun (p : Nat × Nat × Nat) => p.1) beats)
@@ -228,7 +227,7 @@ def wrBLaws (err : Bool) :
     let ii := wrIn i;
     let oo := wrOut o;
     if Bool.and (Bus.Law.bit oo.bch.valid) (Bus.Law.bit ii.bready) then
-      Axi4.Law.BRespOk (packAw ii.aw) (packB oo.bch) err
+      Axi4.Law.BRespOk (packAw ii.awch) (packB oo.bch) err
     else wrBLaws err rest
 
 def wrLaws (base len size burst id period errBeat : Nat) : Bool :=
@@ -240,8 +239,10 @@ def wrLaws (base len size burst id period errBeat : Nat) : Bool :=
   let qs := wrQs z;
   Bool.and (wrAddrOkAll base len size burst beats)
     (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
-      (Bool.and (wrBeatLaws base len size burst 0 ws qs)
-        (Bool.and (wrLastLaws len 0 ws) (wrBLaws (Nat.lt errBeat (Axi4.beats len)) z))))
+      (Bool.and (wrBeatLaws (Axi4.beatSeq burst base size len) ws qs)
+        (Bool.and (wrLastLaws (Hdl.map (fun (k : Nat) => Nat.beq k len)
+            (units (Axi4.beats len))) ws)
+          (wrBLaws (Nat.lt errBeat (Axi4.beats len)) z))))
 
 def wrAgree (base len size burst id period : Nat) : Bool :=
   agree (Axi4.wrC 8 16 4) (wrInsFor base len size burst id period 99)
@@ -355,27 +356,30 @@ def rdQs : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code
       .cons (packQ oo.req) (rdQs rest)
     else rdQs rest
 
-def rdBeatLaws (base len size burst k : Nat) :
-    List (HwTy.El (Bus.ReqW.code 8 16)) → Bool
-  | .nil => .true
-  | .cons q qs =>
-    Bool.and (Axi4.Law.RdBeatOk q (Axi4.beatAddr burst base size len k))
-      (rdBeatLaws base len size burst (Nat.succ k) qs)
+def rdBeatLaws : List Nat → List (HwTy.El (Bus.ReqW.code 8 16)) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons q qs =>
+    Bool.and (Axi4.Law.RdBeatOk q a) (rdBeatLaws as qs)
+  | _, _ => .false
 
-def rdRLaws (base len size burst errBeat k : Nat) :
-    List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) → Bool
-  | .nil => .true
+def rdRs : List (HwTy.El (Axi4.ReadIn.code 8 16 4) × HwTy.El (Axi4.ReadOut.code 8 16 4)) →
+    List (HwTy.El (Axi4.R.code 16 4))
+  | .nil => .nil
   | .cons (i, o) rest =>
     let ii := rdIn i;
     let oo := rdOut o;
     if Bool.and (Bus.Law.bit oo.rch.valid) (Bus.Law.bit ii.rready) then
-      Bool.and (Axi4.Law.RLastOk (packR oo.rch) (Nat.beq k len))
-        (Bool.and
-          (Axi4.Law.RRespOk (packAr ii.ar) (packR oo.rch)
-            (ramValue (Axi4.beatAddr burst base size len k))
-            (Nat.beq k errBeat) (Nat.beq k len))
-          (rdRLaws base len size burst errBeat (Nat.succ k) rest))
-    else rdRLaws base len size burst errBeat k rest
+      .cons (packR oo.rch) (rdRs rest)
+    else rdRs rest
+
+def rdRLaws (ar : HwTy.El (Axi4.Ar.code 8 4)) : List Nat → List Bool → List Bool →
+    List (HwTy.El (Axi4.R.code 16 4)) → Bool
+  | .nil, .nil, .nil, .nil => .true
+  | .cons a as, .cons e es, .cons l ls, .cons r rs =>
+    Bool.and (Axi4.Law.RLastOk r l)
+      (Bool.and (Axi4.Law.RRespOk ar r (ramValue a) e l)
+        (rdRLaws ar as es ls rs))
+  | _, _, _, _ => .false
 
 def rdLaws (base len size burst id period errBeat : Nat) : Bool :=
   let ins := rdInsFor base len size burst id period errBeat;
@@ -383,11 +387,16 @@ def rdLaws (base len size burst id period errBeat : Nat) : Bool :=
   let z := rdZip ins outs;
   let beats := collectRdBus z;
   let qs := rdQs z;
+  let addrs := Axi4.beatSeq burst base size len;
+  let errs := Hdl.map (fun (k : Nat) => Nat.beq k errBeat) (units (Axi4.beats len));
+  let lasts := Hdl.map (fun (k : Nat) => Nat.beq k len) (units (Axi4.beats len));
+  let arE := packAr
+    (rdIn (Hdl.nthD (HwTy.unpack (Axi4.ReadIn.code 8 16 4) 0) ins 0)).ar;
   Bool.and (Axi4.Law.addrsOk burst base size len
       (Hdl.map (fun (p : Nat × Nat × Nat) => p.1) beats))
     (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
-      (Bool.and (rdBeatLaws base len size burst 0 qs)
-        (rdRLaws base len size burst errBeat 0 z)))
+      (Bool.and (rdBeatLaws addrs qs)
+        (rdRLaws arE addrs errs lasts (rdRs z))))
 
 def rdAgree (base len size burst id period : Nat) : Bool :=
   agree (Axi4.rdC 8 16 4) (rdInsFor base len size burst id period 99)

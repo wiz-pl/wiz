@@ -288,32 +288,48 @@ def Bus.Law.AnsweredAfter {ω aw dw : Nat} (d : Nat)
   Bus.Law.answeredAfterGo d q r (List.length r)
 
 /-- Is there an answer to the request at cycle `t` at some cycle `t … t + fuel - 1`? -/
-def Bus.Law.answerFromGo {ω aw dw : Nat}
-    (q : List (HwTy.El (Bus.Req.code aw dw)))
-    (r : List (HwTy.El (Bus.Resp.code dw))) (t : Nat) : Nat → Bool
-  | .zero => .false
-  | .succ k =>
-    if Bus.Law.answer (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q t)
-        (Hdl.nthD (Bus.Law.noRespE (dw := dw)) r t) then .true
-    else Bus.Law.answerFromGo q r (Nat.succ t) k
+def Bus.Law.take {A : Type} : Nat → List A → List A
+  | .zero, _ => .nil
+  | .succ _, .nil => .nil
+  | .succ n, .cons x xs => .cons x (Bus.Law.take n xs)
 
-/-- Every offered request is answered within `k` cycles. -/
-def Bus.Law.noStarveGo {ω aw dw : Nat}
-    (q : List (HwTy.El (Bus.Req.code aw dw)))
-    (r : List (HwTy.El (Bus.Resp.code dw))) (k t : Nat) : Nat → Bool
-  | .zero => .true
-  | .succ fuel =>
-    Bool.and
-      (Bool.or (Bool.not (Bus.Law.valid (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q t)))
-        (Bus.Law.answerFromGo q r t k))
-      (Bus.Law.noStarveGo q r k (Nat.succ t) fuel)
+/-- The list without its first `n` elements. -/
+def Bus.Law.drop {A : Type} : Nat → List A → List A
+  | .zero, xs => xs
+  | .succ _, .nil => .nil
+  | .succ n, .cons _ xs => Bus.Law.drop n xs
+
+/-- Pair a request trace with its response trace, up to the shorter one. -/
+def Bus.Law.pairsOf {ω aw dw : Nat} :
+    List (HwTy.El (Bus.Req.code aw dw)) → List (HwTy.El (Bus.Resp.code dw)) →
+    List (HwTy.El (Bus.Req.code aw dw) × HwTy.El (Bus.Resp.code dw))
+  | .cons q qs, .cons r rs => .cons (q, r) (Bus.Law.pairsOf qs rs)
+  | _, _ => .nil
+
+/-- Is one of the pairs an answer? (The look-ahead of `NoStarvation`.) -/
+def Bus.Law.answerFrom {ω aw dw : Nat} :
+    List (HwTy.El (Bus.Req.code aw dw) × HwTy.El (Bus.Resp.code dw)) → Bool
+  | .nil => .false
+  | .cons (q, r) rest =>
+    if Bus.Law.answer q r then .true else Bus.Law.answerFrom rest
+
+/-- A conjunction of Booleans. -/
+def Bus.Law.allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (Bus.Law.allTrue bs)
 
 /-- No starvation on a finite trace: every offered request is answered within `k` cycles
-(the example checks the last `k` cycles separately or leaves them out). -/
+(the last `k` cycles are outside the checked window). -/
 def Bus.Law.NoStarvation {ω aw dw : Nat} (k : Nat)
     (q : List (HwTy.El (Bus.Req.code aw dw)))
     (r : List (HwTy.El (Bus.Resp.code dw))) : Bool :=
-  Bus.Law.noStarveGo q r k 0 (Nat.sub (List.length r) k)
+  Bus.Law.allTrue (Hdl.map (fun (t : Nat) =>
+    Bool.or
+      (Bool.not (Bus.Law.valid (Hdl.nthD (Bus.Law.noReqE (aw := aw) (dw := dw)) q t)))
+      (Bus.Law.answerFrom (Bus.Law.pairsOf
+        (Bus.Law.take k (Bus.Law.drop t q))
+        (Bus.Law.take k (Bus.Law.drop t r)))))
+    (Hdl.upto (Nat.sub (List.length r) k) 0))
 
 /-- The router: a hit forwards the request unchanged and passes the sink's answer; a
 miss forwards no request and answers the master at once with `err`, zero data and
@@ -333,7 +349,7 @@ def Bus.Law.ReadAfterWrite {ω ab dw : Nat} (shift : Nat)
       (BitVec.ofNat (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1));
   let read :=
     Hw.memRead (Bus.Law.ram (Hw.fst (Bus.ramWStep shift ab dw (Bus.Law.ram s) i))).cells
-      (Bus.slice shift ab i.addr);
+      (Hw.slice shift ab i.addr);
   Bool.or (Bool.not go)
     (Bool.or (Bool.not (Bus.Law.bit i.we))
       (Bool.or (Bool.not allStrb) (BitVec.beq read i.wdata)))
