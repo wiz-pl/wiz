@@ -48,6 +48,7 @@ def privMod : String := "import Prelude\nprivate def secret : Nat := 42\ndef rev
 def group : Group where
   name := "reject"
   exercise := "negative corpus: soundness starts at rejection"
+  parallel := true
   cases := [
     -- universe and level escapes
     rejected "universe: Type : Type" "def X : Type := Type\n"
