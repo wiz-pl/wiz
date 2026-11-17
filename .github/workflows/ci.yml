@@ -203,9 +203,11 @@ jobs:
         run: |
           mkdir -p .lake/build/bin
           ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
-          scripts/trust-ledger.sh --check
+          scripts/trust-ledger.sh --check --strict-legacy
           Tests/trust-ledger/run.sh
           scripts/trust-ledger-merge_test.sh
+          python3 scripts/host-unsafe-ledger.py --check
+          Tests/host-unsafe-ledger/run.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
@@ -513,7 +515,7 @@ jobs:
       # A green run must have tested something. Fails when a group skipped wholesale
       # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
       # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,
-      # …), or when a shard's unexplained skipped ratio is over 25%. The self-test runs
+      # …), or when a group's unexplained skipped ratio (over its cases in every shard) is over 25%. The self-test runs
       # first, so the rule itself is checked on synthetic logs without the suite.
       - name: Skips are explained
         if: needs.test.result != 'skipped'

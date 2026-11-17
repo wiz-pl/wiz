@@ -2,10 +2,11 @@
 """Performance dashboard for Wiz: perf-history.tsv -> one self-contained HTML page.
 
     perf-dashboard.py [--history TSV] [--timings FILE_OR_DIR]… [--commit SHA] [--at ISO]
-                      [--repo DIR] [--out HTML | --html HTML] [--gap MINUTES]
+                      [--repo DIR] [--out HTML | --html HTML | --notes DIR] [--gap MINUTES]
 
-Defaults: /workspace/wiz-tools/perf-history.tsv, /workspace/wiz-lang-solutions,
-/workspace/wiz-notes/perf-dashboard.html, 90 minutes.
+Defaults: /workspace/wiz-tools/perf-history.tsv, /workspace/wiz-lang-solutions, 90 minutes.
+The page goes to `--out`, else to perf-dashboard.html in the notes directory named by
+`--notes DIR` or $WIZ_NOTES_DIR; with none of them the script exits with status 2.
 
 * `--timings` ingests CI `test-timings.jsonl` artifacts (what `lake test --timings`
   writes and `scripts/ci.py summary` reads: one JSON record per case with `shard`,
@@ -682,7 +683,7 @@ def render(rows, repo, gap, src, runs=None):
                          esc(p["commit"]), "" if p["main"] else '<span class="badge" style="color:var(--branch)">branch</span> ', esc(p["title"]),
                          s["n"], fmt_s(s["t"]), fmt_s(s["tmin"]), fmt_s(s["tmax"]), fmt_m(s["m"]), fmt_m(s["mmin"]), fmt_m(s["mmax"])))
         o.append('</tbody></table></div></details></section>')
-    o.append('<p class="muted sm">Regenerate: <code>python3 /workspace/wiz-tools/perf-dashboard.py</code> (see /workspace/wiz-notes/perf-queue.md).</p>')
+    o.append('<p class="muted sm">Regenerate: <code>python3 /workspace/wiz-tools/perf-dashboard.py</code> (see the perf measurement queue).</p>')
     o.append('</main><div id="tip"></div><script>%s</script></body></html>' % JS)
     return "".join(o)
 
@@ -694,10 +695,18 @@ def main():
     ap.add_argument("--commit", default=None, help="the commit of the --timings runs, if their files don't say")
     ap.add_argument("--at", default=None, help="the ISO date of the --timings runs, if their files don't say")
     ap.add_argument("--repo", default="/workspace/wiz-lang-solutions")
-    ap.add_argument("--out", "--html", dest="out", default="/workspace/wiz-notes/perf-dashboard.html",
-                    help="the HTML file to write (--html is a synonym)")
+    ap.add_argument("--out", "--html", dest="out", default=None,
+                    help="the HTML file to write (--html is a synonym; default: perf-dashboard.html in the notes directory)")
+    ap.add_argument("--notes", metavar="DIR", default=None,
+                    help="the notes directory the page goes to when --out is not given (default: $WIZ_NOTES_DIR)")
     ap.add_argument("--gap", type=float, default=90, help="minutes between measurements that start a new window (default 90)")
     a = ap.parse_args()
+    if a.out is None:
+        notes = a.notes or os.environ.get("WIZ_NOTES_DIR")
+        if not notes:
+            print("perf-dashboard: no output given: pass --out HTML or --notes DIR, or set WIZ_NOTES_DIR", file=sys.stderr)
+            sys.exit(2)
+        a.out = os.path.join(notes, "perf-dashboard.html")
     rows = load(a.history)
     repo = Repo(a.repo)
     runs = load_timings(a.timings, a.commit, a.at) if a.timings else []

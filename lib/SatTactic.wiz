@@ -22,7 +22,7 @@ unfolds to one of those is unfolded at its head. The tactic
    every gate holds (`SatT.holdsE`: `refl` at each node's own subterm, or a lemma, as in
    lib/BitBlast.wiz, 28d), and the kernel checks both by conversion.
 Neither the solver, nor this tactic, nor the host's DIMACS/LRAT plumbing is trusted.
-The kernel runs the checker (slow for big proofs; kernel evaluation, wiz-notes/smt.md).
+The kernel runs the checker by evaluation, which is slow for big proofs.
 -/
 
 

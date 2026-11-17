@@ -19,6 +19,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   arguments and computes them when those differ; an operation on an operation computes
   the inner one first. The self-hosted kernel has no native `Nat` operations and was
   already lazy here.
+* The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
+  by key: a row one side deleted and the other left unchanged is deleted (a union kept
+  it, so a branch merging master resurrected rows master had removed), and a row one
+  side deleted and the other modified is a conflict the driver refuses (22f).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
@@ -51,7 +55,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,

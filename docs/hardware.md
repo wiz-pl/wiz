@@ -132,5 +132,3 @@ about it is pointwise (`HwTy.El.memRead_write_miss`).
 * `examples/hdl-temporal.wiz` (PR #146): a UART's line is idle-high for ever, the
   loopback delivers every byte, a valid/ready buffer is stable and live.
 * The iCEstick project (UART, toy CPU) uses all of the above; its findings drove them.
-
-Design notes: `wiz-notes/cohesion-hardware.md`.

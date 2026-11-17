@@ -121,13 +121,13 @@ partial def insertImplicits (ctx : LocalCtx R) (t : Term R) (ty : VTy R) :
     ElabM R (Term R × VTy R) := do
   -- (given, stage 7) an instance argument: a hole for instance resolution
   if let .pi x .instImplicit _ dom cod _ ← force ty then
-    let m ← freshMeta ctx s!"instance {x}"
+    let m ← freshMeta ctx s!"instance {x}" dom
     addInstProblem ctx m dom
     return ← insertImplicits ctx (.app t m) (← instM cod (← evalIn ctx m))
   --<sol
   match ← force ty with
   | .pi x .implicit _ dom cod _ =>
-    let m ← freshMeta ctx s!"implicit argument {x}"
+    let m ← freshMeta ctx s!"implicit argument {x}" dom
     noteImplicitType ctx t m dom
     insertImplicits ctx (.app t m) (← instM cod (← evalIn ctx m))
   | _ => pure (t, ty)  -- the type as it was (forcing would lose glued names)
@@ -221,7 +221,7 @@ def ofNatLit? (ctx : LocalCtx R) (n : Nat) (A : VTy R) : ElabM R (Option (Term R
   if let .sort l ← force domA then addSortConstraint ctx qA l
   let .pi _ _ _ _ codN _ ← force (← instM codA A) | return none
   let .pi x .instImplicit _ dom _ _ ← force (← instM codN (.natLit n)) | return none
-  let m ← freshMeta ctx s!"instance {x}"
+  let m ← freshMeta ctx s!"instance {x}" dom
   addInstProblem ctx m dom
   -- a numeral that doesn't fit a fixed-width word of lib/Word.wiz wraps around: say so
   -- (outside lib/Word.wiz the word types are opaque, 13b/22k: a constant applied to `w`)
@@ -314,7 +314,7 @@ def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : Ela
       .error { info := (ctx.withInfo stx).info,
                msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++
                  mismatchReason (show' expected) (show' inferred) e.msg,
-               code := if e.code == ErrorCode.nonPattern then e.code else ErrorCode.typeMismatch,
+               code := if e.code == ErrorCode.nonPattern || e.code == ErrorCode.private_ then e.code else ErrorCode.typeMismatch,
                -- what was recorded up to here (the info tree, `trace`s)
                state? := some s }
 
@@ -1141,8 +1141,8 @@ partial def elabQuantity (ctx : LocalCtx R) (bi : BinderInfo) : Option Syntax �
 metavariable). -/
 partial def checkType (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × Level) := do
   if stx.isOfKind "term.hole" then
-    let m ← freshMeta (ctx.withInfo stx) "type"
     let u ← freshLevelMeta
+    let m ← freshMeta (ctx.withInfo stx) "type" (some (.sort u))
     addSortConstraint ctx m u
     return (m, u)
   let (t, ty) ← infer ctx stx
@@ -1436,8 +1436,8 @@ where
         | some prf => return .absurd (quote g ctx.lvl expected) (quote g ctx.lvl prf)
         | none => throwAt (ctx.withInfo (stx.getArg 1)).info s!"absurd expects a proof of False or Empty, got {← showVal ctx ety}"
       | ety => throwAt (ctx.withInfo (stx.getArg 1)).info s!"absurd expects a proof of False or Empty, got {← showVal ctx ety}"
-    | "term.hole" => freshMeta ctx
-    | "term.syntheticHole" => freshMeta ctx s!"?{((stx.getArg 1).getId?).getD "_"}"
+    | "term.hole" => freshMeta ctx (ty := expected)
+    | "term.syntheticHole" => freshMeta ctx s!"?{((stx.getArg 1).getId?).getD "_"}" expected
     -- (13h) `⟨a, b⟩` and `let ⟨a, b⟩ := s; body`
     | "term.anon" => elabAnon ctx stx expected
     | "term.letPat" => return (← elabLetPat ctx stx (some expected)).1
@@ -1526,7 +1526,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
       if !sizedBase then return some (← check ctx stx' expected)
       -- a sized expected type: the value has size `↑m`, where `m` is the size of its
       -- recursive arguments (the generated constructors themselves return `T^∞`)
-      let m ← freshMeta ctx "a size"
+      let m ← freshMeta ctx "a size" (some .size)
       let vm ← evalIn ctx m
       if stx.isOfKind "term.app" then
         for a in (stx.getArg 1).args do
@@ -2054,7 +2054,7 @@ partial def elabPis (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   | b :: rest =>
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
-      | none => pure (← freshMeta ctx s!"the type of {b.name}", ← freshLevelMeta)
+      | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
     let q ← elabQuantity ctx b.bi b.qty
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2071,7 +2071,7 @@ partial def elabSigmas (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax)
   | b :: rest =>
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
-      | none => pure (← freshMeta ctx s!"the type of {b.name}", ← freshLevelMeta)
+      | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
     let q ← elabQuantity ctx b.bi b.qty
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2398,7 +2398,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
     | .pi x bi _ dom cod _ =>
       -- `@f … _ …` at an instance argument: a problem for instance resolution
       let a ← if explicitMode && bi == .instImplicit && arg.isOfKind "term.hole" then do
-          let m ← freshMeta (ctx.withInfo arg) s!"instance {x}"
+          let m ← freshMeta (ctx.withInfo arg) s!"instance {x}" dom
           addInstProblem ctx m dom
           pure m
         else match ← tryCatch (Except.ok <$> check ctx arg dom) (fun e => pure (.error e)) with
@@ -2484,7 +2484,7 @@ partial def inferAppNamed (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R ×
           | some e =>
             pos := pos + 1
             if explicitMode && bi == .instImplicit && e.isOfKind "term.hole" then do
-              let m ← freshMeta (ctx.withInfo e) s!"instance {x}"
+              let m ← freshMeta (ctx.withInfo e) s!"instance {x}" dom
               addInstProblem ctx m dom
               pure m
             else check ctx e dom
@@ -2495,11 +2495,11 @@ partial def inferAppNamed (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R ×
               throwAt (ctx.withInfo a).info s!"no parameter named '{y}' (the function's type is {← showVal ctx fty})" ErrorCode.unknownParameter
             throwAt (ctx.withInfo a).info s!"named argument '{y}' comes after the explicit parameter '{x}', which has no argument" ErrorCode.namedArgument
         else if bi == .instImplicit then do
-          let m ← freshMeta ctx s!"instance {x}"
+          let m ← freshMeta ctx s!"instance {x}" dom
           addInstProblem ctx m dom
           pure m
         else do
-          let m ← freshMeta ctx s!"implicit argument {x}"
+          let m ← freshMeta ctx s!"implicit argument {x}" dom
           noteImplicitType ctx f m dom
           pure m
     f := .app f a
@@ -3182,8 +3182,9 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
     unifyAt ctx other expected C
     let o ← check ctx other C
     let cls : Name := if op == "AndOp.and" then "AndOp" else "OrOp"
-    let inst ← freshMeta ctx "an instance"
-    addInstProblem ctx inst (vApp g (eval g [] (.const cls [])) C)
+    let instTy := vApp g (eval g [] (.const cls [])) C
+    let inst ← freshMeta ctx "an instance" instTy
+    addInstProblem ctx inst instTy
     return some (.app (.app (.app (.app (.const op []) Ct) inst) c) o)
   -- a branch that is a numeral (or an `if` of numerals) takes its type from the other
   -- one (`if c then 0 else x + 1`), so the other is elaborated first
@@ -3191,7 +3192,7 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
       let e ← check ctx eStx expected
       pure (← check ctx tStx expected, e)
     else pure (← check ctx tStx expected, ← check ctx eStx expected)
-  let inst ← freshMeta ctx "an instance"
+  let inst ← freshMeta ctx "an instance" (mux expected)
   addInstProblem ctx inst (mux expected)
   let At := quote (← getGlobals) ctx.lvl expected
   return some (.app (.app (.app (.app (.app (.app (.const "Mux.mux" []) Ct) At) inst) c) t) e)
@@ -3572,7 +3573,8 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
   | "term.hole" | "term.syntheticHole" =>
     let a ← freshMeta ctx "the type of a hole"
     let desc := if stx.isOfKind "term.hole" then "_" else s!"?{((stx.getArg 1).getId?).getD "_"}"
-    return (← freshMeta ctx desc, ← evalIn ctx a)
+    let va ← evalIn ctx a
+    return (← freshMeta ctx desc va, va)
   | "term.app" =>
     if let some r ← inferData? ctx stx then return r
     inferApp ctx stx
@@ -3973,18 +3975,20 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let x ← str (fld 1)
     let .pi _ _ _ dom cod _ ← force gl.ty | throwAt info "intro: the goal is not a function type" ErrorCode.tacticFailed
     let ctx' := gl.ctx.bind x dom
-    let m ← freshMeta ctx' "goal"
+    let ty ← instM cod (Val.var lvl)
+    let m ← freshMeta ctx' "goal" ty
     unifyGoal gl (.lam x m)
-    let (st, id) := addGoal st { ctx := ctx', ty := ← instM cod (Val.var lvl), tm := m }
+    let (st, id) := addGoal st { ctx := ctx', ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
   if tag == TacTag.introFresh then
     let .pi bx _ _ dom cod _ ← force gl.ty | throwAt info "intro: the goal is not a function type" ErrorCode.tacticFailed
     let x := introName gl.ctx.names (← str (fld 1)) bx (isProp g gl.ctx.types.reverse.toArray dom)
       (decodeBool (fld 2) == some true)
     let ctx' := gl.ctx.bind x dom
-    let m ← freshMeta ctx' "goal"
+    let ty ← instM cod (Val.var lvl)
+    let m ← freshMeta ctx' "goal" ty
     unifyGoal gl (.lam x m)
-    let (st, id) := addGoal st { ctx := ctx', ty := ← instM cod (Val.var lvl), tm := m }
+    let (st, id) := addGoal st { ctx := ctx', ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (encodePair (encodeString x) (.nat id)))
   if tag == TacTag.rename then
     let i ← num (fld 1)
@@ -3996,7 +4000,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let ty ← evalIn gl.ctx (← reify st.handles (fld 1) lvl)
     try unify lvl gl.ty ty
     catch e => throwAt info s!"change: the new goal is not convertible with the old one ({e.msg})" ErrorCode.tacticFailed
-    let m ← freshMeta gl.ctx "goal"
+    let m ← freshMeta gl.ctx "goal" ty
     unifyGoal gl m
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
@@ -4046,9 +4050,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let eqn (x y : Term R) : Term R := if rtl then .eqTy y x else .eqTy x y
     let P : Term R := .lam "x" (.lam "_" (eqn (body.lift 1) (Ga.lift 2)))
     let pf : Term R := .transp A a P (.reflTy Ga) b h
-    let m ← freshMeta gl.ctx "goal"
+    let ty ← evalIn gl.ctx newT
+    let m ← freshMeta gl.ctx "goal" ty
     unifyGoal gl (.cast newT goalT pf m)
-    let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
+    let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
   if tag == TacTag.rewriteAt then
     -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
@@ -4146,7 +4151,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     return ← runTac code info st (fld 2)
   if tag == TacTag.newGoal then
     let ty ← evalIn gl.ctx (← reify st.handles (fld 1) lvl)
-    let m ← freshMeta gl.ctx "goal"
+    let m ← freshMeta gl.ctx "goal" ty
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 2) (.nat id))
   if tag == TacTag.normalize then
@@ -4184,7 +4189,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
   let code ← match s.compileCode ("TacticM.run" :: s.tactics.map (·.2)) with
     | .ok c => pure c
     | .error e => throwAt ctx.info e
-  let m ← freshMeta ctx "by"
+  let m ← freshMeta ctx "by" expected
   let mut st : TacState R := { goals := #[{ ctx, ty := expected, tm := m }], «open» := [0] }
   -- each step is `[tactic, [";"?]]`
   let tacs := (stx.getArg 1).args.filterMap fun step => step.args[0]?

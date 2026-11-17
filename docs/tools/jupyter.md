@@ -300,8 +300,10 @@ wc -l lib/*.wiz
 ```
 
 stdout and stderr are published as `stream` messages **as the lines arrive**, so
-a slow command shows output while it runs. A zero exit becomes the cell's result
-(`exit status 0`); a non-zero one is an `error` with `ename: ShellError` and the
+a slow command shows output while it runs. Each stream keeps its own order, but
+the two are separate pipes, so a stderr line can be published before a stdout line
+the script wrote first (use `2>&1` when the interleaving matters). A zero exit
+becomes the cell's result (`exit status 0`); a non-zero one is an `error` with `ename: ShellError` and the
 status in `evalue`, so `%%sh` is usable as a check (Jupyter marks the cell
 failed). The interpreter is `/bin/sh`; arguments replace that command line, e.g.
 `%%sh bash -e`. The timeout is `$WIZ_SHELL_TIMEOUT` seconds (default 300).
