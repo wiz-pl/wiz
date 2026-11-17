@@ -1,4 +1,6 @@
 import Text
+import Word
+import WordArray
 /-!
 # Scry.Schema: the fact-store schema
 
@@ -203,6 +205,67 @@ def Scry.bumpCount (key : String) : List Scry.Count → List Scry.Count
 /-- Count the keys, in first-appearance order. -/
 def Scry.countKeys (keys : List String) : List Scry.Count :=
   List.foldl (fun acc k => Scry.bumpCount k acc) .nil keys
+
+/-- Counts of an index column, with the ids in first-appearance order: `.1[i]` is how
+often id `i` occurs, and `.2` lists each id that occurs, once, in the order it first
+appears. One pass over the `U32Array` (no boxed per-node list); ids `≥ size` are skipped.
+First-appearance order is the order `Scry.countKeys` gives the per-node names, so the
+stats block reads the same as before. -/
+def Scry.histogramOfColumn (size : Nat) (col : U32Array) : U32Array × U32Array :=
+  U32Array.foldl (fun acc v =>
+    let i := UIntN.toNat v;
+    match acc with
+    | (h, order) => match Nat.lt i size with
+      | .false => (h, order)
+      | .true =>
+        let c := U32Array.get h i;
+        let order' := match UIntN.beq c (U32.ofNat 0) with
+          | .true => U32Array.push order v
+          | .false => order;
+        (U32Array.set h i (UIntN.add c (U32.ofNat 1)), order'))
+    (U32Array.replicate size (U32.ofNat 0), U32Array.empty) col
+
+/-- A histogram as the stats' count list, in the order of `order` (the ids that occur). -/
+def Scry.countsOfHistogram (names : Nat → String) (hist : U32Array × U32Array) :
+    List Scry.Count :=
+  List.reverse (U32Array.foldl (fun acc v =>
+    let i := UIntN.toNat v;
+    List.cons (Scry.Count.mk (names i) (UIntN.toNat (U32Array.get hist.1 i))) acc)
+    .nil hist.2)
+
+/-- The longest parent chain, one pass over a `parent` column (`parent + 1`, 0 = root).
+A parent with a smaller id has its depth in the column already (preorder stores: the
+shim and the JSON loader both number parents first); any other parent falls back to
+`slow`, the per-node chain walk, so a store in another order is still right. -/
+def Scry.depthColumnGo (slow : Nat → Nat) (fuel : Nat) (parents : U32Array) (i : Nat)
+    (depth : U32Array) (best : Nat) : Nat :=
+  match fuel with
+  | .zero => best
+  | .succ k =>
+    let p := UIntN.toNat (U32Array.get parents i);
+    let d := match Nat.beq p 0 with
+      | .true => 0
+      | .false => match Nat.lt (Nat.sub p 1) i with
+        | .true => Nat.succ (UIntN.toNat (U32Array.get depth (Nat.sub p 1)))
+        | .false => slow i;
+    Scry.depthColumnGo slow k parents (Nat.succ i) (U32Array.set depth i (U32.ofNat d))
+      (Nat.max best d)
+
+/-- The longest parent chain of a `parent` column of `n` nodes (`slow` as above). -/
+def Scry.maxDepthOfColumn (slow : Nat → Nat) (n : Nat) (parents : U32Array) : Nat :=
+  Scry.depthColumnGo slow n parents 0 (U32Array.replicate n (U32.ofNat 0)) 0
+
+/-- Nodes with a zero `parent`-column entry. -/
+def Scry.rootCountOfColumn (parents : U32Array) : Nat :=
+  U32Array.foldl (fun acc p => match UIntN.beq p (U32.ofNat 0) with
+    | .true => Nat.succ acc
+    | .false => acc) 0 parents
+
+/-- Nodes whose flags have bit 1 (`ERROR`) or bit 2 (`MISSING`). -/
+def Scry.errorCountOfColumn (flags : U32Array) : Nat :=
+  U32Array.foldl (fun acc f => match UIntN.beq (UIntN.land f (U32.ofNat 6)) (U32.ofNat 0) with
+    | .true => acc
+    | .false => Nat.succ acc) 0 flags
 
 /-- The parent chain length of `id` (0 for a root); `fuel` cuts a cycle, which the loader
 refuses anyway. -/
