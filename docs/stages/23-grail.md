@@ -120,7 +120,8 @@ compiled through C). `-- test: skip REASON` marks an example that the package-wi
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
 needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
-nothing; `grail test FILTER` runs the tests whose path contains it, and
+nothing; `grail test FILTER` runs the tests whose path contains it (a selector that
+matches no test is an error, exit 1, not a pass), and
 `grail test --update` writes the actual output. Every example is a test
 (`examples/*.expected`). The Lean tests stay in `lake test`.
 

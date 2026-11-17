@@ -87,8 +87,23 @@ unboxed; not stable under substitution, so off by default)
 toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --cflags \"…\" --ldflags \"…\" (where GMP lives),
   --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)"
 
+/-- One line of an IO error: Lean's `toString` adds a `  file: …` line, which the
+diagnostic already names. -/
+def ioReason (e : IO.Error) : String :=
+  ((toString e).splitOn "\n").head!
+
+/-- A user-named input's contents, or a diagnostic: a missing or unreadable file is
+`path: error: <reason>` and exit 1, not a Lean exception escaping to the top level. -/
+def readInput (path : String) : IO (Except String String) := do
+  try
+    pure (.ok (← IO.FS.readFile path))
+  catch e =>
+    pure (.error s!"{path}: error: {ioReason e}")
+
 def parseCmd (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let input ← match ← readInput path with
+    | .ok text => pure text
+    | .error e => IO.eprintln e; return 1
   let r := parseFile input
   for cmd in r.commands do
     IO.println cmd.toSExpr
@@ -397,7 +412,10 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut mods : Array Doc.Module := #[]
   for (n, f, root) in wanted do
     if mods.any (·.name == n) then continue
-    mods := mods.push { name := n, src := ← IO.FS.readFile f, rel := ← relativeTo root f }
+    let src ← match ← readInput f.toString with
+      | .ok text => pure text
+      | .error e => IO.eprintln e; return 1
+    mods := mods.push { name := n, src := src, rel := ← relativeTo root f }
   let web ← match a.web with
     | some w => pure (some (System.FilePath.mk w))
     | none => do pure ((← webDir).map System.FilePath.mk)
@@ -458,7 +476,10 @@ def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     | .ok a => pure a
     | .error e => do IO.eprintln e; return 2
   let path := a.input.getD "-"
-  let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
+  let input ← if path == "-" then (← IO.getStdin).readToEnd else
+    match ← readInput path with
+    | .ok text => pure text
+    | .error e => IO.eprintln e; return 1
   let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
   let r := Fmt.run init input { width := a.width, explain := a.explain }
   unless r.errors.isEmpty do
@@ -543,7 +564,9 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   pure 0
 
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let input ← match ← readInput path with
+    | .ok text => pure text
+    | .error e => IO.eprintln e; return 1
   let s ← elaborate tc path input
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
@@ -558,7 +581,9 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
-  let input ← IO.FS.readFile path
+  let input ← match ← readInput path with
+    | .ok text => pure text
+    | .error e => IO.eprintln e; return none
   let s ← elaborate tc path input
   for m in s.messages do
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
@@ -596,7 +621,11 @@ def takeTarget : List String → Except String (Option String × List String)
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
     (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
   let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
+  -- an output that cannot be written (`-o /no/such/dir/a`) is a diagnostic, not an
+  -- uncaught exception from the write of OUT.c, OUT.ll, OUT.h or OUT itself
+  let r ← try Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm")
+    catch e => pure (.error s!"{out}: error: {ioReason e}")
+  match r with
   | .error e => IO.eprintln e; pure 1
   | .ok _ => pure 0
 
@@ -676,14 +705,20 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
     "  :quit         leave (EOF does too)\n" ++
     "The Prelude is imported at the start; errors are reported and the session goes on."
   -- print the messages an input added (with its path, for `:load`), then forget them so
-  -- the next input does not print them again
+  -- the next input does not print them again. `errors` counts the lines that produced an
+  -- error: a script or a pipe exits 1 when there was one (an interactive session does
+  -- not: a typo is not a reason for `wiz repl` to fail when it quits).
+  let errors ← IO.mkRef 0
   let report (before : Nat) (s' : CommandState ZeroOneMany) (input : String)
       (path? : Option String) : IO Unit := do
     for m in s'.messages.extract before s'.messages.size do
       let text := match path? with
         | some p => s!"{p}:{m.render input}"
         | none => m.render input
-      if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
+      if m.severity == .error then
+        errors.modify (· + 1)
+        stderr.putStrLn text
+      else stdout.putStrLn text
   -- one input line: `none` when it ends the session (`:quit`), else the next state
   let process (state : CommandState ZeroOneMany) (raw : String) :
       IO (Option (CommandState ZeroOneMany)) := do
@@ -697,6 +732,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
       if c.startsWith ":" then
         if c == ":type" then
           stderr.putStrLn "usage: :type EXPR"
+          errors.modify (· + 1)
           return some state
         else if c.startsWith ":type " then
           let text := s!"#check {(c.drop 6).trimAscii.toString}"
@@ -705,6 +741,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
           return some { s' with messages := #[] }
         else if c == ":load" then
           stderr.putStrLn "usage: :load FILE"
+          errors.modify (· + 1)
           return some state
         else if c.startsWith ":load " then
           let path := (c.drop 6).trimAscii.toString
@@ -712,6 +749,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
             pure (some (← IO.FS.readFile path))
           catch e =>
             stderr.putStrLn s!"cannot read {path}: {e}"
+            errors.modify (· + 1)
             pure none
           match text? with
           | none => return some state
@@ -724,11 +762,11 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
           | [":run", name] =>
             let dir ← IO.FS.createTempDir
             match ← Build.runGlobal tc state name dir llvm with
-            | .error e => stderr.putStrLn e
+            | .error e => stderr.putStrLn e; errors.modify (· + 1)
             | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
             stdout.flush
             return some state
-          | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; return some state
+          | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; errors.modify (· + 1); return some state
       else
         -- the line is one command: elaborate it into the session, from the pristine base
         let s' := runFrontend.go line base line.toList.toArray 0 state
@@ -738,6 +776,10 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
         return some { s' with messages := #[] }
   let mut state := preloaded
   let mut reading := true
+  -- the status of a script (or of a pipe: no terminal): 1 when any line errored
+  let scriptStatus : IO UInt32 := do
+    let n ← errors.get
+    pure (if n == 0 then 0 else 1)
   -- `--init CMD`s first, then `--script FILE`'s lines (instead of stdin)
   for c in init do
     if reading then
@@ -756,7 +798,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
         match ← process state raw with
         | some s => state := s
         | none => reading := false
-    return 0
+    return (← scriptStatus)
   while reading do
     if tty then
       stdout.putStr "wiz> "
@@ -770,7 +812,9 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
       match ← process state raw with
       | some s => state := s
       | none => reading := false
-  return 0
+  -- an interactive session ends successfully even after a line's error; a pipe is a
+  -- script and reports the errors (`--script` above does the same)
+  if tty then pure 0 else scriptStatus
 
 /-- `--prelude MODULE` / `-p MODULE` (`--prelude=MODULE` too; repeatable and
 comma-separated): the modules `wiz repl` imports after the Prelude. Returns them in the

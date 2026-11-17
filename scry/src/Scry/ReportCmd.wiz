@@ -3,6 +3,7 @@ import Scry.TaintCmd
 import Scry.ProjectIO
 import Scry.Workflow
 import Scry.Report
+import Scry.Status
 /-!
 # Scry.ReportCmd: `scry report`
 
@@ -281,4 +282,4 @@ def Scry.reportRun (o : Scry.ReportOpts) : EIO Nat := do
 def Scry.reportCmd (args : List String) : EIO Nat :=
   match Scry.reportArgs args with
   | .ok o => Scry.reportRun o
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e

@@ -863,7 +863,10 @@ page runs.
   definition `NAME` (C, or LLVM with `--llvm`; `--target llvm` is the same flag);
   `--llvm` affects only that. `--script FILE` reads the commands from FILE instead of
   stdin (one per line; for tests and CI), and `--init CMD` (repeatable) runs CMD before
-  the first input.
+  the first input. **Exit status:** a script (`--script`, or a pipe: no terminal on
+  stdin) exits 1 when any line produced an error (the session still runs every line and
+  prints every result), so it can be a CI check; an interactive session exits 0 at
+  `:quit`/EOF even after an error. A `--prelude` that does not resolve is 2.
 
   `:type EXPR` prints `EXPR`'s type (it is `#check EXPR` in the session), and
   `:load FILE` elaborates a file's commands into the session, so its definitions stay in

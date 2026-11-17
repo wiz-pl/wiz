@@ -4,6 +4,7 @@ import Text
 import IO
 import WordArray
 import Scry.Budget
+import Scry.Status
 import Scry.Native
 import Scry.CstStore
 import Scry.Lower
@@ -1268,4 +1269,4 @@ def Scry.withTimeout (o : Scry.TaintOpts) (act : EIO Nat) : EIO Nat := do
 def Scry.taintCmd (args : List String) : EIO Nat :=
   match Scry.taintArgs args with
   | .ok o => Scry.withTimeout o (Scry.runTaint o)
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e

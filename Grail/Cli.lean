@@ -27,7 +27,8 @@ def usage : String := "usage:
                           bootstrap check, which takes minutes)
   grail test [FILTER…] [--update]
                           run the tests (of `tests` targets) whose path contains a
-                          filter; --update writes the actual output to .expected
+                          filter (one that matches no test is an error); --update
+                          writes the actual output to .expected
   grail update [--locked] resolve the dependencies again and write grail.lock
                           (builds use the lock only); --locked fails if the lock
                           would change
@@ -550,10 +551,20 @@ def cliMain (args : List String) : IO UInt32 := do
       pure 0
     | "test" :: rest =>
       let update := rest.contains "--update"
-      let filters := rest.filter (· != "--update")
+      -- an unknown flag is a usage error, not a substring filter (`--jobs` is `-j`)
+      for a in rest do
+        if a.startsWith "-" && a != "--update" then
+          IO.eprintln s!"grail test: unknown flag {a}"
+          return 2
+      let filters := rest.filter (fun a => !a.startsWith "-")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
       let results ← r.tests pkg.targets filters update
+      -- a selector that picked nothing is a mistake, not a pass: `grail test typo`
+      -- must not exit 0 after running no test at all
+      if !filters.isEmpty && results.isEmpty then
+        IO.eprintln s!"grail test: selector matched no cases: {" ".intercalate filters}"
+        return 1
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
       let failed := results.size - passed - skipped

@@ -7,6 +7,7 @@ import Scry.ProjectCache
 import Scry.ProjectTaint
 import Scry.Preproc
 import Scry.Native
+import Scry.Status
 /-!
 # Scry.ProjectIO: build a project from `compile_commands.json` (or a directory)
 
@@ -514,7 +515,7 @@ project, print the summary, the requested relation or the whole-project taint re
 write `--facts`/`--sarif`. -/
 def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
   match Scry.parseProjectArgs .none (Scry.ProjectOpts.default "") args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok pair => do
     let opts := pair.2;
     r ← Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc opts.allowErrors
@@ -537,10 +538,10 @@ def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
         EIO.pure 0
     | .true => match opts.rel with
       | .some rel => match opts.func with
-        | .some _ => EIO.fail "scry project query takes --rel or --func, not both"
+        | .some _ => Scry.usageFail "scry project query takes --rel or --func, not both"
         | .none => match Scry.Project.relation p rel with
           | .error e => EIO.fail e
           | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
       | .none => match opts.func with
         | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
-        | .none => EIO.fail "usage: scry project query DIR --rel NAME | --func NAME"
+        | .none => Scry.usageFail "usage: scry project query DIR --rel NAME | --func NAME"

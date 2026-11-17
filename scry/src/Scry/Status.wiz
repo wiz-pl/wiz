@@ -1,0 +1,27 @@
+import Sys
+import Text
+/-!
+# Scry.Status: usage errors and exit statuses
+
+`scry` exits 0 on success, 1 on an analysis or IO failure, and 2 on a usage error (an
+unknown command or flag, a missing argument, a `--help` where help is not a command, or a
+conflicting flag). `EIO` carries only a message, so a usage error is marked here and
+`Scry.mainArgs` turns the mark into status 2 (stripping it from the message); every other
+`EIO` error is status 1.
+
+A command's argument parser returns `Except String`; its command wraps the error with
+`Scry.usageFail`, which is the only place the mark is added.
+-/
+
+/-- The marker that distinguishes a usage error from an analysis failure. -/
+def Scry.usageMark : String := "\x01"
+
+/-- Fail with a usage error: `Scry.mainArgs` prints the message and exits 2. -/
+def Scry.usageFail {A : Type} (m : String) : EIO A :=
+  EIO.fail (String.append Scry.usageMark m)
+
+/-- The message of a usage error, without its mark (`none` for an analysis failure). -/
+def Scry.usageText (m : String) : Option String :=
+  match String.startsWith m Scry.usageMark with
+  | .true => .some (String.drop 1 m)
+  | .false => .none

@@ -79,6 +79,9 @@ scry repl tests/fixtures/taint-unsafe.c   # load the file before the first promp
 scry repl --script SESSION.wiz            # one command per line, for tests/CI
 ```
 
+A `--script` (or a pipe) exits 1 when any line errored, so it is a CI check; an
+interactive session exits 0 at `:quit`/EOF.
+
 The module is `scry/src/Scry/Repl.wiz`, imported as `Scry.Repl`. Its state is a small
 cache under `.scry-repl/` (`state.json`, the cached CST columns `uN.cst`, `findings.json`,
 `taint.json`, `config.json`). `load` parses a C file with tree-sitter **once** and writes

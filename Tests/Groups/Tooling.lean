@@ -30,6 +30,20 @@ def runRepl (input : String) (args : List String := []) : IO (UInt32 × String �
   let code ← child.wait
   pure (code, ← IO.ofExcept out.get, ← IO.ofExcept err.get)
 
+/-- `wiz CMD…` on a missing input: exit 1 and `path: error: <reason>` on stderr,
+never Lean's uncaught-exception line. -/
+def missingInputCase (name : String) (mkArgs : String → List String) : Case where
+  name := name
+  run := fun _ => do
+    let dir ← IO.FS.createTempDir
+    let missing := (dir / "missing.wiz").toString
+    let (code, stdout, err) ← runWiz (mkArgs missing)
+    check (code == 1) s!"wiz {mkArgs missing}: exit {code}\n{stdout}{err}"
+    check ((err.splitOn s!"{missing}: error:").length > 1)
+      s!"no `path: error:` diagnostic for wiz {mkArgs missing}:\n{stdout}{err}"
+    check ((err.splitOn "uncaught exception").length == 1)
+      s!"a Lean exception escaped for wiz {mkArgs missing}:\n{err}"
+
 def toolingGroup : Group where
   name := "tooling"
   exercise := "Stage 11"
@@ -132,10 +146,24 @@ def toolingGroup : Group where
     { name := "wiz repl: definitions persist, #eval prints, an error does not stop the session", run := fun _ => do
         let input := "def answer : Nat := 41 + 1\n#eval answer\n#check answer\ndef bad : Nat := true\n#eval answer + 1\n:quit\n"
         let (code, out, err) := ← runRepl input
-        checkEq 0 code
+        -- a pipe is a script: the session went on (43 below) and the exit status says a
+        -- line errored
+        checkEq 1 code
         for frag in ["42", "answer : Nat", "43"] do
           check ((out.splitOn frag).length > 1) s!"no '{frag}' in the session:\n{out}\n{err}"
         check ((err.splitOn ": error:").length > 1) s!"the error was not reported:\n{err}" },
+    { name := "wiz repl --script: a line that errored makes the status 1, a clean script 0", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let script := dir / "bad.wiz"
+        IO.FS.writeFile script "def ok : Nat := 1\n#eval ok + 1\ndef bad : Nat := true\n"
+        let (code, out, err) := ← runRepl "" ["--script", script.toString]
+        check (code == 1) s!"a script with an error exited {code}:\n{out}\n{err}"
+        check ((out.splitOn "2").length > 1) s!"the script did not run to its end:\n{out}\n{err}"
+        check ((err.splitOn ": error:").length > 1) s!"the error was not reported:\n{err}"
+        IO.FS.writeFile script "def ok : Nat := 1\n#eval ok + 1\n"
+        let (code, out, err) := ← runRepl "" ["--script", script.toString]
+        checkEq 0 code
+        check ((out.splitOn "2").length > 1) s!"a clean script did not run:\n{out}\n{err}" },
     { name := "wiz repl: a pipe (no tty) reads one command per line and EOF exits", run := fun _ => do
         -- `:quit` is not needed: the end of the file is the end of the session
         let dir ← IO.FS.createTempDir
@@ -160,7 +188,8 @@ def toolingGroup : Group where
         let missing := dir / "missing.wiz"
         let (code, out, err) := ← runRepl
           s!"def two : Nat := 1 + 1\n:type two\n:load {file}\n#check three\n#eval three + 1\n:load {missing}\n#check two\n:quit\n"
-        checkEq 0 code
+        -- the loaded file's error and the missing `:load` are errors of their lines
+        checkEq 1 code
         check ((out.splitOn "two : Nat").length > 1) s!"`:type` printed nothing:\n{out}\n{err}"
         check ((out.splitOn "three : Nat").length > 1) s!"the loaded definition is not in scope:\n{out}\n{err}"
         check ((out.splitOn "1:1: info: 4").length > 1) s!"`:load` broke the session:\n{out}\n{err}"
@@ -186,6 +215,29 @@ def toolingGroup : Group where
         check ((err.splitOn "unknown module NoSuchPrelude").length > 1)
           s!"no clear missing-module error:\n{out}\n{err}"
         check ((out.splitOn "1").length == 1) s!"the session ran anyway:\n{out}\n{err}" },
+    missingInputCase "wiz check: a missing file is a diagnostic, not an exception"
+      (fun p => ["check", p]),
+    missingInputCase "wiz parse: a missing file is a diagnostic, not an exception"
+      (fun p => ["parse", p]),
+    missingInputCase "wiz fmt: a missing file is a diagnostic, not an exception"
+      (fun p => ["fmt", p]),
+    missingInputCase "wiz build: a missing file is a diagnostic, not an exception"
+      (fun p => ["build", p, "-o", p ++ "-out"]),
+    missingInputCase "wiz run: a missing file is a diagnostic, not an exception"
+      (fun p => ["run", p]),
+    missingInputCase "wiz doc: a missing file is a diagnostic, not an exception"
+      (fun p => ["doc", p, "-o", p ++ "-doc"]),
+    { name := "wiz build -o: an unwritable output is a diagnostic, not an exception", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        IO.FS.writeFile (dir / "ok.wiz") "import Prelude\ndef main : Nat := 1\n"
+        -- a regular file where the output's directory should be: writing OUT.c fails
+        IO.FS.writeFile (dir / "blocker") "not a directory\n"
+        let out := (dir / "blocker" / "out").toString
+        let (code, stdout, err) ←
+          runWiz ["build", (dir / "ok.wiz").toString, "-o", out, "--cache", (dir / "cache").toString]
+        check (code == 1) s!"exit {code}\n{stdout}{err}"
+        check ((err.splitOn s!"{out}: error:").length > 1) s!"no `OUT: error:` diagnostic:\n{stdout}{err}"
+        check ((err.splitOn "uncaught exception").length == 1) s!"a Lean exception escaped:\n{err}" },
     { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath
         let (code, out, err) := ← runWiz ["test-driver", "--driver", self.toString, "--list"] #[]

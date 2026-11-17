@@ -1,6 +1,7 @@
 import Sys
 import Json
 import Scry.Bench
+import Scry.Status
 /-!
 # Scry.BenchCmd: the `scry bench` command
 
@@ -140,7 +141,7 @@ def Scry.benchMaybePrint (show : Bool) (run : Scry.BenchRun) : EIO Unit :=
 
 def Scry.benchCmd (args : List String) : EIO Nat :=
   match Scry.benchArgs args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => do
     corpus ← EIO.lift (Scry.benchResolve o.corpus);
     baseline ← Scry.benchResolveBaseline o.baseline;

@@ -1,0 +1,40 @@
+-- test: run
+import Sys
+import Scry.Cli
+-- The exit-status contract: a usage error (an unknown command or flag, a missing
+-- argument, `--help` where help is not a command) is 2; an analysis or IO error is 1;
+-- success is the command's own code. `Scry.mainArgs` prints and exits; this test reads
+-- the same classification of `Scry.dispatch`'s result.
+def statusOf (r : Except String Nat) : Nat := match r with
+  | .ok n => n
+  | .error m => match Scry.usageText m with
+    | .some _ => 2
+    | .none => 1
+
+def check (label : String) (want : Nat) (r : Except String Nat) : IO Unit :=
+  match Nat.beq (statusOf r) want with
+  | .true => IO.pure ()
+  | .false => IO.bind (IO.println (label ++ ": FAILED (status "
+      ++ Nat.repr (statusOf r) ++ ", wanted " ++ Nat.repr want ++ ")"))
+      (fun _ => Process.exit 1)
+
+def main : IO Unit := do
+  r1 ← Scry.dispatch ["no-such-command"];
+  check "unknown command" 2 r1;
+  r2 ← Scry.dispatch ["facts"];
+  check "facts without a file" 2 r2;
+  r3 ← Scry.dispatch ["taint", "--help"];
+  check "taint --help" 2 r3;
+  r4 ← Scry.dispatch ["taint", "--no-such-flag", "x.c"];
+  check "taint unknown flag" 2 r4;
+  r5 ← Scry.dispatch ["parse", "fixtures/demo.facts.json"];
+  check "parse without --stats" 2 r5;
+  r6 ← Scry.dispatch ["explain", "fixtures/demo.facts.json", "x"];
+  check "explain with a bad node" 2 r6;
+  r7 ← Scry.dispatch ["findings", "no-such"];
+  check "findings unknown command" 2 r7;
+  r8 ← Scry.dispatch ["facts", "fixtures/no-such.facts.json"];
+  check "missing facts file" 1 r8;
+  r9 ← Scry.dispatch ["parse", "--stats", "fixtures/no-such.c"];
+  check "missing C file" 1 r9;
+  IO.println "usage statuses: ok"

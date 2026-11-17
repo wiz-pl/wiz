@@ -1,6 +1,7 @@
 import Sys
 import Json
 import Scry.Dynamic
+import Scry.Status
 import Scry.TaintCmd
 import Scry.Rules
 import Scry.Sarif
@@ -117,7 +118,7 @@ def Scry.dynSarifText (rep : Scry.DynReport) (srep : Option Scry.TaintReport) : 
 
 def Scry.dynCmd (args : List String) : EIO Nat :=
   match Scry.dynArgs args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => do
     rep ← Scry.dynAnalyze o;
     let report := rep.1;

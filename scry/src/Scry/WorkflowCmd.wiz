@@ -3,6 +3,7 @@ import Json
 import Text
 import Scry.Workflow
 import Scry.Repro
+import Scry.Status
 import Scry.TaintCmd
 /-!
 # Scry.WorkflowCmd: `scry findings` (explore -> triage -> repro -> verify)
@@ -468,9 +469,9 @@ partial def Scry.wfScanFiles (o : Scry.ScanOpts) (st : Scry.WfStore) (rulesPath 
 
 def Scry.scanCmd (args : List String) : EIO Nat :=
   match Scry.scanArgsGo Scry.emptyScan args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => match o.files with
-    | .nil => EIO.fail Scry.scanUsage
+    | .nil => Scry.usageFail Scry.scanUsage
     | _ => do
       now ← EIO.lift Scry.wfNow;
       let db := Scry.wfStorePath o.db;
@@ -527,7 +528,7 @@ partial def Scry.wfPrintRecords : List Scry.WfRecord → EIO Unit
 
 def Scry.listCmd (args : List String) : EIO Nat :=
   match Scry.listArgsGo Scry.emptyList args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => do
     st ← Scry.wfLoadStore (Scry.wfStorePath o.db);
     let recs := match o.state with
@@ -564,7 +565,7 @@ def Scry.showCmd (args : List String) : EIO Nat :=
   let db := idDb.2;
   let json := List.any (fun a => String.eq a "--json") args;
   match String.eq id "" with
-  | .true => EIO.fail "usage: scry findings show ID [--db FILE] [--json]"
+  | .true => Scry.usageFail "usage: scry findings show ID [--db FILE] [--json]"
   | .false => do
     st ← Scry.wfLoadStore (Scry.wfStorePath db);
     match Scry.wfFind st id with
@@ -626,13 +627,13 @@ partial def Scry.triageArgsGo (o : Scry.TriageOpts) : List String → Except Str
 
 def Scry.triageCmd (args : List String) : EIO Nat :=
   match Scry.triageArgsGo Scry.emptyTriage args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => do
     match String.eq o.id "" with
-    | .true => EIO.fail Scry.triageUsage
+    | .true => Scry.usageFail Scry.triageUsage
     | .false => do
       match Scry.WfState.parse o.state with
-      | .none => EIO.fail (String.append "unknown state \"" (String.append o.state "\""))
+      | .none => Scry.usageFail (String.append "unknown state \"" (String.append o.state "\""))
       | .some to => do
         let db := Scry.wfStorePath o.db;
         st ← Scry.wfLoadStore db;
@@ -845,10 +846,10 @@ def Scry.wfPrepareWitness (src : Option String) (art : String) : EIO Scry.WfWitn
 
 def Scry.reproCmd (args : List String) : EIO Nat :=
   match Scry.reproArgsGo Scry.emptyReproCmd args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => do
     match String.eq o.id "" with
-    | .true => EIO.fail Scry.reproUsage
+    | .true => Scry.usageFail Scry.reproUsage
     | .false => do
       let db := Scry.wfStorePath o.db;
       st ← Scry.wfLoadStore db;
@@ -937,7 +938,7 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
   let db := idDb.2;
   let json := List.any (fun a => String.eq a "--json") args;
   match String.eq id "" with
-  | .true => EIO.fail "usage: scry findings verify ID [--db FILE] [--json]"
+  | .true => Scry.usageFail "usage: scry findings verify ID [--db FILE] [--json]"
   | .false => do
     let dbPath := Scry.wfStorePath db;
     st ← Scry.wfLoadStore dbPath;
@@ -1045,4 +1046,4 @@ def Scry.findingsCmd (args : List String) : EIO Nat := match args with
   | .cons "triage" rest => Scry.triageCmd rest
   | .cons "repro" rest => Scry.reproCmd rest
   | .cons "verify" rest => Scry.verifyCmd rest
-  | .cons cmd _ => EIO.fail (String.append "unknown findings command \"" (String.append cmd "\" (see scry findings help)"))
+  | .cons cmd _ => Scry.usageFail (String.append "unknown findings command \"" (String.append cmd "\" (see scry findings help)"))

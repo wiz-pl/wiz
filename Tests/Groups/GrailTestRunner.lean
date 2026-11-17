@@ -126,6 +126,24 @@ def testRunnerGroup : Group where
           skip "no toolchain"; return
         failed res "tests/exit.wiz" "exited with 3"
         check (!(← (dir / "tests/exit.expected").pathExists)) "--update recorded the failed run" },
+    { name := "grail test: a selector matching no case exits 1, an unknown flag is a usage error", run := fun _ => do
+        let dir ← mkTree testPkg
+        let cache ← IO.FS.createTempDir
+        let base := ["-C", dir.toString, "--std", "lib", "--cache", cache.toString]
+        let code (rest : List String) : IO UInt32 := Grail.cliMain (base ++ rest)
+        -- a selector that picked nothing must not look like a pass
+        checkEq 1 (← code ["test", "no-such-case"])
+        -- a mistyped flag is not a substring filter (the filter `4` would match nothing)
+        checkEq 2 (← code ["test", "--jobs", "4"])
+        checkEq 2 (← code ["test", "--bogus"])
+        -- the message, through the sibling `grail` when it was built
+        let grail := ((← IO.appPath).parent.getD ".") / "grail"
+        if (← grail.pathExists) then
+          let o ← IO.Process.output {
+            cmd := grail.toString, args := (base ++ ["test", "no-such-case"]).toArray }
+          checkEq 1 o.exitCode
+          check ((o.stderr.splitOn "selector matched no cases").length > 1)
+            s!"no `selector matched no cases` message:\n{o.stdout}{o.stderr}" },
     -- the suite's own driver (`Tests/Main.lean`): `tests --run GROUP INDEX` ran a case
     -- in-process and printed nothing for a pass, so a stale binary or a wrong index that
     -- ran another (passing) case looked like a pass; a selector that picked nothing

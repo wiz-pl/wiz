@@ -1,6 +1,7 @@
 import Sys
 import Json
 import Scry.Fuzz
+import Scry.Status
 /-!
 # Scry.FuzzCmd: the `scry fuzz-span` command
 
@@ -56,9 +57,9 @@ def Scry.fuzzSpanArgs (args : List String) : Except String Scry.FuzzSpanOpts :=
 /-- `scry fuzz-span FILE [--offset N] [--json] [--out FILE]`. -/
 def Scry.fuzzSpanCmd (args : List String) : EIO Nat :=
   match Scry.fuzzSpanArgs args with
-  | .error e => EIO.fail e
+  | .error e => Scry.usageFail e
   | .ok o => match o.file with
-    | .none => EIO.fail Scry.fuzzSpanUsage
+    | .none => Scry.usageFail Scry.fuzzSpanUsage
     | .some file => do
       p ← Scry.Fuzz.parseFile file;
       let j := Scry.fuzzInputJsonAt p o.offset;
