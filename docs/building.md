@@ -419,9 +419,11 @@ the generated C and the linked programs are compared byte for byte by the script
 ## Memory budget
 
 Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
-4 GiB memory cgroup whatever its wall time was, and the self-hosted checker once
-retained 10.7 GB after a `mutual`/`partial` inline-cache change (the `inlineTm` fix
-brought its self-check down to 413 MiB). `scripts/mem-bench.py` measures the peak
+4 GiB memory cgroup whatever its wall time was. The self-hosted checker has a 1 GiB cap
+because a `mutual`/`partial` inline-cache change once made its self-check retain far
+more; after the `inlineTm` fix `bench/mem-baseline.json` records 412.5 MiB peak in
+31.338 s (`python3 scripts/mem-bench.py --update` re-records it). `scripts/mem-bench.py`
+measures the peak
 resident set of a fixed corpus and gates it two ways:
 
 ```sh
@@ -496,7 +498,8 @@ peak of the recorded samples, ±5 %):
 
 The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 GiB
 cap and an order of magnitude above the module checks, which is why it has its own
-entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
+entry. The cap exists because of that inline-cache regression; the baseline records
+412.5 MiB (`scripts/mem-bench.py --update` re-records it).
 The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
 not the largest peak. The 164 KiB `hdl-uart-temporal` example is not in the corpus:
 a cold check takes over four minutes on this host, so the corpus uses

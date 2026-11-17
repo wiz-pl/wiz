@@ -115,7 +115,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
   peak live set, not everything it allocated: the fixed workload in
   `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
-  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  320 MiB to 8.1 MiB of linear memory in 0.7× the time (0.19 s reference counting against
+  0.27 s bump), and a 1000-iteration run completes
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
