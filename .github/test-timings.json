@@ -422,7 +422,7 @@
    "accepted with --trust-native: numbers, lists, a declaration that uses it": {"seconds": 1.005},
    "an erased proof field is built and checked; an erased data field is refused (AB1)": {"seconds": 2.005},
    "lib/ never uses native_refl": {"seconds": 0.086},
-   "no library declaration depends on a native axiom": {"seconds": 218.53},
+   "every library source of trust is a reviewed ledger row": {"seconds": 218.53},
    "only as the whole body of a closed definition": {"seconds": 1.816},
    "only first-order data: functions and types are refused": {"seconds": 0.691},
    "rejected without --trust-native": {"seconds": 1.863},
