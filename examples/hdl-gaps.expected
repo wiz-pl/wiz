@@ -1,0 +1,18 @@
+examples/hdl-gaps.wiz:62:1: info: (.true, .true)
+examples/hdl-gaps.wiz:67:1: info: (.true, 12)
+examples/hdl-gaps.wiz:69:1: info: (.true, .true)
+examples/hdl-gaps.wiz:70:1: info: "module shifts(input clk, input [7:0] x_0, input [3:0] x_1, output [7:0] y_0, output [7:0] y_1, output [7:0] y_2, output [7:0] y_3);\n  wire [7:0] n3 = x_0 << x_1;\n  wire [7:0] n4 = x_0 >> x_1;\n  wire [7:0] n5 = $signed(x_0) >>> x_1;\n  wire [0:0] n6 = x_0[7:7];\n  wire [2:0] n9 = n6 ? 3'd7 : 3'd0;\n  wire [10:0] n10 = {n9, x_0};\n  wire [7:0] n11 = n10[10:3];\n  assign y_0 = n3;\n  assign y_1 = n4;\n  assign y_2 = n5;\n  assign y_3 = n11;\nendmodule\n"
+examples/hdl-gaps.wiz:71:1: info: fun x s => x <<< s ||| x >>> s ^^^ x >>>ₛ s ^^^ x >>>ₛ 2 : Wire B8 → Wire B3 → Wire (.bits 8)
+examples/hdl-gaps.wiz:72:1: info: fun x y => x <ₛ y ||| x ≥ₛ 2 : Wire B8 → Wire B8 → Wire HwTy.bit
+examples/hdl-gaps.wiz:84:1: info: (.true, .true)
+examples/hdl-gaps.wiz:85:1: info: fun a b => a &&& b ||| b : Wire Bit → Wire Bit → Wire Bit
+examples/hdl-gaps.wiz:89:1: info: (.false, .true)
+examples/hdl-gaps.wiz:116:1: info: (2, .cons 0 (.cons 1 (.cons 2 (.cons 3 .nil))), 7, 5)
+examples/hdl-gaps.wiz:122:1: info: 83
+examples/hdl-gaps.wiz:126:1: info: .true
+examples/hdl-gaps.wiz:137:1: info: (.true, .cons 9 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 2 (.cons 3 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 2 (.cons 3 (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 0 (.cons 1 (.cons 2 .nil)))))))))))))))))))))
+examples/hdl-gaps.wiz:139:1: info: (.true, .cons 10 (.cons 83 (.cons 0 (.cons 95 (.cons 9 (.cons 120 (.cons 5 (.cons 81 (.cons 108 (.cons 56 (.cons 115 (.cons 60 (.cons 104 .nil)))))))))))))
+examples/hdl-gaps.wiz:140:1: info: "module phase(input clk, input [0:0] x, output [1:0] y);\n  reg [1:0] r; initial r = 2'd0;\n  wire [0:0] n3 = r == 2'd3;\n  wire [1:0] n6 = r + 2'd1;\n  wire [1:0] n7 = n3 ? 2'd0 : n6;\n  wire [1:0] n8 = x ? n7 : r;\n  always @(posedge clk) r <= n8;\n  assign y = r;\nendmodule\n"
+examples/hdl-gaps.wiz:165:1: info: ((.true, .cons 4 (.cons 42 (.cons 42 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 87 (.cons 87 (.cons 87 (.cons 87 (.cons 42 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 58 (.cons 58 (.cons 58 .nil))))))))))))))))))))))))))))))))))))))))), (.true, .cons 5 (.cons 0 (.cons 0 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 121 (.cons 121 (.cons 121 (.cons 121 (.cons 0 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 5 (.cons 5 (.cons 63 .nil))))))))))))))))))))))))))))))))))))))))), .true, .true)
+examples/hdl-gaps.wiz:166:1: info: .true
+examples/hdl-gaps.wiz:167:1: info: "module reg_(input clk, input [0:0] rst, input [0:0] en, input [7:0] x, output [7:0] y);\n  reg [7:0] r; initial r = 8'd42;\n  always @(posedge clk) if (rst) r <= 8'd42; else if (en) r <= x;\n  assign y = r;\nendmodule\n"

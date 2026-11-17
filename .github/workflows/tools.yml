@@ -1,0 +1,89 @@
+# The tools/ tree: unit tests on every change under tools/, and an opt-in end-to-end
+# smoke test from "Run workflow".
+#
+#   * unit  — Python only, no toolchain: the stdlib tests of each tool that has a
+#             tests/ directory (tools/wiz-mcp, tools/scry-mcp, and tools/jupyter when
+#             it is present).
+#   * smoke — workflow_dispatch only: builds the toolchain with Nix and runs
+#             tools/wiz-mcp/run-tests.sh, which starts the real `wiz lsp` daemon for
+#             diagnostics and hover and checks that it dies with the bridge. A checkout
+#             where `nix build .#wiz` is unavailable is a clean skip, not a pass.
+#
+# ci.yml owns the language's test suite; this workflow does not touch it. The path
+# filter is `tools/**` (any file under tools/, at any depth) plus this workflow, so a
+# change to lib/ or Wiz/ does not start it.
+name: tools
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/tools.yml'
+  push:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/tools.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tools-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+
+jobs:
+  unit:
+    name: unit (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: tools/wiz-mcp
+        run: python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
+      - name: tools/scry-mcp
+        run: python3 -m unittest discover -s tools/scry-mcp/tests -p 'test_*.py' -v
+      - name: tools/jupyter (if present)
+        shell: bash
+        run: |
+          if [ -d tools/jupyter/tests ]; then
+            python3 -m unittest discover -s tools/jupyter/tests -p 'test_*.py' -v
+          else
+            echo "::notice title=tools/jupyter skipped::no tools/jupyter/tests in this checkout; that is a skip, not a pass"
+          fi
+
+  smoke:
+    name: smoke (nix, workflow_dispatch)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: Build wiz
+        id: wiz
+        shell: bash
+        run: |
+          if ! command -v nix >/dev/null 2>&1; then
+            echo "::notice title=wiz-mcp smoke skipped::nix is not available on this runner"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! path=$(nix build .#wiz --no-link --print-out-paths); then
+            echo "::notice title=wiz-mcp smoke skipped::nix build .#wiz is unavailable in this checkout"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "wiz=$path/bin/wiz" >> "$GITHUB_OUTPUT"
+      - name: Unit tests and smoke
+        if: steps.wiz.outputs.skip != 'true'
+        env:
+          WIZ: ${{ steps.wiz.outputs.wiz }}
+        run: sh tools/wiz-mcp/run-tests.sh

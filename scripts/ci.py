@@ -23,10 +23,11 @@
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, and shards=[NAMES], the
-                                     shards of .github/test-shards.json to run (each
-                                     shard's "inputs", see `needed_shards`). `changes
-                                     --all` prints everything
+                                     unless only docs changed, docs=true when a doc
+                                     changed, and shards=[NAMES], the shards of
+                                     .github/test-shards.json to run (each shard's
+                                     "inputs", see `needed_shards`). `changes --all`
+                                     prints everything
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -46,6 +47,19 @@
                                      a Markdown report (stdout); on drift, writes the
                                      regenerated baseline to FILE. Exits 0 (1 with
                                      --strict when there is drift)
+  scripts/ci.py check-skips [--max-ratio F] [--allow FILE] LOG|JSONL..
+                                     a green run must have tested something: fail when
+                                     a group skipped wholesale, when a skip names a tool
+                                     the CI dev shell must provide (cc, GMP, GC, yosys,
+                                     node, nix, …), or when a group's unexplained skipped
+                                     ratio is over F (default 0.25, of the group's
+                                     cases in all shards). A skip in a group of
+                                     .github/skip-allowlist.json whose reason matches
+                                     (and whose case, when the entry names one) is
+                                     explained (reported, not failed); anything else that
+                                     skips wholesale is a failure. Reads `lake test`
+                                     logs and `--timings` files. `--self-test` checks the
+                                     rule on synthetic logs and exits 1 if it is wrong
 
 Selectors are the arguments of `lake test --`: `=NAME` selects the group NAME,
 `=NAME#I,J` the cases I and J of it, anything else is a prefix of group names (see
@@ -56,9 +70,28 @@ import fnmatch, json, os, re, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARDS = os.path.join(ROOT, ".github", "test-shards.json")
 TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
+SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
+
+# A skip whose reason names one of these says the CI dev shell (flake.nix,
+# `devShells.default`) lacks a tool the suite needs: a failure for every group, not an
+# environment skip, because CI runs every step in that shell. Matched as a lowercase
+# substring (so "no node" also covers "no nodejs"). A tool that is only needed on some
+# machines (iverilog, an ARM toolchain) is not here: the allow-list excuses it instead.
+REQUIRED_TOOLS = [
+    ("no toolchain", "cc and GMP (the C toolchain)"),
+    ("no garbage collector", "Boehm GC (--gc-cflags)"),
+    ("no yosys", "yosys"),
+    ("no node", "node"),
+    ("no nix", "nix"),
+    ("no llc", "llc (LLVM)"),
+    ("no z3", "z3"),
+    ("no cadical", "cadical"),
+    ("no wiz binary", "the wiz binary"),
+    ("no grail beside", "grail beside the test driver"),
+]
 
 
 def shards():
@@ -185,12 +218,14 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
-    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
+    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
+    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1".)"""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
-        jobs = s.get("jobs", 1)
+        jobs = s.get("jobs")
         if n <= 1:
             out.append((s["name"], s["select"], None, jobs))
             continue
@@ -278,7 +313,7 @@ DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
-              "devenv.*", ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
+              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
 
 
 def matches(path, globs):
@@ -331,6 +366,7 @@ def changes(args):
     if args[:1] == ["--all"]:
         names = [s["name"] for s in shards()]
         print("code=true")
+        print("docs=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -339,13 +375,16 @@ def changes(args):
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
     code = any(not matches(f, DOCS) for f in files)
+    docs = any(matches(f, DOCS) for f in files)
     print(f"code={'true' if code else 'false'}")
+    print(f"docs={'true' if docs else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
+    print(f"{len(files)} files changed; code: {code}; docs: {docs}; "
+          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
-GROUP = re.compile(r"^── (.*) \((.*)\)$")
+GROUP = re.compile(r"^── (.*?) \((.*)\)$")
 PASS = re.compile(r"^  ✓ (.*?)(?: \([\d.]+ s\))?$")
 FAIL = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
 SKIP = re.compile(r"^  ⊘ (.*?)(?: \([\d.]+ s\))?$")
@@ -496,6 +535,14 @@ def warn(msg, title):
         print(f"warning: {msg}", file=sys.stderr)
 
 
+def error(msg, title):
+    """An error annotation: the step fails (the caller exits nonzero)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::error title={title}::{msg}", file=sys.stderr)
+    else:
+        print(f"error: {msg}", file=sys.stderr)
+
+
 def split_of(shard, split):
     """The split shard that a shard (job) name belongs to, or None."""
     for n in split:
@@ -568,6 +615,334 @@ def balance(args):
     return 1 if problems and strict else 0
 
 
+# --- Skip lint (`check-skips`) -------------------------------------------------------
+SKIP_DETAIL = re.compile(r"^      skipped \((.*)\)$")
+NO_REASON = "(the case printed no reason)"
+
+
+def allowlist(path=SKIPS):
+    """The groups of .github/skip-allowlist.json that may skip in CI, each with the
+    reason it may skip for and an owner, and optionally the one case it excuses. A malformed entry is an error: an allow-list
+    without an owner is a place for skips to hide."""
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    out = []
+    for e in doc.get("groups", []):
+        for k in ("group", "reason", "owner"):
+            if not str(e.get(k, "")).strip():
+                sys.exit(f"{path}: the entry {json.dumps(e)} lacks {k!r}")
+        if "case" in e and not str(e["case"]).strip():
+            sys.exit(f"{path}: the entry {json.dumps(e)} has an empty 'case'")
+        out.append(e)
+    return out
+
+
+def skip_records(paths):
+    """{(shard, group, case): (skipped, reason)} from `lake test` logs and `--timings`
+    files (both describe the run: a log keeps the reason a case printed, including the
+    old style; a --timings file the `skipped` note). A concrete reason wins over none."""
+    recs = {}
+
+    def put(key, skipped, why):
+        old = recs.get(key)
+        if old is None:
+            recs[key] = (skipped, why)
+        else:
+            recs[key] = (old[0] or skipped,
+                         old[1] if old[1] not in (None, NO_REASON) else why or old[1])
+
+    for p in paths:
+        if p.endswith(".jsonl"):
+            for r in read_timings([p]):
+                why = next((n[len("skipped "):] for n in r.get("notes", [])
+                            if n.startswith("skipped ")), None)
+                put((r["shard"], r["group"], r["case"]), why is not None, why)
+            continue
+        shard = os.path.basename(p)
+        for ext in (".log", ".txt"):
+            if shard.endswith(ext):
+                shard = shard[:-len(ext)]
+        group = None
+        lines = open(p, encoding="utf-8", errors="replace").read().split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if m := GROUP.match(line):
+                group = m.group(1)
+            elif group and (m := SKIP.match(line)):
+                why = NO_REASON
+                if i + 1 < len(lines) and (d := SKIP_DETAIL.match(lines[i + 1])):
+                    why = d.group(1)
+                put((shard, group, m.group(1)), True, why)
+                i += 1
+            elif group and (m := PASS.match(line) or FAIL.match(line)):
+                put((shard, group, m.group(1)), False, None)
+            i += 1
+    return recs
+
+
+def allowed_entry(allowed, group, case, why):
+    """The allow-list entry that explains this skip, or None: same group, a reason the
+    skip's starts with, and, when the entry names a case, that case exactly."""
+    low = (why or "").lower()
+    for e in allowed:
+        if (e["group"] == group and low.startswith(e["reason"].lower())
+                and ("case" not in e or e["case"] == case)):
+            return e
+    return None
+
+
+def analyze(recs, allowed, max_ratio):
+    """(errors, warnings, lines) for the skip rule on one run's records: a group that
+    skipped wholesale in a shard is an error unless it is allow-listed with that reason;
+    a skip that names a tool the dev shell must provide is an error always; a GROUP's
+    unexplained skipped ratio (over all its cases, in every shard) may not be over
+    max_ratio. The ratio is per group, not per shard, so moving a group's cases between
+    shards (a refreshed timings file) cannot flip it. Explained skips are reported."""
+    shards_ = {}
+    for (shard, group, case), (skipped, why) in recs.items():
+        shards_.setdefault(shard, {}).setdefault(group, []).append((case, skipped, why if skipped else None))
+
+    def explained(group, case, why):
+        """None when the skip is explained, else (kind, text): 'tool' for a tool the CI
+        dev shell must provide, 'unlisted' for a group, case or reason the allow-list lacks."""
+        low = (why or "").lower()
+        for pattern, tool in REQUIRED_TOOLS:
+            # a clause of its own ("no node", "no iverilog, no yosys"), not a phrase in a
+            # longer reason ("`lake` has no toolchain outside a checkout")
+            if re.search(r"(?:^|, |; )" + re.escape(pattern), low):
+                return ("tool", f"the dev shell must provide {tool} (`{why}`)")
+        if allowed_entry(allowed, group, case, why) is not None:
+            return None
+        return ("unlisted", f"`{why}`")
+
+    errors, warnings, rows, details = [], [], [], []
+    total = len(recs)
+    skipped = sum(1 for s, _ in recs.values() if s)
+    # what each skip is: an error (reported here), a warning (unexplained but tolerated,
+    # counted by its group's ratio), or fine (allow-listed)
+    verdicts = {}
+    for shard in sorted(shards_):
+        for group, cs in sorted(shards_[shard].items()):
+            skipped_cases = [(c, w) for c, s, w in cs if s]
+            whole = len(skipped_cases) == len(cs)
+            by_why = {}
+            for c, w in skipped_cases:
+                v = explained(group, c, w)
+                verdicts[(shard, group, c)] = v
+                # one summary line per (reason, verdict); a case-named entry may excuse
+                # one case of a reason and not another
+                kind = "ok" if v is None else v[0]
+                by_why.setdefault((w, kind), []).append((c, v))
+            for (why, kind), items in sorted(by_why.items(), key=lambda kv: (kv[0][0] or "", kv[0][1])):
+                n = len(items)
+                the = "all %d cases" % len(cs) if whole and n == len(cs) else "%d of %d cases" % (n, len(cs))
+                v = items[0][1]
+                if kind == "ok":
+                    owners = sorted({allowed_entry(allowed, group, c, why)["owner"] for c, _ in items})
+                    details.append(f"- ✅ **{md(group)}**: {the} in `{md(shard)}` — `{md(why)}` "
+                                   f"(allow-listed: {md('; '.join(owners))})")
+                elif kind == "tool":
+                    msg = f"**{md(group)}**: {the} skipped in shard `{md(shard)}` — {v[1]}"
+                    errors.append(msg)
+                    details.append(f"- ❌ {msg}")
+                elif whole:
+                    msg = (f"**{md(group)}**: all {len(cs)} cases skipped in shard `{md(shard)}` — "
+                           f"{v[1]}; not in .github/skip-allowlist.json")
+                    errors.append(msg)
+                    details.append(f"- ❌ {msg}")
+                    for c, _ in items:
+                        verdicts[(shard, group, c)] = ("error", v[1])
+                else:
+                    warnings.append(f"**{md(group)}**: {the} skipped in shard `{md(shard)}`: {v[1]}")
+                    details.append(f"- ⚠️ **{md(group)}**: {the} in `{md(shard)}` — {v[1]}")
+    groups_ = {}
+    for (shard, group, case), (s, _) in recs.items():
+        groups_.setdefault(group, []).append((shard, case, s))
+    for group in sorted(groups_):
+        cases = groups_[group]
+        sk = [(sh, c) for sh, c, s in cases if s]
+        if not sk:
+            continue
+        unexcused = [k for k in sk if (verdicts.get((k[0], group, k[1])) or ("ok",))[0] == "unlisted"]
+        shards_of = ", ".join(sorted({sh for sh, _, _ in cases}))
+        ratio = len(unexcused) / len(cases)
+        rows.append(f"| {md(group)} | {md(shards_of)} | {len(cases)} | {len(sk)} | {len(unexcused)} | {ratio:.0%} |")
+        if ratio > max_ratio:
+            msg = (f"group `{md(group)}`: {len(unexcused)} of {len(cases)} cases skipped without an "
+                   f"allow-list reason ({ratio:.0%}), over the {max_ratio:.0%} limit")
+            errors.append(msg)
+            details.append(f"- ❌ {msg}")
+        elif not unexcused and len(sk) / len(cases) > max_ratio and all(
+                verdicts.get((sh, group, c)) is None for sh, c in sk):
+            warnings.append(f"group `{md(group)}`: {len(sk)} of {len(cases)} cases skipped "
+                            f"({len(sk) / len(cases):.0%}), over the {max_ratio:.0%} limit, but every "
+                            f"one is allow-listed")
+    lines = ["### Skip lint", ""]
+    if errors:
+        lines.append(f"❌ **The skip lint failed, with {len(errors)} problem"
+                     f"{'s' if len(errors) > 1 else ''}.**")
+    elif not skipped:
+        lines.append(f"✅ No skips: all {total} cases ran.")
+    else:
+        lines.append(f"✅ {skipped} of {total} cases skipped, each explained (allow-listed or an "
+                     f"environment skip); a skipped case is not a pass.")
+    if details:
+        lines += [""] + details[:300]
+    if rows:
+        lines += ["", "| group | shards | cases | skipped | unexplained | unexplained ratio |",
+                  "|---|---|---:|---:|---:|---:|"]
+        lines += rows
+    return errors, warnings, lines
+
+
+def self_test():
+    """Check the skip rule on synthetic logs, without running the suite: clean,
+    all-skip, partial skips (below and over the ratio), an allow-listed group, an
+    allow-listed group whose reason also names a tool the shell must provide, a shard
+    reshuffle that leaves the per-group verdict alone, a group over the ratio across
+    shards, a case-named entry, and a `--timings` file. Exits 1 if an expectation is wrong."""
+    import tempfile
+
+    def log(groups):
+        """[(group, [case or (case, skip reason)])] as a `lake test` log."""
+        out = []
+        for g, cs in groups:
+            out.append(f"── {g} (fixture)")
+            for c in cs:
+                if isinstance(c, tuple):
+                    out += [f"  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
+                else:
+                    out.append(f"  ✓ {c} (0.010 s)")
+            out.append(f"  ({g}: 0.010 s; cases 0.010 s)")
+        return "\n".join(out) + "\n"
+
+    def timing(shard, group, cases):
+        """[(case, skip reason or None)] as a --timings file."""
+        return "".join(json.dumps({"shard": shard, "group": group, "index": i, "case": c,
+                                   "seconds": 0.01, "ok": True,
+                                   "notes": [f"skipped {w}"] if w else []}) + "\n"
+                       for i, (c, w) in enumerate(cases))
+
+    pass10 = [f"case {i}" for i in range(10)]
+    pass30 = [f"other {i}" for i in range(30)]
+
+    def eps(lo, hi, skips):
+        """cases lo..hi-1 of group eps, those in `skips` skipped for an unlisted reason"""
+        return [(f"e{i}", "fixture parity difference") if i in skips else f"e{i}" for i in range(lo, hi)]
+    trials = [
+        ("clean", {"core.log": log([("alpha", pass10), ("beta", pass10[:3])])}, 0, None),
+        ("all skip (no node)", {"library-2.log": log([("wasm", [(f"m{i}", "no node") for i in range(25)]),
+                                                      ("other", pass10)])}, 1, "node"),
+        ("partial, allow-listed", {"library-1.log": log([("hdl", pass10[:9] + [("sim", "no iverilog")]),
+                                                         ("other", pass10)])}, 0, None),
+        ("partial, unlisted and under the ratio",
+         {"core.log": log([("alpha", pass10[:9] + [("odd", "fixture reason")]), ("beta", pass10)])}, 0, None),
+        ("unlisted ratio over the limit",
+         {"core.log": log([("gamma", [(f"c{i}", "some reason") for i in range(5)] + pass10[:5])])}, 1, "50%"),
+        ("unlisted whole group",
+         {"core.log": log([("delta", [(f"c{i}", "some reason") for i in range(3)])])}, 1,
+         "not in .github/skip-allowlist.json"),
+        ("allow-listed whole group",
+         {"library-3.log": log([("tower", [("from source", "no source toolchain: `lake` has no toolchain "
+                                                         "outside a checkout (elan has no default)")]),
+                                ("other", pass10)])}, 0, None),
+        ("allow-listed group, tool missing from the shell",
+         {"library-1.log": log([("hdl", [(f"syn{i}", "no yosys") for i in range(3)])])}, 1, "yosys"),
+        ("allow-listed reason with a required tool too",
+         {"library-1.log": log([("hdl", [("memories", "no iverilog, no yosys")])])}, 1, "yosys"),
+        # the same run in two shard layouts: 4 of eps's 20 cases skip (20%). Measured per
+        # shard, layout A put all four in a 10-case shard (40%, a failure) and layout B
+        # two in each (20%); per group both are 20%, so a reshuffle cannot flip the verdict
+        ("reshuffle A: a group's skips in one shard",
+         {"selfhost-1.log": log([("eps", eps(0, 10, {0, 1, 2, 3}))]),
+          "selfhost-2.log": log([("eps", eps(10, 20, set()))])}, 0, None),
+        ("reshuffle B: the same group spread over two shards",
+         {"selfhost-1.log": log([("eps", eps(0, 10, {0, 1}))]),
+          "selfhost-2.log": log([("eps", eps(10, 20, {10, 11}))])}, 0, None),
+        # 6 of eps's 20 cases (30%) skip, 3 in each shard among 30 other passing cases
+        # (each shard 3 of 40, 8%): the group is over the limit wherever its cases run
+        ("group over the ratio across shards",
+         {"selfhost-1.log": log([("eps", eps(0, 10, {0, 1, 2})), ("other", pass30)]),
+          "selfhost-2.log": log([("eps", eps(10, 20, {10, 11, 12})), ("more", pass30)])}, 1,
+         "group `eps`: 6 of 20"),
+        # an entry that names a case excuses that case only: z1 has the same reason and
+        # stays unexplained (1 of 3, 33%)
+        ("case-named entry excuses its case only",
+         {"selfhost-1.log": log([("zeta", [("z0", "parity: named"), ("z1", "parity: named"), "z2"])])}, 1,
+         "group `zeta`: 1 of 3"),
+        ("--timings file", {"library-2.jsonl": timing("library-2", "wasm",
+                                                      [(f"m{i}", "no node") for i in range(25)])}, 1, "node"),
+    ]
+    allowed = {"groups": [{"group": "hdl", "reason": "no iverilog", "owner": "HDL fixtures"},
+                          {"group": "tower", "reason": "no source toolchain", "owner": "tower fixtures"},
+                          {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta fixtures"}]}
+    bad = 0
+    with tempfile.TemporaryDirectory() as d:
+        apath = os.path.join(d, "allow.json")
+        with open(apath, "w", encoding="utf-8") as f:
+            json.dump(allowed, f)
+        for k, (name, files, want_errors, needle) in enumerate(trials):
+            sub = os.path.join(d, f"t{k}")
+            os.mkdir(sub)
+            paths = []
+            for fn, text in files.items():
+                p = os.path.join(sub, fn)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(text)
+                paths.append(p)
+            errors, _, _ = analyze(skip_records(paths), allowlist(apath), 0.25)
+            ok = len(errors) == want_errors and (needle is None or any(needle in e for e in errors))
+            bad += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {name}: {len(errors)} error(s)"
+                  + ("" if ok else f", expected {want_errors}" + (f" mentioning {needle!r}" if needle else "")
+                     + f": {errors}"))
+        # the repository's own allow-list must load, with an owner on every entry
+        try:
+            real = allowlist()
+            ok = True
+        except (OSError, SystemExit, json.JSONDecodeError) as e:
+            real, ok = [], False
+            print(f"FAIL .github/skip-allowlist.json: {e}")
+        bad += not ok
+        if ok:
+            print(f"ok   .github/skip-allowlist.json: {len(real)} entr{'y' if len(real) == 1 else 'ies'}")
+    print(f"skip lint self-test: {len(trials) + 1} checks, {len(trials) + 1 - bad} ok")
+    return 1 if bad else 0
+
+
+def check_skips(args):
+    max_ratio, allow, paths, selftest = 0.25, SKIPS, [], False
+    it = iter(args)
+    for a in it:
+        if a == "--max-ratio":
+            max_ratio = float(next(it))
+        elif a == "--allow":
+            allow = next(it)
+        elif a == "--self-test":
+            selftest = True
+        elif a.startswith("--"):
+            sys.exit(f"check-skips: unknown flag {a}")
+        else:
+            paths.append(a)
+    if selftest:
+        return self_test()
+    if not paths:
+        print(__doc__, file=sys.stderr)
+        return 2
+    recs = skip_records(paths)
+    if not recs:
+        print("No test results: the skip lint checked nothing (was a log written?).")
+        return 0
+    errors, warnings, lines = analyze(recs, allowlist(allow), max_ratio)
+    print("\n".join(lines))
+    for w in warnings:
+        warn(w, "Skips")
+    for e in errors:
+        error(e, "Skips")
+    return 1 if errors else 0
+
+
 def make_baseline(paths):
     """.github/test-timings.json from `--timings` records (see `baseline`); a case seen
     more than once keeps its largest time, a build its largest. Only the shards with
@@ -615,6 +990,8 @@ def main(args):
         return 0
     if args[:1] == ["check-shards"]:
         return check_shards(binary)
+    if args[:1] == ["check-skips"]:
+        return check_skips(args[1:])
     if args[:1] == ["plan"]:
         return plan(binary)
     if args[:1] == ["summary"] and len(args) >= 2:

@@ -21,9 +21,11 @@ Writing the lexer and parser in Wiz showed what the language lacked:
 
 ## 13a: named arguments
 
-```
+```wiz
 class BitPack (A : Type) where
   width : Nat
+instance : BitPack Bool where
+  width := 1
 def bitWidth (0 A : Type) [BitPack A] : Nat := BitPack.width (A := A)
 def sub (a b : Nat) : Nat := Nat.sub a b
 #eval sub (b := 1) 5                    -- 4
@@ -40,7 +42,7 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 
 ## 13b: private declarations and private constructors
 
-```
+```wiz no-check
 private def secret : Nat := 42          -- visible only in this module
 structure Shr (ρ : Region) (A : Type) where
   private mk ::                         -- only this module makes a `Shr`
@@ -98,7 +100,7 @@ would still be accepted:
 | `refl X`, `cast e x`, `transp`, a tuple or look-alike against the type, `p.1` | closed (their types are unified in the elaborator's view) |
 | `exact`, `rfl` and other tactics that elaborate syntax; macros (they produce syntax) | closed (they go through the same rules) |
 | the tactic request `assign` with a term that still has holes | closed: such a term is kept in the tactic state and its type is inferred and compared with its goal at the end of the `by` block (it was a real bypass: `K x ?n : Look Nat` for a goal `Pos Nat`) |
-| a hole solved by unification: the solution is never type-checked by the elaborator | **OPEN, with a forgery**: `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` solve `?F := G`, `?p := x`, and the kernel accepts `x : Look Nat` as a `Pos Nat` (test `elabfix`, "OPEN"; `wiz-notes/structural-probes/priv/forge-unify-first-order.wiz`) |
+| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. A hole records its type when its maker knows it (`MetaEntry.type?`: implicit and instance arguments, `_` against an expected type, goals), and the guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a hole with no recorded type, a comparison that meets an unsolved hole) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`) |
 | the self-hosted frontend (`selfhost/Frontend.wiz`) | open, tracked as a parity item: it parses `private` and ignores it |
 | `T.desc` of an inductive or coinductive type with private parts: `μ T.desc i` written out is the type with nothing hidden, and a raw `con` builds a value of it | closed: `T.desc` is private with the constructors and recursors (a structure has no description). Generic code over `Desc` in another module can't be pointed at such a type; it could not be applied to its values before either, since the type is opaque there. `deriving` reads the kernel's declarations, not the name, and is unaffected (a derived instance that matches on the type is refused as before) |
 | inside the declaring module | by design: there the look-alike is the same type |
@@ -110,8 +112,8 @@ type from its look-alike (`wiz-notes/structural-vs-nominal.md`, §6a).
 **`wiz --strict-privacy`** (off by default; an experiment to measure). Every declaration
 of a module that sees a type opaque to it is checked a second time, by the kernel's
 checker, against the elaborator's view (`privacyCheck`, `Elab/Command.lean`). A
-declaration that passes used no hidden shape, so this closes the open path too: the
-forgery above is rejected with "forge depends on the definition of Pos (module Priv),
+declaration that passes used no hidden shape, so this also rejects a forgery that some
+other rule left to the kernel: "forge depends on the definition of Pos (module Priv),
 which is hidden outside its module". It is not the default because it also rejects
 legitimate proofs that compute through a library operation on such a type: the
 elaborator quotes evaluated values into terms, and a raw pair or projection at a type
@@ -125,7 +127,7 @@ scope or an operation of the library, and hand-written Wiz can't forge one
 (`drafts/rust/rejected/forge_handle.wiz`; test group `regions`). `MutOpt`'s constructors
 stay public: their fields are handles already.
 
-```
+```wiz no-check
 inductive Tok where
   | num (n : Nat)
   | private secret (n : Nat)            -- only this module makes a `.secret`
@@ -173,7 +175,7 @@ code builds and observes them only through the library's combinators and `sample
 
 ## 13c: `if`, `&&`, `||`, `!` in the Prelude
 
-```
+```wiz
 import Prelude
 def clamp (n : Nat) : Nat := if Nat.lt n 10 then n else 10
 #eval Nat.beq 1 1 && !(Nat.beq 2 3) || Bool.false    -- .true
@@ -197,7 +199,7 @@ Tests: group `language`.
 
 ## 13d: `Functor` and `Applicative` (`import Functor`)
 
-```
+```wiz no-check
 import Functor
 #eval Nat.add <$> Option.some 1 <*> Option.some 2          -- .some 3
 #eval (fun (a b : Nat) => (a, b)) <$> List.cons 1 (List.cons 2 .nil) <*> List.cons 3 .nil
@@ -224,7 +226,7 @@ Tests: group `language`.
 
 ## 13e: `∃ x, P`, `¬`, and ASCII spellings
 
-```
+```wiz
 import Logic
 def two : ∃ n : Nat, n + n = 4 := Ex.intro _ 2 rfl
 def swap {A : Type} {P : A → A → Prop} (h : ∃ x y, P x y) : ∃ y x, P x y :=
@@ -248,7 +250,7 @@ lemmas with them (`hexists J h` is `∃ a : A, J a h`; `star` is
 
 ## 13f: `let` with tuple patterns of any length
 
-```
+```wiz no-check
 def f (p : Nat × Nat × Nat) : Nat := let (a, b, c) := p; a + b * c
 def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
   let 1 (n, s, t) := p;
@@ -264,7 +266,7 @@ apart now that linear pairs aren't projected. Tests: group `language`.
 
 ## 13g: as-patterns `x@p`
 
-```
+```wiz
 def last (A : Type) (d : A) : List A → A
   | .nil => d
   | .cons x .nil => x
@@ -306,7 +308,7 @@ whose pattern is a bare name (`x@y`, a second name for the same value) is not av
 
 ## 13h: patterns on structures, `⟨…⟩`
 
-```
+```wiz
 structure Stats where
   hits : Nat
   misses : Nat
@@ -368,7 +370,7 @@ structure pattern …"), `parser: terms`.
 
 ## 13i: structure update `{ s with f := v }`
 
-```
+```wiz no-check
 def bump (s : Stats) : Stats := { s with hits := Nat.succ s.hits }
 def reset (s : Stats) : Stats := { s with hits := 0, misses := 0 }
 ```
@@ -389,7 +391,10 @@ for linear structures). Like 13h it reads the fields through `structLayout?`, an
 refused for a structure that is opaque in the current module.
 
 Syntax: `term.structUpdate`, `"{" term "with" (ident ":=" term),+ "}"`. No new reserved
-word (`with` already is one). Tests: `language` ("structure update …"), `parser: terms`.
+word (`with` already is one). An updated field's value may itself be an update
+(`{ s with inner := { t with x := 1 } }`); that is a term nested in the update, not a
+field path (13p). Tests: `language` ("structure update …"), `elab` ("structure update
+{ s with f := v } …"), `parser: terms`.
 
 ## 13j: keyword scopes
 
@@ -435,7 +440,7 @@ Tests: `parser: commands and syntax`, `language`.
 `[a, b, c]` is `List.cons a (List.cons b (List.cons c List.nil))` and `[]` is `List.nil`,
 in terms and in patterns:
 
-```
+```wiz
 def xs : List Nat := [1, 2, 3]
 def len : List Nat → Nat
   | [] => 0
@@ -477,7 +482,7 @@ Tests: group `language`.
 A grammar command marked `local` stays in its module: modules that import it don't see
 the syntax.
 
-```
+```wiz
 local infixr:67 " & " => String.append
 local syntax (name := shout) "shout" term : term
 local macro_rules
@@ -573,7 +578,7 @@ Tests: groups `language`, `seplogic`. Audit and table: `wiz-notes/dsl-convention
 
 ## 13p: nested structure update `{ s with a.b := v }`, printed back
 
-```
+```wiz
 structure In where
   x : Nat
   y : Nat
@@ -618,7 +623,7 @@ Tests: `language` ("13p: …"), `lsp` ("13p–q: an updated field's hover and de
 
 ## 13q: numeral and literal patterns
 
-```
+```wiz no-check
 def cls : Nat → Nat
   | 0 => 10
   | 1 => 11
@@ -708,3 +713,79 @@ token that can't be read is the parse error's message by itself (`ParseError.lex
 not "expected unknown escape sequence …". Strings print with Lean's escapes (`\x0d` for
 a carriage return). Tests: `language` ("string escapes …"); `selfhost` ("the lexer in
 Wiz agrees with the Lean lexer", whose input now has every escape and a bad one).
+
+Sections of this stage without a letter live in `13-language/`:
+[`include_str`: a file's text, as a string literal](13-language/include-str.md).
+
+## 13s: `calc` chains
+
+A `calc` block is a chain of relations, each with a proof: adjacent steps compose, and
+the chain proves the last step's relation between its first left endpoint and its last
+right endpoint. It is a term (`term.calc`, `Wiz/Parser/Builtin.lean`, `elabCalc` in
+`Wiz/Elab/Term.lean`):
+
+```wiz no-check
+import Nat
+
+def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
+  calc a ≤ b := h1
+       _ < c := h2
+       _ = d := h3
+```
+
+* A step is `term := term`, where the first term is a proposition of the form `a R b`
+  (a relation applied to two endpoints: `≤`, `<`, `=`, `↔`, `≈`, or a relation a program
+  declares). The last two arguments of its application spine are the endpoints.
+* `_` is the previous step's right endpoint; an explicit intermediate term must be the
+  same (definitionally), or "the middle term does not match". The chain itself is built
+  left-associated, `Trans.trans (Trans.trans h₀ h₁) h₂ …`: after each composition the
+  composite relation is found, and it is the next composition's first relation.
+* The steps' relations must be propositions: a relation between two terms whose result
+  is not a `Prop` is rejected. The relation at the last step is the chain's; `≤` then `<`
+  then `=` is `<`.
+* **Composition.** `class Trans (p q : Prop) (r : outParam Prop)` with
+  `trans : p → q → r` lives in `lib/Logic.wiz`. An instance composes two relations;
+  `r` is an output parameter, so instance search finds the composite proposition from
+  the two adjacent ones. `=` (at a type, and between propositions) and `↔` have
+  instances there; `Nat`, `Int` and `Q` register `=`, `≤` and `<` (and `≈` at `Q`) in
+  `lib/Nat.wiz`, `lib/IntOrder.wiz` and `lib/Rat.wiz`. A program registers its own
+  relation the same way:
+
+  ```wiz no-check
+  def Same (a b : Nat) : Prop := (a ≤ b) ∧ (b ≤ a)
+  infix:50 " ≈≈ " => Same
+  def Same.trans {a b c : Nat} (h1 : a ≈≈ b) (h2 : b ≈≈ c) : a ≈≈ c := …
+  instance {a b c : Nat} : Trans (a ≈≈ b) (b ≈≈ c) (a ≈≈ c) :=
+    Trans.mk (fun h h' => Same.trans h h')
+  ```
+* **Errors.** A composition with no instance reports both relations and the meeting
+  term ("calc: no `Trans` instance composes … at the middle term …"); a step whose proof
+  has the wrong type says so with the step's relation; a step that is not a binary
+  relation, or not a proposition, is rejected at the step. All are checked by the
+  kernel: a calc term is a `Trans.trans` application, with no axiom and no native
+  shortcut (`#print axioms`).
+* **The order is a `Bool` at `Nat`.** `Nat.Le m n` is `Nat.le m n = .true` and
+  `Nat.Lt m n` is `Nat.Le (succ m) n`; `Nat.le` reduces on constructors, so `a < succ b`
+  and `a ≤ b` are the *same proposition* by computation. Then the `Trans` instance for
+  `<` then `<` also matches a `<` then `≤` pair, through the shifted relation, and that
+  answer is weaker (`a ≤ c` instead of `a < c`). The intended instance for `<` then `≤`
+  is declared with `priority := 1001` (`lib/Nat.wiz`), so it is tried first. (At `Int`
+  and `Q` the strict and non-strict orders are not definitionally the same, so no
+  priority is needed; an overlapping user relation needs its own priority.) This is the
+  price of composing propositions rather than relation *functions*: relations that are
+  convertible are not told apart by instance search. A `Trans` over relation functions
+  (Lean's design) would not need the priority, but `=` is not a function constant in
+  Wiz, so the propositional class is the smaller, sounder fit here.
+* **Scope.** `BitVec`'s `ult`/`ule` are `Bool`-valued, so they are not relations in this
+  sense and have no instances; a `Prop` wrapper would be a new relation with its own
+  `Trans` instances. There is no dedicated `calc` tactic: `by exact calc …` works
+  (`calc` is a term). The syntax is in the Lean frontend only: `selfhost/Frontend.wiz`
+  has its own parser and no type classes or macros (23m), so a self-hosted `calc` would
+  need a mirrored `Trans` table there.
+
+Tests: `calc` (the mixed chains at `Nat`, `Int` and `Q`, `↔` and propositional `=`, `_`
+and explicit intermediates, a user-registered relation, and the three errors). The
+unrelated `calc_e` syntax category in the `language` group is untouched.
+
+The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
+request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).

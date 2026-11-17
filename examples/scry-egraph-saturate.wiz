@@ -1,0 +1,52 @@
+import Scry.Egraph
+-- Three-rule saturation (`scry-egraph-saturate`): `x + 0 → x`, `x * 1 → x` and
+-- commutativity of `+` run to a fixpoint on `(x * 1) + 0`. The result equates the root
+-- with `x` and contains `0 + x`; extraction returns `x`. `main` is the digest.
+
+-- ops: 0 = x, 1 = add, 2 = mul, 3 = zero, 4 = one
+def pZero : Scry.Pat := .pnode 3 .pnil
+def pOne : Scry.Pat := .pnode 4 .pnil
+def pAddX0 : Scry.Pat := .pnode 1 (.pcons (.var 0) (.pcons pZero .pnil))
+def pMulX1 : Scry.Pat := .pnode 2 (.pcons (.var 0) (.pcons pOne .pnil))
+def pAddXY : Scry.Pat := .pnode 1 (.pcons (.var 0) (.pcons (.var 1) .pnil))
+
+def rAddZero : Scry.Rewrite := Scry.Rewrite.mk pAddX0 (.var 0)
+def rMulOne : Scry.Rewrite := Scry.Rewrite.mk pMulX1 (.var 0)
+def rComm : Scry.Rewrite := Scry.Rewrite.mk pAddXY
+  (.pnode 1 (.pcons (.var 1) (.pcons (.var 0) .pnil)))
+
+def rules : List Scry.Rewrite := [rAddZero, rMulOne, rComm]
+
+def ga : Scry.EGraph × Nat :=
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let z := Scry.EGraph.add x.1 (Scry.ENode.leaf 3);
+  let o := Scry.EGraph.add z.1 (Scry.ENode.leaf 4);
+  let mx1 := Scry.EGraph.add o.1 (Scry.ENode.mk 2 [x.2, o.2]);
+  let root := Scry.EGraph.add mx1.1 (Scry.ENode.mk 1 [mx1.2, z.2]);
+  (root.1, root.2)
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def headD : List Nat → Nat
+  | .nil => 99
+  | .cons x _ => x
+
+def main : Nat :=
+  let s := Scry.EGraph.saturate 6 ga.1 rules;
+  let xcls := classOfD s (Scry.ENode.leaf 0) 900;
+  let rootCls := Scry.EGraph.find s ga.2;
+  let commCls := classOfD s (Scry.ENode.mk 1 [0, 1]) 901;
+  let e := Scry.EGraph.extract s xcls;
+  let op := match e with
+    | .none => 99
+    | .some t => headD (Scry.ETerm.toList t);
+  Scry.EGraph.numClasses s * 1000 +
+  Scry.EGraph.numNodes s * 10 +
+  (if Scry.EGraph.sameClass s rootCls xcls then 100 else 0) +
+  (if Scry.EGraph.sameClass s commCls xcls then 10 else 0) +
+  op +
+  (if Scry.EGraph.canonical s then 1 else 0)

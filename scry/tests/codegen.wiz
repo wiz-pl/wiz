@@ -1,0 +1,32 @@
+-- test: run
+import Sys
+import Json
+import Scry.Codegen
+-- The checked-in gen/C/Schema.wiz must be exactly what the codegen makes from
+-- grammars/tree-sitter-c/node-types.json. Prints the counts and the verdict; exits 1
+-- when stale (so CI fails, not just prints).
+def main : IO Unit := do
+  json ← IO.readFile "grammars/tree-sitter-c/node-types.json";
+  old ← IO.readFile "gen/C/Schema.wiz";
+  match Json.parse json with
+  | .error e => do
+    IO.println ("tree-sitter-c/node-types.json: invalid JSON: " ++ e);
+    Process.exit 1
+  | .ok j => match Scry.generate j with
+    | .error e => do
+      IO.println ("codegen: " ++ e);
+      Process.exit 1
+    | .ok out => do
+      let types := Scry.readNodeTypes j;
+      let concrete := List.filter (fun t => Bool.not t.super) types;
+      let supers := List.filter (fun t => t.super) types;
+      let fields := Scry.dedup (Scry.codegenConcatMap (fun t =>
+        List.map (fun f => f.name) t.fields) concrete);
+      IO.println ("schema: " ++ Nat.repr (List.length concrete) ++ " kinds, "
+        ++ Nat.repr (List.length fields) ++ " fields, " ++ Nat.repr (List.length supers)
+        ++ " supertypes, " ++ Nat.repr (List.length (String.splitOn out "\n")) ++ " lines");
+      match String.eq out old with
+      | .true => IO.println "gen/C/Schema.wiz: up to date"
+      | .false => do
+        IO.println "gen/C/Schema.wiz: STALE (rerun `grail build schema`)";
+        Process.exit 1

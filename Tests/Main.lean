@@ -1,5 +1,6 @@
 import Tests.Rig
 import Tests.Eval
+import Tests.Format
 import Tests.Check
 import Tests.Parser
 import Tests.Elab
@@ -31,6 +32,7 @@ def moduleGroups : List Group :=
   Doc.groups ++
   ElabFix.groups ++
   Feral.groups ++
+  Format.groups ++
   Eval.groups ++
   Grail.groups ++
   Lint.groups ++
@@ -99,7 +101,7 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -192,8 +194,17 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 `--jobs N` (default 1) runs the cases of a group that opted in (`Group.parallel`, see
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
-in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
-(for auditing a group's isolation, not for CI). -/
+in still run one case at a time, but each of their cases is told N (`Tests.caseJobs`), so a
+long sweep may use N workers inside its one process (`=selfhost-libdiff`). `--jobs-all`
+also parallelizes groups that did not opt in (for auditing a group's isolation, not for
+CI).
+
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N]` runs the
+self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and reports
+where they disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
+documents the format). `--jobs N` checks N files at a time; with no `--jobs` it is auto
+(the CPUs minus one), capped by the free memory at `--mem` MB per file. The driver's
+`--jobs` reaches the group's one case; `--jobs 1` is the serial control. -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
@@ -201,9 +212,22 @@ def main (args : List String) : IO UInt32 := do
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
+  -- `--jobs N` (default 1): the cases of an opted-in group run N at a time, and a case
+  -- of a group that runs one at a time may use N workers itself (`caseJobs`). It is
+  -- taken off before the toolchain flags, which also reach `--run-case`'s child.
+  let (jobsArg, args) := takeFlag "--jobs" args
+  let jobs : Option Nat := match jobsArg with
+    | none => some 1
+    | some s => match s.toNat? with
+      | some 0 => none
+      | n => n
+  let some jobs := jobs
+    | IO.eprintln "--jobs needs a count of at least 1"; return 2
+  caseJobsRef.set jobs
+  caseJobsSetRef.set jobsArg.isSome
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -257,6 +281,10 @@ def main (args : List String) : IO UInt32 := do
   | "--probe-reuse-ir" :: files => Scaling.probeReuseIR files
   -- allocation counts and IR of definitions of a file (`Tests/Allocs.lean`)
   | "--allocs" :: rest => Allocs.allocsMain rest
+  -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
+  -- of one file (a bounded child of the sweep), and the sweep itself
+  | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
+  | "--libdiff" :: rest => Elab.libDiffMain rest
   -- the trust ledger (`Tests/Native.lean`, scripts/trust-ledger.sh)
   | "--trust-ledger" :: rest => Native.trustLedgerMain rest
   | ["--list"] => do
@@ -276,15 +304,7 @@ def main (args : List String) : IO UInt32 := do
   | args => do
     let (timings, args) := takeFlag "--timings" args
     let (shard, args) := takeFlag "--shard" args
-    let (jobsArg, args) := takeFlag "--jobs" args
     let (jobsAll, args) := takeSwitch "--jobs-all" args
-    let jobs : Option Nat := match jobsArg with
-      | none => some 1
-      | some s => match s.toNat? with
-        | some 0 => none
-        | n => n
-    let some jobs := jobs
-      | IO.eprintln "--jobs needs a count of at least 1"; return 2
     let shard := shard.getD ""
     if let some code ← checkSelectors args then return code
     let groups ← allGroups

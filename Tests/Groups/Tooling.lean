@@ -8,6 +8,28 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- This test driver's sibling `wiz`. -/
+def wizExe : IO String := do
+  pure (← IO.FS.realPath ((← IO.appPath).parent.getD "." / "wiz")).toString
+
+/-- Run `wiz` and collect its output (`env` overrides, inherited environment otherwise). -/
+def runWiz (args : List String) (env : Array (String × Option String) := #[]) :
+    IO (UInt32 × String × String) := do
+  let out ← IO.Process.output { cmd := ← wizExe, args := args.toArray, env }
+  pure (out.exitCode, out.stdout, out.stderr)
+
+/-- Run `wiz repl` with `input` on a pipe; returns its exit code and output. -/
+def runRepl (input : String) (args : List String := []) : IO (UInt32 × String × String) := do
+  let child ← IO.Process.spawn { cmd := ← wizExe, args := #["repl"] ++ args.toArray,
+                                  stdin := .piped, stdout := .piped, stderr := .piped }
+  let (stdin, child) ← child.takeStdin
+  let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+  let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+  stdin.putStr input
+  stdin.flush
+  let code ← child.wait
+  pure (code, ← IO.ofExcept out.get, ← IO.ofExcept err.get)
+
 def toolingGroup : Group where
   name := "tooling"
   exercise := "Stage 11"
@@ -71,6 +93,21 @@ def toolingGroup : Group where
         let (_, h5) ← Cache.elaborateCached (some dir) [] src init 0 (binary := some me)
         checkEq 0 h4
         check (h5 > 0) "the default is not this binary's hash" },
+    { name := "a long list literal caches in linear time (its expansion is not reprinted exponentially)", run := fun _ => do
+        let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
+        let dir ← IO.FS.createTempDir
+        let names := (List.range 40).map fun i => s!"name{i}"
+        let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
+          "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
+          "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
+        let file := dir / "long-list.wiz"
+        IO.FS.writeFile file src
+        let start ← IO.monoMsNow
+        let out ← IO.Process.output { cmd := "timeout", args :=
+          #["20", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
+        let ms := (← IO.monoMsNow) - start
+        check (out.exitCode == 0) s!"checking a 40-element list literal through the cache failed after {ms} ms: {out.stdout}{out.stderr}"
+        check (ms < 15000) s!"checking a 40-element list literal through the cache took {ms} ms" },
     { name := "terms survive the cache's format", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let st := runFrontend (R := ZeroOneMany) "import Prelude" { trustedModule := Tests.libModule, loader := fun _ => some prelude }
@@ -84,14 +121,84 @@ def toolingGroup : Group where
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let srv : LSP.Server := { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude), trusted := ["Prelude"] }
         let req (s : String) : Lean.Json := (Lean.Json.parse s).toOption.get!
-        let (srv, out) := LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        let (srv, out) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
         check ((out[0]!.compress.splitOn "hoverProvider").length > 1) "no capabilities"
-        let (srv, out) := LSP.handle srv (req ("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":" ++
+        let (srv, out) ← LSP.handle srv (req ("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":" ++
           "{\"uri\":\"file:///t.wiz\",\"text\":\"import Prelude\\ndef ok : Nat := 1\\ndef bad : Nat := true\\n\"}}}"))
         check ((out[0]!.compress.splitOn "unknown identifier").length > 1) s!"no diagnostic: {out[0]!.compress}"
-        let (_, out) := LSP.handle srv (req ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":" ++
+        let (_, out) ← LSP.handle srv (req ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":" ++
           "{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"position\":{\"line\":1,\"character\":9}}}"))
-        check ((out[0]!.compress.splitOn "Nat : Type").length > 1) s!"no hover: {out[0]!.compress}" }
+        check ((out[0]!.compress.splitOn "Nat : Type").length > 1) s!"no hover: {out[0]!.compress}" },
+    { name := "wiz repl: definitions persist, #eval prints, an error does not stop the session", run := fun _ => do
+        let input := "def answer : Nat := 41 + 1\n#eval answer\n#check answer\ndef bad : Nat := true\n#eval answer + 1\n:quit\n"
+        let (code, out, err) := ← runRepl input
+        checkEq 0 code
+        for frag in ["42", "answer : Nat", "43"] do
+          check ((out.splitOn frag).length > 1) s!"no '{frag}' in the session:\n{out}\n{err}"
+        check ((err.splitOn ": error:").length > 1) s!"the error was not reported:\n{err}" },
+    { name := "wiz repl: a pipe (no tty) reads one command per line and EOF exits", run := fun _ => do
+        -- `:quit` is not needed: the end of the file is the end of the session
+        let dir ← IO.FS.createTempDir
+        let script := dir / "session.wiz"
+        IO.FS.writeFile script "def x : Nat := 7\n#eval x + 1\n"
+        let child ← IO.Process.spawn { cmd := "sh", args := #["-c", s!"exec \"{← wizExe}\" repl < \"{script}\""],
+                                        stdout := .piped, stderr := .piped }
+        let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+        let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+        let code ← child.wait
+        let out := ← IO.ofExcept out.get
+        let err := ← IO.ofExcept err.get
+        checkEq 0 code
+        check ((out.splitOn "8").length > 1) s!"no result in the piped session:\n{out}\n{err}"
+        check ((out.splitOn "wiz> ").length == 1) s!"a prompt was printed to a pipe:\n{out}" },
+    { name := "wiz repl: :type prints a type and :load adds a file's definitions", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let file := dir / "Loaded.wiz"
+        -- the second definition is an error: its file's messages are prefixed, the
+        -- session goes on, and the good definition stays in scope
+        IO.FS.writeFile file "def three : Nat := 1 + 2\ndef bad : Nat := true\n"
+        let missing := dir / "missing.wiz"
+        let (code, out, err) := ← runRepl
+          s!"def two : Nat := 1 + 1\n:type two\n:load {file}\n#check three\n#eval three + 1\n:load {missing}\n#check two\n:quit\n"
+        checkEq 0 code
+        check ((out.splitOn "two : Nat").length > 1) s!"`:type` printed nothing:\n{out}\n{err}"
+        check ((out.splitOn "three : Nat").length > 1) s!"the loaded definition is not in scope:\n{out}\n{err}"
+        check ((out.splitOn "1:1: info: 4").length > 1) s!"`:load` broke the session:\n{out}\n{err}"
+        check ((err.splitOn s!"{file}:2:").length > 1) s!"no error with the loaded file's path:\n{err}"
+        check ((err.splitOn "cannot read").length > 1) s!"a missing file was not reported:\n{err}" },
+    { name := "wiz repl: --prelude imports a module before the first input (-I, -p, missing)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        -- a prelude module is an ordinary module: it imports the Prelude itself
+        IO.FS.writeFile (dir / "Pre.wiz") "import Prelude\ndef preValue : Nat := 40 + 2\n"
+        -- `--prelude M` (with `-I DIR`) is an implicit `import M` before the session
+        let (code, out, err) := ← runRepl "#eval preValue + 1\n#check preValue\n:quit\n"
+          ["-I", dir.toString, "--prelude", "Pre"]
+        checkEq 0 code
+        check ((out.splitOn "43").length > 1) s!"the prelude's value is not in scope:\n{out}\n{err}"
+        check ((out.splitOn "preValue : Nat").length > 1) s!"the prelude's definition is not in scope:\n{out}\n{err}"
+        -- `-p` is the short form
+        let (code, out, err) := ← runRepl "#eval preValue\n:quit\n" ["-I", dir.toString, "-p", "Pre"]
+        checkEq 0 code
+        check ((out.splitOn "42").length > 1) s!"`-p` did not import the module:\n{out}\n{err}"
+        -- a missing module is an error at startup, before any input is read
+        let (code, out, err) := ← runRepl "#eval 1\n" ["--prelude", "NoSuchPrelude"]
+        checkEq 2 code
+        check ((err.splitOn "unknown module NoSuchPrelude").length > 1)
+          s!"no clear missing-module error:\n{out}\n{err}"
+        check ((out.splitOn "1").length == 1) s!"the session ran anyway:\n{out}\n{err}" },
+    { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
+        let self ← IO.appPath
+        let (code, out, err) := ← runWiz ["test-driver", "--driver", self.toString, "--list"] #[]
+        checkEq 0 code
+        check ((out.splitOn "tooling").length > 1) s!"no tooling group in --list:\n{out}\n{err}"
+        -- the cheapest group, through the wrapper: each case is one child process
+        let (code, out, err) := ← runWiz ["test-driver", "=rig", s!"--driver={self}", "--jobs", "2"] #[]
+        checkEq 0 code
+        check ((out.splitOn "── rig").length > 1 && (out.splitOn "0 failed").length > 1) s!"not the rig group's result:\n{out}\n{err}"
+        let missing := "/nonexistent/wiz-tests"
+        let (code, out, err) := ← runWiz ["test-driver", "--driver", missing, "--list"] #[]
+        checkEq 2 code
+        check ((err.splitOn "no test driver").length > 1) s!"no clear error:\n{out}\n{err}" }
   ]
 
 builtin_initialize registerGroup toolingGroup

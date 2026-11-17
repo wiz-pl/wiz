@@ -1,1 +1,1 @@
-examples/syntax.wiz:13:19: error: no elaborator for syntax kind term.if_then_else
+examples/syntax.wiz:13:19: error: the syntax term.if_then_else has no meaning: no `macro_rules` (or `attribute [macro term.if_then_else] f`) for it is in scope (if one is defined above, it was rejected: see its error)

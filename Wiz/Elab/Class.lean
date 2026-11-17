@@ -169,7 +169,7 @@ partial def applyInstance (ctx : LocalCtx R) (goal : Term R) (goalTy : VTy R) (e
   repeat
     match ← forceMeta ty with
     | .pi x bi _ dom cod _ =>
-      let m ← freshMeta ctx s!"instance argument {x}"
+      let m ← freshMeta ctx s!"instance argument {x}" dom
       if bi == .instImplicit then subgoals := subgoals.push (m, dom) else args := args.push (m, dom)
       t := .app t m
       ty ← instM cod (← evalIn ctx m)
@@ -193,7 +193,7 @@ partial def synthInstance (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Ter
     else args' := args'.push a
   let g ← getGlobals
   let goalTy := args'.foldl (vApp g) (eval g [] (.const info.name us))
-  let goal ← freshMeta ctx "an instance"
+  let goal ← freshMeta ctx "an instance" goalTy
   let key ← goalKey ctx goalTy
   let saved ← get
   let mut ss : SynthState R := { table := ({} : Std.HashMap String (Entry R)).insert key { waiters := #[.root] } }

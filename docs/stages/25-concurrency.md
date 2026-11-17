@@ -52,7 +52,7 @@ typed precisely in Wiz.
 
 ## 25b: session types
 
-```
+```wiz no-check
 import Session
 def sumProto : Proto := .send Nat (fun n => sendMany ack n)   -- n, then n numbers, then the sum back
 ```

@@ -1,0 +1,579 @@
+import Hdl.Core
+/-!
+# Hdl.Display
+
+The command, data and address-window layer of the SSD1306 (128 × 64 or 128 × 32,
+monochrome) and SSD1331 (96 × 64, RGB 565) OLED controllers (`import Hdl.Display`).
+It is the reusable part of the OLED project (`wiz-icestick-uart`'s `Icestick.Oled`,
+`Icestick.OledRgb` and their Arty ports), with the panel models, the power switches,
+the effect generators and the frame timing left to the design.
+
+The module has three layers:
+
+* **Commands.** `Display.Ssd` and `Display.S1331` are the datasheet command sets the
+  demos use; `Display.Ssd.bytes` and `Display.S1331.bytes` turn one command into its
+  bytes (arguments included). `Display.rgb565` packs a colour, and the `Ssd`/`S1331`
+  pixel helpers read and write pixels in a page-addressed frame or split a 16-bit
+  colour.
+* **Init sequences and windows.** `Display.Ssd.init rows` / `Display.S1331.init` are
+  the controller configuration sequences of the OLED project (display off, clock,
+  multiplex, addressing, remap, COM scan, contrast, charge pump, …). `Display.Ssd.window
+  rows` (`columns` 0 … 127 and `pages` 0 … rows/8 - 1) and `Display.S1331.window`
+  (`columns` 0 … 95 and `rows` 0 … 63) set the full-panel address window. `start` is
+  init + window + display on.
+* **Writing.** `Display.Byte` is one byte with its D/C level (`dc = false`: a command,
+  `dc = true`: display data). `Display.serC` writes bytes given one cycle at a time
+  (`Display.WIn`: `valid`/`dc`/`data`), and `Display.seqC` walks a meta-level
+  `List Display.Byte` by itself from a start pulse and then pulses `done`; both emit
+  the four-wire SPI pins (`sclk`, `mosi`), chip select and D/C. The serialiser is the
+  OLED project's: 16 cycles a byte, mode 0 (data changes on the falling edge and is
+  sampled on the rising edge), most significant bit first, CS low for the whole
+  sequence and high when idle (SCLK is low before the first byte and stays high while
+  idle, as the OLED project's serialiser does). All pins are registers of the state, so
+  they cannot glitch.
+
+There is one interface, four-wire SPI: neither the SSD1306 nor the SSD1331 source in
+the OLED project has a parallel (8080/6800) path, so none is parameterised here. A
+board with a parallel panel can drive `Display.Ssd.bytes` / the command lists itself.
+
+Simulation: every part is a `Circuit` over bundles, polymorphic in the representation
+like the rest of the HDL, so the same definitions simulate at values, run as netlists
+(`Netlist.simulate`, `Hdl.Sim`) and synthesise. The example `examples/hdl-display.wiz`
+decodes the emitted pins back into command/data bytes and checks that the sequence, its
+D/C levels, the address window and the pixel helpers are the datasheet's.
+
+What remains: a frame streamer (the OLED project's pixel generator, which packs eight
+pixels a byte) and the PmodOLED/PmodOLEDrgb power-on sequencer (RES pulse, VBAT/VCC
+delays), both of which are board-specific; the SSD1331's gentle power ramp; scrolling
+commands.
+-/
+
+def Display.B5 : HwTy := HwTy.bits 5
+def Display.B6 : HwTy := HwTy.bits 6
+def Display.B7 : HwTy := HwTy.bits 7
+def Display.B8 : HwTy := HwTy.bits 8
+def Display.B9 : HwTy := HwTy.bits 9
+def Display.B16 : HwTy := HwTy.bits 16
+
+/-- A `Nat` from a `Bool` (`Display.flag .true 1 0 = 1`). -/
+def Display.flag (b : Bool) (yes no : Nat) : Nat := match b with
+  | .true => yes
+  | .false => no
+
+/-- `n` copies of `v` (a list of `n` zero bytes is a blank page). -/
+def Display.rep {A : Type} : Nat → A → List A → List A
+  | .zero, _, acc => acc
+  | .succ k, v, acc => Display.rep k v (List.cons v acc)
+
+/-- `2^bits - 1`. -/
+def Display.ones (bits : Nat) : Nat := Nat.pow 2 bits - 1
+
+--------------------------------------------------------------------------------
+-- Pixel and colour helpers.
+
+/-- RGB 565: red 5 bits, green 6, blue 5 (the SSD1331's 16-bit colour, high byte
+first on the wire). -/
+def Display.rgb565 {r : HwTy → Type} [Hw r] (red : r Display.B5) (green : r Display.B6)
+    (blue : r Display.B5) : r Display.B16 :=
+  Hw.cat red (Hw.cat green blue)
+
+/-- The red field of an RGB 565 colour (bits 15 … 11). -/
+def Display.S1331.red {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
+  Hw.slice 11 5 c
+/-- The green field of an RGB 565 colour (bits 10 … 5). -/
+def Display.S1331.green {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B6 :=
+  Hw.slice 5 6 c
+/-- The blue field of an RGB 565 colour (bits 4 … 0). -/
+def Display.S1331.blue {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B5 :=
+  Hw.slice 0 5 c
+/-- The high byte of a colour (sent first). -/
+def Display.S1331.highByte {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
+  Hw.slice 8 8 c
+/-- The low byte of a colour. -/
+def Display.S1331.lowByte {r : HwTy → Type} [Hw r] (c : r Display.B16) : r Display.B8 :=
+  Hw.slice 0 8 c
+
+/-- The SSD1306's page byte for eight pixel bits: the first bit is the top row of the
+page (bit 0 of the byte), the last the bottom row (bit 7). -/
+def Display.Ssd.packPage : List Nat → Nat
+  | .nil => 0
+  | .cons b bs => Nat.add (Nat.mod b 2) (Nat.mul 2 (Display.Ssd.packPage bs))
+
+/-- The eight pixel bits of a page byte, top row first (the inverse of `packPage`). -/
+def Display.Ssd.unpackPage (b : Nat) : List Nat :=
+  Hdl.map (fun (k : Nat) => Nat.mod (Nat.div b (Nat.pow 2 k)) 2) (Hdl.upto 8 0)
+
+/-- Replace element `k` of a list, if it is there. -/
+def Display.setAt : List Nat → Nat → Nat → List Nat
+  | .nil, _, _ => .nil
+  | .cons x xs, k, v => match k with
+    | .zero => .cons v xs
+    | .succ j => .cons x (Display.setAt xs j v)
+
+/-- The pixel at column `x`, row `y` of a 128-wide page-addressed frame (pages of 8
+rows, bit 0 of a byte the top row). -/
+def Display.Ssd.pixel (ram : List Nat) (x y : Nat) : Nat :=
+  Nat.mod (Nat.div (Hdl.nthD 0 ram (Nat.add (Nat.mul (Nat.div y 8) 128) x))
+    (Nat.pow 2 (Nat.mod y 8))) 2
+
+/-- The frame with the pixel at column `x`, row `y` set to `v` (0 or 1). -/
+def Display.Ssd.setPixel (ram : List Nat) (x y v : Nat) : List Nat :=
+  let i := Nat.add (Nat.mul (Nat.div y 8) 128) x;
+  let bit := Nat.mod y 8;
+  let mask := Nat.pow 2 bit;
+  let old := Hdl.nthD 0 ram i;
+  let keep := Nat.mul (Nat.div old (Nat.mul 2 mask)) (Nat.mul 2 mask);
+  let low := Nat.mod old mask;
+  Display.setAt ram i (Nat.add keep (Nat.add (Nat.mul (Nat.mod v 2) mask) low))
+
+/-- Set `w` pixels of row `y`, from column `x` (a helper for `fillRect`). -/
+def Display.Ssd.fillRowGo : Nat → List Nat → Nat → Nat → Nat → List Nat
+  | .zero, ram, _, _, _ => ram
+  | .succ k, ram, x, y, v =>
+    Display.Ssd.fillRowGo k (Display.Ssd.setPixel ram x y v) (Nat.add x 1) y v
+
+/-- Set `h` rows of `w` pixels each, from column `x`, row `y` (a rectangle; the caller
+keeps it inside the 128-wide, `rows/8 · 8`-row frame). -/
+def Display.Ssd.fillRectGo : Nat → List Nat → Nat → Nat → Nat → Nat → List Nat
+  | .zero, ram, _, _, _, _ => ram
+  | .succ k, ram, x, y, w, v =>
+    Display.Ssd.fillRectGo k (Display.Ssd.fillRowGo w ram x y v) x (Nat.add y 1) w v
+
+/-- The frame with a `w` × `h` rectangle of `v` at column `x`, row `y`. -/
+def Display.Ssd.fillRect (ram : List Nat) (x y w h v : Nat) : List Nat :=
+  Display.Ssd.fillRectGo h ram x y w v
+
+/-- A blank frame for a panel of `rows` rows: `128 · rows/8` zero bytes. -/
+def Display.Ssd.blank (rows : Nat) : List Nat :=
+  Display.rep (Nat.mul 128 (Nat.div rows 8)) 0 .nil
+
+--------------------------------------------------------------------------------
+-- SSD1306 commands (Solomon Systech SSD1306 rev. 1.1, section 9, "Command table").
+
+inductive Display.Ssd where
+  | displayOff                      -- AE
+  | displayOn                       -- AF
+  | clockDiv (d : Nat)              -- D5 d   (divide ratio and oscillator frequency)
+  | multiplex (m : Nat)             -- A8 m   (m + 1 rows, 15 … 63)
+  | offset (o : Nat)                -- D3 o   (vertical shift of the COM lines)
+  | startLine (l : Nat)             -- 40 + l (0 … 63)
+  | chargePump (on : Bool)          -- 8D 14 / 8D 10
+  | addrMode (m : Nat)              -- 20 m   (0 horizontal, 1 vertical, 2 page)
+  | segRemap (on : Bool)            -- A1 / A0 (column 127 on SEG0)
+  | comReverse (on : Bool)          -- C8 / C0 (scan from COM[N-1] to COM0)
+  | comPins (alt : Bool)            -- DA 12 / DA 02 (alternative COM pin configuration)
+  | contrast (c : Nat)              -- 81 c
+  | precharge (p1 p2 : Nat)         -- D9 (p2 · 16 + p1), the two phases in clocks
+  | vcomh (v : Nat)                 -- DB v
+  | resume                          -- A4 (the display follows the RAM)
+  | normal                          -- A6 (not inverted)
+  | columns (a b : Nat)             -- 21 a b (horizontal/vertical mode: column range)
+  | pages (a b : Nat)               -- 22 a b (page range)
+
+/-- The bytes of one SSD1306 command (arguments included). -/
+def Display.Ssd.bytes : Display.Ssd → List Nat
+  | .displayOff => .cons 174 .nil
+  | .displayOn => .cons 175 .nil
+  | .clockDiv d => .cons 213 (.cons d .nil)
+  | .multiplex m => .cons 168 (.cons m .nil)
+  | .offset o => .cons 211 (.cons o .nil)
+  | .startLine l => .cons (Nat.add 64 l) .nil
+  | .chargePump on => .cons 141 (.cons (Display.flag on 20 16) .nil)
+  | .addrMode m => .cons 32 (.cons m .nil)
+  | .segRemap on => .cons (Display.flag on 161 160) .nil
+  | .comReverse on => .cons (Display.flag on 200 192) .nil
+  | .comPins alt => .cons 218 (.cons (Display.flag alt 18 2) .nil)
+  | .contrast c => .cons 129 (.cons c .nil)
+  | .precharge p1 p2 => .cons 217 (.cons (Nat.add (Nat.mul p2 16) p1) .nil)
+  | .vcomh v => .cons 219 (.cons v .nil)
+  | .resume => .cons 164 .nil
+  | .normal => .cons 166 .nil
+  | .columns a b => .cons 33 (.cons a (.cons b .nil))
+  | .pages a b => .cons 34 (.cons a (.cons b .nil))
+
+/-- The whole-panel address window of an SSD1306 with `rows` rows: columns 0 … 127,
+pages 0 … rows/8 - 1 (horizontal addressing mode). -/
+def Display.Ssd.window (rows : Nat) : List Display.Ssd :=
+  .cons (Display.Ssd.columns 0 127)
+    (.cons (Display.Ssd.pages 0 (Nat.sub (Nat.div rows 8) 1)) .nil)
+
+/-- The SSD1306 configuration sequence of the OLED project (Digilent's PmodOLED
+driver and the datasheet's application example), for a panel of `rows` rows: display
+off, clock divide ratio and oscillator frequency, multiplex ratio, offset, start line,
+charge pump on (no external VCC), horizontal addressing, column 127 at SEG0, COM scan
+backwards (the picture upright with the pins at the top), COM pin configuration for the
+panel height, contrast, precharge, VCOMH, resume and normal (not inverted). The power
+switches, reset pulse and blank frame are the board's (`start` adds the window and
+display on). -/
+def Display.Ssd.init (rows : Nat) : List Display.Ssd :=
+  .cons Display.Ssd.displayOff
+  (.cons (Display.Ssd.clockDiv 128)
+  (.cons (Display.Ssd.multiplex (Nat.sub rows 1))
+  (.cons (Display.Ssd.offset 0)
+  (.cons (Display.Ssd.startLine 0)
+  (.cons (Display.Ssd.chargePump .true)
+  (.cons (Display.Ssd.addrMode 0)
+  (.cons (Display.Ssd.segRemap .true)
+  (.cons (Display.Ssd.comReverse .true)
+  (.cons (Display.Ssd.comPins (Nat.beq rows 64))
+  (.cons (Display.Ssd.contrast 207)
+  (.cons (Display.Ssd.precharge 1 15)
+  (.cons (Display.Ssd.vcomh 64)
+  (.cons Display.Ssd.resume
+  (.cons Display.Ssd.normal .nil))))))))))))))
+
+/-- Init, the full-panel window, then display on. -/
+def Display.Ssd.start (rows : Nat) : List Display.Ssd :=
+  List.append (Display.Ssd.init rows)
+    (List.append (Display.Ssd.window rows) (.cons Display.Ssd.displayOn .nil))
+
+--------------------------------------------------------------------------------
+-- SSD1331 commands (Solomon Systech SSD1331 rev. 1.2, section 9, "Command table"),
+-- those the OLED project's colour demos use.
+
+inductive Display.S1331 where
+  | unlock                         -- FD 12  (accept commands)
+  | displayOff                     -- AE
+  | displayOn                      -- AF
+  | remap (m : Nat)                -- A0 m   (addressing, colour order, COM scan, colour depth)
+  | startLine (l : Nat)            -- A1 l
+  | offset (o : Nat)               -- A2 o
+  | normal                         -- A4
+  | multiplex (m : Nat)            -- A8 m   (m + 1 rows)
+  | master (m : Nat)               -- AD m   (8E: external VCC supply)
+  | powerSave (p : Nat)            -- B0 p   (0B: off)
+  | phase (p : Nat)                -- B1 p   (phase 1 and 2 lengths)
+  | clock (c : Nat)                -- B3 c   (divider and oscillator frequency)
+  | prechargeA (v : Nat)           -- 8A v   (second pre-charge speed, colour A)
+  | prechargeB (v : Nat)           -- 8B v
+  | prechargeC (v : Nat)           -- 8C v
+  | prechargeLevel (v : Nat)       -- BB v
+  | vcomh (v : Nat)                -- BE v
+  | current (c : Nat)              -- 87 c   (master current attenuation)
+  | contrastA (c : Nat)            -- 81 c
+  | contrastB (c : Nat)            -- 82 c
+  | contrastC (c : Nat)            -- 83 c
+  | noScroll                       -- 2E
+  | columns (a b : Nat)            -- 15 a b
+  | rows (a b : Nat)               -- 75 a b
+
+/-- The bytes of one SSD1331 command (arguments included; the SSD1331 takes the
+arguments of commands with D/C low too, unlike the SSD1306's data bytes). -/
+def Display.S1331.bytes : Display.S1331 → List Nat
+  | .unlock => .cons 253 (.cons 18 .nil)
+  | .displayOff => .cons 174 .nil
+  | .displayOn => .cons 175 .nil
+  | .remap m => .cons 160 (.cons m .nil)
+  | .startLine l => .cons 161 (.cons l .nil)
+  | .offset o => .cons 162 (.cons o .nil)
+  | .normal => .cons 164 .nil
+  | .multiplex m => .cons 168 (.cons m .nil)
+  | .master m => .cons 173 (.cons m .nil)
+  | .powerSave p => .cons 176 (.cons p .nil)
+  | .phase p => .cons 177 (.cons p .nil)
+  | .clock c => .cons 179 (.cons c .nil)
+  | .prechargeA v => .cons 138 (.cons v .nil)
+  | .prechargeB v => .cons 139 (.cons v .nil)
+  | .prechargeC v => .cons 140 (.cons v .nil)
+  | .prechargeLevel v => .cons 187 (.cons v .nil)
+  | .vcomh v => .cons 190 (.cons v .nil)
+  | .current c => .cons 135 (.cons c .nil)
+  | .contrastA c => .cons 129 (.cons c .nil)
+  | .contrastB c => .cons 130 (.cons c .nil)
+  | .contrastC c => .cons 131 (.cons c .nil)
+  | .noScroll => .cons 46 .nil
+  | .columns a b => .cons 21 (.cons a (.cons b .nil))
+  | .rows a b => .cons 117 (.cons a (.cons b .nil))
+
+/-- The whole-panel address window of an SSD1331 (96 × 64). -/
+def Display.S1331.window : List Display.S1331 :=
+  .cons (Display.S1331.columns 0 95) (.cons (Display.S1331.rows 0 63) .nil)
+
+/-- The SSD1331 configuration sequence of the OLED project (Digilent's PmodOLEDrgb
+driver; 65k colours, column 95 at SEG0, COM scanned backwards, odd/even COM split,
+64 rows, external VCC, power saving off, its phase/clock/pre-charge/VCOMH/current and
+contrast values). The supplies, reset pulse and blank frame are the board's. -/
+def Display.S1331.init : List Display.S1331 :=
+  .cons Display.S1331.unlock
+  (.cons Display.S1331.displayOff
+  (.cons (Display.S1331.remap 114)
+  (.cons (Display.S1331.startLine 0)
+  (.cons (Display.S1331.offset 0)
+  (.cons Display.S1331.normal
+  (.cons (Display.S1331.multiplex 63)
+  (.cons (Display.S1331.master 142)
+  (.cons (Display.S1331.powerSave 11)
+  (.cons (Display.S1331.phase 49)
+  (.cons (Display.S1331.clock 240)
+  (.cons (Display.S1331.prechargeA 100)
+  (.cons (Display.S1331.prechargeB 120)
+  (.cons (Display.S1331.prechargeC 100)
+  (.cons (Display.S1331.prechargeLevel 58)
+  (.cons (Display.S1331.vcomh 62)
+  (.cons (Display.S1331.current 6)
+  (.cons (Display.S1331.contrastA 145)
+  (.cons (Display.S1331.contrastB 80)
+  (.cons (Display.S1331.contrastC 125)
+  (.cons Display.S1331.noScroll .nil))))))))))))))))))))
+
+/-- Init, the full-panel window, then display on. -/
+def Display.S1331.start : List Display.S1331 :=
+  List.append Display.S1331.init
+    (List.append Display.S1331.window (.cons Display.S1331.displayOn .nil))
+
+/-- The SSD1331's gentle power ramp of the OLED project: the panel comes on at the
+lowest master current and low contrasts, and the contrasts are raised (the caller
+inserts its own delays between these commands). -/
+def Display.S1331.low : List Display.S1331 :=
+  .cons (Display.S1331.current 0)
+    (.cons (Display.S1331.contrastA 16) (.cons (Display.S1331.contrastB 8)
+      (.cons (Display.S1331.contrastC 16) .nil)))
+
+/-- The end of the gentle ramp: the usual current and contrasts. -/
+def Display.S1331.rampEnd : List Display.S1331 :=
+  .cons (Display.S1331.current 6)
+    (.cons (Display.S1331.contrastA 145) (.cons (Display.S1331.contrastB 80)
+      (.cons (Display.S1331.contrastC 125) .nil)))
+
+--------------------------------------------------------------------------------
+-- Command lists as a byte stream: a `Byte` is one transfer with its D/C level.
+
+/-- One byte to write to a panel: `dc = false` is a command byte, `dc = true` a data
+byte (the SSD1306's display RAM; the SSD1331's pixels). -/
+structure Display.Byte where
+  dc : Bool
+  data : Nat
+
+/-- The 9-bit entry a sequence ROM stores: bit 8 is D/C, bits 0 … 7 the byte. -/
+def Display.Byte.entry (b : Display.Byte) : Nat :=
+  Nat.add (Display.flag b.dc 256 0) (Nat.mod b.data 256)
+
+/-- `n` copies of a byte with the same D/C level. -/
+def Display.bytesTo (dc : Bool) : List Nat → List Display.Byte
+  | .nil => .nil
+  | .cons b bs => .cons (Display.Byte.mk dc b) (Display.bytesTo dc bs)
+
+/-- The bytes of a list of SSD1306 commands, all with D/C low. -/
+def Display.Ssd.bytesOf : List Display.Ssd → List Nat
+  | .nil => .nil
+  | .cons c cs => List.append (Display.Ssd.bytes c) (Display.Ssd.bytesOf cs)
+
+/-- The byte stream of a list of SSD1306 commands. -/
+def Display.Ssd.stream (cs : List Display.Ssd) : List Display.Byte :=
+  Display.bytesTo .false (Display.Ssd.bytesOf cs)
+
+/-- The bytes of a list of SSD1331 commands, all with D/C low. -/
+def Display.S1331.bytesOf : List Display.S1331 → List Nat
+  | .nil => .nil
+  | .cons c cs => List.append (Display.S1331.bytes c) (Display.S1331.bytesOf cs)
+
+/-- The byte stream of a list of SSD1331 commands. -/
+def Display.S1331.stream (cs : List Display.S1331) : List Display.Byte :=
+  Display.bytesTo .false (Display.S1331.bytesOf cs)
+
+/-- The byte stream of `Display.Ssd.start rows`. -/
+def Display.Ssd.startStream (rows : Nat) : List Display.Byte :=
+  Display.Ssd.stream (Display.Ssd.start rows)
+
+/-- The byte stream of `Display.S1331.start`. -/
+def Display.S1331.startStream : List Display.Byte :=
+  Display.S1331.stream Display.S1331.start
+
+--------------------------------------------------------------------------------
+-- A read-only memory as a balanced tree of multiplexers on the address bits (the
+-- OLED project's `RomT`: yosys makes small look-up tables of it, where a chain of
+-- comparisons would be a carry chain each). Built once, at the meta level, and read
+-- with `Display.romAt` in the step. Missing entries are 0.
+
+inductive Display.RomT where
+  | leaf (v : Nat)
+  | node (k : Nat) (hi lo : Display.RomT)   -- address bit k: 1 → hi, 0 → lo
+
+def Display.allEq (v : Nat) : List Nat → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and (Nat.beq x v) (Display.allEq v xs)
+
+def Display.romGo : Nat → List Nat → Display.RomT
+  | .zero, es => Display.RomT.leaf (Hdl.nthD 0 es 0)
+  | .succ k, es =>
+    match Display.allEq (Hdl.nthD 0 es 0) (List.take (Nat.pow 2 (Nat.succ k)) es) with
+    | .true => Display.RomT.leaf (Hdl.nthD 0 es 0)
+    | .false => Display.RomT.node k
+        (Display.romGo k (List.drop (Nat.pow 2 k) es))
+        (Display.romGo k (List.take (Nat.pow 2 k) es))
+
+/-- A memory of `2^k` entries: the list, then zeros. -/
+def Display.romBuild (k : Nat) (es : List Nat) : Display.RomT :=
+  Display.romGo k (List.append es (Display.rep (Nat.pow 2 k) 0 .nil))
+
+def Display.romAt {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat}
+    (a : r (HwTy.bits n)) : Display.RomT → r (HwTy.bits w)
+  | .leaf v => Hw.lit w v
+  | .node k hi lo => Hw.mux (Hw.slice k 1 a) (Display.romAt w a hi) (Display.romAt w a lo)
+
+/-- The 9-bit entries of a byte stream. -/
+def Display.entries : List Display.Byte → List Nat
+  | .nil => .nil
+  | .cons b bs => .cons (Display.Byte.entry b) (Display.entries bs)
+
+/-- A ROM of `2^k` entries from a byte stream. -/
+def Display.romOf (k : Nat) (xs : List Display.Byte) : Display.RomT :=
+  Display.romBuild k (Display.entries xs)
+
+--------------------------------------------------------------------------------
+-- The serialiser: 16 cycles a byte, mode 0, most significant bit first. State: SCLK
+-- and MOSI (registers), the seven bits still to send, and the number of half periods
+-- left (0: idle). `load` with `d` is taken when idle. The 16 cycles that follow show
+-- (SCLK, MOSI) = (0, d7), (1, d7), (0, d6), (1, d6), …, (0, d0), (1, d0); in the last
+-- of them the serialiser is idle again, so bytes can follow back to back. SCLK stays
+-- low when idle.
+
+structure Display.Ser (r : HwTy → Type) where
+  sclk : r HwTy.bit
+  mosi : r HwTy.bit
+  sh : r Display.B7
+  cnt : r (HwTy.bits 4)
+  deriving Bundle
+
+def Display.Ser.init : Display.Ser HwTy.El :=
+  Display.Ser.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 7 0) (BitVec.ofNat 4 0)
+
+def Display.serReady {r : HwTy → Type} [Hw r] (s : Display.Ser r) : r HwTy.bit :=
+  s.cnt === 0
+
+def Display.serStep {r : HwTy → Type} [Hw r] (s : Display.Ser r) (load : r HwTy.bit)
+    (d : r Display.B8) : r Display.Ser.code :=
+  let busy := ~~~ (Display.serReady s);
+  let go := Display.serReady s &&& load;
+  let fall := busy &&& s.sclk;
+  Display.Ser.pack (Display.Ser.mk
+    (if go then 0 else if busy then ~~~s.sclk else s.sclk)
+    (if go then Hw.slice 7 1 d else if fall then Hw.slice 6 1 s.sh else s.mosi)
+    (if go then Hw.slice 0 7 d
+      else if fall then Hw.cat (Hw.slice 0 6 s.sh) (Hw.lit 1 0) else s.sh)
+    (if go then 15 else if busy then s.cnt - 1 else s.cnt))
+
+/-- The byte writer's input: a byte with its D/C level, taken when the writer is idle
+(`valid`); `data` is ignored unless `valid` is high. -/
+structure Display.WIn (r : HwTy → Type) where
+  valid : r HwTy.bit
+  dc : r HwTy.bit
+  data : r Display.B8
+  deriving Bundle
+
+/-- The byte writer's output: the SPI pins, the D/C level of the byte in flight, and a
+one-cycle `done` at its last rising edge. `cs` is low from the cycle the byte is taken
+until the byte is complete. -/
+structure Display.WOut (r : HwTy → Type) where
+  sclk : r HwTy.bit
+  mosi : r HwTy.bit
+  cs : r HwTy.bit
+  dc : r HwTy.bit
+  busy : r HwTy.bit
+  done : r HwTy.bit
+  deriving Bundle
+
+/-- The writer's state: the serialiser, the D/C level of the byte in flight, and the
+registered `done` (high in the cycle after the last rising edge, so CS can stay low
+through the edge itself). -/
+structure Display.WSt (r : HwTy → Type) where
+  ser : Display.Ser r
+  dc : r HwTy.bit
+  done : r HwTy.bit
+  deriving Bundle
+
+def Display.WSt.init : Display.WSt HwTy.El :=
+  Display.WSt.mk Display.Ser.init (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+
+def Display.wStep {r : HwTy → Type} [Hw r] (s : Display.WSt r) (x : Display.WIn r) :
+    r (HwTy.prod Display.WSt.code Display.WOut.code) :=
+  let ready := Display.serReady s.ser;
+  let go := ready &&& x.valid;
+  -- the edge that completes the byte drives SCLK high; `fin` is the cycle before it
+  let fin := (~~~ready) &&& (~~~s.ser.sclk &&& (s.ser.cnt === 1));
+  let ser := Display.Ser.unpack (Display.serStep s.ser go x.data);
+  let dc := if go then x.dc else s.dc;
+  let done := if fin then 1 else 0;
+  let busy := go ||| ~~~ready ||| s.done;
+  let cs := if busy then 0 else 1;
+  Hw.pair (Display.WSt.pack (Display.WSt.mk ser dc done))
+    (Display.WOut.pack (Display.WOut.mk s.ser.sclk s.ser.mosi cs s.dc busy s.done))
+
+/-- A byte writer as a circuit: give it `valid`/`dc`/`data` when `busy` is low; it
+drives `sclk`/`mosi`/`cs`/`dc` and pulses `done`. -/
+def Display.serC : Circuit Display.WIn.code Display.WOut.code :=
+  Circuit.bundled Display.WSt.bundle Display.WIn.bundle Display.WOut.bundle
+    Display.WSt.init (fun s x => Display.wStep s x)
+
+--------------------------------------------------------------------------------
+-- The sequence writer: walk a meta-level list of `Display.Byte` on a start pulse.
+
+def Display.idxW (n : Nat) : Nat := Nat.log2 (n - 1) + 1
+
+/-- The sequence writer's input: a start pulse (taken when idle). -/
+structure Display.QIn (r : HwTy → Type) where
+  start : r HwTy.bit
+  deriving Bundle
+
+/-- The sequence writer's output: the SPI pins, chip select (low for the whole
+sequence), the D/C level of the byte in flight, `busy`, and a one-cycle `done` at the
+end. -/
+structure Display.QOut (r : HwTy → Type) where
+  sclk : r HwTy.bit
+  mosi : r HwTy.bit
+  cs : r HwTy.bit
+  dc : r HwTy.bit
+  busy : r HwTy.bit
+  done : r HwTy.bit
+  deriving Bundle
+
+/-- The sequence writer's state: the program counter (`pw = Display.idxW n` bits),
+whether a sequence is running, whether the last byte has been loaded, the serialiser,
+the D/C level, and the registered `done`. -/
+structure Display.QSt (pw : Nat) (r : HwTy → Type) where
+  pc : r (HwTy.bits pw)
+  run : r HwTy.bit
+  fin : r HwTy.bit
+  ser : Display.Ser r
+  dc : r HwTy.bit
+  done : r HwTy.bit
+  deriving Bundle
+
+def Display.QSt.init (pw : Nat) : Display.QSt pw HwTy.El :=
+  Display.QSt.mk (BitVec.ofNat pw 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    Display.Ser.init (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+
+/-- One cycle of the sequence writer. -/
+def Display.qStep (pw n : Nat) (rom : Display.RomT) {r : HwTy → Type} [Hw r]
+    (s : Display.QSt pw r) (x : Display.QIn r) :
+    r (HwTy.prod (Display.QSt.code pw) Display.QOut.code) :=
+  let ready := Display.serReady s.ser;
+  let go := x.start &&& ~~~s.run &&& ~~~s.fin;
+  let active := s.run ||| go;
+  let load := active &&& ready &&& ~~~s.fin;
+  -- a start takes the first entry in the same cycle, so the address is 0 then
+  let addr := if go then 0 else s.pc;
+  let e := Display.romAt 9 addr rom;
+  let last := addr === Hw.ofNat (n - 1);
+  let complete := s.fin &&& ready;
+  let pc := if load then (if last then addr else addr + 1) else if go then 0 else s.pc;
+  let run := if go then 1 else if complete then 0 else s.run;
+  let fin := if load &&& last then 1 else if complete then 0 else s.fin;
+  let ser := Display.Ser.unpack (Display.serStep s.ser load (Hw.slice 0 8 e));
+  let dc := if load then Hw.slice 8 1 e else s.dc;
+  let done := complete;
+  -- keep CS low through the cycle of the last rising edge (`complete`), high after it
+  let busy := active;
+  let cs := if busy then 0 else 1;
+  Hw.pair (Display.QSt.pack pw (Display.QSt.mk pc run fin ser dc done))
+    (Display.QOut.pack (Display.QOut.mk s.ser.sclk s.ser.mosi cs s.dc busy s.done))
+
+/-- The sequence writer as a circuit for a non-empty byte list: on `start` it emits every
+byte with its D/C level, holding `cs` low, and pulses `done` one cycle after the last
+bit. -/
+def Display.seqC (xs : List Display.Byte) : Circuit Display.QIn.code Display.QOut.code :=
+  let n := List.length xs;
+  let pw := Display.idxW n;
+  let rom := Display.romOf pw xs;
+  Circuit.bundled (Display.QSt.bundle pw) Display.QIn.bundle Display.QOut.bundle
+    (Display.QSt.init pw) (fun s x => Display.qStep pw n rom s x)

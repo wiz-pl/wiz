@@ -22,7 +22,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `not-defeq` | `rfl` where the two sides are not definitionally equal | | |
 | `wrong-argument-count` | too many arguments (`function expected`), or a pattern or constructor with the wrong number of fields | `Nat.succ 1 2`, `myId Nat 1` | when the count is off by the implicit parameters: give them explicitly (`@myId Nat 1`) |
 | `unknown-parameter` | a named argument `(x := e)` for a parameter the function doesn't have | | |
-| `named-argument` | a named argument given twice, or after the explicit parameter it would follow; a field updated twice | | |
+| `named-argument` | a named argument given twice, or after the explicit parameter it would follow; a structure field updated twice, or an instance field given twice | | |
 | `unsolved-hole` | a hole nothing determines (`_`, an implicit argument, a binder's type) | `(fun (A : Type) => 0) _` | |
 | `unsolved-level` | a universe level nothing determines | | |
 | `cannot-infer` | an expression whose type can't be inferred without an ascription | | |
@@ -38,6 +38,8 @@ table lists exactly those. Messages not listed here have no code yet.
 | `unknown-syntax` | syntax that no macro or elaborator gives a meaning | | |
 | `unknown-class` | an instance of something that is not a class, or of an unknown class | | |
 | `unknown-declaration` | a command (`builtin`, `attribute`, `export`, …) names an unknown declaration | | |
+| `simp-lemma-not-equation` | `attribute [simp] f` where `f`'s type is not an equation after its binders | `attribute [simp] Nat.succ` | |
+| `simp-lemma-conditional` | `attribute [simp] f` where `f` has a premise before its equation (S3) | `attribute [simp] f` for `f : n = 0 → g n = n` | |
 | `quantity` | a variable used against its quantity (erased, linear) | | |
 | `kernel-rejected` | any other error of the kernel's | | |
 | `parse-error` | the parser's errors | `def := 1` | |

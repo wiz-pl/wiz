@@ -1,6 +1,7 @@
 #!/bin/sh
 # Smoke tests of the web infoview and the playground: build the pages (web/build.sh,
-# web/build-playground.sh); run the infoview's Wasm module under Node with
+# web/build-playground.sh); the generated benchmark page's fixtures and the site check
+# (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
 # playground's under Node (web/playground_test.mjs); then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
@@ -14,6 +15,23 @@ PORT=${1:-18765}
 OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# (11s) the search box's ranking and rendering (no build or browser needed)
+node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
+grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
+  echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (bench) the benchmark page's generator fixtures and the site check's rules for it
+"$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
+grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
+  echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
+# (playground-lsp) the language client and goals panel against a mock WebSocket server
+# (no Wasm build, no browser)
+node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
+if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
+  echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
+# (playground-selfhost-lsp) ?lsp=selfhost: the in-page server shim, with a stub engine
+node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
+if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
+  echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
@@ -41,7 +59,7 @@ HTTP=$!
 sleep 1
 node "$ROOT/web/doc_chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 2))/Col.html" > "$OUT/doc-chrome.txt"
 kill $HTTP
-for want in 'interactive: true' 'hover: <span class="kind">const</span> <code>' 'selected: <span class="tt '; do
+for want in 'interactive: true' 'hover: <span class="kind">const</span> <code>' 'selected: <span class="tt ' 'search name: 1' 'search docs: 1' 'search signature: 1'; do
   if grep -qF "$want" "$OUT/doc-chrome.txt"; then echo "ok (doc, chromium): $want"; else echo "FAIL (doc, chromium): missing $want"; cat "$OUT/doc-chrome.txt"; exit 1; fi
 done
 WIZ_WEB_OUT=$OUT "$ROOT/web/bridge.sh" "$PORT" "$WIZ" > "$OUT/bridge.log" 2>&1 &
