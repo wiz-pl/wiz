@@ -528,6 +528,21 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- A function on a family at a concrete index (`F .f`, like `SyntaxF .false`), with a
+recursive call in each branch of a nested `match`: each call's hypothesis takes the
+(trivial) proof that the field's index is that index, so it is a `let`, and one binding
+per call site made the evaluator compute the field's subtree twice per cell. -/
+def indexMatch (n : Nat) : String :=
+  natDecl ++
+  "inductive B where\n  | t\n  | f\n" ++
+  "inductive F : B → Type where\n" ++
+  "  | sep : F .t\n  | leaf (n : N) : F .t\n" ++
+  "  | node (args : F .f) : F .t\n  | nil : F .f\n  | cons (h : F .t) (t : F .f) : F .f\n" ++
+  "def count : F .f → N\n  | .cons x rest => match x with\n    | .sep => count rest\n" ++
+  "    | _ => N.s (count rest)\n  | .nil => N.z\n" ++
+  "def input : N → F .f\n  | .z => .nil\n  | .s m => .cons (.leaf m) (.cons .sep (input m))\n" ++
+  s!"#eval count (input {String.join ((List.range n).map fun _ => "(N.s ")}N.z{String.mk (List.replicate n ')')})\n"
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -555,6 +570,11 @@ def group : Group where
           "def blow : N → N × N\n  | .z => (N.z, N.z)\n  | .s n => let (a, b) := blow n; let (c, d) := blow n; (a, d)\n" ++
           s!"def big : N × (N × N) := (N.z, blow {String.join ((List.range 40).map fun _ => "(N.s ")}N.z{String.mk (List.replicate 40 ')')})\n" ++
           "def y : N := big.1\n") },
+    -- equations on a family matched at a concrete index give each recursive call's
+    -- hypothesis a (trivial) index proof, so it is a `let`, not a substituted variable;
+    -- one binding per call site made a strict evaluator run each branch's copy of it
+    { name := "a function on a family at a fixed index, recursing in two branches, is linear (was exponential)", run := fun _ =>
+        checksWithin 60 (indexMatch 40) },
     { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ =>
         longLiteral 20000 60 },
     -- reuse across `case` (`reuseAcross`) tried a drop it could not pair again from each

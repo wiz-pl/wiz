@@ -2702,7 +2702,20 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
     if let some rc := rc then
       let ihType (l : Lvl) : Option (VTy R) := ctx.types[ctx.lvl - l - 1]?
       match rewriteRecCalls g rc binds ihType ctx.lvl ctx.types.reverse.toArray cl.rhs with
-      | .ok (r, extra) => rhs := r; binds := binds ++ extra
+      | .ok (r, extra) =>
+        rhs := r
+        -- One binding per hypothesis name. A call site finds its hypothesis by name
+        -- (`_ih_y`), and the body is checked under the bindings in order, so when a name
+        -- occurs more than once only the last binding is reachable: the earlier ones are
+        -- dead. A family matched at a concrete index gives each hypothesis the field's
+        -- index proof, so it is emitted as a `let` (not substituted, unlike a plain
+        -- variable), and a strict evaluator runs every `let`: a recursive call in each
+        -- branch of a nested `match` then cost 2 per cell (Tests/Scaling.lean's
+        -- `indexMatch`: `#eval` of 40 elements, 80 cells).
+        let mut kept : List (Name × VTy R × Val R) := []
+        for b in extra.reverse do
+          unless kept.any (fun c => c.1 == b.1) do kept := b :: kept
+        binds := binds ++ kept
       | .error e => throwAt cl.rhs.info e ErrorCode.notStructural
     let mut ctx' := ctx
     for (n, ty, val) in binds do
