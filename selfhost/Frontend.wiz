@@ -9121,6 +9121,50 @@ partial def modHeaderNamesAt : List Char → List String
     else modHeaderNamesAt rest
 def modHeaderNames (text : String) : List String := match text with
   | .mk cs => modHeaderNamesAt cs
+-- (D5) the `include_str "…"` paths of a source text, in order, without duplicates. The
+-- scan is the Lean toolchain's (`Module.includesOf`): a boundary check keeps
+-- `my_include_str` out, and a path written in a string or a comment is found too (a
+-- harmless extra file to key on, never a missing one). The driver reads each relative to
+-- the module's own file and puts its contents in the module's cache key, so editing an
+-- included file invalidates the module and its importers, exactly as it does in the host.
+def modIncludeSp : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Char.code c with
+    | 32 => modIncludeSp cs
+    | 9 => modIncludeSp cs
+    | 10 => modIncludeSp cs
+    | 13 => modIncludeSp cs
+    | _ => .cons c cs
+-- (`prev` is the code of the character before the keyword; 0 at the start of the text)
+def modIncludeBoundary (prev : Nat) : Bool := match prev with
+  | 0 => .true
+  | n => match cIdentChar (Char.mk n) with
+    | .true => .false
+    | .false => match Nat.beq n 39 with
+      | .true => .false
+      | .false => Bool.not (Nat.beq n 46)
+partial def modIncludeNamesGo (prev : Nat) (seen : List String) : List Char → List String
+  | .nil => .nil
+  | .cons c rest =>
+    let here : List Char := .cons c rest;
+    match cStarts (toChars "include_str") here with
+    | .true => match modIncludeBoundary prev with
+      | .false => modIncludeNamesGo (Char.code c) seen rest
+      | .true => match modIncludeSp (cDrop 11 here) with
+        | .cons q more => match Nat.beq (Char.code q) 34 with
+          | .true =>
+            let r := cTakeWhile (fun d => Bool.not (Nat.beq (Char.code d) 34)) more;
+            let path := String.mk r.1;
+            match modEmpty path with
+            | .true => modIncludeNamesGo (Char.code c) seen rest
+            | .false => match containsStr seen path with
+              | .true => modIncludeNamesGo (Char.code c) seen rest
+              | .false => .cons path (modIncludeNamesGo (Char.code c) (.cons path seen) rest)
+          | .false => modIncludeNamesGo (Char.code c) seen rest
+        | .nil => modIncludeNamesGo (Char.code c) seen rest
+    | .false => modIncludeNamesGo (Char.code c) seen rest
+def modIncludeNames (text : String) : List String := match text with
+  | .mk cs => modIncludeNamesGo 0 .nil cs
 mutual
 partial def modHeaderTexts (names : List String) : IO (List Header) := match names with
   | .nil => IO.pure .nil

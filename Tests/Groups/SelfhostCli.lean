@@ -35,6 +35,24 @@ def cliRun (exe : System.FilePath) (files : Array (String × String)) (args : Ar
   let (_, c, out, err) ← cliRunDir exe files args
   pure (c, out, err)
 
+/-- `cliRun` in a directory that already exists (the cases that edit a file in place). -/
+def cliRunIn (dir : System.FilePath) (exe : System.FilePath) (args : Array String) :
+    IO (UInt32 × String × String) := do
+  let out ← IO.Process.output { cmd := "timeout", args := #["120", exe.toString] ++ args, cwd := dir }
+  pure (out.exitCode, out.stdout, out.stderr)
+
+/-- The cache entries of `dir` (the cache's per-module `.mcheck` and the graph's `.check`). -/
+def cliCacheEntries (dir : System.FilePath) (ext : String) : IO Nat := do
+  if ← dir.isDir then
+    pure ((← dir.readDir).foldl (fun n e => if e.fileName.endsWith ext then n + 1 else n) 0)
+  else pure 0
+
+/-- Give `target` `ref`'s access and modification time (`touch -r`), so a case can edit a
+file and keep its mtime: the cache must miss on the contents, not the timestamp. -/
+def cliKeepMtime (ref target : System.FilePath) : IO Unit := do
+  let _ ← IO.Process.output { cmd := "touch", args := #["-r", ref.toString, target.toString] }
+  pure ()
+
 /-- `want` occurs in `s`. -/
 def cliHas (s want : String) : Bool := (s.splitOn want).length > 1
 
@@ -269,6 +287,94 @@ def cliGroup : Group where
         checkEq 1 c
         cliCheck err "cache miss: " "invalidated by the imported edit"
         cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the module's error" },
+    { name := "the cache is per module: an unchanged dependency keeps its entry", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let files := #[("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                       ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a\n")]
+        let (c, _, err) ← cliRun exe files #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        -- (Prelude, A and Main: one entry each, so the modules share the cache instead
+        -- of one whole-graph entry)
+        let before ← cliCacheEntries (cacheDir / "c") ".mcheck"
+        check (before >= 3) s!"a {before}-entry cache for a three-module graph"
+        -- editing the root adds one entry (Main's new key); A's entry (and Prelude's) is
+        -- the same file, not rewritten under a graph-wide key
+        let files2 := #[("A.wiz", "import Prelude\ndef a : Nat := 1\n"),
+                        ("main.wiz", "import Prelude\nimport A\ndef x : Nat := a + 1\n")]
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "the root's edit"
+        let after ← cliCacheEntries (cacheDir / "c") ".mcheck"
+        checkEq (before + 1) after
+        let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "warm after the root's edit" },
+    { name := "a stale entry cannot return a wrong verdict (content key, mtime kept)",
+      run := fun _ => withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let dir ← IO.FS.createTempDir
+        IO.FS.writeFile (dir / "main.wiz") "import Prelude\nimport A\ndef x : Nat := a\n"
+        let a := dir / "A.wiz"
+        IO.FS.writeFile a "import Prelude\ndef a : Nat := 1\n"
+        let ref := dir / "A.ref"
+        IO.FS.writeFile ref "import Prelude\ndef a : Nat := 1\n"
+        cliKeepMtime a ref
+        let before ← ref.metadata
+        let (c, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        -- edit A and give it back the reference's timestamp (A.ref is `touch`ed from A
+        -- above, so this is the mtime the cold run saw)
+        IO.FS.writeFile a "import Prelude\ndef a : Nat := nope\n"
+        cliKeepMtime ref a
+        let after ← a.metadata
+        checkEq (before.modified.sec, before.modified.nsec)
+          (after.modified.sec, after.modified.nsec)
+        -- a cache keyed on the mtime would replay the old (clean) verdict here
+        let (c, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "the edit is a miss although the mtime is the same"
+        cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the new verdict" },
+    { name := "a changed import_c header is a miss (its text is in the key)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let dir ← IO.FS.createTempDir
+        IO.FS.writeFile (dir / "main.wiz") "import Prelude\nimport_c \"h.h\"\ndef x : Nat := 1\n"
+        IO.FS.writeFile (dir / "h.h") "int answer(void);\n"
+        let (c, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        let (c, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "warm"
+        -- the header is read at check time, so its text is part of the key
+        IO.FS.writeFile (dir / "h.h.ref") "int answer(void);\n"
+        IO.FS.writeFile (dir / "h.h") "int answer(void);\nint other(int);\n"
+        cliKeepMtime (dir / "h.h.ref") (dir / "h.h")
+        let (c, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "the header's edit" },
+    { name := "a changed include_str file is a miss (the key rule; the term is an A-gap)",
+      run := fun _ => withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let dir ← IO.FS.createTempDir
+        -- (`include_str "s.txt"` is not elaborated by the self-hosted frontend yet, so the
+        -- verdict is the same either way; what this pins is that the driver keys the file,
+        -- as the host does, so a later slice cannot serve a stale entry)
+        IO.FS.writeFile (dir / "main.wiz") "import Prelude\ndef s : String := include_str \"s.txt\"\n"
+        IO.FS.writeFile (dir / "s.txt") "one\n"
+        let (_, _, _) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        let (_, _, err0) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        cliCheck err0 "cache hit: " "warm"
+        IO.FS.writeFile (dir / "s.txt") "two\n"
+        let (_, _, err) ← cliRunIn dir exe #["check", "main.wiz", "--cache", cache, "-v"]
+        cliCheck err "cache miss: " "the included file's edit" },
     { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]

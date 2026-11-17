@@ -331,18 +331,21 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   mentions it (the imported *term* works, the name does not).
 * **One-shot mode.** `checkFile` (the checker's `--oneshot`, and the old single-file
   behaviour) is one module, `input`: private names are visible throughout the file.
-* **Cache.** A module's elaborated output is unchanged, so the cache's module key/graph
-  key (`moduleGraphKey`, a hash of the modules' names and texts) stays as it is; the
-  visibility check is a lookup on every elaboration, so a warm cache hit replays the
-  diagnostics of the same graph (the key covers every module's text, and the toolchain
-  id every selfhost source). The driver builds that key from the loader's discovery
-  table before elaborating (`tabNames`/`keyOfGraph` in `Cli.wiz`, plus the root's
-  `import_c` header texts), so a warm `check`/`run` repeats no command; `--no-cache`
-  does not construct the key at all. Before this, `prepare` elaborated the graph first
-  and the hit only saved the rendering, so a warm check cost the same as a cold one
-  (measured in `bench/selfhost-bench.py`: compiler.wiz warm 10.6 s vs cold 38.3 s after
-  the fix; 2.0x the host's RSS (`rss_ratio` 1.9765 in `bench/selfhost-bench.json`), 1.2x
-  its cold time).
+* **Cache.** The driver's cache is **per module** (D5): one `<key>.mcheck` entry holds a
+  module's tagged output lines, and the key is that module's content and dependency
+  closure (its name and text, its `import_c` header texts, the contents of its
+  `include_str` files, the toolchain id and, recursively, its imports' keys) -- not its
+  path and not an mtime. A warm `check` computes the load order from the import graph,
+  reads every module's entry and concatenates them, so it runs no command; a changed
+  dependency, header or included file changes the module's key and every importer's, and
+  a file rewritten with its mtime kept is a miss. One missing entry means a cold
+  elaboration of the graph, because an importer's commands are checked against its
+  imports' globals, which the cache does not serialize. A graph with a cycle or a
+  missing module is cached as one graph `.check` entry instead (its loader error lines
+  belong to a module's stream). `--no-cache` constructs no key at all. Before the
+  per-module split the key was one graph-wide rolling hash plus the modules' paths (so
+  the same text under another root missed, and a dependency's header could be stale).
+  Measured in `bench/selfhost-bench.py`: compiler.wiz warm vs cold ...
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
@@ -751,11 +754,12 @@ source order. A cycle is an error naming it (`error: import cycle: B -> C -> B`)
 module that cannot be found is `error: cannot find module NAME`. Duplicate names are
 rejected across modules as within one (the same `newDuplicate` check).
 
-The cache key (`moduleGraphKey`) is a rolling hash of the loaded modules' names and
-texts in load order; the checker prints it with `--key`. It follows a transitive change
-(a dependency's text) and ignores a file that no module imports. The real cache (D5)
-will key on it, plus the frontend's version. The checker's `--oneshot` runs the
-pre-loader single-file path (`checkFile`) instead, for the old behaviour's own tests.
+The checker prints the discovery graph's rolling hash with `--key` (`moduleGraphKey`, a
+hash of the loaded modules' names and texts in load order); it follows a transitive
+change and ignores a file that no module imports. The driver's cache (D5) does not use
+it: it keys each module on its content and dependency closure (see the cache bullet in
+20c), in `Cli.wiz`'s `planOf`/`keyFold`. The checker's `--oneshot` runs the pre-loader
+single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
 **Not done.** `private` is module-scoped now (21n), but only at the declaration level:
 constructor- and field-level `private` is stripped, and a type with private parts is not

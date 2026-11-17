@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: the driver's cache is per module and keyed on content, not paths (D5). One
+  `<key>.mcheck` entry holds a module's tagged output lines; the key is the module's
+  name and text, its `import_c` header texts, the contents of its `include_str` files,
+  the toolchain id and, recursively, its imports' keys. A changed dependency, header or
+  included file is a miss; a path or an mtime is not in the key, so a file edited with
+  its mtime kept is a miss and the same text under another `-I` root is a hit. A warm
+  `check` reads every module's entry in load order and runs no command; one miss is a
+  cold elaboration of the graph (the frontend's globals are not serialized). Entries
+  carry their payload's digest, so a truncated or edited entry is a miss, never a wrong
+  verdict. Before, one graph-wide key mixed the modules' paths and the root's headers,
+  so a dependency's `import_c` header and every `include_str` file were outside it.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
