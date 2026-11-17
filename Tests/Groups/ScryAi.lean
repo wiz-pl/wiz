@@ -95,6 +95,7 @@ def widthSrc : String := "import Scry.AiExamples
 def scryGroup : Group where
   name := "scry-ai"
   exercise := "S5 (code-analysis-design §4.6, §5.3)"
+  parallel := true
   cases := [
     { name := "widening: the loop reaches a post-fixpoint; one narrowing pass lets the checker accept",
       run := fun _ => okLibs wideningSrc [".true", ".false", ".some 999", ".true"] },

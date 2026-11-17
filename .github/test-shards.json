@@ -1,5 +1,5 @@
 [
-  {"name": "selfhost", "split": 6, "heavy": true,
+  {"name": "selfhost", "split": 8, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
@@ -45,7 +45,7 @@
     "sys",
     "wasm"
   ]},
-  {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 8, "jobs": 4, "default": true, "select": [
     "=bus-crc",
     "=bus-law",
     "=bus-protocol",
@@ -109,7 +109,7 @@
     "vec",
     "word"
   ]},
-  {"name": "scaling", "split": 2, "select": [
+  {"name": "scaling", "split": 3, "select": [
     "=scaling"
   ]},
   {"name": "prop", "select": [

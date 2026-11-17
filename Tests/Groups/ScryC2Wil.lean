@@ -169,6 +169,7 @@ def differential (name : String) : IO Unit := do
 def group : Group where
   name := "scry-c2wil"
   exercise := "Scry S2 (C to Wil, origins, CFG, facts)"
+  parallel := true
   cases := [
     { name := "differential: straight-line C (2 + 3 * 4) lowers and runs as compiled",
       run := fun _ => differential "straight" },
