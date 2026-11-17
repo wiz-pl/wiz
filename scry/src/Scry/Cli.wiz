@@ -10,6 +10,10 @@ import Scry.ProjectIO
 import Scry.WorkflowCmd
 import Scry.Repl
 import Scry.FuzzCmd
+import Scry.Native
+import Scry.Lower
+import Scry.EgraphWil
+import Scry.EgraphExtract
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -26,6 +30,10 @@ scry explain FILE NODE          one node: span, parent, children, arcs, relation
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
 scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
 scry fuzz-span FILE             map a fuzz artifact to CST spans (dynamic evidence)
+scry egraph FILE.c [--fuel N] [--rewrite]
+                                build Wil e-classes and print fold/rewrite stats;
+                                `--rewrite` also runs the checked extraction back to
+                                Wil and prints the transformation report
 ```
 
 Exit status is 0 on success, 1 on an error (a message on stderr), 2 on a usage error.
@@ -79,6 +87,9 @@ def Scry.usage : String :=
   ++ "                             finding identity, triage and evidence bundles\n"
   ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
   ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
+  ++ "  egraph FILE.c [--fuel N] [--rewrite]\n"
+  ++ "                             e-classes from lowered Wil, folds and rewrites;\n"
+  ++ "                             --rewrite extracts them back into a checked Wil program\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -197,6 +208,51 @@ def Scry.replCmd (args : List String) : EIO Nat := do
     (List.append rootArgs rest)) SpawnOptions.default;
   EIO.pure (match st with | .exited n => n | _ => 1)
 
+/-- `scry egraph FILE.c [--fuel N] [--rewrite]`: parse C with the native store, lower it
+to Wil, build the e-classes and run the fold/identity saturation. The first report is
+read-only. With `--rewrite`, `Scry.EgraphExtract` extracts the saturated classes back
+into Wil under its soundness checks and prints a second report; the CST and every Datalog
+fact are still untouched (the transformed program is only printed, not re-emitted). -/
+def Scry.egraphCmd (file : String) (fuel : Nat) (rewrite : Bool) : EIO Nat := do
+  st ← Scry.Native.parseFile file;
+  cst ← EIO.lift (Scry.Native.toCstStore file st);
+  src ← FS.readFile file;
+  let c := Scry.Cst.ofStore src cst;
+  let tu := Scry.lowerTU file c;
+  let p := Wil.program tu.funcs;
+  let b := Scry.wgBuildProgram p;
+  let s := Scry.wgSaturate fuel b.g .nil;
+  Scry.say (Scry.wgRenderReport file b s);
+  match rewrite with
+  | .false => EIO.pure 0
+  | .true => do
+    let t := Scry.wgeRewriteProgram fuel p;
+    Scry.say (Scry.wgeRenderReport file t);
+    EIO.pure 0
+
+/-- `scry egraph`'s arguments: one file, optional `--fuel N` and `--rewrite`, in any
+order. A second file is a usage error. -/
+partial def Scry.egraphArgsGo (file : Option String) (fuel : Nat) (rewrite : Bool) :
+    List String → EIO Nat
+  | .nil => match file with
+    | .some f => Scry.egraphCmd f fuel rewrite
+    | .none => EIO.fail "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+  | .cons a rest =>
+    if String.eq a "--rewrite" then
+      Scry.egraphArgsGo file fuel .true rest
+    else if String.eq a "--fuel" then match rest with
+      | .cons n rest' => match String.parseNat n with
+        | .some k => Scry.egraphArgsGo file k rewrite rest'
+        | .none => EIO.fail ("\"" ++ n ++ "\" is not a fuel bound")
+      | .nil => EIO.fail "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+    else match file with
+      | .none => Scry.egraphArgsGo (.some a) fuel rewrite rest
+      | .some _ => EIO.fail ("unexpected argument \"" ++ a ++ "\" (one FILE.c)")
+
+/-- `scry egraph FILE.c [--fuel N] [--rewrite]`. -/
+def Scry.egraphArgs (args : List String) : EIO Nat :=
+  Scry.egraphArgsGo .none 8 .false args
+
 /-- Run one command; the result is the exit status or an error message. -/
 def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .nil => do
@@ -233,6 +289,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "repl" rest => Scry.replCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
+  | .cons "egraph" rest => Scry.egraphArgs rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
 /-- `main`: run a command and exit with its status (1 with a `scry: …` message on an

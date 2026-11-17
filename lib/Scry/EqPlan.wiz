@@ -1,0 +1,282 @@
+import Prelude
+import Word
+import Text
+import Scry.Store
+import Scry.Datalog
+import Scry.Eval
+import Scry.EgraphNative
+/-!
+# Scry.EqPlan: the Datalog plan interpreter with an equality sort
+
+`import Scry.EqPlan` is the S3/S12 seam described in `wiz-notes/code-analysis-design.md`
+§10.3: a Datalog program whose schema reserves some columns as **`eqsort`** (e-class ids
+of an equality sort, `Scry.ColKind`), rules whose heads may be **equality assertions**
+(`Scry.Head.eqAssert`), and an interpreter that inserts a **canonicalise** step between
+rounds.
+
+The interpreter mirrors `Scry.Eval`'s stratum loop (it uses the same `evalRound`,
+`initialDelta` and `initialDelta` pieces), but after every round:
+
+1. the newly derived rows of every equality relation are merged into the sort's e-graph
+   with one `EGraph.mergeFacts` call per sort (which unions the two classes each row
+   names and rebuilds once);
+2. the database is canonicalised: every `eqsort` column is rewritten to its class
+   representative, rows are deduplicated and lattice keys are re-keyed;
+3. the next round runs on the canonical database, so a rule that reads `q(2)` also sees
+   `q(1)` once `1` and `2` are the same class.
+
+The e-graph backend is `Scry.EgraphNative` (the native tables). Swap the import for
+`Scry.Egraph` to run the same plan against the reference list model, exactly as the
+e-graph examples do.
+
+Provenance: the canonical rows are inserted into the database without their own
+`ProofStep` (a rewrite of a fact is not a new derivation), so `State.whyTuple` covers the
+pre-canonical rows only. A canonicalisation-aware witness is future work.
+-/
+
+-- ## A graph per equality sort
+
+/-- The e-graphs of the plan, one per equality sort. A sort is dense and small, so a
+list is the right model. -/
+structure Scry.EqSorts where
+  graphs : List (Nat × Scry.EGraph)
+
+def Scry.EqSorts.empty : Scry.EqSorts := Scry.EqSorts.mk .nil
+
+def Scry.EqSorts.graph (sorts : Scry.EqSorts) (s : Nat) : Scry.EGraph :=
+  Scry.assocGet Scry.EGraph.empty s sorts.graphs
+
+def Scry.EqSorts.setGraph (sorts : Scry.EqSorts) (s : Nat) (g : Scry.EGraph) : Scry.EqSorts :=
+  Scry.EqSorts.mk (Scry.assocSet s g sorts.graphs)
+
+def Scry.EqSorts.size (sorts : Scry.EqSorts) : Nat := List.length sorts.graphs
+
+/-- A column pair in one relation: the two `eqsort` columns an equality row names. -/
+structure Scry.EqPair where
+  a : Nat
+  b : Nat
+  sort : Nat
+
+/-- The two-column relations of a plan: the program, plus the equality columns of its
+schema. -/
+structure Scry.Plan (L : Type) where
+  prog : Scry.Program L
+  eqs : List Scry.EqCol
+
+def Scry.eqConcatMap {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.eqConcatMap f xs)
+
+/-- An empty graph for every sort the schema names. -/
+def Scry.Plan.sorts {L : Type} (p : Scry.Plan L) : Scry.EqSorts :=
+  Scry.EqSorts.mk (List.foldr (fun s acc => .cons (s, Scry.EGraph.empty) acc)
+    .nil (Scry.EqCols.sorts p.eqs))
+
+-- ## Equality assertions
+
+/-- Pair each `eqsort` column of `rel` with every later one of the same sort (so each
+unordered pair appears once). -/
+def Scry.Plan.pairsFrom (rel : Nat) (c : Scry.EqCol) :
+    List Scry.EqCol → List Scry.EqPair
+  | .nil => .nil
+  | .cons x xs =>
+    let rest := Scry.Plan.pairsFrom rel c xs;
+    if Nat.beq x.rel rel then
+      if Bool.and (Nat.beq c.sort x.sort) (Nat.lt c.col x.col) then
+        .cons (Scry.EqPair.mk c.col x.col c.sort) rest
+      else rest
+    else rest
+
+def Scry.Plan.pairsFor {L : Type} (p : Scry.Plan L) (rel : Nat) : List Scry.EqPair :=
+  Scry.eqConcatMap (fun c => Scry.Plan.pairsFrom rel c p.eqs)
+    (Scry.EqCols.forRel p.eqs rel)
+
+/-- The rows an equality relation contributes to sort `s`: for every fact in a relation
+with two `eqsort` columns of sort `s`, the two column values. -/
+def Scry.eqPairRow (args : List U64) (pr : Scry.EqPair) : List U64 :=
+  List.cons (List.getD args pr.a (U64.ofNat 0))
+    (List.cons (List.getD args pr.b (U64.ofNat 0)) .nil)
+
+def Scry.Plan.rowsForSort {L : Type} (p : Scry.Plan L) (s : Nat)
+    (facts : List (Scry.PFact L)) : List (List U64) :=
+  List.foldr (fun f acc =>
+    List.append (List.map (Scry.eqPairRow f.args)
+      (List.filter (fun pr => Nat.beq pr.sort s) (Scry.Plan.pairsFor p f.rel))) acc)
+    .nil facts
+
+def Scry.planMergeGo {L : Type} (p : Scry.Plan L) (facts : List (Scry.PFact L)) :
+    List (Nat × Scry.EGraph) → Scry.EqSorts × Bool
+  | .nil => (Scry.EqSorts.mk .nil, .false)
+  | .cons e rest =>
+    let rows := Scry.Plan.rowsForSort p e.1 facts;
+    let m := Scry.EGraph.mergeFacts e.2 rows;
+    let r := Scry.planMergeGo p facts rest;
+    (Scry.EqSorts.mk (.cons (e.1, m.1) r.1.graphs), Bool.or m.2 r.2)
+
+/-- Wire the rows of every equality relation into its sort's e-graph: one
+`mergeFacts` (all unions, one rebuild) per sort. -/
+def Scry.Plan.mergeTuples {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (facts : List (Scry.PFact L)) : Scry.EqSorts × Bool :=
+  Scry.planMergeGo p facts sorts.graphs
+
+-- ## Canonicalisation
+
+/-- Rewrite one column value through its sort's union-find (ordinary columns pass
+through). -/
+def Scry.Plan.canonValue {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (rel col : Nat) (v : U64) : U64 :=
+  match Scry.EqCols.sortAt p.eqs rel col with
+  | .none => v
+  | .some s => U64.ofNat (Scry.EGraph.find (sorts.graph s) (UIntN.toNat v))
+
+def Scry.Plan.canonRowFrom {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (rel : Nat) : Nat → List U64 → List U64
+  | _, .nil => .nil
+  | i, .cons v vs =>
+    .cons (Scry.Plan.canonValue p sorts rel i v)
+      (Scry.Plan.canonRowFrom p sorts rel (Nat.succ i) vs)
+
+/-- A row with every `eqsort` column replaced by its class representative. -/
+def Scry.Plan.canonRow {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (rel : Nat) (row : List U64) : List U64 :=
+  Scry.Plan.canonRowFrom p sorts rel 0 row
+
+/-- Rewrite and deduplicate one tuple relation. -/
+def Scry.Plan.canonRowsGo {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) (rel : Nat) :
+    List (List U64) → Scry.TupleRel → Bool → Scry.TupleRel × Bool
+  | .nil, acc, changed => (acc, changed)
+  | .cons row rest, acc, changed =>
+    let row' := Scry.Plan.canonRow p sorts rel row;
+    let moved := Bool.not (Scry.rowEq row row');
+    let ins := acc.insert row';
+    Scry.Plan.canonRowsGo p sorts rel rest ins.1
+      (if moved then .true else changed)
+
+/-- Rewrite one tuple relation; `changed` also covers rows that collapsed by rewriting. -/
+def Scry.Plan.canonTuple {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) (rel : Nat)
+    (t : Scry.TupleRel) : Scry.TupleRel × Bool :=
+  let r := Scry.Plan.canonRowsGo p sorts rel t.toList Scry.TupleRel.empty .false;
+  (r.1, Bool.or r.2 (Bool.not (Nat.beq t.size r.1.size)))
+
+/-- Rewrite and re-key one lattice relation, joining the values of keys that collapse. -/
+def Scry.emptyLat {L : Type} (rel : Nat) : Scry.LatRel L :=
+  Scry.Db.latAt (Scry.Db.empty) rel
+
+def Scry.Plan.canonLatGo {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) (rel : Nat) :
+    List (List U64 × L) → Scry.LatRel L → Bool → Scry.LatRel L × Bool
+  | .nil, acc, changed => (acc, changed)
+  | .cons e rest, acc, changed =>
+    let key' := Scry.Plan.canonRow p sorts rel e.1;
+    let moved := Bool.not (Scry.rowEq e.1 key');
+    let old := Scry.LatRel.find acc key';
+    let v := match old with
+      | .none => e.2
+      | .some x => p.prog.ops.join x e.2;
+    let acc' := Scry.LatRel.set acc key' v;
+    Scry.Plan.canonLatGo p sorts rel rest acc'
+      (if Bool.or moved (match old with | .none => .false | .some _ => .true)
+       then .true else changed)
+
+def Scry.Plan.canonLat {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) (rel : Nat)
+    (t : Scry.LatRel L) : Scry.LatRel L × Bool :=
+  Scry.Plan.canonLatGo p sorts rel t.toList (Scry.emptyLat rel) .false
+
+/-- The result of canonicalising a database: the rewritten database and whether
+anything moved. -/
+structure Scry.CanonDb (L : Type) where
+  db : Scry.Db L
+  changed : Bool
+
+def Scry.Plan.canonTuplesGo {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) :
+    List (Nat × Scry.TupleRel) → Scry.Db L → Bool → Scry.Db L × Bool
+  | .nil, out, changed => (out, changed)
+  | .cons e rest, out, changed =>
+    let c := Scry.Plan.canonTuple p sorts e.1 e.2;
+    Scry.Plan.canonTuplesGo p sorts rest (out.setTupleAt e.1 c.1)
+      (Bool.or changed c.2)
+
+def Scry.Plan.canonLatsGo {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts) :
+    List (Nat × Scry.LatRel L) → Scry.Db L → Bool → Scry.Db L × Bool
+  | .nil, out, changed => (out, changed)
+  | .cons e rest, out, changed =>
+    let c := Scry.Plan.canonLat p sorts e.1 e.2;
+    Scry.Plan.canonLatsGo p sorts rest (out.setLatAt e.1 c.1)
+      (Bool.or changed c.2)
+
+/-- The canonicalise step: rewrite every `eqsort` column in place, deduplicate tuples and
+re-key lattice entries. The e-graphs are unchanged. -/
+def Scry.Plan.canonDb {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (db : Scry.Db L) : Scry.CanonDb L :=
+  let a := Scry.Plan.canonTuplesGo p sorts db.tuples (Scry.Db.empty) .false;
+  let b := Scry.Plan.canonLatsGo p sorts db.lats a.1 .false;
+  Scry.CanonDb.mk b.1 (Bool.or a.2 b.2)
+
+/-- Every tuple fact currently in the database (as a `PFact`). -/
+def Scry.Plan.dbFacts {L : Type} (p : Scry.Plan L) (db : Scry.Db L) :
+    List (Scry.PFact L) :=
+  List.foldr (fun e acc =>
+    List.append (List.map (fun row => Scry.PFact.mk e.1 row .none) e.2.toList) acc)
+    .nil db.tuples
+
+/-- The canonicalise step as a public operation: merge every equality row already in the
+database into its sort's graph, then rewrite the database. Returns the state, the graphs
+and whether anything changed. -/
+def Scry.Plan.canonicalise {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (st : Scry.State L) : Scry.State L × Scry.EqSorts × Bool :=
+  let facts := Scry.Plan.dbFacts p st.db;
+  let m := Scry.Plan.mergeTuples p sorts facts;
+  let c := Scry.Plan.canonDb p m.1 st.db;
+  (Scry.State.mk c.db st.nodes st.next, m.1, Bool.or m.2 c.changed)
+
+-- ## The plan interpreter
+
+/-- One stratum with canonicalisation between rounds. The loop runs `evalRound` on the
+whole stratum each time (so a rule sees every canonical fact), merges newly derived
+equality rows, rewrites the database, and stops when a whole round changes nothing or
+the fuel runs out. -/
+partial def Scry.Plan.canonLoop {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (strat : List Nat) (s : Nat) (st : Scry.State L) (fuel : Nat) :
+    Scry.State L × Scry.EqSorts :=
+  match fuel with
+  | .zero => (st, sorts)
+  | .succ k =>
+    let d := Scry.initialDelta st strat s;
+    let m := Scry.Plan.mergeTuples p sorts d.tuples;
+    let c := Scry.Plan.canonDb p m.1 st.db;
+    let st1 := Scry.State.mk c.db st.nodes st.next;
+    let r := Scry.evalRound p.prog strat s d st1 p.prog.rules 0 (Scry.Round.empty st1);
+    let m2 := Scry.Plan.mergeTuples p m.1 r.newTuples;
+    let c2 := Scry.Plan.canonDb p m2.1 r.st.db;
+    let st2 := Scry.State.mk c2.db r.st.nodes r.st.next;
+    let changed := Bool.or m.2 (Bool.or c.changed
+      (Bool.or m2.2 (Bool.or c2.changed (Bool.not (List.isEmpty r.newTuples)))));
+    if changed then Scry.Plan.canonLoop p m2.1 strat s st2 k else (st2, m2.1)
+
+/-- One stratum: merge and canonicalise the incoming facts, run the non-recursive rules,
+then the canonicalising delta loop. `fuel` bounds the loop's rounds. -/
+def Scry.Plan.evalStratum {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (strat : List Nat) (s : Nat) (st : Scry.State L) (fuel : Nat) :
+    Scry.State L × Scry.EqSorts :=
+  let d0 := Scry.initialDelta st strat s;
+  let m0 := Scry.Plan.mergeTuples p sorts d0.tuples;
+  let c0 := Scry.Plan.canonDb p m0.1 st.db;
+  let st0 := Scry.State.mk c0.db st.nodes st.next;
+  let st1 := Scry.evalNonRecursive p.prog strat s p.prog.rules 0 st0;
+  Scry.Plan.canonLoop p m0.1 strat s st1 fuel
+
+partial def Scry.Plan.evalFrom {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
+    (strat : List Nat) (s : Nat) (max : Nat) (st : Scry.State L) (fuel : Nat) :
+    Scry.State L × Scry.EqSorts :=
+  if Nat.lt max s then (st, sorts)
+  else
+    let r := Scry.Plan.evalStratum p sorts strat s st fuel;
+    Scry.Plan.evalFrom p r.2 strat (Nat.succ s) max r.1 fuel
+
+/-- Evaluate the plan: `Program.check`, then strata in order with a canonicalise step
+between rounds. `fuel` bounds each stratum's canonicalising loop. -/
+def Scry.Plan.eval {L : Type} (p : Scry.Plan L) (st : Scry.State L) (fuel : Nat) :
+    Option (Scry.State L × Scry.EqSorts) :=
+  match p.prog.check with
+  | .none => .none
+  | .some strat =>
+    .some (Scry.Plan.evalFrom p (Scry.Plan.sorts p) strat 0 (Scry.maxNat strat) st fuel)

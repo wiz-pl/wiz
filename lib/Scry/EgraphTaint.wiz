@@ -1,0 +1,81 @@
+import Scry.Taint
+import Scry.EgraphExtract
+/-!
+# Scry.EgraphTaint: taint findings before and after the checked e-graph rewrite
+
+This is the differential surface for `Scry.EgraphExtract`. `wgeTaintDiff` runs the
+Datalog taint analysis (`Scry.Taint`, unchanged) on a program, applies the checked
+e-graph extraction (`wgeRewriteProgram`), and runs the same analysis on the result.
+
+The comparison is over **alert identities**, not paths:
+
+* an alert is `(function name, sink statement, sink name, argument index)`, the same
+  `(call, arg)` tuple `Scry.Taint.alertsInFunc` reports, tagged with its function;
+* `added` is an alert present after but not before, `removed` the reverse;
+* statement numbering is stable because the transformation replaces a right-hand side
+  and never inserts or deletes a statement, so the same point in the rewritten function
+  is the same point in the original.
+
+Since an accepted term uses only registers the original right-hand side already read
+(`wgeSubset`), the rewrite cannot add a def-use edge, hence cannot add an alert: `added`
+must be `0`. That is the check `wgeTaintSound` states and the `scry-taint` tests assert.
+`removed` may be positive: `x & 0 -> 0` removes a taint edge to a value that is provably
+constant, which is a precision *improvement*, not a lost finding.
+
+The Datalog facts, the `Scry.Store` and the original `Wil.Program` are inputs only. The
+analysis stays authoritative; the e-graph result is an optional, checked program view.
+-/
+
+structure Scry.WgeAlert where
+  func : String
+  sink : Nat
+  sinkName : String
+  arg : Nat
+
+def Scry.wgeAlertEq (a b : Scry.WgeAlert) : Bool :=
+  Bool.and (String.eq a.func b.func)
+    (Bool.and (Nat.beq a.sink b.sink)
+      (Bool.and (String.eq a.sinkName b.sinkName) (Nat.beq a.arg b.arg)))
+
+def Scry.wgeMemAlert (a : Scry.WgeAlert) (xs : List Scry.WgeAlert) : Bool :=
+  List.any (fun b => Scry.wgeAlertEq a b) xs
+
+/-- Every alert of one function, tagged with the function name. -/
+def Scry.wgeAlertsInFunc (fn : Wil.Func) (spec : Scry.TaintSpec) : List Scry.WgeAlert :=
+  List.map (fun f => Scry.WgeAlert.mk fn.name f.sink f.name f.arg)
+    (Scry.findingsInFunc fn spec)
+
+/-- Every alert of a program, in function order and then the engine's derivation order. -/
+def Scry.wgeAlerts (p : Wil.Program) (spec : Scry.TaintSpec) : List Scry.WgeAlert :=
+  Scry.concatMap (fun fn => Scry.wgeAlertsInFunc fn spec) p.funcs
+
+def Scry.wgeAlertsAdded (before after : List Scry.WgeAlert) : Nat :=
+  List.length (List.filter (fun a => Bool.not (Scry.wgeMemAlert a before)) after)
+
+def Scry.wgeAlertsRemoved (before after : List Scry.WgeAlert) : Nat :=
+  List.length (List.filter (fun a => Bool.not (Scry.wgeMemAlert a after)) before)
+
+structure Scry.WgeDiff where
+  before : List Scry.WgeAlert
+  after : List Scry.WgeAlert
+  added : Nat
+  removed : Nat
+  rewritten : Nat
+  rejected : Nat
+  skipped : Nat
+  stop : String
+
+/-- Taint before and after the checked transformation, under the same spec and fuel. -/
+def Scry.wgeTaintDiff (p : Wil.Program) (spec : Scry.TaintSpec) (fuel : Nat) :
+    Scry.WgeDiff :=
+  let before := Scry.wgeAlerts p spec;
+  let t := Scry.wgeRewriteProgram fuel p;
+  let after := Scry.wgeAlerts t.program spec;
+  Scry.WgeDiff.mk before after
+    (Scry.wgeAlertsAdded before after) (Scry.wgeAlertsRemoved before after)
+    t.rewritten t.rejected t.skipped t.stop
+
+/-- The soundness check the differential exists for: the checked rewrite added no alert.
+A `true` here is a test observation, not a theorem; §"fixed-point law" of the e-graph note
+explains why the construction implies it. -/
+def Scry.wgeTaintSound (d : Scry.WgeDiff) : Bool := Nat.beq d.added 0
