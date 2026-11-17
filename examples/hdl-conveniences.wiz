@@ -1,0 +1,219 @@
+import Hdl.Core
+-- HDL conveniences (docs/libraries.md, H14 S4): the width helpers (`Hw.zext`/`sext`/
+-- `truncate`/`resize`), the small sequential circuits (`Circuit.moore`/`isRising`/
+-- `isFalling`/`riseEvery`/`window`/`counterFreeRun`/`regMaybe`/`delayMaybe`/`regEnN`) and
+-- `deriving BitPack` for inductive types with fields. The width helpers are checked
+-- against `Nat`/`BitVec` on every 8-bit value and target width, and are the same wiring
+-- as their `Hw.cat`/`Hw.slice`/`Hw.signs` spellings (the Verilog text); every circuit is
+-- checked against the netlist simulations (hash-consed and naive); the BitPack layout is
+-- pinned and the round trip checked on every value of two types.
+
+def Bit : HwTy := HwTy.bits 1
+def B3 : HwTy := HwTy.bits 3
+def B6 : HwTy := HwTy.bits 6
+def B8 : HwTy := HwTy.bits 8
+def B10 : HwTy := HwTy.bits 10
+def B12 : HwTy := HwTy.bits 12
+def B16 : HwTy := HwTy.bits 16
+
+def Rng.next (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
+def Rng.trace (m : Nat) : Nat → Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, s => .cons (Nat.mod (Nat.div s 65536) m) (Rng.trace m k (Rng.next s))
+
+/-- The value simulation and both netlist simulations agree, with the outputs. -/
+def agree {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : Bool × List Nat :=
+  let ω ys := Circuit.runPacked c xs;
+  (Bool.and (Hdl.natsEq ys (Circuit.simNet .true c xs)) (Hdl.natsEq ys (Circuit.simNet .false c xs)), ys)
+/-- `n` zero inputs (for a circuit whose input is `HwTy.bits 0`). -/
+def zeros : Nat → List Nat
+  | .zero => .nil
+  | .succ k => .cons 0 (zeros k)
+def below (n : Nat) (p : Nat → Bool) : Bool := match n with
+  | .zero => p 0
+  | .succ k => Bool.and (p (Nat.succ k)) (below k p)
+def allBelow (n : Nat) (p : Nat → Bool) : Bool := below (n - 1) p
+def v (name : String) {ω i o : HwTy} (c : Circuit i o) : String := Verilog.emit (Circuit.netlist name c)
+def same {ω i o : HwTy} (a b : Circuit i o) : Bool := Hdl.strEq (v "m" a) (v "m" b)
+
+------------------------------------------------------------------------------------
+-- 1. Width helpers
+
+def bv (k : Nat) : HwTy.El B8 := BitVec.ofNat 8 k
+def zextSpec (k x : Nat) : Bool := Nat.beq (BitVec.toNat (Hw.zext k (bv x))) (Nat.mod x (Nat.pow 2 k))
+def sextSpec (n k x : Nat) : Nat := match Nat.le k n with
+  | .true => Nat.mod x (Nat.pow 2 k)
+  | .false => (match Nat.lt x (Nat.pow 2 (n - 1)) with
+    | .true => x
+    | .false => x + Nat.pow 2 k - Nat.pow 2 n)
+def sextOk (k x : Nat) : Bool := Nat.beq (BitVec.toNat (Hw.sext k (bv x))) (sextSpec 8 k x)
+def truncOk (k x : Nat) : Bool := Nat.beq (BitVec.toNat (Hw.truncate k (bv x))) (Nat.mod x (Nat.pow 2 k))
+def resizeOk (k x : Nat) : Bool := Nat.beq (BitVec.toNat (Hw.resize k (bv x)))
+  (match Nat.le k 8 with
+    | .true => Nat.mod x (Nat.pow 2 k)
+    | .false => x)
+def widthsSpec : Bool × Bool × Bool × Bool :=
+  (allBelow 256 (fun (x : Nat) => allBelow 17 (fun (k : Nat) => zextSpec k x)),
+   allBelow 256 (fun (x : Nat) => allBelow 17 (fun (k : Nat) => sextOk k x)),
+   allBelow 256 (fun (x : Nat) => allBelow 17 (fun (k : Nat) => truncOk k x)),
+   allBelow 256 (fun (x : Nat) => allBelow 17 (fun (k : Nat) => resizeOk k x)))
+#eval widthsSpec
+
+def zextC : Circuit B8 B16 := Circuit.comb (fun x => Hw.zext 16 x)
+def zextC' : Circuit B8 B16 := Circuit.comb (fun x => Hw.slice 0 16 (Hw.cat (Hw.lit 16 0) x))
+def sextC : Circuit B8 B16 := Circuit.comb (fun x => Hw.sext 16 x)
+def sextC' : Circuit B8 B16 := Circuit.comb (fun x => Hw.slice 0 16 (Hw.cat (Hw.signs x 16) x))
+def truncC : Circuit B8 B6 := Circuit.comb (fun x => Hw.truncate 6 x)
+def truncC' : Circuit B8 B6 := Circuit.comb (fun x => Hw.slice 0 6 x)
+def resizeUpC : Circuit B8 B12 := Circuit.comb (fun x => Hw.resize 12 x)
+def resizeUpC' : Circuit B8 B12 := Circuit.comb (fun x => Hw.zext 12 x)
+def resizeDownC : Circuit B8 B6 := Circuit.comb (fun x => Hw.resize 6 x)
+def resizeDownC' : Circuit B8 B6 := Circuit.comb (fun x => Hw.truncate 6 x)
+def widthsWiring : Bool × Bool × Bool × Bool × Bool :=
+  (same zextC zextC', same sextC sextC', same truncC truncC', same resizeUpC resizeUpC', same resizeDownC resizeDownC')
+#eval widthsWiring
+
+def widthsNet : Circuit B8 (HwTy.prod B16 (HwTy.prod B16 (HwTy.prod B6 B12))) :=
+  Circuit.comb (fun x => Hw.pair (Hw.zext 16 x) (Hw.pair (Hw.sext 16 x) (Hw.pair (Hw.truncate 6 x) (Hw.resize 12 x))))
+#eval (agree widthsNet (Rng.trace 256 200 1)).1
+
+------------------------------------------------------------------------------------
+-- 2. Small sequential conveniences
+
+-- a Moore counter: the output is the state before this cycle's input (Clash's `mac`)
+def mooreC : Circuit B8 B8 := Circuit.moore B8 (BitVec.ofNat 8 0) (fun s x => Hw.add s x) (fun s => s)
+def mooreOutC : Circuit B8 B8 := Circuit.moore B8 (BitVec.ofNat 8 0) (fun s x => Hw.add s x) (fun s => Hw.add s (Hw.lit 8 1))
+#eval agree mooreC (.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil))))
+#eval agree mooreOutC (.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil))))
+def mooreStep : Circuit.stepEl mooreC (BitVec.ofNat 8 7) (BitVec.ofNat 8 3) = (BitVec.ofNat 8 10, BitVec.ofNat 8 7) :=
+  refl (BitVec.ofNat 8 10, BitVec.ofNat 8 7)
+
+def riseC : Circuit B8 Bit := Circuit.isRising 8 (BitVec.ofNat 8 0)
+def fallC : Circuit B8 Bit := Circuit.isFalling 8 (BitVec.ofNat 8 255)
+#eval agree riseC (.cons 0 (.cons 255 (.cons 255 (.cons 0 (.cons 255 .nil)))))
+#eval agree fallC (.cons 255 (.cons 0 (.cons 255 (.cons 0 (.cons 0 .nil)))))
+
+#eval agree (Circuit.riseEvery 3 6) (zeros 16)
+#eval agree (Circuit.counterFreeRun 8) (zeros 6)
+-- `window 2` of B8: three taps, newest first, then two `init`s
+#eval agree (Circuit.window 2 B8 (BitVec.ofNat 8 0)) (.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil))))
+
+-- the `Maybe` input is (flag, value), packed flag high: 256 + x is "just x"
+def delayMaybeC : Circuit (HwTy.prod Bit B8) B8 := Circuit.delayMaybe B8 (BitVec.ofNat 8 0)
+def regMaybeC : Circuit (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod Bit B8)) B8 :=
+  Circuit.regMaybe B8 (BitVec.ofNat 8 0)
+#eval agree delayMaybeC (.cons (256 + 1) (.cons (256 + 2) (.cons 9 (.cons (256 + 5) (.cons 7 (.cons (256 + 9) .nil))))))
+-- (rst, flag, value): reset in cycle 3, no update in cycle 2 and 5
+def regTrace : List Nat := .cons (256 + 4) (.cons 3 (.cons (512 + 256 + 8) (.cons (256 + 5) (.cons 6 (.cons (256 + 7) .nil)))))
+#eval agree regMaybeC regTrace
+
+-- `regEnN 3`: the input three enabled cycles earlier; (en, value) is `256 + x`
+def regEn3C : Circuit (HwTy.prod (HwTy.named "en" Bit) B8) B8 := Circuit.regEnN 3 B8 (BitVec.ofNat 8 0)
+#eval agree regEn3C (.cons (256 + 1) (.cons (256 + 2) (.cons (256 + 3) (.cons (256 + 4) (.cons 4 (.cons (256 + 5) (.cons (256 + 6) (.cons (256 + 7) .nil))))))))
+#eval agree (Circuit.regEnN 0 B8 (BitVec.ofNat 8 0)) (.cons (256 + 7) (.cons (256 + 8) .nil))
+
+------------------------------------------------------------------------------------
+-- 3. `deriving BitPack` for an inductive with fields
+
+inductive Instr where
+  | add (rd : BitVec 3) (rs : BitVec 3)
+  | load (addr : BitVec 8)
+  | halt
+  deriving BitPack
+
+inductive Op where
+  | push
+  | pop
+  deriving BitPack
+inductive Ins where
+  | one (op : Op) (x : BitVec 5)
+  | none
+  deriving BitPack
+
+-- Clash's layout: tag (2 bits for 3 constructors), then the fields (first highest),
+-- zero-padded to the widest constructor (load: 8 bits); `halt` is tag 2 and no fields
+def layouts : Nat × Nat × Nat × Nat × Nat × Nat :=
+  (Instr.tagWidth, Instr.payloadWidth, Instr.width, Ins.tagWidth, Ins.payloadWidth, Ins.width)
+#eval layouts
+def instrPacks : List Nat :=
+  Hdl.map (fun (i : Instr) => BitVec.toNat (Instr.pack i))
+    (.cons (Instr.add (BitVec.ofNat 3 5) (BitVec.ofNat 3 6)) (.cons (Instr.load (BitVec.ofNat 8 171)) (.cons Instr.halt .nil)))
+#eval instrPacks
+def insPacks : List Nat :=
+  Hdl.map (fun (i : Ins) => BitVec.toNat (Ins.pack i))
+    (.cons (Ins.one Op.push (BitVec.ofNat 5 17)) (.cons (Ins.one Op.pop (BitVec.ofNat 5 17)) (.cons Ins.none .nil)))
+#eval insPacks
+#eval HwTy.width Instr.code
+#eval HwTy.width Ins.code
+
+def adds : Nat → List Instr
+  | .zero => .nil
+  | .succ k => .cons (Instr.add (BitVec.ofNat 3 (Nat.div k 8)) (BitVec.ofNat 3 (Nat.mod k 8))) (adds k)
+def loads : Nat → List Instr
+  | .zero => .nil
+  | .succ k => .cons (Instr.load (BitVec.ofNat 8 k)) (loads k)
+def instrs : List Instr := Hdl.concatLists (.cons (adds 64) (.cons (loads 256) (.cons (.cons Instr.halt .nil) .nil)))
+def instrRound : List Instr → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and
+      (Nat.beq (BitVec.toNat (Instr.pack (Instr.unpack (Instr.pack x)))) (BitVec.toNat (Instr.pack x))) (instrRound xs)
+#eval instrRound instrs
+
+def pushes : Nat → List Ins
+  | .zero => .nil
+  | .succ k => .cons (Ins.one Op.push (BitVec.ofNat 5 k)) (pushes k)
+def pops : Nat → List Ins
+  | .zero => .nil
+  | .succ k => .cons (Ins.one Op.pop (BitVec.ofNat 5 k)) (pops k)
+def inses : List Ins := Hdl.concatLists (.cons (pushes 32) (.cons (pops 32) (.cons (.cons Ins.none .nil) .nil)))
+def insRound : List Ins → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and
+      (Nat.beq (BitVec.toNat (Ins.pack (Ins.unpack (Ins.pack x)))) (BitVec.toNat (Ins.pack x))) (insRound xs)
+#eval insRound inses
+
+-- as a signal: a decoder bit for `halt`, from the packed instruction
+def haltC : Circuit B10 Bit := Circuit.comb (fun x => x === Instr.lit Instr.halt)
+#eval agree haltC (.cons 0 (.cons 184 (.cons 427 (.cons 512 .nil))))
+
+-- a `Bool` field (one bit) and a 2-bit field: tag 1 bit, payload 3, width 4
+inductive Ctl where
+  | go (b : Bool) (x : BitVec 2)
+  | stop
+  deriving BitPack
+#eval ((Ctl.tagWidth, Ctl.payloadWidth, Ctl.width) : Nat × Nat × Nat)
+def ctlPacks : List Nat := Hdl.map (fun (c : Ctl) => BitVec.toNat (Ctl.pack c))
+  (.cons (Ctl.go .true (BitVec.ofNat 2 1)) (.cons (Ctl.go .false (BitVec.ofNat 2 2)) (.cons Ctl.stop .nil)))
+#eval ctlPacks
+def ctlsOf (b : Bool) : Nat → List Ctl
+  | .zero => .nil
+  | .succ k => .cons (Ctl.go b (BitVec.ofNat 2 k)) (ctlsOf b k)
+def ctls : List Ctl := Hdl.concatLists (.cons (ctlsOf .false 4) (.cons (ctlsOf .true 4) (.cons (.cons Ctl.stop .nil) .nil)))
+def ctlRound : List Ctl → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and
+      (Nat.beq (BitVec.toNat (Ctl.pack (Ctl.unpack (Ctl.pack x)))) (BitVec.toNat (Ctl.pack x))) (ctlRound xs)
+#eval ctlRound ctls
+
+-- a representation-parameterised inductive: the fields are signals (`r T`), so `pack`
+-- works on wires; `T.bitPack` is the value-level pack (same layout, same numbers); the
+-- fields are carried by `Hw.packBits`/`Hw.unpackBits` of the constructor's product
+inductive CInstr (r : HwTy → Type) where
+  | add (rd : r B3) (rs : r B3)
+  | load (addr : r B8)
+  | halt
+  deriving BitPack
+def toC : Instr → CInstr HwTy.El
+  | .add rd rs => CInstr.add rd rs
+  | .load a => CInstr.load a
+  | .halt => CInstr.halt
+#eval ((CInstr.tagWidth, CInstr.payloadWidth, CInstr.width) : Nat × Nat × Nat)
+def cInstrRound : List Instr → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and
+      (Nat.beq (BitVec.toNat (CInstr.pack (CInstr.unpack (CInstr.pack (toC x))) : BitVec CInstr.width))
+        (BitVec.toNat (Instr.pack x)))
+      (cInstrRound xs)
+#eval cInstrRound instrs
+def cHalt : Circuit B10 Bit := Circuit.comb (fun x => x === CInstr.pack CInstr.halt)
+#eval agree cHalt (.cons 0 (.cons 184 (.cons 427 (.cons 512 .nil))))

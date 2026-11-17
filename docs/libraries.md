@@ -106,7 +106,9 @@ builder). A `Circuit i o` is a Mealy machine whose step is such code: `Circuit.r
 simulates it on values, `Circuit.netlist` builds its netlist, `Netlist.simulate` runs the
 netlist, and `Verilog.emit` prints Verilog-2005. The module declares its registers (with sized initial
 values), then one wire per node, then the register updates, so every name is declared
-before its use (Icarus Verilog insists; the `hdl` test group runs it when it is installed). `examples/hdl.wiz` has a counter, a
+before its use (Icarus Verilog insists; the `hdl` test group runs it, and yosys, when
+they are installed — a missing tool is a skip with a reason (`no iverilog`, `no yosys`),
+not a pass). `examples/hdl.wiz` has a counter, a
 saturating counter, a popcount, a 4-tap sum and a doubling chain.
 
 Sharing has two parts:
@@ -188,9 +190,11 @@ def top : Circuit In.code Out.code := Circuit.bundled Tx.bundle In.bundle Out.bu
   (importers keep `List.map` and the like); the netlist types are `NetOp`, `NetNode`,
   `NetReg`, `NetPort`. (`<+>` stays.)
 
-Not done: module hierarchy in the Verilog, enumerations at `HwTy`, wire names from `let`
-binders (an elaborator hook, wishful `hdl-let-names`), asynchronous reset, several clocks.
-(Numerals and operators: H14 S2.)
+Not done: module hierarchy in the Verilog; an enumeration or vector former at `HwTy`
+(an enumeration is `bits k` plus `deriving BitPack`, H14 S4; a fixed group is a `prod`
+chain, see `HwTy.vec` in S4); wire names from `let` binders (an elaborator hook, wishful
+`hdl-let-names`); asynchronous reset. Multi-clock *composition* is H14 P2 (`Multi`,
+`Cdc`); one `Circuit` still has one clock. (Numerals and operators: H14 S2.)
 
 ## H14 S2: operator notation for signals
 
@@ -665,6 +669,63 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `deriving BitPack`). The bit-level round trip `S.ofBits (S.toBits s) = s` holds by `rfl`
   for closed values (the example checks one, and all 32 values of a 5-bit bundle); a
   general lemma needs words' range proofs (stage 22l) and lemmas on `concat`/`slice`.
+  For an **inductive with fields** (Clash's layout: the tag in the high
+  `⌈log₂ #constructors⌉` bits, then the constructor's fields as a product, the first
+  field highest, zero-padded to the widest constructor), `deriving BitPack` defines
+  `T.tagWidth`, `T.payloadWidth`, `T.width`, `T.code` (`HwTy.bits T.width`), `T.pack`,
+  `T.unpack`, `T.toNat`, `T.lit x : r T.code` (a constant in a circuit) and `T.bitPack`
+  for a type with no parameters:
+  ```wiz no-check
+  inductive Instr where
+    | add (rd rs : BitVec 3)   -- tag 2 bits, payload 8 (the widest: load)
+    | load (addr : BitVec 8)
+    | halt                     -- tag 2, no fields
+    deriving BitPack
+  -- Instr.width = 10, Instr.pack (.add 5 6) = 0b00_101110_00, (.load 0xAB) = 0b01_10101011, .halt = 0b10_00000000
+  ```
+  A field is `BitVec n`, `Bool`, or a type with its own `deriving BitPack` (an
+  enumeration or such an inductive, used through `F.width`/`F.pack`/`F.unpack`); a tag
+  out of range decodes through the first constructor, as an enumeration's `ofNat` does.
+  For a **representation-parameterised inductive** `T Δ r` whose fields are `r Tᵢ` (as a
+  bundle's are), the same layout is generated with `T.tagWidth Δ`, `T.payloadWidth Δ`,
+  `T.width Δ`, `T.code Δ`, and `T.pack Δ` works at *any* `r` (on wires too), with the
+  fields carried by `Hw.packBits`/`Hw.unpackBits` of each constructor's product;
+  `T.unpack Δ`, `T.toBits Δ`, `T.ofBits Δ` and `T.bitPack Δ : BitPack (T Δ HwTy.El)` are
+  the value-level ones (a signal cannot be unpacked into different constructors, so
+  unpack is not a wire function).
+  `examples/hdl-conveniences.wiz` pins the layout and checks
+  `T.unpack (T.pack x) = x` (through `pack`) for every value of a 3-constructor plain
+  type, a type with an enumeration field, a type with a `Bool` field, and the
+  parameterised form (against the plain encoding). The general round-trip lemma has the
+  same bit-level gap as a bundle's.
+* **Width helpers.** `Hw.zext k`, `Hw.sext k`, `Hw.truncate k` and `Hw.resize k` take a
+  `bits n` signal to `bits k` (`k` and `n` are implicit width arguments, as in
+  `Hw.slice`: the target comes from the expected type or is written). All four are
+  wiring (`Hw.cat`/`Hw.slice`/`Hw.signs`) and emit the same Verilog as that spelling;
+  there is no new `NetOp`. `Hw.resize k` is `truncate` when `n ≥ k` and `zext` otherwise
+  (zero extension: `HwTy` has no signedness, so `Hw.sext` says when to sign-extend).
+  `Hw.zext`/`sext` at `k < n` are `Hw.truncate k`. Clash's `zeroExtend`/`signExtend`/
+  `truncateB`/`resize`.
+* **Small sequential circuits**, each a `Circuit` in the style of `registerR/E/RE` (no
+  change to `Circuit`, `HwTy` or the netlist):
+  * `Circuit.moore s init next out`: a Moore machine (the output is `out` of the state
+    *before* this cycle's input, as Clash's `moore`);
+  * `Circuit.isRising w init` / `isFalling w init`: one bit, a pulse when the `w`-bit
+    signal goes `0 → 2^w-1` / `2^w-1 → 0` (`init` is the value before the first cycle);
+  * `Circuit.riseEvery w n`: one pulse every `n` cycles (first in cycle `n-1`);
+  * `Circuit.window n t init`: the last `n` values and this cycle's, newest first, as
+    `HwTy.vec (n+1) t` (a product chain; `HwTy.vec`, `HwTy.vecInit`, `Hw.pushVec`,
+    `Hw.lastVec` are the helpers);
+  * `Circuit.counterFreeRun w`: `0, 1, 2, …` at `w` bits;
+  * `Circuit.delayMaybe`/`Circuit.regMaybe`: a register that updates only when its input's
+    first half is high (the `Maybe` shape is `HwTy.prod HwTy.bit t`; `regMaybe` adds a
+    synchronous `rst`);
+  * `Circuit.regEnN n t init`: `n` registers with a common enable (a shift register), `0`
+    being the input itself.
+  A circuit with no data input takes `HwTy.bits 0` (`Circuit.riseEvery 3 6`,
+  `Circuit.counterFreeRun 8`). The lemma `Circuit.stepEl_moore` gives one cycle;
+  `examples/hdl-conveniences.wiz` checks each against the value and both netlist
+  simulations.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
@@ -684,11 +745,10 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   non-zero initial value into inverters around a flip-flop); a reset is for targets
   without initial values and for restarting a design.
 
-Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
-inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
-`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
-reset.
+Not done: a general bit-level round-trip lemma for bundles and for inductives with
+fields (above), `!` on signals, `match` on a signal with field-binding or literal (`Nat`
+on `bits n`) patterns (see the `match` bullet above; `match` on an enumeration signal
+itself is done), asynchronous reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
 

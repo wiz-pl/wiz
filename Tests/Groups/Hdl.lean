@@ -216,6 +216,43 @@ def hdlGroup : Group where
            "((.true, .cons 4 (.cons 42 (.cons 42 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 87 (.cons 87 (.cons 87 (.cons 87 (.cons 42 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 58 (.cons 58 (.cons 58 .nil))))))))))))))))))))))))))))))))))))))))), (.true, .cons 5 (.cons 0 (.cons 0 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 121 (.cons 121 (.cons 121 (.cons 121 (.cons 0 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 5 (.cons 5 (.cons 63 .nil))))))))))))))))))))))))))))))))))))))))), .true, .true)",
            ".true",
            "\"module reg_(input clk, input [0:0] rst, input [0:0] en, input [7:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd42;\\n  always @(posedge clk) if (rst) r <= 8'd42; else if (en) r <= x;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "S4: width helpers (zext/sext/truncate/resize), the small sequential conveniences (moore, isRising/Falling, riseEvery, window, counterFreeRun, regMaybe/delayMaybe, regEnN) and BitPack for inductives with fields", run := fun _ => do
+        -- examples/hdl-conveniences.wiz: every 8-bit value and target width against the
+        -- Nat/BitVec meaning (then the same circuits through both netlist simulations);
+        -- each convenience's outputs and its netlist simulations; `deriving BitPack` for
+        -- inductives with fields (a 3-constructor type, one with an enumeration field, one
+        -- with a Bool field, and a representation-parameterised one whose pack works on
+        -- wires): the tag/field layout pinned and the round trip on every value (the width
+        -- helpers are also the same Verilog as their cat/slice spellings)
+        okLibs (← IO.FS.readFile "examples/hdl-conveniences.wiz")
+          ["(.true, .true, .true, .true)",
+           "(.true, .true, .true, .true, .true)",
+           ".true",
+           "(.true, .cons 0 (.cons 1 (.cons 3 (.cons 6 .nil))))",
+           "(.true, .cons 1 (.cons 2 (.cons 4 (.cons 7 .nil))))",
+           "(.true, .cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 1 .nil)))))",
+           "(.true, .cons 0 (.cons 1 (.cons 0 (.cons 1 (.cons 0 .nil)))))",
+           "(.true, .cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil))))))))))))))))",
+           "(.true, .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))))",
+           "(.true, .cons 65536 (.cons 131328 (.cons 197121 (.cons 262914 .nil))))",
+           "(.true, .cons 0 (.cons 1 (.cons 2 (.cons 2 (.cons 5 (.cons 5 .nil))))))",
+           "(.true, .cons 0 (.cons 4 (.cons 4 (.cons 0 (.cons 5 (.cons 5 .nil))))))",
+           "(.true, .cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 2 (.cons 2 (.cons 3 (.cons 4 .nil))))))))",
+           "(.true, .cons 7 (.cons 8 .nil))",
+           "(2, 8, 10, 1, 6, 7)",
+           ".cons 184 (.cons 427 (.cons 512 .nil))",
+           ".cons 17 (.cons 49 (.cons 64 .nil))",
+           "10",
+           "7",
+           ".true",
+           ".true",
+           "(.true, .cons 0 (.cons 0 (.cons 0 (.cons 1 .nil))))",
+           "(1, 3, 4)",
+           ".cons 5 (.cons 2 (.cons 8 .nil))",
+           ".true",
+           "(2, 8, 10)",
+           ".true",
+           "(.true, .cons 0 (.cons 0 (.cons 0 (.cons 1 .nil))))"] },
     { name := "S4: match on a signal: an enumeration case tree equals the if chain (same netlist), Bool, nested, non-exhaustive rejected", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-match.wiz")
           [".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",

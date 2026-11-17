@@ -42,8 +42,8 @@ tests (`examples/hdl-sim.wiz`, the `hdl` group); it is not proved here because
   contents in the relation and is left to the memory interface's own laws.
 * **Resets.** A synchronous reset is part of a step and may satisfy `stepOk` if the
   netlist's `NetReg.rst` is what the step does; the theorem does not model reset
-  *domains*, asynchronous assertion, or `Cdc.resetSync`/`Cdc.resetBridge`. Async reset
-  crossings are outside.
+  *domains* or asynchronous assertion, and there is no reset synchroniser: `Cdc.sync2`/
+  `Cdc.wire` are data crossings. Async reset crossings are outside.
 * **Uninterpreted primitives.** `NetPrim.eval` is the primitive's `model`, or a default
   when `model = none`; a design whose primitive has no behavioural model is outside the
   theorem (and `Netlist.simFast` falls back). Vendor cells with a model are in the

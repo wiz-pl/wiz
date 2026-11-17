@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* HDL (H14 S4): `Hw.zext`/`sext`/`truncate`/`resize` change a `bits n` signal's width
+  as wiring (`Hw.cat`/`Hw.slice`/`Hw.signs`; no new `NetOp`), and the small sequential
+  circuits of Clash's prelude are named: `Circuit.moore`, `isRising`/`isFalling`,
+  `riseEvery`, `window`, `counterFreeRun`, `delayMaybe`/`regMaybe` and `regEnN`.
+  `deriving BitPack` now covers inductive types with fields too: Clash's layout (tag in
+  the high `⌈log₂ #constructors⌉` bits, then the constructor's fields, zero-padded to the
+  widest constructor), giving `T.code`/`T.pack`/`T.unpack`/`T.lit`/`T.bitPack`.
+  `examples/hdl-conveniences.wiz` checks the value/width tables and both netlist
+  simulations in the `hdl` group; `docs/libraries.md` H14 S4 documents them. The
+  `Hdl.Netlist` header no longer cites the nonexistent `Cdc.resetSync`/`resetBridge`.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
