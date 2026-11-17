@@ -82,8 +82,9 @@ namespace Wiz
 /-- From now on, a `panic!` anywhere in this process (the kernel's evaluator on an
 ill-typed value, an index out of range) ends it with status 1, after its message, instead
 of going on with the type's default value. The batch commands (`wiz check`, `build`,
-`run`) set it: a kernel-internal failure must fail the check, never become a value
-(`wiz-notes/kernel-lint.md`). The language server does not (it must survive), and relies
+`run`) set it: a kernel-internal failure must fail the check, never become a value (the
+default used to be `Sort 0`, a well-formed term: `absurd` on a glued value panicked and a
+type became `Prop`, F2). The language server does not (it must survive), and relies
 on the default value being a stuck unknown (`Val`'s `Inhabited` instance). -/
 def exitOnPanic (flag : Bool := true) : IO Unit := exitOnPanicRaw flag
 

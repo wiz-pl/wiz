@@ -2942,6 +2942,34 @@ def evalAt (c : TCtx) (t : Tm) (ty : Val) : Val := match Bool.and (inProofMode c
   | .false => eval (TCtx.env c) t
 
 mutual
+-- the guarded inductive description (`μ`, `descGuarded` in Check.lean): every
+-- `drec`/`dhrec` must occur under a non-recursive `darg` field, so a recursive position
+-- is a field of the value, not the value itself. `μ X. X` (a description that is only
+-- recursion) is rejected; `ν` does not use this check (`ν X. X` is a valid coinductive
+-- type; its productivity is `cocon`/`out`). A description whose head is not a spine (a
+-- variable, `dret`, …) is left alone: the kernel cannot see its spine. A constant is
+-- looked through to its inline value (depth-bounded), so a `def` cannot hide it.
+def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
+  | .darg _ _ E => descGuarded depth .true E
+  | .drec _ _ E => Bool.and guarded (descGuarded depth guarded E)
+  | .dhrec _ _ _ E => Bool.and guarded (descGuarded depth guarded E)
+  | .lam b => descGuarded depth guarded b
+  | .ann t _ => descGuarded depth guarded t
+  | .ecase _ _ bs => tmsGuarded depth guarded bs
+  | .letE _ _ b => descGuarded depth guarded b
+  | .letq _ _ _ b => descGuarded depth guarded b
+  | .const _ _ _ v _ => match depth with
+    | .zero => .true
+    | .succ k => descGuarded k guarded v
+  | _ => .true
+def tmsGuarded (depth : Nat) (guarded : Bool) : Tms → Bool
+  | .tnil => .true
+  | .tcons t rest => Bool.and (descGuarded depth guarded t) (tmsGuarded depth guarded rest)
+end
+def unguardedDescription : String :=
+  "unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur under a non-recursive (Desc.arg) field; mu X. X is not an inductive type"
+
+mutual
 -- (given) `infer`, with the proof marker's requirement
 def infer (c : TCtx) (t : Tm) : TyRes := match inferW (TCtx.belowMarked c) t with
   | .ok ty u => match requireMarker c t ty with
@@ -3209,7 +3237,19 @@ def inferW : TCtx → Tm → TyRes
       | r => r
     | r => r
   | c, .nu l I D i sz => match check (TCtx.erase c) sz .vsize with
-    | .ok _ _ => infer c (.mu l I D i)
+    | .ok _ _ => match inferUniv c I with
+      | .ok (.vsort lI) _ => match lvlEquiv lI (lsucc l) with
+        | .false => .err "an index type must be in the data type's universe"
+        | .true =>
+          let vI := eval (TCtx.env c) I;
+          -- (no `descGuarded`: `ν X. X` is a valid coinductive type; `cocon`/`out` are
+          -- its productivity rule)
+          match check c D (.vdesc l vI) with
+          | .ok _ _ => match check c i vI with
+            | .ok _ _ => .ok (.vsort (lsucc l)) (uZeros (TCtx.lvl c))
+            | r => r
+          | r => r
+      | r => r
     | r => r
   | c, .out x => match infer c x with
     | .ok ty u => match whnf ty with
@@ -3269,9 +3309,11 @@ def inferW : TCtx → Tm → TyRes
       | .true =>
         let vI := eval (TCtx.env c) I;
         match check c D (.vdesc l vI) with
-        | .ok _ _ => match check c i vI with
-          | .ok _ _ => .ok (.vsort (lsucc l)) (uZeros (TCtx.lvl c))
-          | r => r
+        | .ok _ _ => match descGuarded 16 .false D with
+          | .false => .err unguardedDescription
+          | .true => match check c i vI with
+            | .ok _ _ => .ok (.vsort (lsucc l)) (uZeros (TCtx.lvl c))
+            | r => r
         | r => r
     | r => r
   | c, .delim v P a b d e D => match infer c D with

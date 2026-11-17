@@ -26,10 +26,11 @@ different key, a lower `(seq)`, or a rewrite of the same sequence. The snapshot'
 chain ties every entry to the signature, and `covers` refuses an index whose entries
 differ from it.
 
-This is the snapshot variant of the first signing stage in
-`wiz-notes/grail-index-signing.md`: one signature covers the whole index, and `(seq)` and
-`(updated)` are the rollback and freshness signals. Transparency logs (Sigsum/Rekor) are
-deliberately absent.
+This is the snapshot variant of the first signing stage: one signature covers the whole
+index, and `(seq)` and `(updated)` are the rollback and freshness signals. Archives are
+not signed one by one: the index state is signed and the hash chain binds each archive
+to it. Transparency logs (Sigsum/Rekor) are deliberately absent: a log nobody monitors
+changes the trust story without improving it.
 -/
 
 namespace Grail

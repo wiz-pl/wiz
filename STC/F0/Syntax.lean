@@ -2,7 +2,7 @@ import STC.F0.Sort
 /-!
 # F0 terms
 
-The F0 syntax of `/workspace/wiz-notes/stc-m0-spec.md` §2: the rules of T0 plus `ULift`,
+The F0 syntax (see `STC.lean`'s module doc): the rules of T0 plus `ULift`,
 with closed three sorts, and nothing of T1/T2.
 
 Departures from `WizMeta/Syntax.lean`, all deliberate:

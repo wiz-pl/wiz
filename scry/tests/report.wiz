@@ -1,0 +1,116 @@
+-- test: run
+import Sys
+import Scry.ReportCmd
+-- `scry report`: the self-contained HTML page.
+--
+-- What this pins:
+--
+-- * a tainted fixture produces a finding, a highlighted sink row and numbered path
+--   marks; the chain, CWE and evidence authority are on the page;
+-- * a safe file is listed but has no finding, and the page says a clean result is not
+--   a proof;
+-- * an XSS-shaped C string is **escaped** (`<script>` appears only as `&lt;script&gt;`),
+--   so a source file cannot inject markup;
+-- * a directory is one page with a sorted file list and finding-id anchors (not line
+--   anchors);
+-- * two runs are byte-identical (no timestamp, stable order and ids);
+-- * `--diff` prints the suppressed count and keeps the suppressed finding in a details
+--   block instead of deleting it.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def run (args : List String) : EIO Nat := Scry.reportCmd args
+
+def read (p : String) : EIO String := FS.readFile p
+
+def ensureBuild : EIO Unit := do
+  ok ← EIO.lift (FS.exists "build");
+  match ok with
+  | .true => EIO.pure ()
+  | .false => do
+    FS.createDir "build";
+    EIO.pure ()
+
+def main : IO Unit := EIO.toIO (do
+  ensureBuild;
+
+  -- 1. One tainted file: sink row, path marks, chain, CWE, evidence.
+  n1 ← run ["tests/fixtures/report/taint.c", "--out", "build/report-taint.html"];
+  check "single: exit 0" (Nat.beq n1 0);
+  p1 ← read "build/report-taint.html";
+  check "single: sink row" (String.contains p1 "class=\"sink\"");
+  check "single: source step 1" (String.contains p1 "step-tag\">1 source");
+  check "single: flow step 2" (String.contains p1 "step-tag\">2 flow");
+  check "single: sink step 3" (String.contains p1 "step-tag\">3 sink");
+  check "single: chain" (String.contains p1 "source &rarr; flow &rarr; sink");
+  check "single: CWE-78" (String.contains p1 "CWE-78 (T1)");
+  check "single: checked evidence" (String.contains p1 "static (L1); certificate (L2, checked)");
+  check "single: no script tag" (Bool.not (String.contains p1 "<script"));
+  check "single: no remote resource"
+    (Bool.and (Bool.not (String.contains p1 "http://"))
+      (Bool.not (String.contains p1 "https://")));
+
+  -- 2. Two runs are byte-identical: no timestamp, sorted findings, stable ids.
+  n2 ← run ["tests/fixtures/report/taint.c", "--out", "build/report-taint-2.html"];
+  check "determinism: exit 0" (Nat.beq n2 0);
+  p2 ← read "build/report-taint-2.html";
+  check "determinism: byte-identical" (String.eq p1 p2);
+  check "determinism: finding-id anchor" (String.contains p1 "id=\"f_");
+  check "determinism: no line anchor" (Bool.not (String.contains p1 "id=\"line-"));
+
+  -- 3. A directory: one page, sorted file list, the safe file has no finding.
+  n3 ← run ["tests/fixtures/report", "--out", "build/report-dir.html"];
+  check "dir: exit 0" (Nat.beq n3 0);
+  d1 ← read "build/report-dir.html";
+  check "dir: lists the tainted file" (String.contains d1 "tests/fixtures/report/taint.c");
+  check "dir: lists the safe file" (String.contains d1 "tests/fixtures/report/safe.c");
+  check "dir: lists the XSS file" (String.contains d1 "tests/fixtures/report/xss.c");
+  check "dir: two findings" (String.contains d1 "<td>2</td><td>2</td><td>0</td>");
+  check "dir: safe file says it is not a proof"
+    (String.contains d1 "A clean analysis is not a proof of safety");
+  check "dir: stable file anchors" (String.contains d1 "id=\"file_");
+
+  -- 4. XSS-shaped source is text: the raw tag never appears, the escaped form does.
+  check "xss: no raw <script>" (Bool.not (String.contains d1 "<script"));
+  check "xss: escaped <script>" (String.contains d1 "&lt;script&gt;");
+  check "xss: escaped closing style" (String.contains d1 "&lt;/style&gt;");
+  check "xss: escaped ampersand" (String.contains d1 "x&amp;y");
+  check "xss: escaped quote in source" (String.contains d1 "&quot;quoted&quot;");
+
+  -- 5. The directory page is deterministic too.
+  n4 ← run ["tests/fixtures/report", "--out", "build/report-dir-2.html"];
+  check "dir determinism: exit 0" (Nat.beq n4 0);
+  d2 ← read "build/report-dir-2.html";
+  check "dir determinism: byte-identical" (String.eq d1 d2);
+
+  -- 6. --diff: the suppressed count is explicit; the finding stays in details.
+  n5 ← run ["tests/fixtures/taint-unsafe.c", "--changed-lines",
+    "tests/fixtures/diff/unsafe-other.patch", "--out", "build/report-diff.html"];
+  check "diff: exit 0" (Nat.beq n5 0);
+  pd ← read "build/report-diff.html";
+  check "diff: suppressed count"
+    (String.contains pd "diff: 0 finding(s) shown, 1 suppressed on unchanged lines");
+  check "diff: suppressed block" (String.contains pd "Suppressed findings (1)");
+  check "diff: finding is not deleted" (String.contains pd "id=\"f_");
+
+  -- --diff all is unfiltered and says so.
+  n6 ← run ["tests/fixtures/taint-unsafe.c", "--diff", "all", "--out",
+    "build/report-diff-all.html"];
+  check "diff all: exit 0" (Nat.beq n6 0);
+  pa ← read "build/report-diff-all.html";
+  check "diff all: header" (String.contains pa "diff: all findings");
+  check "diff all: no suppressed block" (Bool.not (String.contains pa "Suppressed findings"));
+
+  -- 7. Flag validation.
+  match Scry.reportArgs ["tests/fixtures/report/taint.c", "--diff", "HEAD",
+      "--changed-lines", "tests/fixtures/diff/unsafe-other.patch"] with
+  | .error _ => check "flags: --diff and --changed-lines conflict" .true
+  | .ok _ => check "flags: --diff and --changed-lines conflict" .false;
+  match Scry.reportArgs ["tests/fixtures/report/taint.c", "--diff-context", "1"] with
+  | .error _ => check "flags: --diff-context needs a diff" .true
+  | .ok _ => check "flags: --diff-context needs a diff" .false
+)

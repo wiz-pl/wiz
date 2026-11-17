@@ -402,4 +402,4 @@ time; compare groups over runs, not runs on different runners.
 
 `scripts/test-perf-dashboard.sh` checks the two input formats and the self-contained
 output against the small fixtures in `scripts/fixtures/perf/` (under a second, no
-toolchain). The page is published from the notes directory (`wiz-notes/`).
+toolchain). The page itself is published outside this repository.

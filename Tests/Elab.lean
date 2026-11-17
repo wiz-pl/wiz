@@ -1140,6 +1140,31 @@ def sizeArgs : List MTm :=
   [mus 0 (unit 0) natD star star, streamAt (enum 2),
    natAt szInf, ann (lam (natAt (var 0))) (pi size (univ 0)), ann (lam (streamAt (szSuc (var 0)))) (pi size (univ 0))]
 
+/-- The guarded inductive description: `μ` rejects a description whose recursive field is
+not under a non-recursive (`arg`) field — `μ X. X`, the identity functor, has no
+induction principle. `ν X. X` is a valid coinductive type (guardedness there is
+`cocon`/`out`), so the same description is accepted at `ν`. `Nat`, a list, a binary tree,
+a guarded stream and a bare-observation stream are accepted; a size that is not a `Size`
+and a size variable that escapes its binder are rejected by the size check (K3). -/
+def muSize : List (MTm × Bool) :=
+  let listD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (dret star)))]))
+  let treeD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (darg (enum 2) (lam (drec star (dret star))))))]))
+  [(natTy, true),
+   (mu 0 (unit 0) listD star, true),
+   (mu 0 (unit 0) treeD star, true),
+   (nu 0 (unit 0) streamD star szInf, true),
+   (streamAt (szSuc szInf), true),
+   -- unguarded for μ: a description that is only a recursive field (`μ X. X`); the same
+   -- description is a valid coinductive type (`ν X. X`: one observation, itself)
+   (mus 0 (unit 0) (drec star (dret star)) star szInf, false),
+   (nu 0 (unit 0) (drec star (dret star)) star szInf, true),
+   -- a size that is not a Size, and a size variable that escapes its binder
+   (mus 0 (unit 0) natD star star, false),
+   (mus 0 (unit 0) natD star (var 0), false),
+   (nu 0 (unit 0) streamD star (var 0), false)]
+
 /-- Q4 (fixed): a description field must live exactly in `Sort (l+1)`, the universe
 `Desc.elim`'s `marg` takes it from. It used to be enough for it to fit (`Sort k`,
 `k ≤ l+1`), and universes aren't cumulative, so `Desc.elim` could reduce to a term of the
@@ -1348,7 +1373,7 @@ def transpProp : List MTm :=
 /-- Terms the differential test always checks (well-typed ones the generator rarely
 builds whole), before the random ones. -/
 def samples : List MTm :=
-  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
+  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ muSize.map (·.1) ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
    natTy, natZero, natSucc natZero, natSucc (natSucc natZero), ann natD (desc 0 (unit 0)),
    eq natTy natZero (natSucc natZero), eq natTy (natSucc natZero) (natSucc natZero), refl natTy (natSucc natZero),
    delim 1 (lam (unit 0)) (lam star) (lams 4 star) (lams 4 star) (lams 5 star) (ann natD (desc 0 (unit 0))),

@@ -63,8 +63,24 @@ def inductiveGroup : Group where
         fails (indPrelude ++ "def bad : Vec Nat (.succ .zero) := .nil") "type mismatch" },
     { name := "non-uniform parameters are rejected", run := fun _ =>
         fails "inductive T (A : Type) where\n  | mk (x : T Unit)" "parameters" },
+    { name := "guarded recursive descriptions: List and a binary tree", run := fun _ =>
+        ok (indPrelude ++ "inductive MyList (A : Type) where\n  | nil\n  | cons (x : A) (xs : MyList A)\n\ninductive Tree where\n  | leaf\n  | node (l : Tree) (r : Tree)\n") },
     { name := "negative occurrences are rejected", run := fun _ =>
         fails "inductive Bad where\n  | mk (f : Bad → Unit)" "may only occur" },
+    { name := "a positive, not strictly positive occurrence is rejected", run := fun _ =>
+        fails "inductive Bad where\n  | mk (f : (Bad → Unit) → Unit)" "may only occur" },
+    { name := "an unguarded recursive description (μ X. X) is rejected", run := fun _ =>
+        fails "def Bad : Type := μ (Desc.rec 1 () (Desc.ret ()) : Desc Unit) ()" "unguarded recursive description" },
+    { name := "… also when the description is a definition (the check looks through it)", run := fun _ =>
+        fails "def D : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef Bad : Type := μ D ()" "unguarded recursive description" },
+    { name := "a size variable that escapes its binder is rejected", run := fun _ =>
+        fails (indPrelude ++ "def bad : Type := (Nat)^i") "unknown identifier" },
+    { name := "a size must be a Size (a data variable is rejected)", run := fun _ =>
+        fails (indPrelude ++ "def bad (n : Nat) : Type := (Nat)^n") "type mismatch" },
+    { name := "a guarded coinductive description (ν) is accepted", run := fun _ =>
+        ok "def S : Type := ν (Desc.arg 1 Unit (fun _ => Desc.rec 1 () (Desc.ret ())) : Desc Unit) ()" },
+    { name := "ν X. X, an observation of itself, is a valid coinductive type", run := fun _ =>
+        ok "def S : Type := ν (Desc.rec 1 () (Desc.ret ()) : Desc Unit) ()" },
     { name := "fields may not depend on recursive fields", run := fun _ =>
         fails "inductive T : Type where\n  | mk (x : T) (y : (x, x).1 = x)" "may not depend" },
     { name := "Nat.rec computes", run := fun _ =>

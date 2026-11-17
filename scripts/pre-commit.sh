@@ -174,6 +174,11 @@ check_trust_fixtures() {
   TESTS_BIN="$tests_bin" "$root/Tests/trust-ledger/run.sh"
 }
 
+check_host_unsafe() {
+  python3 "$root/scripts/host-unsafe-ledger.py" --root "$root" --check &&
+    "$root/Tests/host-unsafe-ledger/run.sh"
+}
+
 check_trust_ledger() {
   TESTS_BIN="$tests_bin" "$root/scripts/trust-ledger.sh" --check
 }
@@ -408,6 +413,16 @@ elif [ ! -x "$root/Tests/trust-ledger/run.sh" ]; then
   skip_check "trust-ledger fixtures" "Tests/trust-ledger/run.sh is missing"
 else
   run_check "trust-ledger fixtures" check_trust_fixtures
+fi
+
+# the host-side unsafe ledger (the host Lean's `unsafe`/`implemented_by`/`extern`) and its
+# fixtures: python3 only, no build
+if ! have python3; then
+  skip_check "host unsafe ledger" "python3 not found"
+elif [ ! -f "$root/.github/host-unsafe.tsv" ] || [ ! -f "$root/scripts/host-unsafe-ledger.py" ]; then
+  skip_check "host unsafe ledger" "no .github/host-unsafe.tsv in this tree"
+else
+  run_check "host unsafe ledger" check_host_unsafe
 fi
 
 # the skip lint's own rules (synthetic logs: no test run needed)

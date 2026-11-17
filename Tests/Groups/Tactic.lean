@@ -219,7 +219,7 @@ def tacticGroup : Group where
            "r2 : (a : Nat) → (b : Nat) → a = b → (P : Nat → Type) → P a → P b"]
         failsLib "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n  rw h\n  exact pc" "rewrite: the goal does not mention a"
         failsLib "import Prelude\ndef r (a : Nat) (P : Nat → Prop) (pa : P a) : P a := by\n  rw pa\n  exact pa" "rewrite: not an equation" },
-    -- simp (stage 6h; wiz-notes/simp-design.md §8.1)
+    -- simp (stage 6h, docs/stages/06-macros/simp.md: the first stage's acceptance tests)
     { name := "simp: a local equation rewrites under a context; a quantified lemma is matched", run := fun _ =>
         okLib ("import Prelude\n" ++
           "def s1a (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by\n  simp [h]\n  trace_state\n  exact pb\n" ++
