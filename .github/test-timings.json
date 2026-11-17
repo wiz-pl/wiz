@@ -238,6 +238,9 @@
    "transitive resolution: the lock is the closure, fetch and build use it": {"seconds": 20.558},
    "two commits of one dependency are refused": {"seconds": 16.41}
   },
+  "grail-e2e": {
+   "new → dep → lock → build → vendor → publish → consume offline": {"seconds": 84.591}
+  },
   "grail-hygiene": {
    "a time limit kills the job's whole process group": {"seconds": 15.623},
    "killing grail (SIGKILL) kills its jobs": {"seconds": 12.471},
