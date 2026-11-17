@@ -175,23 +175,25 @@ never turns a deterministic failure into a pass. Add an entry in a PR with a rea
 an expiry that leaves time to fix or replace the test; refresh the date only with a new
 reason, never by deleting the entry silently.
 
-**In CI.** The test shard's `tests` step has `continue-on-error: true`, so a failed
-shard reaches the classifier instead of ending the job. `scripts/flaky-ci.sh shard`
-runs `scripts/flaky.py --from-log logs/<shard>.log` with `--budget 600`, writes
-`logs/<shard>-flaky.json` (uploaded with the `test-log-*` artifact) and a Markdown
-section in the run summary, and exits 0 only when every failure is an active quarantine
-entry. The last step, `scripts/flaky-ci.sh verdict`, then makes the job green only when
-the tests passed or the classifier cleared the failure; a deterministic failure, an
+**In CI: not wired yet.** PR #369 added the classifier and its CI glue, but
+`.github/workflows/ci.yml` does not call `scripts/flaky-ci.sh` (nothing under `.github/`
+mentions `flaky`), so the shard's `tests` step has no `continue-on-error`: a failed shard
+still ends the job and is not classified, no report is written, and no expiry runs. The
+glue is ready for the wiring it documents at the top of the script — `shard` on a failed
+shard (`scripts/flaky.py --from-log logs/<shard>.log`, `--budget 600`, writing
+`logs/<shard>-flaky.json` and a summary), then `verdict` with `if: always()`, then
+`expiry` in the `result` job — and with that wiring a shard would be green only when the
+tests passed or the classifier cleared every failure (a deterministic failure, an
 incomplete measurement, a source failure that only skips, or a flaky case with no active
-entry keeps the job red. `scripts/flaky-ci.sh expiry` runs in the `result` job with
-`if: always()` and fails it (naming the entry and its owner) from the entry's expiry
-date on. The `shard` mode prints the shard, case, class, seed(s) and quarantine expiry
-in one table.
+entry keeps it red). Until then the classifier is a local tool:
+`scripts/flaky-ci.sh self-test` (no driver, no build) and the `shard`/`verdict`/`expiry`
+modes run by hand.
 
-**What a failed shard costs.** The classifier reruns each failing case five times alone
-and a suspect five more times after a predecessor: about ten driver runs per failing
-case, plus two `--list-cases` calls. The whole classification is capped at 600 seconds
-of wall time per failed shard (exit 4 if it runs out, which keeps the shard red). It
+**What a failed shard costs when the classifier runs.** The classifier reruns each
+failing case five times alone and a suspect five more times after a predecessor: about
+ten driver runs per failing case, plus two `--list-cases` calls. The whole
+classification is capped at 600 seconds of wall time per failed shard (exit 4 if it runs
+out, which keeps the shard red). It
 runs in the same job as the shard, so it uses that job's store paths, `~/.cache/wiz`
 (the helper passes it as `--cache`) and `.grail`; on the self-hosted runner this is the
 same incremental path, while a cold cache pays elaboration again for every rerun. A
@@ -393,9 +395,14 @@ scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
 scripts/check-repro.sh --json          # one JSON object on stdout
 scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
 scripts/check-repro.sh --compiler-a A --compiler-b B
+scripts/check-repro.sh --self-test     # the skip and empty-tree rules (no compiler)
 ```
 
-It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+A skip is not a pass: when `wiz` is not built, `grail` is missing or `WIZ_LLC` is not
+set, the script exits 2 (with `--json`, `ok:false, status:"skip"`). `--allow-skip`
+accepts that explicitly (exit 0, `"allowed":true` in the JSON); CI never passes it. A
+label the run must cover cannot be skipped quietly, and a comparison with zero files on
+either side is a failure, not `ok, 0 files`. The compiler comparison
 keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
 different compiler input (and a different `RUNPATH` in the executable), not a path
 variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
@@ -714,7 +721,10 @@ the elan toolchain, so the setup action keeps the elan cache for those
   is pinned with `taskset` to `WIZ_BENCH_CPUSET` (otherwise two CPUs are left free).
   `scripts/bench-threshold.py` gates on the **median paired ratio** (default 10%, at
   least 5 pairs per mode), not on absolute time, and writes the table to the job
-  summary; the run JSON records the machine id, CPU set and CPU model. `scry bench
+  summary; the run JSON records the machine id, CPU set and CPU model. Against the
+  checked-in baseline a "no gate" result (fewer than 5 comparable pairs) is a failure,
+  and so is a baseline mode the run no longer contains: neither a mode dropped from the
+  run nor an unmeasured one is a pass. `scry bench
   --no-timing --fail-on-regression` is the second, deterministic corpus gate. On a
   green night the current executable becomes the next A side; the first run compares
   the build with itself, and "Run workflow" with `bootstrap: true` does that again
