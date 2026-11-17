@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's Goals pane answers **completions** (`textDocument/completion`):
+  Ctrl-Space in the editor asks the in-page server for the names in scope, the panel lists
+  them above Goals, and Tab/Enter inserts the chosen label; Escape or typing closes the
+  list. The in-page server advertises `completionProvider` and answers from a new
+  `wiz_playground_names` export (the frontend's global environment after the same check,
+  newest declaration first, with each one's type as `detail`; cached per document text,
+  filtered by the identifier prefix before the caret). Local binders are not listed, and a
+  module without the export answers an empty list.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal

@@ -213,6 +213,7 @@ export class LspClient {
           synchronization: { dynamicRegistration: false, willSave: false, didSave: false },
           publishDiagnostics: { relatedInformation: false, versionSupport: true },
           hover: { contentFormat: ["markdown", "plaintext"] },
+          completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"] } },
         },
         // Ask for `wiz/elaborated` (the server only sends it to clients that do).
         experimental: { wizElaborated: true, wizInfoview: true },
@@ -395,6 +396,7 @@ export class LspClient {
 
   plainGoal(uri, position) { return this.request("wiz/plainGoal", this.positionParams(uri, position)); }
   plainTermGoal(uri, position) { return this.request("wiz/plainTermGoal", this.positionParams(uri, position)); }
+  completion(uri, position) { return this.request("textDocument/completion", this.positionParams(uri, position)); }
   interactiveGoals(uri, position) { return this.request("wiz/interactiveGoals", this.positionParams(uri, position)); }
   interactiveTermGoal(uri, position) { return this.request("wiz/interactiveTermGoal", this.positionParams(uri, position)); }
   subtermInfo(uri, session, ref) {

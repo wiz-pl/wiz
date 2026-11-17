@@ -282,6 +282,20 @@ export function renderDiagnostics(diagnostics) {
   }).join("")}</div>`;
 }
 
+// The completion popup: `{open, items, index, prefix}` from web/playground-lsp.js. It is a
+// list in the panel (a textarea has no menus); `data-completion` carries the item's index.
+export function renderCompletions(state) {
+  if (!state || !state.open) return "";
+  const items = Array.isArray(state.items) ? state.items : [];
+  const head = `<h4>completions${state.prefix ? " for <code>" + escapeHtml(state.prefix) + "</code>" : ""}` +
+    ` <span class="hint">Tab inserts, Esc closes</span></h4>`;
+  if (items.length === 0) return `<div class="completions">${head}<div class="nothing">no completions</div></div>`;
+  return `<div class="completions">${head}${items.map((item, i) =>
+    `<div class="completion${i === state.index ? " sel" : ""}" data-completion="${i}">` +
+    `<span class="label">${escapeHtml(item.label)}</span>` +
+    (item.detail ? `<span class="detail">${escapeHtml(item.detail)}</span>` : "") + `</div>`).join("")}</div>`;
+}
+
 // What the cursor selects (an optional `wiz/subtermInfo` answer).
 export function renderSelection(info) {
   if (!info || typeof info !== "object") return "";
@@ -329,7 +343,7 @@ function hintHtml(view) {
 
 // Render the whole panel. `view` is the page's model:
 //   {state, endpoint, serverInfo, infoview, message, diagnostics, goals, goalsKind,
-//    term, termKind, info, position}
+//    term, termKind, info, position, completions}
 // A stub `{innerHTML}` is enough (the Node test uses one).
 export function renderPanel(element, view) {
   if (!element) return;
@@ -337,6 +351,7 @@ export function renderPanel(element, view) {
   const open = state === "open";
   const parts = [`<div class="lsp-view" data-state="${escapeHtml(state)}">`, statusHtml(view), hintHtml(view)];
   if (open) {
+    if (view.completions) parts.push(renderCompletions(view.completions));
     parts.push(`<h3>Goals</h3>`);
     parts.push(view.goalsKind
       ? renderGoalResult(view.goals, view.goalsKind)

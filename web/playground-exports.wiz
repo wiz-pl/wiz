@@ -114,3 +114,59 @@ def playgroundCheck (text : String) : String :=
       (String.append (pgcLines (List.reverseOf out .nil)) "]}")
 
 export "wiz_playground_check" playgroundCheck
+
+-- (playground LSP, completions) `wiz_playground_names : String → String`: the names in
+-- scope after checking `text`, as JSON:
+--
+--   {"v":1,"names":[{"label":"…","kind":N,"detail":"…"}, …]}
+--
+-- `kind` is an LSP `CompletionItemKind` (7 a type, 3 a function, 6 anything else) and
+-- `detail` the declaration's type as the kernel prints it. The answer is the frontend's
+-- global environment (`Globals.all`, newest declaration first, each source name once), so
+-- the page filters it by the identifier prefix before the caret; the wasm side never sees
+-- the caret. Local binders are **not** listed: the frontend exposes the scope only while
+-- it elaborates a command (there is no info tree), so a definition's parameters are not
+-- in the answer. The names are read from the same `runCommands` as
+-- `wiz_playground_check`, so a name the check accepted is one this list has.
+
+def pgnHas (x : String) : List String → Bool
+  | .nil => .false
+  | .cons y ys => match strEq x y with
+    | .true => .true
+    | .false => pgnHas x ys
+
+def pgnKind (gs : Globals) (n : String) (ty : Tm) : Nat := match Globals.ind gs n with
+  | .some _ => 7
+  | .none => match ty with
+    | .pi _ _ _ _ _ => 3
+    | _ => 6
+
+def pgnEntry (gs : Globals) (n : String) (ty : Tm) (pns : List String) : String :=
+  String.append "{\"label\":" (String.append (pgcStr n) (String.append ",\"kind\":"
+    (String.append (Nat.toString (pgnKind gs n ty)) (String.append ",\"detail\":"
+      (String.append (pgcStr (show pns 0 ty)) "}")))))
+
+-- the globals from the newest back, skipping a source name already emitted
+partial def pgnGo (gs : Globals) (all : Array Global) (i : Nat) (seen : List String) (acc : String) : String :=
+  match Nat.lt i (Array.size all) with
+  | .false => acc
+  | .true => match Array.getD all (Nat.sub (Array.size all) (Nat.add i 1))
+      (.mk "" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty _ _ _ pns =>
+      let label := privBase n;
+      match pgnHas label seen with
+      | .true => pgnGo gs all (Nat.add i 1) seen acc
+      | .false =>
+        let entry := pgnEntry gs label ty pns;
+        let acc' := match strEq acc "" with
+          | .true => entry
+          | .false => String.append acc (String.append "," entry);
+        pgnGo gs all (Nat.add i 1) (.cons label seen) acc'
+
+def playgroundNames (text : String) : String :=
+  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  | .mk _ gs _ _ _ => String.append "{\"v\":1,\"names\":["
+      (String.append (pgnGo gs (Globals.all gs) 0 .nil "") "]}")
+
+export "wiz_playground_names" playgroundNames

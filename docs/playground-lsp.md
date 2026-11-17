@@ -67,7 +67,9 @@ self-hosted implementation of this document. The server may be given together wi
       "textDocument": {
         "synchronization": {"dynamicRegistration": false, "willSave": false, "didSave": false},
         "publishDiagnostics": {"relatedInformation": false, "versionSupport": true},
-        "hover": {"contentFormat": ["markdown", "plaintext"]}
+        "hover": {"contentFormat": ["markdown", "plaintext"]},
+        "completion": {"completionItem": {"snippetSupport": false,
+                         "documentationFormat": ["markdown", "plaintext"]}}
       },
       "experimental": {"wizElaborated": true, "wizInfoview": true}
     }
@@ -135,6 +137,7 @@ UTF-16 index.
 | `wiz/plainGoal` | `TextDocumentPositionParams` | `null` or `{goals: [string], rendered: string, messages?: [string]}` |
 | `wiz/plainTermGoal` | `TextDocumentPositionParams` | `null` or `{goal: string, range}` |
 | `wiz/subtermInfo` | `{"textDocument": {"uri"}, "session", "ref"}` | `null` or `{text, kind, name?, type?: TaggedText, definition?: Location, session}` |
+| `textDocument/completion` | `TextDocumentPositionParams` | `{isIncomplete: false, items: [CompletionItem]}` |
 
 The panel asks for the goals and the expected type at the caret. `wiz/interactiveGoals`
 and `wiz/interactiveTermGoal` are preferred because they carry tagged text; the plain
@@ -196,6 +199,37 @@ None of these is needed for compatibility, and a response that omits all of them
 renders (tagged text without a span is still selectable text; a click just has nowhere
 to jump).
 
+## Completions
+
+The editor is a plain `<textarea>`, so completions are asked for explicitly: **Ctrl-Space**
+(also Cmd-Space) requests them at the caret, and the panel shows the answer as a list above
+Goals. ArrowUp/ArrowDown choose, **Tab** or **Enter** inserts the chosen label over the
+identifier before the caret, **Escape** closes the list, and typing closes it (the list
+would be stale). Clicking an entry inserts it too. There is no automatic popup: a textarea
+has no menu, and a popup anchored at the caret would need a hidden mirror element for the
+geometry, which this pane does not carry.
+
+The request is `textDocument/completion` with `TextDocumentPositionParams`; the result is
+an LSP `CompletionList`, `{"isIncomplete": false, "items": [{"label", "kind"?, "detail"?}]}`.
+The client uses `label`, `kind` (an LSP `CompletionItemKind` number) and `detail`; other
+fields are ignored. A server may return an empty list for "nothing here"; the panel shows
+"no completions".
+
+The in-page server answers from the module's `wiz_playground_names : String → String`
+export (`web/playground-exports.wiz`): it runs the same check as the diagnostics
+(`runCommands`) and returns `{"v":1,"names":[{"label","kind","detail"}, …]}` — the
+frontend's **global environment**, newest declaration first, each source name once, with
+`detail` the declaration's type as the kernel prints it (`kind` 7 for a type, 3 for a
+function, 6 otherwise). The shim caches that answer per document text, so a second
+Ctrl-Space costs nothing, and filters by the identifier prefix before the caret (letters,
+digits, `_`, `'` and `.`; case-insensitive), capped at 200 items.
+
+Two honest limits: **local binders are not listed** (a definition's parameters, a `fun`'s
+variables, a tactic's hypotheses). The self-hosted frontend exposes the scope only while it
+elaborates a command and keeps no info tree, so there is no cheap way to ask "what is in
+scope at offset k". And a module built before the export existed (or one whose export
+fails) answers an empty list rather than an error.
+
 ## Fallback ladder
 
 1. Ask `wiz/interactiveGoals` and `wiz/interactiveTermGoal`.
@@ -254,8 +288,8 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
 6. **Goals.** `wiz/interactiveGoals` (hypotheses with names/types/values, target, tagged
    text, the state's range) and `wiz/interactiveTermGoal` (the expected type), plus the
    `wiz/plainGoal`/`wiz/plainTermGoal` fallbacks so degraded servers still work.
-7. **Optional.** `wiz/subtermInfo`, `wiz/elaborated`, `Hyp.range`, `SubtermTag.range`,
-   `InteractiveGoal.range`, `tree`.
+7. **Optional.** `textDocument/completion` (§ Completions), `wiz/subtermInfo`,
+   `wiz/elaborated`, `Hyp.range`, `SubtermTag.range`, `InteractiveGoal.range`, `tree`.
 
 The server must not require `stdin` (the page is its own editor), must tolerate any
 number of clients (one document each), and may share state between them as the Lean
@@ -267,6 +301,10 @@ server does.
   handshake, `didOpen` with empty diagnostics, goals/term rendering with spans and the
   term tree, a diagnostics update after `didChange`, the plain fallback, close and
   reconnect, the no-server path and no unhandled rejections. It needs no Wiz build.
+* `node web/selfhost_lsp_test.mjs` — the in-page server under Node with a stub engine:
+  the command splitter, the check JSON and index, the handshake, diagnostics, completions
+  (prefix filtering, the empty prefix, a module without the export), and the page's
+  wiring (Ctrl-Space, Tab).
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and

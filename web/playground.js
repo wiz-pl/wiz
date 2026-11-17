@@ -53,6 +53,18 @@ function checkSource(src) {
   return text;
 }
 
+// (completions) `wiz_playground_names`: the names in scope after a check, as JSON; null
+// with a module built before it existed (the pane then lists nothing).
+function namesSource(src) {
+  if (typeof wasm._wiz_playground_names !== "function") return null;
+  const p = wasm.stringToNewUTF8(src);
+  const r = wasm._wiz_playground_names(big(p));
+  wasm._free(big(p));
+  const text = r ? wasm.UTF8ToString(Number(r)) : null;
+  if (r) wasm._free(r);
+  return text;
+}
+
 function line(text) {
   const el = document.createElement("div");
   el.className = "line";
@@ -122,6 +134,7 @@ const selfhost = typeof location !== "undefined" && wantsSelfhost(location.searc
   ? selfhostEndpoint({
     evaluate: (src) => engineLoaded.then(() => evalSource(src)),
     check: (src) => engineLoaded.then(() => checkSource(src)),
+    names: (src) => engineLoaded.then(() => namesSource(src)),
   })
   : undefined;
 startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });

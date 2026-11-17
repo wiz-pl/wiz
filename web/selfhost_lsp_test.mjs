@@ -16,6 +16,7 @@ import {
   isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
   SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
+  completionPrefix, parseNames, filterCompletions,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
@@ -430,7 +431,112 @@ check("check: no lines", parseCheck('{"v":1}'), null);
   c2.close();
 }
 
-// ## 9. Nothing escaped
+// ## 9. Completions (`wiz_playground_names` + `textDocument/completion`)
+
+// The stub of the export: four names, the shape `{"v":1,"names":[{label,kind,detail?}]}`.
+const NAMES = JSON.stringify({ v: 1, names: [
+  { label: "twice", kind: 3, detail: "(x0 : Nat) → Nat" },
+  { label: "Nat.add", kind: 3 },
+  { label: "natPred", kind: 6 },
+  { label: "n", kind: 6 },
+] });
+const stubNames = () => NAMES;
+
+check("prefix: after an identifier", completionPrefix("x := tw", 7), { start: 5, prefix: "tw" });
+check("prefix: a dotted name", completionPrefix("Nat.ad", 6).prefix, "Nat.ad");
+check("prefix: after a space", completionPrefix("= ", 2), { start: 2, prefix: "" });
+check("prefix: at the start", completionPrefix("twice", 0).prefix, "");
+check("names: JSON", parseNames(NAMES).map((n) => n.label), ["twice", "Nat.add", "natPred", "n"]);
+check("names: a bare array", parseNames('[{"label":"a"}]'), [{ label: "a", kind: 6 }]);
+check("names: garbage", parseNames("{"), []);
+check("names: an old module's null", parseNames(null), []);
+check("filter: the prefix", filterCompletions(parseNames(NAMES), "tw").map((n) => n.label), ["twice"]);
+check("filter: case-insensitive", filterCompletions(parseNames(NAMES), "NAT").map((n) => n.label), ["Nat.add", "natPred"]);
+check("filter: dotted", filterCompletions(parseNames(NAMES), "Nat.").map((n) => n.label), ["Nat.add"]);
+check("filter: no match", filterCompletions(parseNames(NAMES), "zz"), []);
+check("filter: an empty prefix keeps the order", filterCompletions(parseNames(NAMES), "").map((n) => n.label),
+  ["twice", "Nat.add", "natPred", "n"]);
+check("filter: the detail survives", filterCompletions(parseNames(NAMES), "tw")[0].detail, "(x0 : Nat) → Nat");
+check("filter: a cap", filterCompletions(parseNames(NAMES), "", 2).length, 2);
+{
+  // the handshake advertises completions, and the answer is filtered by the caret's prefix
+  const c3 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (s) => stubCheck(s), names: stubNames,
+  }) });
+  await c3.connect();
+  checkThat("completion: advertised", (c3.capabilities.completionProvider || {}).triggerCharacters !== undefined,
+    JSON.stringify(c3.capabilities));
+  const doc = "def twice (n : Nat) : Nat := n + n\n#eval tw";
+  const got = waitFor(c3, "diagnostics");
+  c3.openDocument(uri, doc);
+  await got;
+  const answer = await c3.completion(uri, { line: 1, character: 8 });
+  check("completion: isIncomplete", answer.isIncomplete, false);
+  check("completion: the prefix", answer.items.map((i) => i.label), ["twice"]);
+  check("completion: the kind and detail", [answer.items[0].kind, answer.items[0].detail], [3, "(x0 : Nat) → Nat"]);
+  const empty = await c3.completion(uri, { line: 1, character: 6 });
+  check("completion: an empty prefix lists them all", empty.items.map((i) => i.label),
+    ["twice", "Nat.add", "natPred", "n"]);
+  check("completion: none for an unknown prefix", (await c3.completion(uri, { line: 1, character: 8 })), answer);
+  // the names are asked once per document text, not once per request
+  let asked = 0;
+  const c4 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (s) => stubCheck(s), names: (s) => { asked++; return stubNames(s); },
+  }) });
+  await c4.connect();
+  const got4 = waitFor(c4, "diagnostics");
+  c4.openDocument(uri, doc);
+  await got4;
+  await c4.completion(uri, { line: 1, character: 7 });
+  await c4.completion(uri, { line: 1, character: 8 });
+  check("completion: names cached per text", asked, 1);
+  c4.close();
+  c3.close();
+}
+{
+  // a module without the export: an empty list, never an error
+  const server = new SelfhostServer({ evaluate: stubEval, names: undefined });
+  check("completion: no names export is an empty list",
+    (await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'))[0].result
+      .capabilities.completionProvider !== undefined, true);
+  await server.handle(JSON.stringify({ jsonrpc: "2.0", method: "textDocument/didOpen",
+    params: { textDocument: { uri: "u", version: 1, text: "def a : Nat := 1\n" } } }));
+  const out = await server.handle('{"jsonrpc":"2.0","id":2,"method":"textDocument/completion",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("completion: no export, no items", [out[0].result.isIncomplete, out[0].result.items], [false, []]);
+  // before the handshake an unknown method is still refused, and an unopened document is
+  // an invalid parameter (not a crash)
+  const fresh = new SelfhostServer({ evaluate: stubEval });
+  const unknown = await fresh.handle('{"jsonrpc":"2.0","id":3,"method":"wiz/frobnicate","params":{}}');
+  check("before initialize: an unknown method", unknown[0].error.code, -32601);
+  const closed = await fresh.handle('{"jsonrpc":"2.0","id":4,"method":"textDocument/completion",' +
+    '"params":{"textDocument":{"uri":"nope"},"position":{"line":0,"character":0}}}');
+  check("before initialize: an unopened document", closed[0].error.code, -32602);
+}
+{
+  // the page: Ctrl-Space opens the list in the panel, Tab inserts over the prefix
+  const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval tw");
+  editor.selectionStart = editor.selectionEnd = editor.value.length;
+  const wire = fakePanel();
+  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval, names: stubNames }),
+    uri: "file:///complete.wiz" });
+  checkThat("completion: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
+  let prevented = 0;
+  for (const fn of editor.listeners.keydown || []) fn({ key: " ", ctrlKey: true, preventDefault: () => prevented++ });
+  checkThat("completion: Ctrl-Space opens the list", await waitUntil(() => wire.innerHTML.includes('class="completion')),
+    wire.innerHTML.slice(0, 600));
+  check("completion: the popup is filtered", (app.completions().items || []).map((i) => i.label), ["twice"]);
+  check("completion: Ctrl-Space was consumed", prevented, 1);
+  checkThat("completion: the popup says what it is", wire.innerHTML.includes("Tab inserts"),
+    wire.innerHTML.slice(0, 300));
+  for (const fn of editor.listeners.keydown || []) fn({ key: "Tab", preventDefault() {} });
+  check("completion: Tab inserted the label", editor.value.endsWith("#eval twice"), true);
+  check("completion: the list is closed", app.completions().open, false);
+  app.stop();
+}
+
+// ## 10. Nothing escaped
+
 
 await sleep(30);
 check("no unhandled rejections", rejections.length, 0);

@@ -26,6 +26,12 @@
 // `index` (positions → expected types and goal states, a later stage); `PositionIndex`
 // answers `wiz/plainTermGoal`/`wiz/plainGoal` from it with no further Wasm call.
 //
+// Completions: `initialize` advertises `completionProvider`, and `textDocument/completion`
+// asks the module's `wiz_playground_names` (web/playground-exports.wiz) for the names in
+// scope, once per document text (the answer is cached on the document), then filters by
+// the identifier prefix before the caret. Without the export the answer is an empty list,
+// never an error.
+//
 // `SelfhostServer.handle(text) → [message]` has the shape of the planned wasm export
 // `wiz_lsp_handle : String → String` (one JSON-RPC message in, a JSON array out), so a
 // later stage swaps its body for that call and keeps the socket.
@@ -351,17 +357,68 @@ export function offsetOf(text, position) {
   return Math.min(text.length, lineEnd(text, offset), offset + position.character);
 }
 
+// ## Completions
+
+// The identifier before the caret: Wiz names are made of letters, digits, `_`, `'` and
+// `.` (a dotted global such as `Nat.add`), so the scan runs back over exactly those.
+export function completionPrefix(text, offset) {
+  const at = Math.max(0, Math.min(offset, String(text || "").length));
+  let start = at;
+  while (start > 0) {
+    const c = text[start - 1];
+    if (!/[A-Za-z0-9_'.]/.test(c)) break;
+    start--;
+  }
+  return { start, prefix: text.slice(start, at) };
+}
+
+// `wiz_playground_names`'s JSON (or an already-parsed answer) as a list of
+// `{label, kind, detail}`; anything malformed is dropped.
+export function parseNames(json) {
+  if (json === null || json === undefined) return [];
+  let answer;
+  try { answer = typeof json === "string" ? JSON.parse(json) : json; } catch (_) { return []; }
+  const list = Array.isArray(answer) ? answer : (answer && Array.isArray(answer.names) ? answer.names : []);
+  const names = [];
+  for (const item of list) {
+    if (!item || typeof item.label !== "string" || item.label === "") continue;
+    const name = { label: item.label, kind: typeof item.kind === "number" ? item.kind : 6 };
+    if (typeof item.detail === "string" && item.detail !== "") name.detail = item.detail;
+    names.push(name);
+  }
+  return names;
+}
+
+// The names whose label starts with `prefix` (case-insensitive), as LSP completion items.
+// An empty prefix keeps the answer order (`newest declaration first`), capped so a large
+// Prelude cannot flood the popup.
+export function filterCompletions(names, prefix, limit = 200) {
+  const want = String(prefix || "").toLowerCase();
+  const items = [];
+  for (const name of Array.isArray(names) ? names : []) {
+    if (!name || typeof name.label !== "string") continue;
+    if (want !== "" && !name.label.toLowerCase().startsWith(want)) continue;
+    items.push(Object.assign({ label: name.label, kind: name.kind }, name.detail ? { detail: name.detail } : {}));
+    if (items.length >= limit) break;
+  }
+  return items;
+}
+
+
 // ## The server (one per connection; documents are per connection)
 
 // `evaluate(source) → string | Promise<string>` is `wiz_playground_eval` (the page waits
 // for its engine inside it); `check(source) → string | null | Promise<…>` is
-// `wiz_playground_check`, or null when the module has none (then `evaluate` is used).
+// `wiz_playground_check`, or null when the module has none (then `evaluate` is used);
+// `names(source) → string | null | Promise<…>` is `wiz_playground_names`, or null when
+// the module has none (then completions are an empty list).
 export class SelfhostServer {
-  constructor({ evaluate, check = null, serverInfo = SERVER_INFO } = {}) {
+  constructor({ evaluate, check = null, names = null, serverInfo = SERVER_INFO } = {}) {
     this.evaluate = evaluate;
     this.check = check;
+    this.names = names;
     this.serverInfo = serverInfo;
-    this.docs = new Map();     // uri → {text, version}
+    this.docs = new Map();     // uri → {text, version, index?, names?}
     this.session = 0;
     this.wantsElaborated = false;
     this.shutdown = false;
@@ -412,6 +469,7 @@ export class SelfhostServer {
             positionEncoding: "utf-16",
             textDocumentSync: 1,
             hoverProvider: false,
+            completionProvider: { triggerCharacters: ["."], resolveProvider: false },
             experimental: { wizInfoview: { version: 1, methods: SELFHOST_METHODS.slice() } },
           },
           serverInfo: this.serverInfo,
@@ -430,6 +488,15 @@ export class SelfhostServer {
         if (!doc.index || !doc.index.size || !params.position) return ok(null);
         const offset = offsetOf(doc.text, params.position);
         return ok(method === "wiz/plainGoal" ? doc.index.goal(offset) : doc.index.termGoal(offset));
+      }
+      case "textDocument/completion": {
+        const uri = params.textDocument && params.textDocument.uri;
+        const doc = this.docs.get(uri);
+        if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
+        if (!params.position) return ok({ isIncomplete: false, items: [] });
+        const offset = offsetOf(doc.text, params.position);
+        const { prefix } = completionPrefix(doc.text, offset);
+        return ok({ isIncomplete: false, items: filterCompletions(await this.namesOf(doc), prefix) });
       }
       case "textDocument/hover":
         return ok(null);
@@ -462,6 +529,20 @@ export class SelfhostServer {
       default:
         return [];   // initialized, exit, $/… : nothing to say
     }
+  }
+
+  // The names in scope for `doc`, once per document text: the module's
+  // `wiz_playground_names` (a whole check, so it is only asked for when the popup opens),
+  // or `[]` when the module has no export or the call failed.
+  async namesOf(doc) {
+    if (Array.isArray(doc.names)) return doc.names;
+    if (typeof this.names !== "function") { doc.names = []; return doc.names; }
+    try {
+      doc.names = parseNames(await this.names(withPrelude(doc.text).source));
+    } catch (_) {
+      doc.names = [];
+    }
+    return doc.names;
   }
 
   async publish(uri) {

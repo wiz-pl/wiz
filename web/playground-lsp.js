@@ -56,6 +56,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     termKind: null,
     info: null,
     position: null,
+    completions: null,
     canReconnect: false,
   };
 
@@ -118,6 +119,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   }
 
   function onEdit() {
+    closeCompletions();
     clearTimeout(changeTimer);
     changeTimer = setTimeout(() => {
       if (!client || client.state !== "open") return;
@@ -171,6 +173,12 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   }
 
   panel.addEventListener("click", (event) => {
+    const choice = event.target.closest ? event.target.closest("[data-completion]") : null;
+    if (choice && choice.dataset && choice.dataset.completion !== undefined) {
+      event.preventDefault();
+      acceptCompletion(Number(choice.dataset.completion));
+      return;
+    }
     const action = event.target.closest ? event.target.closest("[data-action]") : null;
     if (action && action.dataset.action === "reconnect") {
       event.preventDefault();
@@ -197,6 +205,97 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
       const step = name === "ArrowDown" || name === "ArrowRight" ? 1 : -1;
       selectTag(selected < 0 ? 0 : selected + step);
     },
+  });
+
+  // ## Completions
+  //
+  // A textarea has no popup, so `Ctrl-Space` asks the server for the names that start with
+  // the identifier before the caret and the panel shows them as a list (above Goals):
+  // ArrowUp/ArrowDown choose, Tab or Enter inserts the chosen label over the prefix,
+  // Escape closes, and typing closes it too (the list would be stale). The server does the
+  // prefix filtering, so a page whose module has no `wiz_playground_names` shows an empty
+  // list rather than failing.
+  let completing = { open: false, items: [], index: 0, prefix: "", start: 0 };
+  let completionGeneration = 0;
+
+  function closeCompletions() {
+    completionGeneration++;
+    if (!completing.open) return;
+    completing = { open: false, items: [], index: 0, prefix: "", start: 0 };
+    view.completions = null;
+    render();
+  }
+
+  async function requestCompletions() {
+    if (!client || client.state !== "open") return null;
+    const text = editor.value;
+    const caret = editor.selectionStart || 0;
+    let start = caret;
+    while (start > 0 && /[A-Za-z0-9_'.]/.test(text[start - 1])) start--;
+    const prefix = text.slice(start, caret);
+    const mine = ++completionGeneration;
+    let result = null;
+    try {
+      result = await client.completion(documentUri, positionAt(text, caret));
+    } catch (_) {
+      result = null;
+    }
+    if (mine !== completionGeneration) return null;
+    const items = result && Array.isArray(result.items) ? result.items.slice(0, 200) : [];
+    completing = { open: true, items, index: 0, prefix, start };
+    view.completions = completing;
+    render();
+    return completing;
+  }
+
+  // Insert the chosen item's label over the identifier before the caret; returns whether
+  // something was inserted.
+  function acceptCompletion(which) {
+    if (!completing.open) return false;
+    const item = completing.items[typeof which === "number" ? which : completing.index];
+    if (!item || typeof item.label !== "string") { closeCompletions(); return false; }
+    const text = editor.value;
+    const caret = editor.selectionStart || 0;
+    let start = caret;
+    while (start > 0 && /[A-Za-z0-9_'.]/.test(text[start - 1])) start--;
+    const value = text.slice(0, start) + item.label + text.slice(caret);
+    const at = start + item.label.length;
+    editor.value = value;
+    try { editor.setSelectionRange(at, at); } catch (_) { /* not a text field */ }
+    try { editor.focus({ preventScroll: true }); } catch (_) { try { editor.focus(); } catch (_) { /* no focus */ } }
+    closeCompletions();
+    onEdit();
+    scheduleRefresh(0);
+    return true;
+  }
+
+  editor.addEventListener("keydown", (event) => {
+    const key = event.key;
+    const space = key === " " || key === "Spacebar" || event.code === "Space";
+    if (space && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      requestCompletions();
+      return;
+    }
+    if (!completing.open) return;
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      const n = completing.items.length;
+      if (n === 0) return;
+      completing.index = (completing.index + (key === "ArrowDown" ? 1 : n - 1)) % n;
+      view.completions = completing;
+      render();
+      return;
+    }
+    if (key === "Tab" || key === "Enter") {
+      event.preventDefault();
+      acceptCompletion();
+      return;
+    }
+    if (key === "Escape") {
+      event.preventDefault();
+      closeCompletions();
+    }
   });
 
   // ## The connection
@@ -282,6 +381,10 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     client: () => client,
     refresh,
     reconnect,
+    complete: requestCompletions,
+    acceptCompletion,
+    closeCompletions,
+    completions: () => completing,
     stop() {
       if (!client) return;
       client.closeDocument(documentUri);
