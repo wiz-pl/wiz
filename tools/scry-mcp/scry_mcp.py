@@ -10,9 +10,12 @@ with respect to the workspace:
   drivers, and hands Scry the saved diff).
 * `scry_project` analyses a compile_commands.json project (`scry project DIR
   --taint --json --sarif …`). It runs the host preprocessor (`cc -E`) on the
-  project's files; Scry keeps only `-I`/`-D`/`-U`/`-include`/`-isystem` from the
-  database, and the bridge refuses a database whose files, directories or
-  include paths leave the readable roots.
+  project's files. The database's flags are checked against an explicit allowlist
+  first: `-I`/`-isystem`/`-iquote`/`-idirafter`/`-include` (their paths must stay
+  inside the readable roots), `-D`/`-U` and `-std=`; the driver's `-c`/`-o`/`-M…`
+  structure is dropped, and any other flag (`-B<dir>`, `-fplugin=`, `-specs=`,
+  `-wrapper`, `@file`, `-Xclang`, `-cc1`, …) is refused by name. That is what
+  keeps a repository-supplied database from choosing which program `cc` runs.
 * `scry_query`, `scry_explain` and `scry_facts` read a JSON fact store.
 * `scry_findings` lists or shows the findings database (`scry findings
   list|show`); it never scans, triages, reproduces or verifies.
@@ -250,25 +253,118 @@ def confine_sarif(sarif: Any, roots: list[str], root: Optional[str] = None) -> i
 # Compile databases
 
 
+#: Flags whose value names a path. The value (joined, `-Iinc`, or separate, `-I inc`)
+#: must stay inside the readable roots; system include directories are also allowed.
+PATH_FLAGS = ("-I", "-isystem", "-iquote", "-idirafter", "-include")
+#: Flags whose value is a macro name (`-DFOO=1`, `-U FOO`). They name no path.
+MACRO_FLAGS = ("-D", "-U")
+#: Flags that select the language version; they change predefined macros, nothing else.
+STD_PREFIXES = ("-std=", "--std=")
+#: The compile driver's own structure: consumed by Scry, never passed to `cc -E` (so
+#: `-o` cannot redirect the preprocessed text to a file and `-M` cannot replace it with
+#: make rules). Every real compile database has these.
+DROPPED_FLAGS = ("-c", "-M", "-MM", "-MD", "-MMD", "-MP", "-MG", "-s")
+#: Driver flags whose value is the next word or attached (`-oFILE`, `-MFdep`).
+DROPPED_VALUE_FLAGS = ("-o", "-MF", "-MT", "-MQ", "-MJ")
+
+
+def _joined(arg: str, flags: Iterable[str]) -> Optional[str]:
+    """The value attached to `arg` when it starts with one of `flags` (`-Iinc` → `inc`)."""
+    for flag in flags:
+        if arg.startswith(flag) and len(arg) > len(flag):
+            return arg[len(flag):]
+    return None
+
+
 def _include_paths(args: list[str]) -> list[str]:
+    """The include paths of a compile command (`-I`, `-isystem`, `-iquote`, `-idirafter`,
+    `-include`), in order, joined or separate."""
     out = []
     i = 0
     while i < len(args):
         arg = args[i]
-        for flag in ("-I", "-isystem", "-include", "-iquote", "-idirafter"):
-            if arg == flag and i + 1 < len(args):
+        if arg in PATH_FLAGS:
+            if i + 1 < len(args):
                 out.append(args[i + 1])
-                i += 1
-                break
-            if arg.startswith(flag) and len(arg) > len(flag) and flag in ("-I", "-isystem"):
-                out.append(arg[len(flag):])
-                break
+            i += 2
+            continue
+        value = _joined(arg, PATH_FLAGS)
+        if value is not None:
+            out.append(value)
         i += 1
     return out
 
 
+def _refused(file: str, arg: str) -> str:
+    return (f"compile_commands.json: refusing the flag {arg!r} for {file}: it is not on the "
+            f"allowlist for cc -E ({', '.join(PATH_FLAGS + MACRO_FLAGS + STD_PREFIXES)}); "
+            "the compile driver's -c/-o/-M options are dropped, anything else is refused")
+
+
+def _value(file: str, arg: str) -> str:
+    """A flag's separate value. A value that starts like another option is refused: `cc`
+    must never re-read `-I -Bbin` (or an `@file` expansion) as a flag Scry did not see."""
+    if arg.startswith(("-", "@")):
+        raise ToolError("invalid_args", _refused(file, arg))
+    return arg
+
+
+def _check_flags(file: str, args: list[str]) -> None:
+    """Refuse a compile command word outside the preprocessor allowlist.
+
+    `args` excludes the compiler (`argv[0]`). `-I`/`-isystem`/`-iquote`/`-idirafter`/
+    `-include` (with their value), `-D`/`-U` and `-std=`/`--std=` are allowed; the
+    driver's `-c`/`-o`/`-M…` structure and the source argument are dropped; every other
+    word — `-B`, `-fplugin`, `-specs`, `-wrapper`, `@file`, `-Xclang`, `-cc1`,
+    `-Xlinker`, `-imacros`, `--sysroot`, any other `-f…`/`-m…` — is refused by name.
+    This mirrors `Scry.parseCompdbFlags` in `scry/src/Scry/Project.wiz`.
+    """
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("@"):
+            raise ToolError("invalid_args", _refused(file, arg))
+        if arg in DROPPED_FLAGS:
+            i += 1
+            continue
+        if arg in DROPPED_VALUE_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            i += 2
+            continue
+        if _joined(arg, DROPPED_VALUE_FLAGS) is not None:
+            i += 1
+            continue
+        if arg in PATH_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            _value(file, args[i + 1])
+            i += 2
+            continue
+        if _joined(arg, PATH_FLAGS) is not None:
+            i += 1
+            continue
+        if arg in MACRO_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            _value(file, args[i + 1])
+            i += 2
+            continue
+        if _joined(arg, MACRO_FLAGS) is not None:
+            i += 1
+            continue
+        if arg.startswith(STD_PREFIXES):
+            i += 1
+            continue
+        if arg == file or arg == os.path.basename(file) or arg.endswith("/" + file):
+            i += 1
+            continue
+        raise ToolError("invalid_args", _refused(file, arg))
+
+
 def check_compdb(path: str, roots: list[str]) -> int:
-    """Refuse a compile database that reaches outside the readable roots; its entry count."""
+    """Refuse a compile database that reaches outside the readable roots or whose flags
+    are not on the `cc -E` allowlist; return its entry count."""
     try:
         with open(path, encoding="utf-8") as handle:
             entries = json.load(handle)
@@ -298,7 +394,9 @@ def check_compdb(path: str, roots: list[str]) -> int:
                 raise ToolError("invalid_args", f"{path}: unparsable command: {exc}") from exc
         else:
             args = []
-        for include in _include_paths(args):
+        # `args[0]` is the compiler: Scry drops it, so it never reaches `cc -E`.
+        _check_flags(file, args[1:])
+        for include in _include_paths(args[1:]):
             full = os.path.normpath(os.path.join(directory, include))
             if os.path.realpath(full).startswith(SYSTEM_INCLUDE_PREFIXES):
                 continue
@@ -357,7 +455,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Run Scry over a C project with a compile_commands.json (cross-file taint): per-file and "
             "project findings, symbols and counts. Runs the host preprocessor (cc -E) on the project's "
-            "files; the compile database must stay inside the workspace. The SARIF is kept as a resource."
+            "files; the compile database must stay inside the workspace and its flags must be on the "
+            "preprocessor allowlist (-I/-isystem/-iquote/-idirafter/-include, -D/-U, -std=); any other "
+            "flag is refused, not stripped. The SARIF is kept as a resource."
         ),
         "inputSchema": {
             "type": "object",
