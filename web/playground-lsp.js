@@ -19,6 +19,9 @@
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
 import { readGoalState, renderPanel, positionAt, parseSpan, rangeOffsets } from "./goals.js";
 import { delegate } from "./tagged.js";
+import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
+import { mountCompletions, wantsCompletions } from "./completions.js";
+import { caretOffset } from "./editor-model.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -29,10 +32,19 @@ function scratchUri() {
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server) or the whole endpoint
 // from `parseEndpoint`; `search` defaults to the page's query string.
-export function startInfoview({ editor, panel, config, search, uri } = {}) {
+//
+// Options: `squiggles`/`completions` (false disables the overlay; they are on by
+// default), `onRender(view)` (called after every panel render: the React page uses it to
+// mirror the panel HTML into its model), and `positionDebounce` (ms, 120 by default).
+export function startInfoview({
+  editor, panel, config, search, uri, onRender, document: pageDocument,
+  squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
+  positionDebounce = 120,
+} = {}) {
   if (!editor || !panel) return null;
+  const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined
-    ? endpointFromSearch(search === undefined ? (typeof location !== "undefined" ? location.search : "") : search)
+    ? endpointFromSearch(query)
     : (typeof config === "string" ? { url: config } : config);
   const documentUri = uri || scratchUri();
   let client = null;
@@ -42,6 +54,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   let settleTimer = null;
   let suppressCursor = false;
   let selected = -1;
+  let lastCursor = null;          // the position the goals were last asked about
 
   const view = {
     state: endpoint ? "connecting" : "no-server",
@@ -64,7 +77,25 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     const top = panel.scrollTop || 0;
     renderPanel(panel, view);
     panel.scrollTop = top;
+    if (typeof onRender === "function") {
+      try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
+    }
   }
+
+  // The editor's features: squiggles under the diagnostics, and the completion popup at
+  // the caret. Both are plain overlay DIVs (no dependency, no editor rewrite) and both
+  // are absent without a DOM (the Node tests pass a stub textarea).
+  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query)
+    ? null : mountSquiggles(editor, { document: pageDocument });
+  const completions = wantCompletionsPopup === false || !wantsCompletions(query)
+    ? null : mountCompletions({
+      editor,
+      document: pageDocument,
+      onRequest: (position) => {
+        if (!client || client.state !== "open") return null;
+        return client.completion(documentUri, position);
+      },
+    });
 
   // ## Source highlighting (a textarea's native selection: UTF-16 offsets)
 
@@ -97,10 +128,11 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   async function refresh() {
     if (!client || client.state !== "open") return;
     const mine = ++generation;
-    const position = positionAt(editor.value, editor.selectionStart || 0);
+    const position = positionAt(editor.value, caretOffset(editor));
     view.position = position;
     const state = await readGoalState(client, documentUri, position);
     if (mine !== generation) return;   // a newer cursor/edit won
+    lastCursor = position.line + ":" + position.character;
     view.goals = state.goals;
     view.goalsKind = state.goalsKind;
     view.term = state.term;
@@ -112,7 +144,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     render();
   }
 
-  function scheduleRefresh(delay = 120) {
+  function scheduleRefresh(delay = positionDebounce) {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refresh, delay);
   }
@@ -128,8 +160,16 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     }, 250);
   }
 
-  function onCursor() {
+  // The caret moved: ask for the goals there after a short pause. `closePopup` is set by
+  // a mouse selection (the user is going somewhere else); a keyup is how typing settles,
+  // and must not close the completion list the typing just opened.
+  function onCursor(closePopup = false) {
     if (suppressCursor) return;
+    if (closePopup && completions) completions.close();
+    const position = positionAt(editor.value, caretOffset(editor));
+    const where = position.line + ":" + position.character;
+    // The same caret: the server already answered (diagnostics still force a re-ask).
+    if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
   }
 
@@ -217,11 +257,14 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
       if (info && info.intentional) return;
       view.state = "closed";
       view.info = null;
+      view.diagnostics = [];
+      if (squiggles) squiggles.update([]);
       render();
     });
     client.on("diagnostics", (params) => {
       if (!params || params.uri !== documentUri) return;
       view.diagnostics = params.diagnostics || [];
+      if (squiggles) squiggles.update(view.diagnostics);
       render();
       clearTimeout(settleTimer);
       scheduleRefresh(0);
@@ -282,7 +325,13 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     client: () => client,
     refresh,
     reconnect,
+    // The caret as the page and the tests see it (UTF-16, line 0-based).
+    position: () => positionAt(editor.value, caretOffset(editor)),
+    squiggles: () => squiggles,
+    completions: () => completions,
     stop() {
+      if (completions) completions.destroy();
+      if (squiggles) squiggles.destroy();
       if (!client) return;
       client.closeDocument(documentUri);
       client.close();
@@ -290,9 +339,13 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   };
 
   editor.addEventListener("input", onEdit);
-  editor.addEventListener("keyup", onCursor);
-  editor.addEventListener("click", onCursor);
-  editor.addEventListener("select", onCursor);
+  // Caret → LSP: a keyup is typing settling, a click/mouseup/select is the user moving
+  // the caret (and closes a popup they are leaving).
+  editor.addEventListener("keyup", () => onCursor(false));
+  editor.addEventListener("click", () => onCursor(true));
+  editor.addEventListener("mouseup", () => onCursor(true));
+  editor.addEventListener("select", () => onCursor(true));
+  editor.addEventListener("focus", () => onCursor(false));
   if (typeof addEventListener === "function") addEventListener("pagehide", () => api.stop());
 
   start();

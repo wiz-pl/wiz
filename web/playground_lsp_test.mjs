@@ -20,6 +20,7 @@ import {
 } from "./goals.js";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { startInfoview } from "./playground-lsp.js";
+import { document as minidoc, Element } from "./framework/minidom.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -135,6 +136,15 @@ check("interactiveGoals: session", goals.session, 1);
 
 const term = await client.interactiveTermGoal(uri, { line: 4, character: 8 });
 check("interactiveTermGoal: expected type", plainText(term.goal.type), "Nat");
+
+// `textDocument/completion`: the request the popup makes, and the list a server answers.
+const completions = await client.completion(uri, { line: 1, character: 0 }, { triggerKind: 1 });
+check("completion: the list", completions.items.length, 5);
+check("completion: an item's label", completions.items[0].label, "Nat.add");
+check("completion: the request's method and position",
+  mock.stats.completionArgs.length === 1 && mock.stats.completionArgs[0].position.character === 0, true);
+check("completion: the context's trigger", mock.stats.completionArgs[0].context.triggerKind, 1);
+check("completion: the item with a textEdit", completions.items[4].textEdit.newText, "twice");
 
 const panel = { innerHTML: "" };
 const openView = {
@@ -264,6 +274,17 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
+// The DOM the overlays need: minidom's elements plus the bits the page provides.
+function fakeDocument() {
+  const base = minidoc();
+  return {
+    body: base.createElement("body"),
+    createElement: base.createElement,
+    createTextNode: base.createTextNode,
+    createRange: base.createRange,
+    defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
+  };
+}
 async function waitUntil(predicate, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -278,6 +299,7 @@ const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
 const app = startInfoview({
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
+  document: fakeDocument(),
 });
 checkThat("wiring: the pane says it is connecting", wirePanel.innerHTML.includes("connecting"));
 checkThat("wiring: goals arrive", await waitUntil(() => wirePanel.innerHTML.includes('class="names"')));
@@ -286,17 +308,49 @@ checkThat("wiring: it opened the editor's text",
   wireMock.documents.get("file:///wire.wiz").text === FIXTURE_TEXT);
 checkThat("wiring: the connection status", wirePanel.innerHTML.includes("connected"));
 
+// Cursor → LSP: moving the caret asks for the goals at the new position (after the
+// debounce), and the caret's position is what the request carries.
+const beforeMoves = wireMock.stats.goalPositions.length;
+editor.selectionStart = line2 + 8;
+editor.selectionEnd = line2 + 8;
+for (const fn of editor.listeners.keyup || []) fn({ type: "keyup" });
+checkThat("wiring: a caret move asks again",
+  await waitUntil(() => wireMock.stats.goalPositions.length > beforeMoves &&
+    wireMock.stats.goalPositions[wireMock.stats.goalPositions.length - 1].line === 2), JSON.stringify(wireMock.stats.goalPositions));
+checkThat("wiring: the request carries the UTF-16 caret",
+  wireMock.stats.goalPositions[wireMock.stats.goalPositions.length - 1].character === 8);
+
 // Clicking a hypothesis (a `[data-span]` element) selects its source span.
 const clickTarget = { dataset: { span: "2:8-2:9" }, parentElement: null, closest: () => null };
 wirePanel.listeners.click[0]({ target: clickTarget, preventDefault() {} });
 check("wiring: a click selects the span", editor.selectionStart, line2 + 8);
 check("wiring: the selection ends there", editor.selectionEnd, line2 + 9);
 
-// An edit sends didChange and the goals are asked again.
+// Diagnostics → squiggles: the overlay underlines the same range the panel lists.
 editor.value = "nope import Prelude\n";
+editor.selectionStart = 0;
 for (const fn of editor.listeners.input || []) fn();
 checkThat("wiring: didChange after an edit",
   await waitUntil(() => wireMock.stats.didChange === 1 && wirePanel.innerHTML.includes("mock: unknown identifier")));
+checkThat("wiring: a squiggle for the diagnostic", app.squiggles() && app.squiggles().segments().length === 1,
+  JSON.stringify(app.squiggles() && app.squiggles().segments()));
+check("wiring: the squiggle's range",
+  app.squiggles().segments().map((s) => s.start + "-" + s.end).join(","), "0-3");
+
+// Completions: the popup asks the client at the caret and inserts the chosen item.
+editor.value = "Nat.";
+editor.selectionStart = 4;
+editor.selectionEnd = 4;
+const popup = app.completions();
+checkThat("wiring: a completion popup", !!popup);
+const shown = await popup.requestAtCaret();
+check("wiring: the popup filtered the list", shown.map((i) => i.label).join(","), "Nat.sub,Nat.succ,Nat.add");
+const lastCompletion = wireMock.stats.completionArgs[wireMock.stats.completionArgs.length - 1];
+check("wiring: the completion request's line", lastCompletion.position.line, 0);
+check("wiring: the completion request's character", lastCompletion.position.character, 4);
+popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
+check("wiring: the accepted item replaced the prefix", editor.value, "Nat.sub");
+check("wiring: the caret after accepting", editor.selectionStart, 7);
 app.stop();
 await wireMock.close();
 

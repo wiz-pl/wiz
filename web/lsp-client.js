@@ -213,6 +213,17 @@ export class LspClient {
           synchronization: { dynamicRegistration: false, willSave: false, didSave: false },
           publishDiagnostics: { relatedInformation: false, versionSupport: true },
           hover: { contentFormat: ["markdown", "plaintext"] },
+          // Snippets are not expanded by the playground's popup, so say so; a server may
+          // still send them and acceptCompletion strips the placeholders.
+          completion: {
+            dynamicRegistration: false,
+            contextSupport: true,
+            completionItem: {
+              snippetSupport: false,
+              documentationFormat: ["plaintext", "markdown"],
+              insertReplaceSupport: false,
+            },
+          },
         },
         // Ask for `wiz/elaborated` (the server only sends it to clients that do).
         experimental: { wizElaborated: true, wizInfoview: true },
@@ -401,6 +412,19 @@ export class LspClient {
     return this.request("wiz/subtermInfo", { textDocument: { uri }, session, ref });
   }
   interactiveInfo(uri, position) { return this.request("wiz/interactiveInfo", this.positionParams(uri, position)); }
+
+  // `textDocument/completion` at the caret. `context` is LSP's
+  // `{triggerKind, triggerCharacter}`: 1 = invoked (Ctrl-Space), 2 = a character typed.
+  // The result is an array or a `CompletionList`; the popup accepts either (and a
+  // `MethodNotFound` simply closes it).
+  completion(uri, position, context) {
+    const params = {
+      textDocument: { uri },
+      position: { line: position.line, character: position.character },
+    };
+    if (context) params.context = context;
+    return this.request("textDocument/completion", params);
+  }
 
   // The server's advertised infoview tag, if it has one.
   get infoview() { return infoviewTag(this.capabilities); }

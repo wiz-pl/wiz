@@ -34,6 +34,9 @@ need playground/goals.js
 need playground/playground-lsp.js
 need playground/tagged.js
 need playground/selfhost-lsp-shim.js
+need playground/editor-model.js
+need playground/squiggles.js
+need playground/completions.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
 need notebooks/index.html
