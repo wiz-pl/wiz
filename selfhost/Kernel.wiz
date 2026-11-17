@@ -77,6 +77,11 @@ inductive Tm where
   -- (linear-case stage 2) `let () := u; b`, the unit eliminator: consumes `u : Unit n`
   -- (its usage counts), computes to `b` by η
   | letUnit (u b : Tm)
+  -- `let q (x, y) := s; b` (Σ elimination; `split` in the Lean kernel). `motive` is
+  -- under one binder (`z`), `body` under two (`x`, then `y`); `s`'s components are bound
+  -- at `q·p` and `q` for a Σ at `p`. A pair at 1 can only be consumed this way: `fst`
+  -- and `snd` need an unrestricted pair.
+  | split (q : Q) (scrut motive body : Tm)
   -- an enumeration of `k` tags, its `i`-th tag, and case analysis (the motive is
   -- under one binder, the scrutinee)
   | enum (k : Nat)
@@ -207,6 +212,8 @@ inductive Spine where
   | ssnd (sp : Spine)
   -- a stuck case: its motive and branches, closed over `env`
   | secase (sp : Spine) (env : Env) (motive : Tm) (branches : Tms)
+  -- a stuck `split`: its motive and body, closed over `env`
+  | ssplit (sp : Spine) (env : Env) (q : Q) (motive body : Tm)
   | sabsurd (sp : Spine) (motive : Val)
   | sdelim (sp : Spine) (v : Lvl) (P mret marg mrec mhrec : Val)
   | sind (sp : Spine) (l : Lvl) (I D : Val) (v : Lvl) (P m i : Val)
@@ -527,6 +534,7 @@ def tmSubst (ps : List String) (ls : List Lvl) : Tm → Tm
   | .snd p => .snd (tmSubst ps ls p)
   | .exfalso m t => .exfalso (tmSubst ps ls m) (tmSubst ps ls t)
   | .letUnit u b => .letUnit (tmSubst ps ls u) (tmSubst ps ls b)
+  | .split q s m b => .split q (tmSubst ps ls s) (tmSubst ps ls m) (tmSubst ps ls b)
   | .ecase m sc bs => .ecase (tmSubst ps ls m) (tmSubst ps ls sc) (tmsSubst ps ls bs)
   | .eq A a b => .eq (tmSubst ps ls A) (tmSubst ps ls a) (tmSubst ps ls b)
   | .eqTy A B => .eqTy (tmSubst ps ls A) (tmSubst ps ls B)
@@ -742,6 +750,7 @@ def tmEq : Tm → Tm → Bool
   | .pfalse, .pfalse => .true
   | .exfalso a b, .exfalso c d => Bool.and (tmEq a c) (tmEq b d)
   | .letUnit a b, .letUnit c d => Bool.and (tmEq a c) (tmEq b d)
+  | .split q a m b, .split q' a' m' b' => Bool.and (qEq q q') (Bool.and (tmEq a a') (Bool.and (tmEq m m') (tmEq b b')))
   | .enum k, .enum k' => Nat.beq k k'
   -- (the enumeration's size too: `valSame` compares it, and "the same term" must not
   -- depend on both sides having one type)
@@ -980,6 +989,7 @@ def toAbsurd : Spine → Spine
   | .sfst sp => toAbsurd sp
   | .ssnd sp => toAbsurd sp
   | .secase sp _ _ _ => toAbsurd sp
+  | .ssplit sp _ _ _ _ => toAbsurd sp
   | .sdelim sp _ _ _ _ _ _ => toAbsurd sp
   | .sind sp _ _ _ _ _ _ _ => toAbsurd sp
   | .ssfix sp _ _ _ _ _ _ _ _ => toAbsurd sp
@@ -1019,6 +1029,7 @@ def usesVar : Nat → Tm → Bool
   | i, .fst p => usesVar i p
   | i, .snd p => usesVar i p
   | i, .pair a b => Bool.or (usesVar i a) (usesVar i b)
+  | i, .split _ s m b => Bool.or (usesVar i s) (Bool.or (usesVar (i + 1) m) (usesVar (i + 2) b))
   | i, .con x => usesVar i x
   | i, .ulift _ _ A => usesVar i A
   | i, .up a => usesVar i a
@@ -1130,6 +1141,7 @@ def eval : Env → Tm → Val
   | env, .prf l t => match lvlIsZero l with
     | .true => suspend env t
     | .false => eval env t
+  | env, .split q s m b => vSplit q (eval env s) env m b
   --|ex
   --| | _, _ => .vsort (.lnum 0)
   --sol>
@@ -1140,6 +1152,14 @@ def suspend (env : Env) (t : Tm) : Val := match kernelLazyProofs with
     | .prf _ t' => suspend env t'
     | _ => .vne (.hprf env t) .snil
   | .false => eval env t
+-- `let q (x, y) := s; b`: β-reduces on a pair, is stuck on a neutral; a proof is split
+-- by η (`Σ` has η, and a proof is never evaluated to a pair).
+def vSplit (q : Q) (s : Val) (env : Env) (motive body : Tm) : Val := match whnf s with
+  | .vpair a b => eval (.cons b (.cons a env)) body
+  | .vne h sp => match Bool.and kernelLazyProofs (proofHead h) with
+    | .true => eval (.cons (vsnd s) (.cons (vfst s) env)) body
+    | .false => .vne h (.ssplit sp env q motive body)
+  | v => v
 -- the eliminations of a spine, applied to a value (for reading a proof back, and for
 -- the argument of a cast that regularity removes: `stripCast`)
 def forceSp : Val → Spine → Val
@@ -1159,6 +1179,7 @@ def forceSp : Val → Spine → Val
     | .vtag _ i => eval env (tmsNth bs i)
     | .vne h sp' => .vne h (.secase sp' env m bs)
     | w => w
+  | v, .ssplit sp env q m b => vSplit q (forceSp v sp) env m b
   | v, .sdelim sp k P a b c d => vDelim k P a b c d (forceSp v sp)
   | v, .sind sp l I D k P m i => vInd l I D k P m i (forceSp v sp)
   | v, .ssfix sp l I D k P f sz i => vSfix l I D k P f sz i (forceSp v sp)
@@ -1189,6 +1210,9 @@ def fromAbsurd : Spine → Option Spine
     | .none => .none
   | .secase sp env m bs => match fromAbsurd sp with
     | .some r => .some (.secase r env m bs)
+    | .none => .none
+  | .ssplit sp env q m b => match fromAbsurd sp with
+    | .some r => .some (.ssplit r env q m b)
     | .none => .none
   | .sdelim sp v P a b c d => match fromAbsurd sp with
     | .some r => .some (.sdelim r v P a b c d)
@@ -1877,6 +1901,9 @@ def quoteSpine (qm : Bool) : Nat → Tm → Spine → Tm
   | l, h, .ssnd sp => .snd (quoteSpine qm l h sp)
   | l, h, .secase sp env m bs =>
     .ecase (quoteM qm (l + 1) (instC env (fresh l) m)) (quoteSpine qm l h sp) (quoteBranches qm l env bs)
+  | l, h, .ssplit sp env q m b =>
+    .split q (quoteSpine qm l h sp) (quoteM qm (l + 1) (instC env (fresh l) m))
+      (quoteM qm (l + 2) (eval (.cons (fresh (l + 1)) (.cons (fresh l) env)) b))
   | l, h, .sabsurd sp m => .exfalso (quoteM qm l m) (quoteSpine qm l h sp)
   | l, h, .sdelim sp v P a b c d =>
     .delim v (quoteM qm l P) (quoteM qm l a) (quoteM qm l b) (quoteM qm l c) (quoteM qm l d) (quoteSpine qm l h sp)
@@ -1988,6 +2015,12 @@ def show (names : List String) : Nat → Tm → String
   | l, .letE t v b => String.append (String.append "let " (nameAt names l))
       (String.append (String.append " := " (show names l v)) (String.append "; " (show names (l + 1) b)))
   | l, .letUnit u b => String.append (String.append "let () := " (show names l u)) (String.append "; " (show names l b))
+  | l, .split q s m b =>
+    let qp := match q with
+      | .qw => ""
+      | q' => String.append (qLit q') " ";
+    String.append (String.append (String.append "let " qp) (String.append "(x, y) := " (show names l s)))
+      (String.append "; " (show names (l + 2) b))
   | l, .ann t ty => String.append (String.append "(" (show names l t)) (String.append " : " (String.append (show names l ty) ")"))
   | l, .letq _ t v b => show names l (.letE t v b)
   | l, .sigma q _ _ a b => String.append (String.append (String.append "(" (nameAt names l))
@@ -2240,6 +2273,7 @@ def typeOfNe : TCtx → Head → Spine → Val
     | .vne _ (.ssigq _ _ _ _ env b) => eval (.cons (vfst (.vne x sp)) env) b
     | ty => ty
   | _, x, .secase sp env m _ => eval (.cons (.vne x sp) env) m
+  | _, x, .ssplit sp env _ m _ => eval (.cons (.vne x sp) env) m
   | _, _, .sabsurd _ m => m
   | _, h, .sdelim sp _ P _ _ _ _ => vapp P (.vne h sp)
   | _, h, .sind sp _ _ _ _ P _ i => vapp (vapp P i) (.vne h sp)
@@ -2323,6 +2357,7 @@ def proofSpine : Spine → Bool
   | .ssnd sp => proofSpine sp
   | .sdown sp => proofSpine sp
   | .secase _ _ _ _ => .false
+  | .ssplit _ _ _ _ _ => .false
   | .sabsurd _ _ => .false
   | .sdelim _ _ _ _ _ _ _ => .false
   | .sind _ _ _ _ _ _ _ _ => .false
@@ -2789,6 +2824,18 @@ def convSpineW : TCtx → Head → Head → Spine → Spine → Bool
            (convTy (TCtx.bind c (.venum k)) (eval (.cons (fresh (TCtx.lvl c)) e) m) (eval (.cons (fresh (TCtx.lvl c)) e') m'))
            (convBranches c k e m e' bs bs' 0)
        | _ => .false)
+  | c, x, y, .ssplit r e q m b, .ssplit r' e' q' m' b' =>
+      let sty := whnf (typeOfNe c x r);
+      Bool.and (convSpine c x y r r') (match sty with
+        | .vsigma p i j A env B =>
+          let vx := fresh (TCtx.lvl c)
+          let vy := fresh (TCtx.lvl c + 1)
+          let ctx₂ := (TCtx.bind c A).bind (eval (.cons vx env) B)
+          Bool.and (qEq q q') (Bool.and
+            (convTy (TCtx.bind c sty) (eval (.cons (fresh (TCtx.lvl c)) e) m) (eval (.cons (fresh (TCtx.lvl c)) e') m'))
+            (conv ctx₂ (eval (.cons (.vpair vx vy) e) m)
+              (eval (.cons vy (.cons vx e)) b) (eval (.cons vy (.cons vx e')) b')))
+        | _ => .false)
   | c, x, y, .sabsurd r m, .sabsurd r' m' => match Bool.and (falseNe c x r) (falseNe c y r') with
     | .true => convTy c m m'
     | .false => Bool.and (convSpine c x y r r') (convTy c m m')
@@ -2958,6 +3005,7 @@ def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
   | .ecase _ _ bs => tmsGuarded depth guarded bs
   | .letE _ _ b => descGuarded depth guarded b
   | .letq _ _ _ b => descGuarded depth guarded b
+  | .split _ s m b => Bool.and (descGuarded depth guarded s) (Bool.and (descGuarded depth guarded m) (descGuarded depth guarded b))
   | .const _ _ _ v _ => match depth with
     | .zero => .true
     | .succ k => descGuarded k guarded v
@@ -3068,6 +3116,28 @@ def inferW : TCtx → Tm → TyRes
     | .ok _ uu => match infer c b with
       | .ok bty ub => .ok bty (uAdd uu ub)
       | r => r
+    | r => r
+  -- Σ elimination: the scrutinee first (at `q`; an erased position at 0), the motive is
+  -- a type under the pair, and the body is checked at it. The components are bound at
+  -- `q·p` and `q` and their usages checked against those quantities.
+  | c, .split q s m b => match infer (erasedIf q c) s with
+    | .ok sty us => match whnf sty with
+      | .vsigma p _ _ A env B =>
+        match inferUniv (TCtx.bind c sty) m with
+        | .ok _ _ =>
+          let l := TCtx.lvl c;
+          let vx := fresh l;
+          let vy := fresh (l + 1);
+          let byTy := eval (.cons vx env) B;
+          match check ((TCtx.bind c A).bind byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m) with
+          | .ok _ ub => match popUsageAt (TCtx.bind c A) q byTy ub with
+            | .some ub' => match popUsageAt c (qmul q p) A ub' with
+              | .some ub'' => .ok (eval (.cons (evalAt c s sty) (TCtx.env c)) m) (uAdd (uScale q us) ub'')
+              | .none => .err "the split's first component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+            | .none => .err "the split's second component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+          | r => r
+        | r => r
+      | sty => .err (String.append "not a pair: its type is " (showVal c sty))
     | r => r
   | c, .exfalso m t => match inferUniv c m with
     -- (inside a proof: if the motive is not a proposition the `absurd` is a relevant term,
@@ -3663,6 +3733,7 @@ def tmHasLvlWith (p : Lvl → Bool) : Tm → Bool
   | .letE t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
   | .letq _ t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
   | .letUnit u b => Bool.or (tmHasLvlWith p u) (tmHasLvlWith p b)
+  | .split _ s m b => Bool.or (tmHasLvlWith p s) (Bool.or (tmHasLvlWith p m) (tmHasLvlWith p b))
   | .ann t ty => Bool.or (tmHasLvlWith p t) (tmHasLvlWith p ty)
   | .pair a b => Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b)
   | .fst x => tmHasLvlWith p x
@@ -3800,6 +3871,7 @@ def tmHasHole : Tm → Bool
   | .letE t v b => Bool.or (tmHasHole t) (Bool.or (tmHasHole v) (tmHasHole b))
   | .letq _ t v b => Bool.or (tmHasHole t) (Bool.or (tmHasHole v) (tmHasHole b))
   | .letUnit u b => Bool.or (tmHasHole u) (tmHasHole b)
+  | .split _ s m b => Bool.or (tmHasHole s) (Bool.or (tmHasHole m) (tmHasHole b))
   | .ann t ty => Bool.or (tmHasHole t) (tmHasHole ty)
   | .pair a b => Bool.or (tmHasHole a) (tmHasHole b)
   | .fst p => tmHasHole p
@@ -4036,6 +4108,21 @@ def markInferW : TCtx → Tm → MR
   | c, .letUnit u b => match markInfer c u with
     | .mk u' _ => match markInfer c b with
       | .mk b' tb => .mk (.letUnit u' b') tb
+  -- `split`: the scrutinee, the motive (a type under the pair) and the body at it
+  | c, .split q s m b => match markInfer c s with
+    | .mk s' ts => match knownW ts with
+      | .vsigma p _ _ A env B =>
+        let l := TCtx.lvl c;
+        let vx := fresh l;
+        let vy := fresh (l + 1);
+        let vsty : Val := match ts with
+          | .some v => v
+          | .none => .vunit (ln 1);
+        let m' := markTy (TCtx.bind c vsty) m;
+        let byTy := eval (.cons vx env) B;
+        let b' := markCheck ((TCtx.bind c A).bind byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m');
+        .mk (.split q s' m' b') (.some (eval (.cons (evalAt c s' vsty) (TCtx.env c)) m'))
+      | _ => .mk (.split q s' m b) .none
   | c, .ann t ty =>
     let ty' := markTy c ty;
     let tyv := eval (TCtx.env c) ty';

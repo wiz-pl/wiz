@@ -841,6 +841,7 @@ def tmMapChildren (f : Nat → Tm → Tm) (t : Tm) : Tm := match t with
   | .snd x => .snd (f 0 x)
   | .exfalso m x => .exfalso (f 0 m) (f 0 x)
   | .letUnit u b => .letUnit (f 0 u) (f 0 b)
+  | .split q s m b => .split q (f 0 s) (f 1 m) (f 2 b)
   | .ecase m sc bs => .ecase (f 1 m) (f 0 sc) (tmsMapWith f bs)
   | .eq a b c => .eq (f 0 a) (f 0 b) (f 0 c)
   | .eqTy a b => .eqTy (f 0 a) (f 0 b)
@@ -2192,6 +2193,13 @@ def zonkSub (es : ES) (d : Nat) (t : Tm) : Option Tm := match t with
   | .eqRefl A a => zonk2 es d A a (fun A' a' => .eqRefl A' a')
   | .exfalso m x => zonk2 es d m x (fun m' x' => .exfalso m' x')
   | .letUnit u b => zonk2 es d u b (fun u' b' => .letUnit u' b')
+  | .split q s m b => match zonk es d s with
+    | .some s' => match zonk es (d + 1) m with
+      | .some m' => match zonk es (d + 2) b with
+        | .some b' => .some (.split q s' m' b')
+        | .none => .none
+      | .none => .none
+    | .none => .none
   | .eq A a b => match zonkTms es d (.tcons A (.tcons a (.tcons b .tnil))) with
     | .some (.tcons A' (.tcons a' (.tcons b' _))) => .some (.eq A' a' b')
     | _ => .none
@@ -4557,6 +4565,10 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   | e => e
 -- the other forms
 def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match strEq (kindOf s) "term.letUnit" with
+  | .true => letUnitT gs es cx s .none
+  | .false => inferT1_0 gs es cx s
+def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   let k := kindOf s;
   match strEq k "term.hole" with
   | .true => match newMeta es cx (.vsort (.lnum 1)) with
@@ -4939,8 +4951,82 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
       | .ok v _ es2 => body A Av v es2
       | e => e
     | e => e
+-- `let () := u; b` (the unit eliminator; the unit pattern is linear: `u` is consumed
+-- once, by the kernel's usage `U_u + U_b`). Checked or inferred (`s` is the whole node).
+def letUnitT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val) : TE :=
+  match checkT gs es cx (kid s 4) (.vunit (ln 1)) with
+  | .ok u _ es1 => match expected with
+    | .some T => match checkT gs es1 cx (kid s 6) T with
+      | .ok b _ es2 => .ok (.letUnit u b) T es2
+      | e => e
+    | .none => match inferT gs es1 cx (kid s 6) with
+      | .ok b bt es2 => .ok (.letUnit u b) bt es2
+      | e => e
+  | e => e
+
+-- the `(x, y)` binders of a `term.letPair`/`term.letTuple` node
+def letPairName (s : Syntax) (i : Nat) : String := match kid s i with
+  | .ident n => n
+  | _ => "_"
+-- the node `let (x, y) := e; body` (the quantity is the default)
+def letPairNode (x y e body : Syntax) : Syntax :=
+  mkNode "term.letPair" (.cons (.atom "let")
+    (.cons (mkNull .nil)
+    (.cons (.atom "(")
+    (.cons x (.cons (.atom ",")
+    (.cons y (.cons (.atom ")")
+    (.cons (.atom ":=")
+    (.cons e (.cons (mkNull .nil) (one body)))))))))))
+-- `let (x₁, x₂, …, xₙ) := e; body` as nested pairs (`tuple✝k` names no user name uses),
+-- as the Lean frontend's `letTupleToPairs`
+partial def letPairStx (stx : Syntax) (k : Nat) (xs : List Syntax) (e : Syntax) : Syntax := match xs with
+  | .cons x (.cons y .nil) => letPairNode x y e (kid stx 12)
+  | .cons x rest =>
+    let r : String := String.append "tuple✝" (Nat.toString k);
+    letPairNode x (.ident r) e (letPairStx stx (k + 1) rest (mkNode "term.ident" (one (.ident r))))
+  | _ => kid stx 12
+def letTupleToPairs (stx : Syntax) : Syntax :=
+  let xs : List Syntax := List.append (one (kid stx 3))
+    (List.append (one (kid stx 5)) (nonAtoms (kids (kid stx 7))));
+  letPairStx stx 0 xs (kid stx 10)
+
+-- `let q (x, y) := s; b`: the Σ eliminator (`split`), check mode only. A pair held at
+-- any quantity is consumed this way; components are bound at `q·p` and `q`.
+def letPairT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Val) : TE :=
+  match writtenQ (kid s 1) with
+  | .bad => .err qtyErr
+  | qw =>
+    let q := match qw with
+      | .dflt => Q.qw
+      | .is q' => q'
+      | .bad => Q.qw;
+    let x := letPairName s 3;
+    let y := letPairName s 5;
+    match inferT gs es cx (kid s 8) with
+    | .ok sv sty es1 => match force es1 sty with
+      | .vsigma p _ _ A env B =>
+        let d := Cx.lvl cx;
+        let motive := quote (d + 1) expected;
+        let bty := eval (.cons (fresh d) env) B;
+        let cx2 := Cx.bind (Cx.bind cx x A) y bty;
+        match checkT gs es1 cx2 (kid s 10) expected with
+        | .ok b _ es2 => .ok (.split q sv motive b) expected es2
+        | e => e
+      | sty' => .err (String.append "let (x, y) := ... expects a pair, got "
+          (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) sty'))
+    | e => e
+
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  let k := kindOf s;
+  match strEq k "term.letUnit" with
+  | .true => letUnitT gs es cx s (.some ty)
+  | .false => match strEq k "term.letPair" with
+    | .true => letPairT gs es cx s ty
+    | .false => match strEq k "term.letTuple" with
+      | .true => letPairT gs es cx (letTupleToPairs s) ty
+      | .false => checkT0 gs es cx s ty
+def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
   match strEq k "term.by" with
   | .true => elabBy gs es cx s ty
@@ -5493,6 +5579,7 @@ def inlineTm (gs : Globals) : Tm → Tm
   | .app f a => .app (inlineTm gs f) (inlineTm gs a)
   | .letE ty v b => .letE (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
   | .letq q ty v b => .letq q (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
+  | .split q s m b => .split q (inlineTm gs s) (inlineTm gs m) (inlineTm gs b)
   | .ann t ty => .ann (inlineTm gs t) (inlineTm gs ty)
   | .pair a b => .pair (inlineTm gs a) (inlineTm gs b)
   | .fst t => .fst (inlineTm gs t)
