@@ -26,6 +26,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   The `selfhost` group pins the verdicts against the Lean frontend and runs a program in
   both compilers; its module-private case also checks the Lean frontend's message text
   and the self-hosted compiler's rejection (21n).
+* selfhost: a dot call on a parenthesized receiver, `(x).f y` (the field notation
+  `T.f x y`), now elaborates in the self-hosted frontend: `(TCtx.bind c A).bind byTy` and
+  `(P.bump p 1).bump 2` were rejected with "not a function: its type is …" because the
+  parser reads `(x).f y` as `(x)` applied to the constructor argument `.f`. The fix is
+  by type, not by source position (the self-hosted `Syntax` has none): an argument `.f`
+  next to a head whose type is not a function is the field of that head, and chains
+  (`(x).f.g`). `List.cons (f x) .nil` is untouched — there `.f` is a constructor, which
+  is the case exactly when the head's type is a `Π`. The split code that had spelled the
+  calls out uses them again, so the self-hosted compiler's own build exercises it (21aj).
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one

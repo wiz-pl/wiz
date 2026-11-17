@@ -848,6 +848,29 @@ def splitProgram : String :=
   "  IO.println (Nat.toString (unitElim ()));\n" ++
   "  IO.println (Nat.toString (triple (1, 2, 39)))\n"
 
+/-- (21aj) A dot call on a parenthesized receiver, `(x).f y`: the parser reads `(x)`
+applied to the constructor argument `.f`, and the frontend repairs it by type when the
+head's type is not a function (`projChain`; the host's `adjacentFields?` uses source
+positions instead). `P` is a structure and `B` an inductive, so both the field
+projection and the namespaced-definition route are covered; `p.n` and `P.bump p 1` are
+the controls (a receiver that is an identifier, not a parenthesis). -/
+def dotCallHeader : String :=
+  "structure P where\n  n : Nat\n" ++
+  "inductive B where\n  | mk (k : Nat)\n" ++
+  "def P.bump (p : P) (k : Nat) : P := P.mk (Nat.add p.n k)\n" ++
+  "def B.add (b : B) (k : Nat) : B := match b with\n  | .mk n => .mk (Nat.add n k)\n"
+
+def dotCallDecls : List (String × Bool) := [
+  ("def par (p : P) : P := (P.bump p 1).bump 2\n", true),
+  ("def par2 (p : P) (q : Nat) : P := (P.bump (P.bump p q) q).bump q\n", true),
+  ("def chain (p : P) : P := ((P.bump p 1).bump 2).bump 3\n", true),
+  ("def ind (b : B) : B := (B.add b 1).add 2\n", true),
+  ("def parF (p : P) : Nat := (p).n\n", true),
+  ("def ctl (p : P) : P := P.bump p 1\n", true),
+  ("def ctlF (p : P) : Nat := p.n\n", true),
+  ("def parBad (p : P) : Nat := (p).m\n", false),
+  ("def parBad2 (p : P) : P := (P.bump p 1).nope\n", false)]
+
 /-- (stage 21i) Phantom parameters, for both frontends. -/
 def phantomHeader : String :=
   "inductive UIntN (w : Nat) where\n  | mk (toNat : Nat)\ninductive Proxy (A : Type) where\n  | mk\n" ++
@@ -1983,6 +2006,8 @@ def selfHostGroup : Group where
         ioRun splitProgram "40\n1\n42\n"
         selfhostCompileRun splitProgram "40\n1\n42\n"
         selfhostCompileRun splitProgram "40\n1\n42\n" (flags := #["--rc"]) },
+    { name := "the self-hosted frontend: a dot call on a parenthesized receiver, as in the Lean frontend (21aj)", run := fun _ =>
+        selfhostAgrees dotCallHeader dotCallDecls },
     { name := "the self-hosted frontend: Σ types, pairs, projections and ∀, as in the Lean frontend (21u)", run := fun _ =>
         selfhostAgrees "" sigmaDecls },
     { name := "the self-hosted backend: quantities erase and run, with either collector (21m)", run := fun _ => do

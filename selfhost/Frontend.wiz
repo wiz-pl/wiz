@@ -4434,6 +4434,14 @@ def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) 
       | .err msg => .err msg
     | e => e
   | _ => .err (String.append "no field " f)
+-- `t.f₁.….fₙ` (a `.f` argument of an application is one dotted identifier): the
+-- projections one after another
+partial def projChain (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (n : String) : HE :=
+  match splitLast n with
+  | .some (.mk base f) => match projChain gs es cx bt bty base with
+    | .ok pt pty es1 _ => projT gs es1 cx pt pty f
+    | e => e
+  | .none => projT gs es cx bt bty n
 -- a numeral `n`: `Nat.succ` applied `n` times to `Nat.zero` (stage 18f; there are no
 -- number literals in the kernel)
 def numeral (gs : Globals) (es : ES) (cx : Cx) (n : Nat) : TE := match identHead gs es cx "Nat.zero" with
@@ -4847,7 +4855,17 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
         | .false => match checkT gs es cx a dom with
           | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (codAt cx env cod ta) (tailKinds m) rest post expected pre
           | e => e
-      | ty => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
+      | ty => match strEq (kindOf a) "term.dotIdent" with
+        -- (21aj) `(x).f y`: the parser reads `(x)` applied to the constructor argument
+        -- `.f`, but `x`'s type is not a function: `.f` is the field `T.f x` (the host's
+        -- `adjacentFields?`, done by type here: a constructor argument is only reached
+        -- when the head's type is a Π). `(x).f.g` is a chain of projections.
+        | .true => match kid a 1 with
+          | .ident fname => match projChain gs es cx f fty fname with
+            | .ok pt pty es1 _ => appArgsT gs es1 cx pt pty .nil rest post expected .nil
+            | .err msg => .err msg
+          | _ => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
+        | .false => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- the arguments of an application; with named ones, rewritten to positional first
 def appArgsNamed (gs : Globals) (es : ES) (cx : Cx) (h : Syntax) (f : Tm) (fty : Val) (m : List BKind)
     (args : List Syntax) (post : List Post) (expected : Option Val) (pre : List Tm) : TE :=

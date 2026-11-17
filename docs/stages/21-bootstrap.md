@@ -1249,3 +1249,49 @@ counting) that prints `40 1 42` from a `let 1` pair, a `letUnit` and a three-tup
 
 **Not done:** a destructuring `let 1 (.mk a b) := s` for structures, and a linear
 `match` (A21): a structure held at quantity 1 still has no eliminator.
+
+## 21aj: a dot call on a parenthesized receiver
+
+`(x).f y` is the generalised field notation `T.f x y` (the field of `x`'s type `T`, then
+`y`), and the Lean frontend elaborates it. The self-hosted one rejected it:
+
+```
+error: not a function: its type is TCtx
+```
+
+**Why.** The lexer reads `p.n` as one dotted identifier, but after a `)` the dot starts a
+new token: `(x).f y` is parsed as `(x)` *applied to* the arguments `.f` and `y` (a `.f`
+argument is a constructor of the expected type), and the frontend then tried to apply
+`x` to them. The Lean frontend repairs the parse in its macro expansion
+(`adjacentFields?`): it compares the source *positions* of neighbouring items and turns
+an adjacent `.f` argument into a `term.field` node. The self-hosted `Syntax` carries no
+positions, so it cannot make that test.
+
+**The fix** (`Frontend.wiz`, `projChain` and the last arm of `appArgsT`): the repair is
+by *type* instead. When the next argument is a `.f` and the head's type is not a
+function, `.f` is the field `T.f` of the head (`projT`, the projection a `structure`
+generates or a namespaced `def` like `TCtx.bind`), and the application continues with
+that projection as its head: `(x).f y` is `T.f x y`, and a dotted name chains
+(`(x).f.g` is `(T.f x).g`). This is what makes the two cases distinguishable without
+positions: an argument `.f` is only a *constructor* when the head's type is a `Π` (the
+expected type of an argument), which is exactly when the normal path elaborates it — so
+`List.cons (f x) .nil` is untouched, while `(P.bump p 1).bump 2` repairs the head.
+`x.f` (an identifier) and `x.f y` were already handled by `identHead`'s `splitLast`, and
+are unchanged.
+
+The commit that preceded this one had spelled the same calls out
+(`TCtx.bind (TCtx.bind c A) byTy` instead of `(TCtx.bind c A).bind byTy`) in
+`Kernel.wiz`'s split conversion, `infer` and `markInfer`, and in `Backend.wiz`'s
+erasure of `split`; those call sites are the dot-call form again, so the self-hosted
+compiler's own build exercises the fix (it was the self-check that found the bug).
+
+**Tests** (group `selfhost`): "the self-hosted frontend: a dot call on a parenthesized
+receiver, as in the Lean frontend (21aj)" — `(P.bump p 1).bump 2`, a nested receiver, a
+chain of two, the same on an inductive (`(B.add b 1).add 2`) and `(p).n` accepted by
+both frontends; `p.n` and `P.bump p 1` (a receiver that is an identifier, not a
+parenthesis) accepted as controls; `(p).m` and `(P.bump p 1).nope` rejected by both.
+
+**Limit.** A head that already has a function type is never retried, so a field of a
+*function-valued* term (`(f x).g` where `f x : A → B` and `A.g` exists) must be written
+with the receiver in an identifier or as `T.g (f x)`. The same shape was already an
+error, never a silent field.
