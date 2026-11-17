@@ -1,0 +1,540 @@
+{
+  "schema": 1,
+  "measured_utc": "2026-11-17T08:16:31Z",
+  "host": {
+    "uname": "Linux-7.3.3-x86_64-with-glibc2.44",
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "nproc": 32,
+    "load_average_1_5_15_start": [
+      16.97,
+      23.14,
+      31.28
+    ],
+    "load_average_1_5_15_end": [
+      22.78,
+      21.77,
+      28.5
+    ],
+    "load_average_per_round": [
+      [
+        16.97,
+        23.14,
+        31.28
+      ],
+      [
+        16.5,
+        21.51,
+        30.07
+      ],
+      [
+        19.07,
+        21.0,
+        29.13
+      ]
+    ]
+  },
+  "toolchain": {
+    "wiz": "wiz 0.1.0-dev (aeaa34ef8527c2a72e703959742f7a99d9c03fc9)",
+    "build_command": "wiz build -I lib examples/scry-datalog-bench.wiz -o bench",
+    "harness_sha256": "7175750d3c321f157c4e5a116050069294c283ac9b1038f7c19742ac3470113b"
+  },
+  "revisions": {
+    "old": "bb1a629459385dbc2c4d12ee06bbd91983d46633",
+    "new": "1fde883ae7de4130532d3bba5760246300eefef3",
+    "old_label": "bb1a6294",
+    "new_label": "1fde883a"
+  },
+  "rounds": 3,
+  "inputs": {
+    "chain 1000": {
+      "sha256": "b25d0694e43258355916014f7ba5ef06fa790eeb03ae1aa4b569c468e305a1f1",
+      "edb_rows": 2001
+    },
+    "chain 5000": {
+      "sha256": "6af6e182a8742a49411708c98e6bfab41dd28028ee72a3dc598cf2c11a7b15c7",
+      "edb_rows": 10001
+    },
+    "tc 20": {
+      "sha256": "13dd570a2800cf8c940c741f55d7fbd86649eb45b113d093ed4c33b2dd2ce1fb",
+      "edb_rows": 1281
+    }
+  },
+  "cases": [
+    {
+      "case": "chain 1000",
+      "input_sha256": "b25d0694e43258355916014f7ba5ef06fa790eeb03ae1aa4b569c468e305a1f1",
+      "edb_rows": 2001,
+      "expect": {
+        "tainted": 1001,
+        "alerts": 999
+      },
+      "old": {
+        "eval_ms": [
+          220,
+          217,
+          471
+        ],
+        "eval_ms_median": 220,
+        "wall_ms": [
+          237.5,
+          235.8,
+          507.1
+        ],
+        "wall_ms_median": 237.5,
+        "peak_rss_mib_median": 15.5
+      },
+      "new": {
+        "eval_ms": [
+          9,
+          8,
+          16
+        ],
+        "eval_ms_median": 9,
+        "wall_ms": [
+          18.3,
+          16.7,
+          30.2
+        ],
+        "wall_ms_median": 18.3,
+        "peak_rss_mib_median": 15.5
+      },
+      "speedup_median": 24.44,
+      "speedup_per_round": [
+        24.44,
+        27.12,
+        29.44
+      ]
+    },
+    {
+      "case": "chain 5000",
+      "input_sha256": "6af6e182a8742a49411708c98e6bfab41dd28028ee72a3dc598cf2c11a7b15c7",
+      "edb_rows": 10001,
+      "expect": {
+        "tainted": 5001,
+        "alerts": 4999
+      },
+      "old": {
+        "eval_ms": [
+          5488,
+          5680,
+          9567
+        ],
+        "eval_ms_median": 5680,
+        "wall_ms": [
+          5817.3,
+          6004.9,
+          10308.2
+        ],
+        "wall_ms_median": 6004.9,
+        "peak_rss_mib_median": 15.5
+      },
+      "new": {
+        "eval_ms": [
+          49,
+          46,
+          92
+        ],
+        "eval_ms_median": 49,
+        "wall_ms": [
+          87.6,
+          82.8,
+          171.7
+        ],
+        "wall_ms_median": 87.6,
+        "peak_rss_mib_median": 19.2
+      },
+      "speedup_median": 115.92,
+      "speedup_per_round": [
+        112.0,
+        123.48,
+        103.99
+      ]
+    },
+    {
+      "case": "tc 20",
+      "input_sha256": "13dd570a2800cf8c940c741f55d7fbd86649eb45b113d093ed4c33b2dd2ce1fb",
+      "edb_rows": 1281,
+      "expect": {
+        "reach": 13601
+      },
+      "old": {
+        "eval_ms": [
+          63425,
+          71822,
+          85302
+        ],
+        "eval_ms_median": 71822,
+        "wall_ms": [
+          63454.0,
+          71845.8,
+          85351.4
+        ],
+        "wall_ms_median": 71845.8,
+        "peak_rss_mib_median": 17.2
+      },
+      "new": {
+        "eval_ms": [
+          401,
+          319,
+          563
+        ],
+        "eval_ms_median": 401,
+        "wall_ms": [
+          430.0,
+          342.4,
+          617.2
+        ],
+        "wall_ms_median": 430.0,
+        "peak_rss_mib_median": 16.5
+      },
+      "speedup_median": 179.11,
+      "speedup_per_round": [
+        158.17,
+        225.15,
+        151.51
+      ]
+    }
+  ],
+  "naive_cases": [
+    {
+      "case": "naive chain 1000",
+      "against": "chain 1000",
+      "eval_ms": [
+        3028,
+        3161,
+        4043
+      ],
+      "eval_ms_median": 3161,
+      "wall_ms": [
+        3037.1,
+        3170.9,
+        4057.0
+      ],
+      "peak_rss_mib_median": 15.5,
+      "slowdown_vs_seminaive": 351.22
+    },
+    {
+      "case": "naive tc 20",
+      "against": "tc 20",
+      "eval_ms": [
+        2426,
+        4677,
+        5405
+      ],
+      "eval_ms_median": 4677,
+      "wall_ms": [
+        2450.3,
+        4727.7,
+        5473.4
+      ],
+      "peak_rss_mib_median": 58.1,
+      "slowdown_vs_seminaive": 11.66
+    }
+  ],
+  "records": [
+    {
+      "case": "chain 1000",
+      "engine": "old",
+      "round": 1,
+      "eval_ms": 220,
+      "build_ms": 13,
+      "wall_ms": 237.5,
+      "peak_rss_kib": 15824,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 1000",
+      "engine": "new",
+      "round": 1,
+      "eval_ms": 9,
+      "build_ms": 3,
+      "wall_ms": 18.3,
+      "peak_rss_kib": 15824,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "old",
+      "round": 1,
+      "eval_ms": 5488,
+      "build_ms": 321,
+      "wall_ms": 5817.3,
+      "peak_rss_kib": 15716,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "new",
+      "round": 1,
+      "eval_ms": 49,
+      "build_ms": 15,
+      "wall_ms": 87.6,
+      "peak_rss_kib": 19536,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "old",
+      "round": 1,
+      "eval_ms": 63425,
+      "build_ms": 11,
+      "wall_ms": 63454.0,
+      "peak_rss_kib": 17628,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "new",
+      "round": 1,
+      "eval_ms": 401,
+      "build_ms": 3,
+      "wall_ms": 430.0,
+      "peak_rss_kib": 16848,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "naive chain 1000",
+      "engine": "naive",
+      "round": 1,
+      "eval_ms": 3028,
+      "build_ms": 3,
+      "wall_ms": 3037.1,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "derived": 2000
+      }
+    },
+    {
+      "case": "naive tc 20",
+      "engine": "naive",
+      "round": 1,
+      "eval_ms": 2426,
+      "build_ms": 2,
+      "wall_ms": 2450.3,
+      "peak_rss_kib": 59600,
+      "derived": {
+        "derived": 13601
+      }
+    },
+    {
+      "case": "chain 1000",
+      "engine": "new",
+      "round": 2,
+      "eval_ms": 8,
+      "build_ms": 3,
+      "wall_ms": 16.7,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 1000",
+      "engine": "old",
+      "round": 2,
+      "eval_ms": 217,
+      "build_ms": 14,
+      "wall_ms": 235.8,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "new",
+      "round": 2,
+      "eval_ms": 46,
+      "build_ms": 16,
+      "wall_ms": 82.8,
+      "peak_rss_kib": 19612,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "old",
+      "round": 2,
+      "eval_ms": 5680,
+      "build_ms": 316,
+      "wall_ms": 6004.9,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "new",
+      "round": 2,
+      "eval_ms": 319,
+      "build_ms": 2,
+      "wall_ms": 342.4,
+      "peak_rss_kib": 16848,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "old",
+      "round": 2,
+      "eval_ms": 71822,
+      "build_ms": 11,
+      "wall_ms": 71845.8,
+      "peak_rss_kib": 17572,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "naive chain 1000",
+      "engine": "naive",
+      "round": 2,
+      "eval_ms": 3161,
+      "build_ms": 3,
+      "wall_ms": 3170.9,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "derived": 2000
+      }
+    },
+    {
+      "case": "naive tc 20",
+      "engine": "naive",
+      "round": 2,
+      "eval_ms": 4677,
+      "build_ms": 3,
+      "wall_ms": 4727.7,
+      "peak_rss_kib": 59536,
+      "derived": {
+        "derived": 13601
+      }
+    },
+    {
+      "case": "chain 1000",
+      "engine": "old",
+      "round": 3,
+      "eval_ms": 471,
+      "build_ms": 29,
+      "wall_ms": 507.1,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 1000",
+      "engine": "new",
+      "round": 3,
+      "eval_ms": 16,
+      "build_ms": 5,
+      "wall_ms": 30.2,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 1001,
+        "alerts": 999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "old",
+      "round": 3,
+      "eval_ms": 9567,
+      "build_ms": 728,
+      "wall_ms": 10308.2,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "chain 5000",
+      "engine": "new",
+      "round": 3,
+      "eval_ms": 92,
+      "build_ms": 32,
+      "wall_ms": 171.7,
+      "peak_rss_kib": 19660,
+      "derived": {
+        "tainted": 5001,
+        "alerts": 4999
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "old",
+      "round": 3,
+      "eval_ms": 85302,
+      "build_ms": 25,
+      "wall_ms": 85351.4,
+      "peak_rss_kib": 17604,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "tc 20",
+      "engine": "new",
+      "round": 3,
+      "eval_ms": 563,
+      "build_ms": 3,
+      "wall_ms": 617.2,
+      "peak_rss_kib": 16848,
+      "derived": {
+        "reach": 13601
+      }
+    },
+    {
+      "case": "naive chain 1000",
+      "engine": "naive",
+      "round": 3,
+      "eval_ms": 4043,
+      "build_ms": 5,
+      "wall_ms": 4057.0,
+      "peak_rss_kib": 15828,
+      "derived": {
+        "derived": 2000
+      }
+    },
+    {
+      "case": "naive tc 20",
+      "engine": "naive",
+      "round": 3,
+      "eval_ms": 5405,
+      "build_ms": 4,
+      "wall_ms": 5473.4,
+      "peak_rss_kib": 59296,
+      "derived": {
+        "derived": 13601
+      }
+    }
+  ],
+  "cold_build_seconds": {
+    "old": 3.8,
+    "new": 4.3
+  }
+}

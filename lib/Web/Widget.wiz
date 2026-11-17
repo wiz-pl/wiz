@@ -59,9 +59,9 @@ back is quoted as a Wiz string literal, so it cannot become source.
   This is deliberately not the `React.on` / `delegate` / `React.App.event` path,
   which passes only `(event, handler index)` and loses a control's value; that
   index-only dispatch remains a `Web.React` limitation, not a widget one.
-* `plot` carries opaque JSON in `data-wiz-widget-data`; there is no `Plot` module yet,
-  so the front end renders a placeholder. When `Plot` lands, `Widget.plotOf` is the
-  only function that changes.
+* `plot` carries opaque JSON in `data-wiz-widget-data`; `lib/Plot.wiz` exists, but the
+  widget layer does not consume it yet, so the front end renders a placeholder. A
+  `Widget.plotOf` adapter is proposed, not implemented.
 * Text/range `value` is patched as an **attribute** (React's documented limit): after
   a patch a live input's property may not follow the DOM attribute. Re-mount the
   fragment when that matters.
@@ -106,8 +106,8 @@ def Widget.buttonValue (id event value label callback : String) : Widget.Widget 
 def Widget.text (id event value callback : String) : Widget.Widget :=
   Widget.Widget.mk id "text" event value "" callback "" "" "" ""
 
-/-- A plot. `data` is opaque JSON (a `Plot` value when that module lands) carried in
-`data-wiz-widget-data`; the front end decides how to draw it. -/
+/-- A plot. `data` is opaque JSON (a `Plot` value once an adapter consumes it; none
+exists yet) carried in `data-wiz-widget-data`; the front end decides how to draw it. -/
 def Widget.plot (id event data callback : String) : Widget.Widget :=
   Widget.Widget.mk id "plot" event "" "plot" callback "" "" "" data
 

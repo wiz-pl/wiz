@@ -127,6 +127,25 @@ def ffiGroup : Group where
         ioRun ("import IO\ndef fill : Nat → Bytes → Bytes\n  | .zero, b => b\n  | .succ n, b => Bytes.push (fill n b) (65 + n)\n" ++
           "def main : IO Unit := do\n  IO.println (Bytes.toString (fill 3 Bytes.empty));\n" ++
           "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"λx\")))") "ABC\n3\n" },
+    { name := "byte buffers in #eval and #run (the interpreters' model, 21ag)", run := fun _ =>
+        okLib ("import Std\n" ++
+          "#eval Bytes.show (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))\n" ++
+          "#eval Bytes.size (Bytes.push Bytes.empty 256)\n" ++
+          "#eval Bytes.get (Bytes.ofList (List.cons 7 .nil)) 3\n" ++
+          "#eval Bytes.eq (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 1 .nil))\n" ++
+          "#eval Bytes.eq (Bytes.ofString \"ab\") (Bytes.ofString \"abc\")\n" ++
+          "#eval Bytes.toString (Bytes.ofList (List.cons 65 (List.cons 0 (List.cons 66 .nil))))\n" ++
+          "#eval Bytes.size (Bytes.ofString \"a\\x00b\")\n" ++
+          "#eval Bytes.ofList (List.cons 1 (List.cons 255 .nil))\n" ++
+          "#eval Bytes.show (Bytes.slice (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))) 1 9)\n" ++
+          "#run Bytes.show (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))\n" ++
+          "#run Bytes.eq (Bytes.ofString \"ab\") (Bytes.ofString \"ab\")\n" ++
+          "#run Bytes.toString (Bytes.ofUtf8 \"é\")\n" ++
+          "#run Bytes.size (Bytes.ofUtf8 \"𝄞\")\n")
+          -- (`Bytes.show` is a `String`, so `#eval`/`#run` print it quoted, as they print
+          -- `Bytes.toString`'s; a `Bytes` value itself prints as `[1, 255]`, unquoted)
+          ["\"[1, 2, 44]\"", "1", "0", ".true", ".false", "\"A\"", "1", "[1, 255]", "\"[2, 3]\"",
+           "\"[1, 2, 44]\"", ".true", "\"é\"", "4"] },
     { name := "foreign types are checked", run := fun _ =>
         ioFails "import IO\nextern \"f\" f : ((Nat → Nat) → Nat) → Nat" "foreign function" },
     { name := "link_c: a C file and a library linked with the program (C backend)", run := fun _ =>
