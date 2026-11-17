@@ -76,7 +76,9 @@ terminal gets a prompt; a pipe is a script, and its output is only the commands'
 `--prelude MODULE`/`-p MODULE` (repeatable, comma-separated) imports modules after the
 Prelude and before the first prompt, composing with `-I`; a missing module is a startup
 error. A tool that ships a prelude module can wrap the ordinary REPL instead of forking
-it (`scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`).
+it (`scry repl`, run from `scry/`, is
+`wiz repl -I src -I ../lib --prelude Scry.Repl`; from the repository root,
+`wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 Limits: input is one line per command (no continuation, history or line editing, and no
 completion or goal display — that is `wiz lsp` and the infoview). The REPL is a frontend
@@ -86,8 +88,8 @@ directory: the session has no file of its own. Tests are the `wiz repl:` cases o
 `tooling` group.
 
 `wiz test-driver [--driver PATH] [GROUPS…] [--jobs N] [--list]` runs `.lake/build/bin/tests`
-(or `PATH`) with the other arguments unchanged; build the driver first. The single-file
-form is `wiz test FILE` (stage 11ah).
+with the other arguments unchanged; build the driver first. There is no single-file
+form yet: `wiz test FILE` is still a proposal, and no stage-11ah section exists.
 
 ### Running cases in parallel (`--jobs`)
 
@@ -496,7 +498,7 @@ The worst offender is the self-hosted checker at 413 MiB: it is 40 % of its 1 Gi
 cap and an order of magnitude above the module checks, which is why it has its own
 entry. It was 10.7 GB before the `inlineTm` fix and is the reason the cap exists.
 The stdlib build is the slow entry (146 s; two samples, because the peak is stable),
-not the largest peak. The 167 KiB `hdl-uart-temporal` example is not in the corpus:
+not the largest peak. The 164 KiB `hdl-uart-temporal` example is not in the corpus:
 a cold check takes over four minutes on this host, so the corpus uses
 `hdl-temporal` (294 lines, 35 s cold) instead and keeps the nightly bounded.
 
@@ -696,9 +698,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   does not show that the C is correct (it is compiled with `-w`), that the compiled
   toolchain behaves correctly (the test suite covers that), or anything about other
   inputs, flags, C compilers or GC versions.
-  The self-compile peaks at 5.1–5.4 GiB (the three-stage run measured 5.4 GiB in stage 2
-  and 5.2 GiB in stage 3), so **reserve 6 GiB**; the script names that requirement if a
-  stage is killed for memory (exit 137). Run it locally with `nix develop -c
+  The self-compile needs about 6 GiB; the script names that requirement if a stage is
+  killed for memory (exit 137). Run it locally with `nix develop -c
   scripts/fixpoint.sh` and a 6 GiB reservation.
   The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on

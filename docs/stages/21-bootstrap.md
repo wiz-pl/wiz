@@ -25,7 +25,7 @@
 * **Runtime**: tagged words, objects collected by the Boehm garbage collector (no
   reference counts yet); the program re-executes itself once with a large stack.
 
-**Bootstrap**: the self-hosted compiler (frontend and backend, about 6500 lines of Wiz),
+**Bootstrap**: the self-hosted compiler (frontend and backend, about 12 000 lines of Wiz),
 compiled by the Lean toolchain, compiles itself to C (about 90 000 lines); that program
 (stage 2) produces the same C as stage 1 on the inputs tried. The test suite compiles
 and runs a program with the self-hosted compiler (when `$WIZ_GC_CFLAGS`/`$WIZ_GC_LDFLAGS`
