@@ -1,6 +1,7 @@
 [
   {"name": "selfhost", "split": 6, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "lib/Sys.wiz", "lib/Deriving.wiz",
               "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
@@ -125,7 +126,8 @@
   ]},
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
-              "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*"],
+              "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*",
+              "lib/Text.wiz", "lib/Int.wiz", "lib/Deriving.wiz", "lib/Optic.wiz"],
    "select": [
     "check",
     "conv",

@@ -431,6 +431,12 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
 declares its own `Nat.repr`), checked on their own. -/
 def libApart : List String := ["Json", "Infoview"]
 
+/-- The examples that deliberately show an error (their `.expected` golden holds it):
+`procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
+sweep below treats an error in any other example as a failure, and an allow-listed file
+that stops erroring as one too. -/
+def errorExamples : List String := ["examples/procmacro.wiz", "examples/syntax.wiz"]
+
 /-- Every other module of `lib/` imported at once. -/
 def allLibSource : IO String := do
   let mut ms := #[]
@@ -725,13 +731,28 @@ def group : Group where
           let (n, bad) := hypsMismatches st.globals
           unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
           total := total + n
+        let mut exampleErrors : List String := []
         for e in ← System.FilePath.readDir "examples" do
           unless e.path.extension == some "wiz" do continue
-          let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile e.path) { trustedModule := Tests.libModule, loader }
-          if st.messages.any (·.severity == .error) then continue  -- (an example of an error)
+          let src ← IO.FS.readFile e.path
+          let st := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
+          let path := e.path.toString
+          let errored := st.messages.any (·.severity == .error)
+          if errorExamples.contains path then
+            -- the two files that demonstrate a diagnostic must keep doing so
+            unless errored do exampleErrors := s!"{path}: expected an error, got none" :: exampleErrors
+            continue
+          if errored then
+            let first := match (st.messages.filter (·.severity == .error))[0]? with
+              | some m => m.render src
+              | none => ""
+            exampleErrors := s!"{path}: {first}" :: exampleErrors
+            continue
           let (n, bad) := hypsMismatches st.globals
           unless bad.isEmpty do throw (IO.userError s!"{e.path}: {bad.take 3}")
           total := total + n
+        unless exampleErrors.isEmpty do
+          throw (IO.userError s!"examples with errors (only {errorExamples} may fail):\n{"\n".intercalate exampleErrors.reverse}")
         check (total > 1000) s!"only {total} cases" },
     -- (P3) a universe-polymorphic definition unfolds at the cached levels (0, 1, 2) and at
     -- others alike, and a wrong statement at a cached level is still rejected
