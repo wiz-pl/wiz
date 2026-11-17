@@ -9,7 +9,13 @@ declaration, and search covers names, doc comments and signatures; docs/building
 static playground that runs the self-hosted checker in the browser;
 <https://wiz-pl.github.io/wiz/bench/> is the benchmark page, generated from the JSON
 checked into the repository. This file indexes the repository's documentation; the
-published `/docs/` is generated from `lib/` by `wiz doc --lib`.
+published `/docs/` is generated from `lib/` by `wiz doc --lib`, and these pages are
+published under `/guide/` by `web/build-docs.py` (`docs/building.md`, "Documentation
+site"), so the site never links a reader to a `.md` file.
+
+Start with [install.md](install.md) and [tour.md](tour.md); a first package is in
+[packages.md](packages.md), and [selfhost-compiler.md](selfhost-compiler.md) explains
+what "self-hosted" means here.
 
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
@@ -74,6 +80,8 @@ line below.
 
 ### Self-hosting
 
+* [The self-hosted compiler](selfhost-compiler.md): the sources, `selfhost/Tables.wiz`,
+  the bootstrap and the three-stage fixpoint, and what parity does and does not mean
 * [Stage 12: towards self-hosting](stages/12-towards-selfhosting.md)
 * [Stage 13: the language, for programs this size](stages/13-language.md)
 * [Stage 14: the kernel in Wiz](stages/14-selfhost-kernel.md)
@@ -88,6 +96,10 @@ line below.
 
 ### Tooling
 
+* [Packages: grail, the registry and tower](packages.md): creating a package, consuming
+  dependencies, `grail.lock`, publishing to an index, and choosing a toolchain
+* [scry/README.md](../scry/README.md): the code-analysis platform as a grail package:
+  the C front end (tree-sitter), the Wil lowering, taint analysis and certificates
 * [Stage 11: tooling](stages/11-tooling.md)
 * [Stage 23: grail, a build tool](stages/23-grail.md)
 * [Stage 26: tower, a toolchain manager](stages/26-tower.md)
@@ -106,3 +118,10 @@ line below.
 ### Verification
 
 * [Stage 24: separation logic](stages/24-separation-logic.md)
+
+### Design notes and prior art
+
+* [Design documents](design/README.md): the implemented designs and why (sorts, the proof
+  marker, conversion regularity, the infoview protocol, linear data)
+* [Prior art](prior-art/README.md): surveys of symbolic execution, registries and build
+  systems, and compilers, runtimes and FFI, written to inform the design
