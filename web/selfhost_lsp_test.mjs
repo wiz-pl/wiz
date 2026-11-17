@@ -20,6 +20,7 @@ import {
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
 import { startInfoview } from "./playground-lsp.js";
+import { document as minidoc } from "./framework/minidom.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -292,6 +293,17 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
+// The DOM the squiggle overlay needs (minidom's elements plus a body).
+function fakeDocument() {
+  const base = minidoc();
+  return {
+    body: base.createElement("body"),
+    createElement: base.createElement,
+    createTextNode: base.createTextNode,
+    createRange: base.createRange,
+    defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
+  };
+}
 async function waitUntil(predicate, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -303,13 +315,19 @@ async function waitUntil(predicate, ms = 3000) {
 {
   const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval twice 21\n");
   const wire = fakePanel();
-  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz" });
+  const app = startInfoview({
+    editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    document: fakeDocument(),
+  });
   checkThat("wiring: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
   checkThat("wiring: the #eval result", await waitUntil(() => wire.innerHTML.includes("42")));
   editor.value = "def twice (n : Nat) : Nat := BAD\n";
   for (const fn of editor.listeners.input || []) fn();
   checkThat("wiring: an edit's error", await waitUntil(() => wire.innerHTML.includes("unknown identifier")), wire.innerHTML.slice(0, 600));
   checkThat("wiring: on line 1", wire.innerHTML.includes('data-span="0:0-0:'));
+  // The in-page server's diagnostics reach the editor's squiggle layer too.
+  checkThat("wiring: the error is underlined", !!app.squiggles() && app.squiggles().segments().length === 1,
+    JSON.stringify(app.squiggles() && app.squiggles().segments()));
   app.stop();
 }
 
