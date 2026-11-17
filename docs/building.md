@@ -644,6 +644,10 @@ the elan toolchain, so the setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+  The same job runs `scripts/check-doc-links.py`: every relative link and `#anchor` in
+  those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
+  to `wiz-notes/...` are reported as external notes (the notes live outside the
+  repository) and `http(s)` links are reported but not fetched, so CI needs no network.
 * **Documentation examples** (the `docs_examples` job, and a step in `build`):
   `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
   and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
@@ -900,7 +904,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style and links (`scripts/check-docs-style.py`, `scripts/check-doc-links.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with
