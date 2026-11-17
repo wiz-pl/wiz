@@ -15,6 +15,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
   and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
   still selects an external server and `?lsp=off` disables the pane.
+* selfhost: a `×` type in an inductive or structure field (`| mk (p : Nat × Bool)`)
+  no longer fails with `internal error: a variable out of scope`. The self-hosted
+  frontend's scope checker names a global by its index and `closeG` closes those indices
+  over the globals; it did not visit a `sigma`, so a syntactic pair in a field type kept
+  both components as scope indices (a pair written through a definition was fine). This
+  was the first error on `lib/Web/React.wiz` (21an).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

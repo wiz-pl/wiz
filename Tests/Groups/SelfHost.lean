@@ -566,6 +566,44 @@ def sigmaDecls : List (String × Bool) := [
   ("def bad : Type := (n : Nat) × n\n", false),
   ("def bad : Type := ∀ (n : Nat), n\n", false)]
 
+/-- (21an) A `×` type as an inductive constructor field or a structure field. The
+scope checker names a global by its index and `closeG` closes those indices over the
+globals; it did not visit a `sigma`, so both components of a syntactic pair were left
+as scope indices and the kernel rejected the declaration with "internal error: a
+variable out of scope". A field written through a definition (`def P : Type := A × B`)
+was fine, which is why this went unnoticed. -/
+def sigmaFieldDecls : List (String × Bool) := [
+  ("inductive PairField where\n  | mk (p : Nat × Bool)\n", true),
+  ("structure PairStruct where\n  n : Nat\n  p : Nat × Bool\n", true),
+  ("inductive Many where\n  | mk (a : String) (b : String × Nat) (c : List (String × Nat))\n", true),
+  ("inductive At (A : Type) where\n  | mk (p : A × Nat) (f : Nat → A)\n", true),
+  ("inductive PairField where\n  | mk (p : Nat × Bool)\n\ndef pf : PairField := PairField.mk (1, .true)\ndef pfSnd : Bool := match pf with\n  | .mk p => p.2\n", true),
+  ("structure Nest where\n  n : Nat\n  q : Nat × (Bool × Nat)\n", true),
+  -- (still rejected by both: the pair's second component is a Nat, not a Bool)
+  ("inductive Bad where\n  | mk (p : Nat × Bool)\n\ndef u : Bad := Bad.mk (1, 2)\n", false)]
+
+/-- (21an, A17) List literals are a **library** syntax: `lib/Prelude.wiz` declares
+`syntax (name := listLit) "[" sepBy(term, ",") "]"` and a `Macro` function
+(`ListLit.expand`). The self-hosted frontend's prelude is the embedded `preludeText`,
+which has no such rule, and the frontend has no elaborator-time macro evaluator to run
+the function — so `[a, b]` is not a term there and the parser stops at `[`. Pinned: the
+Lean frontend accepts, the self-hosted one rejects. This is the reason
+`lib/Web/Widget.wiz` is rejected at its first `Json.mkObj [ … ]`.
+
+(`selfhostAgrees`/`selfhostVerdicts` count a diagnostic line that starts with `error`;
+a parse rejection starts with `parse error`, so this case asserts the divergence
+itself.) -/
+def listLitDiff : IO Unit := do
+  let src := "import Prelude\ndef xs : List Nat := [1, 2, 3]\n"
+  let loader ← preludeLoader
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  let errs := s.messages.filter (·.severity == .error)
+  unless errs.isEmpty do
+    throw (IO.userError s!"the Lean frontend rejects a list literal:\n{"\n".intercalate (errs.map (·.render src)).toList}")
+  let some out ← selfhostOutput src | return
+  unless (out.splitOn "parse error").length > 1 do
+    throw (IO.userError s!"the self-hosted frontend now parses a list literal (update this case and A17):\n{out}")
+
 /-- (stage 21m) A program with quantities, compiled by the self-hosted compiler: the
 0-quantity arguments are erased, a `let 1` runs. -/
 def quantityProgram : String :=
@@ -1948,6 +1986,10 @@ def selfHostGroup : Group where
         ioRun linearMatchProgram "3\n5\n6\n" },
     { name := "the self-hosted frontend: Σ types, pairs, projections and ∀, as in the Lean frontend (21u)", run := fun _ =>
         selfhostAgrees "" sigmaDecls },
+    { name := "the self-hosted frontend: a `×` type as an inductive or structure field, as in the Lean frontend (21an)", run := fun _ =>
+        selfhostAgrees "" sigmaFieldDecls },
+    { name := "the self-hosted frontend: list literals, the pinned difference (21an, A17)", run := fun _ =>
+        listLitDiff },
     { name := "the self-hosted backend: quantities erase and run, with either collector (21m)", run := fun _ => do
         selfhostCompileRun quantityProgram "6\n5\n9\n"
         selfhostCompileRun quantityProgram "6\n5\n9\n" (flags := #["--rc"]) },
