@@ -1,4 +1,4 @@
-# Stage 33: deadlock freedom, proved
+# Stage 35: deadlock freedom, proved
 
 Stage 25c claims that a program using only session-typed channels can't deadlock:
 endpoints are linear (quantity 1, which is exact in Wiz), and every `fork` adds one
@@ -13,9 +13,9 @@ starts with `Deadlock.`). Tests: `lake test -- '=verif-deadlock'`.
 
 The theorems are ordinary definitions checked by the kernel. `#print axioms` is empty for
 `Deadlock.progress`, `Deadlock.stepAcyclic` and `Deadlock.reachableProgress`. Only the
-`link` connection (33c) uses an axiom: the Prelude's `castRefl`.
+`link` connection (35c) uses an axiom: the Prelude's `castRefl`.
 
-## 33a: the configuration model
+## 35a: the configuration model
 
 A thread is a session-typed process over the endpoints it holds. A context `Ctx` lists
 the endpoints: a channel name (`Nat`) and that end's remaining protocol (`Proto`, from
@@ -69,7 +69,7 @@ The judgments on a configuration:
   decrease all the way round. The equivalence is argued here, not proved in Wiz.
 * `Final C`: every thread has finished (no fuel left, or at `ret`).
 
-## 33b: progress, and acyclicity preserved
+## 35b: progress, and acyclicity preserved
 
 **`Deadlock.progress (C) : Typed C → Closed C → Acyclic C → Final C ∨ HasStep C`.**
 
@@ -112,9 +112,9 @@ round, because the ranks would have to keep falling (`up`) or keep rising up to 
 Runs (`Steps`, the reflexive-transitive closure): a program starts as one thread holding
 nothing (`Deadlock.init`), which is acyclic. So `Deadlock.reachableAcyclic` says every
 configuration a program reaches is acyclic, and `Deadlock.reachableProgress` says such a
-configuration is final or steps, given `Typed` and `Closed` (33d).
+configuration is final or steps, given `Typed` and `Closed` (35d).
 
-## 33c: the connection to `link`
+## 35c: the connection to `link`
 
 `Proc.thread` turns a `Proc R p` (25b) into a thread on a single endpoint. It needs
 `Bounded n p`, a bound on the protocol's depth, because a thread's fuel is a number while
@@ -140,7 +140,7 @@ def bd : Deadlock.Bounded 2 P := fun _ _ => True.intro
 def ok := Deadlock.linkProgress 2 P bd client server
 ```
 
-## 33d: what remains
+## 35d: what remains
 
 The module proves progress and preserves acyclicity for the finite fragment. Still to do,
 roughly in order:
@@ -154,18 +154,18 @@ roughly in order:
    * fork: the new channel is `DualR p (Proto.dual p)`, which needs `castRefl`, and the
      masks keep every other channel's two holders.
 
-   This is the same `Holds`/`isAtSet` bookkeeping as 33b, plus endpoint protocols. The
+   This is the same `Holds`/`isAtSet` bookkeeping as 35b, plus endpoint protocols. The
    `Closed` part also needs "exactly two holders" (linearity), which `Closed` does not
    state yet.
 2. **Recursive protocols (25i)**: `Proto.loop σ n s` is already an ordinary `Proto`, so
-   a bounded loop whose bodies are `Bounded` fits 33a–33c as it is. True recursion (ν, sizes) needs threads that are
+   a bounded loop whose bodies are `Bounded` fits 35a–35c as it is. True recursion (ν, sizes) needs threads that are
    not fuel-bounded (a coinductive `Th`, or sized types). The progress proof does not use
    the fuel; the definitions do.
 3. **Delegation (25j)**: an action that sends an endpoint, which moves an edge of the
    graph from one thread to another. Acyclicity is then preserved because the sent
    endpoint leaves the sender (linearity), the case JBK22 treat. lib/SessionRec.wiz's
    forwarding `Chan.delegate` needs nothing new: it is a thread relaying between two
-   channels it holds, which 33a already models.
+   channels it holds, which 35a already models.
 4. **Asynchrony**: the model is synchronous like `link`, but `runtime/` channels buffer
    sends. An asynchronous model adds a buffer per channel and makes "ready" mean "a
    receive with an empty buffer".
@@ -173,6 +173,6 @@ roughly in order:
    or to the D3 scheduler (lib/Conc.wiz), so that the theorem is about Wiz programs and
    not only about the model.
 6. **The forest definition**: a Wiz proof that `Acyclic` (the ranking) is equivalent to
-   "no cycle" in the graph-theoretic sense. Here it is argued (33a).
+   "no cycle" in the graph-theoretic sense. Here it is argued (35a).
 7. **MVars, locks and `partial`** stay outside the claim, as in 25c. D5 (lock levels) is
    the next step there.

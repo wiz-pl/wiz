@@ -106,4 +106,4 @@ line below.
 ### Verification
 
 * [Stage 24: separation logic](stages/24-separation-logic.md)
-* [Stage 33: deadlock freedom, proved](stages/33-deadlock.md): progress and acyclicity for session-typed configurations (lib/SessionDeadlock.wiz)
+* [Stage 35: deadlock freedom, proved](stages/35-deadlock.md): progress and acyclicity for session-typed configurations (lib/SessionDeadlock.wiz)

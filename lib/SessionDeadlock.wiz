@@ -3,7 +3,7 @@ import Session
 /-!
 # SessionDeadlock
 
-Deadlock freedom for session-typed channels, proved (stage 33, docs/stages/33-deadlock.md):
+Deadlock freedom for session-typed channels, proved (stage 35, docs/stages/35-deadlock.md):
 `import SessionDeadlock`. The argument that lib/Session.wiz's docstring calls "a
 meta-theorem from the literature" (decision CS2: linearity plus a forest of channels),
 for the finite fragment, as a kernel-checked theorem about a pure model of threads and
@@ -69,7 +69,7 @@ identity.
 **Scope.** Finite fragment only: no recursive protocols (25i) and no delegation (25j).
 Preservation of `Typed` and `Closed` under steps is not proved here, so the theorem is
 "progress plus preservation of acyclicity", not yet "every reachable configuration of a
-well-typed program is deadlock-free". docs/stages/33-deadlock.md lists what remains.
+well-typed program is deadlock-free". docs/stages/35-deadlock.md lists what remains.
 
 ```
 import SessionDeadlock
@@ -1364,7 +1364,7 @@ def Deadlock.reachableAcyclic (n : Nat) (t : Deadlock.Th n .nil) {D : Deadlock.C
   Deadlock.stepsAcyclic r (Deadlock.initAcyclic n t)
 
 /-- **Deadlock freedom for reachable configurations**, given that they are typed and closed
-(the two invariants whose preservation is not proved yet, docs/stages/33-deadlock.md, 33d). -/
+(the two invariants whose preservation is not proved yet, docs/stages/35-deadlock.md, 35d). -/
 def Deadlock.reachableProgress (n : Nat) (t : Deadlock.Th n .nil) {D : Deadlock.Cfg}
     (r : Deadlock.Steps (Deadlock.init n t) D) (ty : Deadlock.Typed D) (cl : Deadlock.Closed D) :
     Deadlock.Final D ∨ Deadlock.HasStep D :=
