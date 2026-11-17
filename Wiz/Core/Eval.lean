@@ -668,7 +668,8 @@ L8), whatever the `let`'s type: everything else on that path is already lazy.
   (sound: the same global on convertible arguments), falling back to `whnf` of both sides
   when they differ (`Nat.add big 5` against `Nat.add 5 big`, or against `big + 5`), so
   conversion is the same relation (wiz-notes/kernel-lazy-let.md, §8).
-* An argument that is itself a glued *operation* is computed first (`whnf`): otherwise a
+* An argument that is itself a glued *operation* is computed first (`whnf`), and replaced
+  by its value when that is a numeral: otherwise a
   loop such as `foldl (fun acc x => Nat.add acc (f x))` would build a chain of suspended
   additions as long as the list, forced at the end one stack frame per element. So only a
   definition's application keeps an operation glued, and a chain of operations never
@@ -684,8 +685,12 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   let isOp (n : Name) : Bool := match g.builtinKey? n with
     | some k => k.startsWith "nat."
     | none => false
+  -- (a numeral replaces the argument; anything else keeps it as it was, glued under the
+  -- operation's name: its `whnf` is the operation's unfolding, stuck on a variable or a
+  -- hole, which unification can't match the way it matches `Nat.pow 2 ?w` against
+  -- `Nat.pow 2 w`)
   let args := args.map fun a => match a with
-    | .unfold n _ _ _ => if isOp n then whnf a else a
+    | .unfold n _ _ _ => if isOp n then (match whnf a with | v@(.natLit _) => v | _ => a) else a
     | a => a
   let glued := args.any fun a => match a with
     | .unfold .. | .lazyInd .. => true
