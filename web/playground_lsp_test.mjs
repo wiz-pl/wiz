@@ -15,7 +15,7 @@ import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
 import { LspClient, LspError, parseEndpoint, endpointFromSearch } from "./lsp-client.js";
 import {
-  renderPanel, readGoalState, offsetAt, positionAt, rangeOffsets,
+  renderPanel, renderGoalResult, renderTermResult, readGoalState, offsetAt, positionAt, rangeOffsets,
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
 } from "./goals.js";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
@@ -224,6 +224,33 @@ checkThat("panel: the severity", withDiagnostic.includes("sev-error"));
   const looseStored = loose.diagnostics.get(looseUri);
   check("diagnostics: unversioned publishes keep the last arrival",
     looseStored && looseStored.diagnostics ? looseStored.diagnostics.map((d) => d.message).join(",") : null, "second");
+}
+
+// ## 6c. Malformed results: "nothing at the cursor", not "no goals" or an empty goal
+
+// A result that is not the protocol's shape is not the positive claim `goals: []` makes
+// ("the proof is complete"). Only the required field being absent is malformed; `null`
+// already means "nothing at the cursor".
+{
+  const nothing = (html) => typeof html === "string" && html.includes("nothing at the cursor");
+  check("malformed: an interactive result without goals is nothing at the cursor",
+    nothing(renderGoalResult({ range: { start: { line: 0, character: 0 } } }, "interactive")), true);
+  check("malformed: it does not claim no goals",
+    renderGoalResult({ range: {} }, "interactive").includes("no goals"), false);
+  check("malformed: a non-array goals field", nothing(renderGoalResult({ goals: "n : Nat" }, "interactive")), true);
+  check("malformed: a plain result without goals or rendered", nothing(renderGoalResult({ range: {} }, "plain")), true);
+  check("malformed: a term result without a goal is nothing at the cursor",
+    nothing(renderTermResult({ range: {} }, "interactive")), true);
+  check("malformed: it does not draw an empty turnstile",
+    renderTermResult({ range: {} }, "interactive").includes("⊢"), false);
+
+  // The valid empty shapes still work.
+  check("malformed: an empty goals array is no goals",
+    renderGoalResult({ goals: [] }, "interactive").includes("no goals"), true);
+  check("malformed: a plain rendered no-goals result",
+    renderGoalResult({ rendered: "no goals" }, "plain").includes("no goals"), true);
+  check("malformed: a plain term goal still renders",
+    renderTermResult({ goal: "⊢ Nat", range: {} }, "plain").includes("⊢ Nat"), true);
 }
 
 // ## 7. The plainGoal fallback (a server with only the text methods)
