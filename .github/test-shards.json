@@ -1,5 +1,5 @@
 [
-  {"name": "selfhost", "split": 6, "heavy": true,
+  {"name": "selfhost", "split": 4, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
@@ -25,9 +25,9 @@
    "select": [
     "=grail-selfhost"
   ]},
-  {"name": "selfhost-libdiff", "heavy": true,
+  {"name": "selfhost-libdiff", "heavy": true, "jobs": 3,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
-              "Tests/Main.lean"],
+              "Tests/Main.lean", "Tests/Harness.lean"],
    "select": [
     "=selfhost-libdiff"
   ]},
@@ -45,7 +45,7 @@
     "sys",
     "wasm"
   ]},
-  {"name": "library", "split": 6, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 8, "jobs": 4, "default": true, "select": [
     "=bus-crc",
     "=bus-law",
     "=bus-protocol",

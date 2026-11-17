@@ -222,7 +222,9 @@ jobs:
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
             $(nix path-info .#wiz .#tests)
       - name: Every test case is in exactly one shard
-        run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
+        run: |
+          python3 scripts/ci.py check-shards --self-test
+          python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
         id: shards
         run: |

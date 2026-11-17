@@ -101,7 +101,16 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  -- `--jobs N`: the case may use N workers (`caseJobs`)
+  let args ← match args with
+    | [g, i, "--jobs", n] | ["--jobs", n, g, i] => match n.toNat? with
+      | some k => if k > 0 then do caseJobsRef.set k; pure [g, i] else pure ["--jobs", n]
+      | none => pure ["--jobs", n]
+    | [gi, "--jobs", n] | ["--jobs", n, gi] => match n.toNat? with
+      | some k => if k > 0 then do caseJobsRef.set k; pure [gi] else pure ["--jobs", n]
+      | none => pure ["--jobs", n]
+    | args => pure args
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -194,10 +203,12 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 `--jobs N` (default 1) runs the cases of a group that opted in (`Group.parallel`, see
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
-in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
+in still run one case at a time, and each of their cases is told N (`caseJobs`): the
+`selfhost-libdiff` sweep then checks its files N at a time (fewer when the memory or
+CPUs are short). `--jobs-all` also parallelizes groups that did not opt in
 (for auditing a group's isolation, not for CI).
 
-`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE]` runs the self-hosted
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N]` runs the self-hosted
 compiler and the Lean frontend over every `lib/` and `scry/` file and reports where they
 disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
 documents the format). -/
@@ -206,6 +217,11 @@ def main (args : List String) : IO UInt32 := do
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
+  -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
+  -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
+  let traceGuesses := args.contains "--trace-guess-fallback"
+  let args := args.filter (· != "--trace-guess-fallback")
+  if traceGuesses then Wiz.traceGuessesRef.set true
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- the processes the suite starts get the toolchain as flags
@@ -214,10 +230,18 @@ def main (args : List String) : IO UInt32 := do
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set tc.toFlags
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
-  | ["--run-case", group, ix] =>
+  | "--run-case" :: group :: ix :: rest =>
+    -- `Group.run` passes the driver's `--jobs N` on (`caseJobsRef`)
+    let n := match rest with
+      | ["--jobs", n] => n.toNat?
+      | [] => some 1
+      | _ => none
+    let some n := n
+      | do IO.eprintln s!"unexpected arguments after --run-case {group} {ix}: {" ".intercalate rest}"; pure 2
+    caseJobsRef.set n
     match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
     | some c => c.runHere
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
@@ -296,6 +320,8 @@ def main (args : List String) : IO UInt32 := do
         | n => n
     let some jobs := jobs
       | IO.eprintln "--jobs needs a count of at least 1"; return 2
+    -- a case of a group that runs its cases one at a time may use `jobs` workers itself
+    caseJobsRef.set jobs
     let shard := shard.getD ""
     if let some code ← checkSelectors args then return code
     let groups ← allGroups
