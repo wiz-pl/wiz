@@ -1,9 +1,16 @@
 import Sys
+import Json
 import Scry.Query
 import Scry.Parse
 import Scry.CstStore
 import Scry.TaintCmd
+import Scry.DynamicCmd
 import Scry.BenchCmd
+import Scry.ProjectIO
+import Scry.WorkflowCmd
+import Scry.Repl
+import Scry.FuzzCmd
+import Scry.ReportCmd
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -14,10 +21,13 @@ grail target is one file):
 scry facts FILE                 load a fact store and print its stats
 scry query FILE --kind KIND     nodes of a CST kind
 scry query FILE --edge LABEL    edges with a label
+scry query FILE --edge-src L    sources of edges labelled L
 scry query FILE --rel NAME      a relation's tuples
 scry explain FILE NODE          one node: span, parent, children, arcs, relations
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
 scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
+scry report FILE.c|DIR          one self-contained HTML page of the taint evidence
+scry fuzz-span FILE             map a fuzz artifact to CST spans (dynamic evidence)
 ```
 
 Exit status is 0 on success, 1 on an error (a message on stderr), 2 on a usage error.
@@ -34,19 +44,47 @@ def Scry.usage : String :=
   ++ "  facts FILE                 load a fact store and print its stats\n"
   ++ "  query FILE --kind KIND     nodes of a CST kind\n"
   ++ "  query FILE --edge LABEL    edges with a label\n"
+  ++ "  query FILE --edge-src L    sources of edges labelled L\n"
   ++ "  query FILE --rel NAME      a relation's tuples\n"
   ++ "  explain FILE NODE          one node: span, parent, children, arcs, relations\n"
   ++ "  parse FILE… --stats        stats of JSON or scry-cst stores (S1)\n"
   ++ "  cst FILE OUT               convert a JSON fact store to scry-cst\n"
   ++ "  taint FILE.c [--rules FILE] [--sarif OUT] [--json] [--allow-errors]\n"
   ++ "              [--fail-on-finding] [--origin-map] [--progress]\n"
+  ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                             C -> Wil -> taint -> findings/SARIF\n"
   ++ "                             (default limits: 300 s, 2 000 000 nodes)\n"
+  ++ "  limits: default --timeout 300 --max-nodes 2000000; 0 disables a limit.\n"
+  ++ "  A truncated fixpoint is reported as scry/budget/* and \"truncated\": true.\n"
+  ++ "  dynamic FILE.c [--cc PATH] [--json] [--sarif OUT] [--timeout SECS]\n"
+  ++ "              [--no-coverage] [--witness FILE] [--keep] [--work-dir DIR]\n"
+  ++ "              [--no-static]\n"
+  ++ "                             compile/run under ASAN/UBSAN, correlate with taint\n"
   ++ "  bench [--corpus DIR] [--baseline FILE] [--extra DIR]... [--json OUT]\n"
-  ++ "        [--markdown OUT] [--update-baseline FILE] [--no-timing] [--quiet]\n"
-  ++ "        [--fail-on-regression]\n"
+  ++ "        [--markdown OUT] [--update-baseline FILE] [--no-baseline]\n"
+  ++ "        [--no-timing] [--quiet] [--fail-on-regression]\n"
+  ++ "        [--dynamic] [--cc PATH] [--no-coverage]\n"
   ++ "                             run the taint corpus and compare with expectations\n"
+  ++ "  repl [FILE.c] [--script FILE] [--init CMD] [--llvm]\n"
+  ++ "                             the Wiz REPL with Scry.Repl preloaded (load once,\n"
+  ++ "                             then query it as ordinary Wiz values)\n"
+  ++ "  project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT]\n"
+  ++ "              [--taint] [--rules FILE] [--json] [--sarif OUT]\n"
+  ++ "              [--cache[=DIR]] [--cache-stats] [--fail-on-finding]\n"
+  ++ "              [--keep-system-headers] [--skip-broken]\n"
+  ++ "                              preprocess and lower a multi-file C project;\n"
+  ++ "                              --taint reports cross-TU findings/SARIF\n"
+  ++ "  project query DIR --rel NAME | --func NAME\n"
+  ++ "                              a project relation (symbols, callgraph, …) or function table\n"
+  ++ "  findings scan|list|show|triage|repro|verify …\n"
+  ++ "                             finding identity, triage and evidence bundles\n"
+  ++ "  report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]\n"
+  ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
+  ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "                             self-contained HTML page of the taint evidence\n"
+  ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
+  ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -72,13 +110,16 @@ def Scry.queryCmd (file : String) (args : List String) : EIO Nat := do
   | .cons "--edge" (.cons label .nil) => do
     Scry.say (Scry.renderQueryEdge f label);
     EIO.pure 0
+  | .cons "--edge-src" (.cons label .nil) => do
+    Scry.say (Scry.renderQueryEdgeSrc f label);
+    EIO.pure 0
   | .cons "--rel" (.cons name .nil) => match Scry.renderQueryRel f name with
     | .ok s => do
       Scry.say s;
       EIO.pure 0
     | .error e => EIO.fail e
-  | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
-  | _ => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+  | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
+  | _ => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
 
 /-- `scry explain FILE NODE`. -/
 def Scry.explainCmd (file : String) (node : String) : EIO Nat := do
@@ -138,6 +179,30 @@ def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
     ++ Nat.repr (Scry.CstStore.relationCount s) ++ " relations to " ++ out);
   EIO.pure 0
 
+
+
+
+
+/-- `scry repl [FILE]`: literally `wiz repl --prelude Scry.Repl -I …`, with `FILE`
+loaded through `Scry.Repl.load` before the first input. -/
+def Scry.replCmd (args : List String) : EIO Nat := do
+  let roots := ["lib", "src", "../lib", "../scry/src"];
+  let wizPath := "wiz";
+  let rootArgs := List.concat (List.map (fun r => ["-I", r]) roots);
+  let (file, rest) := match args with
+    | .cons a more => match String.startsWith a "--" with
+      | .true => ((Option.none : Option String), args)
+      | .false => ((Option.some a : Option String), more)
+    | .nil => ((Option.none : Option String), ([] : List String));
+  step ← (match file with
+    | .some f => do
+      s ← EIO.lift (Scry.Repl.load f);
+      EIO.pure s
+    | .none => EIO.pure ());
+  st ← Process.runWith wizPath (List.append ["repl", "--prelude", "Scry.Repl"]
+    (List.append rootArgs rest)) SpawnOptions.default;
+  EIO.pure (match st with | .exited n => n | _ => 1)
+
 /-- Run one command; the result is the exit status or an error message. -/
 def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .nil => do
@@ -157,16 +222,24 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
     | _ => EIO.fail "usage: scry facts FILE"
   | .cons "query" rest => match rest with
     | .cons file more => Scry.queryCmd file more
-    | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --rel NAME"
+    | .nil => EIO.fail "usage: scry query FILE --kind KIND | --edge LABEL | --edge-src L | --rel NAME"
   | .cons "explain" rest => match rest with
     | .cons file (.cons node .nil) => Scry.explainCmd file node
     | _ => EIO.fail "usage: scry explain FILE NODE"
   | .cons "parse" rest => Scry.parseCmd rest
+  | .cons "project" rest => match rest with
+    | .cons "query" more => Scry.ProjectIO.run .true more
+    | _ => Scry.ProjectIO.run .false rest
   | .cons "cst" rest => match rest with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"
   | .cons "taint" rest => Scry.taintCmd rest
+  | .cons "dynamic" rest => Scry.dynCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
+  | .cons "repl" rest => Scry.replCmd rest
+  | .cons "findings" rest => Scry.findingsCmd rest
+  | .cons "report" rest => Scry.reportCmd rest
+  | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
 /-- `main`: run a command and exit with its status (1 with a `scry: …` message on an

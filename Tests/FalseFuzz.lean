@@ -23,7 +23,10 @@ The module also asks each kernel for the normal form of the equation `T = Empty 
 run compares verdicts *and* normal forms even when neither kernel accepts anything.
 
 `tests --false-fuzz N SEED` runs the campaign; `tests --false-fuzz-replay SHAPE C…` runs
-one sample again.  See `/workspace/wiz-notes/false-fuzz.md`.
+one sample again.  The group `false-fuzz` is a bounded run (20 samples per shape).  A
+campaign of 1000 samples per shape (seed 20261114, 2026-11-14) found no accepted closed
+`Empty` in either kernel, and no verdict or normal-form difference apart from the known K1
+observations (quantity-only `Σ` pairs).
 -/
 
 set_option compiler.extract_closed false
@@ -76,7 +79,7 @@ def natD : Tm :=
   .darg qMany tEnum2
       (.lam "t" (.ecase "z" (.desc 0 tUnit1) (.var 0) [.dret .tt, .drec qMany .tt (.dret .tt)]))
 
-def natAt (s : Tm) : Tm := .mu 0 tUnit1 natD .tt s none
+def natAt (s : Tm) : Tm := .mu 0 tUnit1 natD .tt s none false
 
 def natZero : Tm := .con (.pair (tag2 0) retPayload)
 def natSucc (n : Tm) : Tm := .con (.pair (tag2 1) (.pair n retPayload))
@@ -96,7 +99,7 @@ def mutualD : Tm :=
           .dret (tag2 0),
           .drec qMany (tag2 0) (.dret (tag2 1))]))]))
 
-def mutualAt (i : Nat) (s : Tm := .szInf) : Tm := .mu 0 tEnum2 mutualD (tag2 i) s none
+def mutualAt (i : Nat) (s : Tm := .szInf) : Tm := .mu 0 tEnum2 mutualD (tag2 i) s none false
 
 def mutualA0 : Tm := .con (.pair (tag2 0) retPayload)
 def mutualA1 : Tm := .con (.pair (tag2 1) (.pair (tag2 0) retPayload))
@@ -167,18 +170,18 @@ def genDescParam : Gen (Tm × Tm) := do
     -- `(fun (A : Type) (a : A) => μ (arg A (ret ())) ()) A₀ a₀`
     let b ← pick #[pure tUnit1, pure tEnum2, pure tNat, pure tAxTy] (pure tUnit1)
     let D0 : Tm := .darg qMany (.var 1) (.lam "x" (.dret .tt))
-    let T0 : Tm := .mu 0 tUnit1 D0 .tt .szInf none
+    let T0 : Tm := .mu 0 tUnit1 D0 .tt .szInf none false
     let body : Tm := .con (.pair (.var 0) retPayload)
     let fnTy : Tm := .pi "A" .default qMany (.sort 1)
       (.pi "a" .default qMany (.var 0) T0 .hole) .hole
     let fn : Tm := .ann (.lam "A" (.lam "a" body)) fnTy
     let D : Tm := .darg qMany b (.lam "x" (.dret .tt))
-    let T : Tm := .mu 0 tUnit1 D .tt .szInf none
+    let T : Tm := .mu 0 tUnit1 D .tt .szInf none false
     let a ← leaf b 0
     pure (T, .app (.app fn b) a)
   else
     let D : Tm := .darg qMany A (.lam "a" (.dret .tt))
-    let T : Tm := .mu 0 tUnit1 D .tt .szInf none
+    let T : Tm := .mu 0 tUnit1 D .tt .szInf none false
     let a ← leaf A 1
     pure (T, .con (.pair a retPayload))
 
@@ -207,7 +210,7 @@ def genScaseQ : Gen (Tm × Tm) := do
   let (dt, idx) ← pick #[pure (tNat, Term.tt), pure (mutualAt 0, tag2 0),
     pure (mutualAt 1, tag2 1)] (pure (tNat, Term.tt))
   match cx0.whq dt with
-  | .mu ld I D _ _ _ =>
+  | .mu ld I D _ _ _ _ =>
     let T ← pick #[pure tUnit0, pure tUnit1, pure tNat, pure tEnum2] (pure tUnit1)
     let some vT := cx0.lvlOf T | pure (T, .tt)
     let P : Tm := .lam "i" (.lam "x" (liftT 2 T))
@@ -403,7 +406,7 @@ where
     | .scofix .. => add "scofix"
     | .out _ => add "out"
     | .sfix _ _ _ _ _ _ s _ _ => add (if s == .szInf then "sfix at ∞" else "sfix at a size")
-    | .mu _ _ _ _ s _ => add (if s == .szInf then "μ at ∞" else "μ at a size")
+    | .mu _ _ _ _ s _ _ => add (if s == .szInf then "μ at ∞" else "μ at a size")
     | .nu _ _ _ _ s _ => add (if s == .szInf then "ν at ∞" else "ν at a size")
     | .size => add "Size"
     | .sizeLt _ => add "Size<"

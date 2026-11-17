@@ -21,8 +21,8 @@ the complement form `~(~x >> k)` for a negative `x`, the form `IntN.shiftRight` 
 uses, so the proof needs only the definitional branches and the zero-fill stage chain.
 The canonical `wiz-rv` ones-fill core is still supported by `SLLI`/`SRLI` but not by
 `SRAI`: proving the ones fill at w = 32 needs `Bits.sub_one_high`, whose
-`Nat.add_sub_of_le` recursion over `2^31` overflows the checker (see
-`wiz-notes/rv-shift-lemmas.md` §9).
+`Nat.add_sub_of_le` recursion over `2^31` overflows the checker's stack
+(the same proof checks at w = 20 and overflows from w = 22).
 
 Checks (from a wiz-lang worktree with a built `wiz`, under `light`):
 

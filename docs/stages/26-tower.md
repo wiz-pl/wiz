@@ -274,8 +274,8 @@ What Lean ships, for comparison (lean-4.35.0-linux): clang, ld.lld, libLLVM and
 libclang-cpp, compiler-rt, a link-only glibc 2.26 and static `libgmp.a`/`libuv.a`, but no
 libc headers (Lean's C needs only `lean.h`) and no `llc`. Wiz's runtime and `import_c`
 need libc headers, so the bundle has a whole sysroot, with headers and libraries of the
-same glibc. The clang is Lean's own, so its LLVM follows `lean-toolchain`. The options
-weighed (zig cc, tcc) are in wiz-notes/toolchain-cc.md.
+same glibc. The clang is Lean's own, so its LLVM follows `lean-toolchain`. The other
+options weighed were zig cc and tcc.
 
 **Downloads.** `scripts/bundle-cc.sources` lists the five outside files (three Ubuntu
 .debs, GMP and the Boehm GC) with their sha256 and URLs. Each file is tried from each

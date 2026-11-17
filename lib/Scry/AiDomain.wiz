@@ -22,7 +22,7 @@ Main definitions:
 * `Const`: a constant domain (`known n`, `unknown`, `cbot`).
 * `Null`: `nul`, `nonNull`, `maybe`, `nbot`.
 * `Value`: the simple reduced product `Interval × Const × Null`.
-* `Env`: a non-relational environment `Var → Value`, as an association list.
+* `AiEnv`: a non-relational environment `Var → Value`, as an association list.
 
 The product is reduced in one direction: a known constant tightens the interval to a
 point (`Value.norm`). Nothing here is relational (no octagons yet, §4.6).
@@ -433,76 +433,76 @@ def Value.laws : Prop :=
 -- ## Environments
 
 /-- A non-relational environment: a finite map from `Nat` variable ids to `Value`.
-Every block's state has an entry for every variable of the function (`Env.topOf`), so
-`Env.le` is a pointwise comparison. -/
-def Env : Type := List (Nat × Value)
+Every block's state has an entry for every variable of the function (`AiEnv.topOf`), so
+`AiEnv.le` is a pointwise comparison. -/
+def AiEnv : Type := List (Nat × Value)
 
 /-- Look a variable up. -/
-def Env.lookup (x : Nat) : Env → Option Value
+def AiEnv.lookup (x : Nat) : AiEnv → Option Value
   | .nil => .none
   | .cons (k, v) rest => match Nat.beq x k with
     | .true => .some v
-    | .false => Env.lookup x rest
+    | .false => AiEnv.lookup x rest
 
 /-- Look a variable up, with a default (missing entries are `Value.bot`). -/
-def Env.getD (e : Env) (x : Nat) (d : Value) : Value := match Env.lookup x e with
+def AiEnv.getD (e : AiEnv) (x : Nat) (d : Value) : Value := match AiEnv.lookup x e with
   | .some v => v
   | .none => d
 
 /-- Set a variable. -/
-def Env.set (x : Nat) (v : Value) : Env → Env
+def AiEnv.set (x : Nat) (v : Value) : AiEnv → AiEnv
   | .nil => .cons (x, v) .nil
   | .cons (k, w) rest => match Nat.beq x k with
     | .true => .cons (k, v) rest
-    | .false => .cons (k, w) (Env.set x v rest)
+    | .false => .cons (k, w) (AiEnv.set x v rest)
 
 /-- All variables at `v`, in the order of `vars`. -/
-def Env.allOf (vars : List Nat) (v : Value) : Env :=
+def AiEnv.allOf (vars : List Nat) (v : Value) : AiEnv :=
   List.map (fun x => (x, v)) vars
 
 /-- The initial state of a function: every variable unknown (`Value.top`). -/
-def Env.topOf (vars : List Nat) : Env := Env.allOf vars Value.top
+def AiEnv.topOf (vars : List Nat) : AiEnv := AiEnv.allOf vars Value.top
 
 /-- The bottom state. -/
-def Env.botOf (vars : List Nat) : Env := Env.allOf vars Value.bot
+def AiEnv.botOf (vars : List Nat) : AiEnv := AiEnv.allOf vars Value.bot
 
 /-- Pointwise order. -/
-def Env.le (a b : Env) : Bool :=
-  List.all (fun p => Value.le p.2 (Env.getD b p.1 Value.bot)) a
+def AiEnv.le (a b : AiEnv) : Bool :=
+  List.all (fun p => Value.le p.2 (AiEnv.getD b p.1 Value.bot)) a
 
 /-- Is a variable present? -/
-def Env.has (x : Nat) : Env → Bool
+def AiEnv.has (x : Nat) : AiEnv → Bool
   | .nil => .false
   | .cons (k, _) rest => match Nat.beq x k with
     | .true => .true
-    | .false => Env.has x rest
+    | .false => AiEnv.has x rest
 
 /-- Pointwise join, with the union of both key sets. The empty environment is `bot`. -/
-def Env.join (a b : Env) : Env :=
+def AiEnv.join (a b : AiEnv) : AiEnv :=
   List.append
-    (List.map (fun p => (p.1, Value.join p.2 (Env.getD b p.1 Value.bot))) a)
-    (List.filter (fun q => Bool.not (Env.has q.1 a)) b)
+    (List.map (fun p => (p.1, Value.join p.2 (AiEnv.getD b p.1 Value.bot))) a)
+    (List.filter (fun q => Bool.not (AiEnv.has q.1 a)) b)
 
 /-- Pointwise widening, with the union of both key sets. -/
-def Env.widen (a b : Env) : Env :=
+def AiEnv.widen (a b : AiEnv) : AiEnv :=
   List.append
-    (List.map (fun p => (p.1, Value.widen p.2 (Env.getD b p.1 Value.bot))) a)
-    (List.filter (fun q => Bool.not (Env.has q.1 a)) b)
+    (List.map (fun p => (p.1, Value.widen p.2 (AiEnv.getD b p.1 Value.bot))) a)
+    (List.filter (fun q => Bool.not (AiEnv.has q.1 a)) b)
 
 /-- Pointwise narrowing (no new keys: narrowing only improves old bounds). -/
-def Env.narrow (a b : Env) : Env :=
-  List.map (fun p => (p.1, Value.narrow p.2 (Env.getD b p.1 Value.bot))) a
+def AiEnv.narrow (a b : AiEnv) : AiEnv :=
+  List.map (fun p => (p.1, Value.narrow p.2 (AiEnv.getD b p.1 Value.bot))) a
 
-instance : Lattice Env where
+instance : Lattice AiEnv where
   bot := []
-  le := Env.le
-  join := Env.join
+  le := AiEnv.le
+  join := AiEnv.join
 
-instance : Widen Env where
-  widen := Env.widen
+instance : Widen AiEnv where
+  widen := AiEnv.widen
 
-instance : Narrow Env where
-  narrow := Env.narrow
+instance : Narrow AiEnv where
+  narrow := AiEnv.narrow
 
 /-- Environment soundness reduces to the value obligations, pointwise. -/
-def Env.laws (vars : List Nat) : Prop := Value.laws
+def AiEnv.laws (vars : List Nat) : Prop := Value.laws

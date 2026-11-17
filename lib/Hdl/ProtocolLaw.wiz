@@ -1,0 +1,341 @@
+import Hdl.BusLaw
+import Hdl.Apb
+import Hdl.Wishbone
+import Hdl.AxiLite
+/-!
+# Hdl.ProtocolLaw
+
+The obligations of the protocol bridges in `Hdl.Apb` and `Hdl.Wishbone`, plus the
+`Bus.ReqW` (byte-strobe) form of the bus stability laws. Like `Hdl.BusLaw`, these are
+predicates over value traces and Boolean one-step forms; `examples/hdl-protocols.wiz`
+evaluates the Boolean forms on generated traces at the same time as it compares the
+value simulation, `Netlist.simulate` and `Circuit.simFast`. They are **tested, not
+proved** on those inputs.
+
+The laws, by obligation:
+
+* **Data/address stability.** A bus source holds `valid`, `we`, `addr`, `wdata` and
+  `wstrb` while stalled (`Bus.Law.ReqWStable` and its components). An APB master holds
+  `PSEL`, `PADDR`, `PWDATA`, `PWRITE` and `PSTRB` while `PSEL` is high and `PREADY` is
+  low (`Apb.Law.Stable`); `PENABLE` may rise at the SETUP/ACCESS boundary, so it is not
+  part of that law. A Wishbone master holds `CYC`, `STB`, `WE`, `ADR`, `DAT_W` and `SEL`
+  until `ACK`/`ERR`/`RTY` (`Wishbone.Law.Stable`).
+* **Response ordering.** The bridges are single outstanding, so an answer at cycle `t`
+  belongs to the request offered in that same cycle (the source holds it while
+  stalled): `Apb.Law.ResponseMatches` and `Wishbone.Law.ResponseMatches` require the
+  request fields and the slave's protocol fields to agree, and `Apb.Law.AccessResp` /
+  `Wishbone.Law.AckReq` require a response only in an access/request phase. Since there
+  is only one transfer in flight, answers cannot overtake each other.
+* **No lost strobes.** Every write's byte strobes arrive unchanged on the other side:
+  `Apb.Law.StrobeToApb` (bus -> APB `PSTRB`), `Apb.Law.StrobeToBus` (APB `PSTRB` ->
+  bus `wstrb`), and the two Wishbone `SEL` forms.
+
+The APB bundle's `PSTRB` is zero on reads (APB4), so the strobe laws are conditioned on
+a write. `Apb.Law.ApbResp` and `Wishbone.Law.WbResp` (reverse direction) require
+`PREADY`/`ACK` only in an ACCESS/request phase, and `Apb.Law.PreadyOnlyAccess` /
+`Wishbone.Law.AckOnlyReq` are the same obligation.
+-/
+
+------------------------------------------------------------------------------------
+-- Bus.ReqW: the byte-strobe form of the source laws
+
+/-- `valid` of a packed `Bus.ReqW`. -/
+def Bus.Law.reqWValid {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bus.Law.bit (Bus.Law.reqW q).valid
+/-- `we` of a packed `Bus.ReqW`. -/
+def Bus.Law.reqWWrite {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bus.Law.bit (Bus.Law.reqW q).we
+/-- `addr` of a packed `Bus.ReqW`. -/
+def Bus.Law.reqWAddr {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw)) :
+    HwTy.El (HwTy.bits aw) := (Bus.Law.reqW q).addr
+/-- `wdata` of a packed `Bus.ReqW`. -/
+def Bus.Law.reqWData {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw)) :
+    HwTy.El (HwTy.bits dw) := (Bus.Law.reqW q).wdata
+/-- `wstrb` of a packed `Bus.ReqW`. -/
+def Bus.Law.reqWStrb {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw)) :
+    HwTy.El (HwTy.bits (Nat.div dw 8)) := (Bus.Law.reqW q).wstrb
+
+/-- A packed `Bus.ReqW` offered and not answered. -/
+def Bus.Law.reqWStalled {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) : Bool :=
+  Bool.and (Bus.Law.reqWValid q) (Bool.not (Bus.Law.ack r))
+
+/-- One step of `ReqWStable`: if stalled now, the whole request is unchanged next cycle. -/
+def Bus.Law.ReqWStableStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (q' : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bool.or (Bool.not (Bus.Law.reqWStalled q r))
+    (Nat.beq (HwTy.pack (Bus.ReqW.code aw dw) q) (HwTy.pack (Bus.ReqW.code aw dw) q'))
+
+/-- One step of `ReqWValidStable`. -/
+def Bus.Law.ReqWValidStableStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (q' : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bool.or (Bool.not (Bus.Law.reqWStalled q r)) (Bus.Law.reqWValid q')
+
+/-- One step of `ReqWPayloadStable` (`we`, `addr`, `wdata`, `wstrb`). -/
+def Bus.Law.ReqWPayloadStableStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (q' : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  let x := Bus.Law.reqW q';
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bus.Law.reqWStalled q r))
+    (Bool.and (BitVec.beq x.we y.we)
+      (Bool.and (BitVec.beq x.addr y.addr)
+        (Bool.and (BitVec.beq x.wdata y.wdata) (BitVec.beq x.wstrb y.wstrb))))
+
+/-- One step of `ReqWAddressStable`. -/
+def Bus.Law.ReqWAddressStableStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (q' : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bool.or (Bool.not (Bus.Law.reqWStalled q r))
+    (BitVec.beq (Bus.Law.reqWAddr q') (Bus.Law.reqWAddr q))
+
+/-- One step of `ReqWStrobeStable`: the byte strobes do not change while stalled. -/
+def Bus.Law.ReqWStrobeStableStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (q' : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  Bool.or (Bool.not (Bus.Law.reqWStalled q r))
+    (BitVec.beq (Bus.Law.reqWStrb q') (Bus.Law.reqWStrb q))
+
+/-- The whole `Bus.ReqW` request is held while stalled. -/
+def Bus.Law.ReqWStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.ReqW.code aw dw)))
+    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
+  (t : Nat) → Bus.Law.reqWStalled (q t) (r t) = .true → q (Nat.succ t) = q t
+
+/-- The address does not change while stalled (the byte-strobe form). -/
+def Bus.Law.ReqWAddressStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.ReqW.code aw dw)))
+    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
+  (t : Nat) → Bus.Law.reqWStalled (q t) (r t) = .true →
+    Bus.Law.reqWAddr (q (Nat.succ t)) = Bus.Law.reqWAddr (q t)
+
+/-- The strobes do not change while stalled. -/
+def Bus.Law.ReqWStrobeStable {ω aw dw : Nat} (q : Trace (HwTy.El (Bus.ReqW.code aw dw)))
+    (r : Trace (HwTy.El (Bus.Resp.code dw))) : Prop :=
+  (t : Nat) → Bus.Law.reqWStalled (q t) (r t) = .true →
+    Bus.Law.reqWStrb (q (Nat.succ t)) = Bus.Law.reqWStrb (q t)
+
+------------------------------------------------------------------------------------
+-- APB
+
+/-- The request fields of a packed `Apb.Req`. -/
+def Apb.Law.req {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw)) : Apb.Req aw dw HwTy.El :=
+  Apb.Req.unpack aw dw p
+/-- The response fields of a packed `Apb.Resp`. -/
+def Apb.Law.resp {ω dw : Nat} (p : HwTy.El (Apb.Resp.code dw)) : Apb.Resp dw HwTy.El :=
+  Apb.Resp.unpack dw p
+/-- `PSEL`. -/
+def Apb.Law.psel {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Apb.Law.req p).psel
+/-- `PENABLE`. -/
+def Apb.Law.penable {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Apb.Law.req p).penable
+/-- `PWRITE`. -/
+def Apb.Law.pwrite {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Apb.Law.req p).pwrite
+
+/-- A packed APB `PREADY`, as a Boolean. -/
+def Apb.Law.pready {ω dw : Nat} (r : HwTy.El (Apb.Resp.code dw)) : Bool :=
+  Bus.Law.bit (Apb.Law.resp r).pready
+
+/-- The APB rule: a transfer is in flight while `PSEL` is high and `PREADY` is low. -/
+def Apb.Law.stalled {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw))
+    (r : HwTy.El (Apb.Resp.code dw)) : Bool :=
+  Bool.and (Apb.Law.psel p) (Bool.not (Apb.Law.pready r))
+
+/-- One step of `Apb.Law.Stable`: `PSEL`, `PADDR`, `PWDATA`, `PWRITE` and `PSTRB` are
+held while a transfer is in flight. `PENABLE` may change at SETUP -> ACCESS, so it is
+not compared. -/
+def Apb.Law.StableStep {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw))
+    (r : HwTy.El (Apb.Resp.code dw)) (p' : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  let x := Apb.Law.req p';
+  let y := Apb.Law.req p;
+  Bool.or (Bool.not (Apb.Law.stalled p r))
+    (Bool.and (BitVec.beq x.psel y.psel)
+      (Bool.and (BitVec.beq x.pwrite y.pwrite)
+        (Bool.and (BitVec.beq x.paddr y.paddr)
+          (Bool.and (BitVec.beq x.pwdata y.pwdata) (BitVec.beq x.pstrb y.pstrb)))))
+
+/-- `PREADY` only in an ACCESS phase (`PSEL && PENABLE`): no response without a
+request. -/
+def Apb.Law.AccessRespStep {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw))
+    (r : HwTy.El (Apb.Resp.code dw)) : Bool :=
+  Bool.or (Bool.not (Apb.Law.pready r))
+    (Bool.and (Apb.Law.psel p) (Apb.Law.penable p))
+
+/-- An answer at cycle `t` belongs to the bus request offered at `t`: same access
+phase, same write flag, address and data; on a write the APB strobe is the bus strobe.
+This is the single-outstanding response-order law at the bridge pins. -/
+def Apb.Law.ResponseMatchesStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (p : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  let x := Apb.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bus.Law.ack r))
+    (Bool.and (Bus.Law.reqWValid q)
+      (Bool.and (Apb.Law.psel p)
+        (Bool.and (Apb.Law.penable p)
+          (Bool.and (BitVec.beq x.pwrite y.we)
+            (Bool.and (BitVec.beq x.paddr y.addr)
+              (Bool.and (BitVec.beq x.pwdata y.wdata)
+                (Bool.or (Bool.not (BitVec.isTrue y.we))
+                  (BitVec.beq x.pstrb y.wstrb))))))))
+
+/-- No lost strobes: a write's `PSTRB` is the bus request's `wstrb` in an ACCESS phase. -/
+def Apb.Law.StrobeToApbStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (p : HwTy.El (Apb.Req.code aw dw)) : Bool :=
+  let x := Apb.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bool.and (BitVec.isTrue y.we) (Bool.and (Bus.Law.bit x.psel) (Bus.Law.bit x.penable))))
+    (BitVec.beq x.pstrb y.wstrb)
+
+/-- The reverse strobe law: the bus write strobes are the APB master's `PSTRB` in an
+ACCESS phase. -/
+def Apb.Law.StrobeToBusStep {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw))
+    (q : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  let x := Apb.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bool.and (BitVec.isTrue x.pwrite) (Bool.and (Bus.Law.bit x.psel) (Bus.Law.bit x.penable))))
+    (BitVec.beq x.pstrb y.wstrb)
+
+/-- `PREADY` in the reverse direction is only in an ACCESS phase. -/
+def Apb.Law.PreadyOnlyAccessStep {ω aw dw : Nat} (p : HwTy.El (Apb.Req.code aw dw))
+    (r : HwTy.El (Apb.Resp.code dw)) : Bool := Apb.Law.AccessRespStep p r
+
+------------------------------------------------------------------------------------
+-- Wishbone
+
+/-- The request fields of a packed `Wishbone.Req`. -/
+def Wishbone.Law.req {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw)) :
+    Wishbone.Req aw dw HwTy.El := Wishbone.Req.unpack aw dw p
+/-- The response fields of a packed `Wishbone.Resp`. -/
+def Wishbone.Law.resp {ω dw : Nat} (p : HwTy.El (Wishbone.Resp.code dw)) :
+    Wishbone.Resp dw HwTy.El := Wishbone.Resp.unpack dw p
+/-- `CYC`. -/
+def Wishbone.Law.cyc {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.req p).cyc
+/-- `STB`. -/
+def Wishbone.Law.stb {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.req p).stb
+/-- `WE`. -/
+def Wishbone.Law.write {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.req p).we
+/-- `ACK`. -/
+def Wishbone.Law.ack {ω dw : Nat} (r : HwTy.El (Wishbone.Resp.code dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.resp r).ack
+/-- `ERR`. -/
+def Wishbone.Law.err {ω dw : Nat} (r : HwTy.El (Wishbone.Resp.code dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.resp r).err
+/-- `RTY`. -/
+def Wishbone.Law.rty {ω dw : Nat} (r : HwTy.El (Wishbone.Resp.code dw)) : Bool :=
+  Bus.Law.bit (Wishbone.Law.resp r).rty
+
+/-- A classic Wishbone transfer is in flight while `CYC`/`STB` are high and none of
+`ACK`/`ERR`/`RTY` has ended it. -/
+def Wishbone.Law.stalled {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw))
+    (r : HwTy.El (Wishbone.Resp.code dw)) : Bool :=
+  Bool.and (Bool.and (Wishbone.Law.cyc p) (Wishbone.Law.stb p))
+    (Bool.not (Bool.or (Bool.or (Wishbone.Law.ack r) (Wishbone.Law.err r)) (Wishbone.Law.rty r)))
+
+/-- One step of `Wishbone.Law.Stable`: `CYC`, `STB`, `WE`, `ADR`, `DAT_W` and `SEL`
+are held until the slave ends the transfer. -/
+def Wishbone.Law.StableStep {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw))
+    (r : HwTy.El (Wishbone.Resp.code dw)) (p' : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  let x := Wishbone.Law.req p';
+  let y := Wishbone.Law.req p;
+  Bool.or (Bool.not (Wishbone.Law.stalled p r))
+    (Bool.and (BitVec.beq x.cyc y.cyc)
+      (Bool.and (BitVec.beq x.stb y.stb)
+        (Bool.and (BitVec.beq x.we y.we)
+          (Bool.and (BitVec.beq x.adr y.adr)
+            (Bool.and (BitVec.beq x.dat y.dat) (BitVec.beq x.sel y.sel))))))
+
+/-- `ACK`/`ERR`/`RTY` only for a request (`CYC && STB`): no response without a
+request. -/
+def Wishbone.Law.AckReqStep {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw))
+    (r : HwTy.El (Wishbone.Resp.code dw)) : Bool :=
+  Bool.or (Bool.not (Bool.or (Bool.or (Wishbone.Law.ack r) (Wishbone.Law.err r)) (Wishbone.Law.rty r)))
+    (Bool.and (Wishbone.Law.cyc p) (Wishbone.Law.stb p))
+
+/-- A bus answer belongs to the Wishbone request offered in that cycle; the fields line
+up and a write's `SEL` is the bus `wstrb` (the response-order law). -/
+def Wishbone.Law.ResponseMatchesStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (r : HwTy.El (Bus.Resp.code dw)) (p : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  let x := Wishbone.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bus.Law.ack r))
+    (Bool.and (Bus.Law.reqWValid q)
+      (Bool.and (Bus.Law.bit x.cyc)
+        (Bool.and (Bus.Law.bit x.stb)
+          (Bool.and (BitVec.beq x.we y.we)
+            (Bool.and (BitVec.beq x.adr y.addr)
+              (Bool.and (BitVec.beq x.dat y.wdata)
+                (Bool.or (Bool.not (BitVec.isTrue y.we))
+                  (BitVec.beq x.sel y.wstrb))))))))
+
+/-- No lost strobes: a bus write's `SEL` is its `wstrb`. -/
+def Wishbone.Law.StrobeToWbStep {ω aw dw : Nat} (q : HwTy.El (Bus.ReqW.code aw dw))
+    (p : HwTy.El (Wishbone.Req.code aw dw)) : Bool :=
+  let x := Wishbone.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bool.and (BitVec.isTrue y.we) (Bool.and (Bus.Law.bit x.cyc) (Bus.Law.bit x.stb))))
+    (BitVec.beq x.sel y.wstrb)
+
+/-- The reverse strobe law: the bus `wstrb` is the Wishbone master's `SEL`. -/
+def Wishbone.Law.StrobeToBusStep {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw))
+    (q : HwTy.El (Bus.ReqW.code aw dw)) : Bool :=
+  let x := Wishbone.Law.req p;
+  let y := Bus.Law.reqW q;
+  Bool.or (Bool.not (Bool.and (Bus.Law.bit x.we) (Bool.and (Bus.Law.bit x.cyc) (Bus.Law.bit x.stb))))
+    (BitVec.beq x.sel y.wstrb)
+
+/-- `ACK`/`ERR` in the reverse direction only for a request. -/
+def Wishbone.Law.AckOnlyReqStep {ω aw dw : Nat} (p : HwTy.El (Wishbone.Req.code aw dw))
+    (r : HwTy.El (Wishbone.Resp.code dw)) : Bool := Wishbone.Law.AckReqStep p r
+
+------------------------------------------------------------------------------------
+-- AXI4-Lite bundle views
+
+/-- A write in the single-outstanding subset is one `Bus.ReqW` with both channel
+`valid`s; the read is one with `we` low. -/
+def AxiLite.Law.WriteReqOk {ω aw dw : Nat} (a : HwTy.El (AxiLite.Aw.code aw))
+    (w : HwTy.El (AxiLite.W.code dw)) : Bool :=
+  let r := AxiLite.writeOf (AxiLite.Aw.unpack aw a) (AxiLite.W.unpack dw w);
+  Bool.and (BitVec.beq r.valid (Hw.and (AxiLite.Aw.unpack aw a).valid (AxiLite.W.unpack dw w).valid))
+    (Bool.and (BitVec.beq r.addr (AxiLite.Aw.unpack aw a).addr)
+      (Bool.and (BitVec.beq r.wdata (AxiLite.W.unpack dw w).data)
+        (Bool.and (BitVec.beq r.wstrb (AxiLite.W.unpack dw w).strb) (BitVec.beq r.we (BitVec.ofNat 1 1)))))
+
+/-- A read in the subset is one `Bus.ReqW` with `we` low and no strobes. -/
+def AxiLite.Law.ReadReqOk {ω aw dw : Nat} (a : HwTy.El (AxiLite.Ar.code aw)) : Bool :=
+  let r := AxiLite.readOf (aw := aw) (dw := dw) (AxiLite.Ar.unpack aw a);
+  Bool.and (BitVec.beq r.valid (AxiLite.Ar.unpack aw a).valid)
+    (Bool.and (BitVec.beq r.addr (AxiLite.Ar.unpack aw a).addr)
+      (Bool.and (BitVec.beq r.we (BitVec.ofNat 1 0))
+        (BitVec.beq r.wstrb (BitVec.ofNat (Nat.div dw 8) 0))))
+
+/-- A non-`OKAY` response is an error, and `OKAY` is not. -/
+def AxiLite.Law.ErrOk (resp : HwTy.El (HwTy.bits AxiLite.respW)) : Bool :=
+  Bus.Law.bEq (Bus.Law.bit (AxiLite.errOf resp)) (Bool.not (Nat.beq (BitVec.toNat resp) AxiLite.okay))
+
+------------------------------------------------------------------------------------
+-- Kernel-checked lemmas
+
+/-- `Apb.toBusReq` maps APB's ACCESS phase to the bus `valid` definitionally. -/
+def Apb.toBusReq_valid {ω aw dw : Nat} (p : Apb.Req aw dw HwTy.El) :
+    (Apb.toBusReq p).valid = Hw.and p.psel p.penable := rfl
+
+/-- `Apb.respOfBus` asserts `PREADY` exactly in ACCESS when the bus answered. -/
+def Apb.respOfBus_pready {ω aw dw : Nat} (p : Apb.Req aw dw HwTy.El)
+    (b : Bus.Resp dw HwTy.El) :
+    (Apb.respOfBus p b).pready = Hw.and (Hw.and p.psel p.penable) (Hw.or b.ready b.rvalid) := rfl
+
+/-- `Wishbone.toBusReq` maps `CYC && STB` to the bus `valid` definitionally. -/
+def Wishbone.toBusReq_valid {ω aw dw : Nat} (p : Wishbone.Req aw dw HwTy.El) :
+    (Wishbone.toBusReq p).valid = Hw.and p.cyc p.stb := rfl
+
+/-- `Wishbone.respOfBus` asserts `ACK` exactly when the request is present and the bus
+answered. -/
+def Wishbone.respOfBus_ack {ω aw dw : Nat} (p : Wishbone.Req aw dw HwTy.El)
+    (b : Bus.Resp dw HwTy.El) :
+    (Wishbone.respOfBus p b).ack =
+      Hw.and (Hw.and p.cyc p.stb) (Hw.or b.ready b.rvalid) := rfl
+
+/-- The AXI4-Lite write view's `valid` is `AWVALID && WVALID` definitionally. -/
+def AxiLite.writeOf_valid {ω aw dw : Nat} (a : AxiLite.Aw aw HwTy.El)
+    (w : AxiLite.W dw HwTy.El) :
+    (AxiLite.writeOf a w).valid = Hw.and a.valid w.valid := rfl

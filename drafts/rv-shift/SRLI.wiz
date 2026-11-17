@@ -6,7 +6,8 @@ import BitVecShift
 -- (lib/BitVecShift.wiz). For SRLI the fill is `Hw.and d.alt (bit 31 a)` with `d.alt = 0`,
 -- so its value is 0 — but the proofs keep the fill *value* `K = fill.toNat` symbolic (a
 -- stuck application, so every `Nat` step is a genuine equation rather than the `Nat`
--- normalizer's `True`; see wiz-notes/rv-shift-lemmas.md §7). `shamt = 9` turns on stages
+-- normalizer's `True`: the kernel turns an equation whose sides are convertible into
+-- `True`, which cannot be a rewrite step). `shamt = 9` turns on stages
 -- 1 and 8; `Bits.high_low`/`high_high`/`high_add_pow_l`/`low_low_rev` put the
 -- composition in `BitVec.lshr`'s normal form, and the final `K = 0` steps eliminate the
 -- fill products by `transp` from their (definitionally true) zero instances.

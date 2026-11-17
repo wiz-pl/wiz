@@ -190,8 +190,9 @@ def closedTemplates (l v : Nat) : IO (Globals ZeroOneMany) := do
     "T.map" (Templates.mapTm lv)
 
 /-- The types of the eliminators' arguments (`Conv.lean`): evaluated at variables, quoted,
-and checked to be types. `concrete`: the description is `rec i₀ (ret i₀)` instead of a
-variable (see `scaseMethodTy` below). -/
+and checked to be types. `concrete`: the description is `arg I (λ x. rec i₀ (ret i₀))`
+instead of a variable (see `scaseMethodTy` below); the `arg` field guards the recursive one,
+since the kernel rejects an unguarded description (`μ X. X`, `descGuarded`). -/
 def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let g : Globals ZeroOneMany := {}
   let lv : Level := Level.ofNat l
@@ -206,7 +207,8 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let c1 := c0.bind "I" q (.sort (.succ lv))
   let I : Val ZeroOneMany := Val.var 0
   let c1 := c1.bind "i₀" q I
-  let dTm : Term ZeroOneMany := .drec (.qlit .many) (.var 0) (.dret (.var 0))
+  let dTm : Term ZeroOneMany :=
+    .darg (.qlit .many) (.var 1) (.lam "x" (.drec (.qlit .many) (.var 1) (.dret (.var 1))))
   let c2 := if concrete then c1.define "D" q (.desc lv I) (c1.eval dTm) else c1.bind "D" q (.desc lv I)
   let D : Val ZeroOneMany := if concrete then c1.eval dTm else Val.var 2
   -- Desc.elim
@@ -782,11 +784,12 @@ def pinned : List (String × Query × String × String) :=
 
 def templatePairs : List (String × Term ZeroOneMany) :=
   let L := Level.ofNat
-  [("interpTm 0", Templates.interpTm (L 0)), ("interpTm 1", Templates.interpTm (L 1)),
-   ("allTm 0 0", Templates.allTm (L 0) (L 0)), ("allTm 0 1", Templates.allTm (L 0) (L 1)),
-   ("allTm 1 3", Templates.allTm (L 1) (L 3)),
-   ("hypsTm 0 0", Templates.hypsTm (L 0) (L 0)), ("hypsTm 0 2", Templates.hypsTm (L 0) (L 2)),
-   ("mapTm 0", Templates.mapTm (L 0)), ("mapTm 1", Templates.mapTm (L 1))]
+  -- (U2b) Kernel.wiz's templates take a `Lvl`: the call is written with `ln n`
+  [("interpTm (ln 0)", Templates.interpTm (L 0)), ("interpTm (ln 1)", Templates.interpTm (L 1)),
+   ("allTm (ln 0) (ln 0)", Templates.allTm (L 0) (L 0)), ("allTm (ln 0) (ln 1)", Templates.allTm (L 0) (L 1)),
+   ("allTm (ln 1) (ln 3)", Templates.allTm (L 1) (L 3)),
+   ("hypsTm (ln 0) (ln 0)", Templates.hypsTm (L 0) (L 0)), ("hypsTm (ln 0) (ln 2)", Templates.hypsTm (L 0) (L 2)),
+   ("mapTm (ln 0)", Templates.mapTm (L 0)), ("mapTm (ln 1)", Templates.mapTm (L 1))]
 
 /-- (21x) Drop the description fields' quantities and every `sigmaQ` to the `Σ` at ω, as
 the Lean side's `dropQty` does before `MTm.ofTerm`: the audit compares the kernels modulo

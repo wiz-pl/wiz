@@ -1,6 +1,7 @@
 import Tests.Harness
 import Tests.Grail
 import Wiz.Doc.Site
+import Wiz.Socket
 
 /-! # 11s: doc comments and `wiz doc` (scroll) -/
 
@@ -73,6 +74,45 @@ def pkgFiles : List (String × String) :=
   [("grail.wiz", "import Grail\ndef package : Package := Package.new \"shapes\" |> Package.lib \"shapes\" \"src\"\n"),
    ("src/Shapes/Basic.wiz", basicSrc), ("src/Shapes/Use.wiz", useSrc)]
 
+/-- A package for the reference manual: an implicit argument, a class with two
+instances, an infix operator of its own, markup in a doc comment, and a module without
+any doc comments. -/
+def refSrc : String := "/-! # Reference fixture
+
+A module with **markup** and `Sized`, for the `reference` tests. -/
+import Prelude
+
+/-- The identity, at an implicit type. -/
+def ident {A : Type} (a : A) : A := a
+
+/-- Things with a size. -/
+class Sized (A : Type) where
+  /-- how big it is -/
+  size : A → Nat
+
+/-- A pair of numbers. -/
+structure Pair where
+  /-- the first -/
+  left : Nat
+  /-- the second -/
+  right : Nat
+
+instance : Sized Pair := Sized.mk (fun _ => 2)
+instance : Sized Nat := Sized.mk (fun n => n)
+
+/-- A made-up operator, to show the notation table. -/
+infixl:33 \" +? \" => HAdd.hAdd
+"
+
+def refEmpty : String := "import Prelude
+
+def quiet : Nat := 1
+"
+
+def refPkgFiles : List (String × String) :=
+  [("grail.wiz", "import Grail\ndef package : Package := Package.new \"ref\" |> Package.lib \"ref\" \"src\"\n"),
+   ("src/Ref/A.wiz", refSrc), ("src/Ref/Empty.wiz", refEmpty)]
+
 def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOneMany) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let loader : Name → Option String := fun m => if m == "Prelude" then some prelude else none
@@ -116,12 +156,51 @@ def brokenLinks (out : System.FilePath) : IO (Array String) := do
           broken := broken.push s!"{f.fileName.getD ""}: {target}"
   pure broken
 
+/-- The rows of `search.js`, if it is the generated index. -/
+def searchRows? (js : String) : Option (Array Lean.Json) := do
+  let some json := (js.splitOn "window.wizSearchIndex = ")[1]? | none
+  let .ok (.arr rows) := Lean.Json.parse ((json.trimAscii.dropEnd 1).toString) | none
+  pure rows
+
+/-- A string field of an index row (`""` if missing). -/
+def field (j : Lean.Json) (k : String) : String := (j.getObjValAs? String k).toOption.getD ""
+
 def runOut (cmd : String) (args : List String) (cwd : Option System.FilePath := none) : IO String := do
   let o ← IO.Process.output { cmd, args := args.toArray, cwd }
   unless o.exitCode == 0 do throw (IO.userError s!"{cmd} {args}: exit {o.exitCode}\n{o.stdout}\n{o.stderr}")
   pure o.stdout
 
 def wiz : IO String := do pure (← IO.FS.realPath ".lake/build/bin/wiz").toString
+
+/-- A free TCP port on the loopback interface (bound and released: the server test's). -/
+def freePort : IO UInt16 := do
+  let (fd, p) ← Wiz.Socket.tcpListen Wiz.Socket.loopback 0
+  Wiz.Socket.closeFd fd
+  pure p
+
+/-- One HTTP/1.0 GET through already-connected handles; the whole response (the
+documentation server answers with `Connection: close`). -/
+def httpReq (r w : IO.FS.Handle) (path : String) : IO String := do
+  let rs := IO.FS.Stream.ofHandle r
+  let ws := IO.FS.Stream.ofHandle w
+  ws.putStr s!"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+  ws.flush
+  rs.readToEnd
+
+/-- One HTTP/1.0 GET to a local server. -/
+def httpGet (port : UInt16) (path : String) : IO String := do
+  let (r, w) ← Wiz.Socket.tcpConnect Wiz.Socket.loopback port
+  httpReq r w path
+
+/-- Connect to `port`, retrying while the server starts (about 10 s in all). -/
+def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := do
+  let rec go : Nat → IO (Option (IO.FS.Handle × IO.FS.Handle))
+    | 0 => pure none
+    | n + 1 => do
+      match ← (try some <$> Wiz.Socket.tcpConnect Wiz.Socket.loopback port catch _ => pure none) with
+      | some c => pure (some c)
+      | none => IO.sleep 25; go n
+  go 400
 
 /-- `wiz doc` on the package's source directory, plain (no Wasm). -/
 def makeSite (dir : System.FilePath) : IO System.FilePath := do
@@ -226,6 +305,9 @@ def docGroup : Group where
         let out ← makeSite dir
         let broken ← brokenLinks out
         check broken.isEmpty s!"broken links: {broken}"
+        let api ← IO.FS.readFile (out / "api.html")
+        checkHas api "href=\"Shapes.Basic.html#Shape\""
+        checkHas api "href=\"Shapes.Use.html#twice\""
         let idx ← IO.FS.readFile (out / "search.js")
         let some json := (idx.splitOn "window.wizSearchIndex = ")[1]? | throw (IO.userError "no index")
         let .ok (.arr rows) := Lean.Json.parse ((json.trimAscii.dropEnd 1).toString) | throw (IO.userError "index is not JSON")
@@ -239,6 +321,41 @@ def docGroup : Group where
           for part in (html.splitOn "<div class=\"decl\" id=\"").drop 1 do
             let n := (part.splitOn "\"").headD ""
             check (names.contains n) s!"{n} ({page}) is not in the index" },
+    { name := "wiz doc: the API index and api.json list every module and declaration; search covers docs and signatures", run := fun _ => do
+        let dir ← mkTree pkgFiles
+        let out ← makeSite dir
+        let api ← IO.FS.readFile (out / "api.html")
+        for frag in ["<h1>API index</h1>", "id=\"module-Shapes.Basic\"", "id=\"module-Shapes.Use\"",
+            "href=\"Shapes.Basic.html#Shape\"", "href=\"Shapes.Use.html#twice\"",
+            "href=\"index.html\"", "class=\"api-sig\"", "class=\"lede\""] do
+          checkHas api frag
+        -- the signature on the index retains its cross-links (to the module's page)
+        checkHas api "<a href=\"Shapes.Basic.html#Shape\">Shape</a>"
+        -- api.json is the same index, for machines
+        let text ← IO.FS.readFile (out / "api.json")
+        let .ok j := Lean.Json.parse text | throw (IO.userError "api.json is not JSON")
+        let some (.arr mods) := (j.getObjVal? "modules").toOption | throw (IO.userError "api.json has no modules")
+        checkEq 2 mods.size
+        let some (.arr decls) := (j.getObjVal? "decls").toOption | throw (IO.userError "api.json has no decls")
+        check (decls.size ≥ 16) "api.json lost declarations"
+        let some area := decls.find? (fun d => field d "name" == "Shape.area") | throw (IO.userError "Shape.area is not in api.json")
+        checkEq "Shapes.Basic" (field area "module")
+        checkEq "Shapes.Basic.html#Shape.area" (field area "href")
+        check (has (field area "sig") "Shape") (field area "sig")
+        check (has (field area "doc") "The area of a shape") (field area "doc")
+        -- the search index: modules, declaration docs and signatures
+        let idx ← IO.FS.readFile (out / "search.js")
+        let some rows := searchRows? idx | throw (IO.userError "search.js is not the index")
+        let some modRow := rows.find? (fun r => field r "k" == "module" && field r "n" == "Shapes.Basic")
+          | throw (IO.userError "the module is not searchable")
+        checkEq "Shapes.Basic.html" (field modRow "u")
+        let some areaRow := rows.find? (fun r => field r "n" == "Shape.area")
+          | throw (IO.userError "Shape.area is not in the search index")
+        checkEq "Shapes.Basic.html#Shape.area" (field areaRow "u")
+        check (has (field areaRow "s") "Shape") (field areaRow "s")
+        let some point := rows.find? (fun r => field r "n" == "Point")
+          | throw (IO.userError "Point is not in the search index")
+        check (has (field point "d") "plane") (field point "d") },
     { name := "wiz doc: the pages are complete without JS (no module script without the Wasm); the data is there for it", run := fun _ => do
         let dir ← mkTree pkgFiles
         let out ← makeSite dir
@@ -297,6 +414,105 @@ def docGroup : Group where
         -- the arrow key moves the selection to the next tag
         checkHas o.stdout "data-idx=\"1\" title=\"Shape\""
         check (lines.any (fun l => has l "sel\" data-ref" && has l "data-idx=\"1\"")) o.stdout },
+    { name := "wiz doc --serve: the client is only in served pages, and the server serves the tree and its sources", run := fun _ => do
+        let dir ← mkTree pkgFiles
+        -- (the static site: neither the live client nor the positions it needs)
+        let plain ← makeSite dir
+        let basic ← IO.FS.readFile (plain / "Shapes.Basic.html")
+        check (!has basic "doc-live.js") "a plain page carries the live client"
+        check (!has basic "wiz-doc-serve") "a plain page carries the live data"
+        check (!has basic "data-doc-line") "a plain page carries live positions"
+        -- (a served site: the page presents the client, and the server answers)
+        let port ← freePort
+        let out := dir / "live"
+        let child ← IO.Process.spawn
+          { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
+              "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
+        try
+          let some (r, w) ← connectSoon port | do
+            try child.kill catch _ => pure ()
+            let err ← child.stderr.readToEnd
+            IO.eprintln err
+            skip "the documentation server could not bind its port"
+            return
+          let index ← httpReq r w "/index.html"
+          check (has index "200 OK") s!"GET /index.html: {index.take 200}"
+          check (has index "<title>") index
+          let page ← httpGet port "/Shapes.Basic.html"
+          check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
+          checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
+          checkHas page "id=\"wiz-doc-serve\""
+          checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
+          checkHas page "data-doc-line="
+          -- (the scripts the page imports are in the served tree)
+          checkHas (← httpGet port "/doc-live.js") "readGoalState"
+          checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
+          checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
+          -- (the module's source, for the client to open in the server)
+          let src ← httpGet port "/sources/Shapes.Basic.wiz"
+          check (has src "200 OK") s!"GET /sources: {src.take 200}"
+          checkHas src "structure Point"
+          -- (the landing and API pages stay static even when served)
+          check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
+          check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
+          -- (no path escapes the generated tree)
+          check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
+        finally
+          try child.kill catch _ => pure () },
+    { name := "wiz doc --serve: --port and --lsp need --serve", run := fun _ => do
+        let o ← IO.Process.output { cmd := ← wiz, args := #["doc", "lib/Prelude.wiz", "-o", "/tmp/wiz-doc-noserve", "--lsp", "8765"] }
+        check (o.exitCode == 2) s!"exit {o.exitCode}"
+        checkHas o.stderr "need --serve" },
+    { name := "wiz doc --reference: implicits, a class with two instances, an infix row, doc markup, a module without docs", run := fun _ => do
+        let dir ← mkTree refPkgFiles
+        let out := dir / "site"
+        let ref := dir / "reference"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out.toString,
+          "--web", (dir / "no-web").toString, "--reference", ref.toString]
+        let md ← IO.FS.readFile (ref / "index.md")
+        -- (the header counts, and the manual links its sections and declarations)
+        checkHas md "2 modules"
+        checkHas md "## Contents"
+        checkHas md "#notation"
+        checkHas md "## Notation and precedence"
+        -- (a declaration with an implicit argument: the elaborated type keeps it; names
+        -- are global, not module-qualified, so the anchor is the bare name)
+        checkHas md "<a id=\"ident\"></a>"
+        checkHas md "def · `Ref/A.wiz:"
+        checkHas md "{A : Type} → A → A"
+        -- (a class and its two instances, with their types)
+        checkHas md "<a id=\"Sized\"></a>"
+        checkHas md "**Instances of this class (2)**"
+        checkHas md "Sized Pair"
+        checkHas md "Sized Nat"
+        -- (its field, with a doc comment)
+        checkHas md "<a id=\"Sized.size\"></a>"
+        checkHas md "— how big it is"
+        -- (the module's own infix operator, with precedence and associativity)
+        checkHas md "| `+?` | infixl | 33 | left |"
+        -- (doc comments are Markdown, links included)
+        checkHas md "<strong>markup</strong>"
+        checkHas md "<a href=\"#Sized\"><code>Sized</code></a>"
+        -- (a module without doc comments is still a section, with its declaration)
+        checkHas md "## Ref.Empty"
+        checkHas md "<a id=\"quiet\"></a>"
+        -- (the generated page links to the manual, and the manual to the pages)
+        let html ← IO.FS.readFile (out / "reference.html")
+        checkHas html "id=\"module-Ref.A\""
+        checkHas html "id=\"ident\""
+        let page ← IO.FS.readFile (out / "Ref.A.html")
+        checkHas page "href=\"reference.html#ident\""
+        checkHas page "href=\"reference.html#module-Ref.A\""
+        -- (--check passes on what was just written, and fails when it changes)
+        let o ← runOut (← wiz) ["doc", (dir / "src").toString, "-o", (dir / "site2").toString,
+          "--web", (dir / "no-web").toString, "--reference", ref.toString, "--check"]
+        checkHas o "is up to date"
+        IO.FS.writeFile (ref / "index.md") (md ++ "\nstale\n")
+        let p ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site3").toString, "--web", (dir / "no-web").toString,
+          "--reference", ref.toString, "--check"] }
+        check (p.exitCode == 1) s!"--check exit {p.exitCode}: {p.stdout}{p.stderr}"
+        check (has p.stderr "is out of date") p.stderr },
     libDocCase
   ]
 

@@ -1,28 +1,86 @@
 import Sys
 import Scry.Native
 import Scry.CstStore
+import Scry.Preproc
 /-!
 # scry-cst: spill a C file's CST
 
 `scry-cst FILE` parses `FILE` with the S1 tree-sitter shim (`Scry.Native`) and prints
 its `scry-cst 1` spill format on stdout. It is the checked-in-fixture generator for the
-C-to-Wil lowering (`corpus/c2wil/*.cst`, see `wiz-notes/scry-c2wil.md`):
+C-to-Wil lowering (`corpus/c2wil/*.cst`, see `wiz-notes/scry-c2wil.md`) and for the C#
+frontend (`corpus/csharp/**/*.cst`, see `CSHARP.md`); a `*.cs` file is parsed with
+tree-sitter-c-sharp, anything else with tree-sitter-c:
 
     .grail/bin/scry-cst corpus/c2wil/straight.c > corpus/c2wil/straight.cst
+    .grail/bin/scry-cst corpus/csharp/lower/basic.cs > corpus/csharp/lower/basic.cst
+
+`scry-cst -E [-DFOO=1] [-I dir]… FILE` runs the toolchain's preprocessor (`cc -E
+-ffreestanding FILE …`), blanks its line markers with `Scry.Preproc`, parses the
+preprocessed text, and spills that store. The spill's spans are offsets into the
+preprocessed text; the checked-in `.i` fixture plus `Scry.Preprocessed` recover the
+original files. `-ffreestanding` keeps GCC from injecting its own `stdc-predef.h`, so
+the fixture's marker paths are the source's own.
 
 The tests read the checked-in spill, so they need no tree-sitter build. Regenerate a
 spill only when its `.c` fixture changes; the test checks that the spill's function
 spans point into the source text it embeds.
 -/
 
-/-- Parse `path` and print its columns' spill format. -/
+/-- Parse `path` (C, or C# for `*.cs`) and print its columns' spill format. -/
 def Scry.spill (path : String) : EIO Unit := do
   st ← Scry.Native.parseChecked path;
   store ← EIO.lift (Scry.Native.toCstStore path st);
   EIO.lift (IO.print (Scry.CstStore.render store))
 
-/-- `scry-cst FILE`. -/
-def main : IO Unit := IO.bind IO.args (fun args => match args with
-  | .cons path .nil => EIO.toIO (Scry.spill path)
-  | _ => IO.bind (IO.ePrintln "usage: scry-cst FILE   (print FILE's scry-cst spill)")
-      (fun _ => Process.exit 2))
+/-- The original texts of `paths`, in order (an unreadable or pseudo path like
+`<built-in>` gets `""`; the line map still gives its file, line and column). -/
+def Scry.loadTexts (paths : List String) : EIO (List (String × String)) :=
+  match paths with
+  | .nil => EIO.pure .nil
+  | .cons p rest => do
+    rest' ← Scry.loadTexts rest;
+    match String.startsWith p "<" with
+    | .true => EIO.pure (.cons (p, "") rest')
+    | .false => do
+      there ← EIO.lift (FS.exists p);
+      match there with
+      | .false => EIO.pure (.cons (p, "") rest')
+      | .true => do
+        t ← FS.readFile p;
+        EIO.pure (.cons (p, t) rest')
+
+/-- `scry-cst -E FLAGS… FILE`: preprocess `FILE` with `cc -E -ffreestanding FLAGS`, then
+spill the CST of the blanked preprocessed text. -/
+def Scry.spillPreprocessed (flags : List String) (path : String) : EIO Unit := do
+  out ← Process.output "cc" (List.append (.cons "-E" (.cons "-ffreestanding" .nil))
+    (List.append flags (.cons path .nil))) "";
+  match out.status with
+  | .exited 0 => do
+    let paths := Scry.markerPaths path out.stdout;
+    texts ← Scry.loadTexts paths;
+    let pre := Scry.preprocess path out.stdout texts;
+    st ← Scry.Native.parseCheckedText path pre.text;
+    store ← EIO.lift (Scry.Native.toCstStore path st);
+    EIO.lift (IO.print (Scry.CstStore.render store))
+  | _ => EIO.fail ("cc -E failed (" ++ ExitStatus.toString out.status ++ "): " ++ out.stderr)
+
+/-- All but the last argument (`some (init, last)`), for `-E FLAGS… FILE`. -/
+def Scry.allButLast : List String → Option (List String × String)
+  | .nil => .none
+  | .cons x .nil => .some (.nil, x)
+  | .cons x rest => match Scry.allButLast rest with
+    | .some p => .some (.cons x p.1, p.2)
+    | .none => .none
+
+/-- The usage line on stderr. -/
+def Scry.usage : EIO Unit :=
+  EIO.lift (IO.ePrintln
+    "usage: scry-cst [-E [-DFOO=1] [-I dir]…] FILE   (print FILE's scry-cst spill)")
+
+/-- `scry-cst [-E FLAGS…] FILE`. -/
+def main : IO Unit := EIO.toIO (IO.bind IO.args (fun args => match args with
+  | .cons "-E" rest => match Scry.allButLast rest with
+    | .some p => Scry.spillPreprocessed p.1 p.2
+    | .none => Scry.usage
+  | .cons path .nil => Scry.spill path
+  | _ => Scry.usage))

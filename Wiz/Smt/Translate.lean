@@ -11,7 +11,7 @@ constant (two atoms are the same constant when their terms are the same). Abstra
 subterm to a constant is sound (a formula valid for an arbitrary value is valid for this
 one); it only loses completeness.
 
-The fragment (wiz-notes/smt.md §3.2):
+The fragment:
 * Props: `→` between propositions, `¬`, `∧`, `∨`, `↔`, `True`, `False`, `a = b` at a
   sort below; a `∀` over a sort at the goal's top (a fresh constant).
 * `Bool`: `.true`, `.false`, `Bool.and/or/not/xor`, `Nat.lt/le/beq`, word comparisons.
@@ -130,7 +130,7 @@ partial def sortOf (g : Globals R) (A : Val R) : Option SSort :=
     | "Int", some [] => if fromLib g "Int" then some .int else sortOf g v.get
     | _, _ => sortOf g v.get
   | .lazyInd .. => sortOf g (wh A)
-  | .mu _ _ _ _ _ (some (T, _, args)) => if !fromLib g T then none else match T, args with
+  | .mu _ _ _ _ _ (some (T, _, args)) _ => if !fromLib g T then none else match T, args with
     | "Nat", [] => some .nat
     | "Bool", [] => some .bool
     | "Int", [] => some .int

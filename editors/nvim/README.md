@@ -19,7 +19,8 @@ Wiz in Neovim (0.10 or later; tested with 0.12):
   syntax and what it expands to, an import, the instances found, the command's
   declarations, `#check`/`#eval` output.
 
-The protocol behind the infoview is in `wiz-notes/infoview-protocol.md`; the stage
+The protocol behind the infoview is in
+[docs/design/infoview-protocol.md](../../docs/design/infoview-protocol.md); the stage
 notes are in `docs/stages/11-tooling.md` (11p).
 
 ## Installing

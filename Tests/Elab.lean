@@ -420,11 +420,13 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   let functorLib ← IO.FS.readFile "lib/Functor.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   let textLib ← IO.FS.readFile "lib/Text.wiz"
+  let logicLib ← IO.FS.readFile "lib/Logic.wiz"
   let derivingLib ← IO.FS.readFile "lib/Deriving.wiz"
   let loader : Name → Option String := fun m =>
     if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Eff" then some effLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else if m == "Functor" then some functorLib
-    else if m == "Text" then some textLib else if m == "Deriving" then some derivingLib else none
+    else if m == "Text" then some textLib else if m == "Logic" then some logicLib
+    else if m == "Deriving" then some derivingLib else none
   let headers ← Build.preprocessHeaders (← toolchain) src
   let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule, cHeaders := (headers[·]?) }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
@@ -795,9 +797,9 @@ partial def toWiz : MTm → String
   | pair a b => s!"(.pair {a.toWiz} {b.toWiz})"
   | fst p => s!"(.fst {p.toWiz})"
   | snd p => s!"(.snd {p.toWiz})"
-  | unit n => s!"(.unit {n})"
+  | unit n => s!"(.unit (ln {n + 1}))"
   | star => ".star"
-  | empty n => s!"(.empty {n})"
+  | empty n => s!"(.empty (ln {n + 1}))"
   | exfalso m t => s!"(.exfalso {m.toWiz} {t.toWiz})"
   | letUnit u b => s!"(.letUnit {u.toWiz} {b.toWiz})"
   | enum k => s!"(.enum {k})"
@@ -818,15 +820,15 @@ partial def toWiz : MTm → String
     | t => t.toWiz
   | cast A B e t => s!"(.coe {A.toWiz} {B.toWiz} {e.toWiz} {t.toWiz})"
   | transp A a P p b e => s!"(.subst {A.toWiz} {a.toWiz} {P.toWiz} {p.toWiz} {b.toWiz} {e.toWiz})"
-  | desc l I => s!"(.descr {l} {I.toWiz})"
+  | desc l I => s!"(.descr (ln {l}) {I.toWiz})"
   | dret i => s!"(.dret {i.toWiz})"
   | darg S E q => s!"(.darg (.qlit {qWiz q}) {S.toWiz} {E.toWiz})"
   | drec j E q => s!"(.drec (.qlit {qWiz q}) {j.toWiz} {E.toWiz})"
   | dhrec H j E q => s!"(.dhrec (.qlit {qWiz q}) {H.toWiz} {j.toWiz} {E.toWiz})"
-  | delim v P a b c h D => s!"(.delim {v} {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
-  | mu l I D i => s!"(.mu {l} {I.toWiz} {D.toWiz} {i.toWiz})"
+  | delim v P a b c h D => s!"(.delim (ln {v}) {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
+  | mu l I D i => s!"(.mu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz})"
   | con x => s!"(.con {x.toWiz})"
-  | ind l I D v P m i x => s!"(.ind {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
+  | ind l I D v P m i x => s!"(.ind (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
   | const n ls => match globalDefs.find? (·.1 == n) with
     | some (_, ps, some v, ty) =>
       let psW := ps.foldr (fun p acc => s!"(.cons \"{p}\" {acc})") ".nil"
@@ -844,16 +846,16 @@ partial def toWiz : MTm → String
   | szInf => ".szInf"
   | szSuc s => s!"(.szSuc {s.toWiz})"
   | sizeLt s => s!"(.sizeLt {s.toWiz})"
-  | mus l I D i s => s!"(.mus {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
-  | sfix l I D v P f s i x => s!"(.sfix {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | nu l I D i s => s!"(.nu {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | mus l I D i s => s!"(.mus (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | sfix l I D v P f s i x => s!"(.sfix (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | nu l I D i s => s!"(.nu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
   | out x => s!"(.out {x.toWiz})"
   | cocon x => s!"(.cocon {x.toWiz})"
-  | scofix l I D A f s i a => s!"(.scofix {l} {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
-  | coit l I D S st i s => s!"(.coit {l} {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
-  | scaseq q l I D v P m s i x => s!"(.scase {l} {qWiz q} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | scase l I D v P m s i x => s!"(.scase {l} .qw {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | ulift k l A => s!"(.ulift {k} {l} {A.toWiz})"
+  | scofix l I D A f s i a => s!"(.scofix (ln {l}) {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
+  | coit l I D S st i s => s!"(.coit (ln {l}) {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
+  | scaseq q l I D v P m s i x => s!"(.scase (ln {l}) {qWiz q} {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | scase l I D v P m s i x => s!"(.scase (ln {l}) .qw {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | ulift k l A => s!"(.ulift (ln {k}) (ln {l}) {A.toWiz})"
   | up a => s!"(.up {a.toWiz})"
   | down t => s!"(.down {t.toWiz})"
   | prf l t => s!"(.prf {l.toWiz} {t.toWiz})"
@@ -897,9 +899,9 @@ partial def toTerm : MTm → Term ZeroOneMany
   | drec j E q => .drec (.qlit q) j.toTerm E.toTerm
   | dhrec H j E q => .dhrec (.qlit q) H.toTerm j.toTerm E.toTerm
   | delim v P a b c h D => .delim (Level.ofNat v) P.toTerm a.toTerm b.toTerm c.toTerm h.toTerm D.toTerm
-  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none
+  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none false
   | con x => .con x.toTerm
-  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm
+  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm false
   | const n ls => .const n (ls.map Level.ofNat)
   | sortParam u => .sort (.param u)
   | sortLv l => .sort l.toLevel
@@ -910,7 +912,7 @@ partial def toTerm : MTm → Term ZeroOneMany
   | szInf => .szInf
   | szSuc s => .szSuc s.toTerm
   | sizeLt s => .sizeLt s.toTerm
-  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
+  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none false
   | sfix l I D v P f s i x => .sfix (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm f.toTerm s.toTerm i.toTerm x.toTerm
   | nu l I D i s => .nu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
   | out x => .out x.toTerm
@@ -971,8 +973,8 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .drec (.qlit q) j E => return drec (← ofTerm j) (← ofTerm E) q
   | .dhrec (.qlit q) H j E => return dhrec (← ofTerm H) (← ofTerm j) (← ofTerm E) q
   | .delim v P a b c h D => return delim (← v.toNat?) (← ofTerm P) (← ofTerm a) (← ofTerm b) (← ofTerm c) (← ofTerm h) (← ofTerm D)
-  | .mu l I D i .szInf _ => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
-  | .mu l I D i s _ => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
+  | .mu l I D i .szInf _ false => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
+  | .mu l I D i s _ false => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .nu l I D i s _ => return nu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .out x => return out (← ofTerm x)
   | .cocon x => return cocon (← ofTerm x)
@@ -986,7 +988,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .szSuc s => return szSuc (← ofTerm s)
   | .sizeLt s => return sizeLt (← ofTerm s)
   | .con x => return con (← ofTerm x)
-  | .ind l I D v P m i x => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
+  | .ind l I D v P m i x false => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
   | .const n us => return const n (← us.mapM Level.toNat?)
   | .ulift k l A => return ulift (← k.toNat?) (← l.toNat?) (← ofTerm A)
   | .up a => return up (← ofTerm a)
@@ -1137,6 +1139,31 @@ rejected, the rest accepted. -/
 def sizeArgs : List MTm :=
   [mus 0 (unit 0) natD star star, streamAt (enum 2),
    natAt szInf, ann (lam (natAt (var 0))) (pi size (univ 0)), ann (lam (streamAt (szSuc (var 0)))) (pi size (univ 0))]
+
+/-- The guarded inductive description: `μ` rejects a description whose recursive field is
+not under a non-recursive (`arg`) field — `μ X. X`, the identity functor, has no
+induction principle. `ν X. X` is a valid coinductive type (guardedness there is
+`cocon`/`out`), so the same description is accepted at `ν`. `Nat`, a list, a binary tree,
+a guarded stream and a bare-observation stream are accepted; a size that is not a `Size`
+and a size variable that escapes its binder are rejected by the size check (K3). -/
+def muSize : List (MTm × Bool) :=
+  let listD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (dret star)))]))
+  let treeD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (darg (enum 2) (lam (drec star (dret star))))))]))
+  [(natTy, true),
+   (mu 0 (unit 0) listD star, true),
+   (mu 0 (unit 0) treeD star, true),
+   (nu 0 (unit 0) streamD star szInf, true),
+   (streamAt (szSuc szInf), true),
+   -- unguarded for μ: a description that is only a recursive field (`μ X. X`); the same
+   -- description is a valid coinductive type (`ν X. X`: one observation, itself)
+   (mus 0 (unit 0) (drec star (dret star)) star szInf, false),
+   (nu 0 (unit 0) (drec star (dret star)) star szInf, true),
+   -- a size that is not a Size, and a size variable that escapes its binder
+   (mus 0 (unit 0) natD star star, false),
+   (mus 0 (unit 0) natD star (var 0), false),
+   (nu 0 (unit 0) streamD star (var 0), false)]
 
 /-- Q4 (fixed): a description field must live exactly in `Sort (l+1)`, the universe
 `Desc.elim`'s `marg` takes it from. It used to be enough for it to fit (`Sort k`,
@@ -1346,7 +1373,7 @@ def transpProp : List MTm :=
 /-- Terms the differential test always checks (well-typed ones the generator rarely
 builds whole), before the random ones. -/
 def samples : List MTm :=
-  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
+  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ muSize.map (·.1) ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
    natTy, natZero, natSucc natZero, natSucc (natSucc natZero), ann natD (desc 0 (unit 0)),
    eq natTy natZero (natSucc natZero), eq natTy (natSucc natZero) (natSucc natZero), refl natTy (natSucc natZero),
    delim 1 (lam (unit 0)) (lam star) (lams 4 star) (lams 4 star) (lams 5 star) (ann natD (desc 0 (unit 0))),
@@ -1921,6 +1948,48 @@ def selfhostOutput (file : String) : IO (Option String) := do
     let out ← IO.Process.output { cmd := "timeout", args := #["900", exe.toString], cwd := dir }
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
+
+/-- The self-hosted checker's output for `file`, and its child process's peak resident set
+size in MB; fails if that exceeds `boundMB`. The checker holds the elaborated globals for
+the whole input, so a regression in retention (the `mutual`/`partial` inline cache made
+the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
+def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
+  match ← selfhostChecker with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      pure none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") file
+    let outFile := dir / "out"
+    let errFile := dir / "err"
+    let child ← IO.Process.spawn
+      { cmd := "sh",
+        args := #["-c", "exec \"$0\" > \"$1\" 2> \"$2\"", exe.toString, outFile.toString, errFile.toString],
+        cwd := dir, stdout := .null, stderr := .null }
+    let mut code : Option UInt32 := none
+    let mut peak := 0
+    while code.isNone do
+      match ← child.tryWait with
+      | some c => code := some c
+      | none =>
+        try
+          let s ← IO.FS.readFile s!"/proc/{child.pid}/status"
+          for l in s.splitOn "\n" do
+            if l.startsWith "VmHWM:" then
+              let kb := ((l.drop 6).trimAscii.toString.takeWhile Char.isDigit).toNat!
+              peak := max peak (kb / 1024)
+        catch _ => pure ()
+        IO.sleep 20
+    let exitCode := code.getD 1
+    let out ← IO.FS.readFile outFile
+    let err ← IO.FS.readFile errFile
+    unless exitCode == 0 do throw (IO.userError s!"the checker failed ({exitCode}): {err}")
+    unless peak ≤ boundMB do
+      throw (IO.userError s!"the checker used {peak} MB (bound: {boundMB} MB)")
+    pure (some out)
 
 /-- (A14) The self-hosted checker's output for a set of module files: `input.wiz` is the
 root module, the others are modules (written beside it, subdirectories included). `args`

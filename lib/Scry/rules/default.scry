@@ -10,7 +10,7 @@
 #     message TEXT
 #     source NAME result | arg K
 #     sanitise NAME result | arg K
-#     sink NAME arg K
+#     sink NAME arg K | args        (args: every argument, for a variadic callee)
 #     call NAME                     (forbidden rules)
 #   end
 #
@@ -28,6 +28,19 @@ rule command-injection
   sanitise sanitize arg 0
   sink system arg 0
   sink popen arg 0
+  # execl(path, arg0, …, NULL): every word is part of the command line, including the
+  # path, so any argument is a sink (`args`).
+  sink execl args
+  sink execlp args
+  sink execv arg 0
+  sink execvp arg 0
+  sink execve arg 0
+  # posix_spawn(pid, path, file_actions, attrp, argv, envp): the program path and the
+  # argv vector carry the command; envp is not a command word.
+  sink posix_spawn arg 1
+  sink posix_spawn arg 4
+  sink posix_spawnp arg 1
+  sink posix_spawnp arg 4
 end
 
 rule format-string

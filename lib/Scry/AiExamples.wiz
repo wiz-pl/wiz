@@ -1,12 +1,12 @@
 import Prelude
 import Text
 import Scry.Ai
+import Scry.AiFixpoint
 /-!
 # Scry.AiExamples: the small programs S5's tests and docs run
 
 Hand-built CFGs, so that the engine and the checker can be exercised without a parser or
-a Wil frontend. `Tests/Scry.lean` evaluates the functions below; `wiz-notes/scry-ai.md`
-reproduces the same programs.
+a Wil frontend. `Tests/Groups/ScryAi.lean` evaluates the functions below.
 
 * `loopCfg`: a counter loop that needs widening (16-bit, bound 1000).
 * `constCfg`: `x := 2; y := 3; z := x * y`, an interval/constant proof.
@@ -85,8 +85,8 @@ def AiEx.ovfInv : AState := fixpoint AiEx.m8 AiEx.ovfCfg
 /-- An unsound alleged post-fixpoint: the constant program, but block 3 claims `z = 5`
 while its predecessor computes `z = 6`. -/
 def AiEx.constBadInv : AState :=
-  AState.set 3 (Env.set 2 (Value.ofNat 5) (Env.topOf AiEx.constCfg.vars)) AiEx.constInv
+  AState.set 3 (AiEnv.set 2 (Value.ofNat 5) (AiEnv.topOf AiEx.constCfg.vars)) AiEx.constInv
 
 /-- The value of variable `x` in block `p` of a post-fixpoint. -/
 def AiEx.valueAt (cfg : ACfg) (inv : AState) (p x : Nat) : Value :=
-  Env.getD (AState.at cfg inv p) x Value.top
+  AiEnv.getD (AState.at cfg inv p) x Value.top

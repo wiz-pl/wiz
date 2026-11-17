@@ -1,0 +1,131 @@
+import Hdl.Core
+/-!
+# Hdl.Crc
+
+CRC-8/SMBUS (polynomial `x^8 + x^2 + x + 1` = `0x07`, initial value 0, most significant
+bit first, no reflection, no final xor), twice: as hardware, one byte per clock cycle,
+and as a function on numbers, which is what a host computes. It is the CRC of the
+iCEstick project (`wiz-icestick-uart/src/Icestick/Crc.wiz`) with the
+board-specific vocabulary removed, so any design can use it.
+
+The specification is `Crc.bit` (one bit), `Crc.iter` (n bits), `Crc.step` (one byte),
+`Crc.ofList` (a whole message), `Crc.hex` (a nibble as an ASCII hexadecimal digit) and
+`Crc.reply` (the iCEstick's two-hex-digit answer line). The hardware is `Crc.hwBit`,
+`Crc.hwIter` and `Crc.hwStep` (eight unrolled `hwBit` steps on `c XOR d`), and the
+streaming circuit `Crc.crcC`: input `valid`/`data`, output `valid`/`crc`, one byte per
+cycle while `valid` is high.
+
+The known-answer test is in the module (`Crc.checkDigits`, `Crc.checkValue`,
+`Crc.check_ok`): CRC-8/SMBUS of the ASCII `"123456789"` is `0xF4` = 244. The test group
+`bus-crc` (`examples/hdl-crc.wiz`) also compares the hardware with the specification on
+every `(crc, byte)` pair (65536 inputs), checks `Crc.hexDigit` against `Crc.hex` on all
+16 nibbles, and runs `Crc.crcC` through the value simulation, `Netlist.simulate` and
+`Circuit.simFast`.
+-/
+
+/-- One bit. -/
+def Crc.Bit : HwTy := HwTy.bits 1
+/-- The CRC register's width (CRC-8). -/
+def Crc.B8 : HwTy := HwTy.bits 8
+/-- A hexadecimal digit. -/
+def Crc.B4 : HwTy := HwTy.bits 4
+
+/-- Shift an 8-bit register up by one place, zeros in at the bottom. -/
+def Crc.shl1 {r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
+  Hw.cat (Hw.slice 0 7 c) (Hw.lit 1 0)
+
+/-- One bit of the hardware CRC: shift left, and subtract (xor) the polynomial if a one
+fell out of the top. -/
+def Crc.hwBit {r : HwTy → Type} [Hw r] (c : r Crc.B8) : r Crc.B8 :=
+  let sh := Crc.shl1 c;
+  if Hw.slice 7 1 c then Hw.xor sh (Hw.lit 8 7) else sh
+
+/-- `n` copies of `Crc.hwBit` (a meta-level recursion: the netlist has the copies, not a
+loop). -/
+def Crc.hwIter {r : HwTy → Type} [Hw r] : Nat → r Crc.B8 → r Crc.B8
+  | .zero, c => c
+  | .succ k, c => Crc.hwIter k (Crc.hwBit c)
+
+/-- The CRC after one more byte `d`: eight copies of `Crc.hwBit`, unrolled, on `c XOR d`. -/
+def Crc.hwStep {r : HwTy → Type} [Hw r] (c d : r Crc.B8) : r Crc.B8 :=
+  Crc.hwIter 8 (Hw.xor c d)
+
+/-- A nibble as an ASCII hexadecimal digit (upper case). -/
+def Crc.hexDigit {r : HwTy → Type} [Hw r] (nib : r Crc.B4) : r Crc.B8 :=
+  let z := Hw.cat (Hw.lit 4 0) nib;
+  if Hw.ult nib (Hw.lit 4 10) then Hw.add z (Hw.lit 8 48) else Hw.add z (Hw.lit 8 55)
+
+------------------------------------------------------------------------------------
+-- The specification, on numbers.
+
+/-- One bit of the CRC: shift left modulo 256, and xor the polynomial if bit 7 was set. -/
+def Crc.bit (c : Nat) : Nat := match Nat.testBit c 7 with
+  | .true => Nat.xor (Nat.mod (Nat.mul c 2) 256) 7
+  | .false => Nat.mod (Nat.mul c 2) 256
+
+/-- `n` bits of the CRC. -/
+def Crc.iter : Nat → Nat → Nat
+  | .zero, c => c
+  | .succ k, c => Crc.iter k (Crc.bit c)
+
+/-- The CRC after one byte: eight bit steps on `c XOR d`. -/
+def Crc.step (c d : Nat) : Nat := Crc.iter 8 (Nat.xor c d)
+
+/-- The CRC of a message, from an initial value. -/
+def Crc.ofList : Nat → List Nat → Nat
+  | c, .nil => c
+  | c, .cons d ds => Crc.ofList (Crc.step c d) ds
+
+/-- A nibble as an ASCII hexadecimal digit (upper case), at values. -/
+def Crc.hex (n : Nat) : Nat := match Nat.lt n 10 with
+  | .true => 48 + n
+  | .false => 55 + n
+
+/-- The iCEstick's answer to a line: two hex digits and a newline. -/
+def Crc.reply (line : List Nat) : List Nat :=
+  let c := Crc.ofList 0 line;
+  .cons (Crc.hex (Nat.div c 16)) (.cons (Crc.hex (Nat.mod c 16)) (.cons 10 .nil))
+
+------------------------------------------------------------------------------------
+-- The streaming circuit: a CRC register and an input/output handshake.
+
+/-- The CRC register. -/
+structure Crc.St (r : HwTy → Type) where
+  crc : r Crc.B8
+  deriving Bundle
+
+/-- A byte in: `valid`/`data`. -/
+structure Crc.In (r : HwTy → Type) where
+  valid : r Crc.Bit
+  data : r Crc.B8
+  deriving Bundle
+
+/-- The CRC out: `valid` (this cycle accepted a byte) and the CRC after it. -/
+structure Crc.Out (r : HwTy → Type) where
+  valid : r Crc.Bit
+  crc : r Crc.B8
+  deriving Bundle
+
+/-- One cycle: on `valid`, advance the CRC by `data`; the output shows the new value. -/
+def Crc.streamStep {r : HwTy → Type} [Hw r] (s : Crc.St r) (x : Crc.In r) :
+    r (HwTy.prod Crc.St.code Crc.Out.code) :=
+  let c := Hw.mux x.valid (Crc.hwStep s.crc x.data) s.crc;
+  Hw.pair (Crc.St.pack (Crc.St.mk c)) (Crc.Out.pack (Crc.Out.mk x.valid c))
+
+/-- The streaming CRC-8 as a circuit. -/
+def Crc.crcC : Circuit Crc.In.code Crc.Out.code :=
+  Circuit.bundled Crc.St.bundle Crc.In.bundle Crc.Out.bundle (Crc.St.mk (BitVec.ofNat 8 0))
+    (fun s x => Crc.streamStep s x)
+
+------------------------------------------------------------------------------------
+-- Known-answer test (CRC-8/SMBUS of the ASCII "123456789" is 0xF4 = 244).
+
+/-- The ASCII bytes of `"123456789"`. -/
+def Crc.checkDigits : List Nat :=
+  .cons 49 (.cons 50 (.cons 51 (.cons 52 (.cons 53 (.cons 54 (.cons 55 (.cons 56 (.cons 57 .nil))))))))
+
+/-- The CRC-8/SMBUS check value. -/
+def Crc.checkValue : Nat := 244
+
+/-- The specification meets the check value (kernel-checked). -/
+def Crc.check_ok : Crc.ofList 0 Crc.checkDigits = Crc.checkValue := rfl

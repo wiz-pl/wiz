@@ -55,4 +55,15 @@ python3 "$dash" --history "$fx/history.tsv" \
   --repo "$repo" --html "$tmp/one.html"
 grep -q 'deadbeef' "$tmp/one.html"
 
+# --- the page goes to --notes DIR (or $WIZ_NOTES_DIR); with no destination it is an error
+mkdir "$tmp/notes"
+python3 "$dash" --history "$fx/history.tsv" --repo "$repo" --notes "$tmp/notes"
+test -s "$tmp/notes/perf-dashboard.html"
+rc=0
+env -u WIZ_NOTES_DIR python3 "$dash" --history "$fx/history.tsv" --repo "$repo" 2>"$tmp/err" || rc=$?
+if [ "$rc" != 2 ] || ! grep -q 'no output given' "$tmp/err"; then
+  echo "no --out/--notes/WIZ_NOTES_DIR: expected exit 2 and a message, got $rc" >&2
+  exit 1
+fi
+
 echo "perf-dashboard: ok ($(wc -c < "$tmp/all.html") bytes with --timings, $(wc -c < "$tmp/plain.html") without)"

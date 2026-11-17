@@ -48,9 +48,11 @@ def checkTerminates (input mode : String) (secs : Nat := 20) : IO Unit := do
   unless out.exitCode == 0 do
     throw (IO.userError s!"expected success, got exit code {out.exitCode}: {out.stderr.take 1000}")
 
-/-- (P1) The probe of `wiz-notes/inert-regularity-probe.wiz`: an inert indexed family
-whose index can hide a proof (`f p`), and statements that need InReg (regularity at inert
-types). Each declaration is checked on its own. -/
+/-- (P1) The inert-regularity probe: an inert indexed family whose index can hide a proof
+(`f p`), and statements that need InReg (regularity at inert types). `h2`, the instance
+`r := p` of `h`, was rejected while `h` and its application `h3` were accepted: typing was
+not stable under substitution. Each declaration is checked on its own; the cases "P1: …"
+of this group pin the verdicts. -/
 def p1Prelude : String :=
   "inductive N where\n  | z\n  | s (n : N)\n" ++
   "inductive Fin2 : N → Type where\n  | fz {0 n : N} : Fin2 (.s n)\n  | fs {0 n : N} (k : Fin2 n) : Fin2 (.s n)\n" ++
@@ -142,8 +144,8 @@ def ottGroup : Group where
         ok "def peq {A B : Type} (p : A × B) : p = (p.1, p.2) := refl p" },
     { name := "different type formers are unequal", run := fun _ =>
         ok "def noconf (e : Unit = Empty) : False := e" },
-    -- F2 (`wiz-notes/soundness-audit.md`): `vAbsurd` had no case for a glued value, so
-    -- `absurd (lem h)` panicked and evaluated to `Sort 0`: `g h` was `Prop`
+    -- F2 (found by a soundness audit of the Lean kernel): `vAbsurd` had no case for a
+    -- glued value, so `absurd (lem h)` panicked and evaluated to `Sort 0`: `g h` was `Prop`
     { name := "F2: absurd on a lemma's result is stuck, not Prop", run := fun _ => do
         let p := "def lem (h : False) : False := h\ndef g (h : False) : Type := absurd (lem h)\n"
         ok (p ++ "def r (h : False) (x : g h) : g h := x\n#reduce fun (h : False) => g h") ["fun h => absurd h"]

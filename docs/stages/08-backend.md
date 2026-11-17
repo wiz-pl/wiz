@@ -2,7 +2,7 @@
 
 ## 8a: IR and Perceus reference counting
 
-```
+```wiz no-check
 #ir twice          -- def twice x0 x1 :=  dup x0;  let x2 := ap x0 x1;  let x3 := ap x0 x2;  ret x3
 #run fact 10       -- 3628800, through the IR, on a heap that checks reference counts
 ```
@@ -92,7 +92,7 @@ description).
 
 ## 8e: borrowed parameters and drop specialisation
 
-```
+```wiz no-check
 #ir len            -- def len @&x0 :=  case x0 of | 0 => … | 1 => let x2 := proj 1 x0;  let x3 := len x2; …
 ```
 
@@ -119,4 +119,15 @@ description).
   at their arguments, so they borrow them (`Expr.primBorrows`; the runtime's
   `wiz_nat_beq`/`wiz_nat_blt` no longer decrement): a lookup in a tree counts neither
   the key nor the keys it compares it with.
+
+## 8f: WebAssembly
+
+`wiz build FILE -o OUT --target wasm` writes a binary WebAssembly module directly from
+the IR and `wiz run FILE --target wasm` runs it under Node with a small JS host (big
+integers only; values live in linear memory). `--wasm` is the older spelling of the same
+target. It is additive: C and LLVM are unchanged. The supported subset is enforced when
+the module is emitted, and every module is parsed and type-checked by a small validator
+before it is written (so an encoder bug is a compile error). Its representation, limits,
+the validator and the 34-case `wasm` test group are in
+[08-backend/wasm.md](08-backend/wasm.md).
 

@@ -127,7 +127,8 @@ Proofs carry no usage: they are erased, and conversion never looks at them.
     Γ ⊢ μ.{l} I D i ⇒ Type l           Γ ⊢ con x ⇐ μ D i  if  Γ ⊢ x ⇐ ⟦D⟧ (μ D) i
     Γ ⊢ ind P m i x ⇒ P i x ⊣ ω·(Uₘ + Uₓ)                  (`indMotiveTy`, `indMethodTy`)
     Γ ⊢ ν.{l} I D i ⇒ Type l           Γ ⊢ out x ⇒ ⟦D⟧ (ν D) i
-    (at a size: Γ ⊢ μ^s.{l} I D i ⇒ Type l and Γ ⊢ ν^s.{l} I D i ⇒ Type l if also Γ⁰ ⊢ s ⇐ Size)
+    (at a size: Γ ⊢ μ^s.{l} I D i and Γ ⊢ ν^s.{l} I D i ⇒ Type l if also Γ⁰ ⊢ s ⇐ Size;
+     for μ, D is guarded: every rec/hrec is under an arg field (`descGuarded`; μ X. X is rejected))
     Γ ⊢ coit S step i s ⇒ ν D i ⊣ ω·(U_step + U_s)
 
 ## Sizes (stage 4f)
@@ -437,6 +438,7 @@ def Ctx.sortOf? (ctx : Ctx R) (ty : VTy R) : Option Level :=
   | .sort l => some (.succ l)
   | .qty | .enum _ | .size | .sizeLt _ => some 1
   | .desc l _ => some (.succ (.succ l))
+  | .mu _ _ _ _ _ _ true => some .zero
   | .mu l .. | .nu l .. => some (.succ l)
   | .unit l | .empty l | .ulift _ l _ => some l
   | .pi _ _ _ _ _ σ => if σ.hasHole then typeSort? ctx.globals ctx.tys ty else some σ.piSort
@@ -520,6 +522,44 @@ partial def largeDomain (ctx : Ctx R) (A : Val R) (l : Nat) : Bool :=
   | .sort _ => true
   | .pi _ _ _ _ B _ => largeDomain ctx (Closure.inst ctx.globals B (Val.var l)) (l + 1)
   | _ => false
+
+/-- **The guarded inductive description (`μ`).** A recursive field (`rec`, `hrec`) is
+strictly smaller than the data type it belongs to only when it occurs under at least one
+non-recursive constructor field (`arg`): the constructor has then consumed a field before
+the recursive occurrence, so the recursive position is a field of the value, not the
+value itself. A description that begins with `rec`/`hrec` is the unguarded `μ X. X`
+(the identity functor): a recursive occurrence with nothing consumed before it, which the
+size side condition rejects. `guarded` is whether an `arg` field has been seen on the
+spine. (`ν` is not checked: `ν X. X` is a valid coinductive type, and guardedness there
+is `cocon`/`out`'s productivity rule, plus the surface copattern check.)
+
+A description whose head is not a constructor (a variable, `ret`, or an
+application/projection) is left alone: its spine is not visible to the kernel (the `μ`
+over `c.2.1` in the codes test, `μ Chain.desc i`, …). A *constant* is looked through to
+its value, so `def D := Desc.rec …; μ D ()` cannot hide an unguarded description
+(depth-bounded, so recursive globals stop). The check is conservative: it only rejects a
+`rec`/`hrec` it can see at the head of a constructor spine. -/
+partial def descGuarded (g : Globals R) (depth : Nat) (guarded : Bool) : Term R → Bool
+  | .darg _ _ E => descGuarded g depth true E
+  | .drec _ _ E => guarded && descGuarded g depth guarded E
+  | .dhrec _ _ _ E => guarded && descGuarded g depth guarded E
+  | .lam _ b => descGuarded g depth guarded b
+  | .ann t _ => descGuarded g depth guarded t
+  | .ecase _ _ _ bs => bs.all (descGuarded g depth guarded)
+  | .letE _ _ _ _ b => descGuarded g depth guarded b
+  | .const n _ =>
+    match depth with
+    | 0 => true
+    | k + 1 => match g.find? n with
+      | some d => match d.value with
+        | some v => descGuarded g k guarded v
+        | none => true
+      | none => true
+  | _ => true
+
+/-- The error a `μ` whose description is not guarded gets. -/
+def unguardedDescription : String :=
+  "unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur under a non-recursive (Desc.arg) field; μ X. X is not an inductive type"
 
 mutual
 
@@ -612,10 +652,10 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let uj ← check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩)
     let uD ← check ctx D (.desc l I)
     pure (uj + uD)
-  | .con x, .mu l I D i s _ => do
+  | .con x, .mu l I D i s _ prop => do
     let some s' := sizePred? s
       | throw (.other s!"a constructor builds a value of size ↑s, not {ctx.showVal s}")
-    check ctx x (vInterp ctx.globals l I D (muFamilyAt l I D s') i)
+    check ctx x (vInterp ctx.globals l I D (muFamilyAt l I D s' prop) i prop)
   | .cocon x, .nu l I D i s _ => do
     let some s' := sizePred? s
       | throw (.other s!"cocon builds a value of size ↑s, not {ctx.showVal s}")
@@ -917,27 +957,48 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let uc ← check ctx c tc
     let uh ← check ctx h th
     pure (vApp ctx.globals vP (ctx.eval D), ← methodUsage ctx (ua + ub + uc + uh + uD))
-  | .mu l I D i s h | .nu l I D i s h => do
+  | .mu l I D i s h prop => do
     checkHint ctx h
     let _ ← check { ctx with erased := true } s .size
     let lI ← checkType ctx I
     unless lI.equiv (.succ l) do throw (.other "an index type must be in the data type's universe")
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
+    -- (a recursive field must be guarded, a non-recursive field before it: μ X. X is out)
+    unless descGuarded ctx.globals 16 false D do throw (.other unguardedDescription)
+    let _ ← check ctx i vI
+    pure (if prop then .sort 0 else .sort (.succ l), Usage.zeros ctx.lvl)
+  | .nu l I D i s h => do
+    checkHint ctx h
+    let _ ← check { ctx with erased := true } s .size
+    let lI ← checkType ctx I
+    unless lI.equiv (.succ l) do throw (.other "an index type must be in the data type's universe")
+    let vI := ctx.eval I
+    let _ ← check ctx D (.desc l vI)
+    -- (no guard here: `ν X. X` is a valid coinductive type, its guardedness is
+    -- `cocon`/`out`'s; the `μ` case checks `descGuarded`)
     let _ ← check ctx i vI
     pure (.sort (.succ l), Usage.zeros ctx.lvl)
-  | .ind l I D v P m i x => do
+  | .ind l I D v P m i x prop => do
     checkIndexLevel ctx l I
     let vI := ctx.eval I
     let _ ← check ctx D (.desc l vI)
     let vD := ctx.eval D
+    -- (inductive propositions) large elimination is allowed only when the type is a
+    -- subsingleton (no constructor, or one whose fields are all (sub)singletons). A
+    -- motive in `Prop` is always allowed: every elimination out of a proof that returns
+    -- a proof is singleton elimination.
+    if prop && !v.isZero && !descSingleton ctx.globals 0 vD then
+      throw (.other s!"large elimination from an inductive proposition: this type's \
+description is not a singleton (it has more than one constructor, or a field that \
+stores data), so its eliminator can only target Prop")
     let w := QuantitySyntax.explicitDefault
-    let _ ← check ctx P (indMotiveTy ctx.globals l v vI vD w)
+    let _ ← check ctx P (indMotiveTy ctx.globals l v vI vD w prop)
     let vP := ctx.eval P
-    let um ← check ctx m (indMethodTy ctx.globals l v vI vD vP w)
+    let um ← check ctx m (indMethodTy ctx.globals l v vI vD vP w prop)
     let _ ← check ctx i vI
     let vi := ctx.eval i
-    let ux ← check ctx x (.mu l vI vD vi .szInf none)
+    let ux ← check ctx x (.mu l vI vD vi .szInf none prop)
     pure (vApp ctx.globals (vApp ctx.globals vP vi) (ctx.eval x), ← methodUsage ctx (um + ux))
   | .out x => do
     let (ty, u) ← infer ctx x
@@ -956,7 +1017,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let uf ← check ctx f (sfixFunTy ctx.globals l v vI vD vP w)
     let _ ← check { ctx with erased := true } s .size
     let _ ← check ctx i vI
-    let ux ← check ctx x (.mu l vI vD (ctx.eval i) (ctx.eval s) none)
+    let ux ← check ctx x (.mu l vI vD (ctx.eval i) (ctx.eval s) none false)
     pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), ← methodUsage ctx (uf + ux))
   | .scofix l I D A f s i a => do
     checkIndexLevel ctx l I
@@ -986,7 +1047,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let vs := ctx.eval s
     let um ← check ctx m (scaseMethodTy ctx.globals l v vI vD vP vs (ctx.eval q))
     let _ ← check ctx i vI
-    let ux ← check (ctx.erasedAt qp) x (.mu l vI vD (ctx.eval i) vs none)
+    let ux ← check (ctx.erasedAt qp) x (.mu l vI vD (ctx.eval i) vs none false)
     pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + qp • ux)
   | .cocon _ => throw (.cannotInfer (ctx.showTerm t))
   | .coit l I D S st i s => do
@@ -1367,7 +1428,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   let b := whnf (args.foldl (vApp g) (eval g [fV] (replaceConst d.name (d.levelParams.map Level.param) impl)))
   let (.neutral (.local x) sp, .neutral (.local x') sp') := (a, b)
     | fail "the value or the implementation is not stuck on an argument"
-  let (some (Elim.ind l I D v P M i), some (Elim.ind l' I' D' v' P' MF i')) := ((sp[0]? : Option (Elim R)), (sp'[0]? : Option (Elim R)))
+  let (some (Elim.ind l I D v P M i pr), some (Elim.ind l' I' D' v' P' MF i' pr')) := ((sp[0]? : Option (Elim R)), (sp'[0]? : Option (Elim R)))
     | fail "the value or the implementation is not an induction on an argument"
   let MF? : Option (Val R) := some MF
   unless x == x' && sp.size == sp'.size do fail "they split different arguments"
@@ -1375,9 +1436,9 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   -- that comparing them costs nothing: comparing `M` with itself would go through every
   -- branch of it)
   let mV : Val R := Val.var tys.size
-  let tysM := tys.push (indMethodTy g l v I D P QuantitySyntax.explicitDefault)
-  let a' : Val R := .neutral (.local x) (sp.set! 0 (.ind l I D v P mV i))
-  let b' : Val R := .neutral (.local x') (sp'.set! 0 (.ind l' I' D' v' P' mV i'))
+  let tysM := tys.push (indMethodTy g l v I D P QuantitySyntax.explicitDefault pr)
+  let a' : Val R := .neutral (.local x) (sp.set! 0 (.ind l I D v P mV i pr))
+  let b' : Val R := .neutral (.local x') (sp'.set! 0 (.ind l' I' D' v' P' mV i' pr'))
   unless conv g tysM ty a' b' do fail "their motives, indices or other arguments differ"
   -- the methods, constructor by constructor
   let .darg _ S Fd := whnf D | fail "the description does not start with a tag"
@@ -1389,9 +1450,9 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
     | _ => fail "the description does not start with a tag"
   let jL := tys.size
   let jv : Val R := Val.var jL
-  let X := muFamily l I D
+  let X := muFamily l I D pr
   -- y0 j1 m2 P3 D4 I5 (as in `vIndStep`)
-  let fInd : Val R := .lam "j" (.mk [M, P, D, I] (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0))))
+  let fInd : Val R := .lam "j" (.mk [M, P, D, I] (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0) pr)))
   /- **The hypotheses as calls.** The kernel's hypothesis for a field `y` at index `j` is
   `ind P M j y`; a direct call `F … y …` unfolds to an `ind` too, but only after the whole
   definition (and its recursor) is evaluated again, and comparing the two `ind`s compares
@@ -1470,7 +1531,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
     let _ ← MF?
     -- mode B: the hypothesis takes the index equation first
     let eqArg := !modeA
-    let yTy (j : Val R) : VTy R := .mu l I D j .szInf none
+    let yTy (j : Val R) : VTy R := .mu l I D j .szInf none false
     let bridge (j : Val R) (tys' : Array (VTy R)) : Bool :=
       let yv := Val.var tys'.size
       let tys'' := tys'.push (yTy j)
@@ -1496,7 +1557,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
       | .pair c r => do
         let c' ← match whnf c with
           | .neutral hd sp => match sp.back? with
-            | some (.ind _ _ _ _ _ _ j) =>
+            | some (.ind _ _ _ _ _ _ j _) =>
               some (if ok tys' j then hypCall fV j (.neutral hd sp.pop) rs (!modeA) else c)
             | _ => none
           -- an infinitary field's: `λ h. ind P M (j h) (k h)` becomes `λ h. F … (k h) …`
@@ -1504,7 +1565,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
             let hl := tys'.size
             match whnf (Closure.inst g clo (Val.var hl)) with
             | .neutral hd sp => match sp.back? with
-              | some (.ind _ _ _ _ _ _ j) =>
+              | some (.ind _ _ _ _ _ _ j _) =>
                 if ok tys' j then
                   let jT := quote g (hl + 1) j
                   let yT := quote g (hl + 1) (.neutral hd sp.pop)
@@ -1531,11 +1592,11 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
     let t : Val R := if lifted then .up (.tag ls c) else .tag ls c
     let jv := i
     let tysJ := tys
-    let restTy := vInterp g l I (vApp g Fd t) X jv
+    let restTy := vInterp g l I (vApp g Fd t) X jv pr
     if emptyPayload tysJ 64 restTy then continue
     let tys' := tysJ.push restTy
     let xs : Val R := .pair t (Val.var tysJ.size)
-    let hyps := [I, D, X, P, fInd, jv, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v))
+    let hyps := [I, D, X, P, fInd, jv, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v pr))
     -- (the implementation is compared with `F` free, always: so each of its calls must be
     -- one of the hypotheses' calls, on a field. A call on anything else, the scrutinee say,
     -- would make compiled code loop where the kernel's recursion is well founded: such an

@@ -743,6 +743,13 @@ def serverGroup : Group where
         checkEq 1 (line r)
         let (_, r) ← ask srv "textDocument/hover" src (offAfter src "Nat.add $x" (-5))
         checkEq Lean.Json.null r },
+    { name := "11s: hovering a declaration's own name shows its type and doc", run := fun _ => do
+        let src := "import Prelude\n/-- the answer -/\ndef answer : Nat := 42\n"
+        let (srv, _) ← openDoc src
+        let (_, r) ← ask srv "textDocument/hover" src (offAfter src "def answer" (-6))
+        let md := LSP.getStr r ["contents", "value"]
+        check ((md.splitOn "answer : Nat").length > 1) s!"no type in the declaration's hover:\n{md}"
+        check ((md.splitOn "the answer").length > 1) s!"no doc comment in the declaration's hover:\n{md}" },
     { name := "11q: Prelude notation, syntax categories and imports", run := fun _ => do
         let src := "import Prelude\ndeclare_syntax_cat greeting\nsyntax \"hi\" : greeting\nsyntax \"greet\" greeting : term\ndef three : Nat := 1 + 2\n"
         let (srv, _) ← openDoc src
@@ -1153,11 +1160,19 @@ def nvimGroup : Group where
   name := "nvim"
   exercise := "editors/nvim (stage 11p)"
   cases := [
+    -- `run.sh` exits 1 for a failing test (the case is named in its output) and 2 when
+    -- nvim's own exit status is anomalous after a clean summary (a harness problem, not
+    -- a test result). Both fail this case; the `harness:` lines say which happened.
     { name := "wiz.nvim: abbreviations, and the infoview against wiz lsp (editors/nvim/tests/run.sh)", run := fun _ => do
         let out ← IO.Process.output { cmd := "sh", args := #["editors/nvim/tests/run.sh"] }
         if out.stdout.startsWith "skipped" then skip ((out.stdout.replace "skipped: " "").trimAscii.toString)
         else unless out.exitCode == 0 do
-          throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") }
+          throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") },
+    -- The harness's own reporting: fixture output, so it needs neither nvim nor a build.
+    { name := "wiz.nvim: the harness tells an nvim exit anomaly from a test failure (editors/nvim/tests/run.sh --self-check)", run := fun _ => do
+        let out ← IO.Process.output { cmd := "sh", args := #["editors/nvim/tests/run.sh", "--self-check"] }
+        unless out.exitCode == 0 do
+          throw (IO.userError s!"editors/nvim/tests/run.sh --self-check failed:\n{out.stdout}{out.stderr}") }
   ]
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted

@@ -37,6 +37,7 @@
 #include "tree-sitter/lib/include/tree_sitter/api.h"
 
 const TSLanguage *tree_sitter_c(void);
+const TSLanguage *tree_sitter_c_sharp(void);
 
 typedef uintptr_t wiz_val;
 extern wiz_val wiz_warray_of_c(uint32_t width, const void *p, size_t n);
@@ -256,8 +257,11 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
   bad->kind_names[0] = "";
   bad->field_names[0] = "";
 
-  if (!lang || strcmp(lang, "c") != 0) {
-    set_error(bad, "unknown language (this shim has tree-sitter-c only)");
+  const TSLanguage *language = NULL;
+  if (lang && strcmp(lang, "c") == 0) language = tree_sitter_c();
+  else if (lang && strcmp(lang, "c_sharp") == 0) language = tree_sitter_c_sharp();
+  else {
+    set_error(bad, "unknown language (this shim has tree-sitter-c and tree-sitter-c-sharp)");
     return bad;
   }
   if (len > UINT32_MAX) {
@@ -265,7 +269,6 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
     return bad;
   }
 
-  const TSLanguage *language = tree_sitter_c();
   Builder b;
   memset(&b, 0, sizeof b);
   b.nf = 1; /* field id 0 is the empty name */
@@ -364,6 +367,7 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
   if (!s->ok) {
     /* `build_edges` failed; the block is still freeable and `storeError` says why. */
   }
+  free(bad); /* the success path did not use the pre-allocated error store */
   return s;
 }
 

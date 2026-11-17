@@ -186,10 +186,48 @@ grail test                # 1 passed, 0 failed
 ```
 
 `grail build` again runs nothing: every job is keyed by its inputs. `grail targets`
-lists the targets, and `grail config` prints the C toolchain grail uses. Packages can
-depend on other packages in git repositories (`Package.dep`, with a lock file) and run
-commands as build steps; see [stages/23-grail.md](stages/23-grail.md). Add `.grail/` to
+lists the targets, and `grail config` prints the C toolchain grail uses. Add `.grail/` to
 your `.gitignore`.
+
+### Dependencies
+
+A package can depend on another package from git with `Package.dep NAME URL REV`, or on
+a **registry** package by name and version range with `Package.require NAME REQ`:
+
+```wiz
+import Grail
+def package : Package := Package.new "app"
+  |> Package.set "index" "https://github.com/wiz-pl/grail-index"  -- or --index URL
+  |> Package.require "std" "^0.1"
+  |> Package.dep "helper" "https://example.org/helper.git" "v1"
+```
+
+`grail update` resolves the requirements through the index and writes `grail.lock`;
+commit it. Builds, tests, the language server and `grail doc` use the lock only, so they
+need the index only after a dependency changes. To restore a checkout on another
+machine, run `grail fetch --locked` (or `grail fetch --locked --offline` when the
+archives are already cached); CI should run `grail update --locked` to catch a forgotten
+lock. Update a dependency with `grail update`, never by editing the lock.
+
+For a machine with no network at all, `grail vendor` copies the lock's registry archives
+into `vendor/` (content-addressed, with `vendor/index.sexpr`) without changing the lock;
+commit `vendor/` and use `grail fetch --locked --offline --vendor vendor` (or
+`Package.set "vendor" "vendor"`) and `grail build`. `grail cache path|list|verify`
+inspects the shared archive and package store.
+
+`Package.require` and `Package.dep` are deliberately different: `require` names a
+version range that the index resolves, `dep` names a git source (URL and revision) that
+`grail update` pins to a commit. A package may use both. The index itself is a static
+git repository (any URL; a directory also works), so there is no package server. See
+[stages/23-grail.md](stages/23-grail.md), 23m, for the index format, resolution rules,
+lock v2 and publishing (a reviewed pull request; `grail publish ARCHIVE --source URL`
+prints the entry).
+
+**Fetching is not building.** `grail fetch` downloads and checks archives; `grail build`
+evaluates each dependency's `grail.wiz` (a Wiz program), compiles its C and runs its
+commands. The registry, index and lock give integrity and naming (SHA-256, pinned
+versions, a lock that notices changes); they do not sandbox a package. Building a
+package you do not trust runs its author's code.
 
 ## Editors
 
@@ -240,10 +278,11 @@ repository and are not in the release tarball:
 
 * **in a terminal**: `infoview/build.sh`, then `wiz-infoview SOCK` in a split next to
   the editor (or `wiz-infoview --file F.wiz --at LINE:COL` on its own);
-* **in a browser**: `web/build.sh` (needs Emscripten; `nix develop` has it), then
-  `web/bridge.sh`, which starts `wiz lsp --ws` and serves the page; open the address it
-  prints. The page edits its own documents, and when your editor's server runs with
-  `--ws` it also follows that editor's cursor.
+* **in a browser**: `web/build.sh` (needs Emscripten, which the dev shell does not
+  include; without `emcc` on `PATH` the script runs itself again under
+  `nix shell nixpkgs#emscripten`), then `web/bridge.sh`, which starts `wiz lsp --ws`
+  and serves the page; open the address it prints. The page edits its own documents,
+  and when your editor's server runs with `--ws` it also follows that editor's cursor.
 
 Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 
@@ -252,7 +291,7 @@ Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 `wiz lsp` is a standard language server on stdin/stdout. Any LSP client can use it: run
 `wiz lsp` (or `grail lsp` in a grail package) with the project root as the working
 directory. The infoview is extra protocol (`wiz/interactiveGoals` and friends,
-`wiz-notes/infoview-protocol.md`), so other clients get diagnostics, hover and the rest,
+[the infoview protocol](design/infoview-protocol.md)), so other clients get diagnostics, hover and the rest,
 but not the infoview, unless they run one of the clients above.
 
 ## Troubleshooting
