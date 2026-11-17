@@ -59,7 +59,8 @@ that they agree with the definitions (`checkImplAgrees`). A wrong `implemented_b
 prove a false equation (group *native* has one), and `#print axioms` names it.
 
 **Not evaluating the statement.** The kernel's equality computes: evaluating the type
-`a = b` computes both sides (`vEq`; F5 of `wiz-notes/kernel-eval.md`). So the statement is
+`a = b` computes both sides (`vEq` in `Wiz/Core/Eval.lean` puts each side in weak head
+normal form before comparing them). So the statement is
 checked without being evaluated: `X.native✝`'s type is checked to be a well-formed type
 (`a b : T`, by inference), its sorts are filled without evaluating it, and `X`'s header is
 checked the same way, its value `X.native✝` being at that very type (the constant rule; the
@@ -97,4 +98,4 @@ Tests: group *native* (accepted with the flag, a 20 000-step word computation, r
 without it, a false equation refuted, non-first-order types refused, only as a closed
 definition's body, `#print axioms`, a wrong `implemented_by`, partial definitions, the
 step limit, the flags and grail's keys, the cache across the flag and across a changed
-import, `lib/`). Design: `wiz-notes/native-refl.md`.
+import, `lib/`).

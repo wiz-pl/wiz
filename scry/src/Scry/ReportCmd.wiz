@@ -1,0 +1,284 @@
+import Sys
+import Scry.TaintCmd
+import Scry.ProjectIO
+import Scry.Workflow
+import Scry.Report
+/-!
+# Scry.ReportCmd: `scry report`
+
+The IO half of the human page. It runs **the same pipeline as `scry taint`**
+(`Scry.analyzeFile`) over one C file or every `*.c` under a directory, and fills the pure
+`Scry.Report` structures. It adds no analysis, no second lowering and no claim.
+
+```
+scry report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]
+                        [--diff BASE|all] [--changed-lines FILE] [--diff-context N]
+                        [--timeout SECS] [--max-nodes N] [--max-rounds N]
+```
+
+A directory is a **corpus of independent translation units**, not a project: each file
+is analysed on its own. Use `scry project DIR --taint --sarif` for a cross-TU call graph.
+A file that fails to parse (without `--allow-errors`) stops the run with that file's
+error; a "clean" page over the files that did parse would be a silent false negative.
+
+`--diff BASE` is evaluated **per file** (`git diff -U0 BASE -- FILE`), so a directory
+report shows each file's own suppressed counts. `--diff all` is the unfiltered mode.
+The counts and the finding rows come from `Scry.TaintCmd`'s diff helpers, not a second
+implementation.
+-/
+
+-- ## Options
+
+structure Scry.ReportOpts where
+  path : String
+  out : String
+  rules : Option String
+  allowErrors : Bool
+  diff : Option String
+  changedLines : Option String
+  diffContext : Option Nat
+  timeoutSecs : Option Nat
+  maxNodes : Option Nat
+  maxRounds : Option Nat
+
+def Scry.emptyReportOpts : Scry.ReportOpts :=
+  Scry.ReportOpts.mk "" "report.html" .none .false .none .none .none
+    (.some 300) (.some 2000000) .none
+
+def Scry.reportUsage : String :=
+  "usage: scry report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]\n"
+  ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
+  ++ "                      [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "  writes one self-contained HTML page (default --out report.html).\n"
+
+/-- Parse the flags after `scry report`; flags may come in any order. -/
+partial def Scry.reportArgsGo (path : Option String) (o : Scry.ReportOpts) :
+    List String → Except String Scry.ReportOpts
+  | .nil => match path with
+    | .some p => .ok { o with path := p }
+    | .none => .error Scry.reportUsage
+  | .cons a rest => match a with
+    | "--out" => match rest with
+      | .cons p more => Scry.reportArgsGo path { o with out := p } more
+      | .nil => .error "--out needs an output file"
+    | "--rules" => match rest with
+      | .cons p more => Scry.reportArgsGo path { o with rules := .some p } more
+      | .nil => .error "--rules needs a file"
+    | "--allow-errors" => Scry.reportArgsGo path { o with allowErrors := .true } rest
+    | "--diff" => match rest with
+      | .cons p more => Scry.reportArgsGo path { o with diff := .some p } more
+      | .nil => .error "--diff needs a base revision or 'all'"
+    | "--changed-lines" => match rest with
+      | .cons p more => Scry.reportArgsGo path { o with changedLines := .some p } more
+      | .nil => .error "--changed-lines needs a unified-diff file"
+    | "--diff-context" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.reportArgsGo path { o with diffContext := .some n } more
+        | .none => .error ("--diff-context needs a number, not \"" ++ p ++ "\"")
+      | .nil => .error "--diff-context needs a number"
+    | "--timeout" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.reportArgsGo path { o with timeoutSecs := .some n } more
+        | .none => .error ("--timeout needs a number of seconds, not \"" ++ p ++ "\"")
+      | .nil => .error "--timeout needs a number of seconds"
+    | "--max-nodes" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.reportArgsGo path { o with maxNodes := .some n } more
+        | .none => .error ("--max-nodes needs a node count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-nodes needs a node count"
+    | "--max-rounds" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.reportArgsGo path { o with maxRounds := .some n } more
+        | .none => .error ("--max-rounds needs a round count, not \"" ++ p ++ "\"")
+      | .nil => .error "--max-rounds needs a round count"
+    | "--help" => .error Scry.reportUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.reportUsage)
+      | .false => match path with
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.reportUsage)
+        | .none => Scry.reportArgsGo (.some a) o rest
+
+def Scry.reportArgs (args : List String) : Except String Scry.ReportOpts :=
+  match Scry.reportArgsGo .none Scry.emptyReportOpts args with
+  | .error e => .error e
+  | .ok o => match o.diff, o.changedLines with
+    | .some _, .some _ => .error "--diff and --changed-lines are mutually exclusive"
+    | .some "all", .none => match o.diffContext with
+      | .some _ => .error "--diff-context has no effect with --diff all"
+      | .none => .ok o
+    | .none, .none => match o.diffContext with
+      | .some _ => .error "--diff-context needs --diff or --changed-lines"
+      | .none => .ok o
+    | _, _ => .ok o
+
+/-- The taint options for one file: this command is the same pipeline, not a copy. -/
+def Scry.reportTaintOpts (o : Scry.ReportOpts) (file : String) : Scry.TaintOpts :=
+  { Scry.emptyTaintOpts file with rules := o.rules, allowErrors := o.allowErrors,
+    diff := o.diff, changedLines := o.changedLines, diffContext := o.diffContext,
+    timeoutSecs := o.timeoutSecs, maxNodes := o.maxNodes, maxRounds := o.maxRounds }
+
+-- ## Filling the page structures
+
+def Scry.reportStepOf (m : Scry.OriginMap) (p : Scry.PathNode) : Scry.ReportStep :=
+  match Scry.originAt m p.func p.point with
+  | .some o => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func o.line o.column
+  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0
+
+def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFinding)
+    (checked : Bool) (hit : Option Scry.DiffHit) : Scry.ReportFinding :=
+  let sink := match Scry.originAt m f.func f.sink with
+    | .some o => o
+    | .none => Scry.Origin.mk file 0 0 0 0;
+  let shown : Bool := match hit with
+    | .none => .true
+    | .some h => h.visible;
+  let matchedBy := match hit with
+    | .none => ""
+    | .some h => h.matchedBy;
+  let diffLine := match hit with
+    | .none => 0
+    | .some h => h.line;
+  let id := Scry.wfId f file;
+  Scry.ReportFinding.mk
+    id                              -- anchor; `renderReport` disambiguates a collision
+    id
+    file
+    f.rule
+    (Scry.Severity.show f.severity)
+    (Scry.reportCwe f.rule)
+    (Scry.wfCweTier f.rule)
+    f.message
+    f.func
+    f.name
+    f.arg
+    sink.line
+    sink.column
+    checked
+    (List.map (Scry.reportStepOf m) f.path)
+    shown
+    matchedBy
+    diffLine
+
+def Scry.reportWarningOf (w : Scry.BoundaryFinding) (hit : Option Scry.DiffHit) :
+    Scry.ReportWarning :=
+  let line := match w.origin with
+    | .some o => o.line
+    | .none => 0;
+  let column := match w.origin with
+    | .some o => o.column
+    | .none => 0;
+  let shown : Bool := match hit with
+    | .none => .true
+    | .some h => h.visible;
+  Scry.ReportWarning.mk w.rule w.message w.func line column shown
+
+/-- Zip findings, their checked flags and their diff hits (like `Scry.findingRows`,
+but into the page's structure). -/
+partial def Scry.reportFindingsGo (file : String) (m : Scry.OriginMap) :
+    List Scry.RuleFinding → List Bool → List Scry.DiffHit → List Scry.ReportFinding
+  | .nil, _, _ => .nil
+  | .cons f fs, .cons c cs, .cons h hs =>
+    List.cons (Scry.reportFindingOf file m f c (.some h))
+      (Scry.reportFindingsGo file m fs cs hs)
+  | .cons f fs, .cons c cs, .nil =>
+    List.cons (Scry.reportFindingOf file m f c .none)
+      (Scry.reportFindingsGo file m fs cs .nil)
+  | .cons f fs, .nil, .cons h hs =>
+    List.cons (Scry.reportFindingOf file m f .false (.some h))
+      (Scry.reportFindingsGo file m fs .nil hs)
+  | .cons f fs, .nil, .nil =>
+    List.cons (Scry.reportFindingOf file m f .false .none)
+      (Scry.reportFindingsGo file m fs .nil .nil)
+
+/-- The diff hits for findings (empty outside diff mode, or in `--diff all`). -/
+def Scry.reportFindingHits (dm : Option Scry.DiffMode) (m : Scry.OriginMap)
+    (fs : List Scry.RuleFinding) : List Scry.DiffHit :=
+  match dm with
+  | .none => .nil
+  | .some d => match d.all with
+    | .true => .nil
+    | .false => List.map (fun f => Scry.diffHitFinding d m f) fs
+
+def Scry.reportWarningHits (dm : Option Scry.DiffMode) (ws : List Scry.BoundaryFinding) :
+    List Scry.DiffHit :=
+  match dm with
+  | .none => .nil
+  | .some d => match d.all with
+    | .true => .nil
+    | .false => List.map (fun w => Scry.diffHitBoundary d w) ws
+
+def Scry.reportDiffLines (dm : Option Scry.DiffMode) (fh : List Scry.DiffHit)
+    (bh : List Scry.DiffHit) (mh : List Scry.DiffHit) : List String × List String :=
+  match dm with
+  | .none => (.nil, .nil)
+  | .some d => match d.all with
+    | .true => (Scry.diffHeaderLines d, .nil)
+    | .false =>
+      (Scry.diffHeaderLines d,
+       Scry.diffSummaryLines d (Scry.diffTally fh) (Scry.diffTally bh) (Scry.diffTally mh))
+
+/-- A stable file anchor from the normalized path (never a line number). -/
+def Scry.reportFileAnchor (file : String) : String :=
+  "file_" ++ Scry.wfHex (Scry.wfFnv (Scry.wfNormalizePath file))
+
+/-- Analyse one file and fill its page section. -/
+def Scry.reportFileOf (o : Scry.ReportOpts) (file : String) : EIO Scry.ReportFile := do
+  text ← FS.readFile file;
+  let topts := Scry.reportTaintOpts o file;
+  rep ← Scry.analyzeFile topts;
+  dm ← Scry.loadDiffMode topts;
+  let fh := Scry.reportFindingHits dm rep.origins rep.findings;
+  let bh := Scry.reportWarningHits dm rep.boundaries;
+  let mh := Scry.reportWarningHits dm rep.memory;
+  let findings := Scry.reportFindingsGo file rep.origins rep.findings rep.checks fh;
+  let boundaries := List.map (fun r => Scry.reportWarningOf r.w r.hit)
+    (Scry.warnRows rep.boundaries bh);
+  let memory := List.map (fun r => Scry.reportWarningOf r.w r.hit)
+    (Scry.warnRows rep.memory mh);
+  let diffLines := Scry.reportDiffLines dm fh bh mh;
+  EIO.pure (Scry.ReportFile.mk file (Scry.reportFileAnchor file) text
+    (Scry.reportSortFindings findings) boundaries memory diffLines.1 diffLines.2)
+
+-- ## Discovery and the command
+
+/-- One file, or every `*.c` under a directory (recursive, hidden directories skipped),
+sorted so a directory report is byte-stable. -/
+def Scry.reportFilesOf (path : String) : EIO (List String) := do
+  present ← EIO.lift (FS.exists path);
+  match present with
+  | .false => EIO.fail (path ++ ": no such file or directory")
+  | .true => do
+    isDir ← EIO.lift (FS.isDir path);
+    match isDir with
+    | .false => EIO.pure (List.cons path .nil)
+    | .true => do
+      found ← Scry.ProjectIO.walkGo path;
+      EIO.pure (Scry.sortStrings found)
+
+partial def Scry.reportFilesGo (o : Scry.ReportOpts) : List String → EIO (List Scry.ReportFile)
+  | .nil => EIO.pure .nil
+  | .cons f rest => do
+    r ← Scry.reportFileOf o f;
+    rs ← Scry.reportFilesGo o rest;
+    EIO.pure (List.cons r rs)
+
+/-- `scry report …`: write one self-contained page and say what it contains. -/
+def Scry.reportRun (o : Scry.ReportOpts) : EIO Nat := do
+  files ← Scry.reportFilesOf o.path;
+  reps ← Scry.reportFilesGo o files;
+  let note := match files with
+    | .nil => "No C files were found under this path; the page has no findings."
+    | _ => "";
+  let page := Scry.renderReport
+    (Scry.ReportMeta.mk "scry 0.1.0-dev (S1)" note) reps;
+  FS.writeFile o.out page;
+  let findings := List.foldl (fun acc r => Nat.add acc (List.length r.findings)) 0 reps;
+  EIO.lift (IO.println ("wrote HTML report: " ++ o.out ++ " ("
+    ++ Nat.repr (List.length reps) ++ " file(s), " ++ Nat.repr findings
+    ++ " finding(s); no timestamp, stable finding ids)"));
+  EIO.pure 0
+
+def Scry.reportCmd (args : List String) : EIO Nat :=
+  match Scry.reportArgs args with
+  | .ok o => Scry.reportRun o
+  | .error e => EIO.fail e

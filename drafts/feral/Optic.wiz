@@ -1,7 +1,7 @@
 import Optic
 -- The part of the optics library (RD11) that does not check today. The part that does is
--- lib/Optic.wiz. Each gap is marked `-- wishful: <slug>` and described in
--- /workspace/wiz-notes/wishful/<slug>.md.
+-- lib/Optic.wiz. Each gap is marked `-- wishful: <slug>`, the slug naming the missing
+-- feature; each section's comment says what is missing.
 
 -- ## 1. Laws with ∃ and ∧ (the statement in borrows-as-optics.md §3.1)
 --

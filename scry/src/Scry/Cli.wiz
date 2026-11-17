@@ -10,6 +10,7 @@ import Scry.ProjectIO
 import Scry.WorkflowCmd
 import Scry.Repl
 import Scry.FuzzCmd
+import Scry.ReportCmd
 import Scry.Native
 import Scry.Lower
 import Scry.EgraphWil
@@ -29,6 +30,7 @@ scry query FILE --rel NAME      a relation's tuples
 scry explain FILE NODE          one node: span, parent, children, arcs, relations
 scry parse FILE… --stats        stats of JSON or scry-cst stores (no tree-sitter: S1)
 scry cst FILE OUT.cst           convert a JSON fact store to the native spill format
+scry report FILE.c|DIR          one self-contained HTML page of the taint evidence
 scry fuzz-span FILE             map a fuzz artifact to CST spans (dynamic evidence)
 scry egraph FILE.c [--fuel N] [--rewrite]
                                 build Wil e-classes and print fold/rewrite stats;
@@ -85,6 +87,10 @@ def Scry.usage : String :=
   ++ "                              a project relation (symbols, callgraph, …) or function table\n"
   ++ "  findings scan|list|show|triage|repro|verify …\n"
   ++ "                             finding identity, triage and evidence bundles\n"
+  ++ "  report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]\n"
+  ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
+  ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "                             self-contained HTML page of the taint evidence\n"
   ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
   ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
   ++ "  egraph FILE.c [--fuel N] [--rewrite]\n"
@@ -288,6 +294,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "bench" rest => Scry.benchCmd rest
   | .cons "repl" rest => Scry.replCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
+  | .cons "report" rest => Scry.reportCmd rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons "egraph" rest => Scry.egraphArgs rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")

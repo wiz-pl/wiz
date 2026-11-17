@@ -1102,7 +1102,9 @@ The first divergence is reported per file. A file both compilers accept with the
 declaration count is `ok`; one both reject is `rejected` (the counts of the same code,
 same span and same message are reported apart, because D6's positioning differs by
 design); one whose verdicts differ is `diverging` — that is the gap list. A run that
-hits the per-file time or memory bound is `bounded`, not a gap.
+hits the per-file time or memory bound is `bounded`, not a gap. That includes exit
+status 3, the self-hosted runtime giving up (`wiz: out of memory` when an allocation
+fails under the memory bound); the report carries its `wiz:` line.
 
 The host side is the Lean frontend in a child process (`tests --libdiff-host FILE`, the
 same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/

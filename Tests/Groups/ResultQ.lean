@@ -13,7 +13,8 @@ namespace Tests.Elab
 `ResultQ q A` (lib/Result.wiz) is `Result` with the success value at `%q`: `q = ω` is
 `Result` definitionally, `q = 1` has a linear success value, `q = 0` an erased one.
 `ResultH q B H` (lib/Region.wiz) is `Result1` with the handle on both branches at `%q`;
-`q = 1` is `Result1` definitionally. See `wiz-notes/result-q.md`. -/
+`q = 1` is `Result1` definitionally. They are library API added next to `Result` and
+`Result1`, which are kept unchanged (no constructor or pattern changes). -/
 
 def rqPrelude : String := "import Result\nimport Region\n"
 
