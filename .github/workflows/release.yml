@@ -121,13 +121,23 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$OLD_COMMIT" ] || { echo "commit: give the full 40-hex sha"; exit 1; }
           st=$(gh api "repos/${{ github.repository }}/compare/$OLD_COMMIT...master" --jq .status)
           case $st in ahead|identical) ;; *) echo "$OLD_COMMIT is not on master ($st)"; exit 1 ;; esac
-      # Nix, only to get elan from the checkout's locked nixpkgs: no script is fetched
-      # from a branch. ($HOME/.elan/bin is then the shims nixpkgs' elan installs.)
-      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
-      - name: elan (from the flake's locked nixpkgs)
+      # elan, from the official x86_64-linux release asset, pinned by version and sha256
+      # (no installer script is fetched from a branch). Do not use nixpkgs' elan here:
+      # its patch rewrites the downloaded toolchain's cc/leanc to Nix's gcc wrapper, and
+      # the C_INCLUDE_PATH below then feeds gcc clang's __stddef_* headers ("missing
+      # binary operator before token '('"). The official toolchain has no bin/cc: lake
+      # compiles C through the clang-based leanc, which is what this job needs.
+      - name: elan (official release, hash-pinned)
+        env:
+          ELAN_VERSION: v4.2.4
+          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
         run: |
-          elan=$(nix build --inputs-from . nixpkgs#elan --no-link --print-out-paths)
-          echo "$elan/bin" >> "$GITHUB_PATH"
+          curl -sSfL -o "$RUNNER_TEMP/elan.tar.gz" \
+            "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Cache the Lake build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
