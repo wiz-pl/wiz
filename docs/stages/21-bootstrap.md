@@ -357,6 +357,13 @@ An unknown command, or a modifier the frontend doesn't know (`sealed`, `noncompu
 when the grammar gets them), is an error naming it ("unsupported command
 command.sealed"), never ignored.
 
+**Tests.** The module cases in the `selfhost` group check the scope rules (A <- B <-
+input), the two private names of one spelling in two modules, the duplicate rules, the
+one-shot mode and the cache key. The compiler-level case runs that graph through the
+Lean frontend too (whose message text is exactly `'secret' is private to module A`)
+and through the self-hosted compiler's `build` (exit code 1, the same message on
+standard error, no C written).
+
 ## 21o: `link_c`, `link_lib` and `export`, self-hosted
 
 Parity with [9f](09-ffi.md) and the first half of 9g.
@@ -1211,3 +1218,34 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: the unit eliminator and `split` in the self-hosted toolchain (B7)
+
+The two eliminators linear data needs: `let () := u; b` (the unit eliminator, consuming
+`u : Unit`) and `let q (x, y) := s; b` (Σ elimination). `Kernel.wiz` had the `letUnit`
+rule; it gains `Tm.split q s m b` (the motive `m` under one binder `z`, the body `b`
+under `x` and then `y`), its stuck `Spine.ssplit`, `vSplit` (η on a pair, and a proof
+split by η when `kernelLazyProofs`, as the Lean kernel's `vSplit`), `forceSp`,
+`fromAbsurd`/`toAbsurd`, `quoteSpine`, `typeOfNe`, the conversion of two stuck splits,
+and the usage rule: the scrutinee at `q`, the components bound at `q·p` and `q` (for a
+Σ at `p`), with the erased positions of §7.1 of CoreSpec.
+
+`Frontend.wiz` elaborates the parser's `term.letUnit` (`letUnitT`) and `term.letPair`
+(`letPairT`), a tuple `let (x, y, z)` as nested pairs (`letTupleToPairs`), in check
+position (and `let ()` in infer position), and carries both forms through
+`tmMapChildren`, `zonk` and `inlineTm`.
+
+`Backend.wiz` no longer refuses `letUnit`: `u` is erased and its binding comes before the
+body (in the collector mode the generated C's `let` is a strict statement, so a call in
+`u` is evaluated, as the Lean erasure has it). A `split` becomes
+`let s := s'; let x := s.0; let y := s.1; b`; at quantity 0 the scrutinee, both
+components and the body are erased.
+
+**Tests** (group `selfhost`): the frontend verdicts against the Lean frontend (a linear
+`Unit` consumed once; a `let 1` pair whose second component is dropped or used twice; a
+`let (x, y)` and a three-tuple; a projection of a linear pair refused; `let ()` at
+quantity 0 refused), and a program both compilers build and run (collector and reference
+counting) that prints `40 1 42` from a `let 1` pair, a `letUnit` and a three-tuple.
+
+**Not done:** a destructuring `let 1 (.mk a b) := s` for structures, and a linear
+`match` (A21): a structure held at quantity 1 still has no eliminator.
