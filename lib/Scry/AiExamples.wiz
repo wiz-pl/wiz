@@ -6,8 +6,7 @@ import Scry.AiFixpoint
 # Scry.AiExamples: the small programs S5's tests and docs run
 
 Hand-built CFGs, so that the engine and the checker can be exercised without a parser or
-a Wil frontend. `Tests/Scry.lean` evaluates the functions below; `wiz-notes/scry-ai.md`
-reproduces the same programs.
+a Wil frontend. `Tests/Groups/ScryAi.lean` evaluates the functions below.
 
 * `loopCfg`: a counter loop that needs widening (16-bit, bound 1000).
 * `constCfg`: `x := 2; y := 3; z := x * y`, an interval/constant proof.

@@ -6,8 +6,7 @@ Wiz, in `lib/Prelude.wiz`; the host (`Wiz/Elab/Tactic.lean`, `Wiz/Elab/Term.lean
 provides two small requests: `Tac.rewriteAt` matches one rule and builds the transport,
 and `Tac.getSimpLemmas` hands the default set to the driver. This is deliberate: `simp`
 must be runnable by the self-hosted frontend once its `Tac`/`Expr` layer reaches parity,
-so the tactic is ordinary Wiz code, not a second engine in Lean
-(`wiz-notes/simp-design.md` §4.3, §6.6).
+so the tactic is ordinary Wiz code, not a second engine in Lean.
 
 ```
 import SimpLemmas
@@ -154,13 +153,16 @@ with `all := true`).
 
 A whole simplifier in `Wiz/Elab/Simp.lean` would save interpreter crossings (one
 request per run instead of one per rule per pass), and matching, occurrence selection
-and context transport all need `Term` anyway. It was rejected (user decision,
+and context transport all need `Term` anyway. It was rejected (decided
 2026-11-14) because the algorithm would then have to be written a second time for the
 self-hosted frontend, and `simp` would stop being a Wiz library tactic: rule order,
 `only`, the default set, direction, fuel and later `simp?` policy are exactly the parts
-that must stay changeable in Wiz. The accepted costs and their mitigations are in
-`wiz-notes/simp-design.md` §4.3 and §9 (host-side scan per rule, the new type in the
-answer, no re-reflection per step).
+that must stay changeable in Wiz. The accepted cost is more interpreter crossings: one
+per successful step, and one per rule per pass when the rule does not match. It is kept
+bounded by scanning every subterm for a rule inside one `rewriteAt` request, and by
+returning the new goal's reflected type in the answer, so the driver never re-reflects
+the goal after a step. If the crossings ever dominate, the fallback is a batched
+`rewriteAt` that still takes its policy from Wiz, not a host-side simplifier.
 
 ## What remains
 

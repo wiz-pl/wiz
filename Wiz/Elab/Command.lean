@@ -250,11 +250,16 @@ definition hidden (`drafts/rust/lowered/03_get_mut.wiz`: `get_mut.is_place`,
 `get_mut.spec_under`). With it on, a type with private parts is abstract for proofs too.
 
 On a failure, the types whose shape was used are those that make the check fail when
-hidden alone. `kind` chooses the kernel entry (`addDecl`, or `addPartialDecl`). -/
-def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → TCM (Globals R) := addDecl) : TCM Unit := do
-  unless g.strictPrivacy do return
+hidden alone. `kind` chooses the kernel entry (`addDecl`, or `addPartialDecl`). `force`
+runs the check even without `--strict-privacy`: a declaration whose elaboration used a
+first-order solution (`checkGuessedDecl`) leaves a type comparison to the kernel, so it
+gets this check; `display` is the name to report when the checked copy has another. -/
+def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → TCM (Globals R) := addDecl)
+    (force : Bool := false) (display : Option Name := none) : TCM Unit := do
+  unless force || g.strictPrivacy do return
   let ops := foreignOpaques g
   if ops.isEmpty then return
+  let shown := display.getD d.name
   match kind g.elabView d with
   | .ok _ => pure ()
   | .error e =>
@@ -266,7 +271,7 @@ def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → T
       | .error _ => true
     let used := if used.isEmpty then ops else used
     let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
-    throw (.other (s!"{d.name} depends on the definition of {", ".intercalate (used.map show1)}, which is hidden outside " ++
+    throw (.other (s!"{shown} depends on the definition of {", ".intercalate (used.map show1)}, which is hidden outside " ++
       s!"its module (it has private parts): with the definition hidden, {e}"))
 
 /-- `addDecl` with the sorts of the elaborator's `Π`/`Σ` filled in first (`Sorts`), the
@@ -362,9 +367,36 @@ def solveSortConstraints : ElabM R Unit := do
       let s ← get
       try unify ctx.lvl (← refreshVal ctx A) ty catch _ => set s
     if (← solvedLevels) == before then break
+
+/-- A declaration whose elaboration used a first-order solution that could not be typed
+where it was guessed (`ElabState.unifyGuessed`; a guess is normally checked against its
+hole's type on the spot, `checkGuess` in `Unify.lean`) is checked once more where opaque
+types have no definition: the kernel's check of the declaration is in the full
+environment, where a private type is its definition again, so it would accept a
+look-alike (the same view `rfl` and a holed `assign` already compare in). This is the
+fallback only: a quoted term can carry an evaluated `μ (T.desc …)` without the name `T`,
+which has no type in that view, so the check also rejects some honest declarations
+(`privacyCheck`). A declaration whose guesses were all typed is not affected. -/
+def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Option (Term R)) :
+    ElabM R Unit := do
+  if (← get).unifyGuessed then
+    let g := (← getGlobals).fullView
+    if !(foreignOpaques g).isEmpty then
+      -- (a partial definition's signature is already a global: the checked copy gets
+      -- an internal name, and the message the declaration's)
+      let internal := if g.contains name then name ++ "✝" else name
+      let d : Decl R := { name := internal, levelParams := (← get).levelParams, type := ty, value := val }
+      let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g')
+      match privacyCheck g (d.withSorts g) kind (force := true) (display := some name) with
+      | .ok _ => pure ()
+      | .error e =>
+        throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
+                code := ErrorCode.private_ }
+
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)
-    (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none) :
+    (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none)
+    (checkName? : Option Name := none) :
     ElabM R (Term R × Option (Term R)) := do
   let (ctx, tele) ← elabTelescope { info } (binders.flatMap binderViews).toList
   let ty ← match typeStx with
@@ -394,6 +426,7 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   ensureNoMVars ty info
   let val ← val.mapM (zonk 0)
   if let some v := val then ensureNoMVars v info
+  checkGuessedDecl info (checkName?.getD ((declName?.map (·.1)).getD "_privacyCheck")) ty val
   pure (ty, val)
 
 /-- Where a type ascription goes in `def f binders := v`: after the last of the name, the
@@ -720,6 +753,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let us := (← get).levelParams.map Level.param
   let impl := if rc.isNone || indexEscapes g val then none
     else deriveImpl g name us tele.size names.length pos val
+  checkGuessedDecl info name fullTy (some val)
   pure (fullTy, val, impl)
 
 /-- Does the identifier `n` occur anywhere in `stx`? -/
@@ -996,7 +1030,9 @@ def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : El
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
+  let r ← if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
+  checkGuessedDecl cmd.info name r.1 (some r.2)
+  pure r
 
 /-- `runElabH`, with (28) the solver settings and the definition's name, and the axioms
 that tactics added on success (`ElabState.sideDecls`; the trusted `smt` of 28a will). -/
@@ -2001,18 +2037,21 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | "term.paren" => headIdent (stx.getArg 1)
       | _ => none
     -- (an error: its message and code)
-    let valStx : Except (String × String) Syntax :=
+    let valStx : Except (String × String × SourceInfo) Syntax :=
       if !isWhere then pure body else do
-        let some C := headIdent typeStx | throw ("an instance's type must be an application of a class", ErrorCode.unknownClass)
+        let some C := headIdent typeStx | throw ("an instance's type must be an application of a class", ErrorCode.unknownClass, cmd.info)
         let C := s.globals.resolve C
         let some info := s.classes.find? (·.name == C)
-          | throw (if s.globals.contains C then s!"{C} is not a class" else s!"unknown class '{C}'", ErrorCode.unknownClass)
-        let given := body.args.toList.map fun f => (((f.getArg 0).getId?).getD "_", f.getArg 2)
-        for (x, _) in given do
-          unless info.fields.contains x do throw (s!"{C} has no field {x}", ErrorCode.noSuchField)
-        let args ← info.fields.mapM fun x => match given.lookup x with
-          | some v => pure (Syntax.node v.info "term.paren" #[.atom {} "(", v, .atom {} ")"])
-          | none => throw (s!"missing field {x}", ErrorCode.missingField)
+          | throw (if s.globals.contains C then s!"{C} is not a class" else s!"unknown class '{C}'", ErrorCode.unknownClass, cmd.info)
+        let given := body.args.toList.map fun f => (((f.getArg 0).getId?).getD "_", f, f.getArg 2)
+        let mut seen : Std.HashSet Name := {}
+        for (x, f, _) in given do
+          unless info.fields.contains x do throw (s!"{C} has no field {x}", ErrorCode.noSuchField, cmd.info)
+          if seen.contains x then throw (s!"field '{x}' was already given", ErrorCode.namedArgument, f.info)
+          seen := seen.insert x
+        let args ← info.fields.mapM fun x => match given.find? (·.1 == x) with
+          | some (_, _, v) => pure (Syntax.node v.info "term.paren" #[.atom {} "(", v, .atom {} ")"])
+          | none => throw (s!"missing field {x}", ErrorCode.missingField, cmd.info)
         let head := Syntax.node cmd.info "term.ident" #[.ident cmd.info (C ++ ".mk")]
         pure (if args.isEmpty then head else .node cmd.info "term.app" #[head, .node {} "null" args.toArray])
     -- the universe names in the binders and the type are the instance's universe
@@ -2024,14 +2063,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | _ => []
     let levelParams := (binders.toList.flatMap levelNames ++ levelNames typeStx).eraseDups
     match valStx with
-    | .error (e, code) => reportC cmd.info e code
+    | .error (e, code, i) => reportC i e code
     | .ok _ => if given?.isSome && s.globals.contains name then reportDup nameOpt.info name else
     match valStx with
-    | .error (e, code) => reportC cmd.info e code
+    | .error (e, code, i) => reportC i e code
     | .ok valStx =>
       match ← withTraces (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas)
           (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
-          (elabDeclTerms binders (some typeStx) (some valStx) cmd.info) levelParams) with
+          (elabDeclTerms binders (some typeStx) (some valStx) cmd.info (checkName? := some name)) levelParams) with
       | .error e => reportErr e
       | .ok (ty, val) =>
         let (_, concl) := peelPis ty
