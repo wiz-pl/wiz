@@ -28,6 +28,10 @@ grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
 if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
   echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
+# (playground-selfhost-lsp) ?lsp=selfhost: the in-page server shim, with a stub engine
+node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
+if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
+  echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
