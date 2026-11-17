@@ -88,6 +88,35 @@ def note (line : String) : IO Unit := do
   IO.println (noteMarker ++ line)
   (← IO.getStdout).flush
 
+/-- What a case's process prints on its standard error, before a line, to have the driver
+pass that line on at once (`progress`). -/
+def progressMarker : String := "@@wiz-test-progress "
+
+/-- A progress line from a long case (`=selfhost-libdiff`): the driver prints it on its
+own standard error while the case is still running, indented and without the marker, so
+a CI log shows the case moving. It is not part of the case's result: not a note, not its
+output, and it cannot change whether the case passes. -/
+def progress (line : String) : IO Unit := do
+  let err ← IO.getStderr
+  err.putStrLn (progressMarker ++ line)
+  err.flush
+
+/-- Read a case's standard error to its end: pass its `progress` lines on to the driver's
+standard error as they come (indented by four spaces, which no line of the suite's
+summary format starts with), and give back the rest. -/
+partial def readCaseStderr (h : IO.FS.Handle) : IO String := do
+  let out ← IO.getStderr
+  let rec go (acc : String) : IO String := do
+    let l ← h.getLine
+    if l.isEmpty then return acc
+    if l.startsWith progressMarker then
+      let text := (l.drop progressMarker.length).toString
+      out.putStr ("    " ++ (if text.endsWith "\n" then text else text ++ "\n"))
+      out.flush
+      go acc
+    else go (acc ++ l)
+  go ""
+
 /-- Mark the running case as skipped (it could not run here, e.g. without a C toolchain),
 with the reason; the case then returns normally. The driver shows it as skipped, not
 passed (`Group.run`), and records the note `skipped REASON` (`--timings`). A skipped case
@@ -176,11 +205,17 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     if let some ixs := only then
       unless ixs.contains i do continue
     let start ← IO.monoMsNow
-    let out ← IO.Process.output
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ jobs ++ (← flagsRef.get).toArray }
+    let child ← IO.Process.spawn
+      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ jobs ++ (← flagsRef.get).toArray
+        stdin := .null, stdout := .piped, stderr := .piped }
+    let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+    let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
+    let code ← child.wait
     let ms := (← IO.monoMsNow) - start
-    forwardGuessLines g i out.stderr
-    let r := caseResult c i out.exitCode out.stdout out.stderr ms
+    let out ← IO.ofExcept outT.get
+    let err ← IO.ofExcept errT.get
+    forwardGuessLines g i err
+    let r := caseResult c i code out err ms
     IO.println (renderResult r)
     stdout.flush
     onResult r
@@ -214,7 +249,7 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
     { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
       stdin := .null, stdout := .piped, stderr := .piped }
   let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
-  let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+  let err ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
   let code ← IO.asTask (do pure (← child.wait, (← IO.monoMsNow) - start)) Task.Priority.dedicated
   pure { index := i, kill := child.kill, code, out, err }
 

@@ -30,6 +30,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   elaborated term at a position, its type and range) and `wiz/coreTerm` (a
   declaration's type and value as core terms, its kind, native implementation and
   axioms); both are infoview methods too (11, #435).
+* `=selfhost-libdiff` reports its progress while it runs: the compiler build, one line per
+  file as it finishes (verdict, seconds), a heartbeat every 60 s (files done, elapsed, free
+  memory) and the counts at the end. A case's `Tests.progress` lines go to the driver's
+  standard error at once, indented; they are not notes or output and change no verdict.
 * `=selfhost-libdiff` checks its files N at a time under the driver's `--jobs N` (and
   `tests --libdiff --jobs N`), capped by the CPUs and by the free memory (cgroup-aware) at
   `--mem` per file; each file once, records in file order, the same verdicts (exit 3
