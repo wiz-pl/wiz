@@ -26,6 +26,10 @@ for f in docs/index.html docs/api.html docs/api.json docs/search.js docs/scroll.
 done
 : > "$WEB/wiz-playground.mjs"
 : > "$WEB/wiz-playground.wasm"
+# The UI module is a second build (`?ui=`): check-site requires it beside the playground
+# module, so an empty stand-in keeps this check independent of build-playground.sh.
+: > "$WEB/wiz-playground-ui.mjs"
+: > "$WEB/wiz-playground-ui.wasm"
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"
