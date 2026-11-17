@@ -646,8 +646,9 @@ def cliDiffGroup : Group where
         cliCheck s.err "unknown command: build good.wiz" "the missing -o" },
     { name := "build -o: a missing directory fails in both (exit 1, no artifact)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
-        let spec : CliDiffSpec := { files := #[("good.wiz", cliGood)]
-                                    args := #["build", "good.wiz", "-o", "nodir/out"] }
+        -- (a program with a `main`: the host reaches its C write, and throws there)
+        let spec : CliDiffSpec := { files := #[("hello.wiz", cliHello)]
+                                    args := #["build", "hello.wiz", "-o", "nodir/out"] }
         let (h, s) ← cliDiffBoth host exe spec
         checkEq 1 h.code
         checkEq 1 s.code

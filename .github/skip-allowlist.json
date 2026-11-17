@@ -75,6 +75,7 @@
       "reason": "artifact: --lib's object/header/C match the host's shapes now; --no-main does not link",
       "parity": "D4/C9",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
       "why": "documented self-host parity difference (D4/C9): the object, header and C now match the host's shapes; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C."
     },
     {
@@ -83,6 +84,7 @@
       "reason": "artifact: --no-main links an executable without a `main` in the host",
       "parity": "D4/C9",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
       "why": "documented self-host parity difference (D4/C9): the object, header and C now match the host's shapes; --no-main links an executable in the host, the driver writes the C."
     },
     {
@@ -91,6 +93,7 @@
       "reason": "message: a missing `-o` directory is an uncaught `IO.FS.writeFile` exception",
       "parity": "D4/D7",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
       "why": "documented self-host parity difference (D4/D7): the host lets the C write throw (a machine-dependent trace on stderr); the driver writes one line. Both exit 1 and write nothing."
     },
     {
@@ -99,6 +102,7 @@
       "reason": "artifact: `--header` is the driver's header-only output",
       "parity": "D4",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
       "why": "documented self-host parity difference (D4): `--header` is a driver-only output mode (the host has no such flag; `--lib` writes OUT.h)."
     },
     {

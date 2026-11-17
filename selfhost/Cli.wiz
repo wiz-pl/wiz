@@ -940,25 +940,51 @@ def checkCmd (o : Opts) (file : String) : IO Unit := do
 -- build: the C, to OUT
 
 -- `OUT.c`/`OUT.h`: the Lean host derives them with `System.FilePath.withExtension`
--- (the generated C goes beside the artifact; a library's header beside the object)
-def dotIf (b : Bool) : List Char := match b with
-  | .true => .cons (ch 46) .nil
-  | .false => .nil
+-- (the generated C goes beside the artifact; a library's header beside the object).
+-- That function looks only at the file name (`fileStem`): the last `.` is replaced,
+-- unless it is the name's first character (`.hidden` keeps its name and gains `.c`), and
+-- a path with no file name (a trailing `/`) is returned unchanged.
+structure PathSplit where
+  dir : List Char
+  file : List Char
 
--- the text with its last extension (after the last `/`) dropped: `committed` is the
--- part before the last dot of the last component, `after` the part since it
-def withExtGo (committed after : List Char) (hasDot : Bool) : List Char → List Char
-  | .nil => match hasDot with
-    | .true => committed
-    | .false => List.append committed after
-  | .cons c cs => match strEqC c 47 with
-    | .true => withExtGo (List.append committed (List.append (List.append (dotIf hasDot) after) (.cons c .nil))) .nil .false cs
-    | .false => match strEqC c 46 with
-      | .true => withExtGo (List.append committed (List.append (dotIf hasDot) after)) .nil .true cs
-      | .false => withExtGo committed (List.append after (.cons c .nil)) hasDot cs
+-- (the accumulator is a parameter, not the matched one: the frontend's structural
+-- recursion requires the decreasing argument to be the one that changes)
+def pathSplitGo : List Char → PathSplit → PathSplit
+  | .nil, acc => acc
+  | .cons c cs, acc => match strEqC c 47 with
+    | .true => pathSplitGo cs (PathSplit.mk
+        (List.append acc.dir (List.append acc.file (.cons c .nil))) .nil)
+    | .false => pathSplitGo cs (PathSplit.mk acc.dir
+        (List.append acc.file (.cons c .nil)))
+
+def pathSplit (p : List Char) : PathSplit :=
+  pathSplitGo p (PathSplit.mk .nil .nil)
+
+-- (the text after the file name's last `.`: in the reversed name, its first `.`;
+-- `firstDotGo` is the frontend's, with another type)
+def dotTailGo : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match strEqC c 46 with
+    | .true => .some cs
+    | .false => dotTailGo cs
+
+def stemOf (file : List Char) : List Char :=
+  match dotTailGo (List.reverseOf file .nil) with
+  | .none => file
+  | .some post => match post with
+    -- (a dot with nothing after it is the name's first character: keep the name)
+    | .nil => file
+    | .cons _ _ => List.reverseOf post .nil
 
 def withExtension (p ext : String) : String :=
-  String.append (String.mk (withExtGo .nil .nil .false (charsOf p))) (String.append "." ext)
+  let ps := pathSplit (charsOf p);
+  match ps.file with
+  | .nil => p
+  | .cons _ _ => String.mk (List.append ps.dir (List.append (stemOf ps.file)
+      (match charsOf ext with
+        | .nil => .nil
+        | .cons _ _ => List.append (.cons (ch 46) .nil) (charsOf ext))))
 
 -- the C the backend emits for `p` (the frontend's output as comments, then the program)
 def cText (o : Opts) (p : Prepared) (lines : List String) : String :=
