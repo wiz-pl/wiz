@@ -148,10 +148,12 @@ pieces fix that without replacing the textarea, and none of them adds a dependen
 * **Caret → server.** The caret is sent on selection changes — `keyup`, `click`,
   `mouseup`, `select`, `focus` — debounced by 120 ms (`positionDebounce`), as
   `TextDocumentPositionParams` of `wiz/interactiveGoals` and `wiz/interactiveTermGoal`,
-  with the plain-method fallback of § Fallback. A move to the position the pane already
-  answered is skipped; `publishDiagnostics`/`wiz/elaborated` always re-ask, because the
-  session changed. A selection sends its **start** (where the caret is), as an editor's
-  caret query does.
+  with the plain-method fallback of § Fallback. An edit sends `didChange` at once and
+  only this refresh is debounced, so the position asked about is in text the server has;
+  an answer whose document version changed while it was in flight is discarded. A move
+  to the position the pane already answered is skipped; `publishDiagnostics`/
+  `wiz/elaborated` always re-ask, because the session changed. A selection sends its
+  **start** (where the caret is), as an editor's caret query does.
 
 * **Completions.** `web/completions.js` asks `textDocument/completion` on Ctrl/⌘-Space
   and, debounced by 120 ms, after typing an identifier character (not inside a `--`
@@ -160,11 +162,12 @@ pieces fix that without replacing the textarea, and none of them adds a dependen
   100 items. Up/Down/PageUp/PageDown move (wrapping), Enter and Tab accept, Escape and a
   blur close it; while it is open those keys belong to the popup, so no newline or tab is
   inserted underneath. Accepting replaces the range of the item's `textEdit` when the
-  server sent one, else the identifier prefix before the caret with `insertText` (or the
-  `label`); snippet placeholders are stripped if a server sends them despite
-  `snippetSupport: false`. The edit is a normal `input` event, so the existing
-  `didChange` path re-sends the document. A `MethodNotFound`, an empty list or an error
-  just leaves the popup closed; `?completions=off` disables it.
+  server sent one and its end is still the caret (an answer for an older caret is
+  re-anchored on the current identifier prefix), else the identifier prefix before the
+  caret with `insertText` (or the `label`); snippet placeholders are stripped if a server
+  sends them despite `snippetSupport: false`. The edit is a normal `input` event, so the
+  existing `didChange` path re-sends the document. A `MethodNotFound`, an empty list or
+  an error just leaves the popup closed; `?completions=off` disables it.
 
 The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
