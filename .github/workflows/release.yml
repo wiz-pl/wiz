@@ -92,9 +92,11 @@ jobs:
 
   tarball:
     name: release tarball (x86_64-linux)
-    # after the exercise tree for a tag; without one (master, PRs, dispatch) it is skipped
+    # A tag publishes only when the exercise tree built: for a tag the exercise job is
+    # not optional, so a skip is a failure, not a pass. Without one (master, PRs,
+    # dispatch) the job is skipped by its own `if` and the tarball still runs.
     needs: exercises
-    if: ${{ !cancelled() && (needs.exercises.result == 'success' || needs.exercises.result == 'skipped') }}
+    if: ${{ !cancelled() && (needs.exercises.result == 'success' || (needs.exercises.result == 'skipped' && !startsWith(github.ref, 'refs/tags/v'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
