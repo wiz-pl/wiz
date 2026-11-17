@@ -76,9 +76,12 @@ Snapshot pruning keeps every snapshot that a `v*` tag points at.
 1. `sh scripts/test-release-install.sh --online wiz-x86_64-linux.tar.gz vX.Y.Z`, with the
    tarball downloaded from the release, checks the published URLs too.
 2. On a clean machine (`docker run --rm -it ubuntu:24.04`):
-   `curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/vX.Y.Z/scripts/tower-init.sh | sh -s -- vX.Y.Z`.
+   `curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/wiz-pl/wiz/vX.Y.Z/scripts/tower-init.sh`,
+   check it against the release notes' `sha256sum`, then `sh tower-init.sh vX.Y.Z`.
    Then check that `wiz --version` prints `wiz X.Y.Z (<sha of the tag>)` and that
    `tower default stable` resolves to `vX.Y.Z`. Also run once with Nix:
    `nix run github:wiz-pl/wiz/vX.Y.Z#wiz -- --version`.
 3. Open a PR that sets the version to the next `-dev` (`0.2.0-dev`) in the four places
-   above.
+   above. If `scripts/tower-init.sh` changed since the last release, update the pinned
+   hash in `docs/install.md` and `web/landing/index.html` in the same PR
+   (`sha256sum scripts/tower-init.sh`): the install command there fails closed.

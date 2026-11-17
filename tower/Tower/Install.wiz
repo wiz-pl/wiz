@@ -219,9 +219,10 @@ def Tower.firstDir (x : String) : List String → EIO (Option String)
     | .false => Tower.firstDir x rest
 
 -- unpack the release tarball of `tag` into `work`; the toolchain directory in it. The
--- `.sha256` next to it is checked when there is one, and must be there when `needSum`;
+-- `.sha256` next to it is mandatory (every release publishes one): a missing or
+-- mismatched checksum is an error, never a fallback to the unverified tarball.
 -- `missing` makes the error when the tarball itself can't be fetched.
-def Tower.releaseFetch (s : Settings) (tag work : String) (needSum : Bool) (missing : String → EIO String) : EIO String := do
+def Tower.releaseFetch (s : Settings) (tag work : String) (missing : String → EIO String) : EIO String := do
   a ← Tower.arch;
   let url := s.releases & "/" & tag & "/" & Tower.tarballName a;
   Tower.note ("downloading " & url);
@@ -234,9 +235,7 @@ def Tower.releaseFetch (s : Settings) (tag work : String) (needSum : Bool) (miss
       EIO.fail m : EIO Unit);
   sum ← EIO.lift (Tower.fetch (url & ".sha256") (Path.join work "sum"));
   (match sum with
-    | .error e => match needSum with
-      | .true => EIO.fail (url & ".sha256: " & e & " (a snapshot is only installed with its checksum)")
-      | .false => EIO.pure ()
+    | .error e => EIO.fail (url & ".sha256: " & e & " (a release is only installed with its checksum)")
     | .ok u => do
       wantText ← FS.readFile (Path.join work "sum");
       gotText ← Tower.run "sha256sum" (file :> .nil);
@@ -328,7 +327,7 @@ def Tower.refsAgain (s : Settings) (refs : Except String (List (String × String
 
 -- the release tarball for `w`: a tag's own release, else the snapshot of its commit
 def Tower.releaseOf (s : Settings) (spec work : String) (w : Want) : EIO String := match w.tag with
-  | .some t => Tower.releaseFetch s t work .false (fun (e : String) => EIO.pure e)
+  | .some t => Tower.releaseFetch s t work (fun (e : String) => EIO.pure e)
   | .none => match (match w.snapshot with
       | .some c => .some c
       | .none => w.commit : Option String) with
@@ -339,7 +338,7 @@ def Tower.releaseOf (s : Settings) (spec work : String) (w : Want) : EIO String 
         | .true => EIO.pure (.error "not listed")
         | .false => EIO.lift (Tower.lsRemote s.git) : EIO (Except String (List (String × String))));
       match Tower.snapshotTag refs c with
-      | .ok t => Tower.releaseFetch s t work .true (fun (e : String) => do
+      | .ok t => Tower.releaseFetch s t work (fun (e : String) => do
           refs' ← Tower.refsAgain s refs;
           EIO.pure (Tower.noSnapshot s refs' c e))
       | .error e => do
