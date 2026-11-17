@@ -784,9 +784,8 @@ throughput one item per cycle with ready high (valid delayed by 3), data held wh
 is low, and transfer order preserved under backpressure (7 transfers, no loss or
 duplication in a 12-cycle trace with a 3-cycle stall); reset clears the elastic
 registers; `Circuit.run`, the netlist and `simFast` agree (the compiled `cRunLibs`
-case passed). The `hdl` group has 30 cases: with yosys, Icarus and a C toolchain on
-PATH all 30 passed; without yosys or Icarus the five tool cases are marked skipped with
-their reason, never silently passed.
+case passed). The `hdl` group has 31 cases; without yosys or Icarus the six tool cases
+are marked skipped with their reason, never silently passed.
 
 **What remains.** A `Flow` is one clock and one `Circuit`: no multi-clock flow, no
 memories inside a flow, no true fork/join of independent ready/valid channels (the data
@@ -1462,6 +1461,51 @@ error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.me
 `Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
 in linear time.
 
+## Byte buffers (`lib/IO.wiz`, `Bytes`)
+
+`import IO` (or `Std`, which imports it) gives `Bytes`, a functional buffer of bytes. A
+byte is a `Nat` below 256: `Bytes.push b x` appends the low eight bits of `x`, and
+`Bytes.get b i` is `0` past the end (the total `Bytes.at` is `none`).
+
+| operation | meaning |
+|---|---|
+| `Bytes.empty` | the empty buffer |
+| `Bytes.push b x` | `b` with `x mod 256` at the end (in place when `b` is unique) |
+| `Bytes.size b` | the number of bytes |
+| `Bytes.get b i` | byte `i`, or `0` past the end |
+| `Bytes.ofString s`, `Bytes.toString b` | through a C string: they **stop at a NUL** |
+| `Bytes.slice b start len` | from `start`, at most `len` bytes (both clamp) |
+| `Bytes.append a b` | `a`'s bytes then `b`'s (in place when `a` is unique) |
+| `Bytes.eq a b` | byte for byte equality, length included |
+
+Pure helpers built on those: `Bytes.isEmpty`, `Bytes.at` (`Option Nat`), `Bytes.take`,
+`Bytes.drop` (past the end is the empty buffer), `Bytes.ofList`/`Bytes.toList` (each
+number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.show`
+(`[1, 2, 255]`, the form `#eval` prints a buffer in).
+
+**Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
+`Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;
+the decoder rejects overlong forms, encoded surrogates and truncated sequences with
+`"invalid UTF-8 at byte k"`. `Bytes.ofLatin1 s : Except String Bytes` and
+`Bytes.toLatin1 b` are one byte per character, code points 0 … 255 (above 255 is an
+error, not a truncation). `Bytes.ofString`/`Bytes.toString` stay the C-string pair, so
+`ofString` of a string with a NUL gives the bytes before it; `String.length` counts
+characters and `Bytes.size` bytes, so one astral character is one character and four
+bytes.
+
+`Bytes.ofArray a`/`Bytes.toArray b` (in `Std`, where `Array` is) convert to and from an
+`Array Nat`, each element mod 256. `import WordBytes` adds `Bytes.ofU8s`/`toU8s`
+(`List U8`); `U8Array ↔ Bytes` is not there yet (stage 29). `FS.readBytes`,
+`File.readBytes` and `Fd.read` hand back `Bytes` (9k).
+
+**The interpreters.** `#eval` and `#run` cannot call C, so they implement the nine
+operations on a `ByteArray` (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`), with
+`ofString`/`toString` mirroring the C boundary exactly; a `Bytes` value prints as
+`[1, 2, 255]`, equality computes, and a list of bytes is a `Bytes.ofList` application.
+Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model of
+`Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
+uses the same nine runtime natives (`selfhost/rt.c`).
+
 ## 9j: list lemmas (`lib/ListLemmas.wiz`)
 
 `import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
@@ -1527,8 +1571,9 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `web/widget/test.sh` (golden VDOM and patch application under Node),
 `tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
 (`nbclient`). Limits: no client-side state (every event is a kernel round trip),
-`plot` data is opaque JSON until a `Plot` module lands, and `Owned` cannot be held
-across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+`plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
+widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
+held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
 the raw `React.on`/`React.App.event` path passes only a handler index.
 
 ## Numbers: classes, integers, words
@@ -1976,7 +2021,7 @@ libFuzzer and deduplicated by a normalised stack signature.
 node (up to 64) with line/column, and the smallest CST node containing a byte offset (an
 invariant failure prints `input_offset=N`). `Scry.fuzzInputJsonAt` is the stable JSON;
 `scry/fuzz/run.py` embeds it in `build/fuzz/dynamic.json` beside the static
-`scry bench` report and its 34-case corpus sweep. A missing clang/libFuzzer is a clean
+`scry bench` report and its 52-case corpus sweep. A missing clang/libFuzzer is a clean
 skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a safety
 claim, and the target covers the parser boundary rather than the Wiz lowering/taint
 pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
@@ -2030,10 +2075,14 @@ values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; th
 `Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
 `x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
 `series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
-`upper`), all numbers as decimal strings. `Plot.render` returns
-`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
-kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
-bundle (the `tools/jupyter` hook), with no other coupling to this module.
+`upper`), all numbers as decimal JSON numbers (their source text is preserved).
+`Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value. The
+Jupyter hook is **not wired**: a cell must print the bundle (`#eval Json.render
+(Plot.render chart)`), and the kernel publishes an ordinary `#eval` result as
+`{"text/plain": …}` (`tools/jupyter/wiz_kernel/kernel.py`), so the SVG is not shown as
+an image until a display hook is added. `Plot.render` is the intended notebook hook;
+no other kernel path consumes it.
 
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout

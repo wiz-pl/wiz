@@ -10,6 +10,13 @@ their in-scope vulnerable files and adds patched controls beside them.
 * `cases/cve-<id>-fixed/` — a patched control for a v1 in-scope case, or the
   fixed half of a new pair.
 * `cases/cve-<id>-vuln/` — the vulnerable half of a new pair.
+* `report.md` — the checked-in result of the last full run: the 2x2, per-pair,
+  out-of-scope and per-case tables, plus the command, master revision, date and
+  wall time. It is generated, but it is committed so that the recall claim can
+  be audited; regenerate it and diff (see [Run](#run)).
+* `corpus.sha256` — SHA-256 of every file under `cases/` and of `manifest.json`.
+  `scry/scripts/check-cve-report.sh` verifies it, the report's corpus digest,
+  and the recall quoted in this README.
 
 Like v1, a case directory holds `harness.c` and `upstream.json`, not third-party code:
 `scry/scripts/cve-fetch.py assemble` builds each `case.c` under
@@ -77,15 +84,49 @@ is kept and which plumbing was replaced.
 cd scry
 cp ../grail.local.wiz .                      # once, if absent
 ../.lake/build/bin/grail build scry
-scripts/cve-bench-v2.sh --timeout 120 --max-nodes 200000
+scripts/cve-bench-v2.sh --timeout 120 --max-nodes 200000 --write-report
 cat build/cve-v2/summary.md
 ```
 
 `--case <id|pair|cve>` runs one case or pair; `--no-run` only summarises
-existing `build/cve-v2/` output; `--write-report` writes the full 2x2 report to
-`build/cve-v2/report.md`. That report is **generated and not checked in** (reproducing
-it needs the pinned upstream sources fetched over the network); the measured recall when
-the corpus was added was 1/14 in-scope pairs (7.1%), from that generated report, not
-from a file in the tree. The v1 driver and its twelve cases are unchanged.
+existing `build/cve-v2/` output; `--write-report` also writes the full 2x2
+report to `build/cve-v2/report.md`. The audited copy is the checked-in
+`report.md`; copy it there after a run.
+
+**Measured recall (from the checked-in `report.md`): 1/14 in-scope
+pairs (7.1%).** The report records its exact command, the master
+revision it ran on, the date, the wall time and the corpus digest. Quote that
+number, not one from an untracked `build/` run.
+
+The corpus is pinned by `corpus.sha256` (one line per file under `cases/` and
+`manifest.json`). Check the pins, the report digest and this README's number:
+
+```sh
+scry/scripts/check-cve-report.sh
+```
+
+After an intentional corpus change, refresh the pins **first** (the report
+embeds the hash of `corpus.sha256`), then regenerate the report:
+
+```sh
+scry/scripts/check-cve-report.sh --write
+cd scry && ../.lake/build/bin/grail build scry
+scripts/cve-bench-v2.sh --timeout 120 --max-nodes 200000 --write-report
+cp build/cve-v2/report.md bench/corpus-v2/report.md
+scry/scripts/check-cve-report.sh
+```
+
+Regenerate-and-diff is the review mechanism: `diff build/cve-v2/report.md
+bench/corpus-v2/report.md` must leave the 2x2, per-pair and out-of-scope tables
+unchanged. Only the provenance rows (date, wall time, run wrapper) and the
+per-case `ms`/RSS columns are expected to differ, because timing is informational on a shared machine.
+
+The check is one CI step:
+
+```yaml
+- run: scry/scripts/check-cve-report.sh
+```
+
+The v1 driver and its twelve cases are unchanged.
 
 This is measurement infrastructure. It does not tune rules or analysis.

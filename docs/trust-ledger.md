@@ -96,15 +96,17 @@ removes it. Without it git falls back to a line merge and is likely to conflict.
 
 The driver's rule (`scripts/trust-ledger-merge.sh`, inputs `%O %A %B`) is:
 
-* take the union of the rows of ours and theirs; a row deleted on one side stays
-  unless both sides deleted it;
+* merge three-way by key against the base: a row added on either side is kept; a
+  row changed on one side only takes that side's version; a row deleted on one side
+  and unchanged on the other is deleted (so a branch cannot resurrect a row master
+  removed when the source stopped being trust);
 * keep header/comment lines once: the base's comments in order, then comments new
   on either side;
 * sort the rows by key in byte order, the order `--update` writes;
-* for one key with different contents, take the row whose reason is not the
-  migration marker (`legacy:`);
-* if both rows are reasoned and differ, or both are still legacy and differ, the
-  merge is ambiguous: the driver exits 1, prints the keys, and does not write `%A`.
+* when both sides changed one key to different contents, take the row whose reason
+  is not the migration marker (`legacy:`);
+* if both rows are reasoned and differ, both are still legacy and differ, or one side
+  deleted a row the other modified, the merge is ambiguous: the driver exits 1, prints the keys, and does not write `%A`.
   Choose one row by hand.
 
 The failure mode is deliberate: a reasoned row names who trusts what, so silently
@@ -117,7 +119,8 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The reviewed base is 680 rows, 73 fewer than the migration's 753, and the removals are
+The ledger now has 730 rows: the migration's 753, minus the 73 removals below, plus 50
+`partial` rows added by later modules (the `partial` group is 182 rows). The removals are
 all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -140,20 +143,21 @@ The reviewed base falls into these groups:
 
 * **FFI, 210 declarations (420 rows).** Each `extern` contributes an axiom (the C
   function) and a `builtin extern:` row (the marshalling). Both FFI audits are done:
-  the OS/runtime modules (147 declarations, 290 rows) and the word/array/map modules
-  (66 declarations, 198 rows) carry symbol-specific reasons, naming the C function,
+  the OS/runtime modules (142 declarations, 208 rows) and the word/array/map modules
+  (68 declarations, 212 rows: `Word`, `WordArray`, `WordMap` and `Intern`) carry
+  symbol-specific reasons, naming the C function,
   the property that makes it the definition, and the marshalling's kind string. Do not
   bulk-renew them. `UInt64.ofNat` reduces mod 2^64 (the marshalling used to panic above
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
-* **Mutual recursion and `partial`, 132 rows (109 in `mutual` blocks, 23 standalone
-  `partial`).** The blocks are `Feral` (70: 67 mutual plus `Fe.core`/`Fe.tyStr`/
-  `Fe.zonk`), `Json` (9 mutual plus the deliberately opaque `Json.sub`), the `Scry`
-  engines (18), `SatTactic` (7), `BvDecide` (6), `Tagged` (6), `Infoview` (7), `Ring`
-  (2), `Prelude` (2), `Text` (3) and `IO` (1). Wiz's kernel treats a `partial`
+* **Mutual recursion and `partial`, 182 rows.** The rows come from `Feral` (70: 67
+  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.React` (14), the `Scry` modules
+  (49), `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`), `SatTactic` (7),
+  `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3), `Prelude` (3),
+  `Ring` (2) and `IO` (1). Wiz's kernel treats a `partial`
   definition as opaque: the definition is justified by an inhabited witness of its
   type (22f), never by a termination proof, so a row is not a claim that the recursion
-  terminates. The 132 rows are accepted as one reviewed group, deliberately not
+  terminates. The 182 rows are accepted as one reviewed group, deliberately not
   de-mutualised: each reason names its block and what would remove the row —
   de-mutualising into structural recursion over the syntax or data tree, or a checked
   measure (fuel, a decreasing counter, or a worklist/visited-set measure). A
@@ -204,7 +208,7 @@ rewrite is worthwhile only for a block that is small and hot.
 
 ### The numeric/container FFI audit
 
-`Word`, `WordArray`, `WordMap` and `Intern` declare 66 externs (198 rows: each extern's
+`Word`, `WordArray`, `WordMap` and `Intern` declare 68 externs (212 rows: each extern's
 `axiom` and `builtin extern:` pair, plus the `native` registration and the seal
 `builtin`s). All are reviewed with a reason naming the C function, the property that
 makes it the definition, and the marshalling's kind string; the `native` rows name the
@@ -246,10 +250,12 @@ declaration, a legacy row, a clean tree, and `--update` with and without a reaso
 
 `scripts/trust-ledger-merge_test.sh` checks the merge driver without a build: disjoint
 rows, the same row, a reasoned row against a legacy one, two reasoned rows (must
-refuse), comments, CRLF, and 100 pseudo-random rows. Its last case installs the driver
-with `scripts/setup-trust-merge.sh` in a throwaway repository and runs a real
-`git merge`, so it also checks the `.gitattributes` registration. CI runs it in the
-ledger step of the `build` job.
+refuse), a row deleted on one side and unchanged on the other (both directions; must
+be deleted), a row deleted on one side and modified on the other (both directions;
+must refuse), comments, CRLF, and 100 pseudo-random rows. Its last cases install the
+driver with `scripts/setup-trust-merge.sh` in a throwaway repository and run real
+`git merge`s (a union, a deletion, a refused conflict), so they also check the
+`.gitattributes` registration. CI runs it in the ledger step of the `build` job.
 
 CI runs `scripts/trust-ledger.sh --check --strict-legacy` (a step in the `build` job of
 `.github/workflows/ci.yml`), so both the new-entry gate and the end of the migration
