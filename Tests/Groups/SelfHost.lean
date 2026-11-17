@@ -274,6 +274,73 @@ def ffiAgrees (src expected : String) (gc : Bool := true) : IO Unit := do
   if gc then selfhostCompileRun src expected
   selfhostCompileRun src expected (flags := #["--rc"])
 
+/-- (25a, D1) The concurrency natives (`runtime/rt_con.inc`) on the self-hosted runtime:
+the same program forks a thread per element, sends its number over the channel (the
+parent closes its end once every child has finished), bumps a counter under a lock, and
+rendezvouses on an MVar; the Lean and the self-hosted runtimes print the same sum and
+count. The program declares the natives with `lib/MVar.wiz`'s and `lib/Session.wiz`'s
+types, minus the phantom indices and linear holes the self-hosted frontend cannot express
+yet (a type family `{A : Type} → MVar A → Type`); `MVar.take acc` passes no type argument
+(its implicit `A` is written in the extern's type, which the frontend now inserts at the
+use). It does not `recv` from the channel: a `do` bind whose value is a pair needs the
+self-hosted frontend to solve a metavariable applied to the local context, which it
+cannot yet (a P1 frontend gap). -/
+def concNatives : String :=
+  "import IO\n" ++
+  "axiom MVar : Type → Type\naxiom Lock : Type\naxiom Guard : Type\naxiom Chan : Type\n" ++
+  "extern \"wiz_mvar_new\" MVar.new : {0 A : Type} → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_new_full\" MVar.newFull : {0 A : Type} → (a : A) → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_take\" MVar.take : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_mvar_put\" MVar.put : {0 A : Type} → (m : MVar A) → (a : A) → IO Unit\n" ++
+  "extern \"wiz_mvar_read\" MVar.read : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_lock_new\" Lock.new : IO Lock\n" ++
+  "extern \"wiz_lock_acquire\" Lock.acquire : (l : Lock) → IO Guard\n" ++
+  "extern \"wiz_lock_release\" Lock.release : (l : Lock) → (g : Guard) → IO Unit\n" ++
+  "extern \"wiz_chan_fork\" Chan.fork : (child : (c : Chan) → IO Unit) → IO Chan\n" ++
+  "extern \"wiz_chan_send\" Chan.send : {0 A : Type} → (c : Chan) → (a : A) → IO Chan\n" ++
+  "extern \"wiz_chan_close\" Chan.close : (c : Chan) → IO Unit\n" ++
+  "def child (n : Nat) (acc : MVar Nat) (l : Lock) (done : MVar Nat) : (c : Chan) → IO Unit :=\n" ++
+  "  fun c => do\n" ++
+  "    g ← Lock.acquire l;\n" ++
+  "    x ← MVar.take acc;\n" ++
+  "    MVar.put (A := Nat) acc (x + 1);\n" ++
+  "    Lock.release l g;\n" ++
+  "    c' ← Chan.send (A := Nat) c n;\n" ++
+  "    Chan.close c';\n" ++
+  "    MVar.put (A := Nat) done n\n" ++
+  "def main : IO Unit := do\n" ++
+  "  acc ← MVar.newFull (A := Nat) 0;\n" ++
+  "  l ← Lock.new;\n" ++
+  "  done ← MVar.new (A := Nat);\n" ++
+  "  c1 ← Chan.fork (child 1 acc l done);\n" ++
+  "  c2 ← Chan.fork (child 2 acc l done);\n" ++
+  "  c3 ← Chan.fork (child 3 acc l done);\n" ++
+  "  c4 ← Chan.fork (child 4 acc l done);\n" ++
+  "  c5 ← Chan.fork (child 5 acc l done);\n" ++
+  "  c6 ← Chan.fork (child 6 acc l done);\n" ++
+  "  c7 ← Chan.fork (child 7 acc l done);\n" ++
+  "  c8 ← Chan.fork (child 8 acc l done);\n" ++
+  "  v1 ← MVar.take (A := Nat) done;\n" ++
+  "  v2 ← MVar.take (A := Nat) done;\n" ++
+  "  v3 ← MVar.take (A := Nat) done;\n" ++
+  "  v4 ← MVar.take (A := Nat) done;\n" ++
+  "  v5 ← MVar.take (A := Nat) done;\n" ++
+  "  v6 ← MVar.take (A := Nat) done;\n" ++
+  "  v7 ← MVar.take (A := Nat) done;\n" ++
+  "  v8 ← MVar.take (A := Nat) done;\n" ++
+  "  Chan.close c1;\n  Chan.close c2;\n  Chan.close c3;\n  Chan.close c4;\n" ++
+  "  Chan.close c5;\n  Chan.close c6;\n  Chan.close c7;\n  Chan.close c8;\n" ++
+  "  n ← MVar.take (A := Nat) acc;\n" ++
+  "  IO.println (Nat.toString (v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8));\n" ++
+  "  IO.println (Nat.toString n)\n"
+
+/-- The same program gives the same output in the Lean compiler and in the self-hosted
+one, in both memory modes (the `--rc` run also checks that every object was freed). -/
+def bothRuntimes (src expected : String) : IO Unit := do
+  ioRun src expected
+  selfhostCompileRun src expected
+  selfhostCompileRun src expected (flags := #["--rc"])
+
 /-- (21l) Foreign functions: headers, prototypes, numbers, strings, `Bool`, `Unit`, `IO`. -/
 def ffiProgram1 : String :=
   "import IO\nextern \"strlen\" (header := \"string.h\") strlen : String → Nat\n" ++
@@ -1976,6 +2043,8 @@ def selfHostGroup : Group where
           "14\n2\n0\n5\n3486784401\n8\n14\n6\n3145728\n125\n10\nset\n" },
     { name := "foreign functions: the Lean and the self-hosted compilers agree (21l)", run := fun _ =>
         ffiAgrees ffiProgram1 ffiExpected1 },
+    { name := "threads: the channel, MVar and lock natives agree in both runtimes (25a, D1)", run := fun _ =>
+        bothRuntimes concNatives "36\n8\n" },
     { name := "foreign pointers: the finalizer runs with the last reference, in both compilers (21l)", run := fun _ =>
         ffiAgrees (ffiProgramFin false) "line\nline\nline\n" (gc := false) },
     { name := "foreign pointers passed around and flushed, with either collector (21l)", run := fun _ =>

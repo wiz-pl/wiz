@@ -1550,12 +1550,12 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
       | .false => .mk (.t "") (.t nm) (lvIns (d - 1 - i) live) st
   | .glob n => bindTo st (.t "") (.t ("get_" +++ mangle n +++ "()")) live
   | .app f a => match stringConst t with
-    -- a string literal, built once (a constant: released at exit)
+    -- a string literal, built once (a constant: immortal, never freed)
     | .some cs => match CG.fresh st "str" with
-      | .mk x st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { " +++ x +++ " = wcodes((uint32_t[]){") ⧺ codesC cs ⧺
+      | .mk x st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = wcodes((uint32_t[]){") ⧺ codesC cs ⧺
           .t ((match cs with
             | .nil => "0"
-            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) live st1
+            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
     | .none => match natConst t with
       | .some n => .mk (.t "") (.t "BOX(" ⧺ Doc.nat n ⧺ .t "UL)") live st
       | .none => match spineE f (.cons a .nil) with
@@ -1611,8 +1611,8 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
         -- (built only from constants: built once, a constant)
         | .true => match CG.fresh st "cst" with
           | .mk x st0 => match rcEs (RE.inner re) st0 .nil 0 .nil items with
-            | .mk fc atoms _ st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { ") ⧺ fc ⧺ .t (x +++ " = ") ⧺ objC "" tag n atoms ⧺
-                .t ("; rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) live st1
+            | .mk fc atoms _ st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { ") ⧺ fc ⧺ .t (x +++ " = ") ⧺ objC "" tag n atoms ⧺
+                .t ("; rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
         | .false => match wish with
           | .mk w st0 => match rcEs re st0 names d live items with
             | .mk fc atoms fl st1 => bindTo st1 fc (objC w tag n atoms) fl
@@ -1720,8 +1720,8 @@ def rcLam (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) 
           | .false => match caps with
             -- (capturing nothing: one closure, built once, a constant)
             | .nil => match CG.fresh st3 "clo" with
-              | .mk x st4 => .mk (cc ⧺ .t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { " +++ x +++ " = mkfun(" +++ fname +++ ", " +++
-                  Nat.toString k +++ ", 0, NULL); rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) cl st4
+              | .mk x st4 => .mk (cc ⧺ .t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = mkfun(" +++ fname +++ ", " +++
+                  Nat.toString k +++ ", 0, NULL); rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) cl st4
             | .cons _ _ => bindTo st3 cc (.t ("mkfun(" +++ fname +++ ", " +++ Nat.toString (nc + k) +++ ", " +++ Nat.toString nc +++
                 ", (V[]){" +++ joinC (capsCode names caps) +++ "})")) cl
 -- a saturated call of `d_g`, then the rest applied: a variable in a borrowed position
@@ -2235,9 +2235,6 @@ def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
     | .fn n cname _ ps r io fin =>
       let g := mangle n;
       let k := ffiArity ps io;
-      let keep := match rc with
-        | .true => "rt_root(&c); } inc(c); "
-        | .false => "} ";
       match ffiIn ffi 0 ps with
       | .mk pre cargs post =>
         let body := pre +++ ffiOut ffi r fin (cname +++ "(" +++ commaSep cargs +++ ")") +++ post;
@@ -2245,11 +2242,19 @@ def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
           | .true => "return prodv(r, p" +++ Nat.toString (k - 1) +++ "); "
           | .false => "return r; ";
         match k with
-        | .zero => .cons (.t ("V get_" +++ g +++ "(void) { static V c = 0; static int i = 0; if (!i) { i = 1; c = ({ " +++ body +++ "r; }); " +++
-            keep +++ "return c; }")) (ffiWrappers ffi rc rest)
+        | .zero => .cons (.t ((match rc with
+            -- (25a) a shared constant: the first thread to use it publishes it, a loser
+            -- releases its copy (`rt_caf`)
+            | .true => "static V mk_" +++ g +++ "(void) { " +++ body +++ "return r; } V get_" +++ g +++
+              "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }"
+            | .false => "V get_" +++ g +++ "(void) { static V c = 0; if (!c) c = ({ " +++ body +++ "r; }); return c; }")))
+          (ffiWrappers ffi rc rest)
         | .succ _ => .cons (.t ("V d_" +++ g +++ "(" +++ paramDecls 0 k +++ ") { " +++ body +++ ret +++ "} " +++
             "static V w_" +++ g +++ "(V *a) { return d_" +++ g +++ "(" +++ argList 0 k +++ "); } " +++
-            "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); " +++ keep +++ "return c; }"))
+            (match rc with
+            | .true => "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
+              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }"
+            | .false => "V get_" +++ g +++ "(void) { static V c = 0; if (!c) c = native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); return c; }")))
           (ffiWrappers ffi rc rest)
     | _ => ffiWrappers ffi rc rest
 -- (stage 21o) The C files and libraries of `link_c`/`link_lib`, as lines at the top of the
@@ -2846,9 +2851,8 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
     | .zero => match rcHead (.mk .nil sigs .nil) st .nil 0 .nil .nil e with
       | .mk code atom _ st1 =>
         genCodeRC sigs st1 (.cons (.t ("V get_" +++ g +++ "(void);")) protos)
-          (.cons (.t ("static V g_" +++ g +++ "; static int i_" +++ g +++ "; static V init_" +++ g +++ "(void) { ") ⧺ code ⧺
-            .t "return " ⧺ atom ⧺ .t ("; } V get_" +++ g +++ "(void) { if (!i_" +++ g +++ ") { g_" +++ g +++ " = init_" +++ g +++
-            "(); i_" +++ g +++ " = 1; rt_root(&g_" +++ g +++ "); } inc(g_" +++ g +++ "); return g_" +++ g +++ "; }")) defs) rest
+          (.cons (.t ("static V g_" +++ g +++ "; static V init_" +++ g +++ "(void) { ") ⧺ code ⧺
+            .t "return " ⧺ atom ⧺ .t ("; } V get_" +++ g +++ "(void) { return rt_caf(&g_" +++ g +++ ", init_" +++ g +++ "); }")) defs) rest
     | .succ _ =>
       let names := paramNames k k;
       -- (no signature: every parameter owned)
@@ -2861,8 +2865,8 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
         genCodeRC sigs st1 (.cons (.t ("V d_" +++ g +++ "(" +++ ps +++ "); V get_" +++ g +++ "(void);")) protos)
           (.cons (.t ("V d_" +++ g +++ "(" +++ ps +++ ") { top_: ; ") ⧺ entryDrops names k live (ownedIdx k 0 sig) ⧺ code ⧺ .t "return " ⧺ atom ⧺ .t "; }") (.cons
             (.t ("static V w_" +++ g +++ "(V *a) { V r = d_" +++ g +++ "(" +++ argList 0 k +++ "); " +++ wrapDecs 0 sig +++ "return r; } " +++
-             "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
-             "); rt_root(&c); } inc(c); return c; }")) defs)) rest
+             "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
+             "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
   | .mk all _ _ ffi _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil

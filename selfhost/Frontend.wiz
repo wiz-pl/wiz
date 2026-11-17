@@ -803,6 +803,29 @@ partial def typeBinderNames : Syntax → List String
     | .false => match strEq (kindOf s) "term.arrow" with
       | .true => .cons "_" (typeBinderNames (kid s 2))
       | .false => .nil
+-- the kinds of a type's leading Π binders (as `paramMask`): a declaration may write
+-- its parameters in its type (`axiom f : {A : Type} → …`, `extern … : {A : Type} → …`),
+-- and its implicit arguments are inserted at the uses from this mask
+def binderKindOf (b : Syntax) : BKind := match strEq (kindOf b) "binder.implicit" with
+  | .true => .impl
+  | .false => match isInstB b with
+    | .true => .inst
+    | .false => .dflt
+def kindN (k : BKind) : Nat → List BKind
+  | .zero => .nil
+  | .succ n => .cons k (kindN k n)
+partial def typeBinderMask : Syntax → List BKind
+  | s => match strEq (kindOf s) "term.depArrow" with
+    | .true => List.append (kindN (binderKindOf (kid s 0)) (List.length (binderNames (kid s 0)))) (typeBinderMask (kid s 2))
+    | .false => match strEq (kindOf s) "term.arrow" with
+      | .true => .cons .dflt (typeBinderMask (kid s 2))
+      | .false => .nil
+-- a declaration's parameter kinds: its written binders, else its type's Π binders
+def declParamMask (d : Syntax) : List BKind := match paramMask (kids (kid d 3)) with
+  | .nil => match kids (kid d 4) with
+    | .cons _ (.cons ty _) => typeBinderMask ty
+    | _ => .nil
+  | m => m
 -- a declaration's parameter names: its written binders, else its type's Π binders
 def declParamNames (d : Syntax) : List String := match binderParamNames (kids (kid d 3)) with
   | .nil => match kids (kid d 4) with
@@ -5713,7 +5736,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
                       | .some k => colLvl (nthCol cols k)
                       | .none => 0;
                     let R := RE;
-                    let mc := MatchCtx.mk f params p n v R R pts pts (paramMask (kids (kid stx 3)));
+                    let mc := MatchCtx.mk f params p n v R R pts pts (declParamMask stx);
                     let cxP := bindParams (Cx.mk empty (Globals.scope gs) .nil) 0 params pts;
                     -- induction only for a definition that calls itself (a partial one calls
                     -- its axiom); else every split is case analysis (stage 19e)
@@ -5727,7 +5750,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
                       match checkMarkingParams us (tLams n t) tyT with
                       | .bad m => errStep gs m
                       | .good fn => .mk (String.append f (String.append " : " (show .nil 0 tyT)))
-                          (Globals.add gs (.mk f us tyT fn (inlineTm gs fn) (paramMask (kids (kid stx 3)))
+                          (Globals.add gs (.mk f us tyT fn (inlineTm gs fn) (declParamMask stx)
                             (declParamNames stx)))
     | _ => errStep gs "a definition needs a type"
   | _ => errStep gs "a definition needs a name"
@@ -5756,7 +5779,7 @@ def command (gs : Globals) (stx : Syntax) : Step :=
               match checkMarkingParams us v0z tyT with
               | .bad m => errStep gs m
               | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
-                  (Globals.add gs (.mk x us tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))
+                  (Globals.add gs (.mk x us tyT v (inlineTm gs v) (declParamMask stx)
                     (declParamNames stx)))
       | _ => errStep gs "a definition needs a type"
     | _ => errStep gs "a definition needs a name"
@@ -6432,7 +6455,7 @@ def addAxioms : Globals → List Syntax → AxR
     | .ok f ty =>
       let fn := Globals.declName gs f;
       addAxioms (Globals.add gs (.mk f (univParamsOf d) ty (.axiomC fn ty) (.axiomC fn ty)
-        (paramMask (kids (kid d 3))) (declParamNames d))) rest
+        (declParamMask d) (declParamNames d))) rest
 -- a member of a partial group: `def …`, or `partial (default := w) def …`
 def unwrapDef (d : Syntax) : Syntax := match strEq (kindOf d) "command.partial" with
   | .true => kid d 2

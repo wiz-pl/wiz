@@ -635,10 +635,12 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
   `wiz_in_bool`, `wiz_in_u64`, … The raw `UInt64`/`Float64` boxes and foreign pointers
   already agree; `Nat` is 63-bit here, and a `Bool` result is the constructor payload
   above, not `wiz.c`'s scalar constructor.
-* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*`, channel, MVar,
-  lock and ref entry points; `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz`
-  emits, no POSIX layer and no thread library (the `rc < 0` rule is implemented but never
-  used). `wiz_live` and the proof budget are globals, not `__thread`.
+* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*` entry points;
+  `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz` emits, no POSIX layer.
+  The thread natives are there (`wiz_chan_*`, `wiz_mvar_*`, `wiz_lock_*`, `wiz_ref_*`,
+  `rt_mark_mt`, the shared-thunk lock, `GC_THREADS` under Boehm, per-thread allocation
+  and live count), so values and threads cross between the two runtimes. The proof
+  budget stays a global.
 * **Leak check exit code.** `wiz.c` reports leaks with exit code 2; the self-hosted
   runtime exits 4 (and only in RC mode), which the `=selfhost` cases test.
 
@@ -664,9 +666,10 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
    `T_BIG` objects (one `Nat` representation at last, at a cost), or accept 63-bit `Nat`
    in the self-hosted backend and keep `T_BIG` a Lean-runtime detail. The closure of this
    choice is what lets a *single* runtime object serve both compilers.
-6. **Threads last.** Port `wiz_mark_mt`, thunk locking and the channel/MVar/lock/ref
-   entry points to `rt.c` (or move the Wiz-side `Session`/`Conc` layer to the shared
-   runtime); the `rc < 0` rules are already in place.
+6. **Threads.** Done for the natives: `rt_mark_mt`, the shared-thunk lock and the
+   channel/MVar/lock/ref entry points are in `rt.c` (the `=selfhost` group's differential
+   case runs them in both runtimes). What remains is the self-hosted frontend's library
+   layer for the phantom indices and linear holes (`Chan p`, `MVar.Hole m`, `Lock.Guard l`).
 7. **Then the runtime is one object**: `wiz_rt.h` + `wiz_rt.c`, `-DWIZ_API=` for the
    object build, embedded inline for the default; the self-hosted compiler links the same
    object, and the fixpoint test checks that both compilers' C output is identical.

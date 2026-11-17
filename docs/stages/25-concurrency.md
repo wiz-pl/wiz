@@ -42,9 +42,24 @@ test per `inc`/`dec`. The rest follows from that invariant:
 A spawned thread has a 256 MB stack (`WIZ_THREAD_STACK_MB`). The interpreters (`#eval`,
 `#run`) don't run threads. Checked with ThreadSanitizer (`--cflags -fsanitize=thread`) on
 the `conc` programs; the cost for single-threaded programs is queued for measurement
-(`perf-queue.md`). Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
-Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to a
+(`perf-queue.md`). Not yet: shared lazy cells that keep their payload (a CAS to a
 blackhole), and `rc == -1` counting as unique.
+
+The self-hosted runtime (`selfhost/rt.c`) has the same natives on its values: channels,
+MVars, locks and refs, a new thread for `Chan.fork`, `rt_mark_mt`'s transfer rule,
+shared thunks under one recursive lock, constants published once (`rt_caf`, made
+immortal as `wiz_immortal` does), and per-thread allocation (the size-class free lists
+and the recycling stack are `__thread`, so two threads never write one list). Under the
+collector each thread is created with `GC_pthread_create` (`GC_THREADS`) and the live
+count is per thread in both modes, summed at exit after the program waits for every
+thread. The `=selfhost` group's differential case runs one program — fork, send,
+MVar put/take, lock and join — in both runtimes and in both memory modes. Its library
+layer is the next step: the self-hosted frontend cannot yet express the phantom indices
+(`MVar.Hole m`, `Lock.Guard l`, `Chan p`), and it does not solve a metavariable applied
+to the local context, so a `do` bind whose value is a pair (`Chan.recv`'s `A × Chan`)
+cannot be checked; that program declares the natives directly, passes the type arguments
+by name, and sends on the channel without receiving. The `WIZ_NO_THREADS` one-thread
+build (the Wasm page) has the same natives without locks.
 
 An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and returns any
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
@@ -173,4 +188,5 @@ Pure parallelism (`Task.spawn`, plan C1) on the same runtime, with a `-j1` vs `-
 differential test; structured scopes (C4); a concurrency effect with a pure scheduler
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
-proof (C7); `selfhost/rt.c` threads.
+proof (C7); the self-hosted frontend's library layer for `Chan`/`MVar`/`Lock` (the
+phantom indices and linear holes; the natives themselves are in `selfhost/rt.c`).

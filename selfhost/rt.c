@@ -18,7 +18,15 @@
 
 #include <stddef.h>
 #ifndef WIZ_RC
+/* (25a) the collector is told that the program starts threads: `GC_pthread_create`
+   registers each one, so the collector sees its stack (`runtime/rt_con.inc`'s rule) */
+#ifndef GC_THREADS
+#define GC_THREADS 1
+#endif
 #include <gc.h>
+#endif
+#ifndef WIZ_NO_THREADS
+#include <pthread.h>
 #endif
 #include <sys/resource.h>
 #include <unistd.h>
@@ -105,6 +113,38 @@ _Static_assert(sizeof(Map) == 48 && offsetof(Map, count) == 16 && offsetof(Map, 
 static V unreach(void) { fprintf(stderr, "wiz: unreachable\n"); exit(3); }
 static void die(const char *m) { fprintf(stderr, "wiz: %s\n", m); exit(3); }
 
+/* ---- the locking the runtime needs between threads (25a) ----
+   The natives and the shared-thunk lock (below) use these; a `WIZ_NO_THREADS` build
+   (the one-thread runtime the Wasm page uses) has no threads, so a wait there is an
+   error rather than a block. */
+#ifdef WIZ_NO_THREADS
+typedef struct { int unused; } rt_mutex;
+typedef struct { int unused; } rt_cond;
+#define RT_MUTEX_INITIALIZER {0}
+#define RT_COND_INITIALIZER {0}
+static void rt_mu_init(rt_mutex *m) { (void)m; }
+static void rt_mu_destroy(rt_mutex *m) { (void)m; }
+static void rt_mu_lock(rt_mutex *m) { (void)m; }
+static void rt_mu_unlock(rt_mutex *m) { (void)m; }
+static void rt_cv_init(rt_cond *c) { (void)c; }
+static void rt_cv_destroy(rt_cond *c) { (void)c; }
+static void rt_cv_broadcast(rt_cond *c) { (void)c; }
+static void rt_cv_wait(rt_cond *c, rt_mutex *m) { (void)c; (void)m; die("blocking needs threads (this build has WIZ_NO_THREADS)"); }
+#else
+typedef pthread_mutex_t rt_mutex;
+typedef pthread_cond_t rt_cond;
+#define RT_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+#define RT_COND_INITIALIZER PTHREAD_COND_INITIALIZER
+static void rt_mu_init(rt_mutex *m) { pthread_mutex_init(m, NULL); }
+static void rt_mu_destroy(rt_mutex *m) { pthread_mutex_destroy(m); }
+static void rt_mu_lock(rt_mutex *m) { pthread_mutex_lock(m); }
+static void rt_mu_unlock(rt_mutex *m) { pthread_mutex_unlock(m); }
+static void rt_cv_init(rt_cond *c) { pthread_cond_init(c, NULL); }
+static void rt_cv_destroy(rt_cond *c) { pthread_cond_destroy(c); }
+static void rt_cv_broadcast(rt_cond *c) { pthread_cond_broadcast(c); }
+static void rt_cv_wait(rt_cond *c, rt_mutex *m) { pthread_cond_wait(c, m); }
+#endif
+
 /* (`-DWIZ_STATS`: count allocations, reused cells and the peak of live objects, printed
    at exit under reference counting) */
 #ifdef WIZ_STATS
@@ -120,13 +160,15 @@ static uintptr_t hypKey[HYPT]; static size_t hypMade[HYPT], hypForced[HYPT];
 #ifdef WIZ_RC
 /* ---- reference counting ---- */
 
-static size_t rt_live; /* objects allocated and not freed yet */
+static __thread size_t rt_live; /* objects allocated and not freed yet (per thread) */
 /* Small objects come from free lists, one per size class of 16 bytes (up to 256),
    carved from big blocks (malloc's per-object header and bookkeeping were 15% of a
-   compiler's time); bigger ones from malloc. Blocks are never given back. */
+   compiler's time); bigger ones from malloc. Blocks are never given back. The lists and
+   the block being carved are per thread (25a): an object a thread frees goes on its own
+   list, so two threads never write one free list. */
 #define RT_NCLS 16
-static void *rt_fl[RT_NCLS + 1];
-static char *rt_blk, *rt_blkEnd;
+static __thread void *rt_fl[RT_NCLS + 1];
+static __thread char *rt_blk, *rt_blkEnd;
 static void *rt_alloc(size_t sz) {
   size_t c = (sz + 15) >> 4;
   Obj *o;
@@ -212,6 +254,30 @@ INLINE V mkfun(Fn f, uint32_t arity, uint32_t n, V *args) {
 }
 /* `f a₁ … aₙ`: the function is called once it has all its arguments (as
    `wiz_apply` in `runtime/wiz.c`). */
+/* a thunk shared between threads (`rc < 0`, or immortal `rc == 0` in a constant every
+   thread can see) is forced under one recursive lock, and its value is marked shared
+   before the others can see it: pure code never blocks, so the lock can't deadlock
+   (the same rule as `runtime/wiz.c`, stage 25a) */
+static void rt_mark_mt(V v);
+#ifdef WIZ_RC
+static void rt_immortal(V v);
+#endif
+#ifndef WIZ_NO_THREADS
+static pthread_mutex_t rt_thunk_mu;
+static pthread_once_t rt_thunk_once = PTHREAD_ONCE_INIT;
+static void rt_thunk_mu_init(void) {
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&rt_thunk_mu, &a);
+}
+static void rt_thunk_lock(void) { pthread_once(&rt_thunk_once, rt_thunk_mu_init); pthread_mutex_lock(&rt_thunk_mu); }
+static void rt_thunk_unlock(void) { pthread_mutex_unlock(&rt_thunk_mu); }
+#else
+static void rt_thunk_lock(void) {}
+static void rt_thunk_unlock(void) {}
+#endif
+
 #ifndef WIZ_RC
 static V apn(V f, uint32_t n, V *args) {
   uint32_t i = 0;
@@ -221,8 +287,13 @@ static V apn(V f, uint32_t n, V *args) {
     Obj *o = OBJ(f);
     if (TAG(o) == T_THUNK) {
       Thunk *t = (Thunk *)o;
-      if (t->fn) { V g = t->fn; t->fn = 0; V u = BOX(0); t->val = apn(g, 1, &u); }
-      f = t->val; i++;
+      /* (the collector's counts: `rc == 1` is one thread's, `rc == 0` is immortal) */
+      int shared = RC(t) <= 0;
+      if (shared) rt_thunk_lock();
+      if (t->fn) { V g = t->fn; t->fn = 0; V u = BOX(0); t->val = apn(g, 1, &u); if (shared) rt_mark_mt(t->val); }
+      V r = t->val;
+      if (shared) rt_thunk_unlock();
+      f = r; i++;
       continue;
     }
     if (TAG(o) != T_CLO) die("applying a non-function");
@@ -261,9 +332,18 @@ static V apn(V f, uint32_t n, V *args) {
     Obj *o = OBJ(f);
     if (TAG(o) == T_THUNK) {
       Thunk *t = (Thunk *)o;
-      if (t->fn) { V g = t->fn; t->fn = 0; V u = BOX(0); t->val = apn(g, 1, &u); }
-      else dec(args[i]);
-      V r = t->val; inc(r); dec(f); f = r; i++;
+      int64_t rc = RC(t);
+      int shared = rc <= 0;
+      if (shared) rt_thunk_lock();
+      if (t->fn) {
+        V g = t->fn; t->fn = 0;
+        V u = BOX(0);
+        t->val = apn(g, 1, &u);
+        if (rc < 0) rt_mark_mt(t->val); else if (rc == 0) rt_immortal(t->val);
+      } else dec(args[i]);
+      V r = t->val; inc(r); dec(f);
+      if (shared) rt_thunk_unlock();
+      f = r; i++;
       continue;
     }
     if (TAG(o) != T_CLO) die("applying a non-function");
@@ -569,20 +649,75 @@ static V native(NF f, int arity) { return mkfun(f, (uint32_t)arity, 0, NULL); }
   static V nf_##name(V *a) { __VA_ARGS__ } \
   V get_##name(void) { static V c = 0; if (!c) c = native(nf_##name, arity); return c; }
 #else
-/* the constants a program keeps (globals, string literals, natives' closures), released
-   at exit before the check for leaks */
-static V **rt_roots; static size_t rt_nroots, rt_caproots;
-static void rt_root(V *p) {
-  if (rt_nroots == rt_caproots) {
-    rt_caproots = rt_caproots ? 2 * rt_caproots : 256;
-    rt_roots = (V **)realloc(rt_roots, rt_caproots * sizeof(V *));
-    if (!rt_roots) die("out of memory");
+/* a value every thread can reach (a constant): rc == 0, counted nowhere, never freed
+   (`wiz_immortal` in runtime/wiz.c). The walk is `rt_mark_mt`'s; each object it takes
+   out of this thread's balance is one this thread built. */
+static void rt_immortal(V v) {
+  if (!v || ISBOX(v)) return;
+  size_t cap = 64, n = 0;
+  V *st = (V *)malloc(cap * sizeof(V));
+  if (!st) die("out of memory");
+  st[n++] = v;
+#define RT_PUSH_IM(x) do { V y_ = (x); if (!ISBOX(y_) && y_) { \
+    if (RC(OBJ(y_)) > 0) { \
+      if (n == cap) { cap *= 2; st = (V *)realloc(st, cap * sizeof(V)); if (!st) die("out of memory"); } \
+      st[n++] = y_; } } } while (0)
+  while (n) {
+    V x = st[--n];
+    if (!x || ISBOX(x)) continue;
+    Obj *h = OBJ(x);
+    if (h->h.rc <= 0) continue; /* reached twice, or already immortal or shared */
+    h->h.rc = 0;
+    rt_live--;
+    uint32_t t = TAG(h);
+    if (t < T_CLO || t == T_HYP) { for (uint32_t i = 0; i < SIZE(h); i++) RT_PUSH_IM(h->f[i]); }
+    else if (t == T_CLO) { Clo *c = (Clo *)h; for (uint32_t i = 0; i < SIZE(c); i++) RT_PUSH_IM(c->env[i]); }
+    else if (t == T_THUNK) { Thunk *th = (Thunk *)h; RT_PUSH_IM(th->fn ? th->fn : th->val); }
+    else if (t == T_ARR) { Arr *a = (Arr *)h; for (size_t i = 0; i < a->len; i++) RT_PUSH_IM(a->data[i]); }
+    else if (t == T_MAP) { Map *m = (Map *)h;
+      for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { RT_PUSH_IM(m->keys[i]); RT_PUSH_IM(m->vals[i]); } }
   }
-  rt_roots[rt_nroots++] = p;
+#undef RT_PUSH_IM
+  free(st);
 }
+/* a constant of the program (a global, a native's closure, a literal or a capture-free
+   closure in a body): built once, however many threads first use it
+   (`runtime/wiz.c`'s `wiz_caf_init`). The build is under one recursive lock (a constant
+   may force another; pure code never blocks, so it can't deadlock), and the value is
+   made immortal (`rt_immortal`): every thread can reach it, so no count is paid and no
+   reference can free it. The fast path is one atomic load. */
+#ifndef WIZ_NO_THREADS
+static pthread_mutex_t rt_caf_mu;
+static pthread_once_t rt_caf_once = PTHREAD_ONCE_INIT;
+static void rt_caf_mu_init(void) {
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&rt_caf_mu, &a);
+}
+static void rt_caf_lock(void) { pthread_once(&rt_caf_once, rt_caf_mu_init); pthread_mutex_lock(&rt_caf_mu); }
+static void rt_caf_unlock(void) { pthread_mutex_unlock(&rt_caf_mu); }
+#else
+static void rt_caf_lock(void) {}
+static void rt_caf_unlock(void) {}
+#endif
+static V rt_caf(V *slot, V (*build)(void)) {
+  V v = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+  if (!v) {
+    rt_caf_lock();
+    v = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (!v) { v = build(); rt_immortal(v); __atomic_store_n(slot, v, __ATOMIC_RELEASE); }
+    rt_caf_unlock();
+  }
+  inc(v);
+  return v;
+}
+/* a constant slot's value (see `rt_caf`), for the constants a body builds itself */
+static V rt_peek(V *slot) { return __atomic_load_n(slot, __ATOMIC_ACQUIRE); }
 #define NATIVE(name, arity, ...) \
   static V nf_##name(V *a) { __VA_ARGS__ } \
-  V get_##name(void) { static V c = 0; if (!c) { c = native(nf_##name, arity); rt_root(&c); } inc(c); return c; }
+  static V mk_##name(void) { return native(nf_##name, arity); } \
+  V get_##name(void) { static V c = 0; return rt_caf(&c, mk_##name); }
 #endif
 
 V get_Nat_46_zero(void) { return BOX(0); }
@@ -1029,7 +1164,7 @@ NATIVE(Bytes_46_eq, 2,
 #ifdef WIZ_RC
 /* ---- freeing: a worklist, not recursion (a list a million long is no deeper) ---- */
 
-static Obj **rt_work; static size_t rt_nwork, rt_capwork;
+static __thread Obj **rt_work; static __thread size_t rt_nwork, rt_capwork;
 static void rt_push(Obj *o) {
   if (rt_nwork == rt_capwork) {
     rt_capwork = rt_capwork ? 2 * rt_capwork : 1024;
@@ -1064,7 +1199,7 @@ static void rt_freeShell(Obj *o) {
   if (c <= RT_NCLS) { *(void **)o = rt_fl[c]; rt_fl[c] = o; } else free(o);
   rt_live--;
 }
-static int rt_freeing;
+static __thread int rt_freeing;
 static void rt_drain(void);
 static void rt_free(Obj *o) {
   rt_push(o);
@@ -1153,16 +1288,23 @@ INLINE V resetTake(V x, uint32_t n, V r) {
 }
 INLINE void dropTake(V x, V r) { (void)resetTake(x, 0, r); }
 
-/* at exit: release the constants; then every object must have been freed */
+/* the balances of the threads that have ended (25a): `rt_live` is per thread, and the
+   program waits for every thread before its leak check (as `runtime/wiz.c`) */
+static int64_t rt_live_exited;
+static void rt_wait_threads(void);
+
+/* at exit: wait for the threads; then every object not made immortal must have been
+   freed (a program's constants are immortal, so nothing is released here) */
 static void rt_finish(void) {
-  for (size_t i = rt_nroots; i > 0; i--) dec(*rt_roots[i - 1]);
+  rt_wait_threads();
 #ifdef WIZ_STATS
   fprintf(stderr, "wiz stats: %zu allocations, %zu reused, peak %zu live (mkobj %zu, mkclo %zu, mkfun %zu, mkthunk %zu; hypotheses %zu, forced %zu; capture-free mkfun %zu)\n",
           rt_nalloc, rt_nreuse, rt_peak, rt_nobj, rt_nclo, rt_nfun, rt_nthunk, rt_nhyp, rt_nforced, rt_nfun0);
   fprintf(stderr, "wiz hyp base rt_finish %p\n", (void *)rt_finish);
   for (size_t i = 0; i < HYPT; i++) if (hypMade[i] > 1000000) fprintf(stderr, "wiz hyp %p: %zu made, %zu forced\n", (void *)hypKey[i], hypMade[i], hypForced[i]);
 #endif
-  if (rt_live) { fflush(stdout); fprintf(stderr, "wiz: %zu objects leaked\n", rt_live); exit(4); }
+  int64_t leaked = (int64_t)rt_live + rt_live_exited;
+  if (leaked != 0) { fflush(stdout); fprintf(stderr, "wiz: %ld objects leaked\n", (long)leaked); exit(4); }
 }
 #endif
 
@@ -1253,9 +1395,322 @@ static V rt_out_ptr(void *p, void (*fin)(void *)) {
 #endif
   return o;
 }
+/* ---- threads (25a): spawning, channels, MVars and locks ----
+
+   The same native ABI as `runtime/rt_con.inc`: `wiz_chan_fork`/`wiz_chan_send`/
+   `wiz_chan_recv`/`wiz_chan_close` (lib/Session.wiz), `wiz_mvar_*` (lib/MVar.wiz),
+   `wiz_lock_*` and `wiz_ref_*`, on this runtime's values. The ownership rule is the
+   runtime's: a new thread, a message and an MVar's contents are marked shared before
+   they cross (`rt_mark_mt`), so counts change atomically from then on; the self-hosted
+   extension tags are walked here too (`T_HYP`, offset chains).
+
+   A build with `WIZ_NO_THREADS` (the one-thread runtime the Wasm page uses) has the
+   same natives, without locks: the simple cases work and anything that would block
+   stops with an error instead. */
+
+/* mark everything reachable from `v` shared. Under reference counting the counts become
+   -rc and change atomically from then on (rc == 0 is immortal and keeps its count);
+   under the collector the count is not used, so objects are marked -1 to say they are
+   shared, which is what a shared thunk is forced under (the lock below). The walk is the
+   collector's graph (`rt_drain`), with the self-hosted extensions: `T_HYP` has fields,
+   and a flat chain is marked from its root (its tails share the object). */
+static void rt_mark_mt(V v) {
+  size_t cap = 64, n = 0;
+  V *st = (V *)malloc(cap * sizeof(V));
+  if (!st) die("out of memory");
+  st[n++] = v;
+#define RT_PUSH_MT(x) do { V y_ = (x); if (!ISBOX(y_) && y_) { \
+    if (RC(OBJ(y_)) > 0) { \
+      if (n == cap) { cap *= 2; st = (V *)realloc(st, cap * sizeof(V)); if (!st) die("out of memory"); } \
+      st[n++] = y_; } } } while (0)
+  while (n) {
+    V x = st[--n];
+    if (!x || ISBOX(x)) continue;
+    Obj *h = OBJ(x);
+#ifdef WIZ_RC
+    if (h->h.rc <= 0) continue; /* already shared, or immortal */
+    h->h.rc = -h->h.rc;
+#else
+    if (h->h.rc < 0) continue; /* already marked shared (the collector ignores the count) */
+    h->h.rc = -1;
+#endif
+    uint32_t t = TAG(h);
+    if (t < T_CLO || t == T_HYP) { for (uint32_t i = 0; i < SIZE(h); i++) RT_PUSH_MT(h->f[i]); }
+    else if (t == T_CLO) { Clo *c = (Clo *)h; for (uint32_t i = 0; i < SIZE(c); i++) RT_PUSH_MT(c->env[i]); }
+    else if (t == T_THUNK) { Thunk *th = (Thunk *)h; RT_PUSH_MT(th->fn ? th->fn : th->val); }
+    else if (t == T_ARR) { Arr *a = (Arr *)h; for (size_t i = 0; i < a->len; i++) RT_PUSH_MT(a->data[i]); }
+    else if (t == T_MAP) { Map *m = (Map *)h;
+      for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { RT_PUSH_MT(m->keys[i]); RT_PUSH_MT(m->vals[i]); } }
+  }
+#undef RT_PUSH_MT
+  free(st);
+}
+
+/* the threads a program started but that have not ended (the program waits for them
+   before its leak check; a finished thread adds its allocation balance) */
+static rt_mutex rt_threads_mu = RT_MUTEX_INITIALIZER;
+static rt_cond rt_threads_cv = RT_COND_INITIALIZER;
+static int64_t rt_threads_running = 0;
+
+typedef struct { V fn, arg; } RtSpawn;
+
+static void *rt_thread_main(void *p) {
+  RtSpawn a = *(RtSpawn *)p;
+  free(p);
+  /* `fn : (c : Chan …) → IO Unit`: apply it to its argument and a world */
+  V args[2] = {a.arg, BOX(0)};
+  V r = apn(a.fn, 2, args);
+  rt_drop(r);
+  rt_mu_lock(&rt_threads_mu);
+#ifdef WIZ_RC
+  rt_live_exited += (int64_t)rt_live;
+#endif
+  rt_threads_running--;
+  rt_cv_broadcast(&rt_threads_cv);
+  rt_mu_unlock(&rt_threads_mu);
+  return NULL;
+}
+
+/* run `fn arg world` on a new thread; `fn` must be shared already, `arg` is moved */
+static void rt_spawn(V fn, V arg) {
+#ifdef WIZ_NO_THREADS
+  (void)fn; (void)arg;
+  die("fork needs threads (this build has WIZ_NO_THREADS)");
+#else
+  RtSpawn *a = (RtSpawn *)malloc(sizeof *a);
+  if (!a) die("out of memory");
+  a->fn = fn; a->arg = arg;
+  const char *mb = getenv("WIZ_THREAD_STACK_MB");
+  size_t size = (size_t)(mb ? atol(mb) : 256) << 20;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, size);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  rt_mu_lock(&rt_threads_mu);
+  rt_threads_running++;
+  rt_mu_unlock(&rt_threads_mu);
+  pthread_t t;
+#ifndef WIZ_RC
+  /* (the collector's create: it registers the thread's stack) */
+  if (GC_pthread_create(&t, &attr, rt_thread_main, a) != 0) die("can't start a thread");
+#else
+  if (pthread_create(&t, &attr, rt_thread_main, a) != 0) die("can't start a thread");
+#endif
+  pthread_attr_destroy(&attr);
+#endif
+}
+
+static void rt_wait_threads(void) {
+#ifdef WIZ_NO_THREADS
+  return;
+#else
+  rt_mu_lock(&rt_threads_mu);
+  while (rt_threads_running > 0) rt_cv_wait(&rt_threads_cv, &rt_threads_mu);
+  rt_mu_unlock(&rt_threads_mu);
+#endif
+}
+
+/* -- channels (lib/Session.wiz): two endpoints, one queue of messages towards each.
+   Sending never blocks; receiving waits for a message. Each endpoint is a foreign
+   object; the channel goes when both are closed. -- */
+typedef struct RtMsg { V v; struct RtMsg *next; } RtMsg;
+typedef struct RtChan RtChan;
+typedef struct { RtChan *ch; int side; } RtEnd;
+struct RtChan {
+  rt_mutex mu;
+  rt_cond cv;
+  RtMsg *head[2], *tail[2]; /* messages to side 0, to side 1 */
+  int ends;
+  RtEnd end[2];
+};
+
+static void rt_chan_end_fin(void *p) {
+  RtEnd *e = (RtEnd *)p;
+  RtChan *ch = e->ch;
+  rt_mu_lock(&ch->mu);
+  int last = --ch->ends == 0;
+  rt_mu_unlock(&ch->mu);
+  if (!last) return;
+  for (int s = 0; s < 2; s++)
+    for (RtMsg *m = ch->head[s]; m;) { RtMsg *nx = m->next; rt_drop(m->v); free(m); m = nx; }
+  rt_mu_destroy(&ch->mu);
+  rt_cv_destroy(&ch->cv);
+  free(ch);
+}
+
+static RtChan *rt_chan_of(V c, int *side) {
+  RtEnd *e = (RtEnd *)((Ext *)OBJ(c))->ptr;
+  *side = e->side;
+  return e->ch;
+}
+
+/* `Chan.forkRaw child`: a new channel; `child` runs on end 1 in a new thread, the
+   caller gets end 0 */
+static V wiz_chan_fork(V child) {
+  RtChan *ch = (RtChan *)calloc(1, sizeof(RtChan));
+  if (!ch) die("out of memory");
+  rt_mu_init(&ch->mu);
+  rt_cv_init(&ch->cv);
+  ch->ends = 2;
+  for (int s = 0; s < 2; s++) { ch->end[s].ch = ch; ch->end[s].side = s; }
+  V e0 = rt_out_ptr(&ch->end[0], rt_chan_end_fin);
+  V e1 = rt_out_ptr(&ch->end[1], rt_chan_end_fin);
+  rt_mark_mt(child);
+  rt_spawn(child, e1);
+  return e0;
+}
+
+/* `Chan.sendRaw c a`: queue `a` for the other end; the endpoint comes back */
+static V wiz_chan_send(V c, V a) {
+  int side;
+  RtChan *ch = rt_chan_of(c, &side);
+  rt_mark_mt(a);
+  RtMsg *m = (RtMsg *)malloc(sizeof *m);
+  if (!m) die("out of memory");
+  m->v = a; m->next = NULL;
+  int to = 1 - side;
+  rt_mu_lock(&ch->mu);
+  if (ch->tail[to]) ch->tail[to]->next = m; else ch->head[to] = m;
+  ch->tail[to] = m;
+  rt_cv_broadcast(&ch->cv);
+  rt_mu_unlock(&ch->mu);
+  return c;
+}
+
+/* `Chan.recvRaw c`: wait for a message; ⟨message, endpoint⟩ */
+static V wiz_chan_recv(V c) {
+  int side;
+  RtChan *ch = rt_chan_of(c, &side);
+  rt_mu_lock(&ch->mu);
+  while (!ch->head[side]) rt_cv_wait(&ch->cv, &ch->mu);
+  RtMsg *m = ch->head[side];
+  ch->head[side] = m->next;
+  if (!m->next) ch->tail[side] = NULL;
+  rt_mu_unlock(&ch->mu);
+  V v = m->v;
+  free(m);
+  return pair(v, c);
+}
+
+static void wiz_chan_close(V c) { rt_drop(c); }
+
+/* -- MVars and locks (lib/MVar.wiz) -- */
+typedef struct {
+  rt_mutex mu;
+  rt_cond cv;
+  int full;
+  V v;
+} RtMVar;
+
+static void rt_mvar_fin(void *p) {
+  RtMVar *m = (RtMVar *)p;
+  if (m->full) rt_drop(m->v);
+  rt_mu_destroy(&m->mu);
+  rt_cv_destroy(&m->cv);
+  free(m);
+}
+
+static V wiz_mvar_new(void) {
+  RtMVar *m = (RtMVar *)calloc(1, sizeof(RtMVar));
+  if (!m) die("out of memory");
+  rt_mu_init(&m->mu);
+  rt_cv_init(&m->cv);
+  m->v = BOX(0);
+  return rt_out_ptr(m, rt_mvar_fin);
+}
+
+static V rt_mvar_take_(V mv, int keep) {
+  RtMVar *m = (RtMVar *)((Ext *)OBJ(mv))->ptr;
+  rt_mu_lock(&m->mu);
+  while (!m->full) rt_cv_wait(&m->cv, &m->mu);
+  V v = m->v;
+  if (keep) rt_dup(v);
+  else { m->full = 0; m->v = BOX(0); rt_cv_broadcast(&m->cv); }
+  rt_mu_unlock(&m->mu);
+  rt_drop(mv);
+  return v;
+}
+
+static void wiz_mvar_put(V mv, V a) {
+  RtMVar *m = (RtMVar *)((Ext *)OBJ(mv))->ptr;
+  rt_mark_mt(a);
+  rt_mu_lock(&m->mu);
+  while (m->full) rt_cv_wait(&m->cv, &m->mu);
+  m->v = a; m->full = 1;
+  rt_cv_broadcast(&m->cv);
+  rt_mu_unlock(&m->mu);
+  rt_drop(mv);
+}
+
+static V wiz_mvar_new_full(V a) {
+  V mv = wiz_mvar_new();
+  rt_dup(mv);
+  wiz_mvar_put(mv, a);
+  return mv;
+}
+static V wiz_mvar_take(V mv) { return rt_mvar_take_(mv, 0); }
+static V wiz_mvar_read(V mv) { return rt_mvar_take_(mv, 1); }
+/* the hole is a token with nothing in it */
+static V wiz_mvar_take_hole(V mv) { return pair(rt_mvar_take_(mv, 0), BOX(0)); }
+static void wiz_mvar_fill(V mv, V hole, V a) { rt_drop(hole); wiz_mvar_put(mv, a); }
+
+/* lib/Handle.wiz and lib/Ref.wiz: an obligation and an ownership token are empty boxes
+   (as an MVar hole); a ref is an MVar that stays full */
+static V wiz_handle_own(void) { return BOX(0); }
+static void wiz_handle_disown(V tok) { rt_drop(tok); }
+static V wiz_ref_new(V a) { return pair(wiz_mvar_new_full(a), BOX(0)); }
+static V wiz_ref_read(V mv, V tok) { return pair(rt_mvar_take_(mv, 1), pair(BOX(0), tok)); }
+static V wiz_ref_write(V mv, V a, V tok) {
+  rt_dup(mv); /* take_ and put each consume one reference */
+  rt_drop(rt_mvar_take_(mv, 0));
+  wiz_mvar_put(mv, a);
+  return tok;
+}
+static void wiz_ref_free(V mv, V tok) { rt_drop(tok); rt_drop(rt_mvar_take_(mv, 0)); }
+
+/* a lock is a binary semaphore, so a guard may be released by another thread */
+typedef struct {
+  rt_mutex mu;
+  rt_cond cv;
+  int held;
+} RtLock;
+
+static void rt_lock_fin(void *p) {
+  RtLock *l = (RtLock *)p;
+  rt_mu_destroy(&l->mu);
+  rt_cv_destroy(&l->cv);
+  free(l);
+}
+static V wiz_lock_new(void) {
+  RtLock *l = (RtLock *)calloc(1, sizeof(RtLock));
+  if (!l) die("out of memory");
+  rt_mu_init(&l->mu);
+  rt_cv_init(&l->cv);
+  return rt_out_ptr(l, rt_lock_fin);
+}
+static V wiz_lock_acquire(V lv) {
+  RtLock *l = (RtLock *)((Ext *)OBJ(lv))->ptr;
+  rt_mu_lock(&l->mu);
+  while (l->held) rt_cv_wait(&l->cv, &l->mu);
+  l->held = 1;
+  rt_mu_unlock(&l->mu);
+  rt_drop(lv);
+  return BOX(0);
+}
+static void wiz_lock_release(V lv, V g) {
+  RtLock *l = (RtLock *)((Ext *)OBJ(lv))->ptr;
+  rt_drop(g);
+  rt_mu_lock(&l->mu);
+  l->held = 0;
+  rt_cv_broadcast(&l->cv);
+  rt_mu_unlock(&l->mu);
+  rt_drop(lv);
+}
+
 #ifndef WIZ_RC
 /* at exit (the collector): finalize the foreign pointers nothing reaches any more */
 static void rt_finishGC(void) {
+  rt_wait_threads();
   if (rt_nfin) { GC_gcollect(); GC_invoke_finalizers(); }
   fflush(stdout);
 }
@@ -1307,69 +1762,12 @@ static void rt_ensure(void) {
 /* (21s) Handles, as in `runtime/wiz.c` (stage 9g): C owns the reference to a Wiz value it
    gets (from an export, or a `Callback`'s context), `wiz_retain` makes one more and
    `wiz_release` gives one back. `wiz_live_objects` counts the objects alive, for leak
-   checks in C tests: under reference counting, those allocated and not freed, less the
-   program's constants (what the roots reach: globals computed once, natives' closures);
-   under the collector nothing is counted (0). */
+   checks in C tests: under reference counting, those allocated and not freed (a program's
+   constants are immortal and not counted); under the collector nothing is counted (0). */
 #ifdef WIZ_RC
-static int rt_isNul(Obj *o) { return (void *)o >= (void *)rt_nul && (void *)o < (void *)(rt_nul + RT_NNUL); }
-/* a set of objects (open addressing), and a stack of objects to visit */
-static Obj **rt_seenT; static size_t rt_seenCap, rt_seenN;
-static Obj **rt_todo; static size_t rt_todoN, rt_todoCap;
-static int rt_seenAdd(Obj *o) {
-  if (2 * (rt_seenN + 1) > rt_seenCap) {
-    size_t oc = rt_seenCap; Obj **old = rt_seenT;
-    rt_seenCap = oc ? 2 * oc : 1024;
-    rt_seenT = (Obj **)calloc(rt_seenCap, sizeof(Obj *));
-    if (!rt_seenT) die("out of memory");
-    rt_seenN = 0;
-    for (size_t i = 0; i < oc; i++) if (old[i]) (void)rt_seenAdd(old[i]);
-    free(old);
-  }
-  size_t h = ((uintptr_t)o >> 4) * 11400714819323198485ull & (rt_seenCap - 1);
-  while (rt_seenT[h]) { if (rt_seenT[h] == o) return 0; h = (h + 1) & (rt_seenCap - 1); }
-  rt_seenT[h] = o; rt_seenN++;
-  return 1;
-}
-static void rt_visit(V v) {
-  if (!v || ISBOX(v)) return;
-  if (rt_todoN == rt_todoCap) {
-    rt_todoCap = rt_todoCap ? 2 * rt_todoCap : 256;
-    rt_todo = (Obj **)realloc(rt_todo, rt_todoCap * sizeof(Obj *));
-    if (!rt_todo) die("out of memory");
-  }
-  rt_todo[rt_todoN++] = OBJ(v);
-}
-static size_t rt_rooted(void) {
-  size_t n = 0;
-  rt_seenN = 0;
-  if (rt_seenT) memset(rt_seenT, 0, rt_seenCap * sizeof(Obj *));
-  for (size_t i = 0; i < rt_nroots; i++) rt_visit(*rt_roots[i]);
-  while (rt_todoN) {
-    Obj *x = rt_todo[--rt_todoN];
-    if (rt_isNul(x) || !rt_seenAdd(x)) continue;
-    n++;
-    uint32_t t = TAG(x);
-    /* (the children, as `rt_drain` releases them) */
-    if (t < T_CLO || t == T_HYP) { for (uint32_t i = 0; i < SIZE(x); i++) rt_visit(x->f[i]); }
-    else if (t == T_CLO) {
-      Clo *c = (Clo *)x;
-      for (uint32_t i = 0; i < SIZE(c); i++) rt_visit(c->env[i]);
-    } else if (t == T_THUNK) {
-      Thunk *th = (Thunk *)x;
-      rt_visit(th->fn ? th->fn : th->val);
-    } else if (t == T_ARR) {
-      Arr *a = (Arr *)x;
-      for (size_t i = 0; i < a->len; i++) rt_visit(a->data[i]);
-    } else if (t == T_MAP) {
-      Map *m = (Map *)x;
-      for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { rt_visit(m->keys[i]); rt_visit(m->vals[i]); }
-    }
-  }
-  return n;
-}
 void wiz_release(void *v) { dec((V)v); }
 void wiz_retain(void *v) { inc((V)v); }
-long wiz_live_objects(void) { return (long)(rt_live - rt_rooted()); }
+long wiz_live_objects(void) { return (long)((int64_t)rt_live + rt_live_exited); }
 #else
 void wiz_release(void *v) { (void)v; }
 void wiz_retain(void *v) { (void)v; }
