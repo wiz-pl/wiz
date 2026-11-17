@@ -608,6 +608,92 @@ def serverGroup : Group where
         checkEq "\"x\"" (LSP.get? r ["goal", "userName"]).get!.compress
         let (_, out) ← openDoc src
         check (!(out.any (has · "wiz/elaborated"))) "unasked wiz/elaborated" },
+    { name := "#435: wiz/typeAt and wiz/coreTerm (one-shot: no session, no ref)", run := fun _ => do
+        let src := "import Prelude\ndef double (n : Nat) : Nat := Nat.add n n\ndef four : Nat := double 2\n" ++
+          "def k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n" ++
+          "inductive T where\n  | a\n  | b (t : T)\ndef f (t : T) : Nat := match t with\n  | .a => 0\n  | .b _ => 1\n" ++
+          "def myId {A : Type} (x : A) : A := x\ndef three : Nat := myId 3\naxiom ax : Nat\ndef s : Nat := 1 + 2\n"
+        let (srv, out) ← openDoc src
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        -- advertised, and answered on the infoview socket's side too
+        let (_, caps) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "wiz/typeAt" && has caps[0]! "wiz/coreTerm") "not advertised"
+        check (LSP.infoviewMethods.contains "wiz/typeAt" && LSP.infoviewMethods.contains "wiz/coreTerm") "not infoview methods"
+        -- wiz/typeAt, against what plainTermGoal says at the same place (`⊢ T`, same range)
+        let typeAt (srv : LSP.Server) (off : Nat) (what term ty kind : String) : IO LSP.Server := do
+          let (srv, r) ← ask srv "wiz/typeAt" src off
+          check (r != Lean.Json.null) s!"{what}: null"
+          -- ("" : whatever it is, as long as plainTermGoal agrees)
+          unless term.isEmpty do checkEq term (LSP.getStr r ["term"])
+          unless ty.isEmpty do checkEq ty (LSP.getStr r ["type"])
+          unless kind.isEmpty do checkEq kind (LSP.getStr r ["kind"])
+          let (srv, g) ← ask srv "wiz/plainTermGoal" src off
+          check ((LSP.getStr g ["goal"]).endsWith s!"⊢ {LSP.getStr r ["type"]}") s!"{what}: plainTermGoal says {g.compress}, typeAt {r.compress}"
+          checkEq (LSP.get? g ["range"]).get!.compress (LSP.get? r ["range"]).get!.compress
+          pure srv
+        let srv ← typeAt srv (offAfter src "double 2" (-1)) "a literal" "2" "Nat" "term"
+        let srv ← typeAt srv (offAfter src "four : Nat := double") "an application" "double 2" "Nat" "term"
+        -- (a tactic's arguments have no ranges of their own: what is around them)
+        let srv ← typeAt srv (offAfter src "exact n" (-1)) "inside a tactic proof" "" "" ""
+        let srv ← typeAt srv (offAfter src ":= matc" (-2)) "a match" "match t with | .a => 0 | .b _ => 1" "Nat" "term"
+        let srv ← typeAt srv (offAfter src "myId 3" (-1)) "an implicit argument's instance" "3" "Nat" "term"
+        -- an identifier: the type hover shows, and the name it resolved to
+        let (srv, r) ← ask srv "wiz/typeAt" src (offAfter src "four : Nat := dou")
+        checkEq "const" (LSP.getStr r ["kind"])
+        checkEq "double" (LSP.getStr r ["name"])
+        let (srv, h) ← ask srv "textDocument/hover" src (offAfter src "four : Nat := dou")
+        check ((LSP.getStr h ["contents", "value"]).startsWith s!"```wiz\ndouble : {LSP.getStr r ["type"]}\n") s!"hover {h.compress} vs {r.compress}"
+        checkEq "Nat → Nat" (LSP.getStr r ["type"])
+        -- a function with an implicit argument, applied: as hover shows it
+        let (srv, r) ← ask srv "wiz/typeAt" src (offAfter src "myId 3" (-3))
+        let (srv, h) ← ask srv "textDocument/hover" src (offAfter src "myId 3" (-3))
+        check ((LSP.getStr h ["contents", "value"]).startsWith s!"```wiz\nmyId : {LSP.getStr r ["type"]}\n") s!"hover {h.compress} vs {r.compress}"
+        -- nothing elaborated there: null
+        let (srv, r) ← ask srv "wiz/typeAt" src 2
+        check (r == Lean.Json.null) s!"in the import: {r.compress}"
+        -- wiz/coreTerm, by name
+        let core (srv : LSP.Server) (params : String) : IO (LSP.Server × Lean.Json) := do
+          let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"wiz/coreTerm\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"}{params}}}")
+          pure (srv, (out[0]!.getObjVal? "result").toOption.getD Lean.Json.null)
+        let (srv, r) ← core srv ",\"name\":\"double\""
+        checkEq "double" (LSP.getStr r ["name"])
+        checkEq "Nat → Nat" (LSP.getStr r ["type"])
+        checkEq "definition" (LSP.getStr r ["kind"])
+        check ((LSP.getStr r ["value"]).startsWith "fun " && has r "Nat.add") s!"value: {r.compress}"
+        check (LSP.get? r ["axioms"] matches some (Lean.Json.arr _)) s!"axioms: {r.compress}"
+        check (has r "\"location\":{" && !has r "\"raw\"") s!"location/raw: {r.compress}"
+        -- a tactic proof: its term, after the tactics ran
+        let (srv, r) ← core srv ",\"name\":\"k\""
+        checkEq "Nat → Bool → Nat" (LSP.getStr r ["type"])
+        check ((LSP.getStr r ["value"]).startsWith "fun ") s!"k: {r.compress}"
+        -- opaque things say so instead of unfolding: a constructor, an axiom (which is its own axiom)
+        let (srv, r) ← core srv ",\"name\":\"T.a\""
+        checkEq "opaque" (LSP.getStr r ["kind"])
+        check (LSP.get? r ["value"] == some Lean.Json.null) s!"T.a: {r.compress}"
+        let (srv, r) ← core srv ",\"name\":\"ax\""
+        checkEq "opaque" (LSP.getStr r ["kind"])
+        check (has (LSP.get? r ["axioms"]).get! "\"ax\"") s!"ax: {r.compress}"
+        let (srv, r) ← core srv ",\"name\":\"three\""
+        check (has (LSP.get? r ["axioms"]).get! "\"ax\"" == false) s!"three: {r.compress}"
+        -- by position: the global used there, else the declaration of the command there
+        let (srv, r) ← core srv s!",\"position\":{posJson src (offAfter src "four : Nat := dou")}"
+        checkEq "double" (LSP.getStr r ["name"])
+        let (srv, r) ← core srv s!",\"position\":{posJson src (offAfter src "def fou")}"
+        checkEq "four" (LSP.getStr r ["name"])
+        check (has r "double") s!"four: {r.compress}"
+        -- notation: the core term by default; with `notation: true` as hovers print it
+        let (srv, plain) ← core srv ",\"name\":\"s\""
+        check (!(LSP.getStr plain ["value"]).contains '+') s!"core with notation: {plain.compress}"
+        let (srv, pretty) ← core srv ",\"name\":\"s\",\"notation\":true"
+        check ((LSP.getStr pretty ["value"]).length > 0) s!"notation: {pretty.compress}"
+        -- raw: the core syntax trees; axioms: false leaves the list out
+        let (srv, r) ← core srv ",\"name\":\"double\",\"raw\":true,\"axioms\":false"
+        check ((LSP.getStr r ["raw", "value"]).length > 0 && LSP.get? r ["axioms"] == none) s!"raw: {r.compress}"
+        -- an unknown name, and no name or position: null
+        let (srv, r) ← core srv ",\"name\":\"nope\""
+        check (r == Lean.Json.null) s!"nope: {r.compress}"
+        let (_, r) ← core srv ""
+        check (r == Lean.Json.null) s!"nothing: {r.compress}" },
     { name := "code action: did you mean", run := fun _ => do
         let src := "import Prelude\ndef double (n : Nat) : Nat := n + n\ndef four : Nat := doubel 2\n"
         let (srv, out) ← openDoc src
