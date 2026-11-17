@@ -1462,6 +1462,51 @@ error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.me
 `Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
 in linear time.
 
+## Byte buffers (`lib/IO.wiz`, `Bytes`)
+
+`import IO` (or `Std`, which imports it) gives `Bytes`, a functional buffer of bytes. A
+byte is a `Nat` below 256: `Bytes.push b x` appends the low eight bits of `x`, and
+`Bytes.get b i` is `0` past the end (the total `Bytes.at` is `none`).
+
+| operation | meaning |
+|---|---|
+| `Bytes.empty` | the empty buffer |
+| `Bytes.push b x` | `b` with `x mod 256` at the end (in place when `b` is unique) |
+| `Bytes.size b` | the number of bytes |
+| `Bytes.get b i` | byte `i`, or `0` past the end |
+| `Bytes.ofString s`, `Bytes.toString b` | through a C string: they **stop at a NUL** |
+| `Bytes.slice b start len` | from `start`, at most `len` bytes (both clamp) |
+| `Bytes.append a b` | `a`'s bytes then `b`'s (in place when `a` is unique) |
+| `Bytes.eq a b` | byte for byte equality, length included |
+
+Pure helpers built on those: `Bytes.isEmpty`, `Bytes.at` (`Option Nat`), `Bytes.take`,
+`Bytes.drop` (past the end is the empty buffer), `Bytes.ofList`/`Bytes.toList` (each
+number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.show`
+(`[1, 2, 255]`, the form `#eval` prints a buffer in).
+
+**Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
+`Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;
+the decoder rejects overlong forms, encoded surrogates and truncated sequences with
+`"invalid UTF-8 at byte k"`. `Bytes.ofLatin1 s : Except String Bytes` and
+`Bytes.toLatin1 b` are one byte per character, code points 0 … 255 (above 255 is an
+error, not a truncation). `Bytes.ofString`/`Bytes.toString` stay the C-string pair, so
+`ofString` of a string with a NUL gives the bytes before it; `String.length` counts
+characters and `Bytes.size` bytes, so one astral character is one character and four
+bytes.
+
+`Bytes.ofArray a`/`Bytes.toArray b` (in `Std`, where `Array` is) convert to and from an
+`Array Nat`, each element mod 256. `import WordBytes` adds `Bytes.ofU8s`/`toU8s`
+(`List U8`); `U8Array ↔ Bytes` is not there yet (stage 29). `FS.readBytes`,
+`File.readBytes` and `Fd.read` hand back `Bytes` (9k).
+
+**The interpreters.** `#eval` and `#run` cannot call C, so they implement the nine
+operations on a `ByteArray` (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`), with
+`ofString`/`toString` mirroring the C boundary exactly; a `Bytes` value prints as
+`[1, 2, 255]`, equality computes, and a list of bytes is a `Bytes.ofList` application.
+Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model of
+`Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
+uses the same nine runtime natives (`selfhost/rt.c`).
+
 ## 9j: list lemmas (`lib/ListLemmas.wiz`)
 
 `import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,

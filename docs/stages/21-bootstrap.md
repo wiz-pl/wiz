@@ -866,8 +866,8 @@ pattern) therefore compiles to its natives. Direct pattern matching on a native 
 still needs `get` in erasure.
 
 **Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
-a `c_struct`/`foreign_type`), no `Bytes`/buffer parameters, no `for` loops, struct locals
-or `&struct` in self-hosted glue, no rewriting of matches through `get`.
+a `c_struct`/`foreign_type`), no `for` loops, struct locals or `&struct` in self-hosted
+glue, no rewriting of matches through `get` (buffer parameters came in 21ad).
 
 **Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
 and from `glue`, and a native representation on a sealed constructor that runs through
@@ -877,7 +877,8 @@ and from `glue`, and a native representation on a sealed constructor that runs t
 parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
 is `double`, `s` is `const char *` (borrowed in, caller-owned out), `b` is `int`, `p`
 is `void *` (+1 wrapped, borrowed for a call), `w` is a Wiz `wiz_val` (+0 in, +1 out),
-and `e`/`v` are omitted from the C prototype. Structs by value go only through an
+and `e`/`v` are omitted from the C prototype (`y`, a byte buffer, is 21ag: the buffer's
+pointer and length). Structs by value go only through an
 explicit `c_struct`; a native representation is accepted only on a **sealed** type
 whose constructor's `mk`/`get` are registered, so values of the type are the runtime
 natives. The generated `--header` now defines `WIZ_ABI_MAJOR`/`WIZ_ABI_MINOR` (1/0)
@@ -1146,3 +1147,66 @@ case's output. CI runs it as its own shard (`selfhost-libdiff` in
 files whose verdicts differ by the construct the self-hosted frontend names
 (`unsupported syntax term.by` is `by`, `unsupported command command.syntax` is `syntax`,
 …), and prints the ten files to start with (most common construct first).
+
+## 21ag: `Bytes`, self-hosted (C11)
+
+`Bytes` (9d/9k, `lib/IO.wiz`) now checks and compiles in the self-hosted toolchain.
+
+* **Prelude** (`Frontend.wiz`, `preludeText`). `axiom Bytes : Type` and the nine
+  operations the Lean toolchain declares as `extern`s (`Bytes.empty`, `push`, `size`,
+  `get`, `ofString`, `toString`, `slice`, `append`, `eq`), plus the pure helpers
+  `isEmpty`, `at`, `take`, `drop`, `ofList`, `toList`, `singleton` and `show`, copied
+  from `lib/IO.wiz` so the same program checks in both toolchains. The operations are
+  runtime natives (`bytesNatives`, added to `nativeNames`), as `Array`'s are.
+* **Runtime** (`rt.c`). `wiz_bytes` with `runtime/wiz_rt.h`'s layout (the header, then
+  `len`, `cap`, `data`; a static assert keeps them equal), the nine `get_Bytes_46_*`
+  natives, and `rt_bytes_new` for a struct field. `push` and `append` update in place
+  when the buffer is unique (reference counting), as `runtime/wiz.c` does; under the
+  collector there is no reference count, so they copy instead (a shared buffer must not
+  change: `Bytes` is functional). The storage is freed with the object (a copy's old
+  buffer becomes garbage), and the bytes are not Wiz values (the collector and the leak
+  check ignore them).
+* **`import_c` and `glue`** (`Frontend.wiz`, `Backend.wiz`). A C `const void *buf,
+  size_t n` (or `const unsigned char *` and a length parameter named `n`, `__n`, `len`,
+  `__len`, `nbytes`, `__nbytes`, `length` or `__length`) is one `Bytes` parameter (FFI
+  kind `y`), as in `Elab/Command.lean`. The backend passes the buffer's `data` and `len`
+  as the two C arguments, releases the buffer after the call, and writes both in a
+  prototype. A `c_struct` field of type `Bytes` (with a header) is kind `y` too:
+  `wiz_sin_*` copies the buffer into the C array (cut or zero-padded to the array's
+  size) and `wiz_sout_*` makes a `Bytes` of the array's size. `glue` does not see such
+  a field (as in the Lean frontend) but sees a buffer function's two C parameters.
+  An imported function's parameter keeps its own Wiz type name: a `c_struct`
+  parameter gets the declared structure's name, not the C parameter's name (the C name
+  is only needed to recognize a buffer's length parameter). Glue calls are also checked
+  in source order now (`CGlue.wiz` collected the argument types backwards, which only a
+  call with differently typed parameters, such as a buffer's pointer and length, shows).
+
+**Tests** (group `selfhost`): every operation, including sharing (a `push` or `append`
+that leaves the old buffer alone), compiled by the Lean toolchain and by the
+self-hosted one (collector and reference counting, which also checks for leaks);
+`import_c` with a buffer argument and a struct with a byte-array field passed to C and
+read back; and a `Bytes` `c_struct` field without a header rejected by both frontends.
+
+**Then** (the same stage, extended): the encodings (`ofUtf8`/`toUtf8`, `ofLatin1`/`toLatin1`,
+with `Except` added to the Prelude), `ofString`/`toString` with the C-string rule,
+`Bytes.ofArray`/`toArray` (in `Std`, where `Array` is) and a **model** for `#reduce`:
+`Bytes` is a private constructor over a `List Nat` in the Prelude, so `#reduce
+Bytes.size (Bytes.ofList …)`, `Bytes.eq`, `Bytes.get`, `Bytes.slice` and `Bytes.toList`
+compute and print in the checker's usual constructor style; the nine names are still in
+`nativeNames`, so compiled code is unchanged (the definitions' bodies are never
+compiled, and no constructor value can be built outside them). A buffer pointer may also
+be spelled `char *` (with a length), `unsigned char *` or `signed char *`/`uint8_t *`
+(typedef-resolved), and a `c_struct` parameter is now a `gstruct` in `glueGtyOfKind`
+(it was `.gint`, so glue could take a struct but the C parameter was wrong). The
+borrowed/owned rule and the struct-field copy are in `docs/stages/09-ffi.md` 9l.
+
+**Tests** (group `selfhost`): the encodings, `Array ↔ Bytes` and the
+slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argument
+(borrowed: the buffer is used after the call) and a `Bytes` `c_struct` field through
+`glue` (passed to C and returned), each compiled by the Lean toolchain and by the
+self-hosted one (collector and reference counting); `=ffi` has `#eval`/`#run` of the
+operations in the host interpreters.
+
+**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
+`U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
+`File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
