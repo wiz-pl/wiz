@@ -328,6 +328,21 @@ def group : Group where
        "#eval (forge (Look.mk 11)).val\n")
       (some "private") "G.mk x" "hidden outside its module"
       [("Priv", privMod)],
+    -- (13b) the message shows the hole, the guess and both types, as a type mismatch does
+    rejected "opaque: a forging guess shows the hole, the guess and both types"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" "(implicit argument F)\n  expected: "
+      [("Priv", privMod)],
+    rejected "opaque: a forging guess names the guess"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" "\n  guess: G\n  its type: "
+      [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
     rejected "opaque: a first-order solution in equations cannot forge either"

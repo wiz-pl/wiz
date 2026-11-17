@@ -89,6 +89,8 @@ unboxed; not stable under substitution, so off by default)
 --strict-privacy (13b, an experiment; turns the cache off): check each declaration again with
   the definitions of other modules' types with private parts hidden
 --pp-all (11r; turns the cache off): print terms without notation (as `set_option pp.all true`)
+--trace-guess-fallback (13b, a diagnostic; turns the cache off): print (stderr) each declaration
+  whose guessed hole solutions reach the whole-declaration recheck, and why
 toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --cflags \"…\" --ldflags \"…\" (where GMP lives),
   --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)"
 
@@ -321,7 +323,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
   let unboxStructs ← unboxOpt.get
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
-      proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
+      proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get) &&
+      !(← traceGuessesRef.get)
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
@@ -888,6 +891,8 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
   let args := args.filter (· != "--pp-all")
+  if args.contains "--trace-guess-fallback" then traceGuessesRef.set true
+  let args := args.filter (· != "--trace-guess-fallback")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
   regionStatsOpt.set (args.contains "--region-stats")

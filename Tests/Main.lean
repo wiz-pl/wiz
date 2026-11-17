@@ -206,6 +206,11 @@ def main (args : List String) : IO UInt32 := do
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
+  -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
+  -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
+  let traceGuesses := args.contains "--trace-guess-fallback"
+  let args := args.filter (· != "--trace-guess-fallback")
+  if traceGuesses then Wiz.traceGuessesRef.set true
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- the processes the suite starts get the toolchain as flags
@@ -214,7 +219,7 @@ def main (args : List String) : IO UInt32 := do
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set tc.toFlags
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
