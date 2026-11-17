@@ -1731,6 +1731,39 @@ def selfHostGroup : Group where
           "Pair : U0\n(x0 : Nat) → (x1 : Nat) → Pair\n" ++
           "con((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\n" ++
           s!"error: the type being defined may only occur as the type of a recursive field or the result\nerror: type mismatch: expected Nat, got U1\n") },
+    -- **A19/B4**: `coinductive` and copatterns, compared host (the Lean frontend) and
+    -- self-hosted (the kernel's `coit`/`cocon`).
+    { name := "the self-hosted frontend: coinductive types and copatterns (A19/B4)", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def zeros : Stream Nat\n  | .head => 0\n  | .tail => zeros\n" ++
+           "def register {A : Type} (init : A) (s : Stream A) : Stream A\n  | .head => init\n  | .tail => s\n" ++
+           "def mealy {S I O : Type} (f : S → I → S × O) (st : S) (i : Stream I) : Stream O\n" ++
+           "  | .head => (f st i.head).2\n  | .tail => mealy f (f st i.head).1 i.tail\n")
+          [("(nats 0).tail.tail.head", 2),
+           ("(zeros.tail.tail.tail.head)", 0),
+           ("(register 9 (nats 0)).tail.head", 0),
+           ("(Stream.mk 7 (nats 8)).tail.head", 8),
+           ("(mealy (fun (acc x : Nat) => (acc + x, acc + x)) 0 (nats 1)).tail.tail.head", 6)] },
+    { name := "the self-hosted frontend: the coinduction primitives ν, out, cocon, coit (A19/B4)", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def typed : ν (Stream.desc Nat) () := nats 3\n" ++
+           "def c5 : Stream Nat := cocon (5, nats 6, (), ())\n" ++
+           "def z : Stream Nat := coit (fun (_ : Unit) => Nat) (fun (i : Unit) (s : Nat) => (s, s + 1, (), ())) 0\n")
+          [("(out c5).1", 5),
+           ("(out typed).1", 3),
+           ("(out z).1", 0),
+           ("z.tail.head", 1)] },
+    { name := "the self-hosted frontend: copattern errors (missing observation, guardedness, cocon's type) (A19/B4)", run := fun _ =>
+        selfhostAgrees
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n")
+          [("def ones : Stream Nat\n  | .head => 1\n", false),
+           ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
+           ("def bad : Nat := cocon (0, ())\n", false),
+           ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
     { name := "pattern matching and structural recursion, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef two : Nat := Nat.succ (Nat.succ Nat.zero)\ndef add (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => Nat.succ (add k n)\n#reduce add two two\ndef mul (m n : Nat) : Nat := match n with\n  | .zero => Nat.zero\n  | .succ k => add m (mul m k)\n#reduce mul two (Nat.succ (Nat.succ (Nat.succ Nat.zero)))\ndef Code (n : Nat) : Type := match n with\n  | .zero => Nat\n  | _ => Nat → Nat\n#check Code\ndef pred (n : Nat) : Nat := match n with\n  | .succ k => k\n  | x => x\n#reduce pred two\ndef bad (n : Nat) : Nat := match n with\n  | .succ k => k\ndef bad2 (m n : Nat) : Nat := match m with\n  | .zero => n\n  | .succ k => add k (bad2 n k)\n"
           "Nat : U0\ntwo : Nat\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmul : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nCode : (x0 : Nat) → U0\n(x0 : Nat) → U0\npred : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nerror: missing case zero\nerror: unknown identifier bad2\n" },
