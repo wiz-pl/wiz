@@ -1534,36 +1534,36 @@ left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
 soundness/completeness in proofs and the `#check`/`#eval` behaviour.
 
-## Web: a React-style UI framework (`lib/Web/React.wiz`)
+## Web: the Loom UI framework (`lib/Web/Loom.wiz`)
 
-`import Web.React` (over `Json`, `Optic` and `Tagged`): components, local state,
+`import Web.Loom` (over `Json`, `Optic` and `Tagged`): components, local state,
 typed event handlers, keyed lists, a pure virtual DOM, deterministic server-side
-rendering and a keyed diff to DOM patches. Nodes are `React.VNode M` (`text`, `raw`,
-`el`, keyed `el`, `on`), built with `React.el`/`React.text`/`React.on`/`React.keyed`;
-`React.render` gives `{tree, html, handlers}` (`React.toHtml` is the SSR string) and
-`React.Rendered.diff` a `List React.Patch` (`replace`, `text`, `setAttr`,
-`removeAttr`, `insert`, `remove`, `move`) that `React.patchesJson` hands to
-`web/framework/runtime.js`. An app is `React.App S M` (`init`, `update`, `view`); a
-component is `React.Component P S M`. Local state is a lens into the app state
-(`React.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
-commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the kernel
+rendering and a keyed diff to DOM patches. Nodes are `Loom.VNode M` (`text`, `raw`,
+`el`, keyed `el`, `on`), built with `Loom.el`/`Loom.text`/`Loom.on`/`Loom.keyed`;
+`Loom.render` gives `{tree, html, handlers}` (`Loom.toHtml` is the SSR string) and
+`Loom.Rendered.diff` a `List Loom.Patch` (`replace`, `text`, `setAttr`,
+`removeAttr`, `insert`, `remove`, `move`) that `Loom.patchesJson` hands to
+`web/framework/runtime.js`. An app is `Loom.App S M` (`init`, `update`, `view`); a
+component is `Loom.Component P S M`. Local state is a lens into the app state
+(`Loom.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
+commute), and a one-shot resource is `Loom.Owned S`, a quantity-1 token the kernel
 makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
 the only trust boundary (and must be one element); all other text and attribute values
 are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
-no effects, and `value`/`checked` would need property patches. Tests: group `react`
+no effects, and `value`/`checked` would need property patches. Tests: group `loom`
 and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
 `wiz-notes/react-framework.md`.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
-`import Web.Widget` (over `Web.React`) turns a list of widget **descriptors** into a
-React VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
+`import Web.Widget` (over `Web.Loom`) turns a list of widget **descriptors** into a
+Loom VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
 each with an id, a DOM event, a value/label/data and a callback expression naming a
 `Widget.Callback` (`Widget.Event → List Widget.Widget → List Widget.Widget`).
 `Widget.display` returns `WIZ_WIDGET:` plus the rendered HTML and the descriptors;
 `Widget.handle` parses a previous bundle, runs the callback, re-renders both lists and
 returns a `WIZ_WIDGET:` bundle whose `patches` are
-`React.patchesJson (React.Rendered.diff old new)`. The Jupyter kernel
+`Loom.patchesJson (Loom.Rendered.diff old new)`. The Jupyter kernel
 (`tools/jupyter/wiz_kernel/widgets.py`) turns the display into
 `application/vnd.wiz.widget+json` and a comm, so a slider event re-enters the session
 and the new patches go back on the same comm; `tools/jupyter/static/widget.js` applies
@@ -1574,7 +1574,7 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
 widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
 held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
-the raw `React.on`/`React.App.event` path passes only a handler index.
+the raw `Loom.on`/`Loom.App.event` path passes only a handler index.
 
 ## Numbers: classes, integers, words
 

@@ -597,7 +597,7 @@
   "prop-kernels": {
    "P5: Kernel.wiz agrees with the Lean kernel on judgments, substitution instances and conversions": {"seconds": 321.903}
   },
-  "react": {
+  "loom": {
    "SSR: a component tree renders deterministic HTML": {"seconds": 11.874},
    "escaping: text and attributes are escaped; raw is the trust boundary": {"seconds": 8.211},
    "events: the handler's event name is checked": {"seconds": 8.948},
