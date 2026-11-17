@@ -212,6 +212,8 @@ where
       as.foldl (fun acc a => go a acc) acc
     | _ => acc
 
+-- (the generic body holds the whole frontend: more than the default 200000 heartbeats)
+set_option maxHeartbeats 2000000 in
 /-- Run the frontend on `input` from the state `s`.
 
 `import M` elaborates the library module `M` (once) into the current state. Like
@@ -222,13 +224,19 @@ initial one (`pristine`: then the isolated result is what it would get), it is
 elaborated again into the importer's state, which is what the rest of the file sees.
 Each module is checked in isolation once per run (its errors are kept in
 `CommandState.checked`, its isolated state in `memo` for as long as one call runs), and,
-from an initial state, once per process (`isoKey`). -/
-partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
+from an initial state, once per process (`isoKey`).
+
+The `@[nospecialize]` (here and on the helpers) is a build-time decision: without it
+the compiler copies this body, with the whole elaborator, into each module that calls
+the frontend — `Wiz.Format` and `Wiz.LSP` each held a 29–33 MB specialisation. The
+cost is instance arguments in the frontend loop; the measurement is in
+`docs/building.md`, "The Lean build". -/
+@[nospecialize] partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
   go input s input.toList.toArray 0 s
 where
-  go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
+  @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
     (go' input base chars pos s {}).1
-  go' (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R)
+  @[nospecialize] go' (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R)
       (memo : Std.HashMap Name (CommandState R)) : CommandState R × Std.HashMap Name (CommandState R) :=
     if skipWs chars pos ≥ chars.size then (s, memo) else
     match parseCommand chars s.tables pos with
@@ -293,7 +301,7 @@ where
 
   /-- Elaborate one command, recording where the declarations it adds come from, and
   (11s) what they are and their doc comments. -/
-  step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
+  @[nospecialize] step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
     let before := s.globals.order.size
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
