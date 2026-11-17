@@ -25,6 +25,7 @@ def wordTable64Value : String := ".cons 9223372036854775808 (.cons 0 (.cons 1844
 def wordGroup : Group where
   name := "word"
   exercise := "Stage 22c"
+  parallel := true
   cases := [
     { name := "the definitions compute in the kernel", run := fun _ =>
         okLib (wordTable ++ s!"def t : main = ({wordTableValue} : List Nat) := refl main") },
