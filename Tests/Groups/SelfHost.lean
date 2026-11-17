@@ -459,9 +459,10 @@ def quantityDecls : List (String × Bool) := [
   ("def l0 (x : Nat) : Nat := let 0 y := x; y\n", false),
   ("def linTwice (1 z : Nat) : Nat := lin z (fun y => Nat.add y y)\n", false)]
 
-/-- (stage 21x) Constructor fields with quantities (`Desc.arg q S D`) and implicit
-constructor fields (at 0, filled in at the call, not named by patterns): the same
-verdicts in both frontends. -/
+/-- (stage 21x, 22a) Constructor fields with quantities (`Desc.arg q S D`), implicit
+constructor fields (at 0, filled in at the call, not named by patterns) and instance
+constructor fields (`[i : C A]`: resolved at the call, skipped by a pattern, never an
+explicit argument): the same verdicts in both frontends. -/
 def fieldQtyHeader : String :=
   "axiom Tok : Type\naxiom use : (1 t : Tok) → Nat\n" ++
   "inductive E0 where\n  | mk (0 n : Nat) (m : Nat)\n" ++
@@ -470,7 +471,11 @@ def fieldQtyHeader : String :=
   "inductive V (A : Type) : Nat → Type where\n  | nil : V A Nat.zero\n" ++
   "  | cons {n : Nat} (a : A) (rest : V A n) : V A (Nat.succ n)\n" ++
   "structure S0 where\n  0 n : Nat\n  m : Nat\n" ++
-  "structure P1 where\n  1 a : Tok\n  b : Nat\n"
+  "structure P1 where\n  1 a : Tok\n  b : Nat\n" ++
+  "class C (A : Type) where\n  f : A → Nat\n" ++
+  "instance : C Nat := C.mk (fun x => x)\n" ++
+  "inductive I where\n  | mk [i : C Nat] (x : Nat)\n" ++
+  "inductive LI where\n  | mk [i : C Nat] (1 t : Tok)\n"
 def fieldQtyDecls : List (String × Bool) := [
   -- 0: built with any argument, never read at run time
   ("def e0 : E0 := E0.mk 3 4\ndef getM : E0 → Nat\n  | .mk _ m => m\ndef getM2 : E0 → Nat\n  | .mk n m => m\n", true),
@@ -497,28 +502,48 @@ def fieldQtyDecls : List (String × Bool) := [
   ("def s0mn (s : S0) : Nat := match s with\n  | .mk n m => n\n", false),
   -- recursive fields carry quantities too; a bad quantity is an error
   ("inductive R1 where\n  | z\n  | s (1 r : R1)\n", true),
-  ("inductive Q2 where\n  | mk (2 n : Nat)\n", false)]
+  ("inductive Q2 where\n  | mk (2 n : Nat)\n", false),
+  -- (22a) an instance field: an instance argument of the constructor (resolved at the
+  -- call, at ω as the Lean elaborator's `elabQuantity`), not an explicit one; a pattern
+  -- skips it like an implicit field
+  ("def i1 : I := I.mk 3\ndef iu : I → Nat\n  | .mk x => x\n", true),
+  -- (a regression: `[i]` passed as an explicit argument)
+  ("def ibad : I := I.mk (C.mk (fun x => x)) 3\n", false),
+  -- (22a) and beside a linear field: construction, a match using it once, and a drop
+  ("def li1 (1 t : Tok) : LI := LI.mk t\ndef liu : LI → Nat\n  | .mk t => use t\n", true),
+  ("def lidrop : LI → Nat\n  | .mk _ => 0\n", false),
+  ("def litwice : LI → Nat\n  | .mk t => Nat.add (use t) (use t)\n", false)]
 
-/-- (stage 21x) Field quantities and implicit fields, compiled and run. -/
+/-- (stage 21x, 22a) Field quantities, implicit fields and an instance field, compiled and
+run. -/
 def fieldQtyProgram : String :=
   "import Prelude\n" ++
   "inductive E0 where\n  | mk (0 n : Nat) (m : Nat)\n" ++
   "inductive V (A : Type) : Nat → Type where\n  | nil : V A Nat.zero\n" ++
   "  | cons {n : Nat} (a : A) (rest : V A n) : V A (Nat.succ n)\n" ++
   "inductive L1 where\n  | mk (1 n : Nat)\n" ++
+  "class C (A : Type) where\n  f : A → Nat\n" ++
+  "instance : C Nat := C.mk (fun x => x)\n" ++
+  "inductive I where\n  | mk [i : C Nat] (1 n : Nat)\n" ++
   "def getM : E0 → Nat\n  | .mk _ m => m\n" ++
   "def vsum {n : Nat} : V Nat n → Nat\n  | .nil => 0\n  | .cons a r => Nat.add a (vsum r)\n" ++
   "def unL : L1 → Nat\n  | .mk n => n\n" ++
+  "def unI : I → Nat\n  | .mk n => n\n" ++
   "def main : IO Unit := do\n  IO.println (Nat.toString (getM (E0.mk 3 4)));\n" ++
   "  IO.println (Nat.toString (vsum (V.cons 1 (V.cons 2 V.nil))));\n" ++
-  "  IO.println (Nat.toString (unL (L1.mk 9)))\n"
+  "  IO.println (Nat.toString (unL (L1.mk 9)));\n" ++
+  "  IO.println (Nat.toString (unI (I.mk 7)))\n"
 
-/-- (stage 21m, K1) The pinned differences, `(declaration, Lean accepts, self-hosted
+/-- (stage 21m, K1; 22a) The pinned differences, `(declaration, Lean accepts, self-hosted
 accepts)` (docs/CoreSpec.md §15): the Lean frontend takes a `match` on a linear scrutinee
 apart with `T.casesOn1` (the case at 1), the self-hosted frontend's match is the case at
 ω, which uses the scrutinee ω times. (Constructor field quantities and implicit fields
-were differences until 21x; a linear variable used once in each branch of a `match`
-until 21v: `linearMatchDecls`.) -/
+were differences until 21x, instance fields until 22a; a linear variable used once in
+each branch of a `match` until 21v: `linearMatchDecls`.) `wrapTwice` is the constructor
+field at the same boundary: the ω case projects the payload, so the linear `t` inside the
+scrutinee is used ω times. It needs the linear case (`scase` at 1) and `Kernel.wiz`'s
+missing `split` (B7), not another field-quantity change: `fieldCols` already binds each
+field at its declared quantity, and `scaseMethodTy` hands the payload over at `q`. -/
 def quantityDiffs : List (String × Bool × Bool) := [
   ("def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n", true, false),
   ("def wrapTwice (1 t : Tok) : Nat := match L1.mk t with\n  | .mk u => use u\n", true, false)]
@@ -1934,12 +1959,12 @@ def selfHostGroup : Group where
           "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
         ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
           "ok\nerror\n" },
-    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
+    { name := "the self-hosted frontend: constructor field quantities (0, 1, ω), implicit and instance fields, as in the Lean frontend (21x, 22a)", run := fun _ =>
         selfhostAgrees fieldQtyHeader fieldQtyDecls },
-    { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21x)", run := fun _ => do
-        ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n"
-        selfhostCompileRun fieldQtyProgram "4\n3\n9\n"
-        selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
+    { name := "constructor field quantities, implicit and instance fields: the Lean and the self-hosted compilers agree (21x, 22a)", run := fun _ => do
+        ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n7\n"
+        selfhostCompileRun fieldQtyProgram "4\n3\n9\n7\n"
+        selfhostCompileRun fieldQtyProgram "4\n3\n9\n7\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: quantities, the pinned differences (21m, K1)", run := fun _ =>
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
