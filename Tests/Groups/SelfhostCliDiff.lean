@@ -398,7 +398,8 @@ def cliDiffGroup : Group where
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
         checkEq 1 s.code
-        checkEq "dup.wiz:3: error: duplicate-declaration: 'one' has already been declared\n" s.err },
+        -- (the driver's raw line: the self-hosted frontend's own position and its `[code]`)
+        checkEq "dup.wiz:3:1: error: 'one' has already been declared [duplicate-declaration]\n" s.err },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,
@@ -766,7 +767,7 @@ def cliDiffGroup : Group where
         -- the driver's usage text verbatim, so a wording change is a test failure
         checkEq cliDiffDriverHelp s2.out
         -- and the exact command list it documents (D2): one line per subcommand
-        let cmds := (s2.out.splitOn "\n").filter (·startsWith "  wiz-selfhost ")
+        let cmds := (s2.out.splitOn "\n").filter (fun l => l.startsWith "  wiz-selfhost ")
         checkEq ["  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on",
                  "  wiz-selfhost build FILE -o OUT  write the generated C to OUT",
                  "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)",
