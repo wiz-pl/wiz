@@ -1,4 +1,5 @@
 import Grail.Build
+import Grail.Exec
 
 /-!
 # The test runner (stage 23f)
@@ -85,9 +86,12 @@ def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : Syst
   | .run =>
     let s ← r.elab file
     let secs := r.testTimeoutMs / 1000
-    let out ← IO.Process.output { cmd := "timeout", args := #[toString secs, exe.toString] }
-    if out.exitCode == 124 then return .error s!"timed out ({secs} s)"
-    if out.exitCode != 0 then return .error s!"exited with {out.exitCode}: {out.stderr}"
+    -- (TR0) the program runs under grail's supervisor (`Grail/Exec.lean`), in a process
+    -- group of its own that the supervisor kills at the limit or when this job dies; GNU
+    -- `timeout` made a group of its own that outlived a killed grail
+    let out ← runSupervised (← IO.appPath) r.testTimeoutMs exe.toString #[]
+    if out.code == 124 then return .error s!"timed out ({secs} s)"
+    if out.code != 0 then return .error s!"exited with {out.code}: {out.stderr}"
     match Build.irProgram s "main" with
     | .error e => pure (.error e)
     | .ok (_, ty) =>
