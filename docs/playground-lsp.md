@@ -8,6 +8,13 @@ the page's URL it can also be a **language client** of an external server, showi
 server's tactic state, expected type and diagnostics. Either way clicking a hypothesis or
 a subterm selects its source span in the editor.
 
+The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
+rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
+insertion), `web/squiggles.js` and `web/completions.js` draw them, and
+`web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
+the repo's own React-style framework (`lib/Web/React.wiz`) with `?ui=react`
+(§ The React UI); the default page builds its DOM directly.
+
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
 `web/playground-lsp.js` connects the two to the textarea. A language server that speaks
@@ -40,6 +47,9 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
 * With no endpoint or a failed connection the pane says "no language server" (and how
   to start one), and the playground keeps working as a local checker. Nothing is logged
   to the console and no promise is left unhandled.
+* `?squiggles=off` disables the underlines under the editor's diagnostics, and
+  `?completions=off` the completion popup (§ The editor). `?ui=react` renders the pane
+  with the repo's React-style framework instead of the DOM path (§ The React UI).
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -105,6 +115,94 @@ count UTF-16 units; if it counts scalar values instead, it must make the same BM
 assumption. The playground's positions come from `textarea.selectionStart`, i.e. a
 UTF-16 index.
 
+`web/editor-model.js` has both conversions (`positionFromOffset`,
+`codePointPositionFromOffset`, `utf16OffsetFromCodePoints`) and the Node tests pin that
+they differ only for characters outside the BMP. The page sends the UTF-16 one; the
+code-point helpers exist for a server that counts `String.codes`.
+
+## The editor
+
+Assuming a text field is enough is what makes the playground feel unlike an editor. Three
+pieces fix that without replacing the textarea, and none of them adds a dependency:
+
+* **Squiggles.** `web/squiggles.js` draws every diagnostic range as a wavy underline
+  under the offending source. It puts the editor in a positioned wrapper and places a
+  **mirror** over it: an absolutely positioned `div` with the textarea's font, padding and
+  wrapping, holding the same text with a `<span class="squiggle sev-ERROR">` around each
+  range, transparent text and a coloured `text-decoration`. The layer never takes a
+  pointer event (`pointer-events: none`), so typing, selection and scrolling stay the
+  textarea's, and its colour and caret are untouched. This is the fragile part of
+  decorating a plain textarea — the mirror only lines up if the font metrics and the wrap
+  points match — which is why `web/squiggles.js` copies `getComputedStyle(editor)` on
+  every layout and why `web/playground.css` repeats the same declarations on both sides.
+  If they ever drift, only the underline's position is wrong. `?squiggles=off` (also
+  0/none/false) turns the layer off; the Goals pane's list still selects the spans.
+
+  The ranges are computed by `squiggleSegments` (`web/editor-model.js`), which repairs
+  what real servers send: a range with **no end** underlines the token at its start (one
+  character on whitespace, nothing past the end of the text); an **empty** range does the
+  same; a range past the text is clamped; a **multi-line** range becomes one span per
+  line (no newline inside a span); two **overlapping** ranges merge, keeping the stricter
+  severity and both messages. Diagnostics without a `range.start` are not drawn.
+
+* **Caret → server.** The caret is sent on selection changes — `keyup`, `click`,
+  `mouseup`, `select`, `focus` — debounced by 120 ms (`positionDebounce`), as
+  `TextDocumentPositionParams` of `wiz/interactiveGoals` and `wiz/interactiveTermGoal`,
+  with the plain-method fallback of § Fallback. A move to the position the pane already
+  answered is skipped; `publishDiagnostics`/`wiz/elaborated` always re-ask, because the
+  session changed. A selection sends its **start** (where the caret is), as an editor's
+  caret query does.
+
+* **Completions.** `web/completions.js` asks `textDocument/completion` on Ctrl/⌘-Space
+  and, debounced by 120 ms, after typing an identifier character (not inside a `--`
+  comment). The popup is a `div role="listbox"` fixed at the caret (monospace columns:
+  `character × charWidth`), filtered by the identifier prefix at the caret and capped at
+  100 items. Up/Down/PageUp/PageDown move (wrapping), Enter and Tab accept, Escape and a
+  blur close it; while it is open those keys belong to the popup, so no newline or tab is
+  inserted underneath. Accepting replaces the range of the item's `textEdit` when the
+  server sent one, else the identifier prefix before the caret with `insertText` (or the
+  `label`); snippet placeholders are stripped if a server sends them despite
+  `snippetSupport: false`. The edit is a normal `input` event, so the existing
+  `didChange` path re-sends the document. A `MethodNotFound`, an empty list or an error
+  just leaves the popup closed; `?completions=off` disables it.
+
+The page's `initialize` advertises `textDocument.completion` (with
+`contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
+asking.
+
+## The React UI (`?ui=react`)
+
+The right-hand pane (Goals over Output) can be rendered by the repo's React-style
+framework instead of by `document.createElement` in `web/playground.js`:
+
+```sh
+web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playground-ui.mjs
+# open http://127.0.0.1:8000/playground.html?ui=react
+```
+
+* `web/playground-react.js` keeps the page's model — `{count, lines, goals}` — and
+  serialises it as JSON on every change; `web/framework/driver.js`'s `startModel` calls
+  the UI module's `wiz_ui_html(model)` for the first paint and `wiz_ui_patch(old, new)`
+  for each update, then applies the patches with `web/framework/runtime.js`. The goals
+  pane's HTML (`web/goals.js`) travels in the model and enters the tree as raw HTML, so
+  its spans, ranges and clicks are unchanged.
+* The UI app is `web/playground-ui.wiz`: a pure `model → tree` function, which is why a
+  page with arbitrary text can use the framework even though its typed dispatch carries
+  only `(event, handler index)`. It is built as its own small Wasm module so a failure to
+  build or load it cannot affect the checker; `web/ui-framework.wiz` is the **only** file
+  naming the framework module (`Web.React` today; the module is being renamed to
+  `Web.Loom`, with namespace and Wasm exports, so only that file changes).
+* Still imperative (the same on both paths): the textarea and its squiggle overlay, the
+  completion popup, the header's status line, the Run button and the footer's engine
+  line. The line count moves from under the editor into the pane's Output head under the
+  flag (so it is not drawn twice). The pane's own DOM path is untouched: without the
+  flag, and whenever the UI module is missing, `#side-dom` renders as before and the
+  React container stays hidden.
+* `web/test-playground-ui.sh` checks the Wiz half under Node: it runs the fixture
+  (`web/playground-ui-fixture.wiz`) with `wiz run`, applies the patch list to the SSR HTML
+  in `web/framework/minidom.mjs`, and requires the result to equal the next model's HTML
+  exactly; `web/playground_ui_test.mjs` also drives `startModel` with a fake Wasm module.
+
 ## Documents
 
 * **Full-text synchronisation** (`textDocumentSync: 1`). There are no incremental
@@ -135,6 +233,7 @@ UTF-16 index.
 | `wiz/plainGoal` | `TextDocumentPositionParams` | `null` or `{goals: [string], rendered: string, messages?: [string]}` |
 | `wiz/plainTermGoal` | `TextDocumentPositionParams` | `null` or `{goal: string, range}` |
 | `wiz/subtermInfo` | `{"textDocument": {"uri"}, "session", "ref"}` | `null` or `{text, kind, name?, type?: TaggedText, definition?: Location, session}` |
+| `textDocument/completion` | `TextDocumentPositionParams` + optional `context: {triggerKind, triggerCharacter?}` | `null`, `[CompletionItem]` or `{isIncomplete, items: [CompletionItem]}` |
 
 The panel asks for the goals and the expected type at the caret. `wiz/interactiveGoals`
 and `wiz/interactiveTermGoal` are preferred because they carry tagged text; the plain
@@ -215,8 +314,11 @@ the expected type as text, and (for `plainTermGoal`) its range is clickable.
 `textDocument/publishDiagnostics` is
 `{"uri", "diagnostics": [{"range", "severity"?, "source"?, "code"?, "message"}]}`;
 `severity` is LSP's 1 error, 2 warning, 3 information, 4 hint. The panel lists them with
-their severity and position; clicking one selects its range. An empty array clears the
-list. Versions are ignored. `code`/`data` (the code-action machinery) are not used by
+their severity and position and underlines the same ranges in the editor (§ The editor);
+clicking one selects its range. An empty array clears the list and the underlines. A
+diagnostic's `range` may have no `end`, an empty `end`, or span lines: the editor
+underlines the token at its start for the first two and one span per line for the last.
+Versions are ignored. `code`/`data` (the code-action machinery) are not used by
 the playground.
 
 ## Errors and timeouts
@@ -256,6 +358,9 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
    `wiz/plainGoal`/`wiz/plainTermGoal` fallbacks so degraded servers still work.
 7. **Optional.** `wiz/subtermInfo`, `wiz/elaborated`, `Hyp.range`, `SubtermTag.range`,
    `InteractiveGoal.range`, `tree`.
+8. **Optional, for the editor.** `textDocument/completion` (an array or a
+   `CompletionList`; `textEdit`/`insertText`/`filterText`/`sortText` honoured), so
+   Ctrl-Space and typing have something to show. Without it the popup stays closed.
 
 The server must not require `stdin` (the page is its own editor), must tolerate any
 number of clients (one document each), and may share state between them as the Lean
@@ -266,8 +371,22 @@ server does.
 * `node web/playground_lsp_test.mjs` — the client and panel against a mock server: the
   handshake, `didOpen` with empty diagnostics, goals/term rendering with spans and the
   term tree, a diagnostics update after `didChange`, the plain fallback, close and
-  reconnect, the no-server path and no unhandled rejections. It needs no Wiz build.
+  reconnect, `textDocument/completion`, the caret's position params, the squiggles and
+  the popup's wiring, the no-server path and no unhandled rejections. It needs no Wiz
+  build.
+* `node web/editor_test.mjs` — the editor's pure rules: UTF-16 versus code-point
+  positions (including an astral character), squiggle ranges (no end, empty, multi-line,
+  overlapping, past the text), and completion lists (shapes, filtering, ordering, the
+  keyboard's index arithmetic, `textEdit`/`insertText`/snippet insertion).
+* `node web/editor_dom_test.mjs` — the same two overlays against
+  `web/framework/minidom.mjs`: what the squiggle layer draws, the popup's keys, the
+  insertion and its `input` event, closing on blur/Escape, and the URL flags.
+* `web/test-playground-ui.sh` + `node web/playground_ui_test.mjs` — the `?ui=react` pane:
+  `wiz run` renders the fixture, the patch list is applied in minidom and must reproduce
+  the next HTML, and `web/framework/driver.js`'s `startModel` is driven with a fake Wasm
+  module. `web/framework/test.mjs` remains the framework's own browser-half test.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
-* `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and
-  `web/check-site.sh` ship the new modules and fail if an import does not resolve.
+* `web/test.sh` runs the tests beside the other web tests; `web/build-site.sh` and
+  `web/check-site.sh` ship the new modules (and `framework/`) and fail if an import does
+  not resolve.

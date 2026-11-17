@@ -38,13 +38,17 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css playground-values.js \
          lsp-client.js goals.js playground-lsp.js tagged.js selfhost-lsp-shim.js \
-         editor-model.js squiggles.js completions.js; do
+         editor-model.js squiggles.js completions.js playground-react.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
+# The React driver (?ui=react): web/framework/runtime.js applies the patches, driver.js
+# calls into the UI module.
+mkdir -p "$SITE/playground/framework"
+cp "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/driver.js" "$SITE/playground/framework/"
 
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
-for f in wiz-playground.mjs wiz-playground.wasm; do
+for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs wiz-playground-ui.wasm; do
   if [ ! -f "$WEB/$f" ]; then
     echo "build-site: $WEB/$f is missing: run web/build-playground.sh $WEB first" >&2
     exit 1

@@ -34,10 +34,13 @@ def twice (n : Nat) : Nat := n + n
     </div>
   </section>
   <section class="pane side">
-    <div class="pane-head"><span>Goals</span><span class="hint">from <code>?lsp=ws://host:port</code></span></div>
-    <div id="goals" class="goals" tabindex="0" aria-live="polite"></div>
-    <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
-    <div id="output" class="output" aria-live="polite"></div>
+    <div id="side-ui" class="side-ui" hidden></div>
+    <div id="side-dom" class="side-dom">
+      <div class="pane-head"><span>Goals</span><span class="hint">from <code>?lsp=ws://host:port</code></span></div>
+      <div id="goals" class="goals" tabindex="0" aria-live="polite"></div>
+      <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
+      <div id="output" class="output" aria-live="polite"></div>
+    </div>
   </section>
 </main>
 <footer>

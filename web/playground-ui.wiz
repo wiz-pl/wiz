@@ -1,0 +1,100 @@
+-- (playground, ?ui=react) The right-hand pane's UI as a pure function of a JSON model,
+-- so the page can render it with the repo's React-style framework and patch it instead of
+-- building DOM nodes by hand.
+--
+-- No `import` here: this file is concatenated after `web/ui-framework.wiz`, which names
+-- the framework (`Web.React` today, `Web.Loom` after agent/loom-rename) and imports
+-- `Json`. The two ends are:
+--
+--   * `web/playground-ui-exports.wiz` — the Wasm exports `wiz_ui_html`/`wiz_ui_patch`,
+--     built into `wiz-playground-ui.mjs` by `web/build-playground.sh`;
+--   * `web/playground-ui-fixture.wiz` — `main`, run by `web/test-playground-ui.sh` to
+--     produce the fixture `web/playground_ui_test.mjs` checks.
+--
+-- The model is JSON, built by `web/playground-react.js` on every change:
+--
+--   {"count":"2 lines","lines":[{"kind":"val","text":"42"}],"goals":"<div …>"}
+--
+-- `goals` is the goals panel's HTML from `web/goals.js` (embedded with `Ui.raw`, so the
+-- panel's spans, ranges and clicks are unchanged), `lines` are the output's lines with
+-- the same `err`/`val`/`raw` classes the imperative page uses, and `count` is the line
+-- count under them. A missing or unparsable model renders an empty pane: the page's UI
+-- must never be the thing that breaks evaluating Wiz.
+--
+-- What the React path does **not** own (docs/playground-lsp.md, "?ui=react"): the
+-- textarea and its squiggles, the completion popup, the header's status line, the Run
+-- button and the footer's engine line. Those stay imperative, and the default page
+-- (`?ui=` absent) is entirely imperative.
+
+structure UiLine where
+  kind : String
+  text : String
+
+structure UiModel where
+  count : String
+  lines : List UiLine
+  goals : String
+
+/-- A string field, or "" when it is missing or not a string. -/
+def Ui.fieldStr (j : Json) (key : String) : String :=
+  match Json.get j key with
+  | .some (.str s) => s
+  | _ => ""
+
+def Ui.lineOf (j : Json) : UiLine :=
+  UiLine.mk (Ui.fieldStr j "kind") (Ui.fieldStr j "text")
+
+def Ui.linesOf (j : Json) : List UiLine :=
+  match Json.get j "lines" with
+  | .some (.arr xs) => List.map Ui.lineOf (Jsons.toList xs)
+  | _ => List.nil
+
+/-- The model text as a value; anything unparsable is the empty UI. -/
+def Ui.decode (text : String) : UiModel :=
+  match Json.parse text with
+  | .ok j => UiModel.mk (Ui.fieldStr j "count") (Ui.linesOf j) (Ui.fieldStr j "goals")
+  | .error _ => UiModel.mk "" List.nil ""
+
+/-- A message type with no constructors the app uses: the pane has no handlers of its
+-- own (the Run button and the editor stay outside the React tree). -/
+inductive UiMsg where
+  | noop
+
+/-- The output line's classes, matching `web/playground.js`'s `.line` element. -/
+def Ui.lineClass (kind : String) : String :=
+  match String.eq kind "err" with
+  | .true => "line err"
+  | .false => match String.eq kind "val" with
+    | .true => "line val"
+    | .false => match String.eq kind "raw" with
+      | .true => "line val raw"
+      | .false => "line"
+
+def Ui.lineView (l : UiLine) : Ui.vnode UiMsg :=
+  Ui.el "div" [Ui.class (Ui.lineClass l.kind)] [Ui.text l.text]
+
+/-- The right pane: the Goals pane (the panel's HTML) over the Output's lines. -/
+def Ui.view (m : UiModel) : Ui.vnode UiMsg :=
+  Ui.el "div" [Ui.class "react-ui"] [
+    Ui.el "div" [Ui.class "pane-head"] [
+      Ui.el "span" List.nil [Ui.text "Goals"],
+      Ui.el "span" [Ui.class "hint"] [Ui.text "from ?lsp="]
+    ],
+    Ui.el "div"
+      [Ui.class "goals", Ui.id "goals", Ui.attr "tabindex" "0", Ui.attr "aria-live" "polite"]
+      [Ui.raw m.goals],
+    Ui.el "div" [Ui.class "pane-head"] [
+      Ui.el "span" List.nil [Ui.text "Output"],
+      Ui.el "span" [Ui.class "hint"] [Ui.text m.count]
+    ],
+    Ui.el "div"
+      [Ui.class "output", Ui.id "output", Ui.attr "aria-live" "polite"]
+      (Ui.map Ui.lineView m.lines)
+  ]
+
+/-- The rendered HTML of a model (the page's first paint of the pane). -/
+def Ui.renderHtml (model : String) : String := Ui.html (Ui.view (Ui.decode model))
+
+/-- The patches from one model to another, as JSON. -/
+def Ui.renderPatches (old new : String) : String :=
+  Ui.patches (Ui.view (Ui.decode old)) (Ui.view (Ui.decode new))

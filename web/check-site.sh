@@ -34,11 +34,16 @@ need playground/goals.js
 need playground/playground-lsp.js
 need playground/tagged.js
 need playground/selfhost-lsp-shim.js
+need playground/playground-react.js
+need playground/framework/runtime.js
+need playground/framework/driver.js
 need playground/editor-model.js
 need playground/squiggles.js
 need playground/completions.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
+need playground/wiz-playground-ui.mjs
+need playground/wiz-playground-ui.wasm
 need notebooks/index.html
 
 # Every local ES import of the playground's scripts resolves: a page whose module graph

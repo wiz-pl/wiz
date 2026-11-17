@@ -54,5 +54,26 @@ ENGINE="$OUT/playground.wiz"
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
   "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
-  "$ROOT/web/editor-model.js" "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$OUT/"
-echo "built $OUT/wiz-playground.mjs"
+  "$ROOT/web/editor-model.js" "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" \
+  "$ROOT/web/playground-react.js" "$OUT/"
+mkdir -p "$OUT/framework"
+cp "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/driver.js" "$OUT/framework/"
+
+# 4. (?ui=react) The right pane as a `model -> tree` app (lib/Web/React.wiz, named in
+# web/ui-framework.wiz). A module of its own: the page loads it only under `?ui=react`,
+# and a failure to build or load it leaves the page's DOM path untouched. The exports
+# are `wiz_ui_html : String -> String` and `wiz_ui_patch : String -> String -> String`.
+UI="$OUT/playground-ui.wiz"
+{
+  cat "$ROOT/web/ui-framework.wiz"
+  cat "$ROOT/web/playground-ui.wiz"
+  cat "$ROOT/web/playground-ui-exports.wiz"
+} > "$UI"
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+  --ldflags "-sMEMORY64=1 -sSTACK_SIZE=33554432 --no-entry \
+-sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
+-sEXPORTED_FUNCTIONS=_wiz_ui_html,_wiz_ui_patch,_free \
+-sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
+-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
+  build "$UI" -o "$OUT/wiz-playground-ui.mjs" --no-main)
+echo "built $OUT/wiz-playground.mjs and $OUT/wiz-playground-ui.mjs"

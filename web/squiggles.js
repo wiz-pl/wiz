@@ -67,7 +67,7 @@ function copyTextStyle(editor, text) {
   try {
     style = typeof getComputedStyle === "function" ? getComputedStyle(editor) : null;
   } catch (_) { /* no layout: the CSS file's declarations apply */ }
-  if (!style) return;
+  if (!style) return null;
   for (const property of TEXT_STYLE) {
     const value = style.getPropertyValue ? style.getPropertyValue(property) : style[property];
     setStyle(text, property, value);
@@ -76,6 +76,17 @@ function copyTextStyle(editor, text) {
   // is carried by the text so it scrolls with it (as the textarea's content does).
   setStyle(text, "border", "0");
   setStyle(text, "box-sizing", "border-box");
+  return style;
+}
+
+// The mirror's available width is the textarea's *client* width: a visible scrollbar takes
+// room from the text, so the layer's right edge is inset by it (and wraps land where the
+// textarea wraps them). An overlay scrollbar reports 0 and changes nothing.
+function layoutLayer(editor, layer, style) {
+  if (!style || typeof editor.offsetWidth !== "number") { setStyle(layer, "right", "0"); return; }
+  const border = (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
+  const scrollbar = (editor.offsetWidth || 0) - (editor.clientWidth || 0) - border;
+  setStyle(layer, "right", (scrollbar > 0 ? scrollbar : 0) + "px");
 }
 
 // `mountSquiggles(editor, options)` → `{update(diagnostics), refresh(), segments(), destroy()}`.
@@ -93,7 +104,8 @@ export function mountSquiggles(editor, options = {}) {
   wrapper.appendChild(layer);
   let spans = [];
 
-  copyTextStyle(editor, text);
+  const initialStyle = copyTextStyle(editor, text);
+  layoutLayer(editor, layer, initialStyle);
 
   function render() {
     // The mirror is rebuilt rather than patched: a diagnostic changes the tree's shape,
@@ -129,7 +141,8 @@ export function mountSquiggles(editor, options = {}) {
   }
 
   function refresh() {
-    copyTextStyle(editor, text);
+    const style = copyTextStyle(editor, text);
+    layoutLayer(editor, layer, style);
     render();
     syncScroll();
   }
@@ -162,7 +175,12 @@ export function mountSquiggles(editor, options = {}) {
     update,
     refresh,
     segments: () => spans.map((s) => Object.assign({}, s)),
-    layout: () => copyTextStyle(editor, text),
+    layout() {
+      const style = copyTextStyle(editor, text);
+      layoutLayer(editor, layer, style);
+      render();
+      syncScroll();
+    },
     destroy() {
       if (typeof editor.removeEventListener === "function") {
         editor.removeEventListener("input", onInput);

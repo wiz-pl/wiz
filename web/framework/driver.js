@@ -1,15 +1,22 @@
 // The page half for an app built from lib/Web/React.wiz, mirroring web/tagged.js's
-// `stepper`: the Wiz module exports
+// `stepper`. There are two shapes of app:
 //
-//   wiz_react_init  : State
-//   wiz_react_html  : State -> String          (SSR of the current state)
-//   wiz_react_step  : State -> String -> State (the event string is "event\nindex")
+//   1. `start`: a typed app with event handlers. The Wiz module exports
 //
-// and calls the FFI `js_patch` (web/js.c) with `React.patchesJson` on every step; this
-// file applies those patches and turns DOM events into step calls. It is the intended
-// integration, not yet exercised by a Wasm build (no Emscripten on the machine where
-// the prototype was written); web/framework/test.mjs checks the same code path under
-// Node with minidom.mjs.
+//        wiz_react_init  : State
+//        wiz_react_html  : State -> String          (SSR of the current state)
+//        wiz_react_step  : State -> String -> State (the event string is "event\nindex")
+//
+//      and calls the FFI `js_patch` (web/js.c) with `React.patchesJson` on every step;
+//      this file applies those patches and turns DOM events into step calls.
+//
+//   2. `startModel`: a `model -> tree` app whose model is a string the page holds (the
+//      playground's `?ui=react` pane). The module exports `wiz_ui_html` and
+//      `wiz_ui_patch`, and the page hands the driver the new model; see the function.
+//
+// Neither is exercised by the infoview's Wasm build; web/framework/test.mjs checks the
+// same code path under Node with minidom.mjs, and web/playground_ui_test.mjs checks
+// `startModel` against the playground UI module's fixture.
 "use strict";
 import { applyPatches, delegate, mount } from "./runtime.js";
 
@@ -36,4 +43,70 @@ export function start(wasm, root, { events } = {}) {
     return true;   // a handled event does not also submit a form or follow a link
   }, events);
   return { state: () => state, html };
+}
+
+// The other half of the integration: a page whose whole state is a string (the
+// playground's `?ui=react` model). The Wiz module exports
+//
+//   wiz_ui_html  : Model -> String            (SSR of a model)
+//   wiz_ui_patch : Old -> New -> String       (React.patchesJson between two models)
+//
+// and the page keeps the model; nothing round-trips through a Wiz value it cannot name.
+// This is how a page with arbitrary text (output lines, a rendered goals panel) uses the
+// framework: the framework's typed event dispatch needs static messages, but a pure
+// `model -> tree` function does not. `patchExport` may be absent (an older module): the
+// next render is then a full `mount`, which is correct, only less efficient.
+//
+// options: `model` (the initial model string), `document` (for parsing HTML),
+// `parse` (a custom HTML→DocumentFragment, as the Node tests pass minidom's),
+// `htmlExport`/`patchExport` (the Wasm function names).
+export function startModel(wasm, root, options = {}) {
+  const htmlExport = options.htmlExport || "_wiz_ui_html";
+  const patchExport = options.patchExport || "_wiz_ui_patch";
+  if (!wasm || typeof wasm[htmlExport] !== "function") return null;
+  const doc = options.document || (typeof document !== "undefined" ? document : null);
+  const parseFn = options.parse || (doc && typeof doc.createRange === "function"
+    ? (html) => doc.createRange().createContextualFragment(html)
+    : null);
+  if (!parseFn) return null;   // no DOM to render into (and no parser passed)
+  const call1 = (name, text) => {
+    const p = wasm.stringToNewUTF8(String(text));
+    const r = wasm[name](big(p));
+    wasm._free(big(p));
+    return takeString(wasm, r);
+  };
+  const call2 = (name, a, b) => {
+    const pa = wasm.stringToNewUTF8(String(a));
+    const pb = wasm.stringToNewUTF8(String(b));
+    const r = wasm[name](big(pa), big(pb));
+    wasm._free(big(pa));
+    wasm._free(big(pb));
+    return takeString(wasm, r);
+  };
+  let model = options.model === undefined ? "" : String(options.model);
+  let html = call1(htmlExport, model);
+  mount(root, html, parseFn);
+  let renders = 1;
+  return {
+    model: () => model,
+    html: () => html,
+    renders: () => renders,
+    // Move to `next` (a model string) and patch the DOM there.
+    render(next) {
+      const text = next === undefined || next === null ? "" : String(next);
+      if (text === model) return html;
+      const nextHtml = call1(htmlExport, text);
+      if (typeof wasm[patchExport] === "function") {
+        const patches = JSON.parse(call2(patchExport, model, text));
+        applyPatches(root, patches, parseFn);
+      } else {
+        mount(root, nextHtml, parseFn);
+      }
+      model = text;
+      html = nextHtml;
+      renders += 1;
+      return html;
+    },
+    dom: () => root,
+  };
 }

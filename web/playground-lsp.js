@@ -35,13 +35,18 @@ function scratchUri() {
 //
 // Options: `squiggles`/`completions` (false disables the overlay; they are on by
 // default), `onRender(view)` (called after every panel render: the React page uses it to
-// mirror the panel HTML into its model), and `positionDebounce` (ms, 120 by default).
+// mirror the panel HTML into its model), `eventsFrom` (the element the panel's clicks and
+// keys arrive on; `panel` itself by default, and the live React container when the panel
+// is rendered into a model), and `positionDebounce` (ms, 120 by default).
 export function startInfoview({
-  editor, panel, config, search, uri, onRender, document: pageDocument,
+  editor, panel, config, search, uri, onRender, eventsFrom, document: pageDocument,
   squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
   positionDebounce = 120,
 } = {}) {
   if (!editor || !panel) return null;
+  // The panel's markup may be produced here and rendered elsewhere (the `?ui=react`
+  // model): clicks and arrow keys then arrive on the live container, not on `panel`.
+  const eventRoot = eventsFrom || panel;
   const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined
     ? endpointFromSearch(query)
@@ -117,7 +122,7 @@ export function startInfoview({
   }
 
   function spanOf(element) {
-    for (let el = element; el && el !== panel; el = el.parentElement) {
+    for (let el = element; el && el !== eventRoot; el = el.parentElement) {
       if (el.dataset && el.dataset.span) return parseSpan(el.dataset.span);
     }
     return null;
@@ -192,7 +197,7 @@ export function startInfoview({
   }
 
   function selectTag(index) {
-    const tags = Array.from(panel.querySelectorAll(".tt"));
+    const tags = Array.from(eventRoot.querySelectorAll(".tt"));
     if (tags.length === 0) return;
     selected = Math.max(0, Math.min(tags.length - 1, index));
     for (let i = 0; i < tags.length; i++) tags[i].classList.toggle("sel", i === selected);
@@ -200,17 +205,21 @@ export function startInfoview({
     const span = spanOf(tag);
     if (span) highlight(span);
     // Keep the keys on the panel: `highlight` focused the editor to show the selection,
-    // and a second arrow must walk the tags again rather than the caret.
-    try { panel.focus({ preventScroll: true }); } catch (_) { /* a stub panel in a test */ }
+    // and a second arrow must walk the tags again rather than the caret. In the React
+    // page the panel is a detached model, and the focusable element is `#goals` inside
+    // the live container.
+    const focusTarget = panel === eventRoot ? panel
+      : (eventRoot.querySelector ? (eventRoot.querySelector("#goals") || eventRoot) : eventRoot);
+    try { focusTarget.focus({ preventScroll: true }); } catch (_) { /* a stub panel in a test */ }
     try { tag.scrollIntoView({ block: "nearest" }); } catch (_) { /* a stub panel in a test */ }
   }
 
   function clearSelection() {
     selected = -1;
-    for (const tag of panel.querySelectorAll(".tt.sel")) tag.classList.remove("sel");
+    for (const tag of eventRoot.querySelectorAll(".tt.sel")) tag.classList.remove("sel");
   }
 
-  panel.addEventListener("click", (event) => {
+  eventRoot.addEventListener("click", (event) => {
     const action = event.target.closest ? event.target.closest("[data-action]") : null;
     if (action && action.dataset.action === "reconnect") {
       event.preventDefault();
@@ -224,14 +233,14 @@ export function startInfoview({
     }
     const tag = event.target.closest ? event.target.closest(".tt") : null;
     if (tag) {
-      selected = Array.from(panel.querySelectorAll(".tt")).indexOf(tag);
+      selected = Array.from(eventRoot.querySelectorAll(".tt")).indexOf(tag);
       describeSubterm(tag);
     }
   });
 
   // Hovering a subterm is the infoview's `.hover`; the arrows walk the tags in order and
   // Escape clears the selection. `delegate` adds the classes and prevents the default.
-  delegate(panel, {
+  delegate(eventRoot, {
     key: (name) => {
       if (name === "Escape") { clearSelection(); return; }
       const step = name === "ArrowDown" || name === "ArrowRight" ? 1 : -1;

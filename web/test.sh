@@ -40,6 +40,10 @@ if grep -qF 'editor model: all checks passed' "$OUT/editor.txt"; then echo "ok (
 node "$ROOT/web/editor_dom_test.mjs" > "$OUT/editor-dom.txt"
 if grep -qF 'editor dom: all checks passed' "$OUT/editor-dom.txt"; then echo "ok (editor dom)"; else
   echo "FAIL (editor dom)"; cat "$OUT/editor-dom.txt"; exit 1; fi
+# (playground, ?ui=react) the pane's Wiz view: SSR, patches and the driver (needs a Wiz binary)
+WIZ="$WIZ" "$ROOT/web/test-playground-ui.sh" > "$OUT/ui.txt"
+if grep -qF 'playground ui: all checks passed' "$OUT/ui.txt"; then echo "ok (playground, react ui)"; else
+  echo "FAIL (playground, react ui)"; cat "$OUT/ui.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"

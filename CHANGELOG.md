@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's editor behaves like an editor, with no new dependency. Diagnostics
+  are underlined in the textarea by a mirrored overlay (`web/squiggles.js`, ranges
+  repaired and tested in `web/editor-model.js`: no end, empty, multi-line, overlapping);
+  the caret is sent to the server as UTF-16 `TextDocumentPositionParams` on selection
+  changes (120 ms debounce); and `textDocument/completion` gets a keyboard-navigable popup
+  (`web/completions.js`) on Ctrl-Space or while typing, inserting a `textEdit`/`insertText`
+  through the normal `input` path. `?squiggles=off` and `?completions=off` disable them.
+  The Goals/Output pane can also be rendered by `lib/Web/React.wiz` behind `?ui=react`
+  (`web/playground-react.js`, `web/playground-ui.wiz`, a second small Wasm module); the
+  textarea, header, Run button, footer and the two overlays stay imperative, and the
+  default DOM path is unchanged. `docs/playground-lsp.md` documents both.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
