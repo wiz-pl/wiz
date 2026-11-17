@@ -365,7 +365,7 @@ def IxPackage.resolveSources (base : System.FilePath) (p : IxPackage) : IxPackag
 
 /-- Read every `*.sexpr` of an index directory (`index/` under it, if there is one),
 including one level of scoped subdirectories: `index/@org/name.sexpr` is the package
-`@org/name` (R5 in `wiz-notes/prior-art/registries-build-systems.md`). The file name wins
+`@org/name` (R5 in `docs/prior-art/registries-build-systems.md`). The file name wins
 over the `(package NAME …)` node inside, so the path and the resolver key cannot disagree;
 a duplicate key within one registry is still an error. -/
 def readIndexDir (dir : System.FilePath) : IO (Except String (Std.HashMap String IxPackage)) := do

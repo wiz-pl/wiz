@@ -96,15 +96,17 @@ removes it. Without it git falls back to a line merge and is likely to conflict.
 
 The driver's rule (`scripts/trust-ledger-merge.sh`, inputs `%O %A %B`) is:
 
-* take the union of the rows of ours and theirs; a row deleted on one side stays
-  unless both sides deleted it;
+* merge three-way by key against the base: a row added on either side is kept; a
+  row changed on one side only takes that side's version; a row deleted on one side
+  and unchanged on the other is deleted (so a branch cannot resurrect a row master
+  removed when the source stopped being trust);
 * keep header/comment lines once: the base's comments in order, then comments new
   on either side;
 * sort the rows by key in byte order, the order `--update` writes;
-* for one key with different contents, take the row whose reason is not the
-  migration marker (`legacy:`);
-* if both rows are reasoned and differ, or both are still legacy and differ, the
-  merge is ambiguous: the driver exits 1, prints the keys, and does not write `%A`.
+* when both sides changed one key to different contents, take the row whose reason
+  is not the migration marker (`legacy:`);
+* if both rows are reasoned and differ, both are still legacy and differ, or one side
+  deleted a row the other modified, the merge is ambiguous: the driver exits 1, prints the keys, and does not write `%A`.
   Choose one row by hand.
 
 The failure mode is deliberate: a reasoned row names who trusts what, so silently
@@ -186,8 +188,8 @@ is an elaboration fence, not recursion) and has a reason.
 Every row has a review date; a row is expired when that date is before today, so a
 review is due at least every 180 days and `--check` fails until it is renewed with
 `--update --review YYYY-MM-DD`. A new row defaults to today + 180 days. The migration
-marker cannot come back: `--strict-legacy` is now enforced in CI (the `trust-ledger`
-job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
+marker cannot come back: `--strict-legacy` is now enforced in CI (the ledger step of
+the `build` job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
 checks the same ledger.
 
 ### `partial` and `mutual`: a reviewed design choice
@@ -246,11 +248,13 @@ declaration, a legacy row, a clean tree, and `--update` with and without a reaso
 
 `scripts/trust-ledger-merge_test.sh` checks the merge driver without a build: disjoint
 rows, the same row, a reasoned row against a legacy one, two reasoned rows (must
-refuse), comments, CRLF, and 100 pseudo-random rows. Its last case installs the driver
-with `scripts/setup-trust-merge.sh` in a throwaway repository and runs a real
-`git merge`, so it also checks the `.gitattributes` registration. CI runs it in the
-`trust-ledger` job.
+refuse), a row deleted on one side and unchanged on the other (both directions; must
+be deleted), a row deleted on one side and modified on the other (both directions;
+must refuse), comments, CRLF, and 100 pseudo-random rows. Its last cases install the
+driver with `scripts/setup-trust-merge.sh` in a throwaway repository and run real
+`git merge`s (a union, a deletion, a refused conflict), so they also check the
+`.gitattributes` registration. CI runs it in the ledger step of the `build` job.
 
-CI runs `scripts/trust-ledger.sh --check --strict-legacy` (see the `trust-ledger` job in
+CI runs `scripts/trust-ledger.sh --check --strict-legacy` (a step in the `build` job of
 `.github/workflows/ci.yml`), so both the new-entry gate and the end of the migration
 are enforced before any test shard starts.

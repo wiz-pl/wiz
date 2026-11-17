@@ -189,6 +189,11 @@ def Scry.CstStore.childIn (s : Scry.CstStore) (i : Nat) (fid : U32) : Option Scr
   | .some p => .some p.1
   | .none => .none
 
+/-- Every child of node `i` through field id `fid`, in tree order (a field that may hold
+several children, e.g. `declarator` on a `type_definition`). -/
+def Scry.CstStore.childrenIn (s : Scry.CstStore) (i : Nat) (fid : U32) : List Scry.NodeId :=
+  List.map (fun p => p.1) (List.filter (fun p => UIntN.beq p.2 fid) (Scry.CstStore.childArcs s i))
+
 /-- Node `i`'s field id on its parent arc. -/
 def Scry.CstStore.fieldIdOf (s : Scry.CstStore) (i : Nat) : U32 := U32Array.get s.fieldCol i
 
@@ -239,7 +244,7 @@ def Scry.CstStore.ofFacts (f : Scry.Facts) : Scry.CstStore :=
   let pairs := List.concat (List.map
     (fun i => Scry.rowPairs (List.map (fun p => p.1.n) (Scry.arcsAt f.out i)))
     (Scry.schemaRange nodeCount));
-  let tupleCounts := List.map (fun r => List.length r.tuples) f.relations;
+  let tupleCounts := List.map (fun r => Nat.mul (List.length r.tuples) r.arity) f.relations;
   let flatTuples := List.concat (List.map (fun r => List.concat r.tuples) f.relations);
   Scry.CstStore.mk
     f.language
@@ -351,16 +356,34 @@ def Scry.CstStore.errorCount (s : Scry.CstStore) : Nat :=
   List.length (List.filter (fun i => Bool.or (Scry.CstStore.errorOf s i)
     (Scry.CstStore.missingOf s i)) (Scry.schemaRange (Scry.CstStore.nodeCount s)))
 
-/-- The stats block, from the columns (same shape as `Scry.statsOf` on the model). -/
+/-- The number of relation tuples (not values: a tuple has `arity` values). -/
+def Scry.CstStore.tupleCount (s : Scry.CstStore) : Nat :=
+  List.foldl (fun acc r =>
+    let arity := UIntN.toNat (U32Array.get s.relArity r);
+    match arity with
+    | .zero => acc
+    | .succ _ =>
+      let lo := UIntN.toNat (U32Array.get s.relOff r);
+      let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ r));
+      Nat.add acc (Nat.div (Nat.sub hi lo) arity))
+    0 (Scry.schemaRange (Scry.CstStore.relationCount s))
+
+/-- The stats block, from the columns (same shape as `Scry.statsOf` on the model).
+The histograms are one pass per column into a `U32Array`, rendered in first-appearance
+order (as before), so `statsOf` costs O(nodes) and allocates O(distinct kinds + fields)
+strings, not one string per node. `tuples` counts tuples, not values. -/
 def Scry.CstStore.statsOf (s : Scry.CstStore) : Scry.Stats :=
   let n := Scry.CstStore.nodeCount s;
-  let kindNames := List.map (Scry.CstStore.kindName s) (Scry.schemaRange n);
-  let labelNames := List.map (fun i => InternTable.lookup s.fields
-    (U32Array.get s.edgeLabel i)) (Scry.schemaRange (Scry.CstStore.edgeCount s));
+  let kh := Scry.histogramOfColumn (InternTable.size s.kinds) s.kindCol;
+  let lh := Scry.histogramOfColumn (InternTable.size s.fields) s.edgeLabel;
+  let fuel := Nat.succ n;
   Scry.Stats.mk (InternTable.size s.paths) n (Scry.CstStore.edgeCount s)
-    (Scry.CstStore.relationCount s) (U32Array.size s.relTuples) (Scry.CstStore.rootCount s)
-    (Scry.CstStore.maxDepth s) (Scry.CstStore.errorCount s)
-    (Scry.countKeys kindNames) (Scry.countKeys labelNames)
+    (Scry.CstStore.relationCount s) (Scry.CstStore.tupleCount s)
+    (Scry.rootCountOfColumn s.parent)
+    (Scry.maxDepthOfColumn (Scry.depthAt s fuel) n s.parent)
+    (Scry.errorCountOfColumn s.flags)
+    (Scry.countsOfHistogram (fun i => InternTable.lookup s.kinds (U32.ofNat i)) kh)
+    (Scry.countsOfHistogram (fun i => InternTable.lookup s.fields (U32.ofNat i)) lh)
 
 /-- The store's kind id for a kind name (the generated schema's `C.Kind.name` way in). -/
 def Scry.CstStore.kindIdOf (s : Scry.CstStore) (name : String) : Option U32 :=
@@ -558,7 +581,7 @@ def Scry.CstStore.finish (language : String) (kindNames fieldNames paths : List 
           let rows := Scry.csrOfRows n edgeRows;
           let pairs := List.concat (List.map (fun row =>
             Scry.rowPairs (List.map (fun e => Scry.rowAt e 1) row)) rows);
-          let tupleCounts := List.map (fun r => List.length r.tuples) rels;
+          let tupleCounts := List.map (fun r => Nat.mul (List.length r.tuples) r.arity) rels;
           let flat := List.concat (List.map (fun r => List.concat r.tuples) rels);
           let store := Scry.CstStore.mk language
             (InternTable.internAll InternTable.empty kindNames).1 (InternTable.internAll InternTable.empty fieldNames).1

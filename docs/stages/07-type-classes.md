@@ -43,9 +43,10 @@ instance {A : Type} [Inhabited A] : Inhabited (List A) where
   arguments are known, at the latest at the end of the command. Inside a definition,
   instance binders are local instances.
 * `instance (priority := n)? binders : C T := v`, or `where f := …` with the fields
-  by name. The instance is named after its type (`instInhabitedNat`). Instances
-  overlap freely (Lean-style): local instances first, then higher priority, then
-  later declarations.
+  by name (an unknown field is `no-such-field`, a missing one `missing-field`, and one
+  given twice `named-argument`, as in a structure update). The instance is named after
+  its type (`instInhabitedNat`). Instances overlap freely (Lean-style): local instances
+  first, then higher priority, then later declarations.
 * **Resolution** (`Elab/Class.lean`) is tabled, after Selsam, Ullrich & de Moura
   (2020), with generator and consumer nodes and an answer table per normalised goal.
   A subgoal already in the table waits for that goal's answers instead of being
