@@ -102,13 +102,32 @@ function run() {
   }, 0);
 }
 
-runButton.addEventListener("click", run);
+let userRan = false;
+runButton.addEventListener("click", () => { userRan = true; run(); });
 editor.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
+    userRan = true;
     run();
   }
 });
+
+// The default program is a Wiz file, web/playground-tour.wiz, published beside this
+// page (web/build-site.sh copies it; `playground-tour.wiz` is relative, so the page
+// works at a domain root and under the project site's prefix alike). The textarea's
+// inline text is the fallback: a failed fetch (offline, a `file://` page) leaves it in
+// place, and a fetch that lands after the user has started typing is dropped. If the
+// engine's first run used the fallback, the tour is run once it lands, so the output
+// and the editor show the same program.
+const fallbackSource = editor.value;
+fetch(new URL("playground-tour.wiz", import.meta.url), { cache: "no-cache" })
+  .then((r) => (r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status))))
+  .then((text) => {
+    if (text.trim() === "" || editor.value !== fallbackSource) return;
+    editor.value = text;
+    if (wasm && !userRan) run();
+  })
+  .catch(() => { /* the inline fallback stays */ });
 
 // The goals pane is independent of the Wasm engine. By default it is the in-page server
 // (web/selfhost-lsp-shim.js): the same Wasm engine answers the pane, so there is nothing

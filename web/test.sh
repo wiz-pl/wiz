@@ -34,6 +34,14 @@ if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo
   echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
+# (playground-tour) the page's default program is a Wiz file it fetches, so it must sit
+# beside the page in the built output (web/build-playground.sh copies it).
+if cmp -s "$ROOT/web/playground-tour.wiz" "$OUT/playground-tour.wiz"; then
+  echo "ok (playground, tour deployed)"
+else
+  echo "FAIL (playground, tour not copied to $OUT)" >&2
+  exit 1
+fi
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
@@ -71,3 +79,17 @@ for want in 'status: connected' 'class="names">A</span>' 'data-ref="' 'tt k-cons
   if grep -qF "$want" "$OUT/chrome.txt"; then echo "ok (chromium): $want"; else echo "FAIL (chromium): missing $want"; ok=0; fi
 done
 [ $ok = 1 ] || { cat "$OUT/chrome.txt" "$OUT/bridge.log"; exit 1; }
+# (11ab) the playground in Chromium: `playground-tour.wiz` arrives by fetch and fills
+# the textarea (not the inline fallback), and the page runs it once the engine loads.
+(cd "$OUT" && exec python3 -m http.server $((PORT + 4)) --bind 127.0.0.1) > "$OUT/http-play.log" 2>&1 &
+PLAY=$!
+sleep 1
+PLAYRC=0
+node "$ROOT/web/playground_chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 4))/playground.html" > "$OUT/playground-chrome.txt" || PLAYRC=$?
+kill $PLAY
+if [ $PLAYRC = 0 ] && grep -qF 'tour: yes' "$OUT/playground-chrome.txt" &&
+   grep -qF 'first: Nat' "$OUT/playground-chrome.txt"; then
+  echo "ok (playground, chromium: the tour is fetched and run)"
+else
+  echo "FAIL (playground, chromium)"; cat "$OUT/playground-chrome.txt" "$OUT/http-play.log"; exit 1
+fi

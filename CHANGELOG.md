@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's default program is now a **"Wiz in Y minutes"** tour, published
+  as `web/playground-tour.wiz` and fetched into the editor from
+  `playground-tour.wiz` beside the page (`/playground/playground-tour.wiz` on the site;
+  `web/build-site.sh` copies it and `web/check-site.sh` checks it). It covers comments
+  and layout, literals with `#check`/`#eval`, currying, `let`/`if`, an inductive with
+  pattern matching, lists and `String.length`, a structure with projections, a
+  class/instance, an indexed `Vec` and a `rfl` proof. The textarea's inline text is the
+  fallback when the fetch fails, and a fetch that lands after the visitor has typed is
+  dropped. `web/playground_test.mjs` runs the checked-in file through the Wasm module and
+  compares its whole output; the Chromium test (`web/playground_chrome_test.mjs`) checks
+  that the fetch fills the editor.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal

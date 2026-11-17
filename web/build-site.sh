@@ -36,6 +36,9 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 # The playground page is index.html, so /playground/ is a directory index; its own
 # links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
+# The playground's default program: web/playground.js fetches `playground-tour.wiz`
+# beside the page (the textarea's inline text is only the fallback).
+cp "$ROOT/web/playground-tour.wiz" "$SITE/playground/playground-tour.wiz"
 for f in playground.js playground.css playground-values.js \
          lsp-client.js goals.js playground-lsp.js tagged.js selfhost-lsp-shim.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"

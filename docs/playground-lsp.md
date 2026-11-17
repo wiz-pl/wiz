@@ -8,6 +8,12 @@ the page's URL it can also be a **language client** of an external server, showi
 server's tactic state, expected type and diagnostics. Either way clicking a hypothesis or
 a subterm selects its source span in the editor.
 
+The editor starts with the tour in `web/playground-tour.wiz`, which the page fetches
+from `playground-tour.wiz` beside it (`web/build-site.sh` publishes it, so the URL is
+`/playground/playground-tour.wiz` on the site). The textarea's inline text is only the
+fallback: if the fetch fails (offline, a `file://` page) the page keeps it, and a tour
+that arrives after the visitor has started typing is dropped.
+
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
 `web/playground-lsp.js` connects the two to the textarea. A language server that speaks

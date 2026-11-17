@@ -36,7 +36,22 @@ need playground/tagged.js
 need playground/selfhost-lsp-shim.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
+need playground/playground-tour.wiz
 need notebooks/index.html
+
+# The playground fetches its default program from the site (`playground-tour.wiz`,
+# beside the page); check-site must see the same file the page asks for, with the
+# `import Prelude` the engine needs and a command that shows it is the tour.
+if [ -f "$SITE/playground/playground-tour.wiz" ]; then
+  if ! head -1 "$SITE/playground/playground-tour.wiz" | grep -qx 'import Prelude'; then
+    echo "check-site: playground/playground-tour.wiz does not start with 'import Prelude'" >&2
+    fail=1
+  fi
+  if ! grep -q '^#eval ' "$SITE/playground/playground-tour.wiz"; then
+    echo "check-site: playground/playground-tour.wiz has no #eval (not the tour?)" >&2
+    fail=1
+  fi
+fi
 
 # Every local ES import of the playground's scripts resolves: a page whose module graph
 # is broken would load and then do nothing, which an HTTP check would not see.

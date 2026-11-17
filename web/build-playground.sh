@@ -53,5 +53,6 @@ ENGINE="$OUT/playground.wiz"
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" "$OUT/"
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
+  "$ROOT/web/playground-tour.wiz" "$OUT/"
 echo "built $OUT/wiz-playground.mjs"

@@ -1018,6 +1018,7 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
 | `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/playground-tour.wiz` | the default program the page fetches into the editor (`web/playground-tour.wiz`; the textarea's inline text is the fallback) |
 | `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 
 To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
