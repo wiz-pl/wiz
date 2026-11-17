@@ -264,7 +264,7 @@ def group : Group where
           "#eval Nat.add (Nat.mul (List.length Scry.demoRules.rules) 10000) (Nat.add (Nat.mul (List.length (Scry.RulePack.taintRules Scry.demoRules)) 1000) (Nat.add (Nat.mul (List.length (Scry.RulePack.forbiddenRules Scry.demoRules)) 100) (Nat.add (Nat.mul (totalSinks (Scry.RulePack.taintRules Scry.demoRules)) 10) (totalSources (Scry.RulePack.taintRules Scry.demoRules)))))\n" ++
           "#eval if Scry.nameMatches \"mem*\" \"memcpy\" then 1 else 0\n" ++
           "#eval if Scry.nameMatches \"strcpy*\" \"astrcpy\" then 1 else 0\n" ++
-          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42245, 1, 0, 16]
+          "#eval match Scry.Program.check Scry.ruleTaintProgram with | .none => 999 | .some st => List.length st") [42335, 1, 0, 16]
         evalRuleTexts (rulePrelude ++
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
