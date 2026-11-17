@@ -1,0 +1,47 @@
+import IO
+import Web.React
+
+/-! The builder-DSL alternative to `ui! <…>`: one plain Wiz function per tag, no macros.
+`H.cls` rather than `H.class` because `class` is a reserved word. -/
+
+inductive Msg where
+  | inc
+  | dec
+
+structure Model where
+  count : Nat
+  label : String
+  items : List String
+  show : Bool
+
+def H.div {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "div" attrs kids
+def H.p {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "p" attrs kids
+def H.span {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "span" attrs kids
+def H.button {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "button" attrs kids
+def H.input {M : Type} (attrs : List React.Attr) : React.VNode M := React.el "input" attrs List.nil
+def H.ul {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "ul" attrs kids
+def H.li {M : Type} (attrs : List React.Attr) (kids : List (React.VNode M)) : React.VNode M :=
+  React.el "li" attrs kids
+
+/-- The `class` attribute (`class` is a keyword, so the function is `cls`). -/
+def H.cls (value : String) : React.Attr := React.attr "class" value
+def H.attr (name value : String) : React.Attr := React.attr name value
+def H.text {M : Type} (s : String) : React.VNode M := React.text s
+def H.at {M : Type} (event : String) (msg : M) (node : React.VNode M) : React.VNode M :=
+  React.on event msg node
+def H.nodes {M : Type} (vs : List (React.VNode M)) : React.VNode M := React.seq vs
+
+def view (s : Model) : React.VNode Msg :=
+  H.div [H.cls "app"] [H.p [H.cls "row"] [H.text "count: ", H.text (Nat.toString s.count)], H.at "click" Msg.inc (H.button [] [H.text "+"]), H.at "click" Msg.dec (H.button [] [H.text "-"]), H.span [] [H.text s.label], H.input [H.attr "type" "range"], H.text "raw node", H.nodes (List.map (fun t =>
+    H.text t) s.items)]
+
+def m : Model := Model.mk 2 "hello" ["a", "b"] .true
+
+#eval React.toHtml (view m)
+
+def main : IO Unit := IO.println (React.toHtml (view m))

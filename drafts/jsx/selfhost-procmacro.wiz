@@ -1,0 +1,18 @@
+-- A procedural macro, for contrast: the host elaborator runs it (`wiz check` passes),
+-- the self-hosted frontend does not. Copy this file to a scratch directory as
+-- `input.wiz` and run the self-hosted checker there: it reports
+--
+--   error: unknown identifier Macro
+--   error: unknown declaration bangMacro
+--   error: unsupported syntax term.bang
+--
+-- and still exits 0 (the checker reports errors, it does not fail the process).
+import Prelude
+
+syntax (name := bang) "bang!" term : term
+
+def bangMacro : Macro := fun stx => MacroM.pure (Syntax.getArg stx 1)
+
+attribute [macro term.bang] bangMacro
+
+def y : Nat := bang! 2

@@ -1,0 +1,226 @@
+import Web.React
+
+/-!
+# Web markup (prototype)
+
+A JSX-like markup surface for `Web.React`:
+
+```
+ui! <div class="row"> {text} <button on="click" msg={Msg.inc}> {label} </button> </div>
+```
+
+* `<tag attrs> children </tag>` and `<tag attrs />` are **markup nodes** in a new
+  `markup` category; `ui! markup` is the term that enters the category.
+* attributes are `name="text"`, `name={term}` (a `String` term), a bare `name`, and
+  `on="event" msg={m}` (which becomes `React.on`), plus `key={k}` (`React.keyed`).
+* children are elements, `"text"`, `{s}` (a `String`), `{*v}` (a `VNode`) and `{+vs}`
+  (a `List (VNode M)`).
+* the translation to `React.el`/`React.on`/`React.keyed` is a **procedural macro**
+  (`attribute [macro markup.markupEl]`), because it has to walk an arbitrary number of
+  attributes and children, compare the opening and closing tag, and turn tag and
+  attribute names into `String` literals. `macro_rules` cannot do any of those (see
+  `wiz-notes/jsx-prototype.md`).
+
+The self-hosted frontend parses this grammar and runs `macro_rules`, but it does not
+run procedural macros (and its prelude has no `Macro`/`MacroM`): files using `ui!` are
+host-only. This is why the module lives in `drafts/` rather than `lib/Web/`.
+-/
+
+declare_syntax_cat markup
+declare_syntax_cat markupAttr
+
+-- Attributes. `class` and `for` are reserved words in Wiz, so they are tokens, not
+-- `ident`s: they need rules of their own.
+syntax (name := attrStatic) ident "=" str : markupAttr
+syntax (name := attrSplice) ident "=" "{" term "}" : markupAttr
+syntax (name := attrBare) ident : markupAttr
+syntax (name := attrClass) "class" "=" str : markupAttr
+syntax (name := attrClassSplice) "class" "=" "{" term "}" : markupAttr
+syntax (name := attrFor) "for" "=" str : markupAttr
+
+-- Elements. `markup*` stops at `</`, so the closing tag is unambiguous.
+syntax (name := markupVoid) "<" ident markupAttr* "/>" : markup
+syntax (name := markupEl) "<" ident markupAttr* ">" markup* "</" ident ">" : markup
+-- Children that are not elements.
+syntax (name := markupSplice) "{" term "}" : markup
+syntax (name := markupSpliceNode) "{" "*" term "}" : markup
+syntax (name := markupSpliceList) "{" "+" term "}" : markup
+syntax (name := markupText) str : markup
+-- The entry point: `ui! <…>` is a term.
+syntax (name := markup) "ui!" markup : term
+
+-- `ui!` only unwraps; the markup node expands with the macro below.
+macro_rules
+  | `(term| ui! $m) => `(term| $m)
+
+-- ## Reading syntax
+
+/-- The items of a `SyntaxF` list. -/
+def Markup.stxList {b : Bool} : SyntaxF b → List Syntax
+  | .nil => .nil
+  | .cons x xs => .cons x (Markup.stxList xs)
+  | _ => .nil
+
+/-- The children of a node. -/
+def Markup.args (s : Syntax) : List Syntax := match s with
+  | .node _ a => Markup.stxList a
+  | other => .cons other .nil
+
+/-- The atom inside a token node (a `str` token is `str [atom v]`). -/
+def Markup.atomOf (s : Syntax) : Option String := match s with
+  | .atom v => .some v
+  | .node _ a => match Markup.stxList a with
+    | .cons (.atom v) _ => .some v
+    | _ => .none
+  | _ => .none
+
+/-- The atom, or `""`. -/
+def Markup.strOf (s : Syntax) : String := match Markup.atomOf s with
+  | .some v => v
+  | .none => ""
+
+/-- A tag or attribute name: an identifier, or a reserved word used as an atom. -/
+def Markup.nameOf (s : Syntax) : String := match s with
+  | .ident n => n
+  | .atom v => v
+  | _ => ""
+
+/-- A term `f a₁ … aₙ`. -/
+def Markup.call (f : String) (xs : List Syntax) : Syntax := Syntax.mkApp (Syntax.mkVar f) xs
+
+/-- A term for the list `[x₁, …, xₙ]`, as `List.cons` cells. -/
+def Markup.listTerm (xs : List Syntax) : Syntax := match xs with
+  | .nil => Syntax.mkVar "List.nil"
+  | .cons x rest => Markup.call "List.cons" [x, Markup.listTerm rest]
+
+-- ## Attributes
+
+/-- What an element's attributes become: ordinary `React.Attr`s, and the special
+`on`/`msg` pair (one handler) and `key`. -/
+structure Markup.Attrs where
+  terms : List Syntax
+  event : Option String
+  msg : Option Syntax
+  key : Option Syntax
+
+def Markup.Attrs.empty : Markup.Attrs := Markup.Attrs.mk List.nil .none .none .none
+
+/-- Whether the attribute's value is a spliced term (rather than a string literal). -/
+def Markup.spliceAttr (a : Syntax) : Bool := match a with
+  | .node k _ =>
+    Bool.or (String.eq k "markupAttr.attrSplice") (String.eq k "markupAttr.attrClassSplice")
+  | _ => .false
+
+/-- The term for an attribute's value: the spliced term, or a string literal. -/
+def Markup.attrValue (a : Syntax) : Syntax :=
+  if Markup.spliceAttr a then Syntax.getArg a 3 else Syntax.mkStr (Markup.strOf (Syntax.getArg a 2))
+
+/-- One ordinary attribute, `React.attr name value`. -/
+def Markup.plainAttr (name : String) (value : Syntax) : List Syntax :=
+  List.cons (Markup.call "React.attr" [Syntax.mkStr name, value]) List.nil
+
+/-- Which special attribute this is (if any). -/
+inductive Markup.AttrKind where
+  | on
+  | msg
+  | key
+  | plain
+
+def Markup.attrKind (n : String) : Markup.AttrKind :=
+  if String.eq n "on" then .on else if String.eq n "msg" then .msg else if String.eq n "key" then .key else .plain
+
+/-- Add one attribute: `on` and `msg` are kept aside (they become `React.on`), `key`
+becomes `React.keyed`, and the rest are ordinary attributes. -/
+def Markup.addAttr (acc : Markup.Attrs) (a : Syntax) : Markup.Attrs :=
+  let n := Markup.nameOf (Syntax.getArg a 0);
+  match Markup.attrKind n with
+  | .on => {acc with event := .some (Markup.strOf (Syntax.getArg a 2))}
+  | .msg => {acc with msg := .some (Markup.attrValue a)}
+  | .key => {acc with key := .some (Markup.attrValue a)}
+  | .plain => {acc with terms := List.append acc.terms (Markup.plainAttr n (Markup.attrValue a))}
+
+def Markup.foldAttrs : List Syntax → Markup.Attrs → Markup.Attrs
+  | .nil, acc => acc
+  | .cons a rest, acc => Markup.foldAttrs rest (Markup.addAttr acc a)
+
+-- ## Children
+
+/-- The kind of a child, as a small enumeration (so the match below stays readable). -/
+inductive Markup.Kid where
+  | text
+  | splice
+  | node
+  | list
+  | other
+
+def Markup.kidTable : List (String × Markup.Kid) :=
+  [("markup.markupText", .text), ("markup.markupSplice", .splice), ("markup.markupSpliceNode", .node), ("markup.markupSpliceList", .list)]
+
+def Markup.lookupKid (kind : String) : List (String × Markup.Kid) → Markup.Kid
+  | .nil => .other
+  | .cons (n, v) rest => if String.eq kind n then v else Markup.lookupKid kind rest
+
+def Markup.kidOf (k : Syntax) : Markup.Kid := match k with
+  | .node kind _ => Markup.lookupKid kind Markup.kidTable
+  | _ => .other
+
+/-- A child as a term. An element stays a markup node: the elaborator expands it when
+it reaches it in the generated term (macro expansion is by node kind, not category). -/
+def Markup.kidTerm (k : Syntax) : Syntax := match Markup.kidOf k with
+  | .text => Markup.call "React.text" [Syntax.mkStr (Markup.strOf (Syntax.getArg k 0))]
+  | .splice => Markup.call "React.text" [Syntax.getArg k 1]
+  | .node => Syntax.getArg k 2
+  | .list => Markup.call "React.seq" [Syntax.getArg k 2]
+  | .other => k
+
+-- ## Elements
+
+/-- What is wrong with the tags, if anything. -/
+def Markup.componentError (tag : String) : Option String :=
+  if String.contains tag "." then .some ("component <" ++ tag ++ "> is not supported: use {*Item.view ...}") else .none
+
+def Markup.mismatch (tag close : String) : String :=
+  "closing tag </" ++ close ++ "> does not match <" ++ tag ++ ">"
+
+def Markup.tagCheck (tag close : String) : Option String := match Markup.componentError tag with
+  | .some e => .some e
+  | .none => if String.eq tag close then .none else .some (Markup.mismatch tag close)
+
+/-- The generated element term. -/
+def Markup.elTerm (tag : String) (attrs kids : List Syntax) : Syntax :=
+  let attrList := Markup.listTerm attrs;
+  let kidList := Markup.listTerm (List.map Markup.kidTerm kids);
+  Markup.call "React.el" [Syntax.mkStr tag, attrList, kidList]
+
+/-- Build `React.el tag attrs kids`, then `React.keyed`, then `React.on`. `void` is
+`true` for `<input … />` (no children and no closing tag). -/
+def Markup.elBody (void : Bool) (stx : Syntax) : Except String Syntax :=
+  let tag := Markup.nameOf (Syntax.getArg stx 1);
+  let close := if void then tag else Markup.nameOf (Syntax.getArg stx 6);
+  match Markup.tagCheck tag close with
+  | .some e => .error e
+  | .none =>
+    let attrs := Markup.foldAttrs (Markup.args (Syntax.getArg stx 2)) Markup.Attrs.empty;
+    let kids := if void then List.nil else Markup.args (Syntax.getArg stx 4);
+    let el := Markup.elTerm tag attrs.terms kids;
+    let keyed := match attrs.key with
+      | .some k => Markup.call "React.keyed" [k, el]
+      | .none => el;
+    match attrs.event with
+    | .some ev => match attrs.msg with
+      | .some m => .ok (Markup.call "React.on" [Syntax.mkStr ev, m, keyed])
+      | .none => .error ("attribute on=\"" ++ ev ++ "\" needs msg={message}")
+    | .none => match attrs.msg with
+      | .some _ => .error "attribute msg={message} needs on=\"event\""
+      | .none => .ok keyed
+
+def Markup.elExpand (stx : Syntax) : MacroM Syntax := match Markup.elBody .false stx with
+  | .ok s => MacroM.pure s
+  | .error e => MacroM.throw e
+
+def Markup.voidExpand (stx : Syntax) : MacroM Syntax := match Markup.elBody .true stx with
+  | .ok s => MacroM.pure s
+  | .error e => MacroM.throw e
+
+attribute [macro markup.markupEl] Markup.elExpand
+attribute [macro markup.markupVoid] Markup.voidExpand

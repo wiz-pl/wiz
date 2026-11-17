@@ -1,0 +1,41 @@
+import IO
+import Web.React
+import Markup
+
+inductive Msg where
+  | inc
+  | dec
+
+structure Model where
+  count : Nat
+  label : String
+  items : List String
+  show : Bool
+
+def view (s : Model) : React.VNode Msg :=
+  ui! <div class="app">
+        <p class="row">"count: " {Nat.toString s.count}</p>
+        <button on="click" msg={Msg.inc}>"+"</button>
+        <button on="click" msg={Msg.dec}>"-"</button>
+        <span> {s.label} </span>
+        <input type="range" />
+        {*React.text "raw node"}
+        {+List.map (fun t => React.text t) s.items}
+      </div>
+
+def step (m : Msg) (s : Model) : Model :=
+  match m with
+  | .inc => { s with count := s.count + 1 }
+  | .dec => { s with count := Nat.sub s.count 1 }
+
+def app : React.App Model Msg := React.App.mk (Model.mk 2 "hello" ["a", "b"] .true) step view
+
+def s0 : Model := app.init
+def s1 : Model := React.App.dispatch app s0 0
+
+#eval React.App.html app s0
+#eval React.App.patches app s0 s1
+
+def main : IO Unit := do
+  IO.println (React.App.html app s0);
+  IO.println (React.App.patches app s0 s1)

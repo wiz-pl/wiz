@@ -1,0 +1,35 @@
+-- The declarative subset of the markup grammar, as an experiment in what the
+-- self-hosted frontend supports: `declare_syntax_cat`, `syntax` with `many`/`*`, and
+-- `macro_rules` all work there.
+--
+-- Run it with the self-hosted checker: copy this file to a scratch directory as
+-- `input.wiz` and run the checker there. It prints `z : String`, `w : String`, `q :
+-- String` and exits 0.
+--
+-- The last definition is the warning: a declarative rule can bind the opening and the
+-- closing tag to the same `$t`, but it cannot compare them, so `<div></span>` is
+-- accepted (and expands as if it were `<div></div>`).
+import Prelude
+
+declare_syntax_cat markup
+syntax (name := mText) str : markup
+syntax (name := mEl) "<" ident ">" markup* "</" ident ">" : markup
+syntax (name := mTerm) "ui!" markup : term
+
+macro_rules
+  | `(term| ui! $m) => `(term| $m)
+
+-- one child: the tag is a literal in the pattern; the child is a markup antiquot
+macro_rules
+  | `(markup| <div>$k</div>) => `(term| "one")
+-- no children
+macro_rules
+  | `(markup| <div></div>) => `(term| "empty")
+-- any tag, both sides bound to `$t` (which is not checked for equality); the template
+-- cannot turn `$t` into a `String`, so it can only ignore it
+macro_rules
+  | `(markup| < $t></ $t>) => `(term| "same shape")
+
+def z : String := ui! <div>"hi"</div>
+def w : String := ui! <div></div>
+def q : String := ui! <div></span>
