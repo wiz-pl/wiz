@@ -1644,18 +1644,30 @@ def dropL {A : Type} : Nat → List A → List A
 -- metavariable's type is a Π over the whole context, and quoting every type again for
 -- each one made big definitions run out of memory: stage 20b)
 inductive Cx where
-  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm))
+  | mk (c : TCtx) (sc : Scope) (tele : List (Unit → Tm)) (lins : List Nat)
 def Cx.c : Cx → TCtx
-  | .mk c _ _ => c
+  | .mk c _ _ _ => c
 def Cx.sc : Cx → Scope
-  | .mk _ sc _ => sc
+  | .mk _ sc _ _ => sc
 def Cx.tele : Cx → List (Unit → Tm)
-  | .mk _ _ t => t
+  | .mk _ _ t _ => t
+-- (A21) the levels bound at quantity 1, as the Lean elaborator's `LocalCtx.linearLvls`: a
+-- `match` whose scrutinee uses one is the case at 1 (`T.casesOn1`)
+def Cx.lins : Cx → List Nat
+  | .mk _ _ _ l => l
 def Cx.lvl (cx : Cx) : Nat := TCtx.lvl (Cx.c cx)
 def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
-  | .mk c sc t =>
+  | .mk c sc t l =>
     let d := TCtx.lvl c;
-    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t) l
+-- a binder at a written quantity: a literal other than 0 and ω is linear
+def Cx.bindQ (cx : Cx) (x : String) (ty : Val) (q : Option Q) : Cx := match cx with
+  | .mk c sc t l =>
+    let d := TCtx.lvl c;
+    let l' := match q with
+      | .some .qo => List.cons d l
+      | _ => l;
+    .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t) l'
 -- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
 -- metavariables applied to the context don't carry every `let`'s value along)
 -- (#422) a `let`-bound variable whose value is computed only when something looks through
@@ -1663,10 +1675,28 @@ def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
 -- the program computes at run time, and evaluating it here would run it while compiling
 -- (a `match` on a closed scrutinee, say, evaluates in full)
 def Cx.defineL (cx : Cx) (x : String) (v : Unit → Val) (ty : Val) : Cx := match cx with
-  | .mk c sc t =>
+  | .mk c sc t l =>
     let d := TCtx.lvl c;
-    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo v)) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo v)) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t) l
 def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := Cx.defineL cx x (fun _ => v) ty
+-- a `let`-bound variable at a written quantity (A21: a `let 1` makes later matches additive)
+def Cx.defineLQ (cx : Cx) (x : String) (v : Unit → Val) (ty : Val) (q : Option Q) : Cx := match cx with
+  | .mk c sc t l =>
+    let d := TCtx.lvl c;
+    let l' := match q with
+      | .some .qo => List.cons d l
+      | _ => l;
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo v)) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t) l'
+def Cx.defineQ (cx : Cx) (x : String) (v ty : Val) (q : Option Q) : Cx :=
+  Cx.defineLQ cx x (fun _ => v) ty q
+-- does the term use a variable bound at quantity 1? (the term is at depth `d`)
+def usesLins (d : Nat) (t : Tm) : List Nat → Bool
+  | .nil => .false
+  | .cons l rest => Bool.or (usesVar (d - 1 - l) t) (usesLins d t rest)
+def usesLin (cx : Cx) (t : Tm) : Bool := usesLins (Cx.lvl cx) t (Cx.lins cx)
+def levelIn (l : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons y rest => Bool.or (Nat.beq l y) (levelIn l rest)
 -- (#422) a Π's codomain (`cod` under `env`) at the argument `a`, a term at the depth of
 -- `cx`: `a` is evaluated only if the codomain mentions it, as the kernel's `infer` does
 -- for an application. An argument is an elaborated term (a `match` on a closed scrutinee,
@@ -2162,6 +2192,13 @@ def zonk (es : ES) (d : Nat) (t : Tm) : Option Tm := match metaHead t 0 with
       | .some ty' => match zonk es d v with
         | .some v' => match zonk es (d + 1) b with
           | .some b' => .some (.letq q ty' v' b')
+          | .none => .none
+        | .none => .none
+      | .none => .none
+    | .split q s m b => match zonk es d s with
+      | .some s' => match zonk es (d + 1) m with
+        | .some m' => match zonk es (d + 2) b with
+          | .some b' => .some (.split q s' m' b')
           | .none => .none
         | .none => .none
       | .none => .none
@@ -3287,7 +3324,7 @@ def fieldCols (np L d0 : Nat) (args : Tms) : List Bool → Cx → Nat → List Q
       | .true => .down raw
       | .false => raw;
     let env := TCtx.env (Cx.c cx);
-    match fieldCols np L d0 args (tailB lifts) (Cx.define cx "_" (eval env val) (eval env ty)) (j + 1) (tailQ qs) rest with
+    match fieldCols np L d0 args (tailB lifts) (Cx.defineQ cx "_" (eval env val) (eval env ty) (.some (headQ qs))) (j + 1) (tailQ qs) rest with
     | .mk wrap cols recs cx' => .mk (fun b => letTm (headQ qs) ty val (wrap b)) (.cons (.mk d ty ty (headQ qs)) cols) (match isRec with
         | .true => .cons d recs
         | .false => recs) cx'
@@ -3311,14 +3348,14 @@ def bindLetsT (body : Tm) : Cx → List Bind → Tm
     let A := shiftTm (d - l) 0 ty;
     let v : Tm := .var (d - 1 - l);
     let env := TCtx.env (Cx.c cx);
-    letTm q A v (bindLetsT body (Cx.define cx x (eval env v) (eval env A)) rest)
+    letTm q A v (bindLetsT body (Cx.defineQ cx x (eval env v) (eval env A) (.some q)) rest)
 def bindCx : Cx → List Bind → Cx
   | cx, .nil => cx
-  | cx, .cons (.mk x (.mk l ty _ _)) rest =>
+  | cx, .cons (.mk x (.mk l ty _ q)) rest =>
     let d := Cx.lvl cx;
     let A := shiftTm (d - l) 0 ty;
     let env := TCtx.env (Cx.c cx);
-    bindCx (Cx.define cx x (eval env (.var (d - 1 - l))) (eval env A)) rest
+    bindCx (Cx.defineQ cx x (eval env (.var (d - 1 - l))) (eval env A) (.some q)) rest
 -- bind the parameters after the structural one again: names from `ps`, types from the
 -- Π type `ty`; the rest of `ty` is the expected type inside
 inductive Gen where
@@ -3326,7 +3363,7 @@ inductive Gen where
 def genBind (es : ES) : Cx → Val → List String → Gen
   | cx, ty, .nil => .mk cx ty
   | cx, ty, .cons x rest => match whnf ty with
-    | .vpi _ _ _ dom env cod => genBind es (Cx.bind cx x dom) (eval (.cons (fresh (Cx.lvl cx)) env) cod) rest
+    | .vpi q _ _ dom env cod => genBind es (Cx.bindQ cx x dom (.some q)) (eval (.cons (fresh (Cx.lvl cx)) env) cod) rest
     | t => .mk cx t
 def dropEnv : Nat → Env → Env
   | .zero, e => e
@@ -3990,6 +4027,43 @@ def headParamNames (gs : Globals) (cx : Cx) (h : Syntax) : List String :=
 -- (A13) `unfold`'s traversal result (the term, and whether an occurrence changed)
 inductive UnfoldR where
   | mk (t : Tm) (changed : Bool)
+
+-- (A21) the fields of a linear match's payload, taken apart by `split` at 1 rather than
+-- projected (a projection uses its pair ω times): `fun body => split 1 rest … ; let () := u;
+-- body`. The context returned has the fields (and the index equation and the final `Unit`)
+-- bound, and the columns are at those levels.
+inductive LFS where
+  | ok (wrap : Tm → Tm) (cols : List Col) (cx : Cx)
+  | err (msg : String)
+partial def linearFieldSplits (gs : Globals) (cx : Cx) (cur : Tm) (n : Nat) (expected : Val) : LFS :=
+  let d := Cx.lvl cx;
+  match infer (Cx.c cx) cur with
+  | .err m => .err m
+  | .ok ty _ => match whnf ty with
+    | .vsigma p i j A env B =>
+      if Nat.beq n 0 then
+        -- the index equation at 0 and the final `Unit` at 1, consumed by `let () := u`
+        let xv := fresh d;
+        let Bv := eval (.cons xv env) B;
+        let cxE := Cx.bind cx "e✝" A;
+        let cxU := Cx.bind cxE "u✝" Bv;
+        .ok (fun body => .split .qo cur (quote (d + 1) expected) (.letUnit (.var 0) body)) .nil cxU
+      else
+        let xv := fresh d;
+        let Bv := eval (.cons xv env) B;
+        let cxF := Cx.bind cx "f✝" A;
+        let cxR := Cx.bind cxF "r✝" Bv;
+        match linearFieldSplits gs cxR (.var 0) (Nat.sub n 1) expected with
+        | .err m => .err m
+        | .ok wrap cols cx' =>
+          .ok (fun body => .split .qo cur (quote (d + 1) expected) (wrap body))
+            (.cons (.mk d (quote d A) (quote d A) p) cols) cx'
+    | ty' => .err (String.append "a linear match's payload is not a pair: " (showVal (Cx.c cx) ty'))
+
+-- the fields of a branch: projections at ω (`fieldCols`), or splits at 1 (A21)
+inductive FRes where
+  | ok (wrap : Tm → Tm) (cols : List Col) (recs : List Nat) (cx : Cx)
+  | err (msg : String)
 
 mutual
 -- ------------------------------------------------------------------------------------
@@ -4941,7 +5015,7 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
     | _ => Q.qw;
   let body := fun (A : Tm) (Av : Val) (v : Tm) (es2 : ES) => (match kid s 2 with
     | .ident x =>
-      let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
+      let cx' := Cx.defineLQ cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av (.some q);
       match expected with
       | .some T => match checkT gs es2 cx' (kid s 7) T with
         | .ok b _ es3 => TE.ok (letTm q A v b) T es3
@@ -5096,8 +5170,13 @@ def scrutLets (gs : Globals) (es : ES) (cx : Cx) : List Syntax → SL
     | .ok t xty es1 =>
       let d := Cx.lvl cx;
       let A := quote d (force es1 xty);
-      match scrutLets gs es1 (Cx.defineL cx "x✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) xty) rest with
-      | .ok cx' cols wrap es2 => .ok cx' (.cons (.mk d A A .qw) cols) (fun b => .letE A t (wrap b)) es2
+      -- (A21) a scrutinee that uses a variable held at 1 is itself bound at 1: the case
+      -- at 1 hands its payload over at 1 (`T.casesOn1`)
+      let q : Q := match usesLin cx t with
+        | .true => .qo
+        | .false => .qw;
+      match scrutLets gs es1 (Cx.defineLQ cx "x✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) xty (.some q)) rest with
+      | .ok cx' cols wrap es2 => .ok cx' (.cons (.mk d A A q) cols) (fun b => letTm q A t (wrap b)) es2
       | e => e
 -- `fun x y => b` against a Π type
 -- (a binder's written quantity must be the Π's, as in Lean's `checkFun`)
@@ -5105,7 +5184,7 @@ def checkLams (gs : Globals) (es : ES) (cx : Cx) (xs : List String) (ws : List Q
   | .nil => checkT gs es cx body ty
   | .cons x rest => match whnf (force es ty) with
     | .vpi q _ _ dom env cod =>
-      let cx' := Cx.bind cx x dom;
+      let cx' := Cx.bindQ cx x dom (.some q);
       let go := fun (u : Unit) => (match checkLams gs es cx' rest (match ws with
           | .nil => .nil
           | .cons _ ws' => ws') body (eval (.cons (fresh (Cx.lvl cx)) env) cod) with
@@ -5299,7 +5378,14 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let d := Cx.lvl cx;
   match nthCol cols k with
-  | .mk L ty0 tyI _ =>
+  | .mk L ty0 tyI qcol =>
+    -- (A21) the scrutinee is held at 1: the case at 1 (`T.casesOn1`), whose payload is
+    -- taken apart by `split` at 1 (only case analysis, never the structural split). The
+    -- column's quantity is the scrutinee's: `scrutLets` binds a term that uses a linear
+    -- local at 1, and a field taken at 1 is a column at 1.
+    let linear := Bool.and (Bool.not top) (Bool.or (levelIn L (Cx.lins cx)) (match qcol with
+      | .qo => .true
+      | _ => .false));
     let ty := unfoldTy gs L ty0;
     match headOf ty .tnil with
     | .none => .err "a pattern on a value that isn't of an inductive type"
@@ -5367,13 +5453,18 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
             | .true => 0
             | .false => 1;
           let e := d + b;
+          -- (A21) at quantity 1 the branch's payload binder is at 1 too: a linear value
+          -- passed to an ω binder would be charged ω times
+          let restQ : Q := match linear with
+            | .true => .qo
+            | .false => .qw;
           -- (in case analysis the payload is at `μ^j`, and the motive is applied to
           -- `y := con (tag, rest) : μ^{↑j} D i`, below `μ D i`)
           let MT : Tm := match top with
             | .true => piH (nfAt (d + 4) (interpApp lv (IAt (d + 4)) (DtAt (d + 4) 0) (XAt (d + 4)) (.var 3)))
                 (piH (nfAt (d + 5) (tApps (allTm lv v) (args6 (IAt (d + 5)) (DtAt (d + 5) 1) (XAt (d + 5)) (PAt (d + 5)) (.var 4) (.var 0))))
                   (shiftTm 4 0 MB))
-            | .false => piH (nfAt (e + 4) (interpApp lv (IAt (e + 4)) (DtAt (e + 4) 0) (XsAt (e + 4) (.var 4)) (.var 3)))
+            | .false => piTm restQ (nfAt (e + 4) (interpApp lv (IAt (e + 4)) (DtAt (e + 4) 0) (XsAt (e + 4) (.var 4)) (.var 3)))
                 (piH (.unit (ln 1)) (.letE (.mus lv (IAt (e + 6)) (DAt (e + 6)) (.var 5) (.szSuc (.var 6))) (.con (.pair (match tagL with
                   | .true => .up (.var 2)
                   | .false => .var 2) (.var 1)))
@@ -5394,17 +5485,32 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
             | .false => Cx.define cx2 "ih✝" .vtt (.vunit (ln 1));
           -- the motive's body as a value (it doesn't use `i` and `y`)
           let MBv := eval (.cons .vtt (.cons .vtt env)) MB;
-          match branches gs mc es cx3 expected cols top ihLvls cls k (.mk L ty tyI .qw) T np tagL pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
+          match branches gs mc es cx3 expected cols top linear ihLvls cls k (.mk L ty tyI .qw) T np tagL pargs nidxE I idx fam modeB MB0 MB MBv MT G b (lenL ctors) 0 ctors with
           | .err m => .err m
           | .ok bs es' =>
             let convoyTag : Tm := match tagL with
               | .true => .down (.fst (.var 1))
               | .false => .fst (.var 1);
             let convoy : Tm := .app (.app (.ecase MT convoyTag bs) (.snd (.var 1))) (.var 0);
+            -- (A21) at quantity 1 the payload `xs` is a pair held at 1: take it apart with
+            -- `split` at 1 (a projection would use it ω times), then the tag with `ecase`
+            -- and the rest by the branch's own splits (`linearFieldSplits`)
+            let goal : Tm := .app (.app (PAt (d + 3)) (.var 1)) (.con (.var 0));
+            -- (the split's motive is inferred, so it must be a normal form: a raw
+            -- application of the λ `PAt` would be a λ to `infer`)
+            let linMot : Tm := nfAt (d + 4) (shiftTm 1 0 goal);
+            let linTag : Tm := match tagL with
+              | .true => .down (.var 2)
+              | .false => .var 2;
+            let linConvoy : Tm := .app (.app (.ecase (shiftTm 2 0 MT) linTag (shiftTms 2 bs)) (.var 1)) (.var 0);
+            let linBody : Tm := .split .qo (.var 0) linMot (.letE (.unit (ln 1)) .star linConvoy);
             let indT : Tm := match top with
               | .true => .ind lv (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam convoy))) (shiftTm (d - L) 0 idx) (.var (d - 1 - L))
-              | .false => .scase lv .qw (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam (.letE (.unit (ln 1)) .star convoy)))) .szInf
-                  (shiftTm (d - L) 0 idx) (.var (d - 1 - L));
+              | .false => match linear with
+                | .true => .scase lv .qo (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam linBody))) .szInf
+                    (shiftTm (d - L) 0 idx) (.var (d - 1 - L))
+                | .false => .scase lv .qw (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam (.letE (.unit (ln 1)) .star convoy)))) .szInf
+                    (shiftTm (d - L) 0 idx) (.var (d - 1 - L));
             let withE : Tm := match modeB with
               | .true => .app indT (.eqRefl (IAt d) (shiftTm (d - L) 0 idx))
               | .false => indT;
@@ -5417,10 +5523,19 @@ def otherMember (idx res : Tm) : Bool := match idx with
     | .tag _ j => Bool.not (Nat.beq i j)
     | _ => .false
   | _ => .false
+def branchFields (gs : Globals) (linear : Bool) (cx : Cx) (np L d0 : Nat) (args : Tms)
+    (ls : List Bool) (qs : List Q) (fs : List CField) (expected : Val) : FRes :=
+  match linear with
+  | .true => match linearFieldSplits gs cx (.var 1) (lenL fs) expected with
+    | .ok wrap cols cx' => .ok wrap cols .nil cx'
+    | .err m => .err m
+  | .false => match fieldCols np L d0 args ls cx 0 qs fs with
+    | .mk wrap cols recs cx' => .ok wrap cols recs cx'
+
 -- one branch per constructor, in the context of the method's binders (`cx3`, at depth
 -- `d + 3`): `fun rest ih => let fields; (let hyps; let cur✝; fun q =>) …`
 def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val) (cols : List Col)
-    (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lifted : Bool)
+    (top : Bool) (linear : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) (col : Col) (T : String) (np : Nat) (lifted : Bool)
     (args : Tms) (nidx : Nat) (I idx fam : Tm) (modeB : Bool) (MB0 MB : Tm) (MBv : Val) (MT : Tm) (G b : Nat) (nc i : Nat) : List Ctor → BE
   | .nil => .ok .tnil es
   | .cons (.mk c fs res qs impl ls) rest =>
@@ -5436,23 +5551,29 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
         | .vpi _ _ _ ihTy _ _ => Cx.bind cx4 "ihs✝" ihTy
         | _ => Cx.bind cx4 "ihs✝" .vtt
       | _ => Cx.bind (Cx.bind cx3 "rest✝" .vtt) "ihs✝" .vtt;
-    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top ihLvls cls k col T np lifted args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
+    let next := fun (es1 : ES) => branches gs mc es1 cx3 expected cols top linear ihLvls cls k col T np lifted args nidx I idx fam modeB MB0 MB MBv MT G b nc (i + 1) rest;
     -- the motive's body at the method's `i` (level `d`; the motive itself is over the
     -- context before the method's binders, and `j`)
     let MBi := eval (.cons .vtt (.cons (fresh d) (dropEnv (3 + b) (TCtx.env (Cx.c cx3))))) MB;
     match col with
-    | .mk L _ _ _ => match fieldCols np L d0 args ls cx5 0 qs fs with
-      | .mk wrap fcols recs cx6 =>
+    | .mk L _ _ _ => match branchFields gs linear cx5 np L d0 args ls qs fs
+        (match modeB with
+         | .true => MBi
+         | .false => expected) with
+      | .err m => .err m
+      | .ok wrap fcols recs cx6 =>
         let cls' := specialize T c k F impl col cls;
         match Bool.and modeB (Bool.or (isNilCl cls') (otherMember idx res)) with
         | .true =>
           -- no clause (or another member's constructor): ruled out by the index (else a
           -- missing case)
-          match absurdBranch cx6 np L d d0 F args I idx res MBi with
-          | .some body => match next es with
-            | .ok bs es'' => .ok (.tcons (.lam (.lam (wrap body))) bs) es''
-            | e => e
-          | .none => .err (String.append "missing case " c)
+          match linear with
+          | .true => .err (String.append "a linear match with an impossible constructor is not supported yet: " c)
+          | .false => match absurdBranch cx6 np L d d0 F args I idx res MBi with
+            | .some body => match next es with
+              | .ok bs es'' => .ok (.tcons (.lam (.lam (wrap body))) bs) es''
+              | e => e
+            | .none => .err (String.append "missing case " c)
         | .false =>
           let recsT : List Nat := match top with
             | .true => recs
@@ -5575,7 +5696,7 @@ def defNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aS :
   match xs with
   | .nil => defT gs es cx rest tyS vS
   | .cons x xs' => match inferType gs es cx aS with
-    | .ok A _ es1 => match defNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) q xs' aS rest tyS vS with
+    | .ok A _ es1 => match defNames gs es1 (Cx.bindQ cx x (eval (TCtx.env (Cx.c cx)) A) (.some q)) q xs' aS rest tyS vS with
       | .ok ty v es2 => .ok (piTm q A ty) (.lam v) es2
       | e => e
     | .err m => .err m
@@ -5604,6 +5725,7 @@ def inlineTm (gs : Globals) : Tm → Tm
   | .ecase m sc bs => .ecase m (inlineTm gs sc) (inlineTms gs bs)
   | .ind l I D v P m i x => .ind l I D v P (inlineTm gs m) i (inlineTm gs x)
   | .scase l q I D v P m sz i x => .scase l q I D v P (inlineTm gs m) sz i (inlineTm gs x)
+  | .split q s m b => .split q (inlineTm gs s) (inlineTm gs m) (inlineTm gs b)
   | .prf l t => .prf l (inlineTm gs t)
   | t => t
 def inlineTms (gs : Globals) : Tms → Tms
@@ -5663,13 +5785,13 @@ inductive PR where
   | err (msg : String)
 def elabParams (gs : Globals) (us : List String) : Cx → List Field → PR
   | cx, .nil => .ok .tnil cx
-  | cx, .cons (.mk x _ _ ty) rest => match inferType gs (ES.withParams ES.empty us) cx ty with
+  | cx, .cons (.mk x q _ ty) rest => match inferType gs (ES.withParams ES.empty us) cx ty with
     | .err m => .err m
     | .ok A0 _ es => match finishElab gs es with
       | .err m => .err m
       | .ok es' => match zonk es' (Cx.lvl cx) A0 with
         | .none => .err "could not infer an implicit argument"
-        | .some A => match elabParams gs us (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) rest with
+        | .some A => match elabParams gs us (Cx.bindQ cx x (eval (TCtx.env (Cx.c cx)) A) (.some q)) rest with
           | .ok tys cx' => .ok (.tcons A tys) cx'
           | e => e
 -- does a clause's right-hand side mention `f`?
@@ -5693,7 +5815,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
       let n := lenL params;
       let body := kid stx 6;
       let us := univParamsOf stx;
-      match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil) ps with
+      match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil .nil) ps with
       | .err m => errStep gs m
       | .ok pts cxP0 => match scrutCols params pts pts (nonAtoms (kids (kid body 1))) with
         | .err m => errStep gs m
@@ -5717,7 +5839,10 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
                       | .none => 0;
                     let R := RE;
                     let mc := MatchCtx.mk f params p n v R R pts pts (paramMask (kids (kid stx 3)));
-                    let cxP := bindParams (Cx.mk empty (Globals.scope gs) .nil) 0 params pts;
+                    -- (A21) the parameters' quantities are in `cxP0` (`elabParams` binds
+                    -- them at their written quantity), so a match on a parameter held at 1
+                    -- is the case at 1
+                    let cxP := cxP0;
                     -- induction only for a definition that calls itself (a partial one calls
                     -- its axiom); else every split is case analysis (stage 19e)
                     let useInd := match Scope.lookup (Globals.scope gs) f with
@@ -5937,7 +6062,7 @@ def printAxiomsCmd (gs : Globals) (stx : Syntax) : Step :=
 
 def command (gs : Globals) (stx : Syntax) : Step :=
   --<sol
-  let cx0 := Cx.mk empty (Globals.scope gs) .nil;
+  let cx0 := Cx.mk empty (Globals.scope gs) .nil .nil;
   match strEq (kindOf stx) "command.def" with
   | .true => match kid stx 1 with
     | .ident x => match strEq (kindOf (kid stx 6)) "term.nativeRefl" with
@@ -6409,6 +6534,15 @@ def sealedCmd (gs : Globals) (stx : Syntax) : Step :=
       inductiveCmdS (Globals.add gs (.mk K .nil (.univ 0) ax ax .nil .nil)) inner (.some ax)
     | _ => errStep gs "an inductive type needs a name"
 -- one definition (or inductive type), by its form
+-- (A21) is a binder written at 1? (a non-recursive `def` whose parameters include one
+-- goes through the general term match, where `scrutLets`/the case at 1 live; structural
+-- recursion still uses `matchDefCmd`)
+def anyLinearQ : List Q → Bool
+  | .nil => .false
+  | .cons q rest => Bool.or (qEq q .qo) (anyLinearQ rest)
+def linearBinder (bs : List Syntax) : Bool := match binderQs bs with
+  | .some qs => anyLinearQ qs
+  | .none => .false
 def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "command.inductive" with
   | .true => inductiveCmd gs stx
   | .false => match (match binderQs (kids (kid stx 3)) with
@@ -6419,7 +6553,13 @@ def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "co
   | .true => inductiveCmd gs stx
   | .false => match Bool.and (strEq (kindOf stx) "command.def") (Bool.and (strEq (kindOf (kid stx 6)) "term.match")
       (scrutsAreParams (fieldNames (fieldsOf (kids (kid stx 3)))) (nonAtoms (kids (kid (kid stx 6) 1))))) with
-    | .true => withDefault gs stx
+    | .true =>
+      -- (A21) a non-recursive match on a parameter held at 1 uses the general match
+      -- (the case at 1, `scrutLets`); structural recursion keeps `matchDefCmd`
+      let rec := clausesMention (identOf' (kid stx 1)) (clausesOf (kids (kid (kid stx 6) 3)));
+      match Bool.not rec with
+      | .true => command gs stx
+      | .false => withDefault gs stx
     | .false => match strEq (kindOf stx) "command.defEqns" with
       | .true => match eqnsToMatch stx with
         | .some d => withDefault gs d
@@ -6620,7 +6760,7 @@ def sigType (gs : Globals) (d : Syntax) : PSigR := match kid d 1 with
   | .ident f => match kids (kid d 4) with
     | .cons _ (.cons tyS _) =>
       let us := univParamsOf d;
-      match teleT gs (ES.withParams ES.empty us) (Cx.mk empty (Globals.scope gs) .nil) (kids (kid d 3)) tyS with
+      match teleT gs (ES.withParams ES.empty us) (Cx.mk empty (Globals.scope gs) .nil .nil) (kids (kid d 3)) tyS with
       | .err m => .err m
       | .ok ty0 _ es => match zonk es 0 ty0 with
         | .none => .err "could not infer an implicit argument"
@@ -6654,7 +6794,7 @@ def findWit (gs : Globals) (f : String) (ty : Tm) : PSigR := match wit (WEnv.of 
 def witnessOf (gs : Globals) (d : Syntax) (f : String) (ty : Tm) : PSigR := match strEq (kindOf d) "command.partial" with
   | .true => match kids (kid d 1) with
     | .nil => findWit gs f ty
-    | .cons _ _ => match checkT gs (ES.withParams ES.empty (univParamsOf (unwrapDef d))) (Cx.mk empty (Globals.scope gs) .nil) (kid (kid d 1) 3) (eval .nil ty) with
+    | .cons _ _ => match checkT gs (ES.withParams ES.empty (univParamsOf (unwrapDef d))) (Cx.mk empty (Globals.scope gs) .nil .nil) (kid (kid d 1) 3) (eval .nil ty) with
       | .err m => .err m
       | .ok w0 _ es0 => match finishElab gs es0 with
         | .err m => .err m
@@ -6679,7 +6819,7 @@ def addPartials : Globals → List Syntax → AxR
 def axiomCmd (gs : Globals) (stx : Syntax) : Step := match addAxioms gs (one stx) with
   | .err m => errStep gs m
   | .ok gs' => match kid stx 1 with
-    | .ident f => match identHead gs' ES.empty (Cx.mk empty (Globals.scope gs') .nil) f with
+    | .ident f => match identHead gs' ES.empty (Cx.mk empty (Globals.scope gs') .nil .nil) f with
       | .ok _ ty _ _ => .mk (String.append (String.append f " : ") (show .nil 0 (quote 0 ty))) gs'
       | .err m => errStep gs m
     | _ => errStep gs "an axiom needs a name"
@@ -6971,7 +7111,7 @@ def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
   | .none => err (String.append "unknown declaration " f)
   | .some ty =>
     let tyOk : Option String := match kids (kid stx 3) with
-      | .cons _ (.cons tS _) => match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) tS with
+      | .cons _ (.cons tS _) => match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil .nil) tS with
         | .err m => .some m
         | .ok T0 _ es => match zonk es 0 T0 with
           | .none => .some "could not infer an implicit argument"
@@ -7331,7 +7471,7 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
         let name := match optIdent (kid stx 2) with
           | .some n => n
           | .none => freshName gs (String.append "inst" C) 0;
-        match defT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) bs tyS vS with
+        match defT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil .nil) bs tyS vS with
         | .err m => errStep gs m
         | .ok ty0 v0 es0 => match finishElab gs es0 with
           | .err m => errStep gs m
@@ -7408,7 +7548,7 @@ def cFieldKinds (gs : Globals) (header : String) : List Syntax → FieldKs
   | .nil => .ok .nil .nil
   | .cons f rest =>
     let fname := fieldName f;
-    match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) (kid f 4) with
+    match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil .nil) (kid f 4) with
     | .err m => fieldKindErr fname (String.append m " (fields may not depend on other fields)")
     | .ok T0 _ es => match zonk es 0 T0 with
       | .none => fieldKindErr fname "could not infer an implicit argument (fields may not depend on other fields)"

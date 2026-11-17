@@ -160,9 +160,13 @@ argument, not a citation of a proof.
   the recursive argument at `π` and charges `ω·U_f + π·U_x`, with state threaded through
   the motive. It is needed for linear containers and an inspectable linear effect tree,
   and to close the remaining borrow gap below.
-- **`split` in `selfhost/Kernel.wiz`.** The self-hosted kernel has no `split`, so a pair
-  held at 1 cannot be consumed in its fragment, and its descriptions carry no field
-  quantities (fields are ω; `scase_1` still binds the payload at 1).
+- **Linear matches in the self-hosted backend.** The self-hosted kernel now has `split`
+  (A21, in progress), and the self-hosted frontend emits `T.casesOn1`'s term (the case at
+  1, the payload taken apart by `split`s at 1, the final `Unit` consumed by
+  `let () := u`); the `ecase` scrutinee in the generated term is still the wrong split
+  component, so the frontend rejects the term. The self-hosted *backend* also still
+  refuses the unit eliminator — its `let`s are lazy — so a linear match would not compile
+  there either.
 - **Default field quantity.** Fields default to ω. Linear-by-default fields (as in Linear
   Haskell) would change what `con` charges for every existing type; not proposed now.
 - **Borrow handles.** With `Uniq1` (a one-constructor inductive with a private

@@ -513,25 +513,40 @@ def fieldQtyProgram : String :=
   "  IO.println (Nat.toString (vsum (V.cons 1 (V.cons 2 V.nil))));\n" ++
   "  IO.println (Nat.toString (unL (L1.mk 9)))\n"
 
-/-- (stage 21m, K1) The pinned differences, `(declaration, Lean accepts, self-hosted
-accepts)` (docs/CoreSpec.md §15): the Lean frontend takes a `match` on a linear scrutinee
-apart with `T.casesOn1` (the case at 1), the self-hosted frontend's match is the case at
-ω, which uses the scrutinee ω times. (Constructor field quantities and implicit fields
-were differences until 21x; a linear variable used once in each branch of a `match`
-until 21v: `linearMatchDecls`.) -/
-def quantityDiffs : List (String × Bool × Bool) := [
-  ("def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n", true, false),
-  ("def wrapTwice (1 t : Tok) : Nat := match L1.mk t with\n  | .mk u => use u\n", true, false)]
+/-- (stage 21m, K1; closed by A21) The pinned differences, `(declaration, Lean accepts,
+self-hosted accepts)` (docs/CoreSpec.md §15). A21 closed the last two: a `match` on a
+linear scrutinee is now `T.casesOn1` in both frontends (the case at 1, with the payload
+taken apart by `split` at 1), so the list is empty. -/
+def quantityDiffs : List (String × Bool × Bool) := []
 
-/-- (stage 21v) A variable at quantity 1 used once in each branch of a `match`: the Lean
+/-- (stage 21v, A21) A variable at quantity 1 used once in each branch of a `match`: the Lean
 frontend compiles the match to the additive `T.casesOnA` (its branches are alternatives,
 as the self-hosted frontend's `scase`/`ecase` are), so both accept it; a branch that
-drops it or uses it twice is rejected by both. -/
+drops it or uses it twice is rejected by both. A `match` on a value held at 1 is the case
+at 1 (`T.casesOn1`) in both; `split` at 1 takes its payload apart. -/
 def linearMatchHeader : String :=
   "axiom Tok : Type\naxiom use : (1 t : Tok) → Nat\naxiom use2 : (1 t : Tok) → Nat\n" ++
-  "inductive V (A : Type) : Nat → Type where\n  | nil : V A Nat.zero\n  | cons (n : Nat) (a : A) (rest : V A n) : V A (Nat.succ n)\n"
+  "inductive V (A : Type) : Nat → Type where\n  | nil : V A Nat.zero\n  | cons (n : Nat) (a : A) (rest : V A n) : V A (Nat.succ n)\n" ++
+  "inductive L1 where\n  | mk (1 t : Tok)\n" ++
+  "inductive Res1 (A : Type) where\n  | ok (1 a : A)\n  | err (e : Nat) (1 back : A)\n"
 
 def linearMatchDecls : List (String × Bool) := [
+  -- (A21) the smallest program the host accepted and the self-hosted frontend rejected:
+  -- a match on a linear scrutinee, the case at 1 (docs/CoreSpec.md §15, K1)
+  ("def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n", true),
+  -- a constructor expression using a linear variable: the case at 1 on its result
+  ("def wrapTwice (1 t : Tok) : Nat := match L1.mk t with\n  | .mk u => use u\n", true),
+  -- the resource held at 1, its linear field handed back in both alternatives
+  ("def rebuild (1 r : Res1 Tok) : Res1 Tok := match r with\n  | .ok t => .ok t\n  | .err e t => .err e t\n", true),
+  -- a linear field matched again (nested `casesOn1`)
+  ("def flat (1 r : Res1 (Res1 Tok)) : Res1 Tok := match r with\n  | .ok s => (match s with\n    | .ok t => .ok t\n    | .err e t => .err e t)\n  | .err e s => (match s with\n    | .ok t => .err e t\n    | .err e' t => .err e' t)\n", true),
+  -- the scrutinee dropped after the match: used twice (the `let` binds it at 1)
+  ("def again (1 x : Nat) : Nat := Nat.add (match x with\n  | .zero => 0\n  | .succ k => k) x\n", false),
+  -- a linear field dropped, or used twice, in a `casesOn1` branch
+  ("def dropR (1 r : Res1 Tok) : Nat := match r with\n  | .ok t => 0\n  | .err e t => e\n", false),
+  ("def dupR (1 r : Res1 Tok) : Nat := match r with\n  | .ok t => Nat.add (use t) (use t)\n  | .err e t => e\n", false),
+  ("def dropL (1 t : Tok) : Nat := match L1.mk t with\n  | .mk _ => 0\n", false),
+  -- the additive form: a variable used once in each branch of an unrestricted match
   ("def m1 (1 x : Nat) (b : Bool) : Nat := match b with\n  | .true => x\n  | .false => x\n", true),
   ("def f (b : Bool) (1 t : Tok) : Nat := match b with\n  | .true => use t\n  | .false => use2 t\n", true),
   ("def g (n : Nat) (1 t : Tok) : Nat := match n with\n  | .zero => use t\n  | .succ _ => use2 t\n", true),
@@ -544,6 +559,16 @@ def linearMatchDecls : List (String × Bool) := [
   ("def bad2 (b : Bool) (1 t : Tok) : Nat := match b with\n  | .true => Nat.add (use t) (use t)\n  | .false => use t\n", false),
   ("def bad3 (b : Bool) (1 t : Tok) : Nat := match b with\n  | .true => use t\n  | .false => Nat.add (use t) 1\n", false),
   ("def bad4 (n : Nat) (1 t : Tok) : Nat := match n with\n  | .zero => use t\n  | .succ k => Nat.add k (use t)\n", false)]
+
+/-- (A21) A linear match computes the same in both frontends (the host's `#eval`, the
+self-hosted `#reduce`): the case at 1 on Nat, and a resource held at 1. -/
+def linearComputeProgram : String :=
+  "def m2 (1 x : Nat) : Nat := match x with\n  | .zero => 0\n  | .succ k => k\n" ++
+  "def get (1 r : Res1 Nat) : Nat := match r with\n  | .ok n => n\n  | .err e n => n\n" ++
+  "def getR (1 r : Res1 (Res1 Nat)) : Nat := match r with\n  | .ok s => get s\n  | .err e s => get s\n"
+
+def linearComputeCases : List (String × Nat) :=
+  [("m2 3", 2), ("m2 0", 0), ("get (.ok 5)", 5), ("get (.err 4 6)", 6), ("getR (.ok (.ok 7))", 7)]
 
 /-- (stage 21v) The additive match computes, compiled by the Lean compiler. -/
 def linearMatchProgram : String :=
@@ -1971,10 +1996,12 @@ def selfHostGroup : Group where
         ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
-    { name := "the self-hosted frontend: quantities, the pinned differences (21m, K1)", run := fun _ =>
+    { name := "the self-hosted frontend: quantities, the pinned differences (21m, K1; none left after A21)", run := fun _ =>
         selfhostVerdicts quantityHeader quantityDiffs },
-    { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
+    { name := "a linear variable used once in each branch of a match: both frontends accept it (21v, A21)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
+    { name := "a match on a value held at 1 computes the same in both frontends (A21)", run := fun _ =>
+        selfhostSameNats (linearMatchHeader ++ linearComputeProgram) linearComputeCases },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>

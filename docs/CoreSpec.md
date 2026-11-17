@@ -2144,7 +2144,11 @@ now closed). The frontend reads written quantities (`0`, `1`, `ω`) on binders, 
 binders and `let`, with the Lean elaborator's defaults (ω explicit, 0 implicit; a
 constructor's parameters at 0), and the kernel checks usage. What still differs is below. A linear
 variable used once in each branch of a `match` was a difference until stage 21v: the Lean
-frontend now compiles such a match to the additive `T.casesOnA`, and both accept it.
+frontend now compiles such a match to the additive `T.casesOnA`, and both accept it. A
+`match` on a value held at 1 is the subject of A21 (in progress): `Kernel.wiz` has the
+`split` at a quantity that takes the payload apart (the components at `q·p` and `q`), and
+the frontend emits the case at 1, but the generated `ecase` scrutinee is still the
+payload's rest rather than the tag, so the term is rejected.
 Constructor field quantities and implicit constructor fields were differences until 21x:
 a field `(q x : A)` is `darg q A …` here too (an implicit field `{n : A}` at 0, inserted at
 the call and not named by patterns), a match binds each field at its quantity (`T.casesOn`'s
@@ -2154,7 +2158,7 @@ Commands: `#eval` is `#reduce` here, and `attribute [inline]` is checked and ign
 
 | program | Lean frontend | self-hosted frontend |
 |---|---|---|
-| a `match` on a linear scrutinee (`def m2 (1 x : Nat) : Nat := match x with \| .zero => 0 \| .succ k => k`) | accepts (4h): `T.casesOn1`, the case at 1; `k` is an ω field, so it comes out at `1·ω` | **rejects**: the match is the kernel's case at ω, which uses `x` ω times (the Kernel.wiz rule is the same; only the frontend does not emit `scase` at 1) |
+| a `match` on a linear scrutinee (`def m2 (1 x : Nat) : Nat := match x with \| .zero => 0 \| .succ k => k`) | accepts (4h): `T.casesOn1`, the case at 1; `k` is an ω field, so it comes out at `1·ω` | **A21 in progress**: `Kernel.wiz` now has `split` and the frontend emits the case at 1, but the generated `ecase` receives the split's second component instead of its first, so the term is still rejected |
 | `%t` quantity terms, quantity variables | yes | an error |
 
 **The self-hosted FFI** (stages 21l, 21o–21t) takes the Lean frontend's `extern`,

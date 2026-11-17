@@ -562,6 +562,55 @@ take it.
 List, an indexed family, nested matches, `let 1`; dropping the variable in one branch, or
 using it twice or under an ω argument, rejected); a compiled program with additive matches.
 
+## A21: a `match` on a value held at 1 (`T.casesOn1`, `split` in `Kernel.wiz`) — WIP
+
+**Status (unfinished).** `Kernel.wiz`'s `split` and the frontend's case at 1 are in
+place and type check; the generated `ecase` still receives the payload's second
+component (the rest) instead of its first (the tag), so the new `=selfhost` cases 64–65
+report "not an enumeration". Next: settle the split body's binder order in
+`linTag`/`linConvoy` (and the matching `letUnit` in `linearFieldSplits`), then re-run
+`=selfhost#63,64,65`.
+
+The last pinned difference in CoreSpec §15 was a match on a linear scrutinee. The Lean
+frontend took it apart with `T.casesOn1` (the case at 1, K1); the self-hosted frontend
+compiled every match to the case at ω, which uses the scrutinee ω times, so
+
+    def m2 (1 x : Nat) : Nat := match x with
+      | .zero => 0
+      | .succ k => k
+
+was accepted there and rejected here. It now accepts it, with the same elimination.
+
+The self-hosted frontend tracks the levels bound at quantity 1 (`Cx.lins`, the Lean
+elaborator's `LocalCtx.linearLvls`) and binds a scrutinee that uses one at 1. The match
+at such a column is the `scase` at 1, whose method receives the payload at 1. A
+projection would use that payload ω times, so the fields come out with `split` at 1
+(`linearFieldSplits`): each split binds the field at its declared quantity and the rest
+at 1; the last pair is the index equation at 0 and the final `Unit`, consumed by
+`let () := u`. The tag is split off first (at 1·ω = ω) and the constructors are still
+dispatched by the additive `ecase`, so a linear variable used once in each branch is used
+once. A variable used in an unrestricted match is the additive form as before
+(`T.casesOnA`, 21v).
+
+`Kernel.wiz` gained the `split` term the rules need:
+
+    q ⇐ Qty   s ⇐ (p x : A) × B ⊣ q·U_s
+    m ⇐ (z : (p x : A) × B) → Sort v ⊣ 0
+    b ⇐ m (x, y) ⊣ U_b,  with x : q·p, y : q
+    ────────────────────────────────────────────────────────────
+    split_q s m b ⇐ m s   ⊣ q·U_s + U_b
+
+(`vSplit` reduces on a pair and is stuck on a neutral; it is compared, quoted and marked
+like the other eliminators. The motive is a version of the Lean kernel's; a `split` in a
+proof whose motive is not a proposition is a relevant term and needs the marker, as
+there.) Fields whose types are lifted (`ULift`, Q4) are not unwrapped by the linear path
+yet; linear matches on such an inductive are outside the fragment until that is done.
+
+**Tests** (group `selfhost`): the minimal program above and a constructor expression
+using a linear variable, a resource rebuilt in both alternatives, a nested linear match,
+and the scrutinee reused after the match or a linear field dropped/duplicated, all with
+the Lean frontend's verdicts; the additive declarations of 21v still agree.
+
 ## 21w: one value representation for the two runtimes
 
 The Lean toolchain's C/LLVM runtimes (`runtime/wiz.c`) and the self-hosted backend's
