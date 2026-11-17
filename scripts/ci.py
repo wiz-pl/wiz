@@ -24,7 +24,8 @@
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
                                      unless only docs changed, docs=true when a doc
-                                     changed, and shards=[NAMES], the shards of
+                                     changed, web=true when a browser-facing file
+                                     (`web/*`) changed, and shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). `changes --all`
                                      prints everything
@@ -311,10 +312,19 @@ def check_shards(binary):
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
+# Browser-facing sources: the playground, the infoview and site scripts, their Node
+# tests and the Wiz programs they are built from. The `web` job (`ci.yml`) builds the
+# Wasm modules and runs the browser-free half of web/test.sh when one of these changes;
+# the Chromium half of that script stays local.
+WEB = ["web/*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
-# build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
+# build and its toolchain, the C runtime, CI itself, and the web/ tree — its Wiz
+# sources and JS hosts are read by test groups (`web/Web.wiz`, `web/framework/gen.wiz`,
+# `web/wasm-host.mjs`), and a change there is checked by the `web` job rather than by
+# one shard, so it sends every shard to be safe. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
-              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
+              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz",
+              "web/*"]
 
 
 def matches(path, globs):
@@ -368,6 +378,7 @@ def changes(args):
         names = [s["name"] for s in shards()]
         print("code=true")
         print("docs=true")
+        print("web=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -377,10 +388,12 @@ def changes(args):
     names = needed_shards(files)
     code = any(not matches(f, DOCS) for f in files)
     docs = any(matches(f, DOCS) for f in files)
+    web = any(matches(f, WEB) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
+    print(f"web={'true' if web else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; docs: {docs}; "
+    print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
           f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 

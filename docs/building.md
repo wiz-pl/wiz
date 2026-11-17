@@ -680,6 +680,18 @@ the elan toolchain, so the setup action keeps the elan cache for those
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
+* **The playground and the site's JavaScript** (the `web` job): on a pull request that
+  changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. It
+  builds both Wasm modules with the same scripts as `docs`, then runs its browser-free
+  half: `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
+  and the site check's rules for it); `web/playground_lsp_test.mjs` and
+  `web/selfhost_lsp_test.mjs` (the language client and the in-page server shim, against
+  stubs); `web/node_test.mjs` and `web/playground_test.mjs` (the two modules);
+  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the React
+  framework's browser half, in a Node DOM double) runs beside it. `CI result` requires
+  the job when `changes` selects it. The Chromium half (`web/chrome_test.mjs` and
+  `web/doc_chrome_test.mjs`: a served page over the DevTools protocol) needs a browser
+  and stays local.
 * **Trust ledger** (a step in the `build` job, before any shard):
   `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
@@ -903,15 +915,16 @@ the generated reference manual (`result/index.md`, and `result/site`).
   the files the PR changes and decides what runs: nothing but `changes`, `docs_style`,
   `docs_examples` and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE);
   `trust-ledger` runs whenever any code did; every shard when a Lean
-  file, the build, the runtime, `scripts/` or `.github/` changed; otherwise each shard
-  with `"inputs"` in `.github/test-shards.json` only when one of its inputs changed
-  (a `lib/X.wiz` input brings the lib files it imports), and the shards without
-  `"inputs"` (backends, library) for any non-docs change. So a PR touching only, say, `lib/Json.wiz` skips
-  `core` and the selfhost shards. `CI result` counts a job the filter skipped as fine
-  and a job it wanted only if it succeeded. Pushes to `master`, the merge queue and
-  manual runs always run everything, so a missing input shows up there at the latest.
-  A test that starts reading a new file belongs in a shard without `"inputs"`, or add
-  the file to its shard's `"inputs"`.
+  file, the build, the runtime, `scripts/`, `.github/` or `web/` changed; otherwise each
+  shard with `"inputs"` in `.github/test-shards.json` only when one of its inputs
+  changed (a `lib/X.wiz` input brings the lib files it imports), and the shards without
+  `"inputs"` (backends, library) for any non-docs change. The `web` job (the playground
+  and the site's JavaScript) runs when a `web/` file changed. So a PR touching only,
+  say, `lib/Json.wiz` skips `core` and the selfhost shards. `CI result` counts a job the
+  filter skipped as fine and a job it wanted only if it succeeded. Pushes to `master`,
+  the merge queue and manual runs always run everything, so a missing input shows up
+  there at the latest. A test that starts reading a new file belongs in a shard without
+  `"inputs"`, or add the file to its shard's `"inputs"`.
 * **A self-hosted runner** for the heavy shards (`"heavy": true` in
   `.github/test-shards.json`): set the repository variable `WIZ_RUNNER_HEAVY` to its
   label; unset, everything runs on `ubuntu-latest`. Pull requests from forks never run

@@ -59,11 +59,11 @@ defaults:
 
 jobs:
   # Path filters: which jobs a pull request needs (scripts/ci.py changes; the shards'
-  # "inputs" in .github/test-shards.json). A docs-only PR builds no shard and runs no
-  # test, but it does check the documentation's Wiz examples (docs_examples); a PR
-  # touching only lib/ files no core test reads skips the core shard; the selfhost
-  # shards run for selfhost/ and the lib/ files it imports. Everything but a
-  # pull_request (pushes, the merge queue, manual runs) runs every job.
+  # "inputs" in .github/test-shards.json, and `web/*` for the web job). A docs-only PR
+  # builds no shard and runs no test, but it does check the documentation's Wiz examples
+  # (docs_examples); a PR touching only lib/ files no core test reads skips the core
+  # shard; the selfhost shards run for selfhost/ and the lib/ files it imports.
+  # Everything but a pull_request (pushes, the merge queue, manual runs) runs every job.
   changes:
     name: changes
     if: github.event_name != 'schedule'
@@ -71,6 +71,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
+      web: ${{ steps.filter.outputs.web }}
       shards: ${{ steps.filter.outputs.shards }}
     steps:
       - uses: actions/checkout@v5
@@ -339,11 +340,17 @@ jobs:
       # What the suite builds from Wiz programs, kept between runs: the elaboration cache
       # (`--cache`, which the grail-selfhost test uses), grail's `.grail` (the test's
       # build of the self-hosted checker) and the self-hosted checker and compiler that
-      # Tests/Elab.lean compiles under /tmp. The elaboration cache's keys include the wiz
-      # binary's hash, but the test runner's grail key has a constant binary id and the
-      # /tmp programs a timestamp, so the key starts with the compiler's inputs and
-      # restore-keys never cross compilers; within one compiler, entries are
-      # content-addressed, so a partial hit (other Wiz files) is safe.
+      # Tests/Elab.lean compiles under /tmp. The /tmp programs are keyed by their source
+      # and the *driver's mtime only* (Tests/Elab.lean: `hash (prog ++ stamp)`), and a
+      # Nix store path's mtime is a constant, while the libraries they are compiled
+      # against (`lib/Prelude.wiz`, `lib/IO.wiz`, `lib/Std.wiz`, `lib/Sys.wiz`) are read
+      # from the working tree at build time. So the cache key carries those inputs too:
+      # `selfhost/*.wiz` (the tables are `selfhost/Tables.wiz`) and `lib/*.wiz`, on top
+      # of the compiler inputs (`compiler-key`). `restore-keys` stops at that hash, so a
+      # Prelude change never restores a checker built from the old one; entries restored
+      # under the same hash saw the same selfhost/lib sources, and both the elaboration
+      # cache and the selfhost programs' inputs are then identical or content-addressed,
+      # so a partial hit (other Wiz files) is safe.
       - name: Restore the Wiz build caches
         id: wiz-cache
         uses: actions/cache/restore@v4
@@ -352,8 +359,8 @@ jobs:
             ~/.cache/wiz
             .grail
             /tmp/wiz-selfhost-*
-          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('**/*.wiz') }}
-          restore-keys: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-
+          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-${{ hashFiles('**/*.wiz') }}
+          restore-keys: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-
       - name: tests -- ${{ matrix.shard.name }}
         env:
           SELECT: ${{ matrix.shard.select }}
@@ -376,7 +383,7 @@ jobs:
             ~/.cache/wiz
             .grail
             /tmp/wiz-selfhost-*
-          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('**/*.wiz') }}
+          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-${{ hashFiles('**/*.wiz') }}
       - name: Summary
         if: always()
         run: |
@@ -391,6 +398,46 @@ jobs:
           if-no-files-found: ignore
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
+
+  # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
+  # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
+  # builds both Wasm modules with the same scripts the `docs` job uses and runs its
+  # browser-free half: the search box, the benchmark page and site check, the
+  # playground's language client and self-hosted server shim (against stubs), the
+  # infoview's and playground's modules under Node, and a `wiz doc` page's module.
+  # `WIZ_WEB_NO_BROWSER` stops it before the Chromium half (`web/chrome_test.mjs` and
+  # `web/doc_chrome_test.mjs`: a served page over the DevTools protocol), which still
+  # needs a browser and stays local. The framework's browser half is a Node DOM double
+  # (`web/framework/test.sh`), so it runs here too. This job is in `result`: a
+  # playground that does not build or a failing web test fails `CI result`.
+  web:
+    name: web
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: nix build (wiz, from Cachix)
+        id: nix
+        run: |
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          du -sh "$wiz"
+      - name: The browser-free half of web/test.sh
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          WIZ_WEB_NO_BROWSER: "1"
+        run: sh web/test.sh
+      - name: The React framework's browser half (a Node DOM double)
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: sh web/framework/test.sh
 
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
@@ -498,7 +545,7 @@ jobs:
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, docs_examples, build, test]
+    needs: [changes, docs_style, docs_examples, build, test, web]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -578,15 +625,16 @@ jobs:
       - name: Verdict
         shell: bash
         run: |
-          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, shards: ${{ needs.changes.outputs.shards }})"
+          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, web: ${{ needs.changes.outputs.web }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
-          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}"
+          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
           docs="${{ needs.changes.outputs.docs }}"
+          web="${{ needs.changes.outputs.web }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
           # a docs-only change has no build job, so `docs_examples` builds wiz and checks
           # the snippets; a code change runs the same check in `build`
@@ -599,6 +647,9 @@ jobs:
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
+          # a change to web/** must build the playground and pass its Node tests; the
+          # job is skipped (and that is fine) only when the filter does not want it
+          check web "${{ needs.web.result }}" "$web"
 
   # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
   # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
