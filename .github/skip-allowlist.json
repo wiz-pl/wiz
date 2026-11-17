@@ -60,6 +60,62 @@
       "parity": "D3",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "why": "documented self-host parity difference (D3): --include/--types/-v are driver-only flags the host rejects. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "help and version: exit 0, one version line (the usage documents the subset)",
+      "reason": "usage text: the driver documents the subset it has",
+      "parity": "D2/D8",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D2/D8): the driver's usage documents only the subset it implements (no parse/doc/fmt/lsp, no --llvm). Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build --lib: both accept it and are silent (an object file, or the C)",
+      "reason": "artifact: --lib's object/header match",
+      "parity": "D4/C9",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D4/C9): --no-main does not link without a `main` on the host's Wasm path; the driver writes the C. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "warnings: the host warns about a shadowed Prelude (the driver has none yet)",
+      "reason": "warnings: the host warns (on stdout) about a module root shadowing its own lib",
+      "parity": "A14/D6",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (A14/D6): the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "check: a bad file has the same line, severity and kind (the column is the command's start)",
+      "reason": "column: the host reports the failing term and the declared name",
+      "parity": "D6",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D6): the self-hosted frontend reports the command's start column. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "-I: an error inside a module (the host nests it under the import)",
+      "reason": "structure: the host nests a module's errors under its import",
+      "parity": "D6/A14",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D6/A14): the self-hosted loader reports each error at its own module and position. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build --llvm: the host has it, the self-hosted backend is C only (C5)",
+      "reason": "backend: the host builds through textual LLVM IR",
+      "parity": "C5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (C5): the self-hosted backend is C only. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "a missing file: both exit 1 (the host's message is an uncaught read)",
+      "reason": "message: the host lets IO.readFile throw",
+      "parity": "D6/D7",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
     }
   ]
 }
