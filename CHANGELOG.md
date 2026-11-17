@@ -15,6 +15,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
   and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
   still selects an external server and `?lsp=off` disables the pane.
+* tests: CI's wall time is its longest shard. `selfhost-libdiff` was one case of about
+  82 min; it now checks files `--jobs` at a time inside that case, building the
+  self-hosted compiler once and keeping the records in file order, with the workers
+  capped by the CPUs and the free memory at 4 GiB per file. `scaling`'s Desc sweep is
+  nine cases over the same inputs (so the shard's parts can hold one each), and the
+  light groups of `library` run their cases four at a time; `selfhost` and `library`
+  are split eight ways by the measured times. A case of a group that does not opt in
+  to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
+  workers.
 * selfhost: the frontend now handles the rest of A18 and A17's list literals and boolean
   operators — as-patterns (`x@y@p`, in equations, `match`, literal and tuple rows), tuple
   patterns (pair splitting without the kernel's `split`), `let (x, y)`/`let (x, y, z)`
@@ -26,6 +35,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   program with the Lean host and with the self-hosted compiler and compare their outputs
   rather than a literal (149–154). Still missing: `∃`/`¬` and `⟨…⟩`; a written quantity
   other than ω on `let (x, y)` is refused.
+
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

@@ -58,6 +58,7 @@ def renumberVars (s : String) : String := Id.run do
 def phantomGroup : Group where
   name := "phantom"
   exercise := "Phantom parameters"
+  parallel := true
   cases := [
     { name := "UIntN 8 and UIntN 16 are different types", run := fun _ =>
         failsLib "import Prelude\ninductive UIntN (w : Nat) where\n  | mk (toNat : Nat)\ndef f (x : UIntN 8) : UIntN 16 := x" "mismatch" },
