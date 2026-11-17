@@ -1388,9 +1388,13 @@ with lib/Sys.wiz and lib/Serial.wiz moved onto this module) waits for linear Σ 
 is used once. In `do1`, `x ⇐ e;` binds an `IO1` result at quantity 1, and `(x, y) ⇐ e;` takes a
 pair apart, so an owned handle's token is threaded through straight-line code. The
 operations: `File.writeOwned`, `readLineOwned`, `readAllOwned` and `flushOwned`;
-`Fd.writeOwned` and `Fd.readOwned`; the generic `Handle.use1`. Each returns
-`(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
+`Fd.writeOwned` and `Fd.readOwned`; `Child.communicateOwned`; the generic `Handle.use1`.
+Each returns `(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
 `Child.waitOwned`.
+
+`Child.releaseOwned` drains a piped stdout/stderr (`Child.communicate c ""`) before it
+waits, so a child that fills its pipe cannot deadlock the release; use
+`Child.communicateOwned` first if you want that output.
 
 ```
 File.withOwned p "w" (fun f o => do1

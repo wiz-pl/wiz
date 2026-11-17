@@ -119,8 +119,50 @@ def sysBytesCases : List Case := [
           "say (yesNo (Duration.lt (Duration.millis 19) (Duration.sub t1 t0)))", "FS.removeAll d"]
           "yes\n/nonexistent/x: No such file or directory\nfile\nyes\nyes\n"
           (sysBytesShow ++ "def chEq : List Char → List Char → Bool\n  | .nil, .nil => .true\n  | .cons a xs, .cons b ys => Bool.and (Nat.beq (Char.code a) (Char.code b)) (chEq xs ys)\n  | _, _ => .false\n" ++
-            "def strEq : String → String → Bool\n  | .mk a, .mk b => chEq a b\n") }
+            "def strEq : String → String → Bool\n  | .mk a, .mk b => chEq a b\n") },
+    -- (rtffi-03) `Fd.adopt` does not narrow the Nat: 2^32 + 1 is not fd 1 (stdout)
+    { name := "Fd.adopt rejects a number above INT_MAX instead of wrapping it", run := fun _ =>
+        sysRun ["x ← EIO.lift (Fd.adopt 4294967297)", "e ← EIO.lift (Fd.closeRaw x)",
+          r#"say (match Sys.status "close" e with | .ok _ => "closed?" | .error m => m)"#,
+          "say \"stdout still open\""]
+          "close: Bad file descriptor\nstdout still open\n" sysShow }
   ]
+
+/-- (rtffi-04) A C shim: cap the address space at the current size plus `margin` bytes
+(Linux `/proc/self/statm`), and put the old soft limit back. The hard limit is untouched. -/
+def capShim : String :=
+  "#define _GNU_SOURCE\n#include <stdint.h>\n#include <stdio.h>\n#include <unistd.h>\n" ++
+  "#include <sys/resource.h>\n" ++
+  "static struct rlimit wiz_cap_saved;\nstatic int wiz_cap_have = 0;\n" ++
+  "uint64_t rtffi_test_cap(uint64_t margin) {\n" ++
+  "  FILE *f = fopen(\"/proc/self/statm\", \"r\");\n  unsigned long pages = 0;\n" ++
+  "  if (!f) return 1;\n" ++
+  "  if (fscanf(f, \"%lu\", &pages) != 1) { fclose(f); return 1; }\n" ++
+  "  fclose(f);\n" ++
+  "  if (getrlimit(RLIMIT_AS, &wiz_cap_saved) < 0) return 1;\n" ++
+  "  wiz_cap_have = 1;\n" ++
+  "  struct rlimit r = wiz_cap_saved;\n" ++
+  "  r.rlim_cur = (rlim_t)pages * (rlim_t)sysconf(_SC_PAGESIZE) + (rlim_t)margin;\n" ++
+  "  return setrlimit(RLIMIT_AS, &r) == 0 ? 0 : 1;\n}\n" ++
+  "uint64_t rtffi_test_uncap(void) {\n" ++
+  "  return wiz_cap_have && setrlimit(RLIMIT_AS, &wiz_cap_saved) == 0 ? 0 : 1;\n}\n"
+
+/-- (rtffi-06) A C shim for `readdir`: fail the (n+1)-th call with `EIO`, then pass through
+again (`rtffi_test_readdir_ok` stops the failure early). -/
+def readdirShim : String :=
+  "#define _GNU_SOURCE\n#include <stdint.h>\n#include <dirent.h>\n#include <dlfcn.h>\n" ++
+  "#include <errno.h>\n" ++
+  "static struct dirent *(*wiz_real_readdir)(DIR *) = 0;\nstatic long wiz_fail_after = -1;\n" ++
+  "static struct dirent *wiz_readdir(DIR *d) {\n" ++
+  "  if (!wiz_real_readdir) wiz_real_readdir = (struct dirent *(*)(DIR *))dlsym(RTLD_NEXT, \"readdir\");\n" ++
+  "  if (wiz_fail_after >= 0) {\n" ++
+  "    if (wiz_fail_after == 0) { wiz_fail_after = -1; errno = EIO; return 0; }\n" ++
+  "    wiz_fail_after--;\n  }\n" ++
+  "  return wiz_real_readdir ? wiz_real_readdir(d) : 0;\n}\n" ++
+  "struct dirent *readdir(DIR *d) { return wiz_readdir(d); }\n" ++
+  "struct dirent64 *readdir64(DIR *d) { return (struct dirent64 *)wiz_readdir(d); }\n" ++
+  "uint64_t rtffi_test_readdir_fail(uint64_t n) { wiz_fail_after = (long)n; return 0; }\n" ++
+  "uint64_t rtffi_test_readdir_ok(void) { wiz_fail_after = -1; return 0; }\n"
 
 def sysGroup : Group where
   name := "sys"
@@ -204,7 +246,113 @@ def sysGroup : Group where
           "say (String.append (Nat.toString (Bytes.size bs)) (String.append \" \" (Nat.toString (Bytes.get bs 1))))",
           "o ← EIO.lift File.stdout", "File.write o \"to stdout\\n\"", "File.flush o",
           "FS.removeAll d"]
-          "first,second,(unset)\n3 255\nto stdout\n" sysShow }
+          "first,second,(unset)\n3 255\nto stdout\n" sysShow },
+    -- (rtffi-01) `Process.exec` sets SIGPIPE to its default action for the program it
+    -- replaces; when `exec` fails it must put this program's ignore back, or the next
+    -- write to a pipe with no reader kills the process instead of returning EPIPE.
+    { name := "a failed exec leaves SIGPIPE ignored: a write to a dead child is EPIPE", run := fun _ =>
+        sysRun ["c ← Process.spawn \"cat\" .nil .piped .piped .inherit", "Child.kill c 9",
+          "st ← Child.wait c", "say (ExitStatus.toString st)",
+          "r1 ← EIO.lift (Child.write c \"x\")",
+          "say (match r1 with | .ok _ => \"wrote?\" | .error m => m)",
+          "e ← EIO.lift (Process.exec \"wiz-no-such-program\" .nil)",
+          "say (match e with | .ok _ => \"exec?\" | .error m => m)",
+          "r2 ← EIO.lift (Child.write c \"y\")",
+          "say (match r2 with | .ok _ => \"wrote?\" | .error m => m)"]
+          ("signal 9\nwrite to child: Broken pipe\nwiz-no-such-program: No such file or directory\n" ++
+           "write to child: Broken pipe\n") sysShow },
+    -- (rtffi-02) a `File` handle is close-on-exec: the child does not inherit it
+    { name := "File.open is close-on-exec: a child does not see the handle", run := fun _ =>
+        sysRun ["d ← FS.createTempDir", "let p := Path.join d \"leak.txt\"",
+          "FS.writeFile p \"x\"", "f ← File.open p \"r\"",
+          r#"o ← Process.outputWith "sh" (.cons "-c" (.cons "ls -l /proc/self/fd | grep -c -F $WIZ_T_FILE" .nil)) "" (SpawnOptions.default |> SpawnOptions.setEnv "WIZ_T_FILE" p)"#,
+          "EIO.lift (IO.print o.stdout)", "File.close f", "FS.removeAll d"]
+          "0\n" sysShow },
+    -- (rtffi-08) `input` with no stdin pipe is an error, not silently dropped
+    { name := "communicate without a stdin pipe reports the lost input", run := fun _ =>
+        sysRun ["c ← Process.spawn \"cat\" .nil .null .piped .inherit",
+          "r ← EIO.lift (Child.communicate c \"dropped input\")",
+          "say (match r with | .ok _ => \"dropped?\" | .error m => m)",
+          "o ← Child.readStdout c", "say (Nat.toString (strLen o))",
+          "st ← Child.wait c", "say (ExitStatus.toString st)"]
+          "communicate: Bad file descriptor\n0\nexit code 0\n"
+          (sysShow ++ "def strLen : String → Nat\n  | .mk cs => List.length cs\n") },
+    -- (rtffi-04) an allocation failure in `File.readAll` is `read: …`, not a SIGSEGV
+    { name := "allocation failure in File.readAll is an error, not a crash", run := fun _ => do
+        let files : List (String × String) :=
+          [("main.wiz", "import Sys\nlink_c \"c/cap.c\"\n" ++ sysShow ++
+            "extern \"rtffi_test_cap\" testCap : Nat → IO Nat\nextern \"rtffi_test_uncap\" testUncap : IO Nat\n" ++
+            "def main : IO Unit := EIO.toIO (do\n" ++
+            "  d ← FS.createTempDir;\n" ++
+            "  let p := Path.join d \"big\";\n" ++
+            "  o ← Process.output \"sh\" (.cons \"-c\" (.cons (String.append \"head -c 64000000 /dev/zero > \" p) .nil)) \"\";\n" ++
+            "  say (ExitStatus.toString o.status);\n" ++
+            "  n ← EIO.lift (testCap 2097152);\n" ++
+            "  say (Nat.toString n);\n" ++
+            "  f ← File.open p \"r\";\n" ++
+            "  r ← EIO.lift (File.readAll f);\n" ++
+            "  say (match r with | .ok _ => \"read?\" | .error m => m);\n" ++
+            "  File.close f;\n" ++
+            "  u ← EIO.lift testUncap;\n" ++
+            "  say (Nat.toString u);\n" ++
+            "  say \"survived\";\n" ++
+            "  FS.removeAll d)\n"),
+           ("c/cap.c", capShim)]
+        let want := "exit code 0\n0\nread: Cannot allocate memory\n0\nsurvived\n"
+        linkRun files want
+        linkRun files want (llvm := true) },
+    -- (rtffi-05) `IO.writeFile` writes the text up to the first NUL and reports a failure
+    { name := "IO.writeFile: text up to a NUL, and a failure stops the program", run := fun _ => do
+        let files : List (String × String) :=
+          [("main.wiz", "import Sys\nimport Std\n" ++ sysShow ++
+            "def main : IO Unit := EIO.toIO (do\n" ++
+            "  d ← FS.createTempDir;\n" ++
+            "  let p := Path.join d \"w.txt\";\n" ++
+            "  EIO.lift (IO.writeFile p (String.append \"ab\" (String.append (String.mk (.cons (Char.mk 0) .nil)) \"cd\")));\n" ++
+            "  b ← FS.readBytes p;\n" ++
+            "  say (Nat.toString (Bytes.size b));\n" ++
+            "  say (yesNo (Bytes.eq b (Bytes.ofUtf8 \"ab\")));\n" ++
+            "  FS.removeAll d;\n" ++
+            "  say \"done\")\n")]
+        linkRun files "2\nyes\ndone\n"
+        linkRun files "2\nyes\ndone\n" (llvm := true)
+        let bad : List (String × String) :=
+          [("main.wiz", "import Std\ndef main : IO Unit := do\n  IO.writeFile \"/nonexistent-dir/w\" \"x\";\n  IO.println \"after\"\n")]
+        linkRunFails bad "/nonexistent-dir/w: No such file or directory"
+        linkRunFails bad "/nonexistent-dir/w: No such file or directory" (llvm := true) },
+    -- (rtffi-06) a `readdir` error is the listing's error, not the end of the directory
+    { name := "FS.listDir reports a readdir error, not a truncated listing", run := fun _ => do
+        let files : List (String × String) :=
+          [("main.wiz", "import Sys\nlink_c \"c/readdir.c\"\nlink_lib \"dl\"\n" ++ sysShow ++
+            "extern \"rtffi_test_readdir_fail\" failAfter : Nat → IO Nat\n" ++
+            "extern \"rtffi_test_readdir_ok\" readdirOk : IO Nat\n" ++
+            "def main : IO Unit := EIO.toIO (do\n" ++
+            "  d ← FS.createTempDir;\n" ++
+            "  FS.writeFile (Path.join d \"a\") \"x\";\n" ++
+            "  FS.writeFile (Path.join d \"b\") \"x\";\n" ++
+            "  FS.writeFile (Path.join d \"c\") \"x\";\n" ++
+            "  n ← EIO.lift (failAfter 2);\n" ++
+            "  say (Nat.toString n);\n" ++
+            "  r ← EIO.lift (FS.listDir d);\n" ++
+            "  say (match r with | .ok _ => \"listed?\" | .error _ => \"error\");\n" ++
+            "  u ← EIO.lift readdirOk;\n" ++
+            "  say (Nat.toString u);\n" ++
+            "  xs ← FS.listDir d;\n" ++
+            "  say (showList xs);\n" ++
+            "  FS.removeAll d)\n"),
+           ("c/readdir.c", readdirShim)]
+        linkRun files "0\nerror\n0\na;b;c;\n"
+        linkRun files "0\nerror\n0\na;b;c;\n" (llvm := true) },
+    -- (rtffi-07) the owned release drains a piped stream before it waits
+    { name := "spawnOwned + waitOwned drains 200 KB of piped output (no deadlock)", run := fun _ => do
+        let files : List (String × String) :=
+          [("main.wiz", "import Sys\nimport Handle\n" ++ sysShow ++
+            "def main : IO Unit := EIO.toIO (do\n" ++
+            "  s ← Process.spawnOwned \"sh\" (.cons \"-c\" (.cons \"yes abcdefghi | head -c 200000\" .nil)) .null .piped .inherit\n" ++
+            "        (fun c o => Child.releaseOwned c o (fun r => IO.pure r));\n" ++
+            "  say (ExitStatus.toString s))\n")]
+        linkRun files "exit code 0\n"
+        linkRun files "exit code 0\n" (llvm := true) }
   ] ++ sysBytesCases
 
 builtin_initialize registerGroup sysGroup

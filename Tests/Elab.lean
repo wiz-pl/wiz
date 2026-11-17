@@ -489,6 +489,19 @@ def linkRun (files : List (String × String)) (expected : String) (llvm : Bool :
     let missing := ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1
     if missing then skip "no toolchain" else throw (IO.userError e)
 
+/-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
+def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
+  let (s, src, dir) ← elabTree files
+  let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  | .ok v => throw (IO.userError s!"expected a failure, got {v}")
+  | .error e =>
+    if ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1 then
+      skip "no toolchain"
+    else unless (e.splitOn fragment).length > 1 do
+      throw (IO.userError s!"error does not mention '{fragment}':\n{e}")
+
 /-- A program that links a C file (with a static helper and a header the FFI can't bind)
 and the maths library. -/
 def linkFiles : List (String × String) :=

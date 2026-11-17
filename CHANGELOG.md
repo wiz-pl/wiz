@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* runtime/FFI boundary (the 2026-11-17 review, 9h/9k): `Process.exec` saves the
+  `SIGPIPE` disposition and restores it when `exec` fails, and a spawn re-asserts the
+  ignore every time, so a failed exec no longer leaves the next write to a broken pipe
+  able to kill the program (`EPIPE` again). `File.open` sets `FD_CLOEXEC` (children no
+  longer inherit every `File`). `Fd.adopt` rejects a number above `INT_MAX` with
+  `EINVAL` (an already-closed handle, never fd 1: `4294967297` used to become stdout).
+  The sys/IO
+  allocations fail like the runtime's (`wiz: out of memory`, exit 3) or take the
+  `ENOMEM` error path, never a NULL dereference; `FS.listDir` reports a `readdir`
+  error instead of a truncated listing; `Child.communicate` with input but no stdin
+  pipe is `EBADF`; `IO.writeFile` writes the text up to its first NUL and prints
+  `wiz: <path>: <message>` and exits 1 when the write fails (it used to ignore every
+  failure); `Handle`'s `Child.releaseOwned`/`waitOwned` drain a piped stream before
+  waiting (no deadlock), and `Child.communicateOwned` collects it first.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
