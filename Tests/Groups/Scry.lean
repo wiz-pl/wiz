@@ -33,8 +33,10 @@ def interp (name expected : String) : IO Unit := do
   Elab.okLibs (src ++ "\n#eval main") [expected]
 
 /-- An example run against another backend module: the file's `import Scry.Egraph` line
-is swapped for `mod`. The native-table engine defines the same `Scry.EGraph` interface,
-so the same source and the same digest must work (the differential case). -/
+is swapped for `mod`. The native-table engine declares the same operation names, so an
+example that uses only the shared surface (as the six differential examples do) has the
+same source and digest; it is not the same record type (see `Scry.EgraphNative`'s module
+doc for the fields and the `applyAt`/`applyMatches` signature that differ). -/
 def interpAs (mod name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs ((src.replace "import Scry.Egraph" s!"import {mod}") ++ "\n#eval main") [expected]

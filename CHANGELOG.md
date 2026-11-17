@@ -129,6 +129,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `.github/workflows/tools.yml` runs its unit tests on every change under `tools/`,
   with the end-to-end smoke test on manual dispatch.
 
+* scry: a `Wil` e-graph layer (`Scry.EgraphWil`, `Scry.EgraphExtract`,
+  `Scry.EgraphTaint`). `wgSaturate` folds constants and identities on a read-only view;
+  `wgeRewriteProgram` writes back only checked single-statement rewrites (one-block
+  function, operands already registers of the right-hand side with a single earlier
+  definition, strictly cheaper extracted term); and `wgeTaintDiff` compares taint alerts
+  before and after (`added = 0` by construction, `removed` is a precision gain).
+  `scry egraph FILE.c [--fuel N] [--rewrite]` runs it from the CLI. The native-table
+  e-graph (`Scry.EgraphNative`, with analyses, explanations, limits and `Option`
+  extraction costs) and the equality-sort Datalog planner (`Scry.EqPlan`) are the second
+  S12 slice. `Scry.Egraph` and `Scry.EgraphNative` share names but not the record type
+  (seven fields against five) or the `applyAt`/`applyMatches` signature, and cannot be
+  imported into one program; they are not drop-in replacements. Six of the seventeen
+  e-graph examples are differential. Groups `scry-egraph` and `scry-taint` cover them.
+
 ## [0.1.0] - unreleased (draft)
 
 The first tagged release. Everything below is new in it; it collects stages 1–26 and the

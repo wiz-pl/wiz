@@ -83,7 +83,9 @@ cat build/cve-v2/summary.md
 
 `--case <id|pair|cve>` runs one case or pair; `--no-run` only summarises
 existing `build/cve-v2/` output; `--write-report` writes the full 2x2 report to
-`build/cve-v2/report.md`. The report is generated, so it is not checked in; the
-measured recall when the corpus was added was 1/14 in-scope pairs (7.1%). The v1 driver and its twelve cases are unchanged.
+`build/cve-v2/report.md`. That report is **generated and not checked in** (reproducing
+it needs the pinned upstream sources fetched over the network); the measured recall when
+the corpus was added was 1/14 in-scope pairs (7.1%), from that generated report, not
+from a file in the tree. The v1 driver and its twelve cases are unchanged.
 
 This is measurement infrastructure. It does not tune rules or analysis.

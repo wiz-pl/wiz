@@ -427,20 +427,9 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
       unless a == b do bad := s!"{name}: {a.pretty []} vs {b.pretty []}" :: bad
   pure (n, bad)
 
-/-- Modules of `lib/` that can't be imported together with all the others (`Json`
-declares its own `Nat.repr`; `Scry.EgraphNative` is the native-table backend that replaces
-`Scry.Egraph` under the same names, and `Scry.EqPlan` imports it), checked on their own. -/
-def libApart : List String := ["Json", "Infoview", "Scry.EgraphNative", "Scry.EqPlan"]
-
-/-- Every other module of `lib/` imported at once. -/
-def allLibSource : IO String := do
-  let mut ms := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  pure (String.join (((ms.qsort (· < ·)).toList.filter (!libApart.contains ·)).map (s!"import {·}\n")))
+/- `libApart`, `libSourceExcept` and `allLibSource` live in `Tests.Elab`, so every
+whole-library loader (this Desc sweep and the trust ledger) uses the same per-module
+exclusions. -/
 
 /-- `n` matches on a `len`-element list, checked by `refl`. -/
 def listMatchProgram (len n : Nat) : String :=
@@ -703,7 +692,7 @@ def group : Group where
     -- and the examples, and on stuck descriptions (where the direct one falls back)
     { name := "direct induction hypotheses agree with the template on every Desc in lib/ and examples/", run := fun _ => do
         let loader ← Tests.Elab.libLoader
-        let lib := runFrontend (R := ZeroOneMany) (← allLibSource) { trustedModule := Tests.libModule, loader }
+        let lib := runFrontend (R := ZeroOneMany) (← Tests.Elab.allLibSource) { trustedModule := Tests.libModule, loader }
         let errs := lib.messages.filter (·.severity == .error)
         unless errs.isEmpty do throw (IO.userError s!"the library has errors: {(errs.toList.take 3).map (·.text)}")
         -- (the comparison can fail: a variant with the pairs swapped is caught)
@@ -720,11 +709,18 @@ def group : Group where
         let (n, bad) := hypsMismatches lib.globals stuck
         unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
         total := total + n
-        for m in libApart do
-          let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
-          unless st.messages.all (·.severity != .error) do throw (IO.userError s!"lib/{m} has errors")
+        let mut seenApart : List (List String) := []
+        for (m, skip) in Tests.Elab.libApart do
+          if seenApart.contains skip then continue
+          seenApart := skip :: seenApart
+          let ms ← Tests.Elab.libModuleNames
+          check (ms.contains m) s!"{m} is not a module of lib/"
+          let st := runFrontend (R := ZeroOneMany) (← Tests.Elab.libSourceExcept skip) { trustedModule := Tests.libModule, loader }
+          unless st.messages.all (·.severity != .error) do
+            throw (IO.userError s!"lib/ with {m} (without {skip}) has errors")
           let (n, bad) := hypsMismatches st.globals
           unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
+          check (n > 0) s!"{m}: no descriptions were compared"
           total := total + n
         for e in ← System.FilePath.readDir "examples" do
           unless e.path.extension == some "wiz" do continue

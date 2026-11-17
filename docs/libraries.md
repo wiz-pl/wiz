@@ -1839,17 +1839,32 @@ format and the gaps.
 
 `import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
 congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
-extraction, and saturation with a fuel bound. `import Scry.EgraphNative` defines the same
-`Scry.EGraph` interface on native tables (`U64Array`/`U64Map`) and adds per-e-class
-analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded rewrites), union
-explanations (a flat proof forest), node/round/clock limits with a reported stop reason,
-and `Option Nat` extraction costs. The test group reads every example through both
-imports and compares the digests. `import Scry.EqPlan` is the Datalog seam: `eqsort`
-columns (`Scry.ColKind`), rules whose head is an equality assertion
-(`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and canonicalises
-the database between rounds. This is the second S12 slice: no scheduler/backoff, no
-sharing-aware extraction, no canonicalisation-aware provenance and no kernel-checked
-certificates yet; `wiz-notes/scry-egraph.md` has the design, the API and the gaps.
+extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
+native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
+same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
+and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
+`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
+`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
+record, reads a field, or calls those functions compiles against one import only. It
+adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
+rewrites), union explanations (a flat proof forest), node/round/clock limits with a
+reported stop reason, and `Option Nat` extraction costs. Only six of the seventeen
+`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
+`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
+compares; the analysis, explanation, limit and `EqPlan` surface has no reference
+counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
+byte-identical (matching, instantiation and extraction), so the digests show that the
+two *tables* agree, not that the shared code is independently right. They cannot be
+imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
+operations, so a whole-library import that names both is an error. Every whole-library
+loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
+with everything except the reference family. `import Scry.EqPlan`
+is the Datalog seam: `eqsort` columns (`Scry.ColKind`), rules whose head is an equality
+assertion (`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and
+canonicalises the database between rounds. This is the second S12 slice: no
+scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware provenance and
+no kernel-checked certificates yet; `wiz-notes/scry-egraph.md` has the design, the API
+and the gaps.
 
 ## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
 

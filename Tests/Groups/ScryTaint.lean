@@ -508,14 +508,14 @@ def group : Group where
           "    | .cons f _ => if String.eq f.rule \"command-injection\" then 1 else 0\n" ++
           "    | .nil => 0\n"
         checkEq ["0", "1", "1"] (← runProbe pipelineImports body) },
-    { name := "e-graph folds are read-only: taint findings before and after agree",
+    { name := "e-graph report pass is read-only: the rewritable program is flagged, the clean one is neither rewritten nor flagged",
       run := fun _ => evalEgraphNats
-        ("#eval let before := List.length (Scry.findings Scry.taintRewrite Scry.demoSpec);\n" ++
-         "  let b := Scry.wgBuildProgram Scry.taintRewrite;\n" ++
-         "  let s := Scry.wgSaturate 4 b.g [];\n" ++
-         "  let after := List.length (Scry.findings Scry.taintRewrite Scry.demoSpec);\n" ++
-         "  Nat.add (Nat.mul before 100) (Nat.add (Nat.mul after 10)\n" ++
-         "    (if Nat.lt 0 s.rewrites then 1 else 0))") [111] },
+        ("#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintRewrite).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintRewrite Scry.demoSpec)\n" ++
+         "#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintClean).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintClean Scry.demoSpec)\n" ++
+         "#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintDirect).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintDirect Scry.demoSpec)") [1, 1, 0, 0, 0, 1] },
     { name := "e-graph extract: x + 0 -> x rewrites one statement and keeps the finding",
       run := fun _ => evalEgraphNats (egraphPrelude ++
         "#eval diffSoundCode (Scry.wgeTaintDiff Scry.taintRewrite Scry.demoSpec 4)") [110011] },

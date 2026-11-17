@@ -8,12 +8,37 @@ import Scry.AiDomain
 /-!
 # Scry.EgraphNative: the e-graph engine on native tables
 
-`import Scry.EgraphNative` is the native-table backend of the S12 e-graph. It defines the
-**same `Scry.EGraph` interface** as `lib/Scry/Egraph.wiz` (the pure list model, kept as
-the reference), so an example that imports one of them runs unchanged against the other:
-the test group reads each `examples/scry-egraph-*.wiz` twice, once per import, and
-compares the digests. This module adds the pieces the reference does not have (e-class
-analyses, explanations, limits, `Option` extraction costs).
+`import Scry.EgraphNative` is the native-table backend of the S12 e-graph. It declares
+the same *names* as `lib/Scry/Egraph.wiz` (the pure list model, kept as the reference):
+`Scry.EGraph`, `Scry.ENode`, `Scry.ETerm`, `Scry.Pat`, `Scry.Rewrite` and their
+operations. It is **not** a drop-in replacement, and a programmer must know which
+backend an import brings:
+
+* `Scry.EGraph` has seven fields here (`parent`, `rank`, `nodes : U64Map NodeCell`,
+  `etable : U64Map (List (ENode × Nat))`, `next`, `nseq`, `log`) against the reference's
+  five (`parent : List Nat`, `rank : List Nat`, `nodes : List (Nat × ENode)`,
+  `etable : List (ENode × Nat)`, `next`). `EGraph.mk` takes seven arguments, not five,
+  and `EGraph.empty` has the native shape.
+* `applyAt` and `applyMatches` take a `rule : Nat` before the rewrite (the native
+  `unionWhy` records the rule index in the union log); the reference's do not.
+* The cost passes take the node table's rows: `List (Nat × ENode)` in the reference,
+  `List NodeEntry` here (the map's sequence-keyed cells), so `costPass`/`costIter` also
+  have different argument types.
+
+A client that builds `Scry.EGraph` with `mk` or `empty`, reads a field, or calls
+`applyAt`/`applyMatches`/`costPass`/`costIter` compiles against one import only. The
+operations the six differential examples use (`add`, `merge`, `mergeFacts`, `rebuild`,
+`extract`, `saturate`, matching, instantiation, …) have the same name and type. This
+module adds the pieces the reference does not have (e-class analyses, explanations,
+limits, `Option` extraction costs).
+
+**The two modules cannot be imported into one program.** They declare the same top-level
+names (79 of them, including the types and every operation), and Wiz has no per-module
+shadowing, so an import of both fails with "declared by both". Import one backend or the
+other. Every whole-library loader in the tests goes through `Tests.Elab.libApart` /
+`libSourceExcept`: it imports the reference family with everything else, then each
+native-family module with everything except the reference family. `Scry.EqPlan` imports
+this module, so it is on the native side of that split.
 
 ## Tables
 
@@ -28,9 +53,23 @@ analyses, explanations, limits, `Option` extraction costs).
 * `log` records every union with its reason (merge, congruence, or the rule index of a
   rewrite); `explain` walks it.
 
-The interface is the same one the reference exports (`add`, `merge`, `mergeFacts`,
-`rebuild`, `extract`, `saturate`, …), and the reference stays the executable model: a
-differential test runs the same examples through both backends.
+## The differential and what it does not prove
+
+Six examples (`examples/scry-egraph-{congruence,rebuild,extract,saturate,fuel,datalog}.wiz`)
+run through this import and through `Scry.Egraph`, and the `scry-egraph` test group
+compares their digests. The differential covers the reference surface only: the
+analyses, explanations, limits and `Option` costs below have no reference counterpart,
+and neither does `Scry.EqPlan`.
+
+The differential is also not an independent check of the algorithms. Seventy-nine
+top-level names are declared by both modules; forty-seven of the declarations are
+byte-identical, including the e-node/e-term representation, relational matching,
+instantiation and extraction (the internal list concat-map here is the same code under
+the module-distinct name `Scry.egNConcatMap`). Only the union-find and the node/hash-cons
+table (`parent`, `rank`, `nodes`, `etable`, `nseq`, `log`, `find`, `union`, `rebuild`, …)
+have separate implementations. A bug in the shared matcher, instantiation or extraction
+therefore passes both digests; the digests show that the two *tables* agree on the six
+examples, not that the shared code is right.
 
 ## What this backend adds
 
@@ -49,9 +88,9 @@ compiled (C, LLVM). Nothing here is proved.
 
 -- ## Small list helpers
 
-def Scry.egConcatMap {A B : Type} (f : A → List B) : List A → List B
+def Scry.egNConcatMap {A B : Type} (f : A → List B) : List A → List B
   | .nil => .nil
-  | .cons x xs => List.append (f x) (Scry.egConcatMap f xs)
+  | .cons x xs => List.append (f x) (Scry.egNConcatMap f xs)
 
 def Scry.egRep : Nat → Nat → List Nat
   | .zero, _ => .nil
@@ -630,7 +669,7 @@ def Scry.EGraph.matchPat (g : Scry.EGraph) (p : Scry.Pat) (cls : Nat) :
 
 /-- Match a pattern at every class of the graph: the class and the binding. -/
 def Scry.EGraph.matches (g : Scry.EGraph) (p : Scry.Pat) : List (Nat × Scry.Bindings) :=
-  Scry.egConcatMap (fun cls =>
+  Scry.egNConcatMap (fun cls =>
     List.map (fun b => (cls, b)) (Scry.EGraph.matchPat g p cls))
     (Scry.EGraph.roots g)
 
