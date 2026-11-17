@@ -1047,8 +1047,8 @@ partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected :
       -- (#411) not final yet: kept, with the names for its message, for the end of the
       -- declaration (it used to leave the declaration to `checkGuessedDecl`)
       let names ← unifyNames l
-      modify fun st => { st with deferredGuesses := st.deferredGuesses.push
-        { l, tys, inferred, expected, m, sp, guess, names } }
+      let d : DeferredGuess R := { l, tys, inferred, expected, m, sp, guess, names }
+      modify fun st => { st with deferredGuesses := st.deferredGuesses.push d }
       return
     guessFailed l tys inferred expected m sp guess e (← unifyNames l)
 
