@@ -351,10 +351,16 @@ jobs:
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
-          echo "tests -- --cache ~/.cache/wiz --jobs $JOBS ${sel[*]}"
+          # A shard without "jobs" gets no `--jobs`: the driver already runs one case at
+          # a time, and a case with an auto mode (`=selfhost-libdiff`) tells "not given"
+          # from "--jobs 1" (`Tests.caseJobsGiven`).
+          jobs=()
+          if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
+          jobs_s="${jobs[*]-}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" --jobs "$JOBS" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
