@@ -347,6 +347,23 @@ def selfhostSameNats (header : String) (cases : List (String × Nat)) : IO Unit 
   unless results == cases.map (fun _ => "con((#1, (tt, tt)))") do
     throw (IO.userError s!"the self-hosted frontend computes otherwise:\n{out}")
 
+/-- (A23) The same lines: each `#print axioms` message and each error or warning the Lean
+frontend reports (its text, with an error's `error: ` prefix) is a line the self-hosted
+checker prints, in the same order. (A definition's own `f : T` line is a message in the
+checker's output, not in the host's, so it is left out on both sides; the axioms note's
+second line, `(native: …)`, is kept.) -/
+def selfhostSameLines (src : String) : IO Unit := do
+  let loader ← preludeLoader
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  let lines := s.messages.toList.filterMap fun m =>
+    let l := (if m.severity == .error then "error: " else if m.severity == .warning then "warning: " else "")
+      ++ m.text
+    if m.text.startsWith "'" || m.severity != .info then some l else none
+  let some out ← selfhostOutput src | return
+  let got := (out.splitOn "\n").filter fun l =>
+    l.startsWith "'" || l.startsWith "(" || l.startsWith "error" || l.startsWith "warning"
+  checkEq (String.join (lines.map (· ++ "\n"))) (String.join (got.map (· ++ "\n")))
+
 /-- (13q) Literal patterns: a `String.beq` both frontends have (`lib/Text.wiz` isn't the
 self-hosted frontend's). -/
 def litHeader : String :=
@@ -1578,6 +1595,58 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
         throw (IO.userError s!"{label}: exit {out.exitCode} after {t1 - t0} ms (124 is over {secs} s: the closed scrutinees were evaluated while compiling, #422): {out.stderr.take 2000}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+/-- (A23) `#print axioms` on the forms the host distinguishes: a definition with no
+axioms, a chain to an axiom, an axiom, an inductive type and its constructor, an
+`implemented_by` target (walked as code and marked `native`), a `sealed` type's native
+representation (`native T := mk/get`), and a foreign function. -/
+def axiomsPrintProgram : String :=
+  "import Prelude\n" ++
+  "def base : Nat := 1\n" ++
+  "axiom a : Nat\naxiom b : Nat\n" ++
+  "def g : Nat := Nat.add a b\ndef h : Nat := g\n" ++
+  "inductive T where\n  | mk (x : Nat)\n" ++
+  "def mkT : T := T.mk 1\n" ++
+  "def model (n : Nat) : Nat := n\ndef fast (n : Nat) : Nat := n + 1\n" ++
+  "attribute [implemented_by fast] model\n" ++
+  "def slow (n : Nat) : Nat := n\ndef fastA (n : Nat) : Nat := n + a\n" ++
+  "attribute [implemented_by fastA] slow\n" ++
+  "sealed inductive U where\n  | private mk (n : Nat)\n" ++
+  "def umk (n : Nat) : U := U.mk n\n" ++
+  "def uget (u : U) : Nat := match u with | .mk n => n\n" ++
+  "attribute [implemented_by umk uget] U.mk\n" ++
+  "def useU : Nat := uget (umk 3)\n" ++
+  "extern \"strlen\" (header := \"string.h\") strlen : String → Nat\n" ++
+  "def myLen : Nat := strlen \"abc\"\n" ++
+  "#print axioms base\n#print axioms g\n#print axioms h\n#print axioms a\n" ++
+  "#print axioms mkT\n#print axioms model\n#print axioms slow\n" ++
+  "#print axioms useU\n#print axioms myLen\n#print axioms strlen\n"
+
+/-- (A23) `#print axioms` on partial definitions: the body is walked only where the host
+walks the implementation (an `implemented_by` target), never from a type or a value, so
+`loopA` and its users depend on nothing while `modelA` (implemented by `loopA`) lists
+`pa`. -/
+def partialAxiomsProgram : String :=
+  "import Prelude\n" ++
+  "axiom pa : Nat\n" ++
+  "partial (default := 0) def loop : Nat := loop\n" ++
+  "partial (default := 0) def loopA : Nat := pa\n" ++
+  "def usesLoopA : Nat := loopA\n" ++
+  "def modelA : Nat := 0\n" ++
+  "attribute [implemented_by loopA] modelA\n" ++
+  "#print axioms loop\n#print axioms loopA\n#print axioms usesLoopA\n#print axioms modelA\n"
+
+/-- (A23) `set_option`: the two printing options take `true`/`false`, a bad value and an
+unknown option are the same errors as the host's, and the accepted ones change nothing
+(the self-hosted printer has no notation to switch). -/
+def setOptionProgram : String :=
+  "import Prelude\n" ++
+  "set_option pp.notation false\nset_option pp.all true\n" ++
+  "def f : Nat := 1\n#print axioms f\n" ++
+  "set_option pp.notation maybe\n" ++
+  "set_option pp.all 1\n" ++
+  "set_option pp.other true\n" ++
+  "set_option pp.notation false\n#print axioms f\n"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -1956,8 +2025,14 @@ def selfHostGroup : Group where
     -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
     -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\nerror: unsupported command command.erase\ng : Nat\n" },
+    { name := "the self-hosted frontend: #print axioms lists the same axioms as the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines axiomsPrintProgram },
+    { name := "the self-hosted frontend: #print axioms walks a partial definition's body only as code, as the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines partialAxiomsProgram },
+    { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines setOptionProgram },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"

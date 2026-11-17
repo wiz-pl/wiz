@@ -533,7 +533,8 @@ inductive Foreign where
   -- (stage 21t) `attribute [implemented_by g] f`: compiled code runs `g` for `f`
   | impl (name target : String)
   -- (stage 30) a native representation: `attribute [implemented_by mk get] T.mk`
-  | repr (T mk get : String)
+  -- (the type, its constructor, the implementations of both)
+  | repr (T ctor mk get : String)
   -- (stage 30) `import_c`: the functions glue may call, the header's structs, and the C
   -- text (an include, a glue function) the backend puts before the wrappers
   | cfunc (name : String) (params : List String) (res : String)
@@ -6712,7 +6713,7 @@ def externNamed (n : String) : List Foreign → Bool
 def reprExists (ffi : List Foreign) (T : String) : Bool := match ffi with
   | .nil => .false
   | .cons f rest => match f with
-    | .repr t _ _ => Bool.or (strEq t T) (reprExists rest T)
+    | .repr t _ _ _ => Bool.or (strEq t T) (reprExists rest T)
     | _ => reprExists rest T
 def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let g := identOf' (kid stx 3);
@@ -6745,7 +6746,7 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
                 err (g +++ " can't implement " +++ f +++ ": its type " +++ show .nil 0 tyG +++ " is not " +++ f +++ "'s type")
               else (
                 let gs1 := Globals.addFFI gs (.impl f g);
-                LinkR.mk .none (Globals.addFFI gs1 (.repr T g get)))
+                LinkR.mk .none (Globals.addFFI gs1 (.repr T f g get)))
       | .nil => match Bool.or (externNamed f (Globals.ffi gs)) (elemStr f nativeNames) with
         | .true => err (String.append f " is a builtin or foreign function: it already has an implementation")
         | .false => match strEq f g with
@@ -8705,11 +8706,16 @@ def mutualDeriving : List Syntax → Option String
 -- **(A23) `#print axioms f`** (`command.printAxioms`; `Globals.axiomsOf` in
 -- `Core/Check.lean`): the axioms the declaration `f` depends on. As the host, walk the
 -- declaration's type and value, follow every constant, and name each declaration that
--- has no value (an axiom: here `axiom`, `extern` and a partial definition's signature,
--- which the host also keeps without a value); an `implemented_by` target is named
--- `native f := g`, since compiled code runs it. This frontend registers no `builtin`s,
--- so `builtin k := n` never appears, and its numerals do not unfold through
--- `nat.zero`/`nat.succ` registrations, so a numeral adds no dependency.
+-- has no value (an axiom: here `axiom` and `extern`); an `implemented_by` target is named
+-- `native f := g`, since compiled code runs it, and a native representation
+-- (`attribute [implemented_by mk get] T.mk`) `native T := mk/get`. A partial definition
+-- is two globals here (the signature and then the body): neither is named, and the body
+-- is walked only as code, as the host walks its implementation. This frontend registers
+-- no `builtin`s, so `builtin k := n` never appears, and its numerals do not unfold
+-- through `nat.zero`/`nat.succ` registrations, so a numeral adds no dependency. The one
+-- gap left is a partial definition's witness: the host walks it, and this frontend
+-- checks and discards it (`witnessOf`), so an axiom that only a written
+-- `partial (default := a) def` witness mentions is not listed here.
 -- the constants a term mentions, prepended as the host's `consts` prepends them (its
 -- `mapChildrenM` order; leaf forms have none)
 mutual
@@ -8780,21 +8786,95 @@ partial def globalByKeyFrom (all : Array Global) : Nat → String → Option Glo
       | .false => globalByKeyFrom all j n
 def globalByKey (gs : Globals) (n : String) : Option Global :=
   globalByKeyFrom (Globals.all gs) (Array.size (Globals.all gs)) n
--- `native f := g` (`attribute [implemented_by g] f`): compiled code runs `g` for `f`
-def nativeIn : List Foreign → String → Option String
+-- is some declaration with the kernel name `n` an axiom (`.axiomC`)?
+partial def keyAxiomFrom (all : Array Global) : Nat → String → Bool
+  | .zero, _ => .false
+  | .succ j, n => match Array.getD all j (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k _ _ v _ _ _ => match strEq k n with
+      | .true => match isAxiomTm v with
+        | .true => .true
+        | .false => keyAxiomFrom all j n
+      | .false => keyAxiomFrom all j n
+-- is some declaration with the kernel name `n` a definition (a value that is not an axiom)?
+partial def keyValueFrom (all : Array Global) : Nat → String → Bool
+  | .zero, _ => .false
+  | .succ j, n => match Array.getD all j (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k _ _ v _ _ _ => match strEq k n with
+      | .true => match isAxiomTm v with
+        | .true => keyValueFrom all j n
+        | .false => .true
+      | .false => keyValueFrom all j n
+-- A partial definition is two declarations of one name: the signature (`addPartials`)
+-- and then the body (`defStep`), which `globalByKey` finds. The host keeps one
+-- declaration with a witness, so neither is an axiom and the body is walked only as code
+-- (`Globals.axiomsOf`); this recognises the pair.
+def isPartialKey (gs : Globals) (n : String) : Bool :=
+  Bool.and (keyAxiomFrom (Globals.all gs) (Array.size (Globals.all gs)) n)
+    (keyValueFrom (Globals.all gs) (Array.size (Globals.all gs)) n)
+-- the native representation of `n`, by its type or its constructor (the host triggers on
+-- either; the line is `native T := mk/get`, as its `repr:` registration)
+def reprIn : List Foreign → String → Option Foreign
+  | .nil, _ => .none
+  | .cons f rest, n => match f with
+    | .repr T ctor _ _ => match Bool.or (strEq T n) (strEq ctor n) with
+      | .true => .some f
+      | .false => reprIn rest n
+    | _ => reprIn rest n
+def reprOf (gs : Globals) (n : String) : Option Foreign := reprIn (Globals.ffi gs) n
+def reprLine : Foreign → Option String
+  | .repr t _ mk get => .some ("native " +++ t +++ " := " +++ mk +++ "/" +++ get)
+  | _ => .none
+-- the `native T := mk/get` line for `k`, once (the host keeps one per type)
+def reprAdd (gs : Globals) (first : Bool) (k : String) (out : List String) : List String :=
+  match first with
+  | .false => out
+  | .true => match reprOf gs k with
+    | .some f => match reprLine f with
+      | .some line => match containsStr out line with
+        | .true => out
+        | .false => .cons line out
+      | .none => out
+    | .none => out
+-- does any axiom line name a native implementation? (the host's note)
+def anyNative : List String → Bool
+  | .nil => .false
+  | .cons a rest => match strPrefix "native " a with
+    | .true => .true
+    | .false => anyNative rest
+-- `native f := g` (`attribute [implemented_by g] f`): compiled code runs `g` for `f`.
+-- The two-argument form (`attribute [implemented_by mk get] T.c`) also records
+-- `.impl T.c mk` for the backend, but the host does not name that as `native T.c := mk`:
+-- it is part of the type's native representation (`native T := mk/get`).
+def reprOwns (ffi : List Foreign) (n target : String) : Bool := match ffi with
+  | .nil => .false
+  | .cons f rest => match f with
+    | .repr T _ mk _ => match strEq mk target with
+      | .true => strPrefix (T +++ ".") n
+      | .false => reprOwns rest n target
+    | _ => reprOwns rest n target
+def nativeIn (all : List Foreign) : List Foreign → String → Option String
   | .nil, _ => .none
   | .cons f rest, n => match f with
     | .impl name target => match strEq name n with
-      | .true => .some target
-      | .false => nativeIn rest n
-    | _ => nativeIn rest n
-def nativeOf (gs : Globals) (n : String) : Option String := nativeIn (Globals.ffi gs) n
+      | .true => match reprOwns all name target with
+        | .true => .none
+        | .false => .some target
+      | .false => nativeIn all rest n
+    | _ => nativeIn all rest n
+def nativeOf (gs : Globals) (n : String) : Option String := nativeIn (Globals.ffi gs) (Globals.ffi gs) n
 -- the axiom lines for the kernel name `n`, in the host's order: a work list of
 -- `(declaration, isCode)`; `seen` are the declarations walked, `ran` those walked as code
 -- (a partial definition reached as code runs its body, which this frontend keeps as a
 -- separate declaration of the same name, so its constants are seen anyway)
 inductive AxWork where
   | mk (name : String) (run : Bool)
+-- an implementation is walked only if it has something to walk: the host skips one that
+-- is an axiom, which the `native` line already names
+def implWork (gs : Globals) (t : String) : List AxWork := match globalByKey gs t with
+  | .some (.mk _ _ _ tv _ _ _) => match isAxiomTm tv with
+    | .true => .nil
+    | .false => .cons (.mk t .true) .nil
+  | .none => .nil
 def axWorks (run : Bool) : List String → List AxWork
   | .nil => .nil
   | .cons x rest => .cons (.mk x run) (axWorks run rest)
@@ -8815,7 +8895,10 @@ partial def axiomsGo (gs : Globals) (todo : List AxWork) (seen ran : List String
         | .none => axiomsGo gs rest seen' ran' out
         | .some (.mk k _ ty v _ _ _) =>
             let ax := isAxiomTm v;
-            let out1 : List String := match Bool.and first ax with
+            let isPart := isPartialKey gs k;
+            -- (a partial definition is named by neither its signature nor its body: the
+            -- host's one declaration has a witness)
+            let out1 : List String := match Bool.and first (Bool.and ax (Bool.not isPart)) with
               | .true => .cons k out
               | .false => out;
             let nativ := nativeOf gs k;
@@ -8824,14 +8907,25 @@ partial def axiomsGo (gs : Globals) (todo : List AxWork) (seen ran : List String
               | .true => match nativ with
                 | .some t => .cons ("native " +++ k +++ " := " +++ t) out1
                 | .none => out1;
-            let vc : List String := match ax with
+            -- (a native representation is named for the type or its constructor; this
+            -- frontend walks the type, which any value of it mentions)
+            let reprs : List String := reprAdd gs first k out2;
+            -- (the host walks a partial definition's body only when it is reached as code:
+            -- an implemented_by target or a native_refl's run; not from a type or a value)
+            let vc : List String := match Bool.and isPart (Bool.not run) with
               | .true => .nil
               | .false => tmConsts v .nil;
-            let tc : List String := tmConsts ty .nil;
-            let impl : List AxWork := match nativ with
-              | .some t => .cons (.mk t .true) .nil
+            -- (a sealed type is used at its seal in the host's terms, so mentioning `T`
+            -- mentions `T.seal✝`; this frontend keeps the seal as the index's Π, where no
+            -- constant names it, so name it here)
+            let seal : List String := match globalByKey gs (k +++ ".seal✝") with
+              | .some _ => .cons (k +++ ".seal✝") .nil
               | .none => .nil;
-            axiomsGo gs ((axWorks run (vc ++ tc)) ++ (impl ++ rest)) seen' ran' out2
+            let tc : List String := tmConsts ty seal;
+            let impl : List AxWork := match nativ with
+              | .some t => implWork gs t
+              | .none => .nil;
+            axiomsGo gs ((axWorks run (vc ++ tc)) ++ (impl ++ rest)) seen' ran' reprs
 def axiomsOf (gs : Globals) (n : String) : List String := axiomsGo gs (.cons (.mk n .false) .nil) .nil .nil .nil
 -- `#print axioms f`
 def printAxiomsCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 2 with
@@ -8839,10 +8933,17 @@ def printAxiomsCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 2 with
     | .none => errStep gs (String.append (String.append "unknown declaration '" n) "'")
     | .some i => match Array.getD (Globals.all gs) (Array.size (Globals.all gs) - 1 - i)
         (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk k _ _ _ _ _ _ => match axiomsOf gs k with
+      | .mk k _ _ _ _ _ _ =>
+        let as := axiomsOf gs k;
+        match as with
         | .nil => .mk (String.append (String.append "'" n) "' does not depend on any axioms") gs
-        | .cons _ _ => .mk (String.append (String.append (String.append "'" n) "' depends on axioms: [")
-            (String.append (commaJoin (axiomsOf gs k)) "]")) gs
+        | .cons _ _ =>
+          -- (the host's note: an implementation compiled code runs is trusted, not proved)
+          let note := match anyNative as with
+            | .true => "\n(native: an implementation that compiled code runs, trusted to agree with its definition)"
+            | .false => "";
+          .mk (String.append (String.append (String.append (String.append "'" n) "' depends on axioms: [")
+              (String.append (commaJoin as) "]")) note) gs
   | _ => errStep gs "a #print axioms needs a name"
 
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)

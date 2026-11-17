@@ -1211,3 +1211,59 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ai: `#print axioms` and `set_option`, self-hosted (A23, first slice)
+
+The self-hosted frontend's command set was the closed list of A7 (plus the syntax
+commands): every other parsed command was `unsupported command …`. Two more now have the
+host's behaviour, with the host's text:
+
+* **`#print axioms f`** (`Frontend.wiz`, `printAxiomsCmd`/`tmConsts`/`axiomsOf`). As
+  `Globals.axiomsOf` (`Core/Check.lean`), it walks the declaration's type and value,
+  follows every constant, and names each declaration without a value (`axiom`, `extern`;
+  a partial definition's signature and body are two globals here, and neither is named,
+  its body walked only where the host walks an implementation), lists `native f := g`
+  for an `implemented_by` target (walked as code), and `native T := mk/get` for a native
+  representation, in the host's order and with the host's `(native: …)` note. A `sealed`
+  type's seal is named when the type is mentioned: the host's terms use the type at its
+  seal, while this frontend keeps the seal inside the index's `Π`, where no constant
+  names it. This frontend registers no `builtin`s, so `builtin k := n` never appears,
+  and a numeral adds no dependency (the host lists only the `nat` registrations made
+  outside the toolchain's library).
+* **`set_option pp.notation v` / `set_option pp.all v`** (`setOptionCmd`). Takes
+  `true`/`false` and reports the host's two errors, ``expected `true` or `false``` and
+  `unknown option … (there are pp.notation and pp.all)`. The option changes nothing
+  here: the self-hosted printer prints the kernel's normal form and has no notation to
+  turn off.
+
+**Tests** (group `selfhost`): "#print axioms lists the same axioms as the Lean frontend
+(A23)", "#print axioms walks a partial definition's body only as code, as the Lean
+frontend (A23)" and "set_option values and unknown options, as in the Lean frontend (A23)"
+run one file through both frontends and compare every message line (`selfhostSameLines`).
+The axioms file covers a definition with no axioms, a chain to two axioms, an axiom, an
+inductive type and its constructor, an `implemented_by` target whose implementation
+mentions an axiom, a `sealed` type's native representation, and a foreign function; the
+partial file checks that a partial definition's body is reached only as an implementation
+(so `modelA`, implemented by `loopA`, lists `pa`, while `loopA` and its users do not).
+
+**Not done (A23).**
+
+* `#erase`: the self-hosted *checker* is built from `Selfhost.checkerFiles`, which has the
+  frontend and no `Backend.wiz`, so it has no erasure pass; and the host's `#erase` needs
+  binder names the terms here lack. `ETm.lam` and `ETm.letE` carry none, and neither does
+  the kernel's `Tm.lam`/`letE` (`Kernel.wiz`) that the frontend keeps, where
+  `ETerm.toString` prints `(λx. …)` and `(let x := …; …)`; the host's `#erase` also
+  starts from the declaration's `impl` (the compiler's derived equations) with its level
+  instantiation, not from the value this frontend would erase.
+* `#ir`: no IR, and none of the services that would print one. The self-hosted backend
+  goes from `Tm` through erasure (`eraseCheck`) straight to C (`Backend.wiz`); there is
+  no `lowerProgram`, optimizer or IR printer.
+* `#run`: no IR interpreter or reference-counted checked heap; `#run` runs the host's IR
+  (`IR.runProgram`), which this frontend does not have. `#eval` is `#reduce` here (21u).
+* `#print` (plain), `#guard` and `example`: no such host commands
+  (`Wiz/Parser/Builtin.lean` has `#print` only as `#print axioms`), so there is no host
+  behaviour to match.
+* `builtin`, `universe` and notation attributes: still missing (needed by `lib/`).
+* `#print axioms`'s only textual gap: a *written* partial-definition witness
+  (`partial (default := a) def f`) is checked and then discarded (`witnessOf`), so an
+  axiom that only the witness mentions is not listed; the host walks the witness.
