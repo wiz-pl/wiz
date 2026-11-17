@@ -3,14 +3,15 @@
 -- `Wiz/Selfhost.lean` with a real command line:
 --
 --   wiz-selfhost check FILE            elaborate and type check; diagnostics, exit 1
---   wiz-selfhost build FILE -o OUT     write the generated C to OUT
+--   wiz-selfhost build FILE -o OUT     write the generated C (or LLVM IR) to OUT
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
---            --cache-verify off|warn|strict, --target c (the backend the host names;
---            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
---            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
---            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
+--            --cache-verify off|warn|strict, --target c|llvm (llvm: C5's first slice,
+--            a closed `main : Nat`; wasm is C5), --llvm (the host's alias),
+--            -v (cache hits/misses), --types (each declaration's type),
+--            --cc, --llc, --rt, --cflags, --ldflags (the toolchain for `run`),
+--            --rc | --rc-owned | --gc | --lib | --no-main | --header (the C backend),
 --            --version, -h | --help
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
 --               a bad `--target`), 2 usage (unknown command or option, missing argument)
@@ -46,7 +47,8 @@
 
 -- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5); the
 -- driver's cache has no manifests, so `strict` never trusts an entry (see `cacheRead`).
--- `target` is `--target c`, the only backend the self-hosted code generator has (C5).
+-- `target` is `--target c|llvm`: C is the whole backend, LLVM is C5's first slice (a
+-- closed `main : Nat`, `Backend.wiz` `genLLVM`). `llc` is `--llc CMD` (the host's).
 structure Opts where
   roots : List String
   cache : Option String
@@ -54,6 +56,7 @@ structure Opts where
   verbose : Bool
   types : Bool
   cc : String
+  llc : String
   rt : String
   cflags : List String
   ldflags : List String
@@ -64,7 +67,7 @@ structure Opts where
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
-  Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
+  Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "llc" "selfhost" .nil .nil .nil
     "warn" .none
 
 -- ------------------------------------------------------------------------------------
@@ -749,11 +752,24 @@ def listHas (s : String) : List String → Bool
     | .false => listHas s rest
 
 -- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
--- only (C5), so `c` is the one it can select
+-- and, for C5's first slice, LLVM (a closed `main : Nat`, `genLLVM`), so `wasm` is the
+-- one it refuses by name
 def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
 
-def targetOk (t : String) : Bool := strEq t "c"
+def targetOk (t : String) : Bool := Bool.or (strEq t "c") (strEq t "llvm")
 def targetKnown (t : String) : Bool := listHas t targetModes
+
+-- the selected backend's name (`c` when no `--target` was given)
+def targetName (o : Opts) : String := match o.target with
+  | .some t => t
+  | .none => "c"
+
+def targetIsLLVM (o : Opts) : Bool := strEq (targetName o) "llvm"
+
+-- the artifact's extension: `build` writes the C, or the LLVM IR (C5)
+def targetExt (o : Opts) : String := match targetIsLLVM o with
+  | .true => ".ll"
+  | .false => ".c"
 
 -- `--cache-verify`: the host's modes (`Cache.VerifyMode.ofString?`; `require` is strict)
 def verifyOk (m : String) : Bool :=
@@ -805,7 +821,11 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                       | .true => match rest with
                         | .nil => .err "unknown flag: --cc"
                         | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
-                      | .false => match strEq a "--rt" with
+                      | .false => match strEq a "--llc" with
+                        | .true => match rest with
+                          | .nil => .err "unknown flag: --llc"
+                          | .cons c r2 => parseOptsGo r2 { o with llc := c } file extra
+                        | .false => match strEq a "--rt" with
                         | .true => match rest with
                           | .nil => .err "unknown flag: --rt"
                           | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
@@ -824,7 +844,7 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                 | .cons t r2 => match targetOk t with
                                   | .true => parseOptsGo r2 { o with target := .some t } file extra
                                   | .false => match targetKnown t with
-                                    | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C only (C5)"))
+                                    | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
                                     | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
                               | .false => match strEq a "--cache-verify" with
                                 | .true => match rest with
@@ -838,15 +858,21 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                     | .false => .err (verifyErr m)
                                   | .none => match isBackendFlag a with
                                     | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                    | .false => match strStarts "-" a with
-                                      -- (A14) a root with its directory attached: `-IDIR`,
-                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
-                                      | .true => match modAttachedRoot a with
-                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                        | .none => .err (String.append "unknown flag: " a)
-                                      | .false => match file with
-                                        | .none => parseOptsGo rest o (.some a) extra
-                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+                                    -- (`--llvm`/`--wasm`: the host's aliases for
+                                    -- `--target`; wasm is C5, so it is refused by name)
+                                    | .false => match strEq a "--llvm" with
+                                      | .true => parseOptsGo rest { o with target := .some "llvm" } file extra
+                                      | .false => match strEq a "--wasm" with
+                                        | .true => .fail "unsupported target wasm: the self-hosted backend emits C and LLVM (C5)"
+                                        | .false => match strStarts "-" a with
+                                                      -- (A14) a root with its directory attached: `-IDIR`,
+                                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                                      | .true => match modAttachedRoot a with
+                                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                                        | .none => .err (String.append "unknown flag: " a)
+                                                      | .false => match file with
+                                                        | .none => parseOptsGo rest o (.some a) extra
+                                                        | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -855,20 +881,21 @@ def usageText : String :=
   "\n" +++
   "  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on\n" +++
   "                                  standard error; exit 1 if it has errors)\n" +++
-  "  wiz-selfhost build FILE -o OUT  write the generated C to OUT\n" +++
+  "  wiz-selfhost build FILE -o OUT  write the generated C (or LLVM IR) to OUT\n" +++
   "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" +++
   "  wiz-selfhost version            print the version (also --version)\n" +++
   "  wiz-selfhost help               this text (also -h, --help)\n" +++
   "\n" +++
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
   "  in the working directory),\n" +++
-  "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
-  "  the Lean-hosted `wiz`'s),\n" +++
+  "  -o OUT (the C or LLVM IR `run` compiles, kept), --cache DIR (default\n" +++
+  "  ~/.cache/wiz, as the Lean-hosted `wiz`'s),\n" +++
   "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
-  "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
+  "  manifests yet, so strict never trusts an entry), --target c|llvm (LLVM is a\n" +++
+  "  first slice, C5: a closed `main : Nat`; `--llvm` is its alias), --llc CMD,\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --ldflags FLAGS; C backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 
@@ -935,17 +962,34 @@ def checkCmd (o : Opts) (file : String) : IO Unit := do
   | .some g => checkGraph o g
 
 -- ------------------------------------------------------------------------------------
--- build: the C, to OUT
+-- build: the C (or, with `--target llvm`, the LLVM IR), to OUT
 
-def cOf (o : Opts) (p : Prepared) : IO (Option String) := do
+-- (C5) The LLVM text for `p`: the first slice (`genLLVM`), or the error that says why
+-- this program is outside it. The `link_c` files are C, so the slice refuses them too.
+def llvmOf (o : Opts) (p : Prepared) : IO (Option String) := do
   let lines := linesOf p.run;
   let ds := diagsOf p.tab lines;
   match hasError ds with
   | .true => IO.bind (emitErrors ds) (fun u => noneIO)
-  | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
-    | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
-    | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
-        (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
+  | .false => match o.backend with
+    | .cons b _ => do
+      IO.ePrintln (String.append "error: the LLVM backend's first slice has no backend flag (C5): " b);
+      noneIO
+    | .nil => match genLLVM (Run.gs p.run) with
+      | .ok text => someIO text
+      | .err m => do IO.ePrintln (String.append "error: " m); noneIO
+
+def cOf (o : Opts) (p : Prepared) : IO (Option String) := match targetIsLLVM o with
+  | .true => llvmOf o p
+  | .false => do
+    let lines := linesOf p.run;
+    let ds := diagsOf p.tab lines;
+    match hasError ds with
+    | .true => IO.bind (emitErrors ds) (fun u => noneIO)
+    | .false => IO.bind (missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil)) (fun missing => match missing with
+      | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneIO)
+      | .nil => someIO (String.append (commentsOf (mapS (fun l => stripAt l) lines))
+          (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)))))
 
 def writeOut (out text : String) : IO Unit := do
   ok ← writeFile out text;
@@ -953,17 +997,17 @@ def writeOut (out text : String) : IO Unit := do
   | .true => IO.pure ()
   | .false => do IO.ePrintln (String.append "error: cannot write " out); Process.exit 1
 
--- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
--- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is.
--- The key is the graph's (`keyOfGraph`), so a hit skips elaboration; a miss, or
--- `--no-cache` (no key at all), elaborates.
+-- the code for `p`, through the cache: `build` and `run` share the `.c` (or `.ll`)
+-- entry (the key covers the backend flags and the target), so a second build is a hit,
+-- as the Lean-hosted `wiz`'s is. The key is the graph's (`keyOfGraph`), so a hit skips
+-- elaboration; a miss, or `--no-cache` (no key at all), elaborates.
 def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String) (p : Prepared) : IO Unit := do
   c ← cOf o p;
   match c with
   | .none => Process.exit 1
   | .some ctext => do
     cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
-    cacheWriteIf o useCache cKey ".c" 0 ctext;
+    cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
     writeOut out ctext
 
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
@@ -972,7 +1016,7 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache w
     buildMiss o .false "" "" out (runGraph g)
   | .some _ => do
     let key := keyOfGraph o "c" g;
-    cached ← cacheRead o key ".c";
+    cached ← cacheRead o key (targetExt o);
     match cached with
     | .some (.mk st ctext) => do
       if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
@@ -998,6 +1042,49 @@ def ccCommand (o : Opts) (src prog : String) : String :=
     (String.append " " (String.append src (String.append " -o " (String.append prog (spacesOf o.ldflags))))))))
 
 def exitCodeOf (st : Nat) : Nat := Nat.div st 256
+
+-- (C5) Compile the slice's LLVM text with `llc` and `cc` and run it. The module calls
+-- `printf` itself, so there is no runtime object to link (yet: the host links its own
+-- `runtime/` with `-DWIZ_API=`; the self-hosted compiler does not carry that runtime).
+def compileAndRunLLVM (o : Opts) (key : String) (lltext : String) (extra : List String) : IO Unit := do
+  let dir := String.append "/tmp/wiz-selfhost-" key;
+  ensureDir dir;
+  let src := String.append dir "/main.ll";
+  ok ← writeFile src lltext;
+  match ok with
+  | .false => do IO.ePrintln (String.append "error: cannot write " src); Process.exit 1
+  | .true => do
+    match o.out with
+    | .some p => do kept ← writeFile p lltext; IO.pure ()
+    | .none => IO.pure ();
+    let obj := String.append dir "/main.o";
+    let prog := String.append dir "/prog";
+    let llcCmd := String.append o.llc (String.append " -O2 -filetype=obj -relocation-model=pic -o "
+      (String.append obj (String.append " " src)));
+    st ← cSystem llcCmd;
+    match Nat.beq st 0 with
+    | .false => do
+      IO.ePrintln (String.append "error: llc failed (the IR is " (String.append src "):"));
+      IO.ePrintln llcCmd;
+      Process.exit 1
+    | .true => do
+      let ccCmd := String.append o.cc (String.append " -O2 -w -o "
+        (String.append prog (String.append " " (String.append obj (spacesOf o.ldflags)))));
+      st2 ← cSystem ccCmd;
+      match Nat.beq st2 0 with
+      | .false => do
+        IO.ePrintln (String.append "error: the C compiler failed to link " (String.append obj ":"));
+        IO.ePrintln ccCmd;
+        Process.exit 1
+      | .true => do
+        st3 ← cSystem (String.append prog (spacesOf extra));
+        match Nat.beq (exitCodeOf st3) 0 with
+        | .true => IO.pure ()
+        | .false => do
+          IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st3)));
+          Process.exit 1
+
+-- the C (or LLVM IR) the driver kept: `compileAndRun` below
 
 def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List String) : IO Unit := do
   let dir := String.append "/tmp/wiz-selfhost-" key;
@@ -1026,13 +1113,19 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
         IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
         Process.exit 1
 
+-- the kept text, compiled and run by the selected backend
+def runText (o : Opts) (key : String) (text : String) (extra : List String) : IO Unit :=
+  match targetIsLLVM o with
+  | .true => compileAndRunLLVM o key text extra
+  | .false => compileAndRun o key text extra
+
 def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepared)
     (extra : List String) : IO Unit := do
-  cached ← cacheReadIf o useCache cKey ".c";
+  cached ← cacheReadIf o useCache cKey (targetExt o);
   match cached with
   | .some (.mk st ctext) => do
     if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
-    compileAndRun o cKey ctext extra
+    runText o cKey ctext extra
   | .none => do
     cacheMissMsg o useCache cKey;
     let lines := linesOf p.run;
@@ -1042,14 +1135,21 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
     match Nat.beq st 0 with
     | .false => do emitErrors ds; Process.exit 1
     | .true => do
-      missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
-      match missing with
-      | .cons _ _ => do ePrintAll missing; Process.exit 1
-      | .nil => do
-        let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
-          (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
-        cacheWriteIf o useCache cKey ".c" 0 ctext;
-        compileAndRun o cKey ctext extra
+      match targetIsLLVM o with
+      | .true => match genLLVM (Run.gs p.run) with
+        | .err m => do IO.ePrintln (String.append "error: " m); Process.exit 1
+        | .ok text => do
+          cacheWriteIf o useCache cKey (targetExt o) 0 text;
+          runText o cKey text extra
+      | .false => do
+        missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
+        match missing with
+        | .cons _ _ => do ePrintAll missing; Process.exit 1
+        | .nil => do
+          let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
+            (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
+          cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
+          runText o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   gopt ← loadGraph o.roots file;
@@ -1059,11 +1159,11 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
     | .none => runPrepared o .false "nocache" "" (runGraph g) extra
     | .some _ => do
       let cKey := keyOfGraph o "c" g;
-      cached ← cacheRead o cKey ".c";
+      cached ← cacheRead o cKey (targetExt o);
       match cached with
       | .some (.mk st ctext) => do
         if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
-        compileAndRun o cKey ctext extra
+        runText o cKey ctext extra
       | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
 
 -- ------------------------------------------------------------------------------------
@@ -1144,14 +1244,14 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
 def takesValueFlag (a : String) : Bool :=
   Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
     (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
-      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
-        (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))
+      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--llc") (Bool.or (strEq a "--rt")
+        (Bool.or (strEq a "--cflags") (strEq a "--ldflags"))))))))))
 
 def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types") (Bool.or (strEq a "--llvm") (strEq a "--wasm"))))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)

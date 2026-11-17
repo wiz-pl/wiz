@@ -20,7 +20,8 @@ one, the cache flags — and by the driver items of the self-hosting parity audi
 labels the cases cite: D2 subcommands, D3 flags, D4 build artifacts, D5 the elaboration
 cache, D6 diagnostics, D7 exit codes (and, for the skips, A14 modules, C5 the LLVM/IR
 backends, C9 `--lib`/`--no-main`, C12 the native operations, D8 LSP/doc). The host's newer
-flags are covered too: `--target c` works in both, `--target llvm|wasm` and
+flags are covered too: `--target c` works in both, `--target llvm` is accepted by both
+(its self-hosted path is C5's first slice: a closed `main : Nat`), `--target wasm` and
 `--cache-verify strict` are the host's backend/manifest features the self-hosted
 toolchain has not got (C5, D5), and each is an asserted skip rather than a silent pass.
 
@@ -38,7 +39,7 @@ diagnostics (`unknown flag: …`, the version line) are compared verbatim, with
 `wiz-selfhost` read as `wiz`. Two blocks are not compared:
 
 * **the usage text** after a usage error (everything from the line that starts `usage`):
-  the driver documents the subset it has (no `parse`/`doc`/`fmt`/`lsp`, no `--llvm`);
+  the driver documents the subset it has (no `parse`/`doc`/`fmt`/`lsp`);
   the cases check the message line and the exit code, and the help case says so;
 * **indented continuation lines** of a message (`type mismatch`'s `expected:` /
   `inferred:` lines), since the host's elaborator and the self-hosted one split a
@@ -242,6 +243,9 @@ def main : IO Unit := do
   IO.println \"hello from the selfhost driver\";
   IO.println (Nat.toString (Nat.add 40 2))
 "
+def cliDiffNat : String := "import Prelude
+def main : Nat := Nat.add 40 2
+"
 
 def cliMissingModule : String := "import Prelude
 import M
@@ -380,18 +384,25 @@ def cliDiffGroup : Group where
           cliDiffSame spec h s
           checkEq 1 s.code
           checkEq 1 h.code },
-    { name := "--target llvm|wasm: the host selects the backend, the self-hosted one emits C only (C5)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "--target llvm: both select it, and `check` is silent in both (C5's first slice)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
-        for target in ["llvm", "wasm"] do
-          let args := #["check", "good.wiz", "--target", target]
-          let spec : CliDiffSpec := { files := files, args := args }
-          let (h, s) ← cliDiffBoth host exe spec
-          checkEq 0 h.code
-          checkEq 1 s.code
-          checkEq "" s.out
-          cliCheck s.err s!"unsupported target {target}" "the driver's rejection"
-        skip "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5); the self-hosted backend emits C, so the driver refuses the name (exit 1) instead of silently building C" },
+        let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", "llvm"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 h.code
+        checkEq 0 s.code
+        skip "backend: both accept `--target llvm` and `check` compiles nothing; the self-hosted LLVM path is a first slice (C5: a closed `main : Nat`) and is not exercised here" },
+    { name := "--target wasm: the host selects WebAssembly, the driver refuses the name (C5)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("good.wiz", cliGood)]
+        let spec : CliDiffSpec := { files := files, args := #["check", "good.wiz", "--target", "wasm"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 0 h.code
+        checkEq 1 s.code
+        checkEq "" s.out
+        cliCheck s.err "unsupported target wasm" "the driver's rejection"
+        skip "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C" },
     { name := "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("cv.wiz", cliGood)]
@@ -579,22 +590,38 @@ def cliDiffGroup : Group where
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
           skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
-    { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "build --llvm: both accept it; the host links an executable, the driver writes IR text (D4/C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
-        let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffHello)]
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffNat)]
                                     args := #["build", "good.wiz", "-o", "out", "--llvm"]
                                     hostArgs := tc }
         let (h, s) ← cliDiffBoth host exe spec
-        -- (the driver has no LLVM path at all: it always refuses the flag, C5)
-        checkEq 2 s.code
-        cliCheck s.err "unknown flag: --llvm" "the driver's rejection"
-        if h.code == 0 then do
-          check (← cliDiffExists h "out") "the host's LLVM build wrote no artifact"
-          skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
-        else do
-          let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
-          skip s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
+        checkEq 0 h.code
+        checkEq 0 s.code
+        match ← cliDiffReadBin h "out" with
+        | some b => check (cliDiffIsExe b) "the host's LLVM build is not an executable"
+        | none => throw (IO.userError "the host's LLVM build wrote no artifact")
+        match ← cliDiffRead s "out" with
+        | some text => Tests.check ((text.splitOn "define i32 @main()").length > 1) "the driver's artifact is not LLVM IR"
+        | none => throw (IO.userError "the driver's LLVM build wrote no artifact")
+        skip "artifact: both build through textual LLVM IR; the host then assembles and links an executable, the driver writes the IR (its `build` writes C for the C target: D4). The slice is a closed `main : Nat` (C5)" },
+    { name := "run --llvm: `main : Nat` prints the same value (C5's first slice)", run := fun _ => do
+        match ← cliRunOptions with
+        | none => skip "no garbage collector, --gc-cflags"
+        | some shOpts => withSelfhostCli fun exe => do
+          let host ← cliDiffHost
+          let tc ← cliDiffHostToolchain
+          let wt ← toolchain
+          let spec : CliDiffSpec := { files := #[("n.wiz", cliDiffNat)]
+                                      args := #["run", "n.wiz", "--llvm"]
+                                      hostArgs := tc
+                                      shArgs := shOpts ++ #["--cc", wt.cc, "--llc", wt.llc] }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 0 s.code
+          checkEq "42\n" h.out
+          checkEq "42\n" s.out },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
@@ -647,7 +674,7 @@ def cliDiffGroup : Group where
         for word in ["check", "build", "run"] do
           cliCheck h2.out word "host help"
           cliCheck s2.out word "driver help"
-        skip "usage text: the driver documents the subset it has (no parse/doc/fmt/lsp, no --llvm; D2/D8)" },
+        skip "usage text: the driver documents the subset it has (no parse/doc/fmt/lsp; D2/D8)" },
     { name := "warnings: the host warns about a shadowed Prelude (the driver has none yet)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("Prelude.wiz", "import Prelude\ndef shadow : Nat := 0\n"),

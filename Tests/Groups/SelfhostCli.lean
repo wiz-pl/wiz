@@ -279,7 +279,49 @@ def cliGroup : Group where
         let (c, out, err) ← cliRun exe #[("input.wiz", "import Prelude\ndef bad : Nat := nope\n")] #[]
         checkEq 1 c
         checkEq "" out
-        cliCheck err "error: unknown identifier nope" "one-shot error" }
+        cliCheck err "error: unknown identifier nope" "one-shot error" },
+    { name := "--target llvm: a closed `main : Nat` is textual LLVM IR, built and run (C5)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let files := #[("n.wiz", "import Prelude\ndef main : Nat := Nat.add 40 2\n")]
+        -- the module, to OUT: text only, so no C toolchain is needed here
+        let (dir, c, out, err) ← cliRunDir exe files #["build", "n.wiz", "-o", "out.ll", "--target", "llvm"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        let ll ← IO.FS.readFile (dir / "out.ll")
+        Tests.check (cliHas ll "define i32 @main()") "the module's main"
+        Tests.check (cliHas ll "i64 42") "the numeral"
+        Tests.check (cliHas ll "@printf") "the result's print"
+        -- `--llvm` is the host's alias: the same text
+        let (dir2, c, _, _) ← cliRunDir exe files #["build", "n.wiz", "-o", "out.ll", "--llvm"]
+        checkEq 0 c
+        checkEq ll (← IO.FS.readFile (dir2 / "out.ll"))
+        -- `check --target llvm` selects nothing to compile, as in the host (silent, 0);
+        -- wasm is still C5 and is refused by name (exit 1, the host's `takeTarget` shape)
+        let (c, out, err) ← cliRun exe files #["check", "n.wiz", "--target", "llvm"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        let (c, _, err) ← cliRun exe files #["check", "n.wiz", "--target", "wasm"]
+        checkEq 1 c
+        cliCheck err "unsupported target wasm" "wasm is still C5"
+        -- `llc` and `cc`, then the value as `wiz run` prints a Nat
+        match ← cliRunOptions with
+        | none => skip "no C toolchain (--gc-cflags): the module is built, `run` is not exercised"
+        | some opts => do
+          let tc ← toolchain
+          let opts := opts ++ #["--cc", tc.cc, "--llc", tc.llc]
+          let (c, out, err) ← cliRun exe files (#["run", "n.wiz", "--target", "llvm"] ++ opts)
+          checkEq 0 c
+          checkEq "42\n" out
+          checkEq "" err
+        -- outside the slice: one explicit error, exit 1, and no artifact
+        let (dir, c, out, err) ← cliRunDir exe #[("b.wiz", cliHello)] #["build", "b.wiz", "-o", "b.ll", "--target", "llvm"]
+        checkEq 1 c
+        checkEq "" out
+        cliCheck err "the LLVM backend's first slice" "the slice's error"
+        unless !(← (dir / "b.ll").pathExists) do
+          throw (IO.userError "the LLVM build wrote an artifact for a program outside the slice") }
   ]
 
 builtin_initialize registerGroup cliGroup
