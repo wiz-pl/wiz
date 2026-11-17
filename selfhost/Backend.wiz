@@ -172,6 +172,31 @@ def natOf (x : Tm) (x' : ETm) : ETm := match x' with
     | .nil => .prim "natPack" (etms1 x')
   | _ => .prim "natPack" (etms1 x')
 
+
+
+-- **Lazy `let`s.** The match compiler binds with `let`s things only some branches use:
+-- a shared catch-all (`dflt✝`), the hypotheses of `ind` (each the result of a recursive
+-- call). Evaluated eagerly they cost every call a full walk of its argument, or worse.
+-- A cheap value (a variable, a global, projections of a variable) is substituted at its
+-- uses; any other is suspended (`memo`) and forced where it is used.
+mutual
+def liftE (k c : Nat) : ETm → ETm
+  | .var i => match Nat.lt i c with
+    | .true => .var i
+    | .false => .var (i + k)
+  | .lam b => .lam (liftE k (c + 1) b)
+  | .app f a => .app (liftE k c f) (liftE k c a)
+  | .letE v b => .letE (liftE k c v) (liftE k (c + 1) b)
+  | .obj t fs => .obj t (liftEs k c fs)
+  | .proj i t => .proj i (liftE k c t)
+  | .case s bs => .case (liftE k c s) (liftEs k c bs)
+  | .prim op as => .prim op (liftEs k c as)
+  | t => t
+def liftEs (k c : Nat) : ETms → ETms
+  | .nil => .nil
+  | .cons t rest => .cons (liftE k c t) (liftEs k c rest)
+end
+
 mutual
 -- **Exercise 21.1.** Erase `t`, checking it against `ty` (`eraseCheck` in `Erase.lean`):
 -- an erasable type gives `◾`; `fun` against a Π erases the body under the binder; a
@@ -940,29 +965,6 @@ def cgHead (st : CG) (names : List String) (pe0 : PE) (t : ETm) : CR := match cs
         | .cons _ _ _ _ => .t "({ " ⧺ emDeclsG names (lenL names) em ⧺ c ⧺ .t "; })") (CG.setPe st1 (CG.pe st))
 end
 
-
--- **Lazy `let`s.** The match compiler binds with `let`s things only some branches use:
--- a shared catch-all (`dflt✝`), the hypotheses of `ind` (each the result of a recursive
--- call). Evaluated eagerly they cost every call a full walk of its argument, or worse.
--- A cheap value (a variable, a global, projections of a variable) is substituted at its
--- uses; any other is suspended (`memo`) and forced where it is used.
-mutual
-def liftE (k c : Nat) : ETm → ETm
-  | .var i => match Nat.lt i c with
-    | .true => .var i
-    | .false => .var (i + k)
-  | .lam b => .lam (liftE k (c + 1) b)
-  | .app f a => .app (liftE k c f) (liftE k c a)
-  | .letE v b => .letE (liftE k c v) (liftE k (c + 1) b)
-  | .obj t fs => .obj t (liftEs k c fs)
-  | .proj i t => .proj i (liftE k c t)
-  | .case s bs => .case (liftE k c s) (liftEs k c bs)
-  | .prim op as => .prim op (liftEs k c as)
-  | t => t
-def liftEs (k c : Nat) : ETms → ETms
-  | .nil => .nil
-  | .cons t rest => .cons (liftE k c t) (liftEs k c rest)
-end
 mutual
 -- the body of `let` with variable `c` (at this depth) replaced by `v` (a term at the
 -- `let`'s depth), and the variables above it moved down
