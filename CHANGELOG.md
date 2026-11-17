@@ -10,6 +10,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's Goals pane is served **in the page by default**
+  (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
+  so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
+  and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
+  still selects an external server and `?lsp=off` disables the pane.
 * selfhost: the frontend now handles the rest of A18 and A17's list literals and boolean
   operators — as-patterns (`x@y@p`, in equations, `match`, literal and tuple rows), tuple
   patterns (pair splitting without the kernel's `split`), `let (x, y)`/`let (x, y, z)`
