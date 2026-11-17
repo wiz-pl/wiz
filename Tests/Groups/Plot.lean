@@ -175,6 +175,7 @@ def main : IO Unit := do
 def plotGroup : Group where
   name := "plot"
   exercise := "lib/Plot.wiz"
+  parallel := true
   cases := [
     { name := "linear ticks: 1/2/5 step, inside the domain, increasing, integer multiples (awkward domains)", run := fun _ =>
         okLibs plotTicksSrc plotTicksExpected },

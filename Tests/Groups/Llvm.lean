@@ -12,6 +12,7 @@ namespace Tests.Elab
 def llvmGroup : Group where
   name := "llvm"
   exercise := "Stage 8d"
+  parallel := true
   cases := nativeCases true
 
 builtin_initialize registerGroup llvmGroup

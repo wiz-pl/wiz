@@ -1,10 +1,12 @@
 # The playground's goals panel: the language-server contract
 
 The playground (`web/playground.html`) evaluates Wiz locally: the self-hosted frontend
-and kernel compiled to WebAssembly (stage 11ab). Since the playground-LSP work it can
-also be a **language client**: with an endpoint in the page's URL, the Goals pane shows
-the language server's tactic state, expected type and diagnostics, and clicking a
-hypothesis or a subterm selects its source span in the editor.
+and kernel compiled to WebAssembly (stage 11ab). Since the playground-LSP work its Goals
+pane is served **in the page by default** (`web/selfhost-lsp-shim.js`, the same Wasm
+engine), so the published page has a pane with no server to start; with an endpoint in
+the page's URL it can also be a **language client** of an external server, showing that
+server's tactic state, expected type and diagnostics. Either way clicking a hypothesis or
+a subterm selects its source span in the editor.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
@@ -21,9 +23,13 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
 # then open http://127.0.0.1:8000/playground.html?lsp=ws://127.0.0.1:8765
 ```
 
-* `?lsp=ws://host:port` (optionally with a path) is the endpoint. `?lsp=8765` is
-  shorthand for `ws://127.0.0.1:8765`; a value without a scheme gets `ws://`; `?lsp=off`
-  or no parameter means no server, and the pane says so.
+* With **no `lsp` parameter the in-page server is the default** (`?lsp=selfhost` names it
+  explicitly): the pane's diagnostics and `#check`/`#eval` answers come from the same Wasm
+  engine, with nothing to start. `?lsp=off` (also `none`, `0`, `false`) turns the pane
+  off, and the page stays a local checker.
+* `?lsp=ws://host:port` (optionally with a path) uses an external server instead.
+  `?lsp=8765` is shorthand for `ws://127.0.0.1:8765`; a value without a scheme gets
+  `ws://`.
 * In JavaScript the same thing is a config object:
   `startInfoview({editor, panel, config: {url}})` (the page uses this) or
   `new LspClient({url, WebSocketImpl})` for the client alone. The config may also set

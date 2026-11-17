@@ -13,6 +13,7 @@ namespace Tests.Elab
 def seplogicGroup : Group where
   name := "seplogic"
   exercise := "Stage 24"
+  parallel := true
   cases := [
     { name := "13o: the libraries' helper notation stays in them (∷, ▸, +++, ⊕); Hdl's <+> is public", run := fun _ =>
         okLibs ("import HoareTactics\nimport Feral\nimport Hdl.Core\n" ++

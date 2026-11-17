@@ -186,9 +186,8 @@ jobs:
           # (on this repository's branches, which have the push token). `packages.wiz` is
           # the default package; `packages.tests` is the test driver, from the same build.
           nix build .#wiz .#tests --no-link -L
-          # the reference manual (wiz doc --lib --reference, with this wiz): a Cachix hit
-          # when the compiler and lib/ are unchanged; the docs job substitutes it
-          nix build .#reference --no-link -L
+          # No .#reference here: only the docs job reads it (and only on a push), and no
+          # shard waits on it. That job builds it from this cached wiz, off this path.
           wiz=$(nix path-info .#wiz)
           tests=$(nix path-info .#tests)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
@@ -221,7 +220,7 @@ jobs:
             exit 0
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests .#reference)
+            $(nix path-info .#wiz .#tests)
       - name: Every test case is in exactly one shard
         run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
@@ -352,10 +351,16 @@ jobs:
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
-          echo "tests -- --cache ~/.cache/wiz --jobs $JOBS ${sel[*]}"
+          # A shard without "jobs" gets no `--jobs`: the driver already runs one case at
+          # a time, and a case with an auto mode (`=selfhost-libdiff`) tells "not given"
+          # from "--jobs 1" (`Tests.caseJobsGiven`).
+          jobs=()
+          if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
+          jobs_s="${jobs[*]-}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" --jobs "$JOBS" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
@@ -418,7 +423,10 @@ jobs:
           "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
             --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
           ls doc-site/docs | head -50
-      - name: The reference manual's Markdown (nix build .#reference, from Cachix)
+      - name: The reference manual's Markdown (nix build .#reference)
+        # Built here, not in the `build` job: this is the only consumer, and only a push
+        # runs this job, so it is off the shards' critical path. It is generated from the
+        # `wiz` the build job published (a substitute), so it needs no rebuild of wiz.
         run: |
           ref=$(nix build .#reference --no-link --print-out-paths)
           cp "$ref/index.md" doc-site/docs/reference.md
