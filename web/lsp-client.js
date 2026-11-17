@@ -84,7 +84,7 @@ export class LspClient {
     this.capabilities = null;
     this.capabilitiesRaw = null;
     this.serverInfo = null;
-    this.diagnostics = new Map(); // uri → the last published array
+    this.diagnostics = new Map(); // uri → {version, diagnostics} (the last publish)
     this.handlers = Object.create(null);
     this.pending = new Map();     // id → {resolve, reject, timer, method}
     this.docs = new Map();        // uri → {uri, text, version, languageId}
@@ -327,7 +327,19 @@ export class LspClient {
   dispatchNotification(method, params) {
     if (method === "textDocument/publishDiagnostics" && params && params.uri) {
       const diagnostics = Array.isArray(params.diagnostics) ? params.diagnostics : [];
-      this.diagnostics.set(params.uri, diagnostics);
+      // The client advertises `versionSupport`: a publish for an older document version
+      // than the one already stored is dropped (a second connection, or a server that
+      // fans work out, can deliver them out of order). A server that sends no version
+      // keeps last-arrival, and the last version seen is remembered across such
+      // publishes so a later numbered one is still ordered.
+      const version = typeof params.version === "number" && isFinite(params.version)
+        ? params.version : null;
+      const previous = this.diagnostics.get(params.uri);
+      if (version !== null && previous && typeof previous.version === "number" && version < previous.version) {
+        return;
+      }
+      const kept = version !== null ? version : (previous ? previous.version : null);
+      this.diagnostics.set(params.uri, { version: kept, diagnostics });
       this.emit("diagnostics", { uri: params.uri, diagnostics, version: params.version });
     }
     this.emit("notification", { method, params });
@@ -370,6 +382,9 @@ export class LspClient {
       languageId: options.languageId || this.languageId,
     };
     this.docs.set(uri, doc);
+    // `didOpen` starts a new document lifecycle: a publish from the previous one must
+    // not make the new lifecycle's (lower) versions look stale.
+    this.diagnostics.delete(uri);
     if (this.state === "open") this.sendDidOpen(doc);
     return doc;
   }
@@ -390,6 +405,7 @@ export class LspClient {
 
   closeDocument(uri) {
     if (!this.docs.delete(uri)) return;
+    this.diagnostics.delete(uri);
     if (this.state === "open") this.notify("textDocument/didClose", { textDocument: { uri } });
   }
 

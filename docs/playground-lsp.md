@@ -318,8 +318,9 @@ their severity and position and underlines the same ranges in the editor (§ The
 clicking one selects its range. An empty array clears the list and the underlines. A
 diagnostic's `range` may have no `end`, an empty `end`, or span lines: the editor
 underlines the token at its start for the first two and one span per line for the last.
-Versions are ignored. `code`/`data` (the code-action machinery) are not used by
-the playground.
+A publish whose `version` is older than the one already stored for the URI is ignored;
+a server that sends no version keeps last-arrival order. `code`/`data` (the code-action
+machinery) are not used by the playground.
 
 ## Errors and timeouts
 

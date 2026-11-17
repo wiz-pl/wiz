@@ -187,6 +187,45 @@ checkThat("panel: the diagnostic", withDiagnostic.includes("mock: unknown identi
 checkThat("panel: the diagnostic's span", withDiagnostic.includes('data-span="0:0-0:3"'));
 checkThat("panel: the severity", withDiagnostic.includes("sev-error"));
 
+// ## 6b. Diagnostics versions: an older publish does not replace a newer one
+{
+  const ordered = new LspClient({ url: "ws://127.0.0.1:1" });
+  const orderedUri = "file:///ordered.wiz";
+  let events = 0;
+  ordered.on("diagnostics", () => { events++; });
+  const publish = (version, message) => ordered.receive(JSON.stringify({
+    jsonrpc: "2.0", method: "textDocument/publishDiagnostics",
+    params: Object.assign({ uri: orderedUri, diagnostics: [{ message }] },
+      version === undefined ? {} : { version }),
+  }));
+  publish(2, "v2");
+  const stored = () => ordered.diagnostics.get(orderedUri);
+  const messages = () => {
+    const s = stored();
+    return s && s.diagnostics ? s.diagnostics.map((d) => d.message) : null;
+  };
+  check("diagnostics: the version is stored", stored() && stored().version, 2);
+  check("diagnostics: the diagnostics are stored beside it", messages() && messages().join(","), "v2");
+  publish(1, "v1 (stale)");
+  check("diagnostics: an older version is ignored", messages() && messages().join(","), "v2");
+  check("diagnostics: a stale publish is not emitted", events, 1);
+  publish(3, "v3");
+  check("diagnostics: a newer version replaces it", messages() && messages().join(","), "v3");
+
+  // A server that sends no version (the Lean server today) still gets last-arrival.
+  const loose = new LspClient({ url: "ws://127.0.0.1:1" });
+  const looseUri = "file:///loose.wiz";
+  const unpublish = (message) => loose.receive(JSON.stringify({
+    jsonrpc: "2.0", method: "textDocument/publishDiagnostics",
+    params: { uri: looseUri, diagnostics: [{ message }] },
+  }));
+  unpublish("first");
+  unpublish("second");
+  const looseStored = loose.diagnostics.get(looseUri);
+  check("diagnostics: unversioned publishes keep the last arrival",
+    looseStored && looseStored.diagnostics ? looseStored.diagnostics.map((d) => d.message).join(",") : null, "second");
+}
+
 // ## 7. The plainGoal fallback (a server with only the text methods)
 
 const plainMock = await startMockServer({ mode: "plain" });
