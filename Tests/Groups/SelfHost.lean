@@ -2120,6 +2120,12 @@ def selfHostGroup : Group where
         selfhostSameNats (litHeader ++ litProgram) litCases },
     { name := "the self-hosted frontend: literal pattern verdicts, as in the Lean frontend (13q)", run := fun _ =>
         selfhostAgrees litHeader litDecls },
+    { name := "the self-hosted frontend: `x :: xs` is List.cons, as in the Lean frontend (13k)", run := fun _ => do
+        let header := "def len : List Nat → Nat\n  | .nil => 0\n  | x :: xs => Nat.succ (len xs)\n"
+        selfhostAgrees header [
+          ("def ys : List Nat := 1 :: 2 :: List.nil\n#eval len ys\n", true),
+          ("def bad : List Nat := 1 :: 2\n", false)]
+        selfhostSameNats header [("len (1 :: 2 :: List.cons 3 List.nil)", 3)] },
     { name := "the self-hosted frontend: structure update, plain and nested, as in the Lean frontend (13i, 13p)", run := fun _ =>
         selfhostSameNats (updHeader ++ updProgram) updCases },
     { name := "the self-hosted frontend: structure update verdicts, as in the Lean frontend (13i, 13p)", run := fun _ =>

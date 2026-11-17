@@ -466,6 +466,19 @@ expanded if a macro applies, so `[x, y]` becomes `List.cons x (List.cons y List.
 and a user notation whose expansion is a constructor application works in patterns too.
 Tests: group `language`.
 
+**`x :: xs`.** The Prelude declares `infixr:67 " :: " => List.cons`, so a cons cell can
+be written `x :: xs` in terms and in patterns. It is right-associative at 67, the
+precedence of `++` (13l), and tighter than the arrows (25): `1 :: 2 :: xs` is
+`1 :: (2 :: xs)`, `x :: xs ++ ys` is `x :: (xs ++ ys)` (`++` is right-associative at
+67 too, so it sits in the `::` tail), and `x :: xs → P` is `(x :: xs) → P`. A list
+literal tail keeps the literal spelling: `1 :: [2]` prints as `[1, 2]`; a cons with a
+variable tail prints as `x :: xs` (the inverse of the notation
+rule that 11r installs for every `infix`; `set_option pp.notation false` prints
+`List.cons Nat x xs`). The self-hosted prelude, `preludeText` in `selfhost/Frontend.wiz`,
+declares the same `infixr`, so both frontends expand it to `List.cons` and the
+`selfhost` differential case computes with it. Tests: group `language`, `reject`
+(`1 :: 2`), and `selfhost`.
+
 ## 13l: `++` for lists and strings
 
 `a ++ b` is `Append.append a b`, a method of the homogeneous class
@@ -474,7 +487,8 @@ Tests: group `language`.
 (7e, HD9 stage 1). A heterogeneous `HAppend A B C` would need default instances, which
 the numeric classes also left for later. Other types get `++` by an instance.
 (`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local spellings
-of `String.append`; the self-hosted prelude keeps `infixr " ++ " => List.append`.)
+of `String.append`; the self-hosted prelude keeps `infixr:67 " ++ " => List.append`, and
+`::` (13k) sits at the same precedence.)
 Tests: group `language`.
 
 ## 13m: local notation
