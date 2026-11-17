@@ -308,13 +308,14 @@ Unification is untyped, so it misses the η-rule for `Unit` (`P x =?= P ()` with
 `x : Unit`). When it fails, we ask the kernel's type-directed `convTy`, which treats
 unsolved metas as rigid, before giving up. -/
 def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : ElabM R Unit :=
-  fun s => match unify ctx.lvl expected inferred s with
-    | .ok r => .ok r
+  -- (the context's names, for a message unification writes itself: `checkGuessTypes`)
+  fun s => match unify ctx.lvl expected inferred { s with unifyCtxNames := ctx.names } with
+    | .ok ((), s') => .ok ((), { s' with unifyCtxNames := s.unifyCtxNames })
     | .error e =>
       if subTy s.globals ctx.types.reverse.toArray inferred expected then .ok ((), s) else
       -- (13b) a guess that would take a look-alike of a private type says so itself, with the
       -- hole, the guess and both types (`checkGuessTypes`): not as a reason under the mismatch
-      if e.code == ErrorCode.private_ && e.msg.startsWith "a hole solved by shape" then
+      if e.code == ErrorCode.private_ && e.msg.endsWith forgingGuessTail then
         .error { e with info := (ctx.withInfo stx).info, state? := some s } else
       let show' (v : VTy R) := elideLong ((quote s.globals ctx.lvl v).pretty ctx.names (some s.globals))
       .error { info := (ctx.withInfo stx).info,

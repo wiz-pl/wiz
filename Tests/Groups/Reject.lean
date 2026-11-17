@@ -343,6 +343,24 @@ def group : Group where
        "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
       (some "private") "G.mk x" "\n  guess: G\n  its type: "
       [("Priv", privMod)],
+    -- (#412) the reason comes first, with the hole named by what it was made for
+    rejected "opaque: a forging guess leads with the reason and names the hole"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x"
+      ("the implicit argument F can't be G: the two types agree only through the definition " ++
+       "of Pos (module Priv), hidden outside its module")
+      [("Priv", privMod)],
+    -- (#412) the free variables are shown by their names (the hole is applied to `x`), not as `#0`
+    rejected "opaque: a forging guess names the free variables"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" " x (implicit argument F)\n  expected: Pos Nat → Type\n"
+      [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
     rejected "opaque: a first-order solution in equations cannot forge either"
