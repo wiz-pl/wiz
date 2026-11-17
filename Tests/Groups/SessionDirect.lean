@@ -18,7 +18,7 @@ def sessionDirectGroup : Group where
   name := "conc-sessions"
   exercise := "lib/Session.wiz §4, lib/SessionRec.wiz (stages 25g, 25i, 25j)"
   cases := [
-    { name := "25g direct style: ping-pong, a calculator, a stream of known length, CPS and direct on one channel", run := fun _ =>
+    { name := "25g direct style: ping-pong, a calculator, a stream of known length, CPS and direct on one channel", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/session-direct/finite.wiz") "42\n[7, 12, 8]\n5050\n2\n" },
     { name := "25g an endpoint used twice, dropped, or on the wrong step; natives private", run := fun _ => do
         failsLibs "import IO\nimport Session\n-- the endpoint is used twice: two messages where the protocol has one\ndef twice (1 c : Chan (.send Nat (fun _ => .done))) : IO Unit := do1\n  d ⇐ Chan.sendD c 1;\n  e ⇐ Chan.sendD c 2;\n  Chan.closeD d;\n  Chan.closeD e\n" "quantity 1"
@@ -32,14 +32,14 @@ def sessionDirectGroup : Group where
           "def serveD (1 c : Chan (Proto.dual P)) : IO Unit := do1\n  (n, c) ⇐ Chan.recvD c;\n  c ⇐ Chan.sendD c (n + n);\n  Chan.closeD c\n" ++
           "def clientD (m : Nat) : IO Nat := do1\n  c ⇐ Chan.forkD P serveD;\n  c ⇐ Chan.sendD c m;\n  (r, c) ⇐ Chan.recvD c;\n  IO.then1 (Chan.closeD c) (IO.pure r)\n" ++
           "def main : IO Unit := IO.bind (clientD 21) (fun r => IO.println (Nat.toString r))\n") "42\n" },
-    { name := "25i recursive protocols: ping-pong rounds, a calculator loop, a pulled stream", run := fun _ =>
+    { name := "25i recursive protocols: ping-pong rounds, a calculator loop, a pulled stream", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/session-direct/recursive.wiz") "5\n[7, 12, 1]\n45\n" },
     { name := "25i a loop endpoint used twice, dropped, past its bound; the child at the wrong system", run := fun _ => do
         failsLibs "import IO\nimport Session\nimport SessionRec\ndef Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))\n-- a loop endpoint used twice: two rounds sent on one endpoint\ndef twice (1 c : Chan (Proto.loop Ping 1 ())) : IO Unit := do1\n  d ⇐ Chan.sendD c 1;\n  e ⇐ Chan.sendD c 2;\n  (x, d) ⇐ Chan.recvD d;\n  (y, e) ⇐ Chan.recvD e;\n  Chan.closeD d;\n  Chan.closeD e\n" "quantity 1"
         failsLibs "import IO\nimport Session\nimport SessionRec\ndef Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))\n-- the server stops answering before the bound: the endpoint is dropped\ndef quit : (n : Nat) → (1 c : Chan (Proto.loop (RProto.dualSys Ping) n ())) → IO Unit\n  | .zero => fun c => Chan.closeD c\n  | .succ n => fun c => do1\n      (x, c) ⇐ Chan.recvD c;\n      IO.pure ()\n" "quantity 1"
         failsLibs "import IO\nimport Session\nimport SessionRec\ndef Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))\n-- a round too many: after two rounds the protocol is done, not another send\ndef extra (1 c : Chan (Proto.loop Ping 2 ())) : IO Unit := do1\n  c ⇐ Chan.sendD c 1;\n  (x, c) ⇐ Chan.recvD c;\n  c ⇐ Chan.sendD c 2;\n  (y, c) ⇐ Chan.recvD c;\n  c ⇐ Chan.sendD c 3;\n  Chan.closeD c\n" "mismatch"
         failsLibs "import IO\nimport Session\nimport SessionRec\ndef Ping : Unit → RProto Unit := fun _ => .send Nat (fun _ => .recv Nat (fun _ => .jump ()))\n-- the child follows the system, not its dual\ndef child : (n : Nat) → (1 c : Chan (Proto.loop Ping n ())) → IO Unit\n  | .zero => fun c => Chan.closeD c\n  | .succ n => fun c => do1\n      c ⇐ Chan.sendD c 1;\n      (x, c) ⇐ Chan.recvD c;\n      child n c\ndef bad : IO Unit := do1\n  c ⇐ Chan.forkLoop Ping 1 () (child 1);\n  c ⇐ Chan.sendD c 1;\n  (x, c) ⇐ Chan.recvD c;\n  Chan.closeD c\n" "mismatch" },
-    { name := "25j delegation of a finite, a recursive and a stream session", run := fun _ =>
+    { name := "25j delegation of a finite, a recursive and a stream session", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/session-direct/delegation.wiz") "42\n18\n45\n" },
     { name := "25j a delegated endpoint used again, dropped by the worker, of the wrong protocol, used out of order", run := fun _ => do
         failsLibs "import IO\nimport Session\nimport SessionRec\ndef PP : Proto := .send Nat (fun _ => .recv Nat (fun _ => .done))\n-- the delegated endpoint is used again after it was handed over\ndef again (1 d : Chan PP) (1 c : Chan (Proto.sendCh PP Proto.done)) : IO Unit := do1\n  c ⇐ Chan.delegate PP d c;\n  Chan.closeD c;\n  d ⇐ Chan.sendD d 1;\n  (x, d) ⇐ Chan.recvD d;\n  Chan.closeD d\n" "quantity 1"
