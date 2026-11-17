@@ -1,0 +1,11 @@
+# Rows with no test case at all.  Keep this list minimal: a row with a case belongs in
+# selfhost-parity.tsv, not here.  `row<TAB>reason`.
+A19	no case exercises coinduction or surface sizes/ULift; the kernel formers are reached only by core-term samples in Tests/Elab.lean, not by a self-host group case
+B13	no case exercises kernel numerals/natOp; there is no natOp in selfhost/Kernel.wiz and the differential MTm has none
+C14	no case exercises native_refl / --trust-native; the self-hosted grammar has the entry and rejects it, but no group case says so
+C15	no case exercises smt / certified sat_decide
+C16	no case exercises --unbox-structs or a structure-layout alternative
+D1	no case exercises threads, Chan, MVar, Lock or fork
+D8	no case exercises the LSP, infoview or wiz doc
+D9	no case exercises the trust/experimental flags (--trust-native, --native-fuel, --regularity, --inert, --strict-privacy, --proof-steps)
+E8	no group case runs the bootstrap fixpoint; the evidence is scripts/fixpoint.sh (scheduled CI, not a test case)
