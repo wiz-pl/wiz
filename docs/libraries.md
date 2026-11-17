@@ -118,7 +118,7 @@ Sharing has two parts:
   `ShareLet A B` exists for the value's type `A` and the body's type `B`. `Hdl.Core`'s one
   instance is `[Hw r] → ShareLet (r a) (r b)` (through `Hw.share`), so a meta-level `let`
   of an object value names one wire: the doubling chain `let y := x + x` at depth 20
-  emits 20 adders in 25 builder steps. Write `let ω x := …` to opt out.
+  emits 20 adders in 22 builder steps. Write `let ω x := …` to opt out.
 
 ## H14 S1: a usable HDL: names, bundles, composition, reset, emitters
 
@@ -580,7 +580,8 @@ assertion/deassertion is not modelled); primitives without a behavioural `model`
 the executable differential check in `examples/hdl-sim.wiz`, since `Hdl.Sim` uses
 `Array`, which the kernel does not reduce). The existing differential tests
 (`examples/hdl-sim.wiz`, `examples/hdl-bus.wiz`, `examples/hdl-crc.wiz`) remain the
-broader, executable check over operations, memories, primitives and `simFast`.
+broader, executable check over operations, memories and `simFast`; primitives are
+checked separately in `examples/hdl-prim.wiz`.
 
 ## H14 S4: the iCEstick gaps: shifts by a signal, signed operations, `&&`/`||`, BitPack, reset and enable
 
@@ -1806,8 +1807,8 @@ data edges, so return values are modelled. `import Scry.Taint` feeds those edges
 Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
-`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, above
-24 rows, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
+`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, at
+24 rows or more, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
 atom through the shortest bound-column bucket, skips a delta-loop variant whose anchor
 relation did not move, and indexes provenance by fact hash. The semantics and findings
 are unchanged; the reproducible benchmark is `scry/bench/datalog/` (pinned revisions and
