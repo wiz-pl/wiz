@@ -16,6 +16,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 * grail test (23f): a test may declare its own time limit, `-- test: run timeout 900`
   (or `check … timeout SECS`); the larger of it and `--test-timeout` applies to the test's
   job and to its program, so one long test no longer needs a large flag on every run.
+* `wiz lsp --ws` (breaking for its clients) requires a token: an upgrade without
+  `?token=T` or `Authorization: Bearer T` gets `401`, so a local program can no longer
+  connect, open documents and have them elaborated as you. The token is fresh per launch
+  and printed on stderr, or read from `--token-file FILE` (created 0600 if missing);
+  `--ws-insecure` (loopback only) turns the check off. `wiz/browserInfoview`, the web
+  infoview, the playground and `wiz doc --serve`'s panel pass it on (11o, #430).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container

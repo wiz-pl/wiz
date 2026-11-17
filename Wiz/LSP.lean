@@ -973,6 +973,11 @@ structure Listen where
   /-- (11w) the directory of the web infoview's files (`web/build.sh`'s output), which the
   WebSocket's port also serves over HTTP (`WebSocket.webAssets`) -/
   web : Option String := none
+  /-- (#430) the token a WebSocket client must present (`--token-file`); `none`: a fresh
+  random one per launch, which `ready` reports -/
+  token : Option String := none
+  /-- (#430) `--ws-insecure`: no token at all (any local process gets a full client) -/
+  insecure : Bool := false
 
 /-- Handle a message from a WebSocket client: like an infoview's, but documents may be
 opened and edited, and every request is answered. Its `initialize` changes only its own
@@ -989,14 +994,20 @@ def handleWs (srv : Server) (wants : Bool) (msg : Json) : IO (Server × Array Js
 /-- Serve the editor on `stdio` (if any) until `exit`, and infoviews on the sockets of
 `listen`: several kinds of threads (the editor's reader, an acceptor per socket, a reader
 per infoview) feed one channel, and this loop handles the messages in order, so the
-server's state is never shared. `ready` gets the WebSocket's port once it listens.
+server's state is never shared. `ready` gets the WebSocket's port once it listens, and
+the token its clients must present (#430; `none` only with `listen.insecure`).
 Without `stdio`, the server runs until it is killed. -/
 partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Option (IO.FS.Stream × IO.FS.Stream))
-    (listen : Listen) (ready : UInt16 → IO Unit := fun _ => pure ()) (trusted : List String := [])
+    (listen : Listen) (ready : UInt16 → Option String → IO Unit := fun _ _ => pure ()) (trusted : List String := [])
     (native : Bool × Nat := (false, NativeRun.defaultFuel)) (smt : Smt.Config := {}) : IO Unit := do
   let ch ← Std.Channel.Sync.new (α := Event)
   let next ← IO.mkRef 0
   let fresh : IO Nat := next.modifyGet fun k => (k, k + 1)
+  -- (#430) the WebSocket's token: given, or fresh for this launch
+  let token : Option String ← if listen.insecure then pure none else
+    match listen.token with
+    | some t => pure (some t)
+    | none => some <$> WebSocket.freshToken
   let rec readEditor (input : IO.FS.Stream) : IO Unit := do
     match ← readMessage input with
     | none => ch.send .editorDone
@@ -1014,7 +1025,7 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
   -- a WebSocket: the handshake (on this connection's own thread), then a message per frame
   let wsConn (fd : UInt32) (r w : IO.FS.Handle) : IO Unit := do
     let (r, w) := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
-    unless ← (try WebSocket.accept r w listen.web catch _ => pure false) do Socket.shutdown fd; return
+    unless ← (try WebSocket.accept r w token listen.web catch _ => pure false) do Socket.shutdown fd; return
     let k ← fresh
     ch.send (.connected k { fd, send := fun j => WebSocket.sendText w j.compress, editing := true })
     readLoop k do
@@ -1034,7 +1045,7 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
   let wsRef ← IO.mkRef wsFd
   if let some (fd, port) := wsFd then
     let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
-    ready port
+    ready port token
   -- (11w) `wiz/browserInfoview` from the editor: listen on a WebSocket (on 127.0.0.1, a
   -- free port) unless already listening, and say where the page is
   let browser (msg : Json) : IO Json := do
@@ -1044,12 +1055,15 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
         let (fd, p) ← Socket.tcpListen Socket.loopback 0
         wsRef.set (some (fd, p))
         let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
-        ready p
+        ready p token
         pure p
+    -- (#430) the page passes the token on to its WebSocket (`web/infoview.js`)
+    let tokenArg := match token with | some t => s!"&token={t}" | none => ""
+    let tokenField : List (String × Json) := match token with | some t => [("token", Json.str t)] | none => []
     let res : Json := match listen.web with
-      | some _ => Json.mkObj [("port", port.toNat), ("url", s!"http://127.0.0.1:{port}/infoview.html?port={port}&follow=1")]
-      | none => Json.mkObj [("port", port.toNat), ("url", Json.null),
-          ("message", "the web infoview is not built: run web/build.sh in a checkout, or use a release toolchain")]
+      | some _ => Json.mkObj (([("port", port.toNat), ("url", s!"http://127.0.0.1:{port}/infoview.html?port={port}&follow=1{tokenArg}")] : List (String × Json)) ++ tokenField)
+      | none => Json.mkObj (([("port", port.toNat), ("url", Json.null),
+          ("message", "the web infoview is not built: run web/build.sh in a checkout, or use a release toolchain")] : List (String × Json)) ++ tokenField)
     pure (Json.mkObj [("jsonrpc", "2.0"), ("id", (msg.getObjVal? "id").toOption.getD Json.null), ("result", res)])
   if let some (input, _) := stdio then
     let _ ← IO.asTask (prio := .dedicated) (readEditor input)
@@ -1120,7 +1134,14 @@ partial def serve (libs : Std.HashMap String (String × String)) (listen : Liste
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   -- (11w) always through `serveWith`: `wiz/browserInfoview` may start a WebSocket later
-  let ready (port : UInt16) := IO.eprintln s!"wiz lsp: WebSocket on port {port}"
+  let ready (port : UInt16) (token : Option String) : IO Unit := do
+    IO.eprintln s!"wiz lsp: WebSocket on port {port}"
+    -- (#430) a fresh token is printed, for the person who started the server; one from
+    -- `--token-file` is not (they have it)
+    match token, listen.token with
+    | some t, none => IO.eprintln s!"wiz lsp: WebSocket token {t} (clients connect to /?token={t}; the web infoview: http://127.0.0.1:{port}/infoview.html?port={port}&token={t})"
+    | some _, some _ => IO.eprintln "wiz lsp: WebSocket token from --token-file"
+    | none, _ => IO.eprintln "wiz lsp: warning: --ws-insecure: any local process may connect and edit as you"
   serveWith libs (if stdio then some (stdin, stdout) else none) listen ready trusted native smt
 
 end Wiz.LSP

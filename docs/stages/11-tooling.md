@@ -299,6 +299,24 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
 
+**The token (#430).** The `Origin` check stops other web sites, but a local program
+simply sends no `Origin`, and a WebSocket client may open documents and have them
+elaborated (imports, `import_c` headers, an SMT solver) with the user's privileges. So
+the upgrade must also present the server's token, as `?token=T` in the request target
+(all a browser can add) or as `Authorization: Bearer T`; anything else gets `401` before
+any `101`, and the comparison takes the same time wherever the first difference is
+(`WebSocket.constantTimeEq`). The token is 128 random bits, fresh for every launch and
+printed on stderr with the web infoview's URL; `--token-file FILE` reads it from FILE
+(creating FILE, mode 0600, with a fresh one when it does not exist), and `--ws-insecure`
+turns the check off, for the loopback address only and with a warning.
+`wiz/browserInfoview` returns the token and puts it in the page's URL; the pages
+(`web/infoview.js`, the playground and `wiz doc --serve`'s panel through
+`web/lsp-client.js`) pass their own `?token=` on to the socket and never display it. The
+infoview's files are served without a token (they are the toolchain's own). Tests: the
+`lsp-server` group (no token, a wrong, empty or longer token, a wrong bearer: `401`; the
+query and the bearer: `101`; a token in an asset's URL changes nothing), the `nvim` group
+(the browser infoview's URL and handshake), and `web/playground_lsp_test.mjs`.
+
 ## 11p: a Neovim plugin
 
 `editors/nvim/` is **wiz.nvim**, a Lua plugin for Neovim ≥ 0.10 modelled on lean.nvim

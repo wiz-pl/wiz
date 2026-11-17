@@ -55,7 +55,12 @@ def usage : String := "usage:
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
-                                   both flags may be given; --no-stdio: no editor on stdin)
+                                   both flags may be given; --no-stdio: no editor on stdin);
+                                   clients present a token (`/?token=T` or `Authorization:
+                                   Bearer T`): a fresh one per launch, printed on stderr
+  wiz lsp … --token-file FILE      the token in FILE (created with mode 0600 and a fresh
+                                   token when FILE does not exist)
+  wiz lsp … --ws-insecure          no token: any local process may connect (loopback only)
   wiz lsp … --web DIR              the web infoview's files, served on the WebSocket's port
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
@@ -118,22 +123,38 @@ def loadLibraryPaths (tc : Toolchain) : IO (Std.HashMap String (String × String
     m := m.insert n ((← IO.FS.realPath p).toString, src)
   pure m
 
-/-- `wiz lsp`'s options: `--infoview SOCK`, `--ws [ADDR:]PORT`, `--no-stdio`. -/
-def lspOptions : List String → Option (LSP.Listen × Bool)
-  | [] => some ({}, true)
-  | "--infoview" :: sock :: rest => do let (l, io) ← lspOptions rest; pure ({ l with infoview := some sock }, io)
+/-- `wiz lsp`'s options: `--infoview SOCK`, `--ws [ADDR:]PORT`, `--no-stdio`, `--web DIR`,
+and (#430) `--token-file FILE` (returned apart: it is read later) and `--ws-insecure`. -/
+def lspOptions : List String → Option (LSP.Listen × Bool × Option String)
+  | [] => some ({}, true, none)
+  | "--infoview" :: sock :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with infoview := some sock }, io, t)
   | "--ws" :: spec :: rest => do
-    let (l, io) ← lspOptions rest
+    let (l, io, t) ← lspOptions rest
     let (addr, port) ← match spec.splitOn ":" with
       | [p] => pure (Socket.loopback, p)
       | [a, p] => do pure (← Socket.parseIPv4 a, p)
       | _ => none
     let port ← port.toNat?
     if port ≥ 65536 then none
-    pure ({ l with ws := some (addr, port.toUInt16) }, io)
-  | "--no-stdio" :: rest => do let (l, _) ← lspOptions rest; pure (l, false)
-  | "--web" :: dir :: rest => do let (l, io) ← lspOptions rest; pure ({ l with web := some dir }, io)
+    pure ({ l with ws := some (addr, port.toUInt16) }, io, t)
+  | "--no-stdio" :: rest => do let (l, _, t) ← lspOptions rest; pure (l, false, t)
+  | "--web" :: dir :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with web := some dir }, io, t)
+  | "--token-file" :: f :: rest => do let (l, io, _) ← lspOptions rest; pure (l, io, some f)
+  | "--ws-insecure" :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with insecure := true }, io, t)
   | _ => none
+
+/-- (#430) The token in `file` (its first line, trimmed); a file that does not exist is
+created with mode 0600 (before anything is written to it) and gets a fresh token. -/
+def lspTokenFromFile (file : System.FilePath) : IO String := do
+  if ← file.pathExists then
+    let t := ((← IO.FS.readFile file).splitOn "\n").headD "" |>.trimAscii.toString
+    if t.isEmpty then throw (IO.userError s!"{file}: empty token file")
+    return t
+  let t ← WebSocket.freshToken
+  IO.FS.withFile file .writeNew fun h => do
+    IO.setAccessRights file { user := { read := true, write := true } }
+    h.putStrLn t
+  pure t
 
 /-- (11w) The web infoview's files (`web/build.sh`'s output) beside the toolchain's
 library: `share/wiz/web` in a release, `web/out` in a checkout. -/
@@ -427,7 +448,7 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     return 1
   IO.println s!"wiz doc: serving http://127.0.0.1:{p}/ (Ctrl-C to stop)"
   match a.lsp with
-  | some lp => IO.println s!"wiz doc: the live panel asks wiz lsp --ws {lp}; start it with `wiz lsp --ws {lp} --no-stdio`"
+  | some lp => IO.println s!"wiz doc: the live panel asks wiz lsp --ws {lp}; start it with `wiz lsp --ws {lp} --no-stdio` and open the pages with ?token=T (the token it prints)"
   | none => IO.println "wiz doc: static pages; --lsp PORT shows live types and docs from `wiz lsp --ws PORT`"
   Doc.Serve.acceptLoop fd site
   pure 0
@@ -941,8 +962,23 @@ def main (args : List String) : IO UInt32 := do
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2
-    | some (listen, stdio) =>
+    | some (listen, stdio, tokenFile) =>
       let listen ← if listen.web.isSome then pure listen else do pure { listen with web := ← webDir }
+      -- (#430) no token is only for the loopback address, and not with a token file
+      if listen.insecure then
+        if tokenFile.isSome then
+          IO.eprintln "wiz lsp: --ws-insecure and --token-file contradict each other"
+          return 2
+        if let some (addr, _) := listen.ws then
+          unless addr == Socket.loopback do
+            IO.eprintln "wiz lsp: --ws-insecure is only for the loopback address (127.0.0.1)"
+            return 2
+      let mut listen := listen
+      if let some f := tokenFile then
+        try listen := { listen with token := some (← lspTokenFromFile f) }
+        catch e =>
+          IO.eprintln s!"wiz lsp: --token-file: {e}"
+          return 2
       LSP.serve (← loadLibraryPaths tc) listen stdio (← libTrusted tc) (nativeOpts tc) (← tc.smt.resolve)
       -- (an infoview's reader thread may still be blocked: don't wait for it)
       IO.Process.exit 0

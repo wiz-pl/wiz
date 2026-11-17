@@ -641,7 +641,7 @@ end
 -- follows this editor's cursor.
 
 --- Open the web infoview for `buf`'s server (default: the current buffer). The result
---- (`{ port, url, message? }`) is kept in `M.state.browser`, for tests.
+--- (`{ port, url, token, message? }`; #430: the url carries the token) is kept in `M.state.browser`, for tests.
 function M.open_browser(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   lsp.request(buf, 'wiz/browserInfoview', vim.empty_dict(), function(err, result)
