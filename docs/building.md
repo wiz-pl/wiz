@@ -416,7 +416,72 @@ Lean's `.olean`/`.ilean`/`.trace` files store absolute source paths; the Lean to
 report whichever error finishes first (artifacts are unaffected). The compiler binary,
 the generated C and the linked programs are compared byte for byte by the script.
 
-## Memory budget
+## Build time and memory
+
+### The Lean build (`lake build wiz tests grail`)
+
+The build is 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
+`.lake` and an empty `LAKE_CACHE_DIR` on the 27 GiB, 32-CPU development host, while
+about twenty other agents were building (load average 40–54). The same command with
+the shared artifact cache warm is **12 s**, all 530 jobs replayed, so this is the cost
+of a new commit or toolchain, not of a fresh worktree. What was measured: each C
+compiler invocation was wrapped in a `wait4` recorder (wall time and `ru_maxrss`),
+`lake build -v` gives each Lean job's duration, and the whole process tree's RSS was
+sampled every 20 ms for the peak.
+
+| phase | jobs | sum of job wall times |
+|---|---:|---:|
+| Lean elaboration | 258 | 5110 s |
+| C compilation (`:c.o`) | 258 | 4512 s |
+| link | 3 | 23 s |
+
+The sum is 9646 s over 1680 s of wall: **Lake 5 has no `-j`, but it does not
+serialize** — 43 jobs ran at once at the peak (mean 5.8, because the host, not the
+scheduler, was the limit). The peak of the whole tree was 22.0 GiB, but no single job
+came near it: the largest were the generated C of `Wiz.LSP` (2.10 GiB) and
+`Wiz.Format` (2.02 GiB); the next was 0.78 GiB. The 22 GiB is the sum of roughly
+forty concurrent jobs, mostly Lean elaborations of the test modules (0.5–0.9 GiB
+each), not one large job. **The 7 GiB cap is a per-compile limit, not the build's**;
+a cgroup that small kills the build long before the two big C files.
+
+Those two units were also the tail. They were 29.4 MB and 33.0 MB of C, took 1193 s
+and 1203 s to compile (25 % of all job time), and could only start after their Lean
+elaboration (297 s and 313 s), so the last 1200 s of the 1680 s wall was waiting on
+them. Both hold the same ~630k lines: the compiler specializes the whole elaborator
+(the `runFrontend` body and the `Wiz.Elab.Command.elabCommand` cascade) to
+`ZeroOneMany` in every module that calls the frontend, and `Wiz.Format` and `Wiz.LSP`
+each called it. `@[nospecialize]` on `runFrontend`, its `go`/`go'`/`step`, and
+`Query.elaborate`/`go` leaves **one** copy, in `Wiz.Frontend.Frontend`:
+
+| unit | before | after |
+|---|---:|---:|
+| `Wiz.Format.c` | 29.4 MB, 1193 s, 2.02 GiB | 0.43 MB, 6.4 s, 0.28 GiB |
+| `Wiz.LSP.c` | 33.0 MB, 1203 s, 2.10 GiB | 4.6 MB, 57 s, 0.44 GiB |
+| `Wiz.Frontend.Frontend.c` | 0.40 MB, 7 s | 29.2 MB, 480 s, 2.55 GiB |
+| elaboration of the same modules | 610 s | 379 s |
+
+Two ~30 MB compiles become one, the C of the pair falls from 62.4 MB to 5.0 MB, and
+a change to `Wiz.Format` or `Wiz.LSP` no longer costs a twenty-minute compile
+(editing the frontend itself still costs one). The cost is dictionary arguments in
+the frontend; interleaved A/B of the two binaries on this host, best of five to seven
+runs: `wiz check --no-cache lib/Std.wiz` 2.02 → 2.07 s (+2 %), `lib/Text.wiz`
+1.42 → 1.50 s (+5 %), `wiz fmt --check lib/Std.wiz` 0.92 → 0.98 s (+6 %). The output
+is unchanged: the 25 MB C both binaries emit for the self-hosted compiler (the
+fixpoint's stage 1) is byte-identical (`md5 712ae4ca4bfafc63a01767e06ad33022`), and
+the `format`, `tooling` and `native` groups and the trust ledger pass. Counting the
+changed jobs in the two builds gives 9646 s → about 7600 s (−21 %) of job time; a
+cold build after the change was not re-run under the same load, so treat that as the
+model's estimate, not a measured whole-build number.
+
+Two other changes were considered and rejected. Compiling the units with narrower
+flags (e.g. `-O1`) is the obvious alternative, but Lake gives a module the flags of
+its *library* (`Module.leancArgs` is `self.lib.leancArgs`): there is no per-module
+`moreLeancArgs`, and a second `lean_lib` for those two modules would rename or
+shadow them. Setting `LEAN_CC` to a wrapper would make a plain `lake build` depend
+on the environment, which this repository avoids. With the change above there is
+only one big unit left, and it is the frontend's.
+
+### The `wiz` memory corpus
 
 Time is not the only way a build dies. A run that peaks at 5 GiB is killed by a
 4 GiB memory cgroup whatever its wall time was. The self-hosted checker has a 1 GiB cap
