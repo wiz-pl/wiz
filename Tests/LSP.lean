@@ -1041,6 +1041,78 @@ def serverGroup : Group where
         let (_, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/rename\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src (offAfter src "Nat.add n" (-1))},\"newName\":\"m\"}}")
         let src' := applyEdit src (LSP.get? out[0]! ["result"]).get!
         check ((src'.splitOn "def double (m : Nat) : Nat := Nat.add m m\n").length > 1) s!"renamed:\n{src'}" },
+    { name := "#434: references, highlights and rename from a declaration's own name", run := fun _ => do
+        let src := "import Prelude\ndef double (n : Nat) : Nat := Nat.add n n\n\ndef four : Nat := double 2\n" ++
+          "inductive Col where\n  | red\n  | green\ndef pick (b : Bool) : Col := Col.red\n" ++
+          "def other : Col := Col.green\nstructure Point where\n  px : Nat\n  py : Nat\n" ++
+          "def getX (p : Point) : Nat := Point.px p\n"
+        let (srv, out) ← openDoc src
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        let rename (srv : LSP.Server) (off : Nat) (new : String) : IO Lean.Json := do
+          let (_, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/rename\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src off},\"newName\":\"{new}\"}}")
+          pure out[0]!
+        -- each: (what, an offset in the declaring name, an offset in a use, the name as written
+        -- where it is declared, its line and column there)
+        let sites : List (String × Nat × Nat × String × Nat × Nat) := [
+          ("a def (the issue's example: line 2, character 5)", offAfter src "def dou" (-2), offAfter src ":= dou", "double", 1, 4),
+          ("an inductive", offAfter src "inductive Co", offAfter src "Bool) : Co", "Col", 4, 10),
+          ("a constructor", offAfter src "  | re" (-1), offAfter src "Col.re", "red", 5, 4),
+          ("a constructor (the end of its name)", offAfter src "  | red", offAfter src "Col.r", "red", 5, 4),
+          ("a structure", offAfter src "structure Poi", offAfter src "(p : Poi", "Point", 9, 10),
+          ("a structure field", offAfter src "  px" (-1), offAfter src "Point.p", "px", 10, 2)]
+        let mut srv := srv
+        for (what, declOff, useOff, written, line, col) in sites do
+          -- references: the same from both places, the declaration among them
+          let (srv', atDecl) ← ask srv "textDocument/references" src declOff
+          let (srv', atUse) ← ask srv' "textDocument/references" src useOff
+          srv := srv'
+          check (atDecl != Lean.Json.null && atDecl.compress == atUse.compress)
+            s!"{what}: references\n  at the declaration: {atDecl.compress}\n  at a use: {atUse.compress}"
+          check (has atDecl s!"\"start\":\{\"character\":{col},\"line\":{line}}") s!"{what}: no declaration site in {atDecl.compress}"
+          -- document highlights
+          let (srv', hDecl) ← ask srv "textDocument/documentHighlight" src declOff
+          let (srv', hUse) ← ask srv' "textDocument/documentHighlight" src useOff
+          srv := srv'
+          check (hDecl != Lean.Json.null && hDecl.compress == hUse.compress) s!"{what}: highlights\n  {hDecl.compress}\n  {hUse.compress}"
+          -- prepareRename: the declaring name itself
+          let (srv', p) ← ask srv "textDocument/prepareRename" src declOff
+          srv := srv'
+          checkEq written (LSP.getStr p ["placeholder"])
+          checkEq line (LSP.getNat p ["range", "start", "line"])
+          checkEq col (LSP.getNat p ["range", "start", "character"])
+          -- rename: the same edits from both places
+          let rDecl ← rename srv declOff "Renamed"
+          let rUse ← rename srv useOff "Renamed"
+          check (has rDecl "\"result\"" && rDecl.compress == rUse.compress) s!"{what}: rename\n  {rDecl.compress}\n  {rUse.compress}"
+        -- renaming a def and a constructor from where they are declared gives a program that checks
+        let r ← rename srv (offAfter src "def dou" (-2)) "twice"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "double").length == 1 && (src'.splitOn "twice").length == 3) s!"renamed:\n{src'}"
+        checkEq ([] : List String) (← codes src')
+        let r ← rename srv (offAfter src "  | re" (-1)) "Col.crimson"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "  | crimson\n").length == 2 && (src'.splitOn "Col.crimson").length == 2 &&
+          (src'.splitOn "red").length == 1) s!"renamed:\n{src'}"
+        checkEq ([] : List String) (← codes src')
+        -- a new name in another namespace edits the uses only (the declaration can't say it)
+        let r ← rename srv (offAfter src "  | re" (-1)) "Other.red2"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "  | red\n").length == 2 && (src'.splitOn "Other.red2").length == 2) s!"renamed:\n{src'}"
+        -- a local at its binder still works (`binderOf`): the binder and its two uses
+        let (srv, r) ← ask srv "textDocument/documentHighlight" src (offAfter src "(n" (-1))
+        let some (.arr hs) := some r | throw (IO.userError s!"{r.compress}")
+        checkEq 3 hs.size
+        -- off any name (the `:` of a declaration, a keyword): nothing
+        let (srv, r) ← ask srv "textDocument/references" src (offAfter src "inductiv" (-3))
+        check (r == Lean.Json.null) s!"in a keyword: {r.compress}"
+        let (_, r) ← ask srv "textDocument/references" src (offAfter src "(n : Nat) " (1))
+        check (r == Lean.Json.null || r == Lean.Json.arr #[]) s!"at `:`: {r.compress}"
+        -- the renaming rule
+        checkEq (some "new") (Refs.renameText "old" "new" "old")
+        checkEq (some "blue") (Refs.renameText "C.red" "C.blue" "red")
+        checkEq (none : Option String) (Refs.renameText "C.red" "D.blue" "red")
+        checkEq (none : Option String) (Refs.renameText "red" "blue" "C.red")
+        checkEq (some "D.blue") (Refs.renameText "C.red" "D.blue" "C.red") },
     { name := "document symbols, workspace symbols and folding ranges (11v)", run := fun _ => do
         let src := "import Prelude\n/- a block\n   comment -/\nstructure Point where\n  px : Nat\n  py : Nat\n" ++
           "def Point.norm (p : Point) : Nat := p.px\ndef k : Nat → Nat := by\n  intro n\n  exact n\n"
