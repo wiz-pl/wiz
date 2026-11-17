@@ -11,9 +11,11 @@
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
---            --version, -h | --help
+--            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
+--            recognised and refused with the reason (C5/D5), not as unknown flags.
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
---               a bad `--target`), 2 usage (unknown command or option, missing argument)
+--               a bad/unsupported `--target`, a refused `--split`/`--cache-ro`),
+--               2 usage (unknown command or option, missing argument)
 --
 -- Without a subcommand it is the tool it was: `input.wiz` in the working directory to
 -- standard output (the fixpoint and the selfhost tests use that), and the first argument
@@ -836,17 +838,29 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   | .some m => match verifyOk m with
                                     | .true => parseOptsGo rest { o with verify := m } file extra
                                     | .false => .err (verifyErr m)
-                                  | .none => match isBackendFlag a with
-                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                    | .false => match strStarts "-" a with
-                                      -- (A14) a root with its directory attached: `-IDIR`,
-                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
-                                      | .true => match modAttachedRoot a with
-                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                        | .none => .err (String.append "unknown flag: " a)
-                                      | .false => match file with
-                                        | .none => parseOptsGo rest o (.some a) extra
-                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+                                  | .none => match strEq a "--llvm" with
+                                    | .true => .fail "unsupported target llvm: the self-hosted backend emits C only (C5)"
+                                    | .false => match strEq a "--wasm" with
+                                      | .true => .fail "unsupported target wasm: the self-hosted backend emits C only (C5)"
+                                      | .false => match strEq a "--split" with
+                                        | .true => match rest with
+                                          | .nil => .err "unknown flag: --split"
+                                          | .cons n r2 => .fail (String.append "unsupported --split " (String.append n ": the self-hosted backend emits one C unit (C5)"))
+                                        | .false => match strEq a "--cache-ro" with
+                                          | .true => match rest with
+                                            | .nil => .err "unknown flag: --cache-ro"
+                                            | .cons _ r2 => .fail "unsupported --cache-ro: the self-hosted cache has no read-only layers (D5)"
+                                          | .false => match isBackendFlag a with
+                                            | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                            | .false => match strStarts "-" a with
+                                              -- (A14) a root with its directory attached: `-IDIR`,
+                                              -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                              | .true => match modAttachedRoot a with
+                                                | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                                | .none => .err (String.append "unknown flag: " a)
+                                              | .false => match file with
+                                                | .none => parseOptsGo rest o (.some a) extra
+                                                | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -865,7 +879,8 @@ def usageText : String :=
   "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
   "  the Lean-hosted `wiz`'s),\n" +++
   "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
-  "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
+  "  manifests yet, so strict never trusts an entry), --target c (the only backend;\n" +++
+  "  --llvm/--wasm/--split are the host's and are refused, C5),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
@@ -1144,14 +1159,16 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
 def takesValueFlag (a : String) : Bool :=
   Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
     (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
-      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
-        (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))
+      (Bool.or (strEq a "--split") (Bool.or (strEq a "--cache-ro")
+        (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
+          (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))))
 
 def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types")
+      (Bool.or (strEq a "--llvm") (strEq a "--wasm"))))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)
