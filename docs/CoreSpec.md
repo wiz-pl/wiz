@@ -1634,10 +1634,20 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
 
 After `builtin nat := N` (and `nat.zero`, `nat.succ`, `nat.add`, …), a numeral `n`
 infers `N` (`Check.lean:341–343`), and evaluation treats it as `succⁿ zero`, unfolding one
-step whenever something looks inside (`vNatView`, `Eval.lean:376`). The registered
-operations compute natively on two literals and otherwise use their definitions
-(`vNatOp`, `Eval.lean:386`). `a =_N b` on two literals is decided directly
-(`Eval.lean:516`). `ind` on a numeral is glued (`Val.lazyInd`) so that it computes lazily.
+step whenever something looks inside (`vNatView`, `Eval.lean:612`). A registered
+operation computes natively when **every** argument is a literal, computing an inner
+operation first (`vNatOpNow`, `Eval.lean:706`; `natFast?` for `0`'s short circuits). If an
+argument is still glued — the `.unfold` of a definition, `.lazyInd`, or an operation that
+did not compute to a literal — the operation is **glued** in turn, as `.unfold` under its
+own registered global, computed when something `whnf`s it (`vNatOp`, `Eval.lean:683`,
+`wiz-notes/kernel-lazy-let.md` §8): finding out whether an argument is a numeral would
+force it, so `let ok := Nat.beq big 5` (or a scrutinee `Nat.beq (fib 30) 0`) would run
+`big` while it is merely checked. This adds no value form: the result is the same
+`.unfold` a non-literal operation already had. Conversion compares two such operations by
+their spines and unfolds both when those differ (`convGlued`), so the relation is
+unchanged; read-back keeps them as written while a normal form (`g.eager`) computes them.
+`a =_N b` on two literals is decided directly (`Eval.lean:988`). `ind` on a numeral is
+glued (`Val.lazyInd`) so that it computes lazily.
 **Nothing checks that a registration is correct** (that `N` is a natural-number type and
 that the native operation agrees with the registered definition). The registrations are
 trusted like axioms (§13, Status.md, O3).

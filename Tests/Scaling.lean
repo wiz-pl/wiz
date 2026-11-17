@@ -532,24 +532,27 @@ def recordEqEta : String :=
 def natOpFib : String := "import Prelude\n" ++
   "def fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
 
-/-- `let`s of `Nat` operations on `fib k 1`, never needed for typing, and an equation of two
-such operations with the same arguments (compared by them, not computed). -/
+/-- `let`s of `Nat` operations on `fib k 1`, never needed for typing. (Not an equation of
+two such operations: `rfl`'s expected type *is* the equation, and `vEq` computes it by the
+sides' values, so that forces them — the remaining eager step, note §11. The `same`
+judgement at a cheap `small` is in `natOpLazySemSrc`.) -/
 def natOpLazySrc (k : Nat) : String := natOpFib ++
   s!"def big : Nat := fib {k} 1\n" ++
   "def l8 : String := let ok := Nat.beq big 5; \"a\"\n" ++
   "def l8ty : String := let ok : Bool := Nat.beq big 5; \"a\"\n" ++
   "def natop : String := let n := Nat.add big 5; \"a\"\n" ++
-  s!"def s : String := let x := match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\"\n  x\n" ++
-  "def same : Nat.add big 5 = Nat.add big 5 := rfl\n"
+  s!"def s : String := let x := match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\"\n  x\n"
 
-/-- Conversion through glued operations: computed when the arguments differ, a chain of
-operations (one link suspended at a time), `Nat.mul 0 _` without its other argument, and an
-accumulator loop (no chain of suspended additions as long as the list). -/
+/-- Conversion through glued operations: computed when the arguments differ, two identical
+operations compared by their arguments, a chain of operations (one link suspended at a
+time), `Nat.mul 0 _` without its other argument, and an accumulator loop (no chain of
+suspended additions as long as the list). -/
 def natOpLazySemSrc : String := natOpFib ++
   "def small : Nat := fib 3 1\n" ++
   "def t1 : Nat.beq small 8 = Bool.true := rfl\n" ++
   "def t2 : Nat.add small 5 = Nat.add 5 small := rfl\n" ++
   "def t3 : Nat.add small 5 = 13 := rfl\n" ++
+  "def same : Nat.add small 5 = Nat.add small 5 := rfl\n" ++
   "def t4 : Nat.beq (Nat.add small 1) 9 = Bool.true := rfl\n" ++
   "def t5 : Nat.mul 0 (fib 40 1) = 0 := rfl\n" ++
   "def id' (x : Nat) : Nat := x\n" ++

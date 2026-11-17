@@ -16,9 +16,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   Nat.beq big 5`, `let n := Nat.add big 5` or `let x := match Nat.beq (fib 30) 0 with …`
   is no longer run while the definition is checked, by the elaborator or by the kernel
   (wiz-rv FINDINGS L8: 4.47 GB). Conversion compares two such operations by their
-  arguments and computes them when those differ; an operation on an operation computes
-  the inner one first. The self-hosted kernel has no native `Nat` operations and was
-  already lazy here.
+  arguments and computes them when those differ; an operation on an operation computes the
+  inner one first, and keeps it as written when that does not give a numeral. A zero
+  argument still short-circuits without forcing the other one (`Nat.mul 0 x` is `0`,
+  `Nat.add 0 x` is `x`), and nothing past the first non-numeral argument is forced. An
+  operation whose arguments are all numerals (or stuck, or constructors) still computes, so
+  types and messages read back as before (`Vec Nat 3`). The self-hosted kernel has no
+  native `Nat` operations and was already lazy here.
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one

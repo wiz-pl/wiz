@@ -299,6 +299,19 @@ def markDataEq (v : Val R) (A a b : Val R) : Val R :=
     .sigma x q fst (.mk (env ++ [b, a, A, eqDataMark]) body) s
   | _ => v
 
+/-- `natFast?`'s zero rules on arguments that are **literals already**: `Nat.mul 0 x` is `0`
+whatever `x` is, and `x` may be a value that must not be built (`Nat.pow 2 (Nat.pow 2 34)`
+is a process abort). It also keeps the value's shape as it was: `Nat.add 0 x` is `x`, not a
+glued `Nat.add` over a numeral. `natFast?` itself asks with `whnfNumeral`, which forces a
+non-expansive glued argument, so it cannot be used before the arguments are known. -/
+def natFastLit? {R : Type} (op : Name) (args : Array (Val R)) : Option (Val R) :=
+  match op, args with
+  | "nat.mul", #[.natLit 0, _] => some (.natLit 0)
+  | "nat.add", #[.natLit 0, y] => some y
+  | "nat.sub", #[x, .natLit 0] => some x
+  | "nat.pow", #[_, .natLit 0] => some (.natLit 1)
+  | _, _ => none
+
 mutual
 
 /-- **Exercise 1.1.** Evaluate a term in an environment.
@@ -668,12 +681,17 @@ L8), whatever the `let`'s type: everything else on that path is already lazy.
   (sound: the same global on convertible arguments), falling back to `whnf` of both sides
   when they differ (`Nat.add big 5` against `Nat.add 5 big`, or against `big + 5`), so
   conversion is the same relation (wiz-notes/kernel-lazy-let.md, §8).
-* An argument that is itself a glued *operation* is computed first (`whnf`), and replaced
-  by its value when that is a numeral: otherwise a
-  loop such as `foldl (fun acc x => Nat.add acc (f x))` would build a chain of suspended
-  additions as long as the list, forced at the end one stack frame per element. So only a
-  definition's application keeps an operation glued, and a chain of operations never
-  suspends more than one link.
+* An argument that is itself a glued *operation* is computed first (`whnf`) and replaced by
+  its value when that is a numeral: otherwise a loop such as
+  `foldl (fun acc x => Nat.add acc (f x))` would build a chain of suspended additions as
+  long as the list, forced at the end one stack frame per element. So only a definition's
+  application keeps an operation glued, and a chain of operations never suspends more than
+  one link. Only arguments up to the first one that is not a numeral are looked at, as in
+  `vNatOpNow`'s own scan: an operation that cannot compute does not run an argument it does
+  not need (`Nat.beq x (Nat.div (fib 30) 7)`), and a plain definition's value is never
+  forced here (`Nat.beq big 5`).
+* The definition's zero rules fire before anything is forced (`Nat.mul 0 x` is `0` for
+  every `x`): see `natFastLit?`.
 * An operation whose arguments are all numerals (or stuck, or constructors) is computed as
   before, so types and messages read back computed (`Vec Nat 3`): only an operation on a
   glued, not yet computed, value stays glued (user decision 2026-11-17).
@@ -681,7 +699,9 @@ L8), whatever the `let`'s type: everything else on that path is already lazy.
   `--eager-proofs` (`!g.lazyProofs`, the evaluator as it was), nor for `nat.succ` (a
   constructor: `vNatOpNow` already builds it from a stuck argument without forcing it). -/
 partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
-  if g.eager || !g.lazyProofs || op == "nat.succ" then vNatOpNow g op args else
+  if g.eager || !g.lazyProofs || op == "nat.succ" then vNatOpNow g op args
+  else if let some v := natFastLit? op args then v
+  else
   let isOp (n : Name) : Bool := match g.builtinKey? n with
     | some k => k.startsWith "nat."
     | none => false
@@ -689,9 +709,22 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   -- operation's name: its `whnf` is the operation's unfolding, stuck on a variable or a
   -- hole, which unification can't match the way it matches `Nat.pow 2 ?w` against
   -- `Nat.pow 2 w`)
-  let args := args.map fun a => match a with
-    | .unfold n _ _ _ => if isOp n then (match whnf a with | v@(.natLit _) => v | _ => a) else a
-    | a => a
+  let args := Id.run do
+    let mut args := args
+    let mut stop := false
+    for i in [0:args.size] do
+      if !stop then
+        let a := args[i]!
+        match a with
+        | .unfold n _ _ _ =>
+          let a' := if isOp n then
+            (match whnf a with | v@(.natLit _) => v | _ => a) else a
+          if a' matches .natLit _ then args := args.set! i a' else stop := true
+        | .natLit _ => pure ()
+        | _ => stop := true
+    return args
+  -- (an inner operation above computed to `0`)
+  if let some v := natFastLit? op args then v else
   let glued := args.any fun a => match a with
     | .unfold .. | .lazyInd .. => true
     | _ => false
