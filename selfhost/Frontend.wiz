@@ -5013,7 +5013,7 @@ def letPairT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Val) : 
         | .ok b _ es2 => .ok (.split q sv motive b) expected es2
         | e => e
       | sty' => .err (String.append "let (x, y) := ... expects a pair, got "
-          (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) sty'))
+          (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) sty')))
     | e => e
 
 -- check `s` against `ty`
@@ -5579,6 +5579,7 @@ def inlineTm (gs : Globals) : Tm → Tm
   | .app f a => .app (inlineTm gs f) (inlineTm gs a)
   | .letE ty v b => .letE (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
   | .letq q ty v b => .letq q (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
+  | .letUnit u b => .letUnit (inlineTm gs u) (inlineTm gs b)
   | .split q s m b => .split q (inlineTm gs s) (inlineTm gs m) (inlineTm gs b)
   | .ann t ty => .ann (inlineTm gs t) (inlineTm gs ty)
   | .pair a b => .pair (inlineTm gs a) (inlineTm gs b)

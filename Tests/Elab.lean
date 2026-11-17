@@ -2016,11 +2016,52 @@ def selfhostModuleOutput (files : List (String × String)) (args : Array String 
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
 
+/-- (A8, A14) The self-hosted compiler rejects a module set: `build input.wiz` exits 1,
+the errors are on standard error, and no C is written. `input.wiz` is the root; the other
+files are written beside it, so its `import`s find them. -/
+def selfhostModuleCompileFails (files : List (String × String)) (phrases : List String) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let out ← IO.Process.output
+      { cmd := "timeout", args := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"],
+        cwd := dir }
+    checkEq (1 : UInt32) out.exitCode
+    checkEq "" out.stdout
+    if ← (dir / "out.c").pathExists then
+      throw (IO.userError "the compiler wrote C for a rejected program")
+    for phrase in phrases do
+      unless (out.stderr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the compiler's error does not say {repr phrase}:\n{out.stderr}")
+
 /-- (A14) Check a set of module files with the self-hosted checker and compare its output. -/
 def selfhostCheckModules (files : List (String × String)) (expected : String)
     (args : Array String := #[]) : IO Unit := do
   let some out ← selfhostModuleOutput files args | return
   checkEq expected out
+
+/-- (A8, A14) The Lean frontend's error messages for a set of module files: `input.wiz`
+is the root, the others are modules named by their file name without `.wiz` (`A.wiz` is
+module `A`). The messages are their texts, without positions: the module tests compare
+them with the self-hosted checker's `error: …` lines. -/
+def hostModuleErrors (files : List (String × String)) : IO (List String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let mods : List (Name × String) := files.filterMap fun (n, text) =>
+    if n == "input.wiz" then none
+    else some (((n.dropSuffix? ".wiz").map (·.toString)).getD n, text)
+  let loader : Name → Option String := fun m =>
+    if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Std" then some stdLib else mods.lookup m
+  let src := (files.lookup "input.wiz").getD ""
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  pure ((s.messages.filter (·.severity == .error)).map (·.text)).toList
 
 /-- (D1) The compiled program `main` of `src` doesn't finish within `secs` seconds
 (memory capped: a loop in the kernel allocates). -/
