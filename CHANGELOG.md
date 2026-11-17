@@ -10,6 +10,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail test (23f): a test may declare its own time limit, `-- test: run timeout 900`
+  (or `check … timeout SECS`); the larger of it and `--test-timeout` applies to the test's
+  job and to its program, so one long test no longer needs a large flag on every run.
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container

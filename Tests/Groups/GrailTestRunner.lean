@@ -86,6 +86,29 @@ def testRunnerGroup : Group where
         let (res, _) ← runTests dir tc false
         check (res.size == 1) s!"expected one test, got {res.toList.map (·.file)}"
         check (res.all (·.ok)) s!"{res.toList.map (·.message)}" },
+    { name := "-- test: … timeout SECS: parsed, and a declared limit over --test-timeout applies", run := fun _ => do
+        let parse (src : String) := Grail.TestKind.parseLine src
+        check (parse "-- test: run timeout 900\n" matches .ok (.run, some 900)) "run timeout 900"
+        check (parse "-- test: check  timeout 5\n" matches .ok (.check, some 5)) "check timeout 5"
+        check (parse "-- test: run\n" matches .ok (.run, none)) "run"
+        check (parse "-- test: skip slow, timeout 900\n" matches .ok (.skip _, none)) "a skip's reason is kept"
+        check (parse "-- test: run timeout x\n" matches .error _) "timeout x"
+        check (parse "-- test: run timeout 0\n" matches .error _) "timeout 0"
+        check (parse "-- test: run slowly\n" matches .error _) "run slowly"
+        checkEq 900000 (Grail.testLimitMs 300000 "-- test: run timeout 900\n")
+        checkEq 300000 (Grail.testLimitMs 300000 "-- test: run timeout 5\n")
+        checkEq 300000 (Grail.testLimitMs 300000 "-- test: run\n")
+        -- under a 1 ms --test-timeout the undeclared test times out, the declared one passes
+        let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          ("tests/slow.wiz", "import Prelude\ndef n : Nat := 1\n"),
+          ("tests/declared.wiz", "-- test: check timeout 600\nimport Prelude\ndef n : Nat := 1\n")]
+        let (res, _) ← runTests dir tc (update := true) (testTimeoutMs := some 1)
+        match res.find? (·.file == "tests/slow.wiz"), res.find? (·.file == "tests/declared.wiz") with
+        | some slow, some declared =>
+          check (!slow.ok && (slow.message.splitOn "timed out").length > 1) s!"slow: {slow.message}"
+          check declared.ok s!"declared: {declared.message}"
+        | _, _ => throw (IO.userError s!"results: {res.toList.map (·.file)}") },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),

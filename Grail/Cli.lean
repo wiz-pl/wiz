@@ -79,7 +79,8 @@ def usage : String := "usage:
 options: -C DIR (the package directory), --dir DIR (with `new`: where to write the
   package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
-  --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
+  --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300;
+  a test's `-- test: run timeout SECS` line may ask for more),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
