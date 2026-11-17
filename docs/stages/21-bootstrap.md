@@ -1211,3 +1211,29 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: the parity matrix is machine-checked
+
+`selfhost-parity.tsv` is the row set for `wiz-notes/selfhost-parity.md`: one line per
+feature (`row, area, status, evidence_case, note`). The evidence is a list of case names
+from the six self-host groups, and `scripts/parity-matrix.py --check` proves what the
+old hand-written table could not:
+
+* an **S** row names a case that exists and, through its helper calls, reaches
+  `selfhostCompiler` or `selfhostChecker` in `Tests/Elab.lean`. A case that compiles
+  `selfhost/*.wiz` with the Lean host (`ioRun`) does not count;
+* a **P** row's note names what is missing, and an **M** row names no positive case
+  (`!` marks a case that asserts the gap);
+* every case of the six groups maps to a row, so a new case cannot be an orphan and a
+  removed case cannot leave a stale citation;
+* rows with no case at all are in `scripts/parity-matrix-overrides.tsv` with a reason;
+* the note's `## Counts` section is regenerated from the TSV (`--write-note`).
+
+The check runs as `=selfhost-parity` in the `selfhost` shard. It was written against
+master's monolithic `=selfhost` (185 cases, 35 of them Lean-host-only); when the
+split groups land, the extractor reads the same file and needs no change. Turning the
+old table into the TSV found **7 of its 29 S rows** had no selfhosted-binary case:
+A1 and E1 (parser differentials compiled by the Lean host), B9
+and B14 (kernel probes run in-process), E2 and E3 (the kernel differentials), and E8
+(the fixpoint is a script, not a case). They are now P with the missing evidence named;
+the counts went from 29/28/19 to 24/41/11.
