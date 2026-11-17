@@ -6,6 +6,9 @@
 -- Supported: identifiers, `Type n`, `(x : A) → B`, `A → B`, `fun x (y : A) => b` (the
 -- binder types are not kept: a λ is checked against a type), application,
 -- `let x : A := v; b`, `(t : T)` and parentheses; and (stage 16) inductive types.
+-- (C14) `native_refl` as a closed definition's whole body, behind `--trust-native`: the
+-- frontend's evaluator decides the equation and the proof is the axiom `X.native✝`
+-- (`#print axioms`), never a kernel reduction (see the block below `Globals`).
 
 -- the arguments of a node, as a list
 def argsOf : SyntaxF .false → List Syntax
@@ -555,49 +558,58 @@ def builtinDerivers : StrMap (Option String) :=
 -- the globals so far: by position (the first is `0`), their names in scope, the
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
 -- reads them, since the frontend is pure), and the derivers by class
+--
+-- (C14) `trustNative` is the run's `--trust-native` (`--trust-native` of the host's
+-- `wiz`): `native_refl` is accepted only with it, and it is a flag of the run, not a
+-- property of the source (the host's `CommandState.trustNative`)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String))
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+       (priv : Bool) (ders : StrMap (Option String)) (trust : Bool)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .false
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ _ => sc
+-- (C14) `--trust-native`: `native_refl` may decide an equation by running it
+def Globals.trustNative : Globals → Bool
+  | .mk _ _ _ _ _ _ _ _ _ t => t
+def Globals.withTrust (gs : Globals) (t : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d _ => .mk all sc inds ffi cls ins hs p d t
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d t
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs _ d t => .mk all sc inds ffi cls ins hs p d t
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match g with
+  | .mk all sc inds ffi cls ins hs p d t => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d t
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d =>
+  | .mk all sc inds ffi cls ins hs p d t =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d t
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds (.cons f ffi) cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds (.cons f ffi) cls ins hs p d t
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d t
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -606,33 +618,33 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins _ p d t => .mk all sc inds ffi cls ins hs p d t
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d t
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f))
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) t
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls (.cons i ins) hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls (.cons i ins) hs p d t
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d t => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d t
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -641,13 +653,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -659,7 +671,7 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
@@ -721,7 +733,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -842,6 +854,7 @@ def tmMapChildren (f : Nat → Tm → Tm) (t : Tm) : Tm := match t with
   | .snd x => .snd (f 0 x)
   | .exfalso m x => .exfalso (f 0 m) (f 0 x)
   | .letUnit u b => .letUnit (f 0 u) (f 0 b)
+  | .split q s m b => .split q (f 0 s) (f 1 m) (f 2 b)
   | .ecase m sc bs => .ecase (f 1 m) (f 0 sc) (tmsMapWith f bs)
   | .eq a b c => .eq (f 0 a) (f 0 b) (f 0 c)
   | .eqTy a b => .eqTy (f 0 a) (f 0 b)
@@ -2193,6 +2206,13 @@ def zonkSub (es : ES) (d : Nat) (t : Tm) : Option Tm := match t with
   | .eqRefl A a => zonk2 es d A a (fun A' a' => .eqRefl A' a')
   | .exfalso m x => zonk2 es d m x (fun m' x' => .exfalso m' x')
   | .letUnit u b => zonk2 es d u b (fun u' b' => .letUnit u' b')
+  | .split q s m b => match zonk es d s with
+    | .some s' => match zonk es (d + 1) m with
+      | .some m' => match zonk es (d + 2) b with
+        | .some b' => .some (.split q s' m' b')
+        | .none => .none
+      | .none => .none
+    | .none => .none
   | .eq A a b => match zonkTms es d (.tcons A (.tcons a (.tcons b .tnil))) with
     | .some (.tcons A' (.tcons a' (.tcons b' _))) => .some (.eq A' a' b')
     | _ => .none
@@ -2957,11 +2977,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -3596,7 +3616,7 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ _ =>
+    | .mk _ _ inds _ _ _ _ _ _ _ =>
       match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
@@ -4558,6 +4578,10 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   | e => e
 -- the other forms
 def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
+  match strEq (kindOf s) "term.letUnit" with
+  | .true => letUnitT gs es cx s .none
+  | .false => inferT1_0 gs es cx s
+def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   let k := kindOf s;
   match strEq k "term.hole" with
   | .true => match newMeta es cx (.vsort (.lnum 1)) with
@@ -4600,6 +4624,9 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
     | .true => inferCast gs es cx s
     | .false => match strEq k "term.transp" with
     | .true => inferTransp gs es cx s
+    | .false => match strEq k "term.nativeRefl" with
+    -- (C14) `native_refl` is only a definition's whole body: it has no type of its own
+    | .true => .err "native_refl can only be the whole body of a definition"
     | .false => match strEq k "term.rfl" with
     | .true => .err "cannot infer the type of rfl; add a type ascription"
     | .false => match strEq k "term.app" with
@@ -4940,8 +4967,82 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
       | .ok v _ es2 => body A Av v es2
       | e => e
     | e => e
+-- `let () := u; b` (the unit eliminator; the unit pattern is linear: `u` is consumed
+-- once, by the kernel's usage `U_u + U_b`). Checked or inferred (`s` is the whole node).
+def letUnitT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val) : TE :=
+  match checkT gs es cx (kid s 4) (.vunit (ln 1)) with
+  | .ok u _ es1 => match expected with
+    | .some T => match checkT gs es1 cx (kid s 6) T with
+      | .ok b _ es2 => .ok (.letUnit u b) T es2
+      | e => e
+    | .none => match inferT gs es1 cx (kid s 6) with
+      | .ok b bt es2 => .ok (.letUnit u b) bt es2
+      | e => e
+  | e => e
+
+-- the `(x, y)` binders of a `term.letPair`/`term.letTuple` node
+def letPairName (s : Syntax) (i : Nat) : String := match kid s i with
+  | .ident n => n
+  | _ => "_"
+-- the node `let (x, y) := e; body` (the quantity is the default)
+def letPairNode (x y e body : Syntax) : Syntax :=
+  mkNode "term.letPair" (.cons (.atom "let")
+    (.cons (mkNull .nil)
+    (.cons (.atom "(")
+    (.cons x (.cons (.atom ",")
+    (.cons y (.cons (.atom ")")
+    (.cons (.atom ":=")
+    (.cons e (.cons (mkNull .nil) (one body)))))))))))
+-- `let (x₁, x₂, …, xₙ) := e; body` as nested pairs (`tuple✝k` names no user name uses),
+-- as the Lean frontend's `letTupleToPairs`
+partial def letPairStx (stx : Syntax) (k : Nat) (xs : List Syntax) (e : Syntax) : Syntax := match xs with
+  | .cons x (.cons y .nil) => letPairNode x y e (kid stx 12)
+  | .cons x rest =>
+    let r : String := String.append "tuple✝" (Nat.toString k);
+    letPairNode x (.ident r) e (letPairStx stx (k + 1) rest (mkNode "term.ident" (one (.ident r))))
+  | _ => kid stx 12
+def letTupleToPairs (stx : Syntax) : Syntax :=
+  let xs : List Syntax := List.append (one (kid stx 3))
+    (List.append (one (kid stx 5)) (nonAtoms (kids (kid stx 7))));
+  letPairStx stx 0 xs (kid stx 10)
+
+-- `let q (x, y) := s; b`: the Σ eliminator (`split`), check mode only. A pair held at
+-- any quantity is consumed this way; components are bound at `q·p` and `q`.
+def letPairT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Val) : TE :=
+  match writtenQ (kid s 1) with
+  | .bad => .err qtyErr
+  | qw =>
+    let q := match qw with
+      | .dflt => Q.qw
+      | .is q' => q'
+      | .bad => Q.qw;
+    let x := letPairName s 3;
+    let y := letPairName s 5;
+    match inferT gs es cx (kid s 8) with
+    | .ok sv sty es1 => match force es1 sty with
+      | .vsigma p _ _ A env B =>
+        let d := Cx.lvl cx;
+        let motive := quote (d + 1) expected;
+        let bty := eval (.cons (fresh d) env) B;
+        let cx2 := Cx.bind (Cx.bind cx x A) y bty;
+        match checkT gs es1 cx2 (kid s 10) expected with
+        | .ok b _ es2 => .ok (.split q sv motive b) expected es2
+        | e => e
+      | sty' => .err (String.append "let (x, y) := ... expects a pair, got "
+          (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) sty')))
+    | e => e
+
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  let k := kindOf s;
+  match strEq k "term.letUnit" with
+  | .true => letUnitT gs es cx s (.some ty)
+  | .false => match strEq k "term.letPair" with
+    | .true => letPairT gs es cx s ty
+    | .false => match strEq k "term.letTuple" with
+      | .true => letPairT gs es cx (letTupleToPairs s) ty
+      | .false => checkT0 gs es cx s ty
+def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
   match strEq k "term.by" with
   | .true => elabBy gs es cx s ty
@@ -5494,6 +5595,8 @@ def inlineTm (gs : Globals) : Tm → Tm
   | .app f a => .app (inlineTm gs f) (inlineTm gs a)
   | .letE ty v b => .letE (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
   | .letq q ty v b => .letq q (inlineTm gs ty) (inlineTm gs v) (inlineTm gs b)
+  | .letUnit u b => .letUnit (inlineTm gs u) (inlineTm gs b)
+  | .split q s m b => .split q (inlineTm gs s) (inlineTm gs m) (inlineTm gs b)
   | .ann t ty => .ann (inlineTm gs t) (inlineTm gs ty)
   | .pair a b => .pair (inlineTm gs a) (inlineTm gs b)
   | .fst t => .fst (inlineTm gs t)
@@ -5636,30 +5739,127 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
 -- **Exercise 14.5.** One command: elaborate it (`defT`, `inferT`), put the solutions of
 -- the metavariables in (`zonk`), and check the result with the kernel, in the empty
 -- context (the globals are constants).
+-- ------------------------------------------------------------------------------------
+-- (C14) `native_refl` (the host's stage 27a, `Wiz/Compiler/Native.lean`)
+
+-- The smallest program the host accepts with `--trust-native` and this frontend rejected
+-- (`unsupported syntax term.nativeRefl`):
+--
+--   import Prelude
+--   def x : 1 = 1 := native_refl
+--
+-- (and with a computation in it, `def x : sumTo 3 = 6 := native_refl` for a `sumTo`)
+--
+-- The whole body of a closed definition whose type is an equation `a = b` at a
+-- first-order data type is decided by **running** the two sides — here by the frontend's
+-- evaluator (`eval`/`quote`, with constants replaced by their inlined values as `#reduce`
+-- does) — and recorded as the axiom `X.native✝` plus `X := X.native✝`, never as a
+-- kernel-checked `refl`. The kernel checks only that each side's *value* is a term of the
+-- equation's type; it never evaluates the equation (the host's F5).
+--
+-- The self-hosted toolchain has no trust ledger. The boundary is made visible instead in
+-- the declaration itself: the accessible definition `X` has no kernel-checked proof, its
+-- value is the constant `X.native✝`, a name nothing else can declare, and `#print axioms
+-- X` (`printAxiomsCmd`, A23) names it. `--trust-native` gates it as in the host.
+
+def nativeClosedMsg : String :=
+  "native_refl proves a closed equation: `def X : a = b := native_refl`, with a type and without parameters or universe parameters"
+
+-- the value of a term, normalised by the frontend's evaluator (constants replaced by
+-- their inlined values, as for `#reduce`; the kernel computes nothing here)
+def nativeNorm (gs : Globals) (t : Tm) : Tm := quote 0 (eval .nil (inlineTm gs t))
+
+-- is this a type of first-order data (a function, codata and a type are not)?
+def nativeDataTy (v : Val) : Bool := match whnf v with
+  | .vpi _ _ _ _ _ _ => .false
+  | .vnu _ _ _ _ _ => .false
+  | .vsort _ => .false
+  | _ => .true
+
+-- `X.native✝`: the axiom, then `X := X.native✝`, in the current module
+def nativeAdd (gs : Globals) (x : String) (ty : Tm) : Step :=
+  let axSrc : String := String.append x ".native✝";
+  let ax := Globals.declName gs axSrc;
+  let axTy : Tm := .axiomC ax ty;
+  let gs1 := Globals.add gs (.mk axSrc .nil ty axTy axTy .nil .nil);
+  let v : Tm := .const ax .nil .nil axTy ty;
+  .mk (String.append x (String.append " : " (show .nil 0 ty)))
+    (Globals.add gs1 (.mk x .nil ty v axTy .nil .nil))
+
+-- decide `a = b` at the type `A`: run both sides, check each value at `A` (cheap: `A` is
+-- data), and compare the normal forms. The equation is never handed to the kernel.
+def nativeEq (gs : Globals) (x : String) (ty ATm a b : Tm) : Step :=
+  let A := eval .nil ATm;
+  match nativeDataTy A with
+  | .false => errStep gs (String.append "native_refl compares first-order data; "
+      (String.append (show .nil 0 ATm) " is not (a function, codata or a type)"))
+  | .true =>
+    let ta := nativeNorm gs a;
+    let tb := nativeNorm gs b;
+    match check empty ta A with
+    | .err m => errStep gs (String.append "internal error: the left-hand side's value is ill-typed: " m)
+    | .ok _ _ => match check empty tb A with
+      | .err m => errStep gs (String.append "internal error: the right-hand side's value is ill-typed: " m)
+      | .ok _ _ => match tmEq ta tb with
+        | .true => nativeAdd gs x ty
+        | .false => errStep gs (String.append "native evaluation refutes it: the left-hand side is "
+            (String.append (show .nil 0 ta) (String.append ", the right-hand side " (String.append (show .nil 0 tb) "."))))
+
+-- `def X : ty := native_refl`: the type must be written as an equation between closed
+-- terms (as in the host, a type that only computes to one is not one)
+def nativeEqOf (gs : Globals) (x : String) (ty : Tm) : Step :=
+  match ty with
+  | .eq A a b => nativeEq gs x ty A a b
+  | .ann t _ => nativeEqOf gs x t
+  | _ => errStep gs "native_refl proves an equation `a = b`; this type is not one"
+
+-- `def X : a = b := native_refl` in the command `stx`: gated by `--trust-native`, closed
+-- (no parameters, no universe parameters, a written type)
+def nativeReflStep (gs : Globals) (stx : Syntax) (x : String) : Step :=
+  match Globals.trustNative gs with
+  | .false => errStep gs "native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it"
+  | .true => match kids (kid stx 3) with
+    | .cons _ _ => errStep gs nativeClosedMsg
+    | .nil => match univParamsOf stx with
+      | .cons _ _ => errStep gs nativeClosedMsg
+      | .nil => match kids (kid stx 4) with
+        | .cons _ (.cons tyStx _) =>
+          match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) tyStx with
+          | .err m => errStep gs m
+          | .ok ty0 _ es0 => match finishElab gs es0 with
+            | .err m => errStep gs m
+            | .ok es => match zonk es 0 ty0 with
+              | .none => errStep gs "could not infer an implicit argument"
+              | .some tyZ => nativeEqOf gs x (sortTy tyZ)
+        | _ => errStep gs nativeClosedMsg
+
 def command (gs : Globals) (stx : Syntax) : Step :=
   --<sol
   let cx0 := Cx.mk empty (Globals.scope gs) .nil;
   match strEq (kindOf stx) "command.def" with
   | .true => match kid stx 1 with
-    | .ident x => match kids (kid stx 4) with
-      | .cons _ (.cons tyStx _) =>
-        let us := univParamsOf stx;
-        match defT gs (ES.withParams ES.empty us) cx0 (kids (kid stx 3)) tyStx (kid stx 6) with
-        | .err m => errStep gs m
-        | .ok ty0 v0 es0 => match finishElab gs es0 with
-        | .err m => errStep gs m
-        | .ok es => match zonk es 0 ty0 with
-          | .none => errStep gs "could not infer an implicit argument"
-          | .some tyZ => let tyT := sortTy tyZ; match zonk es 0 v0 with
+    | .ident x => match strEq (kindOf (kid stx 6)) "term.nativeRefl" with
+      -- (C14) `def X : a = b := native_refl`
+      | .true => nativeReflStep gs stx x
+      | .false => match kids (kid stx 4) with
+        | .cons _ (.cons tyStx _) =>
+          let us := univParamsOf stx;
+          match defT gs (ES.withParams ES.empty us) cx0 (kids (kid stx 3)) tyStx (kid stx 6) with
+          | .err m => errStep gs m
+          | .ok ty0 v0 es0 => match finishElab gs es0 with
+          | .err m => errStep gs m
+          | .ok es => match zonk es 0 ty0 with
             | .none => errStep gs "could not infer an implicit argument"
-            | .some v0z =>
-              -- (P2) with the proof markers the kernel requires, if it asks for them
-              match checkMarkingParams us v0z tyT with
-              | .bad m => errStep gs m
-              | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
-                  (Globals.add gs (.mk x us tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))
-                    (declParamNames stx)))
-      | _ => errStep gs "a definition needs a type"
+            | .some tyZ => let tyT := sortTy tyZ; match zonk es 0 v0 with
+              | .none => errStep gs "could not infer an implicit argument"
+              | .some v0z =>
+                -- (P2) with the proof markers the kernel requires, if it asks for them
+                match checkMarkingParams us v0z tyT with
+                | .bad m => errStep gs m
+                | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
+                    (Globals.add gs (.mk x us tyT v (inlineTm gs v) (paramMask (kids (kid stx 3)))
+                      (declParamNames stx)))
+        | _ => errStep gs "a definition needs a type"
     | _ => errStep gs "a definition needs a name"
   | .false =>
     -- (`#check c` shows `c`'s type, without inserting its implicit arguments)
@@ -6241,7 +6441,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -6587,8 +6787,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -6655,7 +6855,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -8710,7 +8910,9 @@ def mutualDeriving : List Syntax → Option String
 -- `native f := g`, since compiled code runs it, and a native representation
 -- (`attribute [implemented_by mk get] T.mk`) `native T := mk/get`. A partial definition
 -- is two globals here (the signature and then the body): neither is named, and the body
--- is walked only as code, as the host walks its implementation. This frontend registers
+-- is walked only as code, as the host walks its implementation. A `native_refl` proof
+-- (C14) names the axiom `X.native✝` its value is, and the host's second note
+-- (`(.native✝: …)`) follows the list. This frontend registers
 -- no `builtin`s, so `builtin k := n` never appears, and its numerals do not unfold
 -- through `nat.zero`/`nat.succ` registrations, so a numeral adds no dependency. The one
 -- gap left is a partial definition's witness: the host walks it, and this frontend
@@ -8841,6 +9043,16 @@ def anyNative : List String → Bool
   | .cons a rest => match strPrefix "native " a with
     | .true => .true
     | .false => anyNative rest
+-- does `s` end with `suf`? (the host's note for a `native_refl` tests `.native✝`)
+def endsWithS (s suf : String) : Bool := match s, suf with
+  | .mk cs, .mk sf => match matchPrefix (reverseChars sf .nil) (reverseChars cs .nil) with
+    | .some _ => .true
+    | .none => .false
+def anyEndsS : List String → String → Bool
+  | .nil, _ => .false
+  | .cons a rest, suf => match endsWithS a suf with
+    | .true => .true
+    | .false => anyEndsS rest suf
 -- `native f := g` (`attribute [implemented_by g] f`): compiled code runs `g` for `f`.
 -- The two-argument form (`attribute [implemented_by mk get] T.c`) also records
 -- `.impl T.c mk` for the backend, but the host does not name that as `native T.c := mk`:
@@ -8938,15 +9150,20 @@ def printAxiomsCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 2 with
         match as with
         | .nil => .mk (String.append (String.append "'" n) "' does not depend on any axioms") gs
         | .cons _ _ =>
-          -- (the host's note: an implementation compiled code runs is trusted, not proved)
+          -- (the host's notes: an implementation compiled code runs is trusted, not
+          -- proved; a `native_refl` axiom is a closed proposition decided by running it)
           let note := match anyNative as with
             | .true => "\n(native: an implementation that compiled code runs, trusted to agree with its definition)"
             | .false => "";
+          let note := String.append note (match anyEndsS as ".native✝" with
+            | .true => "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)"
+            | .false => "");
           .mk (String.append (String.append (String.append (String.append "'" n) "' depends on axioms: [")
               (String.append (commaJoin as) "]")) note) gs
   | _ => errStep gs "a #print axioms needs a name"
 
--- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
+-- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u; `#print axioms`
+-- is `printAxiomsCmd`, dispatched in `stepCommand` as the host's `command.printAxioms`)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
     (Bool.or (strEq k "command.reduce") (strEq k "command.eval"))))
@@ -9136,10 +9353,12 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- driver and `checkFile` keep this path; the module loader is `moduleCheck` below).
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
-def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+def checkFileTrust (cats : List Cat) (tokens : List String) (trust : Bool) (text : String) : List String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+      (String.codes text) 0 (Globals.withTrust (Globals.setModule Globals.empty "input") trust) .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
+def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+  checkFileTrust cats tokens .false text
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
 -- root that has it, else in the working directory (`A.B` is `A/B.wiz`). Each module is
@@ -9363,10 +9582,13 @@ end
 
 -- the whole graph from `roots`, in order: dependencies first, each module once; its
 -- output lines, globals and tables (the load order is in `order`)
+def modCheckRunHTrust (cats : List Cat) (tokens : List String) (trust : Bool) (headers : List Header)
+    (tab : List ModSrc) (roots : List String) : ModLoad :=
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withTrust (Globals.withHeaders Globals.empty headers) trust)
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
-    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
+  modCheckRunHTrust cats tokens .false headers tab roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)
@@ -9487,11 +9709,14 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
+  -- (C14) `--trust-native`: `native_refl` may decide an equation by running it, as the
+  -- host's `wiz --trust-native` (a flag of the run, never a property of the source)
+  let trust := modHasFlag args "--trust-native";
   match modHasFlag args "--oneshot" with
   -- (21n) the one-shot path (`checkFile`: the embedded Prelude inline, one module
   -- `input`), kept reachable for the checker's own tests; the loader is the default
-  | .true => modPrint (checkFile cats tokens text)
-  | .false => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  | .true => modPrint (checkFileTrust cats tokens trust text)
+  | .false => match modCheckRunHTrust cats tokens trust hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)

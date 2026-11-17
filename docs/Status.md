@@ -1008,7 +1008,7 @@ What it costs:
   exactly one field, which silently dropped the others: nothing sound is lost. Linear
   data is a tuple for now; linear matching is wishful
   (`wiz-notes/wishful/linear-case.md`).
-* Kernel.wiz has no split form, so its fragment can't consume a linear pair at all
+* Kernel.wiz has the same split form now, so its fragment consumes a linear pair too
   (CoreSpec §15); both kernels reject the same terms.
 * Nothing in `lib/`, `examples/` or `selfhost/` needed a change: `lib/IO.wiz` already
   split the result of an action with `let 1 (a, w') := x w`.

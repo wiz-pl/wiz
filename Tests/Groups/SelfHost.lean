@@ -351,7 +351,7 @@ def selfhostSameNats (header : String) (cases : List (String × Nat)) : IO Unit 
 frontend reports (its text, with an error's `error: ` prefix) is a line the self-hosted
 checker prints, in the same order. (A definition's own `f : T` line is a message in the
 checker's output, not in the host's, so it is left out on both sides; the axioms note's
-second line, `(native: …)`, is kept.) -/
+extra lines, `(native: …)` and `(.native✝: …)`, are kept.) -/
 def selfhostSameLines (src : String) : IO Unit := do
   let loader ← preludeLoader
   let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
@@ -833,6 +833,37 @@ def privateDecls : List (String × Bool) := [
   ("mutual\nprivate def ev : Nat → Bool\n  | .zero => .true\n  | .succ n => od n\nprivate def od : Nat → Bool\n" ++
      "  | .zero => .false\n  | .succ n => ev n\nend\n", false),
   ("private def dup : Nat := 1\ndef dup : Nat := 2\n", false)]
+
+/-- (B7, A18) `let () := u; b` (the unit eliminator) and `split` (`let q (x, y)`, and a
+tuple `let (x, y, z)` as nested pairs): the Lean frontend's verdicts, which the
+self-hosted one must match. A pair at quantity 1 can only be taken apart by `split`:
+projections need an unrestricted pair, and the components are bound at `q·p` and `q`, so
+at `let 1` a component of an unrestricted Σ can be reused but the second cannot be
+dropped or used twice. -/
+def splitDecls : List (String × Bool) := [
+  ("def f (1 u : Unit) : Nat := let () := u; 42\n", true),
+  ("def f (u : Unit) : Nat := let () := u; 42\n", true),
+  ("def f (0 u : Unit) : Nat := let () := u; 42\n", false),
+  ("def f (1 u : Unit) : Unit × Unit := let () := u; (u, ())\n", false),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; 42\n", true),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; 42\n", false),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; let () := y; 42\n", false),
+  ("def f (p : Nat × Nat) : Nat := let (x, y) := p; x + x + y\n", true),
+  ("def f (p : Nat × Nat × Nat) : Nat := let (x, y, z) := p; x + y + z\n", true),
+  ("def f (1 p : Nat × Nat) : Nat := p.1\n", false),
+  ("def f : Nat := let (x, y) := 5; x\n", false)]
+
+/-- (B7) The same forms as `splitDecls`, as a program the Lean and the self-hosted
+compilers both compile and run. -/
+def splitProgram : String :=
+  "import IO\n" ++
+  "def usePair (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; 40\n" ++
+  "def unitElim (1 u : Unit) : Nat := let () := u; 1\n" ++
+  "def triple (p : Nat × Nat × Nat) : Nat := let (x, y, z) := p; x + y + z\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (usePair ((), ())));\n" ++
+  "  IO.println (Nat.toString (unitElim ()));\n" ++
+  "  IO.println (Nat.toString (triple (1, 2, 39)))\n"
 
 /-- (stage 21i) Phantom parameters, for both frontends. -/
 def phantomHeader : String :=
@@ -2015,6 +2046,12 @@ def selfHostGroup : Group where
         selfhostAgrees linearMatchHeader linearMatchDecls },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
+    { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
+        selfhostAgrees "" splitDecls },
+    { name := "`let () := u; b` and split: the Lean and the self-hosted compilers agree (B7)", run := fun _ => do
+        ioRun splitProgram "40\n1\n42\n"
+        selfhostCompileRun splitProgram "40\n1\n42\n"
+        selfhostCompileRun splitProgram "40\n1\n42\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: Σ types, pairs, projections and ∀, as in the Lean frontend (21u)", run := fun _ =>
         selfhostAgrees "" sigmaDecls },
     { name := "the self-hosted backend: quantities erase and run, with either collector (21m)", run := fun _ => do
@@ -2025,8 +2062,9 @@ def selfHostGroup : Group where
     -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
     -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#erase f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.erase\ng : Nat\n" },
+        -- (`#print axioms` is implemented since C14: it answers as the Lean frontend does)
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\n'f' does not depend on any axioms\nerror: unsupported command command.erase\ng : Nat\n" },
     { name := "the self-hosted frontend: #print axioms lists the same axioms as the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines axiomsPrintProgram },
     { name := "the self-hosted frontend: #print axioms walks a partial definition's body only as code, as the Lean frontend (A23)", run := fun _ =>
@@ -2896,6 +2934,18 @@ def selfHostGroup : Group where
            ("B.wiz", "import Prelude\ndef x : Nat := 2\n"),
            ("input.wiz", "import Prelude\nimport A\nimport B\n#check x\n#check a\n")]
           "x : Bool\na : Bool\nx : Nat\nNat\nBool\n" },
+    { name := "modules: a private name is rejected in an importer with the host's message shape, by the compiler too (A8, 21n)", run := fun _ => do
+        let files :=
+          [("A.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef visible : Nat := secret\n"),
+           ("B.wiz", "import Prelude\nimport A\ndef fromA : Nat := visible\ndef bad : Nat := secret\n"),
+           ("input.wiz", "import Prelude\nimport B\ndef total : Nat := fromA\n#check secret\n")]
+        let phrase := "'secret' is private to module A"
+        let errs ← hostModuleErrors files
+        unless errs.any (· == phrase) do
+          throw (IO.userError s!"the Lean frontend's message is not {repr phrase}:\n{errs}")
+        -- (the checker's pinned output is the test above; the compiler reports the same
+        -- error, and writes no C)
+        selfhostModuleCompileFails files [phrase] },
     { name := "the one-shot path (checkFile) is one module, input (21n)", run := fun _ =>
         selfhostCheckModules
           [("input.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef use : Nat := secret\n#check use\n")]
@@ -3215,7 +3265,36 @@ def selfHostGroup : Group where
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
+    -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
+    -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
+    -- is how a run makes what it trusted visible
+    { name := "(C14) native_refl: decided with --trust-native and recorded as the axiom X.native✝; refused without the flag", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def s : sumTo 3 = 6 := native_refl\n#print axioms s\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some trusted ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has trusted "'s' depends on axioms: [s.native✝]") s!"no .native✝ axiom in the trusted run:\n{trusted}"
+        -- (the host's two lines, exactly: the axiom list, then the `.native✝` note)
+        check (has trusted ("'s' depends on axioms: [s.native✝]\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)")) s!"the .native✝ note is not the host's:\n{trusted}"
+        check (!has trusted "error:") s!"unexpected error in the trusted run:\n{trusted}"
+        let some plain ← selfhostModuleOutput [("input.wiz", src)] #[] | return
+        check (has plain "error: native evaluation is not enabled") s!"accepted without the flag:\n{plain}"
+        check (!has plain "s.native✝") s!"the axiom was added without the flag:\n{plain}" },
+    { name := "(C14) native_refl: a false equation is refuted, and a function type and a bare native_refl are refused", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def bad : sumTo 10 = 54 := native_refl\n" ++
+          "def fn : ((fun (x : Nat) => x) = (fun (x : Nat) => x)) := native_refl\n" ++
+          "def r : Nat := native_refl\n" ++
+          "def q : sumTo 3 = 6 := (native_refl : sumTo 3 = 6)\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some out ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has out "native evaluation refutes it") s!"the false equation was accepted:\n{out}"
+        check (has out "native_refl compares first-order data") s!"a function type was accepted:\n{out}"
+        check (has out "native_refl proves an equation `a = b`; this type is not one") s!"native_refl at Nat was accepted:\n{out}"
+        check (has out "native_refl can only be the whole body of a definition") s!"an ascription was accepted:\n{out}"
+        check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" }
 
   ]
 
