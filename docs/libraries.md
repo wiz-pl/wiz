@@ -1810,8 +1810,10 @@ engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used b
 24 rows, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
 atom through the shortest bound-column bucket, skips a delta-loop variant whose anchor
 relation did not move, and indexes provenance by fact hash. The semantics and findings
-are unchanged; `examples/scry-datalog-bench.wiz` is the benchmark and
-`wiz-notes/scry-datalog.md` §8 has the measurements and limits.
+are unchanged; the reproducible benchmark is `scry/bench/datalog/` (pinned revisions and
+inputs, 3 interleaved rounds, per-round times and peak RSS). It measures about 100–120×
+on `chain 5000` and 180–215× on `tc 20` across three runs, with the same semi-naive loop
+before and after the store index; `wiz-notes/scry-datalog.md` §8 has the limits.
 
 The S4 rule pack and interprocedural slice are separate modules:
 
