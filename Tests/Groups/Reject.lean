@@ -395,10 +395,10 @@ def group : Group where
     accepted "accept: a guess compared at the end of the declaration that agrees"
       ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
        "inductive G : Look Nat → Look Nat → Type where\n  | mk (a b : Look Nat) : G a b\n" ++
-       "def Wrap : Bool → Type\n  | true => Look Nat\n  | false => Nat\n" ++
+       "def Wrap : Bool → Type\n  | .true => Look Nat\n  | .false => Nat\n" ++
        "def sel {A : Type} {b : Bool} {F : A → Wrap b → Type} (a : A) (p : Wrap b) (w : F a p) " ++
        "(q : A) (c : Bool) (e : b = c) : Nat := 0\n" ++
-       "def ok (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x true rfl\n" ++
+       "def ok (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x .true rfl\n" ++
        "#eval ok (Look.mk 1) (Look.mk 2)\n") [("Priv", privMod)],
     rejected "inductive props: large elimination of a non-singleton proposition"
       (prelude ++ "inductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n" ++
