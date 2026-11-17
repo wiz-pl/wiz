@@ -234,6 +234,16 @@ def selfhostCheckFails (file expected : String) : IO Unit := do
     checkEq expected out.stderr
     checkEq "" out.stdout
 
+/-- The checker's output for a file of declarations must be the declarations it printed,
+not the program it read: an echoing stub (the case that checks this group is not vacuous)
+would otherwise pass every "is accepted" case. -/
+def checkChecked (src out : String) : IO Unit := do
+  if out.splitOn "\n" == src.splitOn "\n" then
+    throw (IO.userError s!"the checker's output is its input, not declarations:\n{out.take 500}")
+  for l in out.splitOn "\n" do
+    if l.startsWith "import " then
+      throw (IO.userError s!"the checker's output is its input, not declarations:\n{out.take 500}")
+
 /-- (A11) `lib/Deriving.wiz` and the modules it imports, for the `deriving` differential:
 the tests' prelude loader does not include it. -/
 def derivingLoader : IO (Name → Option String) := do
@@ -306,14 +316,6 @@ def ffiProgramFin (flush : Bool) : String :=
   "def main : IO Unit := do\n  f ← fopen \"" ++ file ++ "\" \"w\";\n  write f 3;\n" ++
   (if flush then "  n ← fflush f;\n" else "") ++
   "  s ← IO.readFile \"" ++ file ++ "\";\n  IO.print s\n"
-
-/-- The checker's output for a file of declarations must be the declarations it printed,
-not the program it read: an echoing stub (the case that checks this group is not vacuous)
-would otherwise pass every "is accepted" case. -/
-def checkChecked (src out : String) : IO Unit := do
-  for l in out.splitOn "\n" do
-    if l.startsWith "import " then
-      throw (IO.userError s!"the checker's output is its input, not declarations:\n{out.take 500}")
 
 /-- (stages 21i–j) Differential: each declaration after `header` is accepted (`true`) or
 rejected by the Lean frontend and by the self-hosted one alike, as `expected` says. -/
@@ -604,7 +606,9 @@ runtime error; 4, a leak) and a fragment of its message. -/
 def selfhostLinkRun (files : List (String × String)) (expected : String) (flags : Array String := #[])
     (fails : Option String := none) (failCode : UInt32 := 3) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then IO.println "    (skipped: no garbage collector, --gc-cflags)"; return
+  if tc.gcCflags.isEmpty then
+    skip "no garbage collector (--gc-cflags)"
+    return
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then IO.println "    (skipped: no toolchain)" else throw (IO.userError e)
@@ -3132,11 +3136,13 @@ def selfHostHostGroup : Group where
           let out ← IO.Process.output
             { cmd := "timeout", args := #["900", self.toString, "--run-case", "selfhost", toString i] ++ flags, env }
           -- (a case that skipped did not demonstrate the pipeline, but it did not pass
-          -- either: only an exit 0 without a `skipped` note is a vacuous case)
-          let skipped := (out.stdout.splitOn "\n").any fun l => l.startsWith (noteMarker ++ "skipped ")
+          -- either: only an exit 0 without a `skipped` note is a vacuous case; both the
+          -- note and the older printed `(skipped: …)` form count)
+          let skipped := (out.stdout.splitOn "\n").any fun l =>
+            l.startsWith (noteMarker ++ "skipped ") || l.trimAscii.toString.startsWith "(skipped: "
           if out.exitCode == 0 && !skipped then passed := passed.push s!"{i}: {c.name}"
         unless passed.isEmpty do
-          throw (IO.userError s!"{passed.length} of {selfHostGroup.cases.length} =selfhost cases pass with a stub compiler/checker that echoes its input; they do not test the pipeline:\n{"\n".intercalate passed.toList}")
+          throw (IO.userError s!"{passed.size} of {selfHostGroup.cases.length} =selfhost cases pass with a stub compiler/checker that echoes its input; they do not test the pipeline:\n{"\n".intercalate passed.toList}")
         note s!"all {selfHostGroup.cases.length} =selfhost cases failed with the echo stub" },
     { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
         -- the checked-in file is what the selfhost builds read; a grammar change that

@@ -1088,11 +1088,11 @@ are not reproduced.
 
 ## 21af: how much of the parity group runs the pipeline
 
-`Tests/Groups/SelfHost.lean` used to be one group, and 35 of its 175 cases never invoked
-the self-hosted compiler or checker: they compiled `selfhost/*.wiz` with the *Lean* host,
-or probed the Lean kernel in process. A stub compiler that echoed its input passed 135
-of the 175, so "175/175" was not a pipeline measurement. The group is now split by what
-a case runs:
+`Tests/Groups/SelfHost.lean` used to be one group (185 cases when it was split; 175 when
+the audit measured it), and 35 of them never invoked the self-hosted compiler or checker:
+they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel in process.
+A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
+pipeline measurement. The group is now split by what a case runs:
 
 * `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
   compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
