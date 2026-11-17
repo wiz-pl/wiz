@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
+  need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
+  shared clause body, and a postponed argument (read back as its normal form, which also
+  put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
+  as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
+  (`fib 40`) at 120 s in `check` and in the one-shot compile.
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one
@@ -28,7 +35,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   termination claim, and the de-mutualisation or measure that would remove the row), and
   `docs/trust-ledger.md` states that such a row is a design choice, not an unreviewed
   gap. The two structural fuel loops `Scry.rdLoop`/`Scry.domLoop` are now total, so the
-  group is 132 rows. The migration is complete: the twenty `Prelude` numeral/`memo`
+  group was 132 rows at that review (182 today, after later modules). The migration is
+  complete: the twenty `Prelude` numeral/`memo`
   registrations, the `PMap`/`Scry` seals and `Proc.runLinked` have individual reasons
   too, no `legacy:` row remains, and CI runs `--strict-legacy` (22f, 13a).
 * grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
@@ -114,7 +122,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
   peak live set, not everything it allocated: the fixed workload in
   `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
-  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  320 MiB to 8.1 MiB of linear memory in 0.7× the time (0.19 s reference counting against
+  0.27 s bump), and a 1000-iteration run completes
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
@@ -123,8 +132,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
   script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
   modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
-  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
-  form, 11ah).
+  test wrapper is `wiz test-driver` (the old `wiz test` name is reserved for the
+  proposed single-file form, which is not implemented).
 * [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
   toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
   `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started
