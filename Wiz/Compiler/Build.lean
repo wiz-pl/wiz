@@ -225,6 +225,8 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     return .error "the Wasm backend builds a `main`; `--lib` and `--no-main` are not supported (stage 8f)"
   if wasm && split != 0 then
     return .error "the Wasm backend has one module; `--split` does not apply (stage 8f)"
+  if wasm && !(exports s).isEmpty then
+    return .error "the Wasm backend rejects `export` wrappers (`export \"name\" f`); use the C target (stage 8f)"
   let bare := lib || noMain
   match irProgram s n bare with
   | .error e => pure (.error e)

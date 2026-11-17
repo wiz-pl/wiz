@@ -13,9 +13,10 @@
 // no unhandled rejection anywhere.
 "use strict";
 import {
-  isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
-  parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
-  SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
+  isSelfhostSearch, wantsSelfhost, withPrelude, stripComments, splitCommands, diagnosticsFromOutput,
+  outputLines, parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass,
+  selfhostEndpoint, SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck,
+  PositionIndex, offsetOf,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
@@ -103,6 +104,23 @@ check("endpoint: a WebSocketImpl", typeof selfhostEndpoint({ evaluate: stubEval 
 
 check("prelude: added without an import", withPrelude("def a : Nat := 1").prefix, "import Prelude\n\n");
 check("prelude: kept with one", withPrelude("import Prelude\ndef a : Nat := 1").prefix, "");
+// wasm-03: the import test sees code, not comments or strings
+check("prelude: an import in a block comment does not count",
+  withPrelude("/-\nimport Std\n-/\ndef two : Nat := 1 + 1\n").prefix, "import Prelude\n\n");
+check("prelude: an inline block comment with an import does not count",
+  withPrelude("/- example: import Std -/\ndef two : Nat := 1 + 1\n").prefix, "import Prelude\n\n");
+check("prelude: a line comment with an import does not count",
+  withPrelude("-- import Std\ndef two : Nat := 1 + 1\n").prefix, "import Prelude\n\n");
+check("prelude: an import in a string does not count",
+  withPrelude("def s : String := \"\nimport Std\n\"\ndef two : Nat := 1\n").prefix, "import Prelude\n\n");
+check("prelude: an identifier `import'` is not the import command",
+  withPrelude("import' Std\ndef two : Nat := 1\n").prefix, "import Prelude\n\n");
+check("prelude: a real import after a comment still counts",
+  withPrelude("/- note -/\nimport Std\ndef two : Nat := 1\n").prefix, "");
+check("comments: blanked, length kept",
+  stripComments("/- a -/ def x := 1 -- c\n").length, "/- a -/ def x := 1 -- c\n".length);
+check("comments: the code survives, the comments do not",
+  stripComments("/- a -/ def x := 1 -- c\n").replace(/ +/g, " ").trim(), "def x := 1");
 check("position: line and character", positionOf("ab\ncd", 4), { line: 1, character: 1 });
 check("code points: an emoji is two UTF-16 units", utf16OfCodePoints("a😀b", 2), 3);
 check("parse error offset", parseErrorOffset("parse error 57: unexpected"), 57);
@@ -139,6 +157,25 @@ check("split: the head is the keyword line", SOURCE.slice(commands[1].head, comm
 check("split: an attribute belongs to its command", SOURCE.slice(commands[2].start, commands[2].start + 2), "@[");
 check("split: results", commands.filter((c) => c.result).map((c) => c.keyword), ["#check", "#eval"]);
 
+// wasm-05: a command after a same-line block comment is not dropped
+{
+  const text = "/- note -/ def a : Nat := 1\n/- another -/ #check a\n";
+  const cs = splitCommands(text);
+  check("split: commands after same-line block comments", cs.map((c) => c.keyword), ["def", "#check"]);
+  check("split: the head is after the comment", [cs[0].start, cs[0].head], [text.indexOf("def"), text.indexOf("def")]);
+  check("split: the second head too", cs[1].head, text.indexOf("#check"));
+}
+{
+  const text = "/-- doc -/ def b : Nat := 1\n";
+  const cs = splitCommands(text);
+  check("split: a same-line doc comment belongs to its command",
+    [text.slice(cs[0].start, cs[0].start + 3), text.slice(cs[0].head, cs[0].head + 3)], ["/--", "def"]);
+}
+{
+  const text = "/- a\nstill a comment\n-/\ndef c : Nat := 1\n";
+  check("split: a multi-line comment is still one comment", splitCommands(text).map((c) => c.keyword), ["def"]);
+}
+
 // ## 4. Lines as diagnostics
 
 {
@@ -169,6 +206,13 @@ check("split: results", commands.filter((c) => c.result).map((c) => c.keyword), 
   checkThat("misaligned: says so", ds[0].message.includes("position unknown"), ds[0].message);
 }
 check("clean: no diagnostics", diagnosticsFromOutput("def a : Nat := 1\n", "a : Nat\n").length, 0);
+{
+  // wasm-05: the command after the comment is the one the line belongs to
+  const text = "/- note -/ def a : Nat := BAD\n";
+  const ds = diagnosticsFromOutput(text, "error: unknown identifier 'BAD'\n");
+  check("same-line comment: the error is on the command", ds.length === 1 ? ds[0].range.start : null,
+    { line: 0, character: text.indexOf("def") });
+}
 
 // ## 5. The server through the real client
 
@@ -335,6 +379,32 @@ function stubCheck(source, extra = {}) {
     offset += line.length + 1;
   }
   return JSON.stringify(Object.assign({ v: 1, lines }, extra));
+}
+
+// wasm-04: `off` is the frontend's `skipWs` position, which includes a leading `@[…]`;
+// the diagnostic belongs on the command's keyword line, as in the text fallback.
+{
+  const text = "@[simp]\ndef one : Nat := BAD\n";
+  const off = withPrelude(text).prefix.length;   // the attribute starts at the command
+  const answer = parseCheck(JSON.stringify({
+    v: 1, lines: [{ off, sev: 1, text: "error: unknown identifier 'BAD'" }],
+  }));
+  const ds = diagnosticsFromCheck(text, answer);
+  check("check: an attributed command's diagnostic is on its head",
+    ds.length === 1 ? ds[0].range.start : null, { line: 1, character: 0 });
+  check("check: its range is the command line, not the attribute",
+    ds.length === 1 ? ds[0].range.end : null, { line: 1, character: "def one : Nat := BAD".length });
+}
+{
+  // a doc comment and an attribute both precede the command; `off` is the attribute's
+  const text = "/-- the one -/\n@[simp]\ndef one : Nat := BAD\n";
+  const answer = parseCheck(JSON.stringify({
+    v: 1, lines: [{ off: withPrelude(text).prefix.length + text.indexOf("@"), sev: 1,
+      text: "error: unknown identifier 'BAD'" }],
+  }));
+  const ds = diagnosticsFromCheck(text, answer);
+  check("check: a doc comment and attribute still land on the head",
+    ds.length === 1 ? ds[0].range.start : null, { line: 2, character: 0 });
 }
 
 check("check: garbage is not an answer", parseCheck("{"), null);

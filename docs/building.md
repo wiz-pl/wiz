@@ -1017,7 +1017,7 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
-| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js`, `playground/playground-wasm.js` | the page's scripts and styles |
 | `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 
 To build the site locally from a checkout (after `nix develop` and `lake build wiz`):

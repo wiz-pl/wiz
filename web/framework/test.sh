@@ -20,3 +20,7 @@ if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
 if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 "$WIZ" "$@" > "$OUT/fixture.json"
 node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
+# The page half (wasm-08) and its Wiz half: app.wiz defines the three exports the driver
+# calls, and patch hooks are scoped to the root that is stepping.
+"$WIZ" check "$ROOT/web/framework/app.wiz"
+node "$ROOT/web/framework/driver_test.mjs"

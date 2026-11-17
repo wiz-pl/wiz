@@ -15,6 +15,22 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
   and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
   still selects an external server and `?lsp=off` disables the pane.
+* web (11ab): the playground's Wasm boundary frees the input and the returned string on
+  every path, so a trap or the runtime's panic no longer leaks one copy of the source per
+  failed Run; a source containing U+0000 is refused with a message instead of being
+  silently cut off at the boundary's NUL; and the Prelude test looks at code, so an
+  `import` inside a `/- … -/` comment (or a string, or the identifier `import'`) no longer
+  suppresses the Prelude and turns a valid program into "unknown identifier Nat". The
+  in-page server's diagnostics for an attributed command land on its keyword line, a
+  command after a same-line `/- … -/` is no longer dropped, and the value renderer caps
+  its recursion depth: a huge `#eval` value shows `… (too deep to show)` with the raw
+  form in the tooltip instead of "Maximum call stack size exceeded".
+* `--target wasm` rejects `export` wrappers with an error instead of silently dropping
+  them (8f), as the stage docs already said.
+* web (11ab): the React framework's page half (`web/framework/driver.js`) calls the three
+  exports `web/framework/app.wiz` defines (`wiz_react_init`/`_html`/`_step`), refuses a
+  module that lacks one, and scopes the page-wide `js_patch` hook to the root whose step
+  is running, so a second mounted app no longer patches the first.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

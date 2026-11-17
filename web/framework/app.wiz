@@ -1,0 +1,60 @@
+import IO
+import Optic
+import Web.React
+-- The Wiz half of web/framework/driver.js: a small counter app whose three exports are
+-- the ones the page half calls.
+--
+--   wiz_react_init : Model                (the initial state, a value like WSt.empty)
+--   wiz_react_html : Model → String       (SSR of the current state)
+--   wiz_react_step : Model → String → IO Model   ("event\nhandler index")
+--
+-- `wizReactStep` applies the event, hands the patch list from the old state to the new
+-- one to `js_patch` (web/js.c → the page's `globalThis.wizPatch`), and returns the new
+-- state. Build it as a library (from the repository root, with Emscripten):
+--
+--   wiz --cc emcc --ldflags "-sMEMORY64=1 --no-entry -sMODULARIZE -sEXPORT_ES6 \
+--     -sEXPORTED_FUNCTIONS=_wiz_react_init,_wiz_react_html,_wiz_react_step,_free" \
+--     build web/framework/app.wiz -o app.mjs --no-main
+--
+-- (`web/framework/driver.js` documents the page side; this file is the export contract.)
+link_c "../js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+inductive Msg where
+  | inc
+  | dec
+
+structure Model where
+  count : Nat
+
+def view (s : Model) : React.VNode Msg :=
+  React.el "div" [React.class "counter"]
+    [ React.el "p" List.nil [React.text "count ", React.text (Nat.toString s.count)]
+    , React.on "click" Msg.inc (React.el "button" List.nil [React.text "+"])
+    , React.on "click" Msg.dec (React.el "button" List.nil [React.text "-"])
+    ]
+
+def app : React.App Model Msg := React.App.mk (Model.mk 0)
+  (fun m s => match m with
+    | .inc => Model.mk (s.count + 1)
+    | .dec => Model.mk (Nat.sub s.count 1))
+  view
+
+-- "event\nindex", the one string the page sends (the driver's protocol).
+def WizReact.event (s : Model) (ev : String) : Model :=
+  match String.splitOn ev "\n" with
+  | .cons event (.cons index _) => match String.parseNat index with
+    | .some i => React.App.event app s event i
+    | .none => s
+  | _ => s
+
+def wizReactInit : Model := app.init
+def wizReactHtml : Model → String := fun s => React.App.html app s
+def wizReactStep (s : Model) (ev : String) : IO Model := do
+  let next := WizReact.event s ev;
+  Js.patch (React.App.patches app s next);
+  IO.pure next
+
+export "wiz_react_init" wizReactInit
+export "wiz_react_html" wizReactHtml
+export "wiz_react_step" wizReactStep

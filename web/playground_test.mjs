@@ -5,19 +5,16 @@
 //   usage: node web/playground_test.mjs OUT_DIR
 import { pathToFileURL } from "node:url";
 import { renderValue } from "./playground-values.js";
+import { evalSource } from "./playground-wasm.js";
+import { withPrelude } from "./selfhost-lsp-shim.js";
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;
 const wasm = await createModule({ printErr: (s) => console.error(s) });
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
+// The page's own wrapper (web/playground-wasm.js): the same ownership and NUL rules.
 function run(source) {
-  const p = wasm.stringToNewUTF8(source);
-  const r = wasm._wiz_playground_eval(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : "";
-  if (r) wasm._free(r);
-  return text.split("\n").filter((l) => l !== "");
+  return evalSource(wasm, source).split("\n").filter((l) => l !== "");
 }
 
 let failed = 0;
@@ -47,6 +44,11 @@ check("an error", out[4], "error: unknown identifier nope");
 const bare = run("import Prelude\ndef one : Nat := 1\n#eval one\n");
 check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
+
+// wasm-03's exact repro through the page's rule: the `import Std` is inside a block
+// comment, so the Prelude must still be prepended and `Nat` is in scope.
+const commented = run(withPrelude("/-\nimport Std\n-/\ndef two : Nat := 1 + 1\n").source);
+check("a commented-out import still gets the Prelude", commented[0], "two : Nat");
 
 if (failed) process.exit(1);
 console.log("playground: all checks passed");

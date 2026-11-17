@@ -32,6 +32,13 @@ if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (p
 node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
 if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
   echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
+# (11ab) the playground's Wasm boundary (ownership, NUL) and value renderer (depth cap)
+node "$ROOT/web/playground-wasm_test.mjs" > "$OUT/playground-wasm.txt"
+if grep -qF 'playground wasm boundary: all checks passed' "$OUT/playground-wasm.txt"; then echo "ok (playground, wasm boundary)"; else
+  echo "FAIL (playground, wasm boundary)"; cat "$OUT/playground-wasm.txt"; exit 1; fi
+node "$ROOT/web/playground_values_test.mjs" > "$OUT/playground-values.txt"
+if grep -qF 'playground values: all checks passed' "$OUT/playground-values.txt"; then echo "ok (playground, values)"; else
+  echo "FAIL (playground, values)"; cat "$OUT/playground-values.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"

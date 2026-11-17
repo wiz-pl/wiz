@@ -190,8 +190,9 @@ These are deliberate for this target; none of them affects the C or LLVM backend
   the JS numbers, not by the module). Decimal output uses an 8 KiB scratch buffer; a big
   number with more digits than that is outside this target.
 * **Not a library target.** `--target wasm` builds a `main`; `--lib`, `--no-main`, `--split`
-  and export wrappers are rejected. The C/LLVM flags (`--cc`, `--cflags`, `--ldflags`,
-  `--gmp`) are ignored.
+  and export wrappers are rejected with an error (a program with `export "name" f` builds
+  with the C target instead, which emits the wrappers). The C/LLVM flags (`--cc`,
+  `--cflags`, `--ldflags`, `--gmp`) are ignored.
 * The host is checked in and must be present to *run* a module
   (`web/wasm-host.mjs`); a browser or another host can instantiate the module itself by
   providing the five `env` functions.

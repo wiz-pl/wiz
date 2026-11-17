@@ -8,11 +8,21 @@
 // raw line (and the page always keeps the raw text in the line's `title`).
 "use strict";
 
+// The deepest `con(`/pair nesting we parse. The parser is recursive-descent, so a big
+// `#eval` normal form (a Nat is one `con(pair(…))` per successor) would otherwise
+// exhaust the JavaScript stack and `run()`'s catch would replace the whole output with
+// "Maximum call stack size exceeded". Past this depth the value is shown as its raw text
+// with a marker; nothing is lost (`line()` keeps the raw form in the title).
+const MAX_DEPTH = 2000;
+const TOO_DEEP = Symbol("too deep");
+export const TOO_DEEP_MARKER = "… (too deep to show)";
+
 // A value is `con(pair(tag, fields))`, a pair `(a, b)`, a tag `#n` or `tt`.
-function parse(s, i = 0) {
+function parse(s, i = 0, depth = 0) {
+  if (depth > MAX_DEPTH) throw TOO_DEEP;
   i = skip(s, i);
   if (s.startsWith("con(", i)) {
-    const [v, j] = parse(s, i + 4);
+    const [v, j] = parse(s, i + 4, depth + 1);
     if (v === null) return [null, i];
     const k = skip(s, j);
     return s[k] === ")" ? [v, k + 1] : [null, i];
@@ -24,11 +34,11 @@ function parse(s, i = 0) {
     return j > i + 1 ? [{ k: "tag", n: Number(s.slice(i + 1, j)) }, j] : [null, i];
   }
   if (s[i] === "(") {
-    const [a, j] = parse(s, i + 1);
+    const [a, j] = parse(s, i + 1, depth + 1);
     if (a === null) return [null, i];
     let k = skip(s, j);
     if (s[k] !== ",") return [null, i];
-    const [b, l] = parse(s, k + 1);
+    const [b, l] = parse(s, k + 1, depth + 1);
     if (b === null) return [null, i];
     k = skip(s, l);
     return s[k] === ")" ? [{ k: "pair", a, b }, k + 1] : [null, i];
@@ -42,8 +52,13 @@ function skip(s, i) {
 }
 
 function whole(s) {
-  const [v, j] = parse(s, 0);
-  return v !== null && skip(s, j) === s.length ? v : null;
+  try {
+    const [v, j] = parse(s, 0);
+    return v !== null && skip(s, j) === s.length ? v : null;
+  } catch (e) {
+    if (e === TOO_DEEP) return TOO_DEEP;
+    throw e;
+  }
 }
 
 const isTt = (v) => v !== null && v.k === "tt";
@@ -106,6 +121,7 @@ function elem(v) {
 export function renderValue(line) {
   const v = whole(line);
   if (v === null) return null;
+  if (v === TOO_DEEP) return TOO_DEEP_MARKER;
   const n = nat(v);
   if (n !== null && n > 0) return String(n);
   const c = con(v);

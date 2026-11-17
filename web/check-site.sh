@@ -29,6 +29,7 @@ need playground/index.html
 need playground/playground.js
 need playground/playground.css
 need playground/playground-values.js
+need playground/playground-wasm.js
 need playground/lsp-client.js
 need playground/goals.js
 need playground/playground-lsp.js

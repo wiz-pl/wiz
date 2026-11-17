@@ -422,6 +422,18 @@ def wasmGroup : Group where
         | .ok _ => throw (IO.userError "the Wasm target accepted --lib")
         | .error e =>
           unless (e.splitOn "not supported").length > 1 do throw (IO.userError e) },
+    { name := "`export` wrappers are rejected, not silently dropped", run := fun _ => do
+        let src := "import Prelude\ndef inc (n : Nat) : Nat := n + 1\n" ++
+          "export \"inc\" inc\ndef main : Nat := inc 41"
+        let s := runFrontend (R := ZeroOneMany) src { loader := ← libLoader, trustedModule := Tests.libModule }
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        let dir ← IO.FS.createTempDir
+        match ← Build.build ({} : Toolchain) s "main" (dir / "m.wasm") false false false 0 true with
+        | .ok _ => throw (IO.userError "the Wasm target silently dropped an `export` wrapper")
+        | .error e =>
+          unless (e.splitOn "export").length > 1 && (e.splitOn "rejects").length > 1 do
+            throw (IO.userError e) },
     { name := "an unknown foreign function is reported, not called", run := fun _ => do
         let e ← wasmError ("import Std\ndef main : Nat := Str.size (Str.ofString \"abc\")")
         unless (e.splitOn "not supported by the Wasm backend").length > 1 do throw (IO.userError e) }

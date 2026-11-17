@@ -63,10 +63,50 @@ export function wantsSelfhost(search) {
   }
 }
 
+// The source with comments and string literals blanked out (their characters become
+// spaces; newlines stay), so a test for real code cannot match inside either. It keeps
+// every offset: the result has the same length as `text`.
+export function stripComments(text) {
+  const out = text.split("");
+  const blank = (i) => { if (i < out.length && out[i] !== "\n") out[i] = " "; };
+  let i = 0;
+  let depth = 0;      // block-comment nesting
+  while (i < text.length) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (depth > 0) {
+      if (c === "/" && d === "-") { depth++; blank(i); blank(i + 1); i += 2; }
+      else if (c === "-" && d === "/") { depth--; blank(i); blank(i + 1); i += 2; }
+      else { blank(i); i++; }
+      continue;
+    }
+    if (c === "/" && d === "-") { depth = 1; blank(i); blank(i + 1); i += 2; continue; }
+    if (c === "-" && d === "-") {
+      while (i < text.length && text[i] !== "\n") { blank(i); i++; }
+      continue;
+    }
+    if (c === "\"") {
+      blank(i); i++;
+      while (i < text.length) {
+        if (text[i] === "\\") { blank(i); blank(i + 1); i += 2; continue; }
+        const close = text[i] === "\"";
+        blank(i); i++;
+        if (close) break;
+      }
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
 // The page's rule (web/playground.js): a source without an `import` gets the embedded
 // Prelude. `prefix` is what was added, so offsets can be moved back into the editor.
+// The test looks at code, not raw text: an `import` inside a comment or a string is not
+// an import (a `/- example: import Std -/` block used to suppress the Prelude), and an
+// identifier such as `import'` is not the keyword either.
 export function withPrelude(text) {
-  if (/^\s*import\b/m.test(text)) return { source: text, prefix: "" };
+  if (/^\s*import\s/m.test(stripComments(text))) return { source: text, prefix: "" };
   const prefix = "import Prelude\n\n";
   return { source: prefix + text, prefix };
 }
@@ -121,35 +161,40 @@ export function splitCommands(text) {
   let inBlock = 0;          // nesting depth of `/- … -/`
   let inMutual = false;
   let pending = null;       // a doc comment or attribute waiting for its command
-  for (const line of lines) {
+  for (const raw of lines) {
     const here = offset;
-    offset += line.length + 1;
+    offset += raw.length + 1;
     if (inBlock > 0) {
-      inBlock = blockDepth(line, inBlock);
+      inBlock = blockDepth(raw, inBlock);
       continue;
     }
+    if (raw.trim() === "" || /^\s*--/.test(raw)) continue;
+    if (/^\s/.test(raw)) continue;               // indented: part of the previous command
+    // A block comment at column 0 may close on this line, and a command may follow it:
+    // `/- note -/ def x : Nat := 1` is one command whose head is `def`.
+    const lead = afterLeadingComments(raw, here);
+    if (raw.startsWith("/--") && pending === null) pending = here;
+    if (lead.block > 0) {
+      inBlock = lead.block;
+      continue;
+    }
+    const line = lead.text;
+    const at = lead.offset;
     if (line.trim() === "" || /^\s*--/.test(line)) continue;
-    if (/^\s/.test(line)) continue;              // indented: part of the previous command
-    if (line.startsWith("/-")) {
-      const depth = blockDepth(line, 0);
-      if (line.startsWith("/--") && pending === null) pending = here;
-      inBlock = depth;
-      continue;
-    }
     if (inMutual) {
       if (/^end\b/.test(line)) inMutual = false;
       continue;
     }
     if (CONTINUES.test(line)) continue;
     if (line.startsWith("@[") && !/\]\s*\S/.test(line)) {
-      if (pending === null) pending = here;      // an attribute on a line of its own
+      if (pending === null) pending = at;        // an attribute on a line of its own
       continue;
     }
     const keyword = line.replace(/^@\[[^\]]*\]\s*/, "")
       .replace(/^((private|protected|noncomputable|partial|unsafe)\s+)*/, "");
     const command = {
-      start: pending === null ? here : pending,
-      head: here,
+      start: pending === null ? at : pending,
+      head: at,
       end: text.length,
       keyword: (keyword.match(/^\S+/) || [""])[0],
       silent: SILENT.test(keyword),
@@ -161,6 +206,37 @@ export function splitCommands(text) {
     if (/^mutual\b/.test(keyword)) inMutual = true;
   }
   return commands;
+}
+
+// The part of `line` after any block comments that start at its first character and
+// close on it, with the offset of that part in the text and the comment depth still open
+// (0 when they all closed). A comment-only line gives an empty `text`.
+function afterLeadingComments(line, offset) {
+  let text = line;
+  let at = offset;
+  while (text.startsWith("/-")) {
+    const close = sameLineBlockEnd(text);
+    if (close < 0) return { text, offset: at, block: blockDepth(text, 0) };
+    const ws = /^[ \t]*/.exec(text.slice(close))[0].length;
+    at += close + ws;
+    text = text.slice(close + ws);
+  }
+  return { text, offset: at, block: 0 };
+}
+
+// The index just after the `-/` that closes a block comment starting at `line[0]`, when
+// it closes on this line; -1 when it runs on (comments nest).
+function sameLineBlockEnd(line) {
+  let depth = 0;
+  for (let i = 0; i + 1 < line.length; i++) {
+    if (line[i] === "/" && line[i + 1] === "-") { depth++; i++; }
+    else if (line[i] === "-" && line[i + 1] === "/") {
+      depth = Math.max(0, depth - 1);
+      i++;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
 }
 
 function blockDepth(line, depth) {
@@ -266,8 +342,20 @@ function editorOffset(text, prefix, codePoints) {
 
 // The diagnostics for `text` from a parsed check answer. A line's range is its
 // command's first line (from `off`); a parse error's is the token at its own offset.
+// `off` is the frontend's `skipWs` position, which includes a leading `@[…]` (and a
+// doc comment); `splitCommands` knows the keyword line (`head`), so the diagnostic
+// lands where the command does, as the text fallback's does.
 export function diagnosticsFromCheck(text, answer) {
   const { prefix } = withPrelude(text);
+  const commands = splitCommands(text);
+  const headFor = (at) => {
+    let found = null;
+    for (const c of commands) {
+      if (c.start > at) break;
+      found = c;
+    }
+    return found === null ? at : found.head;
+  };
   const diagnostics = [];
   for (const line of answer.lines) {
     const raw = String(line.text === undefined ? "" : line.text);
@@ -284,7 +372,7 @@ export function diagnosticsFromCheck(text, answer) {
       continue;
     }
     const known = typeof line.off === "number";
-    const at = known ? editorOffset(text, prefix, line.off) : 0;
+    const at = known ? headFor(editorOffset(text, prefix, line.off)) : 0;
     if (severity === 3 && (raw === "" || !known || !RESULT.test(text.slice(at)))) continue;
     const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(raw) };
     diagnostic.range = known ? range(text, at, lineEnd(text, at)) : range(text, 0, 0);

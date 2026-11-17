@@ -1550,9 +1550,12 @@ commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the ker
 makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
 the only trust boundary (and must be one element); all other text and attribute values
 are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
-no effects, and `value`/`checked` would need property patches. Tests: group `react`
-and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
-`wiz-notes/react-framework.md`.
+no effects, and `value`/`checked` would need property patches. A page's Wiz half is
+`web/framework/app.wiz`, which exports `wiz_react_init`/`wiz_react_html`/`wiz_react_step`
+for `web/framework/driver.js`; the driver applies `js_patch`'s JSON to the root whose
+step is running, so two apps on one page do not patch each other. Tests: group `react`
+and `web/framework/test.sh` (Node DOM, including `driver_test.mjs`). Design, survey and
+migration analysis: `wiz-notes/react-framework.md`.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
