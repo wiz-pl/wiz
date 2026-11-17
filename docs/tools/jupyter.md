@@ -26,7 +26,7 @@ The kernel needs Python ≥ 3.10 and `pyzmq`; Jupyter itself is only needed to
 installed: the kernel lives in this checkout.
 
 ```sh
-python3 -m pip install pyzmq                 # or: nix shell nixpkgs#python3Packages.pyzmq
+python3 -m pip install pyzmq                 # or: nix shell --inputs-from . nixpkgs#python3Packages.pyzmq
 python3 -m wiz_kernel install --user         # from tools/jupyter, or with PYTHONPATH:
                                              # PYTHONPATH=tools/jupyter python3 -m wiz_kernel install --user
 jupyter console --kernel wiz-kernel          # or a notebook: Kernel → Wiz

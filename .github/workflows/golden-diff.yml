@@ -69,7 +69,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # The failing commit, not the default branch: this is the tree whose output the
           # diff must reproduce. `persist-credentials: false`: the read-only token is not
@@ -78,7 +78,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
       - name: The failing run's test logs
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: test-log-*
           path: logs
@@ -123,7 +123,7 @@ jobs:
               --out golden-diff.md --comment-out golden-diff-comment.md "${logs[@]}"
           fi
           cat golden-diff.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && hashFiles('golden-diff.md') != ''
         with:
           name: golden-diff
@@ -146,7 +146,7 @@ jobs:
       actions: read
       pull-requests: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: golden-diff
           path: report

@@ -70,14 +70,14 @@ jobs:
       run:
         shell: nix develop --command bash -eo pipefail {0}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: ./.github/actions/setup
         with:
           cachix-name: badlydrawnwizards
       - name: Generate the exercise tree
         run: python3 scripts/mkexercises.py . "$RUNNER_TEMP/exercises"
       - name: Cache its Lake build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/exercises/.lake
           key: exercises-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.*', '**/*.lean') }}
@@ -102,11 +102,11 @@ jobs:
       # the commit built: the pushed one, or the dispatched `commit`
       OLD_COMMIT: ${{ inputs.commit }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.commit || github.sha }}
       # this workflow's own scripts (a dispatched old commit may predate them)
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: .release-tools
           sparse-checkout: scripts
@@ -121,12 +121,25 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$OLD_COMMIT" ] || { echo "commit: give the full 40-hex sha"; exit 1; }
           st=$(gh api "repos/${{ github.repository }}/compare/$OLD_COMMIT...master" --jq .status)
           case $st in ahead|identical) ;; *) echo "$OLD_COMMIT is not on master ($st)"; exit 1 ;; esac
-      - name: elan
+      # elan, from the official x86_64-linux release asset, pinned by version and sha256
+      # (no installer script is fetched from a branch). Do not use nixpkgs' elan here:
+      # its patch rewrites the downloaded toolchain's cc/leanc to Nix's gcc wrapper, and
+      # the C_INCLUDE_PATH below then feeds gcc clang's __stddef_* headers ("missing
+      # binary operator before token '('"). The official toolchain has no bin/cc: lake
+      # compiles C through the clang-based leanc, which is what this job needs.
+      - name: elan (official release, hash-pinned)
+        env:
+          ELAN_VERSION: v4.2.4
+          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
         run: |
-          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          curl -sSfL -o "$RUNNER_TEMP/elan.tar.gz" \
+            "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Cache the Lake build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .lake
           key: release-lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}
@@ -152,7 +165,7 @@ jobs:
           if grep -q -- --gmp-src web/build.sh 2>/dev/null; then echo "web=yes" >> "$GITHUB_OUTPUT"; else echo "web=no" >> "$GITHUB_OUTPUT"; fi
       - name: Emscripten
         if: steps.web.outputs.web == 'yes'
-        uses: mymindstorm/setup-emsdk@v14
+        uses: emscripten-core/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
           version: 6.0.9
           actions-cache-folder: emsdk-cache
@@ -180,13 +193,13 @@ jobs:
       # needs no outside server; master also copies them to the release bundle-inputs
       - name: Cache the bundle's downloads
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bundle-downloads
           key: bundle-inputs-${{ hashFiles('.release-tools/scripts/bundle-cc.sources') }}
       - name: Cache the bundled C toolchain
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: cc-bundle
           key: release-cc-${{ runner.os }}-${{ hashFiles('lean-toolchain', '.release-tools/scripts/bundle-cc.sh', '.release-tools/scripts/bundle-cc.sources') }}
@@ -331,7 +344,7 @@ jobs:
             [ -f "$f" ] || continue
             echo "$have" | grep -qxF "$(basename "$f")" || gh release upload bundle-inputs $r "$f"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wiz-x86_64-linux
           path: dist/
@@ -350,8 +363,10 @@ jobs:
           notes=$RUNNER_TEMP/notes.md
           awk -v h="## [$v]" 'index($0, h) == 1 { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md > "$notes"
           if ! grep -q '[^[:space:]]' "$notes"; then echo "CHANGELOG.md has no section [$v]"; exit 1; fi
-          printf '\nInstall: `curl -sSfL https://raw.githubusercontent.com/%s/%s/scripts/tower-init.sh | sh -s -- %s` (docs/install.md).\n' \
-            "${{ github.repository }}" "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" >> "$notes"
+          # the installer is at this tag; its sha256 pins the tag's content in the notes
+          sum=$(sha256sum scripts/tower-init.sh | cut -d' ' -f1)
+          printf '\nInstall:\n\n```sh\ncurl -sSfL -o tower-init.sh https://raw.githubusercontent.com/%s/%s/scripts/tower-init.sh\necho "%s  tower-init.sh" | sha256sum -c -\nsh tower-init.sh %s\n```\n\n(docs/install.md).\n' \
+            "${{ github.repository }}" "$GITHUB_REF_NAME" "$sum" "$GITHUB_REF_NAME" >> "$notes"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo "release ${GITHUB_REF_NAME} exists already: its assets are not replaced"; exit 1
           fi

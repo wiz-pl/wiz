@@ -105,7 +105,9 @@
         <p>Tower works like elan or rustup: it puts <code>wiz</code> and
           <code>grail</code> shims on <code>PATH</code> and keeps toolchains per
           project.</p>
-        <pre tabindex="0"><code>curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh | sh
+        <pre tabindex="0"><code>curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh
+echo 'ad9c3a25a846f0316947e1529799dce9c6eccd4bd57fc8c7440a9e3ec371133c  tower-init.sh' | sha256sum -c -
+sh tower-init.sh
 export PATH="$HOME/.tower/bin:$PATH"
 tower default nightly</code></pre>
         <p class="small">Or with Nix:

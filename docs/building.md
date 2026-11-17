@@ -266,8 +266,12 @@ one S-expression file, or a git repository) and writes `grail.lock`; `grail fetc
 --locked` materialises that lock and `grail build/test/run/lsp/doc` read only the lock.
 `grail update --locked` is a check, not a resolution: it reads the lock, verifies that
 the manifest's requirements are pinned, and never reads the index (so a new publication
-cannot break CI). `--offline` makes `update`, `fetch` and builds use cached index clones
-and archives only; a missing item is an error, never a download. `--index URL#COMMIT`
+cannot break CI). CI should run `grail update --locked --require-signature`: that also
+refuses a registry lock with no signed index snapshot. (An index without a signed
+snapshot is the explicit exception: `--allow-unsigned`, documented in
+[install.md](install.md#dependencies); do not use it in CI.) `--offline` makes `update`,
+`fetch` and builds use cached index clones and archives only; a missing item is an
+error, never a download. `--index URL#COMMIT`
 (or `Package.set "index-commit"`) pins the index revision; the lock also records the
 index URL and commit that produced it. A URL index must fast-forward from the lock's
 commit: a force-pushed/rewritten history is refused unless `--allow-rewind` (TUF's
@@ -293,8 +297,10 @@ resolved against the index root (which is what makes the checked-in fixture usab
 offline). An index may publish a signed `index/snapshot.sexpr` (+ `.sig`);
 `grail update --require-signature --allowed-signers FILE` verifies it offline and pins
 its key, sequence and digest in the lock, and `grail index verify` checks one without a
-network. SHA-256 and the lock still give integrity, the index's git history and review
-give names, and building a package still runs its author's code.
+network. `--locked` reads no index, so it checks the signature entry's shape; use
+`grail index verify --locked` to re-verify the signature itself. SHA-256 and the lock
+still give integrity, the index's git history and review give names, and building a
+package still runs its author's code.
 
 `grail vendor [DIR]` (23n) copies the lock's registry archives into `DIR` (default
 `vendor/`) as `<sha256>.tar.gz` and writes `DIR/index.sexpr`; the lock is unchanged, so
@@ -600,15 +606,20 @@ is the standard library's reference manual, made with that `wiz`) and publishes 
 store paths to Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
+nix develop .#ci -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
 ```
 
-with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
-build has no Lake artifact cache: a commit's first build compiles every module in the
-sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
-paths. Pull requests from forks get no secret: they skip the push and their shards build
-the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
-(`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
+The shell `.#ci` carries `cachix` from the flake's locked nixpkgs, so no global
+registry lookup is involved. `CACHIX_AUTH_TOKEN` (the repository secret) is in the
+master push step's environment only. A Nix build has no Lake artifact cache: a commit's
+first build compiles every module in the sandbox (Lean comes from nixpkgs), and a rerun
+of the same commit substitutes the store paths. A pull request never gets the trusted token: it reads the public cache
+anonymously and publishes only to its own untrusted cache (`CACHIX_PR_NAME` and
+`CACHIX_PR_AUTH_TOKEN`); without that secret it publishes nothing and its shards build
+the paths. A merge-queue run gets no trusted token either and publishes nothing, so its
+shards build too. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
+(`cachix-action` is set up for substitution only, `skipPush: true`); a PR's shards also
+add the PR cache as an extra substituter for that job only. No job on the
 critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
 Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
@@ -936,9 +947,9 @@ file (`grail test`, stage 23f). The `golden-diff` workflow
 failed, and makes the diff the artifact a reviewer needs:
 
 * it downloads the run's `test-log-*` artifacts (the shards' `*.log` and `*.jsonl`);
-* it checks out the failing commit, builds `grail` from the public Cachix cache (a fork
-  pull request has no published store path and builds it instead), and runs
-  `scripts/golden-diff.py`;
+* it checks out the failing commit, builds `grail` from the public Cachix cache (a
+  pull request's store path is in the untrusted PR cache, which this workflow does not
+  read, so it builds instead), and runs `scripts/golden-diff.py`;
 * the script re-runs **only the failing golden cases** with `grail test --update` in a
   temporary copy of the checkout, then prints a one-line-per-case summary and a unified
   diff of every changed `.expected` file (a new `.expected` shows as `/dev/null`);

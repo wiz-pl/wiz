@@ -20,14 +20,19 @@ Once you have one: [your first project](#a-first-project-with-grail),
 ### Install it
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/badly-drawn-wizards/wiz/master/scripts/tower-init.sh | sh
+curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/badly-drawn-wizards/wiz/master/scripts/tower-init.sh
+echo 'ad9c3a25a846f0316947e1529799dce9c6eccd4bd57fc8c7440a9e3ec371133c  tower-init.sh' | sha256sum -c -
+sh tower-init.sh
 export PATH="$HOME/.tower/bin:$PATH"      # put this in your shell's profile
 ```
 
-The script needs `curl`, `tar` and `git`. It downloads the release tarball of the
-`nightly` channel and checks its `.sha256`, then copies `tower` to `~/.tower/bin`, writes
-the **shims** `wiz` and `grail` next to it, and makes `nightly` your default toolchain.
-For a release instead, `| sh -s -- v0.1.0`.
+The hash pins the installer itself: a download that does not match it is not run (when
+the script changes, this documentation changes with it). The script needs `curl`, `tar`,
+`sha256sum` and `git`. It downloads the release tarball of the `nightly` channel and
+refuses to unpack it unless its `.sha256` is present and matches, then copies `tower` to
+`~/.tower/bin`, writes the **shims** `wiz` and `grail` next to it, and makes `nightly`
+your default toolchain. For a release instead, `sh tower-init.sh v0.1.0` (the release
+notes carry the same command with that tag's hash).
 
 You can do the same by hand:
 
@@ -206,8 +211,21 @@ def package : Package := Package.new "app"
 commit it. Builds, tests, the language server and `grail doc` use the lock only, so they
 need the index only after a dependency changes. To restore a checkout on another
 machine, run `grail fetch --locked` (or `grail fetch --locked --offline` when the
-archives are already cached); CI should run `grail update --locked` to catch a forgotten
-lock. Update a dependency with `grail update`, never by editing the lock.
+archives are already cached); CI should run
+`grail update --locked --require-signature` to catch a forgotten lock **and** a lock
+that records no verified index snapshot. The first update against an index needs its
+trust root: `grail update --require-signature --allowed-signers FILE` verifies the
+index's signed snapshot and pins its key, sequence and digest in the lock. `--locked`
+reads no index, so it checks that entry's shape; add `grail index verify --locked` to
+re-verify the signature offline. Update a dependency with `grail update`, never by
+editing the lock.
+
+**The escape.** An index without a signed snapshot (the `examples/grail-index` fixture
+is one, and so is any registry that predates signing) is accepted only if you say so:
+pass `--allow-unsigned` to `update`/`fetch`/`build`, or simply omit
+`--require-signature` where nothing passes it. Prefer a signed registry; if you use the
+escape, the lock's SHA-256s still give integrity, but naming rests on the index's git
+history and review, not on a signature. Do not put the escape in CI.
 
 For a machine with no network at all, `grail vendor` copies the lock's registry archives
 into `vendor/` (content-addressed, with `vendor/index.sexpr`) without changing the lock;
@@ -280,7 +298,8 @@ repository and are not in the release tarball:
   the editor (or `wiz-infoview --file F.wiz --at LINE:COL` on its own);
 * **in a browser**: `web/build.sh` (needs Emscripten, which the dev shell does not
   include; without `emcc` on `PATH` the script runs itself again under
-  `nix shell nixpkgs#emscripten`), then `web/bridge.sh`, which starts `wiz lsp --ws`
+  `nix shell --inputs-from . nixpkgs#emscripten`), then `web/bridge.sh`, which starts
+  `wiz lsp --ws`
   and serves the page; open the address it prints. The page edits its own documents,
   and when your editor's server runs with `--ws` it also follows that editor's cursor.
 
