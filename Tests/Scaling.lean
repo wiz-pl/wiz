@@ -428,8 +428,9 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
   pure (n, bad)
 
 /-- Modules of `lib/` that can't be imported together with all the others (`Json`
-declares its own `Nat.repr`), checked on their own. -/
-def libApart : List String := ["Json", "Infoview"]
+declares its own `Nat.repr`; `Scry.EgraphNative` is the native-table backend that replaces
+`Scry.Egraph` under the same names, and `Scry.EqPlan` imports it), checked on their own. -/
+def libApart : List String := ["Json", "Infoview", "Scry.EgraphNative", "Scry.EqPlan"]
 
 /-- Every other module of `lib/` imported at once. -/
 def allLibSource : IO String := do
