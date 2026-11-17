@@ -267,6 +267,37 @@ function completionPage(options = {}) {
   check("completions: a stale answer is dropped", popup.isOpen(), false);
 }
 
+{
+  // The answer was computed for "N", but the user typed "at" while it was in flight:
+  // its textEdit range ends at the old caret, so applying it to the new text would
+  // duplicate the typed suffix (`def x := Nat.addat`). The accept re-anchors the edit
+  // on the identifier prefix at the current caret.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const stale = [{
+    label: "Nat.add",
+    textEdit: {
+      range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } },
+      newText: "Nat.add",
+    },
+  }];
+  const { editor, popup } = completionPage({
+    value: "def x := N", caret: 10, autoTrigger: false,
+    onRequest: async () => { await gate; return stale; },
+  });
+  const pending = popup.request({ line: 0, character: 10 });
+  editor.value = "def x := Nat";
+  editor.selectionStart = 12;
+  editor.selectionEnd = 12;
+  for (const fn of editor._ls.get("input") || []) fn({ type: "input" });
+  release();
+  await pending;
+  check("completions: the stale answer opens over the new prefix", popup.isOpen(), true);
+  popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
+  check("completions: a textEdit from older text is not applied", editor.value, "def x := Nat.add");
+  check("completions: the caret after a re-anchored edit", editor.selectionStart, 16);
+}
+
 check("completions: on by default", wantsCompletions(""), true);
 check("completions: ?completions=off", wantsCompletions("?completions=off"), false);
 check("completions: ?completions=0", wantsCompletions("?completions=0"), false);

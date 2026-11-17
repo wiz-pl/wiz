@@ -296,8 +296,11 @@ export function stripSnippet(text) {
 
 // What an accepted item inserts and where: `{text, start, end, caret, insert}`. A
 // `textEdit` is authoritative (its range replaces the prefix, or more, as the server
-// says); otherwise `insertText` — or the label — replaces the identifier prefix before
-// the caret.
+// says) *when its end is the caret*: an answer requested for an older caret can arrive
+// after more typing, and applying its range to the newer text would duplicate the typed
+// suffix (`Nat.add` over `N`, then `at` → `Nat.addat`). A range that does not end at the
+// current caret is re-anchored on the identifier prefix at the caret. Otherwise
+// `insertText` — or the label — replaces that prefix.
 export function acceptCompletion(item, text, offset) {
   const value = text || "";
   const at = clampNat(num(offset), 0, value.length);
@@ -306,16 +309,19 @@ export function acceptCompletion(item, text, offset) {
   let end = at;
   let insert;
   const edit = item && item.textEdit;
+  const anchored = (from, to) => to === at && from <= at;
   if (edit && edit.range) {
-    start = offsetFromPosition(value, edit.range.start || {});
-    end = edit.range.end ? offsetFromPosition(value, edit.range.end) : at;
+    const from = offsetFromPosition(value, edit.range.start || {});
+    const to = edit.range.end ? offsetFromPosition(value, edit.range.end) : at;
     insert = edit.newText !== undefined ? String(edit.newText) : String(edit.insertText || item.label || "");
+    if (anchored(from, to)) { start = from; end = to; }
   } else if (edit && (edit.insert || edit.replace)) {
     // InsertReplaceEdit: the narrower range is the one an accept replaces.
     const range = edit.replace || edit.insert;
-    start = offsetFromPosition(value, range.start || {});
-    end = range.end ? offsetFromPosition(value, range.end) : at;
+    const from = offsetFromPosition(value, range.start || {});
+    const to = range.end ? offsetFromPosition(value, range.end) : at;
     insert = String(edit.newText || item.label || "");
+    if (anchored(from, to)) { start = from; end = to; }
   } else {
     insert = item && item.insertText !== undefined ? String(item.insertText) : String(item && item.label || "");
     if (item && item.insertTextFormat === 2) insert = stripSnippet(insert);
