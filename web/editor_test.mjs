@@ -35,6 +35,11 @@ function checkThat(name, condition, detail) {
   check("utf-16: position of the caret after the emoji", positionFromOffset(text, 3), { line: 0, character: 3 });
   check("utf-16: position after the newline", positionFromOffset(text, 5), { line: 1, character: 0 });
 
+  // A character past the end of its line stops at the line end (LSP ranges from other
+  // servers do this); it must not resolve into the next line.
+  check("utf-16: past the line end stays on the line", offsetFromPosition("ab\ncd", { line: 0, character: 5 }), 2);
+  check("utf-16: past the last line's end stops at the text", offsetFromPosition("ab\ncd", { line: 1, character: 5 }), 5);
+
   // Code points: a(1) 😀(1) b(1) = 3 on line 0; the difference is one.
   check("code points: after the emoji", codePointPositionFromOffset(text, 3), { line: 0, character: 2 });
   check("code points: line 2", codePointPositionFromOffset(text, 6), { line: 1, character: 1 });

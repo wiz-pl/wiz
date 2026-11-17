@@ -39,7 +39,11 @@ export function offsetAt(text, position) {
     if (newline < 0) return text.length;
     offset = newline + 1;
   }
-  return Math.min(text.length, offset + character);
+  // `character` counts within its line: a past-the-end character stops at the line
+  // break, not at the same column of the next line.
+  const newline = text.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? text.length : newline;
+  return Math.min(lineEnd, offset + character);
 }
 
 // The inverse: an LSP position for a JavaScript string index.
