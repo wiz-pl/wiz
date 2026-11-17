@@ -691,19 +691,37 @@ the elan toolchain, so the setup action keeps the elan cache for those
   Boehm GC, compiling the toolchain to `self2.c`, and stage 3 is `self2.c` compiled the
   same way, compiling to `self3.c`. The script prints every stage's size and md5 and
   marks each stage after the first PASS/FAIL against stage 1; all three C files must be
-  byte-identical (`--stages N` for more stages, 2 for the old two-stage check; `--keep`
-  keeps the C files and binaries, and `--compare-only` re-checks kept ones).
+  byte-identical and must have the same md5 (the printed md5 is part of the verdict,
+  not decoration). It also compiles each stage's C from a fixed file name with
+  `-frandom-seed`, a fixed file-prefix map, `SOURCE_DATE_EPOCH=0` and
+  `-Wl,--build-id=none`, and requires every stage executable from stage 2 on to be
+  byte-identical to stage 2's; if the raw bytes differ it compares stripped copies and
+  names the differing ELF sections. The parser tables are checked too: the generator
+  renders them into the output directory twice and the script diffs both renders against
+  `selfhost/Tables.wiz`, so a stale checked-in table (or a nondeterministic generator)
+  fails the fixpoint rather than being trusted. `--stages N` adds stages, and `--keep`
+  keeps the C files and binaries. `--compare-only` re-checks kept artifacts only when
+  the run's `provenance` file names the same source hash, mode and stage count and every
+  artifact hash matches; the commit is recorded and reported, and a commit that changed
+  an input fails through the source hash. Run it in the same toolchain shell, because
+  the source hash includes the compiler and its flags.
   Stage 1 = stage 2 shows that the C emitted by the Lean-built compiler is reproduced by
   the compiler that C builds. Stage 2 = stage 3 shows that reproduction is a fixed point
-  and not one coincident round. The comparison covers the generated `self.wiz` input in
-  the selected mode (`--rc` for reference counting): it shows that code generation is
+  and not one coincident round; the executable comparison additionally shows that the
+  link is deterministic. The comparison covers the generated `self.wiz` input in the
+  selected mode (`--rc` for reference counting): it shows that code generation is
   deterministic and does not depend on whether the compiler came from Lean or from C. It
   does not show that the C is correct (it is compiled with `-w`), that the compiled
   toolchain behaves correctly (the test suite covers that), or anything about other
-  inputs, flags, C compilers or GC versions.
-  The self-compile needs about 6 GiB; the script names that requirement if a stage is
-  killed for memory (exit 137). Run it locally with `nix develop -c
-  scripts/fixpoint.sh` and a 6 GiB reservation.
+  inputs, flags, C compilers or GC versions. It does not compare stage 1's Lean-built
+  `compiler` (a different toolchain and runtime) or the runtime/GC libraries both stages
+  link (inputs, not stage outputs). The added comparisons are cheap: the two table
+  renders took 9.6 s and 2.0 s in a loaded run (3.2 s and 1.2 s on a quiet machine), the
+  source hash 2.4 s, and the C/executable/table comparisons 0.1 s together; the stages
+  themselves dominate.
+  The self-compile needs about 7 GiB on a loaded machine (a run on 2026-11-17 peaked at
+  6.4 GiB; the script names the requirement if a stage is killed for memory, exit 137).
+  Run it locally with `nix develop -c scripts/fixpoint.sh` and a 7 GiB reservation.
   The weekly `fixpoint` job in `ci.yml` runs it on `ubuntu-latest`. The separate
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
