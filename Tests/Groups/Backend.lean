@@ -11,6 +11,7 @@ namespace Tests.Elab
 def backendGroup : Group where
   name := "backend"
   exercise := "Exercise 8.1"
+  parallel := true
   cases := [
     { name := "numbers through the IR", run := fun _ =>
         okLib "import Prelude\n#run 100 * 100 + 1" ["10001"] },

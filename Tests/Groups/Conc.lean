@@ -302,6 +302,7 @@ def main : IO Unit := EIO.toIO (do
 def concGroup : Group where
   name := "conc"
   exercise := "lib/Session.wiz, lib/MVar.wiz, runtime threads (stage 25)"
+  parallel := true
   cases := [
     { name := "a dependent protocol: the pure semantics `link` runs it", run := fun _ =>
         okLibs (concSum ++ "#eval (link sumProto (client 100) server).1") ["5050"] },
