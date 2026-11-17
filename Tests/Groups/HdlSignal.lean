@@ -45,21 +45,11 @@ def hdlSignalGroup : Group where
           ".cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 .nil)))))))))",
           "10"] },
     { name := "34a: a register that keeps the size is rejected (a combinational loop as a size error)", run := fun _ => do
-        failsLibs "import Hdl.Signal
-def badReg {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^i
-  | .head => init
-  | .tail => s
-" "builds a value of size ↑s or ∞, not i" },
+        failsLibs "import Hdl.Signal\ndef badReg {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^i\n  | .head => init\n  | .tail => s\n" "builds a value of size ↑s or ∞, not i" },
     { name := "34a: a size-preserving map is rejected (needs sized scofix, lane L2)", run := fun _ => do
-        failsLibsEvery "import Hdl.Signal
-def mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i
-  | .head => f s.head
-  | .tail => mapS f s.tail
-" "inferred: Signal^i d A" },
+        failsLibsEvery "import Hdl.Signal\ndef mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i\n  | .head => f s.head\n  | .tail => mapS f s.tail\n" "inferred: Signal^i d A" },
     { name := "34a: signals of two clock domains do not mix", run := fun _ => do
-        failsLibs "import Hdl.Signal
-def crossDomain (s : Signal ClockDomain.sys Nat) : Signal (ClockDomain.named \"fast\") Nat := s
-" "type mismatch" } ]
+        failsLibs "import Hdl.Signal\ndef crossDomain (s : Signal ClockDomain.sys Nat) : Signal (ClockDomain.named \"fast\") Nat := s\n" "type mismatch" } ]
 
 builtin_initialize registerGroup hdlSignalGroup
 
