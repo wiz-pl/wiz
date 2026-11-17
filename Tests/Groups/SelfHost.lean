@@ -754,6 +754,34 @@ def implDecls : List (String × Bool) := [
   ("attribute [implemented_by f1] f1\n", false), ("attribute [implemented_by g2] f1\n", false),
   ("attribute [implemented_by myLen] strlen\n", false)]
 
+/-- (B12) The output of the native-representation program: a value built with `mk` (the
+extern implementation), read back with `get`, combined and matched. -/
+def reprExpected : String := "40\n42\n43\n125\n86\n"
+
+/-- (B12) The declarations the `implemented_by mk get` verdicts are checked against: a
+sealed type with one runtime field, a wrapper (`WR`) whose `mk`/`get` are ordinary
+definitions, a two-live-field type, an unsealed one, and an unrelated definition. -/
+def reprHeader : String :=
+  "sealed inductive WR where\n  | private mk (n : Nat)\n" ++
+  "def WR.mkImpl (n : Nat) : WR := .mk n\n" ++
+  "def WR.getImpl (w : WR) : Nat := match w with\n  | .mk n => n\n" ++
+  "sealed inductive W2 where\n  | private mk (a : Nat) (b : Nat)\n" ++
+  "def W2.mkImpl (a b : Nat) : W2 := .mk a b\n" ++
+  "def W2.getImpl (w : W2) : Nat := 0\n" ++
+  "inductive Unsealed where\n  | mk (n : Nat)\n" ++
+  "def f (n : Nat) : Nat := n\n"
+
+def reprDecls : List (String × Bool) := [
+  ("attribute [implemented_by WR.mkImpl WR.getImpl] WR.mk\n", true),
+  ("attribute [implemented_by nope WR.getImpl] WR.mk\n", false),
+  ("attribute [implemented_by WR.mkImpl nope] WR.mk\n", false),
+  ("attribute [implemented_by f WR.getImpl] WR.mk\n", false),
+  ("attribute [implemented_by WR.mkImpl f] WR.mk\n", false),
+  ("attribute [implemented_by WR.mkImpl WR.getImpl] f\n", false),
+  ("attribute [implemented_by W2.mkImpl W2.getImpl] W2.mk\n", false),
+  ("attribute [implemented_by WR.mkImpl WR.getImpl] Unsealed.mk\n", false),
+  ("attribute [implemented_by WR.mkImpl WR.getImpl] WR.mk\nattribute [implemented_by WR.mkImpl WR.getImpl] WR.mk\n", false)]
+
 /-- (stage 21s) A Wiz library: the self-hosted compiler's C without a `main` (`--lib`, or
 `--no-main`) and its header (`--header`), linked with a C program that calls the exports
 and the handle functions. -/
@@ -2066,22 +2094,46 @@ def selfHostGroup : Group where
         selfhostAgreesIO "" [
           ("c_struct \"wiz_byte_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),
           ("c_struct \"struct b\" B where\n  data : Bytes\n", false)] },
-    { name := "native representation: implemented_by mk/get on a sealed constructor (stage 30)", run := fun _ => do
-        let prog := "import IO\n" ++
-          "sealed inductive WA where\n  | private mk (xs : List Nat)\n" ++
-          "def WA.mkImpl (xs : List Nat) : WA := .mk xs\n" ++
-          "def WA.getImpl (a : WA) : List Nat := match a with\n  | .mk xs => xs\n" ++
-          "attribute [implemented_by WA.mkImpl WA.getImpl] WA.mk\n" ++
-          "def WA.ofList (xs : List Nat) : WA := .mk xs\n" ++
-          "def WA.toList (a : WA) : List Nat := WA.getImpl a\n" ++
-          "extern \"wa_id\" WA.ofListNative : List Nat → WA\n" ++
-          "extern \"wa_id\" WA.toListNative : WA → List Nat\n" ++
-          "attribute [implemented_by WA.ofListNative] WA.ofList\n" ++
-          "attribute [implemented_by WA.toListNative] WA.toList\n" ++
-          "def main : IO Unit := IO.println (Nat.toString (List.length (WA.toList (WA.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))))))"
-        let csrc := "typedef unsigned long wiz_val;\nwiz_val wa_id(wiz_val x) { return x; }\n"
-        selfhostLinkRun [("main.wiz", prog ++ "\nlink_c \"c/wa.c\"\n"), ("c/wa.c", csrc)] "3\n"
-        selfhostLinkRun [("main.wiz", prog ++ "\nlink_c \"c/wa.c\"\n"), ("c/wa.c", csrc)] "3\n" (flags := #["--rc"]) },
+    -- (B12) a native representation: the type's values are the implementation's, in both
+    -- toolchains and in both memory modes. `wnat_of`/`wnat_bits` keep a word as a boxed
+    -- Nat (the host's `wiz_val` and the self-hosted `V` are both `uintptr_t`).
+    { name := "(B12) native representation: implemented_by mk/get on a sealed type, built and read back by the host and by the self-hosted compiler", run := fun _ => do
+        let prog := "import IO\nlink_c \"c/wnat.c\"\n" ++
+          "sealed inductive WN where\n  | private mk (n : Nat)\n" ++
+          "extern \"wnat_of\" WN.ofBits : Nat → WN\n" ++
+          "extern \"wnat_bits\" WN.toBits : WN → Nat\n" ++
+          "attribute [implemented_by WN.ofBits WN.toBits] WN.mk\n" ++
+          "def WN.ofNat (n : Nat) : WN := .mk n\n" ++
+          "def WN.toNat (w : WN) : Nat := WN.toBits w\n" ++
+          "def WN.add (a b : WN) : WN := .mk (WN.toNat a + WN.toNat b)\n" ++
+          "def WN.inc (w : WN) : WN := match w with\n  | .mk n => .mk (n + 1)\n" ++
+          "def WN.sum : List WN → Nat\n  | .nil => 0\n  | .cons w ws => WN.toNat w + WN.sum ws\n" ++
+          "def main : IO Unit := do\n" ++
+          "  let a := WN.ofNat 40;\n  IO.println (Nat.toString (WN.toNat a));\n" ++
+          "  let b := WN.add a (WN.ofNat 2);\n  IO.println (Nat.toString (WN.toNat b));\n" ++
+          "  let c := WN.inc b;\n  IO.println (Nat.toString (WN.toNat c));\n" ++
+          "  IO.println (Nat.toString (WN.sum (.cons a (.cons b (.cons c .nil)))));\n" ++
+          "  IO.println (Nat.toString (match c with\n    | .mk n => n * 2))\n"
+        let csrc := "#include <stdint.h>\ntypedef uintptr_t wv;\n" ++
+          "wv wnat_of(uint64_t n) { return (wv)((n << 1) | 1); }\n" ++
+          "uint64_t wnat_bits(wv v) { return (uint64_t)(v >> 1); }\n"
+        let files := [("main.wiz", prog), ("c/wnat.c", csrc)]
+        linkRun files reprExpected
+        selfhostLinkRun files reprExpected
+        selfhostLinkRun files reprExpected (flags := #["--rc"]) },
+    { name := "(B12) implemented_by mk/get: the host and the self-hosted frontend accept and reject the same registrations", run := fun _ =>
+        selfhostAgreesIO reprHeader reprDecls },
+    { name := "(B12) implemented_by mk/get: the diagnostics are the host's (unknown name, unsuitable constructor or getter)", run := fun _ =>
+        selfhostLevelErrors [
+          ("def f (n : Nat) : Nat := n\nattribute [implemented_by nope] f\n", "unknown declaration 'nope'"),
+          ("sealed inductive WM where\n  | private mk (a : Nat) (b : Nat)\n" ++
+           "def WM.mkImpl (a b : Nat) : WM := .mk a b\ndef WM.getImpl (w : WM) : Nat := 0\n" ++
+           "attribute [implemented_by WM.mkImpl WM.getImpl] WM.mk\n",
+           "is not a constructor with exactly one runtime field"),
+          ("sealed inductive WM where\n  | private mk (n : Nat)\n" ++
+           "def WM.mkImpl (n : Nat) : WM := .mk n\ndef WM.getImpl (n : Nat) : Nat := n\n" ++
+           "attribute [implemented_by WM.mkImpl WM.getImpl] WM.mk\n",
+           "must take a value of WM as its last argument")] },
     { name := "a link_c file that does not exist is an error, in both toolchains (21t)", run := fun _ => do
         let prog := "import IO\nlink_c \"c/nope.c\"\ndef main : IO Unit := IO.println \"hi\"\n"
         let (s, src, _) ← elabTree [("main.wiz", prog)]

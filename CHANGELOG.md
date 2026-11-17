@@ -10,6 +10,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: `attribute [implemented_by mk get] T.mk` now works end to end. The frontend
+  records the native representation (the constructor's tag, its one runtime field and the
+  two conversions' arities, the host's `ReprInfo`) and reports the host's diagnostics for
+  an unknown name, a constructor with more than one runtime field, or a `get` that does
+  not end in the type; the backend erases a value of `T` as `mk` applied to the
+  constructor's runtime field and feeds a match the model's field chain read with `get`,
+  so a `UIntN`-like type compiles to the same values and runtime layout as the Lean
+  toolchain. A differential case compiles and runs a sealed word type with extern
+  `mk`/`get` in both toolchains (GC and RC), and a verdict case pins the registrations
+  (21aa).
+
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

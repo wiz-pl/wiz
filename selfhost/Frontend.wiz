@@ -532,8 +532,11 @@ inductive Foreign where
   | cstruct (name ctype header : String) (fields kinds : List String)
   -- (stage 21t) `attribute [implemented_by g] f`: compiled code runs `g` for `f`
   | impl (name target : String)
-  -- (stage 30) a native representation: `attribute [implemented_by mk get] T.mk`
-  | repr (T mk get : String)
+  -- (stage 30, B12) a native representation: `attribute [implemented_by mk get] T.mk`.
+  -- `T`, `mk` and `get` are kernel names; the rest is the host's `ReprInfo` (`tag` of the
+  -- constructor, field count, the one runtime field, `mk`'s arity and that field's
+  -- position, `get`'s telescope length), which the backend's erasure needs.
+  | repr (T mk get : String) (tag nfields r mkArity p getArity : Nat)
   -- (stage 30) `import_c`: the functions glue may call, the header's structs, and the C
   -- text (an include, a glue function) the backend puts before the wrappers
   | cfunc (name : String) (params : List String) (res : String)
@@ -6712,40 +6715,139 @@ def externNamed (n : String) : List Foreign → Bool
 def reprExists (ffi : List Foreign) (T : String) : Bool := match ffi with
   | .nil => .false
   | .cons f rest => match f with
-    | .repr t _ _ => Bool.or (strEq t T) (reprExists rest T)
+    | .repr t _ _ _ _ _ _ _ _ => Bool.or (strEq t T) (reprExists rest T)
     | _ => reprExists rest T
+-- (B12) a field's type has no runtime content: a sort, a proof, a size, or a lift of
+-- one (`erasable` in `Backend.wiz`; the frontend needs the test before the backend runs)
+partial def erasableTy (ty : Val) : Bool := match whnf ty with
+  | .vsort _ => .true
+  | .vsize => .true
+  | .vsizeLt _ => .true
+  | .vulift _ _ A => erasableTy A
+  | t => isProp empty t
+def dummyEnvN : Nat → Env
+  | .zero => .nil
+  | .succ k => .cons .vtt (dummyEnvN k)
+def qAt : List Q → Nat → Q
+  | .nil, _ => .qw
+  | .cons q _, .zero => q
+  | .cons _ rest, .succ k => qAt rest k
+-- the index of a constructor's one live field (kept at run time), if exactly one
+def liveField : Nat → Nat → List Q → List CField → Option Nat
+  | _, _, _, .nil => .none
+  | i, np, qs, .cons (.mk _ _ ty _) fs =>
+    match Bool.or (qEq (qAt qs i) .qz) (erasableTy (eval (dummyEnvN (np + i)) ty)) with
+    | .true => liveField (i + 1) np qs fs
+    | .false => match liveField (i + 1) np qs fs with
+      | .some _ => .none
+      | .none => .some i
+-- a constructor's erased shape (the host's `ctorShape?`): its tag (declaration order),
+-- field count, its one runtime field, and the type's parameter count
+inductive CtorShape where
+  | mk (tag nfields r np : Nat)
+def ctorShapeOf : String → Nat → Nat → List Ctor → Option CtorShape
+  | _, _, _, .nil => .none
+  | c, k, np, .cons (.mk cn fs _ qs _ _) rest =>
+    match strEq cn c with
+    | .true => match liveField 0 np qs fs with
+      | .some r => .some (.mk k (List.length fs) r np)
+      | .none => .none
+    | .false => ctorShapeOf c (k + 1) np rest
+-- the last domain of a Π telescope and its length (the host's `target`/`lastDom`):
+-- `get` must take a value of the native type as its last argument
+inductive LastArg where
+  | some (dom : Val) (arity : Nat)
+  | none
+def lastArgOf : Nat → Val → LastArg
+  | .zero, _ => .none
+  | .succ fuel, ty => match whnf ty with
+    | .vpi _ _ _ dom env cod =>
+      let cod' := eval (.cons (.vne (.hvar fuel) .snil) env) cod;
+      match whnf cod' with
+      | .vpi _ _ _ _ _ _ => match lastArgOf fuel cod' with
+        | .some d a => .some d (a + 1)
+        | .none => .none
+      | _ => .some dom 1
+    | _ => .none
+-- the type a seal axiom `T.seal✝` names (a native representation is found by the seal,
+-- never by the display name)
+def sealBase (n : String) : Option String := match splitLast n with
+  | .some (.mk base f) => match strEq f "seal✝" with
+    | .true => .some base
+    | .false => (.none : Option String)
+  | .none => (.none : Option String)
+-- the sealed type a `μ` index type's domain names, if it is a seal
+def sealOfDom (dom : Val) : Option String := match whnf dom with
+  | .vne (.haxiom n _) sp => match sp with
+    | .snil => sealBase n
+    | _ => (.none : Option String)
+  | _ => (.none : Option String)
+-- the sealed type a `μ`'s index type names
+partial def sealName : Nat → Val → Option String
+  | .zero, _ => (.none : Option String)
+  | .succ fuel, v => match whnf v with
+    | .vsigma _ _ _ _ env B => sealName fuel (eval (.cons (.vne (.hvar fuel) .snil) env) B)
+    | .vpi _ _ _ dom env cod =>
+      match sealOfDom dom with
+      | .some T => .some T
+      | .none => sealName fuel (eval (.cons (.vne (.hvar fuel) .snil) env) cod)
+    | _ => (.none : Option String)
+def reprSealOf (ty : Val) : Option String := match whnf ty with
+  | .vmu _ I _ _ _ => sealName 1000 I
+  | _ => (.none : Option String)
+-- `attribute [implemented_by mk get] T.mk` on a constructor: register the representation
+-- the backend erases values of `T` with, after the host's checks (`Command.lean`,
+-- `attrImplementedBy`)
+def implementedByRepr (gs : Globals) (g f get Tk Ts : String) (tyF tyG tyGet : Tm) : LinkR :=
+  let err := fun (m : String) => (LinkR.mk (Option.some (String.append "error: " m)) gs : LinkR);
+  match reprExists (Globals.ffi gs) Tk with
+  | .true => err (Ts +++ " already has a native representation")
+  | .false => match Scope.lookup (Globals.scope gs) (Ts +++ ".seal✝") with
+    | .none => err ("a native representation needs `sealed inductive " +++ Ts +++ "`: a look-alike of an unsealed type is the same type")
+    | .some _ => match Globals.ind gs Ts with
+      | .none => err (f +++ " is not a constructor with exactly one runtime field")
+      | .some (.mk np _ _ _ _ ctors _ _ _) =>
+        match ctorShapeOf (match splitLast f with | .some (.mk _ cf) => cf | .none => f) 0 np ctors with
+        | .none => err (f +++ " is not a constructor with exactly one runtime field")
+        | .some (.mk tag nf r np') =>
+          match lastArgOf 1000 (eval .nil tyGet) with
+          | .none => err (get +++ " must take a value of " +++ Ts +++ " as its last argument")
+          | .some dom ga => match reprSealOf dom with
+            | .some Tm => match strEq Tm Tk with
+              | .false => err (get +++ " must take a value of " +++ Ts +++ " as its last argument")
+              | .true => match convTy empty (eval .nil tyG) (eval .nil tyF) with
+                | .false => err (g +++ " can't implement " +++ f +++ ": its type " +++ show .nil 0 tyG +++ " is not " +++ f +++ "'s type " +++ show .nil 0 tyF)
+                | .true => LinkR.mk .none (Globals.addFFI gs (.repr Tk (globalKeyOf gs g) (globalKeyOf gs get)
+                    tag nf r (np' + nf) (np' + r) ga))
+            | .none => err (get +++ " must take a value of " +++ Ts +++ " as its last argument")
 def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let g := identOf' (kid stx 3);
   let f := identOf' (kid stx 6);
   let err := fun (m : String) => (LinkR.mk (Option.some (String.append "error: " m)) gs : LinkR);
   match globalTyOf gs f with
-  | .none => err (String.append "unknown declaration " f)
+  | .none => err (String.append "unknown declaration '" (String.append f "'"))
   | .some tyF => match globalTyOf gs g with
-    | .none => err (String.append "unknown declaration " g)
+    | .none => err (String.append "unknown declaration '" (String.append g "'"))
     | .some tyG => match kids (kid stx 4) with
       | .cons getStx _ =>
-        -- `attribute [implemented_by mk get] T.mk` (stage 22d): values of `T` are native.
-        -- The self-hosted backend records the constructor's implementation (`mk`) and the
-        -- representation; a program that only uses the type through its `implemented_by`
-        -- operations (as `U32Array`/`U64Map` do) compiles to those natives.
+        -- `attribute [implemented_by mk get] T.mk` (stage 22d, B12): values of `T` are
+        -- native. `mk` builds one from the constructor's arguments (it has the
+        -- constructor's type), `get` reads its one runtime field back; the kernel keeps
+        -- the model, and the backend erases a value of `T` to `mk`'s and back with `get`.
         let get := identOf' getStx;
         match globalTyOf gs get with
-        | .none => err (String.append "unknown declaration " get)
+        | .none => err (String.append "unknown declaration '" (String.append get "'"))
         | .some tyGet =>
-          let T := match splitLast f with
+          -- (the backend matches the representation by the type's kernel name, which is
+          -- the seal's base; the diagnostics use the source name)
+          let fk := globalKeyOf gs f;
+          let Tk := match splitLast fk with
+            | .some (.mk base _) => base
+            | .none => fk;
+          let Ts := match splitLast f with
             | .some (.mk base _) => base
             | .none => f;
-          match reprExists (Globals.ffi gs) T with
-          | .true => err (String.append T " already has a native representation")
-          | .false => match Scope.lookup (Globals.scope gs) (String.append T ".seal✝") with
-            | .none => err (String.append "a native representation needs `sealed inductive " (String.append T "`: a look-alike of an unsealed type is the same type"))
-            | .some _ =>
-              -- `mk` must have the constructor's type, and `get` must end in `T`
-              if Bool.not (convTy empty (eval .nil tyG) (eval .nil tyF)) then
-                err (g +++ " can't implement " +++ f +++ ": its type " +++ show .nil 0 tyG +++ " is not " +++ f +++ "'s type")
-              else (
-                let gs1 := Globals.addFFI gs (.impl f g);
-                LinkR.mk .none (Globals.addFFI gs1 (.repr T g get)))
+          implementedByRepr gs g f get Tk Ts tyF tyG tyGet
       | .nil => match Bool.or (externNamed f (Globals.ffi gs)) (elemStr f nativeNames) with
         | .true => err (String.append f " is a builtin or foreign function: it already has an implementation")
         | .false => match strEq f g with
