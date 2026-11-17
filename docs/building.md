@@ -214,7 +214,12 @@ CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles 
 runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
 (the header's prototypes are checked against the parts), each also with
 `-DWIZ_NO_THREADS`, and runs a small C program against the threaded and the one-thread
-runtime.
+runtime. The one-thread binary links with stub pthreads (every pthread name it uses is
+redirected with `-Wl,--wrap=` to a no-op) and must have no pthread symbols; the program
+sends on a channel before receiving, and checks that the waits a second thread would end
+stop with their message. It also compiles the header's Emscripten auto-enable with
+`-D__EMSCRIPTEN__` (there is no `emcc` in the toolchain, so this is not an Emscripten
+build).
 
 ## Test layout
 

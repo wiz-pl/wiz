@@ -395,6 +395,7 @@ WIZ_API wiz_val wiz_chan_fork(wiz_val child);
 WIZ_API wiz_val wiz_chan_send(wiz_val c, wiz_val a);
 WIZ_API wiz_val wiz_chan_recv(wiz_val c);
 WIZ_API void wiz_chan_close(wiz_val c);
+WIZ_API uint64_t wiz_chan_forks(void);
 WIZ_API wiz_val wiz_mvar_new(void);
 WIZ_API void wiz_mvar_put(wiz_val mv, wiz_val a);
 WIZ_API wiz_val wiz_mvar_new_full(wiz_val a);

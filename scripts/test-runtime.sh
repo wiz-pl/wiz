@@ -9,13 +9,22 @@
 #   * WIZ_API=static: every entry point is `static`, as in a generated C program.
 # The header's prototypes are checked against the definitions by this compile, so they
 # cannot drift silently. Both again with -DWIZ_NO_THREADS (the one-thread build of the
-# Wasm pages, concurrency plan R2), and once with -DWIZ_RC_ATOMIC (every count atomic).
+# Wasm pages, concurrency plan R2), once with -DWIZ_RC_ATOMIC (every count atomic), and
+# once with __EMSCRIPTEN__ (without and with __EMSCRIPTEN_PTHREADS__), which checks the
+# header's Emscripten auto-enable translates the one-thread runtime.
 #
 # Then a small C program (nothreads.c below), linked against the runtime, run threaded and
 # with WIZ_NO_THREADS: MVars and locks that never block work in both (and the one-thread
-# build never marks anything shared); `wiz_run_main` runs main on a thread of its own
-# only in the threaded build; and with WIZ_NO_THREADS, `Chan.fork` and waits that could
-# never end stop with a clear message (exit 3).
+# build never marks anything shared); a channel that sends before it receives carries a
+# message on one thread; `wiz_run_main` runs main on a thread of its own only in the
+# threaded build; and with WIZ_NO_THREADS, `Chan.fork` and waits that could never end
+# (an empty or full MVar, a held lock, a channel with no message) stop with a clear
+# message (exit 3).
+#
+# The WIZ_NO_THREADS binary is built against a stub <pthread.h> (stub/pthread.h below) and
+# linked without -lpthread, so this checks the real claim: a build with no threads needs
+# no pthreads (Emscripten without -pthread, the target of R2). The threaded binaries link
+# real pthreads.
 #
 # Usage: scripts/test-runtime.sh (from anywhere; run it through `heavy` or light)
 set -euo pipefail
@@ -36,6 +45,12 @@ cat > "$tmp/runtime.c" <<'EOF'
 #include "rt_data.inc"
 #include "rt_sys.inc"
 #include "rt_con.inc"
+/* the header's Emscripten auto-enable must have taken effect (see the check below) */
+#ifdef WIZ_EXPECT_NO_THREADS
+#ifndef WIZ_NO_THREADS
+#error "WIZ_NO_THREADS should be on: __EMSCRIPTEN__ without __EMSCRIPTEN_PTHREADS__"
+#endif
+#endif
 EOF
 
 check() { # check DESCRIPTION CC-ARGS…
@@ -52,6 +67,48 @@ check "WIZ_API=static (a generated C program)" -DWIZ_API=static
 check "WIZ_API=, WIZ_NO_THREADS" -DWIZ_API= -DWIZ_NO_THREADS
 check "WIZ_API=static, WIZ_NO_THREADS" -DWIZ_API=static -DWIZ_NO_THREADS
 check "WIZ_API=static, WIZ_RC_ATOMIC (every count atomic)" -DWIZ_API=static -DWIZ_RC_ATOMIC
+# Emscripten without -pthread: the header turns WIZ_NO_THREADS on by itself. This is not
+# an Emscripten build (there is no emcc or emscripten sysroot here), but it compiles the
+# auto-enable's translation unit with the same defines, and the runtime.c guard fails if
+# the macro did not take effect. With __EMSCRIPTEN_PTHREADS__ the threaded path stays on.
+check "WIZ_API=static, __EMSCRIPTEN__ without pthreads (the auto-enable)" \
+  -DWIZ_API=static -D__EMSCRIPTEN__ -DWIZ_EXPECT_NO_THREADS
+check "WIZ_API=static, __EMSCRIPTEN__ with pthreads (no auto-enable)" \
+  -DWIZ_API=static -D__EMSCRIPTEN__ -D__EMSCRIPTEN_PTHREADS__
+
+# The one-thread build's claim is that it needs no threads at all. glibc now has the
+# pthread entry points in libc, so "links without -lpthread" proves nothing; instead every
+# pthread name the runtime uses is redirected by -Wl,--wrap= to stub in stubpthread.c.
+# Mutexes and condition variables become no-ops (on one thread nothing contends, and every
+# wait that could block is a `wiz_no_threads` stop), and pthread_create stops the program
+# if it is ever reached (it is not: `wiz_spawn` stops first).
+cat > "$tmp/stubpthread.c" <<'EOF'
+/* Stub pthread entry points for the WIZ_NO_THREADS binary (see -Wl,--wrap). */
+#include <stdio.h>
+#include <stdlib.h>
+int __wrap_pthread_mutex_init(void *m, const void *a) { (void)m; (void)a; return 0; }
+int __wrap_pthread_mutex_destroy(void *m) { (void)m; return 0; }
+int __wrap_pthread_mutex_lock(void *m) { (void)m; return 0; }
+int __wrap_pthread_mutex_unlock(void *m) { (void)m; return 0; }
+int __wrap_pthread_cond_init(void *c, const void *a) { (void)c; (void)a; return 0; }
+int __wrap_pthread_cond_destroy(void *c) { (void)c; return 0; }
+int __wrap_pthread_cond_broadcast(void *c) { (void)c; return 0; }
+int __wrap_pthread_cond_wait(void *c, void *m) { (void)c; (void)m; return 0; }
+int __wrap_pthread_attr_init(void *a) { (void)a; return 0; }
+int __wrap_pthread_attr_destroy(void *a) { (void)a; return 0; }
+int __wrap_pthread_attr_setstacksize(void *a, unsigned long n) { (void)a; (void)n; return 0; }
+int __wrap_pthread_attr_setdetachstate(void *a, int d) { (void)a; (void)d; return 0; }
+unsigned long __wrap_pthread_self(void) { return 0; }
+int __wrap_pthread_equal(unsigned long a, unsigned long b) { return a == b; }
+int __wrap_pthread_sigmask(int how, const void *set, void *old) {
+  (void)how; (void)set; (void)old; return 0;
+}
+int __wrap_pthread_create(void *t, const void *a, void *(*f)(void *), void *p) {
+  (void)t; (void)a; (void)f; (void)p;
+  fprintf(stderr, "stub pthread: pthread_create was called in the one-thread build\n");
+  exit(99);
+}
+EOF
 
 cat > "$tmp/nothreads.c" <<'EOF'
 #include "runtime.c"
@@ -63,6 +120,17 @@ static const int one_thread = 0;
 static pthread_t main_tid;
 static int same_thread = -1;
 static wiz_val entry(void) { same_thread = pthread_equal(pthread_self(), main_tid) != 0; return WIZ_BOX(7); }
+/* A channel whose two ends stay in this thread. `Chan.fork` is the only Wiz-level way to
+   make one and it needs a thread, so this reaches the send/recv paths of the one-thread
+   build directly: a message queued before the receive never waits. */
+static wiz_chan *one_chan(void) {
+  wiz_chan *ch = (wiz_chan *)calloc(1, sizeof(wiz_chan));
+  pthread_mutex_init(&ch->mu, NULL);
+  pthread_cond_init(&ch->cv, NULL);
+  ch->ends = 2;
+  for (int s = 0; s < 2; s++) { ch->end[s].ch = ch; ch->end[s].side = s; }
+  return ch;
+}
 #define EXPECT(c) do { if (!(c)) { fprintf(stderr, "nothreads.c:%d: %s\n", __LINE__, #c); return 1; } } while (0)
 int main(int argc, char **argv) {
   const char *what = argc > 1 ? argv[1] : "";
@@ -82,6 +150,27 @@ int main(int argc, char **argv) {
     wiz_dec(mv);
     EXPECT(wiz_live == 0);
     puts("ok");
+    return 0;
+  }
+  if (!strcmp(what, "chan")) {
+    /* send before receive: the message is buffered, so no wait, on any number of threads */
+    wiz_chan *ch = one_chan();
+    wiz_val a = wiz_out_ptr(&ch->end[0], wiz_chan_end_fin);
+    wiz_val b = wiz_out_ptr(&ch->end[1], wiz_chan_end_fin);
+    EXPECT(wiz_chan_send(a, WIZ_BOX(42)) == a);
+    wiz_val r = wiz_chan_recv(b); /* consumes b and the message */
+    EXPECT(((wiz_ctor *)r)->fields[0] == WIZ_BOX(42));
+    wiz_dec(r); /* drops the endpoint inside the pair (b) */
+    wiz_dec(a);
+    EXPECT(wiz_live == 0);
+    puts("chan 42");
+    return 0;
+  }
+  if (!strcmp(what, "recv")) {
+    /* an empty channel: only another thread could send into it */
+    wiz_chan *ch = one_chan();
+    wiz_chan_recv(wiz_out_ptr(&ch->end[1], wiz_chan_end_fin));
+    puts("received");
     return 0;
   }
   if (!strcmp(what, "main")) {
@@ -112,8 +201,25 @@ build() { # build EXE CC-ARGS…
   fi
 }
 build "$tmp/mt" -DWIZ_API=static
-build "$tmp/st" -DWIZ_API=static -DWIZ_NO_THREADS
 build "$tmp/at" -DWIZ_API=static -DWIZ_RC_ATOMIC
+# the one-thread build: no -lpthread, every pthread name wrapped to the stub
+wrap=""
+for f in mutex_init mutex_destroy mutex_lock mutex_unlock cond_init cond_destroy \
+         cond_broadcast cond_wait attr_init attr_destroy attr_setstacksize \
+         attr_setdetachstate self equal sigmask create; do
+  wrap="$wrap -Wl,--wrap=pthread_$f"
+done
+if ! cc -O1 -w -I "$root/runtime" -I "$tmp" $cflags -DWIZ_API=static -DWIZ_NO_THREADS \
+     -o "$tmp/st" "$tmp/nothreads.c" "$tmp/stubpthread.c" $ldflags -lgmp $wrap; then
+  echo "test-runtime: FAIL: the WIZ_NO_THREADS build does not link with stub pthreads" >&2
+  exit 1
+fi
+if nm -u "$tmp/st" | grep -q pthread; then
+  echo "test-runtime: FAIL: the WIZ_NO_THREADS binary still needs pthread symbols:" >&2
+  nm -u "$tmp/st" | grep pthread >&2
+  exit 1
+fi
+echo "ok: WIZ_NO_THREADS links and runs with stub pthreads and no pthread symbols"
 
 expect() { # expect DESCRIPTION EXIT-CODE STDOUT STDERR-FRAGMENT (empty: no stderr) EXE ARGS…
   local what=$1 code=$2 out=$3 err=$4; shift 4
@@ -129,11 +235,15 @@ expect() { # expect DESCRIPTION EXIT-CODE STDOUT STDERR-FRAGMENT (empty: no stde
 }
 expect "threaded: MVars and locks" 0 ok "" "$tmp/mt" ok
 expect "threaded: main runs on a thread of its own" 0 7 "" "$tmp/mt" main
+expect "threaded: a channel sends before it receives" 0 "chan 42" "" "$tmp/mt" chan
 expect "WIZ_RC_ATOMIC: MVars and locks" 0 ok "" "$tmp/at" ok
 expect "WIZ_NO_THREADS: MVars and locks, nothing marked shared" 0 ok "" "$tmp/st" ok
 expect "WIZ_NO_THREADS: main runs on the calling thread" 0 7 "" "$tmp/st" main
+expect "WIZ_NO_THREADS: a channel sends before it receives" 0 "chan 42" "" "$tmp/st" chan
 expect "WIZ_NO_THREADS: Chan.fork stops with a clear message" 3 "" \
   "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)" "$tmp/st" fork
+expect "WIZ_NO_THREADS: receiving on an empty channel stops" 3 "" \
+  "wiz: Chan.recv on an empty channel would wait forever: threads are not available" "$tmp/st" recv
 expect "WIZ_NO_THREADS: taking from an empty MVar stops" 3 "" \
   "wiz: MVar.take of an empty MVar would wait forever: threads are not available" "$tmp/st" take
 expect "WIZ_NO_THREADS: putting into a full MVar stops" 3 "" \

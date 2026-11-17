@@ -204,10 +204,12 @@ def concGroup : Group where
     { name := "the same protocol over a channel, server in a new thread", run := fun _ =>
         cRunLibs (concSum ++ "def main : IO Unit := Chan.fork sumProto serve (fun c =>\n" ++
           "  IO.bind (runClient 1000 c) (fun s => IO.println (Nat.toString s)))") "500500\n" },
-    { name := "Proc.runLinked: the model is `link`, compiled code runs threads (differential)", run := fun _ => do
+    { name := "Proc.runLinked: the model is `link` and starts no thread; compiled code runs one (differential: the fork count must be 1)", run := fun _ => do
         okLibs (concSum ++ "#eval (link sumProto (client 300) server).1") ["45150"]
         cRunLibs (concSum ++ "def main : IO Unit := IO.bind (Proc.runLinked sumProto (client 300) server)\n" ++
-          "  (fun r => IO.println (Nat.toString r.1))") "45150\n" },
+          "  (fun r => IO.bind Chan.forks (fun k =>\n" ++
+          "    IO.println (String.append (Nat.toString r.1) (String.append \" forks \" (Nat.toString k)))))")
+          "45150 forks 1\n" },
     { name := "a chain of 51 threads; endpoints move into children", run := fun _ =>
         cRunLibs concChain "9950\n4950\n" },
     { name := "cancellation is a branch of the protocol", run := fun _ => do
@@ -272,7 +274,7 @@ def concGroup : Group where
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>
         cRunLibs concCaf "3198400000\n" },
-    { name := "WIZ_NO_THREADS (R2): forking stops with a clear message; MVars and locks that never wait work", run := fun _ => do
+    { name := "WIZ_NO_THREADS (R2): forking, and the waits only another thread could end (empty MVar, full MVar, held lock), stop with a clear message; MVars and locks that never wait work", run := fun _ => do
         noThreadsFails concCounter "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)"
         noThreadsFails (concSum ++ "def main : IO Unit := Chan.fork sumProto serve (fun c =>\n" ++
           "  IO.bind (runClient 10 c) (fun s => IO.println (Nat.toString s)))")
@@ -280,6 +282,13 @@ def concGroup : Group where
         noThreadsFails ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.new (A := Nat);\n" ++
           "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n")
           "wiz: MVar.take of an empty MVar would wait forever: threads are not available in this build"
+        noThreadsFails ("import IO\nimport MVar\n-- a contended cell: it is already full\ndef main : IO Unit := do1\n" ++
+          "  m ← MVar.newFull 1;\n  MVar.put m 2\n")
+          "wiz: MVar.put into a full MVar would wait forever: threads are not available in this build"
+        noThreadsFails ("import IO\nimport MVar\n-- a contended lock: acquired again while held\ndef main : IO Unit := do1\n" ++
+          "  l ← Lock.new;\n  Lock.acquire l (fun g =>\n    Lock.acquire l (fun g2 =>\n" ++
+          "      Lock.release l g2 (Lock.release l g (IO.pure ()))))\n")
+          "wiz: Lock.acquire of a held lock would wait forever: threads are not available in this build"
         match ← cRunLibsFlags ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.newFull 41;\n" ++
             "  l ← Lock.new;\n  k ← MVar.modify m (fun x => x + 1);\n  u ← Lock.with l (IO.pure ());\n" ++
             "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n") ["-DWIZ_NO_THREADS"] with
