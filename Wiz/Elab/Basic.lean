@@ -92,6 +92,21 @@ structure MetaEntry (R : Type) where
   know the type, and such a guess is left to `checkGuessedDecl` -/
   type? : Option (LocalCtx R × VTy R) := none
 
+/-- (13b, #411) A guess whose type comparison met an unsolved hole (`checkGuessTypes`):
+the comparison, kept to be made again at the end of the declaration, when its holes are
+solved (`recheckDeferredGuesses`). The guess `?m sp := guess` was made at level `l`, where
+the variables have the types `tys` (by level) and the names `names` (innermost first, for
+the message); `inferred` is the guess's type and `expected` the hole's. -/
+structure DeferredGuess (R : Type) where
+  l : Lvl
+  tys : Array (VTy R)
+  inferred : VTy R
+  expected : VTy R
+  m : Nat
+  sp : Array (Elim R)
+  guess : Val R
+  names : List Name
+
 /-- (7f) An instance problem not solved yet: the hole, in its context, and its class type.
 `blockers` are the unsolved holes in its (non-output) class arguments when it was last
 tried: it is tried again only once one of them is solved (`Elab/Class.lean`). -/
@@ -316,6 +331,10 @@ structure ElabState (R : Type) where
   /-- why each guess was left untyped (`markGuessed`), for `--trace-guess-fallback`. It is
   state, so a guess that unification backtracks out of takes its reason with it -/
   guessReasons : Array String := #[]
+  /-- (#411) the guesses whose type comparison met a hole, to be compared again at the end
+  of the declaration (`recheckDeferredGuesses`). State, like `guessReasons`, so a guess that
+  unification backtracks out of takes its comparison with it -/
+  deferredGuesses : Array (DeferredGuess R) := #[]
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
   while the globals stay as they are (the elaborator clears it when it changes them). -/

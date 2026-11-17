@@ -376,6 +376,30 @@ def group : Group where
        "def sel {F : Look Nat → Type} (p : Look Nat) (w : F p) : Look Nat := p\n" ++
        "def forge (x : Look Nat) : Look Nat := sel _ (G.mk x)\n" ++
        "#eval (forge (Look.mk 11)).val\n") [("Priv", privMod)] (cli := true),
+    -- (#411) where `?F x y := G` is guessed, `?F`'s type is `?A x y → Pos Nat → Type`: the
+    -- comparison with `Look Nat → Look Nat → Type` solves `?A` and then fails, so it met a
+    -- hole and is not final. It is made again at the end of the declaration, after `q`
+    -- has solved `?A := Look Nat`, and the forgery is reported as on the spot (not by the
+    -- whole-declaration recheck, whose message starts "a hole solved by shape takes")
+    rejected "opaque: a guess compared at the end of the declaration cannot forge either"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Look Nat → Type where\n  | mk (a b : Look Nat) : G a b\n" ++
+       "def sel {A : Type} {F : A → Pos Nat → Type} (a : A) (p : Pos Nat) (w : F a p) (q : A) : Nat := 0\n" ++
+       "def forge (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x\n")
+      (some "private") "sel"
+      ("the implicit argument F can't be G: the two types agree only through the definition " ++
+       "of Pos (module Priv), hidden outside its module")
+      [("Priv", privMod)],
+    -- (#411) its honest neighbour: the comparison meets the holes `?A` and `?b` (`Wrap ?b` is
+    -- stuck) where the guess is made, and agrees once `q` and `e` have solved them
+    accepted "accept: a guess compared at the end of the declaration that agrees"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Look Nat → Type where\n  | mk (a b : Look Nat) : G a b\n" ++
+       "def Wrap : Bool → Type\n  | true => Look Nat\n  | false => Nat\n" ++
+       "def sel {A : Type} {b : Bool} {F : A → Wrap b → Type} (a : A) (p : Wrap b) (w : F a p) " ++
+       "(q : A) (c : Bool) (e : b = c) : Nat := 0\n" ++
+       "def ok (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x true rfl\n" ++
+       "#eval ok (Look.mk 1) (Look.mk 2)\n") [("Priv", privMod)],
     rejected "inductive props: large elimination of a non-singleton proposition"
       (prelude ++ "inductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n" ++
        "def bad (h : Le 0 0) : Nat := match h with\n  | .refl _ => 0\n  | .step _ => 0\n")

@@ -398,9 +398,14 @@ environment, where a private type is its definition again, so it would accept a
 look-alike (the same view `rfl` and a holed `assign` already compare in). This is the
 fallback only: a quoted term can carry an evaluated `μ (T.desc …)` without the name `T`,
 which has no type in that view, so the check also rejects some honest declarations
-(`privacyCheck`). A declaration whose guesses were all typed is not affected. -/
+(`privacyCheck`). A declaration whose guesses were all typed is not affected. A guess
+whose type comparison met a hole is compared again first, with the declaration's holes
+solved (`recheckDeferredGuesses`): only one that is still undecided then reaches this
+recheck. -/
 def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Option (Term R)) :
     ElabM R Unit := do
+  -- (#411) the guesses whose comparison met a hole, now that the holes are solved
+  recheckDeferredGuesses info
   if (← get).unifyGuessed then
     let g := (← getGlobals).fullView
     let recheck := !(foreignOpaques g).isEmpty
