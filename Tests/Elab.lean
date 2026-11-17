@@ -793,12 +793,12 @@ def labels (k : Nat) : List Name := (List.range k).map (s!"a{·}")
 partial def toWiz : MTm → String
   | var i => s!"(.var {i})"
   | univ n => s!"(.univ {n})"
-  | pi a b => s!"(.pi .qw .lhole .lhole {a.toWiz} {b.toWiz})"
+  | pi a b => s!"(.pi (.qlit .qw) .lhole .lhole {a.toWiz} {b.toWiz})"
   | lam b => s!"(.lam {b.toWiz})"
   | app f a => s!"(.app {f.toWiz} {a.toWiz})"
   | letE t v b => s!"(.letE {t.toWiz} {v.toWiz} {b.toWiz})"
   | ann t ty => s!"(.ann {t.toWiz} {ty.toWiz})"
-  | sigma a b => s!"(.sigma .qw .lhole .lhole {a.toWiz} {b.toWiz})"
+  | sigma a b => s!"(.sigma (.qlit .qw) .lhole .lhole {a.toWiz} {b.toWiz})"
   | pair a b => s!"(.pair {a.toWiz} {b.toWiz})"
   | fst p => s!"(.fst {p.toWiz})"
   | snd p => s!"(.snd {p.toWiz})"
@@ -818,9 +818,9 @@ partial def toWiz : MTm → String
   | refl A a => s!"(.eqRefl {A.toWiz} {a.toWiz})"
   | reflTy X => s!"(.tyRefl {X.toWiz})"
   | sorted i j t => match t with
-    | pi a b => s!"(.pi .qw (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | pi a b => s!"(.pi (.qlit .qw) (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
     | piq q a b => s!"(.pi {qWiz q} (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
-    | sigma a b => s!"(.sigma .qw (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
+    | sigma a b => s!"(.sigma (.qlit .qw) (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
     | sigmaq q a b => s!"(.sigma {qWiz q} (.lnum {i}) (.lnum {j}) {a.toWiz} {b.toWiz})"
     | t => t.toWiz
   | cast A B e t => s!"(.coe {A.toWiz} {B.toWiz} {e.toWiz} {t.toWiz})"

@@ -1211,3 +1211,62 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: quantity terms (B6)
+
+The host's binder quantities are **terms** of type `Qty` (`Wiz/Core/Term.lean`): a
+literal `0`, `1`, `ω`, or a quantity variable `%q` (stage 4d), and a usage is a
+*polynomial* over the bound quantity variables (`Core/QPoly.lean`). The self-hosted
+kernel kept the fixed rig `{0, 1, ω}` and a literal `Q` on every binder. It now carries
+a quantity term on `Π` and `Σ` binders and in usage positions, with the concrete
+surface the library uses.
+
+**The smallest program the host accepts and the old frontend rejected:**
+
+```wiz
+def app {A B : Type} {q : Qty} (f : (%q x : A) → B) (%q a : A) : B := f a
+```
+
+The self-hosted frontend reads `%q` in a **Π/Σ binder** (including one written in a
+`def`'s type), so the same program with `(a : A)` in place of `(%q a : A)` elaborates to
+the same type (`a` is unrestricted; the argument to `f` still scales by `q`). A `%t` on a
+definition's **own** binder is deferred: `defT` still takes that one literal (the kernel
+would accept the term).
+
+`f a` uses `a` `q` times: the usage entry for `a` is the polynomial `q`, and leaving
+`a`'s binder checks `q ≤ q`. `def keep {q : Qty} (%q x : A) : A := x` is rejected in
+both (at `q = 0`, `1 ≤ 0` fails), and so is an erased or copied `%q` variable.
+
+* **Kernel** (`Kernel.wiz`). `Tm.pi`/`Tm.sigma` and `Val.vpi`/`Val.vsigma` carry a
+  quantity term/value, as `Term.pi`/`Val.pi` do; `eval` evaluates it, substitution
+  reaches it (so instantiating `q := 1` rewrites the Pi's usage quantity), quotation
+  writes a literal or a bare variable back, and conversion compares two quantities with
+  `qtySame`. Usages are `List QP`, where `QP` is the normal form of `Core/QPoly.lean`
+  (monomials sorted, equal monomials merged, zero coefficients dropped); `uAdd`/`uScale`
+  are polynomial addition and multiplication, `popUsage` uses `qpLe` (both constant:
+  `qle`; otherwise every assignment of the variables to `{0, 1, ω}`, as
+  `QPoly.leSymbolic`), and a case's branches join with `qpJoin` (equal polynomials, or
+  two constants' least upper bound; otherwise "the branches of a case use variables
+  incompatibly"). Erasure is still decided at the constant `0` only (`erasedIfV`):
+  a variable quantity may be `0` for some instances, so its position is not erased.
+* **Frontend** (`Frontend.wiz`). `Qty` is a built-in type name (like `Unit`), `ω` and
+  the numerals `0`/`1` check at an expected `Qty` (`qlit`), and `%t` in a binder is
+  read as a term: literals directly, an identifier (or another term the scope checker
+  reads) through `elab` and `closeG`. This covers `(q x : A) → B`, a Σ type,
+  `∀`, and a `fun` checked against a Π whose quantity is already a variable; the
+  quantities on a `def`'s own binders are still literals (deferred).
+
+**Deferred.** Quantities are still the fixed rig `{0, 1, ω}`: the self-hosted toolchain
+has no rig parameter, so "arbitrary rigs" stay a host-only generality. `%t` is accepted
+where the value normalizes to a literal or a bare quantity variable (the host's
+`qtyPoly` limit); a rig operation such as `q + 1` would be rejected by both, and there
+are no `Qty` operations in the surface language. A `%t` on a `def`'s own
+binder, constructor-field quantities (`| ok (%q a : A)`, `lib/Result.wiz`,
+`lib/Region.wiz`), `let %q`, `scase` at a variable and `%t` in a `fun`'s own binder are
+still errors here (the def-binder, field, `let` and case paths keep their literal `Q`);
+the library forms for those are the next step.
+
+**Tests** (group `selfhost`): `selfhostAgrees qtyTermHeader qtyTermDecls` (accepted:
+`app`, an unrestricted variable, `%0`/`%1`/`%ω`, a quantity variable in a checked `fun`;
+rejected: `keep`, dropping, copying, `%2`, `2` at `Qty`, a `%q` whose `q : Nat`), and
+`selfhostSameNats` on `qAppNat (q := 1) …` / `qAppNat (q := ω) …`.

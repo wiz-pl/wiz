@@ -578,6 +578,35 @@ def quantityProgram : String :=
   "  IO.println (Nat.toString (get b + sum p));\n  IO.println (Nat.toString (Nat.add 1 (lin 4 (fun y => y))));\n" ++
   "  IO.println (Nat.toString (Nat.add (id1 7) (len (List.cons 1 (List.cons 2 .nil)))))\n"
 
+/-- (B6) Quantity terms: `Qty` as a type, quantity literals as terms, a quantity
+variable bound by `{q : Qty}` and written `%q` on a binder, and usage scaled by it. -/
+def qtyTermHeader : String :=
+  "def qUse (q : Qty) : Qty := q\ndef qZero : Qty := 0\ndef qOne : Qty := 1\ndef qMany : Qty := ω\n" ++
+  "def qTwo : Qty := qUse 1\n"
+def qtyTermDecls : List (String × Bool) := [
+  -- a `%q` in a Π scales the argument's usage by `q` (`a` is unrestricted)
+  ("def poly {A B : Type} {q : Qty} (f : (%q x : A) → B) (a : A) : B := f a\n", true),
+  ("def polyNat {q : Qty} (f : (%q x : Nat) → Nat) (a : Nat) : Nat := f a\n", true),
+  -- a variable declared unrestricted may be used `q` times
+  ("def unrestricted {q : Qty} (f : (%q x : Nat) → Nat) (a : Nat) : Nat := f a\n", true),
+  -- `%` with a literal
+  ("def lit1 (%1 x : Nat) : Nat := x\ndef litW (%ω x : Nat) : Nat := x\ndef lit0 (%0 x : Nat) : Nat := 0\n", true),
+  -- a quantity variable in a `fun`'s expected Π (no written quantity)
+  ("def ap2 {q : Qty} : ((%q x : Nat) → Nat) → Nat → Nat := fun f a => f a\n", true),
+  -- an erased variable may not be returned; a linear one may not be dropped or copied
+  ("def keepQ {q : Qty} (%q x : Nat) : Nat := x\n", false),
+  ("def dropQ {q : Qty} (%q x : Nat) : Nat := 0\n", false),
+  ("def twiceQ {q : Qty} (%q x : Nat) : Nat := Nat.add x x\n", false),
+  -- ill-formed quantities: `2` is not a quantity of this rig, `q : Nat` is not `Qty`
+  ("def badRig (%2 x : Nat) : Nat := x\n", false),
+  ("def badLit : Qty := 2\n", false),
+  ("def notQty (q : Nat) (%q x : Nat) : Nat := x\n", false)]
+
+/-- (B6) A quantity-polymorphic function applied at an explicit quantity: the same
+normal form in both kernels (`q` is inferred from the named argument). -/
+def qtyTermEvalHeader : String :=
+  "def qAppNat {q : Qty} (f : (%q x : Nat) → Nat) (a : Nat) : Nat := f a\n"
+
 /-- (stage 21o) The files of `linkFiles`-style programs compiled by the self-hosted
 compiler: `main.wiz` is its input, the `// wiz-link-c:`/`// wiz-link-lib:` lines of the C
 it prints name the C files (relative to the input's directory) and libraries that `cc`
@@ -1926,7 +1955,7 @@ def selfHostGroup : Group where
         -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
-        let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
+        let verdict := "def piW (a b : Tm) : Tm := .pi (.qlit .qw) .lhole .lhole a b\n" ++
           "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
         let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
         let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
@@ -1940,6 +1969,12 @@ def selfHostGroup : Group where
         ioRun (fieldQtyProgram.replace "import Prelude" "import IO") "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n"
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
+    { name := "the self-hosted frontend: quantity terms (`Qty`, `%q`, quantity variables), as in the Lean frontend (B6)", run := fun _ =>
+        selfhostAgrees qtyTermHeader qtyTermDecls },
+    { name := "quantity terms: a quantity-variable application reduces, with the same normal form as the Lean kernel (B6)", run := fun _ =>
+        selfhostSameNats qtyTermEvalHeader [
+          ("qAppNat (q := 1) (fun x => x) 2", 2),
+          ("qAppNat (q := ω) (fun x => x) 5", 5)] },
     { name := "the self-hosted frontend: quantities, the pinned differences (21m, K1)", run := fun _ =>
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
@@ -2418,13 +2453,13 @@ def selfHostGroup : Group where
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
           "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
-          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
-          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
-          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
-          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
-          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
+          "def FP : Val := eval .nil (.pi (.qlit .qw) (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
+          "def U : Val := eval .nil (.pi (.qlit .qw) (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def G : Val := eval .nil (.pi (.qlit .qw) (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def S : Val := eval .nil (.sigma (.qlit .qw) (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
+          "def S1 : Val := eval .nil (.sigma (.qlit .qw) (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
           "def main : IO Unit := do\n" ++
-          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
+          "  IO.println (okT (.pi (.qlit .qw) .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
           "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
           "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
