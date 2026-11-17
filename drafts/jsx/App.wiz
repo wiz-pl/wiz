@@ -19,8 +19,8 @@ def view (s : Model) : React.VNode Msg :=
         <button on="click" msg={Msg.dec}>"-"</button>
         <span> {s.label} </span>
         <input type="range" />
-        {*React.text "raw node"}
-        {+List.map (fun t => React.text t) s.items}
+        {React.text "raw node"}
+        {List.map (fun t => React.text t) s.items}
       </div>
 
 def step (m : Msg) (s : Model) : Model :=

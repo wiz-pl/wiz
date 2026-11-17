@@ -6,7 +6,7 @@ verdict and the recommendation) is `wiz-notes/jsx-prototype.md`.
 | file | what |
 |------|------|
 | `Markup.wiz` | the `ui! <tag …> … </tag>` grammar, and the procedural macro that translates it to `React.el`/`React.on`/`React.keyed` |
-| `App.wiz` | a component tree written with markup, `#eval`ing its HTML and diff patches, and a `main` that prints both |
+| `App.wiz` | a component tree written with markup, `#eval`ing its HTML and diff patches, and a `main` that prints both; `{e}` splices a `String`, a `VNode` or a `List (VNode M)` |
 | `Dsl.wiz` | the same tree with the builder DSL (`H.div [H.cls "row"] [...]`), for comparison; prints the same HTML |
 | `selfhost-declarative.wiz` | the subset the self-hosted frontend accepts (declarative `syntax` + `macro_rules`), and its silent mismatched-tag bug |
 | `selfhost-procmacro.wiz` | the same shape with a procedural macro, which the self-hosted checker rejects |

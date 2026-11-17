@@ -13,8 +13,8 @@ ui! <div class="row"> {text} <button on="click" msg={Msg.inc}> {label} </button>
   `markup` category; `ui! markup` is the term that enters the category.
 * attributes are `name="text"`, `name={term}` (a `String` term), a bare `name`, and
   `on="event" msg={m}` (which becomes `React.on`), plus `key={k}` (`React.keyed`).
-* children are elements, `"text"`, `{s}` (a `String`), `{*v}` (a `VNode`) and `{+vs}`
-  (a `List (VNode M)`).
+* children are elements, `"text"`, or one `{e}` splice: a `String` (text), a `VNode`
+  or a `List (VNode M)`, converted by the `Markup.Child` class below.
 * the translation to `React.el`/`React.on`/`React.keyed` is a **procedural macro**
   (`attribute [macro markup.markupEl]`), because it has to walk an arbitrary number of
   attributes and children, compare the opening and closing tag, and turn tag and
@@ -25,6 +25,20 @@ The self-hosted frontend parses this grammar and runs `macro_rules`, but it does
 run procedural macros (and its prelude has no `Macro`/`MacroM`): files using `ui!` are
 host-only. This is why the module lives in `drafts/` rather than `lib/Web/`.
 -/
+
+/-- What a `{…}` splice may be: a `String` (text), a `VNode` (a node), or a
+`List (VNode M)` (siblings). The expected `VNode M` fixes `M`. -/
+class Markup.Child (M : Type) (A : Type) where
+  child : A → React.VNode M
+
+instance {M : Type} : Markup.Child M String where
+  child := fun s => React.text s
+
+instance {M : Type} : Markup.Child M (React.VNode M) where
+  child := fun v => v
+
+instance {M : Type} : Markup.Child M (List (React.VNode M)) where
+  child := React.seq
 
 declare_syntax_cat markup
 declare_syntax_cat markupAttr
@@ -41,10 +55,9 @@ syntax (name := attrFor) "for" "=" str : markupAttr
 -- Elements. `markup*` stops at `</`, so the closing tag is unambiguous.
 syntax (name := markupVoid) "<" ident markupAttr* "/>" : markup
 syntax (name := markupEl) "<" ident markupAttr* ">" markup* "</" ident ">" : markup
--- Children that are not elements.
+-- Children that are not elements: a splice (a `String`, `VNode` or list of them)
+-- and literal text.
 syntax (name := markupSplice) "{" term "}" : markup
-syntax (name := markupSpliceNode) "{" "*" term "}" : markup
-syntax (name := markupSpliceList) "{" "+" term "}" : markup
 syntax (name := markupText) str : markup
 -- The entry point: `ui! <…>` is a term.
 syntax (name := markup) "ui!" markup : term
@@ -149,12 +162,10 @@ def Markup.foldAttrs : List Syntax → Markup.Attrs → Markup.Attrs
 inductive Markup.Kid where
   | text
   | splice
-  | node
-  | list
   | other
 
 def Markup.kidTable : List (String × Markup.Kid) :=
-  [("markup.markupText", .text), ("markup.markupSplice", .splice), ("markup.markupSpliceNode", .node), ("markup.markupSpliceList", .list)]
+  [("markup.markupText", .text), ("markup.markupSplice", .splice)]
 
 def Markup.lookupKid (kind : String) : List (String × Markup.Kid) → Markup.Kid
   | .nil => .other
@@ -168,9 +179,7 @@ def Markup.kidOf (k : Syntax) : Markup.Kid := match k with
 it reaches it in the generated term (macro expansion is by node kind, not category). -/
 def Markup.kidTerm (k : Syntax) : Syntax := match Markup.kidOf k with
   | .text => Markup.call "React.text" [Syntax.mkStr (Markup.strOf (Syntax.getArg k 0))]
-  | .splice => Markup.call "React.text" [Syntax.getArg k 1]
-  | .node => Syntax.getArg k 2
-  | .list => Markup.call "React.seq" [Syntax.getArg k 2]
+  | .splice => Markup.call "Markup.Child.child" [Syntax.getArg k 1]
   | .other => k
 
 -- ## Elements
