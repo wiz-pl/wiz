@@ -133,3 +133,93 @@ result, and that the CLI's `--timeout 1` exits 124 with the timeout message and 
 stdout. When `native/tree-sitter-c/src/parser.c` is absent the test prints
 `scale: skip (… absent)` and passes; the timeout sub-check is skipped when
 `.grail/bin/scry` has not been built. `tests/taint.wiz` covers the JSON/SARIF fields.
+
+## The 2026-11-17 scale profile
+
+On the base commit the generated tree-sitter-c grammar did **not** finish under the
+runner's 300 s cap. `--progress` reached `store` (1 110 871 nodes, ~1.5 s) and then spent
+the rest of the run in `lower`; the 17 k-node runtime `parser.c` took 142.6 s and the
+34 k-node `query.c` 49.9 s. Two independent **superlinear** passes were responsible.
+Both are fixed on this branch.
+
+### What was wrong
+
+1. **Every node origin was mapped in O(file).** Since `Cst.ofStore` goes through
+   `Cst.ofPreprocessed`, each `originOf`/`emitAt`/`warnAt` called `Scry.mapSpan`, which
+   `String.drop`s from the start of the preprocessed and original texts (a `String` is a
+   `List Char` here) and scans the line-start list. Lowering cost was
+   *(spans lowered) × (file size)*. `Scry.spanIndexOf` now builds the line tables and the
+   word arrays once, and `Scry.mapSpanAt` binary-searches the line and compares slices
+   (O(log lines + span)). `Scry.mapSpan` stays as the reference definition;
+   `tests/preproc.wiz` checks the two agree on every node of the `cc -E` fixture,
+   including the line-fallback branch.
+2. **Per-function analysis was point-at-a-time.** `Scry.fnInfoWith` materialised
+   reaching-definition and dominator sets with one round per point; `predsOf` scanned
+   every point and `lookupSet` scanned an association list, so a large `ts_lex` cost
+   O(points³). The production taint path now uses `Scry.fnInfoFlowWith`: a block-level
+   reaching-definitions worklist over `Scry.Fn`'s `U64Map` point/block indexes, with the
+   same def-use edges and no point-level `rd`/`dom` table. `Scry.fnInfo` keeps the
+   point-level tables for the analysis tests and the old `Scry.Taint` prototype, and
+   `Bounds` builds them per function only when the opt-in out-of-bounds rules are in the
+   pack, so the default pack and this corpus never pay for them.
+
+### Phase table (warm, informational)
+
+`scry taint FILE --json --allow-errors --progress`; wall and `ru_maxrss` come from
+`wait4`, stage deltas from `--progress`, and peak RSS is `VmHWM` sampled when the stage
+line arrived. A stage absent from a run is `–`. The `before` rows are the pre-fix binary
+on this checkout; the base generated-grammar run was bounded at 240 s, timed out in
+`lower` (exit 124), and would not have finished at 300 s either.
+
+| input | run | read | parse | store | rules | lower | points-to | summaries | results/analyse | origins | wall | peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| generated grammar (1.1 M) | before | 0.49 | 0.96 | 0.06 | – | >239* | – | – | – | – | 240.7 | 988 MiB |
+| generated grammar (1.1 M) | after | 0.29 | 0.69 | 0.05 | 0.09 | 1.97 | 20.51 | 3.82 | 3.07 | 0.03 | 31.7 | 1 058 MiB |
+| runtime `parser.c` (17 k) | before | 0.01 | 0.02 | 0.00 | – | 4.59 | 1.22 | 94.91 | 41.68 | 0.01 | 142.6 | 60 MiB |
+| runtime `parser.c` (17 k) | after | 0.01 | 0.01 | 0.00 | 0.00 | 0.07 | 1.03 | 0.32 | 0.08 | 0.00 | 1.6 | 60 MiB |
+| runtime `query.c` (34 k) | before | 0.03 | 0.03 | 0.00 | – | 15.50 | 2.11 | 16.39 | 7.43 | 0.79 | 49.9 | 68 MiB |
+| runtime `query.c` (34 k) | after | 0.02 | 0.03 | 0.00 | 0.00 | 0.14 | 1.56 | 0.41 | 0.05 | 0.00 | 2.3 | 72 MiB |
+
+`wall` includes JSON rendering, which is not a stage: ~1 s for the grammar and ~8 s for
+the pre-fix `query.c` run (1 702 boundary warnings). `summaries` on this branch also
+contains the per-function plan construction; the reference engine that reports a separate
+`plans` stage measured 5.6 s for the grammar and 0.02 s for `query.c`. The numbers are
+informational and move with machine load: a later run of the same grammar binary during
+the machine's heavy baseline load measured 84.4 s (points-to 46.9 s, summaries 11.4 s,
+analyse 9.9 s, peak 845 MiB). The safe-corpus counts are unaffected.
+
+### Hot spots
+
+| # | hot spot | evidence | class | fixed |
+|---|---|---|---|---|
+| 1 | origin mapping (`mapSpan` per emitted node) | `lower` 15.50 s on `query.c`, >239 s (timeout) on the grammar; 0.14 s / 1.97 s after | algorithmic, O(spans × file) | yes |
+| 2 | per-function reaching definitions + dominators | `summaries`+`analyse` 136.6 s on runtime `parser.c`, 23.8 s on `query.c`; 0.40 s / 0.46 s after | algorithmic, O(points³) | yes |
+| 3 | points-to closure | 20.51 s on the grammar, 1.56 s on `query.c`, 1.03 s on runtime `parser.c`; `PtState` `pt`/`mem` are association lists and `fnStep` re-flattens each function per round | algorithmic + list constant factor | no |
+| 4 | CST store and view | `store` is only 0.05–0.06 s, but the 1.1 M columns and the two `SpanIndex` word arrays peak at ~1.0 GiB; `CstStore.arcsFrom` is O(children), so no whole-column traversal remains | linear time, constant-factor memory | no |
+| 5 | Datalog joins and delta loop | after the fixes `summaries` is 3.8 s on the grammar (mostly plan construction) and 0.3–0.4 s on the runtime files; `TupleRel.candidates` picks the shortest bound column, but an unbound first atom (`flow` in `rtRuleProp`) scans the relation and `deltaRows` filters the delta linearly | algorithmic in theory, not hit by this corpus | no |
+
+`Scry.Egraph` is imported only by `examples/scry-egraph-*.wiz` and the `scry-egraph`
+tests; no lowering, points-to or taint pass calls it. Its `rebuild` is O(nodes) after a
+batch of unions, but it is not on the scale path, so it is not a hot spot here. The
+`Lower` passes themselves (`scanTypes`, `scanSyms`, `lowerFuncs`) are linear in the
+top-level/function nodes they visit; the superlinear cost was the origin mapping, not the
+pass structure.
+
+### Reproducing the table
+
+`scripts/perf-scale.sh` runs the three vendored inputs through `scry taint --progress`
+and prints one TSV row per stage (delta, `VmHWM`) plus a `TOTAL` row. It needs bash,
+python3 (only for `fork`/`wait4`; no `time` or `ps`), a built `.grail/bin/scry`, and the
+vendored tree-sitter sources. `-n N` reports the median of N runs, `--timeout` keeps a
+capped run as `exit 124`, and `--bench` also runs the safe corpus:
+
+```sh
+cd scry
+scripts/perf-scale.sh
+scripts/perf-scale.sh -n 3 --bench
+```
+
+The safe corpus stays at TP 32 / FP 1 / TN 17 / FN 0 (`scry bench --no-timing
+--fail-on-regression`). The remaining cost is points-to; the fix is to replace the
+`PtState` association lists with `U64Map`s and flatten/plan each function once, not a
+rule change, so it is left out of this measurement-only change.

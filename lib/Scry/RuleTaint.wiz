@@ -1,5 +1,7 @@
 import Scry.Analysis
 import Scry.PointsTo
+import Word
+import WordMap
 import Scry.Eval
 import Scry.Rules
 import Scry.Models
@@ -580,7 +582,7 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
         | .indirect _ => .nil
       | _ => .nil) (Scry.range g.count);
   let extraDefs := Scry.rulePackConcat (fun p => p.defs) scan;
-  let baseInfo := Scry.fnInfoWith fn (List.append paramDefs extraDefs);
+  let baseInfo := Scry.fnInfoFlowWithG g (List.append paramDefs extraDefs);
   /-- A parameter's definition sits at the entry *statement point*; if that first
   statement reads the parameter (a sink at the top of a function is common), the entry
   definition must reach a use at its own point. Ordinary reaching definitions have no
@@ -588,7 +590,8 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
   let entryUsed := Scry.usesAt g (Scry.entryNode g);
   let selfDeps := List.map (fun p => Scry.DataDep.mk (Scry.entryNode g) (Scry.entryNode g) p.2)
     (List.filter (fun p => Scry.memNat p.2 entryUsed) paramDefs);
-  let info : Scry.FnInfo := { baseInfo with deps := List.append selfDeps baseInfo.deps };
+  let allDeps := List.append selfDeps baseInfo.deps;
+  let info : Scry.FnInfo := { baseInfo with deps := allDeps, depIdx := Scry.depIdxOf allDeps };
   let entryFacts := Scry.entrySourceFacts (Scry.entryNode g)
     (Scry.paramMap 0 fn.params) entrySources;
   let sources := List.append entryFacts (Scry.rulePackConcat (fun p => p.sources) scan);
@@ -757,8 +760,7 @@ def Scry.badAlertRows (st : Scry.State Nat) : List Nat :=
   List.map (fun row => Scry.rtRowNat row 0) (Scry.rtRows st Scry.rtBadAlert)
 
 def Scry.flowHasVar (info : Scry.FnInfo) (d u v : Nat) : Bool :=
-  List.any (fun dep => Bool.and (Nat.beq dep.from d)
-    (Bool.and (Nat.beq dep.to u) (Nat.beq dep.var v))) info.deps
+  List.any (Nat.beq d) (U64Map.findD info.depIdx (Scry.depKey u v) .nil)
 
 /-- Whether register `v` is tainted at use point `u` (a definition reaching `u` is
 tainted). This is the query parameter taint, return summaries and call arguments use. -/
