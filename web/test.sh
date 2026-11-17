@@ -40,8 +40,9 @@ if grep -qF 'editor model: all checks passed' "$OUT/editor.txt"; then echo "ok (
 node "$ROOT/web/editor_dom_test.mjs" > "$OUT/editor-dom.txt"
 if grep -qF 'editor dom: all checks passed' "$OUT/editor-dom.txt"; then echo "ok (editor dom)"; else
   echo "FAIL (editor dom)"; cat "$OUT/editor-dom.txt"; exit 1; fi
-# (playground, ?ui=react) the pane's Wiz view: SSR, patches and the driver (needs a Wiz binary)
-WIZ="$WIZ" "$ROOT/web/test-playground-ui.sh" > "$OUT/ui.txt"
+# (playground, ?ui=react) the pane's Wiz view: SSR, patches and the driver (needs a Wiz
+# binary; the fixture is kept for the Wasm check below)
+WIZ="$WIZ" "$ROOT/web/test-playground-ui.sh" "$OUT/ui-fixture.json" > "$OUT/ui.txt"
 if grep -qF 'playground ui: all checks passed' "$OUT/ui.txt"; then echo "ok (playground, react ui)"; else
   echo "FAIL (playground, react ui)"; cat "$OUT/ui.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
@@ -53,6 +54,10 @@ done
 # (11ab) the playground's module: the self-hosted checker, one evaluation
 node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
 if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
+# (playground, ?ui=react) the UI module's exported functions against the same fixture
+node "$ROOT/web/playground_ui_test.mjs" "$OUT/ui-fixture.json" "$OUT/wiz-playground-ui.mjs" > "$OUT/ui-wasm.txt"
+if grep -qF 'playground ui: all checks passed' "$OUT/ui-wasm.txt"; then echo "ok (playground, react ui wasm)"; else
+  echo "FAIL (playground, react ui wasm)"; cat "$OUT/ui-wasm.txt"; exit 1; fi
 # (11s) the documentation pages' half of the module, on a page `wiz doc` made (the
 # Wasm module's own JSON: the declaration `pick` alone)
 mkdir -p "$OUT/doc/src"

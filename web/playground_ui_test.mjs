@@ -9,9 +9,14 @@
 //      `createPageUi`, driven by a fake Wasm module that answers with the same fixture
 //      strings. No Emscripten and no browser, but the same code the page runs.
 //
-//   usage: node web/playground_ui_test.mjs FIXTURE.json
+//   usage: node web/playground_ui_test.mjs FIXTURE.json [MODULE.mjs]
+//
+// With MODULE.mjs (web/out/wiz-playground-ui.mjs, built by web/build-playground.sh) the
+// same fixture is also checked against the real Wasm module: the exported pointers and
+// the freed strings are the part a fake cannot exercise.
 "use strict";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { applyPatches } from "./framework/runtime.js";
 import { document as minidoc, parse, serialize } from "./framework/minidom.mjs";
 import { startModel } from "./framework/driver.js";
@@ -145,6 +150,43 @@ check("page: no ui module, no page ui", startPageUi({ wasm: {}, root: parse("") 
 check("page: reactUiAvailable", reactUiAvailable({ _wiz_ui_html() {} }), true);
 check("page: reactUiAvailable, absent", reactUiAvailable({}), false);
 check("page: the export names", UI_EXPORTS, { html: "_wiz_ui_html", patch: "_wiz_ui_patch" });
+
+// ## 5. The real Wasm module (web/test.sh passes it; the fixture is the same)
+
+const modulePath = process.argv[3];
+if (modulePath) {
+  const big = (x) => (typeof x === "bigint" ? x : BigInt(x));
+  const createModule = (await import(pathToFileURL(modulePath).href)).default;
+  const wasm = await createModule({ printErr: (s) => console.error(s) });
+  const call1 = (name, text) => {
+    const p = wasm.stringToNewUTF8(String(text));
+    const r = wasm[name](big(p));
+    wasm._free(big(p));
+    const out = r ? wasm.UTF8ToString(Number(r)) : "";
+    if (r) wasm._free(r);
+    return out;
+  };
+  check("wasm: wiz_ui_html of the first model", call1("_wiz_ui_html", fixture.model0), fixture.html0);
+  check("wasm: wiz_ui_html of the second model", call1("_wiz_ui_html", fixture.model1), fixture.html1);
+  const patchJson = (() => {
+    const a = wasm.stringToNewUTF8(fixture.model0);
+    const b = wasm.stringToNewUTF8(fixture.model1);
+    const r = wasm._wiz_ui_patch(big(a), big(b));
+    wasm._free(big(a));
+    wasm._free(big(b));
+    const out = r ? wasm.UTF8ToString(Number(r)) : "";
+    if (r) wasm._free(r);
+    return out;
+  })();
+  check("wasm: the patch list's length", JSON.parse(patchJson).length, JSON.parse(fixture.patches).length);
+  const root = parse("");
+  const driver = startModel(wasm, root, { model: fixture.model0, parse });
+  check("wasm: mounted", serialize(root), fixture.html0);
+  driver.render(fixture.model1);
+  check("wasm: patched to the next model", serialize(root), fixture.html1);
+  checkThat("wasm: a model that is not JSON renders the empty pane",
+    call1("_wiz_ui_html", "{not json").includes('class="react-ui"'));
+}
 
 if (failed) {
   console.log(`playground ui: ${failed} check(s) failed`);
