@@ -391,7 +391,7 @@ def rdLaws (base len size burst id period errBeat : Nat) : Bool :=
   let errs := Hdl.map (fun (k : Nat) => Nat.beq k errBeat) (units (Axi4.beats len));
   let lasts := Hdl.map (fun (k : Nat) => Nat.beq k len) (units (Axi4.beats len));
   let arE := packAr
-    (rdIn (Hdl.nthD (HwTy.unpack (Axi4.ReadIn.code 8 16 4) 0) ins 0)).ar;
+    (rdIn (Hdl.nthD (HwTy.unpack (Axi4.ReadIn.code 8 16 4) 0) ins 0)).arch;
   Bool.and (Axi4.Law.addrsOk burst base size len
       (Hdl.map (fun (p : Nat × Nat × Nat) => p.1) beats))
     (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
