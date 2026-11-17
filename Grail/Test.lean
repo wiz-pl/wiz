@@ -24,7 +24,8 @@ A test is a job like any other (`Grail/Graph.lean`), run in its own process with
 limit: its key covers the file's key (its text and its imports'), the kind, the toolchain
 for `run`, and the expected output, and a passing test is recorded under
 `.grail/build/<key>/`, so `grail test` again runs nothing. A failing test isn't recorded.
-`grail test --update` writes the actual output to `.expected`.
+`grail test --update` writes the actual output to `.expected`; `grail test --rerun` runs the
+tests with a recorded pass again, and records what it finds (a new pass, or none).
 -/
 
 namespace Grail

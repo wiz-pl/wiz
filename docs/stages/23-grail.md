@@ -124,7 +124,11 @@ needs no `.expected`, and is not a pass. A `check` or `run` line may end in
 program. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
-`grail test --update` writes the actual output. Every example is a test
+`grail test --update` writes the actual output. `grail test --rerun` runs the tests again
+even when a pass is recorded (a flaky test, a program that reads something outside its
+key): the old record is dropped, a pass is recorded again and a failure leaves none, so the
+next plain `grail test` reports what this run saw. Only the tests' own jobs run again;
+their programs' checks, objects and links are reused when up to date. Every example is a test
 (`examples/*.expected`). The Lean tests stay in `lake test`.
 
 ## 23g: parallel jobs
