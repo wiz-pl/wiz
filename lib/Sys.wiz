@@ -259,7 +259,11 @@ def FS.readBytes (p : String) : EIO Bytes := Sys.check p (FS.readBytesRaw p)
 /-- Replace the file's contents with the bytes (creating it). -/
 def FS.writeBytes (p : String) (b : Bytes) : EIO Unit := Sys.lift p (FS.writeBytesRaw p b .false)
 
-/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`). -/
+/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`).
+
+Like every foreign handle it is an ordinary (ω) value, so a `Chan.fork` child may
+capture it; the runtime serialises the operations on one handle (25a), so a close
+waits for a read already in progress and later operations are errors. -/
 foreign_type File (finalizer := "wiz_sys_file_free")
 /-- Raw `fopen`; use `File.open`. -/
 extern "wiz_sys_file_open" File.openRaw : String → String → IO File
@@ -303,7 +307,7 @@ def File.readAll (f : File) : EIO String := Sys.check "read" (File.readAllRaw f)
 def File.write (f : File) (s : String) : EIO Unit := Sys.lift "write" (File.writeRaw f s)
 /-- Write out what is buffered. -/
 def File.flush (f : File) : EIO Unit := Sys.lift "flush" (File.flushRaw f)
-/-- Close the handle now; later operations on it are errors. -/
+/-- Close the handle now; later operations on it are errors (a second close too). -/
 def File.close (f : File) : EIO Unit := Sys.lift "close" (File.closeRaw f)
 /-- Print a line on standard error. -/
 def IO.ePrintln (s : String) : IO Unit := do
@@ -354,7 +358,11 @@ def ExitStatus.toString : ExitStatus → String
   | .exited c => String.append "exit code " (Nat.toString c)
   | .signaled s => String.append "signal " (Nat.toString s)
 
-/-- A running (or finished) child process. Its pipes close when the last reference goes. -/
+/-- A running (or finished) child process. Its pipes close when the last reference goes.
+
+Like `File` it is an ω value and may be used from two threads: the runtime locks each
+pipe and the wait status (25a), so a second `closeStdin` is an error, two `wait`s
+agree, and `kill` works while another thread waits. -/
 foreign_type Child (finalizer := "wiz_sys_child_free")
 /-- Raw spawn; use `Process.spawn`. -/
 extern "wiz_sys_spawn" Process.spawnRaw : String → List String → Nat → Nat → Nat → IO Child
@@ -384,7 +392,7 @@ def Process.spawn (cmd : String) (args : List String) (stdin stdout stderr : Std
   Sys.check cmd (Process.spawnRaw cmd args (Stdio.toNat stdin) (Stdio.toNat stdout) (Stdio.toNat stderr))
 /-- Write to the child's stdin (which must be `.piped`). -/
 def Child.write (c : Child) (s : String) : EIO Unit := Sys.lift "write to child" (Child.writeRaw c s)
-/-- Close the child's stdin, so it sees the end of its input. -/
+/-- Close the child's stdin, so it sees the end of its input (the second close is an error). -/
 def Child.closeStdin (c : Child) : EIO Unit := Sys.lift "close child stdin" (Child.closeStdinRaw c)
 /-- The rest of the child's stdout (a pipe), to the end. -/
 def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (Child.readRaw c 1)
