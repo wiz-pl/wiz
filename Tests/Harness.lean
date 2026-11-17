@@ -14,6 +14,9 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+/-- `--case-timeout SECS`: the driver's time limit on one case's process (`none`: no
+limit, as before). See `waitCase`. -/
+initialize caseTimeoutRef : IO.Ref (Option Nat) ← IO.mkRef none
 
 def toolchain : IO Wiz.Toolchain := toolchainRef.get
 
@@ -80,6 +83,24 @@ def note (line : String) : IO Unit := do
   IO.println (noteMarker ++ line)
   (← IO.getStdout).flush
 
+/-- This process's peak resident memory in KiB (`VmHWM` in `/proc/self/status`), if the
+system reports it. The process's own, not its children's (a case that runs `wiz` or `cc`
+does not count their memory). -/
+def selfPeakKiB : IO (Option Nat) := do
+  try
+    let text ← IO.FS.readFile "/proc/self/status"
+    pure <| (text.splitOn "\n").findSome? fun l =>
+      if l.startsWith "VmHWM:" then
+        ((l.drop "VmHWM:".length).trimAscii.toString.splitOn " ").head?.bind String.toNat?
+      else none
+  catch _ => pure none
+
+/-- The note `peak KB N`: what a case's process printed last about its own memory
+(the test runner's lean-suite adapter reads it; `scripts/ci.py` ignores notes it does not
+know). -/
+def notePeak : IO Unit := do
+  if let some kb ← selfPeakKiB then note s!"peak KB {kb}"
+
 /-- Mark the running case as skipped (it could not run here, e.g. without a C toolchain),
 with the reason; the case then returns normally. The driver shows it as skipped, not
 passed (`Group.run`), and records the note `skipped REASON` (`--timings`). A skipped case
@@ -139,6 +160,78 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
     else (stderr ++ stdoutText).trimAscii.toString.replace "\n" "\n      "
   { index, name := c.name, ok := exitCode == 0, ms, notes, skipped, output }
 
+/-! ## Per-case time limits (`--case-timeout SECS`, TR0 of the test-runner plan)
+
+Without `--case-timeout` a case's process is waited for as before, however long it takes
+(a hung case was stopped only by the CI shard's `timeout-minutes`). With it, the case
+starts in a session and process group of its own (`setsid`), so the limit stops
+everything the case started (`wiz`, `cc`, grail and its supervisors, which see their
+pipe close), and not only the case's own process. The price is that Ctrl-C at the
+terminal no longer reaches a running case directly; the driver's own exit kills
+`runJobs`' cases (its `finally`), and a sequential case dies with its pipes. -/
+
+/-- Milliseconds between `SIGTERM` to a timed-out case's process group and `SIGKILL`. -/
+def killGraceMs : Nat := 5000
+
+/-- After `SIGTERM`: wait for the process until `untilMs`, then `SIGKILL` its process
+group (`kill -KILL -PGID`; the case is its group's leader) and reap it. -/
+partial def waitGrace {cfg : IO.Process.StdioConfig} (child : IO.Process.Child cfg) (untilMs : Nat) :
+    IO UInt32 := do
+  match ← child.tryWait with
+  | some c => pure c
+  | none =>
+    if (← IO.monoMsNow) < untilMs then
+      IO.sleep 50
+      waitGrace child untilMs
+    else
+      try
+        let _ ← IO.Process.output { cmd := "kill", args := #["-KILL", s!"-{child.pid}"] }
+      catch _ => pure ()
+      child.wait
+
+/-- Wait for a case's process; with a deadline (`IO.monoMsNow` time), poll it every 50 ms
+and at the deadline send its process group `SIGTERM` (`Child.kill`, which signals the
+whole group of a `setsid` child), then `SIGKILL` after `killGraceMs`. The exit code, and
+whether the driver killed it at its limit. -/
+partial def waitCase {cfg : IO.Process.StdioConfig} (child : IO.Process.Child cfg) (deadline : Option Nat) :
+    IO (UInt32 × Bool) := do
+  match deadline with
+  | none => pure (← child.wait, false)
+  | some d =>
+    match ← child.tryWait with
+    | some c => pure (c, false)
+    | none =>
+      if (← IO.monoMsNow) < d then
+        IO.sleep 50
+        waitCase child deadline
+      else
+        try child.kill catch _ => pure ()
+        pure (← waitGrace child ((← IO.monoMsNow) + killGraceMs), true)
+
+/-- What the driver adds to a timed-out case's output. -/
+def timeoutMessage (secs : Nat) : String :=
+  s!"timed out after {secs} s (--case-timeout; its process group was killed)"
+
+/-- Run one case's process to the end under the `--case-timeout` limit (if any): its exit
+code, stdout, stderr (with the timeout message when it was killed) and wall time. -/
+def runCaseProcess (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) :
+    IO (UInt32 × String × String × Nat) := do
+  let limit ← caseTimeoutRef.get
+  let start ← IO.monoMsNow
+  let child ← IO.Process.spawn
+    { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
+      stdin := .null, stdout := .piped, stderr := .piped, setsid := limit.isSome }
+  let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+  let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+  let (code, timedOut) ← waitCase child (limit.map fun secs => start + secs * 1000)
+  let ms := (← IO.monoMsNow) - start
+  let stdout ← IO.ofExcept out.get
+  let stderr ← IO.ofExcept err.get
+  let stderr := match limit, timedOut with
+    | some secs, true => stderr ++ "\n" ++ timeoutMessage secs
+    | _, _ => stderr
+  pure (if timedOut && code == 0 then 124 else code, stdout, stderr, ms)
+
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
 these indices. Prints each case with its wall time (`✓` passed, `✗` failed, with its
@@ -154,11 +247,8 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
-    let start ← IO.monoMsNow
-    let out ← IO.Process.output
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ (← flagsRef.get).toArray }
-    let ms := (← IO.monoMsNow) - start
-    let r := caseResult c i out.exitCode out.stdout out.stderr ms
+    let (code, stdout, stderr, ms) ← runCaseProcess self g i (← flagsRef.get).toArray
+    let r := caseResult c i code stdout stderr ms
     IO.println (renderResult r)
     stdout.flush
     onResult r
@@ -187,13 +277,23 @@ child never blocks on a full pipe) and one waits for it (so its wall time does n
 include the time it waits in the pool's queue). The child stays in the driver's process
 group, as it was sequentially: `Ctrl-C` at the terminal reaches the running cases too. -/
 private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Array String) : IO Live := do
+  let limit ← caseTimeoutRef.get
   let start ← IO.monoMsNow
   let child ← IO.Process.spawn
     { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
-      stdin := .null, stdout := .piped, stderr := .piped }
+      stdin := .null, stdout := .piped, stderr := .piped, setsid := limit.isSome }
   let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
-  let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
-  let code ← IO.asTask (do pure (← child.wait, (← IO.monoMsNow) - start)) Task.Priority.dedicated
+  let err0 ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+  -- (TR0) the case's deadline is enforced by the task that waits for it
+  let waited ← IO.asTask (do
+      let (code, timedOut) ← waitCase child (limit.map fun secs => start + secs * 1000)
+      pure (if timedOut && code == 0 then 124 else code, (← IO.monoMsNow) - start, timedOut))
+    Task.Priority.dedicated
+  let code := waited.map fun r => r.map fun (c, ms, _) => (c, ms)
+  -- a timed-out case's stderr ends with the timeout message
+  let err := Task.bind err0 fun e => waited.map fun w => match e, w, limit with
+    | .ok text, .ok (_, _, true), some secs => .ok (text ++ "\n" ++ timeoutMessage secs)
+    | e, _, _ => e
   pure { index := i, kill := child.kill, code, out, err }
 
 /-- Run the cases of `g` that `only` picks with a bounded pool of `jobs` child processes

@@ -197,6 +197,12 @@ each case's output and `--timings` line in the group's case order; groups that d
 in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
 (for auditing a group's isolation, not for CI).
 
+`--case-timeout SECS` limits each case's process to SECS seconds of wall time: at the
+limit the driver sends the case's process group `SIGTERM`, then `SIGKILL` after 5 s, and
+the case fails with "timed out after SECS s". Each case's process also reports its own
+peak memory as the note `peak KB N` (`/proc/self/status` VmHWM; its children's memory
+is not included), which `--timings` records with the other notes.
+
 `--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE]` runs the self-hosted
 compiler and the Lean frontend over every `lib/` and `scry/` file and reports where they
 disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
@@ -219,7 +225,11 @@ def main (args : List String) : IO UInt32 := do
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
     match (← findGroup group) >>= fun g => ix.toNat? >>= (g.cases[·]?) with
-    | some c => c.runHere
+    | some c => do
+      let code ← c.runHere
+      -- (TR0) the case's own peak memory, as a note the driver records
+      notePeak
+      pure code
     | none => do IO.eprintln s!"no such case: {group} #{ix}"; pure 2
   | "--run" :: rest => runOne rest
   -- (D1) check a file with the given regularity mode, in a child process that the test
@@ -289,6 +299,13 @@ def main (args : List String) : IO UInt32 := do
     let (shard, args) := takeFlag "--shard" args
     let (jobsArg, args) := takeFlag "--jobs" args
     let (jobsAll, args) := takeSwitch "--jobs-all" args
+    let (caseTimeout, args) := takeFlag "--case-timeout" args
+    if let some t := caseTimeout then
+      match t.toNat? with
+      | some (secs + 1) => caseTimeoutRef.set (some (secs + 1))
+      | _ =>
+        IO.eprintln s!"--case-timeout needs a positive number of seconds, not {t}"
+        return 2
     let jobs : Option Nat := match jobsArg with
       | none => some 1
       | some s => match s.toNat? with
