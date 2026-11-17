@@ -276,18 +276,6 @@ def modPathsOf (tab : List ModSrc) : List String → List String
 inductive Pos where
   | mk (line : Nat) (col : Nat)
 
-def lineColGo : List Char → Nat → Nat → Nat → Nat → Pos
-  | .nil, _, _, ln, col => Pos.mk ln col
-  | .cons c cs, i, off, ln, col => match Nat.lt i off with
-    | .false => Pos.mk ln col
-    | .true => match strEqC c 10 with
-      | .true => lineColGo cs (Nat.succ i) off (Nat.succ ln) 1
-      | .false => lineColGo cs (Nat.succ i) off ln (Nat.succ col)
-
--- the 1-based line and column of a 0-based offset in a text
-def lineCol (text : String) (off : Nat) : Pos := match text with
-  | .mk cs => lineColGo cs 0 off 1 1
-
 -- ------------------------------------------------------------------------------------
 -- Diagnostics
 
@@ -454,12 +442,6 @@ def taggedOf (l : String) : Tagged := match l with
                 | .false => Tagged.mk "Main" 0 l
               | .nil => Tagged.mk "Main" 0 l
 
--- the first `n` characters dropped
-def dropChars : Nat → List Char → List Char
-  | .zero, cs => cs
-  | .succ _, .nil => .nil
-  | .succ k, .cons _ cs => dropChars k cs
-
 -- leading whitespace (spaces, tabs, newlines) dropped
 def skipSpaceChars : List Char → List Char
   | .nil => .nil
@@ -473,9 +455,50 @@ def skipSpaceChars : List Char → List Char
           | .true => skipSpaceChars cs
           | .false => .cons c cs
 
--- the command that starts at `off`: the first token of the text there
-def cmdAt (text : String) (off : Nat) : String := match text with
-  | .mk cs => String.mk (skipSpaceChars (dropChars off cs))
+-- A read cursor into a module's text. `diagsOf` walks a module's tagged lines in
+-- source order, and every line used to scan the text from its start three times
+-- (the command at its offset twice and its line and column once), which is quadratic
+-- in the module size. The cursor moves forward once for the whole file; a line from
+-- another module (or an offset that went backwards: a parse error reports the token it
+-- stopped at) resets it, so the positions are the ones the scans gave.
+inductive Cur where
+  | mk (mod : String) (text : String) (rest : List Char) (off line col : Nat)
+def curOf (m : String) (t : String) : Cur := match t with
+  | .mk cs => Cur.mk m t cs 0 1 1
+def Cur.mod : Cur → String
+  | .mk m _ _ _ _ _ => m
+def Cur.rest : Cur → List Char
+  | .mk _ _ r _ _ _ => r
+def Cur.off : Cur → Nat
+  | .mk _ _ _ o _ _ => o
+def Cur.pos : Cur → Pos
+  | .mk _ _ _ _ ln col => Pos.mk ln col
+-- `c` advanced to offset `o` (`lineCol` stops at the end of the text, so does this);
+-- the loop takes the state apart so a character costs no allocation
+partial def curToGo (m t : String) (rest : List Char) (off ln col o : Nat) : Cur :=
+  match Nat.lt off o with
+  | .false => Cur.mk m t rest off ln col
+  | .true => match rest with
+    | .nil => Cur.mk m t .nil off ln col
+    | .cons ch cs => match Nat.beq (Char.code ch) 10 with
+      | .true => curToGo m t cs (off + 1) (ln + 1) 1 o
+      | .false => curToGo m t cs (off + 1) ln (col + 1) o
+def curTo (c : Cur) (o : Nat) : Cur := match c with
+  | .mk m t rest off ln col => curToGo m t rest off ln col o
+-- the cursor at `m`'s offset `o`: the current one, or a fresh read of `m`'s text
+def curAt (tab : List ModSrc) (c : Cur) (m : String) (o : Nat) : Cur :=
+  let c0 := match strEq m (Cur.mod c) with
+    | .true => c
+    | .false => match modTextOf tab m with
+      | .some t => curOf m t
+      | .none => curOf m "";
+  match Nat.lt o (Cur.off c0) with
+  | .true => match modTextOf tab m with
+    | .some t => curTo (curOf m t) o
+    | .none => curTo (curOf m "") o
+  | .false => curTo c0 o
+-- the command at the cursor
+def curCmd (c : Cur) : String := String.mk (skipSpaceChars (Cur.rest c))
 
 -- the characters up to the end of their line
 def takeLineChars : List Char → List Char
@@ -497,50 +520,54 @@ def rtrimChars (cs : List Char) : List Char :=
 -- (a `#check c` prints `c : T`, as the Lean-hosted `wiz` does; the self-hosted
 -- frontend's own line carries the type alone. The source text stands in for the
 -- elaborator's pretty-printed term, which the driver has not got.)
-def infoPrefix (tab : List ModSrc) (m : String) (off : Nat) : String :=
-  match modTextOf tab m with
+def infoPrefix (cmd : String) : String :=
+  match stripPrefix "#check" cmd with
   | .none => ""
-  | .some t => match stripPrefix "#check" (cmdAt t off) with
-    | .none => ""
-    | .some arg => match rtrimChars (takeLineChars (skipSpaceChars (charsOf arg))) with
-      | .nil => ""
-      | a => String.append (String.mk a) " : "
+  | .some arg => match rtrimChars (takeLineChars (skipSpaceChars (charsOf arg))) with
+    | .nil => ""
+    | a => String.append (String.mk a) " : "
 
 -- (`#check c`, `#reduce c` and `#eval c` print their result without `--types`, as the
 -- Lean-hosted `wiz check` does; a declaration's own type line does not)
-def printsInfo (tab : List ModSrc) (m : String) (off : Nat) : Bool :=
-  match modTextOf tab m with
-  | .none => .false
-  | .some t => match cmdAt t off with
-    | s => Bool.or (strStarts "#check" s) (Bool.or (strStarts "#reduce" s) (strStarts "#eval" s))
+def printsInfo (cmd : String) : Bool :=
+  Bool.or (strStarts "#check" cmd) (Bool.or (strStarts "#reduce" cmd) (strStarts "#eval" cmd))
 
-def sevOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : Sev :=
+def sevOfTagged (cmd : String) (rest : String) : Sev :=
   match sevOf rest with
-  | .info => match printsInfo tab m off with
+  | .info => match printsInfo cmd with
     | .true => .infoEval
     | .false => .info
   | s => s
 
 -- the message: a `#check`'s with the term in front (see `infoPrefix`)
-def msgOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : String :=
+def msgOfTagged (cmd : String) (rest : String) : String :=
   match sevOf rest with
-  | .info => String.append (infoPrefix tab m off) (msgOf rest)
+  | .info => String.append (infoPrefix cmd) (msgOf rest)
   | _ => msgOf rest
 
-def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
+-- one tagged line, and the cursor after it (the module's text is read once)
+def diagGo (tab : List ModSrc) (c : Cur) (l : String) : Diag × Cur := match taggedOf l with
   | .mk m off rest =>
     -- a parse error reports the token it stopped at, not its command's start
     let off' := match parseOff rest with
       | .some n => n
       | .none => off;
+    let c' := curAt tab c m off';
+    let cmd := curCmd c';
     match modTextOf tab m with
-    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (msgOfTagged tab m off' rest) (codeOf rest)
-    | .some t => match lineCol t off' with
-      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) (codeOf rest)
+    | .none => (Diag.mk (sevOfTagged cmd rest) (modFile tab m) 1 1 (msgOfTagged cmd rest) (codeOf rest), c')
+    | .some _ => match Cur.pos c' with
+      | .mk ln col => (Diag.mk (sevOfTagged cmd rest) (modFile tab m) ln col (msgOfTagged cmd rest) (codeOf rest), c')
 
-def diagsOf (tab : List ModSrc) : List String → List Diag
-  | .nil => .nil
-  | .cons l rest => .cons (diagOf tab l) (diagsOf tab rest)
+partial def diagsGo (tab : List ModSrc) (c : Cur) : List String → List Diag × Cur
+  | .nil => (.nil, c)
+  | .cons l rest =>
+    let d := diagGo tab c l;
+    let ds := diagsGo tab d.2 rest;
+    (.cons d.1 ds.1, ds.2)
+
+def diagsOf (tab : List ModSrc) (ls : List String) : List Diag :=
+  (diagsGo tab (curOf "" "") ls).1
 
 def hasError : List Diag → Bool
   | .nil => .false
