@@ -262,6 +262,11 @@ export function startInfoview({
       requestTimeout: endpoint.requestTimeout,
       languageId: endpoint.languageId,
     });
+    // Store the text before the handshake: `openDocument` sends nothing while the
+    // client is not open, and `connect()` opens every stored document. A first connect
+    // that fails therefore leaves the document in the map, and a later reconnect opens
+    // it instead of leaving the pane "connected" with a server that has no document.
+    client.openDocument(documentUri, editor.value);
     client.on("close", (info) => {
       if (info && info.intentional) return;
       view.state = "closed";
@@ -297,7 +302,6 @@ export function startInfoview({
     view.state = "open";
     view.serverInfo = client.serverInfo;
     view.infoview = client.infoview;
-    client.openDocument(documentUri, editor.value);
     render();
     refresh();
     return api;
@@ -305,6 +309,10 @@ export function startInfoview({
 
   async function reconnect() {
     if (!client) return start();
+    // The editor's text may have changed while the connection was down. Store it (this
+    // sends nothing unless the client is open) and let `connect()` open it after the
+    // handshake; `connect()` only re-opens documents already in its map.
+    if (client.state !== "open") client.openDocument(documentUri, editor.value);
     view.state = "connecting";
     view.message = null;
     view.goals = null;

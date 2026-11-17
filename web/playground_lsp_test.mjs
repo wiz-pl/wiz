@@ -369,6 +369,34 @@ checkThat("wiring: a failed connection is no server",
 checkThat("wiring: the failure is explained", deadPanel.innerHTML.includes("cannot connect"));
 checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-action="reconnect"'));
 
+// A reconnect after a *failed first connect* must open the document: the page has to
+// store the text before the handshake (a client whose first connect failed has an empty
+// document map, and `connect()` only opens documents it already knows).
+{
+  const probePort = await startMockServer();
+  const recoverPort = probePort.port;
+  await probePort.close();
+  const recoverEditor = fakeEditor("def recovered : Nat := 1\n");
+  const recoverPanel = fakePanel();
+  const recoverApp = startInfoview({
+    editor: recoverEditor, panel: recoverPanel, uri: "file:///recovered.wiz",
+    config: { url: `ws://127.0.0.1:${recoverPort}`, WebSocketImpl: connectWebSocket },
+  });
+  checkThat("reconnect: the first connection fails",
+    await waitUntil(() => recoverPanel.innerHTML.includes('data-action="reconnect"')),
+    recoverPanel.innerHTML.slice(0, 300));
+  check("reconnect: the page already knows the document", recoverApp.client().docs.size, 1);
+  const recoverMock = await startMockServer({ port: recoverPort });
+  await recoverApp.reconnect();
+  checkThat("reconnect: the document is opened after a failed first connect",
+    await waitUntil(() => recoverMock.stats.didOpen === 1), `didOpen ${recoverMock.stats.didOpen}`);
+  check("reconnect: the server has the editor's text",
+    recoverMock.documents.get("file:///recovered.wiz") &&
+      recoverMock.documents.get("file:///recovered.wiz").text, recoverEditor.value);
+  recoverApp.stop();
+  await recoverMock.close();
+}
+
 // ## 11. Nothing escaped
 
 client.close();
