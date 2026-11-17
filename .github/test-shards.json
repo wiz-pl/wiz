@@ -6,6 +6,7 @@
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
+    "=selfhost-host",
     "=audit-kernels",
     "=selfhost-macro"
   ]},
