@@ -38,6 +38,7 @@ def w3 : V Nat 3 := .cons 1 (.cons 2 (.cons 3 .nil))
 def vecGroup : Group where
   name := "vec"
   exercise := "Stage H0c"
+  parallel := true
   cases := [
     { name := "index-refining matches run: #eval, #run and C (regression: erasing a cast)", run := fun _ => do
         okLib (refinePrelude ++ "#eval V.head v3\n#run V.head v3\n#eval V.sum (V.zipWith Nat.mul v3 w3)\n#run V.sum (V.zipWith Nat.mul v3 w3)")
