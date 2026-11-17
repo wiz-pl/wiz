@@ -11,12 +11,16 @@ an axiom per use that `#print axioms` lists together with the native implementat
 the run can reach; never in the library; and cache entries that never cross the flag.
 
 The group also checks the **trust ledger** (`scripts/trust-ledger.sh`,
-`.github/trust-baseline.tsv`): every declaration of `lib/` is run through
-`#print axioms`, and a source of trust that is not in the checked-in baseline — an
+`.github/trust-baseline.tsv`): every declaration of `lib/` is scanned for sources of
+trust (`trustSources`), and a source that is not in the checked-in baseline — an
 axiom, `sorry`, `native_refl`, `implemented_by`/`repr:`, SMT or `builtin`
 registration, or a `partial` definition — fails until it is reviewed and given a ledger
-row with a reason, an owner and a review date; rows expire. The `hdl-verified` group
-checks the axiom-free example the same way.
+row with a reason, an owner and a review date; rows expire. `#print axioms` is run too,
+as a separate walk over what each declaration reaches: every axiom it lists must be one
+of the ledger's sources. It does not list a `partial` definition (that is an opaque
+constant with a checked witness), so the ledger's `partial` rows come from the scan, not
+from `#print axioms`. The `hdl-verified` group checks the axiom-free example the same
+way.
 -/
 
 open Wiz
@@ -86,11 +90,13 @@ partial def wizFiles (dir : System.FilePath) : IO (List System.FilePath) := do
 
 A checked-in baseline of the **trusted base** of `lib/` (`.github/trust-baseline.tsv`):
 every declaration the kernel does not check, and every registration that decides how a
-definition computes. `#print axioms` is still run on every declaration (as the case
+definition computes. Every declaration is also run through `#print axioms` (as the case
 below always did), and every axiom it lists must be one of the ledger's sources; the
 baseline then makes a *new* source — a new `axiom`, `native_refl`, SMT answer,
 `implemented_by`, `builtin` or `partial` definition — a test failure that a reviewer must
-approve by updating the file.
+approve by updating the file. The `partial` source is the one `#print axioms` does not
+report: `trustSources` reads the witness, while `axiomsOf` treats a partial definition as
+an opaque constant.
 
 The ledger records sources, not every dependency edge: a new theorem that uses
 `castRefl` doesn't add a line (the axiom was already trusted), while a new
@@ -99,7 +105,8 @@ its own) does. See `scripts/trust-ledger.sh` and the header of
 `.github/trust-baseline.tsv`. -/
 
 /-- A source of trust: the module (or example file) that declares it, the declaration it
-belongs to, and the words `#print axioms` uses for it. -/
+belongs to, and the item the ledger lists for it (`#print axioms`' wording for every
+item except `partial`). -/
 structure TrustSource where
   module : String
   name : String
@@ -313,12 +320,15 @@ def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
-  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
-  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
-  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
-  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
-  "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
-  "# trust and are not listed.\n" ++
+  "# `item` is how the ledger names the source (the `trustSources` scan in\n" ++
+  "# Tests/Native.lean): `axiom X`, `native f := g` for implemented_by, `native T :=\n" ++
+  "# mk/get` for a repr registration, `native_refl X.native✝` (compiled evaluation,\n" ++
+  "# the analogue of Lean's native_decide), `smt X.smt✝…`, `builtin k := n`\n" ++
+  "# (including `extern:`/FFI registrations), or `partial` for a partial definition's\n" ++
+  "# compiled body. `#print axioms` uses the same wording for every item except\n" ++
+  "# `partial`: a partial definition has no value and a checked witness, so\n" ++
+  "# `#print axioms` does not list `partial`. `builtin inline` (a compiler hint) and\n" ++
+  "# `builtin int` (how values print) are not trust and are not listed.\n" ++
   "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
   "# is expired when its review date is before today. Rows from the migration still\n" ++
   "# say `legacy: pre-gate baseline; not individually reviewed` and owner\n" ++
@@ -789,6 +799,57 @@ def group : Group where
           let src ← IO.FS.readFile f
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
+    { name := "a native_refl proof's value is kernel-checked, not inserted untyped", run := fun _ => do
+        -- the command records the implementations the run reached as erased lets over the
+        -- `X.native✝` axiom, and adds the definition through `addDecl`, so the kernel types
+        -- the value (it does not evaluate the equation: its head is the `eq` neutral)
+        let loader ← Elab.preludeLoader
+        let s := runFrontend (R := ZeroOneMany)
+          (sumTo ++ "def s100 : sumTo 100 = 5050 := native_refl\n")
+          { loader, trustedModule := Tests.libModule, trustNative := true }
+        let errs := s.messages.filter (·.severity == .error)
+        unless errs.isEmpty do
+          throw (IO.userError s!"unexpected errors: {errs.toList.map (·.text)}")
+        let some d := s.globals.find? "s100"
+          | throw (IO.userError "s100 is not in the environment")
+        let some v := d.value | throw (IO.userError "s100 has no value")
+        check (mentionsConst "s100.native✝" v) "the value does not name its native axiom"
+        match Wiz.check (R := ZeroOneMany) { globals := s.globals } v (Wiz.eval s.globals [] d.type) with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError s!"s100's value is not typed by the kernel: {e}") },
+    { name := "a value of the native_refl shape with a mistyped tail is refused (addDecl checks it)", run := fun _ => do
+        -- the erasure chain's tail is an axiom of the equation; here the equation is
+        -- false (`a ≠ b` in an enumeration) and the body is `() : Unit`, not a proof of it
+        let q : Term ZeroOneMany := .qlit 0
+        let val : Term ZeroOneMany := .letE "_" q (.unit 1) .tt .tt
+        let d : Decl ZeroOneMany :=
+          { name := "tampered",
+            type := .eq (.enum ["a", "b"]) (.tag ["a", "b"] 0) (.tag ["a", "b"] 1),
+            value := some val }
+        match Wiz.addDecl ({} : Globals ZeroOneMany) (d.withTopMarks {}) with
+        | .ok _ => throw (IO.userError "a mistyped native_refl-shaped value was accepted")
+        | .error _ => pure () },
+    { name := "the ledger's partial rows come from the scan, not #print axioms", run := fun _ => do
+        -- behaviour: a partial definition is a ledger source but `#print axioms` treats it
+        -- as an opaque constant with a checked witness (the two mechanisms differ)
+        let ms ← msgs ("import Prelude\npartial def loop (n : Nat) : Nat := loop n\ndef t : Nat := loop 0\n#print axioms t\n")
+        noErrors ms
+        expect ms "info: 't' does not depend on any axioms"
+        let loader ← Elab.preludeLoader
+        let s := runFrontend (R := ZeroOneMany)
+          "import Prelude\npartial def loop (n : Nat) : Nat := loop n\n"
+          { loader, trustedModule := Tests.libModule }
+        check ((trustSources s.globals (fun _ => "(test)")).any fun t => t.item == "partial")
+          "the trust-source scan does not list the partial definition"
+        check (!(s.globals.axiomsOf "loop").contains "loop")
+          "#print axioms lists the partial definition, contrary to docs/trust-ledger.md"
+        -- and the two documents that explain what a `partial` row means say so
+        let doc ← IO.FS.readFile "docs/trust-ledger.md"
+        check ((doc.splitOn "A `partial`\nrow is therefore not `#print axioms` output.").length > 1)
+          "docs/trust-ledger.md does not say that a partial row is not #print axioms output"
+        let hdr ← IO.FS.readFile ".github/trust-baseline.tsv"
+        check ((hdr.splitOn "`#print axioms` does not list `partial`").length > 1)
+          "the ledger header does not say #print axioms does not list partial" },
     { name := "no library declaration depends on a native axiom", run := fun _ => do
         -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
         -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new

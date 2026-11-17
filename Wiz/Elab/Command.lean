@@ -1732,25 +1732,36 @@ a proposition is not data (proofs are erased and all its proofs are definitional
               -- the value mentions the native implementations the run can reach (erased
               -- `let`s), so that `#print axioms` walks what they reach too
               let one := Level.succ .zero
-              let val := v.natives.foldr (fun m body => match g'.find? m with
-                | some d => .letE "_" (.qlit 0) (d.type.instLevels d.levelParams (d.levelParams.map fun _ => one))
-                    (.const m (d.levelParams.map fun _ => one)) body
-                | none => body) (Term.const ax [])
-              -- Added without the kernel's check: checking `val` against the type evaluates
-              -- the equation, and the kernel's `vEq` computes both sides (F5 of
-              -- wiz-notes/kernel-eval.md), which is what native evaluation is for. The
-              -- check is the constant rule: `X.native✝` was declared (just above, by the
-              -- kernel) at this very type, and each `let` binds a constant at its own
-              -- declared type, erased, which the body does not mention.
-              -- (The header is the kernel's: the type is checked to be a well-formed type,
-              -- `a b : T`, which does not evaluate the equation.)
-              let axTy := ((g'.find? ax).map (·.type)).getD ty
-              let d : Decl R := { name, type := axTy, value := some val }
-              match checkHeader g' d with
-              | .error e => report .error cmd.info s!"kernel rejected {name}: {e}"
-              | .ok () =>
-                modify fun s => { s with globals := g'.insert d }
-                report .warning nr.info s!"{name} is accepted on the strength of native evaluation (--trust-native, {v.steps} steps), not checked by the kernel: its proof is the axiom {ax}, which `#print axioms` lists for everything that uses {name}"
+              let mut val := Term.const ax []
+              let mut missing : Option Name := none
+              for m in v.natives.reverse do
+                match g'.find? m with
+                | some d =>
+                  let tty := d.type.instLevels d.levelParams (d.levelParams.map fun _ => one)
+                  val := Term.letE "_" (.qlit 0) tty (Term.const m (d.levelParams.map fun _ => one)) val
+                -- (unreachable: `decideNative` collects a name only when it is in the
+                -- environment. Refused rather than dropped: the value is `#print axioms`'
+                -- record of the implementations the run reached, so a silent omission would
+                -- under-report the trusted base.)
+                | none => missing := some m
+              if let some m := missing then
+                report .error nr.info s!"native_refl: the native implementation {m} is not a declaration; {name} would not record what its run reached in `#print axioms`"
+              else
+                let axTy := ((g'.find? ax).map (·.type)).getD ty
+                let d : Decl R := { name, type := axTy, value := some val }
+                -- (`addDecl`, not `checkHeader` + `insert`: the value is a chain of erased
+                -- `let`s binding the implementations at their own declared types and ending
+                -- in `const ax`, so the kernel types every term that reaches the
+                -- environment. The equation is a proposition, so the body is a proof and
+                -- needs the marker at level 0 — what `addDeclSorted`'s `withTopMarks`
+                -- supplies, without `withSorts`' evaluation of the type. Checking it does
+                -- not evaluate the equation: the type's head is the `eq` neutral and the
+                -- sides are only *checked* at `A`, never run.)
+                match addDecl g' (d.withTopMarks g') with
+                | .error e => report .error cmd.info s!"kernel rejected {name}: {e}"
+                | .ok g'' =>
+                  modify fun s => { s with globals := g'' }
+                  report .warning nr.info s!"{name} is accepted on the strength of native evaluation (--trust-native, {v.steps} steps), not checked by the kernel: its proof is the axiom {ax}, which `#print axioms` lists for everything that uses {name}"
         | _ => report .error nr.info "native_refl proves an equation `a = b`; this type is not one"
     else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>

@@ -10,6 +10,18 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* kernel: a `native_refl` definition's value is added through `addDecl`, so the kernel
+  types every term that reaches the environment, and a native implementation the run
+  reached that is not a declaration is an error rather than a silent omission from
+  `#print axioms`. The trust ledger's `partial` rows are documented as the `trustSources`
+  scan's output: `#print axioms` treats a partial definition as an opaque constant and
+  does not list it. `docs/CoreSpec.md` §9.3 now states why an inductive proposition may
+  have several constructors (or a data field) while `Sort 0` stays sound: proof
+  irrelevance is the conversion rule for every proposition, and the eliminator's
+  singleton test restricts only *large* elimination — so `inductive Bad : Prop | a | b`
+  is admitted, `Bad.a ≡ Bad.b`, and a function that would distinguish them (`Bad → Prop`
+  by a match) is rejected by the `ind` rule; a test pins both.
+
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one

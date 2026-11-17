@@ -1,12 +1,15 @@
 # The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).
 # One row per source of trust, tab-separated:
 #   module, declaration, item, reason, owner, review
-# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for
-# implemented_by, `native T := mk/get` for a repr registration, `native_refl
-# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt
-# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
-# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not
-# trust and are not listed.
+# `item` is how the ledger names the source (the `trustSources` scan in
+# Tests/Native.lean): `axiom X`, `native f := g` for implemented_by, `native T :=
+# mk/get` for a repr registration, `native_refl X.native✝` (compiled evaluation,
+# the analogue of Lean's native_decide), `smt X.smt✝…`, `builtin k := n`
+# (including `extern:`/FFI registrations), or `partial` for a partial definition's
+# compiled body. `#print axioms` uses the same wording for every item except
+# `partial`: a partial definition has no value and a checked witness, so
+# `#print axioms` does not list `partial`. `builtin inline` (a compiler hint) and
+# `builtin int` (how values print) are not trust and are not listed.
 # Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row
 # is expired when its review date is before today. Rows from the migration still
 # say `legacy: pre-gate baseline; not individually reviewed` and owner

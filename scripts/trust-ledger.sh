@@ -1,11 +1,13 @@
 #!/bin/sh
 # The trust ledger (Tests/Native.lean, .github/trust-baseline.tsv): walks every
 # declaration of lib/ (and the example that must stay axiom-free,
-# examples/hdl-verified.wiz), runs `#print axioms`, and fails when a source of trust
-# that is not in the checked-in ledger appears: an axiom, `unsafe`, a `sorry`, a
-# `native_refl`/SMT axiom (Wiz's `native_decide`/`ofReduceBool`), an
-# `implemented_by`/`repr:` implementation, an `extern`/FFI registration, a `builtin`
-# registration, or a `partial` definition.
+# examples/hdl-verified.wiz), scans the environment for sources of trust and runs
+# `#print axioms`, failing when a source that is not in the checked-in ledger appears:
+# an axiom, `unsafe`, a `sorry`, a `native_refl`/SMT axiom (Wiz's
+# `native_decide`/`ofReduceBool`), an `implemented_by`/`repr:` implementation, an
+# `extern`/FFI registration, a `builtin` registration, or a `partial` definition. The
+# `partial` row comes from the scan only: a partial definition is an opaque constant
+# with a checked witness, so `#print axioms` reports nothing for it.
 #
 # A ledger row is `module<TAB>declaration<TAB>item<TAB>reason<TAB>owner<TAB>review`.
 # A new source needs a reviewed row: `--update` refuses to add one without `--reason`.

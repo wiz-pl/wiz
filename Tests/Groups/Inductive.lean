@@ -29,6 +29,20 @@ def propIndGroup : Group where
     { name := "a non-singleton proposition eliminates only into Prop", run := fun _ =>
         ok (propIndPrelude ++
           "def leRefl (k : Nat) : Le k k := Le.casesOn (fun _ _ _ => Le k k) (fun _ => .refl k) (fun _ => .refl k) (.refl k)") [] },
+    { name := "a two-constructor proposition is admitted, and a function that distinguishes it is not", run := fun _ => do
+        -- (kernel-01) `Bad.a ≡ Bad.b` by proof irrelevance, so a function `Bad → Prop`
+        -- that matched on the constructor would make conversion not a congruence. It is
+        -- not definable: the match needs a motive in `Sort 1`, which the `ind` rule
+        -- refuses. The type former itself is Lean's: proof irrelevance is the rule for
+        -- every `Prop`; only *large* elimination is restricted by the description's shape.
+        fails "inductive Bad : Prop where\n  | a\n  | b\n\ndef f (b : Bad) : Prop :=\n  match b with\n  | .a => True\n  | .b => False"
+          "large elimination"
+        let doc ← IO.FS.readFile "docs/CoreSpec.md"
+        check ((doc.splitOn "irrelevance is the conversion rule for every type").length > 1)
+          "docs/CoreSpec.md does not say that proof irrelevance is the rule for every Prop" },
+    { name := "a proposition with a data field is admitted, and its field cannot be extracted", run := fun _ =>
+        fails (indPrelude ++ "inductive Bad : Prop where\n  | mk (n : Nat)\n\ndef get (b : Bad) : Nat :=\n  match b with\n  | .mk n => n")
+          "large elimination" },
     { name := "singleton elimination computes into Type (EqP.rec)", run := fun _ =>
         ok (propIndPrelude ++ "#reduce eqPTest") [".succ .zero"] },
     { name := "large elimination of a non-singleton proposition is rejected", run := fun _ =>

@@ -6,8 +6,16 @@ it, and the `trust-ledger` CI job plus the `native` test group compare it with t
 
 ## What is a source of trust
 
-The ledger is produced by elaborating every module and running `#print axioms`, so it
-records sources rather than dependency edges. One row per:
+The ledger is produced by elaborating every module and **scanning the environment** for
+sources of trust (`trustSources` in `Tests/Native.lean`, which
+`scripts/trust-ledger.sh` calls), so it records sources rather than dependency edges.
+`#print axioms` is run too, but it is a different walk — it follows what a declaration's
+type, value and witness reach — and every axiom it reports must be one of the ledger's
+sources. The two agree on `axiom`, `native`, `native_refl`, `smt` and `builtin` items;
+they differ on `partial`: a partial definition has no value and a kernel-checked
+witness, so `#print axioms` treats it as an opaque constant and reports nothing for it,
+while the ledger lists it as `partial` because its compiled body is trusted. A `partial`
+row is therefore not `#print axioms` output. One row per:
 
 | Wiz | ledger `item` | what it trusts |
 | --- | --- | --- |

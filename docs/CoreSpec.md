@@ -1570,15 +1570,25 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
 * `μ` is in `Sort (l+1)`, unless its `prop` flag is set, in which case it is an
   **inductive proposition** in `Sort 0` (#252). The formation premises are unchanged:
   `I` is still exactly in `Sort (l+1)` and `D ⇐ Desc.{l} I`, so a proposition's fields
-  may live in any `Sort (l+1)`; only its elimination is restricted. `ind` on a
-  proposition checks the same premises and allows a motive in `Sort v` only when
-  `v ≡ 0` or the description is a singleton (no constructor, or one whose fields are
-  all (sub)singleton types: `descSingleton` in `Eval.lean`). A non-singleton
-  proposition's generated eliminator therefore has no motive level parameter; a raw
-  core term with a larger motive is rejected ("large elimination from an inductive
-  proposition"). Singleton elimination evaluates a suspended proof (`vInd` forces its
-  body) because the elimination computes on its constructor; a proof motive stays
-  suspended.
+  may live in any `Sort (l+1)`; only its elimination is restricted. A proposition may
+  therefore have several constructors, or a field that stores data (`inductive Bad : Prop
+  | a | b`, `inductive Bad2 : Prop | mk (n : Nat)`). That is Lean's design: proof
+  irrelevance is the conversion rule for every type in `Sort 0`
+  (§8.5, conv-irr), not a consequence of the description's shape, so `Bad.a ≡ Bad.b` and
+  `Bad2.mk 0 ≡ Bad2.mk 1` — the type is a proposition, and its proofs are its proofs.
+  What the shape decides is *elimination*: `ind` on a proposition checks the same premises
+  and allows a motive in `Sort v` only when `v ≡ 0` or the description is a singleton (no
+  constructor, or one whose fields are all (sub)singleton types: `descSingleton` in
+  `Eval.lean`). So a non-singleton proposition cannot be eliminated into another sort:
+  its data field is only observable through an elimination that returns a proposition,
+  whose results are equal by conv-irr, and erasure drops the proof. A function that
+  distinguished two of its values would need a motive in a larger sort, which is what
+  `ind` refuses (`Tests/Groups/Inductive.lean` pins the rejection); that is why admitting
+  the type former is sound. A non-singleton proposition's generated eliminator therefore
+  has no motive level parameter; a raw core term with a larger motive is rejected ("large
+  elimination from an inductive proposition"). Singleton elimination evaluates a suspended
+  proof (`vInd` forces its body) because the elimination computes on its constructor; a
+  proof motive stays suspended.
 * **The hint** [impl, Lean kernel only]. A `μ`/`ν` term carries an optional hint
   `(T, us, args)`, its nominal form `T.{us} args`. Conversion ignores it; the elaborator
   reads it back (a type's name, constructors and arguments), and `eval` evaluates `args`.
