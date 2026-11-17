@@ -318,7 +318,7 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
         let vy := fresh (l + 1);
         let byTy := eval (.cons vx env) B;
         let bty := eval (.cons (.vpair vx vy) (TCtx.env c)) m;
-        match eraseCheck ((TCtx.bind c A).bind byTy) b bty with
+        match eraseCheck (TCtx.bind (TCtx.bind c A) byTy) b bty with
         | .ok b' =>
           let bx := liftE 1 2 b';
           match zero with

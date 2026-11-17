@@ -2830,7 +2830,7 @@ def convSpineW : TCtx → Head → Head → Spine → Spine → Bool
         | .vsigma p i j A env B =>
           let vx := fresh (TCtx.lvl c)
           let vy := fresh (TCtx.lvl c + 1)
-          let ctx₂ := (TCtx.bind c A).bind (eval (.cons vx env) B)
+          let ctx₂ := TCtx.bind (TCtx.bind c A) (eval (.cons vx env) B)
           Bool.and (qEq q q') (Bool.and
             (convTy (TCtx.bind c sty) (eval (.cons (fresh (TCtx.lvl c)) e) m) (eval (.cons (fresh (TCtx.lvl c)) e') m'))
             (conv ctx₂ (eval (.cons (.vpair vx vy) e) m)
@@ -3129,7 +3129,7 @@ def inferW : TCtx → Tm → TyRes
           let vx := fresh l;
           let vy := fresh (l + 1);
           let byTy := eval (.cons vx env) B;
-          match check ((TCtx.bind c A).bind byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m) with
+          match check (TCtx.bind (TCtx.bind c A) byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m) with
           | .ok _ ub => match popUsageAt (TCtx.bind c A) q byTy ub with
             | .some ub' => match popUsageAt c (qmul q p) A ub' with
               | .some ub'' => .ok (eval (.cons (evalAt c s sty) (TCtx.env c)) m) (uAdd (uScale q us) ub'')
@@ -4120,7 +4120,7 @@ def markInferW : TCtx → Tm → MR
           | .none => .vunit (ln 1);
         let m' := markTy (TCtx.bind c vsty) m;
         let byTy := eval (.cons vx env) B;
-        let b' := markCheck ((TCtx.bind c A).bind byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m');
+        let b' := markCheck (TCtx.bind (TCtx.bind c A) byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m');
         .mk (.split q s' m' b') (.some (eval (.cons (evalAt c s' vsty) (TCtx.env c)) m'))
       | _ => .mk (.split q s' m b) .none
   | c, .ann t ty =>
