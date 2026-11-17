@@ -345,7 +345,13 @@ self-hosted frontend does the first of those, and only for the ordinary declarat
   belong to a module's stream). `--no-cache` constructs no key at all. Before the
   per-module split the key was one graph-wide rolling hash plus the modules' paths (so
   the same text under another root missed, and a dependency's header could be stale).
-  Measured in `bench/selfhost-bench.py`: compiler.wiz warm vs cold ...
+  Measured in `bench/selfhost-bench.py` (compiler.wiz: the whole toolchain as one
+  module plus the embedded prelude; medians of three, under `heavy` on a shared
+  machine): 72.1 s cold and 31.1 s warm, 650 MB and 137 MB peak RSS; the Lean host on
+  the same file is 41.5 s / 27.8 s. A single-file check pays more for a per-module key
+  than for the old graph-wide one (10.6 s warm): it reads and hashes every module's
+  `import_c` headers and `include_str` files, which the graph key did not, and that is
+  what makes those edits miss.
 
 **Left for later slices.** Constructor- and field-level `private` (`| private c`,
 `private f : T`, `private mk ::`) is still parsed and *stripped*: it is not a
@@ -758,7 +764,7 @@ The checker prints the discovery graph's rolling hash with `--key` (`moduleGraph
 hash of the loaded modules' names and texts in load order); it follows a transitive
 change and ignores a file that no module imports. The driver's cache (D5) does not use
 it: it keys each module on its content and dependency closure (see the cache bullet in
-20c), in `Cli.wiz`'s `planOf`/`keyFold`. The checker's `--oneshot` runs the pre-loader
+21n), in `Cli.wiz`'s `planOf`/`keyFold`. The checker's `--oneshot` runs the pre-loader
 single-file path (`checkFile`) instead, for the old behaviour's own tests.
 
 **Not done.** `private` is module-scoped now (21n), but only at the declaration level:

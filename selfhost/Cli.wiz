@@ -680,42 +680,47 @@ def includeFieldsGo (dir : String) : List String → IO (List String)
   | .nil => IO.pure .nil
   | .cons rel rest => IO.bind (readIf (dirJoin dir rel)) (fun t =>
       IO.bind (includeFieldsGo dir rest) (fun more => match t with
-        | .some text => IO.pure (.cons "include" (.cons rel (.cons "ok" (.cons text more))))
-        | .none => IO.pure (.cons "include" (.cons rel (.cons "missing" more)))))
+        | .some text => IO.pure (List.cons "include" (List.cons rel (List.cons "ok" (List.cons text more))))
+        | .none => IO.pure (List.cons "include" (List.cons rel (List.cons "missing" more)))))
 
 def modKeyFieldsOf (m : ModSrc) : IO (List String) :=
   IO.bind (moduleHeaderTexts (modText m)) (fun hs =>
     IO.bind (includeFieldsGo (dirParent (modPath m)) (modIncludeNames (modText m))) (fun incs =>
-      IO.pure (.cons "module" (.cons (modName m) (.cons (modText m)
+      IO.pure (List.cons "module" (List.cons (modName m) (List.cons (modText m)
         (List.append (headerFields hs) incs))))))
 
-def fieldsMapOf : List ModSrc → StrMap (List String) → IO (StrMap (List String))
+-- a module's own key: the digest of its fields (its name and text, its `import_c` header
+-- texts, the contents of its `include_str` files). It is computed once per module and
+-- reused for the module's key and for the graph's raw key, so a check hashes each text
+-- once (the first per-module version hashed it three times and made a warm check slow).
+def ownDigestsOf : List ModSrc → StrMap String → IO (StrMap String)
   | .nil, acc => IO.pure acc
   | .cons m rest, acc => IO.bind (modKeyFieldsOf m) (fun fs =>
-      fieldsMapOf rest (StrMap.insert acc (Str.ofString (modName m)) fs))
+      ownDigestsOf rest (StrMap.insert acc (Str.ofString (modName m)) (digText (digFields fs))))
 
-def fieldsOfNames (fields : StrMap (List String)) : List String → List String
+def digestsOfNames (digs : StrMap String) : List String → List String
   | .nil => .nil
-  | .cons n ns => List.append (.cons n (StrMap.findD fields (Str.ofString n) .nil))
-      (fieldsOfNames fields ns)
+  | .cons n ns => List.append (.cons n (.cons (StrMap.findD digs (Str.ofString n) "") .nil))
+      (digestsOfNames digs ns)
 
--- a module's key: its own fields, then the key of each import in source order (the
--- dependency closure -- a changed dependency changes every importer). The load order is
--- dependencies first, so the imports' keys are already in the map.
+-- a module's key: the digest of its own key and the keys of its imports in source order
+-- (the dependency closure -- a changed dependency changes every importer). The load order
+-- is dependencies first, so the imports' keys are already in the map.
 def importFieldsOf (keys : StrMap String) : List String → List String
   | .nil => .nil
   | .cons n ns => .cons "import" (.cons n (.cons (StrMap.findD keys (Str.ofString n) "")
       (importFieldsOf keys ns)))
 
-def keyFold (tab : List ModSrc) (fields : StrMap (List String)) (shared : List String) :
+def keyFold (tab : List ModSrc) (digs : StrMap String) (shared : List String) :
     StrMap String → List String → StrMap String
   | keys, .nil => keys
   | keys, .cons name rest => match modFind tab name with
-    | .none => keyFold tab fields shared keys rest
+    | .none => keyFold tab digs shared keys rest
     | .some m =>
       let base := List.append (.cons "key" (.cons toolchainId (List.append (.cons "root" shared)
-        (StrMap.findD fields (Str.ofString name) .nil)))) (importFieldsOf keys (modImports m));
-      keyFold tab fields shared
+        (.cons "own" (.cons (StrMap.findD digs (Str.ofString name) "") .nil)))))
+        (importFieldsOf keys (modImports m));
+      keyFold tab digs shared
         (StrMap.insert keys (Str.ofString name) (digText (digFields base))) rest
 
 -- the graph's load order (dependencies first, imports in source order), which is also the
@@ -764,22 +769,22 @@ structure CachePlan where
   raw : String
   simple : Bool
 
-def planOfFields (tab : List ModSrc) (fields : StrMap (List String)) (shared : List String) :
+def planOfFields (tab : List ModSrc) (digs : StrMap String) (shared : List String) :
     CachePlan :=
   let raw := digText (digFields (.cons "raw" (.cons toolchainId (List.append (.cons "root" shared)
-    (fieldsOfNames fields (tabNames tab))))));
+    (digestsOfNames digs (tabNames tab))))));
   match loadInfoOf tab with
   | .mk order simple => match simple with
     | .true =>
-      let keys := keyFold tab fields shared StrMap.empty order;
+      let keys := keyFold tab digs shared StrMap.empty order;
       CachePlan.mk order keys (StrMap.findD keys (Str.ofString "Main") "missing") raw .true
     | .false => CachePlan.mk order StrMap.empty raw raw .false
 
 -- (the root's `import_c` texts are injected into the globals every module elaborates
 -- against, so they are part of every module's key, as they are in the host's root key)
 def planOf (g : Graph) : IO CachePlan := match g with
-  | .mk tab hs => IO.bind (fieldsMapOf tab StrMap.empty) (fun fields =>
-      IO.pure (planOfFields tab fields (headerFields hs)))
+  | .mk tab hs => IO.bind (ownDigestsOf tab StrMap.empty) (fun digs =>
+      IO.pure (planOfFields tab digs (headerFields hs)))
 
 -- the `.c` key: the whole graph's content (the root key covers the closure) and the
 -- backend flags, which change the C and not the elaboration
@@ -890,7 +895,7 @@ def readModuleLinesGo (o : Opts) (keys : StrMap String) :
       | .none => IO.pure (.none : Option (List (List String)))
       | .some (.mk _ payload) => IO.bind (readModuleLinesGo o keys rest) (fun more => match more with
         | .none => IO.pure (.none : Option (List (List String)))
-        | .some ls => IO.pure (.some (.cons
+        | .some ls => IO.pure (Option.some (List.cons
             (mapChars (fun cs => String.mk cs) (splitLines payload)) ls))))
 
 def readModuleLines (o : Opts) (p : CachePlan) : IO (Option (List (List String))) := match p with
@@ -907,10 +912,10 @@ def concatLines : List (List String) → List String
 def readCheckCache (o : Opts) (p : CachePlan) : IO (Option (List String)) := match p with
   | .mk _ _ _ raw _ =>
     IO.bind (readModuleLines o p) (fun per => match per with
-      | .some groups => IO.pure (.some (concatLines groups))
+      | .some groups => IO.pure (Option.some (concatLines groups))
       | .none => IO.bind (cacheRead o raw ".check") (fun c => match c with
         | .some (.mk _ payload) =>
-          IO.pure (.some (mapChars (fun cs => String.mk cs) (splitLines payload)))
+          IO.pure (Option.some (mapChars (fun cs => String.mk cs) (splitLines payload)))
         | .none => IO.pure (.none : Option (List String))))
 
 -- the module of a loader-tagged line (`@NAME:OFFSET text`; `Main` for an untagged one)
