@@ -19,6 +19,7 @@ def failsOptic (input : String) (fragment : String) : IO Unit := do
 def opticGroup : Group where
   name := "optic"
   exercise := "lib/Optic.wiz (Feral, RD11)"
+  parallel := true
   cases := [
     { name := "the optics library checks, with its lens laws", run := fun _ =>
         okOptic "import Optic\n#check List.atL_lawful\n#check Lens.comp_lawful"
