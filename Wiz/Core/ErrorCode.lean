@@ -81,6 +81,11 @@ def quantity := "quantity"
 def kernelRejected := "kernel-rejected"
 /-- the parser's errors -/
 def parseError := "parse-error"
+/-- a file named on the command line that cannot be read -/
+def noSuchFile := "no-such-file"
+/-- a recursive definition that never reaches its equations (a call to itself in the
+body rather than in equation form) -/
+def recursiveWithoutEquations := "recursive-without-equations"
 /-- (internal) unification outside the pattern fragment: the elaborator postpones on it;
 reported as `type-mismatch` -/
 def nonPattern := "non-pattern"
@@ -92,7 +97,8 @@ def all : List String :=
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
    duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
-   unknownDeclaration, simpLemmaNotEquation, simpLemmaConditional, quantity, kernelRejected, parseError]
+   unknownDeclaration, simpLemmaNotEquation, simpLemmaConditional, quantity, kernelRejected,
+   parseError, noSuchFile, recursiveWithoutEquations]
 
 /-- The code a message is reported with: internal codes become the public ones. -/
 def reported (code : String) : String :=

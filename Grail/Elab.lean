@@ -98,7 +98,7 @@ def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState Z
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=
-  String.join (s.messages.toList.map fun m => s!"{path}:{m.render l.src}\n")
+  String.join (s.messages.toList.map fun m => s!"{m.renderFile path l.src}\n")
 
 def hasErrors (s : CommandState ZeroOneMany) : Bool := s.messages.any (·.severity == .error)
 

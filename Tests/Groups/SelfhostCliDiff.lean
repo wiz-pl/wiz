@@ -144,7 +144,17 @@ def cliDiffCodes : List (String × String) :=
    ("cannot find module ", "unknown-module"),
    ("unknown module ", "unknown-module"),
    ("import cycle", "import-cycle"),
-   ("no such file", "no-such-file")]
+   ("no such file", "no-such-file"),
+   -- (err-03) the conditions the self-hosted frontend now codes structurally
+   ("missing case", "missing-case"),
+   ("missing field", "missing-field"),
+   ("unsolved goals", "unsolved-goals"),
+   ("not structurally smaller", "not-structural"),
+   ("not a recursive field", "not-structural"),
+   ("structural recursion", "not-structural"),
+   ("not a class", "unknown-class"),
+   ("declared with quantity", "quantity"),
+   ("has no meaning", "unknown-syntax")]
 
 def cliDiffKindText (msg : String) : String :=
   match cliDiffCodes.find? (fun p => (msg.splitOn p.1).length > 1) with
@@ -179,6 +189,8 @@ def cliDiffLine (columns : Bool) (l : String) : String :=
       | [f, ln, col] =>
         if columns then s!"{f}:{ln}:{col}: {sev}: {cliDiffKind msg}"
         else s!"{f}:{ln}: {sev}: {cliDiffKind msg}"
+      -- a diagnostic with no position (`file: severity: message`)
+      | [f] => s!"{f}: {sev}: {cliDiffKind msg}"
       | _ => cliDiffTool l
   | _ => cliDiffTool l
 
@@ -194,6 +206,23 @@ def cliDiffOneStream (spec : CliDiffSpec) (name ho so : String) : IO Unit := do
   let sn := cliDiffNormal spec.columns so
   unless hn == sn do
     throw (IO.userError s!"{name} differs (args {" ".intercalate spec.args.toList}):\n-- wiz\n{hn}\n-- wiz-selfhost\n{sn}\n-- raw wiz\n{ho}\n-- raw wiz-selfhost\n{so}")
+
+/-- The codes of a run's diagnostics, in order (the host's from its wording, the
+self-hosted driver's from its `[code]` tag): the differential check for `err-03`. -/
+def cliDiffKinds (r : CliDiffRun) : List String :=
+  ((r.err ++ r.out).splitOn "\n").filterMap fun l =>
+    match l.splitOn ": " with
+    | loc :: sev :: rest =>
+      if rest.isEmpty || !["error", "warning", "info"].contains sev then none
+      else
+        let msg := ": ".intercalate rest
+        match loc.splitOn ":" with
+        | f :: ln :: col :: [] =>
+          if f.endsWith ".wiz" && !ln.isEmpty && !col.isEmpty then some (cliDiffKind msg) else none
+        -- a diagnostic with no position (`file: severity: message`)
+        | [f] => if f.endsWith ".wiz" then some (cliDiffKind msg) else none
+        | _ => none
+    | _ => none
 
 /-- Compare a run of each tool: exit code, standard output, standard error. -/
 def cliDiffSame (spec : CliDiffSpec) (h s : CliDiffRun) : IO Unit := do
@@ -315,7 +344,7 @@ def cliDiffGroup : Group where
         cliDiffSame spec2 h2 s2
         checkEq 1 s2.code
         -- (the host's message is identical; only the position differs)
-        cliCheck s2.err "'one' has already been declared" "duplicate text"
+        checkEq "dup.wiz:3:1: error: 'one' has already been declared [duplicate-declaration]\n" s2.err
         -- a type mismatch: the host's expected/inferred lines are indented and dropped
         let spec3 : CliDiffSpec := { files := #[("tm.wiz", "import Prelude\ndef bad : Nat := Bool.true\n")]
                                      args := #["check", "tm.wiz"], columns := false }
@@ -659,15 +688,40 @@ def cliDiffGroup : Group where
         cliCheck h.out "is ignored: module Prelude" "host warning"
         checkEq "" s.out
         skip "warnings: the host warns (on stdout) about a module root shadowing its own lib; the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet (A14/D6)" },
-    { name := "a missing file: both exit 1 (the host's message is an uncaught read)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "diagnostics: one condition has one code in both toolchains (err-03)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let cases : List (String × String) := [
+          ("missing-case", "import Prelude\ninductive C where\n  | a\n  | b\ndef f (c : C) : Nat := match c with\n  | .a => 0\n"),
+          ("missing-field", "import Prelude\nclass K (A : Type) where\n  x : A\n  y : Nat\ninstance : K Nat where\n  x := 1\n"),
+          ("unsolved-goals", "import Prelude\ndef f : Nat → Nat := by intro n\n"),
+          ("not-structural", "import Prelude\ndef f : String → Nat\n  | \"a\" => 0\n  | n => f n\n"),
+          ("unknown-class", "import Prelude\ninstance : Nat := 0\n"),
+          ("quantity", "import Prelude\ndef dup {A : Type} (1 x : A) : A × A := (x, x)\n"),
+          ("unknown-syntax", "import Prelude\nsyntax \"nonsense\" : tactic\ndef f : Nat := by nonsense\n")]
+        for (code, src) in cases do
+          let spec : CliDiffSpec := { files := #[("c.wiz", src)], args := #["check", "c.wiz"], columns := false }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 1 h.code
+          checkEq 1 s.code
+          let hk := cliDiffKinds h
+          let sk := cliDiffKinds s
+          check (hk.contains code) s!"{code}: the host says {hk} for\n{src}"
+          check (sk.contains code) s!"{code}: the self-hosted driver says {sk} for\n{src}"
+          unless hk == sk do
+            throw (IO.userError s!"{code}: the toolchains disagree, host {hk}, self-hosted {sk}, for\n{src}\n-- host\n{h.err}\n-- selfhost\n{s.err}") },
+    { name := "a missing file: one positionless diagnostic with a code, exit 1, both toolchains", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { args := #["check", "no.wiz"] }
         let (h, s) ← cliDiffBoth host exe spec
         checkEq 1 s.code
         checkEq 1 h.code
         checkEq "" s.out
-        checkEq "no.wiz:1:1: error: no such file\n" s.err
-        skip "message: the host lets IO.readFile throw (an uncaught exception on stderr); the driver checks access first and prints one positioned diagnostic (D6/D7)" }
+        checkEq "no.wiz: error: no such file [no-such-file]\n" s.err
+        -- (the host prints no `[code]` in text mode, err-01; its diagnostic has the code
+        -- and no fabricated `1:1` too)
+        checkEq "no.wiz: error: no such file\n" h.err
+        checkEq ["no-such-file"] (cliDiffKinds s)
+        checkEq ["no-such-file"] (cliDiffKinds h) }
   ]
 
 builtin_initialize registerGroup cliDiffGroup

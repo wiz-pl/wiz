@@ -327,7 +327,9 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   if let (k, n) :: _ := clash then
     let was := (s.globals.builtins.lookup k).getD "?"
     let text := s!"builtin {k} := {n}: {k} is already registered (as {was}); a builtin can be registered only once"
-    { s with messages := s.messages.push { info := {}, severity := .error, text }, pristine := false } else
+    -- (err-08) the declaration that re-registers the builtin, not `1:1` (`info := {}`)
+    let site := e.sites.find? (·.1 == n)
+    { s with messages := s.messages.push { info := (site.map (·.2.1)).getD {}, severity := .error, text }, pristine := false } else
   -- An effect's declarations were new where it was recorded (a module elaborated on its
   -- own, from its own imports). Replayed into an importer that already has one of the
   -- names, from another module or from the file itself, it would replace that
@@ -340,7 +342,7 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
     let site := e.sites.find? (·.1 == d.name)
     let text := s!"'{d.name}' is declared by both {Effect.whose (s.declSites.get? d.name |>.map (·.2))} and {Effect.whose (site.map (·.2.2))}"
     { s with messages := s.messages.push { info := (site.map (·.2.1)).getD {}, severity := .error, text,
-                                           code := "duplicate-declaration" },
+                                           code := ErrorCode.duplicateDeclaration },
              pristine := false }
   | none =>
   -- (the declarations belong to the module being replayed: `Globals.declModule`)

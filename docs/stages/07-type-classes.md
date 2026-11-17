@@ -203,7 +203,9 @@ with instances for `Nat` that are the natively computed functions (`Add.mk Nat.a
   above `2^(w-1)` (so `-128 : I8` is fine), still wraps around (`OfNat (UIntN w) n` is
   `UIntN.ofNat`), but with a warning: "the numeral 300 does not fit in UIntN 8 (at most
   255): it wraps around to 44" (the elaborator knows these two families by name; an
-  `Info.warning` carries it to the command's messages).
+  `Info.warning` carries it to the command's messages). The warning is reported wherever
+  the numeral is elaborated, including `#eval (300 : U8)`, `#check`, an `instance` field
+  or a `structure` field — not only in a `def` body.
 * **Errors.** `"a" + 1`: "failed to synthesize an instance of Add String"; `(1 : Bool)`:
   "failed to synthesize an instance of OfNat Bool 1"; `-1 : Nat`: "… Neg Nat".
 * **The self-hosted toolchain** has no type classes: its own prelude

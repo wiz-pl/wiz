@@ -363,10 +363,10 @@ def elab : Scope → Syntax → Elab
   --<sol
   | names, .ident n => match Scope.lookupV names n with
     | .ok i => .ok (.var i)
-    | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+    | .privTo m => .err (coded "private" (("'" +++ privBase n) +++ "' is private to module " +++ m))
     | .missing => match strEq n "Unit" with
       | .true => .ok (.unit (ln 1))
-      | .false => .err ("unknown identifier " +++ n)
+      | .false => .err (coded "unknown-identifier" ("unknown identifier " +++ n))
   | names, s => match strEq (kindOf s) "term.ident" with
     | .true => elab names (kid s 0)
     | .false => match strEq (kindOf s) "term.paren" with
@@ -415,7 +415,7 @@ def elab : Scope → Syntax → Elab
                         | e => e
                       -- (Σ types are elaborated by `inferType`; this scope-level path is
                       -- used for the simple type annotations in the C header parser)
-                      | .false => .err ("unsupported syntax " +++ kindOf s)
+                      | .false => .err (coded "unknown-syntax" ("unsupported syntax " +++ kindOf s))
   --|ex
   --| | _, _ => .err "not implemented"
   --sol>
@@ -452,7 +452,8 @@ def checkText (cats : List Cat) (tokens : List String) (text : String) : String 
   match parseSyntax cats tokens "term" text with
   | .err m => String.append "parse " m
   | .ok stx => match elab Scope.empty stx with
-    | .err m => String.append "scope error: " m
+    -- (a coded error loses its code here: this is the term-level probe, not a diagnostic)
+    | .err m => String.append "scope error: " (uncoded m)
     | .ok t => typeOf t
 
 -- A file of commands (stage 14c): `def x (binders) : T := v`, `#check t` and
@@ -758,7 +759,12 @@ def newDuplicate (gs gs' : Globals) : Option String :=
   let n := Array.size (Globals.all gs);
   dupFrom (Globals.scope gs) (Globals.all gs') (Array.size (Globals.all gs') - n) n .nil
 
-def errStep (gs : Globals) (m : String) : Step := .mk (String.append "error: " m) gs
+def errStep (gs : Globals) (m : String) : Step := match hasCode m with
+  -- (the code goes before `error:`, where `atLine` moves it into the tag)
+  | .true => .mk (coded (codedCode m) (String.append "error: " (uncoded m))) gs
+  | .false => .mk (String.append "error: " m) gs
+
+def errStepC (gs : Globals) (code m : String) : Step := errStep gs (coded code m)
 
 
 -- Inductive types (stage 16a): `inductive T where | c (x : A) (y : T) …`, without
@@ -2536,8 +2542,8 @@ def tacOfStx (stx : Syntax) : STac :=
                                 | .true => STacticM.repeatN 64 (kid stx 1)
                                 | .false => match strEq k "tactic.paren" with
                                   | .true => tacticSeq (tacticKids (kid stx 1))
-                                  | .false => STac.fail (String.append "the tactic syntax "
-                                      (String.append k " has no meaning (the self-hosted frontend has the core tactics only)"))
+                                  | .false => STac.fail (coded "unknown-syntax" (String.append "the tactic syntax "
+                                      (String.append k " has no meaning (the self-hosted frontend has the core tactics only)")))
 def tacticSeq (xs : List Syntax) : STac := match xs with
   | .nil => .done
   | .cons x rest => match isTacticSyntax x with
@@ -3626,8 +3632,8 @@ def pathStr (outer f : String) : String := match strEq outer "" with
 def updErr (S : String) (fields : List String) (outer : String) : List Upd → List String → List String → Option String
   | .nil, _, _ => .none
   | .cons (.mk f p _) rest, direct, nested => match memberS f fields with
-    | .false => .some (String.append (String.append (String.append S " has no field '") f)
-        (String.append "' (its fields are " (String.append (commaJoin fields) ")")))
+    | .false => .some (coded "no-such-field" (String.append (String.append (String.append S " has no field '") f)
+        (String.append "' (its fields are " (String.append (commaJoin fields) ")"))))
     | .true =>
       let twice := String.append (String.append "field '" (pathStr outer f)) "' is updated twice";
       match p with
@@ -3852,7 +3858,7 @@ def resolveOne (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
     match goalOf es ty with
     | .other => .err (stuckMsg p)
     | .mk C args => match Globals.class gs C with
-      | .none => .err (String.append (String.append C " is not a class: ") (goalShow p))
+      | .none => .err (coded "unknown-class" (String.append (String.append C " is not a class: ") (goalShow p)))
       | .some _ => match allClosed es d args with
         | .false => .err (stuckMsg p)
         | .true => match tryLocals gs es cx ty 0 with
@@ -3897,7 +3903,7 @@ def splitNArgs : List Syntax → List NArg → List Syntax → NArgs
     | .true =>
       let x := rawName (kid a 1);
       match nargHas x ns with
-      | .true => .err (String.append (String.append "argument '" x) "' was already given")
+      | .true => .err (coded "named-argument" (String.append (String.append "argument '" x) "' was already given"))
       | .false => splitNArgs rest (.cons (.mk x (kid a 3)) ns) ps
     | .false => splitNArgs rest ns (.cons a ps)
 inductive TakeN where
@@ -4331,7 +4337,7 @@ def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) : 
     match runTacticSteps gs es0 st0 (tacticSteps stx) with
     | .err msg => .err msg
     | .ok st es' => match goalListOpen es' st (STacState.open st) with
-      | .cons _ _ => .err (unsolvedGoals es' st)
+      | .cons _ _ => .err (coded "unsolved-goals" (unsolvedGoals es' st))
       | .nil => match checkUnchecked es' st with
         | .some msg => .err msg
         | .none => match zonk es' 0 m with
@@ -4378,13 +4384,13 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : HE :=
 def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
   let d := Cx.lvl cx;
   match Scope.lookupV (Cx.sc cx) n with
-  | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+  | .privTo m => .err (coded "private" (("'" +++ privBase n) +++ "' is private to module " +++ m))
   | .missing => match splitLast n with
     -- `x.f`: the projection `T.f x`, for `x : T …`
     | .some (.mk base f) => match identHead gs es cx base with
       | .ok bt bty es1 m => match insertImplicits gs es1 cx bt bty m with
         | .ok bt' bty' es2 => match projT gs es2 cx bt' bty' f with
-          | .err _ => .err (String.append "unknown identifier " n)
+          | .err _ => .err (coded "unknown-identifier" (String.append "unknown identifier " n))
           | r => r
         | .err msg => .err msg
       | e => e
@@ -4395,7 +4401,7 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
         | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
         | .false => match strEq n "False" with
           | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
-          | .false => .err (String.append "unknown identifier " n)
+          | .false => .err (coded "unknown-identifier" (String.append "unknown identifier " n))
   | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalUse gs es cx (i - d) .nil with
@@ -4413,7 +4419,7 @@ def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syn
       | .err msg => .err msg
   | .none => match strEq n "Unit" with
     | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
-    | .false => .err (String.append "unknown identifier " n)
+    | .false => .err (coded "unknown-identifier" (String.append "unknown identifier " n))
 -- the projection `T.f t`, for `t : T …`
 def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE := match force es bty with
   | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
@@ -4425,7 +4431,7 @@ def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) 
         | _ => .err (String.append "not a projection: " f)
       | .err msg => .err msg
     | e => e
-  | _ => .err (String.append "no field " f)
+  | _ => .err (coded "no-such-field" (String.append "no field " f))
 -- a numeral `n`: `Nat.succ` applied `n` times to `Nat.zero` (stage 18f; there are no
 -- number literals in the kernel)
 def numeral (gs : Globals) (es : ES) (cx : Cx) (n : Nat) : TE := match identHead gs es cx "Nat.zero" with
@@ -4526,10 +4532,10 @@ def inferCast (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
       match checkT gs es1 cx (kid s 2) X with
       | .ok t _ es2 => .ok (.coe (quote d X) (quote d Y) e t) Y es2
       | e => e
-    | .vempty _ => .err "cannot infer the type of this cast: its proof's type is an empty equation, so it no longer shows the target type; write `(cast e t : T)`"
-    | .vunit _ => .err "cannot infer the type of this cast: its proof's type computed to True, so it no longer shows the target type; write `(cast e t : T)`"
-    | v => .err (String.append "cannot infer the type of this cast: its proof's type is not an equation, but "
-        (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) v)))
+    | .vempty _ => .err (coded "cannot-infer" "cannot infer the type of this cast: its proof's type is an empty equation, so it no longer shows the target type; write `(cast e t : T)`")
+    | .vunit _ => .err (coded "cannot-infer" "cannot infer the type of this cast: its proof's type computed to True, so it no longer shows the target type; write `(cast e t : T)`")
+    | v => .err (coded "cannot-infer" (String.append "cannot infer the type of this cast: its proof's type is not an equation, but "
+        (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) v))))
   | e => e
 -- `transp P p e` along `e : a = b`: `subst A a P p b e : P b e`, with
 -- `P : (b : A) → a = b → Prop` and `p : P a (refl A a)`
@@ -4600,7 +4606,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
     | .false => match strEq k "term.transp" with
     | .true => inferTransp gs es cx s
     | .false => match strEq k "term.rfl" with
-    | .true => .err "cannot infer the type of rfl; add a type ascription"
+    | .true => .err (coded "cannot-infer" "cannot infer the type of rfl; add a type ascription")
     | .false => match strEq k "term.app" with
       | .true => match inferHead gs es cx (kid s 0) with
         | .ok f fty es' m => appArgsNamed gs es' cx (kid s 0) f fty m (kids (kid s 1)) .nil .none .nil
@@ -4640,7 +4646,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
                   | .true => match binderQs (kids (kid s 1)) with
                     | .some qs => inferLams gs es cx qs (fieldsOf (kids (kid s 1))) (kid s 3)
                     | .none => .err qtyErr
-                  | .false => .err "cannot infer the type of a λ; add a type ascription"
+                  | .false => .err (coded "cannot-infer" "cannot infer the type of a λ; add a type ascription")
                 | .false => match strEq k "term.structUpdate" with
                   | .true => structUpdT gs es cx s
                   | .false => inferT2 gs es cx s
@@ -4711,7 +4717,7 @@ def inferT2 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
               | .mk mt es1 => .ok mt (.vsort (.lnum 1)) es1
             | .false => match strEq k "term.namedArg" with
               | .true => .err "a named argument `(x := e)` is only allowed as an argument of an application"
-              | .false => .err (String.append "unsupported syntax " k)
+              | .false => .err (coded "unknown-syntax" (String.append "unsupported syntax " k))
 -- `(x y : A) × B`
 def depSigmas (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
   | .nil => inferType gs es cx body
@@ -4763,7 +4769,7 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
 def inferLams (gs : Globals) (es : ES) (cx : Cx) (qs : List Q) : List Field → Syntax → TE
   | .nil, body => inferT gs es cx body
   | .cons (.mk x _ _ aS) rest, body => match strEq (kindOf aS) "" with
-    | .true => .err "cannot infer the type of a λ; add a type ascription"
+    | .true => .err (coded "cannot-infer" "cannot infer the type of a λ; add a type ascription")
     | .false => match inferType gs es cx aS with
       | .ok A _ es1 =>
         let cx' := Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A);
@@ -4970,8 +4976,8 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
           | .false => inferT gs es cx s) with
           | .ok t ty' es' => match unify es' cx ty' ty with
             | .some es2 => .ok t ty es2
-            | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
-                (String.append ", got " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty')))))
+            | .none => .err (coded "type-mismatch" (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
+                (String.append ", got " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty'))))))
           | e => e
 -- a `match` as a term (stage 18g): its scrutinees are `let`-bound, then the clauses are
 -- compiled against the expected type (no recursion: that is a definition's)
@@ -5022,7 +5028,7 @@ def checkLams (gs : Globals) (es : ES) (cx : Cx) (xs : List String) (ws : List Q
 def compileM (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) : CE :=
   match cls with
-  | .nil => .err "missing case"
+  | .nil => .err (coded "missing-case" "missing case")
   | .cons (.mk pats binds rhs) _ => match firstCtorCol pats 0 with
     | .none =>
       -- a leaf: bind the variables, rewrite the recursive calls, elaborate against the
@@ -5166,8 +5172,8 @@ def litTest (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) 
     | .false => match Bool.not (isLitPat p0) with
     | .true => .err (String.append "a pattern `n + k` needs a Nat, not " tyStr)
     | .false => match top with
-      | .true => .err (String.append (String.append "structural recursion: the first argument must be matched by its constructors, and a literal pattern on " tyStr)
-          " is an equality test")
+      | .true => .err (coded "not-structural" (String.append (String.append "structural recursion: the first argument must be matched by its constructors, and a literal pattern on " tyStr)
+          " is an equality test"))
       | .false => match beqHead gs d xA with
         | .none => .err (String.append (String.append "a literal pattern needs Nat, or a type T with literals and an equality test T.beq : T → T → Bool; " tyStr) " has none")
         | .some T => match anyVarAt k cls with
@@ -5351,7 +5357,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
           | .some body => match next es with
             | .ok bs es'' => .ok (.tcons (.lam (.lam (wrap body))) bs) es''
             | e => e
-          | .none => .err (String.append "missing case " c)
+          | .none => .err (coded "missing-case" (String.append "missing case " c))
         | .false =>
           let recsT : List Nat := match top with
             | .true => recs
@@ -5424,8 +5430,8 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                     | .true => regen p n (base + 1 + eB + eB) pts pts cols'
                     | .false => cols';
                   match compileM gs mc es cx9 expected' cols'' .false ihLvls' (specialize T c k F impl curCol cls) with
-                  | .err m => .err (match strEq m "missing case" with
-                    | .true => String.append "missing case " c
+                  | .err m => .err (match strEq (uncoded m) "missing case" with
+                    | .true => coded "missing-case" (String.append "missing case " c)
                     | .false => m)
                   | .ok body es' =>
                     let inE : Tm := match modeB with
@@ -5679,7 +5685,7 @@ def command (gs : Globals) (stx : Syntax) : Step :=
           | .true => .mk (show .nil 0 (quote 0 ty)) gs
           | .false => match Bool.or (strEq (kindOf stx) "command.reduce") (strEq (kindOf stx) "command.eval") with
             | .true => .mk (show .nil 0 (quote 0 (eval .nil (inlineTm gs t)))) gs
-            | .false => errStep gs (String.append "unsupported command " (kindOf stx))
+            | .false => errStep gs (coded "unknown-syntax" (String.append "unsupported command " (kindOf stx)))
   --|ex
   --| errStep gs "not implemented"
   --sol>
@@ -6599,7 +6605,7 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
 -- released with `f`
 def foreignTypeCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
   | .ident T => match Scope.lookup (Globals.scope gs) T with
-    | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
+    | .some _ => errStepC gs "kernel-rejected" (String.append (String.append "'" T) "' has already been declared")
     | .none =>
       let Tn := Globals.declName gs T;
       let gs' := Globals.add gs (.mk T .nil (.univ 0) (.axiomC Tn (.univ 0)) (.axiomC Tn (.univ 0)) .nil .nil);
@@ -6662,7 +6668,7 @@ def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let f := identOf' (kid stx 2);
   let err := fun (m : String) => (LinkR.mk (Option.some (String.append "error: " m)) gs : LinkR);
   match globalTyOf gs f with
-  | .none => err (String.append "unknown declaration " f)
+  | .none => err (coded "unknown-declaration" (String.append "unknown declaration " f))
   | .some ty =>
     let tyOk : Option String := match kids (kid stx 3) with
       | .cons _ (.cons tS _) => match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) tS with
@@ -6719,9 +6725,9 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
   let f := identOf' (kid stx 6);
   let err := fun (m : String) => (LinkR.mk (Option.some (String.append "error: " m)) gs : LinkR);
   match globalTyOf gs f with
-  | .none => err (String.append "unknown declaration " f)
+  | .none => err (coded "unknown-declaration" (String.append "unknown declaration " f))
   | .some tyF => match globalTyOf gs g with
-    | .none => err (String.append "unknown declaration " g)
+    | .none => err (coded "unknown-declaration" (String.append "unknown declaration " g))
     | .some tyG => match kids (kid stx 4) with
       | .cons getStx _ =>
         -- `attribute [implemented_by mk get] T.mk` (stage 22d): values of `T` are native.
@@ -6730,7 +6736,7 @@ def implementedByCmd (gs : Globals) (stx : Syntax) : LinkR :=
         -- operations (as `U32Array`/`U64Map` do) compiles to those natives.
         let get := identOf' getStx;
         match globalTyOf gs get with
-        | .none => err (String.append "unknown declaration " get)
+        | .none => err (coded "unknown-declaration" (String.append "unknown declaration " get))
         | .some tyGet =>
           let T := match splitLast f with
             | .some (.mk base _) => base
@@ -6939,10 +6945,10 @@ def unknownFld (order : List String) : List Fld → Option String
 def instArgs (C : String) (given : List Fld) : List String → ArgsR
   | .nil => .ok .nil
   | .cons f rest => match fldCount given f with
-    | .zero => fldErr (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C)
-    | .succ (.succ _) => fldErr (String.append (String.append (String.append "field '" f) "' is given twice in the instance for class ") C)
+    | .zero => fldErr (coded "missing-field" (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C))
+    | .succ (.succ _) => fldErr (coded "named-argument" (String.append (String.append (String.append "field '" f) "' is given twice in the instance for class ") C))
     | .succ _ => match findFld given f with
-      | .none => fldErr (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C)
+      | .none => fldErr (coded "missing-field" (String.append (String.append (String.append "missing field '" f) "' in the instance for class ") C))
       | .some v => match instArgs C given rest with
         | .ok vs => .ok (.cons v vs)
         | .err m => .err m
@@ -7005,7 +7011,7 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
   match headIdent tyS with
   | .none => errStep gs "an instance's type must be a class application (C a…)"
   | .some C => match Globals.class gs C with
-    | .none => errStep gs (String.append C " is not a class: an instance needs a class declared with `class`")
+    | .none => errStepC gs "unknown-class" (String.append C " is not a class: an instance needs a class declared with `class`")
     | .some _ =>
       let isWhere := match kid stx 6 with
         | .atom w => strEq w "where"
@@ -7014,9 +7020,9 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
         | .true => match Globals.structFields gs C with
           | .none => .err (String.append "internal error: no fields for class " C)
           | .some fs => match unknownFld fs (instFlds (kids (kid stx 7))) with
-            | .some n => .err (String.append (String.append (String.append "unknown field '" n) "' for class ") C)
+            | .some n => .err (coded "no-such-field" (String.append (String.append (String.append "unknown field '" n) "' for class ") C))
             | .none => match instArgs C (instFlds (kids (kid stx 7))) fs with
-              | .err m => .err (String.append (String.append "instance for class " C) (String.append ": " m))
+              | .err m => .err (wrapCoded (String.append (String.append "instance for class " C) ": ") m)
               | .ok args => .ok (mkAppS C args)
         | .false => .ok (kid stx 7);
       match vR with
@@ -7129,7 +7135,7 @@ def cStructCmd (gs : Globals) (stx : Syntax) : Step :=
     | .nil => String.append "wiz_s_" (String.mk (hexMangle (strChars T)));
   let fs := kids (kid stx 5);
   match Scope.lookup (Globals.scope gs) T with
-  | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
+  | .some _ => errStep gs (coded "duplicate-declaration" (String.append (String.append "'" T) "' has already been declared"))
   | .none => match fs with
     | .nil => errStep gs "a c_struct needs at least one field"
     | .cons _ _ => match Bool.or (badCChar (strChars ctype)) (badCChar (strChars header)) with
@@ -7479,7 +7485,7 @@ def glueCmd (gs : Globals) (stx : Syntax) : Step :=
         let cname := glueName name;
         let cparams := glueParamDecls gs (pairNames pairs) (pairKinds pairs);
         match Scope.lookup (Globals.scope gs) name with
-        | .some _ => errStep gs (String.append "error: '" (String.append name "' has already been declared"))
+        | .some _ => errStep gs (coded "duplicate-declaration" (String.append "'" (String.append name "' has already been declared")))
         | .none =>
           let gs1 := Globals.add gs (.mk name .nil ty (.axiomC name ty) (.axiomC name ty) (dfltKinds (lenL ks)) .nil);
           let gs2 := Globals.addFFI gs1 (.code ("static " +++ kindCType gs rk +++ " " +++ cname +++ "(" +++
@@ -8062,7 +8068,7 @@ def attrRegCmd (gs : Globals) (cats : List Cat) (tokens : List String) (stx : Sy
   match kid stx 5 with
   | .ident f => match declExists gs f with
     | .true => .mk cats tokens .nil .none
-    | .false => .mk cats tokens .nil (.some ("unknown declaration " +++ f))
+    | .false => .mk cats tokens .nil (.some (coded "unknown-declaration" ("unknown declaration " +++ f)))
   | _ => .mk cats tokens .nil (.some "an attribute needs a name")
 def setOptionCmd (cats : List Cat) (tokens : List String) (stx : Syntax) : Tab0 :=
   match kid stx 1 with
@@ -8156,9 +8162,9 @@ def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
   match Scope.lookup (Globals.scope gs) f with
   | .none => match isBuiltinDeriver f with
     | .true => LinkR.mk .none (Globals.addDeriver gs C (deriverBase f))
-    | .false => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+    | .false => LinkR.mk (.some (coded "unknown-declaration" ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f))) gs
   | .some i => match globalTyOf gs f with
-    | .none => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f)) gs
+    | .none => LinkR.mk (.some (coded "unknown-declaration" ("error: " +++ f +++ " is not a deriver: unknown declaration " +++ f))) gs
     | .some ty => match piArity ty with
       | .succ (.zero) => LinkR.mk .none (Globals.addDeriver gs C f)
       | n => LinkR.mk (.some ("error: " +++ f +++ " is not a deriver: it takes " +++ Nat.toString n
@@ -8168,7 +8174,7 @@ def deriverCmd (gs : Globals) (stx : Syntax) : LinkR :=
 def attrStep (gs : Globals) (stx : Syntax) : Option LinkR := match strEq (kindOf stx) "command.attrInline" with
   | .true => .some (match kid stx 4 with
     | .ident f => match Scope.lookup (Globals.scope gs) f with
-      | .none => LinkR.mk (.some (String.append "error: unknown declaration " f)) gs
+      | .none => LinkR.mk (.some (coded "unknown-declaration" (String.append "error: unknown declaration " f))) gs
       | .some i => match globalTm .false gs i with
         | .const _ _ _ v _ => match isAxiomTm v with
           | .false => LinkR.mk .none gs
@@ -8720,7 +8726,10 @@ inductive StepR where
 -- line leaves `stepCommand`: the driver entry.)
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
-  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+  | .some s => match hasCode s with
+    | .true => .some (String.append "@" (String.append (Nat.toString start)
+        (String.append "#" (String.append (codedCode s) (String.append " " (uncoded s))))))
+    | .false => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
@@ -8728,7 +8737,7 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
   match Nat.lt start (Array.size input) with
   | .false => .done
   | .true => match parseCommandAt cats tokens input pos with
-    | .err m => .next (atLine start (.some (String.append "parse " m))) (Array.size input) gs cats tokens notes
+    | .err m => .next (atLine start (.some (coded "parse-error" (String.append "parse " m)))) (Array.size input) gs cats tokens notes
     | .ok stx0 stop => match strEq (kindOf stx0) "command.import" with
     -- (A14) with the module loader (`inlineImports = false`) the import was loaded
     -- before the file: skip it (only the Prelude, when checking one file, is inline)
@@ -8796,10 +8805,10 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                         | .false => defStep gs0 stx
                       -- (an unknown command, or a modifier this frontend doesn't know, is
                       -- an error naming it, never ignored)
-                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
+                      | .false => errStep gs0 (coded "unknown-syntax" (String.append "unsupported command " (kindOf stx)));
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
-        | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
+        | .some x => .next (atLine start (.some (coded "duplicate-declaration" (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
         -- (A11) `deriving instance` prints no line, as in the Lean toolchain
         | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
             | .true => .none
@@ -8817,13 +8826,22 @@ end
 -- text` for the one-file path; `stripAt` drops it, `tagLine` adds the name. The driver
 -- (`selfhost/Cli.wiz`) turns the tag into `file:line:col`; `stripAt` keeps the checker's
 -- own output as it was.
+def skipToSpace : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 32 with
+    | .true => .some cs
+    | .false => skipToSpace cs
+
+-- (err-02) after the offset: ` text` (no code) or `#code text`
 def stripAtDigits : List Char → Option (List Char)
   | .nil => .none
   | .cons c cs => match Nat.beq (Char.code c) 32 with
     | .true => .some cs
     | .false => match isDigitC (Char.code c) with
       | .true => stripAtDigits cs
-      | .false => .none
+      | .false => match Nat.beq (Char.code c) 35 with
+        | .true => skipToSpace cs
+        | .false => .none
 
 -- after `NAME:` (a module name), the same digits and space
 def skipModName : List Char → Option (List Char)
@@ -8870,8 +8888,10 @@ def tagFirst (name : String) : Nat → List String → List String
   | .succ j, .nil => .nil
   | .succ j, .cons l rest => .cons (tagLine name l) (tagFirst name j rest)
 
-def tagOne (name : String) (off : Nat) (s : String) : String :=
-  String.append "@" (String.append name (String.append ":" (String.append (Nat.toString off) (String.append " " s))))
+def tagOne (name : String) (off : Nat) (s : String) : String := match hasCode s with
+  | .true => String.append "@" (String.append name (String.append ":" (String.append (Nat.toString off)
+      (String.append "#" (String.append (codedCode s) (String.append " " (uncoded s)))))))
+  | .false => String.append "@" (String.append name (String.append ":" (String.append (Nat.toString off) (String.append " " s))))
 
 -- (A14) one file, with each `import` loading the embedded Prelude inline (the compiler
 -- driver and `checkFile` keep this path; the module loader is `moduleCheck` below).
@@ -9049,8 +9069,8 @@ def modTakeTo : List String → String → List String
     | .true => .cons x .nil
     | .false => .cons x (modTakeTo rest n)
 def modCycleMsg (stack : List String) (name : String) : String :=
-  String.append "error: import cycle: "
-    (modJoinArrows (List.append (List.reverseOf (modTakeTo stack name) .nil) (.cons name .nil)))
+  coded "import-cycle" (String.append "error: import cycle: "
+    (modJoinArrows (List.append (List.reverseOf (modTakeTo stack name) .nil) (.cons name .nil))))
 
 -- the loader's state: the output, globals and tables (`Run`), each module's state, the
 -- current import path, and the modules loaded so far (in load order)
@@ -9085,12 +9105,12 @@ def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
           (modCycleMsg stack name))) vis stack order
     | .unseen => match modFind tab name with
       | .none => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
-            (String.append "error: cannot find module " name)))
+            (coded "unknown-module" (String.append "error: cannot find module " name))))
           (modMark vis name 2) stack order
       | .some (.mk n p t is) => match modEmpty p with
         -- the driver found no file: a `ModSrc` with path "" (or the caller had no entry)
         | .true => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
-              (String.append "error: cannot find module " n)))
+              (coded "unknown-module" (String.append "error: cannot find module " n))))
             (modMark vis name 2) stack order
         | .false =>
           let l1 : ModLoad := .mk run (modMark vis name 1) (.cons name stack) order;

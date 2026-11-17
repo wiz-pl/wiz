@@ -41,6 +41,16 @@ def cliHas (s want : String) : Bool := (s.splitOn want).length > 1
 def cliCheck (s want msg : String) : IO Unit :=
   unless cliHas s want do throw (IO.userError s!"{msg}: {want} not in:\n{s}")
 
+/-- The `[code]` tag of the diagnostic line containing `needle` (`some ""` when it has
+none): an exact code assertion without depending on the rest of the wording. -/
+def cliTagOf (s needle : String) : Option String :=
+  (s.splitOn "\n").findSome? fun l =>
+    if (l.splitOn needle).length > 1 then
+      match (l.splitOn " [").reverse with
+      | last :: _ => if last.endsWith "]" then some (last.dropEnd 1).toString else some ""
+      | [] => some ""
+    else none
+
 /-- The compiler, or a skip (no C toolchain) or the build's error. -/
 def withSelfhostCli (k : System.FilePath → IO Unit) : IO Unit := do
   match ← selfhostCompiler with
@@ -111,7 +121,7 @@ def cliGroup : Group where
         let (c, out, err) ← cliRun exe #[] #["check", "no.wiz"]
         checkEq 1 c
         checkEq "" out
-        checkEq "no.wiz:1:1: error: no such file\n" err },
+        checkEq "no.wiz: error: no such file [no-such-file]\n" err },
     { name := "check reports diagnostics only; build writes the C", run := fun _ =>
         withSelfhostCli fun exe => do
         let files := #[("good.wiz", cliGood)]
@@ -194,12 +204,22 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe cyc #["check", "c.wiz"]
         checkEq 1 c
         cliCheck err "c.wiz:2:1: error: import cycle: " "cycle position"
-        cliCheck err "[import-cycle]" "cycle code"
+        checkEq (some "import-cycle") (cliTagOf err "import cycle")
         -- the parser's error, at the command that starts it
         let (c, _, err) ← cliRun exe #[("parse.wiz", "import Prelude\ndef one : Nat := 1\ndef two : Nat :=\n")] #["check", "parse.wiz"]
         checkEq 1 c
         cliCheck err "parse.wiz:4:1: error: " "parse position"
-        cliCheck err "[parse-error]" "parse code" },
+        checkEq (some "parse-error") (cliTagOf err "parse.wiz:4:1:") },
+    { name := "the code of a term whose type cannot be inferred", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let (c, _, err) ← cliRun exe #[("inf.wiz", "import Prelude\n#check (fun x => x)\n")] #["check", "inf.wiz"]
+        checkEq 1 c
+        checkEq (some "cannot-infer") (cliTagOf err "cannot infer") },
+    { name := "a duplicated foreign_type is kernel-rejected, as in the host", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let (c, _, err) ← cliRun exe #[("dupft.wiz", "import Prelude\nforeign_type F\nforeign_type F\n")] #["check", "dupft.wiz"]
+        checkEq 1 c
+        checkEq "dupft.wiz:3:1: error: 'F' has already been declared [kernel-rejected]\n" err },
     { name := "the cache: cold, warm, then invalidated by an edit", run := fun _ =>
         withSelfhostCli fun exe => do
         -- (one cache directory across the runs: each run gets a fresh working directory)

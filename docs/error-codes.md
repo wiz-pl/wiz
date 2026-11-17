@@ -5,7 +5,9 @@ language server sends it as the diagnostic's `code` (with the data its quick fix
 such as `suggestions`) and keys its code actions on it (`Wiz/Actions.lean`). The wording
 of a message may change; its code does not. The codes are defined in
 `Wiz/Core/ErrorCode.lean` (`ErrorCode.all`); the `lsp-server` test group checks that this
-table lists exactly those. Messages not listed here have no code yet.
+table lists exactly those, and scans the Lean emitters for a bare kebab-case string
+passed as a code (every one must be registered, so a diagnostic cannot be emitted with a
+code that is in neither place). Messages not listed here have no code yet.
 
 | code | the error | example | quick fixes |
 |---|---|---|---|
@@ -20,7 +22,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `missing-field` | an instance misses a field of its class | | |
 | `type-mismatch` | the expected and the inferred type don't unify | `def b : Nat := Bool.true` | |
 | `not-defeq` | `rfl` where the two sides are not definitionally equal | | |
-| `wrong-argument-count` | too many arguments (`function expected`), or a pattern or constructor with the wrong number of fields | `Nat.succ 1 2`, `myId Nat 1` | when the count is off by the implicit parameters: give them explicitly (`@myId Nat 1`) |
+| `wrong-argument-count` | too many or too few arguments (`function expected`, `takes fewer than`), or a pattern or constructor with the wrong number of fields | `Nat.succ 1 2`, `myId Nat 1` | when the count is off by the implicit parameters: give them explicitly (`@myId Nat 1`) |
 | `unknown-parameter` | a named argument `(x := e)` for a parameter the function doesn't have | | |
 | `named-argument` | a named argument given twice, or after the explicit parameter it would follow; a structure field updated twice, or an instance field given twice | | |
 | `unsolved-hole` | a hole nothing determines (`_`, an implicit argument, a binder's type) | `(fun (A : Type) => 0) _` | |
@@ -43,6 +45,20 @@ table lists exactly those. Messages not listed here have no code yet.
 | `quantity` | a variable used against its quantity (erased, linear) | | |
 | `kernel-rejected` | any other error of the kernel's | | |
 | `parse-error` | the parser's errors | `def := 1` | |
+| `no-such-file` | a file named on the command line that cannot be read | `wiz check no.wiz` | |
+| `recursive-without-equations` | a recursive definition that calls itself in its body instead of in equation form (so it never reaches its equations) | `def f (g : Nat → Nat) : Nat := f g` | |
+
+Messages may span several lines (a type mismatch's `expected:`/`inferred:` lines, an
+`unsolved goals` block). A diagnostic's first line carries its `file:line:col:` prefix;
+the continuation lines belong to the preceding diagnostic and are indented, except the
+goal lines of an `unsolved goals` block, which follow its `unsolved goals:` line
+unindented. A parser that reads one diagnostic per line should join both kinds of
+continuation line to the previous diagnostic (the test drivers do this, and the
+`selfhost-cli-diff` comparison reads only the first line of each diagnostic).
+
+A diagnostic with no position in a file — a missing file, or a warning about the file
+as a whole — omits `line:col` and prints `file: severity: message`, rather than a
+fabricated `1:1`.
 
 One more quick fix is not keyed on a code: an error inside `@f a…` where `f` is given
 as many arguments as it has explicit parameters offers to let the implicit ones be

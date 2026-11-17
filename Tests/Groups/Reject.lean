@@ -350,6 +350,31 @@ def group : Group where
     accepted "accept: singleton elimination of an inductive proposition"
       (prelude ++ "inductive EqP {A : Type} (a : A) : A → Prop where\n  | refl : EqP a a\n" ++
        "def out {A : Type} {a : A} (h : EqP a a) : Nat :=\n  EqP.rec (fun _ _ => Nat) 3 h\n#eval out (A := Nat) (a := 0) EqP.refl\n"),
+    -- (err-04/err-12) codes that had no test that fails when the code changes
+    rejected "module-errors: an imported module has errors"
+      "import Prelude\nimport M\ndef x : Nat := 1\n"
+      (some "module-errors") "import M" "module M has errors" [("M", "def bad : Nat := Bool.true\n")],
+    rejected "not-defeq: rfl where the sides are not definitionally equal"
+      "import Prelude\ndef h (n : Nat) : n = 0 := rfl\n"
+      (some "not-defeq") "rfl" "not definitionally equal",
+    rejected "unknown-parameter: a named argument the function has no parameter for"
+      "import Prelude\ndef f (x : Nat) : Nat := x\ndef g : Nat := f (y := 1)\n"
+      (some "unknown-parameter") "y := 1" "no parameter named 'y'",
+    rejected "tactic-failed: a tactic that does not apply"
+      "import Prelude\ndef x : Nat := by intro n\n"
+      (some "tactic-failed") "intro n" "not a function type",
+    rejected "shadowed-recursive: a local variable shadows the recursive definition"
+      "import Prelude\ndef f : Nat → Nat\n  | .zero => 0\n  | .succ n => let f := n; f n\n"
+      (some "shadowed-recursive") "f" "shadows the recursive definition",
+    rejected "unknown-syntax: a tactic with no registered meaning"
+      "import Prelude\nsyntax \"nonsense\" : tactic\ndef x : Nat := by nonsense\n"
+      (some "unknown-syntax") "nonsense" "has no meaning",
+    rejected "simp-lemma-not-equation: a constructor is not an equation"
+      "import Prelude\nattribute [simp] Nat.succ\n"
+      (some "simp-lemma-not-equation") "Nat.succ" "must be an equation",
+    rejected "simp-lemma-conditional: a premise before the equation"
+      "import Prelude\ndef f (n : Nat) : n = 0 → n = n := fun _ => rfl\nattribute [simp] f\n"
+      (some "simp-lemma-conditional") "f" "conditional simp lemma",
     { name := "modules: two modules declaring one name"
       run := fun _ => do
         let dir ← IO.FS.createTempDir

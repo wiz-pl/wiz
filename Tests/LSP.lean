@@ -11,6 +11,14 @@ abbrev St := CommandState ZeroOneMany
 
 def prelude : IO String := IO.FS.readFile "lib/Prelude.wiz"
 
+/-- Every `.lean` file under `d` (for the error-code source scan). -/
+partial def leanFilesUnder (d : System.FilePath) : IO (Array System.FilePath) := do
+  let mut out : Array System.FilePath := #[]
+  for e in ← d.readDir do
+    if ← e.path.isDir then out := out ++ (← leanFilesUnder e.path)
+    else if e.path.extension == some "lean" then out := out.push e.path
+  pure out
+
 /-- Elaborate `src` (which imports the prelude) as the language server does. -/
 def elabSrc (src : String) (termInfo : Bool := true) : IO St := do
   let p ← prelude
@@ -649,7 +657,52 @@ def serverGroup : Group where
         for c in ErrorCode.all do
           check (rows.contains c) s!"docs/error-codes.md has no row for {c}"
         for c in rows do
-          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all" },
+          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all"
+        -- (err-14/err-15) the row covers both directions, and the continuation-line
+        -- convention is documented (a one-diagnostic-per-line reader needs it)
+        check ((doc.splitOn "too many or too few").length > 1)
+          "docs/error-codes.md: the wrong-argument-count row still mentions only one direction"
+        check ((doc.splitOn "continuation lines").length > 1)
+          "docs/error-codes.md does not document multi-line (continuation-line) messages" },
+    { name := "error codes: every code a diagnostic is thrown with is registered", run := fun _ => do
+        -- (err-04) the docs↔`all` check above can only compare two lists, so a code that is
+        -- emitted but in neither list was invisible. Scan the emitters for a bare
+        -- kebab-case string passed as a code: every one must be a registered constant
+        -- (or the internal `non-pattern` / a quick fix's data key).
+        let mut files ← leanFilesUnder (System.FilePath.mk "Wiz")
+        files := files.push (System.FilePath.mk "Main.lean")
+        let kebab (s : String) : Bool :=
+          let cs := s.toList
+          match cs with
+          | [] => false
+          | c :: _ => c.isAlpha && cs.any (· == '-') &&
+              cs.all fun c => c.isAlphanum || c == '-'
+        let allow := ErrorCode.all ++ [ErrorCode.nonPattern, "explicit-app"]
+        let markers := ["throwAt", "throwFix", "report", "reportC", "code :="]
+        let mut bad : Array String := #[]
+        for f in files do
+          let ls := (← IO.FS.readFile f).splitOn "\n" |>.toArray
+          for i in [:ls.size] do
+            let l := ls[i]!
+            -- (a comparison or a match arm *reads* a code; it does not emit one. A
+            -- message may itself contain `=>`, so only a `| … =>` arm is skipped.)
+            if l.contains "==" || l.contains "!=" || (l.trimAscii.toString.startsWith "|" && l.contains "=>") then continue
+            -- (the code may follow a multi-line message: look a few lines back)
+            let near := "\n".intercalate (ls.extract (i - min i 3) (i + 1)).toList
+            unless markers.any (near.contains ·) do continue
+            let parts := l.splitOn "\""
+            for j in [:parts.length] do
+              if j % 2 == 1 then
+                let s := parts[j]!
+                if kebab s && !allow.contains s then
+                  bad := bad.push s!"{f}:{i + 1}: {s}"
+        unless bad.isEmpty do
+          throw (IO.userError s!"bare error codes (add them to ErrorCode.all and docs/error-codes.md, or use the constant):\n{"\n".intercalate bad.toList}")
+        -- (cannot-infer is not reachable from surface syntax today: every `def` body and
+        -- `#check` is checked against a metavariable. Pin the emitter by name so a
+        -- rename or a different code there fails this test.)
+        let term ← IO.FS.readFile "Wiz/Elab/Term.lean"
+        check (term.contains "ErrorCode.cannotInfer") "Wiz/Elab/Term.lean no longer throws ErrorCode.cannotInfer" },
     { name := "code action: did you mean (fields, namespace, constructors)", run := fun _ => do
         let pre := "import Prelude\nstructure P where\n  count : Nat\n  total : Nat\ninductive Box where\n  | mk (n : Nat)\ndef Box.double : Box → Nat\n  | .mk n => n + n\ninductive Color where\n  | red\n  | green\n"
         for (body, needle, title, fixed) in [

@@ -28,10 +28,11 @@
 --
 -- Diagnostics: the frontend reports one line per command, prefixed with the offset of
 -- its command (`@N text`, `atLine` in `Frontend.wiz`), and the loader names the module
--- (`@NAME:N text`); the driver turns that into `file:line:col: severity: message [code]`,
--- with the Lean frontend's error code where the message names the same mistake
--- (`ErrorCode.lean`). A stack trace is never printed: every failure is one line, and a
--- missing file is checked with `access` first.
+-- (`@NAME:N text`); a diagnostic whose condition has a code carries it in the tag
+-- (`@N#code text`, from `coded` in `Kernel.wiz`). The driver turns that into
+-- `file:line:col: severity: message [code]`; a diagnostic with no position (a missing
+-- file) is `file: severity: message [code]`. A stack trace is never printed: every
+-- failure is one line, and a missing file is checked with `access` first.
 --
 -- Cache: `--cache DIR` (default `~/.cache/wiz`) keys an entry by the toolchain id
 -- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
@@ -319,24 +320,47 @@ def readNat : List Char → Nat → NumRest
     | .false => NumRest.mk acc (.cons c cs)
 
 inductive SplitAt where
-  | mk (off : Nat) (text : String)
+  | mk (off : Nat) (text : String) (code : String)
 
--- `@OFFSET text` → (offset, text); `(0, l)` for a line without the prefix
+inductive CodeRest where
+  | mk (code : List Char) (rest : List Char)
+
+-- the code up to the following space, and the rest
+def readCode : List Char → CodeRest
+  | .nil => CodeRest.mk .nil .nil
+  | .cons c cs => match strEqC c 32 with
+    | .true => CodeRest.mk .nil cs
+    | .false => match readCode cs with
+      | .mk d r => CodeRest.mk (.cons c d) r
+
+inductive TagRest where
+  | mk (text : String) (code : String)
+
+-- after the offset: ` text` (no code) or `#code text`
+def tagRest : List Char → TagRest
+  | .nil => TagRest.mk "" ""
+  | .cons c rest => match strEqC c 32 with
+    | .true => TagRest.mk (String.mk rest) ""
+    | .false => match strEqC c 35 with
+      | .true => match readCode rest with
+        | .mk code r => TagRest.mk (String.mk r) (String.mk code)
+      | .false => TagRest.mk "" ""
+
+-- `@OFFSET[#code] text` → (offset, text, code); `(0, l, "")` for a line without the prefix
 def splitAtLine (l : String) : SplitAt := match l with
   | .mk cs => match cs with
-    | .nil => SplitAt.mk 0 l
+    | .nil => SplitAt.mk 0 l ""
     | .cons c rest => match strEqC c 64 with
-      | .false => SplitAt.mk 0 l
+      | .false => SplitAt.mk 0 l ""
       | .true => match rest with
-        | .nil => SplitAt.mk 0 l
+        | .nil => SplitAt.mk 0 l ""
         | .cons d ds => match isDigitC (Char.code d) with
-          | .false => SplitAt.mk 0 l
+          | .false => SplitAt.mk 0 l ""
           | .true => match readNat (.cons d ds) 0 with
-            | .mk n after => match after with
-              | .cons sp r => match strEqC sp 32 with
-                | .true => SplitAt.mk n (String.mk r)
-                | .false => SplitAt.mk 0 l
-              | .nil => SplitAt.mk 0 l
+            | .mk n after => match tagRest after with
+              | .mk text code => match strEq text "" with
+                | .true => SplitAt.mk 0 l ""
+                | .false => SplitAt.mk n text code
 
 -- `error 12: expected …` → `expected …` (the parser's message, without its offset)
 def afterColonSp : List Char → String
@@ -382,47 +406,13 @@ def msgOf (s : String) : String := match stripPrefix "error: " s with
       | .some m => m
       | .none => s
 
--- the Lean frontend's code (`ErrorCode.lean`), where the message names the same mistake
--- the Lean frontend's code (`ErrorCode.lean`) for a message, where it names the same
--- mistake: a table of (text, code), in order, then the loader's and the parser's own
-inductive CodeEntry where
-  | mk (key : String) (code : String)
-
-def codeEntry (m : String) (e : CodeEntry) : Option String := match e with
-  | .mk k v => match occursSub m k with
-    | .true => .some v
-    | .false => .none
-
-def codeLookup (m : String) : List CodeEntry → String
-  | .nil => ""
-  | .cons e rest => match codeEntry m e with
-    | .some v => v
-    | .none => codeLookup m rest
-
-def codeTable : List CodeEntry :=
-  .cons (.mk "has already been declared" "duplicate-declaration")
-  (.cons (.mk "unknown identifier" "unknown-identifier")
-  (.cons (.mk "is private to module" "private")
-  (.cons (.mk "type mismatch" "type-mismatch")
-  (.cons (.mk "no field " "no-such-field")
-  (.cons (.mk "cannot infer" "cannot-infer")
-  (.cons (.mk "unknown declaration" "unknown-declaration")
-  (.cons (.mk "unsupported command " "unknown-syntax")
-  (.cons (.mk "unsupported syntax " "unknown-syntax") .nil))))))))
-
-def codeOf (s : String) : String := match stripPrefix "error: " s with
-  | .none => match strStarts "parse error" s with
-    | .true => "parse-error"
-    | .false => ""
-  | .some m => match strStarts "cannot find module " m with
-    | .true => "unknown-module"
-    | .false => match strStarts "import cycle" m with
-      | .true => "import-cycle"
-      | .false => codeLookup m codeTable
+-- (err-02/03) The code is not read from the message here: the frontend attaches it where
+-- the condition is known, and the line's tag carries it (`@NAME:OFFSET#code text`).
+-- `tagRest` reads it; a message without one has no code (`""`).
 
 -- a line's tag: the module it came from and its offset in that module's text
 inductive Tagged where
-  | mk (mod : String) (off : Nat) (text : String)
+  | mk (mod : String) (off : Nat) (text : String) (code : String)
 
 inductive NameRest where
   | mk (name : List Char) (rest : List Char)
@@ -435,24 +425,23 @@ def readToColon : List Char → List Char → NameRest
       | .true => NameRest.mk .nil .nil
       | .false => readToColon (.cons c acc) cs
 
--- `@NAME:OFFSET text` (the loader's) or `@OFFSET text` (one file) or no tag
+-- `@NAME:OFFSET[#code] text` (the loader's) or `@OFFSET[#code] text` (one file) or no tag
 def taggedOf (l : String) : Tagged := match l with
   | .mk cs => match cs with
-    | .nil => Tagged.mk "Main" 0 l
+    | .nil => Tagged.mk "Main" 0 l ""
     | .cons c rest => match strEqC c 64 with
-      | .false => Tagged.mk "Main" 0 l
+      | .false => Tagged.mk "Main" 0 l ""
       | .true => match readToColon .nil rest with
         | .mk name after =>
           let nameStr := String.mk name;
           match strEq nameStr "" with
           | .true => match splitAtLine l with
-            | .mk off text => Tagged.mk "Main" off text
+            | .mk off text code => Tagged.mk "Main" off text code
           | .false => match readNat after 0 with
-            | .mk off afterNum => match afterNum with
-              | .cons sp r => match strEqC sp 32 with
-                | .true => Tagged.mk nameStr off (String.mk r)
-                | .false => Tagged.mk "Main" 0 l
-              | .nil => Tagged.mk "Main" 0 l
+            | .mk off afterNum => match tagRest afterNum with
+              | .mk text code => match strEq text "" with
+                | .true => Tagged.mk "Main" 0 l ""
+                | .false => Tagged.mk nameStr off text code
 
 -- the first `n` characters dropped
 def dropChars : Nat → List Char → List Char
@@ -528,15 +517,16 @@ def msgOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : S
   | _ => msgOf rest
 
 def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
-  | .mk m off rest =>
+  | .mk m off rest code =>
     -- a parse error reports the token it stopped at, not its command's start
     let off' := match parseOff rest with
       | .some n => n
       | .none => off;
     match modTextOf tab m with
-    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (msgOfTagged tab m off' rest) (codeOf rest)
+    -- (no source text for the module: no position, never a fabricated `1:1`)
+    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 0 0 (msgOfTagged tab m off' rest) code
     | .some t => match lineCol t off' with
-      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) (codeOf rest)
+      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) code
 
 def diagsOf (tab : List ModSrc) : List String → List Diag
   | .nil => .nil
@@ -554,9 +544,13 @@ def codeSuffix (c : String) : String := match strEq c "" with
 
 def diagLine (d : Diag) : String := match d with
   | .mk sev f ln col msg code =>
-    String.append (String.append f ":") (String.append (Nat.toString ln) (String.append ":"
-      (String.append (Nat.toString col) (String.append ": " (String.append (sevName sev)
-        (String.append ": " (String.append msg (codeSuffix code))))))))
+    -- (line 0: no position in the file — the file is missing, or the diagnostic is
+    -- about the file as a whole; no fabricated `1:1`)
+    let at := if Nat.beq ln 0 then String.append f ": "
+      else String.append (String.append f ":") (String.append (Nat.toString ln) (String.append ":"
+          (String.append (Nat.toString col) ": ")));
+    String.append at (String.append (sevName sev)
+      (String.append ": " (String.append msg (codeSuffix code))))
 
 def emitDiag (o : Opts) (d : Diag) : IO Unit := match d with
   | .mk sev _ _ _ _ _ => match sev with
@@ -925,7 +919,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         | .false => Process.exit 1
 
 def missingFile (file : String) : IO Unit := do
-  IO.ePrintln (diagLine (Diag.mk .error file 1 1 "no such file" ""));
+  IO.ePrintln (diagLine (Diag.mk .error file 0 0 "no such file" "no-such-file"));
   Process.exit 1
 
 def checkCmd (o : Opts) (file : String) : IO Unit := do

@@ -2587,7 +2587,7 @@ partial def compileLitTest (ctx : LocalCtx R) (vars : List Lvl) (clauses : List 
   let g ← getGlobals
   let x := vars[k]!
   let xty := ctx.types[ctx.lvl - x - 1]!
-  let some cl := clauses.head? | throwAt ctx.info "missing cases" "missing-case"
+  let some cl := clauses.head? | throwAt ctx.info "missing cases" ErrorCode.missingCase
   let p0 := cl.pats[k]!
   let pview (p : Syntax) : ElabM R (List Name × PatView) := match patViewAs g p with
     | .ok v => pure v
@@ -2605,7 +2605,7 @@ partial def compileLitTest (ctx : LocalCtx R) (vars : List Lvl) (clauses : List 
     pure (v matches .var _ || v matches .wild)
   unless catchAll do
     throwAt p0.info (s!"a match on literals of type {← showVal ctx xty} needs a catch-all case " ++
-      "(`_` or a variable) after them: literals don't cover the type") "missing-case"
+      "(`_` or a variable) after them: literals don't cover the type") ErrorCode.missingCase
   -- the test, on an alias of `x` (its own name may be shadowed)
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   let ctx1 := ctx.define "lit✝" xty (Val.var x)
@@ -2648,7 +2648,7 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
         catch e => if firstErr.isNone then firstErr := some e
     match firstErr with
     | some e => throw e
-    | none => throwAt ctx.info "missing cases" "missing-case"
+    | none => throwAt ctx.info "missing cases" ErrorCode.missingCase
   -- A catch-all last row of a multi-column match would be copied into every leaf of the
   -- split (one per pair of constructors, say): elaborate it once, as a local function
   -- of the scrutinees, and make the row call it. If it doesn't check generically (its
@@ -3043,7 +3043,7 @@ data), so its eliminator can only target Prop"
           let fields := fieldInfos.filterMap fun (n, bi, _) =>
             if bi == .default then some (if n == "_" || n.contains '✝' then "x" else n) else none
           let pat := String.join ((s!".{c}" :: fields).intersperse " ")
-          throwAt ctx.info s!"missing case for constructor {c}: add an alternative for {pat}" "missing-case"
+          throwAt ctx.info s!"missing case for constructor {c}: add an alternative for {pat}" ErrorCode.missingCase
         -- reverted variables are re-introduced at new levels: their hypotheses follow them
         let moved := rs.zip rsLvls.toList
         let rc := rc.map fun r => { r with ihs := r.ihs.map fun (a, b) => ((moved.lookup a).getD a, (moved.lookup b).getD b) }
@@ -3496,7 +3496,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
       if (← get).defining == some x then
         throwAt ctx.info (s!"recursive call to {x} in a definition without equations; write it as equations " ++
           s!"(`def {x} … : T | p => …`), or as `:= match y with | p => …` on its own parameters, " ++
-          "or make it `partial`") "recursive-without-equations"
+          "or make it `partial`") ErrorCode.recursiveWithoutEquations
       -- field access: `p.x.y`
       match x.splitOn "." with
       | base :: f :: fs =>
@@ -3524,7 +3524,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
             if fs.isEmpty && (((structLayout? g (g.resolve base)).map (·.fields)).getD []).contains f then
               throwAt ctx.info s!"unknown identifier '{x}': the field {f} of {base} has no projection function (an erased field has none; take the structure apart with `match` or `let ⟨…⟩`)"
             pushInfo (.done (.unknownIdent ctx.info x ctx.names))
-            throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
+            throwAt ctx.info s!"unknown identifier '{x}'" ErrorCode.unknownIdentifier
           let (t, ty) ← infer ctx (.node stx.info "term.ident" #[.ident stx.info base])
           -- (#266) `T.f` with `T` a global type (or type family, or function) and no field
           -- `f`: a qualified name that doesn't exist (not imported, or its definition failed)
@@ -3536,12 +3536,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
             catch e =>
               if e.msg.startsWith "no field '" then
                 pushInfo (.done (.unknownIdent ctx.info x ctx.names))
-                throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
+                throwAt ctx.info s!"unknown identifier '{x}'" ErrorCode.unknownIdentifier
               else throw e
           else elabFields ctx t ty (f :: fs)
       | _ =>
         pushInfo (.done (.unknownIdent ctx.info x ctx.names))
-        throwAt ctx.info s!"unknown identifier '{x}'" "unknown-identifier"
+        throwAt ctx.info s!"unknown identifier '{x}'" ErrorCode.unknownIdentifier
   | "term.recCall" =>
     -- a recursive call `f y …` of the definition whose equations these are, already the
     -- induction hypothesis (`rewriteRecCalls`). A local variable named `f` would make the
@@ -3550,7 +3550,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     if (lookupLocal ctx fn).isSome then
       throwAt ((ctx.withInfo (stx.getArg 0)).info)
         (s!"a local variable named {fn} shadows the recursive definition {fn}: inside the equations of {fn}, " ++
-          s!"`{fn} …` is the recursive call; rename the local variable") "shadowed-recursive"
+          s!"`{fn} …` is the recursive call; rename the local variable") ErrorCode.shadowedRecursive
     infer ctx (stx.getArg 1)
   | "term.type" | "term.sort" =>
     let l ← match (stx.getArg 1).args[0]? with
@@ -4205,7 +4205,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
     if let some gl := st.goals[i]? then
       if ← gl.isOpen then rest := rest.push (← gl.show)
   pushInfo (.tactic stx.info true #[(ctx, expected)] (← openGoals st))
-  unless rest.isEmpty do throwAt ctx.info s!"unsolved goals:\n{"\n\n".intercalate rest.toList}" "unsolved-goals"
+  unless rest.isEmpty do throwAt ctx.info s!"unsolved goals:\n{"\n\n".intercalate rest.toList}" ErrorCode.unsolvedGoals
   -- (13b) the terms `assign` took with holes: now that the holes are solved, their types
   -- are inferred and compared with their goals here, in the elaborator's view (where a
   -- type with a private constructor is opaque), not left to the kernel

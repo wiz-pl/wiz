@@ -1094,8 +1094,8 @@ file as a root module, its imports under `lib/`, `drafts/feral/lib` and the `scr
 package roots) and compares
 
 * **acceptance** (does the frontend report an error at all),
-* the **code** of the first error (`ErrorCode` on the Lean side, the self-hosted
-  driver's table on the other),
+* the **code** of the first error (`ErrorCode` on the Lean side, the code the
+  self-hosted frontend attached where the condition is known on the other),
 * its **span** (file, line, column),
 * its **message** (whitespace-normalised; the driver's `[code]` suffix moved out), and
 * the **number of declarations** the file produced.
@@ -1211,3 +1211,31 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ao: diagnostic codes at the site, not from the wording
+
+The self-hosted driver used to recover a diagnostic's `[code]` from its text: a
+hand-kept table of substrings (`codeOf`/`codeTable` in `selfhost/Cli.wiz`) knew 11 of the
+codes and silently returned `""` for everything else. Two toolchains therefore disagreed
+about the same mistake: a missing `match` case, a missing instance field, unsolved goals,
+non-structural recursion, `C is not a class`, the kernel's quantity check and an
+unimplemented tactic syntax all got a code from `wiz check` and none from the
+self-hosted driver. A duplicated `foreign_type` was worse: the host's kernel path reports
+`kernel-rejected` (pinned by `reject`), while the table mapped the identical
+`has already been declared` wording to `duplicate-declaration`.
+
+The code now travels with the message from the site that knows the condition. A helper
+in `selfhost/Kernel.wiz` (`coded`) prefixes a message with the code, U+001F-separated;
+`errStep` hoists it before `error:`, and `atLine`/`tagOne` move it into the line's tag
+(`@NAME:OFFSET#code text`). `stripAt` drops the tag as before, so the checker's own
+output (`checkFile`, `moduleCheck`) is unchanged; the driver reads the code from the tag
+and prints `[code]`. `codeOf`/`codeTable` are gone. `loadGraph`'s two loader errors
+(`unknown-module`, `import-cycle`) and the parser's (`parse-error`) are coded at their
+construction too.
+
+The differential group `selfhost-cli-diff` gains a case per condition above: it runs both
+`wiz check` and the self-hosted `check` on the same source and compares the lists of
+codes (the host's from its wording, the self-hosted one from its tag). `selfhost-cli`
+pins the `[import-cycle]`/`[parse-error]` tags exactly, and `tests/LSP` scans the Lean
+emitters: a bare kebab-case string passed as a code must be registered (the hole that hid
+`recursive-without-equations`, now in `ErrorCode.all` and `docs/error-codes.md`).

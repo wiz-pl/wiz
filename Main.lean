@@ -542,11 +542,25 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
+/-- A diagnostic with no position (`Msg.render` prints no `line:col`). -/
+def noPosition (severity : Severity) (text code : String) : Msg :=
+  { info := {}, severity, text, code }
+
+/-- Read the file a command named, or report `no-such-file` (err-08/err-11: one
+positionless diagnostic with a real code, not an uncaught `IO.FS.readFile` exception). -/
+def readInput (path : String) : IO (Option String) := do
+  try
+    pure (some (← IO.FS.readFile path))
+  catch _ =>
+    let m := noPosition .error "no such file" ErrorCode.noSuchFile
+    IO.eprintln (m.renderFile path "")
+    pure none
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let some input ← readInput path | pure 1
   let s ← elaborate tc path input
   for m in s.messages do
-    let line := s!"{path}:{m.render input}"
+    let line := m.renderFile path input
     if m.severity == .error then IO.eprintln line else IO.println line
   if ← regionStatsOpt.get then
     let c ← regionStats.get
@@ -558,10 +572,10 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
-  let input ← IO.FS.readFile path
+  let some input ← readInput path | pure none
   let s ← elaborate tc path input
   for m in s.messages do
-    if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
+    if m.severity == .error then IO.eprintln (m.renderFile path input)
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 /-- The backend names `wiz build --target` accepts. -/
@@ -681,7 +695,7 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
       (path? : Option String) : IO Unit := do
     for m in s'.messages.extract before s'.messages.size do
       let text := match path? with
-        | some p => s!"{p}:{m.render input}"
+        | some p => m.renderFile p input
         | none => m.render input
       if m.severity == .error then stderr.putStrLn text else stdout.putStrLn text
   -- one input line: `none` when it ends the session (`:quit`), else the next state

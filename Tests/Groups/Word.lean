@@ -69,7 +69,7 @@ def wordGroup : Group where
     { name := "numerals and operators at word types wrap around", run := fun _ =>
         okLib ("import Word\ndef s : U8 := 250 + 10\n#eval s.toNat\ndef t : s = 4 := rfl\n#eval (300 : U8).toNat\n" ++
           "def mac {ω w : Nat} (a b c : UIntN w) : UIntN w := a * b + c\n#eval (mac (16 : U8) 16 3).toNat\n#eval (1 - 2 : U16).toNat")
-          ["4", "44", "3", "65535"] },
+          ["4", "the numeral 300 does not fit in UIntN 8 (at most 255): it wraps around to 44", "44", "3", "65535"] },
     { name := "a numeral that does not fit a word type wraps, with a warning", run := fun _ => do
         let loader ← preludeLoader
         let src := "import Word\ndef a : U8 := 255\ndef b : U8 := 300\ndef c : I8 := -128\ndef d : I8 := 200\n#eval b.toNat"
@@ -78,6 +78,14 @@ def wordGroup : Group where
         checkEq (repr #["the numeral 300 does not fit in UIntN 8 (at most 255): it wraps around to 44",
           "the numeral 200 does not fit in IntN 8 (at most 128): it wraps around to -56"]).pretty (repr ws).pretty
         check (s.messages.any (·.text == "44")) "300 : U8 is not 44" },
+    { name := "#eval warns about a wrapping numeral too (err-05)", run := fun _ => do
+        let loader ← preludeLoader
+        let src := "import Word\n#eval (300 : U8).toNat\ndef x : U8 := 300\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let ws := (s.messages.filter (·.severity == .warning)).map (·.text)
+        checkEq 2 ws.size
+        check (ws.all (·.contains "does not fit in UIntN 8")) s!"warnings: {ws}"
+        check (s.messages.any (·.text == "44")) "#eval (300 : U8) is not 44" },
     { name := "signed and unsigned division are told apart (one shape, two sealed types)", run := fun _ =>
         okLib "import Word\n#eval (-7 / 2 : I32).toNat\n#eval (-7 % 2 : I32).toNat\n#eval ((4294967289 : U32) / 2).toNat"
           ["4294967293", "4294967295", "2147483644"] },

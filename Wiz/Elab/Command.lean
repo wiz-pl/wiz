@@ -51,9 +51,19 @@ structure Msg where
   deriving Repr, Inhabited
 
 def Msg.render (input : String) (m : Msg) : String :=
-  let (l, c) := lineCol input m.info.start
   let sev := match m.severity with | .error => "error" | .warning => "warning" | .info => "info"
-  s!"{l + 1}:{c + 1}: {sev}: {m.text}"
+  -- (err-08) `start = stop = 0` is "no position in this file" (a missing file, a
+  -- warning about the file as a whole): do not print a fabricated `1:1`
+  if m.info.start == 0 && m.info.stop == 0 then s!"{sev}: {m.text}"
+  else
+    let (l, c) := lineCol input m.info.start
+    s!"{l + 1}:{c + 1}: {sev}: {m.text}"
+
+/-- `render` behind a file name: `file:line:col: sev: text`, or `file: sev: text` when
+the diagnostic has no position in the file. -/
+def Msg.renderFile (file input : String) (m : Msg) : String :=
+  if m.info.start == 0 && m.info.stop == 0 then s!"{file}: {m.render input}"
+  else s!"{file}:{m.render input}"
 
 /-- The error at an `import` of a module `m` (text `src`) whose own check reported
 `errs`. Its own errors are listed once, one per line with their positions in `m`; an
@@ -1294,8 +1304,9 @@ def withTraces (r : Except (ElabError R) α × Array (Info R)) : StateM (Command
   for i in r.2 do
     match i with
     | .trace info text => modify fun s => { s with messages := s.messages.push { info, severity := .info, text } }
-    -- (11q) the rest of the tree too (hovers in `#check`, an inductive type's binders)
-    | .warning .. => pure ()
+    -- (err-05) the command's warnings too (`#eval (300 : U8)` must warn like a `def`
+    -- does), not only its traces; the rest of the tree is kept for hovers
+    | .warning info text => modify fun s => { s with messages := s.messages.push { info, severity := .warning, text } }
     | i => modify fun s => { s with infos := s.infos.push i }
   pure r.1
 
@@ -1480,7 +1491,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
   -- a second declaration of a name (code `duplicate-declaration`: an import reports it as it is)
   let reportDup (info : SourceInfo) (n : Name) : StateM (CommandState R) Unit :=
     modify fun s => { s with messages := s.messages.push { info, severity := .error, text := s.alreadyDeclared n,
-                                                           code := "duplicate-declaration" } }
+                                                           code := ErrorCode.duplicateDeclaration } }
   let reportErr (e : ElabError R) : StateM (CommandState R) Unit :=
     modify fun s =>
       -- an unknown identifier: the names close to it (computed here, not where it is

@@ -2214,6 +2214,57 @@ def popUsage (q : Q) : List Q → Option (List Q)
     | .true => .some rest
     | .false => .none
 
+-- (err-02/03) A code carried with an error message from where the condition is known.
+-- U+001F cannot occur in a message; `atLine` moves it into the line's tag
+-- (`@OFFSET#code text`), so `stripAt` (the checker's own output) shows the message
+-- alone, and the driver (`selfhost/Cli.wiz`) prints the code without a text table.
+def codeSep : Char := Char.mk 31
+
+def codeSepStr : String := String.mk (.cons codeSep .nil)
+
+def coded (code m : String) : String :=
+  String.append codeSepStr (String.append code (String.append codeSepStr m))
+
+def hasCode (m : String) : Bool := match m with
+  | .mk cs => match cs with
+    | .cons c _ => Nat.beq (Char.code c) 31
+    | .nil => .false
+
+def takeToSep : List Char → List Char → String
+  | .nil, acc => String.mk (List.revOnto acc .nil)
+  | .cons c cs, acc => match Nat.beq (Char.code c) 31 with
+    | .true => String.mk (List.revOnto acc .nil)
+    | .false => takeToSep cs (.cons c acc)
+
+def afterSep : List Char → Option (List Char)
+  | .nil => .none
+  | .cons c cs => match Nat.beq (Char.code c) 31 with
+    | .true => .some cs
+    | .false => afterSep cs
+
+-- the code at the front of a coded message (`""` when there is none)
+def codedCode (m : String) : String := match m with
+  | .mk cs => match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 31 with
+      | .true => takeToSep rest .nil
+      | .false => ""
+    | .nil => ""
+
+-- the message without its code
+def uncoded (m : String) : String := match m with
+  | .mk cs => match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 31 with
+      | .true => match afterSep rest with
+        | .some r => String.mk r
+        | .none => ""
+      | .false => m
+    | .nil => m
+
+-- `prefix ++ m`, keeping a code at the front (a message about a message)
+def wrapCoded (pre m : String) : String := match hasCode m with
+  | .true => coded (codedCode m) (String.append pre (uncoded m))
+  | .false => String.append pre m
+
 inductive TyRes where
   | ok (ty : Val) (u : List Q)
   | err (msg : String)
@@ -3008,7 +3059,7 @@ def inferW : TCtx → Tm → TyRes
       -- (at a variable, as the templates' methods have it under `Desc.elim`: the parts
       -- are checked as a `Σ` at ω's are)
       | _ => infer c (.sigma .qw i j a b)
-  | _, .lam _ => .err "cannot infer the type of a λ; add a type ascription"
+  | _, .lam _ => .err (coded "cannot-infer" "cannot infer the type of a λ; add a type ascription")
   | c, .app f a => match infer c f with
     | .ok fty uf => match whnf fty with
       -- (inside a proof: the application is a proof exactly when its function is; if it is
@@ -3029,7 +3080,7 @@ def inferW : TCtx → Tm → TyRes
       | .ok _ u => .ok (eval (TCtx.env c) ty) u
       | r => r
     | r => r
-  | _, .pair _ _ => .err "cannot infer the type of a pair; add a type ascription"
+  | _, .pair _ _ => .err (coded "cannot-infer" "cannot infer the type of a pair; add a type ascription")
   -- (R1) projections are available only on unrestricted pairs: outside erased positions
   -- `p.1` and `p.2` count `p` as used ω times, whatever the component types (a pair held
   -- at 1 can't be projected: this kernel has no `split`, so it can't be taken apart here)
@@ -3061,7 +3112,7 @@ def inferW : TCtx → Tm → TyRes
   | c, .empty l => .ok (.vsort l) (uZeros (TCtx.lvl c))
   | c, .ptrue => .ok (.vsort (.lnum 0)) (uZeros (TCtx.lvl c))
   | c, .pfalse => .ok (.vsort (.lnum 0)) (uZeros (TCtx.lvl c))
-  | _, .star => .err "cannot infer the type of tt; add a type ascription"
+  | _, .star => .err (coded "cannot-infer" "cannot infer the type of tt; add a type ascription")
   -- the unit eliminator: `u` must be of type `Unit` itself (not a function into it,
   -- which may be a closure holding a resource); usage `U_u + U_b`
   | c, .letUnit u b => match checkUnit c u with
@@ -3170,11 +3221,11 @@ def inferW : TCtx → Tm → TyRes
       | .true => .ok (.vsort (lsucc (lsucc l))) (uZeros (TCtx.lvl c))
       | .false => .err "a description's index type must be in its universe"
     | r => r
-  | _, .dret _ => .err "cannot infer the type of a description; add a type ascription"
-  | _, .darg _ _ _ => .err "cannot infer the type of a description; add a type ascription"
-  | _, .drec _ _ _ => .err "cannot infer the type of a description; add a type ascription"
-  | _, .dhrec _ _ _ _ => .err "cannot infer the type of a description; add a type ascription"
-  | _, .con _ => .err "cannot infer the type of a constructor; add a type ascription"
+  | _, .dret _ => .err (coded "cannot-infer" "cannot infer the type of a description; add a type ascription")
+  | _, .darg _ _ _ => .err (coded "cannot-infer" "cannot infer the type of a description; add a type ascription")
+  | _, .drec _ _ _ => .err (coded "cannot-infer" "cannot infer the type of a description; add a type ascription")
+  | _, .dhrec _ _ _ _ => .err (coded "cannot-infer" "cannot infer the type of a description; add a type ascription")
+  | _, .con _ => .err (coded "cannot-infer" "cannot infer the type of a constructor; add a type ascription")
   | c, .size => .ok (.vsort (.lnum 1)) (uZeros (TCtx.lvl c))
   | c, .szInf => .ok .vsize (uZeros (TCtx.lvl c))
   | c, .szSuc sz => match check (TCtx.erase c) sz .vsize with
@@ -3258,7 +3309,7 @@ def inferW : TCtx → Tm → TyRes
         | .none => .err "only a value of size ↑s or ∞ can be observed"
       | ty' => .err (String.append "not a coinductive type: " (showVal c ty'))
     | r => r
-  | _, .cocon _ => .err "cannot infer the type of a constructor; add a type ascription"
+  | _, .cocon _ => .err (coded "cannot-infer" "cannot infer the type of a constructor; add a type ascription")
   | c, .scofix l I D A f sz i a => match checkIndexLevel c l I with
     | .ok _ _ =>
       let vI := eval (TCtx.env c) I;
@@ -3375,7 +3426,7 @@ def inferW : TCtx → Tm → TyRes
         | .false => .err (String.append (String.append (String.append "ULift." (lvlShow l)) " can't lift ")
             (String.append (showVal c (eval (TCtx.env c) A)) (String.append ", which is in Sort " (lvlShow k))))
     | r => r
-  | _, .up _ => .err "cannot infer the type of up; add a type ascription"
+  | _, .up _ => .err (coded "cannot-infer" "cannot infer the type of up; add a type ascription")
   | c, .down t => match infer c t with
     | .ok ty u => match whnf ty with
       | .vulift _ _ A => .ok A u
@@ -3423,7 +3474,7 @@ def letIn : TCtx → Q → Tm → Tm → Tm → TyRes
         | .ok bty ub => (match check (erasedIf q (modeIf c (isProofTy c bty))) v tyv with
           | .ok _ uv => (match popUsageAt c q tyv ub with
             | .some ub' => .ok bty (uAdd (uScale q uv) ub')
-            | .none => .err "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)")
+            | .none => .err (coded "quantity" "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"))
           | r => r)
         | r => r)
       -- (a `let` at 0 never computes its value: an erased position)
@@ -3431,7 +3482,7 @@ def letIn : TCtx → Q → Tm → Tm → Tm → TyRes
         | .ok _ uv => match infer (TCtx.define c (eval (TCtx.env c) v) tyv) b with
           | .ok bty ub => match popUsageAt c q tyv ub with
             | .some ub' => .ok bty (uAdd (uScale q uv) ub')
-            | .none => .err "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+            | .none => .err (coded "quantity" "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)")
           | r => r
         | r => r
     | r => r
@@ -3445,7 +3496,7 @@ def checkLet : TCtx → Q → Tm → Tm → Tm → Val → TyRes
       | .ok _ uv => match check (TCtx.define c (evalAt c v tyv) tyv) b T with
         | .ok _ ub => match popUsageAt c q tyv ub with
           | .some ub' => .ok T (uAdd (uScale q uv) ub')
-          | .none => .err "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+          | .none => .err (coded "quantity" "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)")
         | r => r
       | r => r
     | r => r
@@ -3511,7 +3562,7 @@ def checkW : TCtx → Tm → Val → TyRes
     match check (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
     | .ok _ u => match popUsageAt c q dom u with
       | .some u' => .ok (.vpi q i j dom env cod) u'
-      | .none => .err "the bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+      | .none => .err (coded "quantity" "the bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)")
     | r => r
   | c, .letE ty v b, T => checkLet c .qw ty v b T
   | c, .letq q ty v b, T => checkLet c q ty v b T
@@ -3589,8 +3640,8 @@ def checkW : TCtx → Tm → Val → TyRes
 def checkByInfer (c : TCtx) (t : Tm) (ty : Val) : TyRes := match inferW c t with
   | .ok ty' u => match subTy c ty' ty with
     | .true => .ok ty u
-    | .false => .err (String.append (String.append "type mismatch: expected " (showVal c ty))
-        (String.append ", got " (showVal c ty')))
+    | .false => .err (coded "type-mismatch" (String.append (String.append "type mismatch: expected " (showVal c ty))
+        (String.append ", got " (showVal c ty'))))
   | r => r
 --<sol
 -- a size below `sz`

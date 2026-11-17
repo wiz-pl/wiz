@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* diagnostics: the self-hosted driver no longer guesses a `[code]` from the message text
+  (`codeOf`/`codeTable` are gone): the frontend attaches it where the condition is known
+  and the line's tag carries it. The conditions that had a code in one toolchain only
+  (a missing `match` case or instance field, unsolved goals, non-structural recursion,
+  `C is not a class`, a quantity violation, an unimplemented tactic syntax) now agree, and
+  a duplicated `foreign_type` is `kernel-rejected` in both (21ao). `err-04`:
+  `recursive-without-equations` is in `ErrorCode.all` and `docs/error-codes.md`, and the
+  `lsp-server` test scans the emitters for unregistered code literals.
+* diagnostics: `#eval`, `#check`, `instance`, `inductive`/`structure` and `coinductive`
+  report the warnings their terms produce (a wrapping numeral at a word type now warns in
+  `#eval (300 : U8)` as it does in a `def`). A missing file is one positionless
+  `no-such-file` diagnostic (`wiz check no.wiz` → `no.wiz: error: no such file`) instead
+  of an uncaught read, and a replayed `builtin` clash points at the declaration instead of
+  `1:1`; the CLI omits `line:col` for a whole-file diagnostic (`docs/error-codes.md`).
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
