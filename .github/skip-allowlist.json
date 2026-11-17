@@ -1,5 +1,5 @@
 {
-  "comment": "Groups that may skip cases in CI, with the reason and an owner (scripts/ci.py check-skips; docs/building.md, 'Skips'). A group that is not here must run in CI: if it skips wholesale the run fails. A skip whose reason names a tool the dev shell (flake.nix, devShells.default) must provide is a failure even for a group here. Prefer fixing the shell or the test to adding an entry.",
+  "comment": "Groups that may skip cases in CI, with the reason and an owner (and, with `case`, the one case the entry excuses) (scripts/ci.py check-skips; docs/building.md, 'Skips'). A group that is not here must run in CI: if it skips wholesale the run fails. A skip whose reason names a tool the dev shell (flake.nix, devShells.default) must provide is a failure even for a group here. Prefer fixing the shell or the test to adding an entry.",
   "groups": [
     {
       "group": "hdl",
@@ -12,6 +12,54 @@
       "reason": "no source toolchain",
       "owner": "tower (Tests/Tower.lean, docs/building.md)",
       "why": "the 'from source' case needs Lake's toolchain inside a checkout, which the store-built shards do not have; the rest of the group runs."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only",
+      "reason": "prelude: the self-hosted Prelude is one embedded module that includes the IO natives",
+      "parity": "A14/C12",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (A14/C12): the self-hosted Prelude embeds the IO natives; the host's lib/Prelude.wiz has none. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "--target llvm|wasm: the host selects the backend, the self-hosted one emits C only (C5)",
+      "reason": "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5)",
+      "parity": "C5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (C5): the self-hosted backend emits C only and refuses the other target names. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "cache: --cache-ro is a host layer the driver has not got (a named difference)",
+      "reason": "cache: `--cache-ro DIR` adds a read-only layer",
+      "parity": "D5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D5): the driver's one-file cache has no read-only layers, so it rejects --cache-ro. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)",
+      "reason": "cache verification: the host writes output manifests",
+      "parity": "D5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D5): the self-hosted cache writes no output manifests, so --cache-verify strict never hits. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build: a good file is silent and exit 0 (the artifact is C, not an executable)",
+      "reason": "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C",
+      "parity": "D4",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D4): the self-hosted build's artifact is the generated C, not an executable. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "extensions: --include, --types and -v are the driver's own (the host rejects them)",
+      "reason": "flags: the driver also has `--include` (an -I alias), `--types` and `-v`",
+      "parity": "D3",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "why": "documented self-host parity difference (D3): --include/--types/-v are driver-only flags the host rejects. Allow-listed by the user (2026-11-17) for this one case only."
     }
   ]
 }
