@@ -409,12 +409,15 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
 * **Text and bytes.** A `String` crossing the FFI is UTF-8 and ends at the first NUL:
   `File.write`, `Child.write` and every other `String` argument write the characters'
   UTF-8 and stop at code point 0; `readLine`, `readAll` and other `String` results
-  decode UTF-8 without checking (bytes that aren't UTF-8 become wrong characters, not
-  an error) and stop at a NUL byte. So binary data goes as `Bytes`, and text and bytes
+  decode UTF-8 leniently (an invalid sequence becomes U+FFFD, not an error; the rule is
+  below and in `docs/libraries.md`) and stop at a NUL byte. A code point that is not a
+  scalar value (a surrogate or above U+10FFFF) is written as U+FFFD on the way out, by
+  every encoder. So binary data goes as `Bytes`, and text and bytes
   meet only through a named encoding: `Bytes.ofUtf8 : String → Bytes` (every string,
   NUL included; a code point that isn't a scalar value becomes U+FFFD),
-  `Bytes.toUtf8 : Bytes → Except String String` (checked: overlong forms, surrogates,
-  truncated sequences are `"invalid UTF-8 at byte k"`), `Bytes.ofLatin1 : String →
+  `Bytes.toUtf8 : Bytes → Except String String` (checked: a byte that is not a lead,
+  an overlong form, a surrogate, a value above U+10FFFF and a truncated sequence are
+  `"invalid UTF-8 at byte k"`), `Bytes.ofLatin1 : String →
   Except String Bytes` (fails on a character above 255) and `Bytes.toLatin1` (total).
   `Bytes.ofString`/`toString` (9d) still go through a C string.
 * **Bytes** also got `slice b start len`, `take`, `drop`, `append` (in place when the
@@ -516,22 +519,26 @@ buffer for the call*:
 
 * **In.** A prototype's buffer pointer and its length (a `size_t`/integer parameter
   right after it, named `n`, `len`, `nbytes` or `length`, with or without `__`) fold
-  into **one** `Bytes` parameter: the runtime passes the buffer's `data` and `len` as
+  into **one** `Bytes` parameter: the wrapper passes the buffer's `data` and `len` as
   the two C arguments. The pointer may be `const void *`, `const char *`/`char *`,
-  `unsigned char *`/`const unsigned char *`, `signed char *` or `uint8_t *` (a typedef
+  `const unsigned char *`/`unsigned char *`, `signed char *` or `uint8_t *` (a typedef
   for `unsigned char`, resolved by the header parser). A `char *` *without* a length is
-  still the C-string `String`.
-* **Ownership: borrowed, not given.** The pointer stays the Wiz value's storage for the
-  duration of the call only. C must not keep it (in a static, a struct, a callback it
-  registers) and must not `free` it: the reference the call takes is released when it
-  returns. A caller that still uses the buffer keeps it alive
-  (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`). No copy is made, so writing
-  through a non-`const` pointer is only well defined on a buffer the caller built for
-  the call and does not share (`Bytes` is functional: a shared buffer must not change).
-  Returning bytes needs a `foreign_type` or a caller-supplied buffer (below).
+  still the C-string `String`. A function whose parameter is named `C.f` takes the
+  buffer as one argument, so a `char *, int n` import used to have arity two and now has
+  one (`#check C.f` is `Bytes → …`).
+* **Ownership: borrowed or copied, never shared.** A `const` pointer is borrowed for the
+  call (`y`): the pointer is the Wiz value's storage, C must not keep it (in a static, a
+  struct, a callback it registers) and must not `free` it, and the reference the call
+  takes is released when it returns. A *writable* pointer (`Y`) is given a **copy**: the
+  wrapper `malloc`s `len` bytes, copies the buffer into them, hands those to C, and
+  frees them after the call, so whatever C writes is discarded and cannot change the Wiz
+  `Bytes` (which is functional; a shared buffer must not change). A caller that still
+  uses the buffer keeps it alive (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`).
+  Returning bytes therefore needs a `foreign_type` or a runtime read (below), not a
+  writable buffer argument.
 * **Out.** There is no `Bytes` *result* kind. C that produces bytes returns a
-  `foreign_type` pointer, or fills a buffer the caller passes; `FS.readBytes`,
-  `File.readBytes` and `Fd.read` (9k) are the runtime's own.
+  `foreign_type` pointer; `FS.readBytes`, `File.readBytes` and `Fd.read` (9k) are the
+  runtime's own.
 * **A `c_struct` field.** `unsigned char f[N]` or `char f[N]` is a `Bytes` field (the
   `c_struct` needs a header, so the array's length is known): the wrapper copies the
   buffer into the C array, cut or zero-padded to `N`, and a struct coming back gets a
@@ -540,9 +547,10 @@ buffer for the call*:
   frontend's `declared` does). A `Bytes` field without a header is rejected by both
   frontends (the length would be unknown).
 
-Both toolchains implement the kind: the Lean frontend/backends in `Elab/Command.lean`
+Both toolchains implement the kinds: the Lean frontend/backends in `Elab/Command.lean`
 and `Compiler/C.lean`, the self-hosted one in `selfhost/Frontend.wiz`/`Backend.wiz` with
-the same two C arguments (21ag). Tests: `=selfhost` "Bytes (21ag): a
-char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call" and "Bytes
-(21ag): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
-reference counting), plus the `ffi-structs` buffer case.
+the same two C arguments (21ag; `y` is a `const` buffer, `Y` a writable one, copied).
+Tests: `=selfhost` "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length,
+borrowed for the call" (it also writes through a writable pointer and shows the Wiz
+buffer unchanged) and "Bytes (21ag): a c_struct with a Bytes field through glue" (host
+and self-hosted, collector and reference counting), plus the `ffi-structs` buffer case.

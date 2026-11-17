@@ -1197,8 +1197,10 @@ compute and print in the checker's usual constructor style; the nine names are s
 compiled, and no constructor value can be built outside them). A buffer pointer may also
 be spelled `char *` (with a length), `unsigned char *` or `signed char *`/`uint8_t *`
 (typedef-resolved), and a `c_struct` parameter is now a `gstruct` in `glueGtyOfKind`
-(it was `.gint`, so glue could take a struct but the C parameter was wrong). The
-borrowed/owned rule and the struct-field copy are in `docs/stages/09-ffi.md` 9l.
+(it was `.gint`, so glue could take a struct but the C parameter was wrong). A writable
+buffer pointer is a copy for the call (`Y`), so C cannot change the Wiz value. The
+borrowed/copied rule, the UTF-8 rule and the struct-field copy are in
+`docs/stages/09-ffi.md` 9l and `docs/libraries.md`.
 
 **Tests** (group `selfhost`): the encodings, `Array ↔ Bytes` and the
 slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argument

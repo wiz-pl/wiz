@@ -1485,9 +1485,19 @@ number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.sho
 (`[1, 2, 255]`, the form `#eval` prints a buffer in).
 
 **Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
-`Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;
-the decoder rejects overlong forms, encoded surrogates and truncated sequences with
-`"invalid UTF-8 at byte k"`. `Bytes.ofLatin1 s : Except String Bytes` and
+`Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included.
+The UTF-8 rule is one rule, implemented once per runtime (`lib/IO.wiz`, the C runtime's
+`wiz_in_string`/`wiz_out_string`, the self-hosted `cstr`/`wstr`, and the interpreters'
+model): the lead byte's top bits give a sequence's length — `0xxxxxxx` 1, `110xxxxx` 2,
+`1110xxxx` 3, `11110xxx` 4; `10xxxxxx` and `11111xxx` are not leads. A sequence is valid
+when its continuation bytes are all there and the scalar is not overlong (below `80`,
+`800`, `10000` for two, three, four bytes), not a surrogate (`D800` … `DFFF`) and at most
+`10FFFF`. The checked decoder rejects the first invalid sequence with
+`"invalid UTF-8 at byte k"`; the NUL-terminated decoders (`Bytes.toString`,
+`readLine`, …) cannot fail, so they write U+FFFD for it and resume after the bytes the
+lead claimed (one for a byte that is not a lead). Every encoder writes U+FFFD for a code
+point that is not a scalar value, so `Bytes.ofUtf8` and `Bytes.ofString` agree on one.
+`Bytes.ofLatin1 s : Except String Bytes` and
 `Bytes.toLatin1 b` are one byte per character, code points 0 … 255 (above 255 is an
 error, not a truncation). `Bytes.ofString`/`Bytes.toString` stay the C-string pair, so
 `ofString` of a string with a NUL gives the bytes before it; `String.length` counts

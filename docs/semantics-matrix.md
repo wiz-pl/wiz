@@ -799,19 +799,23 @@ kernel` on this machine).
     glibc's spelling for the x86 default NaN, while the spec says only "NaN".
   * **`Float64` `lt` with NaN / signed zero** is IEEE (all comparisons with
     NaN false, `-0 = 0`), but there is no total order to pin.
-  * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; `Bytes.ofUtf8`
-    maps a lone surrogate or a value above `U+10FFFF` to `U+FFFD`, so
-    `toUtf8 (ofUtf8 s) != s`. The behaviour is pinned by the surrogate cells
-    but is not stated as a general rule.
+  * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; every encoder
+    (`Bytes.ofUtf8`, `Bytes.pushUtf8`, `Bytes.ofString`, and a `String` crossing
+    the FFI) maps a lone surrogate or a value above `U+10FFFF` to `U+FFFD`, so
+    `toUtf8 (ofUtf8 s) != s`. `docs/libraries.md` states this as the UTF-8 rule;
+    the surrogate cells pin it.
   * **`Int` has no shift or bitwise operation**, so there is nothing to pin
     there (the `int` cells cover arithmetic, comparison and conversion only).
 * **`String` can contain non-scalar `Char`s.** `Char` is a `Nat` code, with no
-  check that it is a Unicode scalar value. `Bytes.ofUtf8` maps a lone surrogate
+  check that it is a Unicode scalar value. Every encoder maps a lone surrogate
   or a code point above `U+10FFFF` to `U+FFFD` (three bytes), so
-  `toUtf8 (ofUtf8 s) != s` for such a string; this is not stated in the docs and
-  is pinned by the "surrogate" cells. `toUtf8` rejects overlong forms and
-  encoded surrogates (the decoder checks).
-* **`Bytes.ofString`/`Bytes.toString` stop at a NUL** (documented) while
+  `toUtf8 (ofUtf8 s) != s` for such a string; `docs/libraries.md` states this
+  rule, and the "surrogate" cells pin it. `toUtf8` rejects overlong forms,
+  encoded surrogates, bytes that are not a lead and a value above `U+10FFFF`;
+  the NUL-terminated decoders (`Bytes.toString`, `readLine`, …) cannot fail,
+  so they write U+FFFD for an invalid sequence and resume after it.
+* **`Bytes.ofString`/`Bytes.toString` stop at a NUL** (documented; invalid
+  UTF-8 in the bytes is U+FFFD in `toString`, one per invalid sequence) while
   `Bytes.ofUtf8`/`toUtf8` do not; `String.length` counts characters and
   `Bytes.size` counts UTF-8 bytes. The trap is that an astral character is 1
   `String` character and 4 bytes. `Bytes.get` past the end is `0` (the total

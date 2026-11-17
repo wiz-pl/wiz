@@ -2254,6 +2254,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .k 's' => .const "String" []
         | .k 'b' => .const "Bool" []
         | .k 'y' => .const "Bytes" []
+        | .k 'Y' => .const "Bytes" []
         | .k 'p' => .const "_" []
         | .struct c h fs =>
           let key := s!"cstruct:{(RVal.FKind.struct c h fs).toKey}"
@@ -2361,13 +2362,18 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ptr (.const .void) => true
         | .ptr t => isChar t
         | _ => false
+      -- (21ag) a `const` pointer is borrowed for the call (`y`); a writable one (`Y`) is
+      -- copied, so C never changes a Wiz `Bytes` value (it is functional)
+      let isConstPtr (t : FFI.CType) : Bool := match t with
+        | .ptr (.const _) => true
+        | _ => false
       for f in funcs do
         let name : Name := "C." ++ f.name
         if f.variadic || (← get).globals.contains name || skips.contains f.name then continue
         -- the parameters, with buffers and their lengths as one
         let names := f.paramNames ++ List.replicate (f.params.length - f.paramNames.length) ""
         let arr := (f.params.zip names).toArray
-        let mut ps : Array (Option FFI.CType) := #[]
+        let mut ps : Array (FFI.CType × Bool × Bool) := #[] -- (type, is a buffer, writable)
         let mut i := 0
         while i < arr.size do
           let t := arr[i]!.1
@@ -2375,15 +2381,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             | some (l, ln) => (match l with | .int _ | .const (.int _) => true | _ => false) && lenNames.contains ln
             | none => false
           if !noAuto && isBuf t && isLen then
-            ps := ps.push none; i := i + 2
+            ps := ps.push (t, true, !isConstPtr t); i := i + 2
           else
-            ps := ps.push (some t); i := i + 1
+            ps := ps.push (t, false, false); i := i + 1
         let mut ks : Array (RVal.FKind × Option Name) := #[]
         let mut ok := true
-        for p in ps do
-          match p with
-          | none => ks := ks.push (.k 'y', none)
-          | some t => match ← kindOf t false with
+        for (t, isb, wr) in ps do
+          if isb then ks := ks.push (.k (if wr then 'Y' else 'y'), none)
+          else match ← kindOf t false with
             | some k => ks := ks.push k
             | none => ok := false; break
         if !ok then continue

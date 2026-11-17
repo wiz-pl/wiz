@@ -283,8 +283,10 @@ def render (b : ByteArray) : String :=
     | x :: xs => toString x ++ ", " ++ go xs
   "[" ++ go (toList b) ++ "]"
 
-/-- One code point as UTF-8, as `wiz_in_string` writes it (no scalar-value check). -/
+/-- One code point as UTF-8, as the encoders write it (`Bytes.scalar`): a surrogate or
+a value above `U+10FFFF` is not a scalar value and becomes U+FFFD. -/
 def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
+  let c := if c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF) then 0xFFFD else c
   if c < 0x80 then b.push (UInt8.ofNat c)
   else if c < 0x800 then
     (b.push (UInt8.ofNat (0xC0 ||| (c >>> 6)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
@@ -302,14 +304,20 @@ def ofCString (s : String) : ByteArray :=
     (· != 0)).toArray)
 
 /-- The code point `cp` with the continuation bytes `j … len - 1` of a UTF-8
-sequence folded in, as `wiz_out_string` reads them (a helper of `decodeFrom`). -/
-partial def decodeCont (b : ByteArray) (i len j cp : Nat) : Nat :=
-  if j < len && i + j < b.size then
-    decodeCont b i len (j + 1) ((cp <<< 6) ||| ((b.get! (i + j)).toNat &&& 0x3F))
-  else cp
+sequence folded in (a helper of `decodeFrom`); `none` if one of them is not
+`10xxxxxx`. -/
+partial def decodeCont (b : ByteArray) (i len j cp : Nat) : Option Nat :=
+  if j >= len then some cp
+  else if h : i + j < b.size then
+    let x := (b[i + j]).toNat
+    if x < 0x80 || x > 0xBF then none
+    else decodeCont b i len (j + 1) ((cp <<< 6) ||| (x &&& 0x3F))
+  else none
 
-/-- The bytes from offset `i` decoded as `wiz_out_string` decodes UTF-8 (the sequence
-length comes from the leading byte; continuation bytes are not checked). -/
+/-- The bytes from offset `i` decoded as the C-string decoders read UTF-8: the length
+comes from the lead byte's top bits; an invalid sequence (a missing or malformed
+continuation, an overlong form, a surrogate, above `U+10FFFF`, or a byte that is not a
+lead) is U+FFFD and the scan resumes after the bytes the lead claimed. -/
 partial def decodeFrom (b : ByteArray) (i : Nat) (acc : String) : String :=
   if h : i < b.size then
     let c := (b[i]).toNat
@@ -317,8 +325,14 @@ partial def decodeFrom (b : ByteArray) (i : Nat) (acc : String) : String :=
       if c < 0x80 then (c, 1)
       else if c >>> 5 == 6 then (c &&& 0x1F, 2)
       else if c >>> 4 == 14 then (c &&& 0x0F, 3)
-      else (c &&& 0x07, 4)
-    decodeFrom b (i + len) (acc.push (Char.ofNat (decodeCont b i len 1 cp)))
+      else if c >>> 3 == 30 then (c &&& 0x07, 4)
+      else (0xFFFD, 1)
+    let cp := match decodeCont b i len 1 cp with
+      | some x => x
+      | none => 0xFFFD
+    let cp := if (len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)
+        || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF then 0xFFFD else cp
+    decodeFrom b (i + len) (acc.push (Char.ofNat cp))
   else acc
 
 /-- The bytes up to the first NUL, decoded as text. -/

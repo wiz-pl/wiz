@@ -311,20 +311,25 @@ def Bytes.showAux : List Nat → String
 /-- The bytes as numbers, as `[1, 2, 255]`. -/
 def Bytes.show (b : Bytes) : String := String.append "[" (Bytes.showAux (Bytes.toList b))
 
+/-- The code point an encoder writes: a value that is not a scalar value (above
+`0x10FFFF`, or a surrogate) becomes U+FFFD. This is the encoders' half of the UTF-8
+rule; the C runtime's `wiz_in_string` and the self-hosted `cstr` do the same. -/
+def Bytes.scalar (c : Nat) : Nat :=
+  match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with
+  | .true => 65533
+  | .false => c
 /-- `b` with the UTF-8 encoding of code point `c` appended (one to four bytes). A code
-point that is not a scalar value (above 0x10FFFF, or a surrogate) is written as
-U+FFFD. -/
+point that is not a scalar value is written as U+FFFD (`Bytes.scalar`). -/
 def Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=
+  let c := Bytes.scalar c;
   match Nat.lt c 128 with
   | .true => Bytes.push b c
   | .false => match Nat.lt c 2048 with
     | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)
-    | .false => match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with
-      | .true => Bytes.push (Bytes.push (Bytes.push b 239) 191) 189
-      | .false => match Nat.lt c 65536 with
-        | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
-        | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))
-            (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+    | .false => match Nat.lt c 65536 with
+      | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+      | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))
+          (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
 /-- `acc` with the characters encoded as UTF-8 (a helper of `Bytes.ofUtf8`). -/
 def Bytes.ofCharsUtf8 : List Char → Bytes → Bytes
   | .nil, acc => acc
@@ -345,16 +350,27 @@ def Bytes.cont (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with
     | .false => .none
   | .none => .none
 /-- The code point that starts at byte `i`, and its length in bytes; `none` if the bytes
-there are not valid UTF-8 (no overlong forms, no surrogates). -/
+there are not valid UTF-8.
+
+The UTF-8 rule, shared with the C runtime's `wiz_out_string` and the self-hosted
+`wstr`: the lead byte's top bits give the length — 0xxxxxxx 1, 110xxxxx 2, 1110xxxx 3,
+11110xxx 4; 10xxxxxx and 11111xxx are not leads. A sequence is valid when its
+continuation bytes (`Bytes.cont`) are all there and the scalar is not overlong (below
+`0x80`, `0x800`, `0x10000` for two, three, four bytes), not a surrogate (`D800` …
+`DFFF`) and at most `10FFFF`. -/
 def Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=
   let x := Bytes.get b i;
   match Nat.lt x 128 with
   | .true => .some (x, 1)
-  | .false => match Bool.and (Nat.lt 193 x) (Nat.lt x 224) with
+  | .false => match Nat.beq (Nat.div x 32) 6 with
     | .true => (match Bytes.cont b (i + 1) with
-      | .some y => .some ((Nat.sub x 192) * 64 + y, 2)
+      | .some y =>
+        let c := (Nat.sub x 192) * 64 + y;
+        (match Nat.lt c 128 with -- no overlong forms (C0, C1)
+        | .true => .none
+        | .false => .some (c, 2))
       | .none => .none)
-    | .false => match Bool.and (Nat.lt 223 x) (Nat.lt x 240) with
+    | .false => match Nat.beq (Nat.div x 16) 14 with
       | .true => (match Bytes.cont b (i + 1), Bytes.cont b (i + 2) with
         | .some y, .some z =>
           let c := (Nat.sub x 224) * 4096 + y * 64 + z;
@@ -363,7 +379,7 @@ def Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=
           | .true => .none
           | .false => .some (c, 3))
         | _, _ => .none)
-      | .false => match Bool.and (Nat.lt 239 x) (Nat.lt x 245) with
+      | .false => match Nat.beq (Nat.div x 8) 30 with
         | .true => (match Bytes.cont b (i + 1), Bytes.cont b (i + 2), Bytes.cont b (i + 3) with
           | .some y, .some z, .some w =>
             let c := (Nat.sub x 240) * 262144 + y * 4096 + z * 64 + w;

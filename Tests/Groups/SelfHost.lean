@@ -1226,6 +1226,107 @@ def bytesEncExpected : String :=
   "3\n1\n[97]\neq\n4\n4\neq\n[233]\n[233]\nnot Latin-1: character 0 is U+256\n" ++
   "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
 
+/-- `l` as the bracketed list `Bytes.show` prints: `[1, 2, 255]`. -/
+def showNats (l : List Nat) : String := "[" ++ ", ".intercalate (l.map toString) ++ "]"
+
+/-- `l` as a Wiz `List Nat` literal (`(List.cons 1 .nil)`; `[]` for the empty list). -/
+def natListLit : List Nat → String
+  | [] => ".nil"
+  | x :: xs => s!"(List.cons {x} {natListLit xs})"
+
+/-- A `Bytes` of `l` as a Wiz expression (`Bytes.ofList` for a non-empty list). -/
+def bytesLit : List Nat → String
+  | [] => "Bytes.empty"
+  | l => s!"(Bytes.ofList {natListLit l})"
+
+/-- (21ag) The UTF-8 differential table: `(label, bytes, what the C-string decoder
+(`Bytes.toString`) makes of them, as bytes, and what the checked decoder
+(`Bytes.toUtf8`) says)`. The third column is the fourth column's opposite: the lenient
+decoder writes U+FFFD (`EF BF BD`) for an invalid sequence and resumes after the bytes
+the lead claimed, or stops at a NUL; `none` in the last column means the checked
+decoder accepts the bytes and re-encodes them unchanged, `some k` that it reports
+`invalid UTF-8 at byte k`.
+
+ASCII, 2/3/4-byte sequences, the maximum scalar, a truncated sequence, an overlong
+`C0 80` and `E0 80 80`, a lone continuation byte, a surrogate half, above U+10FFFF, a
+byte that is not a lead (`F8`), a bad continuation, a NUL inside the buffer, and a valid
+character before an invalid one. -/
+def utf8Table : List (String × List Nat × List Nat × Option Nat) := [
+  ("ascii", [0x41, 0x42, 0x43], [0x41, 0x42, 0x43], none),
+  ("two bytes", [0xC3, 0xA9], [0xC3, 0xA9], none),
+  ("three bytes", [0xE2, 0x82, 0xAC], [0xE2, 0x82, 0xAC], none),
+  ("four bytes", [0xF0, 0x9D, 0x84, 0x9E], [0xF0, 0x9D, 0x84, 0x9E], none),
+  ("max scalar", [0xF4, 0x8F, 0xBF, 0xBF], [0xF4, 0x8F, 0xBF, 0xBF], none),
+  ("truncated", [0xE2, 0x82], [0xEF, 0xBF, 0xBD], some 0),
+  ("overlong C0 80", [0xC0, 0x80], [0xEF, 0xBF, 0xBD], some 0),
+  ("overlong E0 80 80", [0xE0, 0x80, 0x80], [0xEF, 0xBF, 0xBD], some 0),
+  ("lone continuation", [0x88, 0x41], [0xEF, 0xBF, 0xBD, 0x41], some 0),
+  ("surrogate half", [0xED, 0xA0, 0x80], [0xEF, 0xBF, 0xBD], some 0),
+  ("above 10FFFF", [0xF4, 0x90, 0x80, 0x80], [0xEF, 0xBF, 0xBD], some 0),
+  ("not a lead F8", [0xF8, 0x41], [0xEF, 0xBF, 0xBD, 0x41], some 0),
+  ("bad continuation", [0xE2, 0x28, 0xA1], [0xEF, 0xBF, 0xBD], some 0),
+  ("NUL inside", [0x41, 0x00, 0x42], [0x41], none),
+  ("valid then invalid", [0x41, 0xE2, 0x82], [0x41, 0xEF, 0xBF, 0xBD], some 1)]
+
+/-- (21ag) The encoders' table: `(label, code point, the bytes every encoder writes)`.
+A non-scalar code point is U+FFFD. -/
+def utf8EncTable : List (String × Nat × List Nat) := [
+  ("enc one byte", 0x41, [0x41]),
+  ("enc two bytes low", 0x80, [0xC2, 0x80]),
+  ("enc two bytes high", 0x7FF, [0xDF, 0xBF]),
+  ("enc three bytes low", 0x800, [0xE0, 0xA0, 0x80]),
+  ("enc three bytes high", 0xFFFF, [0xEF, 0xBF, 0xBF]),
+  ("enc four bytes low", 0x10000, [0xF0, 0x90, 0x80, 0x80]),
+  ("enc max scalar", 0x10FFFF, [0xF4, 0x8F, 0xBF, 0xBF]),
+  ("enc surrogate low", 0xD800, [0xEF, 0xBF, 0xBD]),
+  ("enc surrogate high", 0xDFFF, [0xEF, 0xBF, 0xBD]),
+  ("enc above max", 0x110000, [0xEF, 0xBF, 0xBD])]
+
+/-- `l` with each element's index, in order. -/
+def listIdx : List α → List (α × Nat)
+  | [] => []
+  | x :: xs => (x, 0) :: (listIdx xs).map fun (a, n) => (a, n + 1)
+
+/-- (21ag) The differential program: every row of `utf8Table` through `Bytes.toString`
+(the C-string decoder) and `Bytes.toUtf8` (checked), then every row of `utf8EncTable`
+through `Bytes.pushUtf8`, `Bytes.ofUtf8` and `Bytes.ofString` (the last two from a
+one-character `String`), with an encode → decode → encode round trip. The same source is
+compiled by the Lean toolchain and the self-hosted one; the outputs must be equal, byte
+for byte, and equal to `utf8Expected`.
+
+Every `match` scrutinee is `let`-bound (a closed one is evaluated while the self-hosted
+compiler compiles; #422). -/
+def utf8Program : String :=
+  "import Std\ndef main : IO Unit := do\n" ++
+  String.join ((listIdx utf8Table).map fun ((label, bs, _, _), n) =>
+    s!"  IO.println \"{label}\";\n" ++
+    s!"  let b{n} := {bytesLit bs};\n" ++
+    s!"  IO.println (Bytes.show (Bytes.ofUtf8 (Bytes.toString b{n})));\n" ++
+    s!"  let c{n} := Bytes.toUtf8 b{n};\n" ++
+    s!"  IO.println (match c{n} with\n    | .ok s => Bytes.show (Bytes.ofUtf8 s)\n" ++
+    s!"    | .error e => String.append \"err \" e)\n")
+  ++
+  String.join ((listIdx utf8EncTable).map fun ((label, cp, _), n) =>
+    s!"  IO.println \"{label}\";\n" ++
+    s!"  let e{n} := Bytes.pushUtf8 Bytes.empty {cp};\n" ++
+    s!"  IO.println (Bytes.show e{n});\n" ++
+    s!"  let t{n} := String.mk (List.cons (Char.mk {cp}) .nil);\n" ++
+    s!"  IO.println (Bytes.show (Bytes.ofUtf8 t{n}));\n" ++
+    s!"  IO.println (Bytes.show (Bytes.ofString t{n}));\n" ++
+    s!"  IO.println (if Bytes.eq (Bytes.ofUtf8 (Bytes.toString e{n})) e{n} then \"eq\" else \"ne\")\n")
+
+/-- What `utf8Program` prints: each row's label, the two decoders' bytes (or the checked
+error), the three encoders' bytes, and the round trip. -/
+def utf8Expected : String :=
+  String.join ((utf8Table).map fun (label, bs, out, chk) =>
+    label ++ "\n" ++ showNats out ++ "\n" ++
+    (match chk with
+     | none => showNats bs
+     | some k => s!"err invalid UTF-8 at byte {k}") ++ "\n") ++
+  String.join ((utf8EncTable).map fun (label, _, out) =>
+    label ++ "\n" ++ showNats out ++ "\n" ++ showNats out ++ "\n" ++ showNats out ++ "\neq\n")
+
+
 /-- (#422) A closed `match` scrutinee that is expensive to evaluate: `fib k n` doubles
 `n` `k` times by recursion (2^18 calls here). The self-hosted compiler evaluates such a
 scrutinee in full while it compiles (`scrutLets` binds its value), and the `let`-bound
@@ -1268,7 +1369,9 @@ def bytesArrayExpected : String :=
 
 /-- (21ag) A header for a buffer pointer written three ways: `const char *`,
 `uint8_t *` (a typedef for `unsigned char`) and `unsigned char *`, each followed by its
-length, which the frontends fold into one `Bytes` parameter (kind `y`). -/
+length, which the frontends fold into one `Bytes` parameter (kind `y`, or `Y` when the
+pointer is writable and the argument is a copy). `wiz_scribble_chars` writes through a
+writable pointer, to show the Wiz buffer does not change. -/
 def bytesPtrHeader : String :=
   "#ifndef WIZ_BYTES2_H\n#define WIZ_BYTES2_H\n" ++
   "typedef unsigned char uint8_t;\n" ++
@@ -1284,22 +1387,34 @@ def bytesPtrHeader : String :=
   "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
   "#endif\n"
 
+/-- (21ag) A header of the writable-pointer case: `char *` with a length, writing
+through the pointer (imported without `(pure)`, so the call is an `IO` action). -/
+def bytesPtrIoHeader : String :=
+  "#ifndef WIZ_BYTES2_IO_H\n#define WIZ_BYTES2_IO_H\n" ++
+  "static inline void wiz_scribble_chars(char *buf, unsigned long n) {\n" ++
+  "  if (n) buf[0] = 'X';\n}\n" ++
+  "#endif\n"
+
 /-- (21ag) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
-called with one `Bytes` argument; the buffer is **borrowed** for the call (C may read it
-and must not keep it), so the same Wiz buffer is usable after the call. Prints
-`198 258 198 [65, 66, 67] 3`. -/
-def bytesPtrProgram (header : String) : String :=
+called with one `Bytes` argument; a `const` buffer is **borrowed** for the call (C may
+read it and must not keep it), a writable one is a **copy** (C's writes are discarded),
+so the same Wiz buffer is usable and unchanged after either call. Prints
+`198 258 198 [65, 66, 67] 3 [65, 66, 67]`. -/
+def bytesPtrProgram (header ioHeader : String) : String :=
   "import IO\n" ++
   s!"import_c \"{header}\" (pure)\n" ++
+  s!"import_c \"{ioHeader}\"\n" ++
   "def main : IO Unit := do\n" ++
   "  let b := Bytes.ofString \"ABC\";\n" ++
   "  IO.println (Nat.toString (C.wiz_sum_chars b));\n" ++
   "  IO.println (Nat.toString (C.wiz_sum_u8 (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 255 .nil))))));\n" ++
   "  IO.println (Nat.toString (C.wiz_sum_u8c b));\n" ++
   "  IO.println (Bytes.show b);\n" ++
-  "  IO.println (Nat.toString (Bytes.size b))\n"
+  "  IO.println (Nat.toString (Bytes.size b));\n" ++
+  "  C.wiz_scribble_chars b;\n" ++
+  "  IO.println (Bytes.show b)\n"
 
-def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n"
+def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n[65, 66, 67]\n"
 
 /-- (21ag) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
 value and comes back by value (the field is copied into the C array and out of it), and
@@ -1983,6 +2098,8 @@ def selfHostGroup : Group where
         selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
     { name := "Bytes (21ag): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
         ffiAgrees bytesEncProgram bytesEncExpected },
+    { name := "Bytes (21ag): one UTF-8 rule — the differential table through both decoders and three encoders", run := fun _ =>
+        ffiAgrees utf8Program utf8Expected },
     -- (#422, expected slow) the pattern `bytesEncProgram` works around: a closed `match`
     -- scrutinee is evaluated while the self-hosted compiler compiles (about 2 s at
     -- `fib 16` and four times that per two more levels, against 0.4 s let-bound). Both
@@ -1998,11 +2115,13 @@ def selfHostGroup : Group where
         note s!"#422: inline scrutinee {t1 - t0} ms, let-bound {t2 - t1} ms" },
     { name := "Bytes (21ag): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
         ffiAgrees bytesArrayProgram bytesArrayExpected },
-    { name := "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
+    { name := "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length, borrowed or copied for the call, in both toolchains", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_bytes2.h"
+        let hi := dir / "wiz_bytes2_io.h"
         IO.FS.writeFile h bytesPtrHeader
-        let prog := bytesPtrProgram h.toString
+        IO.FS.writeFile hi bytesPtrIoHeader
+        let prog := bytesPtrProgram h.toString hi.toString
         ioRun prog bytesPtrExpected
         selfhostCompileRun prog bytesPtrExpected
         selfhostCompileRun prog bytesPtrExpected (flags := #["--rc"]) },
