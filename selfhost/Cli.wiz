@@ -10,7 +10,8 @@
 --            --cache-verify off|warn|strict, --target c (the backend the host names;
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
---            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
+--            --rc | --rc-owned | --gc | --unbox-structs | --lib | --no-main |
+--            --header (the backend),
 --            --version, -h | --help
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
 --               a bad `--target`), 2 usage (unknown command or option, missing argument)
@@ -739,7 +740,8 @@ inductive Kind where
 
 def isBackendFlag (a : String) : Bool :=
   Bool.or (strEq a "--rc") (Bool.or (strEq a "--rc-owned") (Bool.or (strEq a "--gc")
-    (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
+    (Bool.or (strEq a "--unbox-structs") (Bool.or (strEq a "--lib")
+      (Bool.or (strEq a "--no-main") (strEq a "--header"))))))
 
 -- a word in a list
 def listHas (s : String) : List String → Bool
@@ -868,7 +870,7 @@ def usageText : String :=
   "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 

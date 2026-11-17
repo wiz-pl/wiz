@@ -728,6 +728,30 @@ def structFiles : List (String × String) :=
 
 def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
 
+/-- (22i, `--unbox-structs`) A one-field and a two-field `c_struct` by value: the last
+field is not in a pair, so `wiz_sin`/`wiz_sout` must read and build the unboxed layout. A
+layout mismatch (the helpers still assuming nested pairs, or erasure still boxing)
+changes the numbers or reads a pair offset as a field. -/
+def unboxStructFiles : List (String × String) :=
+  [("main.wiz", "import IO\nlink_c \"c/unbox.c\"\n" ++
+      "c_struct \"struct one\" One where\n  val : Nat\n" ++
+      "c_struct \"struct two\" Two where\n  a : Nat\n  b : Nat\n" ++
+      "extern \"one_add\" oneAdd : One → Nat\nextern \"one_make\" oneMake : Nat → One\n" ++
+      "extern \"two_sum\" twoSum : Two → Nat\nextern \"two_swap\" twoSwap : Two → Two\n" ++
+      "def main : IO Unit := do\n  IO.println (Nat.toString (oneAdd (One.mk 41)));\n" ++
+      "  let o := oneMake 7;\n  IO.println (Nat.toString o.val);\n" ++
+      "  IO.println (Nat.toString (twoSum (Two.mk 40 2)));\n" ++
+      "  let t := twoSwap (Two.mk 3 9);\n  IO.println (Nat.toString (t.a * 10 + t.b))\n"),
+   ("c/unbox.c", "#include <stdint.h>\n" ++
+      "struct one { uint64_t val; };\n" ++
+      "struct two { uint64_t a; uint64_t b; };\n" ++
+      "uint64_t one_add(struct one x) { return x.val + 1; }\n" ++
+      "struct one one_make(uint64_t n) { struct one x; x.val = n; return x; }\n" ++
+      "uint64_t two_sum(struct two x) { return x.a + x.b; }\n" ++
+      "struct two two_swap(struct two x) { struct two y; y.a = x.b; y.b = x.a; return y; }\n")]
+
+def unboxStructExpected : String := "42\n7\n42\n93\n"
+
 /-- (stage 21r) The checks of `c_struct`, both frontends alike. -/
 def structDecls : List (String × Bool) := [
   ("c_struct S3 where\n  x : Nat\n  y : Bool\ndef s3 : S3 := S3.mk 1 .true\ndef s3x : Nat := s3.x\n" ++
@@ -1986,6 +2010,9 @@ def selfHostGroup : Group where
         selfhostLinkRun structFiles structExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: c_struct is checked as in the Lean frontend (21r)", run := fun _ =>
         selfhostAgreesIO "" structDecls },
+    { name := "c_struct with --unbox-structs: the last field is unboxed, and C reads it back (22i)", run := fun _ => do
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--unbox-structs"])
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--rc", "--unbox-structs"]) },
     { name := "a Wiz library (--lib, --no-main, --header) used by a C program, with the handle functions (21s)", run := fun _ => do
         libRunC libSrc libMain libExpected
         selfhostLibRun libSrc libMain libExpected (flags := #["--lib"])

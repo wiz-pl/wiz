@@ -428,12 +428,20 @@ static V lazyHyp(V nat, V D, V m, V j, V y, V rest) {
   V fs[3] = {mkclo(recFn, 5, env), rest, BOX(0)};
   return mkobj(T_HYP, 3, fs);
 }
+/* (`--unbox-structs`, 22i) The last field of a structure is not in a pair: the backend
+   erases its description as `arg`/`rec`/`hrec` with tags 5/6/7 instead of 1/2/3, so the
+   payload itself is the field and there is no rest payload (and no hypothesis after it
+   for an `arg`). */
 static V hyps(V nat, V D, V m, V d, V pl) {
   switch (tagof(d)) {
   case 1: return hyps(nat, D, m, ap(fld(d, 1), fld(pl, 0)), fld(pl, 1));
   case 2: return lazyHyp(nat, D, m, fld(d, 0), fld(pl, 0), hyps(nat, D, m, fld(d, 1), fld(pl, 1)));
   case 3: { V env[5] = {nat, D, m, fld(d, 1), fld(pl, 0)};
     return pair(mkclo(hrecFn, 5, env), hyps(nat, D, m, fld(d, 2), fld(pl, 1))); }
+  case 5: return BOX(0);
+  case 6: return lazyHyp(nat, D, m, fld(d, 0), pl, BOX(0));
+  case 7: { V env[5] = {nat, D, m, fld(d, 1), pl};
+    return pair(mkclo(hrecFn, 5, env), BOX(0)); }
   default: return BOX(0);
   }
 }
@@ -473,6 +481,8 @@ static V lazyHyp(V nat, V D, V m, V j, V y, V rest) {
   return mkobj(T_HYP, 3, fs);
 }
 /* (`D`, `m`, `d`, `pl` borrowed) */
+/* (`--unbox-structs`, 22i) the last field of a structure is the payload, not
+   `fld(pl, 0)`, and there is no rest payload; its description is tag 5/6/7. */
 static V hyps(V nat, V D, V m, V d, V pl) {
   switch (tagof(d)) {
   case 1: {
@@ -488,6 +498,11 @@ static V hyps(V nat, V D, V m, V d, V pl) {
     inc(D); inc(m); inc(env[3]); inc(env[4]);
     V c = mkclo(hrecFn, 5, env);
     return pair(c, hyps(nat, D, m, fld(d, 2), fld(pl, 1))); }
+  case 5: return BOX(0);
+  case 6: return lazyHyp(nat, D, m, fld(d, 0), pl, BOX(0));
+  case 7: { V env[5] = {nat, D, m, fld(d, 1), pl};
+    inc(D); inc(m); inc(env[3]); inc(env[4]);
+    return pair(mkclo(hrecFn, 5, env), BOX(0)); }
   default: return BOX(0);
   }
 }
@@ -548,6 +563,29 @@ static V p_hypAt(V vw, V jj) {
       }
       k--; d = fld(d, 2); p = fld(p, 1);
       continue;
+    /* (`--unbox-structs`, 22i) the last field of a structure: the payload is the
+       field, and nothing follows it */
+    case 5:
+      r = unreach();
+      goto done;
+    case 6:
+      if (k == 0) {
+        V j = fld(d, 0), y = p;
+        inc(D); inc(m); inc(j); inc(y);
+        r = p_indv(nat, D, m, j, y);
+        goto done;
+      }
+      r = unreach();
+      goto done;
+    case 7:
+      if (k == 0) {
+        V env[5] = {nat, D, m, fld(d, 1), p};
+        inc(D); inc(m); inc(env[3]); inc(env[4]);
+        r = mkclo(hrecFnV, 5, env);
+        goto done;
+      }
+      r = unreach();
+      goto done;
     default:
       r = unreach();
       goto done;
