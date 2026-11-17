@@ -732,11 +732,12 @@ inductive NameRes where
   | privTo (mod name : String)
   | missing
   | ambiguous (names : List String)
--- `dropL` is defined later in this file
-def dropChars : Nat → List Char → List Char
+-- `dropL` is defined later in this file; `Cli.wiz` has a `dropChars` of its own (the
+-- compiler is one source, so the names must differ)
+def dropNChars : Nat → List Char → List Char
   | .zero, cs => cs
   | .succ _, .nil => .nil
-  | .succ k, .cons _ cs => dropChars k cs
+  | .succ k, .cons _ cs => dropNChars k cs
 def hasDotC : List Char → Bool
   | .nil => .false
   | .cons c cs => Bool.or (Nat.beq (Char.code c) 46) (hasDotC cs)
@@ -785,7 +786,7 @@ def aliasBest (x : String) : List NsAlias → Option NsAlias
     | .false => best
 def expandAliases (gs : Globals) (x : String) : String := match aliasBest x (Globals.aliases gs) with
   | .none => x
-  | .some (.mk a m) => m +++ String.mk (dropChars (lenStr a) (match x with | .mk cs => cs))
+  | .some (.mk a m) => m +++ String.mk (dropNChars (lenStr a) (match x with | .mk cs => cs))
 def prefixOpens : List String → String → List String
   | .nil, _ => .nil
   | .cons m ms, x => .cons (m +++ "." +++ x) (prefixOpens ms x)
@@ -808,29 +809,44 @@ partial def candsOf (sc : Scope) (acc : List Nat) : List String → List Nat
 def nameOfIdx (gs : Globals) : List Nat → List String
   | .nil => .nil
   | .cons i is => .cons (privBase (globalNameOf gs i)) (nameOfIdx gs is)
+-- the scope-free name: a qualified one as written (after the longest alias), an
+-- unqualified one through the namespace/open candidates
+def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes := match x with
+  | .mk cs => match hasDotC cs with
+    | .true =>
+      let y := expandAliases gs x;
+      match lookupExact sc y with
+      | .ok i => .ok i
+      | .privTo m => .privTo m y
+      | .missing =>
+        let p := Globals.nsPrefix gs;
+        match p with
+        | .mk ps => match ps with
+          | .nil => .missing
+          | _ => (match lookupExact sc (p +++ "." +++ y) with
+            | .ok i => .ok i
+            | .privTo m => .privTo m (p +++ "." +++ y)
+            | .missing => .missing)
+    | .false => match candsOf sc .nil (nsCandidates gs x) with
+      | .nil => match lookupExact sc x with
+        -- the bare name is another module's private declaration: name the module (an
+        -- `open` cannot reach it, so a name found only through one is just unknown)
+        | .privTo m => .privTo m x
+        | _ => .missing
+      | .cons i .nil => .ok i
+      | found => .ambiguous (sortStr (nameOfIdx gs found))
 def resolveNameV (sc : Scope) (gs : Globals) (n : String) : NameRes :=
   match indexOf (Scope.localNames sc) n 0 with
   | .some i => .ok i
-  | .none => match stripScope n with
-    | .mk cs => match hasDotC cs with
-      | .true =>
-        let x := expandAliases gs n;
-        match lookupExact sc x with
-        | .ok i => .ok i
-        | .privTo m => .privTo m x
-        | .missing =>
-          let p := Globals.nsPrefix gs;
-          match p with
-          | .mk ps => match ps with
-            | .nil => .missing
-            | _ => (match lookupExact sc (p +++ "." +++ x) with
-              | .ok i => .ok i
-              | .privTo m => .privTo m (p +++ "." +++ x)
-              | .missing => .missing)
-      | .false => match candsOf sc .nil (nsCandidates gs (String.mk cs)) with
-        | .nil => .missing
-        | .cons i .nil => .ok i
-        | found => .ambiguous (sortStr (nameOfIdx gs found))
+  -- (13t) a helper this frontend generated keeps its `✝` in its name (`f✝s`, the
+  -- reordered structural parameter): its declaration is exactly that name, so it is
+  -- tried before the scope-free spelling; a macro's template is looked up stripped
+  | .none => match strEq n (stripScope n) with
+    | .false => match lookupExact sc n with
+      | .ok i => .ok i
+      | .privTo m => .privTo m n
+      | .missing => resolvePlain sc gs (stripScope n)
+    | .true => resolvePlain sc gs n
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
 -- globals (each command is checked in the empty context, so usage vectors and lookups
@@ -9068,9 +9084,12 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
         let outer : String := match rest with
           | .cons (.mk p _) _ => p
           | .nil => "";
+        -- the host reports the mismatch and still closes the namespace (so the file is
+        -- not also reported as leaving it open)
+        let gs' := Globals.popNs gs outer rest;
         .some (match errOpt with
-          | .some m => nsErrStep gs m
-          | .none => .mk "" (Globals.popNs gs outer rest))
+          | .some m => .mk ("error: " +++ m) gs'
+          | .none => .mk "" gs')
     | .false => match strEq k "command.open" with
       | .true =>
         let n := match getIdOpt (kid stx 1) with

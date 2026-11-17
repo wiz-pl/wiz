@@ -3160,7 +3160,7 @@ def selfHostGroup : Group where
         selfhostCheckFile "import Prelude\nend\n"
           "error: `end` without an open `namespace`\n"
         selfhostCheckFile "import Prelude\nnamespace A\ndef x : Nat := 1\nend B\n"
-          "x : Nat\nerror: `end B` does not close the namespace `A` (write `end` or `end A`)\n"
+          "A.x : Nat\nerror: `end B` does not close the namespace `A` (write `end` or `end A`)\n"
         selfhostCheckFile "import Prelude\nopen Z\n"
           "error: unknown namespace 'Z': there is no declaration `Z.…`\n" },
     { name := "(13t) mutual inductive types under a namespace", run := fun _ =>
