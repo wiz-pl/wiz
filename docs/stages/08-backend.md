@@ -41,7 +41,7 @@ $ wiz run fact.wiz        # def main : Nat := fact 30
 * **Runtime** (`runtime/`, embedded in the compiler): a value is a word; scalars
   have the low bit set; objects have a header (reference count, tag, size). Closures
   point to a boxed entry and share or move their captured arguments when applied.
-  Numbers that don't fit in 62 bits are GMP integers. Projecting a number gives its
+  Numbers that don't fit in 63 bits are GMP integers. Projecting a number gives its
   unary view. The program checks at exit that every object was freed.
 * **Codegen** (`Compiler/C.lean`): one C function per IR function (plus a boxed
   version for closures); `case` is a `switch`, join points are labels, `dup`/`drop`

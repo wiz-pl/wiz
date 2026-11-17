@@ -103,8 +103,9 @@ What each compiler does with a numeral:
 
 * **The Lean compiler** keeps it as a literal from the elaborator to the IR
   (`Term.natLit`, `ETerm.natLit`, `Expr.lit`), and the backends emit a constant: below
-  `2^62` an immediate, from `2^62` a GMP number built once from its digits
-  (`wiz_nat_lit`). Nothing recurses on the value. One bug on the way: the LLVM backend
+  `2^63` an immediate, from `2^63` a GMP number built once from its digits
+  (`wiz_nat_lit`; C13 raised the scalar width from 62 to 63). Nothing recurses on the
+  value. One bug on the way: the LLVM backend
   named the global holding the digits with a counter per function, so a module with
   two such literals in two functions defined `@lit.1.str` twice and `llc` rejected it;
   the global is now named after the number.

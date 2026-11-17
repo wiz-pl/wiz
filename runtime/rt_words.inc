@@ -275,7 +275,8 @@ enum { WIZ_W_ADD, WIZ_W_SUB, WIZ_W_MUL, WIZ_W_UDIV, WIZ_W_UMOD, WIZ_W_NOT, WIZ_W
        WIZ_W_AND, WIZ_W_OR, WIZ_W_XOR, WIZ_W_LSHR, WIZ_W_EQ, WIZ_W_ULT, WIZ_W_ULE, WIZ_W_BIT };
 /* for operations whose result never exceeds their arguments: no width needed */
 #define WIZ_W_ANY (~(uint64_t)0)
-#define WIZ_WORD_SCALAR_MAX ((((uint64_t)1) << 63) - 1)
+/* a word below 2^63 is the Nat scalar of the same number: the one boundary (C13) */
+#define WIZ_WORD_SCALAR_MAX WIZ_MAX_SMALL
 static inline wiz_val wiz_word_out(uint64_t b) { return b <= WIZ_WORD_SCALAR_MAX ? WIZ_BOX(b) : wiz_raw_box(b); }
 /* the bits of a word below 2^64 (without consuming it) */
 static inline int wiz_word_in(wiz_val v, uint64_t *b) {
@@ -297,7 +298,7 @@ static wiz_val wiz_word_of_mpz(mpz_t z) {
 }
 /* the model's constructor: a number below 2^w (a Nat) as a word */
 WIZ_API wiz_val wiz_word_of_bits(wiz_val n) {
-  if (WIZ_IS_SCALAR(n)) return n;  /* below 2^62: the same scalar */
+  if (WIZ_IS_SCALAR(n)) return n;  /* below 2^63: the same scalar */
   if (mpz_sizeinbase(((wiz_big *)n)->z, 2) > 64) return n;  /* at least 2^64: the same number */
   uint64_t b = mpz_get_ui(((wiz_big *)n)->z);
   wiz_dec(n);
@@ -305,7 +306,8 @@ WIZ_API wiz_val wiz_word_of_bits(wiz_val n) {
 }
 /* the model's field: a word as its number (a Nat) */
 WIZ_API wiz_val wiz_word_to_bits(wiz_val v) {
-  if (WIZ_IS_SCALAR(v)) return WIZ_UNBOX(v) <= WIZ_MAX_SMALL ? v : wiz_out_nat(WIZ_UNBOX(v));
+  /* every scalar is already a Nat below 2^63: no conversion needed (C13) */
+  if (WIZ_IS_SCALAR(v)) return v;
   if (((wiz_hdr *)v)->tag == WIZ_TAG_RAW) { uint64_t b = wiz_raw_bits(v); wiz_dec(v); return wiz_out_nat(b); }
   return v;
 }

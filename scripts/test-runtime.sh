@@ -29,6 +29,12 @@ cat > "$tmp/runtime.c" <<'EOF'
 #include "rt_data.inc"
 #include "rt_sys.inc"
 #include "rt_con.inc"
+
+/* (C13) One scalar width: a tagged scalar has 63 payload bits, and a machine word
+   below 2^63 is that same scalar (the self-hosted runtime's `NAT_BITS`). */
+_Static_assert(WIZ_NAT_BITS == 63, "the scalar Nat width is 63 bits (C13)");
+_Static_assert(WIZ_MAX_SMALL == ((((uintptr_t)1) << 63) - 1), "WIZ_MAX_SMALL is 2^63 - 1");
+_Static_assert(WIZ_MAX_SMALL == WIZ_WORD_SCALAR_MAX, "a word and a Nat share the scalar bound");
 EOF
 
 check() { # check DESCRIPTION CC-ARGS…

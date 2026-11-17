@@ -24,6 +24,54 @@ def main : IO Unit := printAll (.cons 1000000000 (.cons 2147483648 (.cons 429496
 def selfhostBigLitsExpected : String :=
   "1000000000\n2147483648\n4294967296\n4611686018427387904\n9223372036854775807\n0\n4294967296\n"
 
+/-- (C13) A `Nat` at and near the scalar boundary: `2^62` (the host's old scalar limit),
+`2^63 - 1` (the self-hosted runtime's largest word), a literal of each, `Nat.add` result
+`2^63 - 1`, and `Nat.beq`/`Nat.lt` across the boundary's neighbourhood. Every value and
+intermediate fits in 63 bits, so the host (scalar or GMP) and the self-hosted runtime
+(63-bit scalar) must print the same lines. -/
+def nat63Program : String :=
+  "import Std\n" ++
+  "def b : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
+  "def main : IO Unit := do\n" ++
+  "  let a := 4611686018427387904;\n" ++
+  "  IO.println (Nat.toString a);\n" ++
+  "  IO.println (Nat.toString (a + 1));\n" ++
+  "  IO.println (b (Nat.beq a a));\n" ++
+  "  IO.println (b (Nat.beq a (a + 1)));\n" ++
+  "  let m := 9223372036854775807;\n" ++
+  "  IO.println (Nat.toString m);\n" ++
+  "  IO.println (Nat.toString (m - 1));\n" ++
+  "  IO.println (Nat.toString (m - 1 + 1));\n" ++
+  "  IO.println (b (Nat.beq m m));\n" ++
+  "  IO.println (b (Nat.beq (m - 1) m));\n" ++
+  "  IO.println (b (Nat.lt (m - 1) m));\n" ++
+  "  IO.println (b (Nat.lt m (m - 1)))\n"
+
+def nat63Expected : String :=
+  "4611686018427387904\n4611686018427387905\ntrue\nfalse\n" ++
+  "9223372036854775807\n9223372036854775806\n9223372036854775807\n" ++
+  "true\nfalse\ntrue\nfalse\n"
+
+/-- (C13) The boundary values the self-hosted runtime cannot hold: the host keeps them
+as GMP numbers. (The self-hosted frontend rejects the same numerals; the test below
+pins that error.) `2^63 - 1 + 1` crosses the boundary at run time, and `Nat.beq`/`Nat.lt`
+compare a scalar with a big object. -/
+def nat63AboveProgram : String :=
+  "import Std\n" ++
+  "def b : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString 9223372036854775808);\n" ++
+  "  IO.println (Nat.toString 18446744073709551615);\n" ++
+  "  IO.println (Nat.toString 1000000000000000000000000000000);\n" ++
+  "  IO.println (Nat.toString (9223372036854775807 + 1));\n" ++
+  "  IO.println (b (Nat.beq 9223372036854775807 9223372036854775807));\n" ++
+  "  IO.println (b (Nat.lt 9223372036854775807 9223372036854775808));\n" ++
+  "  IO.println (b (Nat.lt 9223372036854775808 9223372036854775807))\n"
+
+def nat63AboveExpected : String :=
+  "9223372036854775808\n18446744073709551615\n1000000000000000000000000000000\n" ++
+  "9223372036854775808\ntrue\ntrue\nfalse\n"
+
 /-- Tokens as the Lean lexer reads them, as `kind:text` lines. -/
 partial def leanTokens (tokens : Array String) (input : String) : List String :=
   let chars := input.toList.toArray
@@ -1841,6 +1889,20 @@ def selfHostGroup : Group where
     { name := "big numerals with the self-hosted compiler: no deep recursion, 63-bit words (15g)", run := fun _ => do
         selfhostCompileRun selfhostBigLits selfhostBigLitsExpected
         selfhostCompileRun selfhostBigLits selfhostBigLitsExpected (flags := #["--rc"]) },
+    { name := "a Nat at 2^62 and 2^63-1: host and self-hosted agree (C13)", run := fun _ => do
+        -- (the host: 2^62 and 2^63-1 are scalars after C13; 2^63-1 fits the self-hosted word)
+        ioRun nat63Program nat63Expected
+        selfhostCompileRun nat63Program nat63Expected
+        selfhostCompileRun nat63Program nat63Expected (flags := #["--rc"]) },
+    { name := "Nat above the self-hosted 63 bits: the host's GMP objects (C13)", run := fun _ =>
+        -- (2^63, 2^64-1 and a GMP-sized value; the self-hosted frontend rejects these)
+        ioRun nat63AboveProgram nat63AboveExpected },
+    { name := "boundary numerals above 2^63-1 stay an error in the self-hosted frontend (C13)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\ndef a : Nat := 9223372036854775808\ndef b : Nat := 18446744073709551615\n" ++
+          "def c : Nat := 1000000000000000000000000000000\n")
+          ("error: the numeral does not fit in 63 bits (numbers are 63-bit words here)\n" ++
+           "error: the numeral does not fit in 63 bits (numbers are 63-bit words here)\n" ++
+           "error: the numeral does not fit in 63 bits (numbers are 63-bit words here)\n") },
     { name := "the self-hosted compiler stops at a frontend error: exit code 1, the errors on stderr, no C (15g)", run := fun _ =>
         selfhostCompileFails ("import Prelude\ndef a : Nat := 9223372036854775808\ndef b : Nat := nope\n" ++
           "def main : IO Unit := IO.println (Nat.toString 1)\n")

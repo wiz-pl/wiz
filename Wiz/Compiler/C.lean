@@ -41,7 +41,8 @@ def args (xs : Array Var) : String := ", ".intercalate (xs.toList.map var)
 def expr (arities : Std.HashMap Name Nat) (x : Var) : Expr → String
   | .erased => s!"{var x} = WIZ_BOX(0);"
   | .lit n =>
-    if n < 2 ^ 62 then s!"{var x} = WIZ_BOX({n}UL);" else s!"{var x} = wiz_nat_lit(\"{n}\");"
+    -- (a scalar holds 63 bits: `WIZ_BOX` up to `WIZ_MAX_SMALL`, GMP above; C13)
+    if scalarNat n then s!"{var x} = WIZ_BOX({n}UL);" else s!"{var x} = wiz_nat_lit(\"{n}\");"
   | .ctor t as =>
     if as.isEmpty then s!"{var x} = WIZ_BOX({t});"
     else

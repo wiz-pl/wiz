@@ -234,12 +234,16 @@ The reduction now happens in Wiz before the call
 bits). `Float64.ofNat`'s rounding is another change; the `UInt64` fix does not overlap
 it.
 
-Not established by this pass: whether a *word* scalar in [2⁶², 2⁶³) can ever reach a
-runtime path that assumes every scalar is a `Nat` (a word's representation is its bits,
-so `wiz_word_out` boxes up to 2⁶³−1, while `wiz_out_nat` boxes only to 2⁶²−1); the
-answer turns on the type discipline between `UIntN w` and `Nat` at every C entry point,
-not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are in
-`IO`/`Std` (the OS audit's modules), so their reasons are not in this pass.
+**Established by C13:** a *word* scalar in [2⁶², 2⁶³) is a `Nat` scalar too, so no
+runtime path can see a scalar that is a word but not a `Nat`. One bound now governs both
+representations: `WIZ_MAX_SMALL` (2⁶³−1, `WIZ_NAT_BITS`) and `WIZ_WORD_SCALAR_MAX` are
+the same value, `wiz_out_nat`/`wiz_big_norm` box below it (GMP above), `wiz_word_out`
+boxes below it (a `WIZ_TAG_RAW` word above), and `wiz_word_to_bits` leaves a scalar
+unchanged. `scripts/test-runtime.sh` pins the three constants; the `selfhost` group
+compares a program at `2^62` and `2^63−1` on both runtimes. The self-hosted runtime's
+`NAT_BITS` is 63, so every `Nat` it can build is a host scalar.
+`UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are in `IO`/`Std` (the OS audit's
+modules), so their reasons are not in this pass.
 
 ## Tests
 

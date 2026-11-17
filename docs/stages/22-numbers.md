@@ -75,8 +75,8 @@ that is `0`.
   an FNV-1a hash, and facts proved by `refl` about named values; an equation whose
   sides still contain an unsolved implicit width when it is computed gets stuck, so
   state facts about definitions). A word is still an
-  object holding a number (above `2^62`, a GMP number); unboxed words need the type-level
-  `implemented_by` (22d).
+  object holding a number (above `2^63`, a GMP number; C13); unboxed words need the
+  type-level `implemented_by` (22d).
 
 ## 22d: native representations: unboxed words
 
@@ -102,7 +102,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
   `UIntN w` (unknown `w`, any width: `BitVec n`, the HDL's `Unsigned n`) needs no width
   to build or read a word, and each value has exactly one representation (equality is
   a comparison of bits). `ofBits`/`toBits` convert from and to `Nat` (free below
-  `2^62`).
+  `2^63`, the one scalar boundary since C13).
 * **Operations** are natives on that representation (`wiz_word_*` in `runtime/`):
   `ofNat`/`ofNeg`, `+ - *`, `div`/`mod`/`rem`, comparisons, `land`/`lor`/`xor`/`not`,
   shifts and `testBit` (a shift or index of `2^64` or more counts as infinite),

@@ -302,7 +302,7 @@ WIZ_API uint64_t wiz_map_size(wiz_val v) { uint64_t n = ((wiz_map *)v)->count; w
    unique ----
    The model is `mk (toList : List (UIntN w))` for w = 8, 32, 64 (`U8Array`, `U32Array`,
    `U64Array`); these implement its operations, on `width`-byte elements. Each consumes
-   its arguments. Indices are `NatObj`s: one of 2^62 or more (a GMP number) is out of
+   its arguments. Indices are `NatObj`s: one of 2^63 or more (a GMP number) is out of
    range, as in the model. */
 
 /* an index (consumed): a big number is past every array */
@@ -617,10 +617,8 @@ static uint64_t wiz_string_hash(wiz_val s) {
   }
   return h;
 }
-static int wiz_nat_same(wiz_val a, wiz_val b) {
-  if (WIZ_IS_SCALAR(a) || WIZ_IS_SCALAR(b)) return a == b;
-  return mpz_cmp(((wiz_big *)a)->z, ((wiz_big *)b)->z) == 0;
-}
+/* the one Nat comparison (`rt_num.inc`), so a scalar and a big object compare alike */
+static int wiz_nat_same(wiz_val a, wiz_val b) { return wiz_nat_cmp(a, b) == 0; }
 static int wiz_string_same(wiz_val a, wiz_val b) {
   if (a == b) return 1;
   wiz_val x = wiz_field_ref(a, 0), y = wiz_field_ref(b, 0);

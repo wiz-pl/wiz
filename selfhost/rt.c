@@ -41,6 +41,22 @@ typedef uintptr_t V;
 #define ISBOX(v) (((v) & 1) != 0)
 #define UNBOX(v) ((v) >> 1)
 
+/* ---- `Nat`: the 63-bit scalar (C13) ----
+   A `Nat` below 2^63 is the scalar `BOX(n)`; the tag leaves 63 payload bits
+   (`runtime/wiz_rt.h`'s `WIZ_NAT_BITS`, the same number). This runtime builds no GMP
+   objects and no `T_BIG`, so here **every** `Nat` is a scalar: a value that is not
+   `ISBOX` is a constructor, closure, string, … — never a number. The helpers below are
+   the one place the width and the box/unbox pair are written; the host runtime's
+   `wiz_nat_*` use the same width for their scalar branch and put 2^63 and above in a
+   `WIZ_TAG_BIG` object. */
+#define NAT_BITS 63
+#define NAT_MAX ((((V)1) << NAT_BITS) - 1)
+static inline int nat_is_scalar(V v) { return ISBOX(v); }
+static inline V nat_box(uintptr_t n) { return BOX(n); }
+static inline uintptr_t nat_unbox(V v) { return UNBOX(v); }
+static inline int nat_eq(V a, V b) { return nat_unbox(a) == nat_unbox(b); }
+static inline int nat_lt(V a, V b) { return nat_unbox(a) < nat_unbox(b); }
+
 /* runtime/wiz.c's `WIZ_TAG_*`; `T_HYP` is the self-hosted compiler's own (the next
    free number, reserved here so it can be added to `wiz_rt.h` before values cross) */
 enum { T_CLO = 0xFFFF0000u, T_BIG = 0xFFFF0001u, T_RAW = 0xFFFF0002u,
@@ -96,8 +112,9 @@ _Static_assert(sizeof(Map) == 48 && offsetof(Map, count) == 16 && offsetof(Map, 
      instead of three. (`runtime/wiz.c` has no offset chains; removing them is the
      next representation step, not this one.)
    * `T_HYP`, the suspension of `ind`.
-   * 63-bit `Nat` scalars with wrapping arithmetic (the Lean runtime has 62-bit scalars
-     and GMP objects; the self-hosted tests rely on `2^63 - 1`).
+   * 63-bit `Nat` scalars with wrapping arithmetic (the host runtime's scalars are 63
+     bits too, C13; above that it has GMP objects, which this runtime does not, and the
+     self-hosted tests rely on `2^63 - 1`).
    * the Boehm mode (`WIZ_RC` off): its arrays are persistent (Baker), not `wiz_array`. */
 #define OBJ(v) ((Obj *)((v) & ~(V)0xE))
 #define OFF(v) ((unsigned)(((v) >> 1) & 7))
@@ -397,17 +414,17 @@ static V wcodes(const uint32_t *cps, size_t k) {
 /* ---- primitives the erased code uses ---- */
 
 static V p_unreachable(void) { return unreach(); }
-static V p_natSucc(V n) { return BOX(UNBOX(n) + 1); }
+static V p_natSucc(V n) { return nat_box(nat_unbox(n) + 1); }
 /* a number's payload for a match: `(tag 0, ◾)` or `(tag 1, (n - 1, ◾))` */
 static V p_natUnpack(V n) {
-  uintptr_t k = UNBOX(n);
+  uintptr_t k = nat_unbox(n);
 #ifdef WIZ_RC
   if (k == 0) return nul(0);
 #endif
-  return k == 0 ? pair(BOX(0), BOX(0)) : flat3(BOX(1), BOX(k - 1), BOX(0));
+  return k == 0 ? pair(BOX(0), BOX(0)) : flat3(BOX(1), nat_box(k - 1), BOX(0));
 }
 static V p_natPack(V p) {
-  V r = tagof(fld(p, 0)) == 0 ? BOX(0) : BOX(UNBOX(fld(fld(p, 1), 0)) + 1);
+  V r = tagof(fld(p, 0)) == 0 ? BOX(0) : nat_box(nat_unbox(fld(fld(p, 1), 0)) + 1);
 #ifdef WIZ_RC
   dec(p);
 #endif
@@ -438,7 +455,7 @@ static V hyps(V nat, V D, V m, V d, V pl) {
   }
 }
 static V p_ind(V nat, V D, V m, V i, V x) {
-  V pl = UNBOX(nat) ? p_natUnpack(x) : x;
+  V pl = nat_unbox(nat) ? p_natUnpack(x) : x;
   V args[3] = {i, pl, hyps(nat, D, m, D, pl)};
   return apn(m, 3, args);
 }
@@ -492,7 +509,7 @@ static V hyps(V nat, V D, V m, V d, V pl) {
   }
 }
 static V p_ind(V nat, V D, V m, V i, V x) {
-  V pl = UNBOX(nat) ? p_natUnpack(x) : x;
+  V pl = nat_unbox(nat) ? p_natUnpack(x) : x;
   V h = hyps(nat, D, m, D, pl);
   dec(D);
   V args[3] = {i, pl, h};
@@ -503,7 +520,7 @@ static V p_ind(V nat, V D, V m, V i, V x) {
    `p_hypAt`, computed there (the backend uses this only for methods that read each at
    most once on a path, or whose result is a function) */
 static V p_indv(V nat, V D, V m, V i, V x) {
-  V pl = UNBOX(nat) ? p_natUnpack(x) : x;
+  V pl = nat_unbox(nat) ? p_natUnpack(x) : x;
   inc(m); inc(pl);
   V vw = mkobj(0, 4, (V[]){nat, D, m, pl});
   V args[3] = {i, pl, vw};
@@ -585,27 +602,27 @@ static void rt_root(V *p) {
   V get_##name(void) { static V c = 0; if (!c) { c = native(nf_##name, arity); rt_root(&c); } inc(c); return c; }
 #endif
 
-V get_Nat_46_zero(void) { return BOX(0); }
-NATIVE(Nat_46_succ, 1, return BOX(UNBOX(a[0]) + 1);)
-NATIVE(Nat_46_pred, 1, return UNBOX(a[0]) ? BOX(UNBOX(a[0]) - 1) : BOX(0);)
-NATIVE(Nat_46_add, 2, return BOX(UNBOX(a[0]) + UNBOX(a[1]));)
-NATIVE(Nat_46_sub, 2, return UNBOX(a[0]) > UNBOX(a[1]) ? BOX(UNBOX(a[0]) - UNBOX(a[1])) : BOX(0);)
-NATIVE(Nat_46_mul, 2, return BOX(UNBOX(a[0]) * UNBOX(a[1]));)
-NATIVE(Nat_46_beq, 2, return boolv(UNBOX(a[0]) == UNBOX(a[1]));)
-NATIVE(Nat_46_blt, 2, return boolv(UNBOX(a[0]) < UNBOX(a[1]));)
-NATIVE(Nat_46_lt, 2, return boolv(UNBOX(a[0]) < UNBOX(a[1]));)
-NATIVE(Nat_46_le, 2, return boolv(UNBOX(a[0]) <= UNBOX(a[1]));)
+V get_Nat_46_zero(void) { return nat_box(0); }
+NATIVE(Nat_46_succ, 1, return nat_box(nat_unbox(a[0]) + 1);)
+NATIVE(Nat_46_pred, 1, return nat_unbox(a[0]) ? nat_box(nat_unbox(a[0]) - 1) : nat_box(0);)
+NATIVE(Nat_46_add, 2, return nat_box(nat_unbox(a[0]) + nat_unbox(a[1]));)
+NATIVE(Nat_46_sub, 2, return nat_unbox(a[0]) > nat_unbox(a[1]) ? nat_box(nat_unbox(a[0]) - nat_unbox(a[1])) : nat_box(0);)
+NATIVE(Nat_46_mul, 2, return nat_box(nat_unbox(a[0]) * nat_unbox(a[1]));)
+NATIVE(Nat_46_beq, 2, return boolv(nat_eq(a[0], a[1]));)
+NATIVE(Nat_46_blt, 2, return boolv(nat_lt(a[0], a[1]));)
+NATIVE(Nat_46_lt, 2, return boolv(nat_lt(a[0], a[1]));)
+NATIVE(Nat_46_le, 2, return boolv(!nat_lt(a[1], a[0]));)
 /* as the Prelude defines them: n / 0 = 0, n % 0 = n, log2 0 = 0 (words wrap, as in `mul`) */
-NATIVE(Nat_46_div, 2, return BOX(UNBOX(a[1]) ? UNBOX(a[0]) / UNBOX(a[1]) : 0);)
-NATIVE(Nat_46_mod, 2, return BOX(UNBOX(a[1]) ? UNBOX(a[0]) % UNBOX(a[1]) : UNBOX(a[0]));)
-NATIVE(Nat_46_pow, 2, uintptr_t r = 1, b = UNBOX(a[0]); for (uintptr_t e = UNBOX(a[1]); e; e >>= 1, b *= b) if (e & 1) r *= b; return BOX(r);)
-NATIVE(Nat_46_land, 2, return BOX(UNBOX(a[0]) & UNBOX(a[1]));)
-NATIVE(Nat_46_lor, 2, return BOX(UNBOX(a[0]) | UNBOX(a[1]));)
-NATIVE(Nat_46_xor, 2, return BOX(UNBOX(a[0]) ^ UNBOX(a[1]));)
-NATIVE(Nat_46_shiftLeft, 2, return BOX(UNBOX(a[1]) >= 64 ? 0 : UNBOX(a[0]) << UNBOX(a[1]));)
-NATIVE(Nat_46_shiftRight, 2, return BOX(UNBOX(a[1]) >= 64 ? 0 : UNBOX(a[0]) >> UNBOX(a[1]));)
-NATIVE(Nat_46_log2, 1, uintptr_t x = UNBOX(a[0]); return BOX(x ? 63 - __builtin_clzll((unsigned long long)x) : 0);)
-NATIVE(Nat_46_toString, 1, char b[32]; int n = snprintf(b, sizeof b, "%lu", (unsigned long)UNBOX(a[0])); return wstr(b, (size_t)n);)
+NATIVE(Nat_46_div, 2, return nat_box(nat_unbox(a[1]) ? nat_unbox(a[0]) / nat_unbox(a[1]) : 0);)
+NATIVE(Nat_46_mod, 2, return nat_box(nat_unbox(a[1]) ? nat_unbox(a[0]) % nat_unbox(a[1]) : nat_unbox(a[0]));)
+NATIVE(Nat_46_pow, 2, uintptr_t r = 1, b = nat_unbox(a[0]); for (uintptr_t e = nat_unbox(a[1]); e; e >>= 1, b *= b) if (e & 1) r *= b; return nat_box(r);)
+NATIVE(Nat_46_land, 2, return nat_box(nat_unbox(a[0]) & nat_unbox(a[1]));)
+NATIVE(Nat_46_lor, 2, return nat_box(nat_unbox(a[0]) | nat_unbox(a[1]));)
+NATIVE(Nat_46_xor, 2, return nat_box(nat_unbox(a[0]) ^ nat_unbox(a[1]));)
+NATIVE(Nat_46_shiftLeft, 2, return nat_box(nat_unbox(a[1]) >= 64 ? 0 : nat_unbox(a[0]) << nat_unbox(a[1]));)
+NATIVE(Nat_46_shiftRight, 2, return nat_box(nat_unbox(a[1]) >= 64 ? 0 : nat_unbox(a[0]) >> nat_unbox(a[1]));)
+NATIVE(Nat_46_log2, 1, uintptr_t x = nat_unbox(a[0]); return nat_box(x ? NAT_BITS - __builtin_clzll((unsigned long long)x) : 0);)
+NATIVE(Nat_46_toString, 1, char b[32]; int n = snprintf(b, sizeof b, "%lu", (unsigned long)nat_unbox(a[0])); return wstr(b, (size_t)n);)
 /* the program's arguments, without its name (stage 21k; `rt_start` saves them) */
 static int rt_argc; static char **rt_argv;
 NATIVE(IO_46_argCount, 1, return prodv(BOX((uintptr_t)(rt_argc > 1 ? rt_argc - 1 : 0)), a[0]);)
@@ -1168,7 +1185,7 @@ static void rt_finish(void) {
 
 /* ---- the C FFI (stage 21l): what the wrappers of `extern` functions call ----
    The wrappers own their arguments (`rt_drop` releases one under reference counting).
-   `Nat` is a scalar of 63 bits (a bigger C result is cut to them); `UInt64` and
+   `Nat` is a scalar of 63 bits (a bigger C result is an error, 21p); `UInt64` and
    `Float64` (its bits) are scalars when the top bit is clear, else a `T_RAW` object; a
    foreign pointer is a `T_EXT` object whose finalizer runs when it is freed (under the
    collector: when it is collected; `rt_finishGC` collects once more at exit). */
@@ -1187,11 +1204,11 @@ INLINE void rt_dup(V v) {
   (void)v;
 #endif
 }
-static uint64_t rt_in_nat(V v) { return ISBOX(v) ? (uint64_t)UNBOX(v) : 0; }
+static uint64_t rt_in_nat(V v) { return nat_is_scalar(v) ? (uint64_t)nat_unbox(v) : 0; }
 /* (21p) a `Nat` here is 63 bits: a C number that doesn't fit is an error, not cut */
 static V rt_out_nat(uint64_t n) {
-  if (n >> 63) die("a foreign function's Nat does not fit in 63 bits (the self-hosted runtime's Nat)");
-  return BOX(n);
+  if (n >> NAT_BITS) die("a foreign function's Nat does not fit in 63 bits (the self-hosted runtime's Nat)");
+  return nat_box(n);
 }
 static uint64_t rt_in_u64(V v) {
   if (ISBOX(v)) return (uint64_t)UNBOX(v);

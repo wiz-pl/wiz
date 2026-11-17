@@ -1,10 +1,16 @@
 
-/* ---- numbers: small scalars, or GMP objects ---- */
+/* ---- numbers: small scalars, or GMP objects ----
+
+   A `Nat` is a scalar iff it is below `WIZ_NAT_BITS` (2^63); from 2^63 it is a
+   `wiz_big` object with `WIZ_TAG_BIG`. The tag bit (`WIZ_IS_SCALAR`) alone decides the
+   shape, so the two branches never have to meet except in the operations below. A
+   *scalar* that is not a `Nat` (a tag, `◾`) is distinguished by type, never by the
+   representation: every scalar word is a valid 63-bit `Nat`. */
 
 static int wiz_is_big(wiz_val v) { return !WIZ_IS_SCALAR(v) && ((wiz_hdr *)v)->tag == WIZ_TAG_BIG; }
 
 static wiz_val wiz_big_norm(mpz_t z) {
-  if (mpz_cmp_ui(z, 0) >= 0 && mpz_sizeinbase(z, 2) <= 62) {
+  if (mpz_cmp_ui(z, 0) >= 0 && mpz_sizeinbase(z, 2) <= WIZ_NAT_BITS) {
     wiz_val r = WIZ_BOX(mpz_get_ui(z));
     mpz_clear(z);
     return r;
@@ -63,23 +69,27 @@ WIZ_API wiz_val wiz_nat_mul(wiz_val a, wiz_val b) {
 WIZ_API wiz_val wiz_nat_succ(wiz_val a) { return wiz_nat_add(a, WIZ_BOX(1)); }
 WIZ_API wiz_val wiz_nat_pred(wiz_val a) { return wiz_nat_sub(a, WIZ_BOX(1)); }
 
-static int wiz_nat_eq(wiz_val a, wiz_val b) {
-  if (WIZ_IS_SCALAR(a) && WIZ_IS_SCALAR(b)) return a == b;
-  if (WIZ_IS_SCALAR(a) || WIZ_IS_SCALAR(b)) return 0;
-  return mpz_cmp(((wiz_big *)a)->z, ((wiz_big *)b)->z) == 0;
+/* The one comparison of two Nats, whichever representation each has. `wiz_big_norm`
+   keeps every big object at 2^63 or more, so a scalar/big pair is ordered by shape
+   alone (and the scalar `WIZ_UNBOX` is never widened to `unsigned long` by accident).
+   Borrows both arguments. */
+static int wiz_nat_cmp(wiz_val a, wiz_val b) {
+  if (WIZ_IS_SCALAR(a) && WIZ_IS_SCALAR(b)) {
+    uintptr_t x = WIZ_UNBOX(a), y = WIZ_UNBOX(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+  if (WIZ_IS_SCALAR(a)) return -1;
+  if (WIZ_IS_SCALAR(b)) return 1;
+  return mpz_cmp(((wiz_big *)a)->z, ((wiz_big *)b)->z);
 }
 
 /* the prelude's `Bool`: a constructor without fields is its tag. The comparisons
    borrow their arguments (stage 8e, `primBorrows`): the caller keeps its references. */
 WIZ_API wiz_val wiz_nat_beq(wiz_val a, wiz_val b) {
-  int eq = wiz_nat_eq(a, b);
-  return WIZ_BOX(eq ? 1 : 0);
+  return WIZ_BOX(wiz_nat_cmp(a, b) == 0 ? 1 : 0);
 }
 WIZ_API wiz_val wiz_nat_blt(wiz_val a, wiz_val b) {
-  int lt;
-  if (WIZ_IS_SCALAR(a) && WIZ_IS_SCALAR(b)) lt = WIZ_UNBOX(a) < WIZ_UNBOX(b);
-  else { mpz_t x, y; wiz_to_mpz(x, a); wiz_to_mpz(y, b); lt = mpz_cmp(x, y) < 0; mpz_clear(x); mpz_clear(y); }
-  return WIZ_BOX(lt ? 1 : 0);
+  return WIZ_BOX(wiz_nat_cmp(a, b) < 0 ? 1 : 0);
 }
 
 /* division, powers and bits; as the Prelude defines them: n / 0 = 0, n % 0 = n,
@@ -126,7 +136,8 @@ WIZ_API wiz_val wiz_nat_shiftLeft(wiz_val a, wiz_val n) {
   if (WIZ_IS_SCALAR(a) && WIZ_UNBOX(a) == 0) { wiz_dec(n); return a; }
   if (!WIZ_IS_SCALAR(n)) wiz_panic("Nat.shiftLeft: the shift is too big");
   uintptr_t k = WIZ_UNBOX(n);
-  if (WIZ_IS_SCALAR(a) && k < 62 && WIZ_UNBOX(a) <= (WIZ_MAX_SMALL >> k)) return WIZ_BOX(WIZ_UNBOX(a) << k);
+  if (WIZ_IS_SCALAR(a) && k < WIZ_NAT_BITS && WIZ_UNBOX(a) <= (WIZ_MAX_SMALL >> k))
+    return WIZ_BOX(WIZ_UNBOX(a) << k);
   mpz_t x;
   wiz_to_mpz(x, a);
   mpz_mul_2exp(x, x, (mp_bitcnt_t)k);

@@ -30,10 +30,16 @@ typedef uintptr_t wiz_val;
 #define WIZ_API static
 #endif
 
+/* A scalar is `(n << 1) | 1`: **63** payload bits, so every `Nat` below 2^63 is one
+   machine word, and only a `Nat` from 2^63 is an object (`wiz_big`, `WIZ_TAG_BIG`,
+   GMP). This is the width of `selfhost/rt.c` too (`NAT_BITS`), so a self-hosted
+   program's every `Nat` has a representation the host runtime can hold (stage 21w,
+   C13). `wiz_big_norm` normalises a GMP result back below this bound. */
+#define WIZ_NAT_BITS 63
+#define WIZ_MAX_SMALL ((((uintptr_t)1) << WIZ_NAT_BITS) - 1)
 #define WIZ_BOX(n) ((((wiz_val)(n)) << 1) | 1)
 #define WIZ_UNBOX(v) ((v) >> 1)
 #define WIZ_IS_SCALAR(v) ((v) & 1)
-#define WIZ_MAX_SMALL (((uintptr_t)1 << 62) - 1)
 
 enum { WIZ_TAG_FIRST_SPECIAL = 0xFFFF0000u, WIZ_TAG_CLO = 0xFFFF0000u, WIZ_TAG_BIG = 0xFFFF0001u, WIZ_TAG_RAW = 0xFFFF0002u,
        WIZ_TAG_EXT = 0xFFFF0003u, WIZ_TAG_BYTES = 0xFFFF0004u, WIZ_TAG_ARRAY = 0xFFFF0005u,

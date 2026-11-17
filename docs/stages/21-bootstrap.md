@@ -613,10 +613,11 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
   the same pointer with an index in bits 1–3. `wiz.c` has flat constructors only. Removing
   the chains changes `Backend.wiz`'s object generation and projection code (and costs
   memory and allocations), so it is the next representation step, not this one.
-* **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic; `wiz.c`
-  has 62-bit scalars and `T_BIG` GMP objects. The self-hosted tests rely on `2^63 - 1`
-  (`=selfhost` case 36), so this cannot change without either GMP in every self-hosted
-  program or a deliberate smaller `Nat`.
+* **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic. The
+  host runtime's scalars are now 63 bits too (C13: `WIZ_NAT_BITS`, `WIZ_MAX_SMALL =
+  2^63 - 1`), so every `Nat` the self-hosted runtime can build is a host *scalar*; the
+  host keeps `T_BIG` GMP objects only from 2^63. Wrapping above 2^63 − 1, and a numeral
+  from 2^63 in the frontend, remain self-hosted-only (the tests pin both).
 * **`T_HYP = 0xFFFF000C`.** `ind`'s lazily computed hypotheses have no `wiz.c` counterpart
   (it computes them in compiled Wiz, `PrimCode.lean`). It is the next free special tag;
   it must be added to the shared header before a value can cross runtimes.
@@ -663,7 +664,10 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
 5. **Decide the number story** (D7's sibling): either give the self-hosted runtime GMP
    `T_BIG` objects (one `Nat` representation at last, at a cost), or accept 63-bit `Nat`
    in the self-hosted backend and keep `T_BIG` a Lean-runtime detail. The closure of this
-   choice is what lets a *single* runtime object serve both compilers.
+   choice is what lets a *single* runtime object serve both compilers. **C13 chose the
+   second** and made the scalar widths one: `WIZ_NAT_BITS = 63` in `wiz_rt.h`, `NAT_BITS
+   = 63` in `rt.c`, one comparison (`wiz_nat_cmp`) across scalar and GMP. The remaining
+   choice for a shared runtime is where `T_BIG` lives for values from 2^63.
 6. **Threads last.** Port `wiz_mark_mt`, thunk locking and the channel/MVar/lock/ref
    entry points to `rt.c` (or move the Wiz-side `Session`/`Conc` layer to the shared
    runtime); the `rc < 0` rules are already in place.

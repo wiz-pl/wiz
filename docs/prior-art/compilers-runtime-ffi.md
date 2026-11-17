@@ -320,7 +320,8 @@ different values. Boxed `Nat` by default is listed as deferred in stage 21aa.
 **Where Wiz is.** Tagged words (`WIZ_BOX`/`WIZ_IS_SCALAR` in `runtime/wiz_rt.h`), a
 16-byte header `{rc, tag, size}`, reserved tags for closures, big numbers, raw words,
 foreign pointers, bytes, arrays, text, maps, thunks, word arrays, word maps and intern
-tables, and GMP above `WIZ_MAX_SMALL` (2^62 − 1). The runtime is pasted into every
+tables, and GMP above `WIZ_MAX_SMALL` (2^63 − 1, the self-hosted runtime's scalar
+bound too since C13). The runtime is pasted into every
 generated C file (`runtime/WizRuntime.lean`, by `include_str`), so `cc -O2` inlines the
 word operations. Type-level native representation is `attribute [implemented_by mk get]
 T.mk` (stage 22d): erasure never builds the model's object, a constructor becomes `mk`

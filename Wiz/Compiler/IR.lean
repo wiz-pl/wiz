@@ -23,6 +23,14 @@ namespace Wiz.IR
 abbrev Var := Nat
 abbrev JoinId := Nat
 
+/-- The largest `Nat` the runtime boxes as a scalar: `runtime/wiz_rt.h`'s
+`WIZ_MAX_SMALL`. A scalar has 63 payload bits, so this is `2^63 - 1` (stage C13); the
+same bound as the self-hosted runtime's `NAT_BITS`. -/
+def maxSmallNat : Nat := 2 ^ 63 - 1
+
+/-- Is a numeral a scalar (`WIZ_BOX`) rather than a GMP object (`wiz_nat_lit`)? -/
+def scalarNat (n : Nat) : Bool := n ≤ maxSmallNat
+
 inductive Expr where
   /-- `◾`, a scalar -/
   | erased
@@ -155,7 +163,7 @@ up: scalars, and calls of other constants (which are cached themselves). -/
 without parameters, whose calls are lookups or cheap themselves.) -/
 def Expr.isWork (zeroParam : Name → Bool) : Expr → Bool
   | .erased | .proj .. => false
-  | .lit n => n ≥ 2 ^ 62
+  | .lit n => !scalarNat n
   | .ctor _ as => !as.isEmpty
   | .fap f _ => !zeroParam f
   | .pap .. | .ap .. | .prim .. | .reset _ | .reuse .. => true

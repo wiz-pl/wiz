@@ -243,8 +243,8 @@ def main : List Nat := .cons (3 * 4 + 10 - 20) (.cons (Nat.div 7 0) (.cons (Nat.
 def foldExpected : String :=
   ".cons 2 (.cons 0 (.cons 0 (.cons 6 (.cons 11 (.cons 0 (.cons 4 (.cons 1180591620717411303424 (.cons 7 .nil))))))))"
 
-/-- (15g) Numerals around the boundaries of the representation: small numbers are 62-bit
-immediates, bigger ones GMP objects (`2^62` is the first), and a few operations on them. -/
+/-- (15g) Numerals around the boundaries of the representation: small numbers are 63-bit
+immediates, bigger ones GMP objects (`2^63` is the first), and a few operations on them. -/
 def bigLitSrc : String := "import Prelude
 def a : Nat := 2147483648
 def b : Nat := 4294967296

@@ -56,7 +56,7 @@ def args (env : Std.HashMap Var String) (xs : Array Var) : String :=
 def expr (arities : Std.HashMap Name Nat) (env : Std.HashMap Var String) (x : String) : Expr → M Unit
   | .erased => emit s!"  {x} = add i64 0, 1"
   | .lit n =>
-    if n < 2 ^ 62 then emit s!"  {x} = add i64 0, {2 * n + 1}"
+    if scalarNat n then emit s!"  {x} = add i64 0, {2 * n + 1}"
     else do
       -- a big literal: through the runtime, from its digits
       let s := toString n

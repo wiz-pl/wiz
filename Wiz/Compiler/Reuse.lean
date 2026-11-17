@@ -190,7 +190,7 @@ partial def dropScalars (b : Body) (sc : Std.HashSet Var := {}) : Body :=
   | .vdecl x e rest =>
     let scalar := match e with
       | .erased => true
-      | .lit n => n < 2 ^ 62
+      | .lit n => scalarNat n
       | .ctor _ as => as.isEmpty
       -- tests and tags are scalars too
       | .prim op _ => op == "nat.beq" || op == "nat.blt" || op == "natTag" || op == "tag"
