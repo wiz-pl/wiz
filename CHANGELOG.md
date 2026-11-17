@@ -10,6 +10,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: `c_struct` fields at quantity 0 are erased from the C struct (marshalling
+  kind `e`, as in the Lean frontend), a header's `<` is accepted, and the `selfhost`
+  group passes structs by value in both compilers for a quantity-0 field, two levels of
+  nesting and a `Bytes` (`char f[N]`) field (21r, C8).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

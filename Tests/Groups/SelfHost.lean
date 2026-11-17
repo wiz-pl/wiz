@@ -728,6 +728,72 @@ def structFiles : List (String × String) :=
 
 def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
 
+/-- (C8) A `c_struct` field at quantity 0 is erased from the C struct (kind `e`, as in
+`Elab/Command.lean`) but keeps its slot in the Wiz structure. The header fixes the C
+layout; an extern passes the struct by value both ways. -/
+def structErasedHeader : String :=
+  "typedef struct { unsigned long x; } wiz_q;\n" ++
+  "static inline unsigned long q_get(wiz_q q) { return q.x; }\n" ++
+  "static inline wiz_q q_make(unsigned long x) { wiz_q q; q.x = x; return q; }\n"
+
+def structErasedProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_q\" (header := \"{header}\") Q where\n  0 tag : Nat\n  x : Nat\n" ++
+  s!"extern \"q_get\" (header := \"{header}\") qGet : Q → Nat\n" ++
+  s!"extern \"q_make\" (header := \"{header}\") qMake : Nat → IO Q\n" ++
+  "def main : IO Unit := do\n  IO.println (Nat.toString (qGet (Q.mk 0 7)));\n" ++
+  "  r ← qMake 9;\n  IO.println (Nat.toString r.x)\n"
+
+def structErasedExpected : String := "7\n9\n"
+
+/-- (C8) Structs nested two deep, each passed and returned by value, with a string and a
+number read out of the outermost — the field order and the marshalling helpers compose. -/
+def structDeepHeader : String :=
+  "struct pt { unsigned long x; double y; };\n" ++
+  "typedef struct { struct pt a; struct pt b; } wiz_seg;\n" ++
+  "typedef struct { wiz_seg s; unsigned long n; } wiz_deep;\n" ++
+  "static inline struct pt pt_bump(struct pt p) { p.x += 1; p.y *= 2; return p; }\n" ++
+  "static inline unsigned long deep_sum(wiz_deep d) { return d.s.a.x + d.s.b.x + d.n; }\n" ++
+  "static inline wiz_deep deep_make(unsigned long n) { wiz_deep d; d.s.a.x = n; d.s.a.y = 0.5;\n" ++
+  "  d.s.b.x = n + 1; d.s.b.y = 1.5; d.n = 2 * n; return d; }\n"
+
+def structDeepProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"struct pt\" (header := \"{header}\") Pt where\n  x : Nat\n  y : Float64\n" ++
+  s!"c_struct \"wiz_seg\" (header := \"{header}\") Seg where\n  a : Pt\n  b : Pt\n" ++
+  s!"c_struct \"wiz_deep\" (header := \"{header}\") Deep where\n  s : Seg\n  n : Nat\n" ++
+  s!"extern \"pt_bump\" (header := \"{header}\") ptBump : Pt → Pt\n" ++
+  s!"extern \"deep_sum\" (header := \"{header}\") deepSum : Deep → Nat\n" ++
+  s!"extern \"deep_make\" (header := \"{header}\") deepMake : Nat → IO Deep\n" ++
+  "def main : IO Unit := do\n  let p := ptBump (Pt.mk 4 (Float64.ofNat 3));\n" ++
+  "  IO.println (Nat.toString p.x);\n  IO.println (Float64.toString p.y);\n" ++
+  "  let d := Deep.mk (Seg.mk p (Pt.mk 10 (Float64.ofNat 0))) 7;\n" ++
+  "  IO.println (Nat.toString (deepSum d));\n  r ← deepMake 5;\n" ++
+  "  IO.println (Nat.toString (r.s.a.x + r.s.b.x + r.n));\n  IO.println (Float64.toString r.s.b.y)\n"
+
+def structDeepExpected : String := "5\n6\n22\n21\n1.5\n"
+
+/-- (C8) A byte array (`unsigned char data[4]`) as a `c_struct` field, passed and
+returned by value through an extern (not through `glue`): cut/zero-padded going in,
+copied out. -/
+def structArrayHeader : String :=
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_ab;\n" ++
+  "static inline unsigned long ab_sum(wiz_ab m) {\n" ++
+  "  return (unsigned long)m.data[0] + m.data[1] + m.data[2] + m.data[3] + m.n; }\n" ++
+  "static inline wiz_ab ab_make(unsigned long n) {\n" ++
+  "  wiz_ab m; m.data[0] = 1; m.data[1] = 2; m.data[2] = 3; m.data[3] = 4; m.n = n; return m; }\n"
+
+def structArrayProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_ab\" (header := \"{header}\") AB where\n  data : Bytes\n  n : Nat\n" ++
+  s!"extern \"ab_sum\" (header := \"{header}\") abSum : AB → Nat\n" ++
+  s!"extern \"ab_make\" (header := \"{header}\") abMake : Nat → IO AB\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (abSum (AB.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  m ← abMake 10;\n  IO.println (Bytes.show m.data);\n  IO.println (Nat.toString m.n)\n"
+
+def structArrayExpected : String := "136\n[1, 2, 3, 4]\n10\n"
+
 /-- (stage 21r) The checks of `c_struct`, both frontends alike. -/
 def structDecls : List (String × Bool) := [
   ("c_struct S3 where\n  x : Nat\n  y : Bool\ndef s3 : S3 := S3.mk 1 .true\ndef s3x : Nat := s3.x\n" ++
@@ -736,7 +802,13 @@ def structDecls : List (String × Bool) := [
   ("c_struct S1 where\n  xs : List Nat\n", false),
   ("c_struct \"a:b\" S2 where\n  x : Nat\n", false),
   ("c_struct Nat where\n  x : Nat\n", false),
-  ("extern \"f7\" f7 : Nat → Type\n", false)]
+  ("extern \"f7\" f7 : Nat → Type\n", false),
+  -- (C8) a field at quantity 0 is erased, whatever its type; `<` is allowed in a header
+  ("c_struct Q where\n  0 xs : List Nat\n  y : Nat\n", true),
+  ("c_struct Q where\n  0 data : Bytes\n  n : Nat\n", true),
+  ("c_struct \"q\" (header := \"<q.h>\") Q where\n  x : Nat\n", true),
+  ("c_struct Q where\n  2 x : Nat\n", false),
+  ("c_struct \"q\" (header := \"a:b\") Q where\n  x : Nat\n", false)]
 
 /-- (stage 21t) `implemented_by`: compiled code runs the implementation (here a different
 answer, to see it), for a definition and for an axiom. -/
@@ -1984,6 +2056,30 @@ def selfHostGroup : Group where
         linkRun structFiles structExpected
         selfhostLinkRun structFiles structExpected
         selfhostLinkRun structFiles structExpected (flags := #["--rc"]) },
+    { name := "c_struct: a field at quantity 0 is erased from the C struct, in both compilers (C8)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_q.h"
+        IO.FS.writeFile h structErasedHeader
+        let prog := structErasedProgram h.toString
+        ioRun prog structErasedExpected
+        selfhostCompileRun prog structErasedExpected
+        selfhostCompileRun prog structErasedExpected (flags := #["--rc"]) },
+    { name := "c_struct: two levels of nesting pass and return by value, in both compilers (C8)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_deep.h"
+        IO.FS.writeFile h structDeepHeader
+        let prog := structDeepProgram h.toString
+        ioRun prog structDeepExpected
+        selfhostCompileRun prog structDeepExpected
+        selfhostCompileRun prog structDeepExpected (flags := #["--rc"]) },
+    { name := "c_struct: a byte-array field passes and returns by value, in both compilers (C8)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_ab.h"
+        IO.FS.writeFile h structArrayHeader
+        let prog := structArrayProgram h.toString
+        ioRun prog structArrayExpected
+        selfhostCompileRun prog structArrayExpected
+        selfhostCompileRun prog structArrayExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: c_struct is checked as in the Lean frontend (21r)", run := fun _ =>
         selfhostAgreesIO "" structDecls },
     { name := "a Wiz library (--lib, --no-main, --header) used by a C program, with the handle functions (21s)", run := fun _ => do

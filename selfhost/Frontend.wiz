@@ -7047,10 +7047,10 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
 -- (stage 21r) `c_struct ["ctype"] [(header := "h")] T where fields` (`command.cStruct`):
 -- the structure `T` (`structCmd`), standing for the C struct `ctype` (by default
 -- `wiz_s_T`, mangled as the Lean backend mangles), passed to and from foreign functions
--- by value. A field is `Nat`, `UInt64`, `Float64`, `String`, `Bool`, a foreign type or
--- another `c_struct`, checked on its own (fields may not depend on each other); the
--- Lean frontend's checks and messages. (No `Bytes` here: the self-hosted runtime has
--- none.)
+-- by value. A field is `Nat`, `UInt64`, `Float64`, `String`, `Bool`, a foreign type, a
+-- `Bytes` (with a header: a `char f[N]` array) or another `c_struct`, checked on its own
+-- (fields may not depend on each other); a field at quantity 0 is erased (`e`, not in
+-- the C struct), as in the Lean frontend. The Lean frontend's checks and messages.
 def hexDigit (d : Nat) : Char := Char.mk (match Nat.lt d 10 with
   | .true => d + 48
   | .false => d + 87)
@@ -7070,6 +7070,10 @@ def badCChar : List Char → Bool
   | .nil => .false
   | .cons c cs => Bool.or (Bool.or (Nat.beq (Char.code c) 58) (Nat.beq (Char.code c) 124))
       (Bool.or (Nat.beq (Char.code c) 60) (badCChar cs))
+-- a header is only checked for `:` and `|` (`<` is allowed there, as in `Elab/Command.lean`)
+def badHChar : List Char → Bool
+  | .nil => .false
+  | .cons c cs => Bool.or (Bool.or (Nat.beq (Char.code c) 58) (Nat.beq (Char.code c) 124)) (badHChar cs)
 def strChars (s : String) : List Char := match s with
   | .mk cs => cs
 def tmName (t : Tm) : String := match t with
@@ -7102,15 +7106,21 @@ def cFieldKinds (gs : Globals) (header : String) : List Syntax → FieldKs
   | .nil => .ok .nil .nil
   | .cons f rest =>
     let fname := fieldName f;
-    match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) (kid f 4) with
-    | .err m => fieldKindErr fname (String.append m " (fields may not depend on other fields)")
-    | .ok T0 _ es => match zonk es 0 T0 with
-      | .none => fieldKindErr fname "could not infer an implicit argument (fields may not depend on other fields)"
-      | .some T => match fieldKindNamed (Globals.ffi gs) header (tmName (tmHead T)) with
-        | .none => fieldKindErr fname "a field must be Nat, UInt64, Float64, String, Bool, a foreign type, another c_struct or (with a header) Bytes"
-        | .some k => match cFieldKinds gs header rest with
-          | .ok ns ks => .ok (.cons fname ns) (.cons k ks)
-          | .err m => .err m
+    -- (C8) a field at quantity 0 is erased: it is not in the C struct and is `e` (as
+    -- `Elab/Command.lean`'s `q0`); its type is checked by the `structure` command below
+    match erasedField f with
+    | .true => match cFieldKinds gs header rest with
+      | .ok ns ks => .ok (.cons fname ns) (.cons "e" ks)
+      | .err m => .err m
+    | .false => match inferType gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) (kid f 4) with
+      | .err m => fieldKindErr fname (String.append m " (fields may not depend on other fields)")
+      | .ok T0 _ es => match zonk es 0 T0 with
+        | .none => fieldKindErr fname "could not infer an implicit argument (fields may not depend on other fields)"
+        | .some T => match fieldKindNamed (Globals.ffi gs) header (tmName (tmHead T)) with
+          | .none => fieldKindErr fname "a field must be Nat, UInt64, Float64, String, Bool, a foreign type, another c_struct or (with a header) Bytes"
+          | .some k => match cFieldKinds gs header rest with
+            | .ok ns ks => .ok (.cons fname ns) (.cons k ks)
+            | .err m => .err m
 -- an output line with an error (the structure's lines, one per declaration)
 def errStart (cs : List Char) : Bool := match dropPrefix (strChars "error") cs with
   | .some _ => .true
@@ -7132,7 +7142,7 @@ def cStructCmd (gs : Globals) (stx : Syntax) : Step :=
   | .some _ => errStep gs (String.append (String.append "'" T) "' has already been declared")
   | .none => match fs with
     | .nil => errStep gs "a c_struct needs at least one field"
-    | .cons _ _ => match Bool.or (badCChar (strChars ctype)) (badCChar (strChars header)) with
+    | .cons _ _ => match Bool.or (badCChar (strChars ctype)) (badHChar (strChars header)) with
       | .true => errStep gs "c_struct: unexpected characters in the C type or header"
       | .false => match cFieldKinds gs header fs with
         | .err m => errStep gs m

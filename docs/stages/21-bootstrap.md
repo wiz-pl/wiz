@@ -451,8 +451,9 @@ Parity with [9i](09-ffi.md)'s structs by value.
   (f₀, (f₁, … ◾)))`, a string converted with a reference of its own), `wiz_sfree_T` frees
   its strings, and `wiz_sout_T(c)` builds a structure (strings copied, a pointer without a
   finalizer). A struct argument is released after the call.
-* Not mirrored: `Bytes` fields (there is no `Bytes` here), fields at quantity 0 (a field
-  quantity is an error, 21m), `import_c`'s automatic structs (21t), structs in glue.
+* Not mirrored: `import_c`'s automatic header structs (that is C10), and `glue` beyond a
+  declared `c_struct` parameter (struct locals, their fields and `&t`). `Bytes` fields
+  (C11) and fields at quantity 0 (erased from the C struct, kind `e`) are mirrored.
 
 ## 21s: libraries and handles, self-hosted
 
@@ -492,7 +493,8 @@ that prints one C file.
 
 **Tests** (group `selfhost`): callbacks (qsort with Wiz comparators, a string callback,
 a `Callback` kept, called in `IO` and released) and `c_struct`s (`div_t` from its header,
-a generated struct with every scalar kind passed and returned, a nested one), each run
+a generated struct with every scalar kind passed and returned, a nested one, a field at
+quantity 0, two levels of nesting and a byte-array field, each by value), each run
 by the Lean compiler and the self-hosted one in both modes; a kept callback never released
 is a leak in both; the checks of callbacks, `c_struct` and `implemented_by` (same
 verdicts); a C program using a self-hosted library (`--lib` with the collector,

@@ -2055,14 +2055,16 @@ def elemS (x : String) : List String → Bool
 -- (stage 21r) A `c_struct`'s C side: its definition (without a header: `struct t { … };`
 -- or a `typedef`, from the fields) and the marshalling helpers, as `structHelpers` in
 -- `C.lean`: `wiz_sin_T(&c, v)` fills `c` from the structure `v` (borrowed: the payload
--- `(tag, (f₀, (f₁, … ◾)))`; fields not named are zero), `wiz_sfree_T` frees the strings
--- that made, and `wiz_sout_T(c)` builds a structure (strings copied, a pointer without a
--- finalizer).
+-- `(tag, (f₀, (f₁, … ◾)))`; fields not named are zero; a field at quantity 0, kind `e`,
+-- is not in `c`), `wiz_sfree_T` frees the strings that made, and `wiz_sout_T(c)` builds
+-- a structure (strings copied, a pointer without a finalizer, an erased field zero).
 def structFieldCType (ffi : List Foreign) (k : String) : String := match kindStruct ffi k with
   | .some f => structCType f
   | .none => ffiCType k
 def structFieldDecls (ffi : List Foreign) : List String → List String → String
-  | .cons f fs, .cons k ks => structFieldCType ffi k +++ " " +++ f +++ "; " +++ structFieldDecls ffi fs ks
+  | .cons f fs, .cons k ks => (match strEq k "e" with
+    | .true => ""
+    | .false => structFieldCType ffi k +++ " " +++ f +++ "; ") +++ structFieldDecls ffi fs ks
   | _, _ => ""
 def structDefinition (ffi : List Foreign) (ctype : String) (fs ks : List String) : String := match strStarts "struct " ctype with
   | .true => ctype +++ " { " +++ structFieldDecls ffi fs ks +++ "};"
@@ -2108,7 +2110,10 @@ def structFree (ffi : List Foreign) : List String → List String → String
 def structOut (ffi : List Foreign) : Nat → List String → List String → String
   | i, .cons f fs, .cons k ks =>
     let x := "c." +++ f;
-    "fs[" +++ Nat.toString i +++ "] = " +++ (match strEq k "s" with
+    "fs[" +++ Nat.toString i +++ "] = " +++ (match strEq k "e" with
+    -- (C8) a field at quantity 0: erased from C, a slot in the Wiz value
+    | .true => "BOX(0)"
+    | .false => match strEq k "s" with
     | .true => "rt_out_str(" +++ x +++ ")"
     | .false => match strEq k "p" with
     | .true => "rt_out_ptr((void *)" +++ x +++ ", NULL)"
