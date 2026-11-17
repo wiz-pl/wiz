@@ -141,3 +141,29 @@ def Budget.admit_busy (s : Pool) (r : Nat) (hf : Pool.fits s r = .false) (hi : P
     Pool.admit s r = .none :=
   Eq.substProp (fun (b : Bool) => Pool.admitBy s r b (Pool.idle s) = .none) (Eq.symm hf)
     (Eq.substProp (fun (b : Bool) => Pool.admitBy s r .false b = .none) (Eq.symm hi) rfl)
+
+-- ## A pool that carries its invariant
+
+/-- A pool with a proof that its reservations are within its budget. The scheduler
+(lib/TestRun/Sched.wiz) holds one of these, so every state it can reach satisfies the
+invariant by construction: the only ways to change it are `OkPool.admit` (by
+`Budget.admit_le`) and `OkPool.release` (by `Budget.release_le`). -/
+structure OkPool where
+  pool : Pool
+  ok : Pool.Ok pool
+
+/-- An empty pool (nothing reserved: `0 ≤ budget`). -/
+def OkPool.new (budget jobs : Nat) : OkPool := OkPool.mk (Pool.new budget jobs) (Nat.zero_le budget)
+
+/-- `OkPool.admit` with the admission's result and its equation. -/
+def OkPool.admitGo (p : Pool) (r : Nat) : (o : Option Grant) → Pool.admit p r = o → Option (Grant × OkPool)
+  | .none, _ => .none
+  | .some g, h => .some (g, OkPool.mk g.pool (Budget.admit_le p r g h))
+
+/-- Admit a case reserving `r` MiB: the grant and the new pool, or `none` (it waits). -/
+def OkPool.admit (p : OkPool) (r : Nat) : Option (Grant × OkPool) :=
+  OkPool.admitGo p.pool r (Pool.admit p.pool r) rfl
+
+/-- Give back what a finished case held. -/
+def OkPool.release (p : OkPool) (held : Nat) : OkPool :=
+  OkPool.mk (Pool.release p.pool held) (Budget.release_le p.pool held p.ok)

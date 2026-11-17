@@ -1,0 +1,463 @@
+import TestRun.Budget
+import TestRun.Report
+/-!
+# TestRun.Sched
+
+The test runner's scheduler as a pure state machine (`docs/stages/33-test-runner.md`,
+33d). A driver (TR3: a `Scope` worker pool, or one thread polling) feeds it **events**
+and carries out the **commands** it returns. The scheduler never touches a process or a
+clock, so it is tested with **scripted events on a virtual clock** (`Sched.runScript`,
+`Sched.simulate`).
+
+```
+Sched.feed : S → Nat → Event → S × List Cmd      -- at time t (ms), this happened
+Sched.wake : S → Option Nat                      -- call back (with tick) by then
+```
+
+* **Events**: `started slot` (the driver spawned it; its clock starts now),
+  `exited slot result`, `tick` (only time passed), `pressure ok` (the PSI and
+  MemAvailable gate, as `heavy`'s `limits.conf`), `interrupt`.
+* **Commands**: `run slot attempt timeoutMs memMib`, `kill slot signal`, `print line`,
+  `record rec` (a timings record, lib/TestRun/Report.wiz).
+
+**Admission** follows `heavy`'s rules. Cases start in plan order (lib/TestRun/Plan.wiz)
+while the memory pool admits them (lib/TestRun/Budget.wiz): fewer than `jobs` running
+and the reservations within the budget, or alone when the case is bigger than the
+whole budget. When the head of the queue does not fit, at most `maxBypass` smaller
+cases may pass it; after that the runner drains until the head fits. The pool is an
+`OkPool`, which carries the proof that its reservations are within its budget, so
+**every state the scheduler reaches satisfies the invariant** (`Sched.reserved_le`).
+
+**Ends.** A case past its time limit gets `kill 15`, and `kill 9` after the grace
+period. A case over its memory budget (`oom`) whose limit was *learned* is retried once
+alone, with the whole budget, and its record notes the drift. A failure is retried up
+to `retries` times, and a pass on a retry is `flaky`, never `pass`. An interrupt kills
+every running case's group and starts nothing more.
+-/
+
+-- ## State
+
+/-- A queued attempt: the case's position in the plan (the driver's handle for it),
+the case, which attempt this is, and why it is a retry. -/
+structure Job where
+  slot : Nat
+  case : Case
+  attempt : Nat
+  /-- run alone with the whole budget (the retry of a learned budget's OOM) -/
+  alone : Bool
+  /-- an earlier attempt failed (a pass is then flaky) -/
+  retried : Bool
+  queuedAt : Nat
+
+/-- How far a running case is from being killed. -/
+inductive Phase where
+  | running
+  /-- sent `kill 15`; `kill 9` at the deadline -/
+  | termed
+  /-- sent `kill 9`; waiting for the exit -/
+  | killed
+
+/-- A running attempt. `deadline` is when to send the next signal. -/
+structure Run where
+  job : Job
+  held : Nat
+  startMs : Nat
+  deadline : Nat
+  phase : Phase
+  timedOut : Bool
+
+/-- What a case's process reported when it ended. -/
+structure Res where
+  /-- the exit code (128 + n for signal n) -/
+  code : Nat
+  /-- the kernel killed it for memory (`memory.events` oom_kill, or the poll monitor) -/
+  oom : Bool
+  peakMib : Nat
+  /-- why it skipped itself, if it did -/
+  skipped : Option String
+  notes : List String
+  output : String
+
+/-- The run's settings. -/
+structure Cfg where
+  shard : String
+  maxBypass : Nat
+  graceMs : Nat
+  retries : Nat
+  /-- how memory limits are enforced (`cgroup`, `poll`, `none`), for the records -/
+  enforce : String
+
+/-- The scheduler's state. `finals` are the records of every case's last attempt,
+newest first. -/
+structure S where
+  cfg : Cfg
+  now : Nat
+  pool : OkPool
+  queue : List Job
+  bypassed : Nat
+  running : List Run
+  gate : Bool
+  stopping : Bool
+  finals : List Rec
+
+/-- **The invariant**, in every reachable state: what running cases reserve is within the
+budget. It holds by construction (`OkPool`). -/
+def Sched.reserved_le (s : S) : Nat.Le s.pool.pool.reserved s.pool.pool.budget := s.pool.ok
+
+inductive Event where
+  | started (slot : Nat)
+  | exited (slot : Nat) (res : Res)
+  | tick
+  | pressure (ok : Bool)
+  | interrupt
+
+inductive Cmd where
+  | run (slot attempt timeoutMs memMib : Nat)
+  | kill (slot signal : Nat)
+  | print (line : String)
+  | record (r : Rec)
+
+-- ## Small helpers
+
+def Phase.isRunning : Phase → Bool
+  | .running => .true
+  | _ => .false
+
+def Phase.isKilled : Phase → Bool
+  | .killed => .true
+  | _ => .false
+
+/-- The memory an attempt reserves: its limit, or more than the budget to run alone. -/
+def Job.ask (budget : Nat) (j : Job) : Nat := match j.alone with
+  | .true => Nat.succ budget
+  | .false => j.case.limits.memMib
+
+/-- The limits an attempt runs under (alone: the whole budget). -/
+def Job.limits (budget : Nat) (j : Job) : Limits := match j.alone with
+  | .true => Limits.mk j.case.limits.timeoutMs budget j.case.limits.source
+  | .false => j.case.limits
+
+/-- `s` with some fields replaced (the scheduler's only constructor of states besides
+`Sched.init`). -/
+def S.with (s : S) (pool : OkPool) (queue : List Job) (bypassed : Nat) (running : List Run) : S :=
+  S.mk s.cfg s.now pool queue bypassed running s.gate s.stopping s.finals
+
+-- ## Admission
+
+/-- Start an admitted job: it runs, holding what it was granted. -/
+def Sched.start (s : S) (j : Job) (g : Grant) (pool : OkPool) (queue : List Job) (bypassed : Nat) : S × Cmd :=
+  let lim := Job.limits s.pool.pool.budget j;
+  let r := Run.mk j g.held s.now (s.now + lim.timeoutMs) .running .false;
+  (S.with s pool queue bypassed (List.append s.running (.cons r .nil)),
+   Cmd.run j.slot j.attempt lim.timeoutMs lim.memMib)
+
+/-- The first job after the head that fits beside the running ones (not one that must
+run alone), and the queue without it. -/
+def Sched.pickFit (p : Pool) : List Job → Option (Job × List Job)
+  | .nil => .none
+  | .cons j js => match Bool.and (Bool.not j.alone) (Pool.fits p j.case.limits.memMib) with
+    | .true => .some (j, js)
+    | .false => (match Sched.pickFit p js with
+      | .some (k, rest) => .some (k, .cons j rest)
+      | .none => .none)
+
+/-- A bypass, if the head has been passed fewer than `maxBypass` times and a later job
+fits. -/
+def Sched.bypass (s : S) (h : Job) (rest : List Job) : Option (S × Cmd) :=
+  match Nat.lt s.bypassed s.cfg.maxBypass with
+  | .false => .none
+  | .true => match Sched.pickFit s.pool.pool rest with
+    | .none => .none
+    | .some (j, rest') => (match OkPool.admit s.pool (Job.ask s.pool.pool.budget j) with
+      | .some (g, p) => .some (Sched.start s j g p (.cons h rest') (Nat.succ s.bypassed))
+      | .none => .none)
+
+/-- One admission, if any is possible: the head if it fits (or runs alone), else a
+bypass. -/
+def Sched.admitOne (s : S) : Option (S × Cmd) :=
+  match Bool.or s.stopping (Bool.not s.gate) with
+  | .true => .none
+  | .false => match s.queue with
+    | .nil => .none
+    | .cons h rest => (match OkPool.admit s.pool (Job.ask s.pool.pool.budget h) with
+      | .some (g, p) => .some (Sched.start s h g p rest 0)
+      | .none => Sched.bypass s h rest)
+
+/-- Admit until nothing more can start (each step removes a job from the queue, so
+`fuel` = the queue's length suffices). Commands are added to `acc` reversed. -/
+def Sched.fillGo : Nat → S → List Cmd → S × List Cmd
+  | .zero, s, acc => (s, acc)
+  | .succ n, s, acc => match Sched.admitOne s with
+    | .some (s', c) => Sched.fillGo n s' (.cons c acc)
+    | .none => (s, acc)
+
+def Sched.fill (s : S) (acc : List Cmd) : S × List Cmd := Sched.fillGo (Nat.succ (List.length s.queue)) s acc
+
+-- ## Time
+
+/-- Signal the running cases whose deadline has passed: `kill 15` (a timeout), then
+`kill 9` after the grace period. -/
+def Sched.expireGo (now grace : Nat) : List Run → List Run → List Cmd → List Run × List Cmd
+  | .nil, done, acc => (List.reverse done, acc)
+  | .cons r rs, done, acc => match Bool.and (Bool.not (Phase.isKilled r.phase)) (Nat.le r.deadline now) with
+    | .false => Sched.expireGo now grace rs (.cons r done) acc
+    | .true => (match r.phase with
+      | .running => Sched.expireGo now grace rs
+          (.cons (Run.mk r.job r.held r.startMs (now + grace) .termed .true) done) (.cons (Cmd.kill r.job.slot 15) acc)
+      | _ => Sched.expireGo now grace rs
+          (.cons (Run.mk r.job r.held r.startMs r.deadline .killed r.timedOut) done) (.cons (Cmd.kill r.job.slot 9) acc))
+
+/-- When the driver must call back (with `tick`) at the latest: the earliest deadline of
+a case that has not been sent `kill 9`. -/
+def Sched.wakeGo : List Run → Option Nat → Option Nat
+  | .nil, best => best
+  | .cons r rs, best => match Phase.isKilled r.phase with
+    | .true => Sched.wakeGo rs best
+    | .false => Sched.wakeGo rs (.some (match best with
+      | .none => r.deadline
+      | .some b => (match Nat.lt r.deadline b with
+        | .true => r.deadline
+        | .false => b)))
+
+def Sched.wake (s : S) : Option Nat := Sched.wakeGo s.running .none
+
+-- ## Ends
+
+/-- A running attempt, by slot, and the others. -/
+def Sched.takeRun (slot : Nat) : List Run → Option (Run × List Run)
+  | .nil => .none
+  | .cons r rs => match Nat.beq r.job.slot slot with
+    | .true => .some (r, rs)
+    | .false => (match Sched.takeRun slot rs with
+      | .some (x, rest) => .some (x, .cons r rest)
+      | .none => .none)
+
+/-- What became of an attempt, and whether to queue another: `.some (j, front)` queues
+`j` (at the front of the queue when `front`). -/
+structure Verdict2 where
+  status : Status
+  again : Option (Job × Bool)
+  notes : List String
+
+/-- Classify an ended attempt. -/
+def Sched.judge (s : S) (r : Run) (res : Res) : Verdict2 :=
+  let j := r.job;
+  let next := fun (alone retried : Bool) => Job.mk j.slot j.case (Nat.succ j.attempt) alone retried s.now;
+  match r.timedOut with
+  | .true => (match Nat.le j.attempt s.cfg.retries with
+    | .true => Verdict2.mk .timeout (.some (next .false .true, .false)) .nil
+    | .false => Verdict2.mk .timeout .none .nil)
+  | .false => match Bool.and s.stopping (Bool.not (Phase.isRunning r.phase)) with
+  | .true => Verdict2.mk .interrupted .none .nil
+  | .false => match res.oom with
+  | .true => (match Bool.and (Bool.not j.alone) (match j.case.limits.source with
+      | .learned => .true
+      | _ => .false) with
+    | .true => Verdict2.mk .oom (.some (next .true j.retried, .true))
+        (.cons (String.join ["learned budget ", Nat.repr j.case.limits.memMib, " MiB too small; retrying alone"]) .nil)
+    | .false => Verdict2.mk .oom .none .nil)
+  | .false => match Nat.beq res.code 0 with
+  | .true => (match res.skipped with
+    | .some _ => Verdict2.mk .skip .none .nil
+    | .none => (match j.retried with
+      | .true => Verdict2.mk .flaky .none .nil
+      | .false => (match j.alone with
+        | .true => Verdict2.mk .pass .none (.cons "drift: passed alone after its learned budget ran out" .nil)
+        | .false => Verdict2.mk .pass .none .nil)))
+  | .false => match Nat.le j.attempt s.cfg.retries with
+    | .true => Verdict2.mk .fail (.some (next .false .true, .false)) .nil
+    | .false => Verdict2.mk .fail .none .nil
+
+/-- The detail of a record: the skip reason, or the output (the exit code when it
+printed nothing). -/
+def Res.detail (res : Res) : String := match res.skipped with
+  | .some why => why
+  | .none => match String.isEmpty (String.trim res.output) with
+    | .true => String.join ["exit code ", Nat.repr res.code]
+    | .false => res.output
+
+/-- An attempt's record. -/
+def Sched.recOf (s : S) (r : Run) (res : Res) (v : Verdict2) : Rec :=
+  Rec.mk s.cfg.shard r.job.case.info (s.now - r.startMs) v.status r.job.attempt res.peakMib
+    (Job.limits s.pool.pool.budget r.job) s.cfg.enforce (r.startMs - r.job.queuedAt)
+    (List.append res.notes v.notes) (Res.detail res)
+
+/-- An attempt ended. -/
+def Sched.exited (s : S) (slot : Nat) (res : Res) : S × List Cmd :=
+  match Sched.takeRun slot s.running with
+  | .none => (s, .cons (Cmd.print (String.join ["  (an exit for slot ", Nat.repr slot, ", which is not running)"])) .nil)
+  | .some (r, rest) =>
+    let v := Sched.judge s r res;
+    let rc := Sched.recOf s r res v;
+    let pool := OkPool.release s.pool r.held;
+    match v.again with
+    | .some (j, front) =>
+      let q := (match front with
+        | .true => .cons j s.queue
+        | .false => List.append s.queue (.cons j .nil));
+      (S.with s pool q s.bypassed rest,
+       .cons (Cmd.print (String.join [Rec.line rc, "\n      retrying (attempt ", Nat.repr j.attempt, ")"]))
+         (.cons (Cmd.record rc) .nil))
+    | .none =>
+      (S.mk s.cfg s.now pool s.queue s.bypassed rest s.gate s.stopping (.cons rc s.finals),
+       .cons (Cmd.print (Rec.line rc)) (.cons (Cmd.record rc) .nil))
+
+/-- The driver spawned a case: its time starts now. -/
+def Sched.startedGo (now : Nat) (slot : Nat) : List Run → List Run
+  | .nil => .nil
+  | .cons r rs => match Nat.beq r.job.slot slot with
+    | .true => .cons (Run.mk r.job r.held now (now + (r.deadline - r.startMs)) r.phase r.timedOut) rs
+    | .false => .cons r (Sched.startedGo now slot rs)
+
+/-- Stop: kill every running case's group (`kill 15`, then `kill 9` after the grace). -/
+def Sched.stopAll (grace now : Nat) : List Run → List Run × List Cmd
+  | .nil => (.nil, .nil)
+  | .cons r rs =>
+    let rest := Sched.stopAll grace now rs;
+    match Phase.isRunning r.phase with
+    | .true => (.cons (Run.mk r.job r.held r.startMs (now + grace) .termed r.timedOut) rest.1,
+        .cons (Cmd.kill r.job.slot 15) rest.2)
+    | .false => (.cons r rest.1, rest.2)
+
+-- ## The machine
+
+/-- No commands. -/
+def Sched.none : List Cmd := .nil
+
+/-- Advance the clock (never backwards). -/
+def S.at (s : S) (t : Nat) : S :=
+  S.mk s.cfg (Nat.max s.now t) s.pool s.queue s.bypassed s.running s.gate s.stopping s.finals
+
+/-- Handle one event at time `t` (ms): the new state and the commands to carry out, in
+order. Expired deadlines are handled first, and admission last. -/
+def Sched.feed (s0 : S) (t : Nat) (e : Event) : S × List Cmd :=
+  let s1 := S.at s0 t;
+  let ex := Sched.expireGo s1.now s1.cfg.graceMs s1.running .nil .nil;
+  let s := S.with s1 s1.pool s1.queue s1.bypassed ex.1;
+  let pre := ex.2;
+  let after := (match e with
+    | .started slot => (S.with s s.pool s.queue s.bypassed (Sched.startedGo s.now slot s.running), Sched.none)
+    | .exited slot res => Sched.exited s slot res
+    | .tick => (s, Sched.none)
+    | .pressure ok => (S.mk s.cfg s.now s.pool s.queue s.bypassed s.running ok s.stopping s.finals, Sched.none)
+    | .interrupt =>
+      let st := Sched.stopAll s.cfg.graceMs s.now s.running;
+      (S.mk s.cfg s.now s.pool s.queue s.bypassed st.1 s.gate .true s.finals,
+       .cons (Cmd.print "interrupted: stopping") st.2));
+  let filled := Sched.fill after.1 .nil;
+  (filled.1, List.append (List.reverse pre) (List.append after.2 (List.reverse filled.2)))
+
+/-- Number the elements from `i`. -/
+def TestRun.indexedGo {A : Type} : Nat → List A → List (Nat × A)
+  | _, .nil => .nil
+  | i, .cons x xs => .cons (i, x) (TestRun.indexedGo (Nat.succ i) xs)
+
+def TestRun.indexed {A : Type} (xs : List A) : List (Nat × A) := TestRun.indexedGo 0 xs
+
+/-- A new run over planned cases (in plan order; a case's slot is its position), with a
+budget of `budget` MiB and `jobs` at most at once. The first admissions are returned. -/
+def Sched.init (cfg : Cfg) (budget jobs : Nat) (cases : List Case) : S × List Cmd :=
+  let jobsOf := TestRun.indexed cases;
+  let s := S.mk cfg 0 (OkPool.new budget jobs) (List.map (fun p => Job.mk p.1 p.2 1 .false .false 0) jobsOf)
+    0 .nil .true .false .nil;
+  let f := Sched.fill s .nil;
+  (f.1, List.reverse f.2)
+
+/-- Whether the run is over: nothing runs, and nothing more will start. -/
+def Sched.finished (s : S) : Bool :=
+  Bool.and (List.isEmpty s.running) (Bool.or s.stopping (List.isEmpty s.queue))
+
+/-- The final records, in the order cases ended. -/
+def Sched.results (s : S) : List Rec := List.reverse s.finals
+
+/-- The summary line (cases never started after an interrupt are counted apart). -/
+def Sched.summary (s : S) : String :=
+  let t := Tally.line (Tally.ofRecs (Sched.results s));
+  match List.length s.queue with
+  | .zero => t
+  | n => String.join [t, ", ", Nat.repr n, " not started"]
+
+-- ## Scripts on a virtual clock
+
+/-- A command as one line of a transcript. -/
+def Cmd.show : Cmd → String
+  | .run slot a t m => String.join ["run ", Nat.repr slot, " #", Nat.repr a, " ", TestRun.showMs t, "s ", Nat.repr m, "M"]
+  | .kill slot sig => String.join ["kill ", Nat.repr slot, " ", Nat.repr sig]
+  | .print l => String.join ["print ", l]
+  | .record r => String.join ["record ", r.info.id, " ", Status.name r.status, " #", Nat.repr r.attempt]
+
+/-- Feed timed events in order; the transcript of commands, each with its time. -/
+def Sched.scriptGo : S → List (Nat × Event) → List String → S × List String
+  | s, .nil, acc => (s, List.reverse acc)
+  | s, .cons (t, e) rest, acc =>
+    let r := Sched.feed s t e;
+    Sched.scriptGo r.1 rest
+      (List.revApp (List.map (fun c => String.join ["@", Nat.repr r.1.now, " ", Cmd.show c]) r.2) acc)
+
+/-- Start a run and feed it a script: the transcript (the first admissions at `@0`). -/
+def Sched.runScript (cfg : Cfg) (budget jobs : Nat) (cases : List Case) (script : List (Nat × Event)) : S × List String :=
+  let i := Sched.init cfg budget jobs cases;
+  Sched.scriptGo i.1 script (List.reverse (List.map (fun c => String.join ["@0 ", Cmd.show c]) i.2))
+
+/-- A result with exit code `code`, peak `peak` MiB and nothing else. -/
+def Res.of (code peak : Nat) : Res := Res.mk code .false peak .none .nil ""
+
+/-- A simulated process: when it ends, and what it reports. -/
+structure Proc where
+  slot : Nat
+  endsAt : Nat
+  res : Res
+
+/-- Carry out commands in the simulation: `run` starts a process whose duration and
+result come from `beh slot attempt`; `kill` ends it at once with 128 + the signal. -/
+def Sim.apply (beh : Nat → Nat → Nat × Res) (now : Nat) : List Cmd → List Proc → List Proc
+  | .nil, ps => ps
+  | .cons (.run slot a _ _) cs, ps =>
+    let b := beh slot a;
+    Sim.apply beh now cs (List.append ps (.cons (Proc.mk slot (now + b.1) b.2) .nil))
+  | .cons (.kill slot sig) cs, ps =>
+    Sim.apply beh now cs (List.map (fun p => match Nat.beq p.slot slot with
+      | .true => Proc.mk p.slot now (Res.of (128 + sig) p.res.peakMib)
+      | .false => p) ps)
+  | .cons _ cs, ps => Sim.apply beh now cs ps
+
+/-- The process that ends first (the earlier one in the list on a tie), and the rest. -/
+def Sim.next : List Proc → Option (Proc × List Proc)
+  | .nil => .none
+  | .cons p ps => match Sim.next ps with
+    | .none => .some (p, .nil)
+    | .some (q, rest) => (match Nat.le p.endsAt q.endsAt with
+      | .true => .some (p, ps)
+      | .false => .some (q, .cons p rest))
+
+/-- Run the simulation for at most `fuel` events. Each step feeds the next process exit,
+or a `tick` at the scheduler's wake time if that comes first. The transcript also
+records, at each step, what is reserved and running (`res=…/… run=…`). -/
+def Sim.go (beh : Nat → Nat → Nat × Res) : Nat → S → List Proc → List String → S × List String
+  | .zero, s, _, acc => (s, List.reverse (.cons "out of fuel" acc))
+  | .succ n, s, ps, acc =>
+    let ev := (match Sim.next ps with
+      | .none => (match Sched.wake s with
+        | .none => Option.none
+        | .some w => .some (w, Event.tick, ps))
+      | .some (p, rest) => (match Sched.wake s with
+        | .some w => (match Nat.lt w p.endsAt with
+          | .true => .some (w, Event.tick, ps)
+          | .false => .some (p.endsAt, Event.exited p.slot p.res, rest))
+        | .none => .some (p.endsAt, Event.exited p.slot p.res, rest)));
+    match ev with
+    | .none => (s, List.reverse acc)
+    | .some (t, e, ps') =>
+      let r := Sched.feed s t e;
+      let ps'' := Sim.apply beh r.1.now r.2 ps';
+      let lines := List.map (fun c => String.join ["@", Nat.repr r.1.now, " ", Cmd.show c]) r.2;
+      let state := String.join ["@", Nat.repr r.1.now, " res=", Nat.repr r.1.pool.pool.reserved, "/",
+        Nat.repr r.1.pool.pool.budget, " run=", Nat.repr (List.length r.1.running)];
+      Sim.go beh n r.1 ps'' (.cons state (List.revApp lines acc))
+
+/-- Simulate a whole run on a virtual clock: `beh slot attempt` is how long that attempt
+takes and what it reports. The final state and the transcript. -/
+def Sched.simulate (cfg : Cfg) (budget jobs : Nat) (cases : List Case) (beh : Nat → Nat → Nat × Res) : S × List String :=
+  let i := Sched.init cfg budget jobs cases;
+  let ps := Sim.apply beh 0 i.2 .nil;
+  Sim.go beh (4 * List.length cases + 16) i.1 ps (List.reverse (List.map (fun c => String.join ["@0 ", Cmd.show c]) i.2))

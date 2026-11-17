@@ -16,7 +16,7 @@ test. Otherwise it is one of
 
 with the options, in any order, as words: `timeout SECS`, `build-timeout SECS`, `mem SIZE`
 (`512M`, `5G`, or MiB), `tags a,b`, and `args …` (the rest of the line, for `run`). The
-word form extends `agent/grail-test-timeout`'s `timeout SECS`.
+word form extends the per-test `timeout SECS` proposed for `grail test`.
 
 **Comparison.** `F.expected` beside `F.wiz` holds the expected output. A missing file
 fails and names `--update`; a difference reports the first line that differs, in
