@@ -2,8 +2,7 @@ import STC.F0.Renaming
 /-!
 # The M0 obligations, as `Prop`s
 
-The design note (`/workspace/wiz-notes/stc-m0-spec.md` §5) asks F0 to **state** what its
-metatheory will prove, not to prove it yet. This file is that list:
+M0 asks F0 to **state** what its metatheory will prove (see `STC.lean`'s module doc), not to prove it yet. This file is that list:
 
 * `SoundF0 sg`: a checker exists that is sound, complete and total for F0 typing;
 * `Con sg`: an axiom-free signature has no closed term of type `Empty prop`;

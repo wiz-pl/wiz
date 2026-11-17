@@ -1013,6 +1013,24 @@ def ctorName (c : Syntax) : String := match kid c 2 with
   | .ident n => n
   | _ => "_"
 def ctorFields (c : Syntax) : List Field := fieldsOf (kids (kid c 3))
+-- (positivity) does the type being defined occur as an identifier in a field's type?
+-- `T` may only occur as a recursive field (`T args`, which `recField` turns into
+-- `drec`) or in the result; any other occurrence is a negative or non-strictly-positive
+-- one (the Lean frontend's `ctorDesc` message, `Inductive.lean`).
+mutual
+def typeOccurs (T : String) (s : Syntax) : Bool := match s with
+  | .ident n => strEq n T
+  | .node _ args => typeOccursArgs T args
+  | _ => .false
+def typeOccursArgs (T : String) : SyntaxF .false → Bool
+  | .nil => .false
+  | .cons s rest => Bool.or (typeOccurs T s) (typeOccursArgs T rest)
+end
+def typeOccursAny (Ts : List String) (s : Syntax) : Bool := match Ts with
+  | .nil => .false
+  | .cons t rest => Bool.or (typeOccurs t s) (typeOccursAny rest s)
+def positivityError : String :=
+  "the type being defined may only occur as the type of a recursive field or the result"
 
 -- an index (`tt` without one), scope-checked in `sc` and closed at depth `d`
 def idxTm (inline : Bool) (gs : Globals) (sc : Scope) (d : Nat) : Option Syntax → Elab
@@ -1047,21 +1065,23 @@ def ctorDesc (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nid
       | .ok jt => match ctorDesc inline gs T ps nidx res lv c sc d rest with
         | .ok D => .ok (.drec (.qlit q) jt D)
         | e => e
-    | .no => match elab sc ty with
-      | .err m => .err m
-      | .ok A =>
-        let Acl : Tm := closeG .false gs d A;
-        let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
-        let lifted : Bool := match k with
-          | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
-          | .none => .false;
-        match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+    | .no => match typeOccurs T ty with
+      | .true => .err positivityError
+      | .false => match elab sc ty with
         | .err m => .err m
-        | .ok D => match lifted with
-          | .true => .ok (.darg (.qlit q) (.ulift (match k with
-              | .some k' => k'
-              | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
-          | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+        | .ok A =>
+          let Acl : Tm := closeG .false gs d A;
+          let k : Option Lvl := sortOf c (eval (TCtx.env c) Acl);
+          let lifted : Bool := match k with
+            | .some k' => Bool.not (lvlEquiv k' (lsucc lv))
+            | .none => .false;
+          match ctorDesc inline gs T ps nidx res lv (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest with
+          | .err m => .err m
+          | .ok D => match lifted with
+            | .true => .ok (.darg (.qlit q) (.ulift (match k with
+                | .some k' => k'
+                | .none => .lhole) (lsucc lv) (closeG inline gs d A)) (.lam (downVar0 (d + 1) D)))
+            | .false => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
   --|ex
   --| | _, _, _, _ => .err "not implemented"
   --sol>
@@ -1625,10 +1645,22 @@ def Cx.bind (cx : Cx) (x : String) (ty : Val) : Cx := match cx with
     .mk (TCtx.bind c ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
 -- (a `let`'s variable is glued to its value: it quotes back as the variable, so the
 -- metavariables applied to the context don't carry every `let`'s value along)
-def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := match cx with
+-- (#422) a `let`-bound variable whose value is computed only when something looks through
+-- it (`whnf`): the value of a `let`, a `match` scrutinee or a shared clause body is a term
+-- the program computes at run time, and evaluating it here would run it while compiling
+-- (a `match` on a closed scrutinee, say, evaluates in full)
+def Cx.defineL (cx : Cx) (x : String) (v : Unit → Val) (ty : Val) : Cx := match cx with
   | .mk c sc t =>
     let d := TCtx.lvl c;
-    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo (fun _ => v))) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+    .mk (TCtx.define c (.vglued (.hvar d) .snil (memo v)) ty) (Scope.bind sc x) (.cons (memo (fun _ => quote d ty)) t)
+def Cx.define (cx : Cx) (x : String) (v ty : Val) : Cx := Cx.defineL cx x (fun _ => v) ty
+-- (#422) a Π's codomain (`cod` under `env`) at the argument `a`, a term at the depth of
+-- `cx`: `a` is evaluated only if the codomain mentions it, as the kernel's `infer` does
+-- for an application. An argument is an elaborated term (a `match` on a closed scrutinee,
+-- say), and evaluating it would run it while compiling.
+def codAt (cx : Cx) (env : Env) (cod : Tm) (a : Tm) : Val := match usesVar 0 cod with
+  | .true => eval (.cons (eval (TCtx.env (Cx.c cx)) a) env) cod
+  | .false => eval (.cons .vtt env) cod
 -- the metavariables: the depth each was made at, its solution (a term at that depth),
 -- and, for an implicit argument that is a type (`{A : Type u}`), the sort its solution
 -- must be in (`noteImplicitType` in `Elab/Term.lean`: the level constraint that solves
@@ -1948,9 +1980,13 @@ partial def pruneTm (k d : Nat) (es : ES) (t : Tm) : Pruned := match spineHead t
     | .lam b => match pruneTm k (d + 1) es b with
       | .mk es1 b' => .mk es1 (.lam b')
     | t' => .mk es t'
-def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
+-- solve the unsolved metavariable `i` (applied to its `k` context variables) with `tm0`, a
+-- term at the depth of `cx`; `tv` is its value, needed only for an implicit type
+-- argument's sort. (#422) A postponed argument's elaborated term is taken as it is
+-- (`postSolve`), not evaluated and read back: that would run a `match` on a closed
+-- scrutinee while compiling, and put its result in the program.
+def solveTm (es0 : ES) (cx : Cx) (i k : Nat) (tm0 : Tm) (tv : Unit → Val) : Option ES :=
   let d := Cx.lvl cx;
-  let tm0 := quote d t;
   let pr := match lowerTm (d - k) 0 tm0 with
     | .some _ => Pruned.mk es0 tm0
     | .none => pruneTm k d es0 tm0;
@@ -1971,10 +2007,12 @@ def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES :=
         -- the universe level it mentions)
         match sc with
         | .none => .some es1
-        | .some l => match sortOf (Cx.c cx) t with
+        | .some l => match sortOf (Cx.c cx) (tv ()) with
           | .none => .none
           | .some sl => unifyLevel es1 sl l
     | .none => .none
+-- the same with a value `t`, read back first
+def solve (es0 : ES) (cx : Cx) (i k : Nat) (t : Val) : Option ES := solveTm es0 cx i k (quote (Cx.lvl cx) t) (fun _ => t)
 mutual
 -- unify two values (types, mostly) at depth `cx`, solving metavariables
 def unify (es : ES) (cx : Cx) (a b : Val) : Option ES :=
@@ -4029,7 +4067,7 @@ def runOpHave (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (
         match checkT gs es1 cx vstx Av with
         | .err m => .err m
         | .ok v _ es2 =>
-          let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) v) Av;
+          let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
           let goalT := quote (d + 1) (force es2 (TacGoal.ty gl));
           match newMeta es2 cx' (eval (TCtx.env (Cx.c cx')) goalT) with
           | .mk m es3 => match tacGoalUnify es3 gl (.letE A v m) with
@@ -4382,7 +4420,7 @@ def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) 
     | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
       | .ok pt' pty' es4 => match whnf (force es4 pty') with
         | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
-          | .some es5 => .ok (.app pt' bt) (eval (.cons (eval (TCtx.env (Cx.c cx)) bt) env) cod) es5 .nil
+          | .some es5 => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
           | .none => .err (String.append "cannot apply the projection " f)
         | _ => .err (String.append "not a projection: " f)
       | .err msg => .err msg
@@ -4630,7 +4668,7 @@ def structUpdT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
         match updErr S fields outer ups .nil .nil with
         | .some m => .err m
         | .none =>
-          let cx' := Cx.define cx "upd✝" (eval (TCtx.env (Cx.c cx)) t) sty;
+          let cx' := Cx.defineL cx "upd✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) sty;
           let mk := mkNode "term.ident" (one (.ident (String.append S ".mk")));
           let app := match updArgs S outer ups fields with
             | .nil => mk
@@ -4716,7 +4754,7 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
   | .cons a .nil => checkT gs es cx a ty
   | .cons a rest => match whnf (force es ty) with
     | .vsigma _ _ _ A env B => match checkT gs es cx a A with
-      | .ok ta _ es1 => match checkTuple gs es1 cx rest (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) B) with
+      | .ok ta _ es1 => match checkTuple gs es1 cx rest (codAt cx env B ta) with
         | .ok tb _ es2 => .ok (.pair ta tb) ty es2
         | e => e
       | e => e
@@ -4795,7 +4833,7 @@ def appArgsT (gs : Globals) (es : ES) (cx : Cx) (f : Tm) (fty : Val) (m : List B
           | .mk mt es1 => appArgsT gs es1 cx (.app f mt) (eval (.cons (eval (TCtx.env (Cx.c cx)) mt) env) cod) (tailKinds m) rest
               (.cons (.mk a dom mt) post) expected pre
         | .false => match checkT gs es cx a dom with
-          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (eval (.cons (eval (TCtx.env (Cx.c cx)) ta) env) cod) (tailKinds m) rest post expected pre
+          | .ok ta _ es1 => appArgsT gs es1 cx (.app f ta) (codAt cx env cod ta) (tailKinds m) rest post expected pre
           | e => e
       | ty => .err (String.append "not a function: its type is " (show .nil (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- the arguments of an application; with named ones, rewritten to positional first
@@ -4828,6 +4866,16 @@ def appExpected (gs : Globals) (es : ES) (cx : Cx) (h : Syntax) (f : Tm) (fty : 
         | .some es2 => appArgsT gs es2 cx f fty m args .nil (.some ty) ims
         | .none => appArgsT gs es cx f fty m args .nil (.some ty) .nil
       | .none => appArgsT gs es cx f fty m args .nil (.some ty) .nil
+-- (#422) a postponed argument's metavariable `mt` and its elaborated term `t`: the
+-- metavariable, still unsolved, takes `t` as it is (`solveTm`); else the two are unified as
+-- values. (Evaluating `t` would run a `match` on a closed scrutinee while compiling.)
+def postSolve (es : ES) (cx : Cx) (mt t : Tm) : Option ES :=
+  let env := TCtx.env (Cx.c cx);
+  match metaApp es (force es (eval env mt)) with
+  | .mk i k => match Nat.beq k (Cx.lvl cx) with
+    | .true => solveTm es cx i k t (fun _ => eval env t)
+    | .false => unify es cx (eval env mt) (eval env t)
+  | .none => unify es cx (eval env mt) (eval env t)
 -- the postponed arguments, each unified with its metavariable (one whose type is
 -- still unknown waits longer: `drain`)
 def resolvePosts (gs : Globals) (es : ES) (cx : Cx) : List Post → Option ES
@@ -4836,9 +4884,7 @@ def resolvePosts (gs : Globals) (es : ES) (cx : Cx) : List Post → Option ES
     | .some es1 => match isMetaApp es1 dom with
       | .true => .some (ES.pend es1 (.mk a dom mt cx))
       | .false => match checkT gs es1 cx a dom with
-        | .ok t _ es2 =>
-          let env := TCtx.env (Cx.c cx);
-          unify es2 cx (eval env mt) (eval env t)
+        | .ok t _ es2 => postSolve es2 cx mt t
         | .err _ => .none
     | .none => .none
 -- the arguments still waiting, while some can be done
@@ -4847,9 +4893,7 @@ def drainList (gs : Globals) : ES → Bool → List Pend → DR
   | es, pr, .cons (.mk a dom mt cx) rest => match isMetaApp es dom with
     | .true => drainList gs (ES.pend es (.mk a dom mt cx)) pr rest
     | .false => match checkT gs es cx a dom with
-      | .ok t _ es2 =>
-        let env := TCtx.env (Cx.c cx);
-        match unify es2 cx (eval env mt) (eval env t) with
+      | .ok t _ es2 => match postSolve es2 cx mt t with
         | .some es3 => drainList gs es3 .true rest
         | .none => .err
       | .err _ => .err
@@ -4870,7 +4914,7 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
     | _ => Q.qw;
   let body := fun (A : Tm) (Av : Val) (v : Tm) (es2 : ES) => (match kid s 2 with
     | .ident x =>
-      let cx' := Cx.define cx x (eval (TCtx.env (Cx.c cx)) v) Av;
+      let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
       match expected with
       | .some T => match checkT gs es2 cx' (kid s 7) T with
         | .ok b _ es3 => TE.ok (letTm q A v b) T es3
@@ -4951,7 +4995,7 @@ def scrutLets (gs : Globals) (es : ES) (cx : Cx) : List Syntax → SL
     | .ok t xty es1 =>
       let d := Cx.lvl cx;
       let A := quote d (force es1 xty);
-      match scrutLets gs es1 (Cx.define cx "x✝" (eval (TCtx.env (Cx.c cx)) t) xty) rest with
+      match scrutLets gs es1 (Cx.defineL cx "x✝" (fun _ => eval (TCtx.env (Cx.c cx)) t) xty) rest with
       | .ok cx' cols wrap es2 => .ok cx' (.cons (.mk d A A .qw) cols) (fun b => .letE A t (wrap b)) es2
       | e => e
 -- `fun x y => b` against a Π type
@@ -5017,7 +5061,7 @@ def compileM (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val)
                 let dv := bindLetsT b' cx binds';
                 let d := Cx.lvl cx;
                 let nm := String.append "dflt✝" (Nat.toString d);
-                let cxD := Cx.define cx nm (eval (TCtx.env (Cx.c cx)) dv) expected;
+                let cxD := Cx.defineL cx nm (fun _ => eval (TCtx.env (Cx.c cx)) dv) expected;
                 match splitCol gs mc es1 cxD expected cols top ihLvls
                     (replaceLastRhs (mkNode "term.ident" (one (.ident nm))) cls) k with
                 | .ok body es2 => .ok (.letE (quote d expected) dv body) es2
@@ -5680,16 +5724,20 @@ def mctorDesc (inline : Bool) (gs : Globals) (members ps : List String) (m j : N
       | .ok D => .ok (.drec (.qlit q) (.tag m j') D)
       | e => e
     | .none => match hrecMember members ps ty with
-    | .yes H j' => match elab sc H with
-      | .err m' => .err m'
-      | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
-        | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
-        | e => e
-    | .no => match elab sc ty with
-      | .err m' => .err m'
-      | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
-        | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
-        | e => e
+    | .yes H j' => match typeOccursAny members H with
+      | .true => .err positivityError
+      | .false => match elab sc H with
+        | .err m' => .err m'
+        | .ok Ht => match mctorDesc inline gs members ps m j sc d rest with
+          | .ok D => .ok (.dhrec (.qlit q) (closeG inline gs d Ht) (.lam (.tag m j')) D)
+          | e => e
+    | .no => match typeOccursAny members ty with
+      | .true => .err positivityError
+      | .false => match elab sc ty with
+        | .err m' => .err m'
+        | .ok A => match mctorDesc inline gs members ps m j (Scope.bind sc x) (d + 1) rest with
+          | .ok D => .ok (.darg (.qlit q) (closeG inline gs d A) (.lam D))
+          | e => e
 -- a member constructor: the member's index and the syntax
 inductive MCtor where
   | mk (j : Nat) (c : Syntax)
@@ -6641,15 +6689,21 @@ def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
 -- frontend's checks and messages; a native representation (`implemented_by mk get` on
 -- a constructor, 22d) is not supported here.
 -- the globals the runtime provides (the backend's natives; moved here for
--- `implemented_by`, stage 21t)
+-- `implemented_by`, stage 21t): the `Bytes` operations (stage 30, `C11`) are the
+-- runtime's `wiz_bytes_*`, as `Array`'s are the runtime's arrays
+def bytesNatives : List String :=
+  .cons "Bytes.empty" (.cons "Bytes.push" (.cons "Bytes.size" (.cons "Bytes.get"
+  (.cons "Bytes.ofString" (.cons "Bytes.toString" (.cons "Bytes.slice" (.cons "Bytes.append"
+  (.cons "Bytes.eq" .nil))))))))
 def nativeNames : List String :=
-  .cons "Nat.zero" (.cons "Nat.succ" (.cons "Nat.add" (.cons "Nat.sub" (.cons "Nat.mul" (.cons "Nat.pred"
+  List.append bytesNatives
+  (.cons "Nat.zero" (.cons "Nat.succ" (.cons "Nat.add" (.cons "Nat.sub" (.cons "Nat.mul" (.cons "Nat.pred"
   (.cons "Nat.beq" (.cons "Nat.blt" (.cons "Nat.lt" (.cons "Nat.le" (.cons "Nat.toString"
   (.cons "IO.ePrintln" (.cons "Process.exit" (.cons "IO.println" (.cons "IO.print" (.cons "IO.readFile" (.cons "IO.argCount" (.cons "IO.arg" (.cons "Str.ofString"
   (.cons "Array.empty" (.cons "Array.push" (.cons "Array.size" (.cons "Array.getD" (.cons "Array.set"
   (.cons "StrMap.empty" (.cons "StrMap.insert" (.cons "StrMap.findD" (.cons "StrMap.size" (.cons "memo"
   (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow" (.cons "Nat.land" (.cons "Nat.lor" (.cons "Nat.xor"
-  (.cons "Nat.shiftLeft" (.cons "Nat.shiftRight" (.cons "Nat.log2" .nil)))))))))))))))))))))))))))))))))))))
+  (.cons "Nat.shiftLeft" (.cons "Nat.shiftRight" (.cons "Nat.log2" .nil))))))))))))))))))))))))))))))))))))))
 def externNamed (n : String) : List Foreign → Bool
   | .nil => .false
   | .cons f rest => match f with
@@ -7022,7 +7076,7 @@ def tmName (t : Tm) : String := match t with
   | .const n _ _ _ _ => n
   | .axiomC n _ => n
   | _ => ""
-def fieldKindNamed (ffi : List Foreign) (n : String) : Option String := match strEq n "Nat" with
+def fieldKindNamed (ffi : List Foreign) (header n : String) : Option String := match strEq n "Nat" with
   | .true => .some "n"
   | .false => match strEq n "UInt64" with
   | .true => .some "u"
@@ -7032,6 +7086,11 @@ def fieldKindNamed (ffi : List Foreign) (n : String) : Option String := match st
   | .true => .some "s"
   | .false => match strEq n "Bool" with
   | .true => .some "b"
+  -- (stage 30, C11) a byte array `char f[N]`: its size comes from the header
+  | .false => match strEq n "Bytes" with
+  | .true => match strEq header "" with
+    | .true => .none
+    | .false => .some "y"
   | .false => match foreignFin ffi n with
   | .some _ => .some "p"
   | .none => cstructKind ffi n
@@ -7039,7 +7098,7 @@ inductive FieldKs where
   | ok (names kinds : List String)
   | err (msg : String)
 def fieldKindErr (fname m : String) : FieldKs := .err (String.append (String.append "c_struct field " fname) (String.append ": " m))
-def cFieldKinds (gs : Globals) : List Syntax → FieldKs
+def cFieldKinds (gs : Globals) (header : String) : List Syntax → FieldKs
   | .nil => .ok .nil .nil
   | .cons f rest =>
     let fname := fieldName f;
@@ -7047,9 +7106,9 @@ def cFieldKinds (gs : Globals) : List Syntax → FieldKs
     | .err m => fieldKindErr fname (String.append m " (fields may not depend on other fields)")
     | .ok T0 _ es => match zonk es 0 T0 with
       | .none => fieldKindErr fname "could not infer an implicit argument (fields may not depend on other fields)"
-      | .some T => match fieldKindNamed (Globals.ffi gs) (tmName (tmHead T)) with
+      | .some T => match fieldKindNamed (Globals.ffi gs) header (tmName (tmHead T)) with
         | .none => fieldKindErr fname "a field must be Nat, UInt64, Float64, String, Bool, a foreign type, another c_struct or (with a header) Bytes"
-        | .some k => match cFieldKinds gs rest with
+        | .some k => match cFieldKinds gs header rest with
           | .ok ns ks => .ok (.cons fname ns) (.cons k ks)
           | .err m => .err m
 -- an output line with an error (the structure's lines, one per declaration)
@@ -7075,7 +7134,7 @@ def cStructCmd (gs : Globals) (stx : Syntax) : Step :=
     | .nil => errStep gs "a c_struct needs at least one field"
     | .cons _ _ => match Bool.or (badCChar (strChars ctype)) (badCChar (strChars header)) with
       | .true => errStep gs "c_struct: unexpected characters in the C type or header"
-      | .false => match cFieldKinds gs fs with
+      | .false => match cFieldKinds gs header fs with
         | .err m => errStep gs m
         | .ok names ks =>
           let st := mkNode "command.structure" (.cons (.atom "structure") (.cons (kid stx 3) (.cons (mkNull .nil)
@@ -7099,6 +7158,8 @@ def namedConst (gs : Globals) (n : String) : Tm :=
 def kindTy2 (gs : Globals) (k n : String) : Tm :=
   if strEq k "b" then namedConst gs "Bool"
   else if strEq k "v" then .unit (ln 1)
+  -- (stage 30, C11) a byte buffer (`const void *buf, size_t n`)
+  else if strEq k "y" then namedConst gs "Bytes"
   else namedConst gs n
 
 def kindTy (gs : Globals) (k n : String) : Tm :=
@@ -7228,16 +7289,52 @@ partial def padNames : List String → Nat → List String
 def zipKinds : List String → List String → List KN
   | .cons k ks, .cons n ns => .cons (KN.mk k n) (zipKinds ks ns)
   | _, _ => .nil
-inductive KList where
-  | kok (ks : List String) (gs : Globals)
+-- (stage 30, C11) A byte buffer and its length (`const void *buf, size_t n`, or
+-- `const unsigned char *`): one `Bytes` parameter, as `Elab/Command.lean`'s `import_c`
+-- takes a buffer and the length parameter right after it (only when that is named n,
+-- len, nbytes or length, with or without `__`).
+def lenParamNames : List String :=
+  .cons "n" (.cons "__n" (.cons "len" (.cons "__len" (.cons "nbytes" (.cons "__nbytes"
+  (.cons "length" (.cons "__length" .nil)))))))
+-- (21ag) a `char`, `unsigned char` or `signed char` (`uint8_t` resolves to the last),
+-- with or without a `const`
+def isCharTy : CTy → Bool
+  | .cint n => Bool.or (Bool.or (strEq n "char") (strEq n "unsigned char")) (strEq n "signed char")
+  | .cconst t => isCharTy t
+  | _ => .false
+def isBufTy : CTy → Bool
+  | .cptr (.cconst .cvoid) => .true
+  | .cptr t => isCharTy t
+  | _ => .false
+def isLenTy : CTy → Bool
+  | .cint _ => .true
+  | .cconst (.cint _) => .true
+  | _ => .false
+def isBufferPair (t : CTy) (rest : List CTy) (names : List String) (noAuto : Bool) : Bool :=
+  match rest, names with
+  | .cons l _, .cons ln _ => Bool.and (Bool.not noAuto) (Bool.and (isBufTy t) (Bool.and (isLenTy l) (elemStr ln lenParamNames)))
+  | _, _ => .false
+def restNames : List String → List String
+  | .nil => .nil
+  | .cons _ ns => ns
+inductive KBuf where
+  | kok (ks : List String) (names : List String) (gs : Globals)
   | kerr
-partial def kindList (gs : Globals) (noAuto : Bool) (skips : List String) : List CTy → KList
-  | .nil => .kok .nil gs
-  | .cons t ts => match kindOfCTy .false t gs noAuto skips 8 with
-    | .kerr => .kerr
-    | .kok k _ gs1 => match kindList gs1 noAuto skips ts with
+partial def kindListBuf (gs : Globals) (noAuto : Bool) (skips : List String) : List CTy → List String → KBuf
+  | .nil, _ => .kok .nil .nil gs
+  | .cons t ts, names => match isBufferPair t ts (restNames names) noAuto with
+    | .true => match ts, restNames names with
+      | .cons _ ts2, .cons _ ns2 => match kindListBuf gs noAuto skips ts2 ns2 with
+        | .kerr => .kerr
+        | .kok ks ns gs1 => .kok (.cons "y" ks) (.cons "" ns) gs1
+      | _, _ => .kerr
+    | .false => match kindOfCTy .false t gs noAuto skips 8 with
       | .kerr => .kerr
-      | .kok ks gs2 => .kok (.cons k ks) gs2
+      -- (the kind's own Wiz name: a `c_struct` or foreign pointer type, not the C
+      -- parameter's name, which only `y` and the scalars have no use for)
+      | .kok k kn gs1 => match kindListBuf gs1 noAuto skips ts (restNames names) with
+        | .kerr => .kerr
+        | .kok ks ns gs2 => .kok (.cons k ks) (.cons kn ns) gs2
 partial def importFuncs (gs : Globals) (header : String) (noAuto : Bool) (skips : List String) (isPure : Bool) : List CFn → Globals
   | .nil => gs
   | .cons (.mk name ret ps variadic pnames) rest =>
@@ -7245,16 +7342,16 @@ partial def importFuncs (gs : Globals) (header : String) (noAuto : Bool) (skips 
       | .true => gs
       | .false => match elemStr name skips with
         | .true => gs
-        | .false => match kindList gs noAuto skips ps with
+        | .false => match kindListBuf gs noAuto skips ps pnames with
           | .kerr => gs
-          | .kok ks gsA => match kindOfCTy .true ret gsA noAuto skips 8 with
+          | .kok ks ns gsA => match kindOfCTy .true ret gsA noAuto skips 8 with
             | .kerr => gsA
             | .kok rk rn gsB =>
               let gname := "C." +++ name;
               match Scope.lookup (Globals.scope gsB) gname with
               | .some _ => gsB
               | .none =>
-                let ty := tyOfKinds gsB (zipKinds ks (padNames pnames (lenL ks))) rk rn isPure;
+                let ty := tyOfKinds gsB (zipKinds ks ns) rk rn isPure;
                 let fin := match strEq rk "p" with
                   | .true => match foreignFin (Globals.ffi gsB) rn with
                     | .some x => x
@@ -7270,9 +7367,9 @@ partial def addCfuncs (gs : Globals) (noAuto : Bool) (skips : List String) : Lis
   | .cons (.mk name ret ps variadic pnames) rest =>
     let gs1 := match variadic with
       | .true => gs
-      | .false => match kindList gs noAuto skips ps with
+      | .false => match kindListBuf gs noAuto skips ps pnames with
         | .kerr => gs
-        | .kok ks gA => Globals.addFFI gA (.cfunc name ks (match kindOfCTy .true ret gA noAuto skips 8 with | .kok k _ _ => k | .kerr => ""))
+        | .kok ks _ gA => Globals.addFFI gA (.cfunc name ks (match kindOfCTy .true ret gA noAuto skips 8 with | .kok k _ _ => k | .kerr => ""))
     addCfuncs gs1 noAuto skips rest
 def importCCmd (gs : Globals) (stx : Syntax) : Step :=
   let header := strValue (kid stx 1);
@@ -7290,7 +7387,13 @@ def importCCmd (gs : Globals) (stx : Syntax) : Step :=
       .mk "" (addCfuncs gs2 noAuto skips fs)
 -- `glue`: a checked C body. As in `Elab/Command.lean`, the Wiz type gives the signature;
 -- the body may call the functions `import_c` bound.
-def glueGtyOfKind (k : String) : GTy := match strEq k "f" with
+def glueGtyOfKind (k : String) : GTy :=
+  -- (21ag) a `c_struct` by value (its kind is `S:T`): glue passes it on, and the
+  -- backend writes the parameter with the struct's C type (`kindCType`)
+  match dropPrefix (strChars "S:") (strChars k) with
+  | .some r => .gstruct (String.mk r)
+  | .none =>
+  match strEq k "f" with
   | .true => .gdbl
   | .false => match strEq k "s" with
   | .true => .gstr
@@ -7336,14 +7439,20 @@ def glueParamDecls (gs : Globals) (names : List String) (ks : List String) : Str
   | _, _ => ""
 def mapGlueKinds : List String → List GTy
   | .nil => .nil
-  | .cons k rest => .cons (glueGtyOfKind k) (mapGlueKinds rest)
+  -- (stage 30) a byte buffer is two C parameters: the pointer and the length
+  | .cons k rest => match strEq k "y" with
+    | .true => .cons .gptr (.cons .gint (mapGlueKinds rest))
+    | .false => .cons (glueGtyOfKind k) (mapGlueKinds rest)
 def glueFuncs (ffi : List Foreign) : List Callable := match ffi with
   | .nil => .nil
   | .cons f rest => match f with
     | .cfunc n ps r => .cons (Callable.mk n (mapGlueKinds ps) (glueGtyOfKind r)) (glueFuncs rest)
     | _ => glueFuncs rest
 def glueDeclFields : List String → List String → List NamedGTy
-  | .cons n ns, .cons k ks => .cons (NamedGTy.mk n (glueGtyOfKind k)) (glueDeclFields ns ks)
+  -- (a byte array `char f[N]` is not a field glue can read, as in `Elab/Command.lean`)
+  | .cons n ns, .cons k ks => match strEq k "y" with
+    | .true => glueDeclFields ns ks
+    | .false => .cons (NamedGTy.mk n (glueGtyOfKind k)) (glueDeclFields ns ks)
   | _, _ => .nil
 def glueStructDecls (ffi : List Foreign) : List StructDef := match ffi with
   | .nil => .nil
@@ -7376,7 +7485,7 @@ def glueCmd (gs : Globals) (stx : Syntax) : Step :=
           let gs2 := Globals.addFFI gs1 (.code ("static " +++ kindCType gs rk +++ " " +++ cname +++ "(" +++
             (if strEq cparams "" then "void" else cparams) +++ ") {\n" +++ body +++ "\n}"));
           .mk "" (Globals.addFFI gs2 (.fn name cname "" ks rk io ""))
-def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
+def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive Bytes where\n  | private mk (data : List Nat)\ninductive Except (E A : Type) where\n  | error (e : E)\n  | ok (val : A)\ndef Bytes.getAux : List Nat → Nat → Nat\n  | .nil, _ => 0\n  | .cons x xs, i => match i with\n    | .zero => x\n    | .succ j => Bytes.getAux xs j\ndef Bytes.empty : Bytes := .mk .nil\ndef Bytes.push (b : Bytes) (x : Nat) : Bytes := match b with\n  | .mk bs => .mk (List.append bs (.cons (Nat.mod x 256) .nil))\ndef Bytes.size (b : Bytes) : Nat := match b with\n  | .mk bs => List.length bs\ndef Bytes.get (b : Bytes) (i : Nat) : Nat := match b with\n  | .mk bs => Bytes.getAux bs i\ndef Bytes.dropN : Nat → List Nat → List Nat\n  | .zero, xs => xs\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => Bytes.dropN k xs\ndef Bytes.takeN : Nat → List Nat → List Nat\n  | .zero, _ => .nil\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => .cons x (Bytes.takeN k xs)\ndef Bytes.slice (b : Bytes) (start len : Nat) : Bytes := match b with\n  | .mk bs => .mk (Bytes.takeN len (Bytes.dropN start bs))\ndef Bytes.append (a b : Bytes) : Bytes := match a with\n  | .mk xs => match b with\n    | .mk ys => .mk (List.append xs ys)\ndef Bytes.eqAux : List Nat → List Nat → Bool\n  | .nil, .nil => .true\n  | .cons x xs, .cons y ys => match Nat.beq x y with\n    | .true => Bytes.eqAux xs ys\n    | .false => .false\n  | _, _ => .false\ndef Bytes.eq (a b : Bytes) : Bool := match a with\n  | .mk xs => match b with\n    | .mk ys => Bytes.eqAux xs ys\ndef Bytes.pushCp (b : Bytes) (c : Nat) : Bytes :=\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Nat.lt c 65536 with\n      | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n      | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n          (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofStringAux : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => match Nat.beq (Char.code c) 0 with\n    | .true => acc\n    | .false => Bytes.ofStringAux cs (Bytes.pushCp acc (Char.code c))\ndef Bytes.ofString (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofStringAux cs Bytes.empty\ndef Bytes.cont : Nat → Nat → List Nat → Nat\n  | .zero, cp, _ => cp\n  | .succ k, cp, .nil => cp\n  | .succ k, cp, .cons x xs => Bytes.cont k (Nat.lor (Nat.shiftLeft cp 6) (Nat.land x 63)) xs\ndef Bytes.revChars : List Char → List Char → List Char\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.revChars cs (.cons c acc)\ndef Bytes.beforeNul : List Nat → List Nat\n  | .nil => .nil\n  | .cons c cs => match Nat.beq c 0 with\n    | .true => .nil\n    | .false => .cons c (Bytes.beforeNul cs)\ndef Bytes.decodeFrom : Nat → List Nat → List Char → List Char\n  | .zero, _, acc => acc\n  | .succ fuel, .nil, acc => acc\n  | .succ fuel, .cons c xs, acc => match Nat.beq c 0 with\n    | .true => acc\n    | .false => match Nat.lt c 128 with\n      | .true => Bytes.decodeFrom fuel xs (.cons (Char.mk c) acc)\n      | .false => match Nat.beq (Nat.div c 32) 6 with\n        | .true => Bytes.decodeFrom fuel (Bytes.dropN 1 xs) (.cons (Char.mk (Bytes.cont 1 (Nat.land c 31) xs)) acc)\n        | .false => match Nat.beq (Nat.div c 16) 14 with\n          | .true => Bytes.decodeFrom fuel (Bytes.dropN 2 xs) (.cons (Char.mk (Bytes.cont 2 (Nat.land c 15) xs)) acc)\n          | .false => Bytes.decodeFrom fuel (Bytes.dropN 3 xs) (.cons (Char.mk (Bytes.cont 3 (Nat.land c 7) xs)) acc)\ndef Bytes.toString (b : Bytes) : String := match b with\n  | .mk bs => let t := Bytes.beforeNul bs; .mk (Bytes.revChars (Bytes.decodeFrom (List.length t) t .nil) .nil)\ndef Bytes.isEmpty (b : Bytes) : Bool := Nat.beq (Bytes.size b) 0\ndef Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b) with\n  | .true => .some (Bytes.get b i)\n  | .false => .none\ndef Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n\ndef Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)\ndef Bytes.ofListAux : List Nat → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons x xs, acc => Bytes.ofListAux xs (Bytes.push acc x)\ndef Bytes.ofList (l : List Nat) : Bytes := Bytes.ofListAux l Bytes.empty\ndef Bytes.toListAux (b : Bytes) : Nat → List Nat → List Nat\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.toListAux b k (.cons (Bytes.get b k) acc)\ndef Bytes.toList (b : Bytes) : List Nat := Bytes.toListAux b (Bytes.size b) .nil\ndef Bytes.singleton (x : Nat) : Bytes := Bytes.push Bytes.empty x\ndef Bytes.rangeAux : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ k, i, acc => Bytes.rangeAux k (Nat.succ i) (Bytes.push acc i)\ndef Bytes.range (n : Nat) : Bytes := Bytes.rangeAux n 0 Bytes.empty\ndef Bytes.showAux : List Nat → String\n  | .nil => \"]\"\n  | .cons x .nil => String.append (Nat.toString x) \"]\"\n  | .cons x xs => String.append (Nat.toString x) (String.append \", \" (Bytes.showAux xs))\ndef Bytes.show (b : Bytes) : String := String.append \"[\" (Bytes.showAux (Bytes.toList b))\ndef Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n      | .true => Bytes.push (Bytes.push (Bytes.push b 239) 191) 189\n      | .false => match Nat.lt c 65536 with\n        | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n        | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n            (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofCharsUtf8 : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.ofCharsUtf8 cs (Bytes.pushUtf8 acc (Char.code c))\ndef Bytes.ofUtf8 (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofCharsUtf8 cs Bytes.empty\ndef Bytes.contOp (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with\n  | .some x => match Bool.and (Nat.lt 127 x) (Nat.lt x 192) with\n    | .true => .some (Nat.sub x 128)\n    | .false => .none\n  | .none => .none\ndef Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=\n  let x := Bytes.get b i;\n  match Nat.lt x 128 with\n  | .true => .some (x, 1)\n  | .false => match Bool.and (Nat.lt 193 x) (Nat.lt x 224) with\n    | .true => (match Bytes.contOp b (i + 1) with\n      | .some y => .some ((Nat.sub x 192) * 64 + y, 2)\n      | .none => .none)\n    | .false => match Bool.and (Nat.lt 223 x) (Nat.lt x 240) with\n      | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2) with\n        | .some y, .some z =>\n          let c := (Nat.sub x 224) * 4096 + y * 64 + z;\n          (match Bool.or (Nat.lt c 2048) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n          | .true => .none\n          | .false => .some (c, 3))\n        | _, _ => .none)\n      | .false => match Bool.and (Nat.lt 239 x) (Nat.lt x 245) with\n        | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2), Bytes.contOp b (i + 3) with\n          | .some y, .some z, .some w =>\n            let c := (Nat.sub x 240) * 262144 + y * 4096 + z * 64 + w;\n            (match Bool.or (Nat.lt c 65536) (Nat.lt 1114111 c) with\n            | .true => .none\n            | .false => .some (c, 4))\n          | _, _, _ => .none)\n        | .false => .none\ndef Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat String\n  | .zero, _, acc => .ok (.mk (Bytes.revChars acc .nil))\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .false => .ok (.mk (Bytes.revChars acc .nil))\n    | .true => match Bytes.utf8At b i with\n      | .some p => Bytes.decodeUtf8 b fuel (i + p.2) (.cons (Char.mk p.1) acc)\n      | .none => .error i\ndef Bytes.toUtf8 (b : Bytes) : Except String String :=\n  match Bytes.decodeUtf8 b (Bytes.size b) 0 .nil with\n  | .ok s => .ok s\n  | .error i => .error (String.append \"invalid UTF-8 at byte \" (Nat.toString i))\ndef Bytes.latin1Chars (b : Bytes) : Nat → List Char → List Char\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.latin1Chars b k (.cons (Char.mk (Bytes.get b k)) acc)\ndef Bytes.toLatin1 (b : Bytes) : String := .mk (Bytes.latin1Chars b (Bytes.size b) .nil)\ndef Bytes.ofLatin1Aux : Nat → List Char → Bytes → Except String Bytes\n  | _, .nil, acc => .ok acc\n  | i, .cons c cs, acc => match Nat.lt (Char.code c) 256 with\n    | .true => Bytes.ofLatin1Aux (Nat.succ i) cs (Bytes.push acc (Char.code c))\n    | .false => .error (String.append \"not Latin-1: character \" (String.append (Nat.toString i)\n        (String.append \" is U+\" (Nat.toString (Char.code c)))))\ndef Bytes.ofLatin1 (s : String) : Except String Bytes := match s with\n  | .mk cs => Bytes.ofLatin1Aux 0 cs Bytes.empty\ndef Bytes.ofArrayAux (a : Array Nat) : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Array.size a) with\n    | .true => Bytes.ofArrayAux a fuel (Nat.succ i) (Bytes.push acc (Array.getD a i 0))\n    | .false => acc\ndef Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a (Array.size a) 0 Bytes.empty\ndef Bytes.toArrayAux (b : Bytes) : Nat → Nat → Array Nat → Array Nat\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .true => Bytes.toArrayAux b fuel (Nat.succ i) (Array.push acc (Bytes.get b i))\n    | .false => acc\ndef Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b (Bytes.size b) 0 Array.empty\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
 
 -- Notation and macros (stage 19b; A12). `notation`, `infixl`/`infixr`/`infix`, `syntax`
 -- and `macro_rules` all become parser-table changes and *macro rules*: a pattern tree, a

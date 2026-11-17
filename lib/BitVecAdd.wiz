@@ -26,8 +26,7 @@ is the instruction's `sub` control signal) is `BitVec.sub a b` when `s` is 1 and
 
 Nothing here uses the native-refl escape hatch: every lemma is kernel-checked, and the
 `Nat` steps are explicit `Eq.trans` chains (a `Nat` identity that the kernel's normalizer
-closes would be `True`, and cannot be a rewrite step — see
-`wiz-notes/rv-shift-lemmas.md` §4/§7).
+closes would be `True`, and cannot be a rewrite step).
 -/
 
 -- ## The circuit's expression

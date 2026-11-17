@@ -10,6 +10,31 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's Goals pane is served **in the page by default**
+  (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
+  so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
+  and term-goal requests answer `null` until the expected-type index lands; `?lsp=ws://…`
+  still selects an external server and `?lsp=off` disables the pane.
+* tests: CI's wall time is its longest shard. `selfhost-libdiff` was one case of about
+  82 min; it now checks files `--jobs` at a time inside that case, building the
+  self-hosted compiler once and keeping the records in file order, with the workers
+  capped by the CPUs and the free memory at 4 GiB per file. `scaling`'s Desc sweep is
+  nine cases over the same inputs (so the shard's parts can hold one each), and the
+  light groups of `library` run their cases four at a time; `selfhost` and `library`
+  are split eight ways by the measured times. A case of a group that does not opt in
+  to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
+  workers.
+* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
+  need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
+  shared clause body, and a postponed argument (read back as its normal form, which also
+  put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
+  as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
+  (`fib 40`) at 120 s in `check` and in the one-shot compile.
+* The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
+  by key: a row one side deleted and the other left unchanged is deleted (a union kept
+  it, so a branch merging master resurrected rows master had removed), and a row one
+  side deleted and the other modified is a conflict the driver refuses (22f).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
@@ -24,7 +49,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   termination claim, and the de-mutualisation or measure that would remove the row), and
   `docs/trust-ledger.md` states that such a row is a design choice, not an unreviewed
   gap. The two structural fuel loops `Scry.rdLoop`/`Scry.domLoop` are now total, so the
-  group is 132 rows. The migration is complete: the twenty `Prelude` numeral/`memo`
+  group was 132 rows at that review (182 today, after later modules). The migration is
+  complete: the twenty `Prelude` numeral/`memo`
   registrations, the `PMap`/`Scry` seals and `Proc.runLinked` have individual reasons
   too, no `legacy:` row remains, and CI runs `--strict-legacy` (22f, 13a).
 * grail (23n): `grail vendor [DIR]` copies the lock's registry archives into a
@@ -42,7 +68,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -110,7 +136,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   free list, and `reset`/`reuse` refill a unique cell. A long-running program's peak is its
   peak live set, not everything it allocated: the fixed workload in
   `scripts/wasm-workload.wiz` (320 MiB under the bump allocator, 40 iterations) drops from
-  320 MiB to 8.1 MiB of linear memory in 0.6× the time, and a 1000-iteration run completes
+  320 MiB to 8.1 MiB of linear memory in 0.7× the time (0.19 s reference counting against
+  0.27 s bump), and a 1000-iteration run completes
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
@@ -119,8 +146,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
   script with no prompt. `--prelude MODULE`/`-p` (repeatable, comma-separated) imports
   modules after the Prelude, so a tool can ship a prelude and wrap the ordinary REPL. The
-  test wrapper is `wiz test-driver` (the old `wiz test` name is left for the single-file
-  form, 11ah).
+  test wrapper is `wiz test-driver` (the old `wiz test` name is reserved for the
+  proposed single-file form, which is not implemented).
 * [`tools/wiz-mcp/`](tools/wiz-mcp/README.md) is a stdlib-only MCP server for the
   toolchain: `version`, `check`, `parse`, `fmt`, `build`, and the language server's
   `diagnostics`, `hover` and `goals` over MCP stdio, with one lazily started

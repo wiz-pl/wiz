@@ -30,7 +30,7 @@ cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
 grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats,
-                                # taint, project, dynamic, fuzz spans, scale
+                                # taint, report, project, dynamic, fuzz spans, scale
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -46,10 +46,10 @@ a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C �
 Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
 correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), `project` (a `compile_commands.json` multi-file C project:
-cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `fuzz-span`
-(map a fuzz artifact to CST spans for the dynamic-evidence report) and `repl` (the Wiz
-REPL with `Scry.Repl` preloaded). `parse --stats` prints counts only; the perf agent owns
-throughput numbers.
+cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `report`
+(one self-contained HTML page of the taint evidence), `fuzz-span` (map a fuzz artifact
+to CST spans for the dynamic-evidence report) and `repl` (the Wiz REPL with `Scry.Repl`
+preloaded). `parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 ## Optics and accessors
 
@@ -294,13 +294,14 @@ to the findings. A capped fixpoint adds a `scry/budget/points-to-incomplete` or
 cannot mistake a truncated run for a complete one. Every reported finding is still a
 real derivation; only recall can be reduced.
 
-Measured on this machine (`grail` build, cold-ish cache; wall time, informational):
+Measured on this machine (`grail` build, cold-ish cache; wall time, informational;
+the table is `scry/bench/scale.md`, "Function-heavy files", on the base commit):
 
-| input | nodes | before | after | peak RSS |
+| input | nodes | before | after (warm / cold) | peak RSS |
 |---|---:|---:|---:|---:|
-| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2 s warm, 6–7.5 s cold** | ≈ 650 MiB |
-| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 79 s | ≈ 48 s | ≈ 650 MiB |
-| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 149 s | ≈ 35 s | ≈ 70 MiB |
+| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2.2 s warm, 6–7.5 s cold** | 654 MiB |
+| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 117.7 s | 50.3 s / 56.4 s | 34 MiB |
+| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 180.7 s | 15.6 s / 35–38 s | 71 MiB |
 
 Parsing and building the store account for ≈ 1.7 s of the 3.9 MB case; the rest is the
 lowering walk. One generated grammar function dominates the two tree-sitter runtime
@@ -376,7 +377,8 @@ function pointers resolve only through the points-to analysis.
 
 `scry bench` runs the same pipeline as `scry taint` over `bench/corpus/manifest.json`,
 compares the findings with the manifest's expectations, and writes stable JSON and
-Markdown. The checked-in corpus is **S0/S2** (48 cases on this branch): the existing
+Markdown. The checked-in corpus is **S0/S2** (52 cases in
+`scry/bench/corpus/manifest.json`): the existing
 `tests/fixtures/taint-*.c` goldens plus hand-authored safe/unsafe pairs for CWE-78
 (command injection), CWE-134 (format string), CWE-242 (`gets`) and CWE-120/121
 (`strcpy`/`strcat`), and the external-model cases. S1/S3/S4 are optional external
@@ -394,9 +396,10 @@ Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, pre
 F1, macro averages, path validity (the path ends at the reported sink; a taint path also
 starts at a source), certificate (`checked`) coverage, boundary warnings, and runtime.
 The ratios are computed in integer basis points, so the checked-in baseline is stable.
-The checked-in baseline on this branch is **48 cases**: TP/FN 30/0, TN/FP 15/1,
-unknown 2, TPR 100.00%, FPR 6.25%, precision 96.77%, 35/35 valid paths and checked
-certificates, and 45 boundary warnings (4 blocking, 3 cases).
+The checked-in baseline (`scry/bench/baseline.json`, produced by
+`grail run scry -- bench --update-baseline bench/baseline.json`) has **52 cases**:
+TP/FN 32/0, TN/FP 17/1, unknown 2, TPR 100.00%, FPR 5.56%, precision 96.97%, 44/44
+valid paths and checked certificates, and 62 boundary warnings (4 blocking, 3 cases).
 
 Metrics are per **case**, not per alert. An `unsafe` case is TP only when every expected
 finding is matched with valid evidence and no extra finding appears; a `safe` case with a
@@ -484,6 +487,57 @@ and path shape; moving a finding keeps the id, renaming the sink or changing the
 shape creates a new one. Two identical sinks in one function with the same path shape can
 still collide (the id is a handle, not a proof of uniqueness).
 
+## `scry report`: one self-contained HTML page
+
+SARIF and JSON are for machines; a corpus review needs a page. `scry report` runs the
+same pipeline as `scry taint` and writes one HTML file with an inlined stylesheet, no
+JavaScript and no remote resource:
+
+```sh
+scry report FILE.c --out report.html
+scry report DIR --out report.html --allow-errors
+scry report FILE.c --diff origin/main --out review.html
+scry report DIR --changed-lines saved.patch --out review.html
+```
+
+The page has a summary table (files, findings, checked/unchecked, boundary and memory
+warnings, shown/suppressed), a sorted finding table, and one section per file. Each
+finding shows its rule, severity, CWE, the coarse chain (`source → flow → sink`, or
+`alloc → free → sink` for a use-after-free), its evidence (`static (L1)` plus
+`certificate (L2, checked)` or `(L0, unchecked)`), the source excerpt with the sink line
+highlighted and every path step numbered, and the diff verdict when filtering is on.
+A directory is a corpus of **independent translation units**, not a project; use
+`scry project DIR --taint` for a cross-TU call graph.
+
+**Escaping is the whole game.** The C source is escaped exactly once (`&`, `<`, `>`, `"`,
+`'`) into a text cell; there is no `innerHTML` and no script. A file containing
+`<script>alert(1)</script>` renders that text. `tests/report.wiz` uses a fixture with
+exactly that string, an ampersand and quotes, and asserts the raw tag is absent while
+`&lt;script&gt;` is present. The page also has no external URL, so it cannot phone home.
+
+**Deterministic output.** There is no timestamp, host name or elapsed time in the page.
+Files and findings are sorted, and every finding anchor is its semantic workflow id
+(`f_<16 hex>`, rule + normalized path + sink + path shape), never a line number, so two
+runs over the same input are byte-identical and a line move keeps the link. A genuine
+id collision (two identical sinks with the same path shape) gets a `-2`, `-3` anchor
+suffix; the displayed id stays the semantic id.
+
+`--diff BASE` is evaluated **per file**, so a directory page shows each file's own
+suppressed count. The wording and counts come from `Scry.TaintCmd`'s diff helpers, not a
+second filter. Suppressed findings and warnings stay on the page in a native `<details>`
+block; a filter is not a deletion.
+
+What the page does **not** claim: it is a rendering of one run's evidence, not a proof.
+A clean file is not a proof of absence, a boundary warning is a documented gap rather
+than a pass, and the page does not include dynamic evidence, SMT models or concolic
+witnesses (those live in a `scry findings` bundle). It is static evidence only, and it
+needs no JavaScript to read — so there is no client-side filtering, sorting or
+collapsing beyond the browser's native `<details>`.
+
+`tests/report.wiz` pins the tainted/safe/XSS fixtures, the sink and step spans, the
+suppressed-count line, finding-id anchors and two-run byte identity. The reusable
+renderer is `lib/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
+
 ## `scry dynamic`: observed execution evidence
 
 `scry dynamic FILE.c` compiles and runs the file under AddressSanitizer /
@@ -541,6 +595,33 @@ in `native/ts_shim.c`; that is a dynamic finding, not a clean bill of health.
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
 the remaining S1 work.
+
+## Real CVE corpus (opt-in)
+
+`bench/cases/cve-*/` holds twelve reduced reproducers of historical CVEs (CWE-78/134/22/
+416/476/190/787/125), each with its upstream vulnerable revision, licence and expected
+result in `case.json`. `scripts/cve-bench.sh` compiles each one with a plain C compiler,
+runs `scry taint` per case with `--timeout`/`--max-nodes`, and records wall time, peak
+RSS, expected/matched findings and extras. It is **opt-in only**: it is not part of
+`scry bench`, `grail test`, the fast gate or CI, and one case takes about a minute.
+
+```sh
+cd scry
+scripts/cve-bench.sh                       # build/cve/summary.{json,md}
+scripts/cve-bench.sh --case cve-2020-1752  # one case
+```
+
+**No third-party code is checked in.** Each case directory holds our `harness.c` (the
+reduction) and `upstream.json`, which pins every source (tags resolved to commits, a
+SHA-256 per file) and the line ranges of the few spans that are verbatim upstream code;
+`scripts/cve-fetch.py assemble` fetches them into a content-addressed cache and writes
+the compilable `case.c` files under `build/cve-src/`. The bench drivers run it first.
+Of the 38 case files (v1 and v2), 8 contain upstream spans (214 lines in all); the other
+30 are rewritten reductions and fetch nothing.
+
+The checked-in table, the honest precision/recall (0/6 in-scope CVEs detected today),
+the per-case miss reasons and the top analysis gaps are in `bench/cve.md`. Treat the
+synthetic `scry bench` rates as a regression corpus, not as real-world recall.
 
 ## `scry findings`: exploration → triage → repro → verify
 
