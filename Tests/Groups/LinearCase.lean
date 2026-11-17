@@ -64,6 +64,7 @@ def ticketSrc : String := ticketHeader ++
 def linearCaseGroup : Group where
   name := "linear-case"
   exercise := "docs/CoreSpec.md §10.2 (K1), §10.2a (the unit eliminator)"
+  parallel := true
   cases := [
     { name := "a2: a linear field matched out of a linear scrutinee, handed back in both alternatives (D8)", run := fun _ =>
         okLibs (linearCaseHeader ++ "def rebuild (1 r : Res1 Tok) : Res1 Tok := match r with\n  | .ok t => .ok t\n  | .err e t => .err e t\n") },

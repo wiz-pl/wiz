@@ -12,6 +12,7 @@ namespace Tests.Elab
 def textGroup : Group where
   name := "text"
   exercise := "Stage 9j"
+  parallel := true
   cases := [
     -- two modules that declare one name are an error at import: the libraries that had
     -- copies of Text's functions use Text's
