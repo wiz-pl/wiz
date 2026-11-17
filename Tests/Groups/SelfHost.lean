@@ -1993,8 +1993,9 @@ def selfHostGroup : Group where
     -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
     -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
+        -- (`#print axioms` is implemented since C14: it answers as the Lean frontend does)
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
+          "f : Nat\n'f' does not depend on any axioms\nerror: unsupported command command.erase\ng : Nat\n" },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -3189,7 +3190,35 @@ def selfHostGroup : Group where
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
+    -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
+    -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
+    -- is how a run makes what it trusted visible
+    { name := "(C14) native_refl: decided with --trust-native and recorded as the axiom X.native✝; refused without the flag", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def s : sumTo 3 = 6 := native_refl\n#print axioms s\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some trusted ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has trusted "'s' depends on axioms: [s.native✝]") s!"no .native✝ axiom in the trusted run:\n{trusted}"
+        check (has trusted ".native✝: a closed proposition decided by running it") s!"no trust note in the trusted run:\n{trusted}"
+        check (!has trusted "error:") s!"unexpected error in the trusted run:\n{trusted}"
+        let some plain ← selfhostModuleOutput [("input.wiz", src)] #[] | return
+        check (has plain "error: native evaluation is not enabled") s!"accepted without the flag:\n{plain}"
+        check (!has plain "s.native✝") s!"the axiom was added without the flag:\n{plain}" },
+    { name := "(C14) native_refl: a false equation is refuted, and a function type and a bare native_refl are refused", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def bad : sumTo 10 = 54 := native_refl\n" ++
+          "def fn : ((fun (x : Nat) => x) = (fun (x : Nat) => x)) := native_refl\n" ++
+          "def r : Nat := native_refl\n" ++
+          "def q : sumTo 3 = 6 := (native_refl : sumTo 3 = 6)\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some out ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has out "native evaluation refutes it") s!"the false equation was accepted:\n{out}"
+        check (has out "native_refl compares first-order data") s!"a function type was accepted:\n{out}"
+        check (has out "native_refl proves an equation `a = b`; this type is not one") s!"native_refl at Nat was accepted:\n{out}"
+        check (has out "native_refl can only be the whole body of a definition") s!"an ascription was accepted:\n{out}"
+        check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" }
 
   ]
 
