@@ -155,13 +155,29 @@ def expansiveOp (g : Globals R) (n : Name) : Bool :=
 /-- Would forcing this value need the value of an expansive operation? A glued operation
 does if it is expansive itself, or if an argument on its spine is (`Nat.sub h (Nat.pow …)`
 is as expensive to unfold as the power: `subFrom` matches on its second argument). Used by
-`whnfNumeral` to keep such a value stuck when a caller only asks for its shape. -/
-partial def expensiveVal (g : Globals R) : Val R → Bool
-  | .unfold n _ sp _ =>
-    expansiveOp g n || sp.any (fun e => match e with
-      | .app a => expensiveVal g a
-      | _ => false)
-  | _ => false
+`whnfNumeral` to keep such a value stuck when a caller only asks for its shape.
+
+A value is a **DAG**, not a tree: `let q := (Nat.add q₁ q₂, Nat.add q₂ q₁)` shares its
+components, and a chain of those has `2ⁿ` paths through only `2n` values. Walking paths
+would make this predicate exponential (it did: a 30-deep doubling chain took minutes to
+*elaborate*, before anything was evaluated). The walk therefore carries a **budget**, and
+answers `true` when it runs out. `true` only means "don't force it here", and a value that
+is left glued is still computed whenever something asks for its value, so an
+over-approximation is sound: it can cost a fast path, never a wrong answer. -/
+partial def expensiveVal (g : Globals R) (v : Val R) : Bool :=
+  (go g 64 v).1
+where
+  /-- The walk, with the budget left: `(does it need an expansive op, budget left)`. -/
+  go (g : Globals R) : Nat → Val R → Bool × Nat
+    | 0, _ => (true, 0)
+    | f + 1, .unfold n _ sp _ =>
+      if expansiveOp g n then (true, f)
+      else sp.foldl (fun (found, f) e =>
+        if found then (true, f) else
+        match e with
+        | .app a => go g f a
+        | _ => (false, f)) (false, f)
+    | f + 1, _ => (false, f)
 
 /-- `whnf`, but a glued value that would need an expansive operation's value is not
 forced: its result may need as much memory as the value, and not forcing it is always

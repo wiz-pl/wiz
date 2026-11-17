@@ -41,6 +41,12 @@ def runGroup : Group where
             String.join ((List.range 30).map fun i =>
               s!"  match (Nat.add y{i} y{i}, y{i}) with | (y{i + 1}, _) =>\n") ++ "  y30\n#eval mt 1")
           ["(536870912, 536870912)", "1073741824"] },
+    -- (the memo is lazy: `big` is reachable from `f` and compiled, but never forced)
+    { name := "an unused closed definition is not computed", run := fun _ =>
+        withinMs 20000 <| okLibs ("import Prelude\ndef big0 : Nat := 1\n" ++ String.join ((List.range 30).map fun i =>
+            s!"def big{i + 1} : Nat := Nat.add big{i} big{i}\n") ++
+            "def f (n : Nat) : Nat := match n with | .zero => .zero | .succ _ => big30\n#eval f .zero")
+          [".zero"] },
     { name := "types and proofs erase to ◾", run := fun _ =>
         ok "def id {A : Type} (x : A) : A := x\n#erase id" ["id := (λA. (λx. #0))"] },
     { name := "erased fields are gone at runtime", run := fun _ =>

@@ -527,20 +527,48 @@ partial def ETerm.globals (e : ETerm) (acc : Array Name := #[]) : Array Name :=
   | .case s bs => bs.foldl (fun acc b => b.globals acc) (s.globals acc)
   | _ => acc
 
+/-- Is this erased body worth remembering (the analogue of `IR.Expr.isWork`)? A constant
+whose body is a variable, a projection, a numeral or another constant is cheaper to
+rebuild than to look up. -/
+partial def ETerm.isWork : ETerm → Bool
+  | .erased | .var _ | .proj _ _ | .natLit _ | .global _ => false
+  | .obj _ fs => !fs.isEmpty
+  | .letE _ v b => v.isWork || b.isWork
+  | _ => true
+
+/-- Is this erased body a **closed definition** that compiled code caches (a CAF,
+`IR.cafs`): no parameters after erasure (not a `λ`), not a registration of a native
+operation (whose "body" is the stub that makes the value), and work worth remembering.
+
+Effects are not an issue in this interpreter: `run` has none. The only operations it can
+perform are its pure primitives and `fireNative`'s arithmetic/`show`, and a foreign
+function it cannot run (it panics: `#eval` never runs one). A value of type `IO A` is a
+closure, not an action, so caching it does not run anything. We still exclude the native
+registrations (`IR.cafExcluded`: `wiz.entry`, exports, native wrappers) as compiled code
+does, and a body that does no work. -/
+def ETerm.caf? (t : ETerm) : Bool :=
+  match t with
+  | .lam .. | .prim .unreachable #[.global _] => false
+  | t => t.isWork
+
 /-- The closed definitions among those `roots` reach (their erased bodies are not lambdas:
 constant applicative forms, `IR.cafs`), each computed on its first use and then shared,
 as compiled code does. Without it a constant is recomputed at every use, and a chain
 `c (i+1) := c i + c i` is exponential. A value is a `Thunk`, so a definition that is
-never used is never computed.
+never used is never computed: the walk only *creates* thunks (one per reachable CAF), and
+a thunk's body runs on its first `.get`.
 
 Each thunk runs with the values of the definitions finished before it: the globals are
 visited depth first and a definition is added after everything it reaches, so a constant
 finds every constant it uses, except along a cycle, where the use is recomputed as
-before (the same value, without the sharing). -/
+before (the same value, without the sharing).
+
+The key is the declaration's `Name`, in a table built for **one** command: a `RunCode` is
+made fresh for each `#eval`, so no value outlives the `Globals` it was computed from. -/
 def RunCode.withCafs (code : Code) (roots : Array Name) : RunCode := Id.run do
-  let isCaf : ETerm → Bool := fun
-    | .lam .. | .prim .unreachable #[.global _] => false
-    | _ => true
+  -- (as compiled code: not run once by `main`, not an exported or foreign wrapper)
+  let excluded (n : Name) : Bool :=
+    n == "wiz.entry" || n.startsWith "wiz.export." || n.startsWith "wiz.native."
   let mut seen : Std.HashSet Name := {}
   let mut cafs : Std.HashMap Name (Thunk RVal) := {}
   -- (an explicit stack: `true` once the definition's globals are pushed)
@@ -550,9 +578,9 @@ def RunCode.withCafs (code : Code) (roots : Array Name) : RunCode := Id.run do
     stack := stack.pop
     if finished then
       if let some t := code[n]? then
-        if isCaf t then
+        if !excluded n && t.caf? then
           let rc : RunCode := { code, cafs }
-          cafs := cafs.insert n (Thunk.mk fun _ => run rc [] t)
+          cafs := cafs.insert n (memoThunk fun _ => run rc [] t)
     else if !seen.contains n then
       seen := seen.insert n
       stack := stack.push (n, true)
