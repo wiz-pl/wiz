@@ -1659,6 +1659,40 @@ def selfhostDerivingBad : String :=
 def selfhostDerivingBadExpected : String :=
   "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
+/-- (#422) Programs whose `match` (or `if`) scrutinee is closed and costly: `fib k n` doubles
+`n` `k` times by recursion (2^k calls). The scrutinee is an argument (`IO.println`, `f`), a
+postponed argument (`pick`: its type is a metavariable until `"x"` fixes it), a
+`let`-bound variable's use in an argument, and an `if`. The self-hosted frontend used to
+evaluate such a match while it compiled (the codomain at the argument, `let` values and
+postponed arguments were evaluated eagerly), so its time grew with `fib`'s. -/
+def closedScrutProgram (k : Nat) : String :=
+  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n" ++
+  "def f (x : String) : String := x\n" ++
+  "def pick {A : Type} (a : A) (b : A) : A := a\n" ++
+  s!"def a : IO Unit := IO.println (match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\")\n" ++
+  s!"def b : String := f (if Nat.beq (fib {k} 1) 0 then \"z\" else \"nz\")\n" ++
+  s!"def c : String := pick (match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\") \"x\"\n" ++
+  s!"def d : String := let r := Nat.beq (fib {k} 1) 0; f (match r with\n  | .true => \"z\"\n  | .false => \"nz\")\n" ++
+  "def main : IO Unit := do\n  a;\n  IO.println b;\n  IO.println c;\n  IO.println d\n"
+
+/-- (#422) `closedScrutProgram 40` through the self-hosted compiler, `check` and then the
+one-shot C, each within `secs`: evaluating any of its scrutinees (2^40 calls) would not
+finish. The program is not run. -/
+def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") (closedScrutProgram 40)
+    for (label, args) in [("check", #[exe.toString, "check", "input.wiz"]), ("the one-shot compile", #[exe.toString])] do
+      let t0 ← IO.monoMsNow
+      let out ← IO.Process.output { cmd := "timeout", args := #[toString secs] ++ args, cwd := dir }
+      let t1 ← IO.monoMsNow
+      unless out.exitCode == 0 do
+        throw (IO.userError s!"{label}: exit {out.exitCode} after {t1 - t0} ms (124 is over {secs} s: the closed scrutinees were evaluated while compiling, #422): {out.stderr.take 2000}")
+      note s!"#422 {label}: {t1 - t0} ms"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -3221,7 +3255,11 @@ def selfHostGroup : Group where
           ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
 
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
-        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
+        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
+    { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
+        selfhostClosedScrutBounded 120
+        ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
 
   ]
 

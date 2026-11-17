@@ -41,6 +41,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   continuation byte, a surrogate half, above U+10FFFF and an embedded NUL, through both
   toolchains, collector and reference counting), the `ffi` `#eval`/`#run` cases, and
   `#check` pins of the folded `import_c` signatures.
+* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
+  need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
+  shared clause body, and a postponed argument (read back as its normal form, which also
+  put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
+  as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
+  (`fib 40`) at 120 s in `check` and in the one-shot compile.
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one
