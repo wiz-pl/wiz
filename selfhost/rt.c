@@ -263,6 +263,7 @@ INLINE V mkfun(Fn f, uint32_t arity, uint32_t n, V *args) {
    before the others can see it: pure code never blocks, so the lock can't deadlock
    (the same rule as `runtime/wiz.c`, stage 25a) */
 static void rt_mark_mt(V v);
+static void rt_root(V *p);
 #ifdef WIZ_RC
 static void rt_immortal(V v);
 #endif
@@ -687,9 +688,11 @@ static void rt_immortal(V v) {
 /* a constant of the program (a global, a native's closure, a literal or a capture-free
    closure in a body): built once, however many threads first use it
    (`runtime/wiz.c`'s `wiz_caf_init`). The build is under one recursive lock (a constant
-   may force another; pure code never blocks, so it can't deadlock), and the value is
-   made immortal (`rt_immortal`): every thread can reach it, so no count is paid and no
-   reference can free it. The fast path is one atomic load. */
+   may force another; pure code never blocks, so it can't deadlock). The value is marked
+   shared (`rt_mark_mt`: every thread may use it, so its counts change atomically) and its
+   slot is a root (`rt_root`) holding the one reference `build` returned; a use's `inc` is
+   a reference the consumer moves, and `rt_finish` releases the slot at exit. The fast
+   path is one atomic load. */
 #ifndef WIZ_NO_THREADS
 static pthread_mutex_t rt_caf_mu;
 static pthread_once_t rt_caf_once = PTHREAD_ONCE_INIT;
@@ -710,7 +713,12 @@ static V rt_caf(V *slot, V (*build)(void)) {
   if (!v) {
     rt_caf_lock();
     v = __atomic_load_n(slot, __ATOMIC_RELAXED);
-    if (!v) { v = build(); rt_immortal(v); __atomic_store_n(slot, v, __ATOMIC_RELEASE); }
+    if (!v) {
+      v = build();
+      rt_mark_mt(v);           /* threads may use it: the counts turn atomic (rc < 0) */
+      rt_root(slot);           /* the slot's reference, released at exit */
+      __atomic_store_n(slot, v, __ATOMIC_RELEASE);
+    }
     rt_caf_unlock();
   }
   inc(v);
@@ -1295,10 +1303,24 @@ INLINE void dropTake(V x, V r) { (void)resetTake(x, 0, r); }
 /* the balances of the threads that have ended (25a): `rt_live` is per thread, and the
    program waits for every thread before its leak check (as `runtime/wiz.c`) */
 static int64_t rt_live_exited;
+/* the constant slots: a value built once (a global, a literal, a capture-free closure,
+   a native's closure) holds one reference from its slot, released at exit. 25a made
+   them immortal (`rc = 0`, counted nowhere) while every emitter still promises one
+   owned reference per use; `takeArgs`/`resetTake` then consumed a reference that never
+   existed (the 15g leak case). Rooted and counted again, as `cb7e778b` had them. */
+static V **rt_roots; static size_t rt_nroots, rt_caproots;
+static void rt_root(V *p) {
+  if (rt_nroots == rt_caproots) {
+    rt_caproots = rt_caproots ? 2 * rt_caproots : 256;
+    rt_roots = (V **)realloc(rt_roots, rt_caproots * sizeof(V *));
+    if (!rt_roots) die("out of memory");
+  }
+  rt_roots[rt_nroots++] = p;
+}
 static void rt_wait_threads(void);
 
-/* at exit: wait for the threads; then every object not made immortal must have been
-   freed (a program's constants are immortal, so nothing is released here) */
+/* at exit: wait for the threads, release the constant slots' references (a constant is a
+   rooted value, freed here), then every object left must have been freed */
 static void rt_finish(void) {
   rt_wait_threads();
 #ifdef WIZ_STATS
@@ -1307,6 +1329,7 @@ static void rt_finish(void) {
   fprintf(stderr, "wiz hyp base rt_finish %p\n", (void *)rt_finish);
   for (size_t i = 0; i < HYPT; i++) if (hypMade[i] > 1000000) fprintf(stderr, "wiz hyp %p: %zu made, %zu forced\n", (void *)hypKey[i], hypMade[i], hypForced[i]);
 #endif
+  for (size_t i = rt_nroots; i > 0; i--) dec(*rt_roots[i - 1]);
   int64_t leaked = (int64_t)rt_live + rt_live_exited;
   if (leaked != 0) { fflush(stdout); fprintf(stderr, "wiz: %ld objects leaked\n", (long)leaked); exit(4); }
 }
@@ -1766,12 +1789,70 @@ static void rt_ensure(void) {
 /* (21s) Handles, as in `runtime/wiz.c` (stage 9g): C owns the reference to a Wiz value it
    gets (from an export, or a `Callback`'s context), `wiz_retain` makes one more and
    `wiz_release` gives one back. `wiz_live_objects` counts the objects alive, for leak
-   checks in C tests: under reference counting, those allocated and not freed (a program's
-   constants are immortal and not counted); under the collector nothing is counted (0). */
+   checks in C tests: under reference counting, those allocated and not freed, less what
+   the constants' roots reach; under the collector nothing is counted (0). */
 #ifdef WIZ_RC
+static int rt_isNul(Obj *o) { return (void *)o >= (void *)rt_nul && (void *)o < (void *)(rt_nul + RT_NNUL); }
+/* a set of objects (open addressing), and a stack of objects to visit */
+static Obj **rt_seenT; static size_t rt_seenCap, rt_seenN;
+static Obj **rt_todo; static size_t rt_todoN, rt_todoCap;
+static int rt_seenAdd(Obj *o) {
+  if (2 * (rt_seenN + 1) > rt_seenCap) {
+    size_t oc = rt_seenCap; Obj **old = rt_seenT;
+    rt_seenCap = oc ? 2 * oc : 1024;
+    rt_seenT = (Obj **)calloc(rt_seenCap, sizeof(Obj *));
+    if (!rt_seenT) die("out of memory");
+    rt_seenN = 0;
+    for (size_t i = 0; i < oc; i++) if (old[i]) (void)rt_seenAdd(old[i]);
+    free(old);
+  }
+  size_t h = ((uintptr_t)o >> 4) * 11400714819323198485ull & (rt_seenCap - 1);
+  while (rt_seenT[h]) { if (rt_seenT[h] == o) return 0; h = (h + 1) & (rt_seenCap - 1); }
+  rt_seenT[h] = o; rt_seenN++;
+  return 1;
+}
+static void rt_visit(V v) {
+  if (!v || ISBOX(v)) return;
+  if (rt_todoN == rt_todoCap) {
+    rt_todoCap = rt_todoCap ? 2 * rt_todoCap : 256;
+    rt_todo = (Obj **)realloc(rt_todo, rt_todoCap * sizeof(Obj *));
+    if (!rt_todo) die("out of memory");
+  }
+  rt_todo[rt_todoN++] = OBJ(v);
+}
+/* the objects the roots reach: the program's constants, counted in `rt_live` but not
+   leaks (the C tests' `wiz_live_objects` asks for what is alive otherwise) */
+static size_t rt_rooted(void) {
+  size_t n = 0;
+  rt_seenN = 0; rt_todoN = 0;
+  if (rt_seenT) memset(rt_seenT, 0, rt_seenCap * sizeof(Obj *));
+  for (size_t i = 0; i < rt_nroots; i++) rt_visit(*rt_roots[i]);
+  while (rt_todoN) {
+    Obj *x = rt_todo[--rt_todoN];
+    if (rt_isNul(x) || !rt_seenAdd(x)) continue;
+    n++;
+    uint32_t t = TAG(x);
+    /* (the children, as `rt_drain` releases them) */
+    if (t < T_CLO || t == T_HYP) { for (uint32_t i = 0; i < SIZE(x); i++) rt_visit(x->f[i]); }
+    else if (t == T_CLO) {
+      Clo *c = (Clo *)x;
+      for (uint32_t i = 0; i < SIZE(c); i++) rt_visit(c->env[i]);
+    } else if (t == T_THUNK) {
+      Thunk *th = (Thunk *)x;
+      rt_visit(th->fn ? th->fn : th->val);
+    } else if (t == T_ARR) {
+      Arr *a = (Arr *)x;
+      for (size_t i = 0; i < a->len; i++) rt_visit(a->data[i]);
+    } else if (t == T_MAP) {
+      Map *m = (Map *)x;
+      for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { rt_visit(m->keys[i]); rt_visit(m->vals[i]); }
+    }
+  }
+  return n;
+}
 void wiz_release(void *v) { dec((V)v); }
 void wiz_retain(void *v) { inc((V)v); }
-long wiz_live_objects(void) { return (long)((int64_t)rt_live + rt_live_exited); }
+long wiz_live_objects(void) { return (long)((int64_t)rt_live + rt_live_exited - (int64_t)rt_rooted()); }
 #else
 void wiz_release(void *v) { (void)v; }
 void wiz_retain(void *v) { (void)v; }

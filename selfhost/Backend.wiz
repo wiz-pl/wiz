@@ -1675,7 +1675,7 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
       | .mk x st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = wcodes((uint32_t[]){") ⧺ codesC cs ⧺
           .t ((match cs with
             | .nil => "0"
-            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
+            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
     | .none => match natConst t with
       | .some n => .mk (.t "") (.t "BOX(" ⧺ Doc.nat n ⧺ .t "UL)") live st
       | .none => match spineE f (.cons a .nil) with
@@ -1732,7 +1732,7 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
         | .true => match CG.fresh st "cst" with
           | .mk x st0 => match rcEs (RE.inner re) st0 .nil 0 .nil items with
             | .mk fc atoms _ st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { ") ⧺ fc ⧺ .t (x +++ " = ") ⧺ objC "" tag n atoms ⧺
-                .t ("; rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
+                .t ("; rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
         | .false => match wish with
           | .mk w st0 => match rcEs re st0 names d live items with
             | .mk fc atoms fl st1 => bindTo st1 fc (objC w tag n atoms) fl
@@ -1841,7 +1841,7 @@ def rcLam (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) 
             -- (capturing nothing: one closure, built once, a constant)
             | .nil => match CG.fresh st3 "clo" with
               | .mk x st4 => .mk (cc ⧺ .t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = mkfun(" +++ fname +++ ", " +++
-                  Nat.toString k +++ ", 0, NULL); rt_immortal(" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) cl st4
+                  Nat.toString k +++ ", 0, NULL); rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) cl st4
             | .cons _ _ => bindTo st3 cc (.t ("mkfun(" +++ fname +++ ", " +++ Nat.toString (nc + k) +++ ", " +++ Nat.toString nc +++
                 ", (V[]){" +++ joinC (capsCode names caps) +++ "})")) cl
 -- a saturated call of `d_g`, then the rest applied: a variable in a borrowed position
