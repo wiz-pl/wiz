@@ -118,11 +118,18 @@ its own `grail.wiz` is left out). The first line gives the kind: `-- test: check
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
 compiled through C). `-- test: skip REASON` marks an example that the package-wide run
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
-needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
+needs no `.expected`, and is not a pass. A `check` or `run` line may end in
+`timeout SECS` (`-- test: run timeout 900`) for a test that needs more than
+`--test-timeout` gives every test: the larger limit applies to its job and to its
+program. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
-`grail test --update` writes the actual output. Every example is a test
-(`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
+`grail test --update` writes the actual output. `grail test --rerun` runs the tests again
+even when a pass is recorded (a flaky test, a program that reads something outside its
+key): the old record is dropped, a pass is recorded again and a failure leaves none, so the
+next plain `grail test` reports what this run saw. Only the tests' own jobs run again;
+their programs' checks, objects and links are reused when up to date. Every example is a
+test (`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
 them in CI, in three cases over name ranges, so a change to a library that changes what
 an example prints fails the suite rather than only a command a person runs. The Lean
 tests stay in `lake test`.
@@ -139,8 +146,8 @@ dependencies are done (an object's key hashes the C its `c` node wrote); a node 
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
 (`grail --grail-job …` with the toolchain as flags, or the C compiler) with a time limit
-(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, so a test that
-hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
+(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, or the larger `timeout SECS` of a
+test's `-- test:` line (23f), so a test that hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.

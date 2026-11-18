@@ -2077,6 +2077,40 @@ def libLoader : IO (Name → Option String) := do
           m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
   pure fun n => m.lookup n
 
+/-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/
+def libModuleNames : IO (List String) := do
+  let mut ms : Array String := #[]
+  for e in ← System.FilePath.readDir "lib" do
+    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
+    else if ← e.path.isDir then
+      for f in ← System.FilePath.readDir e.path do
+        if f.path.extension == some "wiz" then
+          ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
+  pure ((ms.qsort (· < ·)).toList)
+
+/-- Modules of `lib/` that are alternative implementations and cannot be imported into
+one program, paired with the modules each must leave out. `Scry.EgraphNative` declares
+the same top-level names as `Scry.Egraph` (the reference list model), and `Scry.EqPlan`
+imports it; the modules built on the reference (`Scry.EgraphWil`/`Extract`/`Taint`)
+import it too. Every whole-library loader must go through `allLibSource` (or load an
+apart module with `libSourceExcept skip`) — importing all of `lib/` at once fails with
+"declared by both". (`Json` and `Infoview` used to be here when `Json` declared
+`Nat.repr`; `Text` owns it now, so they load with all the rest.) -/
+def libApart : List (String × List String) :=
+  [ ("Scry.EgraphNative",
+     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"])
+  , ("Scry.EqPlan",
+     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"]) ]
+
+/-- `import` lines for every module of `lib/` except `skip`. -/
+def libSourceExcept (skip : List String) : IO String := do
+  pure (String.join (((← libModuleNames).filter (!skip.contains ·)).map (s!"import {·}\n")))
+
+/-- Every module of `lib/` imported at once, except the alternative backends that
+cannot co-load (see `libApart`). -/
+def allLibSource : IO String := do
+  libSourceExcept (libApart.map (·.1))
+
 /-- No errors, and these messages, with every library importable. -/
 def okLibs (input : String) (infos : List String := []) : IO Unit := do
   let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← libLoader }

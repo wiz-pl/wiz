@@ -106,8 +106,9 @@ jobs:
   # relative link and anchor in the docs resolves (scripts/check-doc-links.py;
   # external links are reported but not fetched). The same job runs the quadratic-shape
   # lint on the pull request's changed `.lean`/`.wiz` lines only
-  # (scripts/check-complexity --diff HEAD^1; the existing sites are its allowlist), so a
-  # new append-in-loop or eraseDups fails a PR before the build starts.
+  # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
+  # a PR before the build starts. A bounded site is excused inline, on the line or the
+  # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
   # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
@@ -266,9 +267,8 @@ jobs:
             $(nix path-info .#wiz .#tests)
       - name: Every test case is in exactly one shard
         run: |
+          python3 scripts/ci.py check-shards --self-test
           python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
-          # the parts check's rule, on synthetic artifacts (no test logs needed)
-          python3 scripts/ci.py libdiff-union --self-test
       - name: Shards
         id: shards
         run: |
@@ -488,7 +488,6 @@ jobs:
         env:
           SELECT: ${{ matrix.shard.select }}
           JOBS: ${{ matrix.shard.jobs }}
-          PART: ${{ matrix.shard.part }}
         run: |
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
@@ -498,31 +497,13 @@ jobs:
           # from "--jobs 1" (`Tests.caseJobsGiven`).
           jobs=()
           if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
-          # A shard with "parts" carries "i/n": the part of the one case whose files it
-          # checks (`--part i/n`), so the six jobs together are the case they replace.
-          part=()
-          if [ -n "$PART" ]; then part=(--part "$PART"); fi
           jobs_s="${jobs[*]-}"
-          part_s="${part[*]-}"
-          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${part_s:+$part_s }${sel[*]}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" \
-            "${jobs[@]}" "${part[@]}" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
-      - name: Keep the libdiff part's records
-        # A part writes its records as it goes, so a part that the job's timeout kills
-        # still leaves what it finished; `CI result` checks the union (a missing or
-        # partial part is a failure, not a smaller green total). `always()` is what runs
-        # this after a timed-out test step.
-        if: always() && matrix.shard.part
-        run: |
-          # In a subdirectory: `CI result` reads `logs/*.jsonl` as `--timings` records
-          # (summary, balance, check-skips), and a libdiff record is not one of those.
-          mkdir -p logs/libdiff
-          cp .lake/libdiff/records.jsonl "logs/libdiff/${{ matrix.shard.name }}.jsonl" || true
-          cp .lake/libdiff/part.txt "logs/libdiff/${{ matrix.shard.name }}.txt" || true
       - name: Save the Wiz build caches
         if: always() && steps.wiz-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -800,25 +781,6 @@ jobs:
           # all shards' case times in one file, for `scripts/ci.py baseline`
           mkdir -p timings
           cat logs/*.jsonl > timings/timings.jsonl 2>/dev/null || true
-      # `selfhost-libdiff` is one case split by index into six jobs (`--part i/6`). This
-      # proves the union is the one case: the parts are 1..6, agree on the corpus, cover
-      # every file in .github/libdiff-corpus.txt once, sum to the whole run's summary,
-      # and have no `bounded` record (a bounded file was not compared). The check runs
-      # only when `changes` asked for the shard, so an unrelated change is not failed
-      # for a shard that was not scheduled.
-      - name: selfhost-libdiff parts cover the corpus
-        if: needs.test.result != 'skipped' && contains(needs.changes.outputs.shards, 'selfhost-libdiff')
-        shell: bash
-        run: |
-          shopt -s nullglob
-          parts=(logs/libdiff/*.txt)
-          recs=(logs/libdiff/*.jsonl)
-          if [ ${#parts[@]} -eq 0 ] || [ ${#recs[@]} -eq 0 ]; then
-            echo "::error title=selfhost-libdiff::the shard ran but wrote no part artifacts"
-            ls -la logs
-            exit 1
-          fi
-          python3 scripts/ci.py libdiff-union "${parts[@]}" "${recs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       # A green run must have tested something. Fails when a group skipped wholesale
       # (unless .github/skip-allowlist.json allows it, with a reason and an owner), when
       # a skip names a tool the dev shell must provide (cc, GMP, GC, yosys, node, nix,

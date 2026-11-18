@@ -375,6 +375,28 @@ def solveSortConstraints : ElabM R Unit := do
       try unify ctx.lvl (← refreshVal ctx A) ty catch _ => set s
     if (← solvedLevels) == before then break
 
+/-- (13b, `--trace-guess-fallback` of `wiz` and of the tests binary) print each declaration
+that reaches `checkGuessedDecl` (stderr). A process-wide switch, set once before anything
+is elaborated: the elaborator is pure and the test suite builds its states in some 180
+places, so it is read as the frontend reads its isolation memo (`isoGet`).
+
+**Invariant: the switch changes only what is printed, never what is accepted, rechecked
+or cached in a run without the flag.** It is false unless `--trace-guess-fallback` is
+given, and it is read in three places only: here, where it gates a `dbgTrace` and nothing
+else (whether `checkGuessedDecl` rechecks depends on `unifyGuessed` and the foreign
+opaque types alone); in `Cache.elaborateCached`, where a traced run reads and writes no
+cache (a cache is transparent by contract, so that changes no result either); and in
+`wiz`'s own cache switch (`Main.lean`). Like `isoGet`/`isoPut`, this host-side `unsafe`
+read is outside the trust ledger, which covers the Wiz sources of `lib/`. -/
+initialize traceGuessesRef : IO.Ref Bool ← IO.mkRef false
+
+private unsafe def traceGuessesOnImpl (_ : Name) : Bool := unsafeBaseIO traceGuessesRef.get
+
+/-- Is `--trace-guess-fallback` on? (The argument, the declaration's name, only keeps the
+compiler from evaluating this once, as a constant, before the switch is set.) -/
+@[implemented_by traceGuessesOnImpl]
+opaque traceGuessesOn (name : Name) : Bool
+
 /-- A declaration whose elaboration used a first-order solution that could not be typed
 where it was guessed (`ElabState.unifyGuessed`; a guess is normally checked against its
 hole's type on the spot, `checkGuess` in `Unify.lean`) is checked once more where opaque
@@ -383,12 +405,23 @@ environment, where a private type is its definition again, so it would accept a
 look-alike (the same view `rfl` and a holed `assign` already compare in). This is the
 fallback only: a quoted term can carry an evaluated `μ (T.desc …)` without the name `T`,
 which has no type in that view, so the check also rejects some honest declarations
-(`privacyCheck`). A declaration whose guesses were all typed is not affected. -/
+(`privacyCheck`). A declaration whose guesses were all typed is not affected. A guess
+whose type comparison met a hole is compared again first, with the declaration's holes
+solved (`recheckDeferredGuesses`): only one that is still undecided then reaches this
+recheck. -/
 def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Option (Term R)) :
     ElabM R Unit := do
+  -- (#411) the guesses whose comparison met a hole, now that the holes are solved
+  recheckDeferredGuesses info
   if (← get).unifyGuessed then
     let g := (← getGlobals).fullView
-    if !(foreignOpaques g).isEmpty then
+    let recheck := !(foreignOpaques g).isEmpty
+    -- (`--trace-guess-fallback`) one line per declaration that reaches the fallback: the
+    -- count to drive to zero (`scripts/guess-fallback-stats.sh`)
+    if traceGuessesOn name then
+      let reasons := "; ".intercalate (← get).guessReasons.toList
+      dbgTrace s!"guess-fallback: {if g.module.isEmpty then "_" else g.module} {name} recheck={if recheck then "ran" else "skipped"} reasons={reasons}" fun _ => pure ()
+    if recheck then
       -- (a partial definition's signature is already a global: the checked copy gets
       -- an internal name, and the message the declaration's)
       let internal := if g.contains name then name ++ "✝" else name
@@ -408,7 +441,7 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   let (ctx, tele) ← elabTelescope { info } (binders.flatMap binderViews).toList
   let ty ← match typeStx with
     | some s => pure (← Elab.checkType ctx s).1
-    | none => freshMeta ctx "the type of this definition"
+    | none => freshTypeMeta ctx "the type of this definition"
   -- (for the language server) the type after the binders, and where ` : T` would go
   if let some (n, ni, at_) := declName? then
     pushInfo (.decl ni n ctx ty typeStx.isSome at_)

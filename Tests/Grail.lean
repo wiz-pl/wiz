@@ -177,7 +177,8 @@ def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain
 substrings `grail test FILTER` takes (all the tests of the targets if empty), so a case
 can run the tests of a name range without copying the package. -/
 def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false)
-    (testTimeoutMs : Option Nat := none) (filters : List String := []) :
+    (testTimeoutMs : Option Nat := none) (filters : List String := [])
+    (rerun : Bool := false) :
     IO (Array Grail.TestResult × Grail.Stats) := do
   let std : System.FilePath := "lib"
   match ← Grail.readConfig tc 7 std dir with
@@ -185,7 +186,7 @@ def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false)
   | .ok (pkg, machine) =>
     let tc ← withSettings tc pkg machine
     let r ← runner dir tc pkg 2 (← IO.mkRef "")
-    let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs }
+    let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs, rerunTests := rerun }
     let res ← r.tests pkg.targets filters update
     pure (res, ← r.stats.get)
 

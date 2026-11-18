@@ -167,12 +167,14 @@ def placeholderFull (ctx : LocalCtx R) : Bool :=
 /-- A placeholder metavariable for an argument (`checkApp`): like `freshMeta`, but
 applied only to the bound variables that are their own values, so that unifying it with
 the argument stays in the pattern fragment in a `match` branch whose context has
-variables replaced by others (index unification). -/
-def freshPlaceholder (ctx : LocalCtx R) : ElabM R (Term R) := do
+variables replaced by others (index unification). `ty` is the argument's type (13b,
+`MetaEntry.type?`), recorded in `ctx` with only those variables bound. -/
+def freshPlaceholder (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Term R) := do
   let m := (← get).metas.size
   let live := (ctx.bound.zip (ctx.env.zip (List.range ctx.lvl).reverse)).reverse.map fun (b, v, l) =>
     b && isOwnVar v l
-  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc := "an argument", arity := (live.filter id).length } }
+  let type? := some ({ ctx with bound := live.reverse }, ty)
+  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc := "an argument", arity := (live.filter id).length, type? } }
   let mut t : Term R := .mvar m
   for b in live, lvl in [0:ctx.lvl] do
     if b then t := .app t (.var (ctx.lvl - lvl - 1))
@@ -306,10 +308,15 @@ Unification is untyped, so it misses the η-rule for `Unit` (`P x =?= P ()` with
 `x : Unit`). When it fails, we ask the kernel's type-directed `convTy`, which treats
 unsolved metas as rigid, before giving up. -/
 def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : ElabM R Unit :=
-  fun s => match unify ctx.lvl expected inferred s with
-    | .ok r => .ok r
+  -- (the context's names, for a message unification writes itself: `checkGuessTypes`)
+  fun s => match unify ctx.lvl expected inferred { s with unifyCtxNames := ctx.names } with
+    | .ok ((), s') => .ok ((), { s' with unifyCtxNames := s.unifyCtxNames })
     | .error e =>
       if subTy s.globals ctx.types.reverse.toArray inferred expected then .ok ((), s) else
+      -- (13b) a guess that would take a look-alike of a private type says so itself, with the
+      -- hole, the guess and both types (`checkGuessTypes`): not as a reason under the mismatch
+      if e.code == ErrorCode.private_ && e.msg.endsWith forgingGuessTail then
+        .error { e with info := (ctx.withInfo stx).info, state? := some s } else
       let show' (v : VTy R) := elideLong ((quote s.globals ctx.lvl v).pretty ctx.names (some s.globals))
       .error { info := (ctx.withInfo stx).info,
                msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++
@@ -1216,7 +1223,9 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
         let meet := match prevRhs? with
           | some m => m
           | none => lhs
-        let rM ← freshMeta ctx "the relation this calc step composes to"
+        -- (13b) typed by `Trans`'s third parameter (`MetaEntry.type?`)
+        let rTy? ← constArgType? "Trans" [] [← evalIn ctx resType, propTy]
+        let rM ← freshMeta ctx "the relation this calc step composes to" rTy?
         let goalTy : VTy R := vApp g (vApp g (vApp g (eval g [] (.const "Trans" []))
           (← evalIn ctx resType)) propTy) (← evalIn ctx rM)
         let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | do
@@ -1992,7 +2001,7 @@ partial def inferFun (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   | b :: rest =>
     let ty ← match b.type with
       | some s => pure (← checkType ctx s).1
-      | none => freshMeta ctx s!"the type of {b.name}"
+      | none => freshTypeMeta ctx s!"the type of {b.name}"
     let q ← elabQuantity ctx b.bi b.qty
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
@@ -2228,7 +2237,7 @@ partial def checkApp (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Elab
     (f, fty) ← insertImplicits ctx f fty
     match ← force fty with
     | .pi _ _ _ dom cod _ =>
-      let m ← freshPlaceholder (ctx.withInfo arg)
+      let m ← freshPlaceholder (ctx.withInfo arg) dom
       -- (does the rest of the type mention the argument? If not, the placeholder occurs
       -- only in `f`, which `respine` rebuilds: it needn't be solved)
       let used := match cod with | .mk _ body => body.hasVar 0
@@ -2359,7 +2368,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
   -- (a lambda argument with unannotated binders is postponed: `checkApp` against an
   -- unknown type does that)
   if postpone && !explicitMode && ((stx.getArg 1).args.any postponable || (← numOperands ctx stx)) then
-    let T ← freshMeta ctx "the type of an application"
+    let T ← freshTypeMeta ctx "the type of an application"
     let vT ← evalIn ctx T
     let t ← checkApp ctx stx vT
     return (t, vT)
@@ -2381,9 +2390,9 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
     let fty' ← match ← force fty with
       | ty@(.pi ..) => pure ty
       | ty@(.neutral (.mvar _) _) =>
-        let a ← freshMeta ctx "a function domain"
+        let a ← freshTypeMeta ctx "a function domain"
         let va ← evalIn ctx a
-        let b ← freshMeta (ctx.bind "x" va) "a function codomain"
+        let b ← freshTypeMeta (ctx.bind "x" va) "a function codomain"
         let pi : Val R := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) va (.mk ctx.env b) .hole
         unifyAt ctx fStx ty pi
         pure pi
@@ -2412,7 +2421,7 @@ partial def inferApp (ctx : LocalCtx R) (stx : Syntax) (postpone : Bool := true)
           | .ok a => pure a
           | .error e =>
             if e.code != "non-pattern" then throw e
-            let m ← freshPlaceholder (ctx.withInfo arg)
+            let m ← freshPlaceholder (ctx.withInfo arg) dom
             waiting := waiting.push (arg, m, dom)
             pure m
       f := .app f a
@@ -3578,7 +3587,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let t ← check ctx (stx.getArg 1) vty
     return (.ann t ty, vty)
   | "term.hole" | "term.syntheticHole" =>
-    let a ← freshMeta ctx "the type of a hole"
+    let a ← freshTypeMeta ctx "the type of a hole"
     let desc := if stx.isOfKind "term.hole" then "_" else s!"?{((stx.getArg 1).getId?).getD "_"}"
     let va ← evalIn ctx a
     return (← freshMeta ctx desc va, va)
@@ -3692,7 +3701,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let firstIx (n : Name) : Option Nat := ctx.names.findIdx? (· == n)
     let hidden := scrut.filterMap firstIx
     let ctx' := { ctx with bound := ctx.bound.zipIdx.map fun (b, i) => b && !hidden.contains i }
-    let ty ← evalIn ctx (← freshMeta ctx' "the type of this match")
+    let ty ← evalIn ctx (← freshTypeMeta ctx' "the type of this match")
     return (← check ctx stx ty, ty)
   | "term.calc" => elabCalc ctx stx
   | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>
@@ -4109,9 +4118,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       let P : Term R := .lam "x" (.lam "_"
         (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
       let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
-      let m ← freshMeta gl.ctx "goal"
+      let newTy ← evalIn gl.ctx newT
+      let m ← freshMeta gl.ctx "goal" newTy
       unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := ← evalIn gl.ctx newT, tm := m }
+      let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
       let (r, st) ← refl st gl newT
       return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.getSimpLemmas then

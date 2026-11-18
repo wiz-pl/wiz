@@ -195,9 +195,9 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
 in still run one case at a time, but each of their cases is told N (`Tests.caseJobs`), so a
-long sweep may use N workers inside its one process (`=selfhost-libdiff`). `--jobs-all`
-also parallelizes groups that did not opt in (for auditing a group's isolation, not for
-CI).
+long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer when the
+memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
+auditing a group's isolation, not for CI).
 
 `--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
 runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and
@@ -213,6 +213,11 @@ def main (args : List String) : IO UInt32 := do
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
+  -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
+  -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
+  let traceGuesses := args.contains "--trace-guess-fallback"
+  let args := args.filter (· != "--trace-guess-fallback")
+  if traceGuesses then Wiz.traceGuessesRef.set true
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- `--jobs N` (default 1): the cases of an opted-in group run N at a time, and a case
@@ -238,7 +243,7 @@ def main (args : List String) : IO UInt32 := do
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set tc.toFlags
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>

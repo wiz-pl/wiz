@@ -29,7 +29,7 @@
   ]},
   {"name": "selfhost-libdiff", "heavy": true, "parts": 6, "jobs": 3,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
-              "Tests/Main.lean"],
+              "Tests/Main.lean", "Tests/Harness.lean"],
    "select": [
     "=selfhost-libdiff"
   ]},

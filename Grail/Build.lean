@@ -75,6 +75,9 @@ structure Runner where
   /-- a job's time limit, in milliseconds; tests have their own -/
   timeoutMs : Nat := 1800000
   testTimeoutMs : Nat := 300000
+  /-- `grail test --rerun`: run every test's job again, even one with a recorded pass
+  (the pass it records replaces the old one; a failure removes it) -/
+  rerunTests : Bool := false
 
 def Runner.load (r : Runner) (file : String) : IO Loaded := do
   if let some l := (← r.memo.get).loaded[file]? then return l

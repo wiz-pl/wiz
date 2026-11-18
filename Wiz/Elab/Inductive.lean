@@ -41,7 +41,7 @@ def elabTelescope (ctx : LocalCtx R) (bs : List BinderView) :
   for b in bs do
     let ty ← match b.type with
       | some s => pure (← checkType ctx s).1
-      | none => freshMeta ctx s!"the type of {b.name}"
+      | none => freshTypeMeta ctx s!"the type of {b.name}"
     let q ← elabQuantity ctx b.bi b.qty
     tele := tele.push (b.name, b.bi, q, ty)
     let vty ← evalIn ctx ty

@@ -1,0 +1,83 @@
+import Scry.EgraphExtract
+-- The checked extraction back to Wil (`scry-egraph-wil-extract`): the same straight-line
+-- function as `scry-egraph-wil-const`, but here the saturated e-classes are extracted
+-- into a *new* `Wil.Program`. `2 + 3` becomes `5`, `a * 1` and `a + 0` become copies of
+-- the registers that hold 5, and the final `b + c` folds to 10. `main` is the digest:
+-- rounds, counts, stop reason, and the rewritten right-hand sides.
+
+def v0 : Wil.Var := Wil.var 0 Wil.i32
+def v1 : Wil.Var := Wil.var 1 Wil.i32
+def v2 : Wil.Var := Wil.var 2 Wil.i32
+def v3 : Wil.Var := Wil.var 3 Wil.i32
+def v4 : Wil.Var := Wil.var 4 Wil.i32
+def v5 : Wil.Var := Wil.var 5 Wil.i32
+def v6 : Wil.Var := Wil.var 6 Wil.i32
+def v7 : Wil.Var := Wil.var 7 Wil.i32
+
+def fn : Wil.Func :=
+  Wil.func "constants" [] [v0, v1, v2, v3, v4, v5, v6, v7]
+    [ Wil.block
+        [ Wil.num v0 2
+        , Wil.num v1 3
+        , Wil.binop v2 .add v0 v1
+        , Wil.num v3 1
+        , Wil.binop v4 .mul v2 v3
+        , Wil.num v5 0
+        , Wil.binop v6 .add v2 v5
+        , Wil.binop v7 .add v4 v6 ]
+        (Wil.ret (.some v7)) ]
+
+def p : Wil.Program := Wil.program [fn]
+
+def s0 : Scry.WgeStats := Scry.wgeRewriteProgram 0 p
+def s1 : Scry.WgeStats := Scry.wgeRewriteProgram 1 p
+def s8 : Scry.WgeStats := Scry.wgeRewriteProgram 8 p
+
+def stmtAt : List Wil.Stmt → Nat → Option Wil.Stmt
+  | .nil, _ => .none
+  | .cons s _, .zero => .some s
+  | .cons _ rest, .succ n => stmtAt rest n
+
+def rhsAt (prog : Wil.Program) (i : Nat) : Option Wil.Rhs :=
+  match prog.funcs with
+  | .cons f (.nil) => match f.blocks with
+    | .cons b .nil => match stmtAt b.stmts i with
+      | .some (.assign _ e _) => .some e
+      | _ => .none
+    | _ => .none
+  | _ => .none
+
+def isCst (prog : Wil.Program) (i n : Nat) : Bool :=
+  match rhsAt prog i with
+  | .some (.cst (.int _ _ b)) => Nat.beq b n
+  | _ => .false
+
+def isVar (prog : Wil.Program) (i n : Nat) : Bool :=
+  match rhsAt prog i with
+  | .some (.use v) => Nat.beq v.index n
+  | _ => .false
+
+def bit (x : Bool) : Nat := if x then 1 else 0
+
+def d (n k : Nat) : Nat := Nat.mul n (Nat.pow 10 k)
+
+def runNat (prog : Wil.Program) : Nat :=
+  match Wil.runFunction prog 200 "constants" [] with
+  | .ok (.int _ _ b) => b
+  | _ => 999
+
+def main : Nat :=
+  d s8.rounds 13
+  + d s8.rewritten 12
+  + d s8.rejected 11
+  + d s8.skipped 10
+  + d (bit (String.eq s8.stop "fixpoint")) 9
+  + d (bit (isCst s8.program 2 5)) 8
+  + d (bit (isVar s8.program 4 2)) 7
+  + d (bit (isCst s8.program 7 10)) 6
+  + d (bit (String.eq s1.stop "fuel")) 5
+  + d s1.rewritten 4
+  + d s0.rewritten 3
+  + d (bit (String.eq s0.stop "fuel")) 2
+  + d (bit (Nat.beq (runNat p) 10)) 1
+  + d (bit (Nat.beq (runNat s8.program) 10)) 0
