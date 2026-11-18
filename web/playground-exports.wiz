@@ -118,12 +118,16 @@ def pgcLines : List String → String
     | .nil => pgcLine l
     | .cons _ _ => String.append (pgcLine l) (String.append "," (pgcLines rest))
 
+-- the check's text; the export runs it under the boundary. (A named helper keeps the
+-- `match` at command indentation, where the layout parser wants it.)
+def playgroundCheckText (text : String) : String :=
+  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  | .mk out _ _ _ _ => String.append "{\"v\":1,\"lines\":["
+      (String.append (pgcLines (List.reverseOf out .nil)) "]}")
+
 def playgroundCheck (text : String) : String :=
-  pgStopRun (fun _ =>
-    match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-        (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
-    | .mk out _ _ _ _ => String.append "{\"v\":1,\"lines\":["
-        (String.append (pgcLines (List.reverseOf out .nil)) "]}")
+  pgStopRun (fun _ => playgroundCheckText text)
 
 export "wiz_playground_check" playgroundCheck
 
