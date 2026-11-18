@@ -60,7 +60,10 @@ def scale : EIO Unit := do
   match present with
   | .false => say "scale: skip (native/tree-sitter-c/src/parser.c absent)"
   | .true => do
-    o ← opts (List.cons path (List.cons "--allow-errors" .nil));
+    -- The docstring above says 900 s, but the library default is 300: on a cold CI
+    -- runner parsing the 3.9 MB grammar exceeds it, and the test then fails itself.
+    o ← opts (List.cons path (List.cons "--allow-errors"
+      (List.cons "--timeout" (List.cons "900" .nil))));
     rep ← Scry.analyzeFile o;
     say ("scale: nodes=" ++ Nat.repr rep.nodes
       ++ " parseErrors=" ++ Nat.repr rep.parseErrors
