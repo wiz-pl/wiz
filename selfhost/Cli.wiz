@@ -2304,7 +2304,7 @@ def knownTopFlag (a : String) : Bool :=
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
     (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types")
       (Bool.or (strEq a "--llvm") (Bool.or (strEq a "--wasm")
-        (Bool.or (strEq a "--trust-native") (strEq a "--trust-smt")))))))
+        (Bool.or (strEq a "--trust-native") (strEq a "--trust-smt"))))))))
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)
 
