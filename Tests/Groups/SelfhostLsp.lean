@@ -58,9 +58,9 @@ def lspMessages (raw : String) : IO (List Lean.Json) := do
     unless body.utf8ByteSize == len do
       throw (IO.userError s!"Content-Length {len} but the body is {body.utf8ByteSize} bytes:\n{body.take 200}")
     match Lean.Json.parse body with
-    | .ok j => out := out ++ [j]
+    | .ok j => out := j :: out
     | .error e => throw (IO.userError s!"a message is not JSON ({e}):\n{body.take 200}")
-  pure out
+  pure out.reverse
 
 /-- The `n`th message, or an error naming what arrived. -/
 def lspAt (msgs : List Lean.Json) (n : Nat) : IO Lean.Json :=

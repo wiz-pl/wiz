@@ -169,3 +169,5 @@ Wiz/Module.lean	3a53fc3c2a8c	search-in-loop: grandfathered 2026-11-18 (pre-exist
 Wiz/Module.lean	e7c73d7f05a8	search-in-loop: grandfathered 2026-11-18 (pre-existing; reviews/2026-11-18-complexity-patterns.md)
 Wiz/Parser/Monad.lean	854241e8d50e	eraseDups: grandfathered 2026-11-18 (pre-existing; reviews/2026-11-18-complexity-patterns.md)
 Wiz/Semantic.lean	04d6cec20897	append-in-loop: grandfathered 2026-11-18 (pre-existing; reviews/2026-11-18-complexity-patterns.md)
+Tests/Native.lean	557b690c12cf	eraseDups: the trust ledger's dedup over the whole checked base (1308 sources); n^2 is ~1.7M string comparisons, once per check, measured negligible
+Tests/Native.lean	ef35df4c26b0	eraseDups: the trust ledger's dedup over the whole checked base (1308 sources); n^2 is ~1.7M string comparisons, once per check, measured negligible
