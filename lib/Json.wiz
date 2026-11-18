@@ -173,13 +173,9 @@ def Json.skipWs : List Char → List Char
   | .cons c cs => match Json.isWs (Char.code c) with
     | .true => Json.skipWs cs
     | .false => .cons c cs
-/-- The input after the literal `lit` (the first list), if it starts with it. -/
-def Json.expect : List Char → List Char → Option (List Char)
-  | .nil, s => .some s
-  | .cons l ls, .cons c cs => match Nat.beq (Char.code l) (Char.code c) with
-    | .true => Json.expect ls cs
-    | .false => .none
-  | _, _ => .none
+/-- The input after the literal `lit` (the first list), if it starts with it
+(`Chars.stripPrefix` in lib/Text.wiz). -/
+def Json.expect : List Char → List Char → Option (List Char) := Chars.stripPrefix
 /-- Parses the keyword `lit` (`true`, `false`, `null`) as the value `v`. -/
 def Json.keyword (lit : String) (v : Json) (s : List Char) : JParse Json :=
   match Json.expect (String.chars lit) s with
