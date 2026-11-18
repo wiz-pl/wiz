@@ -492,7 +492,8 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz", "--cache", cache, "-v"]
         checkEq 1 c
         cliCheck err "cache hit: " "warm"
-        cliCheck err refuse "warm message" },    { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
+        cliCheck err refuse "warm message" },
+    { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]
         checkEq 0 c
