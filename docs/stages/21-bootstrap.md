@@ -871,18 +871,26 @@ typedefs and struct definitions. `import_c` binds the scalar prototypes it can m
 access, then emits a static C wrapper called by the backend's normal foreign path.
 
 `attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
-constructor's implementation is registered (`mk`), as is the representation. A type
-whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
-pattern) therefore compiles to its natives. Direct pattern matching on a native value
-still needs `get` in erasure.
+constructor's implementation is registered (`mk`), as is the representation: its tag,
+field count, one runtime field, and the arities of the two conversions. Erasure builds a
+value of `T` as `mk` applied to the constructor's runtime field, and feeds a match on a
+value of `T` the model's field chain (with `get` for that field), as the Lean compiler
+does. A type whose operations are all `implemented_by` runtime natives (the
+`U32Array`/`U64Map` pattern) therefore compiles to its natives, and pattern matching on
+a native value reads the field through `get`.
 
 **Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
 a `c_struct`/`foreign_type`), no `for` loops, struct locals or `&struct` in self-hosted
-glue, no rewriting of matches through `get` (buffer parameters came in 21ad).
+glue, and no `nativeHome?` (a value with a native representation built or taken apart
+outside the type's module: the constructor's `private` is not enforced as a scope, so a
+multi-module program can do it).
 
 **Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
 and from `glue`, and a native representation on a sealed constructor that runs through
-`wiz_u32array_*`, in GC and RC modes.
+`wiz_u32array_*`, in GC and RC modes. A `UIntN`-like sealed type whose `mk`/`get` are
+externs is compiled and run by the Lean host and by the self-hosted compiler, with the
+same output in GC and RC modes; the registrations' verdicts and the errors' wording are
+differential too.
 
 **ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
 parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
