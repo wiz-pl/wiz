@@ -13,7 +13,7 @@
 "use strict";
 import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
-import { LspClient, LspError, parseEndpoint, endpointFromSearch } from "./lsp-client.js";
+import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
 import {
   renderPanel, readGoalState, offsetAt, positionAt, rangeOffsets,
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
@@ -73,6 +73,15 @@ check("endpoint: absent", parseEndpoint(null), null);
 check("endpoint: from an empty query", endpointFromSearch(""), null);
 check("endpoint: from ?lsp=", endpointFromSearch("?lsp=ws://example:1").url, "ws://example:1");
 check("endpoint: ?lsp=off", endpointFromSearch("?lsp=off"), null);
+// (#430) the server's token: from `?token=`, into the socket's URL, never into the label
+check("token: a port and ?token=", endpointFromSearch("?lsp=8765&token=abc").url, "ws://127.0.0.1:8765/?token=abc");
+check("token: the label leaves it out", endpointFromSearch("?lsp=8765&token=abc").label, "ws://127.0.0.1:8765/");
+check("token: already in the ?lsp= URL", endpointFromSearch("?lsp=ws://h:1/?token=x&token=y").url, "ws://h:1/?token=x");
+check("token: with a fallback endpoint", endpointFromSearch("?token=t", "lsp", "ws://127.0.0.1:9").url, "ws://127.0.0.1:9/?token=t");
+check("token: ?lsp= wins over the fallback", endpointFromSearch("?lsp=off&token=t", "lsp", "ws://127.0.0.1:9"), null);
+check("token: none, the URL unchanged", withToken("ws://h:1", ""), "ws://h:1");
+check("token: escaped", withToken("ws://h:1/", "a b&c"), "ws://h:1/?token=a+b%26c");
+check("token: withoutToken keeps the rest", withoutToken("ws://h:1/?a=1&token=t"), "ws://h:1/?a=1");
 
 // ## 2. The RFC 6455 frames (the mock server and the test client share them)
 
@@ -314,6 +323,32 @@ checkThat("wiring: a failed connection is no server",
   await waitUntil(() => deadPanel.innerHTML.includes("no language server")), deadPanel.innerHTML.slice(0, 300));
 checkThat("wiring: the failure is explained", deadPanel.innerHTML.includes("cannot connect"));
 checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-action="reconnect"'));
+
+// ## 10b. The token (#430): the mock refuses like `wiz lsp --ws`; a client with the
+// page's `?token=` gets in, one without it does not
+
+const tokenMock = await startMockServer({ token: "s3cr3t" });
+const bare = new LspClient({ url: tokenMock.url, WebSocketImpl: connectWebSocket, connectTimeout: 1500 });
+let bareError = null;
+try { await bare.connect(); } catch (e) { bareError = e; }
+checkThat("token: no token, refused", bareError instanceof Error && tokenMock.stats.refused === 1, String(bareError));
+bare.close();
+const wrongEp = endpointFromSearch("?lsp=" + tokenMock.port + "&token=nope");
+const wrong = new LspClient({ url: wrongEp.url, WebSocketImpl: connectWebSocket, connectTimeout: 1500 });
+let wrongError = null;
+try { await wrong.connect(); } catch (e) { wrongError = e; }
+checkThat("token: a wrong token, refused", wrongError instanceof Error && tokenMock.stats.refused === 2, String(wrongError));
+wrong.close();
+const tokenPanel = fakePanel();
+const tokenApp = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: tokenPanel, uri: "file:///token.wiz",
+  config: { ...endpointFromSearch("?lsp=" + tokenMock.port + "&token=s3cr3t"), WebSocketImpl: connectWebSocket },
+});
+checkThat("token: the page's ?token= gets in",
+  await waitUntil(() => tokenPanel.innerHTML.includes('class="names"')), tokenPanel.innerHTML.slice(0, 300));
+checkThat("token: the panel does not show it", !tokenPanel.innerHTML.includes("s3cr3t"));
+tokenApp.stop();
+await tokenMock.close();
 
 // ## 11. Nothing escaped
 

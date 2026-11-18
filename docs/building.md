@@ -27,6 +27,26 @@ as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skippe
 not a pass. A selector that picks no group, a case index the group lacks, and an unknown
 flag are errors (exit code 2), not an empty run.
 
+**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
+compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
+program's exit code and standard error, `.timeout`, or `.readback` when the program itself
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
+only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
+program's stderr. Never look for `No such file` in a program's stderr to decide "no
+toolchain": a program may print that itself (a missing fixture, a `File.open`, a
+`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
+has a case for each half.
+
+A case whose name claims **linear** time must measure it. `Tests.checkScaling`
+(`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
+start-up floor measured at `f 0`), prints both times, and requires
+`t(2n) ≤ 3·t(n) + 250 ms` for a linear claim (`bound` 6 for `n log n`, 10 for
+quadratic). An absolute millisecond bound is a timeout guard, not a complexity test: a
+quadratic implementation passes it. Name a timeout-guarded case accordingly ("… within
+N s"), and give a new scaling case the input that grows the suspect dimension
+(`Tests/Scaling.lean`).
+
 `tests --run GROUP INDEX` runs one case as `lake test -- '=GROUP#INDEX'` does: in a child
 process, with the toolchain of `grail.local.wiz` (toolchain flags after it override it),
 printing the case's name and result, a failure's output, and a last line
@@ -189,23 +209,25 @@ never turns a deterministic failure into a pass. Add an entry in a PR with a rea
 an expiry that leaves time to fix or replace the test; refresh the date only with a new
 reason, never by deleting the entry silently.
 
-**In CI.** The test shard's `tests` step has `continue-on-error: true`, so a failed
-shard reaches the classifier instead of ending the job. `scripts/flaky-ci.sh shard`
-runs `scripts/flaky.py --from-log logs/<shard>.log` with `--budget 600`, writes
-`logs/<shard>-flaky.json` (uploaded with the `test-log-*` artifact) and a Markdown
-section in the run summary, and exits 0 only when every failure is an active quarantine
-entry. The last step, `scripts/flaky-ci.sh verdict`, then makes the job green only when
-the tests passed or the classifier cleared the failure; a deterministic failure, an
+**In CI: not wired yet.** PR #369 added the classifier and its CI glue, but
+`.github/workflows/ci.yml` does not call `scripts/flaky-ci.sh` (nothing under `.github/`
+mentions `flaky`), so the shard's `tests` step has no `continue-on-error`: a failed shard
+still ends the job and is not classified, no report is written, and no expiry runs. The
+glue is ready for the wiring it documents at the top of the script — `shard` on a failed
+shard (`scripts/flaky.py --from-log logs/<shard>.log`, `--budget 600`, writing
+`logs/<shard>-flaky.json` and a summary), then `verdict` with `if: always()`, then
+`expiry` in the `result` job — and with that wiring a shard would be green only when the
+tests passed or the classifier cleared every failure (a deterministic failure, an
 incomplete measurement, a source failure that only skips, or a flaky case with no active
-entry keeps the job red. `scripts/flaky-ci.sh expiry` runs in the `result` job with
-`if: always()` and fails it (naming the entry and its owner) from the entry's expiry
-date on. The `shard` mode prints the shard, case, class, seed(s) and quarantine expiry
-in one table.
+entry keeps it red). Until then the classifier is a local tool:
+`scripts/flaky-ci.sh self-test` (no driver, no build) and the `shard`/`verdict`/`expiry`
+modes run by hand.
 
-**What a failed shard costs.** The classifier reruns each failing case five times alone
-and a suspect five more times after a predecessor: about ten driver runs per failing
-case, plus two `--list-cases` calls. The whole classification is capped at 600 seconds
-of wall time per failed shard (exit 4 if it runs out, which keeps the shard red). It
+**What a failed shard costs when the classifier runs.** The classifier reruns each
+failing case five times alone and a suspect five more times after a predecessor: about
+ten driver runs per failing case, plus two `--list-cases` calls. The whole
+classification is capped at 600 seconds of wall time per failed shard (exit 4 if it runs
+out, which keeps the shard red). It
 runs in the same job as the shard, so it uses that job's store paths, `~/.cache/wiz`
 (the helper passes it as `--cache`) and `.grail`; on the self-hosted runner this is the
 same incremental path, while a cold cache pays elaboration again for every rerun. A
@@ -224,7 +246,14 @@ rebuild all of it); `scripts/test-embed.sh` checks the setup (a local
 `nix develop -c scripts/test-embed.sh` check, since it needs an incremental Lake build;
 CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles the
 runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
-(the header's prototypes are checked against the parts).
+(the header's prototypes are checked against the parts), each also with
+`-DWIZ_NO_THREADS`, and runs a small C program against the threaded and the one-thread
+runtime. The one-thread binary links with stub pthreads (every pthread name it uses is
+redirected with `-Wl,--wrap=` to a no-op) and must have no pthread symbols; the program
+sends on a channel before receiving, and checks that the waits a second thread would end
+stop with their message. It also compiles the header's Emscripten auto-enable with
+`-D__EMSCRIPTEN__` (there is no `emcc` in the toolchain, so this is not an Emscripten
+build).
 
 ## Test layout
 
@@ -407,13 +436,28 @@ scripts/check-repro.sh                 # the corpus (needs .lake/build/bin/wiz)
 scripts/check-repro.sh --json          # one JSON object on stdout
 scripts/check-repro.sh --compiler      # also build wiz and grail under two paths
 scripts/check-repro.sh --compiler-a A --compiler-b B
+scripts/check-repro.sh --self-test     # the skip and empty-tree rules (no compiler)
+python3 scripts/check-repro-report.py [--require-compiler] FILE
+                                       # assert a --json result (self-test also)
 ```
 
-It skips cleanly (exit 0, `status: skip`) when `wiz` is not built. The compiler comparison
+A skip is not a pass: when `wiz` is not built, `grail` is missing or `WIZ_LLC` is not
+set, the script exits 2 (with `--json`, `ok:false, status:"skip"`). `--allow-skip`
+accepts that explicitly (exit 0, `"allowed":true` in the JSON); CI never passes it. A
+label the run must cover cannot be skipped quietly, and a comparison with zero files on
+either side is a failure, not `ok, 0 files`. The compiler comparison
 keeps `HOME` fixed: elan installs a Lean toolchain per `HOME`, so a different `HOME` is a
 different compiler input (and a different `RUNPATH` in the executable), not a path
 variation. `--compiler-olean` also compares `.olean` files; Lean stores the absolute
 source path in them, so they are expected to differ and are skipped by default.
+
+CI reads the JSON instead of discarding it: `ci.yml`'s corpus step runs
+`check-repro.sh --json` and passes the result to `scripts/check-repro-report.py`, which
+fails on a run-level skip, an empty check list or any diff/error, and annotates a
+skipped compiler comparison as a notice. That PR job does not pass `--compiler` (two
+full Lake builds); the nightly `repro.yml` workflow does, on the self-hosted runner, and
+runs the reader with `--require-compiler`, so `"compiler": {"status": "skip"}` is a
+failure there rather than an invisible pass.
 
 The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
 directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
@@ -432,11 +476,16 @@ the generated C and the linked programs are compared byte for byte by the script
 
 ### The Lean build (`lake build wiz tests grail`)
 
-The build is 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
+The figures in this section are a one-off observation from the parallel-build work on
+2026-11-17 (see `wiz-notes/parallel-build.md`). The `wait4` recorder and the run's data
+are not committed, so they cannot be reproduced from the tree; treat them as historical,
+not as a gate or a baseline.
+
+The build was 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
 `.lake` and an empty `LAKE_CACHE_DIR` on the 27 GiB, 32-CPU development host, while
 about twenty other agents were building (load average 40–54). The same command with
 the shared artifact cache warm is **12 s**, all 530 jobs replayed, so this is the cost
-of a new commit or toolchain, not of a fresh worktree. What was measured: each C
+of a new commit or toolchain, not of a fresh worktree. How it was measured: each C
 compiler invocation was wrapped in a `wait4` recorder (wall time and `ru_maxrss`),
 `lake build -v` gives each Lean job's duration, and the whole process tree's RSS was
 sampled every 20 ms for the peak.
@@ -607,22 +656,24 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. The toolchain is built **once**, with Nix: the `build` job runs
-`nix build .#wiz .#tests .#reference` (nixpkgs' Lean, no Lake artifact cache; `reference`
-is the standard library's reference manual, made with that `wiz`) and publishes the three
-store paths to Cachix with
+`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes those
+two store paths to Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
 ```
 
 with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
 build has no Lake artifact cache: a commit's first build compiles every module in the
 sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
 paths. Pull requests from forks get no secret: they skip the push and their shards build
-the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
-(`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
-critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
-Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
+the paths themselves. The `docs` job builds `.#reference` (the standard library's
+reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
+The `test`, `docs` and `docs_examples` jobs pull from Cachix
+(`cachix-action` is set up for substitution only, `skipPush: true`); the `build` job
+publishes explicitly (above). No job on the critical path runs `lake build` directly or
+saves a `.lake` Actions cache. The shards run the Nix-built test driver
+(`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Groups/Grail*.lean` look for). The dev shell (`nix develop`)
@@ -634,8 +685,8 @@ LLVM) and 165 MB for the test driver (2.0 GB with its closure, which includes th
 `wiz` it carries beside itself), so a shard's substitution is a download, not a compile. The store path is content-addressed: the same
 sources give the same path, and a shard on another architecture (the aarch64 caveat in
 [ci-runner.md](ci-runner.md)) has a different one and builds it there. The weekly
-bootstrap fixpoint, the release workflow and `scripts/test-embed.sh` still use Lake and
-the elan toolchain, so the setup action keeps the elan cache for those
+bootstrap fixpoint and the release workflow still use Lake and the elan toolchain, so the
+setup action keeps the elan cache for those
 (`lean: true`); it is skipped in the Nix jobs (`lean: false`).
 
 * **The test suite** runs in parallel shards, one job per entry of
@@ -644,7 +695,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
+  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting, and
+  again end to end on the matrix the jobs are started from; `check-shards --self-test`
+  checks the check on a stand-in driver). See
   "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
@@ -656,6 +709,22 @@ the elan toolchain, so the setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+  The same job runs `scripts/check-doc-links.py`: every relative link and `#anchor` in
+  those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
+  to `wiz-notes/...` are reported as external notes (the notes live outside the
+  repository) and `http(s)` links are reported but not fetched, so CI needs no network.
+* **The preludes** (the `prelude_drift` job): the self-hosted frontend's embedded
+  prelude (`preludeText`, `selfhost/Frontend.wiz`) is a hand-written subset of
+  `lib/Prelude.wiz`, and the Wasm playground compiles that frontend. Every CI run
+  (including docs-only pull requests) runs `scripts/check-prelude-drift.py`, which
+  compares the two semantic surfaces
+  (names, kinds, constructors and fields), fails a `lib/` prelude value declaration
+  that is not mirrored in the embedded copy or reviewed in the script's exception list,
+  and fails when a reviewed exception goes stale. It also reports the names the page
+  promotes without their library import (`List.map`, `String.length`, the
+  `IO`/`Std`/`Bytes` names). No build, well under a second, and `CI result` requires it;
+  the copies, the current gaps and what the real fix costs are in
+  [stages/21-bootstrap.md](stages/21-bootstrap.md#the-two-preludes-and-the-drift-check).
 * **Documentation examples** (the `docs_examples` job, and a step in `build`):
   `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
   and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
@@ -669,12 +738,25 @@ the elan toolchain, so the setup action keeps the elan cache for those
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
-  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
+  a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
   checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
+* **The playground and the site's JavaScript** (the `web` job): on a pull request that
+  changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. It
+  builds both Wasm modules with the same scripts as `docs`, then runs its browser-free
+  half: `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
+  and the site check's rules for it); `web/playground_lsp_test.mjs` and
+  `web/selfhost_lsp_test.mjs` (the language client and the in-page server shim, against
+  stubs); `web/node_test.mjs` and `web/playground_test.mjs` (the two modules);
+  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the React
+  framework's browser half, in a Node DOM double) runs beside it. `CI result` requires
+  the job when `changes` selects it. The Chromium half (`web/chrome_test.mjs` and
+  `web/doc_chrome_test.mjs`: a served page over the DevTools protocol) needs a browser
+  and stays local.
 * **Trust ledger** (a step in the `build` job, before any shard):
   `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
@@ -700,6 +782,27 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
+* **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
+  (after a perf fix, or when a group grows), fetch the last runs and rebalance:
+
+  ```sh
+  r=$(mktemp -d)
+  scripts/ci.py fetch-runs --branch 'master|integration/.*' 14 "$r"
+                                               # $r/RUN/timings.jsonl and jobs.json
+  scripts/ci.py rebalance "$r"/*               # report only
+  scripts/ci.py rebalance --write "$r"/*       # .github/test-timings.json, test-shards.json
+  ```
+
+  A case's time is its median over the runs, and each part's prediction is scaled by
+  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
+  runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
+  shard with the longest part, until the job budget (`--jobs`, default the current
+  number of test jobs) is used or another part would not shorten the longest one; a
+  long job that cannot be split does not stop it. It exits with an error if the parts
+  do not cover every case of the split shards exactly once. The case list is the test driver's (`--bin`), or the last run's; cases that no
+  run has measured yet (a case just split) can be given with `--assume TSV`
+  (`GROUP<TAB>CASE<TAB>SECONDS`, or `drop` for a case that is gone). It prints the
+  predicted time of every job under the current and the new counts.
 * **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
   opted-in groups run N cases at a time, and a lone case may use N workers itself.
   Only set it on a shard whose groups were verified (and opted in) to be safe in
@@ -738,15 +841,22 @@ the elan toolchain, so the setup action keeps the elan cache for those
   limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
   minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
   3-worker auto pool (splitting it into cases would make each part build the
-  self-hosted compiler again). `scaling`'s sweep was one case of about 24 min; it is now nine cases
-  over the same inputs, so the shard's parts can each hold one.
+  self-hosted compiler again). Split such a case in its test instead, into cases over
+  parts of its input that together check the same things: `scaling`'s sweep of the
+  induction hypotheses over `lib/` and `examples/` (up to 31 min as one case) was one
+  case; it is now nine cases (one for `lib/`, one for the modules checked apart, six
+  over the examples, and one that checks that the six cover every example once), measured
+  on CI in `.github/test-timings.json` (1330 s in total, the longest 229 s), so the
+  shard's parts can each hold one.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
   * a group's cases all skipped and the group is not in
-    `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
-    for and an owner, and may name the one `case` it excuses; the self-host parity
-    entries do, with their `parity` code);
+    `.github/skip-allowlist.json`. Each entry names exactly one `case` (there is no
+    whole-group entry), the reason it may skip for, an owner, and an `expires` date
+    (`YYYY-MM-DD`); the case matches exactly, the reason matches the start of the
+    skip's reason, and an entry past its date is an error until it is renewed with a new
+    reason. The self-host parity entries also carry their `parity` code;
   * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
     nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
@@ -754,15 +864,28 @@ the elan toolchain, so the setup action keeps the elan cache for those
     the allow-list instead;
   * a group's unexplained skipped ratio is over 25% (`--max-ratio`), counted over all
     of the group's cases in every shard, so moving cases between shards (a refreshed
-    `.github/test-timings.json`) cannot change the verdict.
+    `.github/test-timings.json`) cannot change the verdict;
+  * the logs parse no records at all: an empty or unreadable log proves nothing, so
+    "No skips: all 0 cases ran" is not a pass.
 
   Explained skips are reported in the summary (with the reason and the allow-list owner)
   and give a warning annotation, never a failure. Skips that are not whole-group and stay
   under the ratio also warn, so a few skipped cases are visible without blocking. The
   step first runs `scripts/ci.py check-skips --self-test`, which checks the rule on
-  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool)
-  without running the suite. Adding an allow-list entry needs a real reason: prefer
-  putting the tool in the dev shell.
+  synthetic logs (all-skip, partial-skip, clean, an allow-listed group, a required tool,
+  an expired or case-less entry, an empty record set) without running the suite. Adding
+  an allow-list entry needs a real reason and an expiry date, and the entry names the one
+  case it excuses: prefer putting the tool in the dev shell.
+* **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
+  test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
+  `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
+  library through the host; this is the package's own suite, and no other job ran it
+  (`golden-diff.yml` only *shows* what `--update` would write, after a shard failed for
+  another reason). The workflow never passes `--update`: a non-zero `grail test` fails,
+  and a later step fails if anything rewrote `scry/tests`. Measured on a loaded 32-core
+  box: 11.5 min for `grail build scry` and 14 min for the 26 tests, peak ~220 MiB, so it
+  runs on `ubuntu-latest` with a 60-minute job timeout and needs no memory reservation.
+  It is not part of `CI result` yet: it is its own required-check candidate.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)
@@ -792,6 +915,13 @@ the elan toolchain, so the setup action keeps the elan cache for those
   `.github/workflows/fixpoint.yml` runs it nightly on `master` and from "Run workflow" on
   the self-hosted runner named by `WIZ_RUNNER_HEAVY`; it checks for 6 GiB free, is skipped
   when the variable is unset, and is not part of `CI result`.
+* **The compiler's own reproducibility** (`.github/workflows/repro.yml`) runs
+  `scripts/check-repro.sh --compiler` nightly on `master` on the same self-hosted runner
+  (a clean skip when `WIZ_RUNNER_HEAVY` is unset; 5 GiB free). It builds wiz and grail
+  under two absolute roots and asserts the JSON with
+  `scripts/check-repro-report.py --require-compiler`, so a skipped compiler comparison is
+  a failure; the pull-request corpus step in `ci.yml` runs only the corpus and annotates
+  the skip as a notice. See [Reproducible builds](#reproducible-builds).
 * **The nightly benchmarks** (`.github/workflows/bench.yml`) also run only on
   `master` and from "Run workflow", on the `WIZ_RUNNER_HEAVY` runner (a clean skip
   when it is unset). They use the Nix-built `wiz`/`grail` and need 6 GiB free (the fixpoint's
@@ -802,7 +932,10 @@ the elan toolchain, so the setup action keeps the elan cache for those
   is pinned with `taskset` to `WIZ_BENCH_CPUSET` (otherwise two CPUs are left free).
   `scripts/bench-threshold.py` gates on the **median paired ratio** (default 10%, at
   least 5 pairs per mode), not on absolute time, and writes the table to the job
-  summary; the run JSON records the machine id, CPU set and CPU model. `scry bench
+  summary; the run JSON records the machine id, CPU set and CPU model. Against the
+  checked-in baseline a "no gate" result (fewer than 5 comparable pairs) is a failure,
+  and so is a baseline mode the run no longer contains: neither a mode dropped from the
+  run nor an unmeasured one is a pass. `scry bench
   --no-timing --fail-on-regression` is the second, deterministic corpus gate. On a
   green night the current executable becomes the next A side; the first run compares
   the build with itself, and "Run workflow" with `bootstrap: true` does that again
@@ -880,15 +1013,16 @@ the generated reference manual (`result/index.md`, and `result/site`).
   the files the PR changes and decides what runs: nothing but `changes`, `docs_style`,
   `docs_examples` and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE);
   `trust-ledger` runs whenever any code did; every shard when a Lean
-  file, the build, the runtime, `scripts/` or `.github/` changed; otherwise each shard
-  with `"inputs"` in `.github/test-shards.json` only when one of its inputs changed
-  (a `lib/X.wiz` input brings the lib files it imports), and the shards without
-  `"inputs"` (backends, library) for any non-docs change. So a PR touching only, say, `lib/Json.wiz` skips
-  `core` and the selfhost shards. `CI result` counts a job the filter skipped as fine
-  and a job it wanted only if it succeeded. Pushes to `master`, the merge queue and
-  manual runs always run everything, so a missing input shows up there at the latest.
-  A test that starts reading a new file belongs in a shard without `"inputs"`, or add
-  the file to its shard's `"inputs"`.
+  file, the build, the runtime, `scripts/`, `.github/` or `web/` changed; otherwise each
+  shard with `"inputs"` in `.github/test-shards.json` only when one of its inputs
+  changed (a `lib/X.wiz` input brings the lib files it imports), and the shards without
+  `"inputs"` (backends, library) for any non-docs change. The `web` job (the playground
+  and the site's JavaScript) runs when a `web/` file changed. So a PR touching only,
+  say, `lib/Json.wiz` skips `core` and the selfhost shards. `CI result` counts a job the
+  filter skipped as fine and a job it wanted only if it succeeded. Pushes to `master`,
+  the merge queue and manual runs always run everything, so a missing input shows up
+  there at the latest. A test that starts reading a new file belongs in a shard without
+  `"inputs"`, or add the file to its shard's `"inputs"`.
 * **A self-hosted runner** for the heavy shards (`"heavy": true` in
   `.github/test-shards.json`): set the repository variable `WIZ_RUNNER_HEAVY` to its
   label; unset, everything runs on `ubuntu-latest`. Pull requests from forks never run
@@ -907,7 +1041,7 @@ the generated reference manual (`result/index.md`, and `result/site`).
 ### Before you push
 
 `scripts/pre-commit.sh` runs the cheap gates CI would run first, in one command, so a
-formatting, ledger or docs problem is found in seconds instead of in CI. It needs no
+formatting, ledger, prelude or docs problem is found in seconds instead of in CI. It needs no
 build for the fast tier:
 
 ```sh
@@ -919,7 +1053,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style (`scripts/check-docs-style.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style and links (`scripts/check-docs-style.py`, `scripts/check-doc-links.py`), the embedded prelude's surface (`scripts/check-prelude-drift.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, the check-repro and check-repro-report self-tests, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with
@@ -1016,6 +1150,23 @@ exist and the landing page's and benchmark page's local links resolve; no server
 uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
 then publishes that artifact.
 
+`wiz doc --lib` elaborates the whole library once when its cache is cold, and that is
+the bulk of the job (10-19 min in recent runs; 43 min on a loaded machine). So the job
+restores `wiz`'s elaboration cache from the Actions cache and passes it as a read-only
+layer (`.wiz-doc-cache/ro`, `--cache-ro`); this run's misses go to
+`.wiz-doc-cache/write`, which a miss publishes as the next run's layer. The key is
+`wiz-doc-v1-<os>-<SHA-256 of the wiz binary>-<git tree of lib/>`. The first half is the
+cache's own namespace (`Wiz/Cache.lean`: an entry is named by `binaryId`, a hash of the
+running binary; manifests carry its SHA-256, `toolchainTag`), so an identical build of
+the same source hits and a changed compiler misses; the second half only decides when a
+new snapshot is saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still
+serves the modules a `lib/` change did not touch. A restored run replays the cache in a
+few minutes instead of elaborating (roughly a tenth of the cold time; ~2 min with
+`--jobs 4`, once `wiz doc` has that flag). `--cache-verify off` is deliberate: the layer
+is this job's own and its entries are content-keyed; the manifest check would bind them
+to the toolchain's store paths (cc, llc) and throw a same-binary rebuild away. The
+toolchain's own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
+
 The benchmark page is **generated, not written**: `web/build-bench.py` renders
 `web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
 first, so a JSON change that was not regenerated fails the job (and is visible as a diff
@@ -1052,6 +1203,11 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
+`wiz doc --jobs N` elaborates and renders N modules at once (`0`: auto); the tree is the
+same as with `--jobs 1`. `-v` (`-vv`, `-q`) turns on the progress log on stderr, which
+names each phase, each module's elaboration/rendering time and cache hits, and ends with
+the wall time and peak RSS.
+
 **Live documentation (`wiz doc --serve`).** The generated documentation is static by
 default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port
 8000, `--port N`; `0` takes a free one), and `--lsp PORT` makes the module pages ask a
@@ -1068,10 +1224,14 @@ with `didOpen`, so the positions are the ones the page was generated from. Start
 language server from the module root, or with `-I` roots, so its imports resolve:
 
 ```sh
-.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib &
+.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib --token-file lsp-token &
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --serve --lsp 8765
-# then http://127.0.0.1:8000/
+# then http://127.0.0.1:8000/?token=T, with T from lsp-token
 ```
+
+The language server lets in only clients that present its token (`?token=` in the
+page's URL is passed on to the socket; docs/playground-lsp.md, "The token"); the pages
+never carry it themselves.
 
 `--serve` without `--lsp` writes the same documentation plus the inert client: there is
 no socket and no fetch, and the pages read without JavaScript. `?lsp=PORT` (or
@@ -1082,7 +1242,18 @@ TLS or authentication. Live search results and code actions are not part of it �
 need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
-slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Both web
+builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
+are compiled without `-pthread` (the header also turns it on by itself for Emscripten
+without `-pthread`): the runtime then has one thread, nothing is ever
+marked shared (so every count operation is plain), `main` runs on the calling thread,
+and `Chan.fork`, or a wait that no other thread could end (taking from an empty `MVar`,
+putting into a full one, acquiring a held `Lock`, receiving on an empty channel), stops
+the program with `wiz: …: threads are not available in this build (WIZ_NO_THREADS)` and
+exit code 3 instead of hanging. `-DWIZ_RC_ATOMIC` is the opposite debugging build:
+thread-owned counts change atomically too. `scripts/test-runtime.sh` checks all three;
+`scripts/rc-cost-bench.sh` times them against each other (the single-thread cost of
+thread-safe counts). Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
 `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
 stays for 3 days for debugging; the site keeps the newest deployed tree until the next
