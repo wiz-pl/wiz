@@ -486,16 +486,22 @@ coverage: 25 row(s) — what was skipped or warned about
 ```
 
 The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
-in 311.8 s and about 4.1 GiB with `--no-taint`: 4 605 parsed, 4 250 lowered, 16 parse
-failures, 36 319 functions and 46 coverage rows. Taint dominates: Crux.Api took 219.8 s
-with taint and 2.0 s without, so a full tainted sweep of the tree is hours, not minutes,
-and is not attempted by default.
+in 311.8 s and about 4.1 GiB with `--no-taint` on the build that first ran the sweep:
+4 605 parsed, 4 250 lowered, 16 parse failures, 36 319 functions and 46 coverage rows.
+The 2026-11-18 re-run that named all 16 failures (commit `e3f27195`, before merging
+master) reports the same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage
+rows: the lowering now names more constructs, and each failed file is its own row. Taint
+dominates: Crux.Api took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
+the tree is hours, not minutes, and is not attempted by default. All 16 failures are two
+upstream grammar gaps, not malformed files and not our walker: §8.2.
 
 `files found / parsed / lowered / failed` distinguishes native parsing from lowering:
 `failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered
-at all. A file that parses but produces no method is a `no functions lowered` warning, not
-a zero. An unreadable file or a directory that cannot be listed is a row, never an
-omission.
+at all. A failed file gets **its own** `parse failure` row (errors are never summed), and
+the row's location is the first failing node's position and kind — `path:line:col
+(MISSING identifier)` or `(ERROR)`. A file that parses but produces no method is a `no
+functions lowered` warning, not a zero. An unreadable file or a directory that cannot be
+listed is a row, never an omission.
 
 Lowering messages interpolate identifiers and types; the coverage row normalises them to
 the construct (`lambda body not lowered: an opaque function value`, `out/ref argument not
@@ -525,16 +531,87 @@ row says so). `--rules FILE` selects a pack; otherwise the walk tries
 ### Fixture and tests
 
 `scry/corpus/csharp/repo/` is a small tree: three analysable files (one with a real
-finding), one deliberately invalid file, and five excluded paths (`bin/`, `obj/`,
-`node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda and a
-`from … where … select` query: the lambda is still an opaque `fnptr` (its own warning),
-while the query lowers to `System.Int32[].get_Item` and
+finding), three files that do not parse (`Broken.cs` is invalid C#; the other two are
+valid C# that tree-sitter-c-sharp refuses — §8.2), and five excluded paths (`bin/`,
+`obj/`, `node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda
+and a `from … where … select` query: the lambda is still an opaque `fnptr` (its own
+warning), while the query lowers to `System.Int32[].get_Item` and
 `System.Linq.Enumerable.Select` calls, so those two calls are part of the five
 `unmodelled-external` rows (with `Console.ReadLine`, `Process.Start` and
 `System.Int32[].get_Length`) instead of a `query_expression not modelled` row: a query
 the lowering handles is analysed, not skipped. The `scry-csharp` group enumerates it,
 applies `Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the
 driver's aggregation) to checked-in spills, and asserts the before/after counts, the
-coverage rows, both report renderings and all four exit statuses. The Lean interpreter
-cannot call the native shim, so the spills are checked in exactly as for the other C#
-fixtures; the invalid file has no spill and its `.err` result is built directly.
+coverage rows (one `parse failure` row per failed file, each named), both report
+renderings and all four exit statuses. The Lean interpreter cannot call the native shim,
+so the spills are checked in exactly as for the other C# fixtures; the three invalid
+files have no spill and their `.err` results are built directly.
+
+### 8.2 The 16 Nexus parse failures: two upstream grammar gaps (2026-11-18)
+
+The first whole-tree run reports `4 621 kept, 4 605 parsed, 4 250 lowered, 16 failed`.
+All sixteen are files **tree-sitter-c-sharp v0.23.5 cannot parse although they are valid
+C#**; none is a truncated write, an encoding problem (all 4 621 decode as UTF-8, and the
+grammar's `extras` accept a BOM), a preprocessor form (Nexus has no `#if`/`#region`), or a
+walker bug. Each failed file now gets its own row, with the first failing node's position
+and kind, so the sweep names the sixteen instead of summing them into one row with one
+example:
+
+| file (below `/workspace/Nexus/`) | first node | rejected construct |
+|---|---|---|
+| `src/Crux.Demo.Api/Execution/RealServerActionExecutor.cs:865:82` | `ERROR` | `.. var selector` in a list pattern (gap B) |
+| `tests/Crux.Api.Tests/AgentCashEndpointsTests.cs:473:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Api.Tests/CardChargebackTests.cs:227:9` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ApplicationRegistersTests.cs:84:9` | `ERROR` | `var with` (gap A; also `partial`) |
+| `tests/Crux.Application.Tests/Compliance/OwnershipRegisterTests.cs:280:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ReserveBankDirectionsTests.cs:99:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/StructureRegistersTests.cs:179:9` | `ERROR` | `partial` as a local (gap A; also `var with`) |
+| `tests/Crux.Application.Tests/Identity/AppKeyAttestationsTests.cs:165:15` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Treasury/PartyCalendarsTests.cs:47:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Architecture.Tests/ContainerDirectoryTests.cs:1:1` | `ERROR` | `required` as a local (gap A); recovery's node spans the unit |
+| `tests/Crux.Communications.Tests/SegmentEvaluatorTests.cs:174:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Dashboard.Api.Tests/CertificationContentTests.cs:241:16` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Demo.Api.Tests/CardMachineValueTourTests.cs:45:17` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Domain.Tests/Compliance/InternalAuditRecordTests.cs:80:9` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Tenant.Api.Tests/AgentTests.cs:415:15` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Worker.Tests/NextDaySegregationTests.cs:186:15` | `ERROR` | `partial` as a local (gap A) |
+
+**Gap A (15 files): `with`, `partial` and `required` are not reserved identifiers.**
+C# makes these *contextual* keywords: outside a `with` expression, a `partial` modifier or
+a `required` member modifier, each is an ordinary identifier, and Nexus uses them as local
+names (`var with = await …;`, then `partial.Detail.Should()`, `required.Should()`). The
+grammar's `_reserved_identifier` rule lists the contextual keywords it accepts as names
+(`alias`, `ascending`, … `yield`) but omits these three
+(`native/tree-sitter-c-sharp/src/grammar.json`, v0.23.5). The parse fails where the name is
+used: `var with = …` is an `ERROR` at `var`, while `var required = 1;` and
+`WriteLine(required)` parse and the member access `required.M` is the `ERROR` (at the
+`.`, or at the identifier depending on recovery). The smallest reproduction is
+`corpus/csharp/repo/src/KeywordIdentifier.cs`:
+
+```csharp
+public static int Count(int[] items)
+{
+    var with = items.Length;
+    var partial = with;
+    var required = partial;
+    return required;
+}
+```
+
+Upstream has not fixed it since: `tree-sitter-c-sharp` 0.24.0 (master, checked 2026-11-18)
+has the same `_reserved_identifier` list without these three, so a grammar bump alone
+would not clear the fifteen.
+
+**Gap B (1 file): a list-pattern slice with a designation.** C# 11 allows
+`['[', .. var selector, ']']`; the grammar's `list_pattern` accepts a bare `..` only, so
+the `ERROR` starts at the `var`. The smallest reproduction is
+`corpus/csharp/repo/src/SlicePattern.cs` (`text is ['[', .. var middle, ']']`).
+
+Both fixtures are deliberately **left failing**: they are in the repo tree without a
+spill, and the sweep reports them as `parse failure` rows. Renaming the identifiers before
+the parse, or patching the generated `parser.c`, would hide a real gap (and a rewrite would
+move every span); the honest result is the named failure. When the grammar gains either
+construct, add the spill and delete the fixture's row from this section — the group's
+`repoFailureRows` case names all three failed files (and `repoCoverage` counts them), so
+both change with it.
+
