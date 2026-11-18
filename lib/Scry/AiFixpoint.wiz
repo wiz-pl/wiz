@@ -15,7 +15,9 @@ Stage S5's untrusted fast path and its result checker.
   about termination is proved (widening makes it terminate for the finite-height
   domains here, but the engine is outside the trusted base).
 * `narrowOnce` improves a widened post-fixpoint once, as §4.6 describes.
-* `check` is the §5.3 certificate checker: every edge must satisfy
+* `checkCert` is the §5.3 certificate checker (named so a test file can keep its own
+  `check` helper; `Scry.Interproc` imports this module through `Scry.Nullness`): every
+  edge must satisfy
   `transfer (inv p) ⊑ inv q`, the entry must be covered, and every statement's alarm
   condition must be discharged by the invariant. It reports `Alarm`s; an empty list is
   acceptance. The checker never trusts the engine.
@@ -23,7 +25,7 @@ Stage S5's untrusted fast path and its result checker.
 ```
 import Scry.AiFixpoint
 
-#eval check (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
+#eval checkCert (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
 ```
 -/
 
@@ -249,13 +251,13 @@ def checkAlarms (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
   List.concat (List.map (fun p => AStmt.alarms m p.1 (AState.at cfg st p.1) p.2) cfg.stmts)
 
 /-- The post-fixpoint certificate check: edges, entry, alarms. -/
-def check (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
+def checkCert (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
   List.append (checkEntry cfg st)
     (List.append (checkEdges m cfg st) (checkAlarms m cfg st))
 
 /-- Did the checker accept? -/
 def accepts (m : AiMach) (cfg : ACfg) (st : AState) : Bool :=
-  List.isEmpty (check m cfg st)
+  List.isEmpty (checkCert m cfg st)
 
 /-- The number of alarms. -/
 def alarmCount (as : List Alarm) : Nat := List.length as
