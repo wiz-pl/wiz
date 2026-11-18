@@ -575,6 +575,21 @@ def coreTermTarget (st : St) (off : Nat) : Option Name :=
   | some (.ident _ n false _ _) => some n
   | _ => (Query.declsAt st off).find? (!auxiliaryDecl ·)
 
+/-- Is `d`'s value one of the kernel's encodings rather than a definition written in Wiz?
+A constructor's is its payload (`.con`/`.cocon` under its lambdas, `inline`), and an
+inductive or coinductive type's is its μ/ν (`.mu`/`.nu`): neither is a value the user can
+unfold, so `wiz/coreTerm` says `opaque` and reports no value for them (#435). -/
+def encodedDecl (d : Decl ZeroOneMany) : Bool :=
+  let rec head : Term ZeroOneMany → Term ZeroOneMany
+    | .lam _ b => head b
+    | t => t
+  match d.value with
+  | none => false
+  | some v => match head v with
+    | .con _ | .cocon _ => d.inline
+    | .mu .. | .nu .. => true
+    | _ => false
+
 /-- `wiz/coreTerm`: the declaration `n` as the kernel has it, after elaboration (macros
 expanded): its type and value printed as core terms (`notation`: with the notation in
 scope, as hovers print), what it is (`kind`: `definition`; `opaque` for one with no value
@@ -589,7 +604,8 @@ def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (useNotati
   | none => Json.null
   | some d =>
     let pp (t : Term ZeroOneMany) : String := t.pretty [] (if useNotation then some st.globals else none)
-    let kind := if d.value.isSome then "definition" else if d.witness.isSome then "partial" else "opaque"
+    let encoded := encodedDecl d
+    let kind := if encoded then "opaque" else if d.value.isSome then "definition" else if d.witness.isSome then "partial" else "opaque"
     let native : List (String × Json) := match d.nativeImpl? with
       | some g => [("native", Json.str g)]
       | none => []
@@ -599,7 +615,7 @@ def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (useNotati
       if withRaw then [("raw", Json.mkObj [("type", Json.str (reprStr d.type)),
         ("value", match d.value with | some v => Json.str (reprStr v) | none => Json.null)])] else []
     Json.mkObj ([("name", Json.str n), ("type", Json.str (pp d.type)),
-      ("value", match d.value with | some v => Json.str (pp v) | none => Json.null),
+      ("value", match d.value with | some v => if encoded then Json.null else Json.str (pp v) | none => Json.null),
       ("kind", Json.str kind), ("levelParams", Json.arr (d.levelParams.map Json.str).toArray),
       ("location", location srv uri doc n)] ++ native ++ ax ++ rawF)
 

@@ -125,18 +125,22 @@ def declaredAt (s : CommandState R) (text : String) (off : Nat) : Option (Name �
   pure (n, r)
 
 /-- The identifier at `off`, as a target, and its range; (#434) or the name of a
-declaration where it is declared. -/
+declaration where it is declared. A declaration's own name wins over an identifier the
+elaborator recorded there: a structure field's name is also a binder of the constructor's
+telescope (whose range is the whole field, `px : Nat`), and it is the global `Point.px`
+that references and rename are after. -/
 def targetAt (s : CommandState R) (text : String) (off : Nat) : Option (Target × SourceInfo) :=
-  match Query.innermost s off (· matches .ident ..) (endIn := true) with
-  | some (.ident r n isLocal ..) =>
-    if r.synthetic then none
-    else if !isLocal then some (.global n, r)
-    else do
-      let scope ← commandAround s off
-      pure (.local n scope (binderOf (binders s) scope n r.start), r)
-  | _ => do
-    let (n, r) ← declaredAt s text off
-    pure (.global n, r)
+  match declaredAt s text off with
+  | some (n, r) => some (.global n, r)
+  | none =>
+    match Query.innermost s off (· matches .ident ..) (endIn := true) with
+    | some (.ident r n isLocal ..) =>
+      if r.synthetic then none
+      else if !isLocal then some (.global n, r)
+      else do
+        let scope ← commandAround s off
+        pure (.local n scope (binderOf (binders s) scope n r.start), r)
+    | _ => none
 
 /-- Where the name `n` is written in its declaration `cmd` (the first whole-word
 occurrence), as a range. -/
