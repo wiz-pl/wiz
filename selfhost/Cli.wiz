@@ -15,7 +15,8 @@
 --            --trust-native (27a: `def X : a = b := native_refl` is decided by running
 --            a and b; the frontend's `Globals.trustNative`), --trust-smt (C15: the `smt`
 --            tactic is refused; there is no solver here), --cc, --rt, --cflags,
---            --ldflags (the C toolchain for `run`),--            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
+--            --ldflags (the C toolchain for `run`),
+--            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
 --            recognised and refused with the reason (C5/D5), not as unknown flags.
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
