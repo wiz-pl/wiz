@@ -288,6 +288,29 @@ their argument answers `null` (their arguments still get entries when an applica
 checks them). The recorder is the same code the compiler runs; with the index off (any
 other caller) it is dead weight of one `none`.
 
+## Tactic states (`wiz/plainGoal`)
+
+The same index carries `kind: "goal"` entries: `{"s","e","kind":"goal","goals":[…]}`,
+where `goals` holds the state `tacGoalsShow` prints, one goal per blank-line-separated
+block (`"no goals"` for a finished proof). `wiz/plainGoal` at the caret answers the
+**innermost `goal` entry containing it** as `{goals, rendered, range}`; `rendered` is a
+` ```wiz ` fence around the goals, as the Lean server sends, and `null` means the caret
+is outside any recorded state.
+
+Where the entries come from (`selfhost/Frontend.wiz`): `elabBy` records the state
+**before each tactic step**, keyed by the step's span (`runTacticSteps` interleaves the
+spans from `tacticStepsSp`, which follows `firstTactic` into the syntax so a step's span
+is the tactic the interpreter runs). It also records the state at the `by` itself, and a
+zero-width entry at the block's **end** with the final state, so a caret at the block's
+end reads "no goals" for a finished proof. The state is taken from the interpreter
+(`STacState`) at that moment, so it is the same text an error message would print.
+
+Limits: a block that fails to elaborate has no index at all (the command's error drops
+its entries); `try`/`first`/`repeat` show the state before the compound step, not the
+states inside a branch; and a tactic whose syntax the frontend rewrites has no span, so
+its step is skipped. Tactic goals need stage 3's spans (above) and the A13 tactic engine,
+both in the tree.
+
 ## Fallback ladder
 
 1. Ask `wiz/interactiveGoals` and `wiz/interactiveTermGoal`.
@@ -361,11 +384,12 @@ server does.
   reconnect, the no-server path and no unhandled rejections. It needs no Wiz build.
 * `node web/selfhost_lsp_test.mjs` — the in-page server under Node with a stub engine:
   the command splitter, the check JSON and index, the handshake, diagnostics, completions
-  (prefix filtering, the empty prefix, a module without the export), the expected-type
-  answer from the index (including an astral character), and the page's wiring
-  (Ctrl-Space, Tab).
+  (prefix filtering, the empty prefix, a module without the export), the goal and
+  expected-type answers from the index (including an astral character), and the page's
+  wiring (Ctrl-Space, Tab).
 * `node web/playground_test.mjs` — the Wasm module itself: the engine's output, the
-  check's `index` (a definition's expected type) and the names export.
+  check's `index` (a definition's expected type, a `by` block's state before its step and
+  at its end) and the names export.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and

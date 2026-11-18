@@ -90,6 +90,22 @@ function checkThat(name, condition, detail) {
   check("app: the argument's own span", (index.termGoal(arg) || { range: { start: {} } }).range.start.character, arg);
 }
 {
+  // a tactic block: the state before `exact a` is the initial goal
+  const src = "import Prelude\n\ndef idA (A : Type) (a : A) : A := by\n  exact a\n";
+  const answer = JSON.parse(call("_wiz_playground_check", src));
+  const errors = answer.lines.filter((l) => l.sev === 1 || l.sev === 2);
+  check("by: the block checks", errors.map((l) => l.text), []);
+  const doc = "def idA (A : Type) (a : A) : A := by\n  exact a\n";
+  const index = new PositionIndex(doc, answer.index);
+  const step = doc.indexOf("exact");
+  const goal = index.goal(step);
+  checkThat("by: a goal before the step", goal !== null && goal.goals.length === 1,
+    JSON.stringify(answer.index));
+  checkThat("by: its target", goal !== null && goal.rendered.includes("⊢ A"), goal && goal.rendered);
+  const end = doc.indexOf("exact a") + "exact a".length;   // the block's stop
+  checkThat("by: the end of the block has a state", index.goal(end) !== null, JSON.stringify(goal));
+}
+{
   // the names export is not wired into the build yet (it enumerated the environment and
   // overflowed the wasm stack); the page's server treats that as an empty completion list
   check("names: the export is not wired yet", typeof wasm._wiz_playground_names, "undefined");

@@ -16,7 +16,7 @@ import {
   isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
   SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
-  completionPrefix, parseNames, filterCompletions,
+  completionPrefix, parseNames, filterCompletions, splitGoals,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
@@ -535,8 +535,52 @@ check("filter: a cap", filterCompletions(parseNames(NAMES), "", 2).length, 2);
   app.stop();
 }
 
-// ## 10. Stage 2: the index's UTF-16 edge
+// ## 10. Stage 3: tactic states in the index (`wiz/plainGoal`)
 
+check("goals: two blocks", splitGoals("a : Nat\n⊢ Nat\n\nb : Bool\n⊢ Bool"),
+  ["a : Nat\n⊢ Nat", "b : Bool\n⊢ Bool"]);
+check("goals: a finished proof", splitGoals("no goals"), []);
+check("goals: nothing", splitGoals(""), []);
+{
+  // an index with the states a `by` block records: one per step, the block's end, and
+  // the expected types beside them (the shapes `wiz_playground_check` emits)
+  const text = "def f (n : Nat) : Nat := n + n\n";
+  const p = withPrelude(text).prefix.length;
+  const body = text.indexOf("n + n");               // 24
+  const second = text.lastIndexOf("n");             // 28
+  const index = [
+    { s: p + body, e: p + body + 5, kind: "term", expected: "Nat" },
+    { s: p + body, e: p + body + 1, kind: "term", expected: "Nat" },
+    { s: p + second, e: p + second + 1, kind: "term", expected: "Nat" },
+    { s: p + body, e: p + body + 5, kind: "goal", goals: ["n : Nat\n⊢ Nat"] },
+    { s: p + body, e: p + second + 1, kind: "goal", goals: ["n : Nat\n⊢ Nat\n\nm : Nat\n⊢ Nat"] },
+    { s: p + second + 1, e: p + second + 1, kind: "goal", goals: [] },
+  ];
+  const c5 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+  }) });
+  await c5.connect();
+  const got5 = waitFor(c5, "diagnostics");
+  c5.openDocument(uri, text);
+  await got5;
+  check("goals: the innermost step", await c5.plainGoal(uri, { line: 0, character: body + 1 }),
+    { goals: ["n : Nat\n⊢ Nat", "m : Nat\n⊢ Nat"], rendered: "```wiz\nn : Nat\n⊢ Nat\n\nm : Nat\n⊢ Nat\n```",
+      range: { start: { line: 0, character: body }, end: { line: 0, character: second + 1 } } });
+  check("goals: at the body's end, the finished proof", (await c5.plainGoal(uri, { line: 0, character: second + 1 })).goals, []);
+  check("goals: outside it is null", await c5.plainGoal(uri, { line: 0, character: 0 }), null);
+  // the expected type at the same carets
+  check("term: the second n", (await c5.plainTermGoal(uri, { line: 0, character: second })).goal, "Nat");
+  check("term: the whole body", (await c5.plainTermGoal(uri, { line: 0, character: body + 3 })).range,
+    { start: { line: 0, character: body }, end: { line: 0, character: body + 5 } });
+  // the panel shows both
+  const st5 = await readGoalState(c5, uri, { line: 0, character: 28 });
+  const p5 = { innerHTML: "" };
+  renderPanel(p5, { state: "open", endpoint: SELFHOST_URL, diagnostics: [], goals: st5.goals,
+    goalsKind: st5.goalsKind, term: st5.term, termKind: st5.termKind, info: null });
+  checkThat("panel: the tactic goals", p5.innerHTML.includes("n : Nat") && p5.innerHTML.includes("m : Nat"),
+    p5.innerHTML.slice(0, 500));
+  c5.close();
+}
 {
   // a code-point offset after an astral character: the entry is inside the checked text,
   // the caret is a UTF-16 position

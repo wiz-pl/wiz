@@ -2502,6 +2502,29 @@ def tacticStepsGo : List Syntax → List Syntax → List Syntax
     | .some t => tacticStepsGo rest (List.append acc (.cons t .nil))
     | .none => tacticStepsGo rest acc
 def tacticSteps (stx : Syntax) : List Syntax := tacticStepsGo (kids (kid stx 1)) .nil
+-- (playground LSP, stage 3) the same steps with their spans: `firstTactic` descends into a
+-- kid that is not a tactic itself, so the spans descend with it (a step's span is the
+-- tactic the interpreter runs); the two lists stay the same length
+inductive SpStep where
+  | mk (stx : Syntax) (sp : Option SpT)
+mutual
+def firstTacticSp (sp : Option SpT) (s : Syntax) : Option SpStep :=
+  match isTacticSyntax s with
+  | .true => .some (.mk s sp)
+  | .false => firstTacticSpList (kids s) (spKidsOpt sp)
+def firstTacticSpList : List Syntax → List (Option SpT) → Option SpStep
+  | .nil, _ => .none
+  | .cons s rest, sps => match firstTacticSp (spHead sps) s with
+    | .some t => .some t
+    | .none => firstTacticSpList rest (spTail sps)
+end
+def tacticStepsSpGo : List Syntax → List (Option SpT) → List (Option SpT) → List (Option SpT)
+  | .nil, _, acc => acc
+  | .cons x rest, sps, acc => match firstTacticSp (spHead sps) x with
+    | .some (.mk _ sp) => tacticStepsSpGo rest (spTail sps) (List.append acc (.cons sp .nil))
+    | .none => tacticStepsSpGo rest (spTail sps) acc
+def tacticStepsSp (sp : Option SpT) (stx : Syntax) : List (Option SpT) :=
+  tacticStepsSpGo (kids (kid stx 1)) (spKidsOpt (spKid sp 1)) .nil
 def optionalTerm (s : Syntax) : Option Syntax := match strEq (kindOf s) "null" with
   | .true => match kids s with
     | .nil => .none
@@ -4354,19 +4377,36 @@ def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) : STa
   | .atom _ => .ok st es
   | _ => runTac gs es st (tacOfStx stx)
 
-def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (steps : List Syntax) : STacR := match steps with
-  | .nil => .ok st es
-  | .cons t rest => match evalTacticStx gs es st t with
-    | .ok st' es' => runTacticSteps gs es' st' rest
+-- (playground LSP, stage 3) the tactic state before a step, keyed by the step's span: the
+-- answer `wiz/plainGoal` gives while the caret is in that step. `sp` is `.none` everywhere
+-- except the playground's check, so the recorder costs a match.
+def recordGoal (es : ES) (sp : Option SpT) (st : STacState) : ES := match sp with
+  | .none => es
+  | .some t => ES.addInfo es (.mk (SpT.start t) (SpT.stop t) "goal" (tacGoalsShow es st))
+
+def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT)
+    (steps : List Syntax) (sps : List (Option SpT)) : STacR := match steps with
+  | .nil => .ok st (recordGoal es endSp st)
+  | .cons t rest =>
+    let esB := recordGoal es (spHead sps) st;
+    match evalTacticStx gs esB st t with
+    | .ok st' es' => runTacticSteps gs es' st' endSp rest (spTail sps)
     | .err m => .err (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st)))
 
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by the tactic script, and
 checked by the kernel as an ordinary term. -/
-def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) : TE :=
+def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) (sp : Option SpT) : TE :=
   match newMeta es cx expected with
   | .mk m es0 =>
     let st0 := STacState.mk (.cons (TacGoal.mk cx expected m) .nil) (.cons 0 .nil) .nil;
-    match runTacticSteps gs es0 st0 (tacticSteps stx) with
+    -- (stage 3) the state at the `by` itself, and (zero-width, so it wins at the block's
+    -- end) the final state: a caret outside every step but inside the block gets one of
+    -- those, and an inner step's own span wins where it contains the caret
+    let es1 := recordGoal es0 sp st0;
+    let endSp : Option SpT := match sp with
+      | .some t => .some (.leaf (SpT.stop t) (SpT.stop t))
+      | .none => .none;
+    match runTacticSteps gs es1 st0 endSp (tacticSteps stx) (tacticStepsSp sp stx) with
     | .err msg => .err msg
     | .ok st es' => match goalListOpen es' st (STacState.open st) with
       | .cons _ _ => .err (unsolvedGoals es' st)
@@ -4608,7 +4648,7 @@ def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT) :
   | .true => match newMeta es cx (.vsort (.lnum 1)) with
     | .mk mt es1 =>
       let T := eval (TCtx.env (Cx.c cx)) mt;
-      match elabBy gs es1 cx s T with
+      match elabBy gs es1 cx s T sp with
       | .ok t _ es2 => .ok t (force es2 T) es2
       | e => e
   | .false => match strEq k "term.paren" with
@@ -4989,7 +5029,7 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
   let es := recordTerm es sp cx ty;
   let k := kindOf s;
   match strEq k "term.by" with
-  | .true => elabBy gs es cx s ty
+  | .true => elabBy gs es cx s ty sp
   | .false => match strEq k "term.paren" with
   | .true => checkT gs es cx (kid s 1) ty (spKid sp 1)
   | .false => match dotCtor gs es ty s with

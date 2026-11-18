@@ -10,15 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
-* web: the playground's Goals pane answers **`wiz/plainTermGoal`** from the check's
-  position index. The self-hosted frontend now records, while it elaborates, each checked
-  node's expected type: the parser produces source spans as a side table beside the tree
-  (`SpT` in `selfhost/Parse.wiz`; `Syntax` is unchanged), `checkT` records into the
-  elaborator state, and `wiz_playground_check` returns the entries as `index`
-  (`{"s","e","kind":"term","expected"}`; code-point offsets, the shim converts to UTF-16).
-  The pane answers the innermost entry containing the caret, with no further Wasm call.
-  Recording is off outside the playground, so the compiler pays one `Bool` check per
-  command.
+* web: the playground's Goals pane answers **`wiz/plainTermGoal` and `wiz/plainGoal`**
+  from the check's position index. The self-hosted frontend now records, while it
+  elaborates, each checked node's expected type and the tactic state before each step: the
+  parser produces source spans as a side table beside the tree (`SpT` in
+  `selfhost/Parse.wiz`; `Syntax` is unchanged), `checkT`/`elabBy` record into the
+  elaborator state, and `wiz_playground_check` returns them as `index` (`{"s","e","kind",
+  "expected"|"goals"}`; code-point offsets, the shim converts to UTF-16). The pane answers
+  the innermost entry containing the caret, with no further Wasm call. Recording is off
+  outside the playground, so the compiler pays one `Bool` check per command.
 * web: the playground's Goals pane answers **completions** (`textDocument/completion`):
   Ctrl-Space in the editor asks the in-page server, the panel lists the names above Goals,
   and Tab/Enter inserts the chosen label; Escape or typing closes the list. The shim
@@ -30,9 +30,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   answers completions normally. Local binders are not listed either way.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
-  so diagnostics and `#check`/`#eval` results appear with no server to start; expected
-  types and completions come from the same engine (`?lsp=ws://…` still selects an external
-  server and `?lsp=off` disables the pane).
+  so diagnostics and `#check`/`#eval` results appear with no server to start; goals,
+  expected types and completions come from the same engine (`?lsp=ws://…` still selects an
+  external server and `?lsp=off` disables the pane).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

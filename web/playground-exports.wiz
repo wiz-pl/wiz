@@ -113,13 +113,15 @@ def pgcLines : List String → String
 -- elaborating (a checked node's expected type, later a tactic state before a step) as
 -- `{"s","e","kind","expected"|"goals"}`; `s`/`e` are code-point offsets into the checked
 -- text, end-exclusive. The page's server turns them into UTF-16 ranges.
-def pgiBody (t : String) : String := String.append ",\"expected\":" (pgcStr t)
+def pgiBody (k t : String) : String := match strEq k "goal" with
+  | .true => String.append ",\"goals\":[" (String.append (pgcStr t) "]")
+  | .false => String.append ",\"expected\":" (pgcStr t)
 
 def pgiEntry (i : Info) : String := match i with
   | .mk s e k t => String.append "{\"s\":" (String.append (Nat.toString s)
       (String.append ",\"e\":" (String.append (Nat.toString e)
         (String.append ",\"kind\":" (String.append (pgcStr k)
-          (String.append (pgiBody t) "}"))))))
+          (String.append (pgiBody k t) "}"))))))
 
 def pgiEntries : List Info → String
   | .nil => ""

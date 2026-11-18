@@ -9,9 +9,9 @@
 //   * the handshake (`initialize`/`initialized`, `shutdown`/`exit`);
 //   * full-text `didOpen`/`didChange`/`didClose`, each answered with
 //     `textDocument/publishDiagnostics` (and `wiz/elaborated` when the client asked);
-//   * `wiz/plainTermGoal` answered from the check's position index (the expected type at
-//     the caret; a later stage adds tactic states), and the other infoview methods with
-//     `MethodNotFound`, so the panel takes its plain path;
+//   * `wiz/plainGoal`/`wiz/plainTermGoal` answered from the check's position index (the
+//     expected type and, before a tactic step, the goal state at the caret), and the
+//     interactive methods with `MethodNotFound`, so the panel takes its plain path;
 //   * `textDocument/completion` from `wiz_playground_names` (below).
 //
 // The diagnostics come from `wiz_playground_eval`'s text: one line per command (an
@@ -302,6 +302,14 @@ export function diagnosticsFromCheck(text, answer) {
   return diagnostics;
 }
 
+// `tacGoalsShow`'s text as the goals it lists: one per blank-line-separated block,
+// `"no goals"` (a finished proof) and an empty text as none.
+export function splitGoals(text) {
+  const s = String(text === null || text === undefined ? "" : text).trim();
+  if (s === "" || s === "no goals") return [];
+  return s.split(/\n\s*\n/).map((g) => g.trim()).filter((g) => g !== "");
+}
+
 // Positions → what the pane asks for, from a check answer's `index`. An entry is
 // `{s, e, kind: "term"|"goal", expected?: string, goals?: [string]}`, `s`/`e` code-point
 // offsets into the checked source (end-exclusive). A lookup is the innermost entry of
@@ -342,7 +350,10 @@ export class PositionIndex {
   goal(offset) {
     const x = this.lookup(offset, "goal");
     if (!x || !Array.isArray(x.goals)) return null;
-    const goals = x.goals.map(String);
+    const goals = [];
+    for (const g of x.goals) {
+      for (const one of splitGoals(g)) goals.push(one);
+    }
     const rendered = goals.length ? "```wiz\n" + goals.join("\n\n") + "\n```" : "no goals";
     return { goals, rendered, range: this.rangeOf(x) };
   }
