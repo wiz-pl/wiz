@@ -42,6 +42,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   imports and the documented `React.*` names change with the rename. `Web.Widget`,
   `web/framework`, the Jupyter widget front end, examples and docs use the new
   names (11s, `docs/libraries.md`).
+* scroll (11s): the documentation generator shows **every command that declares a name**,
+  not only `def`: `def` (equations too), `partial def`, `axiom`, `extern`,
+  `foreign_type`, `glue`, `c_struct`, `structure`, `class`, `inductive`, `coinductive`,
+  `sealed inductive` and named or anonymous `instance`s, plus a user's own command
+  (`syntax … : command`, so `theorem`/`lemma`/`abbrev` written as command macros appear
+  with their own kind). Kinds are labelled consistently (`c struct`, `foreign type`, a
+  `lemma` as `theorem`), an entry's signature is the declaration's type or statement and
+  never its body, and private constructors and fields are left out as private
+  declarations already were. The `doc` group has a fixture with one declaration of each
+  kind, checking the module page, `api.html`/`api.json`, the search index, the reference
+  manual and deterministic output. Wiz has no `abbrev`, `opaque`, `theorem`, `lemma` or
+  `namespace` command: `theorem`, `lemma` and `abbrev` written as command macros are
+  shown with those kinds (a `lemma` as `theorem`), and dotted names (`T.f`) stay fully
+  qualified since there is no namespace syntax.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
