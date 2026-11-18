@@ -1,0 +1,55 @@
+func ReportScope..ctor(%0, %1)
+  b0:
+    %2 = gep %0, 0
+    store %2, %1
+    ret %0
+func ReportScope.Mark(%0, %1)
+  b0:
+    %2 = gep %0, 0
+    %3 = load %2
+    %4 = call System.String.Concat(%3, %1)
+    %5 = call System.Console.WriteLine(%4)
+    ret
+func ReportScope.Dispose(%0)
+  b0:
+    %1 = global $str:"done"
+    %2 = call System.Console.WriteLine(%1)
+    ret
+func toplevel.Main()
+  b0:
+    %0 = global $str:"REPORT_PREFIX"
+    %1 = call System.Environment.GetEnvironmentVariable(%0)
+    %2 = global $str:"daily"
+    %3 = %1
+    %4 = null
+    br eq %1, %4 ? b1 : b2
+  b1:
+    %3 = %2
+    goto b2
+  b2:
+    %5 = %3
+    %6 = call System.Console.ReadLine()
+    %7 = %6
+    %8 = global $str:" "
+    %9 = call System.String.Concat(%5, %8)
+    %10 = call System.String.Concat(%9, %7)
+    %11 = %10
+    %12 = global $str:"/bin/sh"
+    %13 = call System.Diagnostics.Process.Start(%12, %11)
+    %14 = alloc 2
+    %15 = call ReportScope..ctor(%14, %11)
+    %16 = %14
+    %17 = global $str:"started"
+    %18 = call ReportScope.Mark(%16, %17)
+    %19 = havoc u1
+    %20 = 0
+    br ne %19, %20 ? b3 : b4
+  b3:
+    ret
+  b4:
+    goto b5
+  b5:
+    %21 = call System.String.Concat(%11)
+    %22 = call System.Console.WriteLine(%21)
+    ret
+warning: toplevel.Main:15: is test not modelled: havoc
