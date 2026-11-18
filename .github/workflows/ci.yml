@@ -242,18 +242,6 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
-      - name: The trusted base matches the baseline (before any shard runs)
-        # Fast fail: a ledger regression stops the run here, before the 1.8 GB Cachix
-        # push and before any test shard starts, and it reuses the store path this job
-        # already built instead of a separate job that builds again (~6 min).
-        run: |
-          mkdir -p .lake/build/bin
-          ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
-          scripts/trust-ledger.sh --check --strict-legacy
-          Tests/trust-ledger/run.sh
-          scripts/trust-ledger-merge_test.sh
-          python3 scripts/host-unsafe-ledger.py --check
-          Tests/host-unsafe-ledger/run.sh
       - name: Publish the store paths to Cachix
         # The shards substitute from here. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
@@ -351,6 +339,80 @@ jobs:
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+
+  # The trust ledger (scripts/trust-ledger.sh, .github/trust-baseline.tsv): every
+  # declaration of `lib/` (and the axiom-free example) goes through `#print axioms`, and a
+  # source of trust the reviewed baseline does not list fails the run, as does an expired
+  # row (`--strict-legacy` refuses the migration's sentinel reason/owner too).
+  #
+  # Its own job, not a step of `build`: the walk takes ~8 min and nothing the shards need
+  # waits on it, so `build` publishes the store paths and the matrix, the shards start,
+  # and this job runs beside them. It substitutes the test driver from Cachix (the store
+  # path `build` publishes) rather than rebuilding it; a fork pull request, whose `build`
+  # could not publish, builds it here (its shards build too). `result` requires the job
+  # when code changed, so it is still a gate, just not one on the critical path.
+  trust_ledger:
+    name: trust ledger
+    needs: build
+    runs-on: ubuntu-latest
+    # 75 min: the whole-lib walk (cold, when the elaboration cache misses) plus the
+    # fixture trees and the host-side ledger. A fork pull request has no Cachix token,
+    # so it builds the test driver here (~the build job's cold build) and then walks.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: nix build (the test driver, from Cachix), and point .lake at it
+        id: nix
+        run: |
+          tests=$(nix build .#tests --no-link --print-out-paths)
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          du -sh "$tests"
+          # the ledger driver and the fixture scripts name `.lake/build/bin/tests`
+          mkdir -p .lake/build/bin
+          ln -sf "$tests/bin/tests" .lake/build/bin/tests
+      - name: Cache key
+        # The elaboration cache is keyed by the driver's bytes (every entry is mixed with
+        # `Cache.binaryId`, so another driver's entries are never read) and by the tree of
+        # `lib/` the walk reads; `restore-keys` stops at the binary, so a library change
+        # still restores the layers of unchanged modules.
+        id: key
+        shell: bash
+        run: |
+          bin=$(sha256sum "${{ steps.nix.outputs.tests }}/bin/tests" | cut -d' ' -f1)
+          printf 'cache=trust-cache-%s-%s-%s\n' "${{ runner.os }}" "$bin" "$(git rev-parse HEAD:lib)" >> "$GITHUB_OUTPUT"
+          printf 'prefix=trust-cache-%s-%s-\n' "${{ runner.os }}" "$bin" >> "$GITHUB_OUTPUT"
+      - name: Restore the elaboration cache
+        id: trust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .lake/trust-cache
+          key: ${{ steps.key.outputs.cache }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+      - name: The trusted base matches the baseline
+        # The elaboration cache: master writes the restored layer (content-addressed
+        # entries, from the same sources it checks; the save step publishes it). Every
+        # other run passes `--cache-ro` and only reads it, so a pull request or a
+        # merge-queue entry cannot change what the next run restores; a miss is then
+        # elaborated as in a cold run, not an error.
+        env:
+          TRUST_CACHE_MODE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '--cache' || '--cache-ro' }}
+        run: |
+          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache
+          Tests/trust-ledger/run.sh
+          scripts/trust-ledger-merge_test.sh
+          python3 scripts/host-unsafe-ledger.py --check
+          Tests/host-unsafe-ledger/run.sh
+      - name: Save the elaboration cache (master)
+        if: steps.trust-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .lake/trust-cache
+          key: ${{ steps.key.outputs.cache }}
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -687,7 +749,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, prelude_drift, docs_examples, build, test, web, docs]
+    needs: [changes, docs_style, prelude_drift, docs_examples, build, trust_ledger, test, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -773,7 +835,7 @@ jobs:
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
-          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
+          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
@@ -796,6 +858,7 @@ jobs:
           check "prelude drift" "${{ needs.prelude_drift.result }}" true
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check build "${{ needs.build.result }}" "$code"
+          check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
           # a change to web/** must build the playground and pass its Node tests; the
           # job is skipped (and that is fine) only when the filter does not want it
