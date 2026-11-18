@@ -23,6 +23,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `wiz: <path>: <message>` and exits 1 when the write fails (it used to ignore every
   failure); `Handle`'s `Child.releaseOwned`/`waitOwned` drain a piped stream before
   waiting (no deadlock), and `Child.communicateOwned` collects it first.
+* tests: a compiled program that fails at run time is a **failed case**, not a skipped
+  one. `Build.runGlobal` now returns a `Build.RunError` that says whether the failure was
+  the build (`.build`, or `.toolchain` when the compiler, `llc` or GMP's `gmp.h` could not
+  be found) or the program (`.run` with its exit code and stderr, `.timeout`,
+  `.readback`), and the test helpers in `Tests/Elab.lean` skip only a `.toolchain`
+  failure. Before, any error containing "No such file" was recorded as
+  `⊘ skipped (no toolchain)`, so a `conc`/`Handle` program (or any test program) that
+  failed with ENOENT hid as a missing toolchain. The failure now reports the program's
+  exit code and stderr. New `conc` cases pin a run-time ENOENT failure, a pass whose
+  program writes "No such file" on stderr but exits 0, and the genuine missing-compiler
+  skip.
 * web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
   `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
   `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
