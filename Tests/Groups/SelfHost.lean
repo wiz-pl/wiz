@@ -1093,6 +1093,29 @@ def namedArgCases : List (String × Nat) := [
   ("const2 (B := Bool) 7 .true", 7),
   ("mixed (B := Bool) 3 .true", 3)]
 
+/-- (A9) A constructor's fields (and its parameters) are named arguments too:
+`P.mk (y := 2) (x := 1)` fills them in any order — the telescope is walked in its own
+order, so a later field's type may mention an earlier named one — and a missing,
+unknown or repeated field is an error, as in Lean. -/
+def ctorNamedHeader : String :=
+  "inductive P where\n  | mk (x : Nat) (y : Nat)\n" ++
+  "def getX : P → Nat\n  | .mk x _ => x\n" ++
+  "def getY : P → Nat\n  | .mk _ y => y\n" ++
+  "inductive Pair (A B : Type) where\n  | mk (a : A) (b : B)\n" ++
+  "inductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A Nat.zero\n" ++
+  "  | cons (n : Nat) (a : A) (v : Vec A n) : Vec A (Nat.succ n)\n" ++
+  "def vhead : Vec Nat 1 → Nat\n  | .cons _ a _ => a\n" ++
+  "inductive Imp where\n  | mk {n : Nat} (v : Nat)\n"
+
+def ctorNamedDecls : List (String × Bool) := [
+  ("def a : P := P.mk (y := 2) (x := 1)", true),
+  ("def b : P := P.mk (x := 1)", false),
+  ("def c : P := P.mk (z := 1)", false),
+  ("def d : P := P.mk (x := 1) (x := 2)", false),
+  ("def p : Pair Nat Bool := Pair.mk (B := Bool) (b := .true) (a := 1)", true),
+  ("def v1 : Vec Nat 2 := Vec.cons (v := Vec.cons .zero 5 Vec.nil) (n := 1) (a := 7)", true),
+  ("def i1 : Imp := Imp.mk (n := 3) 7", true)]
+
 /-- The parser differential's corpus (`selfhost` group): the category and the input. The
 Lean parser is the oracle; the tables generated here and the checked-in
 `selfhost/Tables.wiz` must both accept it and produce the same tree. -/
@@ -1104,6 +1127,223 @@ def parseDiffCorpus : List (Name × String) := [
   ("command", "inductive T where\n  | a\n  | b (t : T)"),
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
 
+
+/-- (stage 30, C11) A header of our own for `Bytes`: a buffer function (`const void *buf,
+size_t n`, one `Bytes` argument on the Wiz side) and a struct with a byte-array field
+(`unsigned char data[4]`), with the types written out (the self-hosted compiler does not
+run the C preprocessor, so a header it reads must be self-contained). -/
+def bytesHeader : String :=
+  "#ifndef WIZ_BYTES_H\n#define WIZ_BYTES_H\n" ++
+  "static inline unsigned long wiz_sum_buf(const void *buf, unsigned long n) {\n" ++
+  "  const unsigned char *p = (const unsigned char *)buf;\n" ++
+  "  unsigned long s = 0;\n  for (unsigned long i = 0; i < n; i++) s += p[i];\n  return s;\n}\n" ++
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_byte_msg;\n" ++
+  "static inline wiz_byte_msg wiz_byte_msg_make(unsigned long n) {\n" ++
+  "  wiz_byte_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
+  "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "static unsigned char wiz_static_buf[3] = {65, 66, 67};\n" ++
+  "static inline const void *wiz_get_buf(void) { return wiz_static_buf; }\n" ++
+  "#endif\n"
+
+/-- Write `bytesHeader` to a fresh directory; its absolute path (both toolchains read the
+header from the file system: the Lean one when it preprocesses, the self-hosted one when
+the frontend asks for it). -/
+def writeBytesHeader : IO String := do
+  let dir ← IO.FS.createTempDir
+  let h := dir / "wiz_bytes.h"
+  IO.FS.writeFile h bytesHeader
+  pure h.toString
+
+/-- (stage 30, C11) The `Bytes` operations of `lib/IO.wiz` (`empty`, `push` and its
+in-place update, `size`, `get` past the end, `slice`, `take`, `drop`, `append`, `eq`,
+`isEmpty`, `at`, `ofString`/`toString`, `ofList`/`toList`/`singleton`/`show`), the same
+in both toolchains. Prints the list below. -/
+def bytesProgram : String :=
+  "import IO\ndef atShow (b : Bytes) (i : Nat) : String := match Bytes.at b i with\n  | .some n => Nat.toString n\n  | .none => \"none\"\ndef main : IO Unit := do\n" ++
+  "  let b := Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil)));\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Bytes.size b));\n" ++
+  "  IO.println (Nat.toString (Bytes.get b 1));\n" ++
+  "  IO.println (Nat.toString (Bytes.get b 9));\n" ++
+  "  IO.println (if Bytes.isEmpty Bytes.empty then \"empty\" else \"no\");\n" ++
+  "  IO.println (Bytes.show (Bytes.slice b 1 2));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice b 2 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.singleton 7));\n" ++
+  "  IO.println (Bytes.show (Bytes.take b 1));\n" ++
+  "  IO.println (Bytes.show (Bytes.drop b 1));\n" ++
+  "  IO.println (Bytes.show (Bytes.append b (Bytes.singleton 4)));\n" ++
+  "  let a := Bytes.ofString \"AB\";\n" ++
+  "  let p := Bytes.push a 67;\n" ++
+  "  IO.println (Bytes.toString a);\n" ++
+  "  IO.println (Bytes.toString p);\n" ++
+  "  let q := Bytes.append a (Bytes.singleton 68);\n" ++
+  "  IO.println (Bytes.toString a);\n" ++
+  "  IO.println (Bytes.toString q);\n" ++
+  "  IO.println (Bytes.show (Bytes.range 4));\n" ++
+  "  let c := Bytes.ofString \"AB\";\n" ++
+  "  IO.println (Bytes.toString c);\n" ++
+  "  IO.println (Nat.toString (Bytes.size c));\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofString \"AB\") then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofString \"ab\") then \"eq\" else \"ne\");\n" ++
+  "  IO.println (Bytes.show (Bytes.append c (Bytes.ofString \"c\")));\n" ++
+  "  IO.println (atShow (Bytes.ofList (List.cons 5 (List.cons 6 .nil))) 1);\n" ++
+  "  IO.println (atShow (Bytes.ofString \"a\") 7)\n"
+
+def bytesExpected : String :=
+  "[1, 2, 44]\n3\n2\n0\nempty\n[2, 44]\n[44]\n[7]\n[1]\n[2, 44]\n[1, 2, 44, 4]\nAB\nABC\nAB\nABD\n[0, 1, 2, 3]\nAB\n2\neq\nne\n[65, 66, 99]\n6\nnone\n"
+
+/-- (stage 30, C11) `Bytes` across the FFI: one `Bytes` argument for a buffer and its
+length (`C.wiz_sum_buf`), a struct with a byte-array field given to C and read back
+(`Msg.mk`, `C.wiz_byte_msg_first`, `C.wiz_byte_msg_make`). -/
+def bytesFfiProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_byte_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  s!"foreign_type BUF\n" ++
+  s!"extern \"wiz_get_buf\" (header := \"{header}\") getBuf : IO BUF\n" ++
+  "glue sumBuf (p : BUF) (n : Nat) : Nat := \"return wiz_sum_buf(p, n);\"\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_buf (Bytes.ofString \"ABC\")));\n" ++
+  "  IO.println (Nat.toString (C.wiz_byte_msg_first (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  let m := C.wiz_byte_msg_make 5;\n" ++
+  "  IO.println (Bytes.show m.data);\n" ++
+  "  IO.println (Nat.toString m.n);\n" ++
+  "  b ← getBuf;\n" ++
+  "  IO.println (Nat.toString (sumBuf b 3))\n"
+
+def bytesFfiExpected : String := "198\n70\n[120, 121, 0, 122]\n5\n198\n"
+
+/-- (21ag) The encodings of `lib/IO.wiz`: `ofUtf8`/`toUtf8` (every character, NULs
+included; the decoder checks overlong forms and surrogates), `ofString`/`toString`
+(through a C string: they stop at a NUL) and `ofLatin1`/`toLatin1` (one byte per
+character, an error above 255). The strings are observed through `Bytes` only (a text
+module is not in the self-hosted Prelude). Prints the list below.
+
+Every `match` scrutinee is `let`-bound first: the self-hosted compiler evaluates a closed
+scrutinee in full while it compiles (`scrutLets` binds its value; #422), and the
+Prelude's `Bytes.toUtf8` model on `"𝄞"` alone took over 200 s and 3.4 GB there. The
+case "a closed match scrutinee is evaluated at compile time" pins that pattern. -/
+def bytesEncProgram : String :=
+  "import Std\ndef main : IO Unit := do\n" ++
+  "  let u := Bytes.ofUtf8 \"a\\x00b\";\n" ++
+  "  IO.println (Nat.toString (Bytes.size u));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"a\\x00b\")));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofString (Bytes.toString u)));\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofString (Bytes.toString u)) (Bytes.ofList (List.cons 97 .nil)) then \"eq\" else \"ne\");\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofUtf8 \"𝄞\")));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.ofString \"𝄞\")));\n" ++
+  "  let e1 := Bytes.toUtf8 (Bytes.ofUtf8 \"𝄞\");\n" ++
+  "  IO.println (match e1 with\n    | .ok t => if Bytes.eq (Bytes.ofUtf8 t) (Bytes.ofUtf8 \"𝄞\") then \"eq\" else \"ne\"\n    | .error _ => \"err\");\n" ++
+  "  let e2 := Bytes.ofLatin1 \"é\";\n" ++
+  "  IO.println (match e2 with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
+  "  let e3 := Bytes.ofLatin1 (Bytes.toLatin1 (Bytes.ofList (List.cons 233 .nil)));\n" ++
+  "  IO.println (match e3 with\n    | .ok b => Bytes.show b\n    | .error _ => \"err\");\n" ++
+  "  let e4 := Bytes.ofLatin1 \"\\u{100}\";\n" ++
+  "  IO.println (match e4 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e5 := Bytes.toUtf8 (Bytes.ofList (List.cons 128 .nil));\n" ++
+  "  IO.println (match e5 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e6 := Bytes.toUtf8 (Bytes.ofList (List.cons 192 (List.cons 128 .nil)));\n" ++
+  "  IO.println (match e6 with\n    | .ok _ => \"ok\"\n    | .error e => e);\n" ++
+  "  let e7 := Bytes.toUtf8 (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil))));\n" ++
+  "  IO.println (match e7 with\n    | .ok _ => \"ok\"\n    | .error e => e)\n"
+
+def bytesEncExpected : String :=
+  "3\n1\n[97]\neq\n4\n4\neq\n[233]\n[233]\nnot Latin-1: character 0 is U+256\n" ++
+  "invalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\ninvalid UTF-8 at byte 0\n"
+
+/-- (#422) A closed `match` scrutinee that is expensive to evaluate: `fib k n` doubles
+`n` `k` times by recursion (2^18 calls here). The self-hosted compiler evaluates such a
+scrutinee in full while it compiles (`scrutLets` binds its value), and the `let`-bound
+form below does not; the host compiles both at once. -/
+def closedScrutFib : String :=
+  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n"
+
+def closedScrutInline : String :=
+  closedScrutFib ++ "def main : IO Unit := IO.println (match Nat.beq (fib 18 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\")\n"
+
+def closedScrutLet : String :=
+  closedScrutFib ++ "def main : IO Unit := do\n  let r := Nat.beq (fib 18 1) 0;\n  IO.println (match r with\n  | .true => \"z\"\n  | .false => \"nz\")\n"
+
+/-- (21ag) `Array ↔ Bytes` (`lib/Std.wiz`: `Bytes.ofArray`, `Bytes.toArray`) and the
+`Bytes.slice`/`append`/`eq`/`get`/`push` boundaries the semantics matrix pins: a slice
+past the end clamps, a drop past the end is empty, a read past the end is 0, a pushed
+number keeps its low eight bits, and equality is byte for byte, length included. -/
+def bytesArrayProgram : String :=
+  "import Std\ndef main : IO Unit := do\n" ++
+  "  let a := Array.push (Array.push (Array.push Array.empty 1) 2) 300;\n" ++
+  "  let b := Bytes.ofArray a;\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Array.size (Bytes.toArray b)));\n" ++
+  "  IO.println (Nat.toString (Array.getD (Bytes.toArray b) 2 0));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofArray (Bytes.toArray b)));\n" ++
+  "  let c := Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice c 2 99));\n" ++
+  "  IO.println (Nat.toString (Bytes.size (Bytes.drop c 5)));\n" ++
+  "  IO.println (Bytes.show (Bytes.take c 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.append (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 (List.cons 3 .nil)))));\n" ++
+  "  IO.println (if Bytes.eq c (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))) then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofList (List.cons 1 .nil)) c then \"eq\" else \"ne\");\n" ++
+  "  IO.println (if Bytes.eq (Bytes.ofList (List.cons 2 .nil)) (Bytes.ofList (List.cons 1 .nil)) then \"eq\" else \"ne\");\n" ++
+  "  IO.println (Nat.toString (Bytes.get (Bytes.ofList (List.cons 7 .nil)) 9));\n" ++
+  "  IO.println (Bytes.show (Bytes.ofList (List.cons 256 (List.cons 257 .nil))));\n" ++
+  "  IO.println (Bytes.show (Bytes.slice (Bytes.ofList (List.cons 1 .nil)) 9 2))\n"
+
+def bytesArrayExpected : String :=
+  "[1, 2, 44]\n3\n44\n[1, 2, 44]\n[3]\n0\n[1, 2, 3]\n[1, 2, 3]\neq\nne\nne\n0\n[0, 1]\n[]\n"
+
+/-- (21ag) A header for a buffer pointer written three ways: `const char *`,
+`uint8_t *` (a typedef for `unsigned char`) and `unsigned char *`, each followed by its
+length, which the frontends fold into one `Bytes` parameter (kind `y`). -/
+def bytesPtrHeader : String :=
+  "#ifndef WIZ_BYTES2_H\n#define WIZ_BYTES2_H\n" ++
+  "typedef unsigned char uint8_t;\n" ++
+  "static inline unsigned long wiz_sum_chars(const char *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += (unsigned char)buf[i]; return s;\n}\n" ++
+  "static inline unsigned long wiz_sum_u8(const uint8_t *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += buf[i]; return s;\n}\n" ++
+  "static inline unsigned long wiz_sum_u8c(unsigned char *buf, unsigned long n) {\n" ++
+  "  unsigned long s = 0; for (unsigned long i = 0; i < n; i++) s += buf[i]; return s;\n}\n" ++
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_byte_msg;\n" ++
+  "static inline wiz_byte_msg wiz_byte_msg_make(unsigned long n) {\n" ++
+  "  wiz_byte_msg m;\n  m.data[0] = 'x'; m.data[1] = 'y'; m.data[2] = 0; m.data[3] = 'z'; m.n = n;\n  return m;\n}\n" ++
+  "static inline unsigned long wiz_byte_msg_first(wiz_byte_msg m) { return (unsigned long)m.data[0] + m.n; }\n" ++
+  "#endif\n"
+
+/-- (21ag) A C function taking a `char *`/`uint8_t *`/`unsigned char *` and its length,
+called with one `Bytes` argument; the buffer is **borrowed** for the call (C may read it
+and must not keep it), so the same Wiz buffer is usable after the call. Prints
+`198 258 198 [65, 66, 67] 3`. -/
+def bytesPtrProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  let b := Bytes.ofString \"ABC\";\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_chars b));\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_u8 (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 255 .nil))))));\n" ++
+  "  IO.println (Nat.toString (C.wiz_sum_u8c b));\n" ++
+  "  IO.println (Bytes.show b);\n" ++
+  "  IO.println (Nat.toString (Bytes.size b))\n"
+
+def bytesPtrExpected : String := "198\n258\n198\n[65, 66, 67]\n3\n"
+
+/-- (21ag) A `c_struct` with a `Bytes` field through `glue`: the struct goes to C by
+value and comes back by value (the field is copied into the C array and out of it), and
+glue may pass the struct on but not read the buffer field (`glueDeclFields` leaves it
+out, as the Lean frontend does). Prints `70`, the field's bytes, `7`, `127`. -/
+def bytesGlueProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_byte_msg\" (header := \"{header}\") Msg where\n  data : Bytes\n  n : Nat\n" ++
+  s!"import_c \"{header}\" (pure)\n" ++
+  "glue msgFirst (m : Msg) : Nat := \"return wiz_byte_msg_first(m);\"\n" ++
+  "glue msgMake (k : Nat) : Msg := \"return wiz_byte_msg_make(k);\"\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (msgFirst (Msg.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  let m := msgMake 7;\n" ++
+  "  IO.println (Bytes.show m.data);\n" ++
+  "  IO.println (Nat.toString m.n);\n" ++
+  "  IO.println (Nat.toString (C.wiz_byte_msg_first m))\n"
+
+def bytesGlueExpected : String := "70\n[120, 121, 0, 122]\n7\n127\n"
 
 /-- (U2b) Polymorphic declarations: a structure at a level parameter, an inductive whose
 fields are at two different level parameters, a class at a level parameter, and generic
@@ -1329,6 +1569,40 @@ def selfhostDerivingBad : String :=
 def selfhostDerivingBadExpected : String :=
   "BEq : (x0 : U0) → U0\nBEq.beq : (x0 :0 U0) → (x1 : (BEq x0)) → (x2 : x0) → (x3 : x0) → Bool\nerror: failed to synthesize an instance of (BEq ((((((((((((((((((?m0 x✝0) x✝1) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) j✝) i✝) xs✝) ih✝) rest✝) ihs✝) _) a✝0) b✝0))\nSize : (x0 : U0) → U0\nSize.size : (x0 :0 U0) → (x1 : (Size x0)) → (x2 : x0) → Nat\nerror: no deriver for Size (register one with `attribute [deriver Size] f`)\n"
 
+/-- (#422) Programs whose `match` (or `if`) scrutinee is closed and costly: `fib k n` doubles
+`n` `k` times by recursion (2^k calls). The scrutinee is an argument (`IO.println`, `f`), a
+postponed argument (`pick`: its type is a metavariable until `"x"` fixes it), a
+`let`-bound variable's use in an argument, and an `if`. The self-hosted frontend used to
+evaluate such a match while it compiled (the codomain at the argument, `let` values and
+postponed arguments were evaluated eagerly), so its time grew with `fib`'s. -/
+def closedScrutProgram (k : Nat) : String :=
+  "import Std\ndef fib : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ k, n => Nat.add (fib k n) (fib k n)\n" ++
+  "def f (x : String) : String := x\n" ++
+  "def pick {A : Type} (a : A) (b : A) : A := a\n" ++
+  s!"def a : IO Unit := IO.println (match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\")\n" ++
+  s!"def b : String := f (if Nat.beq (fib {k} 1) 0 then \"z\" else \"nz\")\n" ++
+  s!"def c : String := pick (match Nat.beq (fib {k} 1) 0 with\n  | .true => \"z\"\n  | .false => \"nz\") \"x\"\n" ++
+  s!"def d : String := let r := Nat.beq (fib {k} 1) 0; f (match r with\n  | .true => \"z\"\n  | .false => \"nz\")\n" ++
+  "def main : IO Unit := do\n  a;\n  IO.println b;\n  IO.println c;\n  IO.println d\n"
+
+/-- (#422) `closedScrutProgram 40` through the self-hosted compiler, `check` and then the
+one-shot C, each within `secs`: evaluating any of its scrutinees (2^40 calls) would not
+finish. The program is not run. -/
+def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") (closedScrutProgram 40)
+    for (label, args) in [("check", #[exe.toString, "check", "input.wiz"]), ("the one-shot compile", #[exe.toString])] do
+      let t0 ← IO.monoMsNow
+      let out ← IO.Process.output { cmd := "timeout", args := #[toString secs] ++ args, cwd := dir }
+      let t1 ← IO.monoMsNow
+      unless out.exitCode == 0 do
+        throw (IO.userError s!"{label}: exit {out.exitCode} after {t1 - t0} ms (124 is over {secs} s: the closed scrutinees were evaluated while compiling, #422): {out.stderr.take 2000}")
+      note s!"#422 {label}: {t1 - t0} ms"
+
 def selfHostGroup : Group where
   name := "selfhost"
   exercise := "Stages 12b–14q"
@@ -1511,6 +1785,20 @@ def selfHostGroup : Group where
     { name := "the self-hosted frontend: a named argument for a binder written in the type (A9)", run := fun _ =>
         selfhostCheckFile "import Prelude\naxiom f : {A : Type} → A → A\ndef g : Nat := f (A := Nat) 3\n"
           "f : (x0 :0 U0) → (x1 : x0) → x0\ng : Nat\n" },
+    { name := "the self-hosted frontend: named arguments of a constructor (A9)", run := fun _ => do
+        selfhostAgrees ctorNamedHeader ctorNamedDecls
+        selfhostSameNats (ctorNamedHeader ++ "def a : P := P.mk (y := 2) (x := 1)\n")
+          [("getX a", 1), ("getY a", 2)]
+        selfhostSameNats ctorNamedHeader
+          [("vhead (Vec.cons (v := Vec.nil) (n := 0) (a := 5))", 5)] },
+    { name := "the self-hosted frontend: constructor named-argument errors (A9)", run := fun _ => do
+        let p := "import Prelude\ninductive P where\n  | mk (x : Nat) (y : Nat)\n"
+        selfhostCheckFile (p ++ "def c : P := P.mk (z := 1)\n")
+          "P : U0\nerror: no parameter named 'z'\n"
+        selfhostCheckFile (p ++ "def d : P := P.mk (x := 1) (x := 2)\n")
+          "P : U0\nerror: argument 'x' was already given\n"
+        selfhostCheckFile (p ++ "def e : P := P.mk (y := 2)\n")
+          "P : U0\nerror: named argument 'y' comes after the explicit parameter 'x', which has no argument\n" },
     { name := "constructors by their names (.c) and @f, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ndef two : Nat := .succ (.succ .zero)\n#reduce two\ndef xs : List Nat := .cons .zero (.cons two .nil)\n#reduce xs\ndef id {A : Type} (x : A) : A := x\n#reduce @id Nat .zero\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add two two\ndef map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons h t => .cons (f h) (map f t)\n#reduce map (add two) xs\ndef bad : Nat := .nil\n"
           "Nat : U0\nList : (x0 : U0) → U0\ntwo : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\nxs : (List Nat)\ncon((#1, (con((#0, (tt, tt))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nid : (x0 :0 U0) → (x1 : x0) → x0\ncon((#0, (tt, tt)))\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmap : (x0 :0 U0) → (x1 :0 U0) → (x2 : (x2 : x0) → x1) → (x3 : (List x0)) → (List x1)\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nerror: unknown identifier Nat.nil\n" },
@@ -1747,14 +2035,76 @@ def selfHostGroup : Group where
         selfhostAgreesIO implHeader implDecls },
     { name := "import_c binds a header's functions and glue calls them (stage 30)", run := fun _ => do
         let header := "static inline unsigned long hdr_add(unsigned long a, unsigned long b) { return a + b; }\n" ++
-          "static inline unsigned long hdr_mul(unsigned long a, unsigned long b) { return a * b; }\n"
+          "static inline unsigned long hdr_mul(unsigned long a, unsigned long b) { return a * b; }\n" ++
+          "static inline unsigned long hdr_sub(unsigned long a, unsigned long b) { return a - b; }\n"
         let prog := "import IO\nimport_c \"h.h\" (pure)\n" ++
           "glue twice (n : Nat) : Nat := \"return hdr_add(n, n);\"\n" ++
           "glue square (n : Nat) : Nat := \"return hdr_mul(n, n);\"\n" ++
+          "glue sub (a b : Nat) : Nat := \"return hdr_sub(a, b);\"\n" ++
           "def main : IO Unit := do\n  IO.println (Nat.toString (C.hdr_add 20 22));\n" ++
-          "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7))"
-        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n"
-        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n" (flags := #["--rc"]) },
+          "  IO.println (Nat.toString (twice 21));\n  IO.println (Nat.toString (square 7));\n" ++
+          "  IO.println (Nat.toString (sub 40 10))"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n30\n"
+        selfhostLinkRun [("main.wiz", prog), ("h.h", header)] "42\n42\n49\n30\n" (flags := #["--rc"]) },
+    { name := "Bytes (C11): the type and its operations, in the Lean toolchain and the self-hosted one (stage 30)", run := fun _ =>
+        ffiAgrees bytesProgram bytesExpected },
+    { name := "Bytes: a buffer argument and a byte-array struct field through import_c (stage 30)", run := fun _ => do
+        let h ← writeBytesHeader
+        let prog := bytesFfiProgram h
+        ioRun prog bytesFfiExpected
+        selfhostCompileRun prog bytesFfiExpected
+        selfhostCompileRun prog bytesFfiExpected (flags := #["--rc"]) },
+    { name := "Bytes (21ag): the encodings (ofUtf8/toUtf8, ofString/toString, ofLatin1/toLatin1), in both toolchains", run := fun _ =>
+        ffiAgrees bytesEncProgram bytesEncExpected },
+    -- (#422, expected slow) the pattern `bytesEncProgram` works around: a closed `match`
+    -- scrutinee is evaluated while the self-hosted compiler compiles (about 2 s at
+    -- `fib 16` and four times that per two more levels, against 0.4 s let-bound). Both
+    -- must still compile within `selfhostCompileRun`'s 300 s; the note keeps the gap
+    -- visible until #422 is fixed, when the two times should match
+    { name := "a closed match scrutinee is evaluated at compile time (expected slow, #422)", run := fun _ => do
+        ioRun closedScrutInline "nz\n"
+        let t0 ← IO.monoMsNow
+        selfhostCompileRun closedScrutInline "nz\n"
+        let t1 ← IO.monoMsNow
+        selfhostCompileRun closedScrutLet "nz\n"
+        let t2 ← IO.monoMsNow
+        note s!"#422: inline scrutinee {t1 - t0} ms, let-bound {t2 - t1} ms" },
+    { name := "Bytes (21ag): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains", run := fun _ =>
+        ffiAgrees bytesArrayProgram bytesArrayExpected },
+    { name := "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call, in both toolchains", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_bytes2.h"
+        IO.FS.writeFile h bytesPtrHeader
+        let prog := bytesPtrProgram h.toString
+        ioRun prog bytesPtrExpected
+        selfhostCompileRun prog bytesPtrExpected
+        selfhostCompileRun prog bytesPtrExpected (flags := #["--rc"]) },
+    { name := "Bytes (21ag): #reduce in the self-hosted checker (the Prelude's Bytes model)", run := fun _ =>
+        selfhostCheckFile
+          ("import Prelude\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))) 3\n" ++
+           "#reduce Nat.beq (Bytes.get (Bytes.ofList (List.cons 7 (List.cons 8 .nil))) 1) 8\n" ++
+           "#reduce Nat.beq (Bytes.get (Bytes.ofList (List.cons 7 .nil)) 9) 0\n" ++
+           "#reduce Bytes.eq (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 1 .nil))\n" ++
+           "#reduce Bytes.eq (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 .nil))\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.slice (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 3 .nil)))) 2 9)) 1\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.append (Bytes.ofList (List.cons 1 .nil)) (Bytes.ofList (List.cons 2 .nil)))) 2\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofString \"a\\x00b\")) 1\n" ++
+           "#reduce Nat.beq (Bytes.size (Bytes.ofUtf8 \"a\\x00b\")) 3\n" ++
+           "#reduce Bytes.ofList (List.cons 1 (List.cons 2 .nil))\n")
+          "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#1, (tt, tt)))\ncon((#0, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt))))), (tt, tt))))\n" },
+    { name := "Bytes (21ag): a c_struct with a Bytes field through glue, in both toolchains", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_bytes2.h"
+        IO.FS.writeFile h bytesPtrHeader
+        let prog := bytesGlueProgram h.toString
+        ioRun prog bytesGlueExpected
+        selfhostCompileRun prog bytesGlueExpected
+        selfhostCompileRun prog bytesGlueExpected (flags := #["--rc"]) },
+    { name := "the self-hosted frontend: a Bytes c_struct field takes a header, as in the Lean frontend (stage 30)", run := fun _ =>
+        selfhostAgreesIO "" [
+          ("c_struct \"wiz_byte_msg\" (header := \"wiz_bytes.h\") Msg where\n  data : Bytes\n  n : Nat\n", true),
+          ("c_struct \"struct b\" B where\n  data : Bytes\n", false)] },
     { name := "native representation: implemented_by mk/get on a sealed constructor (stage 30)", run := fun _ => do
         let prog := "import IO\n" ++
           "sealed inductive WA where\n  | private mk (xs : List Nat)\n" ++
@@ -2825,7 +3175,11 @@ def selfHostGroup : Group where
           ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
 
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
-        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected }
+        selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
+    { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
+        selfhostClosedScrutBounded 120
+        ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
 
   ]
 

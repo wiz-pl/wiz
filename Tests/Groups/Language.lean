@@ -70,6 +70,7 @@ def r1Header : String := "import Prelude\naxiom Tok : Type\n"
 def languageGroup : Group where
   name := "language"
   exercise := "Stage 13"
+  parallel := true
   cases := [
     { name := "string escapes: \\r, \\t, \\0, \\\\, \\\", \\', \\xHH, \\u{H}; a bad one is reported where it is", run := fun _ => do
         okLib "import Prelude\n#eval \"a\\rb\\t\\0\\'\\x41\\u{3bb}\\\\\\\"\"" ["\"a\\x0db\\t\\x00'Aλ\\\\\\\"\""]
@@ -79,6 +80,12 @@ def languageGroup : Group where
         failsLib "import Prelude\ndef s : String := \"\\u{}\"" "2:20: error: the escape \\u is written \\u{H}"
         failsLib "import Prelude\ndef s : String := \"\\u{1234567}\"" "2:20: error: the escape \\u is written \\u{H}"
         failsLib "import Prelude\ndef s : String := \"abc" "2:19: error: unterminated string literal" },
+    { name := "named arguments: a constructor's parameters and fields (13a)", run := fun _ => do
+        let p := "import Prelude\ninductive P where\n  | mk (x : Nat) (y : Nat)\n"
+        okLib (p ++ "def a : P := P.mk (y := 2) (x := 1)\ndef getX : P → Nat\n  | .mk x _ => x\n#eval getX a") ["1"]
+        failsLib (p ++ "def b : P := P.mk (x := 1)") "type mismatch"
+        failsLib (p ++ "def c : P := P.mk (z := 1)") "no parameter named 'z'"
+        failsLib (p ++ "def d : P := P.mk (x := 1) (x := 2)") "already given" },
     -- (CoreSpec §6: proofs use nothing) a term at a proposition is checked erased, so a
     -- variable at 0 may appear in a proof (wiz-cats G2/B2, wiz-reals B2)
     { name := "a proof uses nothing: a 0-variable may appear in a proof, a linear one still must be used (both kernels)", run := fun _ => do

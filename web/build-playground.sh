@@ -44,14 +44,22 @@ ENGINE="$OUT/playground.wiz"
 
 # 3. Wiz → C → wasm. wasm64 as in web/build.sh; the export is called from
 # web/playground.js, and returns a malloc'ed UTF-8 string the page frees.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+#
+# The runtime's clean stops use setjmp/longjmp (runtime/rt_core.inc, runtime/rt_con.inc:
+# `wiz_stop_run`), so a program that ends on purpose leaves the module alive.
+# Emscripten's default SUPPORT_LONGJMP=emscripten implements that in wasm64; it needs no
+# flag (and SUPPORT_LONGJMP=wasm works too, but is not required). The module exports
+# `wiz_playground_exit` beside the two calls: the code of the last clean stop, read by
+# web/playground-engine.js after each call.
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_playground_eval,_free \
+-sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_wiz_playground_exit,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$OUT/"
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
+  "$ROOT/web/playground-engine.js" "$OUT/"
 echo "built $OUT/wiz-playground.mjs"

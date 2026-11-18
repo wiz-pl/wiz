@@ -104,6 +104,7 @@ def grailLspCase : Case :=
 def grailGroup : Group where
   name := "grail"
   exercise := "Stage 23d"
+  parallel := true
   cases := [
     { name := "the build file is Wiz", run := fun _ => do
         let dir ← mkTree (pkgFiles ++ [("grail.local.wiz", "import Grail\ndef settings : Settings := Settings.empty |> Settings.set \"cflags\" \"-I \\\"x\\\"\"\n")])

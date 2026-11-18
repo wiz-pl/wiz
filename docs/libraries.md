@@ -118,7 +118,7 @@ Sharing has two parts:
   `ShareLet A B` exists for the value's type `A` and the body's type `B`. `Hdl.Core`'s one
   instance is `[Hw r] → ShareLet (r a) (r b)` (through `Hw.share`), so a meta-level `let`
   of an object value names one wire: the doubling chain `let y := x + x` at depth 20
-  emits 20 adders in 25 builder steps. Write `let ω x := …` to opt out.
+  emits 20 adders in 22 builder steps. Write `let ω x := …` to opt out.
 
 ## H14 S1: a usable HDL: names, bundles, composition, reset, emitters
 
@@ -580,7 +580,8 @@ assertion/deassertion is not modelled); primitives without a behavioural `model`
 the executable differential check in `examples/hdl-sim.wiz`, since `Hdl.Sim` uses
 `Array`, which the kernel does not reduce). The existing differential tests
 (`examples/hdl-sim.wiz`, `examples/hdl-bus.wiz`, `examples/hdl-crc.wiz`) remain the
-broader, executable check over operations, memories, primitives and `simFast`.
+broader, executable check over operations, memories and `simFast`; primitives are
+checked separately in `examples/hdl-prim.wiz`.
 
 ## H14 S4: the iCEstick gaps: shifts by a signal, signed operations, `&&`/`||`, BitPack, reset and enable
 
@@ -784,9 +785,8 @@ throughput one item per cycle with ready high (valid delayed by 3), data held wh
 is low, and transfer order preserved under backpressure (7 transfers, no loss or
 duplication in a 12-cycle trace with a 3-cycle stall); reset clears the elastic
 registers; `Circuit.run`, the netlist and `simFast` agree (the compiled `cRunLibs`
-case passed). The `hdl` group has 30 cases: with yosys, Icarus and a C toolchain on
-PATH all 30 passed; without yosys or Icarus the five tool cases are marked skipped with
-their reason, never silently passed.
+case passed). The `hdl` group has 31 cases; without yosys or Icarus the six tool cases
+are marked skipped with their reason, never silently passed.
 
 **What remains.** A `Flow` is one clock and one `Circuit`: no multi-clock flow, no
 memories inside a flow, no true fork/join of independent ready/valid channels (the data
@@ -1389,9 +1389,13 @@ with lib/Sys.wiz and lib/Serial.wiz moved onto this module) waits for linear Σ 
 is used once. In `do1`, `x ⇐ e;` binds an `IO1` result at quantity 1, and `(x, y) ⇐ e;` takes a
 pair apart, so an owned handle's token is threaded through straight-line code. The
 operations: `File.writeOwned`, `readLineOwned`, `readAllOwned` and `flushOwned`;
-`Fd.writeOwned` and `Fd.readOwned`; the generic `Handle.use1`. Each returns
-`(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
+`Fd.writeOwned` and `Fd.readOwned`; `Child.communicateOwned`; the generic `Handle.use1`.
+Each returns `(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
 `Child.waitOwned`.
+
+`Child.releaseOwned` drains a piped stdout/stderr (`Child.communicate c ""`) before it
+waits, so a child that fills its pipe cannot deadlock the release; use
+`Child.communicateOwned` first if you want that output.
 
 ```
 File.withOwned p "w" (fun f o => do1
@@ -1462,6 +1466,51 @@ error at import). Feral keeps only what Text lacks (`Fe.split`, `Fe.nth`, `Fe.me
 `Fe.split` and `Fe.wordsOf` keep a reversed accumulator and reverse it once, so they run
 in linear time.
 
+## Byte buffers (`lib/IO.wiz`, `Bytes`)
+
+`import IO` (or `Std`, which imports it) gives `Bytes`, a functional buffer of bytes. A
+byte is a `Nat` below 256: `Bytes.push b x` appends the low eight bits of `x`, and
+`Bytes.get b i` is `0` past the end (the total `Bytes.at` is `none`).
+
+| operation | meaning |
+|---|---|
+| `Bytes.empty` | the empty buffer |
+| `Bytes.push b x` | `b` with `x mod 256` at the end (in place when `b` is unique) |
+| `Bytes.size b` | the number of bytes |
+| `Bytes.get b i` | byte `i`, or `0` past the end |
+| `Bytes.ofString s`, `Bytes.toString b` | through a C string: they **stop at a NUL** |
+| `Bytes.slice b start len` | from `start`, at most `len` bytes (both clamp) |
+| `Bytes.append a b` | `a`'s bytes then `b`'s (in place when `a` is unique) |
+| `Bytes.eq a b` | byte for byte equality, length included |
+
+Pure helpers built on those: `Bytes.isEmpty`, `Bytes.at` (`Option Nat`), `Bytes.take`,
+`Bytes.drop` (past the end is the empty buffer), `Bytes.ofList`/`Bytes.toList` (each
+number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.show`
+(`[1, 2, 255]`, the form `#eval` prints a buffer in).
+
+**Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
+`Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;
+the decoder rejects overlong forms, encoded surrogates and truncated sequences with
+`"invalid UTF-8 at byte k"`. `Bytes.ofLatin1 s : Except String Bytes` and
+`Bytes.toLatin1 b` are one byte per character, code points 0 … 255 (above 255 is an
+error, not a truncation). `Bytes.ofString`/`Bytes.toString` stay the C-string pair, so
+`ofString` of a string with a NUL gives the bytes before it; `String.length` counts
+characters and `Bytes.size` bytes, so one astral character is one character and four
+bytes.
+
+`Bytes.ofArray a`/`Bytes.toArray b` (in `Std`, where `Array` is) convert to and from an
+`Array Nat`, each element mod 256. `import WordBytes` adds `Bytes.ofU8s`/`toU8s`
+(`List U8`); `U8Array ↔ Bytes` is not there yet (stage 29). `FS.readBytes`,
+`File.readBytes` and `Fd.read` hand back `Bytes` (9k).
+
+**The interpreters.** `#eval` and `#run` cannot call C, so they implement the nine
+operations on a `ByteArray` (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`), with
+`ofString`/`toString` mirroring the C boundary exactly; a `Bytes` value prints as
+`[1, 2, 255]`, equality computes, and a list of bytes is a `Bytes.ofList` application.
+Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model of
+`Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
+uses the same nine runtime natives (`selfhost/rt.c`).
+
 ## 9j: list lemmas (`lib/ListLemmas.wiz`)
 
 `import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
@@ -1490,36 +1539,36 @@ left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
 soundness/completeness in proofs and the `#check`/`#eval` behaviour.
 
-## Web: a React-style UI framework (`lib/Web/React.wiz`)
+## Web: the Loom UI framework (`lib/Web/Loom.wiz`)
 
-`import Web.React` (over `Json`, `Optic` and `Tagged`): components, local state,
+`import Web.Loom` (over `Json`, `Optic` and `Tagged`): components, local state,
 typed event handlers, keyed lists, a pure virtual DOM, deterministic server-side
-rendering and a keyed diff to DOM patches. Nodes are `React.VNode M` (`text`, `raw`,
-`el`, keyed `el`, `on`), built with `React.el`/`React.text`/`React.on`/`React.keyed`;
-`React.render` gives `{tree, html, handlers}` (`React.toHtml` is the SSR string) and
-`React.Rendered.diff` a `List React.Patch` (`replace`, `text`, `setAttr`,
-`removeAttr`, `insert`, `remove`, `move`) that `React.patchesJson` hands to
-`web/framework/runtime.js`. An app is `React.App S M` (`init`, `update`, `view`); a
-component is `React.Component P S M`. Local state is a lens into the app state
-(`React.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
-commute), and a one-shot resource is `React.Owned S`, a quantity-1 token the kernel
+rendering and a keyed diff to DOM patches. Nodes are `Loom.VNode M` (`text`, `raw`,
+`el`, keyed `el`, `on`), built with `Loom.el`/`Loom.text`/`Loom.on`/`Loom.keyed`;
+`Loom.render` gives `{tree, html, handlers}` (`Loom.toHtml` is the SSR string) and
+`Loom.Rendered.diff` a `List Loom.Patch` (`replace`, `text`, `setAttr`,
+`removeAttr`, `insert`, `remove`, `move`) that `Loom.patchesJson` hands to
+`web/framework/runtime.js`. An app is `Loom.App S M` (`init`, `update`, `view`); a
+component is `Loom.Component P S M`. Local state is a lens into the app state
+(`Loom.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
+commute), and a one-shot resource is `Loom.Owned S`, a quantity-1 token the kernel
 makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
 the only trust boundary (and must be one element); all other text and attribute values
 are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
-no effects, and `value`/`checked` would need property patches. Tests: group `react`
+no effects, and `value`/`checked` would need property patches. Tests: group `loom`
 and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
 `wiz-notes/react-framework.md`.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
-`import Web.Widget` (over `Web.React`) turns a list of widget **descriptors** into a
-React VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
+`import Web.Widget` (over `Web.Loom`) turns a list of widget **descriptors** into a
+Loom VDOM fragment: `slider`/`sliderRange`, `button`/`buttonValue`, `text` and `plot`,
 each with an id, a DOM event, a value/label/data and a callback expression naming a
 `Widget.Callback` (`Widget.Event → List Widget.Widget → List Widget.Widget`).
 `Widget.display` returns `WIZ_WIDGET:` plus the rendered HTML and the descriptors;
 `Widget.handle` parses a previous bundle, runs the callback, re-renders both lists and
 returns a `WIZ_WIDGET:` bundle whose `patches` are
-`React.patchesJson (React.Rendered.diff old new)`. The Jupyter kernel
+`Loom.patchesJson (Loom.Rendered.diff old new)`. The Jupyter kernel
 (`tools/jupyter/wiz_kernel/widgets.py`) turns the display into
 `application/vnd.wiz.widget+json` and a comm, so a slider event re-enters the session
 and the new patches go back on the same comm; `tools/jupyter/static/widget.js` applies
@@ -1527,9 +1576,10 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `web/widget/test.sh` (golden VDOM and patch application under Node),
 `tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
 (`nbclient`). Limits: no client-side state (every event is a kernel round trip),
-`plot` data is opaque JSON until a `Plot` module lands, and `Owned` cannot be held
-across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
-the raw `React.on`/`React.App.event` path passes only a handler index.
+`plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
+widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
+held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+the raw `Loom.on`/`Loom.App.event` path passes only a handler index.
 
 ## Numbers: classes, integers, words
 
@@ -1761,12 +1811,14 @@ data edges, so return values are modelled. `import Scry.Taint` feeds those edges
 Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
-`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, above
-24 rows, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
+`scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, at
+24 rows or more, a hashed dedup index plus `(column, value)` join indexes; `Scry.Eval` matches an
 atom through the shortest bound-column bucket, skips a delta-loop variant whose anchor
 relation did not move, and indexes provenance by fact hash. The semantics and findings
-are unchanged; `examples/scry-datalog-bench.wiz` is the benchmark and
-`wiz-notes/scry-datalog.md` §8 has the measurements and limits.
+are unchanged; the reproducible benchmark is `scry/bench/datalog/` (pinned revisions and
+inputs, 3 interleaved rounds, per-round times and peak RSS). It measures about 100–120×
+on `chain 5000` and 180–215× on `tc 20` across three runs, with the same semi-naive loop
+before and after the store index; `wiz-notes/scry-datalog.md` §8 has the limits.
 
 The S4 rule pack and interprocedural slice are separate modules:
 
@@ -1834,6 +1886,60 @@ pure. What remains outside the model is listed in `wiz-notes/scry-taint.md` (hea
 context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
+
+## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
+
+`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
+congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
+extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
+native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
+same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
+and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
+`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
+`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
+record, reads a field, or calls those functions compiles against one import only. It
+adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
+rewrites), union explanations (a flat proof forest), node/round/clock limits with a
+reported stop reason, and `Option Nat` extraction costs. Only six of the seventeen
+`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
+`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
+compares; the analysis, explanation, limit and `EqPlan` surface has no reference
+counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
+byte-identical (matching, instantiation and extraction), so the digests show that the
+two *tables* agree, not that the shared code is independently right. They cannot be
+imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
+operations, so a whole-library import that names both is an error. Every whole-library
+loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
+with everything except the reference family. `import Scry.EqPlan`
+is the Datalog seam: `eqsort` columns (`Scry.ColKind`), rules whose head is an equality
+assertion (`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and
+canonicalises the database between rounds. This is the second S12 slice: no
+scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware provenance and
+no kernel-checked certificates yet; `wiz-notes/scry-egraph.md` has the design, the API
+and the gaps.
+
+## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
+
+`import Scry.EgraphWil` turns a `Wil.Program` into an e-graph: every `x = e` is a union
+of the register's class with a structural encoding of `e` (`cst`, `use`, `bin`, `un`,
+`load`, `gep`; `alloc`, `havoc`, `slot`, `globalRef`, `fnptr` and `gepVar` get distinct
+opaque leaves). `wgSaturate` then runs a deterministic, fuel-bounded fold/identity pass —
+constant arithmetic through the same `Wil.Val.bin` semantics as the interpreter, plus
+`x + 0`, `x * 1`, `x * 0` and the other zero/one identities — and reports classes,
+nodes, rounds, fold/rewrite counts and the stop reason (`fixpoint` or `fuel`).
+`wgMergeEqRows` accepts the equality rows a Datalog stratum derives
+(`Scry.EGraph.mergeFacts`), but the e-graph is a read-only view: the `Scry.Store` facts
+and the taint findings stay authoritative.
+
+`import Scry.EgraphExtract` decodes the saturated classes back into a `Wil.Program`, and
+only under checks: a one-block (straight-line) function, every original operand a
+parameter or a single definition before the statement, candidate registers a subset of
+the original right-hand side, and a strictly cheaper term. `import Scry.EgraphTaint`
+compares taint alerts before and after that transformation (`added = 0` by construction;
+`removed` is a precision gain). `scry egraph FILE.c [--fuel N] [--rewrite]` parses C,
+lowers it with `Scry.Lower` and prints both reports (`scry/fixtures/egraph-const.c` is the
+checked-in example). Groups `scry-egraph` and `scry-taint` cover them;
+`wiz-notes/scry-egraph.md` has the design and limits.
 
 ## Scry: the taint benchmark and metrics (`scry/src/Scry/Bench.wiz`)
 
@@ -1922,7 +2028,7 @@ libFuzzer and deduplicated by a normalised stack signature.
 node (up to 64) with line/column, and the smallest CST node containing a byte offset (an
 invariant failure prints `input_offset=N`). `Scry.fuzzInputJsonAt` is the stable JSON;
 `scry/fuzz/run.py` embeds it in `build/fuzz/dynamic.json` beside the static
-`scry bench` report and its 34-case corpus sweep. A missing clang/libFuzzer is a clean
+`scry bench` report and its 52-case corpus sweep. A missing clang/libFuzzer is a clean
 skip (exit 0); a bounded run with no crash is explicit dynamic evidence, not a safety
 claim, and the target covers the parser boundary rather than the Wiz lowering/taint
 pipeline. `scry/fuzz/README.md` has the command, schema, counts and limits, and
@@ -1976,10 +2082,14 @@ values, a fixed attribute order, and the fixed sRGB palette in `Plot.colour`; th
 `Plot.toJson` is the renderer schema: `title`, `xlabel`, `ylabel`, `width`, `height`,
 `x` and `y` objects (`scale`, `domain` `{min, max}`, `ticks` of `{value, label}`),
 `series` (`label`, `mark`, `points` of `[x, y]`) and `bands` (`label`, `lower`,
-`upper`), all numbers as decimal strings. `Plot.render` returns
-`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value; the Jupyter
-kernel calls `Json.render (Plot.render chart)` and uses the result as the cell's MIME
-bundle (the `tools/jupyter` hook), with no other coupling to this module.
+`upper`), all numbers as decimal JSON numbers (their source text is preserved).
+`Plot.render` returns
+`{"text/plain": …, "image/svg+xml": …, "text/html": …}` as a `Json` value. The
+Jupyter hook is **not wired**: a cell must print the bundle (`#eval Json.render
+(Plot.render chart)`), and the kernel publishes an ordinary `#eval` result as
+`{"text/plain": …}` (`tools/jupyter/wiz_kernel/kernel.py`), so the SVG is not shown as
+an image until a display hook is added. `Plot.render` is the intended notebook hook;
+no other kernel path consumes it.
 
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout
