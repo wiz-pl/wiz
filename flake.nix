@@ -174,6 +174,134 @@
               platforms = systems;
             };
           };
+          # --- content-addressed staging prototype (opt-in: `.#ca.*`) -----------
+          # `nix build .#ca.wiz .#ca.tests` is the same package as `.#wiz .#tests`,
+          # staged and content-addressed:
+          #
+          #   caUnwrapped  lake build wiz grail tests        (the 17.8-min parallel phase)
+          #   caLib        the lib/ bytes, as their own node
+          #   caPrewarm    the serial 12.9-min elaboration prewarm -> $out/cache
+          #   caWiz        lib + binaries + cache + the wrappers (self-referential)
+          #   caTests      the test driver
+          #
+          # Two builds that produce the same bytes get the same store path, so a stage
+          # whose output is unchanged does not rebuild its dependents (`--early-cutoff`
+          # is the default for CA in Nix). The default `wiz`/`tests` above are untouched;
+          # evaluating any `.#ca.*` attribute needs the `ca-derivations` experimental
+          # feature on the *store* (the daemon, if there is one), not just the client.
+          # See wiz-notes/ca-derivations-2026-11-18.md.
+          caMark = attrs: attrs // { __contentAddressed = true; outputHashMode = "recursive"; };
+          caUnwrapped = pkgs.stdenv.mkDerivation (caMark {
+            pname = "wiz-unwrapped";
+            version = "0.1.0";
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./lakefile.lean ./lake-manifest.json ./lean-toolchain
+                ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+                ./Tests ./runtime ./c
+              ];
+            };
+            nativeBuildInputs = [ lean ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
+              lake build wiz grail tests
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
+              runHook postInstall
+            '';
+          });
+          # The standard library as its own CA node: exactly the lib/ bytes.
+          caLib = pkgs.runCommand "wiz-lib" (caMark { }) ''
+            mkdir -p $out
+            cp -r ${fs.toSource { root = ./lib; fileset = ./lib; }} $out/lib
+          '';
+          # The prewarm alone: the compiler (CA), lib (CA), and nothing else. Its output
+          # is the elaboration cache, so a compiler that is rebuilt to identical bytes
+          # cuts this stage off (and with it everything below).
+          caPrewarm = pkgs.stdenv.mkDerivation (caMark {
+            pname = "wiz-prewarm";
+            version = "0.1.0";
+            dontUnpack = true;
+            installPhase = ''
+              runHook preInstall
+              share=$TMPDIR/share
+              mkdir -p $share/.lake/build/bin
+              cp -r ${caLib}/lib $share/lib
+              cp ${caUnwrapped}/bin/wiz ${caUnwrapped}/bin/grail $share/.lake/build/bin/
+              export HOME=$TMPDIR
+              cd $share
+              cache=$TMPDIR/cache
+              mkdir -p "$cache"
+              while IFS= read -r f; do
+                m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
+                printf 'import %s\n' "$m" > "$TMPDIR/lib-import.wiz"
+                .lake/build/bin/wiz --cache "$cache" -I "$share/lib" check "$TMPDIR/lib-import.wiz"
+              done < <(find lib -name '*.wiz' | LC_ALL=C sort)
+              warm=$TMPDIR/warm-pkg
+              mkdir -p "$warm"
+              printf '%s\n' 'import Grail' \
+                'def package : Package := Package.new "warm"' \
+                '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
+              printf 'import Std\n' > "$warm/main.wiz"
+              .lake/build/bin/grail -C "$warm" --cache "$cache" build
+              rm -rf "$cache/bin"
+              chmod -R a-w "$cache"
+              mkdir -p $out
+              cp -r "$cache" $out/cache
+              runHook postInstall
+            '';
+          });
+          caWiz = pkgs.stdenv.mkDerivation (caMark {
+            pname = "wiz";
+            version = "0.1.0";
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            installPhase = ''
+              share=$out/share/wiz
+              mkdir -p $share/.lake/build/bin $out/bin
+              cp -r ${caLib}/lib $share/lib
+              echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
+              cp ${caUnwrapped}/bin/wiz ${caUnwrapped}/bin/grail $share/.lake/build/bin/
+              cp -r ${caPrewarm}/cache $share/cache
+              chmod -R a-w "$share/cache"
+              makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
+                --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils ]} \
+                --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib"
+                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+              makeWrapper $share/.lake/build/bin/grail $out/bin/grail \
+                --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git ]} \
+                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+            '';
+            meta = {
+              description = "Wiz, a didactic dependently typed language, and grail, its build tool";
+              mainProgram = "wiz";
+              platforms = systems;
+            };
+          });
+          caTests = pkgs.stdenv.mkDerivation (caMark {
+            pname = "wiz-tests";
+            version = "0.1.0";
+            dontUnpack = true;
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              install -m755 ${caUnwrapped}/bin/tests $out/bin/tests
+              install -m755 ${caWiz}/bin/wiz $out/bin/wiz
+              install -m755 ${caWiz}/bin/grail $out/bin/grail
+              runHook postInstall
+            '';
+            meta = {
+              description = "The Wiz test driver";
+              mainProgram = "tests";
+              platforms = systems;
+            };
+          });
           # The standard library's reference manual (stage 11s; `wiz doc --lib --reference`):
           # built, not committed. It reads only the packaged wiz (its lib/ and its
           # read-only elaboration cache), so while the compiler and lib/ are unchanged a
@@ -387,6 +515,9 @@
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz;
+          # opt-in content-addressed staging prototype (needs `ca-derivations`);
+          # every attribute above is the normal, input-addressed build, untouched.
+          ca = { inherit caUnwrapped caLib caPrewarm caWiz caTests; wiz = caWiz; tests = caTests; unwrapped = caUnwrapped; prewarm = caPrewarm; lib = caLib; };
           wizc = bootstrapChain.wizc;
           wizc-seed = bootstrapChain.seed;
           wizc-release = bootstrapChain.release { };
