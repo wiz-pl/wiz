@@ -59,6 +59,21 @@ def one : Nat := 1
 def two : Nat := Nat.add one one
 "
 
+/-- (C14) the smallest `native_refl` program: only with `--trust-native` (27a). The
+import is needed for `Nat`'s constructors (the frontend's numerals are `Nat.succ …`). -/
+def cliNativeRefl : String := "import Prelude
+def x : 1 = 1 := native_refl
+"
+
+/-- (C14) the same `native_refl` with a `main`, for `build` (the host wants an entry
+point there, the self-hosted driver does not). -/
+def cliNativeReflMain : String := "import Prelude
+import IO
+def x : 1 = 1 := native_refl
+def main : IO Unit := do
+  IO.println (Nat.toString 1)
+"
+
 def cliBad : String := "import Prelude
 def one : Nat := 1
 def two : Nat := nope
@@ -279,7 +294,69 @@ def cliGroup : Group where
         let (c, out, err) ← cliRun exe #[("input.wiz", "import Prelude\ndef bad : Nat := nope\n")] #[]
         checkEq 1 c
         checkEq "" out
-        cliCheck err "error: unknown identifier nope" "one-shot error" }
+        cliCheck err "error: unknown identifier nope" "one-shot error" },
+    { name := "(C14) --trust-native: native_refl is accepted with it (before or after the command) and refused without it", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- without the flag: the host's message verbatim, exit 1, no output
+        let (c, out, err) ← cliRun exe files #["check", "native.wiz"]
+        checkEq 1 c
+        checkEq "" out
+        cliCheck err "native.wiz:2:1: error: native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it" "untrusted refusal"
+        -- with the flag, after the command and before it (the host's positional flags)
+        for args in [#["check", "native.wiz", "--trust-native"],
+                     #["--trust-native", "check", "native.wiz"]] do
+          let (c, out, err) ← cliRun exe files args
+          checkEq 0 c
+          checkEq "" out
+          checkEq "" err
+        -- the frontend's own lines: the declaration's type and the axiom `#print axioms` names
+        let files2 := #[("axioms.wiz", cliNativeRefl ++ "#print axioms x\n")]
+        let (c, out, _) ← cliRun exe files2 #["check", "axioms.wiz", "--trust-native", "--types"]
+        checkEq 0 c
+        cliCheck out "axioms.wiz:2:1: info: x : Eq(Nat, (Nat.succ Nat.zero), (Nat.succ Nat.zero))" "the declaration's type"
+        cliCheck out "'x' depends on axioms: [x.native✝]" "the axiom"
+        -- `build` with the flag writes the C; without it, no artifact and exit 1
+        let (dir, c, out, err) ← cliRunDir exe files #["build", "native.wiz", "-o", "out.c", "--trust-native"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        let ctext ← IO.FS.readFile (dir / "out.c")
+        Tests.check (cliHas ctext "/* x : ") "build's comments"
+        let (dir, c, _, err) ← cliRunDir exe files #["build", "native.wiz", "-o", "out.c"]
+        checkEq 1 c
+        cliCheck err "native evaluation is not enabled" "build's refusal"
+        unless !(← (dir / "out.c").pathExists) do throw (IO.userError "build wrote the C of an untrusted native_refl")
+        -- an unknown trust flag is the host's usage error (exit 2); the value form is not
+        -- one in the host either, and `--trust-smt` is a host flag this toolchain has not got
+        for bad in ["--trust-native=1", "--trust-smt"] do
+          let (c, out, err) ← cliRun exe files #["check", "native.wiz", bad]
+          checkEq 2 c
+          checkEq "" out
+          cliCheck err (String.append "unknown flag: " bad) "the host's unknown-flag message" },
+    { name := "(C14) --trust-native is part of the cache key: an untrusted refusal is not replayed as an acceptance", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- cold, without the flag: an error, cached under the untrusted key
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "untrusted cold"
+        cliCheck err "native evaluation is not enabled" "untrusted diagnostic"
+        -- the same file with the flag must be a miss (a different key), then a hit
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v", "--trust-native"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "the trusted run must not read the untrusted entry"
+        unless !(cliHas err "error:") do throw (IO.userError s!"the trusted warm-up reported an error:\n{err}")
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v", "--trust-native"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "trusted warm"
+        -- and the untrusted key still holds its own answer
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache hit: " "untrusted warm"
+        cliCheck err "native evaluation is not enabled" "the replayed refusal" }
   ]
 
 builtin_initialize registerGroup cliGroup

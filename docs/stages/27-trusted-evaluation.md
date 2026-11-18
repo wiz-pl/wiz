@@ -80,8 +80,11 @@ The first run with the flag elaborates the imports again.
 
 **The self-hosted toolchain (C14).** The self-hosted frontend implements the form too,
 behind the same `--trust-native` flag (a flag of the run, in `Globals.trustNative`; the
-checker's `moduleMain` reads it, and `selfhost/Cli.wiz`'s driver does not yet). Without the
-flag it is refused with the host's message; with it, the whole body of a closed definition
+checker's `moduleMain` reads it, and `selfhost/Cli.wiz` passes it for `check`, `build`,
+`run`/`eval` and the one-shot mode, before or after the command as the host's positional
+flags are). It is mixed into the driver's cache key, as the host mixes the flag and the
+step limit: an acceptance is never replayed without the flag, nor the refusal with it.
+Without the flag it is refused with the host's message; with it, the whole body of a closed definition
 whose type is an equation at a first-order data type is decided by running both sides
 (`nativeNorm`: `inlineTm`, the frontend's `eval`/`quote` — compiled code here, so the
 "interpreter" is the kernel's evaluator run natively), the two values are read back and
@@ -93,8 +96,9 @@ it never sees the Lean toolchain's declarations.
 
 The self-hosted toolchain has **no checked-in trust ledger and no `--native-fuel`**: the
 boundary is the declaration's shape (a definition whose value is an axiom, an inaccessible
-`.native✝` name, and `#print axioms`), and the evaluator has no step counter
-(`--native-fuel N` is not accepted). A `partial` definition is not refused explicitly (it
+`.native✝` name, and `#print axioms`), and the evaluator has no step counter, so the
+driver refuses `--native-fuel N` as an unknown flag rather than accept a flag with nothing
+to limit. A `partial` definition is not refused explicitly (it
 is an axiom to this frontend, so a run that reaches one stays stuck and never equals a
 value), and the erasure/read-back strictness of the host (foreign constants, quantity-0
 fields) is simplified: both are refused as "not first-order data" only when the *type* is a
@@ -111,4 +115,7 @@ Tests: group *native* (accepted with the flag, a 20 000-step word computation, r
 without it, a false equation refuted, non-first-order types refused, only as a closed
 definition's body, `#print axioms`, a wrong `implemented_by`, partial definitions, the
 step limit, the flags and grail's keys, the cache across the flag and across a changed
-import, `lib/`).
+import, `lib/`). The self-hosted driver has its own cases in *selfhost-cli* (the flag
+before and after the command, `build`, an unknown trust flag, the cache key across the
+flag) and *selfhost-cli-diff* (the acceptance, the refusal's message, `build`, the unknown
+flag, and `--native-fuel` as a named difference).

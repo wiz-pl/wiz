@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: `selfhost/Cli.wiz` now passes `--trust-native` (27a) to the frontend's
+  `Globals.trustNative`, so `wiz-selfhost check`, `build`, `run`/`eval` and the one-shot
+  mode accept `def X : a = b := native_refl` (C14). The flag is a switch before or after
+  the command, as in the host's `parseFlags`, is part of the driver's cache key (an
+  acceptance is never replayed without it), and an unknown trust flag (`--trust-native=1`,
+  `--trust-smt`) is the host's `unknown flag: …` with exit 2. `--native-fuel N` is not
+  accepted: the self-hosted evaluator has no step counter, so the driver refuses it as an
+  unknown flag rather than take a flag with nothing to limit. Cases: *selfhost-cli* and
+  *selfhost-cli-diff*.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
