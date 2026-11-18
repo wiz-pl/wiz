@@ -91,7 +91,7 @@ of each node of `declaringKinds`, and of any other command that is a keyword fol
 by an identifier (a `theorem`-like command a macro declares). -/
 partial def declIdents : Syntax → Array (SourceInfo × Name)
   | .node _ k args =>
-    let inner := args.foldl (fun acc a => acc ++ declIdents a) #[]
+    let inner := args.foldl (fun acc a => (declIdents a).foldl (fun acc x => acc.push x) acc) #[]
     let keywordIdent := k.startsWith "command." && (args[0]? matches some (Wiz.Syntax.atom ..)) &&
       (args[1]? matches some (Wiz.Syntax.ident ..))
     if declaringKinds.contains k || keywordIdent then

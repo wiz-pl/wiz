@@ -265,7 +265,7 @@ def libTrustStates (cache : TrustCache := {}) :
   for (m, skip) in Elab.libApart do
     unless seen.contains skip do
       seen := skip :: seen
-      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]
+      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]   -- complexity: ok (libApart is a handful of module groups; test-only)
   pure out
 
 /-- The state of elaborating `path` (an example) with every library module importable. -/
@@ -333,7 +333,7 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none)
       checkCovered s.globals sources
       libSources := libSources ++ sources
     check (decls > 1000) s!"only {decls} library declarations in all loads"
-    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList
+    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList   -- complexity: ok (test-only: one dedup of the whole ledger, after the loop)
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
