@@ -31,19 +31,19 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "cache: --cache-ro is a host layer the driver has not got (a named difference)",
-      "reason": "cache: `--cache-ro DIR` adds a read-only layer",
+      "case": "--cache-verify: the modes are accepted, and strict is warm in both",
+      "reason": "cache verification: both modes behave alike",
       "parity": "D5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "why": "documented self-host parity difference (D5): the driver's one-file cache has no read-only layers, so it rejects --cache-ro. Allow-listed by the user (2026-11-17) for this one case only."
+      "why": "documented self-host parity difference (D5): the policy is the same in both, but the manifests' layouts differ (the host's per-module SHA-256/Merkle .wizmf under manifest.d/, the driver's per-entry digest sidecar). Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)",
-      "reason": "cache verification: the host writes output manifests",
+      "case": "cache: --cache-prune DAYS checks its argument in both, and prunes before the run",
+      "reason": "cache prune: both prune only the write cache by age",
       "parity": "D5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "why": "documented self-host parity difference (D5): the self-hosted cache writes no output manifests, so --cache-verify strict never hits. Allow-listed by the user (2026-11-17) for this one case only."
+      "why": "documented self-host parity difference (D5): both prune only the write cache by age and agree on the argument errors, but the summary names each tool's own keyed files (.wizc/.wizm/.wizr/.wizs against .check/.c). Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",
