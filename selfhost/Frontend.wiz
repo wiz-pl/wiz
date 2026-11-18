@@ -692,6 +692,12 @@ def closeG (inline : Bool) (gs : Globals) : Nat → Tm → Tm
   | d, .app f a => .app (closeG inline gs d f) (closeG inline gs d a)
   | d, .letE ty v b => .letE (closeG inline gs d ty) (closeG inline gs d v) (closeG inline gs (d + 1) b)
   | d, .ann t ty => .ann (closeG inline gs d t) (closeG inline gs d ty)
+  -- (21an) `A × B` is a `.sigma`, whose second component is under the pair's binder:
+  -- both sides are scope indices here (`elab` names a global by its index), so they must
+  -- be closed too — a field type like `String × Nat` was left with `var String` and
+  -- failed the kernel's check with "a variable out of scope"
+  | d, .sigma q i j a b => .sigma q i j (closeG inline gs d a) (closeG inline gs (d + 1) b)
+  -- (every other form `elab` produces is closed above; it builds no other `Tm`)
   | _, t => t
 
 def tmsToList : Tms → List Tm

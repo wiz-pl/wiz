@@ -1337,3 +1337,89 @@ partial file checks that a partial definition's body is reached only as an imple
 * `#print axioms`'s only textual gap: a *written* partial-definition witness
   (`partial (default := a) def f`) is checked and then discarded (`witnessOf`), so an
   axiom that only the witness mentions is not listed; the host walks the witness.
+## 21an: a `×` type as an inductive field, self-hosted
+
+The self-hosted frontend has two elaborators: `inferType`/`elabBy` check types and
+terms, and a **scope checker** (`elab`) names each global by its index in the
+declaration table, which `closeG` then closes over the globals so that a declaration is
+a term in the empty context (`closeG d t` turns every index at or beyond its `d`
+binders into a constant). The scope checker is what elaborates an inductive
+constructor's field types (and a `match`'s descriptions).
+
+`closeG` visited `var`, `pi`, `lam`, `app`, `letE` and `ann`, and returned every other
+form unchanged. That was invisible while the field types were only functions and
+constants, but `elab` reads `A × B` (`term.prod`) as a `sigma` whose **second component
+is under the pair's binder** — so a syntactic pair in a field type was left with its
+two components as *scope indices*, and the kernel rejected the declaration with
+
+```
+internal error: a variable out of scope
+```
+
+A pair written through a definition (`def P : Type := Nat × Bool`; `| mk (p : P)`) was
+fine, because there the pair is an `app` of constants and `closeG` closed it; the same
+type in a `def` was fine too, as `def` types go through `inferType`, not `elab`.
+
+`closeG` now closes a `sigma`'s first component at `d` and its second at `d + 1`, like
+`pi`. That is the whole fix: `structure React.Out (M : Type) where … handlers : List
+(String × M)` in `lib/Web/React.wiz` and `inductive … | mk (p : Nat × Bool)` in any
+module now elaborate and check, in the self-hosted frontend as on the Lean one.
+
+**Tests** (group `selfhost`): `sigmaFieldDecls` — a `×` as an inductive field, a
+structure field, a field of a parameterised type, two nested pairs in a structure, and a
+use of the pair's `.1`/`.2` in a `match`, with the same verdicts in both frontends; a
+pair argument of the wrong type is still rejected by both. A second case pins a
+difference that is *not* fixed here: `[a, b]` (a list literal, A17) is a term on the
+Lean side and a parse error on the self-hosted one.
+
+**Measured** (`tests --libdiff` over the two library modules and three neighbours, the
+same harness before and after the one-line change):
+
+| file | before | after |
+|---|---|---|
+| `lib/Web/React.wiz` | 139 errors, first `internal error: a variable out of scope` (l. 182) | 136 errors, first `type mismatch: … (List (String × M))` (l. 221) |
+| `lib/Web/Widget.wiz` | 141 errors, first `type mismatch: expected Json, got …→ Json` (l. 130) | 138 errors, first the same |
+| `lib/Json.wiz`, `lib/Hoare.wiz` | 3, 261 errors | 3, 261 |
+| `scry/tests/ReplPrelude.wiz` | `ok` | `ok` |
+
+Neither record flips to `ok`: the counts are errors in the whole module graph, not in
+the file (21ae). React's first error is now a second, independent self-hosted bug that
+the fix uncovered — a `partial` definition **by equations** whose result is a pair and
+whose body calls itself:
+
+```
+structure Out (M : Type) where
+  handlers : List (String × M)
+
+partial def go {M : Type} : Nat → Out M → Nat × Out M
+  | .zero, o => (1, o)
+  | .succ k, o => go k o
+```
+
+The Lean frontend accepts it; the self-hosted one reports `type mismatch: expected
+(Nat × Out M), got (Nat × Out (… ?m …))`, a metavariable from the recursive call's
+inserted `{M}` left unsolved with a spine of the match's binders. Without the recursive
+call, or as a plain `def`, the same declaration passes.
+
+**Not done:** the two `lib/Web` modules this was found in are still not accepted by the
+self-hosted frontend, and the `=selfhost-libdiff` rows for them cannot flip to `ok`
+yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in these files:
+
+* `lib/Web/Widget.wiz` writes its attribute and child lists as `[a, b]`. List literals
+  are a **library** syntax in `lib/Prelude.wiz` (a `syntax` rule plus a `Macro`
+  function, `ListLit.expand`), and the self-hosted frontend's prelude is
+  `preludeText`, which declares no such rule; the self-hosted frontend has no
+  elaborator-time macro evaluator to run `ListLit.expand` either (A12). List literals
+  are a known gap (A17): expanding `term.listLit` in `expandNotes`, with a surface rule
+  in `Parse.wiz`, is not on master.
+* Both files import `Json`, `Text`, `Web.React` and their closures (`Optic`, `Tagged`,
+  `Logic`, `Result`). The Lean toolchain's prelude is `lib/Prelude.wiz` (266
+  declarations: `builtin`, `attribute`, macros, tactics, classes), while the
+  self-hosted loader always uses its embedded `Prelude` (`moduleRootSourcesAs`: "the
+  self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`"). The two
+  preludes disagree, so a `lib/` module that declares `List.map`, `List.length` or
+  `String.length` (as `lib/Text.wiz` does) is a duplicate declaration for the
+  self-hosted frontend, and names the embedded prelude lacks (`List.foldl`,
+  `List.revOnto`, `outParam`) are unknown. Until the self-hosted frontend can
+  elaborate `lib/Prelude.wiz` (A9–A23), a `lib/` row of the libdiff measures the
+  difference between two preludes, not the file.
