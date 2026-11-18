@@ -1441,7 +1441,8 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
-          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
+          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c))))
+          (List.append ps (fieldNames (ctorFields c))))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with

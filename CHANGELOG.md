@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: a constructor's parameters and fields are named arguments too (A9). The
+  self-hosted frontend kept no binder names for a constructor's `Global`, so
+  `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
+  parameters followed by the constructor's fields, so fields can be given in any order
+  (a later field's type may mention an earlier named one), and an implicit field or a
+  parameter can be named. An inductive type's own parameters, a dot-constructor and a
+  local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
+  and rejected constructor forms against the Lean frontend (21ab, 13a).
 * runtime/FFI boundary (the 2026-11-17 review, 9h/9k): `Process.exec` saves the
   `SIGPIPE` disposition and restores it when `exec` fails, and a spawn re-asserts the
   ignore every time, so a failed exec no longer leaves the next write to a broken pipe
