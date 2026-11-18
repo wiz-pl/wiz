@@ -1,0 +1,5 @@
+# fixture ledger (Tests/trust-ledger/sealdenied): a seal reason denying the native
+# representation the type has (the `native S := mkImpl/getImpl` row)
+S	S.mk	native S := mkImpl/getImpl	fixture: `S.mk` is `mkImpl`; `getImpl` reads the field	gate-fixture	2027-06-30
+S	S.seal✝	axiom S.seal✝	seal of a sealed brand (no native representation); keeps the type opaque and distinct	gate-fixture	2027-06-30
+S	S.seal✝	builtin seal:S := S.seal✝	`builtin seal:S := S.seal✝` registers the axiom `sealed inductive S` generated; it is a value-less phantom index	gate-fixture	2027-06-30

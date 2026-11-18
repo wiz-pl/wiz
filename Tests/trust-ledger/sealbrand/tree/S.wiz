@@ -1,0 +1,5 @@
+import Prelude
+
+/-- A sealed brand: no native representation. -/
+sealed inductive S where
+  | private mk (n : Nat)

@@ -11,12 +11,13 @@ an axiom per use that `#print axioms` lists together with the native implementat
 the run can reach; never in the library; and cache entries that never cross the flag.
 
 The group also checks the **trust ledger** (`scripts/trust-ledger.sh`,
-`.github/trust-baseline.tsv`): every declaration of `lib/` is run through
-`#print axioms`, and a source of trust that is not in the checked-in baseline — an
-axiom, `sorry`, `native_refl`, `implemented_by`/`repr:`, SMT or `builtin`
-registration, or a `partial` definition — fails until it is reviewed and given a ledger
-row with a reason, an owner and a review date; rows expire. The `hdl-verified` group
-checks the axiom-free example the same way.
+`.github/trust-baseline.tsv`): every declaration of `lib/` and of the programs built
+from `selfhost/` is run through `#print axioms`, and a source of trust that is not in the
+checked-in baseline — an axiom, `sorry`, `native_refl`, `implemented_by`/`repr:`, SMT or
+`builtin` registration, or a `partial` definition — fails until it is reviewed and given a
+ledger row with a reason, an owner and a review date; rows expire, and a `seal✝` reason's
+native-representation claim is cross-checked with the `native T := mk/get` rows. The
+`hdl-verified` group checks the axiom-free example the same way.
 -/
 
 open Wiz
@@ -218,18 +219,35 @@ their own declarations must add no trust. `examples/hdl-verified.wiz` is checked
 `hdl-verified` group too; `-native`/`-full` are deliberately trusted and are not here. -/
 def trustLedgerExamples : List String := ["examples/hdl-verified.wiz"]
 
-/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
+/-- The state of importing every module under `dir`, as `wiz check` does (the toolchain's
 library trusted). Both trust extensions are on so that a use is *recorded* by the
 ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
 and `lib/ never uses native_refl` still fail on a use). -/
-def libTrustState : IO (CommandState ZeroOneMany) := do
-  let files ← wizFiles "lib"
+def modulesTrustState (dir : String) : IO (CommandState ZeroOneMany) := do
+  let files ← wizFiles dir
+  let dropLen := dir.length + 1
   let mods := files.filterMap fun f => do
-    let cs := (f.toString.toList.drop 4)
+    let cs := (f.toString.toList.drop dropLen)
     pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
   let mods := mods.toArray.qsort (· ≤ ·) |>.toList
-  let input := String.join (mods.map (s!"import {·}\n"))
+  let input := String.join (mods.map fun m => s!"import {m}\n")
   pure (runFrontend (R := ZeroOneMany) input
+    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
+      trustNative := true, smt := { trust := true } })
+
+/-- The state of importing every module of `lib/`. -/
+def libTrustState : IO (CommandState ZeroOneMany) := modulesTrustState "lib"
+
+/-- The state of elaborating one `selfhost/` program: its files concatenated in build
+order (`Wiz.Selfhost.compilerFiles`/`checkerFiles`), as the toolchain builds it. The
+selfhost is one namespace, not a module tree — its files reference each other
+unqualified and several would clash with a `lib/` module of the same name in one
+elaboration — so a program is a root of its own and `Prelude`/`IO`/`Std`/`Sys` come
+from `lib/` through the ordinary loader. -/
+def programTrustState (files : List String) (source : List String → String) :
+    IO (CommandState ZeroOneMany) := do
+  let srcs ← files.mapM fun f => IO.FS.readFile (System.FilePath.mk f)
+  pure (runFrontend (R := ZeroOneMany) (source srcs)
     { loader := ← Elab.libLoader, trustedModule := Tests.libModule
       trustNative := true, smt := { trust := true } })
 
@@ -253,10 +271,38 @@ def rejectSorry (files : List System.FilePath) : IO Unit := do
     | [] => pure ()
     | off :: _ => throw (IO.userError s!"{f}:{lineOf src off}: `sorry` is not checked by the kernel; it is never allowed in the trusted base")
 
+/-- A checked-in root of the ledger. `lib/` is a module tree; `selfhost/` is not — its
+files are concatenated into the programs the toolchain builds (`Wiz.Selfhost`), so each
+program is one root and one elaboration. `--tree` is deliberately not a root: it is a
+fixture scope (see `Tests/trust-ledger/`), and walking it with the checked-in ledger
+would report every `lib/` row stale. -/
+inductive LedgerRoot where
+  | modules (dir : String)
+  | program (label : String) (files : List String) (source : List String → String)
+
+/-- The roots of the checked-in ledger, and the reason `--lib-only` is lib alone.
+`selfhost/` is two programs: the compiler (what a user runs) and the checker (what
+`wiz check` runs). Their shared files are elaborated twice, which is why the sources
+are deduplicated by key. Every selfhost declaration is labelled `selfhost`: a
+declaration's file is not part of its name, so its reason names the file instead. -/
+def ledgerRoots : List LedgerRoot :=
+  [.modules "lib",
+   .program "selfhost" Selfhost.compilerFiles Selfhost.compilerSource,
+   .program "selfhost" Selfhost.checkerFiles Selfhost.checkerSource]
+
+/-- A declaration a `selfhost/` program made itself, rather than one imported from
+`lib/`. An imported public declaration has its module set; an imported *private* one has
+no module (`renamePrivate` does not rewrite it) but is named `_private.<module>._0.name`,
+while the program's own privates are `_private.._0.name` (the program is the main file). -/
+def programOwn (s : CommandState ZeroOneMany) (n : Name) : Bool :=
+  s.globals.declModule[n]?.isNone &&
+    !(n.startsWith "_private." && !n.startsWith "_private.._0.")
+
 /-- The ledger's sources: `module<TAB>declaration<TAB>item`, sorted and deduplicated.
-With `includeExamples`, the axiom-free examples' own declarations are included too.
-`root` is for the fixture trees under `Tests/trust-ledger/` (a directory of `.wiz`
-modules); it is not part of the checked-in ledger. -/
+With `includeExamples` the full checked-in scope is walked — `lib/`, `selfhost/` and
+the axiom-free examples' own declarations. Without it (`--lib-only`, the `native`
+group) only `lib/` is. `root` is for the fixture trees under `Tests/trust-ledger/` (a
+directory of `.wiz` modules); it is not part of the checked-in ledger. -/
 def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (List TrustSource) := do
   match root with
   | some dir =>
@@ -280,15 +326,38 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
     checkCovered s.globals sources own
     pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
   | none =>
-    let libFiles ← wizFiles "lib"
-    rejectSorry libFiles
-    let s ← libTrustState
-    noTrustErrors "the library" s
-    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-    let libLabel (n : Name) : String := trustModuleOf s.globals n
-    let libSources := trustSources s.globals libLabel
-    checkCovered s.globals libSources
-    let mut sources := libSources
+    let roots := if includeExamples then ledgerRoots else
+      ledgerRoots.filter fun r => match r with
+        | .modules _ => true
+        | .program _ _ _ => false
+    if includeExamples then rejectSorry (← wizFiles "selfhost")
+    let mut sources : List TrustSource := []
+    let mut states : List (Bool × CommandState ZeroOneMany) := []
+    -- elaborate every root; a program's imports come from lib/ through `libLoader`
+    for root in roots do
+      match root with
+      | .modules dir =>
+        rejectSorry (← wizFiles dir)
+        let s ← modulesTrustState dir
+        noTrustErrors dir s
+        check (s.globals.order.size > 1000) s!"only {s.globals.order.size} declarations in {dir}"
+        let labelOf (n : Name) : String := trustModuleOf s.globals n
+        sources := sources ++ trustSources s.globals labelOf
+        states := states ++ [(true, s)]
+      | .program label files source =>
+        let s ← programTrustState files source
+        noTrustErrors label s
+        sources := sources ++ trustSources s.globals (fun _ => label) (programOwn s)
+        states := states ++ [(false, s)]
+    let allSources : List TrustSource := sources.eraseDups
+    -- A module tree's sources are its own declarations (all of them); a program's are
+    -- only the declarations it makes itself (its lib/ imports are the library's rows).
+    -- Either may depend on another root's trusted base, so the walk checks against all.
+    for (isModule, s) in states do
+      let own (n : Name) : Bool :=
+        if isModule then true else programOwn s n
+      checkCovered s.globals allSources own
+    let mut all := allSources
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
@@ -299,9 +368,9 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
         let ownSources := (trustSources es.globals labelOf own)
         -- an example's declarations may depend on the library's trusted base, so the
         -- walk checks against both; its own sources are what the baseline would gain
-        checkCovered es.globals (libSources ++ ownSources) own
-        sources := sources ++ ownSources
-    pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
+        checkCovered es.globals (all ++ ownSources) own
+        all := all ++ ownSources
+    pure (all.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
 
 /-- The ledger's lines, sorted and deduplicated (what `--print` prints). -/
 def ledgerLines (includeExamples : Bool) (root : Option String := none) : IO (List String) := do
@@ -310,7 +379,8 @@ def ledgerLines (includeExamples : Bool) (root : Option String := none) : IO (Li
 def trustBaseline : System.FilePath := ".github/trust-baseline.tsv"
 
 def trustBaselineHeader : String :=
-  "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
+  "# The Wiz trust ledger: the trusted base of lib/, selfhost/ (the programs the toolchain\n" ++
+  "# is built from) and the axiom-free examples.\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
   "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
@@ -445,14 +515,45 @@ def missingMetadata (r : TrustRow) : List String :=
   (if r.owner.trimAscii.toString.isEmpty then ["an owner"] else []) ++
   (if r.review.trimAscii.toString.isEmpty then ["a review date"] else [])
 
+/-- The types with a native representation, from the sources: a `native T := mk/get`
+row is the `attribute [implemented_by mk get] T.mk` registration, recorded under the
+constructor's name. -/
+def reprTypes (actual : List TrustSource) : Std.HashSet String :=
+  actual.foldl (fun s t =>
+    if t.item.startsWith "native " && t.name.endsWith ".mk" then
+      match (t.item.drop "native ".length).toString.splitOn " :=" with
+      | T :: _ => s.insert T
+      | [] => s
+    else s) {}
+
+/-- Check the one structural claim a `seal✝` reason can make: whether the sealed type
+has a native representation. A reason saying "native representation" (or "no native
+representation") is cross-checked against the `native T := mk/get` sources, so a
+copy-pasted seal reason cannot claim a representation the type does not have — a
+sealed *brand* — and a reason cannot deny one it does have. -/
+def checkSealReasons (actual : List TrustSource) (rows : List TrustRow) : List String :=
+  let reprs := reprTypes actual
+  rows.filterMap fun r =>
+    if r.item.startsWith "axiom " && r.name.endsWith ".seal✝" then
+      let T := (r.name.dropEnd ".seal✝".length).toString
+      let denies := (r.reason.splitOn "no native representation").length > 1
+      let claims := !denies && (r.reason.splitOn "native representation").length > 1
+      if claims && !reprs.contains T then
+        some s!"{TrustRow.key r}: reason claims a native representation, but there is no `native {T} := mk/get` row (a sealed brand)"
+      else if denies && reprs.contains T then
+        some s!"{TrustRow.key r}: reason says there is no native representation, but the ledger has a `native {T} := mk/get` row"
+      else none
+    else none
+
 structure TrustReport where
   count : Nat
   legacy : Nat
 
 /-- Compare the actual sources with the ledger rows. Fails on a new source (the security
 relevant direction), a stale row, an incomplete row (a reason, owner and review date are
-all required once any is present), an invalid or expired review date, and — with
-`strictLegacy` — a row still carrying the migration reason/owner. -/
+all required once any is present), an invalid or expired review date, a `seal✝` reason
+that claims a native representation the type does not have (or denies one it has), and
+— with `strictLegacy` — a row still carrying the migration reason/owner. -/
 def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustRow)
     (today : String) (strictLegacy : Bool := false) : IO TrustReport := do
   let actualLines := actual.map TrustSource.line
@@ -473,6 +574,7 @@ def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustR
         problems := problems ++ [s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD"]
       else if r.review < today then
         problems := problems ++ [s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})"]
+  problems := problems ++ checkSealReasons actual rows
   if strictLegacy && legacy > 0 then
     problems := problems ++ [s!"{legacy} legacy rows still have the pre-gate reason/owner (review them, or run without --strict-legacy)"]
   if added.isEmpty && removed.isEmpty && problems.isEmpty then
@@ -504,8 +606,9 @@ def checkTrustLedger (includeExamples : Bool := true) (root : Option String := n
   let today ← if today.isEmpty then currentDate else pure today
   let actual ← ledgerSources includeExamples root
   let rows ← readTrustRows ledger
-  -- `--lib-only` (the `native` group) leaves the examples' rows out, as before.
-  let rows := if includeExamples then rows else rows.filter fun r => !r.module.startsWith "examples/"
+  -- `--lib-only` (the `native` group) leaves the examples' and selfhost's rows out.
+  let rows := if includeExamples then rows else
+    rows.filter fun r => !r.module.startsWith "examples/" && r.module != "selfhost"
   compareTrust "the trust ledger" actual rows today strictLegacy
 
 /-- Check one axiom-free example's own declarations against its part of the ledger, from

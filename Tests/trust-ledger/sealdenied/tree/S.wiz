@@ -1,0 +1,10 @@
+import Prelude
+
+/-- A sealed type with a native representation. -/
+sealed inductive S where
+  | private mk (n : Nat)
+
+def mkImpl (n : Nat) : S := S.mk n
+def getImpl (s : S) : Nat := match s with
+  | .mk n => n
+attribute [implemented_by mkImpl getImpl] S.mk

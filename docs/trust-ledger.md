@@ -1,8 +1,9 @@
 # The trust ledger
 
-`.github/trust-baseline.tsv` is the reviewed list of everything in `lib/` (and the
-axiom-free examples) that the kernel does not check. `scripts/trust-ledger.sh` regenerates
-it, and the `trust-ledger` CI job plus the `native` test group compare it with the source.
+`.github/trust-baseline.tsv` is the reviewed list of the trusted base: every source of
+trust in `lib/`, in the programs built from `selfhost/`, and in the axiom-free examples.
+`scripts/trust-ledger.sh` regenerates it, and the `trust-ledger` CI job plus the `native`
+test group compare it with the source.
 
 ## What is a source of trust
 
@@ -23,6 +24,35 @@ records sources rather than dependency edges. One row per:
 `builtin inline` (a compiler hint) and `builtin int` (only how values print) are not
 trust and are not listed. Wiz has no `unsafe` keyword: an `unsafe` declaration is a parse
 error, and `sorry` is rejected by the ledger walker before it elaborates.
+
+`seal✝` reasons are checked against the `native T := mk/get` rows: a reason that says
+"native representation" fails when the sealed type has no such row (it is a *brand*), and
+one that says "no native representation" fails when it has one. That is the one
+structural claim a seal reason makes that the checker can decide; it caught three
+copy-pasted reasons (`PMap`, `Scry.LatRel`, `Scry.TupleRel`) that called a brand a
+native representation.
+
+## The roots: `lib/`, `selfhost/` and the examples
+
+`ledgerRoots` in `Tests/Native.lean` is the list of trees the checked-in ledger walks:
+
+* **`lib/`** as a module tree: every `.wiz` file is imported, as `wiz check` does.
+* **`selfhost/`** as the two programs built from it (`Wiz.Selfhost.compilerFiles` and
+  `checkerFiles`). The selfhost is not a module tree in the ledger's sense: its files
+  reference each other unqualified and are concatenated into one program, and several
+  would clash with a `lib/` module of the same name in one elaboration. Each program is
+  therefore one root and one elaboration, and every declaration it makes is labelled
+  `selfhost`; the reason names the file (a declaration's file is not part of its name).
+  The shared frontend files are elaborated twice (once for each program) and their rows
+  are deduplicated by key.
+* **the axiom-free examples** (`examples/hdl-verified.wiz`): its own declarations must
+  add no trust.
+
+`--tree DIR` is **not** a root. It is the fixture scope used by
+`Tests/trust-ledger/run.sh`: it elaborates a small module tree with `lib/` importable and
+counts only that tree's declarations. Passing `selfhost/` to it would count the two
+programs' declarations as a fixture and report every `lib/` row stale. `--lib-only` is
+the `native` group's narrower scope: `lib/` alone, without `selfhost/` or the examples.
 
 ## Format
 
@@ -49,10 +79,12 @@ check fails with "missing a reason", "missing an owner" or "missing a review dat
 
 `scripts/trust-ledger.sh --check` fails when:
 
-* a source of trust in `lib/` (or `examples/hdl-verified.wiz`) has no matching row —
-  the **new-entry gate**;
+* a source of trust in `lib/`, in a `selfhost/` program, or in
+  `examples/hdl-verified.wiz` has no matching row — the **new-entry gate**;
 * a row names a declaration that is no longer there (a stale row; a renamed declaration
   is called out explicitly when the item kind matches);
+* a `seal✝` reason claims a native representation the type does not have (or denies one
+  it has);
 * a row is incomplete (including a bare three-column row), has an invalid date, or is
   expired.
 
@@ -76,8 +108,10 @@ formality.
 
 The migration gave the 753 pre-gate rows the reason `legacy: pre-gate baseline; not
 individually reviewed`, owner `unassigned`, and review date `2027-05-14`. That
-migration is **complete**: every row now has a declaration-specific reason and a named
-owner, so no row carries the marker and `--strict-legacy` passes.
+migration is **complete**: every row now has a reason naming its kind or block (a
+`partial` row names its definition or mutual block, an FFI row names its C function, a
+seal row names its registration and says whether the type has a native representation)
+and a named owner, so no row carries the marker and `--strict-legacy` passes.
 
 ## Merging the ledger
 
@@ -119,9 +153,10 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The ledger now has 730 rows: the migration's 753, minus the 73 removals below, plus 50
-`partial` rows added by later modules (the `partial` group is 182 rows). The removals are
-all structural, not a loosening of the gate:
+The `lib/` part of the ledger has 730 rows: the migration's 753, minus the 73 removals
+below, plus 50 `partial` rows added by later modules (the `partial` group is 182 rows).
+The `selfhost/` part is described below. The removals are all structural, not a
+loosening of the gate:
 
 | what was removed | rows | why it was not trust |
 | --- | --- | --- |
@@ -185,6 +220,35 @@ new name; the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` s
 and `Proc.runLinked` now have their own reasons. `Json.sub` is partial by intent (it
 is an elaboration fence, not recursion) and has a reason.
 
+### The `selfhost/` rows
+
+The `selfhost/` part of the ledger is **578 rows**. With the 730 `lib/` rows (and no
+example rows) the ledger is **1308 rows**: 18 for the 9 `extern` declarations (each an
+`axiom` and a `builtin extern:` pair) and 560 `partial` rows (436 members of 83 `mutual`
+blocks and 124 standalone `partial def`s). Each reason names its file; a mutual row
+names the block and its members, an extern row names the C function, what makes it the
+definition and the marshalling's kind string.
+
+These are the toolchain's own sources, not a library's, and they were outside the gate
+until 2026-11-18. The rows are a **source inventory**: the two programs are elaborated by
+the Lean frontend (with `lib/` importable), so the same walk sees their `extern`s and
+`partial def`s, but a row is not a claim that the Lean kernel checks the selfhost build —
+the selfhost frontend compiles these bodies, and its `partial` is the same trust
+construct (a body the kernel does not see, 22f). The pre-existing trust is recorded at
+block/file granularity (as the `Feral` block's 50 rows are in `lib/`), not re-reviewed
+declaration by declaration; a *new* source still needs a new, reviewed row, and
+`--strict-legacy` still rejects a row without a reason or owner.
+
+The full `--check` takes about 9m30s here (about 7m26s for `lib/` alone), so
+`--lib-only` remains the `native` group's faster scope; the `selfhost/` programs add
+about two minutes.
+
+The cache and native-representation work adds four `extern`s (`cListDir`, `cStat`,
+`cUnlink`, `cClockNs`) and two `partial def`s (`erasableTy`, `sealName`) to
+`selfhost/`. They are not in this tree yet; when they land, the `selfhost` root reports
+them as new sources and the gate fails until their reviewed rows (8 `axiom`/`builtin
+extern:` and 2 `partial`) are added — which is the point of the scope change.
+
 ## Review cadence
 
 Every row has a review date; a row is expired when that date is before today, so a
@@ -245,8 +309,10 @@ not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are i
 
 `Tests/trust-ledger/run.sh` checks the gate's exit codes and messages against small
 trees: a new axiom with no row, a row with no reason, an expired row, a renamed
-declaration, a legacy row, a clean tree, and `--update` with and without a reason. The
-`native` group runs it, so `lake test -- '=native'` covers it.
+declaration, a legacy row, a clean tree, `--update` with and without a reason, a seal
+reason that claims a native representation the type lacks, one that denies a
+representation it has, and one that correctly claims it (the `native S := mkImpl/getImpl`
+row). The `native` group runs it, so `lake test -- '=native'` covers it.
 
 `scripts/trust-ledger-merge_test.sh` checks the merge driver without a build: disjoint
 rows, the same row, a reasoned row against a legacy one, two reasoned rows (must

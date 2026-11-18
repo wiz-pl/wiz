@@ -125,6 +125,18 @@ run 1 renamed --check --tree "$root/Tests/trust-ledger/renamed/tree" \
 has "renamed declaration (1)" renamed
 has "renamedOld -> renamedNew" renamed
 
+# A `seal✝` reason may not claim a native representation the type does not have (a
+# sealed brand), nor deny one it has; the claim is cross-checked with the `native T` rows.
+run 1 sealbrand --check --tree "$root/Tests/trust-ledger/sealbrand/tree" \
+  --ledger "$root/Tests/trust-ledger/sealbrand/ledger.tsv" --today "$today"
+has 'claims a native representation, but there is no `native S := mk/get` row' sealbrand
+run 1 sealdenied --check --tree "$root/Tests/trust-ledger/sealdenied/tree" \
+  --ledger "$root/Tests/trust-ledger/sealdenied/ledger.tsv" --today "$today"
+has 'says there is no native representation, but the ledger has a `native S := mk/get` row' sealdenied
+run 0 sealnative --check --tree "$root/Tests/trust-ledger/sealnative/tree" \
+  --ledger "$root/Tests/trust-ledger/sealnative/ledger.tsv" --today "$today"
+has "trust ledger: OK (3 sources" sealnative
+
 # A pre-gate row (migration reason/owner): accepted, reported; --strict-legacy refuses it.
 run 0 legacy --check --tree "$root/Tests/trust-ledger/legacy/tree" \
   --ledger "$root/Tests/trust-ledger/legacy/ledger.tsv" --today "$today"
