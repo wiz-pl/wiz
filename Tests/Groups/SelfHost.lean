@@ -3140,7 +3140,16 @@ def selfHostGroup : Group where
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+
+    { name := "(21an) a partial definition by equations with a pair result and a recursive call: the Lean host and the self-hosted frontend agree", run := fun _ =>
+        selfhostAgrees ("structure Out (M : Type) where\n  handlers : List M\n") [
+          ("partial def go {M : Type} : Nat → Out M → Nat × Out M\n  | .zero, o => (1, o)\n  | .succ k, o => go k o\n", true),
+          -- (the same shape without the recursive call, and as a plain `def` with one)
+          ("partial def go {M : Type} : Nat → Out M → Nat × Out M\n  | .zero, o => (1, o)\n  | .succ _, o => (2, o)\n", true),
+          ("def go {M : Type} : Nat → Out M → Nat × Out M\n  | .zero, o => (1, o)\n  | .succ k, o => go k o\n", true),
+          -- (a pair under a type constructor: the metavariable is not the result's head)
+          ("partial def go {M : Type} : Nat → Out M → List (Nat × Out M)\n  | .zero, o => .nil\n  | .succ k, o => go k o\n", true)] }
 
   ]
 

@@ -2055,6 +2055,18 @@ def unifyS (es : ES) (cx : Cx) (a b : Val) : Option ES := match a with
         | .none => .none
       | .false => .none
     | _ => unifyConv es cx a b
+  -- a pair's second component is under its binder, as a Π's codomain is: comparing only
+  -- by conversion (`unifyConv` → `convTy`) decides `?m … = M` as false and never solves
+  -- it, so a metavariable that appears only in a `×` is never solved
+  | .vsigma q _ _ A e B => match b with
+    | .vsigma q' _ _ A' e' B' => match qEq q q' with
+      | .true => match unify es cx A A' with
+        | .some es1 =>
+          let x := fresh (Cx.lvl cx);
+          unify es1 (Cx.bind cx "_" A) (eval (.cons x e) B) (eval (.cons x e') B')
+        | .none => .none
+      | .false => .none
+    | _ => unifyConv es cx a b
   | .vne h sp => match b with
     | .vne h' sp' => match convHead (Cx.c cx) h h' with
       | .true => unifySpine es cx sp sp'
