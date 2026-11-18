@@ -7174,7 +7174,7 @@ def classCmd (gs : Globals) (stx : Syntax) : Step :=
   let bs := kids (kid stx 3);
   let exts := kids (kid stx 4);
   let fs := kids (kid stx 8);
-  let unsupported := match exts with
+  let unsupported : Option String := match exts with
     | .cons _ _ => .some "a class's `extends` is not supported by the self-hosted frontend (A10 of docs/stages/30-selfhost-typeclasses.md)"
     | .nil => .none;
   match unsupported with
