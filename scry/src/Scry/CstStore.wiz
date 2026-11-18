@@ -3,6 +3,7 @@ import Text
 import Functor
 import WordArray
 import Intern
+import IO
 import Scry.Facts
 /-!
 # Scry.CstStore: the native CST columns
@@ -82,6 +83,92 @@ def Scry.flagsOf (n : Scry.Node) : Nat :=
 def Scry.parentEntry (p : Option Scry.NodeId) : Nat := match p with
   | .none => 0
   | .some x => Nat.succ x.n
+
+-- ## Line tables from bytes
+
+/-- The byte offsets where each line starts (`0`, then one past every `\n`), scanning a
+`Bytes` buffer forward. The same table `Scry.lineStartsOf` builds from a `String`, but
+without materialising the whole file as a `List Char`. -/
+def Scry.lineStartsOfBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.sub n (Nat.succ k);
+    Scry.lineStartsOfBytesGo b n k
+      (match Nat.beq (Bytes.get b i) 10 with
+        | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
+        | .false => acc)
+
+/-- The line-start offsets of a byte buffer. -/
+def Scry.lineStartsOfBytes (b : Bytes) : U32Array :=
+  Scry.lineStartsOfBytesGo b (Bytes.size b) (Bytes.size b)
+    (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+
+/-- Binary search for the largest line-start index whose offset is `<= off`. -/
+partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
+    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
+    | .true => Scry.lineIndexGo starts off mid hi
+    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
+
+/-- A 1-based line and column for a byte offset, from a precomputed line-start table. -/
+def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+
+/-- The bytes as text: UTF-8 when they are valid, otherwise Latin-1 (one character per
+byte, which is the lowering's byte-as-character convention for a non-ASCII file). -/
+def Scry.bytesText (b : Bytes) : String := match Bytes.toUtf8 b with
+  | .ok s => s
+  | .error _ => Bytes.toLatin1 b
+
+/-- Is the byte one of the characters `String.trimLeft` skips? (`Char.isSpace`: space,
+or 9 … 13: tab, LF, VT, FF, CR.) -/
+def Scry.isSpaceByte (x : Nat) : Bool :=
+  Bool.or (Nat.beq x 32) (Bool.and (Nat.le 9 x) (Nat.le x 13))
+
+/-- Skip space bytes from `i` (never past `n`). -/
+partial def Scry.skipSpaceBytes (b : Bytes) (i n : Nat) : Nat :=
+  if Nat.lt i n then
+    (if Scry.isSpaceByte (Bytes.get b i) then Scry.skipSpaceBytes b (Nat.succ i) n
+     else i)
+  else i
+
+/-- Skip the white space at the start of one line (space, tab, CR, VT, FF — not LF):
+a line marker's `#` follows its own line's indentation, never the next line's. -/
+partial def Scry.skipSpaceLine (b : Bytes) (i n : Nat) : Nat :=
+  if Nat.lt i n then
+    (if Bool.and (Scry.isSpaceByte (Bytes.get b i)) (Bool.not (Nat.beq (Bytes.get b i) 10))
+     then Scry.skipSpaceLine b (Nat.succ i) n
+     else i)
+  else i
+
+/-- `Scry.bytesMatchChars b i cs`: whether the bytes at `i` are the UTF-8 bytes of `cs`
+(a helper of `Scry.bytesStartsWith`). -/
+def Scry.bytesMatchChars (b : Bytes) : Nat → List Char → Bool
+  | _, .nil => .true
+  | i, .cons c cs =>
+    if Nat.lt i (Bytes.size b) then
+      (if Nat.beq (Bytes.get b i) (Char.code c) then Scry.bytesMatchChars b (Nat.succ i) cs
+       else .false)
+    else .false
+
+/-- Whether the buffer starts with the bytes of `s`:
+`Scry.bytesStartsWith (Bytes.ofUtf8 "scry-cst x") "scry-cst "`. A byte comparison, so it
+does not build a `List Char` for `s` on the way. (Scry-local rather than a `lib/IO.wiz`
+addition, so the native path does not require a matching toolchain build.) -/
+def Scry.bytesStartsWith (b : Bytes) (s : String) : Bool := match s with
+  | .mk cs => Scry.bytesMatchChars b 0 cs
+
+/-- Whether the bytes at offset `i` are the UTF-8 bytes of `s`. -/
+def Scry.bytesMatchesAt (b : Bytes) (i : Nat) (s : String) : Bool := match s with
+  | .mk cs => Scry.bytesMatchChars b i cs
 
 -- ## The store
 

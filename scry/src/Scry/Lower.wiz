@@ -1,6 +1,7 @@
 import Text
 import Functor
 import WordArray
+import IO
 import Scry.Wil
 import Scry.CstStore
 import Scry.Models
@@ -116,6 +117,54 @@ store has one file per parse, so `text` is file 0. Line and column of every node
 origin are derived from the text (a direct parse, not preprocessed). -/
 def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
   Scry.Cst.ofPreprocessed (Scry.Preprocessed.plain (Scry.CstStore.pathName s 0) text) s
+
+-- ## A bytes-backed view (no whole-file `String`)
+
+/-- The text of node `i`, sliced out of the source bytes. The lowering asks for a token's
+spelling only where the analysis needs it (an identifier, a number, a declarator); a
+4 MiB string literal is classified and havoc'd without its text, so this is where the
+whole-file `String` used to cost ~250× the input. There is deliberately no length cap:
+the analysis still sees the whole token when it asks for it. -/
+def Scry.nodeTextBytes (b : Bytes) (s : Scry.CstStore) (i : Nat) : String :=
+  let sp := Scry.CstStore.spanOf s i;
+  Bytes.toLatin1 (Bytes.slice b sp.start (Nat.sub sp.stop sp.start))
+
+/-- The `Scry.Cst` view of a **direct** parse whose source is held as `Bytes`, with the
+line table already built (the caller uses it for origins too, so the file is scanned
+once). The common case (no preprocessor line markers) is built without a `String` of
+the file: origins are line/column from the byte table (`Scry.lineColFrom`) and a node's
+text is a `Bytes` slice. A file with markers falls back to `Scry.Cst.ofStore`, which
+needs the text to honour them.
+
+`fileText` is empty here: `Scry.lowerTU` keeps the file table for project-level origin
+rendering, which the single-file `scry taint` path does not use. A caller that needs
+the original texts reads them with `FS.readFile` and uses `Scry.Cst.ofStore`, which
+pays for them. -/
+def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
+    (s : Scry.CstStore) : Scry.Cst :=
+  match Scry.hasLineMarkers b starts with
+  | .true => Scry.Cst.ofStore (Scry.bytesText b) s
+  | .false =>
+    Scry.Cst.mk (Scry.CstStore.nodeCount s)
+      (fun i => Scry.CstStore.kindName s i)
+      (fun i => Scry.CstStore.fieldName s i)
+      (fun i => let sp := Scry.CstStore.spanOf s i;
+        let lc := Scry.lineColFrom starts sp.start;
+        Wil.Span.mk 0 sp.start sp.stop i lc.1 lc.2)
+      (fun i => match Scry.CstStore.parentOf s i with
+        | .none => .none
+        | .some x => .some x.n)
+      (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
+      (fun _ => "")
+      (fun f => match Nat.beq f 0 with
+        | .true => path
+        | .false => "")
+      1
+      (fun i => Scry.nodeTextBytes b s i)
+
+/-- `Scry.Cst.ofStoreBytesAt` with the line table built here. -/
+def Scry.Cst.ofStoreBytes (path : String) (b : Bytes) (s : Scry.CstStore) : Scry.Cst :=
+  Scry.Cst.ofStoreBytesAt path b (Scry.lineStartsOfBytes b) s
 
 /-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). Byte
 offsets are used as character indices: the fixtures are ASCII (the shim's offsets are

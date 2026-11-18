@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* scry: the native C path reads a source **once as `Bytes`** and keeps byte spans
+  (`Scry.Native.parseBytes`, `Scry.Cst.ofStoreBytes`), instead of building the whole
+  file as a Wiz `String` (`List Char`, two cons cells per character) and copying it
+  again for the span/preprocess view. A 4 MiB string literal is one CST node, so
+  `--max-nodes` never bounded it; it now peaks at 10.3 MiB for `taint` and 7.8 MiB for
+  `parse --stats`, down from 1159.5 and 648.4 MiB (8 MiB: 14.4 MiB, was 2043.0). A file
+  with preprocessor line markers still uses the text view, which honours them. A
+  node's spelling is sliced out of the buffer only when the lowering asks for it; there
+  is no token cap. `scry/tests/mem.wiz` + `scry/scripts/mem-check.py` pin 1/2/4 MiB
+  literals under 96 MiB RSS.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,

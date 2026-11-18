@@ -371,6 +371,32 @@ ScryStore *scry_parse(const char *lang, const char *src, uint64_t len) {
   return s;
 }
 
+/* `scry_parse`, with the source borrowed from a Wiz `Bytes` value. An extern whose
+   `Bytes` parameter has no C header is passed as a Wiz value (kind `w`), so the
+   buffer's header is read here. The layout is the runtime's `wiz_bytes`
+   (runtime/wiz_rt.h): a 16-byte object header, then len, cap and data; the static
+   assertion below makes a layout change a compile error. The value is owned by the
+   call (the extern wrapper does not drop a kind-`w` argument), so release it after
+   the parse: the tree-sitter tree keeps byte offsets, not the buffer. */
+typedef struct {
+  int64_t rc;
+  uint32_t tag, size;
+  size_t len, cap;
+  unsigned char *data;
+} scry_wiz_bytes;
+_Static_assert(sizeof(scry_wiz_bytes) == 40, "wiz_bytes layout changed");
+/* Weak: the Nix `scry-native` static library is linked by a smoke test without the Wiz
+   runtime, so the reference must not make that link fail. A Wiz program always defines
+   it (runtime/rt_data.inc). */
+extern void wiz_release(void *v) __attribute__((weak));
+
+ScryStore *scry_parse_wizval(const char *lang, wiz_val src) {
+  scry_wiz_bytes *b = (scry_wiz_bytes *)src;
+  ScryStore *s = scry_parse(lang, (const char *)b->data, (uint64_t)b->len);
+  if (wiz_release) wiz_release((void *)src);
+  return s;
+}
+
 /* ---- Hard wall-clock guard ----------------------------------------------
    `--timeout` is a contract even when a single pure stage (one enormous
    function's rule evaluation) is running and cannot poll the clock. `alarm`

@@ -1,0 +1,22 @@
+-- test: run
+import IO
+import Sys
+-- The resident-memory regression for the native C store (scrydos-01): one 4 MiB
+-- string literal must not cost a gigabyte. `scripts/mem-check.py` generates the
+-- inputs and measures each child with wait4(2)/ru_maxrss; this test forwards its
+-- stable summary and fails when a case is over the limit. The CLI needs
+-- `.grail/bin/scry` (the `scry` grail app), which the scry workflow builds; a plain
+-- checkout without it prints a skip line, as `tests/scale.wiz` does.
+
+def main : IO Unit := EIO.toIO (do
+  present ← EIO.lift (FS.exists ".grail/bin/scry");
+  match present with
+  | .false => EIO.lift (IO.println "mem: skip (.grail/bin/scry absent)")
+  | .true => do
+    out ← Process.output "python3" ["scripts/mem-check.py", "--scry", ".grail/bin/scry"] "";
+    EIO.lift (IO.print out.stdout);
+    match out.status with
+    | .exited 0 => EIO.pure ()
+    | _ => do
+      EIO.lift (IO.ePrintln out.stderr);
+      EIO.lift (Process.exit 1))

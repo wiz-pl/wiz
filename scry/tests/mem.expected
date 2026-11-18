@@ -1,0 +1,6 @@
+mem: 1 MiB string literal, taint: ok (< 96 MiB)
+mem: 1 MiB string literal, parse --stats: ok (< 96 MiB)
+mem: 2 MiB string literal, taint: ok (< 96 MiB)
+mem: 2 MiB string literal, parse --stats: ok (< 96 MiB)
+mem: 4 MiB string literal, taint: ok (< 96 MiB)
+mem: 4 MiB string literal, parse --stats: ok (< 96 MiB)

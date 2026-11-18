@@ -18,6 +18,15 @@ offset is unchanged), and maps each node's preprocessed span back to the origina
 file/line/column in `Wil.Span`. `scry-cst -E [-D…] [-I…] FILE` runs `cc -E` and spills
 the blanked text, which is how `corpus/c2wil/preproc/main.i.cst` was generated.
 
+A source file is read **once as `Bytes`** (`FS.readBytes`) and the shim parses that
+buffer in place; the store keeps byte spans, and `Scry.Cst.ofStoreBytes` maps origins
+from a byte line table and slices a node's text out of the buffer only when a stage
+needs its spelling. Nothing turns the whole file into a Wiz `String` (`List Char`, two
+cons cells per character) on the C path, so a 4 MiB string literal costs about 10 MiB of
+resident memory rather than a gigabyte, however few CST nodes it is. `parse --stats`
+sniffs a store's format on the bytes too. The `cc -E`/JSON/spill readers still take
+text, because their inputs are text.
+
 The C# frontend's first slice (design: `CSHARP.md`) parses with
 tree-sitter-c-sharp (fetched by Nix; `native/README.md`) through the same shim (`scry-cst FILE.cs` spills it);
 `src/Scry/CsCst.wiz` views the store as a `Scry.Cst` and `src/Scry/CsLower.wiz` lowers

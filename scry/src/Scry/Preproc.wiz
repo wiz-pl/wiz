@@ -1,6 +1,7 @@
 import Text
 import Functor
 import WordArray
+import IO
 import Scry.Wil
 import Scry.CstStore
 /-!
@@ -126,6 +127,40 @@ def Scry.markerOf (l : String) : Option Scry.Marker :=
         | .some x => String.trimLeft x
         | .none => after;
       Scry.markerFrom r
+
+-- ## The same test on bytes (no whole-file `String`)
+
+/-- Is the byte an ASCII decimal digit? -/
+def Scry.isDigitByte (x : Nat) : Bool := Bool.and (Nat.le 48 x) (Nat.le x 57)
+
+/-- Does the line starting at `i` start with a preprocessor line marker (`# 12 "a.c"`,
+`#line 12`)? This is `Scry.markerOf` on bytes, without building the line's text. -/
+def Scry.markerAtBytes (b : Bytes) (i n : Nat) : Bool :=
+  let j := Scry.skipSpaceLine b i n;
+  match Nat.lt j n with
+  | .false => .false
+  | .true => match Nat.beq (Bytes.get b j) 35 with
+    | .false => .false
+    | .true =>
+      let k := Scry.skipSpaceLine b (Nat.succ j) n;
+      match Nat.lt k n with
+      | .false => .false
+      | .true =>
+        (if Scry.isDigitByte (Bytes.get b k) then .true
+         else if Scry.bytesMatchesAt b k "line" then
+           (let l := Scry.skipSpaceLine b (Nat.add k 4) n;
+            match Nat.lt l n with
+            | .true => Scry.isDigitByte (Bytes.get b l)
+            | .false => .false)
+         else .false)
+
+/-- Whether any line start in `starts` begins a preprocessor line marker. A file with
+markers is `cc -E` output; `Scry.Cst.ofStoreBytesAt` falls back to the text view, which
+honours them. Ordinary C (`#include`, `#define`, `#pragma`) has a `#` but no digit or
+`line` after it, so it is not a marker. -/
+def Scry.hasLineMarkers (b : Bytes) (starts : U32Array) : Bool :=
+  U32Array.foldl (fun acc off => Bool.or acc
+    (Scry.markerAtBytes b (UIntN.toNat off) (Bytes.size b))) .false starts
 
 -- ## The line map
 

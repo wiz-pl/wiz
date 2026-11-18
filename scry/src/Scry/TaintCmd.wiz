@@ -238,38 +238,11 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
 
 /-- The byte offsets where each line starts (`0`, then one past every `\n`). Built once
 per file: the old `lineColAt` walked the source from byte 0 for **every** origin entry,
-which is O(points × file) and dominated the report on a real file. -/
-def Scry.lineStartsBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
-  | .zero, acc => acc
-  | .succ k, acc =>
-    let i := Nat.sub n (Nat.succ k);
-    let acc' := match Nat.beq (Bytes.get b i) 10 with
-      | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
-      | .false => acc;
-    Scry.lineStartsBytesGo b n k acc'
-
+which is O(points × file) and dominated the report on a real file. The C path reads the
+file as `Bytes` and calls `Scry.lineStartsOfBytes`; this text-only form is for callers
+that already have a `String` (the REPL's cached store). -/
 def Scry.lineStartsOf (text : String) : U32Array :=
-  let b := Bytes.ofString text;
-  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
-
-/-- Binary search for the largest line-start index whose offset is `<= off`. -/
-partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
-  match Nat.lt lo hi with
-  | .false => lo
-  | .true =>
-    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
-    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
-    | .true => Scry.lineIndexGo starts off mid hi
-    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
-
-/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
-def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
-  let n := U32Array.size starts;
-  match Nat.beq n 0 with
-  | .true => (1, Nat.succ off)
-  | .false =>
-    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
-    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+  Scry.lineStartsOfBytes (Bytes.ofString text)
 
 /-- The old signature, kept for callers that only have the text (it builds the line
 table first, so prefer `originOfSpanAt` when several spans are located). -/
@@ -963,8 +936,8 @@ nodes and keeps their partial facts, but the analysis is still partial. This war
 makes that explicit, so `--allow-errors` can never report a silent empty unit: when no
 function could be recovered it says so instead of returning 0 findings with no evidence.
 -/
-def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs : Nat)
-    (funcs : Nat) : List Scry.BoundaryFinding :=
+def Scry.parseRecoveryFindings (uri : String) (starts : U32Array) (cst : Scry.CstStore)
+    (errs : Nat) (funcs : Nat) : List Scry.BoundaryFinding :=
   match Nat.beq errs 0 with
   | .true => .nil
   | .false =>
@@ -976,7 +949,7 @@ def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs :
     let origin : Option Scry.Origin := match Scry.CstStore.firstError cst with
       | .some i =>
         let sp := Scry.CstStore.spanOf cst i;
-        .some (Scry.originOfSpan uri text (Wil.Span.mk 0 sp.start sp.stop i 0 0))
+        .some (Scry.originOfSpanAt uri starts (Wil.Span.mk 0 sp.start sp.stop i 0 0))
       | .none => .none
     .cons (Scry.BoundaryFinding.mk "scry/lowering/parse-recovery" message "<unit>" 0 origin) .nil
 
@@ -985,10 +958,11 @@ def Scry.certVerified : Option Scry.Certificate → Bool
   | .none => .false
 
 /-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
-locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
-so a session does not parse the C again. -/
-def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
-    (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
+locate. `Scry.analyzeStoreC` takes the CST view (built from bytes by `scry taint`, or
+from a cached store by `scry repl`); `Scry.analyzeStore` builds it from a `String` for
+callers that already have the source text. -/
+def Scry.analyzeStoreC (o : Scry.TaintOpts) (startMs : Nat) (c : Scry.Cst)
+    (starts : U32Array) (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
   let errs := Scry.CstStore.errorCount cst;
   match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
   | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
@@ -996,7 +970,6 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
   | .false => do
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
-    let c := Scry.Cst.ofStore text cst;
     let tu := Scry.lowerTU o.file c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
@@ -1052,7 +1025,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let origins := Scry.originEntries o.file starts tu.funcs;
     Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
     Scry.checkDeadline o startMs "origins";
-    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+    let boundaries := List.append (Scry.parseRecoveryFindings o.file starts cst errs
       (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
@@ -1065,14 +1038,22 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
       boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds
       run.complete notes)
 
-/-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
+/-- `Scry.analyzeStore` for callers that already hold the source text (the REPL's cached
+store and the tests): build the text-backed CST view, then run the pipeline. -/
+def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+    (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport :=
+  Scry.analyzeStoreC o startMs (Scry.Cst.ofStore text cst) starts cst nodes
+
+/-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. The
+source is read as `Bytes` and parsed in place; only a file with preprocessor line
+markers falls back to a `String` (see `Scry.Cst.ofStoreBytesAt`). -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   startMs ← EIO.lift Scry.nowMs;
-  text ← FS.readFile o.file;
-  starts ← EIO.lift (IO.pure (Scry.lineStartsOf text));
-  Scry.reportStage o startMs "read" (Nat.repr (String.length text) ++ " bytes, "
+  bytes ← FS.readBytes o.file;
+  starts ← EIO.lift (IO.pure (Scry.lineStartsOfBytes bytes));
+  Scry.reportStage o startMs "read" (Nat.repr (Bytes.size bytes) ++ " bytes, "
     ++ Nat.repr (U32Array.size starts) ++ " lines");
-  st ← Scry.Native.parse "c" text;
+  st ← Scry.Native.parseBytes "c" bytes;
   nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
   Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
   -- The node cap is checked **before** the column copy: refusing a giant file should
@@ -1083,7 +1064,8 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     cst ← EIO.lift (Scry.Native.toCstStore o.file st);
     Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
       ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
-    Scry.analyzeStore o startMs text starts cst nodes
+    Scry.analyzeStoreC o startMs (Scry.Cst.ofStoreBytesAt o.file bytes starts cst)
+      starts cst nodes
 
 
 /-- `(finding, checked)` pairs in the findings' order. -/

@@ -220,10 +220,10 @@ read-only. With `--rewrite`, `Scry.EgraphExtract` extracts the saturated classes
 into Wil under its soundness checks and prints a second report; the CST and every Datalog
 fact are still untouched (the transformed program is only printed, not re-emitted). -/
 def Scry.egraphCmd (file : String) (fuel : Nat) (rewrite : Bool) : EIO Nat := do
-  st ← Scry.Native.parseFile file;
+  bytes ← FS.readBytes file;
+  st ← Scry.Native.parseBytes (Scry.Native.languageOf file) bytes;
   cst ← EIO.lift (Scry.Native.toCstStore file st);
-  src ← FS.readFile file;
-  let c := Scry.Cst.ofStore src cst;
+  let c := Scry.Cst.ofStoreBytes file bytes cst;
   let tu := Scry.lowerTU file c;
   let p := Wil.program tu.funcs;
   let b := Scry.wgBuildProgram p;

@@ -48,6 +48,11 @@ foreign_type ScryStore (finalizer := "free")
 
 /-- Parse `src` (byte length `len`) as language `lang`; the store says whether it worked. -/
 extern "scry_parse" Scry.Native.parseRaw : String → String → Nat → IO ScryStore
+/-- Parse a byte buffer as `lang`. A `Bytes` argument with no C header is passed to C
+as a Wiz value (the runtime's byte-buffer layout), so `scry_parse_wizval` reads its data
+and length and releases it; the source is never materialised as a `String` (`List Char`,
+two cons cells per character). -/
+extern "scry_parse_wizval" Scry.Native.parseBytesRaw : String → Bytes → IO ScryStore
 /-- 1 when the parse succeeded, 0 when `storeError` says why. -/
 extern "scry_store_ok" Scry.Native.storeOk : ScryStore → Nat
 /-- The shim's error message (`""` after a good parse). -/
@@ -134,10 +139,20 @@ def Scry.Native.languageOf (path : String) : String :=
   | .true => "c_sharp"
   | .false => "c"
 
-/-- Parse a source file in the language of its extension (`Scry.Native.languageOf`). -/
+/-- Parse `bytes` as `lang`, or fail with the shim's message. `Scry.Native.parse` for
+callers that already hold the file as `Bytes`. -/
+def Scry.Native.parseBytes (lang : String) (bytes : Bytes) : EIO ScryStore := do
+  st ← EIO.lift (Scry.Native.parseBytesRaw lang bytes);
+  match Nat.beq (Scry.Native.storeOk st) 1 with
+  | .true => EIO.pure st
+  | .false => EIO.fail (Scry.Native.storeError st)
+
+/-- Parse a source file in the language of its extension (`Scry.Native.languageOf`). The
+file is read as `Bytes` and parsed in place, so a large source is not copied into a
+`String` list. -/
 def Scry.Native.parseFile (path : String) : EIO ScryStore := do
-  text ← FS.readFile path;
-  Scry.Native.parse (Scry.Native.languageOf path) text
+  bytes ← FS.readBytes path;
+  Scry.Native.parseBytes (Scry.Native.languageOf path) bytes
 
 /-- `parseFile`, refusing a file with `ERROR`/`MISSING` nodes: the "malformed input is
 an error" view (the stats view keeps the recovery tree; tree-sitter always returns one). -/
