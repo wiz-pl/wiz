@@ -944,7 +944,7 @@ partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
     let allMems := Scry.allMemSeeds sums;
     results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries plans allMems
       sums p.funcs 0 (List.length p.funcs);
-    let next := Scry.growSummaries p graph sums results;
+    let next := Scry.growSummaries p pack graph sums results;
     match Scry.summariesEq next sums with
     | .true => do
       Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
