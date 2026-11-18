@@ -43,6 +43,7 @@ if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo 
   echo "FAIL (playground, engine guard)"; cat "$OUT/engine.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
+"$ROOT/web/build-playground-ui.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
@@ -50,6 +51,10 @@ done
 # (11ab) the playground's module: the self-hosted checker, one evaluation
 node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
 if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
+# (loom) the whole page as one Loom app (?ui=loom): its module mounted under Node with
+# the framework's driver and DOM double, then the page's wiz_loom_* calls
+node "$ROOT/web/playground_ui_test.mjs" "$OUT" > "$OUT/ui.txt"
+if grep -qF 'playground ui: all checks passed' "$OUT/ui.txt"; then echo "ok (playground, loom ui)"; else echo "FAIL (playground, loom ui)"; cat "$OUT/ui.txt"; exit 1; fi
 # (11s) the documentation pages' half of the module, on a page `wiz doc` made (the
 # Wasm module's own JSON: the declaration `pick` alone)
 mkdir -p "$OUT/doc/src"

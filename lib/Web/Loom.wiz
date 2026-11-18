@@ -116,10 +116,16 @@ def Loom.mergeText {M : Type} (x : Loom.VNode M) (rest : Loom.VNode M) : Loom.VN
   | .text a .nil, .text b r => .text (String.append a b) r
   | _, _ => Loom.append x rest
 
-/-- A sibling chain from a list (adjacent text merged, as the DOM would). -/
+/-- A sibling chain from a list (adjacent text merged, as the DOM would). An empty text
+node is dropped: it has no DOM node, so keeping it would make a patch path address a
+node the DOM does not have (the playground's `#count` starts out empty). -/
 def Loom.ofList {M : Type} : List (Loom.VNode M) → Loom.VNode M
   | .nil => .nil
-  | .cons x xs => Loom.mergeText x (Loom.ofList xs)
+  | .cons x xs => match x with
+    | .text s .nil => match String.isEmpty s with
+      | .true => Loom.ofList xs
+      | .false => Loom.mergeText x (Loom.ofList xs)
+    | _ => Loom.mergeText x (Loom.ofList xs)
 
 /-- A text node (escaped when rendered; a patch carries its unescaped text). -/
 def Loom.text {M : Type} (s : String) : Loom.VNode M := .text s .nil

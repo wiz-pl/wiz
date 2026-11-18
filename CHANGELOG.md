@@ -24,6 +24,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   way the output pane is: `web/playground_editor_gen.wiz` renders and steps it and
   `web/playground_editor_test.mjs` applies the patches to the SSR in the DOM double
   (both run in `web/playground-loom-test.sh`).
+* playground: `?ui=loom` mounts the whole page as one Loom app (`web/playground-ui.wiz`,
+  built by `web/build-playground-ui.sh` into `wiz-playground-ui.mjs`): the header and
+  `#status`, the editor, the goals pane's container, the output pane and the footer's
+  `#engine`. The page (`web/playground.js`) keeps the effects (the engine, the goals
+  client) and reports their results through the module's `wiz_loom_*` entry points; the
+  UI is its own Wasm instance, so neither a trap in the engine nor an engine restart
+  touches it. The static markup stays the default and the fallback when the module is
+  missing. The UI state is one opaque Wasm value passed by ownership (stage 9g's C ABI
+  consumes an argument): the driver takes an extra `wiz_retain` for the read-only first
+  paint, and the page hands each state to its `wiz_loom_*` calls and keeps the result.
+  `web/playground_ui_test.mjs` mounts the real module under Node with the driver and the
+  DOM double and checks the panes, the status pair, the count, the value classes and
+  the entry points.
 * web: the standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`)
   now mounts the playground's goals pane (`web/playground-lsp.js` on `web/lsp-client.js`
   and `web/goals.js`) instead of the Wiz program `web/Web.wiz` stepped through

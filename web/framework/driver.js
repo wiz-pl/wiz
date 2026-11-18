@@ -25,6 +25,13 @@
 // already holds that string (web/framework/runtime.js), so a re-render cannot move the
 // caret of a control the user is typing in.
 //
+// **Ownership (stage 9g's C ABI).** An exported function consumes its arguments and
+// returns an owned value, so `state` is transferred to every `wiz_loom_step` and the new
+// one is kept. A read-only call (`wiz_loom_html` for the first paint) cannot take that
+// one reference: the module must export `wiz_retain`, and the driver takes an extra
+// reference first. A page that calls its own `wiz_loom_*` entry points must do the same:
+// pass the state, keep the returned one.
+//
 // It is the intended integration, not yet exercised by a Wasm build (no Emscripten on
 // the machine where the prototype was written); web/framework/driver_test.mjs checks the
 // event strings and the mount under Node with minidom.mjs.
@@ -62,7 +69,14 @@ export function payloadOf(type, e) {
 // event, index, payload)` sees every step after it happened (a page's effect hook).
 export function start(wasm, root, { events, parse, onStep } = {}) {
   let state = wasm._wiz_loom_init();
-  const html = () => takeString(wasm, wasm._wiz_loom_html(state));
+  // An exported function *consumes* its argument (the C ABI's ownership rule, stage 9g):
+  // the SSR call only reads the state, so take an extra reference for it and keep ours.
+  const html = () => {
+    if (typeof wasm._wiz_retain === "function") {
+      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
+    }
+    return takeString(wasm, wasm._wiz_loom_html(state));
+  };
   mount(root, html(), parse);
   globalThis.wizPatch = (json) => applyPatches(root, JSON.parse(json), parse);
   delegate(root, (event, index, e) => {

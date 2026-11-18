@@ -13,15 +13,20 @@ trap) and renders the result. Nothing here calls the engine, so the component re
 and diffs without WebAssembly (`web/playground_loom_gen.wiz` drives it under
 `web/playground_loom_test.mjs`).
 
-`Line.kind` is the CSS class the page already uses: `err` for an error line and `val`
-for a value this component was handed as one. `web/playground-values.js` still decides
-what a value looks like; moving that in is the next step, and it changes nothing here.
+`Line.kind` is the CSS class the page already uses: `err` for an error line, `val` for a
+kernel value (`val raw` when `renderValue` does not know its shape). The value grammar
+(`web/playground-values.js`) lives here now, so a line's kind is decided in one place;
+the JavaScript module is the oracle the corpus in `web/playground_loom_gen.wiz` is
+checked against.
 -/
 
-/-- One output line: its text, and the class the page put on it. -/
+/-- One output line: the engine's text, the classes the page adds, what the line shows
+(a value's friendly form) and its tooltip (the raw text of a value). -/
 structure Line where
   text : String
   kind : String
+  shown : String
+  title : String
 
 /-- The pane's state: the lines, how many of them are errors, the page's status pair
 (`setStatus(text, kind)`), and the `#count` text (the page writes `exit code 3` there
@@ -35,7 +40,7 @@ structure Model where
 
 /-- The pane has no events yet. The clear control is the first one it will gain; the
 run and the engine stay on the page's side because they are effects. -/
-inductive Msg where
+inductive PlaygroundMsg where
   | clear
 
 def Model.empty : Model := Model.mk List.nil 0 "" "" "0 lines"
@@ -50,6 +55,208 @@ def isErr (l : Line) : Bool :=
   | .true => .true
   | .false => .false
 
+-- ## Kernel values (`web/playground-values.js`, ported)
+--
+-- `#eval` prints the kernel's normal form: the runtime's tagged values, e.g.
+-- `con((#1, (con((#0, (tt, tt))), (tt, tt))))` for 1. The page used to parse that shape in
+-- JavaScript (`isValue`, `renderValue`); the pane's classification is here now, so a
+-- line's kind is decided in one place. The JavaScript module is still the oracle:
+-- `web/playground_loom_gen.wiz` carries a corpus and `web/playground_loom_test.mjs`
+-- compares the two.
+
+/-- A value as the runtime prints it: `tt`, a tag `#n`, or a pair. -/
+inductive PlaygroundValue where
+  | tt
+  | tag (n : Nat)
+  | pair (a b : PlaygroundValue)
+
+/-- Skip the white space the printer may put between tokens (space, newline, tab). -/
+def PlaygroundValue.skip : List Char → List Char
+  | .nil => .nil
+  | .cons c rest => match Char.isSpace c with
+    | .true => PlaygroundValue.skip rest
+    | .false => .cons c rest
+
+/-- Whether `p` is a prefix of `s`. -/
+def PlaygroundValue.isPrefix (p s : List Char) : Bool :=
+  match p, s with
+  | .nil, _ => .true
+  | .cons _ _, .nil => .false
+  | .cons pc ps, .cons sc ss => match Char.eq pc sc with
+    | .true => PlaygroundValue.isPrefix ps ss
+    | .false => .false
+
+/-- The decimal digits at the front of `cs`, with the rest. -/
+partial def PlaygroundValue.digits (n : Nat) (cs : List Char) : Nat × List Char :=
+  match cs with
+  | .nil => (n, .nil)
+  | .cons c rest => match Char.isDigit c with
+    | .true => PlaygroundValue.digits (n * 10 + (Char.code c - 48)) rest
+    | .false => (n, cs)
+
+/-- Parse one value at the front of `cs`: `tt`, `#n`, `(a, b)`, or `con(v)` (which is just
+`v`). Mirrors `parse` in `web/playground-values.js`. -/
+partial def PlaygroundValue.at (cs : List Char) : Option (PlaygroundValue × List Char) :=
+  let s := PlaygroundValue.skip cs;
+  match PlaygroundValue.isPrefix (String.chars "con(") s with
+  | .true => match PlaygroundValue.at (List.drop 4 s) with
+    | .none => .none
+    | .some p => match PlaygroundValue.skip p.2 with
+      | .nil => .none
+      | .cons c rest => match Char.eq c (Char.mk 41) with
+        | .true => .some (p.1, rest)
+        | .false => .none
+  | .false => match PlaygroundValue.isPrefix (String.chars "tt") s with
+    | .true => .some (PlaygroundValue.tt, List.drop 2 s)
+    | .false => match s with
+      | .nil => .none
+      | .cons c rest => match Char.eq c (Char.mk 35) with
+        | .true => match rest with
+          | .nil => .none
+          | .cons d _ => match Char.isDigit d with
+            | .true => let p := PlaygroundValue.digits 0 rest; .some (PlaygroundValue.tag p.1, p.2)
+            | .false => .none
+        | .false => match Char.eq c (Char.mk 40) with
+          | .true => match PlaygroundValue.at rest with
+            | .none => .none
+            | .some a => match PlaygroundValue.skip a.2 with
+              | .nil => .none
+              | .cons comma r => match Char.eq comma (Char.mk 44) with
+                | .true => match PlaygroundValue.at r with
+                  | .none => .none
+                  | .some b => match PlaygroundValue.skip b.2 with
+                    | .nil => .none
+                    | .cons close r2 => match Char.eq close (Char.mk 41) with
+                      | .true => .some (PlaygroundValue.pair a.1 b.1, r2)
+                      | .false => .none
+                | .false => .none
+          | .false => .none
+
+/-- A whole string as one value (nothing but white space after it). -/
+def PlaygroundValue.whole (s : String) : Option PlaygroundValue :=
+  match PlaygroundValue.at (String.chars s) with
+  | .none => .none
+  | .some p => match PlaygroundValue.skip p.2 with
+    | .nil => .some p.1
+    | .cons _ _ => .none
+
+/-- The fields of a constructor's payload, `(f1, (f2, … (tt, tt)))`; `(tt, tt)` is none. -/
+partial def PlaygroundValue.fields (v : PlaygroundValue) (acc : List PlaygroundValue) : Option (List PlaygroundValue) :=
+  match v with
+  | .pair a b => match a, b with
+    | .tt, .tt => .some (List.reverse acc)
+    | _, _ => PlaygroundValue.fields b (.cons a acc)
+  | _ => .none
+
+/-- `con((#tag, payload))` as the tag and its fields. -/
+def PlaygroundValue.con (v : PlaygroundValue) : Option (Nat × List PlaygroundValue) :=
+  match v with
+  | .pair a b => match a with
+    | .tag n => match PlaygroundValue.fields b List.nil with
+      | .some fs => .some (n, fs)
+      | .none => .none
+    | _ => .none
+  | _ => .none
+
+/-- A Nat: a chain of `succ` (tag 1, one field) to `zero` (tag 0, no fields). -/
+partial def PlaygroundValue.nat (v : PlaygroundValue) : Option Nat :=
+  match PlaygroundValue.con v with
+  | .none => .none
+  | .some c => match Nat.beq c.1 0 with
+    | .true => match c.2 with
+      | .nil => .some 0
+      | .cons _ _ => .none
+    | .false => match Nat.beq c.1 1 with
+      | .true => match c.2 with
+        | .nil => .none
+        | .cons f rest => match rest with
+          | .nil => match PlaygroundValue.nat f with
+            | .some n => .some (n + 1)
+            | .none => .none
+          | .cons _ _ => .none
+      | .false => .none
+
+mutual
+/-- A list: `nil` (tag 0, no fields; only inside a list) or `cons` (tag 1, two fields). -/
+partial def PlaygroundValue.list (nested : Bool) (v : PlaygroundValue) : Option (List String) :=
+  match PlaygroundValue.con v with
+  | .none => .none
+  | .some c => match Nat.beq c.1 0 with
+    | .true => match c.2 with
+      | .nil => match nested with
+        | .true => .some List.nil
+        | .false => .none
+      | .cons _ _ => .none
+    | .false => match Nat.beq c.1 1 with
+      | .true => match c.2 with
+        | .nil => .none
+        | .cons head rest => match rest with
+          | .nil => .none
+          | .cons tail more => match more with
+            | .nil => match PlaygroundValue.elem head with
+              | .none => .none
+              | .some h => match PlaygroundValue.list .true tail with
+                | .none => .none
+                | .some t => .some (.cons h t)
+            | .cons _ _ => .none
+      | .false => .none
+
+/-- One element of a list: a positive Nat, `true`, or a nested list. -/
+partial def PlaygroundValue.elem (v : PlaygroundValue) : Option String :=
+  match PlaygroundValue.nat v with
+  | .some n => match Nat.beq n 0 with
+    | .true => PlaygroundValue.elemOther v
+    | .false => .some (Nat.toString n)
+  | .none => PlaygroundValue.elemOther v
+
+/-- The fallbacks of `PlaygroundValue.elem`: a `true`, then a nested list. -/
+partial def PlaygroundValue.elemOther (v : PlaygroundValue) : Option String :=
+  match PlaygroundValue.con v with
+  | .some c => match Nat.beq c.1 1 with
+    | .true => match c.2 with
+      | .nil => .some "true"
+      | .cons _ _ => PlaygroundValue.elemList v
+    | .false => PlaygroundValue.elemList v
+  | .none => PlaygroundValue.elemList v
+
+partial def PlaygroundValue.elemList (v : PlaygroundValue) : Option String :=
+  match PlaygroundValue.list .true v with
+  | .none => .none
+  | .some xs => .some (String.append "[" (String.append (String.intercalate ", " xs) "]"))
+end
+
+/-- `renderValue`'s last fallback: a list (where `nil` alone is not enough: it looks like
+`false` and `0`). -/
+def renderList (v : PlaygroundValue) : Option String :=
+  match PlaygroundValue.list .false v with
+  | .none => .none
+  | .some xs => .some (String.append "[" (String.append (String.intercalate ", " xs) "]"))
+
+/-- `renderValue`'s first fallbacks: a `true`, then a list. -/
+def renderOther (v : PlaygroundValue) : Option String :=
+  match PlaygroundValue.con v with
+  | .some c => match Nat.beq c.1 1 with
+    | .true => match c.2 with
+      | .nil => .some "true"
+      | .cons _ _ => renderList v
+    | .false => renderList v
+  | .none => renderList v
+
+/-- The display text for one output line, or `none` to show it as it came (the page's
+`renderValue`). -/
+def renderValue (line : String) : Option String :=
+  match PlaygroundValue.whole line with
+  | .none => .none
+  | .some v => match PlaygroundValue.nat v with
+    | .some n => match Nat.beq n 0 with
+      | .true => renderOther v
+      | .false => .some (Nat.toString n)
+    | .none => renderOther v
+
+/-- Lines that are a kernel value rather than a definition or an error. -/
+def isValue (line : String) : Bool := String.startsWith line "con("
+
+
 /-- `line`, plus `err`/`val` when the line has a kind (the page sets `line` and adds
 the kind separately). -/
 def Line.cls (l : Line) : String :=
@@ -58,15 +265,25 @@ def Line.cls (l : Line) : String :=
   | .false => String.append "line " l.kind
 
 /-- An output line, classified the way the page's `line()` does: `error:` and
-`parse error` are `err`; everything else keeps the kind it was given (`val` is set by
-the page before the text gets here, because rendering a value is still its job). -/
+`parse error` are `err`; a kernel value (`con(…)`) is `val` with its friendly form when
+`renderValue` knows it (`val raw` otherwise); everything else is plain text. -/
 def Line.ofText (text : String) : Line :=
   match String.startsWith text "error:" with
-  | .true => Line.mk text "err"
+  | .true => Line.mk text "err" text ""
   | .false =>
     match String.startsWith text "parse error" with
-    | .true => Line.mk text "err"
-    | .false => Line.mk text ""
+    | .true => Line.mk text "err" text ""
+    | .false => match isValue text with
+      | .true => match renderValue text with
+        | .some shown => Line.mk text "val" shown text
+        | .none => Line.mk text "val raw" text text
+      | .false => Line.mk text "" text ""
+
+/-- A line's attributes: its class, and the raw text as the tooltip of a value line. -/
+def Line.attrs (l : Line) : List Loom.Attr :=
+  match String.isEmpty l.title with
+  | .true => [Loom.class (Line.cls l)]
+  | .false => [Loom.class (Line.cls l), Loom.attr "title" l.title]
 
 /-- The non-empty lines of `text`, classified. -/
 def linesOf (text : String) : List Line :=
@@ -101,11 +318,11 @@ def Model.ofFailure (text : String) (status : String) (count : String) (kind : S
   let ls := linesOf text;
   Model.mk ls (countOf ls) status kind count
 
-def Line.view (l : Line) : Loom.VNode Msg :=
-  Loom.el "div" [Loom.class (Line.cls l)] [Loom.text l.text]
+def Line.view {M : Type} (l : Line) : Loom.VNode M :=
+  Loom.el "div" (Line.attrs l) [Loom.text l.shown]
 
 /-- The pane: the page's `#output` element, one `.line` div per line. -/
-def Model.view (s : Model) : Loom.VNode Msg :=
+def Model.view {M : Type} (s : Model) : Loom.VNode M :=
   Loom.el "div"
     [Loom.class "output", Loom.attr "id" "output", Loom.attr "aria-live" "polite"]
     (List.map Line.view s.lines)
@@ -113,6 +330,6 @@ def Model.view (s : Model) : Loom.VNode Msg :=
 /-- SSR of the pane at `s`, and its patches between two states. The app exists so
 that the pane can be mounted through the same driver as any other Loom page once the
 playground serves it from its own Wasm instance. -/
-def app : Loom.App Model Msg := Loom.App.mk Model.empty
+def app : Loom.App Model PlaygroundMsg := Loom.App.mk Model.empty
   (fun _ s => s)
   Model.view

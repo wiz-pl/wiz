@@ -17,25 +17,25 @@ def jstr (s : String) : Json := Json.mkStr s
 def program : String :=
   "import Prelude\n\n-- Everything here runs in the page: the self-hosted Wiz frontend and kernel\n-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.\ndef twice (n : Nat) : Nat := n + n\n\n#check twice\n#eval twice 21"
 
-def app : Loom.LiveApp Editor Editor.Msg := Editor.app program
+def app : Loom.LiveApp WebEditor WebEditor.Msg := WebEditor.app program
 
-def s0 : Editor := app.init
+def s0 : WebEditor := app.init
 
 -- The driver's event strings: `event\nindex\npayload` (the textarea's handler is 0, the
 -- Run button's is 1; `input` carries the whole new text, newlines included).
-def typed : Editor := Loom.LiveApp.step app s0 "input\n0\nimport Prelude\n\ndef twice (n : Nat) : Nat := n + n"
-def escaped : Editor := Loom.LiveApp.step app s0 "input\n0\n</textarea><script>alert('x')</script>"
-def multiline : Editor := Loom.LiveApp.step app s0 "input\n0\na\nb\nc"
-def disabledClick : Editor := Loom.LiveApp.step app s0 "click\n1"
-def enabled : Editor := Editor.withDisabled s0 .false
-def clicked : Editor := Loom.LiveApp.step app enabled "click\n1"
-def twiceClicked : Editor := Loom.LiveApp.step app clicked "click\n1"
+def typed : WebEditor := Loom.LiveApp.step app s0 "input\n0\nimport Prelude\n\ndef twice (n : Nat) : Nat := n + n"
+def escaped : WebEditor := Loom.LiveApp.step app s0 "input\n0\n</textarea><script>alert('x')</script>"
+def multiline : WebEditor := Loom.LiveApp.step app s0 "input\n0\na\nb\nc"
+def disabledClick : WebEditor := Loom.LiveApp.step app s0 "click\n1"
+def enabled : WebEditor := WebEditor.withDisabled s0 .false
+def clicked : WebEditor := Loom.LiveApp.step app enabled "click\n1"
+def twiceClicked : WebEditor := Loom.LiveApp.step app clicked "click\n1"
 -- A stale index (handler 0 is the textarea, not the button) and a stale event name: both
 -- must leave the state alone.
-def staleIndex : Editor := Loom.LiveApp.step app enabled "click\n0"
-def staleEvent : Editor := Loom.LiveApp.step app s0 "input\n1\nbogus"
+def staleIndex : WebEditor := Loom.LiveApp.step app enabled "click\n0"
+def staleEvent : WebEditor := Loom.LiveApp.step app s0 "input\n1\nbogus"
 -- The page's other entry points: the count text and the text replaced.
-def counted : Editor := Editor.withCount (Editor.withText s0 "x") "2 lines · 1 error"
+def counted : WebEditor := WebEditor.withCount (WebEditor.withText s0 "x") "2 lines · 1 error"
 
 def fields : List (String × Json) :=
   [ Json.field "initial" (jstr (Loom.LiveApp.html app s0))

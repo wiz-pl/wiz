@@ -1152,6 +1152,13 @@ first, so a JSON change that was not regenerated fails the job (and is visible a
 in the checked-in page). Regenerate it with `python3 web/build-bench.py`; the fixture
 tests and the site-check rules for it are in `web/test-bench.sh`.
 
+The playground's Loom page (`?ui=loom`) needs a fourth build,
+`web/build-playground-ui.sh` (the page's UI module, `wiz-playground-ui.mjs`). The `web`
+job builds and tests it; `web/build-site.sh` copies it when the `docs` job built it into
+`web/out`, and the page falls back to its static markup when it is missing. To publish
+the Loom page, add the command to the `docs` job's module step beside `web/build.sh` and
+`web/build-playground.sh`.
+
 | path | what it is |
 |---|---|
 | `index.html`, `landing.css` | the landing page |
