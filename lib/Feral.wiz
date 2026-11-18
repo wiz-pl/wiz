@@ -23,18 +23,27 @@ requests (`Fe.Req`), the lowering (`Fe.expr`, `Fe.scopeOne`, …), items (`Fe.si
 `feral … end` is a command macro written in Wiz (this file): it type-checks the items
 with a checker whose types carry regions, and lowers each to Wiz source, which the
 elaborator and the kernel then check as usual. `#lower feral … end` also shows the
-generated Wiz. The lowering rules are drafts/feral/LOWERING.md (L1 … L22; the comments
+generated Wiz. The lowering rules are drafts/feral/LOWERING.md (L1 … L23; the comments
 below cite them); the generated code uses lib/Region.wiz, lib/Optic.wiz and, for a
 `structure`'s field lenses, lib/OpticDerive.wiz.
 
 Borrow errors (E0499, E0502, E0515, E0597, a missing `'a : 'b`) are reported at the Feral
-source by this front end. They are also type errors of the lowered program:
-`#unchecked feral … end` lowers without the front end's verdict, so that tests can see
-the kernel reject the same programs. Mutable borrows lower to linear handles (`Uniq`,
-`Mut`, `MutOpt` at quantity 1, cohesion M4b), so duplicating one (E0499) or keeping one
-past its scope is a type error of the lowering too. What is *not* is reading the lender
-under a renamed `Lent` token in hand-written Wiz (LOWERING.md, L21; the lender is an ω
-value): that is ruled out by the shape of what this file emits.
+source by this front end. E0499, E0515 and E0597 are also type errors of the lowered
+program: `#unchecked feral … end` lowers without the front end's verdict, so that tests
+can see the kernel reject the same programs. Mutable borrows lower to linear handles
+(`Uniq`, `Mut`, `MutOpt` at quantity 1, cohesion M4b), so duplicating one (E0499) or
+keeping one past its scope is a type error of the lowering too. What is *not* is:
+
+* E0502 — reading the lender while it is lent is ruled out by the *shape* this file
+  emits (the scope rebinds the lender's name to a `Lent` token, L20), not by the
+  library's types: a hand-written body that renames the token can still read the lender
+  (a known gap, pinned in `regions`); and
+* E0506 — assigning to a lent lender is a front end check only: `#unchecked` accepts the
+  lowering (the reassignment shadows the token).
+
+Both messages say so. Moves are not checked at all: E0382 (use after move), E0505 (use of
+a moved value) and E0507 (move out of a borrow) are not reported for owned values
+(`drafts/feral/STATUS.md`, "Checks today").
 
 Positions: runtime `Syntax` has none, so every function here carries the *path* of the
 node it works on (child indices from the block), and errors are `Syntax.errorAt path`.
@@ -100,6 +109,17 @@ syntax (name := alt) "|" feral_pat "=>" feral_expr : feral_alt
 syntax:20 (name := whileE) "while" feral_expr:21 "do" feral_expr:20 : feral_expr
 syntax:20 (name := whileLet) "while" "let" feral_pat ":=" feral_expr:21 "do" feral_expr:20 : feral_expr
 syntax:20 (name := forE) "for" ident "in" feral_expr:51 ".." feral_expr:51 "do" feral_expr:20 : feral_expr
+-- Out of the fragment, but parsed so that they are *named* rather than reported as an
+-- unknown identifier or a parse error (L23; STATUS.md, "Not in the fragment"): `loop`,
+-- `break`, `continue`, closures, and loop specifications on `while`/`for`.
+syntax:20 (name := loopE) "loop" feral_expr:20 : feral_expr
+syntax:20 (name := breakE) "break" : feral_expr
+syntax:20 (name := continueE) "continue" : feral_expr
+syntax:max (name := closure) "|" sepBy(ident, ",") "|" feral_expr:20 : feral_expr
+syntax:20 (name := whileInv) "while" feral_expr:21 "invariant" "(" term ")" "do" feral_expr:20 : feral_expr
+syntax:20 (name := whileDec) "while" feral_expr:21 "decreases" term "do" feral_expr:20 : feral_expr
+syntax:20 (name := forInv) "for" ident "in" feral_expr:51 ".." feral_expr:51 "invariant" "(" term ")" "do" feral_expr:20 : feral_expr
+syntax:20 (name := forDec) "for" ident "in" feral_expr:51 ".." feral_expr:51 "decreases" term "do" feral_expr:20 : feral_expr
 
 -- statements of a block
 syntax (name := letS) "let" "mut"? ident (":" feral_ty)? ":=" feral_expr : feral_stmt
@@ -124,6 +144,13 @@ syntax (name := ens) "ensures" "(" term ")" : feral_clause
 syntax (name := specI) withPosition("spec" ident feral_clause*) : feral_item
 syntax (name := structI) withPosition("struct" ident "where" feral_field*) : feral_item
 syntax (name := enumI) withPosition("enum" ident "where" feral_ctor*) : feral_item
+-- Out of the fragment, but parsed so that they are named (L23; STATUS.md): `impl S { … }`
+-- and `trait T { … }` (the body in Feral's item syntax), and a struct/enum that tries to
+-- take type parameters (`struct S {T : Type} where …`).
+syntax (name := implI) withPosition("impl" ident ("{" feral_item* "}")?) : feral_item
+syntax (name := traitI) withPosition("trait" ident ("{" feral_item* "}")?) : feral_item
+syntax (name := structGen) withPosition("struct" ident "{" ident+ ":" "Type" "}" "where" feral_field*) : feral_item
+syntax (name := enumGen) withPosition("enum" ident "{" ident+ ":" "Type" "}" "where" feral_ctor*) : feral_item
 
 -- `feral … end`; `#lower feral … end` also shows the generated Wiz; `#unchecked feral … end`
 -- lowers without the front end's borrow errors (tests: the kernel's verdict on its own)
@@ -716,14 +743,36 @@ def Fe.tyApp (f : Fe.Ty) (as : List Fe.Ty) : Fe.Ty := match f, as with
     | _, _, _ => Fe.appN f as)
   | _, _ => Fe.appN f as
 
+/-- The integer type names Feral does not lower: numerals and operators are `U64`'s
+(`USize` is an alias, checked separately). -/
+def Fe.isMachineInt (n : String) : Bool :=
+  List.any (fun (m : String) => String.eq n m)
+    (.cons "U8" (.cons "U16" (.cons "U32" (.cons "U128"
+    (.cons "I8" (.cons "I16" (.cons "I32" (.cons "I64" (.cons "I128"
+    (.cons "ISize" .nil))))))))))
+/-- The names inline spec clauses become when they are read as a type application
+(`fn f … : U64 requires (P) := …`); named in `Fe.tyOf` so the construct is reported. -/
+def Fe.isClauseName (n : String) : Bool :=
+  List.any (fun (m : String) => String.eq n m)
+    (.cons "requires" (.cons "ensures" (.cons "invariant" (.cons "decreases" .nil))))
+/-- The diagnostics of checks that the lowering's *types* do not also make: a reader must
+be able to tell "the kernel would reject this too" from "the front end is the only
+check". E0502 is the shape of the lowering (L20/L21), E0506 is front-end only. -/
+def Fe.shapeNote : String := " (checked by the lowering's shape, not by the library types)"
+/-- See `Fe.shapeNote`: E0506's lowering is accepted by the kernel, so the message says
+so (`#unchecked` shows it). -/
+def Fe.frontNote : String := " (front-end check only: `#unchecked` accepts this program)"
+
 -- ## Types from syntax (L1, L3, L13). An elided region is a variable.
 mutual
 /-- A Feral type, from syntax (L1, L3, L13). An elided region becomes an inference variable. -/
 def Fe.tyOf (p : List Nat) (s : Syntax) : Fe.M Fe.Ty :=
   Fe.sw (Fe.kind s) (
-    ("feral_ty.name", fun _ => (match String.eq (Fe.id (Fe.arg s 0)) "USize" with
-      | .true => Fe.M.pure Fe.tU64
-      | .false => Fe.M.pure (Fe.Ty.con (Fe.id (Fe.arg s 0))))) ▸
+    ("feral_ty.name", fun _ => (match String.eq (Fe.id (Fe.arg s 0)) "USize", Fe.isClauseName (Fe.id (Fe.arg s 0)), Fe.isMachineInt (Fe.id (Fe.arg s 0)) with
+      | .true, _, _ => Fe.M.pure Fe.tU64
+      | _, .true, _ => Fe.fail p ("inline `" +++ Fe.id (Fe.arg s 0) +++ "` on `fn` is not supported yet: write a `spec f requires (…) ensures (…)` item after the function (L23)")
+      | _, _, .true => Fe.fail p ("the type `" +++ Fe.id (Fe.arg s 0) +++ "` is not supported yet: Feral's numerals and operators are `U64` (and `USize`, an alias)")
+      | _, _, _ => Fe.M.pure (Fe.Ty.con (Fe.id (Fe.arg s 0))))) ▸
     ("feral_ty.paren", fun _ => Fe.tyOf (Fe.sub p 1) (Fe.arg s 1)) ▸
     ("feral_ty.prod", fun _ => do
       a ← Fe.tyOf (Fe.sub p 0) (Fe.arg s 0);
@@ -1442,7 +1491,10 @@ def Fe.exprK (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
       | .some m => (match Fe.findSig m cx.g.sigs with
         | .some sig => Fe.call cx env p (Fe.sub p 2) sig (.cons (Fe.sub p 0, Fe.arg s 0) (Fe.argPaths p 3 s)) k
         | .none => Fe.fail p "internal: method without a signature")
-      | .none => Fe.fail p ("no method `" +++ Fe.id (Fe.arg s 2) +++ "` in the supported library"))) ▸
+      | .none => Fe.fail p ("no method `" +++ Fe.id (Fe.arg s 2) +++ "` in the supported library" +++
+          (match Fe.is "feral_expr.var" (Fe.arg s 0) with
+          | .true => ""
+          | .false => " (a field is read on a variable, `x.f`; a field of a non-variable, `(*s).f`, is not supported yet)"))) ▸
     -- L10: `v[i]` for reading is `Vec.index`, a bounds check (L2)
     ("feral_expr.index", fun _ => do
       tv ← Fe.freshVar;
@@ -1528,7 +1580,16 @@ def Fe.exprK (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
         Fe.body cx2 e2 (Fe.sub (Fe.sub (Fe.sub p 3) a.1) 3) (Fe.arg a.2 3) exp tl kk) : Fe.Arm)) (Fe.kids (Fe.arg s 3))) tail k) ▸
     ("feral_expr.whileE", fun _ => Fe.loop cx env p s 0 k) ▸
     ("feral_expr.whileLet", fun _ => Fe.loop cx env p s 1 k) ▸
-    ("feral_expr.forE", fun _ => Fe.forE cx env p s k) ▸ .nil)
+    ("feral_expr.forE", fun _ => Fe.forE cx env p s k) ▸
+    -- L23: out of the fragment, named (not "unknown identifier" / a parse error)
+    ("feral_expr.loopE", fun _ => Fe.fail p "`loop` is not supported yet: Feral has no unbounded loops (write `while c do { … }`, which is a `partial def`; STATUS.md)") ▸
+    ("feral_expr.breakE", fun _ => Fe.fail p "`break` is not supported yet: Feral has no `break`/`continue` (a loop's only exit is its condition; write the test into `while`, or `return` from the function)") ▸
+    ("feral_expr.continueE", fun _ => Fe.fail p "`continue` is not supported yet: Feral has no `continue` (a loop's only exit is its condition; write the test into `while`)") ▸
+    ("feral_expr.closure", fun _ => Fe.fail p "closures are not supported yet: Feral's functions are first-order (no `|x| …`); a `&mut` traversal is `zoom` in Wiz (L16)") ▸
+    ("feral_expr.whileInv", fun _ => Fe.fail p "a loop `invariant` is not supported yet: Feral has no loop specifications (the loop is a `partial def`; wishful: `decreases-loops`)") ▸
+    ("feral_expr.whileDec", fun _ => Fe.fail p "`decreases` on a loop is not supported yet: Feral has no well-founded recursion (the loop is a `partial def`; wishful: `decreases-loops`)") ▸
+    ("feral_expr.forInv", fun _ => Fe.fail p "a loop `invariant` is not supported yet: Feral has no loop specifications (the loop is a `partial def`; wishful: `decreases-loops`)") ▸
+    ("feral_expr.forDec", fun _ => Fe.fail p "`decreases` on a loop is not supported yet: Feral has no well-founded recursion (the loop is a `partial def`; wishful: `decreases-loops`)") ▸ .nil)
     (fun _ => Fe.fail p "not an expression of the supported fragment")
 
 /-- Several expressions, left to right, each flowing to its expected type; `kk` gets their values. -/
@@ -1562,7 +1623,7 @@ def Fe.varE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (exp : Fe.Ty
       t ← Fe.zonkM v.ty;
       (match t with
       | .lent r l => do
-        Fe.softErr p ("error[E0502]: cannot use `" +++ v.name +++ "` because it is mutably borrowed");
+        Fe.softErr p ("error[E0502]: cannot use `" +++ v.name +++ "` because it is mutably borrowed" +++ Fe.shapeNote);
         k (Fe.o v.name) l env
       | .ref .false r l => (match String.eq v.src v.name with
         | .true => k (Fe.o (v.name +++ ".val")) l env
@@ -1575,7 +1636,7 @@ def Fe.varE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (exp : Fe.Ty
       | .none => (match Fe.orElse (Fe.fieldTy cx (Fe.pointee t) sp.2) .none with
         | .some ft => (match t with
           | .lent r l => do
-            Fe.softErr p ("error[E0502]: cannot use `" +++ v.name +++ "` because it is mutably borrowed");
+            Fe.softErr p ("error[E0502]: cannot use `" +++ v.name +++ "` because it is mutably borrowed" +++ Fe.shapeNote);
             k (Fe.o (v.name +++ "." +++ sp.2)) ft env
           | .ref .false _ _ => k (Fe.o (v.name +++ ".val." +++ sp.2)) ft env
           | .ref .true _ _ => do
@@ -1610,9 +1671,12 @@ def Fe.globalE (cx : Fe.Cx) (env : Fe.Env) (p hp : List Nat) (x : String) (args 
     | .none => (match Fe.findStruct x cx.g.structs, Fe.findEnum sp.1 cx.g.enums with
       | .some st, _ => (match st.fields, args with
         | .nil, .nil => k (Fe.o (x +++ ".mk")) (Fe.Ty.con x) env
-        | _, _ => Fe.fail p "struct literals are not supported yet (only a struct without fields)")
+        | _, _ => Fe.fail p ("constructing `" +++ x +++ "` from fields is not supported yet: Feral has no struct literals (only a fieldless struct, `" +++ x +++ "`); build it in the surrounding Wiz, or use `mem.take`"))
       | _, .some en => Fe.ctorApp cx env p sp.2 sp.1 args exp k
-      | _, _ => Fe.fail p ("unknown identifier `" +++ x +++ "`")))
+      | _, _ => (match Fe.findStruct sp.1 cx.g.structs, String.eq sp.2 "mk", args with
+        | .some st, .true, .nil => k (Fe.o (sp.1 +++ ".mk")) (Fe.Ty.con sp.1) env
+        | .some st, .true, _ => Fe.fail p ("constructing `" +++ sp.1 +++ "` from fields is not supported yet: Feral has no struct literals (only a fieldless struct, `" +++ sp.1 +++ "`); build it in the surrounding Wiz")
+        | _, _, _ => Fe.fail p ("unknown identifier `" +++ x +++ "`"))))
 
 /-- An application: a constructor, a method call, or a function call. -/
 def Fe.appE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.Ty) (k : Fe.K) : Fe.M Fe.Out :=
@@ -1713,7 +1777,7 @@ def Fe.argRef0 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (m : Bool
         | .lent r l => do
           Fe.softErr p (match m with
             | .true => "error[E0499]: cannot borrow `" +++ x +++ "` as mutable more than once at a time"
-            | .false => "error[E0502]: cannot borrow `" +++ x +++ "` as immutable because it is also borrowed as mutable");
+            | .false => "error[E0502]: cannot borrow `" +++ x +++ "` as immutable because it is also borrowed as mutable" +++ Fe.shapeNote);
           rv ← Fe.freshVar;
           kk x (Fe.Ty.ref m rv l) env
         | _ => Fe.fail p ("internal: no borrow of `" +++ x +++ "` was opened for this argument"))))
@@ -1808,8 +1872,8 @@ def Fe.borrowE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (k : Fe.K
         let mt := Fe.Ty.mutb r ft l;
         rest ← k (Fe.o mname) mt ((Fe.Var.setRel (Fe.mkVar mname mt .false) (.cons v.name .nil)) ▸ Fe.goneAll (.cons v.name .nil) env);
         Fe.pure (Fe.letH mt mname (Fe.o ("(Mut.ofLens " +++ v.name +++ " " +++ sn +++ "." +++ sp.2 +++ "L)")) ⊕ rest)
-      | _, _, _, _ => Fe.fail p "this borrow of a place is not supported yet (a field of a `&mut` struct, or `&mut v[i]`)"))
-  | _, _, _ => Fe.fail p "this borrow of a place is not supported yet (a field of a `&mut` struct, or `&mut v[i]`)"
+      | _, _, _, _ => Fe.fail p ("`&mut` of a field of an owned local (`&mut s.f`) is not supported yet: it works on a field of a `&mut` struct, or `&mut v[i]` on a `&mut Vec` (STATUS.md)"))
+  | _, _, _ => Fe.fail p ("this borrow of a place is not supported yet: only `&mut v[i]` on a `&mut Vec` and `&mut s.f` on a `&mut` struct are place borrows (STATUS.md)")
 
 /-- L6: assignment rebinds (SSA); `*x := e` is `Uniq.write`/`Mut.set` (L3, L4); L16: a cursor moves -/
 def Fe.assignE (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (isAdd : Bool) (k : Fe.K) : Fe.M Fe.Out :=
@@ -1853,7 +1917,7 @@ def Fe.target (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kk : Stri
       | .ref .true _ a, _ => kk x 1 a env
       | .mutb _ a _, _ => kk x 2 a env
       | .lent _ a, _ => do
-        Fe.softErr p ("error[E0506]: cannot assign to `*" +++ x +++ "` because it is borrowed");
+        Fe.softErr p ("error[E0506]: cannot assign to `*" +++ x +++ "` because it is borrowed" +++ Fe.frontNote);
         kk x 1 a env
       | .ref .false _ a, _ => Fe.fail p ("error[E0594]: cannot assign through `" +++ x +++ "`, a `&` reference")
       | other, _ => (match Bool.or v.mutable v.alias with
@@ -1870,13 +1934,16 @@ def Fe.target (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (kk : Stri
   | .false =>
     let x := Fe.plainVar s;
     (match Fe.find x env with
-    | .none => Fe.fail p "this place cannot be assigned yet (a variable, or `*r` for a mutable borrow `r`)"
+    | .none => Fe.fail p (match Fe.is "feral_expr.dot" s, Fe.is "feral_expr.index" s with
+      | .true, _ => "assigning to a field (`x.f := e`) is not supported yet: a place is a variable or `*r` (STATUS.md)"
+      | _, .true => "assigning to an index (`v[i] := e`) is not supported yet: a place is a variable or `*r` (STATUS.md)"
+      | _, _ => "this place cannot be assigned yet (a variable, or `*r` for a mutable borrow `r`)")
     | .some v => do
       t ← Fe.zonkM v.ty;
       (match (t : Fe.Ty), v.gone, Bool.or v.mutable v.alias with
       | _, .true, _ => Fe.fail p ("error[E0506]: cannot assign to `" +++ x +++ "`: it was moved into a borrow that is still in use")
       | .lent _ a, _, _ => do
-        Fe.softErr p ("error[E0506]: cannot assign to `" +++ x +++ "` because it is borrowed");
+        Fe.softErr p ("error[E0506]: cannot assign to `" +++ x +++ "` because it is borrowed" +++ Fe.frontNote);
         kk x 0 a env
       | _, _, .true => kk x 0 t env
       | _, _, .false => Fe.fail p ("error[E0384]: cannot assign twice to immutable variable `" +++ x +++ "` (declare it `let mut`)")))
@@ -1971,7 +2038,7 @@ def Fe.matchG (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (sp : Lis
     | .ref .false r l, _ => Fe.branch cx env p s tail (fun cx2 tl kk => Fe.arms cx2 env p 3 (Fe.o (x +++ ".val")) l x arms tl kk) k
     | .mopt _ _ _, _ => Fe.branch cx env p s tail (fun cx2 tl kk => Fe.arms cx2 env p 4 (Fe.o x) t x arms tl kk) k
     | .lent r l, _ => do
-      Fe.softErr sp ("error[E0502]: cannot use `" +++ x +++ "` because it is mutably borrowed");
+      Fe.softErr sp ("error[E0502]: cannot use `" +++ x +++ "` because it is mutably borrowed" +++ Fe.shapeNote);
       Fe.branch cx env p s tail (fun cx2 tl kk => Fe.arms cx2 env p 0 (Fe.o x) l x arms tl kk) k
     | _, _ => Fe.branch cx env p s tail (fun cx2 tl kk => Fe.arms cx2 env p 0 (Fe.o x) t x arms tl kk) k)
   | .none => do
@@ -2444,9 +2511,9 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
         | .true => Fe.fail p ("not supported yet: two fields of `" +++ (Fe.split rq.as).1 +++ "` borrowed in one statement (name the borrows with `let h := &mut "
             +++ rq.as +++ "`, L11)")
         | .false => Fe.softErr p ("error[E0499]: cannot borrow `" +++ rq.lender +++ "` as mutable more than once at a time"))
-      | .lent _ _, .true => Fe.softErr p ("error[E0502]: cannot borrow `" +++ rq.lender +++ "` as immutable because it is also borrowed as mutable")
+      | .lent _ _, .true => Fe.softErr p ("error[E0502]: cannot borrow `" +++ rq.lender +++ "` as immutable because it is also borrowed as mutable" +++ Fe.shapeNote)
       | .ref .false _ _, .false => (match Nat.beq rq.kind 0 with
-        | .true => Fe.softErr p ("error[E0502]: cannot borrow `" +++ rq.lender +++ "` as mutable because it is also borrowed as immutable")
+        | .true => Fe.softErr p ("error[E0502]: cannot borrow `" +++ rq.lender +++ "` as mutable because it is also borrowed as immutable" +++ Fe.shapeNote)
         | .false => Fe.pure ())
       | _, _ => Fe.pure ());
     let onHandle := Bool.not (Bool.or (Nat.beq rq.kind 0) (Nat.beq rq.kind 1));
@@ -3155,17 +3222,22 @@ def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × L
           let r := Fe.pass1 bp xs (Fe.Glob.mk (.cons sig g.sigs) g.enums g.structs);
           (r.1, .cons (Fe.Item.func p it) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
-      ("feral_item.specI", fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.spec p it) r.2)) ▸ .nil)
+      ("feral_item.specI", fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.spec p it) r.2)) ▸
+      -- L23: out of the fragment, named (the body is Feral's item syntax; the message says so)
+      ("feral_item.implI", fun _ => let r := Fe.pass1 bp xs g;
+        (r.1, .cons (Fe.Item.bad p ("`impl` is not supported yet: Feral has no methods on user types (the supported methods are lib/Region.wiz's and lib/Feral.wiz's `Fe.methods`); write a `fn` that takes the struct") r.2)) ▸
+      ("feral_item.traitI", fun _ => let r := Fe.pass1 bp xs g;
+        (r.1, .cons (Fe.Item.bad p "`trait` is not supported yet: Feral has no traits or type classes (a function's constraints are Wiz propositions in `spec` items)") r.2)) ▸
+      ("feral_item.structGen", fun _ => let r := Fe.pass1 bp xs g;
+        (r.1, .cons (Fe.Item.bad p ("generic data types are not supported yet: `struct " +++ name +++ "` has no type parameters (a `struct`/`enum` is monomorphic; STATUS.md)")) r.2)) ▸
+      ("feral_item.enumGen", fun _ => let r := Fe.pass1 bp xs g;
+        (r.1, .cons (Fe.Item.bad p ("generic data types are not supported yet: `enum " +++ name +++ "` has no type parameters (a `struct`/`enum` is monomorphic; STATUS.md)")) r.2)) ▸ .nil)
       (fun _ => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad p "not an item of the supported fragment") r.2))
 /-- second pass: lower each function. The result: errors, and the generated items. -/
 structure Fe.Outp where
   errs : List Syntax
   notes : List Syntax
   srcs : List Syntax
-/-- The first element of a list, if any, as a list. -/
-def Fe.first {A : Type} : List A → List A
-  | .nil => .nil
-  | .cons a _ => .cons a .nil
 /-- The second pass: lowers each function. `mode` 0 is `feral`, 1 `#lower feral`
 (also shows the generated code), 2 `#unchecked feral` (borrow errors become notes). -/
 def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
@@ -3183,8 +3255,10 @@ def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
       | .some sig => (match Fe.run (Fe.fnText g p stx sig) with
         | .err q m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt q m) .nil)) o.notes o.srcs)
         | .ok text st =>
-          let soft := List.map (fun (e : List Nat × String) => Syntax.errorAt e.1 e.2) (Fe.first st.soft);
-          let softN := List.map (fun (e : List Nat × String) => Syntax.infoAt e.1 ("the front end's verdict (not enforced by #unchecked): " +++ e.2)) (Fe.first st.soft);
+          -- every borrow error of the function, in the order it met them (not just the first:
+          -- independent errors are independent, L23)
+          let soft := List.map (fun (e : List Nat × String) => Syntax.errorAt e.1 e.2) st.soft;
+          let softN := List.map (fun (e : List Nat × String) => Syntax.infoAt e.1 ("the front end's verdict (not enforced by #unchecked): " +++ e.2)) st.soft;
           (match Nat.beq mode 2 with
           | .true => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes softN) (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
           | .false => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs soft) (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
