@@ -4203,18 +4203,39 @@ def markInferW : TCtx → Tm → MR
     | .mk t' tt => .mk (.down t') (match knownW tt with
       | .vulift _ _ A => .some A
       | _ => .none)
-  -- checked only: no type to compute
+  -- checked only: no type to compute (`pair`, `up` and the description and constructor
+  -- payloads have their components visited in the sorts pass: `inSorts`)
   | _, .lam b => .mk (.lam b) .none
-  | _, .pair a b => .mk (.pair a b) .none
+  | c, .pair a b => .mk (inSorts c (.pair a b)) .none
   | _, .star => .mk .star .none
-  | _, .up a => .mk (.up a) .none
-  | _, .dret i => .mk (.dret i) .none
-  | _, .darg q S E => .mk (.darg q S E) .none
-  | _, .drec q j E => .mk (.drec q j E) .none
-  | _, .dhrec q H j E => .mk (.dhrec q H j E) .none
-  | _, .con x => .mk (.con x) .none
-  | _, .cocon x => .mk (.cocon x) .none
+  | c, .up a => .mk (inSorts c (.up a)) .none
+  | c, .dret i => .mk (inSorts c (.dret i)) .none
+  | c, .darg q S E => .mk (inSorts c (.darg q S E)) .none
+  | c, .drec q j E => .mk (inSorts c (.drec q j E)) .none
+  | c, .dhrec q H j E => .mk (inSorts c (.dhrec q H j E)) .none
+  | c, .con x => .mk (inSorts c (.con x)) .none
+  | c, .cocon x => .mk (inSorts c (.cocon x)) .none
   | _, .prf l t => .mk (.prf l t) .none
+-- (the sorts pass) `t` with the components of a shape whose type only an expected type
+-- gives visited anyway. None of these constructors binds a variable, so each component is
+-- at this context and `markInfer` fills the sorts inside it even when the whole cannot be
+-- typed. A pair is the case that matters: the frontend wraps a lambda it infers in
+-- `ann … (Π … holes)` (`inferFun`), and a pair literal in inference position (the
+-- scrutinee of a projection) used to keep that hole (`inferComponents` in `Mark.lean`).
+-- Marking needs no such descent: a marker needs the shape's type, which is what is missing.
+def markComponents (c : TCtx) (t : Tm) : Tm := match t with
+  | .pair a b => .pair (MR.tm (markInfer c a)) (MR.tm (markInfer c b))
+  | .up a => .up (MR.tm (markInfer c a))
+  | .dret i => .dret (MR.tm (markInfer c i))
+  | .drec q j D => .drec q (MR.tm (markInfer c j)) (MR.tm (markInfer c D))
+  | .dhrec q H j D => .dhrec q (MR.tm (markInfer c H)) (MR.tm (markInfer c j)) (MR.tm (markInfer c D))
+  | .darg q S D => .darg q (MR.tm (markInfer c S)) (MR.tm (markInfer c D))
+  | .con x => .con (MR.tm (markInfer c x))
+  | .cocon x => .cocon (MR.tm (markInfer c x))
+  | t => t
+def inSorts (c : TCtx) (t : Tm) : Tm := match sortsMode c with
+  | .true => markComponents c t
+  | .false => t
 end
 -- a closed term with its proof markers, at the type `ty` (a term)
 def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)

@@ -1703,7 +1703,14 @@ partial def inferTuple (ctx : LocalCtx R) (items : List Syntax) : ElabM R (Term 
     let g ← getGlobals
     -- the second component's type, weakened under the Σ binder
     let bTerm := quote g (ctx.lvl + 1) bty
-    return (.pair a b, ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole))
+    let S := ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole)
+    -- (annotated: the kernel cannot infer the type of a pair — only check one against a
+    -- `Σ` — and a tuple literal in inference position has no expected type to go on. The
+    -- projection of one (`(a, b).2`, `term.proj`) is exactly that: it infers its
+    -- scrutinee, so without this the term it builds is one the kernel rejects with
+    -- "cannot infer a type for (a, b)". `selfhost/Frontend.wiz`'s `inferTuple` writes the
+    -- annotation for the same reason.)
+    return (.ann (.pair a b) (quote g ctx.lvl S), S)
 
 /-- `let q (x₁, x₂, …, xₙ) := e; body` (n ≥ 3) as right-nested pairs:
 `let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …; let q (xₙ₋₁, xₙ) := rₙ₋₂; body`, with
