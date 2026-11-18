@@ -29,6 +29,10 @@
 #include <pthread.h>
 #endif
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1793,6 +1797,67 @@ uint64_t wiz_sys_write_file(const char *p, const char *s, int append) {
 const char *wiz_sys_getenv(const char *k) {
   const char *v = getenv(k);
   return v ? v : "";
+}
+
+/* The driver's `--cache-prune` (`selfhost/Cli.wiz`): the host runtime's directory,
+   stat, unlink and wall-clock leaves (`runtime/rt_sys.inc`), in this runtime's value
+   representation. A stat result is `[kind, size, mtime seconds, mtime nanoseconds,
+   mode]` (`kind`: 0 file, 1 directory, 2 link, 3 other), or `nil` with the error. */
+uint64_t wiz_sys_clock_ns(uint64_t which) {
+  struct timespec t;
+  clock_gettime(which == 0 ? CLOCK_MONOTONIC : CLOCK_REALTIME, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+V wiz_sys_stat(const char *p, int follow) {
+  struct stat st;
+  if ((follow ? stat(p, &st) : lstat(p, &st)) < 0) return nilv();
+  uint64_t kind = S_ISREG(st.st_mode) ? 0 : S_ISDIR(st.st_mode) ? 1 : S_ISLNK(st.st_mode) ? 2 : 3;
+  V l = nilv();
+  l = consv(rt_out_nat((uint64_t)(st.st_mode & 07777)), l);
+  l = consv(rt_out_nat((uint64_t)st.st_mtim.tv_nsec), l);
+  l = consv(rt_out_nat((uint64_t)st.st_mtim.tv_sec), l);
+  l = consv(rt_out_nat((uint64_t)st.st_size), l);
+  l = consv(rt_out_nat(kind), l);
+  return l;
+}
+
+/* the names in a directory (without . and ..), sorted, as `wiz_sys_list_dir` */
+V wiz_sys_list_dir(const char *p) {
+  DIR *d = opendir(p);
+  if (!d) return nilv();
+  size_t n = 0, cap = 16;
+  char **v = (char **)malloc(cap * sizeof(char *));
+  if (!v) { closedir(d); return nilv(); }
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    if (n == cap) {
+      cap *= 2;
+      char **nv = (char **)realloc(v, cap * sizeof(char *));
+      if (!nv) break;
+      v = nv;
+    }
+    char *name = strdup(e->d_name);
+    if (!name) break;
+    v[n++] = name;
+  }
+  closedir(d);
+  /* (insertion sort: the host sorts too, so two runs see one order) */
+  for (size_t i = 1; i < n; i++) {
+    char *x = v[i];
+    size_t j = i;
+    while (j > 0 && strcmp(v[j - 1], x) > 0) { v[j] = v[j - 1]; j--; }
+    v[j] = x;
+  }
+  V l = nilv();
+  for (size_t i = n; i > 0; i--) { l = consv(rt_out_str(v[i - 1]), l); free(v[i - 1]); }
+  free(v);
+  return l;
+}
+
+uint64_t wiz_sys_unlink(const char *p) {
+  return unlink(p) < 0 ? (uint64_t)errno : 0;
 }
 
 /* the program needs a big stack (deep recursion): raise the limit and start again (a

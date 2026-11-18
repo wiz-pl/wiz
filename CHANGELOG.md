@@ -157,6 +157,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   compiler's entry point is `selfhost/Main.wiz` (the checker's is
   `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
   text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
+* selfhost (D5): the driver's cache is layered like the host's. `--cache-ro DIR`
+  (repeatable) adds read-only layers, searched after `--cache` in the order given and
+  never written or copied back; `--no-cache` clears both lists, so
+  `--no-cache --cache-ro DIR` replays a shipped cache and writes nothing.
+  `--cache-prune DAYS` removes the write cache's keyed `.check`/`.c` entries older than
+  DAYS days before the command (a layer is never pruned, and a pruned entry is a miss).
+  `--cache-verify off|warn|strict` now has per-entry digest manifests (`<entry>.mf`):
+  `warn` verifies one when it exists, `strict` uses only manifested entries, and a cold
+  strict run writes them, so the next run is a hit. The selfhost runtime gained the
+  host's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns` leaves in
+  its own representation, so a driver built by either toolchain prunes (21al).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual

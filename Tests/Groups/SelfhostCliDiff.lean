@@ -498,7 +498,7 @@ def cliDiffGroup : Group where
           checkEq "" s.out
           cliCheck s.err s!"unsupported target {target}" "the driver's rejection"
         cliDiffKnown "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5); the self-hosted backend emits C, so the driver refuses the name (exit 1) instead of silently building C" },
-    { name := "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "--cache-verify: the modes are accepted, and strict is warm in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("cv.wiz", cliGood)]
         -- (off and warn: both read the entry; the output is the same warm or cold)
@@ -511,6 +511,18 @@ def cliDiffGroup : Group where
           let (h, s) ← cliDiffBoth host exe spec
           cliDiffSame spec h s
           checkEq 0 s.code
+        -- (the driver's own manifest makes a second strict run warm; `-v` shows it in
+        -- `=selfhost-cli`, since the host has no verbose cache line)
+        let spec : CliDiffSpec := { files := files
+                                    args := #["--cache-verify=strict", "check", "cv.wiz", "--cache", "c"] }
+        let h1 ← cliDiffInit spec.files
+        let s1 ← cliDiffInit spec.files
+        let _ ← cliDiffExec host h1 #[] spec.args
+        let _ ← cliDiffExec exe s1 #[] spec.args
+        let h2 ← cliDiffExec host h1 #[] spec.args
+        let s2 ← cliDiffExec exe s1 #[] spec.args
+        cliDiffSame spec h2 s2
+        checkEq 0 s2.code
         -- (an unknown mode: the message and exit 2 agree; the host prints no usage, and
         -- the driver's is not compared. Also with no command: the host validates the
         -- mode before its usage, and a flag's word is its value, not a command.)
@@ -522,7 +534,7 @@ def cliDiffGroup : Group where
           checkEq 2 s.code
           checkEq 2 h.code
           cliCheck s.err "--cache-verify: unknown mode bogus (off, warn, strict)" "the mode's error"
-        cliDiffKnown "cache verification: the host writes output manifests, so a second `--cache-verify strict` run is a hit there; the self-hosted cache has none, so strict never trusts an entry (a miss, same output, no saved work) (D5)" },
+        cliDiffKnown "cache verification: both modes behave alike; the manifests' layouts differ (the host's per-module SHA-256/Merkle `.wizmf` under `manifest.d/`, the driver's per-entry digest sidecar) (D5)" },
     { name := "flags: a backend flag is not a `check` option in either (exit 2)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         for args in [#["check", "--lib", "x.wiz"], #["check", "x.wiz", "-o", "out.c"],
@@ -613,15 +625,49 @@ def cliDiffGroup : Group where
         check ((← cliDiffCacheEntries s "home/.cache/wiz") == 0) "the driver wrote a cache entry"
         unless !(← cliDiffExists s ".wiz-cache") do
           throw (IO.userError "the driver wrote `.wiz-cache` with --no-cache") },
-    { name := "cache: --cache-ro is a host layer the driver has not got (a named difference)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "cache: --cache-ro DIR adds a read-only layer in both, and neither writes it", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("ro/.keep", ""), ("r.wiz", cliGood)]
-        let spec : CliDiffSpec := { files := files, args := #["check", "r.wiz", "--cache-ro", "ro"] }
+        let spec : CliDiffSpec := { files := files
+                                    args := #["check", "r.wiz", "--cache", "c", "--cache-ro", "ro"] }
         let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 s.code
         checkEq 0 h.code
-        checkEq 1 s.code
-        cliCheck s.err "unsupported --cache-ro: the self-hosted cache has no read-only layers (D5)" "the driver's rejection"
-        cliDiffKnown "cache: `--cache-ro DIR` adds a read-only layer (a Nix package's share/wiz/cache) in the host; the driver's one-file cache has no layers, so it refuses the flag with exit 1 (D5)" },
+        -- (an empty layer is not a cache source; the write cache gets the entry, and the
+        -- read-only layer keeps only its own `.keep`)
+        check ((← cliDiffEntries (h.dir / "ro")) == 1) "the host wrote its read-only layer"
+        check ((← cliDiffEntries (s.dir / "ro")) == 1) "the driver wrote its read-only layer"
+        -- `--no-cache` clears the write cache, and a later `--cache-ro` adds the layer back
+        let spec2 : CliDiffSpec := { files := files
+                                     args := #["check", "r.wiz", "--no-cache", "--cache-ro", "ro"] }
+        let (h2, s2) ← cliDiffBoth host exe spec2
+        cliDiffSame spec2 h2 s2
+        checkEq 0 s2.code
+        check ((← cliDiffEntries (h2.dir / "ro")) == 1) "the host wrote a layer under --no-cache"
+        check ((← cliDiffEntries (s2.dir / "ro")) == 1) "the driver wrote a layer under --no-cache" },
+    { name := "cache: --cache-prune DAYS checks its argument in both, and prunes before the run", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("p.wiz", cliGood)]
+        -- (the host's `takeCachePrune` errors: the message alone, exit 1, in both)
+        for days in ["0", "x"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "p.wiz", "--cache-prune", days] }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 1 s.code
+          checkEq 1 h.code
+        -- a prune before a run: both exit 0 and print a summary (the entry sets differ:
+        -- `.wizc/.wizm/.wizr/.wizs` against the driver's `.check/.c`, so the line does;
+        -- `c/.keep` makes the write cache exist, as a warm run would)
+        let spec2 : CliDiffSpec :=
+          { files := files.push ("c/.keep", "")
+            args := #["check", "p.wiz", "--cache", "c", "--cache-prune", "7"] }
+        let (h2, s2) ← cliDiffBoth host exe spec2
+        checkEq 0 h2.code
+        checkEq 0 s2.code
+        cliCheck h2.err "cache prune: removed " "the host's summary"
+        cliCheck s2.err "cache prune: removed " "the driver's summary"
+        cliDiffKnown "cache prune: both prune only the write cache by age, but the summary names each tool's own keyed files (the host's .wizc/.wizm/.wizr/.wizs, the driver's .check/.c) (D5)" },
     { name := "cache: an edit is a miss in both (an error becomes clean)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { files := #[("m.wiz", cliMissingModule)]

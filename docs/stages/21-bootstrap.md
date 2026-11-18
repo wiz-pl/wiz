@@ -1431,3 +1431,59 @@ yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in thes
   `List.revOnto`, `outParam`) are unknown. Until the self-hosted frontend can
   elaborate `lib/Prelude.wiz` (A9–A23), a `lib/` row of the libdiff measures the
   difference between two preludes, not the file.
+## 21al: the driver's cache: read-only layers, pruning and manifests (D5)
+
+The driver's elaboration cache was one writable directory (`--cache DIR`, default
+`~/.cache/wiz`) with one `.check` entry (the frontend's tagged lines and exit status)
+and one `.c` entry (the generated C) per graph key (21n). It now has the host's cache
+layers and housekeeping (`Wiz/Cache.lean`, `Wiz/Toolchain.lean`, `docs/stages/11-tooling.md`)
+where a one-file-per-graph cache can have them.
+
+* **Read-only layers.** `--cache-ro DIR` is repeatable and appends a read-only layer.
+  A lookup tries the writable `--cache` first, then the layers in the order given; a
+  missing or unparsable entry falls through to the next. Only a miss writes, and only
+  to `--cache`; a hit in a layer is served where it is and is never copied back. A
+  read-only layer is therefore never created or modified, and `-v` names it
+  (`cache hit: KEY (read-only DIR)`). `--no-cache` clears both lists, as the host's
+  does, so `--no-cache --cache-ro DIR` replays a shipped layer and writes nothing
+  (a later `--cache` or `--cache-ro` adds one again). A layer is one this driver wrote:
+  its keys and file names (`.check`/`.c`) are the driver's, not the host's `.wizc`
+  cache, so a layer shipped for the Lean-hosted `wiz` is not read here.
+* **Pruning.** `--cache-prune DAYS` runs before the command (so the process has not read
+  what it deletes) and walks the **write cache only**: the driver's keyed files
+  (`.check`, `.c`) whose modification time is older than DAYS days are removed,
+  recursively, and their bytes are reported. A layer is never passed to the pruner, a
+  manifest (`.mf`) and anything not named `.check`/`.c` is left alone, and a pruned entry
+  is an ordinary miss (the next run elaborates and rewrites it). DAYS must be a number
+  of at least one, with the host's messages (`--cache-prune needs at least one day`,
+  `--cache-prune needs a number of days, not …`) and exit 1. The walk uses the host
+  runtime's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns`
+  interfaces (`lib/Sys.wiz`); the selfhost runtime (`selfhost/rt.c`) now implements the
+  same leaves in its own value representation, so a driver built by either toolchain
+  can prune.
+* **Output manifests (`--cache-verify`).** Each entry can have a sidecar,
+  `<entry>.mf`: one line, `m<digest>`, where the digest is the driver's rolling hash
+  (`hashStep`, FNV-1a-shaped, modulo 4294967291) over the whole
+  `s<status>\n<payload>` text. `off` neither reads nor writes manifests;
+  `warn` (the default) verifies one when it exists and otherwise keeps the old
+  unverified lookup; `strict` (alias `require`) uses only manifested entries. A
+  mismatched, truncated or unparsable manifest is a miss (never a wrong result), and a
+  cold `strict` run writes the manifests, so the next one is a hit. Manifests are
+  written to the write cache only, never to a layer; an entry written by `--cache-verify
+  off` has no manifest, so `warn` still reads it and `strict` does not. This is the
+  host's policy, not its layout: the host has per-module SHA-256 manifests with a
+  Merkle root under `manifest.d/` and a per-layer generation index, while the driver's
+  graph key already names the whole input, so one digest per entry is enough to catch
+  the corruption and truncation the flag is for. There is no signature (the host has
+  none yet either; P3).
+
+**Tests.** Group `selfhost-cli`: `--cache-ro` with a layer copied from a warm write
+cache (a hit with a fresh, still absent write cache; the layer's bytes unchanged; the
+read-only-only form), layer order (the first layer's answer wins), `--cache-verify`
+cold/warm under `strict`, an `off` entry read by `warn` and refused by `strict`, a
+rewritten entry detected as a miss and re-elaborated, and `--cache-prune` removing the
+two aged keyed files from the write cache, leaving the aged layer and its manifests,
+then keeping fresh entries and rejecting `0`/`x` with the host's messages. Group
+`selfhost-cli-diff`: both tools accept `--cache-ro` (and `--no-cache --cache-ro`) and
+neither writes the layer, both reject a bad `--cache-prune` DAYS alike and prune before
+the run, and both modes of `--cache-verify strict` are warm on the second run.
