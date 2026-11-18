@@ -93,10 +93,10 @@ def binId (tc : Toolchain) : IO UInt64 := Cache.binaryId tc.cacheDir
 `grail.local.wiz`) applied, as `grail` itself does: `grail.wiz` has `Package.set "libs"
 "-lm"`, and a test that runs a program must link it the same way. An unknown setting is
 ignored here (the CLI reports it); the harness is not the build tool. -/
-def withSettings (tc : Toolchain) (pkg : Grail.Package) (local : List (String × String)) :
+def withSettings (tc : Toolchain) (pkg : Grail.Package) (machine : List (String × String)) :
     IO Toolchain := do
   let mut tc := tc
-  for (k, v) in pkg.settings ++ local do
+  for (k, v) in pkg.settings ++ machine do
     match tc.set k v with
     | some t => tc := t
     | none => pure ()
@@ -115,8 +115,8 @@ def buildLog (dir : System.FilePath) (tc : Toolchain) (only : List String := [])
     (timeoutMs : Option Nat := none) : IO (Grail.Stats × Bool × String) := do
   match ← Grail.readConfig tc (← binId tc) "lib" dir with
   | .error e => throw (IO.userError e)
-  | .ok (pkg, local) =>
-    let tc ← withSettings tc pkg local
+  | .ok (pkg, machine) =>
+    let tc ← withSettings tc pkg machine
     let log ← IO.mkRef ""
     let r ← runner dir tc pkg jobs log
     let r := { r with timeoutMs := timeoutMs.getD r.timeoutMs }
@@ -182,8 +182,8 @@ def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false)
   let std : System.FilePath := "lib"
   match ← Grail.readConfig tc 7 std dir with
   | .error e => throw (IO.userError e)
-  | .ok (pkg, local) =>
-    let tc ← withSettings tc pkg local
+  | .ok (pkg, machine) =>
+    let tc ← withSettings tc pkg machine
     let r ← runner dir tc pkg 2 (← IO.mkRef "")
     let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs }
     let res ← r.tests pkg.targets filters update
