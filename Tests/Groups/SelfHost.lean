@@ -1611,7 +1611,7 @@ The compiler's buffer comes first and a failure there short-circuits: it holds e
 shared file (the frontend and the tables) and the driver, so both incidents surface in
 its half of the ~50 s, not after the checker's. -/
 def selfhostHostGuard : IO Unit := do
-  let loader ← libLoader
+  let loader ← selfhostLoader
   let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
     let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
     let prog := source srcs
