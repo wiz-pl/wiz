@@ -1,12 +1,14 @@
 #!/bin/sh
 # Build the web infoview: web/Web.wiz → C (the Wiz compiler) → WebAssembly (Emscripten),
 # with the reference-counting runtime and mini-gmp (GMP's portable subset) for bignums.
-#   usage: web/build.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR]
+#   usage: web/build.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR] [--opt LEVEL]
 #   (OUT default web/out; needs .lake/build/bin/wiz. --gmp-src: mini-gmp from that GMP
 #   source tarball instead of nixpkgs', for builds without nix, such as the release job.
 #   --from DIR, or WIZ_WEB_FROM=DIR: copy the module a Nix build made instead
 #   (`nix build .#wiz-web`), for CI and anyone who has the store path; local use is
-#   unchanged.)
+#   unchanged. --opt LEVEL: the C optimisation level (1, 2, 3); the default is the
+#   compiler's -O2. emcc runs binaryen's `wasm-opt` at -O2 and up, which is the build's
+#   memory peak; -O1 is kept to a smaller module for a machine that cannot fit it.)
 # wasm64 (-sMEMORY64) keeps the runtime's 64-bit words and 62-bit small numbers as they
 # are. Web.wiz is a library (stage 9g): the page calls its exports `wiz_web_init` and
 # `wiz_web_step` on every event, so nothing waits inside Wasm (no Asyncify).
@@ -14,11 +16,13 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GMPSRC=
 FROM=${WIZ_WEB_FROM:-}
+OPT=
 OUT_DIR=
 while [ $# -gt 0 ]; do
   case "$1" in
     --gmp-src) GMPSRC=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
     --from) FROM=$2; shift 2 ;;
+    --opt) OPT=$2; shift 2 ;;
     *) OUT_DIR=$1; shift ;;
   esac
 done
@@ -37,9 +41,13 @@ fi
 if ! command -v emcc >/dev/null; then
   set --; [ -z "$OUT_DIR" ] || set -- "$OUT_DIR"
   [ -z "$GMPSRC" ] || set -- "$@" --gmp-src "$GMPSRC"
+  [ -z "$OPT" ] || set -- "$@" --opt "$OPT"
   exec nix shell nixpkgs#emscripten -c "$0" "$@"
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# (after the compiler's own -O2, so emcc's last -O wins)
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+[ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp from GMP's source tarball, behind a <gmp.h>
 if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
@@ -53,7 +61,7 @@ fi
 # as the C compiler, mini-gmp in place of -lgmp (--gmp), and web/js.c by Web.wiz's
 # `link_c "js.c"` (stage 9f). `--no-main` (9g): the module is Web.wiz's exports, linked
 # without a `main` (emcc's --no-entry). It writes OUT/wiz-infoview.c beside the module.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "$CFLAGS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=33554432 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
 -sEXPORTED_FUNCTIONS=_wiz_web_init,_wiz_web_step,_wiz_doc_init,_wiz_doc_step,_wiz_release,_free \

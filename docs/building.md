@@ -1257,10 +1257,11 @@ slow part (~10 minutes, with Emscripten's `wasm-opt -O2` as the memory tail); wi
 `emcc` on `PATH` the script runs Emscripten from nixpkgs. CI does not run it: the
 `wiz-playground` derivation in flake.nix does, once, and Cachix serves the result
 (`web/build-playground.sh --from "$(nix build .#wiz-playground --no-link
---print-out-paths)"` copies it). That derivation inherits the memory tail: at `-O2`
-`wasm-opt` peaks around 17 GiB on the 7.7 MB module, so `nix build .#wiz-playground`
-needs a machine with that much free RAM; adding `-O1` to the script's `--cflags`
-(emcc then skips binaryen) measures at 2.3 GiB, for a module about 47 % larger. Both web
+--print-out-paths)"` copies it). That derivation builds at `--opt 1`: at `-O2`
+`wasm-opt` peaks at 16.9 GiB on the 7.7 MB module (measured 2026-11-18) and is killed on
+a 16 GB CI runner, while `-O1` skips binaryen and peaks at 2.3 GiB, for a module 47 %
+larger (11.4 MB). The script's default is still the compiler's `-O2`, so a local build
+is unchanged; pass `--opt 1` to it to reproduce what the derivation publishes. Both web
 builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
 are compiled without `-pthread` (the header also turns it on by itself for Emscripten
 without `-pthread`): the runtime then has one thread, nothing is ever

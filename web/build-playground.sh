@@ -4,10 +4,14 @@
 # compiled to C by `wiz` and then to WebAssembly by Emscripten. The page (web/playground.html) calls its exported
 # `wiz_playground_eval : String → String`, so there is no server and no main loop.
 #
-#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR]
+#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR] [--opt LEVEL]
 #   (OUT default web/out; needs .lake/build/bin/wiz, i.e. `lake build wiz` first.
 #   --from DIR, or WIZ_PLAYGROUND_FROM=DIR: copy the engine a Nix build made instead
-#   (`nix build .#wiz-playground`); local use is unchanged.)
+#   (`nix build .#wiz-playground`); local use is unchanged. --opt LEVEL: the C
+#   optimisation level (1, 2, 3); the default is the compiler's -O2. emcc runs
+#   binaryen's `wasm-opt` at -O2 and up, which needs ~17 GiB on this module; -O1 skips
+#   it (2.3 GiB) for a module ~47 % larger. packages.wiz-playground builds at -O1 because
+#   a 16 GB CI runner cannot hold the -O2 peak.)
 #
 # This is web/build.sh's pipeline with a different source and export; the infoview's
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
@@ -15,11 +19,13 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GMPSRC=
 FROM=${WIZ_PLAYGROUND_FROM:-}
+OPT=
 OUT_DIR=
 while [ $# -gt 0 ]; do
   case "$1" in
     --gmp-src) GMPSRC=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
     --from) FROM=$2; shift 2 ;;
+    --opt) OPT=$2; shift 2 ;;
     *) OUT_DIR=$1; shift ;;
   esac
 done
@@ -38,9 +44,13 @@ fi
 if ! command -v emcc >/dev/null; then
   set --; [ -z "$OUT_DIR" ] || set -- "$OUT_DIR"
   [ -z "$GMPSRC" ] || set -- "$@" --gmp-src "$GMPSRC"
+  [ -z "$OPT" ] || set -- "$@" --opt "$OPT"
   exec nix shell nixpkgs#emscripten -c "$0" "$@"
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# (after the compiler's own -O2, so emcc's last -O wins)
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+[ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)
 if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
@@ -75,7 +85,7 @@ ENGINE="$OUT/playground.wiz"
 # flag (and SUPPORT_LONGJMP=wasm works too, but is not required). The module exports
 # `wiz_playground_exit` beside the two calls: the code of the last clean stop, read by
 # web/playground-engine.js after each call.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "$CFLAGS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
 -sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_wiz_playground_exit,_free \

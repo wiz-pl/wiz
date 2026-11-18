@@ -271,7 +271,12 @@
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
-              sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src}
+              # -O1: emcc runs binaryen's `wasm-opt` at -O2 and up, and on this module that
+              # stage peaks at 16.9 GiB (measured 2026-11-18) — it is SIGKILLed on a 16 GB
+              # CI runner. -O1 (LLVM's, without binaryen) is 2.3 GiB and ~3 min faster, for
+              # a module 47 % larger (11.4 MB against 7.75 MB). The script still defaults
+              # to the compiler's -O2, so a local build is unchanged.
+              sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src} --opt 1
               runHook postBuild
             '';
             installPhase = ''
