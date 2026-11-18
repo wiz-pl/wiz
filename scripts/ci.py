@@ -24,7 +24,8 @@
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
                                      unless only docs changed, docs=true when a doc
-                                     changed, and shards=[NAMES], the shards of
+                                     changed, web=true when a browser-facing file
+                                     (`web/*`) changed, and shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). `changes --all`
                                      prints everything
@@ -51,20 +52,23 @@
                                      a green run must have tested something: fail when
                                      a group skipped wholesale, when a skip names a tool
                                      the CI dev shell must provide (cc, GMP, GC, yosys,
-                                     node, nix, …), or when a group's unexplained skipped
+                                     node, nix, …), when a group's unexplained skipped
                                      ratio is over F (default 0.25, of the group's
-                                     cases in all shards). A skip in a group of
-                                     .github/skip-allowlist.json whose reason matches
-                                     (and whose case, when the entry names one) is
-                                     explained (reported, not failed); anything else that
-                                     skips wholesale is a failure. Reads `lake test`
-                                     logs and `--timings` files. `--self-test` checks the
-                                     rule on synthetic logs and exits 1 if it is wrong
+                                     cases in all shards), or when the logs parse no
+                                     records at all. A skip excused by an entry of
+                                     .github/skip-allowlist.json (same group and case
+                                     exactly, a reason the skip's starts with, and an
+                                     expiry still in the future) is explained (reported,
+                                     not failed); anything else that skips wholesale is a
+                                     failure. Reads `lake test` logs and `--timings`
+                                     files. `--self-test` checks the rule on synthetic
+                                     logs and exits 1 if it is wrong
 
 Selectors are the arguments of `lake test --`: `=NAME` selects the group NAME,
 `=NAME#I,J` the cases I and J of it, anything else is a prefix of group names (see
 Tests/Main.lean).
 """
+import datetime as dt
 import fnmatch, json, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -218,12 +222,14 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
-    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
+    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
+    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1".)"""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
-        jobs = s.get("jobs", 1)
+        jobs = s.get("jobs")
         if n <= 1:
             out.append((s["name"], s["select"], None, jobs))
             continue
@@ -308,10 +314,19 @@ def check_shards(binary):
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
+# Browser-facing sources: the playground, the infoview and site scripts, their Node
+# tests and the Wiz programs they are built from. The `web` job (`ci.yml`) builds the
+# Wasm modules and runs the browser-free half of web/test.sh when one of these changes;
+# the Chromium half of that script stays local.
+WEB = ["web/*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
-# build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
+# build and its toolchain, the C runtime, CI itself, and the web/ tree — its Wiz
+# sources and JS hosts are read by test groups (`web/Web.wiz`, `web/framework/gen.wiz`,
+# `web/wasm-host.mjs`), and a change there is checked by the `web` job rather than by
+# one shard, so it sends every shard to be safe. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
-              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
+              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz",
+              "web/*"]
 
 
 def matches(path, globs):
@@ -365,6 +380,7 @@ def changes(args):
         names = [s["name"] for s in shards()]
         print("code=true")
         print("docs=true")
+        print("web=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -374,10 +390,12 @@ def changes(args):
     names = needed_shards(files)
     code = any(not matches(f, DOCS) for f in files)
     docs = any(matches(f, DOCS) for f in files)
+    web = any(matches(f, WEB) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
+    print(f"web={'true' if web else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; docs: {docs}; "
+    print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
           f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
@@ -618,20 +636,34 @@ SKIP_DETAIL = re.compile(r"^      skipped \((.*)\)$")
 NO_REASON = "(the case printed no reason)"
 
 
-def allowlist(path=SKIPS):
-    """The groups of .github/skip-allowlist.json that may skip in CI, each with the
-    reason it may skip for and an owner, and optionally the one case it excuses. A malformed entry is an error: an allow-list
-    without an owner is a place for skips to hide."""
+def allowlist(path=SKIPS, today=None):
+    """The entries of .github/skip-allowlist.json that may skip in CI, each with the
+    reason it may skip for, an owner and the one `case` it excuses, plus an `expires`
+    date (YYYY-MM-DD). A malformed entry is an error: an allow-list without an owner is a
+    place for skips to hide, one without a case excuses a whole group, and one without an
+    expiry is never revisited (an expired entry has to be renewed with a new reason, as
+    the flaky quarantine's do). The reason matches as a prefix of the skip's reason — a
+    skip usually carries detail after the entry's words — but the case matches exactly."""
     with open(path, encoding="utf-8") as f:
         doc = json.load(f)
+    today = today or dt.date.today()
     out = []
     for e in doc.get("groups", []):
-        for k in ("group", "reason", "owner"):
+        for k in ("group", "reason", "owner", "case"):
             if not str(e.get(k, "")).strip():
                 sys.exit(f"{path}: the entry {json.dumps(e)} lacks {k!r}")
-        if "case" in e and not str(e["case"]).strip():
-            sys.exit(f"{path}: the entry {json.dumps(e)} has an empty 'case'")
-        out.append(e)
+        raw = e.get("expires")
+        if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            sys.exit(f"{path}: the entry {json.dumps(e)} needs an 'expires' date as a "
+                     f"YYYY-MM-DD string")
+        try:
+            expires = dt.date.fromisoformat(raw)
+        except ValueError:
+            sys.exit(f"{path}: the entry {json.dumps(e)} has an invalid 'expires' date {raw!r}")
+        if expires <= today:
+            sys.exit(f"{path}: the entry {json.dumps(e)} expired on {raw}; fix the case or "
+                     f"renew the entry with a new reason")
+        out.append(dict(e, expires=raw))
     return out
 
 
@@ -680,12 +712,13 @@ def skip_records(paths):
 
 
 def allowed_entry(allowed, group, case, why):
-    """The allow-list entry that explains this skip, or None: same group, a reason the
-    skip's starts with, and, when the entry names a case, that case exactly."""
+    """The allow-list entry that explains this skip, or None: the same group, the same
+    case exactly, and a reason the skip's starts with. The case is not optional: an entry
+    that named no case would excuse every case of the group."""
     low = (why or "").lower()
     for e in allowed:
-        if (e["group"] == group and low.startswith(e["reason"].lower())
-                and ("case" not in e or e["case"] == case)):
+        if (e["group"] == group and e["case"] == case
+                and low.startswith(e["reason"].lower())):
             return e
     return None
 
@@ -746,7 +779,7 @@ def analyze(recs, allowed, max_ratio):
                     details.append(f"- ❌ {msg}")
                 elif whole:
                     msg = (f"**{md(group)}**: all {len(cs)} cases skipped in shard `{md(shard)}` — "
-                           f"{v[1]}; not in .github/skip-allowlist.json")
+                           f"{v[1]}; not explained by .github/skip-allowlist.json")
                     errors.append(msg)
                     details.append(f"- ❌ {msg}")
                     for c, _ in items:
@@ -840,7 +873,7 @@ def self_test():
          {"core.log": log([("gamma", [(f"c{i}", "some reason") for i in range(5)] + pass10[:5])])}, 1, "50%"),
         ("unlisted whole group",
          {"core.log": log([("delta", [(f"c{i}", "some reason") for i in range(3)])])}, 1,
-         "not in .github/skip-allowlist.json"),
+         "not explained by .github/skip-allowlist.json"),
         ("allow-listed whole group",
          {"library-3.log": log([("tower", [("from source", "no source toolchain: `lake` has no toolchain "
                                                          "outside a checkout (elan has no default)")]),
@@ -872,9 +905,31 @@ def self_test():
         ("--timings file", {"library-2.jsonl": timing("library-2", "wasm",
                                                       [(f"m{i}", "no node") for i in range(25)])}, 1, "node"),
     ]
-    allowed = {"groups": [{"group": "hdl", "reason": "no iverilog", "owner": "HDL fixtures"},
-                          {"group": "tower", "reason": "no source toolchain", "owner": "tower fixtures"},
-                          {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta fixtures"}]}
+    allowed = {"groups": [{"group": "hdl", "case": "sim", "reason": "no iverilog",
+                           "owner": "HDL fixtures", "expires": "2099-01-01"},
+                          {"group": "tower", "case": "from source",
+                           "reason": "no source toolchain", "owner": "tower fixtures",
+                           "expires": "2099-01-01"},
+                          {"group": "zeta", "case": "z0", "reason": "parity:",
+                           "owner": "zeta fixtures", "expires": "2099-01-01"}]}
+    # an entry needs a case and a live expiry: a group-level entry excuses every case,
+    # and one without a date is never revisited
+    loader_trials = [
+        ("a live, case-scoped entry loads",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "2099-01-01"},
+         True, None),
+        ("an entry without a case is rejected",
+         {"group": "zeta", "reason": "parity:", "owner": "zeta", "expires": "2099-01-01"},
+         False, "case"),
+        ("an entry without expires is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta"}, False, "expires"),
+        ("an expiry that is not YYYY-MM-DD is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "soon"},
+         False, "YYYY-MM-DD"),
+        ("an expired entry is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "2020-01-01"},
+         False, "expired"),
+    ]
     bad = 0
     with tempfile.TemporaryDirectory() as d:
         apath = os.path.join(d, "allow.json")
@@ -895,7 +950,26 @@ def self_test():
             print(f"{'ok  ' if ok else 'FAIL'} {name}: {len(errors)} error(s)"
                   + ("" if ok else f", expected {want_errors}" + (f" mentioning {needle!r}" if needle else "")
                      + f": {errors}"))
-        # the repository's own allow-list must load, with an owner on every entry
+        for k, (name, entry, want_ok, needle) in enumerate(loader_trials):
+            p = os.path.join(d, f"allow-loader-{k}.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"groups": [entry]}, f)
+            try:
+                allowlist(p)
+                ok, why = want_ok, "loaded"
+            except SystemExit as e:
+                ok, why = not want_ok and (needle is None or needle in str(e)), str(e)
+            bad += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {name}: {why}")
+        # a log the lint cannot parse is not "all 0 cases ran": no records is a failure
+        empty = os.path.join(d, "empty.log")
+        open(empty, "w", encoding="utf-8").close()
+        rc = check_skips([empty], annotate=False)
+        ok = rc != 0
+        bad += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} an empty record set exits non-zero (check-skips: {rc})")
+        # the repository's own allow-list must load, with an owner, a case and an expiry
+        # on every entry
         try:
             real = allowlist()
             ok = True
@@ -905,11 +979,12 @@ def self_test():
         bad += not ok
         if ok:
             print(f"ok   .github/skip-allowlist.json: {len(real)} entr{'y' if len(real) == 1 else 'ies'}")
-    print(f"skip lint self-test: {len(trials) + 1} checks, {len(trials) + 1 - bad} ok")
+    checks = len(trials) + len(loader_trials) + 2
+    print(f"skip lint self-test: {checks} checks, {checks - bad} ok")
     return 1 if bad else 0
 
 
-def check_skips(args):
+def check_skips(args, annotate=True):
     max_ratio, allow, paths, selftest = 0.25, SKIPS, [], False
     it = iter(args)
     for a in it:
@@ -930,8 +1005,13 @@ def check_skips(args):
         return 2
     recs = skip_records(paths)
     if not recs:
-        print("No test results: the skip lint checked nothing (was a log written?).")
-        return 0
+        # a log that parsed no records proves nothing: "all 0 cases ran" would be a green
+        # gate over an empty or unreadable log
+        msg = "no test results: the skip lint checked nothing (was a log written?)"
+        print(msg, file=sys.stderr)
+        if annotate:
+            error(msg, "Skips")
+        return 1
     errors, warnings, lines = analyze(recs, allowlist(allow), max_ratio)
     print("\n".join(lines))
     for w in warnings:

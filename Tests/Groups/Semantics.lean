@@ -146,9 +146,9 @@ def runLeanC (program : String) : IO Got := do
   match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 180) with
   | .ok out => pure (.ok (digitRuns out))
   | .error e =>
-    match noC e with
-    | some why => pure (.skipped why)
-    | none => pure (.failed ("lean-c: " ++ e))
+    -- a missing compiler/GMP is a skip; a program that ran and failed is a failed cell
+    if e.isToolchain then pure (.skipped "no C toolchain")
+    else pure (.failed ("lean-c: " ++ e.message))
 
 /-- Wiz frontend (`selfhost/`) → C, compiled with the self-hosted runtime. -/
 def runWizC (program : String) : IO Got := do
@@ -308,9 +308,8 @@ def semanticsGroup : Group where
         let dir ← IO.FS.createTempDir
         match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 180) with
         | .error e =>
-          match noC e with
-          | some why => skip why
-          | none => throw (IO.userError e)
+          if e.isToolchain then skip "no toolchain"
+          else throw (IO.userError e.message)
         | .ok out =>
           let vals := (out.splitOn "\n").filter (fun l => !l.trimAscii.isEmpty)
           if vals.length != cs.size then

@@ -111,6 +111,7 @@ def libsAllocs (s : CommandState ZeroOneMany) (n : Name) : IO Nat := do
 def regionsGroup : Group where
   name := "regions"
   exercise := "lib/Region.wiz (Feral lifetimes)"
+  parallel := true
   cases := [
     { name := "handles in different regions are different types; regions are inferred", run := fun _ => do
         okLibs ("import Region\ndef same {ρ : Region} (m : Mut ρ Nat (List Nat)) : Mut ρ Nat (List Nat) := m\n" ++
