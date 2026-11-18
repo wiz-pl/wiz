@@ -1082,7 +1082,7 @@ def superclassParam : String :=
   "instance instShowNat : Show Nat := Show.mk (fun n => n)\n" ++
   "instance instLoudNat : Loud Nat := Loud.mk (fun n => n + 1)\n" ++
   "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := Loud.loud x + Show.show x\n" ++
-  "#check Loud\n#check Loud.loud\n#check both\n#reduce Nat.beq (both (A := Nat) 2) 3\n"
+  "#check Loud\n#check Loud.loud\n#check both\n#reduce Nat.beq (both (A := Nat) 2) 5\n"
 
 def superclassParamExpected : String :=
   "Loud : (x0 : U0) → (x1 : (Show x0)) → U0\n" ++
@@ -1090,7 +1090,8 @@ def superclassParamExpected : String :=
   "both : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : (Loud x0 x1)) → (x3 : x0) → Nat\n" ++
   "con((#1, (tt, tt)))\n"
 
-/-- (30f) The same class compiles and runs with both dictionaries; `both 2` is 3. -/
+/-- (30f) The same class compiles and runs with both dictionaries; `both 2` is 5
+(`loud 2` is 3, `show 2` is 2). -/
 def superclassProgram : String :=
   "import Prelude\nclass Show (A : Type) where\n  show : A → Nat\n" ++
   "class Loud (A : Type) [super : Show A] where\n  loud : A → Nat\n" ++
@@ -3209,7 +3210,7 @@ def selfHostGroup : Group where
     { name := "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)", run := fun _ =>
         selfhostCheckFile superclassParam superclassParamExpected },
     { name := "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)", run := fun _ =>
-        selfhostCompileRun superclassProgram "3\n" }
+        selfhostCompileRun superclassProgram "5\n" }
 
   ]
 
