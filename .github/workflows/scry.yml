@@ -103,10 +103,41 @@ jobs:
             exit 2
           fi
           echo "${#tests[@]} goldens"
+          # `tests/repl.wiz` keeps its session cache under `.scry-repl/`; it runs its
+          # session in a fresh temporary directory (see that test), so a leftover cache
+          # from an earlier run cannot change the transcript.
           # --update is deliberately absent: a drifted golden must be red, not rewritten.
           # `tests/scale.wiz` parses the 3.9 MB generated grammar; on a hosted runner
           # it needs more than grail's default 300 s per test (the file's own cap).
-          grail test --test-timeout 900 "${tests[@]}"
+          # Keep the run's output for the summary step below. `set -o pipefail` is already
+          # on (the step shell), so the pipeline's status is still `grail test`'s, not
+          # tee's; `set +e` only stops the shell from exiting before we can pass it on.
+          log="$RUNNER_TEMP/grail-test.log"
+          set +e
+          grail test --test-timeout 900 "${tests[@]}" 2>&1 | tee "$log"
+          rc=$?
+          set -e
+          exit "$rc"
+      - name: Failing goldens (the diff)
+        # `grail test` prints each failing case and the first line that differs, but this
+        # job runs 28 cases and can spend most of an hour before it reaches them: repeat
+        # that part in the run's summary, where the next person looks first, instead of
+        # making them find it in the log. (The harness already prints the first
+        # difference; this only moves it, it does not re-run or rewrite anything.)
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/grail-test.log"
+          if [ ! -f "$log" ]; then
+            echo "no grail test log (the job failed before the goldens ran)"
+            exit 0
+          fi
+          {
+            echo "### scry goldens: failing output"
+            echo
+            echo '```'
+            awk '/^  ✗ / { failing = 1 } failing' "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: No golden was rewritten
         # Belt and braces: if anything in the run writes a .expected (a tool calling
         # --update, or a test doing it itself), the job fails instead of accepting it.
