@@ -627,6 +627,24 @@ def fieldQtyProgram : String :=
   "  IO.println (Nat.toString (vsum (V.cons 1 (V.cons 2 V.nil))));\n" ++
   "  IO.println (Nat.toString (unL (L1.mk 9)))\n"
 
+/-- (stage 22a) An instance constructor field `[i : C A]`, which is not explicit: the Lean
+frontend resolves the instance at the call and a pattern skips it (as it skips an implicit
+field), so `I.mk 3` supplies only `x`. Master records `[i : C A]` as an explicit ω
+argument (only `{…}` is implicit), so the self-hosted frontend rejects `I.mk 3` with
+`type mismatch: expected (C Nat), got Nat` and binds the pattern's `x` to the instance;
+`agent/sh-ctorqty` @ f07ba230 adds the `BKind.inst` field kind. Pinned difference (Lean
+accepts, self-hosted rejects), to promote when the branch lands. -/
+def instFieldHeader : String :=
+  "class C (A : Type) where\n  f : A → Nat\n" ++
+  "instance : C Nat := C.mk (fun x => x)\n" ++
+  "inductive I where\n  | mk [i : C Nat] (x : Nat)\n"
+
+def instFieldDiffs : List (String × Bool × Bool) := [
+  -- the instance is not explicit: the call takes the field `x` alone
+  ("def i1 : I := I.mk 3\n", true, false),
+  -- and a pattern skips it, binding only `x`
+  ("def iu : I → Nat\n  | .mk x => x\n", true, false)]
+
 /-- (stage 21m, K1) The pinned differences, `(declaration, Lean accepts, self-hosted
 accepts)` (docs/CoreSpec.md §15): the Lean frontend takes a `match` on a linear scrutinee
 apart with `T.casesOn1` (the case at 1), the self-hosted frontend's match is the case at
@@ -844,6 +862,65 @@ def structFiles : List (String × String) :=
       "wiz_s_Outer make_outer(uint64_t n) { wiz_s_Outer o; o.p.a = n; o.p.b = 0.5; o.p.ok = 1; o.p.name = \"made in C\"; o.n = 2 * n; return o; }\n")]
 
 def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
+
+/-- (C8) Structs nested two deep, each passed and returned by value, with a string and a
+number read out of the outermost — the field order and the marshalling helpers compose. -/
+def structDeepHeader : String :=
+  "struct pt { unsigned long x; double y; };\n" ++
+  "typedef struct { struct pt a; struct pt b; } wiz_seg;\n" ++
+  "typedef struct { wiz_seg s; unsigned long n; } wiz_deep;\n" ++
+  "static inline struct pt pt_bump(struct pt p) { p.x += 1; p.y *= 2; return p; }\n" ++
+  "static inline unsigned long deep_sum(wiz_deep d) { return d.s.a.x + d.s.b.x + d.n; }\n" ++
+  "static inline wiz_deep deep_make(unsigned long n) { wiz_deep d; d.s.a.x = n; d.s.a.y = 0.5;\n" ++
+  "  d.s.b.x = n + 1; d.s.b.y = 1.5; d.n = 2 * n; return d; }\n"
+
+def structDeepProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"struct pt\" (header := \"{header}\") Pt where\n  x : Nat\n  y : Float64\n" ++
+  s!"c_struct \"wiz_seg\" (header := \"{header}\") Seg where\n  a : Pt\n  b : Pt\n" ++
+  s!"c_struct \"wiz_deep\" (header := \"{header}\") Deep where\n  s : Seg\n  n : Nat\n" ++
+  s!"extern \"pt_bump\" (header := \"{header}\") ptBump : Pt → Pt\n" ++
+  s!"extern \"deep_sum\" (header := \"{header}\") deepSum : Deep → Nat\n" ++
+  s!"extern \"deep_make\" (header := \"{header}\") deepMake : Nat → IO Deep\n" ++
+  "def main : IO Unit := do\n  let p := ptBump (Pt.mk 4 (Float64.ofNat 3));\n" ++
+  "  IO.println (Nat.toString p.x);\n  IO.println (Float64.toString p.y);\n" ++
+  "  let d := Deep.mk (Seg.mk p (Pt.mk 10 (Float64.ofNat 0))) 7;\n" ++
+  "  IO.println (Nat.toString (deepSum d));\n  r ← deepMake 5;\n" ++
+  "  IO.println (Nat.toString (r.s.a.x + r.s.b.x + r.n));\n  IO.println (Float64.toString r.s.b.y)\n"
+
+def structDeepExpected : String := "5\n6\n22\n21\n1.5\n"
+
+/-- (C8) A byte array (`unsigned char data[4]`) as a `c_struct` field, passed and
+returned by value through an extern (not through `glue`): cut/zero-padded going in,
+copied out. -/
+def structArrayHeader : String :=
+  "typedef struct { unsigned char data[4]; unsigned long n; } wiz_ab;\n" ++
+  "static inline unsigned long ab_sum(wiz_ab m) {\n" ++
+  "  return (unsigned long)m.data[0] + m.data[1] + m.data[2] + m.data[3] + m.n; }\n" ++
+  "static inline wiz_ab ab_make(unsigned long n) {\n" ++
+  "  wiz_ab m; m.data[0] = 1; m.data[1] = 2; m.data[2] = 3; m.data[3] = 4; m.n = n; return m; }\n"
+
+def structArrayProgram (header : String) : String :=
+  "import IO\n" ++
+  s!"c_struct \"wiz_ab\" (header := \"{header}\") AB where\n  data : Bytes\n  n : Nat\n" ++
+  s!"extern \"ab_sum\" (header := \"{header}\") abSum : AB → Nat\n" ++
+  s!"extern \"ab_make\" (header := \"{header}\") abMake : Nat → IO AB\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (abSum (AB.mk (Bytes.ofString \"AB\") 5)));\n" ++
+  "  m ← abMake 10;\n  IO.println (Bytes.show m.data);\n  IO.println (Nat.toString m.n)\n"
+
+def structArrayExpected : String := "136\n[1, 2, 3, 4]\n10\n"
+
+/-- (C8) A field at quantity 0 on master: the field kind is not `e` (erased) yet, so the
+type is checked like any other field's (a `List` field at 0 is rejected) and the C
+marshalling still writes the field into the header's struct. `agent/sh-cstruct` erases it
+from the C struct (keeping the slot in the Wiz structure); these assertions are the
+current behaviour and the prompt to promote this case when that lands. -/
+def structErasedProbe : String :=
+  "import Prelude\n" ++
+  "c_struct \"wiz_q\" (header := \"wiz_q.h\") Q where\n  0 tag : Nat\n  x : Nat\n" ++
+  "extern \"q_get\" (header := \"wiz_q.h\") qGet : Q → Nat\n" ++
+  "def main : IO Unit := IO.println (Nat.toString (qGet (Q.mk 0 7)))\n"
 
 /-- (stage 21r) The checks of `c_struct`, both frontends alike. -/
 def structDecls : List (String × Bool) := [
@@ -1758,6 +1835,21 @@ def axiomsPrintProgram : String :=
   "#print axioms mkT\n#print axioms model\n#print axioms slow\n" ++
   "#print axioms useU\n#print axioms myLen\n#print axioms strlen\n"
 
+/-- (B18) The trust ledger's view of `#print axioms`: a definition's *dependency* (here
+`h`'s value uses `g`, whose value uses the axiom `a`) must still be listed. The selfhost
+toolchain has no checked-in ledger (`.github/trust-baseline.tsv` covers `lib/`), so this
+line is what makes what a run trusted visible; a walk that stopped at a definition's own
+constants prints `'h' does not depend on any axioms` instead, and the ledger would
+silently lose the row. -/
+def axiomsDependencyProgram : String :=
+  "import Prelude\n" ++
+  "axiom a : Nat\n" ++
+  "def g : Nat := Nat.add a a\n" ++
+  "def h : Nat := g\n" ++
+  "#print axioms h\n"
+
+def axiomsDependencyExpected : String := "a : Nat\ng : Nat\nh : Nat\n'h' depends on axioms: [a]\n"
+
 /-- (A23) `#print axioms` on partial definitions: the body is walked only where the host
 walks the implementation (an `implemented_by` target), never from a type or a value, so
 `loopA` and its users depend on nothing while `modelA` (implemented by `loopA`) lists
@@ -1783,6 +1875,32 @@ def setOptionProgram : String :=
   "set_option pp.all 1\n" ++
   "set_option pp.other true\n" ++
   "set_option pp.notation false\n#print axioms f\n"
+
+/-- (B13) A *source-level* numeral: the frontend does not emit `Tm.nlit`/`Tm.natFn` yet
+(`natLitDigits`/`natRegistered` is the hook), so `2` still elaborates as
+`Nat.succ (Nat.succ Nat.zero)` and `#reduce` prints the constructor, not `2`. The kernel's
+literal rules are exercised separately by the `(E-K) Kernel.wiz literals` cases, which
+hand `Kernel.wiz` hand-written `nlit`/`natFn` terms. This is the source side: if the
+frontend starts emitting literals, `#reduce 2` prints `2` and this case fails (promote it,
+and extend the backend, which has no `nlit` case yet). -/
+def numeralSourceProgram : String := "import Prelude\n#reduce 2\n"
+
+def numeralSourceExpected : String :=
+  "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\n"
+
+/-- (C14, D9) The driver's side of the trust flag: the one-shot compiler's driver takes no
+`--trust-native`, so a `native_refl` body is refused by default. `--trust-native` is a
+checker flag (the C14 cases above drive the checker); the driver recognises it as an
+unknown flag. A regression that enabled trust by default would compile this file (exit 0,
+C on stdout) and fail the case. -/
+def nativeReflDriverProgram : String :=
+  "import Prelude\n" ++
+  "def sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+  "def s : sumTo 3 = 6 := native_refl\n"
+
+def nativeReflDriverExpected : String :=
+  "error: native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it\n"
+
 -- ------------------------------------------------------------------------------------
 -- (A17/A18) Surface syntax: list literals, `&&`/`||`, as-patterns, tuple patterns,
 -- `let (x, y)`, `let ()`. The host and the self-hosted frontend compile each program,
@@ -2286,6 +2404,8 @@ def selfHostGroup : Group where
         selfhostCompileRun fieldQtyProgram "4\n3\n9\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: quantities, the pinned differences (21m, K1)", run := fun _ =>
         selfhostVerdicts quantityHeader quantityDiffs },
+    { name := "the self-hosted frontend: an instance constructor field is not explicit yet: the Lean frontend takes `I.mk 3`, the self-hosted one wants the instance (22a, A22)", run := fun _ =>
+        selfhostVerdicts instFieldHeader instFieldDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
@@ -2310,6 +2430,8 @@ def selfHostGroup : Group where
         selfhostSameLines axiomsPrintProgram },
     { name := "the self-hosted frontend: #print axioms walks a partial definition's body only as code, as the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines partialAxiomsProgram },
+    { name := "the self-hosted frontend: #print axioms lists a dependency's axiom (no checked-in selfhost trust ledger) (B18)", run := fun _ =>
+        selfhostCheckFile axiomsDependencyProgram axiomsDependencyExpected },
     { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines setOptionProgram },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
@@ -2340,6 +2462,29 @@ def selfHostGroup : Group where
         selfhostLinkRun structFiles structExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: c_struct is checked as in the Lean frontend (21r)", run := fun _ =>
         selfhostAgreesIO "" structDecls },
+    { name := "c_struct: two levels of nesting pass and return by value, in both compilers (C8)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_deep.h"
+        IO.FS.writeFile h structDeepHeader
+        let prog := structDeepProgram h.toString
+        ioRun prog structDeepExpected
+        selfhostCompileRun prog structDeepExpected
+        selfhostCompileRun prog structDeepExpected (flags := #["--rc"]) },
+    { name := "c_struct: a byte-array field passes and returns by value, in both compilers (C8)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_ab.h"
+        IO.FS.writeFile h structArrayHeader
+        let prog := structArrayProgram h.toString
+        ioRun prog structArrayExpected
+        selfhostCompileRun prog structArrayExpected
+        selfhostCompileRun prog structArrayExpected (flags := #["--rc"]) },
+    { name := "c_struct: a field at quantity 0 is not erased yet: its type is still checked and the C struct still carries it (C8)", run := fun _ => do
+        -- (the shape `agent/sh-cstruct` @ 02342c6c erases: kind `e`, a slot only in Wiz)
+        selfhostCheckFails "import Prelude\nc_struct Q where\n  0 xs : List Nat\n  y : Nat\n"
+          "input.wiz:2:1: error: c_struct field xs: a field must be Nat, UInt64, Float64, String, Bool, a foreign type, another c_struct or (with a header) Bytes\n"
+        let some c ← selfhostC structErasedProbe | return
+        check ((c.splitOn "c->tag = rt_in_nat").length > 1)
+          s!"the 0-quantity field is erased from the C struct:\n{c.take 2000}" },
     { name := "a Wiz library (--lib, --no-main, --header) used by a C program, with the handle functions (21s)", run := fun _ => do
         libRunC libSrc libMain libExpected
         selfhostLibRun libSrc libMain libExpected (flags := #["--lib"])
@@ -3077,6 +3222,8 @@ def selfHostGroup : Group where
         check (has out "native_refl proves an equation `a = b`; this type is not one") s!"native_refl at Nat was accepted:\n{out}"
         check (has out "native_refl can only be the whole body of a definition") s!"an ascription was accepted:\n{out}"
         check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" },
+    { name := "(C14) native_refl: the driver has no --trust-native, so it refuses a native_refl body without the flag (D9)", run := fun _ =>
+        selfhostCompileFails nativeReflDriverProgram nativeReflDriverExpected },
 
     -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
     -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet)
@@ -3117,6 +3264,8 @@ def selfHostGroup : Group where
               | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
             | _ => throw (IO.userError s!"unexpected timing line: {t}")
           | _ => throw (IO.userError s!"unexpected output: {out}") },
+    { name := "(B13) source numerals still elaborate as successor trees, not `nlit`/`natFn` (the kernel literal rules are covered separately)", run := fun _ =>
+        selfhostCheckFile numeralSourceProgram numeralSourceExpected },
     { name := "the lexer in Wiz agrees with the Lean lexer", run := fun _ => do
         let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
         let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
