@@ -448,8 +448,14 @@ jobs:
   # playground that does not build or a failing web test fails `CI result`.
   web:
     name: web
-    needs: changes
-    if: needs.changes.outputs.web == 'true'
+    # Ordered behind `build` when it runs, so `nix build .#wiz` substitutes this commit's
+    # store path from Cachix instead of rebuilding it here (and instead of competing with
+    # the build for the runner). A web-only change skips `build` (`code` is false), which
+    # must not skip this job — hence the explicit result check rather than a bare `needs`.
+    needs: [changes, build]
+    if: >-
+      !cancelled() && needs.changes.outputs.web == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
