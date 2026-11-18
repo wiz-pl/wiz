@@ -313,20 +313,29 @@ def cliDiffDriverHelp : String :=
   "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" ++
   "  wiz-selfhost version            print the version (also --version)\n" ++
   "  wiz-selfhost help               this text (also -h, --help)\n" ++
+  "  wiz-selfhost lsp                a language server on stdin/stdout: initialize,\n" ++
+  "                                  full-text didOpen/didChange/didClose,\n" ++
+  "                                  publishDiagnostics, plainGoal/plainTermGoal (D8)\n" ++
   "\n" ++
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" ++
   "  in the working directory),\n" ++
   "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" ++
-  "  the Lean-hosted `wiz`'s),\n" ++
-  "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" ++
-  "  manifests yet, so strict never trusts an entry), --target c (the only backend;\n" ++
+  "  the Lean-hosted `wiz`'s), --cache-ro DIR (a read-only layer, repeatable:\n" ++
+  "  searched after --cache in order, never written), --no-cache (both lists),\n" ++
+  "  --cache-prune DAYS (remove the write cache's keyed entries older than DAYS\n" ++
+  "  days before the command; a layer is never pruned),\n" ++
+  "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" ++
+  "  strict: only manifested entries), --target c (the only backend;\n" ++
   "  --llvm/--wasm/--split are the host's and are refused, C5),\n" ++
   "  -v (cache hits and misses), --types (each declaration's type),\n" ++
+  "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" ++
+  "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" ++
+  "  --native-fuel: the self-hosted evaluator has no step counter),\n" ++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" ++
-  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" ++
+  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" ++
+  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" ++
   "\n" ++
-  "without a command: input.wiz in the working directory to standard output\n\n"
-
+  "without a command: input.wiz in the working directory to standard output\n"
 def cliDiffGroup : Group where
   name := "selfhost-cli-diff"
   exercise := "stage 21 (D2-D7): the self-hosted driver against the Lean-hosted wiz"
@@ -833,14 +842,15 @@ def cliDiffGroup : Group where
                  "  wiz-selfhost build FILE -o OUT  write the generated C to OUT",
                  "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)",
                  "  wiz-selfhost version            print the version (also --version)",
-                 "  wiz-selfhost help               this text (also -h, --help)"] cmds
+                 "  wiz-selfhost help               this text (also -h, --help)",
+                 "  wiz-selfhost lsp                a language server on stdin/stdout: initialize,"] cmds
         -- (the host's own list is the difference: these are the lines it has and the
         -- driver does not; each is asserted so implementing one fails the case)
-        for word in ["parse", "repl", "test-driver", "doc", "fmt", "cache prune", "lsp"] do
+        for word in ["parse", "repl", "test-driver", "doc", "fmt", "cache prune"] do
           cliCheck h2.out (s!"  wiz {word}") "host help"
           unless !((s2.out.splitOn (s!"  wiz-selfhost {word}")).length > 1) do
             throw (IO.userError s!"the driver now documents `{word}`: promote this case")
-        cliDiffKnown "usage text: the driver lists check/build/run/version/help; the host lists those and parse, repl, test-driver, doc, fmt, cache prune/verify/manifest and lsp (D2/D8)" },
+        cliDiffKnown "usage text: the driver lists check/build/run/version/help/lsp; the host lists those and parse, repl, test-driver, doc, fmt, cache prune/verify/manifest (D2/D8)" },
     { name := "warnings: the host warns about a shadowed Prelude (the driver has none yet)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("Prelude.wiz", "import Prelude\ndef shadow : Nat := 0\n"),

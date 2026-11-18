@@ -819,6 +819,7 @@ def dropQSrc : String :=
   "  | .pfalse => .pfalse\n" ++
   "  | .exfalso m t => .exfalso (dropQTm m) (dropQTm t)\n" ++
   "  | .letUnit u b => .letUnit (dropQTm u) (dropQTm b)\n" ++
+  "  | .split q s m b => .split q (dropQTm s) (dropQTm m) (dropQTm b)\n" ++
   "  | .enum k => .enum k\n" ++
   "  | .tag k i => .tag k i\n" ++
   "  | .ecase m s bs => .ecase (dropQTm m) (dropQTm s) (dropQTms bs)\n" ++
