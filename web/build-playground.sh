@@ -4,18 +4,40 @@
 # compiled to C by `wiz` and then to WebAssembly by Emscripten. The page (web/playground.html) calls its exported
 # `wiz_playground_eval : String → String`, so there is no server and no main loop.
 #
-#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz]
-#   (OUT default web/out; needs .lake/build/bin/wiz, i.e. `lake build wiz` first)
+#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR]
+#   (OUT default web/out; needs .lake/build/bin/wiz, i.e. `lake build wiz` first.
+#   --from DIR, or WIZ_PLAYGROUND_FROM=DIR: copy the engine a Nix build made instead
+#   (`nix build .#wiz-playground`); local use is unchanged.)
 #
 # This is web/build.sh's pipeline with a different source and export; the infoview's
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
-case "${2:-}" in --gmp-src) GMPSRC=$(cd "$(dirname "$3")" && pwd)/$(basename "$3") ;; esac
-OUT=$(mkdir -p "${1:-$ROOT/web/out}" && cd "${1:-$ROOT/web/out}" && pwd)
+FROM=${WIZ_PLAYGROUND_FROM:-}
+OUT_DIR=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gmp-src) GMPSRC=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --from) FROM=$2; shift 2 ;;
+    *) OUT_DIR=$1; shift ;;
+  esac
+done
+OUT=$(mkdir -p "${OUT_DIR:-$ROOT/web/out}" && cd "${OUT_DIR:-$ROOT/web/out}" && pwd)
+# An engine built elsewhere (packages.wiz-playground): same files, no Emscripten, no nix.
+if [ -n "$FROM" ]; then
+  [ -f "$FROM/wiz-playground.mjs" ] || {
+    echo "build-playground: $FROM/wiz-playground.mjs is missing (--from $FROM)" >&2; exit 1; }
+  cp -R "$FROM"/. "$OUT"/
+  echo "copied $OUT/wiz-playground.mjs from $FROM"
+  exit 0
+fi
+# without emcc on the PATH, run again with Emscripten from nixpkgs
+if ! command -v emcc >/dev/null; then
+  set --; [ -z "$OUT_DIR" ] || set -- "$OUT_DIR"
+  [ -z "$GMPSRC" ] || set -- "$@" --gmp-src "$GMPSRC"
+  exec nix shell nixpkgs#emscripten -c "$0" "$@"
+fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)

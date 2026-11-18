@@ -9,8 +9,10 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed). CI pushes them to the Cachix
-  # cache `badlydrawnwizards`; see docs/building.md for `nix run`.
+  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
+  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
+  # derivation instead of in each CI job. CI pushes them to the Cachix cache
+  # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -201,6 +203,86 @@
               platforms = systems;
             };
           };
+          # The two Wiz→wasm page modules (stages 11n/11ab) as derivations, so that Cachix
+          # serves them: CI's `web` job used to run both Emscripten builds inside its
+          # single test step (95 % of it, ~10 min and an 8–10 GiB `wasm-opt -O2` tail),
+          # and the `docs` job ran them again on every push. Each derivation runs the same
+          # script a developer runs, with the packaged wiz, `emcc` on PATH (so the script
+          # does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
+          # `nix build`): no network at build time. `$out` is the script's OUT directory
+          # — the module pair plus the page files it copies beside them — and the scripts
+          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`).
+          #
+          # The `src` filesets list exactly what each script reads: a change to a test or
+          # a page it does not touch leaves the module in the cache. A script that starts
+          # copying one more page file must add it here — the build fails loudly (a
+          # `cp: cannot stat`) rather than publishing a site with a missing file.
+          wiz-web = pkgs.stdenv.mkDerivation {
+            pname = "wiz-web";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
+                ./web/build.sh ./web/Web.wiz ./web/js.c
+                # the page files the script copies into OUT
+                ./web/infoview.html ./web/infoview.js ./web/tagged.js ./web/scroll.js
+                ./web/scroll-search.js ./web/scroll.css
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The web documentation module (wiz-infoview.mjs/.wasm, web/build.sh)";
+              platforms = systems;
+            };
+          };
+          wiz-playground = pkgs.stdenv.mkDerivation {
+            pname = "wiz-playground";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                # the engine (the self-hosted frontend) and the export
+                ./web/build-playground.sh ./web/playground-exports.wiz
+                # the module list the script reads from the Lean side, one source for both
+                ./Wiz/Selfhost.lean
+                ./selfhost/Lex.wiz ./selfhost/Parse.wiz ./selfhost/Kernel.wiz
+                ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
+                ./selfhost/Tables.wiz
+                # the page files the script copies into OUT
+                ./web/playground.html ./web/playground.js ./web/playground-values.js
+                ./web/playground.css ./web/lsp-client.js ./web/goals.js
+                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
+              platforms = systems;
+            };
+          };
           # tower, the toolchain manager (stage 26): the Wiz implementation in `tower/`,
           # built by grail (stage 26e/26h). It needs no Lean at build time; the binary
           # links GMP (the flags below), so the closure grows by GMP and glibc only.
@@ -374,7 +456,8 @@
               platforms = systems;
             };
           };
-        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz; };
+        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
+                   wiz-web wiz-playground; default = wiz; };
     in {
       packages = forAll packagesFor;
 
