@@ -10,6 +10,21 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
+  the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
+  `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,
+  `runtime/rt_con.inc`) with its exit code instead of calling `exit`. The runtime still
+  prints its `wiz: …` message on stderr, `web/playground-engine.js` returns the code as
+  `wiz_playground_exit` (code + 1, 0 for none), and the pane shows it as a failure while
+  the module and the page's state survive: the next run works on the same instance.
+  Only an out-of-memory `wiz_panic` (an `ExitStatus` outside the boundary) and a trap
+  (`unreachable`, out-of-bounds access, stack overflow) still drop and re-instantiate the
+  module from the cached Wasm. Native builds are unchanged: with no boundary armed,
+  `exit` is still `exit`, so the CLI's status, `atexit` and the stdio flush are as
+  before. The guard is covered under Node with a stub module
+  (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`); the runtime boundary,
+  the native exit status and the unarmed `exit` are in `scripts/test-runtime.sh`. No
+  emcc, no Wiz build and no browser are needed for the stubs.
 * CI: the quadratic-shape lint (`scripts/check-complexity`) takes its excuses inline, on
   the hit's line or the line above it (`-- complexity: ok (why it is bounded)`);
   `scripts/complexity-allow.tsv` is gone. A row in a table keyed by a line hash could not
