@@ -6,6 +6,7 @@
 import { isValue, renderValue } from "./playground-values.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
+import { createEngine, failureLines } from "./playground-engine.js";
 
 const editor = document.getElementById("editor");
 const runButton = document.getElementById("run");
@@ -14,9 +15,8 @@ const status = document.getElementById("status");
 const count = document.getElementById("count");
 const engine = document.getElementById("engine");
 
-let wasm = null;
+let wasm = null;   // web/playground-engine.js: every call guarded, restarted after an exit
 let busy = false;
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
 function setStatus(text, kind) {
   status.textContent = text;
@@ -31,27 +31,11 @@ function withPrelude(text) {
 }
 
 // `wiz_playground_eval` on a source: the module's one call, shared by Run and the
-// in-page language server.
-function evalSource(src) {
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_eval(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : "";
-  if (r) wasm._free(r);
-  return text;
-}
-
-// (stage 1) `wiz_playground_check`: the same check as JSON with each line's offset, for
-// the in-page language server; null with a module built before it existed.
-function checkSource(src) {
-  if (typeof wasm._wiz_playground_check !== "function") return null;
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_check(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : null;
-  if (r) wasm._free(r);
-  return text;
-}
+// in-page language server. (stage 1) `wiz_playground_check`: the same check as JSON with
+// each line's offset, for the in-page language server; null with a module built before
+// it existed. Both reject with an `EngineFailure` when the module exits, aborts or traps.
+const evalSource = (src) => wasm.evaluate(src);
+const checkSource = (src) => wasm.check(src);
 
 function line(text) {
   const el = document.createElement("div");
@@ -85,15 +69,18 @@ function run() {
   runButton.disabled = true;
   setStatus("running…", "running");
   // let the status paint before the (synchronous) Wasm call
-  setTimeout(() => {
+  setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = evalSource(withPrelude(editor.value));
+      const text = await evalSource(withPrelude(editor.value));
       const ms = Math.max(0, performance.now() - started);
       const bad = show(text);
       setStatus(`done in ${ms < 10 ? "<10" : Math.round(ms)} ms`, bad ? "error" : "ready");
     } catch (e) {
-      output.replaceChildren(line("error: " + (e && e.message ? e.message : String(e))));
+      if (e && e.name === "EngineFailure") {
+        output.replaceChildren(...failureLines(e).map(line));
+        count.textContent = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
+      } else output.replaceChildren(line("error: " + (e && e.message ? e.message : String(e))));
       setStatus("failed", "error");
     } finally {
       busy = false;
@@ -130,10 +117,13 @@ async function start() {
   setStatus("loading the engine…", "running");
   try {
     const createModule = (await import("./wiz-playground.mjs")).default;
-    wasm = await createModule({
+    const engine = createEngine(createModule, {
       print: (s) => console.log(s),
       printErr: (s) => console.warn(s),
+      onRestart: (f) => console.warn("wiz playground: restarting the engine: " + f.message),
     });
+    await engine.ready;
+    wasm = engine;
     engine.textContent = "engine: ready";
     engineReady.resolve();
     runButton.disabled = false;

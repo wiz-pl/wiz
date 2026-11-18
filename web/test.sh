@@ -32,6 +32,10 @@ if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (p
 node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
 if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
   echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
+# (playground-exit) the engine guard: exit(3), abort/OOM and traps from a stub module
+node "$ROOT/web/playground_engine_test.mjs" > "$OUT/engine.txt"
+if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo "ok (playground, engine guard)"; else
+  echo "FAIL (playground, engine guard)"; cat "$OUT/engine.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"

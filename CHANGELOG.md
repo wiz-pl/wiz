@@ -17,6 +17,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* playground: a Wasm call that exits, aborts or traps no longer takes the page with it.
+  `run`, `eval` and `check` now go through one guard (`web/playground-engine.js`): the
+  one-threaded runtime's `ExitStatus` (a program that forks a thread or blocks forever,
+  status 3), Emscripten's `Aborted(…)`/out-of-memory `RuntimeError`, and a trap
+  (`unreachable`, out-of-bounds access, stack overflow) all become a failure the pane
+  prints together with the runtime's own stderr; the module is then dropped and
+  re-instantiated from the cached Wasm, so the next run works. Nothing else the module
+  throws is caught. The two shims are covered under Node with a stub module
+  (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`): no emcc, no Wiz build,
+  no browser.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
