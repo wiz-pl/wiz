@@ -622,8 +622,8 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
   memory and allocations), so it is the next representation step, not this one.
 * **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic; `wiz.c`
   has 62-bit scalars and `T_BIG` GMP objects. The self-hosted tests rely on `2^63 - 1`
-  (`=selfhost` case 36), so this cannot change without either GMP in every self-hosted
-  program or a deliberate smaller `Nat`.
+  (`=selfhost` case 33, "big numerals with the self-hosted compiler"), so this cannot
+  change without either GMP in every self-hosted program or a deliberate smaller `Nat`.
 * **`T_HYP = 0xFFFF000C`.** `ind`'s lazily computed hypotheses have no `wiz.c` counterpart
   (it computes them in compiled Wiz, `PrimCode.lean`). It is the next free special tag;
   it must be added to the shared header before a value can cross runtimes.
@@ -1077,7 +1077,7 @@ frontends, and the same failing `rw` in both, comparing verdicts and the error t
 unchanged and remains the host-side regression.
 
 **Verification on this branch** (A12+A11+A13 merged; the self-hosted compiler built from
-the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #147–#151), and
+the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #140–#144), and
 `=tactics` is 28/28. A full `=selfhost` run reached **112 cases, 0 failures** (and
 #112–#114 also passed) before the machine restarted; the remaining tail was being
 re-run when it restarted again, and the A13 cases were then re-checked individually. The
@@ -1095,6 +1095,36 @@ written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are n
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21af: how much of the parity group runs the pipeline
+
+`Tests/Groups/SelfHost.lean` used to be one group (185 cases when it was split; 175 when
+the audit measured it), and 35 of them never invoked the self-hosted compiler or checker:
+they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel in process.
+A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
+pipeline measurement. The group is now split by what a case runs:
+
+* `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
+  compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
+  (`selfhostChecker`/`selfhostCheckFile`/`selfhostOutput`) and compares what it says —
+  against a hand-written expectation, or against the Lean frontend/kernel for the
+  differential cases. This is the number to quote for parity.
+* `=selfhost-host` (**14 cases**) runs the Lean host only: the static `Tables.wiz`
+  regeneration check, the additive match (the self-hosted frontend has no additive
+  eliminator, A21), in-process probes of the Lean kernel/`MTm` (their Wiz counterpart is
+  the "and both kernels agree below" pipeline case), and the anti-vacuity case below.
+
+The anti-vacuity case builds a stub that writes `input.wiz` to standard output as both
+the compiler and the checker, runs every `=selfhost` case in a child process with
+`WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
+passes. That is the audit's measurement turned into a test, so the pipeline group cannot
+regress into cases that do not reach the pipeline. Twenty-two cases that used to
+compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
+type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.wiz`'s
+erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
+the cases that cannot — they call the Lean kernel API in process, need the additive
+eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
+`selfhost` shard split 6) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 

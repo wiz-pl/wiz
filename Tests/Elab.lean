@@ -1859,10 +1859,21 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .ok _ => "ok"
   | .error _ => "error"
 
+/-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
+from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
+"an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
+them to a stub, so the pipeline group cannot quietly stop testing the pipeline. -/
+def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
+  let var := "WIZ_SELFHOST_" ++ name.toUpper
+  return (← IO.getEnv var).map System.FilePath.mk
+
 /-- The whole self-hosted pipeline as a compiled program that checks the file `input.wiz`
 in its working directory. It is built once and kept (under `/tmp`, keyed by its source
 and this test binary), since every test that uses it would otherwise compile it again. -/
 def selfhostChecker : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "checker" then
+    note "uses checker"
+    return .ok exe
   let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.checkerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
@@ -1895,6 +1906,9 @@ def selfhostChecker : IO (Except String System.FilePath) := do
 /-- The self-hosted compiler (stage 21): the frontend and `Backend.wiz`, printing the C
 program for `input.wiz` (the frontend's own output as comments). -/
 def selfhostCompiler : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "compiler" then
+    note "uses compiler"
+    return .ok exe
   let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.compilerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
