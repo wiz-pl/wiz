@@ -3570,7 +3570,7 @@ def selfHostGroup : Group where
     { name := "every constructor of Term is covered by the traversals (S1: a missed one proved False)", run := fun _ => do
         let samples := termSamples (.var 5) (.param "pw")
         -- a sample for every constructor
-        let names := (samples.map (termCtor ·.1)).eraseDups
+        let names := (samples.map (termCtor ·.1)).eraseDups -- complexity: ok (one sample per term constructor, a few dozen)
         unless names.length == termCtorCount && samples.length == termCtorCount do
           throw (IO.userError s!"{names.length} constructors have a sample, of {termCtorCount}")
         for (t, nTerms, nLevels) in samples do
