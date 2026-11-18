@@ -2553,10 +2553,16 @@ def selfHostGroup : Group where
         linkRun (callbackFiles true) callbackExpected
         selfhostLinkRun (callbackFiles true) callbackExpected
         selfhostLinkRun (callbackFiles true) callbackExpected (flags := #["--rc"]) },
+    -- (the kept `onTick` argument here is a *constant* closure: C holds it and never
+    -- releases it. This is the case that has to see a retained constant; the runtime's
+    -- constant-immortality is the subject, not an accident of the program.)
     { name := "a kept callback that C never releases is a leak, in both compilers (21q)", run := fun _ => do
-        -- (the runtime makes a program's constants immortal, and a closed closure is one;
-        -- a leak is only visible for a closure that captures a run-time value, so the kept
-        -- callback captures `base` here)
+        let files := callbackFiles false
+        ioRunC ((files.lookup "main.wiz").get!.replace "link_c \"c/cb.c\"\n" "") (files.lookup "c/cb.c").get! "" (fails := some "leaked")
+        selfhostLinkRun files callbackExpected (flags := #["--rc"]) (fails := some "objects leaked") (failCode := 4) },
+    { name := "a kept callback that captures a run-time value and is never released is a leak, in both compilers (21q)", run := fun _ => do
+        -- (a closure that captures a run-time value is counted like any other object, so
+        -- its leak is visible whether or not constants are immortal)
         let files := (callbackFiles false).map fun (n, t) =>
           if n == "main.wiz" then
             (n, ((t.replace "def main : IO Unit := do\n"
