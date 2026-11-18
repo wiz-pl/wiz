@@ -98,9 +98,19 @@ Every tool is annotated `readOnlyHint: true`, `destructiveHint: false` and
   `directory`/`file`/argument with a NUL or other control character is
   `invalid_args`. System include directories (`/usr/include`,
   `/usr/local/include`, `/nix/store`) are also allowed, by containment, not by
-  string prefix. Scry itself keeps only `-I`/`-D`/`-U`/`-include`/`-isystem` from
-  the database and runs `cc -E -ffreestanding`, the host preprocessor. That is the
-  one host program the server can start besides `scry` and `git diff`.
+  string prefix.
+* **The database's flags are on an allowlist.** Only the preprocessing flags
+  Scry needs reach `cc -E`: `-I`, `-isystem`, `-iquote`, `-idirafter`,
+  `-include`, `-D`, `-U` and `-std=`/`--std=`. The compile driver's own `-c`,
+  `-o` and `-M…` structure is consumed (never forwarded, so `-o` cannot write a
+  file and `-M` cannot replace the preprocessed text). **Every other word is
+  refused by name**, not stripped: `-B<dir>` (with a committed `cc1`),
+  `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, `-cc1`, `-Xlinker`,
+  `-imacros`, `--sysroot` and any other `-f…`/`-m…` option could change which
+  program runs or what it reads. The refusal is `invalid_args` and names the
+  flag; Scry's own parser enforces the same list
+  (`scry/src/Scry/Project.wiz`). `cc -E -ffreestanding` is the one host program
+  the server can start besides `scry` and `git diff`.
 * **Outputs are confined.** Findings, SARIF results and findings-database
   records whose file is outside the roots are withheld: counted, never named.
   `show` of such a finding is `path_denied`. Within a report, `skipped[].file`
