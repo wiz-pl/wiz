@@ -1,3 +1,4 @@
+-- test: run
 import Eff
 def prog : Eff (Row.cons (State Nat) (Row.cons (Exn String) (Row.cons Console Row.nil))) Nat := do
   n ← get;

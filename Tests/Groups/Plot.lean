@@ -191,7 +191,10 @@ def plotGroup : Group where
         let histogram ← IO.FS.readFile "Tests/data/plot/histogram.svg"
         let expected := String.intercalate "\n@@\n"
           [line, scatter, bar, histogram, line, line]
-        cRunLibs plotGoldenSrc expected }
+        cRunLibs plotGoldenSrc expected },
+    { name := "examples/plot.wiz regenerates the figure docs/libraries.md shows (docs/assets/plot-example.svg)", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/plot.wiz")
+          (← IO.FS.readFile "docs/assets/plot-example.svg") }
   ]
 
 builtin_initialize registerGroup plotGroup
