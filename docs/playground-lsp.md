@@ -5,8 +5,10 @@ and kernel compiled to WebAssembly (stage 11ab). Since the playground-LSP work i
 pane is served **in the page by default** (`web/selfhost-lsp-shim.js`, the same Wasm
 engine), so the published page has a pane with no server to start; with an endpoint in
 the page's URL it can also be a **language client** of an external server, showing that
-server's tactic state, expected type and diagnostics. Either way clicking a hypothesis or
-a subterm selects its source span in the editor.
+server's tactic state, expected type and diagnostics. With an external server that
+implements the interactive methods, clicking a hypothesis or a tagged subterm selects its
+source span in the editor; the in-page server answers only the plain goal methods, so
+only the goal's span is clickable.
 
 The editor starts with the tour in `web/playground-tour.wiz`, which the page fetches
 from `playground-tour.wiz` beside it (`web/build-site.sh` publishes it, so the URL is

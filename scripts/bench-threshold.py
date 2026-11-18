@@ -38,8 +38,10 @@ Outputs:
   (machine id, runner label, CPU affinity, CPU model) so a stored run says
   where it was measured.
 
-Exit status: 0 no regression (including "not enough samples to gate"), 1 a
-mode is worse than the threshold, 2 bad or incomplete input.
+Exit status: 0 no regression (including "not enough samples to gate" when no
+``--baseline`` was given, i.e. nothing to compare against), 1 a mode is worse than the
+threshold, 2 bad or incomplete input (including a gated run with a ``--baseline`` that
+had too few samples, or a baseline mode the run dropped: neither is a pass).
 
 ``--self-test`` exercises the decision with synthetic pairs (worse, same,
 better, too few samples, an outlier, a checksum change, bad input) and needs
@@ -147,11 +149,12 @@ class Row:
 
 
 class Report:
-    def __init__(self, rows, errors, fail_on, min_samples):
+    def __init__(self, rows, errors, fail_on, min_samples, has_baseline=False):
         self.rows = rows
         self.errors = errors
         self.fail_on = fail_on
         self.min_samples = min_samples
+        self.has_baseline = has_baseline
         self.regressions = [r.mode for r in rows if r.worse]
         gated = [r for r in rows if r.gated]
         self.gated = gated
@@ -167,6 +170,10 @@ class Report:
 
     @property
     def exit_code(self):
+        # Against a baseline, "nothing could be gated" is an incomplete measurement,
+        # not a pass: a night that compares nothing must not look green.
+        if self.status == "no-gate" and self.has_baseline:
+            return 2
         return {"error": 2, "regress": 1}.get(self.status, 0)
 
 
@@ -193,7 +200,18 @@ def evaluate(doc, fail_on, min_samples, baseline=None):
     results = doc.get("results") if isinstance(doc.get("results"), dict) else {}
     if baseline is not None:
         base_results = baseline.get("results") if isinstance(baseline.get("results"), dict) else {}
-        for mode in sorted(set(results) & set(base_results)):
+        # The baseline is the list of modes the run must cover: a mode that vanished
+        # from the run would otherwise simply never be checked (intersecting the two
+        # maps hides exactly the regression that drops it).
+        run_modes = set(results) | set(ab["results"])
+        for mode in sorted(base_results):
+            if mode not in run_modes:
+                errors.append(
+                    f"{mode}: in the baseline but not in this run; a mode dropped from "
+                    "the run is not a pass (update the baseline deliberately)")
+                continue
+            if not isinstance(results.get(mode), dict):
+                continue
             got = number(results[mode].get("n"))
             want = number(base_results[mode].get("n"))
             if got is not None and want is not None and got != want:
@@ -225,7 +243,7 @@ def evaluate(doc, fail_on, min_samples, baseline=None):
         row.worse = (row.gated and row.pct is not None
                      and row.pct > fail_on + EPS)
         rows.append(row)
-    return Report(rows, errors, fail_on, min_samples)
+    return Report(rows, errors, fail_on, min_samples, has_baseline=baseline is not None)
 
 
 def cpu_model():
@@ -297,9 +315,11 @@ def markdown(report, meta, scry=None):
         lines.append(
             f"**PASS**: no gated mode is worse than +{report.fail_on:g}%{tail}.")
     elif report.status == "no-gate":
+        tail = (" With a baseline that is a failure: the run measured nothing "
+                "the gate could decide." if report.has_baseline else "")
         lines.append(
             f"**NO GATE**: no mode had {report.min_samples} comparable pairs; "
-            "the threshold was not applied.")
+            "the threshold was not applied." + tail)
     else:
         lines.append("**ERROR**: " + "; ".join(report.errors))
 
@@ -458,7 +478,37 @@ def self_test():
         assert r.status == "no-gate", r.status
         assert r.regressions == [], r.regressions
         assert r.rows[0].verdict.startswith("few samples"), r.rows[0].verdict
+        # no baseline: there is nothing to be green about, so this is not a failure
         assert r.exit_code == 0, r.exit_code
+
+    @case("too few with a baseline: no-gate exits 2")
+    def _():
+        base = {"results": {"m": {"n": 1000}}}
+        r = evaluate(_synth([1.50] * 2), 10, 5, baseline=base)
+        assert r.status == "no-gate", r.status
+        assert r.has_baseline, r.has_baseline
+        assert r.exit_code == 2, r.exit_code
+        text = markdown(r, {"machine": "m", "runner": "r"})
+        assert "With a baseline that is a failure" in text, text
+
+    @case("dropped mode: a baseline mode missing from the run is an error")
+    def _():
+        base = {"results": {"m": {"n": 1000}, "gone": {"n": 1000}}}
+        r = evaluate(_synth([1.0] * 15), 10, 5, baseline=base)
+        assert r.status == "error", r.status
+        assert any("gone" in e and "not in this run" in e for e in r.errors), r.errors
+        assert r.exit_code == 2, r.exit_code
+
+    @case("dropped mode: a run of other modes only does not hide it")
+    def _():
+        doc = _synth([1.0] * 15)
+        doc["results"] = {"other": {"n": 1000, "median_ns": 1_000_000, "checksum": "1"}}
+        doc["ab"]["results"] = {"other": doc["ab"]["results"]["m"]}
+        base = {"results": {"m": {"n": 1000}}}
+        r = evaluate(doc, 10, 5, baseline=base)
+        assert r.status == "error", r.status
+        assert any("m:" in e and "not in this run" in e for e in r.errors), r.errors
+        assert r.exit_code == 2, r.exit_code
 
     @case("boundary: exactly +10% does not exceed +10%")
     def _():
@@ -613,9 +663,14 @@ def main(argv=None):
             elif report.status == "error":
                 print("::error title=bench threshold input::" + "; ".join(report.errors))
             elif report.status == "no-gate":
-                print("::warning title=bench: too few samples::"
-                      f"no mode had {report.min_samples} comparable pairs; "
-                      "the threshold was not applied")
+                if report.has_baseline:
+                    print("::error title=bench: no gate::"
+                          f"no mode had {report.min_samples} comparable pairs and a "
+                          "baseline was given; the run measured nothing to gate")
+                else:
+                    print("::warning title=bench: too few samples::"
+                          f"no mode had {report.min_samples} comparable pairs; "
+                          "the threshold was not applied")
         return report.exit_code
     except InputError as e:
         print(f"bench-threshold: {e}", file=sys.stderr)

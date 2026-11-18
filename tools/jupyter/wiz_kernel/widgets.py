@@ -18,7 +18,7 @@ kernel evaluates, **in the notebook's own session**,
     #eval Widget.handle (<callback>) "<previous bundle>" "<widget id>" "<event>" "<value>"
 
 which re-renders the old and new widget lists and diffs them with
-``React.Rendered.diff``.  The resulting bundle (with ``patches``) goes back on the
+``Loom.Rendered.diff``.  The resulting bundle (with ``patches``) goes back on the
 same comm, and the browser applies it with ``web/framework/runtime.js``.
 
 The only source that is spliced into the session is ``callback``: it comes from the
@@ -120,7 +120,7 @@ def plain_summary(bundle: dict) -> str:
 def html_fragment(bundle: dict, comm_id: str) -> str:
     """The SSR fragment, wrapped so the loader can find it and its comm.
 
-    The html is the renderer's own output (`React.toHtml`), which escapes every text
+    The html is the renderer's own output (`Loom.toHtml`), which escapes every text
     and attribute; the wrapper adds only a hex comm id.
     """
     return (f'<div class="wiz-widget-fragment" data-wiz-widget-comm="{comm_id}">'
