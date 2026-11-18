@@ -449,11 +449,16 @@ the generated C and the linked programs are compared byte for byte by the script
 
 ### The Lean build (`lake build wiz tests grail`)
 
-The build is 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
+The figures in this section are a one-off observation from the parallel-build work on
+2026-11-17 (see `wiz-notes/parallel-build.md`). The `wait4` recorder and the run's data
+are not committed, so they cannot be reproduced from the tree; treat them as historical,
+not as a gate or a baseline.
+
+The build was 530 jobs. On 2026-11-17 it took **1680 s of wall time** with a cold
 `.lake` and an empty `LAKE_CACHE_DIR` on the 27 GiB, 32-CPU development host, while
 about twenty other agents were building (load average 40–54). The same command with
 the shared artifact cache warm is **12 s**, all 530 jobs replayed, so this is the cost
-of a new commit or toolchain, not of a fresh worktree. What was measured: each C
+of a new commit or toolchain, not of a fresh worktree. How it was measured: each C
 compiler invocation was wrapped in a `wait4` recorder (wall time and `ru_maxrss`),
 `lake build -v` gives each Lean job's duration, and the whole process tree's RSS was
 sampled every 20 ms for the peak.
@@ -624,22 +629,24 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. The toolchain is built **once**, with Nix: the `build` job runs
-`nix build .#wiz .#tests .#reference` (nixpkgs' Lean, no Lake artifact cache; `reference`
-is the standard library's reference manual, made with that `wiz`) and publishes the three
-store paths to Cachix with
+`nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes those
+two store paths to Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests .#reference)
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
 ```
 
 with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
 build has no Lake artifact cache: a commit's first build compiles every module in the
 sandbox (Lean comes from nixpkgs), and a rerun of the same commit substitutes the store
 paths. Pull requests from forks get no secret: they skip the push and their shards build
-the paths themselves. The `test`, `trust-ledger` and `docs` jobs pull from Cachix
-(`cachix-action` is set up for substitution only, `skipPush: true`); no job on the
-critical path runs `lake build` directly or saves a `.lake` Actions cache. The shards run the
-Nix-built test driver (`packages.tests`), not `lake test`, and symlink the store `wiz`
+the paths themselves. The `docs` job builds `.#reference` (the standard library's
+reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
+The `test`, `docs` and `docs_examples` jobs pull from Cachix
+(`cachix-action` is set up for substitution only, `skipPush: true`); the `build` job
+publishes explicitly (above). No job on the critical path runs `lake build` directly or
+saves a `.lake` Actions cache. The shards run the Nix-built test driver
+(`packages.tests`), not `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
 `grail` beside itself, which `Tests/Groups/Grail*.lean` look for). The dev shell (`nix develop`)
@@ -651,8 +658,8 @@ LLVM) and 165 MB for the test driver (2.0 GB with its closure, which includes th
 `wiz` it carries beside itself), so a shard's substitution is a download, not a compile. The store path is content-addressed: the same
 sources give the same path, and a shard on another architecture (the aarch64 caveat in
 [ci-runner.md](ci-runner.md)) has a different one and builds it there. The weekly
-bootstrap fixpoint, the release workflow and `scripts/test-embed.sh` still use Lake and
-the elan toolchain, so the setup action keeps the elan cache for those
+bootstrap fixpoint and the release workflow still use Lake and the elan toolchain, so the
+setup action keeps the elan cache for those
 (`lean: true`); it is skipped in the Nix jobs (`lean: false`).
 
 * **The test suite** runs in parallel shards, one job per entry of
@@ -771,8 +778,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
   minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
   3-worker auto pool (splitting it into cases would make each part build the
-  self-hosted compiler again). `scaling`'s sweep was one case of about 24 min; it is now nine cases
-  over the same inputs, so the shard's parts can each hold one.
+  self-hosted compiler again). `scaling`'s sweep used to be a single case; it is now
+  nine cases over the same inputs, measured on CI in `.github/test-timings.json`
+  (1330 s in total, the longest 229 s), so the shard's parts can each hold one.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
