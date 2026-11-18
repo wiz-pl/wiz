@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* build: reproducible builds are a **required gate on master**, not a report.
+  `scripts/check-repro-build.sh` builds a Nix derivation, rebuilds it with a different
+  `NIX_BUILD_TOP` (`--option sandbox-build-dir`) and compares the outputs' NAR hashes —
+  not the store path, which hashes the derivation and is identical either way. The new
+  `repro` job runs it on `.#unwrapped` (the Lean build) and `.#wiz` for every push to
+  `master`, and `CI result` requires it there; every pull request runs its negative
+  control (two tiny derivations in `Tests/ReproDerivations`) in the `build` job, including
+  the one that embeds a timestamp and must be rejected. `docs/building.md` ("The Nix
+  derivation") has the invariant and the commands.
+
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's

@@ -459,6 +459,56 @@ full Lake builds); the nightly `repro.yml` workflow does, on the self-hosted run
 runs the reader with `--require-compiler`, so `"compiler": {"status": "skip"}` is a
 failure there rather than an invisible pass.
 
+### The Nix derivation
+
+`scripts/check-repro-build.sh` gates the packaged build itself. It builds an installable
+(`.#wiz` by default) with `nix build`, records the NAR hash of each output with
+`nix hash path`, then rebuilds the same derivation with
+
+```sh
+nix build .#wiz --rebuild --keep-failed --option sandbox-build-dir /build-repro-gate
+```
+
+so the second build runs with a different `NIX_BUILD_TOP` (the sandbox's build
+directory), while the first copy is the store's (built at the default `/build`, or
+substituted from Cachix). Before the rebuild the gate realises the derivation's build
+inputs: Nix refuses to check an output it would have to build, and `unwrapped` is a
+build-time input of `wiz`, not a runtime reference, so `nix build .#wiz` alone does not
+make it valid. The gate then compares the output with Nix's check; Nix fails with
+`may not be deterministic` when the bytes differ, leaves the second tree at
+`<out>.check`, and the gate hashes that too, so a failure names both hashes instead of
+only saying that they differ. `--json` prints one `wiz-repro-build/v1` object with both
+hashes per output.
+
+The store path is **not** the invariant. It is a hash of the derivation (its builder,
+inputs and environment), so the same derivation has the same path whether or not its
+build is reproducible; comparing `nix path-info` before and after a rebuild always
+passes. The NAR hash is the bytes, modes and symlinks of the output tree, which is what a
+reproducible build promises, and it is the comparison Nix's own `--rebuild` makes.
+
+`--self-test` is the gate's negative control, and needs no Wiz build (seconds): the two
+tiny derivations in `Tests/ReproDerivations` are one that writes a constant and one that
+embeds the kernel's uptime, its shell's PID and `NIX_BUILD_TOP`. The self-test requires
+the first to pass and the second to fail with two different hashes at the *same* store
+path — the case a path comparison cannot see. The `build` job runs it on every pull
+request.
+
+The real gate is the `repro` job: on a push to `master` only, it substitutes the commit's
+store paths from Cachix and runs the gate on `.#unwrapped` (the Lean build, the
+non-determinism-prone part) and `.#wiz` (the wrapper, the packaged library and its
+elaboration cache). `CI result` requires it on a push, so a commit that does not rebuild
+to the same bytes is red on master. A pull request and the merge queue run only the
+self-test: the two rebuilds take about MEASURED on the development host, which is too
+much to add to every pull request.
+
+```sh
+scripts/check-repro-build.sh                  # .#wiz (and its closure)
+scripts/check-repro-build.sh .#unwrapped      # only the Lean build
+scripts/check-repro-build.sh --json .#wiz     # wiz-repro-build/v1
+scripts/check-repro-build.sh --self-test      # the controls (no Wiz build)
+scripts/check-repro-build.sh --keep .#wiz     # keep the build logs
+```
+
 The cheap sources of non-determinism are fixed: `-g` builds map the generated C's
 directory and the compilation directory to `.` (`-ffile-prefix-map`, so debug info and
 `__FILE__` do not name the checkout); a grail `link_c` file is named relative to the
@@ -657,10 +707,12 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
 `master`. The toolchain is built **once**, with Nix: the `build` job runs
 `nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes those
-two store paths to Cachix with
+store paths — plus `.#unwrapped`, the Lean build that only the `repro` job rebuilds — to
+Cachix with
 
 ```sh
-nix shell nixpkgs#cachix -c cachix push badlydrawnwizards $(nix path-info .#wiz .#tests)
+nix shell nixpkgs#cachix -c cachix push badlydrawnwizards \
+  $(nix path-info .#wiz .#tests .#unwrapped)
 ```
 
 with `CACHIX_AUTH_TOKEN` (the repository secret) in that step's environment only. A Nix
@@ -765,6 +817,11 @@ setup action keeps the elan cache for those
   `scripts/trust-ledger.sh --update`. The `native` and `hdl-verified` groups check the
   same ledger in the shards; this job runs the whole of it without a shard's path
   filter to skip it, and `CI result` requires it when code changed.
+* **Reproducible builds** (the `repro` job, on a push to `master` only, and required by
+  `CI result` there): `scripts/check-repro-build.sh` rebuilds `.#unwrapped` and `.#wiz`
+  with a different `NIX_BUILD_TOP` and compares the output hashes. A pull request runs
+  its negative control (two tiny derivations) in `build`, so the rebuilds stay off the
+  pull-request path. See "Reproducible builds" above.
 * **Split shards.** A shard with `"split": N` runs as N jobs `NAME-1` … `NAME-N`, each a
   list of `=GROUP#I,J,…` selectors. `scripts/ci.py` balances the parts with the case
   times in `.github/test-timings.json`: the cases that use the same shared program (the
@@ -972,7 +1029,8 @@ the generated reference manual (`result/index.md`, and `result/site`).
   hashes the wiz executable each time instead of remembering it under `bin/`.
 * **Storage.** CI no longer stores the build in the Actions cache: the build lives in the
   Nix store and is shared through Cachix (~350 MB for `wiz` plus its closure; the test
-  driver is ~165 MB, with `wiz` in its closure, on x86_64-linux). The Actions cache now
+  driver is ~165 MB, with `wiz` in its closure, on x86_64-linux; the unwrapped Lean build
+  is published too, for the `repro` gate). The Actions cache now
   holds only the per-shard Wiz build caches (the elaboration cache, `.grail`,
   `/tmp/wiz-selfhost-*`) and the elan toolchain (~770 MB, saved only by `master`; pull
   requests restore master's entry), which only the fixpoint/release jobs still need.

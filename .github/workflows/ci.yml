@@ -4,7 +4,9 @@
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
 # toolchain is built once, with Nix (`nix build .#wiz .#tests`), and published to Cachix;
 # the test shards substitute those store paths instead of rebuilding (no Lake build and
-# no `.lake` Actions cache on the critical path). The exercise tree
+# no `.lake` Actions cache on the critical path). The push-only `repro` job rebuilds
+# `.#unwrapped` and `.#wiz` under a different `NIX_BUILD_TOP` and compares the output
+# hashes (see docs/building.md, "The Nix derivation"). The exercise tree
 # (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
 # `exercise tree` job, which must pass before anything is published (it still builds
 # with Lake, as does the weekly fixpoint).
@@ -237,9 +239,12 @@ jobs:
           # shard waits on it. That job builds it from this cached wiz, off this path.
           wiz=$(nix path-info .#wiz)
           tests=$(nix path-info .#tests)
+          # The Lean build, published for the `repro` gate: it is a build-time input of
+          # `wiz`, not a runtime reference of it, so it is not in wiz's Cachix closure.
+          unwrapped=$(nix path-info .#unwrapped)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
-          echo "wiz: $wiz"; echo "tests: $tests"
+          echo "wiz: $wiz"; echo "tests: $tests"; echo "unwrapped: $unwrapped"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
       - name: Publish the store paths to Cachix
@@ -263,7 +268,7 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests)
+            $(nix path-info .#wiz .#tests .#unwrapped)
       - name: Every test case is in exactly one shard
         run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
@@ -297,9 +302,17 @@ jobs:
           nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
           ./io | head -3
           nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
+      - name: The rebuild gate rejects a deliberately non-reproducible derivation
+        # The negative control for scripts/check-repro-build.sh: two tiny derivations
+        # (Tests/ReproDerivations), one constant and one embedding a timestamp. Seconds,
+        # and it runs on every pull request, so the gate's failure path is itself tested
+        # where it is cheap; the real `.#wiz` rebuild is the push-only `repro` job.
+        run: scripts/check-repro-build.sh --self-test
       - name: Reproducibility (two absolute paths)
         # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
         # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
+        # This is the programs `wiz` emits; the packaged Nix derivation is gated
+        # separately by the push-only `repro` job (scripts/check-repro-build.sh).
         # The JSON is asserted, not discarded: a run-level skip is exit 2, and a skipped
         # compiler comparison (this job does not pass --compiler) is a notice. The
         # nightly repro workflow runs --compiler and requires it.
@@ -413,6 +426,37 @@ jobs:
         with:
           path: .lake/trust-cache
           key: ${{ steps.key.outputs.cache }}
+
+  # (two Nix builds) Each derivation, rebuilt under a different NIX_BUILD_TOP, must
+  # produce the same output hash. A store path hashes the derivation, not its output, so
+  # comparing paths can never catch a non-reproducible build; scripts/check-repro-build.sh
+  # compares the outputs' NAR hashes (`nix hash path`) and hashes the `<out>.check` tree
+  # Nix leaves on a mismatch, so a failure names both hashes. `.#unwrapped` is the Lean
+  # build (the non-determinism-prone part); `.#wiz` is the wrapper, the packaged library
+  # and its elaboration cache. `.#tests` only copies the same unwrapped binaries, so it
+  # adds no bytes these two do not compare.
+  # Required by `CI result` on a push to master only: two rebuilds are far more than a
+  # couple of minutes, so a pull request runs only the gate's self-test (the `build` job).
+  # `needs: build`: its Cachix paths are the gate's first builds.
+  repro:
+    name: repro (rebuild)
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # 120 min: substitute this commit's store paths from Cachix, then the two rebuilds
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: The same derivations rebuild to the same output hashes
+        run: |
+          scripts/check-repro-build.sh --self-test
+          scripts/check-repro-build.sh .#unwrapped
+          scripts/check-repro-build.sh .#wiz
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -749,7 +793,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, prelude_drift, docs_examples, build, trust_ledger, test, web, docs]
+    needs: [changes, docs_style, prelude_drift, docs_examples, build, trust_ledger, test, web, docs, repro]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -835,7 +879,7 @@ jobs:
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
-          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
+          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}, repro: ${{ needs.repro.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
@@ -847,6 +891,9 @@ jobs:
           # real failure on master, so it is required there. `deploy-docs` stays out: a
           # Pages outage is not a defect in the commit.
           want_site=$([ "${{ github.event_name }}" = push ] && echo true || echo false)
+          # the Nix rebuild gate runs on a push to master only (it is one cold build); a
+          # pull request and the merge queue run its self-test in `build` instead
+          want_repro=$([ "${{ github.event_name }}" = push ] && echo true || echo false)
           # a docs-only change has no build job, so `docs_examples` builds wiz and checks
           # the snippets; a code change runs the same check in `build`
           want_docs_examples=$([ "$code" = false ] && [ "$docs" = true ] && echo true || echo false)
@@ -864,6 +911,7 @@ jobs:
           # job is skipped (and that is fine) only when the filter does not want it
           check web "${{ needs.web.result }}" "$web"
           check docs "${{ needs.docs.result }}" "$want_site"
+          check repro "${{ needs.repro.result }}" "$want_repro"
 
   # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
   # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
