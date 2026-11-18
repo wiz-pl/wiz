@@ -210,8 +210,14 @@ runs the server without an editor on stdin. The handshake requires a `GET` with
 `Upgrade: websocket`. A request with an `Origin` header is let in only from a local page:
 `null` (a local file), `vscode-webview://`, or `http(s)://` on `localhost`, `127.0.0.1`
 or `[::1]` (`localOrigin`); a browser page on any site could otherwise talk to the
-server. With web infoview files available, a plain `GET` of one of those files (and only
-those, by exact name: `webAssets`) is served over HTTP on the same port.
+server. The upgrade must also present the server's token (#430), as `?token=T` in the
+request target or as `Authorization: Bearer T`; a missing or wrong token gets
+`401 Unauthorized` before any `101`, so a local program, which simply sends no `Origin`,
+cannot connect without it. The token is fresh for every launch and printed on stderr, or
+read from `--token-file FILE` (created with mode 0600 and a fresh token if it does not
+exist); `--ws-insecure` turns the check off, for the loopback address only. With web
+infoview files available, a plain `GET` of one of those files (and only those, by exact
+name: `webAssets`) is served over HTTP on the same port, with or without a token.
 
 Each text or binary frame holds one JSON-RPC message; fragments are joined, pings
 answered, client frames must be masked, and messages over 256 MiB end the connection. A
@@ -232,7 +238,8 @@ page should open a URI of its own; the web infoview picks `file:///scratch-<rand
   follows `wiz/infoview/cursor`, or starts its own `wiz lsp` with `wizElaborated` set for
   a file and position given on the command line.
 - **The web infoview** (`web/infoview.js`, a Wiz program compiled to WebAssembly) talks to
-  `--ws`. It is its own editor by default; with `?follow=1` it shows the editor's cursor
+  `--ws`, passing the page's `?token=` on to the socket. It is its own editor by default;
+  with `?follow=1` it shows the editor's cursor
   instead. The playground (`web/lsp-client.js`, `web/goals.js`) uses the same requests and
   falls back to the plain ones. Its rendering also accepts optional `range` fields on
   hypotheses and tags, which `wiz lsp` does not send today.
@@ -240,7 +247,9 @@ page should open a URI of its own; the web infoview picks `file:///scratch-<rand
 ## Tests
 
 `Tests/LSP.lean` drives the handlers directly and over real sockets, including the cursor
-notification and `wiz/subtermInfo` on an infoview connection; `Tests/Groups/Tactic.lean`
+notification, `wiz/subtermInfo` on an infoview connection, and the token's `401` for a
+missing, wrong, empty or over-long token (and `101` for the query and the bearer);
+`Tests/Groups/Tactic.lean`
 checks that tactic traces reach `wiz/plainGoal`; `Tests/Groups/Infoview.lean` covers the
 Wiz side of the clients (`lib/Infoview.wiz`, `lib/Tagged.wiz`). The clients have their
 own tests in `web/*_test.mjs` and `infoview/pty_test.py`.
