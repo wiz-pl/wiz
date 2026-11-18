@@ -4030,34 +4030,51 @@ inductive UnfoldR where
 
 -- (A21) the fields of a linear match's payload, taken apart by `split` at 1 rather than
 -- projected (a projection uses its pair ω times): `fun body => split 1 rest … ; let () := u;
--- body`. The context returned has the fields (and the index equation and the final `Unit`)
--- bound, and the columns are at those levels.
+-- body`. A split's first component has the *description's* type (a recursive field comes
+-- out at the method's size, say `Nat@j`, not at `Nat`), so each field is bound at its
+-- declared type by a `let`, as `fieldCols` binds a projection; the columns are at the
+-- levels of those `let`s. The context returned also has the index equation and the final
+-- `Unit` bound.
 inductive LFS where
   | ok (wrap : Tm → Tm) (cols : List Col) (cx : Cx)
   | err (msg : String)
-partial def linearFieldSplits (gs : Globals) (cx : Cx) (cur : Tm) (n : Nat) (expected : Val) : LFS :=
+def fieldTsAt (d : Nat) : List Nat → Tms
+  | .nil => .tnil
+  | .cons l rest => .tcons (.var (d - 1 - l)) (fieldTsAt d rest)
+partial def linearFieldSplits (gs : Globals) (cx : Cx) (cur : Tm) (np L : Nat) (args : Tms)
+    (qs : List Q) (fs : List CField) (prev : List Nat) (expected : Val) : LFS :=
   let d := Cx.lvl cx;
   match infer (Cx.c cx) cur with
   | .err m => .err m
   | .ok ty _ => match whnf ty with
-    | .vsigma p i j A env B =>
-      if Nat.beq n 0 then
+    | .vsigma _ _ _ A env B =>
+      match fs with
+      | .nil =>
         -- the index equation at 0 and the final `Unit` at 1, consumed by `let () := u`
         let xv := fresh d;
         let Bv := eval (.cons xv env) B;
         let cxE := Cx.bind cx "e✝" A;
         let cxU := Cx.bind cxE "u✝" Bv;
         .ok (fun body => .split .qo cur (quote (d + 1) expected) (.letUnit (.var 0) body)) .nil cxU
-      else
+      | .cons (.mk _ _ Aq _) restF =>
         let xv := fresh d;
         let Bv := eval (.cons xv env) B;
+        let j := lenL prev;
+        -- the field's declared type, at the split body's depth (where its `let` is): the
+        -- constructor's parameters, then the fields before it
+        let tyD := nfAt (d + 2) (tApps (tLams np (tLams j Aq))
+          (tmsAppend (shiftTms (d + 2 - L) args) (fieldTsAt (d + 2) prev)));
+        let q := headQ qs;
         let cxF := Cx.bind cx "f✝" A;
         let cxR := Cx.bind cxF "r✝" Bv;
-        match linearFieldSplits gs cxR (.var 0) (Nat.sub n 1) expected with
+        let envR := TCtx.env (Cx.c cxR);
+        let cxX := Cx.defineQ cxR "x✝" (eval envR (.var 1)) (eval envR tyD) (.some q);
+        match linearFieldSplits gs cxX (.var 1) np L args (tailQ qs) restF
+            (List.append prev (.cons (d + 2) .nil)) expected with
         | .err m => .err m
         | .ok wrap cols cx' =>
-          .ok (fun body => .split .qo cur (quote (d + 1) expected) (wrap body))
-            (.cons (.mk d (quote d A) (quote d A) p) cols) cx'
+          .ok (fun body => .split .qo cur (quote (d + 1) expected) (letTm q tyD (.var 1) (wrap body)))
+            (.cons (.mk (d + 2) tyD tyD q) cols) cx'
     | ty' => .err (String.append "a linear match's payload is not a pair: " (showVal (Cx.c cx) ty'))
 
 -- the fields of a branch: projections at ω (`fieldCols`), or splits at 1 (A21)
@@ -5498,12 +5515,15 @@ def splitCtors (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Va
             let goal : Tm := .app (.app (PAt (d + 3)) (.var 1)) (.con (.var 0));
             -- (the split's motive is inferred, so it must be a normal form: a raw
             -- application of the λ `PAt` would be a λ to `infer`)
-            let linMot : Tm := nfAt (d + 4) (shiftTm 1 0 goal);
+            -- (the method's body is at `d + 3`; `cx3` has one more level, the `ihs` the
+            -- next `let` binds, as in the case at ω below)
+            let linMot : Tm := nfAt (d + 5) (shiftTm 2 0 goal);
             let linTag : Tm := match tagL with
-              | .true => .down (.var 2)
-              | .false => .var 2;
-            let linConvoy : Tm := .app (.app (.ecase (shiftTm 2 0 MT) linTag (shiftTms 2 bs)) (.var 1)) (.var 0);
-            let linBody : Tm := .split .qo (.var 0) linMot (.letE (.unit (ln 1)) .star linConvoy);
+              | .true => .down (.var 1)
+              | .false => .var 1;
+            -- (the motive keeps its own tag binder at 0: only the outer variables move)
+            let linConvoy : Tm := .app (.app (.ecase (shiftTm 2 1 MT) linTag (shiftTms 2 bs)) (.var 0)) (.var 2);
+            let linBody : Tm := .letE (.unit (ln 1)) .star (.split .qo (.var 1) linMot linConvoy);
             let indT : Tm := match top with
               | .true => .ind lv (IAt d) (DAt d) v (PAt d) (.lam (.lam (.lam convoy))) (shiftTm (d - L) 0 idx) (.var (d - 1 - L))
               | .false => match linear with
@@ -5526,7 +5546,7 @@ def otherMember (idx res : Tm) : Bool := match idx with
 def branchFields (gs : Globals) (linear : Bool) (cx : Cx) (np L d0 : Nat) (args : Tms)
     (ls : List Bool) (qs : List Q) (fs : List CField) (expected : Val) : FRes :=
   match linear with
-  | .true => match linearFieldSplits gs cx (.var 1) (lenL fs) expected with
+  | .true => match linearFieldSplits gs cx (.var 1) np L args qs fs .nil expected with
     | .ok wrap cols cx' => .ok wrap cols .nil cx'
     | .err m => .err m
   | .false => match fieldCols np L d0 args ls cx 0 qs fs with
