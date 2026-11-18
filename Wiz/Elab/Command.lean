@@ -2074,11 +2074,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                 if !s.classes.any (·.name == D) then
                   bad := some (s!"{D} is not a class: a superclass must be an application of a class", t.info)
                 else
-                  supers := supers ++ [(x, D)]
+                  supers := supers ++ [(x, D)]   -- complexity: ok (superFields has at most one entry: a second superclass is rejected above)
                   let taken (n : Name) : Bool := s.globals.contains n || insts.any fun (d, _) => d.name == n
                   let base := "inst" ++ Globals.privateBase name ++ "To" ++ ((D.splitOn ".").getLast?.getD D)
                   let instName := if !taken base then base else
                     ((List.range 1000).map (s!"{base}_{·}")).find? (!taken ·) |>.getD base
+                  -- complexity: ok (the same one-entry loop as `supers` above)
                   insts := insts ++ [({ name := instName, levelParams, type := pd.type,
                                         value := some (.const projName (levelParams.map Level.param)) }, D)]
               | _ => bad := some (s!"{x} is not an application of a class", t.info)

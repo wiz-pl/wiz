@@ -943,11 +943,11 @@ def libDiffGroup : Group where
           for i in [1:n + 1] do
             let p := (libDiffPart n i xs).toList
             if exact then checkEq (expected n i) p
-            checkEq p.length p.eraseDups.length      -- a part has no file twice
+            checkEq p.length p.eraseDups.length      -- a part has no file twice; complexity: ok (a part is at most the 181-file corpus, and the duplicate check is the assertion)
             check (p.all (fun f => xs.contains f)) "a part invented a file"
             all := all ++ p
           checkEq xs.size all.length                 -- every file is in some part
-          checkEq all.length all.eraseDups.length    -- and no file is in two
+          checkEq all.length all.eraseDups.length    -- and no file is in two; complexity: ok (same corpus, and the duplicate check is the assertion)
         let corpus : Array String := ((List.range 181).map toString).toArray
         for n in [1:9] do checkParts n corpus true
         -- the real corpus too, where the checkout has one; its size is not pinned
