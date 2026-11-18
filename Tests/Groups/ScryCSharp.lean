@@ -222,8 +222,10 @@ excluded file names. The group enumerates it with Lean's own `readDir` (the Wiz
 interpreter cannot call `FS.listDir`), hands the listing to `Scry.Cs.walkOfPaths` (the
 same exclusion rule the driver uses) and lowers the checked-in spills, so the report's
 counts and coverage rows are the driver's own aggregation, not a second implementation.
-`Broken.cs` has no spill: `scry-cst` refuses a tree with `ERROR` nodes, so the test builds
-the `.err` result the native path produces. -/
+`Broken.cs` is deliberately invalid C#; `KeywordIdentifier.cs` and `SlicePattern.cs` are
+valid C# that tree-sitter-c-sharp v0.23.5 refuses (two upstream grammar gaps, CSHARP.md
+§8.2). None of the three has a spill: `scry-cst` refuses a tree with `ERROR` nodes, so
+the test builds the `.err` result the native path produces. -/
 
 partial def repoCs (dir : System.FilePath) (rel : String) : IO (List (String × String)) := do
   let mut out : List (String × String) := []
@@ -256,7 +258,7 @@ def repoDefs (files : List (String × String)) : IO String := do
       defs := defs ++ s!"def repoSpill{i} : String := {wizStr spill}\n"   -- complexity: ok (test helper: one chunk per fixture file)
       entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (Scry.Cs.frontend {wizStr rel} repoText{i} repoSpill{i})"]   -- complexity: ok (test helper: one row per fixture file)
     | none =>
-      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"deliberately invalid C#: the native parse fails\")"]   -- complexity: ok (test helper: one row per fixture file)
+      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"no spill: the native parse rejects this file (invalid C#, or a known grammar gap; CSHARP.md §8.2)\")"]   -- complexity: ok (test helper: one row per fixture file)
     i := i + 1
   let paths := "[" ++ ", ".intercalate (files.map fun (r, _) => s!"({wizStr r}, {wizStr r})") ++ "]"
   pure (defs ++ s!"def repoPaths : List (String × String) := {paths}\n"
@@ -299,7 +301,7 @@ def repoCounts : IO Unit := do
   let body ← repoBody files
   let m ← oneMessage "repo counts" (body ++
     "#eval \"before=\" ++ Nat.repr repoReport.before ++ \" found=\" ++ Nat.repr repoReport.found ++ \" excluded=\" ++ Nat.repr repoReport.excluded ++ \" parsed=\" ++ Nat.repr repoReport.parsed ++ \" lowered=\" ++ Nat.repr repoReport.lowered ++ \" failed=\" ++ Nat.repr repoReport.failed\n")
-  checkEq "before=9 found=4 excluded=5 parsed=3 lowered=3 failed=1" m
+  checkEq "before=11 found=6 excluded=5 parsed=3 lowered=3 failed=3" m
 
 def repoCoverage : IO Unit := do
   let files ← repoFiles
@@ -308,6 +310,8 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
+     ++ "|error 1 parse failure"
+     ++ "|error 1 parse failure"
      ++ "|warning 3 unmodelled-external"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
      ++ "|warning 1 query_expression not modelled: havoc"
@@ -316,6 +320,18 @@ def repoCoverage : IO Unit := do
      ++ "|note 1 excluded: bin/"
      ++ "|note 1 excluded: node_modules/"
      ++ "|note 1 excluded: obj/") m
+
+/-- Every failed file is named: error rows are not summed into one "parse failure 3" row
+with a single example (the sweep's 16 Nexus failures used to hide fifteen file names). -/
+def repoFailureRows : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  let m ← oneMessage "repo failure rows" (body ++
+    "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ r.construct ++ \" \" ++ r.example) (List.filter (fun r => String.eq (Scry.Severity.show r.level) \"error\") repoReport.coverage))\n")
+  checkEq
+    ("error parse failure src/Broken.cs"
+     ++ "|error parse failure src/KeywordIdentifier.cs"
+     ++ "|error parse failure src/SlicePattern.cs") m
 
 def repoExitCodes : IO Unit := do
   let files ← repoFiles
@@ -401,6 +417,8 @@ def group : Group where
       run := fun _ => repoCounts },
     { name := "cs: the summary lists every skipped or warned construct with a count and an example",
       run := fun _ => repoCoverage },
+    { name := "cs: every parse failure is its own row, with its file named",
+      run := fun _ => repoFailureRows },
     { name := "cs: the human report (counts, findings and coverage rows)",
       run := fun _ => repoSummary },
     { name := "cs: the JSON report (same counts, findings by rule and exit status)",
