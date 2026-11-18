@@ -893,7 +893,8 @@ function-heavy file (e.g. tree-sitter's `query.c`) show where it is instead of r
 silently for a minute. -/
 partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : String)
     (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (sums : List Scry.Summary) (funcs : List Wil.Func)
+    (entries : List (String × Nat)) (plans : List Scry.FuncPlan)
+    (allMems : List Scry.MemSeed) (sums : List Scry.Summary) (funcs : List Wil.Func)
     (i total : Nat) : EIO (List Scry.FuncResult) :=
   match funcs with
   | .nil => EIO.pure .nil
@@ -908,29 +909,49 @@ partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : Strin
           ++ " elapsed=" ++ Nat.repr (Nat.sub now startMs) ++ "ms"))
       | .false => EIO.pure ()
     | .false => EIO.pure ();
-    let r := Scry.evalWithEntries graph pack pt entries sums fn;
-    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries sums rest (Nat.succ i) total;
+    let r := match plans with
+      | .cons plan _ => Scry.evalWithPreparedM graph pt plan sums allMems fn
+      | .nil => Scry.evalWithEntries graph pack pt entries sums fn;
+    let plans' := match plans with
+      | .cons _ prest => prest
+      | .nil => (List.nil : List Scry.FuncPlan);
+    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries plans' allMems sums rest
+      (Nat.succ i) total;
     EIO.pure (List.cons r rs)
 
+/-- The result of the summary fixpoint: the stable summaries plus the evaluations made
+under them (reusable as the final results, so convergence does not pay a second pass). -/
+structure Scry.SummaryRun where
+  summaries : List Scry.Summary
+  rounds : Nat
+  complete : Bool
+  /-- The per-function results of the **last** round. They are the final results when
+  `complete` (the summaries did not move); otherwise the caller re-evaluates. -/
+  results : List Scry.FuncResult
+
 /-- The summary fixpoint, one round at a time (so `--timeout` and progress can act
-between rounds). Returns the summaries, the rounds run, and whether it converged. -/
+between rounds). Returns the summaries, the rounds run, whether it converged, and the
+last round's results. -/
 partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
     (p : Wil.Program) (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (fuel rounds : Nat) (sums : List Scry.Summary) :
-    EIO (List Scry.Summary × Nat × Bool) :=
+    (entries : List (String × Nat)) (plans : List Scry.FuncPlan)
+    (fuel rounds : Nat) (sums : List Scry.Summary) :
+    EIO Scry.SummaryRun :=
   match fuel with
-  | .zero => EIO.pure (sums, rounds, .false)
+  | .zero => EIO.pure (Scry.SummaryRun.mk sums rounds .false .nil)
   | .succ k => do
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries sums p.funcs 0
-      (List.length p.funcs);
+    let allMems := Scry.allMemSeeds sums;
+    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries plans allMems
+      sums p.funcs 0 (List.length p.funcs);
     let next := Scry.growSummaries p graph sums results;
     match Scry.summariesEq next sums with
     | .true => do
       Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
         ++ " round(s), converged");
-      EIO.pure (next, Nat.succ rounds, .true)
-    | .false => Scry.summaryRounds o startMs p graph pack pt entries k (Nat.succ rounds) next
+      EIO.pure (Scry.SummaryRun.mk next (Nat.succ rounds) .true results)
+    | .false => Scry.summaryRounds o startMs p graph pack pt entries plans k (Nat.succ rounds)
+        next
 
 /-- The summary fixpoint's fuel: its historical bound, or `--max-rounds` when given. -/
 def Scry.summaryFuel (o : Scry.TaintOpts) (p : Wil.Program) (pt : Scry.PtResult) : Nat :=
@@ -1001,10 +1022,20 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let entries := Scry.entrySources prog graph;
     let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
     let summaryFuel := Scry.summaryFuel o prog pt;
-    sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
+    -- Plans depend on the function, the rule pack, points-to and the entry policy only,
+    -- so they are built once; the summary fixpoint and the final pass reuse them.
+    let plans := Scry.prepareAllWithEntries prog pack pt entries;
+    Scry.reportStage o startMs "plans" (Nat.repr (List.length plans) ++ " plan(s)");
+    Scry.checkDeadline o startMs "plans";
+    run ← Scry.summaryRounds o startMs prog graph pack pt entries plans summaryFuel 0 sums0;
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
-      prog.funcs 0 (List.length prog.funcs);
+    -- A converged round evaluated every function under summaries equal to the final
+    -- ones, so its results are the final results.
+    results ← match run.complete with
+      | .true => EIO.pure run.results
+      | .false => Scry.evalAllStaged o startMs "results" graph pack pt entries plans
+          (Scry.allMemSeeds run.summaries) run.summaries prog.funcs 0
+          (List.length prog.funcs);
     Scry.checkDeadline o startMs "results";
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
@@ -1020,10 +1051,10 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
       (List.append bounds.warnings nulls));
     let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
-    let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
+    let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
-      ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
-      ++ (match sums.2.2 with
+      ++ " function(s), " ++ Nat.repr run.rounds ++ " summary round(s)"
+      ++ (match run.complete with
         | .true => ""
         | .false => " (incomplete)"));
     let findings := Scry.programFindings pr;
@@ -1036,12 +1067,12 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
     let checks := List.map Scry.certVerified certificates;
     let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
-      (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
-    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
+      (Scry.summariesBudgetNotes o.maxRounds run.rounds run.complete);
+    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not run.complete);
     endMs ← EIO.lift Scry.nowMs;
     EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
-      sums.2.2 notes)
+      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds
+      run.complete notes)
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do

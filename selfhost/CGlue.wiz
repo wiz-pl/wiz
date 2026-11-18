@@ -367,11 +367,11 @@ partial def gArgs (p : GS) (args : List GTy) : GArgs :=
     | .some (.gstruct sp) =>
       let p2 := gAdvance p1; if Bool.not (Bool.or (strEq (gPeek p2) ",") (strEq (gPeek p2) ")")) then
         .gerr "'&' only takes the address of a whole struct variable"
-      else gArgsMore p2 (.cons (.gaddr sp) args)
+      else gArgsMore p2 (List.append args (.cons (.gaddr sp) .nil))
     | _ => .gerr "'&' is only allowed on a struct variable, as the argument of a C function")
   else (match gExpr 0 p with
     | .gerr m => .gerr m
-    | .gok a p1 => gArgsMore p1 (.cons a args))
+    | .gok a p1 => gArgsMore p1 (List.append args (.cons a .nil)))
 
 def gCheckArgs (t : String) (args : List GTy) (ps : List GTy) : Option String := match args, ps with
   | .nil, .nil => .none

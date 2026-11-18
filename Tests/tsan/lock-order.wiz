@@ -1,0 +1,53 @@
+import IO
+import Session
+import MVar
+
+-- The contended case: a second thread announces that it is going to acquire the lock
+-- while the first holds it, and the only order a working lock permits is
+--   holder in, second wants, holder checks, holder out, second in, overlap 0, second got it
+-- (the holder's release happens after "holder out" and before "second in").  A no-op
+-- `Lock.with` prints "second in" inside the holder's section instead, or two threads are
+-- inside at once (the overlap detector), which also shows on a one-CPU job because the
+-- holder yields.
+link_c "lock.c"
+
+extern "lock_enter" lockEnter : IO Nat
+extern "lock_leave" lockLeave : IO Nat
+extern "lock_yield" lockYield : IO Nat
+extern "lock_overlap" lockOverlap : IO Nat
+
+def yields : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ n => IO.bind lockYield (fun _ => yields n)
+
+def second (go want : MVar Nat) (l : Lock) (done : MVar Nat) (1 c : Chan Proto.done) : IO Unit :=
+  Chan.close c (IO.bind (MVar.take go) (fun _ =>
+    IO.bind (IO.println "second wants") (fun _ =>
+    IO.bind (MVar.put want 1) (fun _ =>
+    IO.bind (Lock.with l (do1
+      lockEnter;
+      IO.println "second in";
+      yields 4;
+      lockLeave;
+      IO.pure ())) (fun _ =>
+    MVar.put done 1)))))
+
+def main : IO Unit := do1
+  l ← Lock.new;
+  go ← MVar.new (A := Nat);
+  want ← MVar.new (A := Nat);
+  done ← MVar.new (A := Nat);
+  Chan.fork Proto.done (second go want l done) (fun c => Chan.close c (Lock.with l (do1
+    lockEnter;
+    IO.println "holder in";
+    MVar.put go 1;
+    MVar.take want;
+    yields 4;
+    IO.println "holder checks";
+    IO.println "holder out";
+    lockLeave;
+    IO.pure ())));
+  MVar.take done;
+  o ← lockOverlap;
+  IO.println (String.append "overlap " (Nat.toString o));
+  IO.println "second got it"

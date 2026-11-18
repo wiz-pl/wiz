@@ -22,7 +22,7 @@ disappeared. Now a defined constant evaluates to a **glued** value
   `nf` (`#reduce`) evaluates with `Globals.eager`.
 * Exercise 3.1 is now `forceMeta` (metas only). `force` also unfolds glued heads.
 
-The prelude now elaborates about 6× faster.
+The prelude now elaborates substantially faster.
 
 ## 7b: classes, instances, tabled resolution
 

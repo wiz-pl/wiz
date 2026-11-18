@@ -7,6 +7,7 @@ import Scry.Lifetime
 import Scry.Bounds
 import Scry.Nullness
 import Text
+import WordMap
 /-!
 # Scry.Interproc
 
@@ -194,7 +195,9 @@ def Scry.indexedNats : Nat → List Nat → List (Nat × Nat)
   | _, .nil => .nil
   | i, .cons v vs => List.cons (i, v) (Scry.indexedNats (Nat.succ i) vs)
 
-/-- For a callee, every argument position some caller passes a tainted value at. -/
+/-- For a callee, every argument position some caller passes a tainted value at. This
+is the slow form (it re-scans every result for every callee); `growSummaries` uses
+`paramContribMap`, which builds the taint indexes once. -/
 def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncResult)
     (callee : String) : List Nat :=
   Scry.concatLists (fun r =>
@@ -204,6 +207,56 @@ def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncRe
           if Scry.argTainted r site.node p.2 then List.cons p.1 .nil else .nil)
           (Scry.indexedNats 0 site.args)
       else .nil) graph.sites) results
+
+/-- Add parameter positions to `callee`'s entry in a contribution map (order-preserving
+and deterministic). -/
+def Scry.contribAdd : List (String × List Nat) → String → List Nat → List (String × List Nat)
+  | .nil, callee, ps => List.cons (callee, ps) List.nil
+  | .cons p rest, callee, ps =>
+    if String.eq p.1 callee then
+      List.cons (p.1, List.append p.2 ps) rest
+    else List.cons p (Scry.contribAdd rest callee ps)
+
+/-- A result's taint query data: its name, def-use index, taint index, and whether a
+`ret` uses a tainted value (the return summary). -/
+structure Scry.TaintIdxEntry where
+  name : String
+  info : Scry.FnInfo
+  idx : U64Map (List Nat)
+  retTainted : Bool
+
+/-- Build one taint entry per function result (one pass over its taint rows). -/
+def Scry.taintEntries (results : List Scry.FuncResult) : List Scry.TaintIdxEntry :=
+  List.map (fun r =>
+    let idx := Scry.taintIdxOf (Scry.resultTaint r);
+    Scry.TaintIdxEntry.mk r.fn.name r.plan.info idx
+      (Scry.returnsTaintedIdx r.plan.info idx r.plan.rets)) results
+
+/-- Every callee's tainted argument positions, computed in **one** pass: one taint index
+per result, then each call site looks its caller up. The old path called `argTainted`
+(which scanned every taint row and every data edge) for every argument of every site of
+every callee. -/
+def Scry.paramContribFrom (graph : Scry.CallGraph) (idxs : List Scry.TaintIdxEntry) :
+    List (String × List Nat) :=
+  List.foldl (fun acc site =>
+    match List.find (fun e => String.eq e.name site.caller) idxs with
+    | .none => acc
+    | .some e =>
+      let ps := Scry.concatLists (fun p =>
+        if Scry.taintAtUseIdx e.info e.idx site.node p.2 then List.cons p.1 List.nil
+        else List.nil) (Scry.indexedNats 0 site.args);
+      match List.isEmpty ps with
+      | .true => acc
+      | .false => Scry.contribAdd acc site.callee ps) List.nil graph.sites
+
+def Scry.paramContribMap (graph : Scry.CallGraph) (results : List Scry.FuncResult) :
+    List (String × List Nat) :=
+  Scry.paramContribFrom graph (Scry.taintEntries results)
+
+def Scry.contribOf (m : List (String × List Nat)) (callee : String) : List Nat :=
+  match List.find (fun p => String.eq p.1 callee) m with
+  | .none => List.nil
+  | .some p => p.2
 
 /-- The call results a function gets from callees that return tainted values. -/
 def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
@@ -225,6 +278,10 @@ def Scry.allMemSeeds (sums : List Scry.Summary) : List Scry.MemSeed :=
 which keeps the provenance — a fact seeded as EDB would shadow its derivation). -/
 def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) (Scry.allMemSeeds sums)
+
+/-- `seedsFor` with the round's deduplicated seed set computed once. -/
+def Scry.seedsForAll (all : List Scry.MemSeed) (func : String) : List Scry.MemSeed :=
+  List.filter (fun m => Bool.not (String.eq m.func func)) all
 
 /-- The parameter positions a rule pack declares as sources regardless of the caller.
 Today one such policy exists: `source argv result` asks for `main`'s second parameter
@@ -258,21 +315,52 @@ def Scry.resultsWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (entries : List (String × Nat)) : List Scry.FuncResult :=
   List.map (Scry.evalWithEntries graph pack pt entries sums) p.funcs
 
+/-- `evalWith` with a precomputed plan (the summary fixpoint prepares every function's
+plan once, not once per round). -/
+def Scry.evalWithPrepared (graph : Scry.CallGraph) (pt : Scry.PtResult)
+    (plan : Scry.FuncPlan) (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWithPlan fn plan (Scry.seedsFor sums fn.name)
+    (Scry.summaryOf sums fn.name).params
+    (Scry.retSeedsOf graph sums fn.name)
+
+/-- `evalWithPrepared` with the round's deduplicated memory-seed set supplied by the
+driver (computed once per round instead of once per function). -/
+def Scry.evalWithPreparedM (graph : Scry.CallGraph) (pt : Scry.PtResult)
+    (plan : Scry.FuncPlan) (sums : List Scry.Summary) (allMems : List Scry.MemSeed)
+    (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWithPlan fn plan (Scry.seedsForAll allMems fn.name)
+    (Scry.summaryOf sums fn.name).params
+    (Scry.retSeedsOf graph sums fn.name)
+
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   Scry.resultsWithEntries p pack graph pt sums .nil
+
+/-- Prepare every function's plan once, aligned with `p.funcs`, with the exported-entry
+parameter sources (`Scry.entrySources`) each function's `evalWithEntries` would use. -/
+def Scry.prepareAllWithEntries (p : Wil.Program) (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (entries : List (String × Nat)) : List Scry.FuncPlan :=
+  List.map (fun fn => Scry.prepareFuncWith fn pack pt (Scry.entrySourcesFor entries fn.name))
+    p.funcs
+
+/-- Prepare every function's plan once, aligned with `p.funcs`. -/
+def Scry.prepareAll (p : Wil.Program) (pack : Scry.RulePack) (pt : Scry.PtResult) :
+    List Scry.FuncPlan :=
+  List.map (fun fn => Scry.prepareFunc fn pack pt) p.funcs
 
 /-- Grow every summary from one round's results: the argument-taint contributions the
 results expose and the return flags, plus the tainted memory locations. -/
 def Scry.growSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
+  let entries := Scry.taintEntries results;
+  let contribs := Scry.paramContribFrom graph entries;
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.unionNat (Scry.paramContributions graph results fn.name)
+    let contrib := Scry.unionNat (Scry.contribOf contribs fn.name)
       (Scry.argvParamsOf pack fn);
-    let ret := match List.find (fun r => String.eq r.fn.name fn.name) results with
-      | .some r => Scry.returnsTainted r
+    let ret := match List.find (fun e => String.eq e.name fn.name) entries with
+      | .some e => e.retTainted
       | .none => (.false : Bool);
     Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
       (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs

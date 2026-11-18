@@ -1,6 +1,6 @@
 # Scry benchmark corpus
 
-This directory is the checked-in S0/S2 corpus (48 cases on `agent/scry-models`) for `scry bench`:
+This directory is the checked-in S0/S2 corpus (52 cases) for `scry bench`:
 
 * `manifest.json` — the cases: suite, CWE, file, `expect`, and the expected findings.
 * `cwe78/` — CWE-78 command injection.
