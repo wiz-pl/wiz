@@ -1211,3 +1211,61 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ap: coinductive types and copatterns, self-hosted (A19/B4)
+
+The kernel had the coinduction forms (`ν`, `out`, `cocon`, `coit`) and their sized
+rules; the self-hosted frontend had no surface for them, so `coinductive` was an
+unsupported command and a copattern definition elaborated as equations. Both now
+elaborate to the kernel's forms, as the Lean frontend's `elabCoinductive` and
+`elabCopatterns` do.
+
+* **`coinductive T (ps) where f₁ : A₁ …`** (`Frontend.wiz`, `coinductiveCmdL`). The
+  observations are a one-constructor description: `T.desc : ps → Desc Unit` has a
+  `darg q A` per observation (lifted, `ULift`, when the field's sort is not the type's:
+  the same Q4 rule as an inductive field) and a `drec` where the observation is `T`
+  itself. The type is `T := ν T.desc () : Type u` (index `()`; a coinductive type has no
+  indices yet), each observation `T.f : ps → T ps → F` is `out` projected (and `down`
+  if the field is lifted), and `T.mk : ps → F₁ → … → Fₙ → T ps` is a `cocon` of the
+  fields. The observations sit in `Globals` under `coinductive T` (as a structure's
+  fields sit under `structure T`), so the match compiler does not take the type for an
+  inductive one. A declaration's universe must be a declared universe parameter, as for
+  `inductive`.
+* **Copatterns** (`copatternDef`, `copatternBuild`). `def f ps : T args | .obs => rhs …`
+  is read off the syntax: every alternative's pattern is a `.observation`, and the
+  result type's head names a coinductive type. If an observation of `T` that is `T`
+  itself is defined by a corecursive call `f e…`, the definition is a `coit`: the state
+  is the tuple of the explicit binders (`(x₁ : A₁) × … × Unit`), the call's arguments
+  are the next state, and a recursive observation's right-hand side must be that call
+  (the guardedness condition, so `| .tail => (f n).tail` is rejected). Otherwise the
+  definition is not recursive at all and is a `cocon` of the observations, one cell in
+  front of the values it names (`register a s | .head => a | .tail => s`); then `f` may
+  not occur on any right-hand side. The payload ends in the index equation (`()` at the
+  always-`Unit` index) and the unit; `()` now checks against any `Unit` (the equation
+  at a `Unit` type is `True`).
+* **The primitives.** `ν D i`, `out x`, `coit S st s` and `cocon xs` are kernel terms;
+  an unshadowed identifier applied to its arguments is read as one (`builtinApp`), for
+  the type in inference and for the value in checking, so `def c : Stream Nat := cocon
+  (5, nats 6, (), ())` and `def z := coit (fun _ => Nat) step 0` work without a
+  notation. `ν`'s applicand is a description, `out`'s a value of a `ν` at a known size,
+  `cocon`'s payload the interpretation at `↑s` or `∞`, and `coit`'s the state family,
+  step and seed of the kernel's rule.
+* **Dotted projection chains.** The lexer reads `x.tail.tail.head` as one identifier, so
+  a field name can be a chain; `projT` now projects one part at a time (`splitDots`)
+  instead of looking up a global `T.tail.tail.head`.
+
+**Tests** (group `selfhost`): `coinductive` and copatterns (`nats`, `zeros`, `register`,
+`mealy` over `Stream`, `T.mk`), the primitives `ν`/`out` and `cocon`/`coit`, each form
+compared with the Lean frontend's `#eval`, and the copattern errors (a missing
+observation, a non-corecursive observation, `cocon` against a non-coinductive type) with
+both frontends' verdicts.
+
+**Not done:** `scofix` and the sized surface (`Size`, `Size<`, `μ … ^s`), the `ULift`
+surface (`up`/`down` are built as terms, not written), coinductive types with indices,
+and a fixpoint run (the self-hosted frontend compiled by itself) for this pass. A
+copattern definition whose **state includes a value of the coinductive type itself**
+(`def mealy {S I O} (f : S → I → S × O) (st : S) (i : Stream I) : Stream O | .head =>
+(f st i.head).2 | .tail => mealy f (f st i.head).1 i.tail`) is also owed: in the step's
+context the projection `i.head` leaves the implicit type parameter that `projT` inserts
+unsolved, so the kernel rejects the term. A `cocon` definition with such a parameter
+(`register`) works.

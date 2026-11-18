@@ -4441,18 +4441,41 @@ def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syn
   | .none => match strEq n "Unit" with
     | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
     | .false => .err (String.append "unknown identifier " n)
--- the projection `T.f t`, for `t : T …`
-def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE := match force es bty with
-  | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
-    | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
-      | .ok pt' pty' es4 => match whnf (force es4 pty') with
-        | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
-          | .some es5 => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
-          | .none => .err (String.append "cannot apply the projection " f)
-        | _ => .err (String.append "not a projection: " f)
-      | .err msg => .err msg
-    | e => e
-  | _ => .err (String.append "no field " f)
+-- a projection chain `a.b.c` as `["a", "b", "c"]` (the lexer reads dotted names as one
+-- identifier, as in `(nats 0).tail.tail.head`)
+def noChars (s : String) : Bool := match s with
+  | .mk cs => match cs with
+    | .nil => .true
+    | .cons _ _ => .false
+def splitDotsGo (cur : String) : List Char → List String
+  | .nil => match noChars cur with
+    | .true => .nil
+    | .false => .cons cur .nil
+  | .cons c rest => match Nat.beq (Char.code c) 46 with
+    | .true => match noChars cur with
+      | .true => splitDotsGo (String.mk .nil) rest
+      | .false => .cons cur (splitDotsGo (String.mk .nil) rest)
+    | .false => splitDotsGo (String.append cur (String.mk (.cons c .nil))) rest
+def splitDots (n : String) : List String := match n with
+  | .mk cs => splitDotsGo (String.mk .nil) cs
+-- the projection `T.f t`, for `t : T …`; a dotted field name is one projection per part
+def projTGo (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) : List String → HE
+  | .nil => .err "no field"
+  | .cons f rest => match force es bty with
+    | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
+      | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
+        | .ok pt' pty' es4 => match whnf (force es4 pty') with
+          | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
+            | .some es5 => match rest with
+              | .nil => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
+              | .cons _ _ => projTGo gs es5 cx (.app pt' bt) (codAt cx env cod bt) rest
+            | .none => .err (String.append "cannot apply the projection " f)
+          | _ => .err (String.append "not a projection: " f)
+        | .err msg => .err msg
+      | e => e
+    | _ => .err (String.append "no field " f)
+def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE :=
+  projTGo gs es cx bt bty (splitDots f)
 -- a numeral `n`: `Nat.succ` applied `n` times to `Nat.zero` (stage 18f; there are no
 -- number literals in the kernel)
 def numeral (gs : Globals) (es : ES) (cx : Cx) (n : Nat) : TE := match identHead gs es cx "Nat.zero" with
@@ -5041,6 +5064,18 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
       | .ok v _ es2 => body A Av v es2
       | e => e
     | e => e
+-- `()` checks against a `Unit` at any level (its inferred type is `Unit` at level 1;
+-- the index equation of a coinductive payload is `True`, which `vEq` makes of an
+-- equation at a `Unit` type); otherwise it infers and unifies, as `term.unitVal` does
+def checkUnitVal (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match whnf (force es ty) with
+  | .vunit _ => .ok .star ty es
+  | _ => match inferT gs es cx s with
+    | .ok t ty' es' => match unify es' cx ty' ty with
+      | .some es2 => .ok t ty es2
+      | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
+          (String.append ", got " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty')))))
+    | e => e
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
@@ -5065,7 +5100,9 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
         | .true => letT gs es cx s (.some ty)
         | .false => match strEq k "term.rfl" with
         | .true => checkRfl gs es cx (force es ty)
-        | .false => match (match strEq k "term.app" with
+        | .false => match strEq k "term.unitVal" with
+          | .true => checkUnitVal gs es cx s ty
+          | .false => match (match strEq k "term.app" with
           | .true => match builtinApp gs cx s with
             | .some (.mk n args) => checkBuiltin gs es cx n args s ty
             | .none => match inferHead gs es cx (kid s 0) with
@@ -6486,17 +6523,13 @@ def coinBindExplicit (types : Env) (np : Nat) : Cx → Val → List (String × N
 -- by projections of `s` (as `let`s, in the kernel's term)
 def coinStripLets (n : Nat) (body : Tm) : Tm := match n with
   | .zero => body
-  | .succ k => coinStripLets k (instAt (.fst (sndN k (.var (.succ k)))) 0 body)
+  | .succ k => coinStripLets k (instAt (.fst (sndN k (.var k))) 0 body)
 inductive CCS where
-  | ok (body : Tm) (es : ES)
+  | ok (comps : List Tm) (es : ES)
   | err (msg : String)
 inductive CArgs where
   | ok (ts : List Tm) (es : ES)
   | err (msg : String)
-def coinNth : List Tm → Nat → Tm
-  | .nil, _ => .star
-  | .cons x xs, .zero => x
-  | .cons _ xs, .succ k => coinNth xs k
 def coinArgsGo (gs : Globals) (cx : Cx) (types : Env) (np : Nat) : List Syntax → List (String × Nat) → ES → CArgs
   | .nil, _, es => .ok .nil es
   | .cons arg args', .cons (_, k) ex', es => match lookup types (np - 1 - k) with
@@ -6506,37 +6539,42 @@ def coinArgsGo (gs : Globals) (cx : Cx) (types : Env) (np : Nat) : List Syntax �
         | .err m => .err m
         | .ok cs es2 => .ok (.cons c cs) es2
   | _, .nil, _ => .err "too many arguments"
-def copatternCoitGo (gs : Globals) (cx : Cx) (alts : List Syntax) (f : String) (explicit : List (String × Nat)) (types : Env) (fieldEnv : Env) (np : Nat) (fts : List Tm) : List (String × Bool) → Nat → List Tm → ES → CCS
-  | .nil, _, comps, es => .ok (coinPairs comps (.pair .star .star)) es
-  | .cons (o, isRec) rest, k, comps, es => match copatternAlt alts o with
+def copatternCoitGo (gs : Globals) (cx : Cx) (alts : List Syntax) (f : String) (explicit : List (String × Nat)) (types : Env) (np : Nat) : List (String × Bool) → Val → List Tm → ES → CCS
+  | .nil, _, comps, es => .ok comps es
+  | .cons (o, isRec) rest, pty, comps, es => match copatternAlt alts o with
     | .none => .err (String.append "missing copattern ." o)
     | .some a =>
       let rhs := altRhs a;
-      match isRec with
-      | .true =>
-        let head := match strEq (kindOf rhs) "term.app" with
-          | .true => kid rhs 0
-          | .false => rhs;
-        let as : List Syntax := match strEq (kindOf rhs) "term.app" with
-          | .true => kids (kid rhs 1)
-          | .false => .nil;
-        match Bool.and (strEq (kindOf head) "term.ident") (strEq (identOf head) f) with
-        | .false => .err (String.append (String.append (String.append "the observation ." o) " must be a corecursive call of ") (String.append f " (guardedness)"))
-        | .true => match Nat.beq (List.length as) (List.length explicit) with
-          | .false => .err (String.append (String.append (String.append f " takes ") (Nat.toString (List.length explicit))) " explicit arguments")
-          | .true => match coinArgsGo gs cx types np as explicit es with
+      match whnf pty with
+      | .vsigma _ _ _ A env B => match isRec with
+        | .true =>
+          let head := match strEq (kindOf rhs) "term.app" with
+            | .true => kid rhs 0
+            | .false => rhs;
+          let as : List Syntax := match strEq (kindOf rhs) "term.app" with
+            | .true => kids (kid rhs 1)
+            | .false => .nil;
+          match Bool.and (strEq (kindOf head) "term.ident") (strEq (identOf head) f) with
+          | .false => .err (String.append (String.append (String.append "the observation ." o) " must be a corecursive call of ") (String.append f " (guardedness)"))
+          | .true => match Nat.beq (List.length as) (List.length explicit) with
+            | .false => .err (String.append (String.append (String.append f " takes ") (Nat.toString (List.length explicit))) " explicit arguments")
+            | .true => match coinArgsGo gs cx types np as explicit es with
+              | .err m => .err m
+              | .ok cs es1 =>
+                -- the recursive component of `coit`'s payload is the next state
+                let st := coinPairs cs .star;
+                copatternCoitGo gs cx alts f explicit types np rest
+                  (eval (.cons (eval (TCtx.env (Cx.c cx)) st) env) B) (.append comps (.cons st .nil)) es1
+        | .false => match whnf A with
+          | .vulift _ _ A' => match checkT gs es cx rhs A' with
             | .err m => .err m
-            | .ok cs es1 => match coinPairs cs .star with
-              | st => copatternCoitGo gs cx alts f explicit types fieldEnv np fts rest (k + 1) (.append comps (.cons st .nil)) es1
-      | .false =>
-        let F := eval fieldEnv (coinNth fts k);
-        match whnf F with
-          | .vulift _ _ F' => match checkT gs es cx rhs F' with
+            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types np rest
+              (eval (.cons (eval (TCtx.env (Cx.c cx)) (.up c)) env) B) (.append comps (.cons (.up c) .nil)) es1
+          | _ => match checkT gs es cx rhs A with
             | .err m => .err m
-            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types fieldEnv np fts rest (k + 1) (.append comps (.cons (.up c) .nil)) es1
-          | _ => match checkT gs es cx rhs F with
-            | .err m => .err m
-            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types fieldEnv np fts rest (k + 1) (.append comps (.cons c .nil)) es1
+            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types np rest
+              (eval (.cons (eval (TCtx.env (Cx.c cx)) c) env) B) (.append comps (.cons c .nil)) es1
+      | _ => .err "internal error: a coinductive payload is not a Σ"
 def coinAnyObs (f : String) (alts : List Syntax) : List (String × Bool) → Bool
   | .nil => .false
   | .cons (o, isRec) rest => match Bool.and isRec (altCorecursive f o alts) with
@@ -6597,17 +6635,17 @@ def copatternBuild (gs : Globals) (f : String) (stx : Syntax) : CRes :=
                 let sv0 := fresh (Cx.lvl cxS - 1);
                 match coinBindExplicit types np cxS sv0 explicit esR' with
                 | .ok cxB sv esB =>
-                  let fieldTys : List Tm := match Globals.coind gs T with
-                    | .some info => match info with
-                      | .mk _ _ _ _ _ ctors _ _ _ => match ctors with
-                        | .cons (.mk _ fields _ _ _ _) _ => mapL (fun (cf : CField) => match cf with
-                            | .mk _ _ ft _ => ft) fields
-                        | .nil => .nil
-                    | .none => .nil;
-                  match copatternCoitGo gs cxB alts f explicit types (TCtx.env (Cx.c cxP)) np fieldTys obs 0 .nil esB with
+                  -- the payload's type: `⟦T.desc⟧ S i` with the state family `S` in the
+                  -- recursive fields (a corecursive observation is the next state)
+                  let lB := Cx.lvl cxB;
+                  let Sfam : Val := .vlam (TCtx.env (Cx.c cxB)) (shiftTm (lB - np + 1) 0 stateTy);
+                  let pty0 := vInterp lv I D Sfam i;
+                  match copatternCoitGo gs cxB alts f explicit types np obs pty0 .nil esB with
                   | .err m => .err m
-                  | .ok payload es1 =>
+                  | .ok comps es1 =>
                     let n := List.length explicit;
+                    -- the index equation is at the step's context (`i` and `s` bound)
+                    let payload : Tm := coinPairs comps (.pair (shiftTm 2 0 (coinRhsIndex np I i)) .star);
                     let body : Tm := coinStripLets n payload;
                     let step : Tm := .lam (.lam body);
                     let Sfn : Tm := .lam (shiftTm 1 0 stateTy);
