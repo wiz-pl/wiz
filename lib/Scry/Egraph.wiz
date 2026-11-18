@@ -45,10 +45,12 @@ non-terminating system (e.g. `f x → f (f x)`) usable. A rewrite adds no new eq
 when the right-hand side already lives in the left-hand side's class, so a saturated
 graph stops early rather than burning the whole budget.
 
-Extraction is bottom-up dynamic programming: `costs` relaxes a cost per class for
-`next + 1` rounds (each node costs `1 + weight op + the children's costs`), then
-`buildTerm` picks a cheapest node per class, with the class cost as a depth bound so a
-cyclic e-class cannot loop. `extract` is unit cost; `extractWith` takes a weight table.
+Extraction is bottom-up dynamic programming: `costs` relaxes an `Option Nat` cost per
+class for `next + 1` rounds (each node costs `1 + weight op + the children's costs`;
+`none` is "no finite term"), then `buildTerm` picks a cheapest node per class, with the
+class cost as a depth bound so a cyclic e-class cannot loop. `extract` is unit cost;
+`extractWith` takes a weight table. There is no `inf` sentinel: a real weight can exceed
+any bound without being mistaken for "no term".
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
 compiled (C and LLVM). It is untrusted, like the rest of the fast engine: nothing here
@@ -327,6 +329,27 @@ def Scry.EGraph.merge (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
                            (List.length (Scry.EGraph.roots g1)));
   (g1, ch)
 
+-- ## Growing the union-find for facts about ids it has not seen
+
+/-- Add classes until `id` exists (`ensure` is what a Datalog equality row uses: a fact
+may name a class the e-graph has not interned yet). -/
+partial def Scry.EGraph.ensureFrom (g : Scry.EGraph) (fuel : Nat) (target : Nat) :
+    Scry.EGraph :=
+  match fuel with
+  | .zero => g
+  | .succ k =>
+    if Nat.le (Nat.succ target) (List.length g.parent) then g
+    else
+      let i := List.length g.parent;
+      let g' := Scry.EGraph.mk
+        (List.append g.parent (.cons i .nil))
+        (List.append g.rank (.cons 0 .nil))
+        g.nodes g.etable (Nat.max g.next (Nat.succ i));
+      Scry.EGraph.ensureFrom g' k target
+
+def Scry.EGraph.ensure (g : Scry.EGraph) (id : Nat) : Scry.EGraph :=
+  Scry.EGraph.ensureFrom g (Nat.succ id) id
+
 -- ## A merge usable from Datalog / lattice relations
 
 /-- Union the first two columns of every row (rows with fewer than two columns are
@@ -336,7 +359,10 @@ def Scry.EGraph.mergeRows : List (List U64) → Scry.EGraph → Scry.EGraph × B
   | .cons row rows, g =>
     match row with
     | .cons a (.cons b _) =>
-      let u := Scry.EGraph.union g (UIntN.toNat a) (UIntN.toNat b);
+      let ai := UIntN.toNat a;
+      let bi := UIntN.toNat b;
+      let g1 := Scry.EGraph.ensure (Scry.EGraph.ensure g ai) bi;
+      let u := Scry.EGraph.union g1 ai bi;
       let rest := Scry.EGraph.mergeRows rows u.1;
       (rest.1, if u.2 then .true else rest.2)
     | _ => Scry.EGraph.mergeRows rows g
@@ -353,60 +379,86 @@ def Scry.EGraph.mergeFacts (g : Scry.EGraph) (rows : List (List U64)) :
                            (List.length (Scry.EGraph.roots g1)));
   (g1, ch)
 
--- ## Extraction: minimal cost
+-- ## Extraction: minimal cost, `Option Nat`
 
-/-- The cost of a class that has no finite extraction (a cycle with no leaves). Large
-enough to be above any test-sized term. -/
-def Scry.EGraph.inf : Nat := 1000000
+/-- Add two optional costs (`none` is "no finite term"). -/
+def Scry.egAddOpt : Option Nat → Option Nat → Option Nat
+  | .some a, .some b => .some (Nat.add a b)
+  | _, _ => .none
 
-/-- `1 + weight op + the children's costs`; the `1` makes every node cost at least the
-sum of its children plus one, which bounds extraction depth by the cost. -/
-def Scry.ENode.cost (w : Nat → Nat) (costs : List Nat) (n : Scry.ENode) : Nat :=
-  List.foldr (fun a acc => Nat.add (List.getD costs a Scry.EGraph.inf) acc)
-    (Nat.succ (w n.op)) n.args
+/-- `a < b` on optional costs, with `none` as infinity. -/
+def Scry.egLtOpt : Option Nat → Option Nat → Bool
+  | .some a, .some b => Nat.lt a b
+  | .none, .none => .false
+  | .none, .some _ => .false
+  | .some _, .none => .true
+
+/-- The cost at class `i` (an absent class has no finite term). -/
+def Scry.egCostAt (costs : List (Option Nat)) (i : Nat) : Option Nat :=
+  List.getD costs i .none
+
+/-- `n` copies of "no finite cost". -/
+def Scry.egRepNone : Nat → List (Option Nat)
+  | .zero => .nil
+  | .succ k => .cons .none (Scry.egRepNone k)
+
+/-- The sum of the children's costs, if all are finite. -/
+def Scry.ENode.argsCost (costs : List (Option Nat)) : List Nat → Option Nat
+  | .nil => .some 0
+  | .cons a as => Scry.egAddOpt (Scry.egCostAt costs a) (Scry.ENode.argsCost costs as)
+
+/-- `1 + weight op + the children's costs`; `none` if a child has no finite term. The
+leading `1` makes every node cost at least the sum of its children plus one, which
+bounds extraction depth by the cost. -/
+def Scry.ENode.cost (w : Nat → Nat) (costs : List (Option Nat)) (n : Scry.ENode) :
+    Option Nat :=
+  Scry.egAddOpt (.some (Nat.succ (w n.op))) (Scry.ENode.argsCost costs n.args)
 
 def Scry.EGraph.costPass (g : Scry.EGraph) (w : Nat → Nat) :
-    List (Nat × Scry.ENode) → List Nat → List Nat
+    List (Nat × Scry.ENode) → List (Option Nat) → List (Option Nat)
   | .nil, costs => costs
   | .cons p rest, costs =>
     let cls := Scry.EGraph.find g p.1;
     let c := Scry.ENode.cost w costs p.2;
-    let old := List.getD costs cls Scry.EGraph.inf;
-    let costs' := if Nat.lt c old then List.setAt costs cls c else costs;
+    let old := Scry.egCostAt costs cls;
+    let costs' := if Scry.egLtOpt c old then List.setAt costs cls c else costs;
     Scry.EGraph.costPass g w rest costs'
 
-def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → List Nat → List Nat
+def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) :
+    Nat → List (Option Nat) → List (Option Nat)
   | .zero, costs => costs
   | .succ k, costs =>
     Scry.EGraph.costIter g w k (Scry.EGraph.costPass g w g.nodes costs)
 
-/-- A cost per class id (`inf` when nothing finite reaches it). One pass is a full
-relaxation; `next + 1` passes suffice for a shortest derivation tree (a shortest tree
-repeats no class on a root-to-leaf path when every node costs at least one). -/
-def Scry.EGraph.costs (g : Scry.EGraph) (w : Nat → Nat) : List Nat :=
-  Scry.EGraph.costIter g w (Nat.succ g.next)
-    (Scry.egRep g.next Scry.EGraph.inf)
+/-- A cost per class id (`none` when nothing finite reaches it). One pass is a full
+relaxation; `next + 1` passes suffice for a shortest derivation tree. -/
+def Scry.EGraph.costs (g : Scry.EGraph) (w : Nat → Nat) : List (Option Nat) :=
+  Scry.EGraph.costIter g w (Nat.succ g.next) (Scry.egRepNone g.next)
 
-def Scry.EGraph.cost (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) : Nat :=
-  List.getD (Scry.EGraph.costs g w) (Scry.EGraph.find g cls) Scry.EGraph.inf
+/-- The cheapest extraction cost of `cls`, if it has a finite term. -/
+def Scry.EGraph.cost (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) : Option Nat :=
+  Scry.egCostAt (Scry.EGraph.costs g w) (Scry.EGraph.find g cls)
 
-/-- The cheapest node of a list under fixed costs (the first one on a tie; `nodes` is
-most-recent-first, so later-added nodes win ties). -/
-def Scry.EGraph.bestIn (w : Nat → Nat) (costs : List Nat) :
+/-- The cheapest node of a list under fixed costs (the first on a tie; `nodes` is
+most-recent-first, so later-added nodes win ties). Nodes whose children have no finite
+cost are skipped. -/
+def Scry.EGraph.bestIn (w : Nat → Nat) (costs : List (Option Nat)) :
     List Scry.ENode → Option (Scry.ENode × Nat) → Option (Scry.ENode × Nat)
   | .nil, best => best
   | .cons n ns, best =>
-    let c := Scry.ENode.cost w costs n;
-    let best' : Option (Scry.ENode × Nat) := match best with
-      | .none => .some (n, c)
-      | .some p => if Nat.lt c p.2 then .some (n, c) else .some p;
-    Scry.EGraph.bestIn w costs ns best'
+    match Scry.ENode.cost w costs n with
+    | .none => Scry.EGraph.bestIn w costs ns best
+    | .some c =>
+      let best' : Option (Scry.ENode × Nat) := match best with
+        | .none => .some (n, c)
+        | .some p => if Nat.lt c p.2 then .some (n, c) else .some p;
+      Scry.EGraph.bestIn w costs ns best'
 
 mutual
 /-- Build a cheapest term of a class with `fuel` depth left. The class cost bounds the
 fuel, and a cheapest node's children all cost strictly less, so the recursion is
 bounded even when the e-class contains a cycle. -/
-partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : List Nat) :
+partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : List (Option Nat)) :
     Nat → Nat → Option Scry.ETerm
   | .zero, _ => .none
   | .succ k, cls =>
@@ -416,7 +468,7 @@ partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : L
       match Scry.EGraph.buildArgs g w costs k p.1.args with
       | .none => .none
       | .some ts => .some (.tnode p.1.op ts)
-partial def Scry.EGraph.buildArgs (g : Scry.EGraph) (w : Nat → Nat) (costs : List Nat) :
+partial def Scry.EGraph.buildArgs (g : Scry.EGraph) (w : Nat → Nat) (costs : List (Option Nat)) :
     Nat → List Nat → Option Scry.ETerms
   | _, .nil => .some .tnil
   | k, .cons a as =>
@@ -431,11 +483,11 @@ end
 /-- The cheapest term of `cls` under `w`, or `none` when the class has no finite term. -/
 def Scry.EGraph.extractWith (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) :
     Option Scry.ETerm :=
-  let c := Scry.EGraph.cost g w cls;
-  if Nat.lt c Scry.EGraph.inf then
+  match Scry.EGraph.cost g w cls with
+  | .none => .none
+  | .some c =>
     Scry.EGraph.buildTerm g w (Scry.EGraph.costs g w) (Nat.succ c)
       (Scry.EGraph.find g cls)
-  else .none
 
 /-- Unit-cost extraction: the term with the fewest nodes. -/
 def Scry.EGraph.extract (g : Scry.EGraph) (cls : Nat) : Option Scry.ETerm :=

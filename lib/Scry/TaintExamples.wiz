@@ -21,7 +21,12 @@ feature of the prototype each:
   stores the source through a pointer and reloads it (this prototype's memory blind
   spot, so it misses it);
 * `directFn` again is the positive control for the pair: the same shape without a
-  sanitiser or memory is reported.
+  sanitiser or memory is reported;
+* `taintRewriteFn` — the same flow with an `x + 0` identity (the e-graph rewrite keeps
+  the finding), and `taintMaskedFn` — `y = r & 0`, where the checked extraction removes a
+  false positive;
+* `taintReassignFn` — `x` has two definitions, which blocks the checked extraction (the
+  may-equality view cannot justify the candidate), so taint is unchanged.
 
 The comments give each statement's program point (`Scry.Analysis` numbers statements and
 terminators per block), so the expected paths in the tests can be read off by hand.
@@ -45,7 +50,67 @@ def Scry.directFn : Wil.Func :=
         , Wil.call .none "system" [y] ]
         (Wil.ret .none) ]
 
+/-- `r = getenv(); x = r; zero = 0; y = x + zero; system(y)`: the same flow as
+`directFn`, but the arithmetic has a constant identity the e-graph layer rewrites
+(`x + 0 -> x`). Taint findings must be unchanged by that read-only pass. -/
+def Scry.taintRewriteFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let x := Scry.tv 1;
+  let zero := Scry.tv 2;
+  let y := Scry.tv 3;
+  Wil.func "rewrite" [] [r, x, zero, y]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.copy x r
+        , Wil.num zero 0
+        , Wil.binop y .add x zero
+        , Wil.call .none "system" [y] ]
+        (Wil.ret .none) ]
+
 def Scry.taintDirect : Wil.Program := Wil.program [Scry.directFn]
+def Scry.taintRewrite : Wil.Program := Wil.program [Scry.taintRewriteFn]
+
+/-- `r = getenv(); z = 0; y = r & z; system(y)`: the mask fixes the value to 0, so the
+sink is not attacker-controlled. The naive def-use taint reports one alert (`y` uses the
+tainted `r`); the e-graph identity `x & 0 -> 0` proves `y` is the clean `z`, and the
+checked extraction drops that alert. This is the "improvement" side of the differential.
+Points: 0 source, 1 const, 2 mask, 3 sink, 4 return. -/
+def Scry.taintMaskedFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let z := Scry.tv 1;
+  let y := Scry.tv 2;
+  Wil.func "masked" [] [r, z, y]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num z 0
+        , Wil.binop y .and r z
+        , Wil.call .none "system" [y] ]
+        (Wil.ret .none) ]
+
+def Scry.taintMasked : Wil.Program := Wil.program [Scry.taintMaskedFn]
+
+/-- `r = getenv(); z = 0; x = 0; x = r; y = x + z; system(y)`: `x` has two definitions,
+so the e-graph's may-equality view cannot say which one `x + z` sees (the identity rule
+sees the `0` definition). The checked extraction refuses the candidate `x` (not
+single-definition before the statement) and the program is unchanged. Taint is unchanged
+too: the `r` definition still reaches the sink.
+Points: 0 source, 1 zero, 2 clean constant, 3 tainted copy, 4 identity, 5 sink, 6 return. -/
+def Scry.taintReassignFn : Wil.Func :=
+  let r := Scry.tv 0;
+  let z := Scry.tv 1;
+  let x := Scry.tv 2;
+  let y := Scry.tv 3;
+  Wil.func "reassign" [] [r, z, x, y]
+    [ Wil.block
+        [ Wil.call (.some r) "getenv" []
+        , Wil.num z 0
+        , Wil.num x 0
+        , Wil.copy x r
+        , Wil.binop y .add x z
+        , Wil.call .none "system" [y] ]
+        (Wil.ret .none) ]
+
+def Scry.taintReassign : Wil.Program := Wil.program [Scry.taintReassignFn]
 
 /-- `r = getenv(); s = sanitize(r); system(s)`.
 Points: 0 source, 1 sanitiser, 2 sink, 3 return. -/

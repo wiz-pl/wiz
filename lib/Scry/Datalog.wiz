@@ -241,3 +241,65 @@ def Scry.Program.stratify {L : Type} (p : Scry.Program L) : Option (List Nat) :=
 /-- Range restriction and stratification, the checks the surface macro will perform. -/
 def Scry.Program.check {L : Type} (p : Scry.Program L) : Option (List Nat) :=
   if Scry.Program.wellFormed p then Scry.Program.stratify p else .none
+
+-- ## Equality-sorted columns (S12 seam)
+
+/-- The kind of a relation column. `u64` is an ordinary 64-bit word; `eqsort s` is a
+column whose values are e-class ids of equality sort `s`. The canonicalisation step of
+`Scry.EqPlan` rewrites an `eqsort` column to its class representative, and an equality
+assertion merges the two classes a row names. The kind is declared in an `EqCol` schema
+next to the program, so existing `Program`s are unchanged (`Scry.Datalog`'s typed-column
+work owns the column types themselves). -/
+inductive Scry.ColKind where
+  | u64
+  | eqsort (sort : Nat)
+
+/-- One equality-sorted column: relation `rel`, column index `col`, equality sort
+`sort`. A relation with two `eqsort` columns of the same sort can be the target of an
+equality assertion (`Head.eqAssert`). -/
+structure Scry.EqCol where
+  rel : Nat
+  col : Nat
+  sort : Nat
+
+def Scry.EqCols.forRel (cols : List Scry.EqCol) (rel : Nat) : List Scry.EqCol :=
+  List.filter (fun c => Nat.beq c.rel rel) cols
+
+/-- The declared kind of one column (`u64` when nothing is declared). -/
+def Scry.EqCols.kindAt (cols : List Scry.EqCol) (rel col : Nat) : Scry.ColKind :=
+  match List.filter (fun c => Bool.and (Nat.beq c.rel rel) (Nat.beq c.col col)) cols with
+  | .nil => .u64
+  | .cons c _ => .eqsort c.sort
+
+/-- The equality sort of a column, if it is one. -/
+def Scry.EqCols.sortAt (cols : List Scry.EqCol) (rel col : Nat) : Option Nat :=
+  match Scry.EqCols.kindAt cols rel col with
+  | .u64 => .none
+  | .eqsort s => .some s
+
+/-- Whether a relation has at least one equality-sorted column. -/
+def Scry.EqCols.hasEq (cols : List Scry.EqCol) (rel : Nat) : Bool :=
+  match Scry.EqCols.forRel cols rel with
+  | .nil => .false
+  | .cons _ _ => .true
+
+/-- The sorts named by a schema. -/
+def Scry.EqCols.sorts (cols : List Scry.EqCol) : List Nat :=
+  List.foldr (fun c acc => if Scry.natMem c.sort acc then acc else .cons c.sort acc) .nil cols
+
+/-- A schema is well formed when every declared column is an ordinary column of an
+existing relation (an equality-sorted column is never also a lattice column). -/
+def Scry.EqCols.ok {L : Type} (p : Scry.Program L) (cols : List Scry.EqCol) : Bool :=
+  List.foldr (fun c acc =>
+    if Nat.lt c.rel (List.length p.arities) then
+      if Nat.lt c.col (p.arity c.rel) then
+        if Scry.natMem c.rel p.latRels then .false else acc
+      else .false
+    else .false) .true cols
+
+/-- A rule head that **asserts an equality**: a tuple head in `rel` (an equality
+relation, whose two first columns are `eqsort` of one sort) with the two terms to be
+merged. `Scry.EqPlan` calls `EGraph.mergeFacts` on those rows after a round and then
+canonicalises the database. -/
+def Scry.Head.eqAssert {L : Type} (rel : Nat) (a b : Scry.Term) : Scry.Head L :=
+  .tuple rel (.cons a (.cons b .nil))

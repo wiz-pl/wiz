@@ -1389,9 +1389,13 @@ with lib/Sys.wiz and lib/Serial.wiz moved onto this module) waits for linear Σ 
 is used once. In `do1`, `x ⇐ e;` binds an `IO1` result at quantity 1, and `(x, y) ⇐ e;` takes a
 pair apart, so an owned handle's token is threaded through straight-line code. The
 operations: `File.writeOwned`, `readLineOwned`, `readAllOwned` and `flushOwned`;
-`Fd.writeOwned` and `Fd.readOwned`; the generic `Handle.use1`. Each returns
-`(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
+`Fd.writeOwned` and `Fd.readOwned`; `Child.communicateOwned`; the generic `Handle.use1`.
+Each returns `(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
 `Child.waitOwned`.
+
+`Child.releaseOwned` drains a piped stdout/stderr (`Child.communicate c ""`) before it
+waits, so a child that fills its pipe cannot deadlock the release; use
+`Child.communicateOwned` first if you want that output.
 
 ```
 File.withOwned p "w" (fun f o => do1
@@ -1882,6 +1886,60 @@ pure. What remains outside the model is listed in `wiz-notes/scry-taint.md` (hea
 context sensitivity, non-ASCII columns); the lowering still warns (havoc) for the
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
+
+## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
+
+`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
+congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
+extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
+native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
+same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
+and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
+`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
+`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
+record, reads a field, or calls those functions compiles against one import only. It
+adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
+rewrites), union explanations (a flat proof forest), node/round/clock limits with a
+reported stop reason, and `Option Nat` extraction costs. Only six of the seventeen
+`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
+`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
+compares; the analysis, explanation, limit and `EqPlan` surface has no reference
+counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
+byte-identical (matching, instantiation and extraction), so the digests show that the
+two *tables* agree, not that the shared code is independently right. They cannot be
+imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
+operations, so a whole-library import that names both is an error. Every whole-library
+loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
+with everything except the reference family. `import Scry.EqPlan`
+is the Datalog seam: `eqsort` columns (`Scry.ColKind`), rules whose head is an equality
+assertion (`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and
+canonicalises the database between rounds. This is the second S12 slice: no
+scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware provenance and
+no kernel-checked certificates yet; `wiz-notes/scry-egraph.md` has the design, the API
+and the gaps.
+
+## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
+
+`import Scry.EgraphWil` turns a `Wil.Program` into an e-graph: every `x = e` is a union
+of the register's class with a structural encoding of `e` (`cst`, `use`, `bin`, `un`,
+`load`, `gep`; `alloc`, `havoc`, `slot`, `globalRef`, `fnptr` and `gepVar` get distinct
+opaque leaves). `wgSaturate` then runs a deterministic, fuel-bounded fold/identity pass —
+constant arithmetic through the same `Wil.Val.bin` semantics as the interpreter, plus
+`x + 0`, `x * 1`, `x * 0` and the other zero/one identities — and reports classes,
+nodes, rounds, fold/rewrite counts and the stop reason (`fixpoint` or `fuel`).
+`wgMergeEqRows` accepts the equality rows a Datalog stratum derives
+(`Scry.EGraph.mergeFacts`), but the e-graph is a read-only view: the `Scry.Store` facts
+and the taint findings stay authoritative.
+
+`import Scry.EgraphExtract` decodes the saturated classes back into a `Wil.Program`, and
+only under checks: a one-block (straight-line) function, every original operand a
+parameter or a single definition before the statement, candidate registers a subset of
+the original right-hand side, and a strictly cheaper term. `import Scry.EgraphTaint`
+compares taint alerts before and after that transformation (`added = 0` by construction;
+`removed` is a precision gain). `scry egraph FILE.c [--fuel N] [--rewrite]` parses C,
+lowers it with `Scry.Lower` and prints both reports (`scry/fixtures/egraph-const.c` is the
+checked-in example). Groups `scry-egraph` and `scry-taint` cover them;
+`wiz-notes/scry-egraph.md` has the design and limits.
 
 ## Scry: the taint benchmark and metrics (`scry/src/Scry/Bench.wiz`)
 

@@ -1218,6 +1218,11 @@ class PolicyTests(unittest.TestCase):
             if tool["name"] == "build":
                 self.assertIs(annotations["readOnlyHint"], False)
                 self.assertIs(annotations["destructiveHint"], True)
+            elif tool["name"] in wiz_mcp.RUNNER_TOOL_NAMES:
+                # The runners execute code: never advertised as read-only, and gated.
+                self.assertIs(annotations["readOnlyHint"], False, tool["name"])
+                self.assertIs(annotations["destructiveHint"], False, tool["name"])
+                self.assertIn(tool["name"], wiz_mcp.GATED_TOOLS)
             else:
                 self.assertIs(annotations["readOnlyHint"], True, tool["name"])
                 self.assertIs(annotations["destructiveHint"], False, tool["name"])

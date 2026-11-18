@@ -40,6 +40,16 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 (Lean would abstract it). Unknown and repeated names are errors (`inferAppNamed`,
 `Elab/Term.lean`; test group `elabfix`).
 
+A constructor's parameters and fields have names as well: with
+`inductive P where | mk (x : Nat) (y : Nat)`, `P.mk (y := 2) (x := 1)` fills `x` with 1
+and `y` with 2 — the telescope is walked in its own order, so a later field's type may
+mention an earlier named one — and an implicit field or a parameter can be named too.
+A missing field leaves a partial application (`P.mk (x := 1)` is a type mismatch at
+`P`), an unknown field is `no parameter named 'z'`, and a repeated one is an error
+(test groups `language`, `selfhost`). A dot-constructor (`.mk (x := 1)`, whose head needs
+the expected type) and an inductive type's own parameters (`L (A := Nat)`) keep no names
+yet.
+
 ## 13b: private declarations and private constructors
 
 ```wiz no-check
@@ -100,7 +110,7 @@ would still be accepted:
 | `refl X`, `cast e x`, `transp`, a tuple or look-alike against the type, `p.1` | closed (their types are unified in the elaborator's view) |
 | `exact`, `rfl` and other tactics that elaborate syntax; macros (they produce syntax) | closed (they go through the same rules) |
 | the tactic request `assign` with a term that still has holes | closed: such a term is kept in the tactic state and its type is inferred and compared with its goal at the end of the `by` block (it was a real bypass: `K x ?n : Look Nat` for a goal `Pos Nat`) |
-| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. A hole records its type when its maker knows it (`MetaEntry.type?`: implicit and instance arguments, `_` against an expected type, goals), and the guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a hole with no recorded type, a comparison that meets an unsolved hole) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`) |
+| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. Every hole records its type (`MetaEntry.type?`): the parameter's type for an implicit, instance or placeholder argument, the expected type for `_` and goals, `Sort ?u` for a hole that stands for a type, and the declared telescope for an output parameter, a simp or fold argument and a calc relation. The guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations. The error leads with the reason and names the hole by what it was made for ("the implicit argument F can't be G: the two types agree only through the definition of Pos (module Priv), hidden outside its module"), then shows the hole, its expected type, the guess and the guess's type, with the free variables by name; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a pruned hole whose own Π lost a binder, a type that mentions a variable the hole is not applied to, a head whose type can't be read off, a comparison that still meets an unsolved hole at the end of the declaration) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`). A comparison that meets a hole where the guess is made is kept and made again at the end of the declaration, with its holes solved (`recheckDeferredGuesses`); a forgery found then is reported as on the spot (`reject`, "a guess compared at the end of the declaration cannot forge either") |
 | the self-hosted frontend (`selfhost/Frontend.wiz`) | open, tracked as a parity item: it parses `private` and ignores it |
 | `T.desc` of an inductive or coinductive type with private parts: `μ T.desc i` written out is the type with nothing hidden, and a raw `con` builds a value of it | closed: `T.desc` is private with the constructors and recursors (a structure has no description). Generic code over `Desc` in another module can't be pointed at such a type; it could not be applied to its values before either, since the type is opaque there. `deriving` reads the kernel's declarations, not the name, and is unaffected (a derived instance that matches on the type is refused as before) |
 | inside the declaring module | by design: there the look-alike is the same type |
@@ -120,6 +130,20 @@ elaborator quotes evaluated values into terms, and a raw pair or projection at a
 without a definition does not type-check (`drafts/rust/lowered/03_get_mut.wiz`,
 `get_mut.is_place` and `get_mut.spec_under`). With the flag a type with private parts is
 abstract for proofs as well.
+
+**`wiz --trace-guess-fallback`** (a diagnostic, off by default). Every hole a guess can
+meet records its type, apart from a pruned hole whose own function type lost a binder
+and a constant whose declared type is not a function there. Even so, a guess can still
+reach the whole-declaration recheck: its type can mention a variable the hole is not
+applied to, the guessed head's type can't be read off, or the comparison can still meet
+a hole at the end of the declaration (a comparison that meets one where the guess is made
+is made again there, once the holes are solved). The flag prints one line per declaration that reaches the recheck, with the
+reasons: `guess-fallback: <module> <declaration> recheck=ran|skipped reasons=…`
+(`skipped`: no other module's private type is in view, so the recheck has nothing to
+hide). `scripts/guess-fallback-stats.sh` counts them over `lib/`, `examples/` and `tests/`
+(`WIZ`), and over the programs inline in the test groups (`--tests TESTS`: the tests binary
+takes the same flag, and its cases' lines name their file `GROUP#INDEX`).
+The goal is zero, so the recheck can go.
 
 The motivating use is `lib/Region.wiz` ([22g](22-numbers.md)): the constructors of the borrow handles
 `Shr`, `Uniq`, `Mut` and `Lent` are private, so a handle at a region comes only from a
