@@ -254,6 +254,31 @@ jobs:
             exit "$code"
           fi
 
+      - name: Scry resource limits
+        # scrydos-01/02 regressions: RSS < 20x input on a few-MiB file, and linear
+        # preparation for 16..256 `a++;` statements. The Scry corpus step above built
+        # the CLI; a checkout without it skips (the script prints one line and exits 0).
+        shell: bash
+        run: |
+          if [ ! -x scry/.grail/bin/scry ]; then
+            echo "::notice title=scry dos-check skipped::scry/.grail/bin/scry was not built"
+            exit 0
+          fi
+          python3 scry/scripts/dos-check.py --scry scry/.grail/bin/scry
+
+      - name: Scry fuzz regressions
+        # The minimised parse/lower regressions (scry/bench/fuzz.md) at the RSS cap
+        # and time budget recorded in their manifest, plus the bounded --ci profile.
+        # The fixtures are committed; a checkout without the CLI skips both.
+        shell: bash
+        run: |
+          if [ ! -x scry/.grail/bin/scry ]; then
+            echo "::notice title=scry fuzz regressions skipped::scry/.grail/bin/scry was not built"
+            exit 0
+          fi
+          python3 scry/scripts/fuzz-lower.py --ci --iterations 10 --no-write-fixtures
+          python3 scry/scripts/fuzz-lower.py --regressions-only
+
       - name: Paired-ratio threshold
         id: threshold
         # The gate is the Gate step below: this step still writes the summary,

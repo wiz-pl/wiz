@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* scry: `scry taint` and `scry parse --stats` read C source as `Bytes` and parse it in
+  place (`FS.readBytes`, `Scry.Native.parseBytes`, `Scry.Cst.ofStoreBytes`), and
+  `parseBlock` sniffs the store format on bytes instead of `String.trim`-ing the whole
+  file. A 4 MiB source no longer becomes a `String` (`List Char`, two cons cells per
+  character): the memory ratio drops from ~287× to ~5×. The summary fixpoint reuses the
+  converged round's `FuncResult`s for the results stage (it evaluated every function a
+  second time), prepares each function's plan once instead of per round, and indexes a
+  point's CFG predecessors (`Scry.Fn.preds`) instead of rebuilding them by scanning
+  every point: the 525-byte 128-statement case drops from 12.85 s to ~0.1 s. Long
+  integer literals are parsed by halving the digit list (`Scry.parseDigitsAt`) instead
+  of one quadratic-size multiply per digit. New `scry/scripts/dos-check.py` (grail target
+  `dos-check`, run by the nightly bench workflow) pins RSS < 20× input and statement
+  counts 16/64/128/256 to small time budgets (S1 findings `scrydos-01/02/03`).
+
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

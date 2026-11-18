@@ -236,6 +236,16 @@ def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
     (Scry.retSeedsOf graph sums fn.name)
     (Scry.entrySourcesFor entries fn.name)
 
+/-- `Scry.evalWithEntries` with the function's plan prepared earlier: the plan does not
+depend on the summaries, so a summary fixpoint prepares it once and evaluates it in
+every round (and in the results stage) without repeating the reaching-definitions and
+dominator fixpoints. -/
+def Scry.evalPlanWith (graph : Scry.CallGraph) (sums : List Scry.Summary)
+    (plan : Scry.FuncPlan) : Scry.FuncResult :=
+  Scry.evaluatePlan plan (Scry.seedsFor sums plan.info.g.fn.name)
+    (Scry.summaryOf sums plan.info.g.fn.name).params
+    (Scry.retSeedsOf graph sums plan.info.g.fn.name)
+
 def Scry.evalWith (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
     (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
   Scry.evalWithEntries graph pack pt .nil sums fn

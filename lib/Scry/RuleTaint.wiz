@@ -883,13 +883,20 @@ structure Scry.FuncResult where
   edb : Scry.State Nat
   state : Option (Scry.State Nat)
 
+/-- Evaluate a plan that was prepared earlier (a summary fixpoint prepares every
+function once; the plan does not depend on the summaries, only the seeds assigned to it
+do). `Scry.evaluateFuncWith` is this with a fresh plan. -/
+def Scry.evaluatePlan (plan0 : Scry.FuncPlan) (memSeeds : List Scry.MemSeed)
+    (paramTaint : List Nat) (retSeeds : List (Nat × Nat)) : Scry.FuncResult :=
+  let plan := { plan0 with seeds := Scry.dedupSeeds memSeeds };
+  let edb := Scry.planInput plan paramTaint retSeeds;
+  Scry.FuncResult.mk plan.info.g.fn plan edb (Scry.eval (Scry.ruleTaintProgramFor plan) edb)
+
 def Scry.evaluateFuncWith (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
     (memSeeds : List Scry.MemSeed) (paramTaint : List Nat) (retSeeds : List (Nat × Nat))
     (entrySources : List Nat) : Scry.FuncResult :=
-  let plan0 := Scry.prepareFuncWith fn pack pt entrySources;
-  let plan := { plan0 with seeds := Scry.dedupSeeds memSeeds };
-  let edb := Scry.planInput plan paramTaint retSeeds;
-  Scry.FuncResult.mk fn plan edb (Scry.eval (Scry.ruleTaintProgramFor plan) edb)
+  Scry.evaluatePlan (Scry.prepareFuncWith fn pack pt entrySources)
+    memSeeds paramTaint retSeeds
 
 /-- Evaluate one function with no exported-entry parameter sources. -/
 def Scry.evaluateFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)

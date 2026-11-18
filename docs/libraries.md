@@ -1480,8 +1480,10 @@ byte is a `Nat` below 256: `Bytes.push b x` appends the low eight bits of `x`, a
 
 Pure helpers built on those: `Bytes.isEmpty`, `Bytes.at` (`Option Nat`), `Bytes.take`,
 `Bytes.drop` (past the end is the empty buffer), `Bytes.ofList`/`Bytes.toList` (each
-number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.show`
-(`[1, 2, 255]`, the form `#eval` prints a buffer in).
+number mod 256), `Bytes.singleton`, `Bytes.range n`, `Bytes.show`
+(`[1, 2, 255]`, the form `#eval` prints a buffer in), and `Bytes.startsWith b s` /
+`Bytes.matchesAt b i s` (a byte comparison with a string's UTF-8 bytes, without building
+its `List Char`).
 
 **Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
 `Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;

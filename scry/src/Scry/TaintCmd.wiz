@@ -239,37 +239,8 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
 /-- The byte offsets where each line starts (`0`, then one past every `\n`). Built once
 per file: the old `lineColAt` walked the source from byte 0 for **every** origin entry,
 which is O(points × file) and dominated the report on a real file. -/
-def Scry.lineStartsBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
-  | .zero, acc => acc
-  | .succ k, acc =>
-    let i := Nat.sub n (Nat.succ k);
-    let acc' := match Nat.beq (Bytes.get b i) 10 with
-      | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
-      | .false => acc;
-    Scry.lineStartsBytesGo b n k acc'
-
 def Scry.lineStartsOf (text : String) : U32Array :=
-  let b := Bytes.ofString text;
-  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
-
-/-- Binary search for the largest line-start index whose offset is `<= off`. -/
-partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
-  match Nat.lt lo hi with
-  | .false => lo
-  | .true =>
-    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
-    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
-    | .true => Scry.lineIndexGo starts off mid hi
-    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
-
-/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
-def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
-  let n := U32Array.size starts;
-  match Nat.beq n 0 with
-  | .true => (1, Nat.succ off)
-  | .false =>
-    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
-    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+  Scry.lineStartsOfBytes (Bytes.ofString text)
 
 /-- The old signature, kept for callers that only have the text (it builds the line
 table first, so prefer `originOfSpanAt` when several spans are located). -/
@@ -884,47 +855,60 @@ def Scry.summariesBudgetNotes (maxRounds : Option Nat) (rounds : Nat) (complete 
 /-- Evaluate every function of the summary fixpoint one at a time, checking `--timeout`
 between them and printing a progress line every ten functions. This is what makes a
 function-heavy file (e.g. tree-sitter's `query.c`) show where it is instead of running
-silently for a minute. -/
+silently for a minute. The plans were prepared once (`Scry.prepareFuncWith`); only the
+seeds and parameter/return summaries change between rounds. -/
 partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : String)
-    (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (sums : List Scry.Summary) (funcs : List Wil.Func)
+    (graph : Scry.CallGraph) (sums : List Scry.Summary) (plans : List Scry.FuncPlan)
     (i total : Nat) : EIO (List Scry.FuncResult) :=
-  match funcs with
+  match plans with
   | .nil => EIO.pure .nil
-  | .cons fn rest => do
+  | .cons plan rest => do
     Scry.checkDeadline o startMs tag;
     match o.progress with
     | .true => match Nat.beq (Nat.mod i 10) 0 with
       | .true => do
         now ← EIO.lift Scry.nowMs;
         EIO.lift (IO.ePrintln ("scry: [stage] " ++ tag ++ " function "
-          ++ Nat.repr (Nat.succ i) ++ "/" ++ Nat.repr total ++ " " ++ fn.name
+          ++ Nat.repr (Nat.succ i) ++ "/" ++ Nat.repr total ++ " "
+          ++ plan.info.g.fn.name
           ++ " elapsed=" ++ Nat.repr (Nat.sub now startMs) ++ "ms"))
       | .false => EIO.pure ()
     | .false => EIO.pure ();
-    let r := Scry.evalWithEntries graph pack pt entries sums fn;
-    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries sums rest (Nat.succ i) total;
+    let r := Scry.evalPlanWith graph sums plan;
+    rs ← Scry.evalAllStaged o startMs tag graph sums rest (Nat.succ i) total;
     EIO.pure (List.cons r rs)
 
+/-- What the summary fixpoint found: the converged summaries, the round's results (the
+same summaries the result stage needs, so they are reused rather than evaluated a second
+time), the number of rounds, and whether it converged. `results` is `none` when the fuel
+ran out: the last round was evaluated under the previous summaries, which are not the
+returned ones. -/
+structure Scry.SummaryRounds where
+  sums : List Scry.Summary
+  results : Option (List Scry.FuncResult)
+  rounds : Nat
+  complete : Bool
+
 /-- The summary fixpoint, one round at a time (so `--timeout` and progress can act
-between rounds). Returns the summaries, the rounds run, and whether it converged. -/
+between rounds). -/
 partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
-    (p : Wil.Program) (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (fuel rounds : Nat) (sums : List Scry.Summary) :
-    EIO (List Scry.Summary × Nat × Bool) :=
+    (p : Wil.Program) (graph : Scry.CallGraph) (plans : List Scry.FuncPlan)
+    (fuel rounds : Nat) (sums : List Scry.Summary) :
+    EIO Scry.SummaryRounds :=
   match fuel with
-  | .zero => EIO.pure (sums, rounds, .false)
+  | .zero => EIO.pure (Scry.SummaryRounds.mk sums .none rounds .false)
   | .succ k => do
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries sums p.funcs 0
-      (List.length p.funcs);
+    results ← Scry.evalAllStaged o startMs "summaries" graph sums plans 0
+      (List.length plans);
     let next := Scry.growSummaries p graph sums results;
     match Scry.summariesEq next sums with
     | .true => do
       Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
         ++ " round(s), converged");
-      EIO.pure (next, Nat.succ rounds, .true)
-    | .false => Scry.summaryRounds o startMs p graph pack pt entries k (Nat.succ rounds) next
+      EIO.pure (Scry.SummaryRounds.mk next (.some results) (Nat.succ rounds) .true)
+    | .false =>
+      Scry.summaryRounds o startMs p graph plans k (Nat.succ rounds) next
 
 /-- The summary fixpoint's fuel: its historical bound, or `--max-rounds` when given. -/
 def Scry.summaryFuel (o : Scry.TaintOpts) (p : Wil.Program) (pt : Scry.PtResult) : Nat :=
@@ -942,7 +926,7 @@ nodes and keeps their partial facts, but the analysis is still partial. This war
 makes that explicit, so `--allow-errors` can never report a silent empty unit: when no
 function could be recovered it says so instead of returning 0 findings with no evidence.
 -/
-def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs : Nat)
+def Scry.parseRecoveryFindings (uri : String) (starts : U32Array) (cst : Scry.CstStore) (errs : Nat)
     (funcs : Nat) : List Scry.BoundaryFinding :=
   match Nat.beq errs 0 with
   | .true => .nil
@@ -955,7 +939,7 @@ def Scry.parseRecoveryFindings (uri text : String) (cst : Scry.CstStore) (errs :
     let origin : Option Scry.Origin := match Scry.CstStore.firstError cst with
       | .some i =>
         let sp := Scry.CstStore.spanOf cst i;
-        .some (Scry.originOfSpan uri text (Wil.Span.mk 0 sp.start sp.stop i 0 0))
+        .some (Scry.originOfSpanAt uri starts (Wil.Span.mk 0 sp.start sp.stop i 0 0))
       | .none => .none
     .cons (Scry.BoundaryFinding.mk "scry/lowering/parse-recovery" message "<unit>" 0 origin) .nil
 
@@ -963,10 +947,10 @@ def Scry.certVerified : Option Scry.Certificate → Bool
   | .some c => c.verified
   | .none => .false
 
-/-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
-locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
-so a session does not parse the C again. -/
-def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+/-- `Scry.analyzeStore` with the CST view supplied by the caller: `scry taint` builds it
+from bytes (`Scry.Cst.ofStoreBytes`), so no stage copies the whole file into a `String`
+list. -/
+def Scry.analyzeStoreC (o : Scry.TaintOpts) (startMs : Nat) (c : Scry.Cst) (starts : U32Array)
     (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
   let errs := Scry.CstStore.errorCount cst;
   match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
@@ -975,7 +959,6 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
   | .false => do
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
-    let c := Scry.Cst.ofStore text cst;
     let tu := Scry.lowerTU o.file c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
@@ -993,12 +976,23 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
     address taken is an exported entry, so its parameters are sources. -/
     let entries := Scry.entrySources prog graph;
+    /-- The plan of a function does not depend on the summaries, so prepare it once and
+    evaluate it in every summary round and in the result stage. (Preparing it inside
+    the staged evaluation repeated the reaching-definitions/dominator fixpoints per
+    round, which made `analyse` superlinear in the function's statement count.) -/
+    let plans := List.map (fun fn => Scry.prepareFuncWith fn pack pt
+      (Scry.entrySourcesFor entries fn.name)) prog.funcs;
     let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
     let summaryFuel := Scry.summaryFuel o prog pt;
-    sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
+    sr ← Scry.summaryRounds o startMs prog graph plans summaryFuel 0 sums0;
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
-      prog.funcs 0 (List.length prog.funcs);
+    /-- Reuse the converged round's evaluation: `summariesEq` says the summaries are the
+    same ones the result stage would use, so a second evaluation of every function is
+    redundant. (An incomplete fixpoint evaluates once more under the final summaries.) -/
+    results ← match sr.results with
+      | .some rs => EIO.pure rs
+      | .none => Scry.evalAllStaged o startMs "results" graph sr.sums plans 0
+          (List.length plans);
     Scry.checkDeadline o startMs "results";
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
@@ -1011,37 +1005,47 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
       bounds.warnings);
     let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
-    let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
+    let pr := Scry.ProgramResult.mk results sr.sums graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
-      ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
-      ++ (match sums.2.2 with
+      ++ " function(s), " ++ Nat.repr sr.rounds ++ " summary round(s)"
+      ++ (match sr.complete with
         | .true => ""
         | .false => " (incomplete)"));
     let findings := Scry.programFindings pr;
     let origins := Scry.originEntries o.file starts tu.funcs;
     Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
     Scry.checkDeadline o startMs "origins";
-    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+    let boundaries := List.append (Scry.parseRecoveryFindings o.file starts cst errs
       (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
     let checks := List.map Scry.certVerified certificates;
     let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
-      (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
-    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
+      (Scry.summariesBudgetNotes o.maxRounds sr.rounds sr.complete);
+    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sr.complete);
     endMs ← EIO.lift Scry.nowMs;
     EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
-      sums.2.2 notes)
+      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sr.rounds
+      sr.complete notes)
 
-/-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
+/-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
+locate. `Scry.analyzeFile` calls `Scry.analyzeStoreC` with a bytes-backed `Scry.Cst`;
+`scry repl` calls this text form on a cached store, so a session does not parse the C
+again. -/
+def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+    (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport :=
+  Scry.analyzeStoreC o startMs (Scry.Cst.ofStore text cst) starts cst nodes
+
+/-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. The
+source is read as `Bytes` and parsed in place; only a file with preprocessor line
+markers falls back to a `String` (see `Scry.Cst.ofStoreBytes`). -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   startMs ← EIO.lift Scry.nowMs;
-  text ← FS.readFile o.file;
-  starts ← EIO.lift (IO.pure (Scry.lineStartsOf text));
-  Scry.reportStage o startMs "read" (Nat.repr (String.length text) ++ " bytes, "
+  bytes ← FS.readBytes o.file;
+  starts ← EIO.lift (IO.pure (Scry.lineStartsOfBytes bytes));
+  Scry.reportStage o startMs "read" (Nat.repr (Bytes.size bytes) ++ " bytes, "
     ++ Nat.repr (U32Array.size starts) ++ " lines");
-  st ← Scry.Native.parse "c" text;
+  st ← Scry.Native.parseBytes "c" bytes;
   nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
   Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
   -- The node cap is checked **before** the column copy: refusing a giant file should
@@ -1052,7 +1056,7 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     cst ← EIO.lift (Scry.Native.toCstStore o.file st);
     Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
       ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
-    Scry.analyzeStore o startMs text starts cst nodes
+    Scry.analyzeStoreC o startMs (Scry.Cst.ofStoreBytesAt o.file bytes starts cst) starts cst nodes
 
 
 /-- `(finding, checked)` pairs in the findings' order. -/

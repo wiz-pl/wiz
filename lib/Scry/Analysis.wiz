@@ -1,6 +1,7 @@
 import Scry.Wil
 import Text
 import Word
+import WordMap
 /-!
 # Scry.Analysis
 
@@ -111,6 +112,11 @@ structure Scry.Fn where
   bases : List (Nat × Nat)
   /-- Number of program points (statements plus one terminator point per block). -/
   count : Nat
+  /-- Predecessors of each point, indexed by point (`U64Map`, so the lookup is the
+  runtime's hash table in compiled code). `Scry.predsOf` used to rebuild this by
+  scanning every point's successors on each call, which made the reaching-definitions
+  and dominator fixpoints cubic in the statement count. -/
+  preds : U64Map (List Nat)
 
 /-- The base of every block, and the total point count, in one pass. -/
 def Scry.blockBases : Nat → Nat → List Wil.Block → List (Nat × Nat) × Nat
@@ -119,9 +125,44 @@ def Scry.blockBases : Nat → Nat → List Wil.Block → List (Nat × Nat) × Na
     match Scry.blockBases (Nat.succ i) (Nat.add base (Nat.succ (List.length b.stmts))) bs with
     | (rest, total) => (.cons (i, base) rest, total)
 
+/-- The CFG edges a block contributes: point to next point inside the block, then the
+terminator point to each target's base. -/
+def Scry.blockEdges (bases : List (Nat × Nat)) (base : Nat) (blk : Wil.Block) :
+    List (Nat × Nat) :=
+  let n := List.length blk.stmts;
+  let lin : List (Nat × Nat) :=
+    List.map (fun pc => (Nat.add base pc, Nat.add base (Nat.succ pc))) (Scry.range n);
+  let t := Nat.add base n;
+  let tail : List (Nat × Nat) := match blk.term with
+    | .goto target _ => .cons (t, Scry.lookupNatD 0 bases target.index) .nil
+    | .br _ x y _ => .cons (t, Scry.lookupNatD 0 bases x.index)
+        (.cons (t, Scry.lookupNatD 0 bases y.index) .nil)
+    | .ret _ _ => .nil
+    | .unreachable _ => .nil
+  List.append lin tail
+
+/-- Every CFG edge, in source order. This is `Scry.cfgEdges` without a `locate` and
+`List.length` per point. -/
+def Scry.blockEdgesAll (bases : List (Nat × Nat)) : Nat → List Wil.Block → List (Nat × Nat)
+  | _, .nil => .nil
+  | i, .cons blk rest =>
+    List.append (Scry.blockEdges bases (Scry.lookupNatD 0 bases i) blk)
+      (Scry.blockEdgesAll bases (Nat.succ i) rest)
+
+/-- Add `a` to `b`'s predecessor bucket, keeping each bucket in increasing order and
+free of duplicates (the order `Scry.predsOf` used to produce). -/
+def Scry.addPred (m : U64Map (List Nat)) (a b : Nat) : U64Map (List Nat) :=
+  let k := U64.ofNat b;
+  let bucket := U64Map.findD m k .nil;
+  if Scry.memNat a bucket then m
+  else U64Map.insert m k (List.append bucket (.cons a .nil))
+
 def Scry.flatten (fn : Wil.Func) : Scry.Fn :=
   match Scry.blockBases 0 0 fn.blocks with
-  | (bases, total) => Scry.Fn.mk fn bases total
+  | (bases, total) =>
+    let preds := List.foldl (fun (m : U64Map (List Nat)) (e : Nat × Nat) =>
+      Scry.addPred m e.1 e.2) U64Map.empty (Scry.blockEdgesAll bases 0 fn.blocks);
+    Scry.Fn.mk fn bases total preds
 
 def Scry.baseOf (g : Scry.Fn) (b : Wil.BlockId) : Nat :=
   Scry.lookupNatD 0 g.bases b.index
@@ -193,10 +234,10 @@ def Scry.succs (g : Scry.Fn) (n : Nat) : List Nat :=
         | .unreachable _ => .nil
 
 def Scry.predsOf (g : Scry.Fn) (n : Nat) : List Nat :=
-  List.filter (fun m => Scry.memNat n (Scry.succs g m)) (Scry.range g.count)
+  U64Map.findD g.preds (U64.ofNat n) .nil
 
 def Scry.cfgEdges (g : Scry.Fn) : List (Nat × Nat) :=
-  Scry.concatLists (fun n => List.map (fun m => (n, m)) (Scry.succs g n)) (Scry.range g.count)
+  Scry.blockEdgesAll g.bases 0 g.fn.blocks
 
 -- ## Definitions and uses
 
