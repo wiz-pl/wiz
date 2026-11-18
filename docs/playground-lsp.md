@@ -134,6 +134,33 @@ UTF-16 index.
 * Optionally, if the client asked for it, `wiz/elaborated`
   `{"uri", "version", "session"}` after the diagnostics; the panel also re-asks on it.
 
+## The editor: hover and go-to-definition
+
+The pane is not the only server feature the page shows. Two standard requests make the
+textarea an editor:
+
+* **Hover.** When the caret rests after a mouse click or selection, or after an
+  arrow/Home/End/Page key, the page sends `textDocument/hover` at that position and
+  draws the answer in a small card under the caret. The server's Markdown is rendered as
+  text lines (a fenced block stays code, `---` is a rule) and never as HTML, so a server
+  cannot inject markup. The card is not shown while typing; keyboard navigation shows it
+  again when the caret stops. `?hover=off` (also `0`, `none`, `false`) turns the feature
+  off, and the `startInfoview({..., hover: false})` option does the same in JavaScript.
+* **Go to definition.** F12 or Ctrl/⌘-click sends `textDocument/definition` at the
+  caret. A location in the document the page has open (`file:///playground-….wiz`)
+  moves the caret and selects the name; a definition in a library file has no page here,
+  so the card shows `Prelude.wiz:7:1` and the editor is left alone. Escape, typing,
+  scrolling or leaving the field close the card.
+
+Both requests use `TextDocumentPositionParams` and the same UTF-16 positions as the rest
+of the client. A server that answers `null` (nothing at that character) or
+`MethodNotFound` is silent: the page keeps working as before. The in-page server
+(`web/selfhost-lsp-shim.js`) currently answers `hover` with `null` and has no
+`definition`, because the self-hosted frontend keeps no position index yet; with
+`?lsp=ws://…` both come from the Lean server, which implements them. `web/hover.js` is
+the page half (the content rules and the card), and `web/hover_test.mjs` tests it without
+a browser.
+
 ## Requests
 
 `TextDocumentPositionParams` below means
@@ -268,7 +295,8 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
    text, the state's range) and `wiz/interactiveTermGoal` (the expected type), plus the
    `wiz/plainGoal`/`wiz/plainTermGoal` fallbacks so degraded servers still work.
 7. **Optional.** `wiz/subtermInfo`, `wiz/elaborated`, `Hyp.range`, `SubtermTag.range`,
-   `InteractiveGoal.range`, `tree`.
+   `InteractiveGoal.range`, `tree`, and the editor's `textDocument/hover` /
+   `textDocument/definition` (without them the card stays closed and F12 does nothing).
 
 The server must not require `stdin` (the page is its own editor), must tolerate any
 number of clients (one document each), and may share state between them as the Lean
@@ -284,5 +312,9 @@ server does.
   Wiz build.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
+* `node web/hover_test.mjs` — the hover card and go-to-definition: the three LSP content
+  shapes and the line rules (fences, a rule, the length limit), `Location` / `LocationLink`
+  / array definitions, and the widget's keys (Escape, F12, Ctrl-click, typing) against
+  `web/framework/minidom.mjs`. No browser, no server, no Wiz build.
 * `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and
   `web/check-site.sh` ship the new modules and fail if an import does not resolve.

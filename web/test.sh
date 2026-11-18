@@ -28,6 +28,11 @@ grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
 if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
   echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
+# (editor features) the hover card and go-to-definition: the content rules and the
+# widget (minidom), no server and no Wasm build
+node "$ROOT/web/hover_test.mjs" > "$OUT/hover.txt"
+if grep -qF 'hover: all checks passed' "$OUT/hover.txt"; then echo "ok (playground, hover)"; else
+  echo "FAIL (playground, hover)"; cat "$OUT/hover.txt"; exit 1; fi
 # (playground-selfhost-lsp) ?lsp=selfhost: the in-page server shim, with a stub engine
 node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
 if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else

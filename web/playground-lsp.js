@@ -19,6 +19,7 @@
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
 import { readGoalState, renderPanel, positionAt, parseSpan, rangeOffsets } from "./goals.js";
 import { delegate } from "./tagged.js";
+import { mountHover, wantsHover } from "./hover.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -29,10 +30,16 @@ function scratchUri() {
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server) or the whole endpoint
 // from `parseEndpoint`; `search` defaults to the page's query string.
-export function startInfoview({ editor, panel, config, search, uri } = {}) {
+//
+// `hover: false` (or `?hover=off`) turns the hover card and go-to-definition off;
+// `document` is the page's document (the Node tests pass a double).
+export function startInfoview({
+  editor, panel, config, search, uri, hover: wantHover, document: pageDocument,
+} = {}) {
   if (!editor || !panel) return null;
+  const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined
-    ? endpointFromSearch(search === undefined ? (typeof location !== "undefined" ? location.search : "") : search)
+    ? endpointFromSearch(query)
     : (typeof config === "string" ? { url: config } : config);
   const documentUri = uri || scratchUri();
   let client = null;
@@ -59,6 +66,24 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     position: null,
     canReconnect: false,
   };
+
+  // ## Hover and go-to-definition
+
+  // The card shows the server's `textDocument/hover` at the caret and jumps to a
+  // definition (`textDocument/definition`). A definition in the editor's own document
+  // moves the caret and selects the name; one in a library has no page here, so the card
+  // says `Prelude.wiz:7:1` and the editor stays where it was.
+  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+    editor,
+    document: pageDocument,
+    onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
+    onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
+    onJump: (target) => {
+      if (!target || target.uri !== documentUri) return false;
+      highlight(target.range);
+      return true;
+    },
+  });
 
   // Keep the panel's scroll position across re-renders (a click re-renders the panel).
   function render() {
@@ -216,6 +241,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     });
     client.on("close", (info) => {
       if (info && info.intentional) return;
+      if (hover) hover.close();
       view.state = "closed";
       view.info = null;
       render();
@@ -281,9 +307,11 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     uri: documentUri,
     view,
     client: () => client,
+    hover: () => hover,
     refresh,
     reconnect,
     stop() {
+      if (hover) hover.close();
       if (!client) return;
       client.closeDocument(documentUri);
       client.close();

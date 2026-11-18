@@ -420,6 +420,12 @@ export class LspClient {
     return { textDocument: { uri }, position: { line: position.line, character: position.character } };
   }
 
+  // The editor's requests: the type at the caret and where the identifier is declared
+  // (both already advertised in `initializeParams`'s capabilities). A server without
+  // them answers `MethodNotFound`; `web/hover.js` treats that as "nothing to show".
+  hover(uri, position) { return this.request("textDocument/hover", this.positionParams(uri, position)); }
+  definition(uri, position) { return this.request("textDocument/definition", this.positionParams(uri, position)); }
+
   plainGoal(uri, position) { return this.request("wiz/plainGoal", this.positionParams(uri, position)); }
   plainTermGoal(uri, position) { return this.request("wiz/plainTermGoal", this.positionParams(uri, position)); }
   interactiveGoals(uri, position) { return this.request("wiz/interactiveGoals", this.positionParams(uri, position)); }

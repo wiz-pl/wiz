@@ -97,3 +97,17 @@ footer code { font-size: 12px; }
 ul.tree { list-style: none; margin: 4px 0 0; padding-left: 14px; border-left: 1px dotted var(--line); }
 ul.tree li { margin: 1px 0; }
 ul.tree li.leaf { color: var(--dim); }
+
+/* (editor features) The hover card: `web/hover.js` places it under the caret with
+   fixed coordinates, so it follows the editor when the page scrolls; it never takes a
+   pointer event, so a click still goes to the textarea. */
+.wiz-hover { position: fixed; z-index: 40; max-width: min(46ch, 80vw); max-height: 40vh;
+             overflow: auto; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+             background: var(--panel); color: var(--fg); box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+             font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+             white-space: pre-wrap; pointer-events: none; }
+.wiz-hover[hidden] { display: none; }
+.wiz-hover .hover-head { font: 600 12px system-ui, sans-serif; color: var(--dim); margin-bottom: 4px; }
+.wiz-hover .hover-line.code { color: var(--const); }
+.wiz-hover .hover-line.more { color: var(--dim); }
+.wiz-hover hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
