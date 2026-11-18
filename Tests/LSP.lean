@@ -454,7 +454,10 @@ def wsCase : IO Unit := do
         -- the token as `Authorization: Bearer` (a program's way) is let in
         let (r, w) ← tcp
         match ← WebSocket.connect r w s!"127.0.0.1:{port}" "/" (bearer := some token) with
-        | .ok () => send w (req "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+        -- Do NOT send `exit` here: it stops the server, and the next check expects that same
+        -- server to refuse a plain GET with 426. The handshake succeeding is the point of this
+        -- case; the editor's `exit` near the end of this function stops the server.
+        | .ok () => pure ()
         | .error e => throw (IO.userError s!"bearer handshake: {e}")
         let (r, w) ← tcp
         w.putStr "GET / HTTP/1.1\r\nHost: x\r\n\r\n"; w.flush
