@@ -818,7 +818,8 @@ passes, and the self-hosted frontend still checks itself.
 `f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
 carry no binder names, so a `Global` keeps its parameters' names beside their implicit
 mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
-definitions from their written binders; an `extern` writes no binders). An application
+definitions from their written binders, and for a constructor from the type's parameters
+followed by the constructor's fields; an `extern` writes no binders). An application
 with `term.namedArg`
 arguments is split into named and positional lists, in source order. A duplicate name is
 `argument 'x' was already given`. The telescope is then walked: a binder whose name has
@@ -836,17 +837,23 @@ arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
 Named arguments work for a global function whose parameters are written as binders, or
 in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
 (A := B)` is accepted; that also reads the names an `extern` writes in its type).
-A constructor's fields and a local variable's Π type keep no names yet, so a named
-argument there is rejected (a clear error, not a silent mismatch); class/instance
-binders will use the same path once A10 stores their names. An implicit parameter
-written only in a declaration's type is still not inserted positionally when it is
-omitted (A3); it can be supplied by name.
+A constructor's parameters and fields are named too (`paramNames` is the type's `ps`
+followed by the constructor's fields, beside the same implicit mask): `P.mk (y := 2)
+(x := 1)` fills `x` and `y` in the telescope's own order, so a later field's type may
+mention an earlier named one, and an implicit constructor field or a parameter can be
+named (`Imp.mk (n := 3) 7`). A local variable's Π type, a dot-constructor (`.mk`, whose
+head needs the expected type) and an inductive type's own parameters
+(`List (A := Nat)`) keep no names yet, so a named argument there is rejected
+(a clear error, not a silent mismatch); class/instance binders will use the same path
+once A10 stores their names. An implicit parameter written only in a declaration's type
+is still not inserted positionally when it is omitted (A3); it can be supplied by name.
 
-**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
-arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
-implicit insertion around named arguments, checked against the Lean frontend; unknown,
-duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
-checks itself.
+**Tests** (groups `selfhost`, `language`): explicit, implicit, reordered and interleaved
+named arguments, a named implicit, `@f` with a named implicit and with a named explicit,
+and implicit insertion around named arguments, checked against the Lean frontend; a
+constructor's named fields and parameters (reordered, a dependent later field, an
+implicit field); unknown, duplicate, ordering and bare named-argument errors; and the
+self-hosted frontend still checks itself.
 ## 21aa: `import_c`, `glue` and native representations, self-hosted
 
 The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
