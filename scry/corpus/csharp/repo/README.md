@@ -6,7 +6,7 @@ A small real tree for `scry cs scry/corpus/csharp/repo` and the `scry-csharp` te
 |---|---|
 | `src/Clean.cs` | parses and lowers with no warning |
 | `src/Helper.cs` | `Console.ReadLine` reaches `Process.Start`, so the report has a finding |
-| `src/Unsupported.cs` | a lambda and a LINQ query: parses, lowers with two coverage rows |
+| `src/Unsupported.cs` | a lambda (its own warning) and a LINQ query lowered to `get_Item`/`Enumerable.Select`, which add unmodelled-external calls rather than a query row |
 | `src/Broken.cs` | deliberately not valid C#; the native parse fails, so it is a `parse failure` row |
 | `src/Form1.Designer.cs` | excluded by `*.Designer.cs` |
 | `src/Generated.g.cs` | excluded by `*.g.cs` |
