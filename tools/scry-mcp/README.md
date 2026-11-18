@@ -17,17 +17,18 @@ build` in `scry/`) that lives outside the workspace, or an explicit `--scry` /
 
 1. `--scry PATH` — used as given; a non-executable path is `scry_not_found` (there
    is no fallback to the next entry);
-2. `$SCRY_BIN` — likewise, when `--scry` was not given;
+2. `$SCRY_BIN` — tried when `--scry` was not given (a bad value falls through to
+   `PATH`);
 3. `scry` on `PATH`.
 
 The workspace's own build (`scry/.grail/bin/scry`) is **not** found
 automatically: the workspace is the tree under review, and a server whose first
 tool call executes a program from that tree would run repository-controlled
 code. Point `--scry` or `$SCRY_BIN` at it explicitly if that is what you want.
-That is the intentional trust decision about `scry` itself: everything else it
-starts is `cc` (the host preprocessor), `git diff`, or `uname`, each found through
-the inherited `PATH`. A relative entry in `PATH` is therefore a second trust decision,
-not a sandbox boundary.
+That is the intentional trust decision about `scry` itself: the other programs it
+starts are `cc` (the host preprocessor) and `git diff`, each found through the inherited
+`PATH`. A relative entry in `PATH` is therefore a second trust decision, not a sandbox
+boundary.
 
 The default rule pack is `--rules`, else `./lib/Scry/rules/default.scry`, else
 the `default.scry` in the library of the `wiz` the workspace would use.
