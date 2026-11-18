@@ -9,7 +9,9 @@
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
 --            --cache-verify off|warn|strict, --target c (the backend the host names;
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
---            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
+--            --trust-native (27a: `def X : a = b := native_refl` is decided by running
+--            a and b; the frontend's `Globals.trustNative`), --cc, --rt, --cflags,
+--            --ldflags (the C toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
 --            recognised and refused with the reason (C5/D5), not as unknown flags.
@@ -62,12 +64,15 @@ structure Opts where
   backend : List String
   verify : String
   target : Option String
+  -- (27a) `--trust-native`: `native_refl` may decide an equation by running it; the
+  -- frontend's `Globals.trustNative` (the host's `Toolchain.trustNative`)
+  trustNative : Bool
 
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
   Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
-    "warn" .none
+    "warn" .none .false
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
@@ -241,15 +246,17 @@ def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
           someGraph (Graph.mk tab hs))))
 
-def runGraph (g : Graph) : Prepared := match g with
-  | .mk tab hs => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+-- (27a) `trust` is the run's `--trust-native`: it is handed to the frontend's
+-- `Globals.trustNative` (never a property of the source)
+def runGraph (trust : Bool) (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunHTrust cats tokens trust hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => Prepared.mk tab run order
 
 -- the whole program: the loader, every module checked, and the run it produced
-def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+def prepare (trust : Bool) (roots : List String) (file : String) : IO (Option Prepared) :=
   IO.bind (loadGraph roots file) (fun g => match g with
     | .none => nonePrepared
-    | .some g => somePrepared (runGraph g))
+    | .some g => somePrepared (runGraph trust g))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -635,13 +642,18 @@ def headerHash : List Header → Nat → Nat
 -- (the cache key) the graph alone: every module's name and text, the paths they were
 -- found at, the root's header texts, and the backend flags. This is the same before and
 -- after elaboration, so a warm `check`/`run` can answer it without running a command.
+-- (27a) `--trust-native` is part of the key, as it is of the host's: a `native_refl`
+-- accepted with it is never replayed without it, nor the refusal with it.
 def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
   | .mk tab hs =>
     let names := tabNames tab;
+    let trustPart := match o.trustNative with
+      | .true => .cons "--trust-native" .nil
+      | .false => (.nil : List String);
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append o.backend (modPathsOf tab names)))))) 2166136261)
+          (List.append trustPart (List.append o.backend (modPathsOf tab names))))))) 2166136261)
 
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
@@ -857,7 +869,14 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                               -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
                                               | .true => match modAttachedRoot a with
                                                 | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                                | .none => .err (String.append "unknown flag: " a)
+                                                -- (27a) the host's `--trust-native`: a switch,
+                                                -- before or after the command, as in its
+                                                -- `parseFlags` (the value form is not one: the
+                                                -- host leaves `--trust-native=…` over as an
+                                                -- unknown flag, and so does this)
+                                                | .none => match strEq a "--trust-native" with
+                                                  | .true => parseOptsGo rest { o with trustNative := .true } file extra
+                                                  | .false => .err (String.append "unknown flag: " a)
                                               | .false => match file with
                                                 | .none => parseOptsGo rest o (.some a) extra
                                                 | .some _ => parseOptsGo rest o file (.cons a extra)
@@ -882,6 +901,9 @@ def usageText : String :=
   "  manifests yet, so strict never trusts an entry), --target c (the only backend;\n" +++
   "  --llvm/--wasm/--split are the host's and are refused, C5),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
+  "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" +++
+  "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" +++
+  "  --native-fuel: the self-hosted evaluator has no step counter),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
@@ -909,7 +931,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
     -- no cache: do not even build the key (it hashes every module's text)
     | .none => do
       cacheMissMsg o .false "";
-      let p := runGraph g;
+      let p := runGraph o.trustNative g;
       let ds := diagsOf p.tab (linesOf p.run);
       let st := statusOf ds;
       emitDiags o ds;
@@ -929,7 +951,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         | .false => Process.exit 1
       | .none => do
         if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-        let p := runGraph g;
+        let p := runGraph o.trustNative g;
         let lines := linesOf p.run;
         let ds := diagsOf p.tab lines;
         let st := statusOf ds;
@@ -984,7 +1006,7 @@ def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : Strin
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
   | .none => do
     cacheMissMsg o .false "";
-    buildMiss o .false "" "" out (runGraph g)
+    buildMiss o .false "" "" out (runGraph o.trustNative g)
   | .some _ => do
     let key := keyOfGraph o "c" g;
     cached ← cacheRead o key ".c";
@@ -994,7 +1016,7 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache w
       writeOut out ctext
     | .none => do
       cacheMissMsg o .true key;
-      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustNative g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -1071,7 +1093,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   match gopt with
   | .none => missingFile file
   | .some g => match o.cache with
-    | .none => runPrepared o .false "nocache" "" (runGraph g) extra
+    | .none => runPrepared o .false "nocache" "" (runGraph o.trustNative g) extra
     | .some _ => do
       let cKey := keyOfGraph o "c" g;
       cached ← cacheRead o cKey ".c";
@@ -1079,7 +1101,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
       | .some (.mk st ctext) => do
         if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
         compileAndRun o cKey ctext extra
-      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustNative g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -1109,7 +1131,9 @@ def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  -- (27a) the one-shot mode reads `--trust-native` too (the frontend's
+  -- `Globals.trustNative`; `genProgramArgs` ignores the flag itself)
+  match modCheckRunHTrust cats tokens (listHas "--trust-native" args) hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
@@ -1168,7 +1192,7 @@ def knownTopFlag (a : String) : Bool :=
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
     (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types")
-      (Bool.or (strEq a "--llvm") (strEq a "--wasm"))))))
+      (Bool.or (strEq a "--llvm") (Bool.or (strEq a "--wasm") (strEq a "--trust-native"))))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)

@@ -791,6 +791,68 @@ def cliDiffGroup : Group where
         cliCheck h.out "is ignored: module Prelude" "host warning"
         checkEq "" s.out
         cliDiffKnown "warnings: the host warns (on stdout) about a module root shadowing its own lib; the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet (A14/D6)" },
+    { name := "(C14) check --trust-native: native_refl is accepted in both, before or after the command", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("native.wiz", cliNativeRefl)]
+        for args in [#["check", "native.wiz", "--trust-native"],
+                     #["--trust-native", "check", "native.wiz"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 0 s.code
+          checkEq "" s.out
+          checkEq "" s.err
+          checkEq "" h.err
+          cliCheck h.out "is accepted on the strength of native evaluation" "the host's warning"
+        cliDiffKnown "warning: the host reports the acceptance as a warning naming the steps; the self-hosted frontend has no warning channel, and the `X.native✝` axiom is visible through `#print axioms` instead (D6/C14)" },
+    { name := "(C14) check without --trust-native: native_refl is refused with the host's message in both", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("native.wiz", cliNativeRefl)]
+                                    args := #["check", "native.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 h.code
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq "native.wiz:2:1: error: native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it\n" s.err },
+    { name := "(C14) build --trust-native: both accept the flag and write an artifact (an executable there, the C here)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let tc ← cliDiffHostToolchain
+        -- (the host's `build` needs a `main`; the driver writes the C without one)
+        let spec : CliDiffSpec := { files := #[("nmain.wiz", cliNativeReflMain)]
+                                    args := #["build", "nmain.wiz", "-o", "out", "--trust-native"]
+                                    hostArgs := tc }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 h.code
+        checkEq 0 s.code
+        check (← cliDiffExists h "out") "the host wrote no artifact"
+        check (← cliDiffExists s "out") "the driver wrote no C"
+        let sc ← cliDiffRead s "out"
+        check (cliHas (sc.getD "") "/* x : ") "the driver's artifact is not the C for `x`"
+        cliDiffKnown "artifact: `build` writes an executable (via C) in the host and the generated C here (D4)" },
+    { name := "(C14) an unknown trust flag is the same usage error, before or after the command", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- (the host's `--trust-native` is a switch: its value form is left over as an
+        -- unknown flag; a misspelling is one in both)
+        for bad in ["--trust-native=1", "--trust-nativ"] do
+          for args in [#["check", "native.wiz", bad], #[bad, "check", "native.wiz"]] do
+            let spec : CliDiffSpec := { files := files, args := args }
+            let (h, s) ← cliDiffBoth host exe spec
+            cliDiffSame spec h s
+            checkEq 2 h.code
+            checkEq 2 s.code
+            cliCheck s.err s!"unknown flag: {bad}" "the unknown flag's text" },
+    { name := "(C14) --native-fuel: the host takes a step limit, the driver's evaluator has no counter", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("native.wiz", cliNativeRefl)]
+                                    args := #["check", "native.wiz", "--trust-native", "--native-fuel", "100"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 0 h.code
+        checkEq 2 s.code
+        cliCheck s.err "unknown flag: --native-fuel" "the driver's rejection"
+        cliDiffKnown "native fuel: the self-hosted evaluator has no step counter, so `--native-fuel N` is refused as an unknown flag rather than accepted and ignored (C14)" },
     { name := "a missing file: both exit 1 (the host's message is an uncaught read)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { args := #["check", "no.wiz"] }
