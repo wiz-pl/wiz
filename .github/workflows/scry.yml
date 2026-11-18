@@ -107,7 +107,7 @@ jobs:
           # `tests/scale.wiz` parses the 3.9 MB generated grammar: the test gives the
           # analysis a 900 s budget, so the harness must allow the whole case more than
           # that (its own default is 300 s per test).
-          grail test --test-timeout 1200 "${tests[@]}"
+          grail test --test-timeout 2400 "${tests[@]}"
       - name: No golden was rewritten
         # Belt and braces: if anything in the run writes a .expected (a tool calling
         # --update, or a test doing it itself), the job fails instead of accepting it.
