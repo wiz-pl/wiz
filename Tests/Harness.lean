@@ -74,6 +74,41 @@ def checkEq {α : Type} [BEq α] [ToString α] (expected actual : α) : IO Unit 
   unless expected == actual do
     throw (IO.userError s!"expected {expected}\n      got {actual}")
 
+/-- The wall time of `f k` in milliseconds, best of `runs` (a shared machine stalls one
+run, not all of them). -/
+def bestMs (f : Nat → IO Unit) (k : Nat) (runs : Nat := 3) : IO Nat := do
+  let mut best := 1_000_000_000
+  for _ in [0:runs] do
+    let t0 ← IO.monoMsNow
+    f k
+    best := min best ((← IO.monoMsNow) - t0)
+  pure best
+
+/-- `checkScaling name f n bound`: a claim of "linear" measured at `n` and `2n`, not an
+absolute millisecond bound.
+
+Runs `f 0` once to measure the fixed floor (process start-up and the like; `f 0` must
+be a valid, minimal input), then `f n` and `f (2 * n)` best of three each, subtracts the
+floor, and requires `t(2n) ≤ bound * t(n) + slackMs`.  `bound` 3 is a claim of linear,
+6 of `n log n`, 10 of quadratic.  The measured pair is printed on success and repeated
+in the failure, so a failure can be diagnosed without re-running (and no timing claim
+depends on one machine's absolute numbers).
+
+The floor matters: a ~1 s start-up otherwise hides a 2× ratio at small `n`.  The
+`slackMs` allowance (default 250 ms) absorbs scheduler noise in the net times; it is
+not a subsidy for a real superlinear shape, which doubles with `n`. -/
+def checkScaling (name : String) (f : Nat → IO Unit) (n bound : Nat)
+    (slackMs : Nat := 250) : IO (Nat × Nat) := do
+  let floor ← bestMs f 0 1
+  let a ← bestMs f n
+  let b ← bestMs f (2 * n)
+  let na := max 1 (a - floor)
+  let nb := max 1 (b - floor)
+  IO.println s!"  {name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms, best of 3, bound {bound}×)"
+  unless nb ≤ bound * na + slackMs do
+    throw (IO.userError s!"{name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms): more than {bound}× plus {slackMs} ms")
+  pure (a, b)
+
 /-- Run one case in-process; used by the child process. -/
 def Case.runHere (c : Case) : IO UInt32 := do
   try

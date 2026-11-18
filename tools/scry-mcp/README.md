@@ -53,13 +53,16 @@ Results:
   outside the readable roots.
 * `diff: "BASE"` keeps only the findings on lines changed since `BASE`. The
   others are counted under `result.diff.findings.suppressed`. The bridge runs
-  `git diff --no-ext-diff --no-textconv -U0 BASE -- FILE` in the workspace and
-  passes the saved diff to Scry. `BASE` must be a ref or commit, not an option or
-  a range. Git runs with every config source pinned (`GIT_CONFIG_NOSYSTEM`,
-  `GIT_CONFIG_GLOBAL=/dev/null`), `core.fsmonitor=false`,
-  `core.hooksPath=/dev/null`, `protocol.allow=never` and `GIT_NO_LAZY_FETCH=1`,
-  so the workspace's own `.git/config` cannot run a command or fetch objects.
-  `diff: "all"` treats every line as changed.
+  `git diff --no-ext-diff --no-textconv --no-color -U0 -M BASE -- FILE` in the
+  workspace and passes the saved diff to Scry. `BASE` must be a ref or commit,
+  not an option or a range. The system and user-global config files are
+  replaced (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`), and
+  `core.fsmonitor`, hooks, external diff and textconv are disabled and the
+  pager fixed to `cat`, so the workspace's own `.git/config` cannot run a
+  command through those paths or fetch objects. It does **not** disable the
+  repository's `filter.<driver>.clean`, and the repository must be owned by the
+  bridge's user; see "Git diff and repository ownership" below. `diff: "all"`
+  treats every line as changed.
 * `scry_findings` reads `scry-workflow/findings.json` unless `db` names another
   file. A missing database lists as empty. Before `show`, the bridge parses the
   database itself (refusing one over 64 MiB or without the
@@ -116,14 +119,79 @@ Every tool except the runners is annotated `readOnlyHint: true`,
   `project --facts`/`--cache`/`--cc`, and `cst`. `scry dynamic`,
   `findings repro`, `verify` and `triage` exist only as the runners above.
 * **Temporary-directory output only.** Each run gets a fresh directory inside
-  the server's private (0700) temporary directory. That directory is the
-  child's working directory, `HOME`, `XDG_CACHE_HOME` and `TMPDIR`, so anything
-  Scry writes lands there.
+  the server's private (0700) temporary directory. That directory is Scry's
+  working directory, `HOME`, `XDG_CACHE_HOME` and `TMPDIR`, so anything Scry
+  writes lands there. (`git diff` runs in the workspace and inherits the
+  server's `HOME`.)
   * The SARIF and JSON reports of the last 20 runs are kept there as
     resources.
   * The whole directory is removed when the server exits.
   * Nothing is written to the workspace. The smoke test checks that `git status`
     is unchanged.
+* **Git diff and repository ownership.** Only `scry_taint` with `diff: BASE`
+  starts git; every other tool works whatever the ownership. The child
+  environment is the shared allowlist (`scry_mcp.py:849`), so inherited `GIT_*`
+  variables do not reach it:
+  * `GIT_DIR` and `GIT_WORK_TREE` could point the diff at another repository
+    or working tree.
+  * `GIT_CEILING_DIRECTORIES` is dropped too. That removes the caller's stop on
+    repository discovery, so a workspace that is a subdirectory can discover a
+    parent repository; it is a known gap, not a protection.
+  * `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` is
+    command-scope config injection that could compete with the explicit `-c`
+    pins.
+
+  `_git_diff` then pins what it can. `GIT_CONFIG_NOSYSTEM=1` and
+  `GIT_CONFIG_GLOBAL=/dev/null` (`:854-856`) keep the system and user-global
+  files from supplying `core.fsmonitor`, `core.hooksPath`, aliases or
+  `safe.directory`. `GIT_NO_LAZY_FETCH=1`, `GIT_ATTR_NOSYSTEM=1`,
+  `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0` (`:857-860`) stop a lazy
+  fetch, system attributes, a credential prompt and optional index writes.
+  `-c core.fsmonitor=false`, `-c core.hooksPath=/dev/null`,
+  `-c protocol.allow=never`, `-c core.pager=cat`, `--no-ext-diff` and
+  `--no-textconv` (`:863-867`) cover the repository's own config for those
+  paths.
+
+  What remains is git's ownership check: the repository/worktree root that
+  `git -C <workspace>` discovers must be owned by the bridge's effective uid.
+  A workspace that is a subdirectory counts, because git checks the discovered
+  root, not the `--workspace` string. If it is owned by another uid the call
+  fails as `invalid_args`:
+
+  ```
+  invalid_args: git diff HEAD failed: error: Could not access 'HEAD'
+  ```
+
+  That is not `fatal: detected dubious ownership`: `git diff` is a gentle
+  setup command, so an ownership refusal surfaces as an unresolved ref.
+  `git status` in the same directory does print the familiar
+  `fatal: detected dubious ownership in repository at '…'`. `HEAD~1` and a
+  full SHA fail the same way with their own name. Adding `safe.directory` with
+  `git config --global` or `--system` does not help, because both scopes are
+  replaced. `diff: "all"` needs no ownership change and is the workaround.
+
+  `safe.directory` is not restored here because it is an ownership check, not
+  an integrity check: it verifies no signature and hashes nothing, and once a
+  repository is admitted git reads its config as usual. The bridge's own
+  `git diff` still applies the repository's `filter.<driver>.clean` to
+  worktree files (`--no-textconv` does not disable it), so admitting a
+  foreign-owned repository would run that filter as the bridge user — as root
+  when the bridge runs as root. A same-owner repository is already past this
+  boundary and can run the filter today; the ownership check only helps when
+  the uids differ. Restore `safe.directory` only after the clean filter (and
+  `.process`) is closed, and then with the repository/worktree root computed
+  from git rather than the `--workspace` path. On git before 2.38,
+  `-c safe.directory` is ignored; the fallback there is a bridge-owned config
+  file that names the exact path, never `*`.
+
+  The regression test that distinguishes a correct restoration is
+  `test_diff_in_a_subdirectory_of_a_foreign_owned_repository` (workspace
+  `repo/sub`, foreign-owned). A naive `safe.directory=repo/sub` fails it
+  because git checks the discovered root `repo`, not the workspace string.
+
+  `--pass-env` does not reach this command: `_run` passes
+  `extra=self.config.pass_env` (`:823`), `_git_diff` calls `child_env()` with
+  no extra (`:849`). It applies to Scry's environment only.
 * **Paths are confined.** Every `path`, `rules`, `compdb` and `db` must be
   inside the workspace, the rule pack's directory, or an `--allow-root DIR`.
   Real paths are compared, so an absolute path, `..` or a symlink out is
@@ -185,7 +253,7 @@ Error kinds:
 --rules FILE      the default rule pack
 --timeout SECS    per-call deadline, also the cap on Scry's own --timeout (default: 300)
 --allow-root DIR  another directory tools may read (repeatable; never written)
---pass-env NAME   pass another environment variable (credential-like names are still dropped)
+--pass-env NAME   pass another variable to Scry, not git diff (credential-like names dropped)
 --allow-scry-dynamic  list and allow scry_dynamic, scry_repro, scry_verify (heavy, sandboxed)
 --allow-scry-triage   list and allow scry_triage (writes the findings database; light, sandboxed)
 --heavy PATH, --light PATH, --bwrap PATH, --max-mem SIZE, --max-runtime SECS
@@ -209,7 +277,7 @@ environment. They check:
 * that secrets are filtered;
 * `diff` validation, that `git diff` runs in the workspace, and that a
   workspace `.git/config` cannot run a command through `core.fsmonitor` or a
-  hook;
+  hook (a clean filter is not covered);
 * that a `scry` planted in the workspace is never executed;
 * the limits, the retention of runs, and the size caps;
 * that the findings database is never written, and that its records, a `show`
@@ -220,3 +288,19 @@ environment. They check:
   refusal when heavy is busy.
 
 The `tools` workflow runs them on every change under `tools/`.
+
+## Claims to check at merge time
+
+Found while writing the git section; left as written rather than changed
+silently.
+
+* "The first of these that exists is used" (Quick start): `resolve_scry` does
+  not fall back. An explicit `--scry` that is not executable is
+  `scry_not_found`; `$SCRY_BIN` and `PATH` are not tried after it.
+* `--timeout` is described as the per-call deadline (Options): `scry_version`
+  uses 30 seconds, `scry_facts`/`scry_query`/`scry_explain`/`scry_findings` cap
+  at 120, and only `scry_taint`/`scry_project` use the configured value.
+* "That is the one intentional trust decision in the server" (Quick start):
+  `git` is found through the inherited `PATH` and is not resolved to an
+  absolute host path, so a relative `PATH` entry is a second trust decision.
+  It is not changed here.

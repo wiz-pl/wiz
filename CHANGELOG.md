@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: a constructor's parameters and fields are named arguments too (A9). The
+  self-hosted frontend kept no binder names for a constructor's `Global`, so
+  `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
+  parameters followed by the constructor's fields, so fields can be given in any order
+  (a later field's type may mention an earlier named one), and an implicit field or a
+  parameter can be named. An inductive type's own parameters, a dot-constructor and a
+  local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
+  and rejected constructor forms against the Lean frontend (21ab, 13a).
 * runtime/FFI boundary (the 2026-11-17 review, 9h/9k): `Process.exec` saves the
   `SIGPIPE` disposition and restores it when `exec` fails, and a spawn re-asserts the
   ignore every time, so a failed exec no longer leaves the next write to a broken pipe
@@ -34,6 +42,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   exit code and stderr. New `conc` cases pin a run-time ENOENT failure, a pass whose
   program writes "No such file" on stderr but exits 0, and the genuine missing-compiler
   skip.
+* tooling: the self-hosted frontend's embedded prelude (`preludeText`,
+  `selfhost/Frontend.wiz`) is checked against `lib/Prelude.wiz` by
+  `scripts/check-prelude-drift.py`, a CI job (`prelude_drift`). It fails when a value
+  declaration is added to the library prelude without the embedded copy, when the
+  embedded copy invents a name, or when a reviewed exception goes stale; it prints the
+  known gaps and the names the page promotes. The two preludes are not meant to be
+  equal (the embedded one is a monomorphic model for the self-hosted frontend), so the
+  check compares the semantic surface, not bytes (21y, `docs/stages/21-bootstrap.md`).
 * web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
   `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
   `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
@@ -89,7 +105,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   re-asserted by `wiz_sys_spawn_in` before **every** spawn, with no shared flag at all
   (`wiz_sys_exec` saves the disposition with `sigaction` and restores it if `exec` fails,
   rt-ffi); `Tests/tsan/spawn.wiz` is the case that exercises it under TSan.
-
+* cache: a fresh root file no longer misses the shared `~/.cache/wiz` on every check.
+  Its manifest was keyed by its headers only, so every file with the same headers shared
+  one manifest (12.7 MB in one cache here): it grew without bound, was parsed and
+  rewritten on every root miss, and two concurrent checks of different files lost each
+  other's entries, so a fresh file re-elaborated every run. A root file's manifest is now
+  keyed by its text too (`wiz-cache/root-manifest-v1`); the command keys and `.wizc`
+  entries are unchanged. A run no longer rebuilds `manifest.sexpr` from a full scan of
+  `manifest.d` (thousands of files, hundreds of MB, ~a minute per writing run): the index
+  is written by `wiz cache manifest` (and sealed by a Nix package), and nothing a run
+  reads needs its module list.
+  `=tooling` has a case for each (a fresh file hits on the second check, an edit misses
+  and keeps its unchanged prefix warm, and two root files get two root manifests).
+* selfhost: the driver's cache is per module and keyed on content, not paths (D5). One
+  `<key>.mcheck` entry holds a module's tagged output lines; the key is the module's
+  name and text, its `import_c` header texts, the contents of its `include_str` files,
+  the toolchain id and, recursively, its imports' keys. A changed dependency, header or
+  included file is a miss; a path or an mtime is not in the key, so a file edited with
+  its mtime kept is a miss and the same text under another `-I` root is a hit. A warm
+  `check` reads every module's entry in load order and runs no command; one miss is a
+  cold elaboration of the graph (the frontend's globals are not serialized). Entries
+  carry their payload's digest, so a truncated or edited entry is a miss, never a wrong
+  verdict. Before, one graph-wide key mixed the modules' paths and the root's headers,
+  so a dependency's `import_c` header and every `include_str` file were outside it.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
@@ -159,6 +197,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   symbols), runs a channel program that sends before receiving, checks the empty
   channel and full MVar / held lock stops, and compiles the header's Emscripten
   auto-enable's translation unit (there is no `emcc` build; 25k).
+* scry: the C parse/lower pipeline is fuzzed (#478). `scry/scripts/fuzz-lower.py` drives
+  the native CstStore, `Scry.lowerTU` and the taint pipeline with generated and mutated C
+  (122 seed files, 400 executions, 5 s and 256 MiB resident per run), and commits the 25
+  regression fixtures under `scry/tests/fixtures/fuzz-regression/`; `--regressions-only`
+  replays them. `scry/bench/fuzz.md` records the campaign, the caps and every finding
+  (0 crashes, 38 hangs, 19 OOMs, 5 refusals, 338 clean). A clean run is not a safety
+  claim: it is a bounded search over the Wiz side, complementary to the tree-sitter
+  `fuzz/run.py`.
 * trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
   per block (compiled-only general recursion, an inhabited witness at 22f, no
   termination claim, and the de-mutualisation or measure that would remove the row), and
@@ -211,6 +257,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   refuses a registry lock with no `(index-signature …)` even when its `(index …)` line
   is absent; `--locked` reads no index, so it checks the entry's shape only, and
   `grail index verify --locked` is the command that re-verifies the signature.
+* grail (23f, #390): the root `grail test` run is green (88 passed, 0 failed, 2 skipped).
+  A golden may be `-- test: skip REASON` (reported `⊘`, no `.expected`, not a pass); a
+  subdirectory with its own `grail.wiz` is a nested package, not a test of the parent; 38
+  missing goldens were added and 3 stale ones reviewed. `Package.tests` documents the
+  nested-package rule (`docs/stages/23-grail.md:116-125`).
 * selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
   rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
   current and that its tables accept the same corpus as the Lean parser), and the
@@ -226,7 +277,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
   length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
   and the rotate composition for `k >= w` (22a, 22c).
-
+* libraries: `lib/Plot.wiz` (#381), data plots as deterministic SVG. `Plot.Frame` takes
+  named `Series` (`line`, `scatter`, `bar`, `step`) over exact arithmetic (`Q` over
+  `Int`; no `Float64` in the core), so the same input renders byte-identically: no
+  timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
+  group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
+  `docs/libraries.md:1979` has the API.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
@@ -256,6 +312,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* wasm (8f, #372): tail calls and CAF caching. A self tail call compiles to `return_call`
+  (`return_call_indirect` for an indirect one), so a loop no longer grows the engine
+  stack, and a closed definition's value is built once and shared (`wiz_caf_builds`).
+  Ten million mutual tail calls run in 36.6 ms at one page of linear memory;
+  `web/wasm-host.mjs` implements both, and the `wasm` group checks 200k-deep recursion
+  and a CAF built once (`Tests/Groups/Wasm.lean:361-375`). The validator knows the
+  tail-call proposal (`docs/stages/08-backend/wasm.md:41-45`).
 * `wiz repl` (11ac): one command per line into one persistent frontend session
   (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
   `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
@@ -287,8 +350,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [0.1.0] - unreleased (draft)
 
-The first tagged release. Everything below is new in it; it collects stages 1–26 and the
-pull requests merged up to the tag. The repository is https://github.com/wiz-pl/wiz
+The first tagged release. Everything below is new in it; it collects the stage docs 1–30
+and 32 (`docs/stages/`; there is no stage 31) and the pull requests merged up to the tag.
+The repository is https://github.com/wiz-pl/wiz
 (moved from `badly-drawn-wizards/wiz`; GitHub redirects the old URLs).
 
 ### Stability
@@ -332,7 +396,8 @@ pull requests merged up to the tag. The repository is https://github.com/wiz-pl/
   #59), the eliminators' index levels (F9, #83), K3/Q1/Q2/Q3 (#14), projections only on
   unrestricted pairs (R1, #84), two declarations of one name (#104), a variable out of
   scope (#72), the self-hosted kernel's fast path at universe levels (W1, #76),
-  `Size ≡ Size` in the self-hosted kernel (O1).
+  `Size ≡ Size` in the self-hosted kernel (O1), and Π/Σ/`ULift` casts computing only
+  when their components are in one sort (D2, #203).
 * Kernel lint: every traversal handles every constructor; a panic is not a value (#78).
 * WizMeta: a specification of the core theory and a reference checker (#122);
   equations at propositions are `True`, and the Σ rule along a proof component uses
@@ -456,13 +521,15 @@ that pin each one):
 * Conjectures, not proved: regularity at inert types (D1; `--inert conv` is
   experimental), `μ` injective in its description (E1), and the rest of the core
   theory's combination (Status §1–2).
-* Open issues: the neutral case of NU-TRANSP; Π/Σ/`ULift` casts compute without
-  checking their components' sorts (D2, until mandatory sorts); an unannotated Π/Σ
-  makes type equality stuck (U5); Σ unboxing is not stable under substitution, so
-  `--unbox-structs` stays off (R3 open 1); duplicating a `&mut` and borrowing one
-  local twice in Feral are not rejected (pinned "KNOWN GAP" tests).
+* Open issues: the neutral case of NU-TRANSP; Σ unboxing is not stable under
+  substitution, so `--unbox-structs` stays off (R3 open 1); duplicating a `&mut` and
+  borrowing one local twice in Feral are not rejected (pinned "KNOWN GAP" tests).
 * "Stuck but sound" cases (Status §5) are incompleteness: some true equations don't
   compute.
-* No mechanised model, and no systematic search for proofs of `False` yet.
-* Not yet in Wiz: string patterns, `deriving` in the self-hosted frontend, termination
-  by measure, machine-integer and vector literals.
+* No mechanised model. A bounded search for `False` exists: `tests --false-fuzz` builds
+  closed terms that claim to inhabit `Empty` and asks both kernels, and the `false-fuzz`
+  group (20 samples per shape) runs in the `selfhost` shard
+  (`.github/test-shards.json:2,8`). A campaign of 1000 samples per shape (seed 20261114)
+  found no accepted closed `Empty` in either kernel and no verdict difference beyond the
+  known quantity-only `Σ` observations (`Tests/FalseFuzz.lean:1-26`).
+* Not yet in Wiz: termination by measure, machine-integer and vector literals.

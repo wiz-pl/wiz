@@ -5,11 +5,14 @@
 --   wiz-selfhost check FILE            elaborate and type check; diagnostics, exit 1
 --   wiz-selfhost build FILE -o OUT     write the generated C to OUT
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
+--   wiz-selfhost lsp                   a language server on stdin/stdout (D8: the
+--                                      protocol subset `web/selfhost-lsp-shim.js` answers)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
 --            --cache-verify off|warn|strict, --target c (the backend the host names;
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
+--            --trust-smt (C15: the `smt` tactic is refused; there is no solver here),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
@@ -60,12 +63,15 @@ structure Opts where
   backend : List String
   verify : String
   target : Option String
+  -- (C15) the host's `--trust-smt`: accepted, and it selects the `smt` refusal (the
+  -- frontend has no solver; see `smtUnsupported`); it is in the cache key when set
+  trustSmt : Bool
 
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
   Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
-    "warn" .none
+    "warn" .none .false
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
@@ -239,15 +245,15 @@ def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
           someGraph (Graph.mk tab hs))))
 
-def runGraph (g : Graph) : Prepared := match g with
-  | .mk tab hs => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+def runGraph (smtTrust : Bool) (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunT smtTrust cats tokens hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => Prepared.mk tab run order
 
 -- the whole program: the loader, every module checked, and the run it produced
 def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
   IO.bind (loadGraph roots file) (fun g => match g with
     | .none => nonePrepared
-    | .some g => somePrepared (runGraph g))
+    | .some g => somePrepared (runGraph .false g))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -636,10 +642,15 @@ def headerHash : List Header → Nat → Nat
 def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
   | .mk tab hs =>
     let names := tabNames tab;
+    -- (C15) the flag is part of the key when set, as the host's `smtKey` mixes in a
+    -- non-default `Smt.Config` (a refusal message is cached with the run that wrote it)
+    let smtFlag : List String := match o.trustSmt with
+      | .true => .cons "--trust-smt" .nil
+      | .false => .nil;
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append o.backend (modPathsOf tab names)))))) 2166136261)
+          (List.append o.backend (List.append smtFlag (modPathsOf tab names))))))) 2166136261)
 
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
@@ -836,17 +847,19 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   | .some m => match verifyOk m with
                                     | .true => parseOptsGo rest { o with verify := m } file extra
                                     | .false => .err (verifyErr m)
-                                  | .none => match isBackendFlag a with
-                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                    | .false => match strStarts "-" a with
-                                      -- (A14) a root with its directory attached: `-IDIR`,
-                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
-                                      | .true => match modAttachedRoot a with
-                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                        | .none => .err (String.append "unknown flag: " a)
-                                      | .false => match file with
-                                        | .none => parseOptsGo rest o (.some a) extra
-                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+                                  | .none => match strEq a "--trust-smt" with
+                                    | .true => parseOptsGo rest { o with trustSmt := .true } file extra
+                                    | .false => match isBackendFlag a with
+                                      | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                      | .false => match strStarts "-" a with
+                                        -- (A14) a root with its directory attached: `-IDIR`,
+                                        -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                        | .true => match modAttachedRoot a with
+                                          | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                          | .none => .err (String.append "unknown flag: " a)
+                                        | .false => match file with
+                                          | .none => parseOptsGo rest o (.some a) extra
+                                          | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -859,6 +872,9 @@ def usageText : String :=
   "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" +++
   "  wiz-selfhost version            print the version (also --version)\n" +++
   "  wiz-selfhost help               this text (also -h, --help)\n" +++
+  "  wiz-selfhost lsp                a language server on stdin/stdout: initialize,\n" +++
+  "                                  full-text didOpen/didChange/didClose,\n" +++
+  "                                  publishDiagnostics, plainGoal/plainTermGoal (D8)\n" +++
   "\n" +++
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
   "  in the working directory),\n" +++
@@ -868,7 +884,8 @@ def usageText : String :=
   "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
+  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 
@@ -894,7 +911,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
     -- no cache: do not even build the key (it hashes every module's text)
     | .none => do
       cacheMissMsg o .false "";
-      let p := runGraph g;
+      let p := runGraph o.trustSmt g;
       let ds := diagsOf p.tab (linesOf p.run);
       let st := statusOf ds;
       emitDiags o ds;
@@ -914,7 +931,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         | .false => Process.exit 1
       | .none => do
         if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-        let p := runGraph g;
+        let p := runGraph o.trustSmt g;
         let lines := linesOf p.run;
         let ds := diagsOf p.tab lines;
         let st := statusOf ds;
@@ -969,7 +986,7 @@ def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : Strin
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
   | .none => do
     cacheMissMsg o .false "";
-    buildMiss o .false "" "" out (runGraph g)
+    buildMiss o .false "" "" out (runGraph o.trustSmt g)
   | .some _ => do
     let key := keyOfGraph o "c" g;
     cached ← cacheRead o key ".c";
@@ -979,7 +996,7 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache w
       writeOut out ctext
     | .none => do
       cacheMissMsg o .true key;
-      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustSmt g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -1056,7 +1073,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   match gopt with
   | .none => missingFile file
   | .some g => match o.cache with
-    | .none => runPrepared o .false "nocache" "" (runGraph g) extra
+    | .none => runPrepared o .false "nocache" "" (runGraph o.trustSmt g) extra
     | .some _ => do
       let cKey := keyOfGraph o "c" g;
       cached ← cacheRead o cKey ".c";
@@ -1064,7 +1081,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
       | .some (.mk st ctext) => do
         if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
         compileAndRun o cKey ctext extra
-      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustSmt g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -1094,8 +1111,842 @@ def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  match modCheckRunT (modHasFlag args "--trust-smt") cats tokens hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
+
+-- ------------------------------------------------------------------------------------
+-- lsp: the language server (D8), JSON-RPC over stdin/stdout
+--
+-- The subset is the one the playground's self-hosted shim answers
+-- (`web/selfhost-lsp-shim.js`, the `docs/playground-lsp.md` contract): `initialize`
+-- (`textDocumentSync` 1: full text, `wizInfoview` v1), `textDocument/didOpen`,
+-- `didChange`, `didClose`, `textDocument/publishDiagnostics`, the `wiz/elaborated`
+-- notification when the client asks for it, and the infoview's plain queries
+-- (`wiz/plainGoal`, `wiz/plainTermGoal`): a check with the collection on records each
+-- definition body's expected type and, in a `by` block, the goals after each tactic
+-- (`LspEntry` in `selfhost/Frontend.wiz`), and the queries answer from those entries in
+-- the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
+-- innermost term at the cursor, `plainGoal` the nearest snapshot at or before it
+-- (`{rendered, goals, messages}`, `null` outside every `by` block). `textDocument/hover`
+-- is `null` and the interactive infoview methods are `MethodNotFound`, as in the shim.
+-- Diagnostics are `check`'s, with `source: "wiz"`,
+-- the code `check` prints, and a range from the diagnostic's position to the end of its
+-- line. An imported module's diagnostics are not published: open that module. A
+-- document's URI need not name a file (the playground's is `file:///playground-*.wiz`):
+-- the text is the buffer's, and the path only names it in diagnostics and is the first
+-- `import` root. (`import_c` headers are read from the server's working directory, as
+-- `check` reads them; the Lean server resolves them beside the document.) Positions are
+-- the frontend's, which count characters; as in the Lean server (`Wiz/LSP.lean`), that
+-- agrees with LSP's UTF-16 unit outside the BMP.
+--
+-- Not here (see `wiz-notes/selfhost-parity.md` D8): definition, references,
+-- completion, signature help, inlay hints, semantic tokens, document and workspace
+-- symbols, folding, code actions, formatting (`fmt`), the documentation generator
+-- (`doc`), and `repl`.
+
+-- one byte of the client's stream. `getchar` is C's `int`; the return is read as
+-- `UInt64`, so the end of the file (a negative `int`, hence above any byte) is seen
+-- before `UInt64.toNat`, which would refuse 2^64-1 (a `Nat` is 63 bits here)
+extern "getchar" (header := "stdio.h") cGetchar : IO UInt64
+
+-- (`lspSomeNat`/…: inside a bound lambda the frontend has no expected type for a bare
+-- constructor, gap A18; a helper gives it one from its signature)
+def lspSomeNat (n : Nat) : Option Nat := .some n
+def lspNoneNat : Option Nat := .none
+def lspSomeStr (s : String) : Option String := .some s
+def lspNoneStr : Option String := .none
+
+def lspByte : IO (Option Nat) := IO.bind cGetchar (fun c =>
+  match UInt64.lt c (UInt64.ofNat 256) with
+  | .true => IO.pure (lspSomeNat (UInt64.toNat c))
+  | .false => IO.pure lspNoneNat)
+
+-- ## JSON (RFC 8259, the subset the messages need)
+
+-- a parsed value (or key) and the characters left (a structure: a pair `×` here is a
+-- sigma, whose `Prod` name is not in scope in this source)
+structure JRes (A : Type) where
+  val : A
+  rest : List Char
+
+mutual
+inductive J where
+  | jnull
+  | jbool (b : Bool)
+  | jnum (text : String)
+  | jstr (s : String)
+  | jarr (xs : JList)
+  | jobj (fs : JObj)
+inductive JList where
+  | jnil
+  | jcons (head : J) (tail : JList)
+inductive JObj where
+  | onil
+  | ocons (key : String) (val : J) (tail : JObj)
+end
+
+def jAppend : JList → JList → JList
+  | .jnil, ys => ys
+  | .jcons h t, ys => .jcons h (jAppend t ys)
+
+def oAppend : JObj → JObj → JObj
+  | .onil, ys => ys
+  | .ocons k v t, ys => .ocons k v (oAppend t ys)
+
+def jReverse : JList → JList
+  | .jnil => .jnil
+  | .jcons h t => jAppend (jReverse t) (.jcons h .jnil)
+
+def oReverse : JObj → JObj
+  | .onil => .onil
+  | .ocons k v t => oAppend (oReverse t) (.ocons k v .onil)
+
+def jDigit (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.and (Nat.le 48 n) (Nat.le n 57)
+
+def jSpace (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.or (Nat.beq n 32) (Bool.or (Nat.beq n 10) (Bool.or (Nat.beq n 13) (Nat.beq n 9)))
+
+def jSkip : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match jSpace c with
+    | .true => jSkip cs
+    | .false => .cons c cs
+
+def jHexChar (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57))
+    (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 70)) (Bool.and (Nat.le 97 n) (Nat.le n 102)))
+
+def jHexNum (c : Char) : Nat :=
+  let n := Char.code c;
+  if Bool.and (Nat.le 48 n) (Nat.le n 57) then Nat.sub n 48 else
+  if Bool.and (Nat.le 65 n) (Nat.le n 70) then Nat.sub n 55 else
+  if Bool.and (Nat.le 97 n) (Nat.le n 102) then Nat.sub n 87 else 0
+
+-- four hex digits after `\u`, as a number and the rest
+def jHex4 : Nat → List Char → Option (JRes Nat)
+  | .zero, cs => .some (JRes.mk 0 cs)
+  | .succ k, cs => match cs with
+    | .nil => .none
+    | .cons c rest => match jHexChar c with
+      | .false => .none
+      | .true => match jHex4 k rest with
+        | .none => .none
+        | .some (JRes.mk acc r) =>
+          .some (JRes.mk (Nat.add (Nat.mul (jHexNum c) (Nat.pow 16 k)) acc) r)
+
+-- a `\uXXXX` code unit and the rest: a high surrogate followed by a low one is one
+-- code point (as `lib/Json.wiz`'s parser does)
+def jCodePoint (cp : Nat) (rest : List Char) : JRes Nat :=
+  if Bool.and (Nat.le 0xD800 cp) (Nat.le cp 0xDBFF) then (match rest with
+    | .cons b (.cons u (.cons d ds)) =>
+      if Bool.and (Nat.beq (Char.code b) 92) (Nat.beq (Char.code u) 117) then (match jHex4 4 (.cons d ds) with
+        | .some (JRes.mk lo r) =>
+          if Bool.and (Nat.le 0xDC00 lo) (Nat.le lo 0xDFFF) then
+            JRes.mk (Nat.add 0x10000 (Nat.add (Nat.mul (Nat.sub cp 0xD800) 1024) (Nat.sub lo 0xDC00))) r
+          else JRes.mk cp rest
+        | .none => JRes.mk cp rest)
+      else JRes.mk cp rest
+    | _ => JRes.mk cp rest)
+  else JRes.mk cp rest
+
+-- the characters of a string literal after its opening quote, reversed in `acc`
+partial def jStringGo : List Char → List Char → Option (JRes String)
+  | .nil, _ => .none
+  | .cons c cs, acc =>
+    let n := Char.code c;
+    if Nat.beq n 34 then .some (JRes.mk (String.mk (List.reverseOf acc .nil)) cs) else
+    if Nat.beq n 92 then (match cs with
+      | .nil => .none
+      | .cons e rest =>
+        let m := Char.code e;
+        if Nat.beq m 110 then jStringGo rest (.cons (Char.mk 10) acc) else
+        if Nat.beq m 116 then jStringGo rest (.cons (Char.mk 9) acc) else
+        if Nat.beq m 114 then jStringGo rest (.cons (Char.mk 13) acc) else
+        if Nat.beq m 98 then jStringGo rest (.cons (Char.mk 8) acc) else
+        if Nat.beq m 102 then jStringGo rest (.cons (Char.mk 12) acc) else
+        if Nat.beq m 117 then (match jHex4 4 rest with
+          | .none => .none
+          | .some (JRes.mk cp r) => let p := jCodePoint cp r; jStringGo p.rest (.cons (Char.mk p.val) acc))
+        else jStringGo rest (.cons e acc))
+    else jStringGo cs (.cons c acc)
+
+def jNumChar (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.or (jDigit c) (Bool.or (Nat.beq n 45) (Bool.or (Nat.beq n 43) (Bool.or (Nat.beq n 46)
+    (Bool.or (Nat.beq n 101) (Nat.beq n 69)))))
+
+def jNumberGo : List Char → List Char → JRes String
+  | .nil, acc => JRes.mk (String.mk (List.reverseOf acc .nil)) .nil
+  | .cons c cs, acc => match jNumChar c with
+    | .true => jNumberGo cs (.cons c acc)
+    | .false => JRes.mk (String.mk (List.reverseOf acc .nil)) (.cons c cs)
+
+mutual
+partial def jValue (cs : List Char) : Option (JRes J) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    let n := Char.code c;
+    if Nat.beq n 123 then jObject rest else
+    if Nat.beq n 91 then jArray rest else
+    if Nat.beq n 34 then (match jStringGo rest .nil with
+      | .some (JRes.mk s r) => .some (JRes.mk (.jstr s) r)
+      | .none => .none)
+    else if Nat.beq n 116 then jLiteral "true" (.jbool .true) (.cons c rest)
+    else if Nat.beq n 102 then jLiteral "false" (.jbool .false) (.cons c rest)
+    else if Nat.beq n 110 then jLiteral "null" .jnull (.cons c rest)
+    else if jNumChar c then (let r := jNumberGo (.cons c rest) .nil;
+      .some (JRes.mk (.jnum r.val) r.rest))
+    else .none
+
+partial def jLiteral (w : String) (v : J) (cs : List Char) : Option (JRes J) :=
+  match stripPrefix w (String.mk cs) with
+  | .some rest => .some (JRes.mk v (charsOf rest))
+  | .none => .none
+
+partial def jArray (cs : List Char) : Option (JRes J) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 93 then .some (JRes.mk (.jarr .jnil) rest)
+    else (match jValue (.cons c rest) with
+      | .none => .none
+      | .some (JRes.mk v r) => jArrayMore (.jcons v .jnil) r)
+
+partial def jArrayMore (acc : JList) (cs : List Char) : Option (JRes J) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 44 then (match jValue rest with
+      | .none => .none
+      | .some (JRes.mk v r) => jArrayMore (.jcons v acc) r)
+    else if Nat.beq (Char.code c) 93 then .some (JRes.mk (.jarr (jReverse acc)) rest)
+    else .none
+
+partial def jKey (cs : List Char) : Option (JRes String) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 34 then (match jStringGo rest .nil with
+      | .some (JRes.mk s r) => .some (JRes.mk s r)
+      | .none => .none)
+    else .none
+
+partial def jColon (cs : List Char) : Option (List Char) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest => if Nat.beq (Char.code c) 58 then .some rest else .none
+
+partial def jObject (cs : List Char) : Option (JRes J) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 125 then .some (JRes.mk (.jobj .onil) rest)
+    else (match jKey (.cons c rest) with
+      | .none => .none
+      | .some (JRes.mk k r) => (match jColon r with
+        | .none => .none
+        | .some r2 => (match jValue r2 with
+          | .none => .none
+          | .some (JRes.mk v r3) => jObjectMore (.ocons k v .onil) r3)))
+
+partial def jObjectMore (acc : JObj) (cs : List Char) : Option (JRes J) := match jSkip cs with
+  | .nil => .none
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 44 then (match jKey rest with
+      | .none => .none
+      | .some (JRes.mk k r) => (match jColon r with
+        | .none => .none
+        | .some r2 => (match jValue r2 with
+          | .none => .none
+          | .some (JRes.mk v r3) => jObjectMore (.ocons k v acc) r3)))
+    else if Nat.beq (Char.code c) 125 then .some (JRes.mk (.jobj (oReverse acc)) rest)
+    else .none
+end
+
+def jHexDigit (d : Nat) : Char := if Nat.lt d 10 then Char.mk (Nat.add 48 d) else Char.mk (Nat.add 87 d)
+
+def jEscape (n : Nat) : List Char :=
+  if Nat.beq n 34 then .cons (Char.mk 92) (.cons (Char.mk 34) .nil) else
+  if Nat.beq n 92 then .cons (Char.mk 92) (.cons (Char.mk 92) .nil) else
+  if Nat.beq n 10 then .cons (Char.mk 92) (.cons (Char.mk 110) .nil) else
+  if Nat.beq n 13 then .cons (Char.mk 92) (.cons (Char.mk 114) .nil) else
+  if Nat.beq n 9 then .cons (Char.mk 92) (.cons (Char.mk 116) .nil) else
+  if Nat.lt n 32 then
+    .cons (Char.mk 92) (.cons (Char.mk 117) (.cons (Char.mk 48) (.cons (Char.mk 48)
+      (.cons (jHexDigit (Nat.div n 16)) (.cons (jHexDigit (Nat.mod n 16)) .nil)))))
+  else .cons (Char.mk n) .nil
+
+def jQuoteChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => List.append (jEscape (Char.code c)) (jQuoteChars cs)
+
+def jQuote (s : String) : String := match s with
+  | .mk cs => String.mk (.cons (Char.mk 34) (List.append (jQuoteChars cs) (.cons (Char.mk 34) .nil)))
+
+mutual
+partial def jRender : J → String
+  | .jnull => "null"
+  | .jbool b => if b then "true" else "false"
+  | .jnum t => t
+  | .jstr s => jQuote s
+  | .jarr xs => String.append "[" (String.append (jRenderList xs) "]")
+  | .jobj fs => String.append "{" (String.append (jRenderObj fs) "}")
+
+partial def jRenderList : JList → String
+  | .jnil => ""
+  | .jcons h .jnil => jRender h
+  | .jcons h t => String.append (jRender h) (String.append "," (jRenderList t))
+
+partial def jRenderObj : JObj → String
+  | .onil => ""
+  | .ocons k v .onil => String.append (jQuote k) (String.append ":" (jRender v))
+  | .ocons k v t => String.append (jQuote k) (String.append ":" (String.append (jRender v)
+      (String.append "," (jRenderObj t))))
+end
+
+def someJ (j : J) : Option J := .some j
+def noneJ : Option J := .none
+
+-- a field of an object, or `none`
+def jField (fs : JObj) (key : String) : Option J := match fs with
+  | .onil => .none
+  | .ocons k v t => if strEq k key then .some v else jField t key
+
+-- a field of a value, when it is an object
+def jGet (o : Option J) (key : String) : Option J := match o with
+  | .some (.jobj fs) => jField fs key
+  | _ => .none
+
+partial def jAt (j : J) (path : List String) : Option J := match path with
+  | .nil => .some j
+  | .cons k rest => match jGet (.some j) k with
+    | .some v => jAt v rest
+    | .none => .none
+
+def jStrOf (o : Option J) : String := match o with
+  | .some (.jstr s) => s
+  | _ => ""
+
+def jNatOf (o : Option J) : Nat := match o with
+  | .some (.jnum t) => match readNat (charsOf t) 0 with
+    | .mk n _ => n
+  | _ => 0
+
+def jIsTrue (o : Option J) : Bool := match o with
+  | .some (.jbool .true) => .true
+  | _ => .false
+
+-- ## Framing (`Content-Length` counts UTF-8 bytes, the header a blank line)
+
+def lspDropCr : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => if Nat.beq (Char.code c) 13 then cs else .cons c cs
+
+-- the line `acc` (reversed) so far, as text
+def lspLine (acc : List Char) : Option String := match acc with
+  | .nil => lspNoneStr
+  | .cons _ _ => lspSomeStr (String.mk (List.reverseOf (lspDropCr acc) .nil))
+
+partial def lspReadLine (acc : List Char) : IO (Option String) :=
+  IO.bind lspByte (fun b => match b with
+    | .none => IO.pure (lspLine acc)
+    | .some n => if Nat.beq n 10 then IO.pure (lspLine acc)
+        else lspReadLine (.cons (Char.mk n) acc))
+
+-- the body's bytes, reversed (a list, not `Bytes`: the embedded prelude's `push` is a
+-- list append, so a body read byte by byte would be quadratic there)
+partial def lspReadBytes : Nat → List Nat → IO (List Nat)
+  | .zero, acc => IO.pure acc
+  | .succ k, acc => IO.bind lspByte (fun b => match b with
+    | .none => IO.pure acc
+    | .some n => lspReadBytes k (.cons n acc))
+
+-- UTF-8 (RFC 3629) as text; a malformed sequence drops its lead byte
+partial def lspUtf8 : List Nat → List Char
+  | .nil => .nil
+  | .cons b bs =>
+    if Nat.lt b 128 then .cons (Char.mk b) (lspUtf8 bs) else
+    if Bool.and (Nat.le 194 b) (Nat.le b 223) then (match bs with
+      | .cons b2 r => if Bool.and (Nat.le 128 b2) (Nat.le b2 191) then
+          .cons (Char.mk (Nat.add (Nat.mul (Nat.sub b 192) 64) (Nat.sub b2 128))) (lspUtf8 r)
+        else lspUtf8 bs
+      | .nil => .nil)
+    else if Bool.and (Nat.le 224 b) (Nat.le b 239) then (match bs with
+      | .cons b2 (.cons b3 r) =>
+        if Bool.and (Nat.le 128 b2) (Bool.and (Nat.le b2 191) (Bool.and (Nat.le 128 b3) (Nat.le b3 191))) then
+          .cons (Char.mk (Nat.add (Nat.mul (Nat.sub b 224) 4096)
+            (Nat.add (Nat.mul (Nat.sub b2 128) 64) (Nat.sub b3 128)))) (lspUtf8 r)
+        else lspUtf8 bs
+      | _ => .nil)
+    else if Bool.and (Nat.le 240 b) (Nat.le b 244) then (match bs with
+      | .cons b2 (.cons b3 (.cons b4 r)) =>
+        if Bool.and (Bool.and (Nat.le 128 b2) (Nat.le b2 191)) (Bool.and (Nat.le 128 b3)
+            (Bool.and (Nat.le b3 191) (Bool.and (Nat.le 128 b4) (Nat.le b4 191)))) then
+          .cons (Char.mk (Nat.add (Nat.mul (Nat.sub b 240) 262144) (Nat.add (Nat.mul (Nat.sub b2 128) 4096)
+            (Nat.add (Nat.mul (Nat.sub b3 128) 64) (Nat.sub b4 128))))) (lspUtf8 r)
+        else lspUtf8 bs
+      | _ => .nil)
+    else lspUtf8 bs
+
+def lspFromBytes (bs : List Nat) : String := String.mk (lspUtf8 bs)
+
+-- the UTF-8 bytes of one code point
+def lspUtf8Bytes (c : Nat) : List Nat :=
+  if Nat.lt c 128 then .cons c .nil else
+  if Nat.lt c 2048 then .cons (Nat.add 192 (Nat.div c 64)) (.cons (Nat.add 128 (Nat.mod c 64)) .nil) else
+  if Nat.lt c 65536 then .cons (Nat.add 224 (Nat.div c 4096))
+      (.cons (Nat.add 128 (Nat.mod (Nat.div c 64) 64)) (.cons (Nat.add 128 (Nat.mod c 64)) .nil)) else
+  .cons (Nat.add 240 (Nat.div c 262144)) (.cons (Nat.add 128 (Nat.mod (Nat.div c 4096) 64))
+    (.cons (Nat.add 128 (Nat.mod (Nat.div c 64) 64)) (.cons (Nat.add 128 (Nat.mod c 64)) .nil)))
+
+-- the UTF-8 byte count of a string (what `Content-Length` counts)
+def lspUtf8Len : List Char → Nat
+  | .nil => 0
+  | .cons c cs =>
+    let n := Char.code c;
+    Nat.add (if Nat.lt n 128 then 1 else if Nat.lt n 2048 then 2 else if Nat.lt n 65536 then 3 else 4)
+      (lspUtf8Len cs)
+
+structure LspHead where
+  len : Nat
+  got : Bool
+
+def lspSomeHead (h : LspHead) : Option LspHead := .some h
+def lspNoneHead : Option LspHead := .none
+
+-- a `Content-Length` line's number
+def lspHeaderLen (line : String) : Option Nat := match stripPrefix "Content-Length:" line with
+  | .some rest => match readNat (ltrim (charsOf rest)) 0 with
+    | .mk n _ => .some n
+  | .none => .none
+
+mutual
+partial def lspHeaders (h : LspHead) : IO (Option LspHead) :=
+  IO.bind (lspReadLine .nil) (fun l => match l with
+    | .none => IO.pure lspNoneHead
+    | .some line => lspHeaderStep h line)
+
+partial def lspHeaderStep (h : LspHead) (line : String) : IO (Option LspHead) :=
+  if strEq line "" then IO.pure (lspSomeHead h)
+  else match lspHeaderLen line with
+    | .some n => lspHeaders (LspHead.mk n .true)
+    | .none => lspHeaders h
+end
+
+def lspBody (hd : LspHead) : IO (Option String) := match hd.got with
+  | .false => IO.pure lspNoneStr
+  | .true => IO.bind (lspReadBytes hd.len .nil) (fun b =>
+      IO.pure (lspSomeStr (lspFromBytes (List.reverseOf b .nil))))
+
+def lspMessage : IO (Option String) :=
+  IO.bind (lspHeaders (LspHead.mk 0 .false)) (fun h => match h with
+    | .none => IO.pure lspNoneStr
+    | .some hd => lspBody hd)
+
+-- ## Documents: URIs, paths, directories
+
+partial def lspPercent : List Char → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons c cs, acc =>
+    if Nat.beq (Char.code c) 37 then (match cs with
+      | .cons a (.cons b r) => if Bool.and (jHexChar a) (jHexChar b) then
+          lspPercent r (List.append acc (.cons (Nat.add (Nat.mul 16 (jHexNum a)) (jHexNum b)) .nil))
+        else lspPercent cs (List.append acc (.cons 37 .nil))
+      | _ => lspPercent cs (List.append acc (.cons 37 .nil)))
+    else lspPercent cs (List.append acc (lspUtf8Bytes (Char.code c)))
+
+-- `file:///a%20b/c.wiz` → `/a b/c.wiz` (as `Wiz.LSP.percentDecode`)
+def lspUriPath (uri : String) : String :=
+  match stripPrefix "file://" uri with
+  | .some rest => lspFromBytes (lspPercent (charsOf rest) .nil)
+  | .none => uri
+
+-- everything through the last `/` (`""` when there is none: the working directory)
+def lspDirGo : List Char → List Char → List Char → List Char
+  | .nil, _, best => best
+  | .cons c cs, rev, best => if Nat.beq (Char.code c) 47
+      then lspDirGo cs (.cons c rev) (.cons c rev)
+      else lspDirGo cs (.cons c rev) best
+
+def lspDir (p : String) : String := match p with
+  | .mk cs => String.mk (List.reverseOf (lspDirGo cs .nil .nil) .nil)
+
+structure LspDoc where
+  uri : String
+  path : String
+  text : String
+  version : Nat
+  /-- (D8 goals) what the last check recorded: body expected types and tactic states -/
+  entries : List LspEntry
+
+structure LspState where
+  docs : List LspDoc
+  roots : List String
+  elaborated : Bool
+  session : Nat
+  closed : Bool
+
+def lspFind : List LspDoc → String → Option LspDoc
+  | .nil, _ => .none
+  | .cons d rest, uri => if strEq d.uri uri then .some d else lspFind rest uri
+
+def lspPut : List LspDoc → LspDoc → List LspDoc
+  | .nil, d => .cons d .nil
+  | .cons x rest, d => if strEq x.uri d.uri then .cons d rest else .cons x (lspPut rest d)
+
+def lspErase : List LspDoc → String → List LspDoc
+  | .nil, _ => .nil
+  | .cons x rest, uri => if strEq x.uri uri then rest else .cons x (lspErase rest uri)
+
+-- ## Diagnostics (the host's `publishDiagnostics` shape)
+
+def lspSev : Sev → Nat
+  | .error => 1
+  | .warning => 2
+  | .info => 3
+  | .infoEval => 3
+
+partial def lspDropLines : List Char → Nat → List Char
+  | cs, .zero => cs
+  | .nil, _ => .nil
+  | .cons c cs, k => if Nat.beq (Char.code c) 10 then lspDropLines cs (Nat.sub k 1) else lspDropLines cs k
+
+def lspLineLen : List Char → Nat
+  | .nil => 0
+  | .cons c cs => if Nat.beq (Char.code c) 10 then 0 else Nat.succ (lspLineLen cs)
+
+-- the line's length in characters (the end of a diagnostic's range)
+def lspLineEnd (text : String) (ln : Nat) : Nat := match text with
+  | .mk cs => lspLineLen (lspDropLines cs (Nat.sub ln 1))
+
+def lspRange (text : String) (ln col : Nat) : J :=
+  let l0 := Nat.sub ln 1;
+  let c0 := Nat.sub col 1;
+  let e := Nat.max (lspLineEnd text ln) c0;
+  .jobj (.ocons "start" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
+      (.ocons "character" (.jnum (Nat.toString c0)) .onil)))
+    (.ocons "end" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
+      (.ocons "character" (.jnum (Nat.toString e)) .onil))) .onil))
+
+-- (D8 goals) a range from character offsets, as the host's `range` (`Wiz/LSP.lean`):
+-- start at `start`, end at `stop` (at least one character on, as an empty range is not
+-- clickable)
+def lspPosJ (p : Pos) : J := match p with
+  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
+    (.ocons "character" (.jnum (Nat.toString (Nat.sub col 1))) .onil))
+def lspRangeOff (text : String) (start stop : Nat) : J :=
+  .jobj (.ocons "start" (lspPosJ (lineCol text start))
+    (.ocons "end" (lspPosJ (lineCol text (Nat.max stop (Nat.add start 1)))) .onil))
+
+-- (D8 goals) the innermost term entry at `off` (a caret at an entry's end counts, as
+-- `Query.termGoalAt`'s `endIn`; ties go to the later entry, and the list is newest
+-- first)
+structure LspTerm where
+  start : Nat
+  stop : Nat
+  goal : String
+
+def lspTermAt (es : List LspEntry) (off : Nat) : Option LspTerm :=
+  match es with
+  | .nil => .none
+  | .cons e rest => match e with
+    | .term s t g => match Bool.and (Nat.le s off) (Nat.le off t) with
+      | .false => lspTermAt rest off
+      | .true => match lspTermAt rest off with
+        | .some b => match Nat.le (Nat.sub t s) (Nat.sub b.stop b.start) with
+          | .true => .some (LspTerm.mk s t g)
+          | .false => .some b
+        | .none => .some (LspTerm.mk s t g)
+    | .goal _ _ _ => lspTermAt rest off
+
+-- (D8 goals) the nearest goal snapshot at or before `off`, inside the `by` block it
+-- belongs to (its stop); a later snapshot wins
+structure LspGoal where
+  start : Nat
+  stop : Nat
+  goals : List String
+
+def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
+  match es with
+  | .nil => .none
+  | .cons e rest => match e with
+    | .goal s t gs => match Bool.and (Nat.le s off) (Nat.le off t) with
+      | .false => lspGoalAt rest off
+      | .true => match lspGoalAt rest off with
+        | .some b => match Nat.le b.start s with
+          | .true => .some (LspGoal.mk s t gs)
+          | .false => .some b
+        | .none => .some (LspGoal.mk s t gs)
+    | .term _ _ _ => lspGoalAt rest off
+
+-- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
+partial def lspOffGo : List Char → Nat → Nat → Nat
+  | .nil, _, i => i
+  | .cons _ _, .zero, i => i
+  | .cons c cs, .succ k, i => match strEqC c 10 with
+    | .true => lspOffGo cs k (i + 1)
+    | .false => lspOffGo cs (.succ k) (i + 1)
+def lspOffOf (text : String) (line col : Nat) : Nat :=
+  match text with
+  | .mk cs => Nat.add (lspOffGo cs line 0) col
+
+def lspStrList : List String → JList
+  | .nil => .jnil
+  | .cons s rest => .jcons (.jstr s) (lspStrList rest)
+
+def lspJoin2 : List String → String
+  | .nil => ""
+  | .cons s .nil => s
+  | .cons s rest => String.append (String.append s "\n\n") (lspJoin2 rest)
+
+-- the host's `plainGoals`: the goals in a `wiz` fence (`no goals` when none), the goal
+-- strings, and the (empty) trace messages
+def lspGoalJson (gs : List String) : J :=
+  let rendered := match gs with
+    | .nil => "no goals"
+    | _ => String.append "```wiz\n" (String.append (lspJoin2 gs) "\n```");
+  .jobj (.ocons "rendered" (.jstr rendered)
+    (.ocons "goals" (.jarr (lspStrList gs))
+    (.ocons "messages" (.jarr .jnil) .onil)))
+
+-- the host's `plainTermGoal`: the expected type and the range of the term it belongs to
+def lspTermJson (text : String) (g : LspTerm) : J :=
+  .jobj (.ocons "goal" (.jstr g.goal)
+    (.ocons "range" (lspRangeOff text g.start g.stop) .onil))
+
+def lspCodeField (code : String) : JObj := match strEq code "" with
+  | .true => .onil
+  | .false => .ocons "code" (.jstr code) .onil
+
+def lspDiag (text : String) (d : Diag) : J := match d with
+  | .mk sev _ ln col msg code =>
+    .jobj (.ocons "range" (lspRange text ln col)
+      (.ocons "severity" (.jnum (Nat.toString (lspSev sev)))
+      (.ocons "source" (.jstr "wiz")
+      (.ocons "message" (.jstr msg) (lspCodeField code)))))
+
+def lspDiags (text : String) : List Diag → JList
+  | .nil => .jnil
+  | .cons d rest => .jcons (lspDiag text d) (lspDiags text rest)
+
+-- a declaration's type line is `check --types` output, not a message: the language
+-- server publishes errors and warnings, and `#check`/`#eval`/`#reduce` results
+-- (`infoEval`), as the Lean server and the playground shim do
+def lspKeep (d : Diag) : Bool := match d with
+  | .mk sev _ _ _ _ _ => match sev with
+    | .info => .false
+    | _ => .true
+
+-- the document's own diagnostics (an imported module's are for its own document)
+def lspOnlyFile (path : String) : List Diag → List Diag
+  | .nil => .nil
+  | .cons d rest => match d with
+    | .mk _ f _ _ _ _ => match Bool.and (strEq f path) (lspKeep d) with
+      | .true => .cons d (lspOnlyFile path rest)
+      | .false => lspOnlyFile path rest
+
+-- ## Messages
+
+def lspReply (id : J) (result : J) : J :=
+  .jobj (.ocons "jsonrpc" (.jstr "2.0") (.ocons "id" id (.ocons "result" result .onil)))
+
+def lspError (id : J) (code : String) (msg : String) : J :=
+  .jobj (.ocons "jsonrpc" (.jstr "2.0") (.ocons "id" id
+    (.ocons "error" (.jobj (.ocons "code" (.jnum code) (.ocons "message" (.jstr msg) .onil))) .onil)))
+
+def lspNotifyMsg (method : String) (params : J) : J :=
+  .jobj (.ocons "jsonrpc" (.jstr "2.0") (.ocons "method" (.jstr method)
+    (.ocons "params" params .onil)))
+
+def lspFrame (body : String) : String :=
+  String.append "Content-Length: " (String.append (Nat.toString (lspUtf8Len (charsOf body)))
+    (String.append "\r\n\r\n" body))
+
+def lspSend (j : J) : IO Unit := IO.print (lspFrame (jRender j))
+
+-- the host's `capabilities`, restricted to what this server answers (an absent provider
+-- is not supported; the shim says `hoverProvider: false` the same way)
+def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
+  (.ocons "methods" (.jarr (.jcons (.jstr "wiz/plainGoal")
+    (.jcons (.jstr "wiz/plainTermGoal") .jnil)))
+  (.ocons "notifications" (.jarr (.jcons (.jstr "wiz/elaborated") .jnil)) .onil)))
+
+def lspCaps : J := .jobj (.ocons "positionEncoding" (.jstr "utf-16")
+  (.ocons "textDocumentSync" (.jnum "1")
+  (.ocons "hoverProvider" (.jbool .false)
+  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))
+
+def lspServerInfo : J := .jobj (.ocons "name" (.jstr "wiz-selfhost")
+  (.ocons "version" (.jstr wizVersion) .onil))
+
+def lspCapabilities : J :=
+  .jobj (.ocons "capabilities" lspCaps (.ocons "serverInfo" lspServerInfo .onil))
+
+-- the workspace roots `initialize` names: `workspaceFolders`, else `rootUri`
+def lspFolderRoots : JList → List String
+  | .jnil => .nil
+  | .jcons v rest => List.append (match v with
+      | .jobj fs => match jField fs "uri" with
+        | .some (.jstr s) => .cons (lspUriPath s) .nil
+        | _ => .nil
+      | _ => .nil) (lspFolderRoots rest)
+
+def lspWorkspaceRoots (msg : J) : List String :=
+  match jAt msg (.cons "params" (.cons "workspaceFolders" .nil)) with
+  | .some (.jarr xs) => lspFolderRoots xs
+  | _ => List.nil
+
+def lspInitRoots (msg : J) : List String :=
+  let folders := lspWorkspaceRoots msg;
+  match folders with
+  | .cons _ _ => folders
+  | .nil => match jAt msg (.cons "params" (.cons "rootUri" .nil)) with
+    | .some (.jstr s) => if strEq s "" then List.nil else List.cons (lspUriPath s) List.nil
+    | _ => List.nil
+
+-- the last element of `contentChanges` (full sync: it is the whole text)
+def jLastText : JList → String
+  | .jnil => ""
+  | .jcons v .jnil => match v with
+    | .jobj fs => jStrOf (jField fs "text")
+    | _ => ""
+  | .jcons _ t => jLastText t
+
+def lspChangesText (o : Option J) : String := match o with
+  | .some (.jarr xs) => jLastText xs
+  | _ => ""
+
+def lspHasChanges (o : Option J) : Bool := match o with
+  | .some (.jarr (.jcons _ _)) => .true
+  | _ => .false
+
+-- ## The session
+
+-- elaborate the document and publish its diagnostics (`check`'s, on the buffer)
+def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
+  hs ← moduleHeaderTexts doc.text;
+  let roots := List.cons (lspDir doc.path) st.roots;
+  tab ← moduleRootSourcesAs cats tokens roots "Main" doc.path doc.text;
+  let run := match modCheckRunHLsp cats tokens hs tab (.cons "Main" .nil) with
+    | .mk r _ _ _ => r;
+  -- (D8 goals) the document's entries: its body expected types and tactic snapshots
+  let doc := { doc with entries := Globals.lspEntries (Run.gs run) };
+  let ds := lspOnlyFile doc.path (diagsOf tab (linesOf run));
+  let session := Nat.succ st.session;
+  lspSend (lspNotifyMsg "textDocument/publishDiagnostics"
+    (.jobj (.ocons "uri" (.jstr doc.uri)
+      (.ocons "diagnostics" (.jarr (lspDiags doc.text ds)) .onil))));
+  sent ← match st.elaborated with
+    | .true => lspSend (lspNotifyMsg "wiz/elaborated"
+        (.jobj (.ocons "uri" (.jstr doc.uri)
+          (.ocons "version" (.jnum (Nat.toString doc.version))
+          (.ocons "session" (.jnum (Nat.toString session)) .onil)))))
+    | .false => IO.pure ();
+  IO.pure (LspState.mk (lspPut st.docs doc) st.roots st.elaborated session st.closed)
+
+def lspDidOpen (st : LspState) (msg : J) : IO LspState := do
+  let td := jAt msg (.cons "params" (.cons "textDocument" .nil));
+  let uri := jStrOf (jGet td "uri");
+  let text := jStrOf (jGet td "text");
+  let version := jNatOf (jGet td "version");
+  match strEq uri "" with
+  | .true => IO.pure st
+  | .false => do
+    let doc := LspDoc.mk uri (lspUriPath uri) text version (.nil : List LspEntry);
+    lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
+
+def lspDidChange (st : LspState) (msg : J) : IO LspState := do
+  let td := jAt msg (.cons "params" (.cons "textDocument" .nil));
+  let uri := jStrOf (jGet td "uri");
+  let version := jNatOf (jGet td "version");
+  let changes := jAt msg (.cons "params" (.cons "contentChanges" .nil));
+  -- (no change: nothing to publish, as the shim's `didChange` returns)
+  match Bool.and (Bool.not (strEq uri "")) (lspHasChanges changes) with
+  | .false => IO.pure st
+  | .true => do
+    let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version (.nil : List LspEntry);
+    lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
+
+def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState :=
+  match strEq method "initialize" with
+  | .true => do
+    let want := jIsTrue (jAt msg (.cons "params" (.cons "capabilities"
+      (.cons "experimental" (.cons "wizElaborated" .nil)))));
+    let roots := lspInitRoots msg;
+    lspSend (lspReply id lspCapabilities);
+    IO.pure (LspState.mk st.docs (List.append roots st.roots) want st.session st.closed)
+  | .false => match strEq method "shutdown" with
+    | .true => do
+      lspSend (lspReply id .jnull);
+      IO.pure st
+    | .false => match strEq method "wiz/plainGoal" with
+      | .true => do
+        -- (D8 goals) the nearest snapshot at or before the cursor, inside its `by` block
+        let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+        let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+        let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+        match lspFind st.docs uri with
+        | .some doc => match lspGoalAt doc.entries (lspOffOf doc.text line col) with
+          | .some g => lspSend (lspReply id (lspGoalJson g.goals))
+          | .none => lspSend (lspReply id .jnull)
+        | .none => lspSend (lspReply id .jnull);
+        IO.pure st
+      | .false => match strEq method "wiz/plainTermGoal" with
+        | .true => do
+          -- (D8 goals) the innermost recorded term's expected type at the cursor
+          let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+          let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+          let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+          match lspFind st.docs uri with
+          | .some doc => match lspTermAt doc.entries (lspOffOf doc.text line col) with
+            | .some g => lspSend (lspReply id (lspTermJson doc.text g))
+            | .none => lspSend (lspReply id .jnull)
+          | .none => lspSend (lspReply id .jnull);
+          IO.pure st
+        | .false => match strEq method "textDocument/hover" with
+          | .true => do
+            lspSend (lspReply id .jnull);
+            IO.pure st
+          | .false => do
+            lspSend (lspError id "-32601" (String.append "the self-hosted server has no " method));
+            IO.pure st
+
+def lspNotify (st : LspState) (method : String) (msg : J) : IO LspState :=
+  match strEq method "textDocument/didOpen" with
+  | .true => lspDidOpen st msg
+  | .false => match strEq method "textDocument/didChange" with
+    | .true => lspDidChange st msg
+    | .false => match strEq method "textDocument/didClose" with
+      | .true => do
+        let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+        IO.pure (LspState.mk (lspErase st.docs uri) st.roots st.elaborated st.session st.closed)
+      | .false => match strEq method "exit" with
+        | .true => IO.pure (LspState.mk st.docs st.roots st.elaborated st.session .true)
+        | .false => IO.pure st
+
+def lspHandle (st : LspState) (msg : J) : IO LspState :=
+  let method := jStrOf (jGet (.some msg) "method");
+  match jGet (.some msg) "id" with
+  | .some id => lspRequest st id method msg
+  | .none => lspNotify st method msg
+
+def lspStart : LspState :=
+  LspState.mk (.nil : List LspDoc) (.nil : List String) .false 0 .false
+
+partial def lspLoop (st : LspState) : IO Unit := do
+  mopt ← lspMessage;
+  match mopt with
+  | .none => IO.pure ()
+  | .some body => match jValue (charsOf body) with
+    | .none => do
+      lspSend (lspError .jnull "-32700" "parse error");
+      lspLoop st
+    | .some (.mk msg _) => do
+      st' ← lspHandle st msg;
+      match st'.closed with
+      | .true => IO.pure ()
+      | .false => lspLoop st'
+
+def lspCmd : IO Unit := lspLoop lspStart
 
 -- ------------------------------------------------------------------------------------
 -- dispatch
@@ -1151,7 +2002,7 @@ def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types") (strEq a "--trust-smt")))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)
@@ -1236,10 +2087,20 @@ def dispatch : List String → IO Unit
                         | .true => match rest3 with
                           | .nil => IO.println usageText
                           | .cons _ _ => usageError "unknown flag: -h"
-                        | .false => match unknownTopFlag lead with
-                          | .some f => usageError (String.append "unknown flag: " f)
-                          | .none => match strStarts "-" b with
-                            | .true => usageError (String.append "unknown flag: " b)
-                            | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
+                        | .false => match strEq b "lsp" with
+                          -- (`lsp` takes no options: the workspace roots are the ones
+                          -- `initialize` names; a flag before it is the host's error)
+                          | .true => match lead with
+                            | .cons f _ => usageError (String.append "unknown flag: " f)
+                            | .nil => match rest3 with
+                              | .nil => lspCmd
+                              | .cons x _ => match strStarts "-" x with
+                                | .true => usageError (String.append "unknown flag: " x)
+                                | .false => usageError (String.append "unknown command: " (argv (.cons "lsp" rest3)))
+                          | .false => match unknownTopFlag lead with
+                            | .some f => usageError (String.append "unknown flag: " f)
+                            | .none => match strStarts "-" b with
+                              | .true => usageError (String.append "unknown flag: " b)
+                              | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
 -- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)
