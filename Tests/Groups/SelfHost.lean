@@ -2534,7 +2534,16 @@ def selfHostGroup : Group where
         selfhostLinkRun (callbackFiles true) callbackExpected
         selfhostLinkRun (callbackFiles true) callbackExpected (flags := #["--rc"]) },
     { name := "a kept callback that C never releases is a leak, in both compilers (21q)", run := fun _ => do
-        let files := callbackFiles false
+        -- (the runtime makes a program's constants immortal, and a closed closure is one;
+        -- a leak is only visible for a closure that captures a run-time value, so the kept
+        -- callback captures `base` here)
+        let files := (callbackFiles false).map fun (n, t) =>
+          if n == "main.wiz" then
+            (n, ((t.replace "def main : IO Unit := do\n"
+                    "def main : IO Unit := do\n  let base := Nat.add 40 2;\n").replace
+                  "onTick (say (String.append \"tick \" \"#\"))"
+                  "onTick (fun n => say (String.append \"tick \" (Nat.toString (Nat.add n base))))"))
+          else (n, t)
         ioRunC ((files.lookup "main.wiz").get!.replace "link_c \"c/cb.c\"\n" "") (files.lookup "c/cb.c").get! "" (fails := some "leaked")
         selfhostLinkRun files callbackExpected (flags := #["--rc"]) (fails := some "objects leaked") (failCode := 4) },
     { name := "the self-hosted frontend: callbacks are checked as in the Lean frontend (21q)", run := fun _ =>
