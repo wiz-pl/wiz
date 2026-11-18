@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
+  `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
+  `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
+  Wasm exports are `wiz_loom_init`/`wiz_loom_html`/`wiz_loom_step`. There is **no
+  compatibility alias**: the framework has not appeared in a tagged release, so
+  imports and the documented `React.*` names change with the rename. `Web.Widget`,
+  `web/framework`, the Jupyter widget front end, examples and docs use the new
+  names (11s, `docs/libraries.md`).
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
@@ -99,6 +107,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 * runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
   `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
   reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
+* scry project: a `compile_commands.json` is repository-supplied, so its flags are now
+  filtered by an explicit allowlist before they reach `cc -E`. `-I`, `-isystem`,
+  `-iquote`, `-idirafter`, `-include`, `-D`, `-U` and `-std=`/`--std=` are kept (the MCP
+  bridge also confines the path-valued ones), the compile driver's `-c`/`-o`/`-M…`
+  structure is consumed, and every other word is **refused by name**. A database with
+  `-B<dir>` (which selected a committed `cc1`), `-fplugin=`, `-specs=`, `-wrapper`,
+  `@file`, `-Xclang` or `-cc1` no longer executes code through `scry_project`, whose
+  tools are `readOnlyHint: true`. `Scry.parseCompdbFlags` and the scry-mcp bridge check
+  the same list (security-01).
 * trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
   per block (compiled-only general recursion, an inhabited witness at 22f, no
   termination claim, and the de-mutualisation or measure that would remove the row), and

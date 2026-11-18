@@ -1255,7 +1255,7 @@ a Σ of propositions (whose components are propositions too).
 ### 8.6 Proofs are never evaluated (P2)
 
 The evaluator does not run proofs. This is the design of TTobs, CCobs and CICobs
-[PT22, PT23, PLT25]: there is no reduction relation on terms of a proposition, and
+\[PT22, PT23, PLT25\]: there is no reduction relation on terms of a proposition, and
 conversion never compares two proofs. It is `Globals.lazyProofs` in the Lean kernel and
 `kernelLazyProofs` in `Kernel.wiz`, both on by default.
 

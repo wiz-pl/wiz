@@ -1,4 +1,4 @@
-// End-to-end test of the browser half of the Wiz React framework: take the JSON
+// End-to-end test of the browser half of the Wiz Loom framework: take the JSON
 // web/framework/gen.wiz printed (SSR HTML before and after a state change, and the
 // patch list the Wiz diff produced), parse the "before" tree with minidom.mjs, apply
 // the patches with runtime.js, and require the serialized result to equal the "after"
@@ -109,4 +109,4 @@ ok(fixture.deterministic === true, "SSR is deterministic (Wiz rendered it twice)
 ok(fixture.handlers === 3, "the fixture has three handlers", String(fixture.handlers));
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
-console.log("\nreact framework: all checks passed");
+console.log("\nloom framework: all checks passed");
