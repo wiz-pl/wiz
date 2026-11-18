@@ -14,6 +14,8 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
 * **View goldens**: each `parse/*.cs` through `Scry.Cs.ofStore` against its `*.sexp`, a
   tree-sitter-style S-expression with field names: the grammar's tree as the lowering
   sees it (named nodes, field tokens, and the normalised fields of `Scry.CsCst`).
+  `parse/contextual` is the grammar-patch case (contextual keywords as identifiers and a
+  list-pattern slice).
 * **Lowering golden**: `lower/*.cs` against `*.wil` (every lowered function and the
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
   and returns the value C# would. `lower/modern` covers records, partial parts, switch
@@ -112,7 +114,7 @@ def fixtureDefs (src spill : String) : String :=
 /-- Every fixture, as `(dir, name)`. -/
 def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
-   ("parse", "modern"),
+   ("parse", "modern"), ("parse", "contextual"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
@@ -223,9 +225,9 @@ interpreter cannot call `FS.listDir`), hands the listing to `Scry.Cs.walkOfPaths
 same exclusion rule the driver uses) and lowers the checked-in spills, so the report's
 counts and coverage rows are the driver's own aggregation, not a second implementation.
 `Broken.cs` is deliberately invalid C#; `KeywordIdentifier.cs` and `SlicePattern.cs` are
-valid C# that tree-sitter-c-sharp v0.23.5 refuses (two upstream grammar gaps, CSHARP.md
-§8.2). None of the three has a spill: `scry-cst` refuses a tree with `ERROR` nodes, so
-the test builds the `.err` result the native path produces. -/
+the two grammar-gap reproducers that now parse (CSHARP.md §8.2), so they have spills.
+`Broken.cs` has none: `scry-cst` refuses a tree with `ERROR` nodes, so the test builds
+the `.err` result the native path produces. -/
 
 partial def repoCs (dir : System.FilePath) (rel : String) : IO (List (String × String)) := do
   let mut out : List (String × String) := []
@@ -301,7 +303,7 @@ def repoCounts : IO Unit := do
   let body ← repoBody files
   let m ← oneMessage "repo counts" (body ++
     "#eval \"before=\" ++ Nat.repr repoReport.before ++ \" found=\" ++ Nat.repr repoReport.found ++ \" excluded=\" ++ Nat.repr repoReport.excluded ++ \" parsed=\" ++ Nat.repr repoReport.parsed ++ \" lowered=\" ++ Nat.repr repoReport.lowered ++ \" failed=\" ++ Nat.repr repoReport.failed\n")
-  checkEq "before=11 found=6 excluded=5 parsed=3 lowered=3 failed=3" m
+  checkEq "before=11 found=6 excluded=5 parsed=5 lowered=5 failed=1" m
 
 def repoCoverage : IO Unit := do
   let files ← repoFiles
@@ -310,10 +312,10 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|error 1 parse failure"
-     ++ "|error 1 parse failure"
-     ++ "|warning 5 unmodelled-external"
+     ++ "|warning 6 unmodelled-external"
+     ++ "|warning 1 is test not modelled: havoc"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
+     ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
      ++ "|note 1 excluded: bin/"
@@ -321,16 +323,14 @@ def repoCoverage : IO Unit := do
      ++ "|note 1 excluded: obj/") m
 
 /-- Every failed file is named: error rows are not summed into one "parse failure 3" row
-with a single example (the sweep's 16 Nexus failures used to hide fifteen file names). -/
+with a single example (the sweep's 16 Nexus failures used to hide fifteen file names; the
+two grammar-gap reproducers now parse, so only the deliberately invalid file is left). -/
 def repoFailureRows : IO Unit := do
   let files ← repoFiles
   let body ← repoBody files
   let m ← oneMessage "repo failure rows" (body ++
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ r.construct ++ \" \" ++ r.example) (List.filter (fun r => String.eq (Scry.Severity.show r.level) \"error\") repoReport.coverage))\n")
-  checkEq
-    ("error parse failure src/Broken.cs"
-     ++ "|error parse failure src/KeywordIdentifier.cs"
-     ++ "|error parse failure src/SlicePattern.cs") m
+  checkEq "error parse failure src/Broken.cs" m
 
 def repoExitCodes : IO Unit := do
   let files ← repoFiles
@@ -368,6 +368,8 @@ def group : Group where
       run := fun _ => parseGolden "expressions" },
     { name := "view: record, switch expression, with, collection expression, query syntax",
       run := fun _ => parseGolden "modern" },
+    { name := "view: contextual keywords as identifiers and a list-pattern slice (grammar patch)",
+      run := fun _ => parseGolden "contextual" },
     { name := "lower: classes, fields, constructors, calls, strings, control flow, try/catch to Wil",
       run := fun _ => lowerGolden "basic" },
     { name := "lower: record and record struct, partial parts, switch expression, LINQ, with, collection, ctor init, async",
