@@ -45,6 +45,10 @@ done
 # (11ab) the playground's module: the self-hosted checker, one evaluation
 node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
 if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
+# (playground-loom) the pane's Loom module: mounted under Node, compared line by line
+# with the hand-written pane (no engine, no browser)
+node "$ROOT/web/playground_ui_test.mjs" "$OUT" > "$OUT/playground-ui.txt"
+if grep -qF 'playground ui: all checks passed' "$OUT/playground-ui.txt"; then echo "ok (playground, loom pane)"; else echo "FAIL (playground, loom pane)"; cat "$OUT/playground-ui.txt"; exit 1; fi
 # (11s) the documentation pages' half of the module, on a page `wiz doc` made (the
 # Wasm module's own JSON: the declaration `pick` alone)
 mkdir -p "$OUT/doc/src"

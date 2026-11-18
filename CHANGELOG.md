@@ -21,8 +21,10 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   so a trap or abort that replaces the engine keeps the page's state. The module's
   entry points (`wiz_loom_init/html/show/fail/status/patches`) take the state by
   ownership; a read-only call takes `_wiz_retain` first. `web/playground_test.mjs`
-  compares the Loom pane line by line with the hand-written one. The default page is
-  unchanged and still loads one module.
+  compares the Loom pane line by line with the hand-written one on the engine's output,
+  and `web/playground_ui_test.mjs` does the same on a corpus without the engine (mount,
+  status, failure, a hundred transitions). The default page is unchanged and still loads
+  one module.
 * playground: the output pane's first piece now exists as a Loom component,
   `lib/Web/Playground.wiz`: `Model.ofText` splits a run's output into classified lines
   and produces the page's `#count` text verbatim (`2 lines · 1 error`), `Model.ofFailure`
