@@ -2,6 +2,7 @@ import Sys
 import Text
 import Scry.Wil
 import Scry.CsCmd
+import Scry.Interproc
 /-!
 # cs-externals: the `unmodelled-external` frequency table for a C# tree
 
