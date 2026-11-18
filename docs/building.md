@@ -653,23 +653,29 @@ build, a branch CI has not pushed — are copied explicitly with
 `nix copy --from ssh://<host>` from a machine whose store has them. That copy is
 also how a machine gets the *inputs* for a build it must do itself.
 
-Two things are worth knowing before trusting a build to a second host:
+Three things are worth knowing before trusting a build to a second host:
 
 * **A multi-user Nix daemon ignores `substituters` from an untrusted user.** If the
   daemon's `trusted-users` does not include the build user, `~/.config/nix/nix.conf`
   can enable `nix-command`/`flakes` but its cache list is ignored ("ignoring
   untrusted substituter") and `nix build` refuses to fetch. Either add the user to
   `trusted-users` once (as root) or copy explicitly with `nix copy --from`, which
-  works for any user.
+  works for any user (it accepts only paths signed by a key the daemon trusts —
+  `cache.nixos.org`'s is built in).
 * **Build output belongs in the store, the source may not.** `nix build` first copies
   the tree into the store, so a worktree on a slow (sshfs) mount pays one source copy
   per changed tree: measured on a 3 MB/s link, `nix flake metadata` took about five
   minutes cold and 4.8 s once the tree was in the store; `git status` over the same
   1,690 files took 80 s. The output then goes to the store, so later builds in the
-  same tree do not cross the network. `nix develop` is a bigger first step: its
-  closure includes LLVM, Python, Node, yosys and Neovim (17.6 GiB), and elan then
-  downloads the Lean toolchain separately; `nix build .#tests` needs 10.4 GiB of
-  build inputs instead.
+  same tree do not cross the network.
+* `nix develop` is a bigger first step than `nix build`: its input closure includes
+  LLVM, Python, Node, yosys and Neovim (17.6 GiB), and elan then downloads the Lean
+  toolchain separately (3.0 GB in `~/.elan`); `nix build .#tests` needs 10.4 GiB of
+  build inputs.  Both work once seeded — `nix develop -c lake --version` printed
+  `Lake version 5.0.0-src (Lean 4.35.0)` — but every invocation in a worktree on a
+  slow mount pays the flake evaluation again (measured: 5m for a warm
+  `nix develop -c lake --version`, against 0.11 s for `lake --version` from the
+  pinned Lean store path).
 * **Which cache to copy from matters.** A Wiz output's closure is not in Cachix
   alone — Cachix has the output, not its `nixpkgs` dependencies (a `nix copy` of a
   `wiz` closure from Cachix fails on `llvm`), so a substitute needs
