@@ -282,6 +282,13 @@ def addDeclSorted (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- whose `hidden` definitions (13b) `conv` would consult
   unless g.hidden.isEmpty do throw (.other s!"internal error: {d.name} checked against the elaborator's view")
   let d := d.withSorts g
+  -- (the sorts pass is untrusted and it is total — but it can be incomplete, and the hole
+  -- it left is a bug in this elaborator, not in the declaration. Report it here, where the
+  -- pass is, as an ordinary error: the kernel's message for the same hole says "internal
+  -- error", which is not a user-facing message. The kernel keeps its check: it is the
+  -- invariant's last line of defence, for declarations built by hand or by a tactic.)
+  if d.type.hasHole || d.value.any (·.hasHole) || d.impl.any (·.hasHole) || d.witness.any (·.hasHole) then
+    throw (.other "a Π/Σ/ULift sort could not be inferred: the sorts pass left it a hole (add a type annotation to the term that contains it)")
   let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g')
   let g' ← kind g d
   privacyCheck g d kind

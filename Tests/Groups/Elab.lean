@@ -110,7 +110,26 @@ def group : Group where
           "#eval DecidableEq.decide (Option.some 2) (Option.some 2)\n" ++
           "#eval DecidableEq.decide (List.cons 1 List.nil) (List.cons 2 List.nil)\n" ++
           "def cmp (a b : Status) : Bool := DecidableEq.decide a b")
-          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] }
+          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
+    -- (a tuple literal in inference position) The kernel cannot infer the type of a pair,
+    -- only check one against a `Σ`, and the projection (`(a, b).2`) infers its scrutinee:
+    -- `inferTuple` now writes the `ann` the self-hosted frontend already wrote, so the
+    -- term is one the kernel can check at all. The sorts pass then fills the sorts inside
+    -- it: the elaborator wraps a lambda it *infers* in `ann … (Π … ⟨hole, hole⟩)`
+    -- (`term.fun`), and the pass never descended into the pair, so that hole reached the
+    -- kernel ("a Π/Σ/ULift in … without its sorts") before the pair's own missing
+    -- annotation could be reported. The helper spelling is the control: checked against a
+    -- declared `Σ`, the pair is built without either `ann`, which is why the same law was
+    -- accepted through a `toStore` helper (`lib/Optic.wiz`'s GetPut, spelled inline).
+    { name := "a projected tuple literal: checked at all, and with the sorts inside it (the inline store law)", run := fun _ =>
+        okLibs ("import Prelude\n" ++
+          "def projPair (n : Nat) : Nat := (n, n).2\n" ++
+          "def proj (n : Nat) : Nat := (n, fun x => x).2 n\n" ++
+          "def Store (A S : Type) : Type := A × (A → S)\n" ++
+          "def toStore (n : Nat) : Store Nat Nat := (n, fun x => x)\n" ++
+          "def projViaHelper (n : Nat) : Nat := (toStore n).2 n\n" ++
+          "def P : Prop := (n : Nat) → (n, fun x => x).2 n = n\n" ++
+          "def p : P := fun n => rfl") }
   ]
 
 builtin_initialize registerGroup group
