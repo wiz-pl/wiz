@@ -6159,7 +6159,7 @@ def reprIn : List Foreign → String → Option Foreign
       | .true => .some f
       | .false => reprIn rest n
     | _ => reprIn rest n
-def reprOf (gs : Globals) (n : String) : Option Foreign := reprIn (Globals.ffi gs) n
+def reprOfName (gs : Globals) (n : String) : Option Foreign := reprIn (Globals.ffi gs) n
 def reprLine : Foreign → Option String
   | .repr t _ mk get _ _ _ _ _ _ => .some ("native " +++ t +++ " := " +++ mk +++ "/" +++ get)
   | _ => .none
@@ -6167,7 +6167,7 @@ def reprLine : Foreign → Option String
 def reprAdd (gs : Globals) (first : Bool) (k : String) (out : List String) : List String :=
   match first with
   | .false => out
-  | .true => match reprOf gs k with
+  | .true => match reprOfName gs k with
     | .some f => match reprLine f with
       | .some line => match containsStr out line with
         | .true => out
