@@ -1,0 +1,141 @@
+import Tests.Elab
+
+open Wiz
+
+-- Closed terms are normally evaluated at program start-up; that would execute
+-- unimplemented `sorry`s before any test runs.
+set_option compiler.extract_closed false
+
+namespace Tests.Elab
+
+/-! (13t) `namespace` and `open`: declarations under a dotted prefix, unqualified use
+from an `open`, prefix aliases (`open M as A`), the ambiguity error, and the interaction
+with `private` and `end`.
+
+The files here are under `Tests/` only: the self-hosted frontend does not have the two
+commands yet (its parser table and `elabCommand` walk are the follow-up), so nothing it
+compiles may use them. -/
+
+/-- No errors, and exactly these messages (the `#check` lines), from a program with the
+given modules importable. -/
+def nsOk (mods : List (Name × String)) (src : String) (infos : List String) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { loader := fun n => mods.lookup n }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  checkEq (repr infos).pretty (repr (s.messages.toList.map (·.text))).pretty
+
+/-- Exactly one error, mentioning `fragment`, from a program with the given modules
+importable. -/
+def nsFails (mods : List (Name × String)) (src : String) (fragment : String) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { loader := fun n => mods.lookup n }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.size == 1 do throw (IO.userError s!"expected one error, got {errs.size}: {errs}")
+  unless (errs[0]!.splitOn fragment).length > 1 do
+    throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
+
+/-- The nested-namespace program: `A.B.x`, `A.y` (which uses `B.x` through `A`), and
+`#check`s of the qualified names. -/
+def nestedNs : String :=
+  "namespace A\nnamespace B\ndef x : Unit := ()\ndef y : Unit := x\nend B\n" ++
+  "def z : Unit := B.x\nend A\n#check A.B.x\n#check A.B.y\n#check A.z\n"
+
+def openUse : String :=
+  "namespace A\ndef x : Unit := ()\ndef y : Unit := x\nend A\n" ++
+  "open A\ndef use : Unit := x\n#check x\n#check use\n"
+
+def twoOpens : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nnamespace B\ndef x : Unit := ()\nend B\n" ++
+  "open A\nopen B\ndef use : Unit := x\n"
+
+def openAndDecl : String :=
+  "namespace A\ndef x : Unit := ()\nend A\ndef x : Unit := ()\nopen A\ndef use : Unit := x\n"
+
+def openedTwice : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nopen A\nopen A\ndef use : Unit := x\n#check use\n"
+
+def aliasPrefix : String :=
+  "namespace A\ndef x : Unit := ()\nend A\n" ++
+  "open A as Al\ndef use : Unit := Al.x\n#check Al.x\n"
+
+def aliasNotOpen : String :=
+  "namespace A\ndef x : Unit := ()\nend A\n" ++
+  "open A as Al\ndef use : Unit := x\n"
+
+/-- A module with a private and a public declaration in a namespace. -/
+def privMod : String :=
+  "namespace Secret\nprivate def hidden : Unit := ()\ndef shown : Unit := ()\nend Secret\n"
+
+def privThroughOpen : String :=
+  "import Priv\nopen Secret\ndef a : Unit := shown\ndef b : Unit := hidden\n"
+
+def privThroughAlias : String :=
+  "import Priv\nopen Secret as S\ndef a : Unit := S.shown\ndef b : Unit := S.hidden\n"
+
+/-- A qualified name needs no `open`, and `secret` is usable in its own module. -/
+def privQualified : String :=
+  "import Priv\ndef a : Unit := Secret.shown\n"
+
+def openOutlivesNamespace : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nnamespace B\nopen A\nend B\n" ++
+  "def use : Unit := x\n#check use\n"
+
+/-- `open` in a module is file-scoped: it does not reach an importer. -/
+def openerMod : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nopen A\ndef y : Unit := x\n"
+
+def importedOpenDoesNotLeak : String :=
+  "import Op\ndef z : Unit := x\n"
+
+def missingEnd : String := "namespace A\ndef x : Unit := ()\n"
+
+def strayEnd : String := "def x : Unit := ()\nend\n"
+
+def wrongEnd : String := "namespace A\ndef x : Unit := ()\nend B\n"
+
+def mutualNs : String :=
+  "namespace N\nmutual\ninductive A where\n  | mk (b : B)\ninductive B where\n  | mk (a : A)\nend\n" ++
+  "def a (b : B) : A := A.mk b\nend N\n#check N.A\n#check N.B\n"
+
+def namespaceGroup : Group where
+  name := "namespace"
+  exercise := "Stage 13t"
+  cases := [
+    { name := "nested namespaces: A.B.x, a member used through the enclosing namespace, #check shows the qualified name", run := fun _ =>
+        nsOk [] nestedNs ["A.B.x : Unit", "A.B.y : Unit", "A.z : Unit"] },
+    { name := "a qualified name works with no `open`", run := fun _ =>
+        nsOk [] "namespace A\ndef x : Unit := ()\nend A\ndef use : Unit := A.x\n#check use\n" ["use : Unit"] },
+    { name := "`open A` then an unqualified use; #check shows A.x", run := fun _ =>
+        nsOk [] openUse ["A.x : Unit", "use : Unit"] },
+    { name := "two opens with the same name: the use is ambiguous, naming both", run := fun _ =>
+        nsFails [] twoOpens "'x' is ambiguous: it refers to 'A.x', 'B.x'; qualify it with a namespace" },
+    { name := "an open and a declaration with the same name: the use is ambiguous", run := fun _ =>
+        nsFails [] openAndDecl "'x' is ambiguous: it refers to 'A.x', 'x'; qualify it with a namespace" },
+    { name := "opening the same namespace twice is one candidate, not an ambiguity", run := fun _ =>
+        nsOk [] openedTwice ["use : Unit"] },
+    { name := "`open A as Al` makes Al.x a spelling of A.x", run := fun _ =>
+        nsOk [] aliasPrefix ["A.x : Unit"] },
+    { name := "`open A as Al` does not open A unqualified", run := fun _ =>
+        nsFails [] aliasNotOpen "unknown identifier 'x'" },
+    { name := "a private name is not reachable through an open", run := fun _ =>
+        nsFails [("Priv", privMod)] privThroughOpen "unknown identifier 'hidden'" },
+    { name := "a private name is not reachable through an alias: the private error names the module", run := fun _ =>
+        nsFails [("Priv", privMod)] privThroughAlias "'Secret.hidden' is private to module Priv" },
+    { name := "a qualified public name works without an open", run := fun _ =>
+        nsOk [("Priv", privMod)] privQualified [] },
+    { name := "an `open` is file-scoped: it outlives its namespace's `end`", run := fun _ =>
+        nsOk [] openOutlivesNamespace ["use : Unit"] },
+    { name := "an `open` in a module does not reach the files that import it", run := fun _ =>
+        nsFails [("Op", openerMod)] importedOpenDoesNotLeak "unknown identifier 'x'" },
+    { name := "a namespace with no `end` is reported at its own line", run := fun _ =>
+        nsFails [] missingEnd "namespace A is not closed: add `end` (or `end A`)" },
+    { name := "a stray `end` is an error at its own line", run := fun _ =>
+        nsFails [] strayEnd "`end` without an open `namespace`" },
+    { name := "`end B` that does not close `A` is an error", run := fun _ =>
+        nsFails [] wrongEnd "`end B` does not close the namespace `A`" },
+    { name := "mutual inductive types under a namespace", run := fun _ =>
+        nsOk [] mutualNs ["N.A : Type", "N.B : Type"] }
+  ]
+
+builtin_initialize registerGroup namespaceGroup
+
+end Tests.Elab

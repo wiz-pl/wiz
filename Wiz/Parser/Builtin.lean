@@ -305,6 +305,9 @@ continue onto a line starting at the command's column.
 | `command.defEqns`            | "def" ident [".{" us "}"] [binders] ":" T [alts] |
 | `command.partial`            | "partial" ["(" "default" ":=" w ")"] command (a `def`) |
 | `command.mutual`             | "mutual" [command+] "end" (`def`s, all partial; or `partial (default := w) def`s) |
+| `command.namespace`          | "namespace" ident (opens a namespace; ended by `command.end`) |
+| `command.open`               | "open" ident ["as" ident] (13t: names visible unqualified; `as` an alias for qualified names) |
+| `command.end`                | "end" [ident] (13t: closes the innermost `namespace`; `end Foo` must name it) |
 | `command.printAxioms`        | "#print" "axioms" ident |
 | `command.cStruct`            | "c_struct" [str] ["(" "header" ":=" str ")"] ident "where" [fields] ["deriving" C,+] (9i) |
 
@@ -328,7 +331,15 @@ def commandLeading : List LeadingParser := [
   -- (a partial definition's type needs a witness: found, or given with `(default := w)`)
   { kind := "command.partial", prec := maxPrec,
     p := seqs ["partial", optional (seqs ["(", nonReserved "default", ":=", term, ")"]), cat "command" 0] },
-  { kind := "command.mutual", prec := maxPrec, p := seqs ["mutual", many1 (cat "command" 0), "end"] },
+  { kind := "command.mutual", prec := maxPrec, p := seqs ["mutual", many1 (cat "command" 1), "end"] },
+  -- (13t) `namespace Foo` opens a namespace; `end`/`end Foo` closes the innermost.
+  -- (`end` is a command only at the top level: its precedence 0 keeps it out of a
+  -- `mutual` block's body, which parses commands at precedence 1 and has its own `end`.)
+  { kind := "command.namespace", prec := maxPrec,
+    p := seqs [nonReserved "namespace", ident] },
+  { kind := "command.open", prec := maxPrec,
+    p := seqs [nonReserved "open", ident, optional (seqs [colGt, nonReserved "as", ident])] },
+  { kind := "command.end", prec := 0, p := seqs ["end", optional (seqs [colGt, ident])] },
   { kind := "command.axiom", prec := maxPrec,
     p := seqs ["axiom", ident, univParams, many (bracketedBinder false), typeSpec true] },
   { kind := "command.check", prec := maxPrec, p := seqs ["#check", term] },
