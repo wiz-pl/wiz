@@ -1403,7 +1403,7 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
-## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+## Quantity-polymorphic results (`lib/Data/Result.wiz`, `lib/Region.wiz`)
 
 `ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
 `%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
@@ -1495,7 +1495,7 @@ characters and `Bytes.size` bytes, so one astral character is one character and 
 bytes.
 
 `Bytes.ofArray a`/`Bytes.toArray b` (in `Std`, where `Array` is) convert to and from an
-`Array Nat`, each element mod 256. `import WordBytes` adds `Bytes.ofU8s`/`toU8s`
+`Array Nat`, each element mod 256. `import Data.WordBytes` adds `Bytes.ofU8s`/`toU8s`
 (`List U8`); `U8Array ↔ Bytes` is not there yet (stage 29). `FS.readBytes`,
 `File.readBytes` and `Fd.read` hand back `Bytes` (9k).
 
@@ -1507,9 +1507,9 @@ Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model
 `Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
 uses the same nine runtime natives (`selfhost/rt.c`).
 
-## 9j: list lemmas (`lib/ListLemmas.wiz`)
+## 9j: list lemmas (`lib/Data/ListLemmas.wiz`)
 
-`import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
+`import Data.ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
 so a user proof is not a hand induction every time.
 
 * **Membership**: `List.Mem` (`x ∈ l`) is a proposition, with the binder notation
@@ -1529,7 +1529,7 @@ so a user proof is not a hand induction every time.
   and the `cons` equations `any_cons_true`/`any_cons_false`/`all_cons_true`/
   `all_cons_false`.
 
-All are structural recursions: no axiom, no `sorry`, so `lib/ListLemmas.wiz` leaves the
+All are structural recursions: no axiom, no `sorry`, so `lib/Data/ListLemmas.wiz` leaves the
 trust ledger unchanged. Wiz has no `simp` and no `[simp]` attribute, so they are stated
 left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
@@ -1623,7 +1623,7 @@ and doc comments; std's tests check one example of each.
 
 | module | contents |
 |--------|----------|
-| `lib/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
+| `lib/Data/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
 | `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
 | `lib/Ring.wiz` | `nat_ring! lhs = rhs`: identities of commutative semirings at `Nat`, by reflection |
 | `lib/IntRing.wiz` | `int_ring! lhs = rhs` at `Int`; the ring laws `Int.add_comm` … `Int.neg_mul`; the pair representation `Int.ofPair a b = a - b` |
@@ -1682,7 +1682,7 @@ use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
 | `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
 | `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
 | `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
-| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/Data/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
 | `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
 
 * **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
@@ -1760,7 +1760,7 @@ in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets
 
-`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+`lib/Data/PMap.wiz` (`import Data.PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
 structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
 search tree; every update returns a new map and leaves the old one valid, copying only
 the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).

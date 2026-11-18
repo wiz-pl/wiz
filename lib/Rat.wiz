@@ -5,7 +5,7 @@ import IntOrder
 Rational numbers as an ordered field, up to an equivalence (`import Rat`).
 
 A rational `Q` is a numerator and a positive denominator, **not reduced**, and `p ≈ q`
-(lib/Order.wiz) is the equality of fractions `p.num · q.den = q.num · p.den`: a setoid,
+(lib/Data/Order.wiz) is the equality of fractions `p.num · q.den = q.num · p.den`: a setoid,
 not a quotient (Wiz has no quotient types). Reducing by gcd would keep the numbers
 small, but every law would then need facts about gcd; with unreduced fractions every law
 is an identity of integers. Every operation respects `≈` (`Q.add_congr`, …), and the

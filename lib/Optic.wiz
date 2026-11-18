@@ -1,4 +1,4 @@
-import Result
+import Data.Result
 import Logic
 
 /-!
@@ -19,7 +19,7 @@ Main definitions: `Store` (a borrowed value and how to put it back), `Lens` and
 `Affine` (`Option<&mut A>`), `TraverseMut` (`iter_mut`), the lens laws
 (`Lens.Lawful`, `PLens.Lawful`, `Lens.Indep`) and proofs that composition keeps them
 (`Lens.comp_lawful`, `List.atL_lawful`). `Result`, `Error` and their specification
-predicates are in lib/Result.wiz.
+predicates are in lib/Data/Result.wiz.
 
 ```
 import Optic
@@ -31,7 +31,7 @@ def p : Pair2 Nat Nat := Pair2.mk 1 2
 ```
 -/
 
--- `Result`, `Error` and their specification predicates are in lib/Result.wiz.
+-- `Result`, `Error` and their specification predicates are in lib/Data/Result.wiz.
 
 -- ## Store: a value and a way to put it back
 --

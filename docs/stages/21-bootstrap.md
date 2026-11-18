@@ -1208,6 +1208,6 @@ slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argu
 self-hosted one (collector and reference counting); `=ffi` has `#eval`/`#run` of the
 operations in the host interpreters.
 
-**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
+**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/Data/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).

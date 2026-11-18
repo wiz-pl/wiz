@@ -420,7 +420,7 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
 * **Bytes** also got `slice b start len`, `take`, `drop`, `append` (in place when the
   first is unique), `eq`, `isEmpty`, `at : Bytes → Nat → Option Nat` (`get` past the end
   is 0), `ofList`/`toList` (`List Nat`, each mod 256), `singleton`, `range n` (0 … n-1)
-  and `show` (`[1, 2, 255]`). A byte is a `Nat`; `import WordBytes` adds
+  and `show` (`[1, 2, 255]`). A byte is a `Nat`; `import Data.WordBytes` adds
   `Bytes.ofU8s`/`toU8s` (`List U8`, lib/Word.wiz), kept out of IO and Sys because
   `Hdl.Core` users define their own `U8`.
 * **Bytes on a `File`** (stdio, buffered, so they mix with `readLine`):

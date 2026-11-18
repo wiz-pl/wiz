@@ -183,7 +183,7 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   * `Compare`: lexicographic on the fields of the same constructor, `.lt`/`.gt` by the
     constructors' **declaration order** (the first is least), recursive fields through
     the helper. There is no Lean-host deriver for `Compare` (the class is
-    `lib/PMap.wiz`'s, whose `Ordering` comes from `lib/Nat.wiz`, and its instances are
+    `lib/Data/PMap.wiz`'s, whose `Ordering` comes from `lib/Nat.wiz`, and its instances are
     written by hand), so this one has no differential case; it is tested in the
     self-hosted toolchain only, whose prelude has no `Ordering` (the case declares one),
     and the deriver names its result type `Ordering` as the other derivers name `Bool`
