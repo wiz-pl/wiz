@@ -1,0 +1,495 @@
+import Prelude
+import Scry.Egraph
+import Scry.Wil
+/-!
+# Scry.EgraphWil: a Wil-term layer over the e-graph
+
+`Scry.Egraph` is an uninterpreted e-graph: an operator is just a `Nat`. This module gives
+that engine the two things a program analysis needs:
+
+1. **Terms from Wil.** `wgBuildProgram` walks every statement of a `Wil.Program` and
+   encodes an assignment `x = e` as two e-nodes, one for the value of `e` and one for the
+   register `x`, joined by a union. The encoding is structural: `Rhs.cst` is a constant
+   e-node, `Rhs.bin`/`Rhs.un` are operator e-nodes over their operands' classes,
+   `Rhs.use` is the register's class, and memory/opaque right-hand sides get a distinct
+   leaf so they are never confused with each other. A register is a leaf keyed by its
+   index, so an assignment is exactly an equality between the register's class and the
+   expression's class.
+
+2. **Two rewrite families.** `wgSimplify` scans the graph once for
+
+   * **constant folding** — an arithmetic node whose two operands are constants in the
+     same width/signedness is replaced by the constant the concrete `Wil.Val.bin`
+     semantics computes, and
+   * **algebraic identities** — `x + 0 -> x`, `x - 0 -> x`, `x * 1 -> x`,
+     `x * 0 -> 0`, `x / 1 -> x`, `x & 0 -> 0`, `x | 0 -> x`, `x ^ 0 -> x`,
+     `x << 0 -> x`, `x >> 0 -> x`.
+
+   A fold and an identity are both `union`s: the e-class of the expression is merged
+   with the e-class of its result. `wgSaturate` runs a simplify pass, then any extra
+   `Scry.Rewrite` rules (relational e-matching from `Scry.Egraph`), rebuilds for
+   congruence closure, and repeats while something changed, under a **fuel bound**. The
+   result reports the classes/nodes, the rounds, the fold and rewrite counts and the stop
+   reason (`fixpoint` or `fuel`), so a run is deterministic and inspectable.
+
+## Relation to the Datalog layer
+
+The e-graph is a *view*: it consumes the Wil program (and, through `wgMergeEqRows`, the
+equality rows a Datalog stratum derives) and never writes back to the program, the
+`Scry.Store` facts or any analysis result. The Datalog facts remain authoritative; this
+layer is an optional simplification/reporting pass (`scry egraph FILE.c`), not a second
+semantics. `Scry.EgraphExtract` (a separate module) is the one that extracts saturated
+classes back into a checked `Wil.Program`; it leaves this build/rewrite layer unchanged
+and hands the new program to an analysis explicitly (`scry egraph --rewrite`).
+
+The encoding is intentionally an approximation: registers are keyed by index, not by
+definition point, so two assignments to the same register are merged. It is a
+*may-equality* graph for display/rewriting, not a flow-sensitive value-numbering pass.
+-/
+
+-- ## Operator tags
+
+-- Structural operator tags are small. Literals, types and register leaves use disjoint
+-- very large ranges, so an uninterpreted operator cannot be mistaken for a literal just
+-- because a constant happens to be large.
+def Scry.wgBinBase : Nat := 100
+def Scry.wgUnBase : Nat := 200
+def Scry.wgLoadOp : Nat := 300
+def Scry.wgGepBase : Nat := 400
+def Scry.wgOpaqueBase : Nat := 500
+
+def Scry.wgLitBase : Nat := 1000000000000000000000000000000
+def Scry.wgTyBase : Nat := 2000000000000000000000000000000
+def Scry.wgVarBase : Nat := 3000000000000000000000000000000
+def Scry.wgConstOp : Nat := 4000000000000000000000000000000
+def Scry.wgOtherBase : Nat := 5000000000000000000000000000000
+
+def Scry.wgOpCode : Wil.Op → Nat
+  | .add => 0
+  | .sub => 1
+  | .mul => 2
+  | .div => 3
+  | .rem => 4
+  | .and => 5
+  | .or => 6
+  | .xor => 7
+  | .shl => 8
+  | .shr => 9
+  | .eq => 10
+  | .ne => 11
+  | .lt => 12
+  | .le => 13
+  | .gt => 14
+  | .ge => 15
+  | .neg => 16
+  | .not => 17
+
+def Scry.wgOpOfCode : Nat → Option Wil.Op
+  | .zero => .some .add
+  | 1 => .some .sub
+  | 2 => .some .mul
+  | 3 => .some .div
+  | 4 => .some .rem
+  | 5 => .some .and
+  | 6 => .some .or
+  | 7 => .some .xor
+  | 8 => .some .shl
+  | 9 => .some .shr
+  | 10 => .some .eq
+  | 11 => .some .ne
+  | 12 => .some .lt
+  | 13 => .some .le
+  | 14 => .some .gt
+  | 15 => .some .ge
+  | 16 => .some .neg
+  | 17 => .some .not
+  | _ => .none
+
+def Scry.wgOpName : Wil.Op → String
+  | .add => "+"
+  | .sub => "-"
+  | .mul => "*"
+  | .div => "/"
+  | .rem => "%"
+  | .and => "&"
+  | .or => "|"
+  | .xor => "^"
+  | .shl => "<<"
+  | .shr => ">>"
+  | .eq => "=="
+  | .ne => "!="
+  | .lt => "<"
+  | .le => "<="
+  | .gt => ">"
+  | .ge => ">="
+  | .neg => "-"
+  | .not => "~"
+
+def Scry.wgBinOp (op : Wil.Op) : Nat := Nat.add Scry.wgBinBase (Scry.wgOpCode op)
+def Scry.wgUnOp (op : Wil.Op) : Nat := Nat.add Scry.wgUnBase (Scry.wgOpCode op)
+def Scry.wgVarOp (i : Nat) : Nat := Nat.add Scry.wgVarBase i
+def Scry.wgLitBitsOp (b : Nat) : Nat := Nat.add Scry.wgLitBase b
+def Scry.wgLitTyOp (w : Nat) (s : Bool) : Nat :=
+  Nat.add Scry.wgTyBase (Nat.add (Nat.mul w 2) (if s then 1 else 0))
+
+def Scry.wgOpFromBin (op : Nat) : Option Wil.Op :=
+  if Nat.le Scry.wgBinBase op then
+    if Nat.lt op (Nat.add Scry.wgBinBase 100) then
+      Scry.wgOpOfCode (Nat.sub op Scry.wgBinBase)
+    else .none
+  else .none
+
+def Scry.wgOpFromUn (op : Nat) : Option Wil.Op :=
+  if Nat.le Scry.wgUnBase op then
+    if Nat.lt op (Nat.add Scry.wgUnBase 100) then
+      Scry.wgOpOfCode (Nat.sub op Scry.wgUnBase)
+    else .none
+  else .none
+
+-- ## Reading a class
+
+/-- The first stored e-node of a class with operator `op`. -/
+def Scry.wgFindNode (g : Scry.EGraph) (op : Nat) (cls : Nat) : Option Scry.ENode :=
+  List.find (fun n => Nat.beq n.op op) (Scry.EGraph.nodesOf g cls)
+
+/-- The operator of the first leaf in a class (a literal or register leaf). -/
+def Scry.wgLeafOp (g : Scry.EGraph) (cls : Nat) : Option Nat :=
+  match List.find (fun n => List.isEmpty n.args) (Scry.EGraph.nodesOf g cls) with
+  | .some n => .some n.op
+  | .none => .none
+
+def Scry.wgLitBitsOf (op : Nat) : Option Nat :=
+  if Nat.le Scry.wgLitBase op then
+    if Nat.lt op Scry.wgTyBase then .some (Nat.sub op Scry.wgLitBase) else .none
+  else .none
+
+def Scry.wgLitTyOf (op : Nat) : Option (Nat × Bool) :=
+  if Nat.le Scry.wgTyBase op then
+    if Nat.lt op Scry.wgVarBase then
+      let k := Nat.sub op Scry.wgTyBase;
+      .some (Nat.div k 2, Nat.beq (Nat.mod k 2) 1)
+    else .none
+  else .none
+
+def Scry.wgVarOf (op : Nat) : Option Nat :=
+  if Nat.le Scry.wgVarBase op then
+    if Nat.lt op Scry.wgConstOp then .some (Nat.sub op Scry.wgVarBase) else .none
+  else .none
+
+def Scry.wgVarOfNodes : List Scry.ENode → Option Nat
+  | .nil => .none
+  | .cons n rest => match Scry.wgVarOf n.op with
+    | .some i => .some i
+    | .none => Scry.wgVarOfNodes rest
+
+def Scry.wgVarOfClass (g : Scry.EGraph) (cls : Nat) : Option Nat :=
+  Scry.wgVarOfNodes (Scry.EGraph.nodesOf g cls)
+
+/-- A class represented as an integer constant, if it has one. The constant e-node has
+two children: a literal leaf for the bits and one for `2 * width + signed`. -/
+def Scry.wgConstOfClass (g : Scry.EGraph) (cls : Nat) : Option Wil.Val :=
+  match Scry.wgFindNode g Scry.wgConstOp (Scry.EGraph.find g cls) with
+  | .none => .none
+  | .some n => match n.args with
+    | .cons a (.cons t .nil) =>
+      match Scry.wgLeafOp g a, Scry.wgLeafOp g t with
+      | .some oa, .some ot =>
+        match Scry.wgLitBitsOf oa, Scry.wgLitTyOf ot with
+        | .some b, .some p => .some (.int p.1 p.2 b)
+        | _, _ => .none
+      | _, _ => .none
+    | _ => .none
+
+/-- A shallow rendering of a class (constant, register, or class id). Rewrite logs use
+this; a full term extractor is `Scry.EGraph.extract`. -/
+def Scry.wgShowClass (g : Scry.EGraph) (cls : Nat) : String :=
+  match Scry.wgConstOfClass g cls with
+  | .some v => Wil.Val.show v
+  | .none => match Scry.wgVarOfClass g cls with
+    | .some i => String.append "v" (Nat.repr i)
+    | .none => String.append "c" (Nat.repr (Scry.EGraph.find g cls))
+
+-- ## Building from Wil
+
+/-- Intern a constant. Integers get a bits leaf and a type leaf; the other values get one
+distinct leaf (`null`, `undef`, or a pointer's block/offset). -/
+def Scry.wgAddConst (g : Scry.EGraph) (v : Wil.Val) : Scry.EGraph × Nat :=
+  match v with
+  | .int w s b =>
+    let a := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgLitBitsOp b));
+    let t := Scry.EGraph.add a.1 (Scry.ENode.leaf (Scry.wgLitTyOp w s));
+    Scry.EGraph.add t.1 (Scry.ENode.mk Scry.wgConstOp [a.2, t.2])
+  | .nul => Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOtherBase 0))
+  | .undef => Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOtherBase 1))
+  | .ptr p o =>
+    Scry.EGraph.add g (Scry.ENode.leaf
+      (Nat.add Scry.wgOtherBase (Nat.add 2 (Nat.add (Nat.mul p 1000000) o))))
+
+/-- The e-node for a right-hand side. `g.next` keys an opaque value so `alloc`/`havoc`
+(and `slot`/`globalRef`/`fnptr`/`gepVar`) values are never conflated with an existing
+class. -/
+def Scry.wgRhs (g : Scry.EGraph) : Wil.Rhs → Scry.EGraph × Nat
+  | .use v => Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgVarOp v.index))
+  | .cst v => Scry.wgAddConst g v
+  | .bin op a b =>
+    let ea := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgVarOp a.index));
+    let eb := Scry.EGraph.add ea.1 (Scry.ENode.leaf (Scry.wgVarOp b.index));
+    Scry.EGraph.add eb.1 (Scry.ENode.mk (Scry.wgBinOp op) [ea.2, eb.2])
+  | .un op a =>
+    let ea := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgVarOp a.index));
+    Scry.EGraph.add ea.1 (Scry.ENode.mk (Scry.wgUnOp op) [ea.2])
+  | .load p =>
+    let ep := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgVarOp p.index));
+    Scry.EGraph.add ep.1 (Scry.ENode.mk Scry.wgLoadOp [ep.2])
+  | .gep p off =>
+    let ep := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgVarOp p.index));
+    Scry.EGraph.add ep.1 (Scry.ENode.mk (Nat.add Scry.wgGepBase off) [ep.2])
+  | .alloc cells =>
+    let c := Scry.EGraph.add g (Scry.ENode.leaf (Scry.wgLitBitsOp cells));
+    Scry.EGraph.add c.1 (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase c.1.next))
+  | .havoc _ =>
+    Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase g.next))
+  -- The points-to right-hand sides are opaque leaves too: a stack slot is a fresh block
+  -- (like `alloc`), and a global's or function's address and a variable-index `gep` are
+  -- values the fold/identity rules say nothing about, so no class is merged with them.
+  | .slot _ =>
+    Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase g.next))
+  | .globalRef _ =>
+    Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase g.next))
+  | .fnptr _ =>
+    Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase g.next))
+  | .gepVar _ _ _ =>
+    Scry.EGraph.add g (Scry.ENode.leaf (Nat.add Scry.wgOpaqueBase g.next))
+
+/-- Build the e-classes of a statement list. Only `assign` makes an e-node;
+`x = e` unions the register leaf with the value's class. Controlled statements are
+ignored (a flow-sensitive build is a later pass). -/
+partial def Scry.wgBuildStmts (g : Scry.EGraph) : List Wil.Stmt → Scry.EGraph × Nat
+  | .nil => (g, 0)
+  | .cons s rest =>
+    match s with
+    | .assign x e _ =>
+      let r := Scry.wgRhs g e;
+      let t := Scry.EGraph.add r.1 (Scry.ENode.leaf (Scry.wgVarOp x.index));
+      let u := Scry.EGraph.union t.1 t.2 r.2;
+      let rest' := Scry.wgBuildStmts u.1 rest;
+      (rest'.1, Nat.succ rest'.2)
+    | _ => Scry.wgBuildStmts g rest
+
+partial def Scry.wgBuildBlocks (g : Scry.EGraph) : List Wil.Block → Scry.EGraph × Nat
+  | .nil => (g, 0)
+  | .cons b rest =>
+    let s := Scry.wgBuildStmts g b.stmts;
+    let r := Scry.wgBuildBlocks s.1 rest;
+    (r.1, Nat.add s.2 r.2)
+
+/-- The built graph and its source counts. -/
+structure Scry.WgBuild where
+  g : Scry.EGraph
+  funcs : Nat
+  stmts : Nat
+
+partial def Scry.wgBuildProgramGo (g : Scry.EGraph) (funcs stmts : Nat) :
+    List Wil.Func → Scry.WgBuild
+  | .nil => Scry.WgBuild.mk (Scry.EGraph.rebuild g) funcs stmts
+  | .cons f rest =>
+    let r := Scry.wgBuildBlocks g f.blocks;
+    Scry.wgBuildProgramGo r.1 (Nat.succ funcs) (Nat.add stmts r.2) rest
+
+/-- Build a graph from a whole program. -/
+def Scry.wgBuildProgram (p : Wil.Program) : Scry.WgBuild :=
+  Scry.wgBuildProgramGo Scry.EGraph.empty 0 0 p.funcs
+
+/-- The Datalog surface: merge equality rows (the first two columns) into a built graph.
+The rows are facts the Datalog engine derived; the e-graph consumes them and does not
+change the facts. -/
+def Scry.wgMergeEqRows (b : Scry.WgBuild) (rows : List (List U64)) : Scry.WgBuild :=
+  let r := Scry.EGraph.mergeFacts b.g rows;
+  Scry.WgBuild.mk r.1 b.funcs b.stmts
+
+-- ## Rewrite facts
+
+structure Scry.WgRewrite where
+  rule : String
+  from : String
+  to : String
+
+structure Scry.WgPass where
+  g : Scry.EGraph
+  folds : Nat
+  rewrites : Nat
+  log : List Scry.WgRewrite
+
+structure Scry.WgStats where
+  g : Scry.EGraph
+  rounds : Nat
+  folds : Nat
+  rewrites : Nat
+  ruleRounds : Nat
+  stop : String
+  log : List Scry.WgRewrite
+
+def Scry.wgIntBeq (v : Wil.Val) (n : Nat) : Bool :=
+  match v with
+  | .int _ _ b => Nat.beq b n
+  | _ => .false
+
+/-- Evaluate a binary operation with the authoritative concrete Wil semantics. -/
+def Scry.wgEvalBin (op : Wil.Op) (a b : Wil.Val) : Option Wil.Val :=
+  match Wil.Val.bin op a b with
+  | .ok v => .some v
+  | .error _ => .none
+
+/-- A unary operation is `Wil.Val.bin op a undef`, exactly as `Wil.evalRhs` does it. -/
+def Scry.wgEvalUn (op : Wil.Op) (a : Wil.Val) : Option Wil.Val :=
+  match Wil.Val.bin op a .undef with
+  | .ok v => .some v
+  | .error _ => .none
+
+/-- Union the expression class with the target and log the event if it changed. -/
+def Scry.wgDoRewrite (g : Scry.EGraph) (expr target : Nat)
+    (rule from to : String) : Scry.WgPass :=
+  let u := Scry.EGraph.union g expr target;
+  if u.2 then
+    Scry.WgPass.mk u.1 0 1 (.cons (Scry.WgRewrite.mk rule from to) .nil)
+  else Scry.WgPass.mk u.1 0 0 .nil
+
+/-- The same, counted as a constant fold (the report distinguishes folds from the
+algebraic identity rewrites). -/
+def Scry.wgDoFold (g : Scry.EGraph) (expr target : Nat)
+    (rule from to : String) : Scry.WgPass :=
+  let u := Scry.EGraph.union g expr target;
+  if u.2 then
+    Scry.WgPass.mk u.1 1 0 (.cons (Scry.WgRewrite.mk rule from to) .nil)
+  else Scry.WgPass.mk u.1 0 0 .nil
+
+/-- `x op K -> x` (or `-> K`) for the identity rows. The constant is on the right; the
+non-commutative exception `x * 0 -> 0` uses the constant class as the target. -/
+def Scry.wgIdentity (op : Wil.Op) (ca cb : Nat) (vb : Option Wil.Val) :
+    Option (Nat × String) :=
+  match vb with
+  | .none => .none
+  | .some v =>
+    if Scry.wgIntBeq v 0 then
+      match op with
+      | .add => .some (ca, "add-zero")
+      | .sub => .some (ca, "sub-zero")
+      | .mul => .some (cb, "mul-zero")
+      | .and => .some (cb, "and-zero")
+      | .or => .some (ca, "or-zero")
+      | .xor => .some (ca, "xor-zero")
+      | .shl => .some (ca, "shl-zero")
+      | .shr => .some (ca, "shr-zero")
+      | _ => .none
+    else if Scry.wgIntBeq v 1 then
+      match op with
+      | .mul => .some (ca, "mul-one")
+      | .div => .some (ca, "div-one")
+      | _ => .none
+    else .none
+
+/-- The rewrite work for one e-node: fold it if both operands are constants, otherwise
+apply an identity. -/
+def Scry.wgSimplifyNode (g : Scry.EGraph) (cls : Nat) (n : Scry.ENode) : Scry.WgPass :=
+  match Scry.wgOpFromBin n.op with
+  | .some op => match n.args with
+    | .cons a (.cons b .nil) =>
+      let ca := Scry.EGraph.find g a;
+      let cb := Scry.EGraph.find g b;
+      let c := Scry.EGraph.find g cls;
+      let va := Scry.wgConstOfClass g ca;
+      let vb := Scry.wgConstOfClass g cb;
+      let from := String.append (Scry.wgShowClass g ca)
+        (String.append " " (String.append (Scry.wgOpName op)
+          (String.append " " (Scry.wgShowClass g cb))));
+      match va, vb with
+      | .some x, .some y => match Scry.wgEvalBin op x y with
+        | .some v =>
+          let m := Scry.wgAddConst g v;
+          Scry.wgDoFold m.1 c m.2 "fold" from (Wil.Val.show v)
+        | .none => Scry.WgPass.mk g 0 0 .nil
+      | _, _ => match Scry.wgIdentity op ca cb vb with
+        | .some t =>
+          Scry.wgDoRewrite g c t.1 t.2 from (Scry.wgShowClass g t.1)
+        | .none => Scry.WgPass.mk g 0 0 .nil
+    | _ => Scry.WgPass.mk g 0 0 .nil
+  | .none => match Scry.wgOpFromUn n.op with
+    | .some op => match n.args with
+      | .cons a .nil =>
+        match Scry.wgConstOfClass g (Scry.EGraph.find g a) with
+        | .some x => match Scry.wgEvalUn op x with
+          | .some v =>
+            let m := Scry.wgAddConst g v;
+            let from := String.append (Scry.wgOpName op)
+              (String.append " " (Scry.wgShowClass g (Scry.EGraph.find g a)));
+            Scry.wgDoFold m.1 (Scry.EGraph.find g cls) m.2 "fold" from (Wil.Val.show v)
+          | .none => Scry.WgPass.mk g 0 0 .nil
+        | .none => Scry.WgPass.mk g 0 0 .nil
+      | _ => Scry.WgPass.mk g 0 0 .nil
+    | .none => Scry.WgPass.mk g 0 0 .nil
+
+partial def Scry.wgSimplifyNodes (g : Scry.EGraph) :
+    List (Nat × Scry.ENode) → Scry.WgPass
+  | .nil => Scry.WgPass.mk g 0 0 .nil
+  | .cons p rest =>
+    let r := Scry.wgSimplifyNode g p.1 p.2;
+    let rest' := Scry.wgSimplifyNodes r.g rest;
+    Scry.WgPass.mk rest'.g (Nat.add r.folds rest'.folds)
+      (Nat.add r.rewrites rest'.rewrites) (List.append r.log rest'.log)
+
+/-- One pass: a snapshot of the node table, then a rebuild to close congruence. -/
+def Scry.wgSimplify (g : Scry.EGraph) : Scry.WgPass :=
+  let r := Scry.wgSimplifyNodes g g.nodes;
+  Scry.WgPass.mk (Scry.EGraph.rebuild r.g) r.folds r.rewrites r.log
+
+-- ## Saturation with fuel
+
+/-- The fixed-point loop. It counts the final no-change round, so a clean graph reports
+`rounds = 1` and `stop = fixpoint`; a budget that runs out reports `stop = fuel`. -/
+partial def Scry.wgLoop (fuel rounds folds rewrites ruleRounds : Nat)
+    (g : Scry.EGraph) (extra : List Scry.Rewrite) (log : List Scry.WgRewrite) :
+    Scry.WgStats :=
+  match fuel with
+  | .zero => Scry.WgStats.mk g rounds folds rewrites ruleRounds "fuel" log
+  | .succ k =>
+    let s := Scry.wgSimplify g;
+    let a := Scry.EGraph.applyRules extra s.g .false;
+    let g1 := Scry.EGraph.rebuild a.1;
+    let changed := Bool.or (Bool.not (Nat.beq s.folds 0)) a.2;
+    let changed2 := Bool.or changed (Bool.not (Nat.beq s.rewrites 0));
+    let folds' := Nat.add folds s.folds;
+    let rewrites' := Nat.add rewrites s.rewrites;
+    let ruleRounds' := if a.2 then Nat.succ ruleRounds else ruleRounds;
+    let log' := List.append s.log log;
+    if changed2 then
+      Scry.wgLoop k (Nat.succ rounds) folds' rewrites' ruleRounds' g1 extra log'
+    else
+      Scry.WgStats.mk g1 (Nat.succ rounds) folds' rewrites' ruleRounds' "fixpoint" log'
+
+/-- Saturate `g` under the built-in folds/identities and any extra e-matching rules.
+`fuel` bounds the rounds, so even a growing rule system terminates. -/
+def Scry.wgSaturate (fuel : Nat) (g : Scry.EGraph)
+    (extra : List Scry.Rewrite) : Scry.WgStats :=
+  Scry.wgLoop fuel 0 0 0 0 g extra .nil
+
+-- ## Rendering
+
+def Scry.wgRenderRewrite (r : Scry.WgRewrite) : String :=
+  "rewrite: " ++ r.rule ++ ": " ++ r.from ++ " -> " ++ r.to
+
+/-- The deterministic report `scry egraph` prints (and the tests assert). -/
+def Scry.wgRenderReport (path : String) (b : Scry.WgBuild)
+    (s : Scry.WgStats) : String :=
+  let head := "egraph: " ++ path ++ "\n"
+    ++ "functions: " ++ Nat.repr b.funcs ++ "\n"
+    ++ "statements: " ++ Nat.repr b.stmts ++ "\n"
+    ++ "e-classes: " ++ Nat.repr (Scry.EGraph.numClasses s.g) ++ "\n"
+    ++ "e-nodes: " ++ Nat.repr (Scry.EGraph.numNodes s.g) ++ "\n"
+    ++ "rounds: " ++ Nat.repr s.rounds ++ "\n"
+    ++ "folds: " ++ Nat.repr s.folds ++ "\n"
+    ++ "rewrites: " ++ Nat.repr s.rewrites ++ "\n"
+    ++ "rule-rounds: " ++ Nat.repr s.ruleRounds ++ "\n"
+    ++ "stop: " ++ s.stop;
+  match s.log with
+  | .nil => head
+  | .cons _ _ => head ++ "\n" ++ String.intercalate "\n" (List.map Scry.wgRenderRewrite s.log)

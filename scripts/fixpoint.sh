@@ -21,7 +21,7 @@
 #   OUTDIR          default .lake/fixpoint
 #
 # It prints each step's wall time and peak RSS (the self-compile stages need about
-# 6 GiB; they have peaked near 5.4 GiB), and each stage's C size and md5 with PASS/FAIL.
+# 7 GiB; stage 2 peaked at 6.3 GiB on 2026-11-16), and each stage's C size and md5 with PASS/FAIL.
 # A stage killed by the OOM killer or a memory cgroup (exit 137) fails with a hint.
 # Slow: two or more compilations of the whole toolchain (CI runs it on a schedule).
 set -euo pipefail
@@ -161,8 +161,8 @@ run_step() {
     echo "FAILED: '$label' exited $rc after ${secs}s (peak $((kb / 1024)) MiB)." >&2
     if [ "$rc" -eq 137 ] || [ "$rc" -eq 9 ]; then
       echo "It was killed (SIGKILL), which is how the OOM killer and a memory cgroup end a run." >&2
-      echo "The fixpoint needs about 6 GiB: the self-compiles peak near 5.4 GiB (stage 2 has reached 5.5 GiB)." >&2
-      echo "Reserve it (e.g. 'heavy --mem 6G scripts/fixpoint.sh') and give the runner >= 6 GiB free." >&2
+      echo "The fixpoint needs about 7 GiB: the stage-2 self-compile has peaked at 6.3 GiB." >&2
+      echo "Reserve it (e.g. 'heavy --mem 7G scripts/fixpoint.sh') and give the runner >= 7 GiB free." >&2
     fi
     echo "Artifacts are in $out (run/ and the files already produced)." >&2
     exit 1
@@ -194,9 +194,15 @@ if [ "$compare_only" = 0 ]; then
   while [ "$k" -le "$stages" ]; do
     prev=$((k - 1))
     step "stage $k: cc self$prev.c with selfhost/rt.c"
+    # cc records the source's base name in the executable's symbol table (an STT_FILE
+    # entry), so every stage compiles a copy with one fixed name, cc/wizc.c: equal C then
+    # gives equal executables, and stage k's binary can be compared with stage k+1's
+    # (docs/bootstrap-chain.md, "The release is the fixpoint stage").
+    mkdir -p "$out/cc"
+    cp "$out/self$prev.c" "$out/cc/wizc.c"
     # shellcheck disable=SC2086
     run_step "cc self$prev.c -> stage$k" "$PWD" /dev/null \
-      cc -O2 -w -I"$PWD/selfhost" $WIZ_GC_CFLAGS "$out/self$prev.c" -o "$out/stage$k" $WIZ_GC_LDFLAGS
+      cc -O2 -w -I"$PWD/selfhost" $WIZ_GC_CFLAGS "$out/cc/wizc.c" -o "$out/stage$k" $WIZ_GC_LDFLAGS
     done_
 
     step "stage $k compiles the toolchain (self$k.c)"
@@ -236,6 +242,20 @@ for k in $(seq 1 "$stages"); do
   printf 'stage %d  %-16s  %10d bytes  md5 %s  %s\n' "$k" "self$k.c" "$bytes" "$md5" "$result"
 done
 
+# The stage executables (informational, not part of the verdict): with equal C and the
+# fixed source name above they should be byte-identical, which is what makes the
+# fixpoint stage's executable a release whose hash does not depend on its predecessor.
+if [ "$stages" -ge 3 ] && [ -f "$out/stage2" ]; then
+  echo
+  echo "stage executables (stage2 is the reference; informational):"
+  for k in $(seq 2 "$stages"); do
+    f=$out/stage$k
+    [ -f "$f" ] || continue
+    if [ "$k" -eq 2 ]; then r="(reference)"; elif cmp -s "$out/stage2" "$f"; then r=IDENTICAL; else r=DIFFERENT; fi
+    printf 'stage %d  %-16s  sha256 %s  %s\n' "$k" "stage$k" "$(sha256sum "$f" | cut -d' ' -f1)" "$r"
+  done
+fi
+
 if [ "$compare_only" = 0 ]; then
   echo
   printf 'total   %8ss   peak %s MiB\n' "$total_wall" "$((total_peak / 1024))"
@@ -263,7 +283,7 @@ first_md5=$(md5_of "$out/self1.c")
 rm -f "$measure"
 
 if [ "$compare_only" = 0 ] && [ "$keep" = 0 ]; then
-  rm -rf "$out/run" "$out"/self*.c "$out"/stage* "$out/compiler" "$out/compiler.wiz" "$out/self.wiz"
+  rm -rf "$out/run" "$out/cc" "$out"/self*.c "$out"/stage* "$out/compiler" "$out/compiler.wiz" "$out/self.wiz"
   echo "artifacts removed (--keep keeps self*.c, the stage binaries and run/)"
 elif [ "$keep" = 1 ]; then
   echo "artifacts kept in $out"

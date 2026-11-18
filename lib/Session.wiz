@@ -174,9 +174,10 @@ def Proc.run {R : Type} : (p : Proto) → Proc R p → (1 c : Chan p) → IO R
 
 /-- Run a process and a peer following the dual, and return both results. The model (what
 the kernel, proofs, `#eval` and `#run` see) is `link`; compiled code runs the peer in a
-new thread over a real channel (`Proc.runLinkedThreads`, by `implemented_by`), so a
-compiled program that prints `Proc.runLinked`'s result is a differential test of the
-native channels against the pure semantics. -/
+new thread over a real channel (`Proc.runLinkedThreads`, by `implemented_by`). The model
+starts no thread and `Chan.forks` counts them, so a compiled program that prints
+`Proc.runLinked`'s result *and* `Chan.forks` is a differential test: dropping the
+`implemented_by` attribute prints the same result with `0` forks and fails. -/
 def Proc.runLinked {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
   IO.pure (link p a b)
 /-- The compiled implementation of `Proc.runLinked`: the peer runs in a new thread over a
@@ -186,3 +187,10 @@ def Proc.runLinkedThreads {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (P
     Chan.fork p (fun c => IO.bind (Proc.run (Proto.dual p) b c) (fun y => MVar.put m y))
       (fun c => IO.bind (Proc.run p a c) (fun x => IO.bind (MVar.take m) (fun y => IO.pure (x, y)))))
 attribute [implemented_by Proc.runLinkedThreads] Proc.runLinked
+
+/-- How many threads `Chan.fork` has started in this program: an interpreted run (`#eval`,
+`#run`) starts none, so it is `0` there, and compiled code reports `n` after `n` forks. A
+diagnostic for the runtime and the tests, not part of the channel API; `Proc.runLinked`
+starts exactly one, which is how the `conc` case checks that compiled code took the
+native path. -/
+extern "wiz_chan_forks" Chan.forks : IO Nat

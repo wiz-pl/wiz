@@ -324,6 +324,21 @@ def cliDiffGroup : Group where
         checkEq 1 s3.code
         cliCheck s3.err "tm.wiz:2:1: error: type mismatch" "type mismatch"
         skip "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+    { name := "smt: without --trust-smt the refusal is the host's, at the command's start (C15)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        -- `smt` (stage 28a) is a library tactic: the host parses it, elaborates it, and
+        -- refuses it unless `--trust-smt`; the self-hosted frontend parses the same tree
+        -- (Parse.wiz `surfaceCats`) and refuses it with the same message and exit code
+        let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
+        let spec : CliDiffSpec := { files := #[("f.wiz", src)], args := #["check", "f.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq ("f.wiz:2:1: error: SMT solving is not enabled: `smt` closes a goal on an " ++
+          "SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n") s.err
+        skip "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6); the message and the exit code are the same" },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,

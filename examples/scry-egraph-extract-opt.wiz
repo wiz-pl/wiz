@@ -1,0 +1,30 @@
+import Scry.EgraphNative
+-- Extraction costs are `Option Nat` (`scry-egraph-extract-opt`): `none` means "no
+-- finite term" (a cycle with no leaf), and a large weight is an ordinary `some`, with no
+-- `inf` sentinel to collide with a real cost. `main` is the digest.
+
+-- ops: 3 = a leaf, 10 = f
+def cyclic : Scry.EGraph :=
+  -- `f 0` with child 0 is the class 0 itself: a cycle with no leaf
+  let e := Scry.EGraph.empty;
+  let c := Scry.EGraph.add e (Scry.ENode.mk 10 [0]);
+  c.1
+
+def finite : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let a := Scry.EGraph.add e (Scry.ENode.leaf 3);
+  a.1
+
+def main : Nat :=
+  let w := fun op => if Nat.beq op 3 then 1000000 else 0;
+  let cycCost := Scry.EGraph.cost cyclic (fun _ => 0) 0;
+  let cycTerm := Scry.EGraph.extract cyclic 0;
+  let leafCost := Scry.EGraph.cost finite (fun _ => 0) 0;
+  let leafTerm := Scry.EGraph.extract finite 0;
+  let weighted := Scry.EGraph.cost finite w 0;
+  (match cycCost with | .none => 100000 | .some _ => 0) +
+  (match cycTerm with | .none => 10000 | .some _ => 0) +
+  (match leafCost with | .some c => if Nat.beq c 1 then 1000 else 0 | .none => 0) +
+  (match leafTerm with | .some t => Scry.ETerm.size t * 100 | .none => 900) +
+  (match weighted with | .some c => if Nat.beq c 1000001 then 10 else 0 | .none => 0) +
+  (if Scry.EGraph.canonical finite then 1 else 0)

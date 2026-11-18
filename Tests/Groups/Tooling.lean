@@ -74,6 +74,86 @@ def toolingGroup : Group where
         checkEq (msgs plain) (msgs cold)
         checkEq (msgs plain) (msgs warm)
         checkEq plain.globals.order.size warm.globals.order.size },
+    { name := "a root file's manifest is its own (same headers, different text)", run := fun _ => do
+        let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, module := "", loader := fun m => if m == "Prelude" then some prelude else none }
+        let dir ← IO.FS.createTempDir
+        let s1 := "import Prelude\ndef one : Nat := 1\n"
+        let s2 := "import Prelude\ndef two : Nat := 2\n"
+        let (_, h1) ← Cache.elaborateCached (some dir) [] s1 init 0 (verify := .warn)
+        let (_, h2) ← Cache.elaborateCached (some dir) [] s2 init 0 (verify := .warn)
+        let (_, h3) ← Cache.elaborateCached (some dir) [] s1 init 0 (verify := .warn)
+        let (_, h4) ← Cache.elaborateCached (some dir) [] s2 init 0 (verify := .warn)
+        -- (a cold run still counts its imported modules' replay as hits: 283 for the
+        -- Prelude here, so the check is that the roots hit more than the module alone)
+        check (h3 > h1 && h4 > h2) s!"a root file's entries were lost: {h1}/{h3}, {h2}/{h4}"
+        -- (the root pseudo-module's manifest is keyed by the file's text too: before that,
+        -- both files shared one manifest, which grew with every root checked and could
+        -- lose a concurrent writer's entries -- a fresh file then missed on every run)
+        let mdir := dir / "manifest.d"
+        let mut roots := 0
+        for e in ← mdir.readDir do
+          unless e.fileName.endsWith ".wizmf" do continue
+          let text ← IO.FS.readFile e.path
+          if (((text.take 160).toString).splitOn "(module \"\")").length > 1 then roots := roots + 1
+        checkEq 2 roots },
+    { name := "a fresh file hits on the second check; an edit is a miss", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let file := dir / "fresh.wiz"
+        let cache := (dir / "cache").toString
+        IO.FS.writeFile file "import Prelude\ndef one : Nat := 1\ndef two : Nat := one + 1\n"
+        let wiz ← wizExe
+        let hits (err : String) : Nat :=
+          match err.splitOn " manifests, " with
+          | _ :: s :: _ => match s.splitOn " entries" with
+            | h :: _ => (h.trimAscii.toString.toNat?).getD 0
+            | [] => 0
+          | _ => 0
+        -- (a hit writes no `.wizc`; a miss puts one, so the count is the hit/miss signal
+        -- even though imported modules contribute to the stats' hit count)
+        let cacheDir : System.FilePath := cache
+        let entries : IO Nat := do
+          if !(← cacheDir.isDir) then return 0
+          let mut n := 0
+          for e in ← cacheDir.readDir do
+            if e.fileName.endsWith ".wizc" then n := n + 1
+          pure n
+        let checkIt (verify : List String) : IO (UInt32 × String) := do
+          let out ← IO.Process.output { cmd := wiz, args := #["check", file.toString, "--cache", cache, "--cache-verify-stats"] ++ verify.toArray }
+          pure (out.exitCode, out.stderr)
+        let (c1, e1) ← checkIt []
+        checkEq 0 c1
+        let h1 := hits e1
+        let n1 ← entries
+        let (c2, e2) ← checkIt []
+        checkEq 0 c2
+        check (hits e2 > h1) s!"the second check of a fresh file did not add its hits ({h1} -> {hits e2}):\n{e2}"
+        checkEq n1 (← entries)
+        let h2 := hits e2
+        -- (an edit re-elaborates its changed command: one new entry and one fewer hit; the
+        -- pointer to the previous text's manifest keeps `one` warm -- without it, two
+        -- commands would be re-elaborated)
+        IO.FS.writeFile file "import Prelude\ndef one : Nat := 1\ndef two : Nat := one + 2\n"
+        let (c3, e3) ← checkIt []
+        checkEq 0 c3
+        let n3 ← entries
+        checkEq (n1 + 1) n3
+        checkEq (hits e3 + 1) h2
+        let (c4, e4) ← checkIt []
+        checkEq 0 c4
+        check (hits e4 > 0) s!"the second check after an edit missed:\n{e4}"
+        checkEq h2 (hits e4)
+        checkEq n3 (← entries)
+        -- (`--cache-verify strict` uses the manifests the `warn` runs wrote)
+        let (c5, e5) ← checkIt ["--cache-verify", "strict"]
+        checkEq 0 c5
+        check (hits e5 > 0) s!"strict did not serve the manifested entries:\n{e5}"
+        -- (`off` is the old unverified lookup: the same verdict, and it writes no manifest)
+        let (c6, _) ← checkIt ["--cache-verify", "off"]
+        checkEq 0 c6
+        let (c7, e7) ← checkIt []
+        checkEq 0 c7
+        check (hits e7 > 0) s!"a warn run after off did not hit:\n{e7}" },
     { name := "another build of wiz misses the shared cache (its binary is in the key)", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := fun m => if m == "Prelude" then some prelude else none }
@@ -95,19 +175,25 @@ def toolingGroup : Group where
         check (h5 > 0) "the default is not this binary's hash" },
     { name := "a long list literal caches in linear time (its expansion is not reprinted exponentially)", run := fun _ => do
         let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
-        let dir ← IO.FS.createTempDir
-        let names := (List.range 40).map fun i => s!"name{i}"
-        let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
-          "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
-          "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
-        let file := dir / "long-list.wiz"
-        IO.FS.writeFile file src
-        let start ← IO.monoMsNow
-        let out ← IO.Process.output { cmd := "timeout", args :=
-          #["20", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
-        let ms := (← IO.monoMsNow) - start
-        check (out.exitCode == 0) s!"checking a 40-element list literal through the cache failed after {ms} ms: {out.stdout}{out.stderr}"
-        check (ms < 15000) s!"checking a 40-element list literal through the cache took {ms} ms" },
+        -- one cold check of a `k`-element list literal through a fresh cache
+        let checkLiteral (k : Nat) : IO Unit := do
+          let dir ← IO.FS.createTempDir
+          let names := (List.range k).map fun i => s!"name{i}"
+          let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
+            "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
+            "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
+          let file := dir / "long-list.wiz"
+          IO.FS.writeFile file src
+          try
+            let out ← IO.Process.output { cmd := "timeout", args :=
+              #["60", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
+            unless out.exitCode == 0 do
+              throw (IO.userError s!"checking a {k}-element list literal through the cache failed (exit {out.exitCode}): {out.stdout}{out.stderr}")
+          finally
+            IO.FS.removeDirAll dir
+        -- (finding in reviews/2026-11-17-test-audit.md:35: one size and `ms < 15000`
+        -- passes a quadratic implementation; the ratio at 40 and 80 is the claim)
+        let _ ← checkScaling "long list literal" checkLiteral 40 3 },
     { name := "terms survive the cache's format", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let st := runFrontend (R := ZeroOneMany) "import Prelude" { trustedModule := Tests.libModule, loader := fun _ => some prelude }

@@ -182,6 +182,10 @@ structure Scry.BenchBaseline where
   path : String
   matches : Bool
   changes : List Scry.BenchChange
+  /-- Cases in the baseline that the run did not produce (`present→absent`). -/
+  missingFromRun : List String
+  /-- Cases in the run that the baseline did not have (`absent→present`). -/
+  addedInRun : List String
 
 /-- Everything one `scry bench` run produces. -/
 structure Scry.BenchRun where
@@ -215,6 +219,8 @@ structure Scry.BenchOpts where
   noTiming : Bool
   quiet : Bool
   failOnRegression : Bool
+  /-- Allow a missing baseline under `--fail-on-regression` (an explicit first run). -/
+  bootstrap : Bool
   /-- Also run the dynamic corpus (`bench/dynamic`). -/
   dynamic : Bool
   /-- Compiler for dynamic cases (`--cc`). -/
@@ -854,6 +860,8 @@ def Scry.benchReportJson (run : Scry.BenchRun) : Json :=
         [ ("status", Json.mkStr run.baseline.status)
         , ("path", Json.mkStr run.baseline.path)
         , ("matches", Json.mkBool run.baseline.matches)
+        , ("missing_from_run", Json.mkArr (List.map Json.mkStr run.baseline.missingFromRun))
+        , ("new_in_run", Json.mkArr (List.map Json.mkStr run.baseline.addedInRun))
         , ("changes", Json.mkArr (List.map (fun c => Json.mkObj
             [ ("scope", Json.mkStr c.scope)
             , ("name", Json.mkStr c.name)
@@ -964,6 +972,15 @@ def Scry.benchMarkdown (run : Scry.BenchRun) : String :=
         ++ (match run.baseline.matches with
           | .true => " (matches)"
           | .false => " (does not match)")) ];
+  let presence : List String :=
+    List.append
+      (List.map (fun id => String.append "- case `" (id ++ "`: present→absent (in the baseline, missing from the run)"))
+        run.baseline.missingFromRun)
+      (List.map (fun id => String.append "- case `" (id ++ "`: absent→present (new in the run, not in the baseline)"))
+        run.baseline.addedInRun);
+  let presenceLines : List String := match presence with
+    | .nil => .nil
+    | _ => List.append [ "", "Presence changes:" ] presence;
   let changes : List String := match run.baseline.changes with
     | .nil => .nil
     | _ =>
@@ -989,7 +1006,8 @@ def Scry.benchMarkdown (run : Scry.BenchRun) : String :=
   let body4 := List.append body3 caseHeader;
   let body5 := List.append body4 caseRows;
   let body6 := List.append body5 base;
-  let body7 := List.append body6 changes;
+  let body6b := List.append body6 presenceLines;
+  let body7 := List.append body6b changes;
   let body8 := List.append body7 skipped;
   Scry.benchJoinLines (List.append body8 footer)
 
@@ -1040,31 +1058,55 @@ def Scry.benchCompareOverall (b : Json) (run : Scry.BenchRun) : List Scry.BenchC
     , ("error", Nat.repr run.summary.overall.metrics.counts.error)
     , ("skipped", Nat.repr run.summary.overall.metrics.counts.skipped) ]
 
+def Scry.benchFindRunCase (id : String) (run : Scry.BenchRun) : Bool :=
+  List.any (fun r => String.eq r.caseId id) run.cases
+
+/-- Baseline cases the run did not produce, in baseline order. -/
+def Scry.benchMissingFromRun (bcases : List Json) (run : Scry.BenchRun) : List String :=
+  Scry.benchFilterMap (fun b =>
+    let id := Scry.benchJsonCaseField b "id";
+    match Scry.benchFindRunCase id run with
+    | .true => .none
+    | .false => .some id) bcases
+
+/-- Run cases the baseline did not have, in run order. -/
+def Scry.benchAddedInRun (bcases : List Json) (run : Scry.BenchRun) : List String :=
+  Scry.benchFilterMap (fun r => match Scry.benchFindBaselineCase r.caseId bcases with
+    | .none => .some r.caseId
+    | .some _ => .none) run.cases
+
 def Scry.benchLoadBaseline (path : String) (run : Scry.BenchRun) : EIO Scry.BenchBaseline := do
   ok ← EIO.lift (FS.exists path);
   match ok with
-  | .false => EIO.pure (Scry.BenchBaseline.mk "absent" path .false .nil)
+  | .false => EIO.pure (Scry.BenchBaseline.mk "absent" path .false .nil .nil .nil)
   | .true => do
     text ← FS.readFile path;
     match Json.parse text with
     | .error e => EIO.pure (Scry.BenchBaseline.mk "invalid" path .false
-        (.cons (Scry.BenchChange.mk "baseline" path "parse" e "") .nil))
+        (.cons (Scry.BenchChange.mk "baseline" path "parse" e "") .nil) .nil .nil)
     | .ok j => do
       let fmt := Scry.benchJsonCaseField j "format";
       match String.eq fmt "scry-bench-baseline" with
       | .false => EIO.pure (Scry.BenchBaseline.mk "invalid" path .false
-          (.cons (Scry.BenchChange.mk "baseline" path "format" fmt "scry-bench-baseline") .nil))
+          (.cons (Scry.BenchChange.mk "baseline" path "format" fmt "scry-bench-baseline") .nil)
+          .nil .nil)
       | .true => do
         let bcases := Scry.benchJsonList j "cases";
         let perCase : List (List Scry.BenchChange) := List.map (fun r =>
           (match Scry.benchFindBaselineCase r.caseId bcases with
-          | .none => .cons (Scry.BenchChange.mk "case" r.caseId "presence" "present" "absent") .nil
+          | .none => .cons (Scry.BenchChange.mk "case" r.caseId "presence" "absent" "present") .nil
           | .some b => Scry.benchCompareCase b r)) run.cases;
+        let missingBaselineCases : List (List Scry.BenchChange) :=
+          List.map (fun id =>
+            .cons (Scry.BenchChange.mk "case" id "presence" "present" "absent") .nil)
+            (Scry.benchMissingFromRun bcases run);
         let overall : List Scry.BenchChange := match Json.get j "overall" with
           | .some o => Scry.benchCompareOverall o run
           | .none => .nil;
-        let changes := List.append (List.concat perCase) overall;
-        EIO.pure (Scry.BenchBaseline.mk "compared" path (List.isEmpty changes) changes)
+        let changes := List.append (List.append (List.concat perCase)
+          (List.concat missingBaselineCases)) overall;
+        EIO.pure (Scry.BenchBaseline.mk "compared" path (List.isEmpty changes) changes
+          (Scry.benchMissingFromRun bcases run) (Scry.benchAddedInRun bcases run))
 
 def Scry.benchRun (opts : Scry.BenchOpts) : EIO Scry.BenchRun := do
   t0 ← EIO.lift Clock.monotonic;
@@ -1079,7 +1121,7 @@ def Scry.benchRun (opts : Scry.BenchOpts) : EIO Scry.BenchRun := do
     | .false => EIO.pure (.none : Option Scry.DynBenchRun);
   let blank := Scry.BenchRun.mk res.status res.reason opts.corpus
     (Path.join opts.corpus "manifest.json") (Bool.not opts.noTiming) totalMs res.cases
-    summary (Scry.BenchBaseline.mk "absent" "" .false .nil) dyn res.skipped;
+    summary (Scry.BenchBaseline.mk "absent" "" .false .nil .nil .nil) dyn res.skipped;
   match opts.baseline with
   | .none => EIO.pure blank
   | .some b => match String.eq res.status "ok" with
@@ -1087,6 +1129,69 @@ def Scry.benchRun (opts : Scry.BenchOpts) : EIO Scry.BenchRun := do
     | .true => do
       br ← Scry.benchLoadBaseline b blank;
       EIO.pure { blank with baseline := br }
+
+def Scry.benchJoinIds (ids : List String) : String := String.intercalate ", " ids
+
+def Scry.benchChangeBrief (c : Scry.BenchChange) : String :=
+  c.scope ++ " " ++ c.name ++ " " ++ c.field ++ ": " ++ c.before ++ "→" ++ c.after
+
+def Scry.benchBaselineProblem (b : Scry.BenchBaseline) : String :=
+  match b.changes with
+  | .nil => b.status
+  | .cons c _ => match String.eq c.field "parse" with
+    | .true => "parse error: " ++ c.before
+    | .false => "format is `" ++ c.before ++ "`, expected `" ++ c.after ++ "`"
+
+/-- Why `--fail-on-regression` fails, or `.none` when the gate passes. A missing or
+invalid baseline, a run that is not `ok`, a baseline case missing from the run, and a
+new run case all fail closed; only an absent baseline with `bootstrap` set (an explicit
+first run) passes. -/
+def Scry.benchGateFailure (opts : Scry.BenchOpts) (run : Scry.BenchRun) : Option String :=
+  match opts.failOnRegression with
+  | .false => .none
+  | .true => match String.eq run.status "ok" with
+    | .false => .some ("scry bench: run status is `" ++ run.status ++ "`"
+        ++ (match String.eq run.reason "" with
+          | .true => ""
+          | .false => " (" ++ run.reason ++ ")")
+        ++ "; --fail-on-regression needs a complete run")
+    | .true => match String.eq run.baseline.status "compared" with
+      | .false => match String.eq run.baseline.status "absent" with
+        | .true => match opts.bootstrap with
+          | .true => .none
+          | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+              ++ "` is missing; create it with --update-baseline, or pass --baseline-bootstrap for a first run")
+        | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+            ++ "` is " ++ run.baseline.status ++ ": " ++ Scry.benchBaselineProblem run.baseline)
+      | .true => match run.baseline.missingFromRun with
+        | .cons _ _ => .some ("scry bench: " ++ Nat.repr (List.length run.baseline.missingFromRun)
+            ++ " baseline case(s) missing from the run (present→absent): "
+            ++ Scry.benchJoinIds run.baseline.missingFromRun
+            ++ (match run.baseline.addedInRun with
+              | .nil => ""
+              | _ => "; new in the run (absent→present): "
+                  ++ Scry.benchJoinIds run.baseline.addedInRun)
+            ++ "; update the baseline only after reviewing a real change")
+        | .nil => match run.baseline.addedInRun with
+          | .cons _ _ => .some ("scry bench: " ++ Nat.repr (List.length run.baseline.addedInRun)
+              ++ " case(s) absent from the baseline (absent→present): "
+              ++ Scry.benchJoinIds run.baseline.addedInRun
+              ++ "; update the baseline after reviewing them")
+          | .nil => match run.baseline.matches with
+            | .true => .none
+            | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+                ++ "` does not match: " ++ Nat.repr (List.length run.baseline.changes)
+                ++ " change(s); first: " ++ (match run.baseline.changes with
+                  | .cons c _ => Scry.benchChangeBrief c
+                  | .nil => "(none)"))
+
+/-- The exit code `scry bench` returns. The gate has one implementation, so tests and
+the command cannot disagree about what fails. -/
+def Scry.benchExitCode (opts : Scry.BenchOpts) (run : Scry.BenchRun) : Nat :=
+  match Scry.benchGateFailure opts run with
+  | .some _ => 1
+  | .none => 0
+
 
 def Scry.benchBaselineText (run : Scry.BenchRun) : String :=
   Json.render (Scry.benchBaselineJson run)

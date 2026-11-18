@@ -26,7 +26,7 @@ static _Thread_local char *wiz_sys_scratch = NULL;
 /* a result string, kept until the next one (the wrapper copies it) */
 static const char *wiz_sys_keep(char *s) {
   free(wiz_sys_scratch);
-  wiz_sys_scratch = s ? s : (char *)calloc(1, 1);
+  wiz_sys_scratch = s ? s : (char *)wiz_xcalloc(1, 1);
   return wiz_sys_scratch;
 }
 static uint64_t wiz_sys_status(int r) { return r < 0 ? (uint64_t)errno : 0; }
@@ -43,10 +43,10 @@ static wiz_val wiz_sys_cons(wiz_val h, wiz_val t) { wiz_val fs[2] = {h, t}; retu
 /* a `List String` as a NULL-terminated array of C strings (consumes the list) */
 static char **wiz_sys_strings(wiz_val l, const char *first) {
   size_t n = 0, cap = 8;
-  char **v = (char **)malloc(cap * sizeof(char *));
-  if (first) v[n++] = strdup(first);
+  char **v = (char **)wiz_xmalloc(cap * sizeof(char *));
+  if (first) v[n++] = wiz_xstrdup(first);
   for (wiz_val c = l; wiz_tag(c) == 1; c = wiz_field_ref(c, 1)) {
-    if (n + 2 > cap) { cap *= 2; v = (char **)realloc(v, cap * sizeof(char *)); }
+    if (n + 2 > cap) { cap *= 2; v = (char **)wiz_xrealloc(v, cap * sizeof(char *)); }
     wiz_val s = wiz_field_ref(c, 0);
     wiz_inc(s);
     v[n++] = wiz_in_string(s);
@@ -64,7 +64,7 @@ static int wiz_sys_cmp(const void *a, const void *b) { return strcmp(*(char *con
 WIZ_API const char *wiz_sys_getenv(const char *k) {
   const char *v = getenv(k);
   wiz_sys_err = v ? 0 : ENOENT;
-  return wiz_sys_keep(strdup(v ? v : ""));
+  return wiz_sys_keep(wiz_xstrdup(v ? v : ""));
 }
 WIZ_API uint64_t wiz_sys_setenv(const char *k, const char *v) { return wiz_sys_status(setenv(k, v, 1)); }
 WIZ_API uint64_t wiz_sys_unsetenv(const char *k) { return wiz_sys_status(unsetenv(k)); }
@@ -72,12 +72,12 @@ WIZ_API uint64_t wiz_sys_unsetenv(const char *k) { return wiz_sys_status(unseten
 WIZ_API wiz_val wiz_sys_environ(void) {
   size_t n = 0;
   for (char **e = environ; e && *e; e++) n++;
-  char **v = (char **)malloc((n + 1) * sizeof(char *));
+  char **v = (char **)wiz_xmalloc((n + 1) * sizeof(char *));
   for (size_t i = 0; i < n; i++) v[i] = environ[i];
   qsort(v, n, sizeof(char *), wiz_sys_cmp);
   wiz_val l = WIZ_BOX(0);
   for (size_t i = n; i > 0; i--) {
-    char *kv = strdup(v[i - 1]), *eq = strchr(kv, '=');
+    char *kv = wiz_xstrdup(v[i - 1]), *eq = strchr(kv, '=');
     const char *val = "";
     if (eq) { *eq = 0; val = eq + 1; }
     l = wiz_sys_cons(wiz_out_string(kv), wiz_sys_cons(wiz_out_string(val), l));
@@ -104,7 +104,7 @@ WIZ_API uint64_t wiz_sys_chmod(const char *p, uint64_t mode) { return wiz_sys_st
 WIZ_API const char *wiz_sys_readlink(const char *p) {
   size_t cap = 256;
   for (;;) {
-    char *b = (char *)malloc(cap);
+    char *b = (char *)wiz_xmalloc(cap);
     ssize_t n = readlink(p, b, cap);
     if (n < 0) { wiz_sys_err = errno; free(b); return wiz_sys_keep(NULL); }
     if ((size_t)n < cap) { b[n] = 0; wiz_sys_err = 0; return wiz_sys_keep(b); }
@@ -115,7 +115,7 @@ WIZ_API const char *wiz_sys_readlink(const char *p) {
 /* a new directory `<prefix>XXXXXX` */
 WIZ_API const char *wiz_sys_mkdtemp(const char *prefix) {
   size_t n = strlen(prefix);
-  char *t = (char *)malloc(n + 7);
+  char *t = (char *)wiz_xmalloc(n + 7);
   memcpy(t, prefix, n);
   memcpy(t + n, "XXXXXX", 7);
   if (!mkdtemp(t)) { wiz_sys_err = errno; free(t); return wiz_sys_keep(NULL); }
@@ -135,19 +135,30 @@ WIZ_API wiz_val wiz_sys_stat(const char *p, int follow) {
   for (int i = 4; i >= 0; i--) l = wiz_sys_cons(wiz_out_nat(fs[i]), l);
   return l;
 }
-/* the names in a directory (without . and ..), sorted */
+/* the names in a directory (without . and ..), sorted; a `readdir` error is the
+   listing's error, not its end */
 WIZ_API wiz_val wiz_sys_list_dir(const char *p) {
   DIR *d = opendir(p);
   if (!d) { wiz_sys_err = errno; return WIZ_BOX(0); }
   size_t n = 0, cap = 16;
-  char **v = (char **)malloc(cap * sizeof(char *));
+  char **v = (char **)wiz_xmalloc(cap * sizeof(char *));
   struct dirent *e;
-  while ((e = readdir(d))) {
+  int saved = 0;
+  for (;;) {
+    errno = 0;
+    e = readdir(d);
+    if (!e) { saved = errno; break; }
     if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-    if (n == cap) { cap *= 2; v = (char **)realloc(v, cap * sizeof(char *)); }
-    v[n++] = strdup(e->d_name);
+    if (n == cap) { cap *= 2; v = (char **)wiz_xrealloc(v, cap * sizeof(char *)); }
+    v[n++] = wiz_xstrdup(e->d_name);
   }
   closedir(d);
+  if (saved) {
+    for (size_t i = 0; i < n; i++) free(v[i]);
+    free(v);
+    wiz_sys_err = saved;
+    return WIZ_BOX(0);
+  }
   qsort(v, n, sizeof(char *), wiz_sys_cmp);
   wiz_val l = WIZ_BOX(0);
   for (size_t i = n; i > 0; i--) { l = wiz_sys_cons(wiz_out_string(v[i - 1]), l); free(v[i - 1]); }
@@ -167,7 +178,7 @@ static int wiz_sys_rm_rf(const char *p) {
   size_t n = strlen(p);
   while (r == 0 && (e = readdir(d))) {
     if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-    char *q = (char *)malloc(n + strlen(e->d_name) + 2);
+    char *q = (char *)wiz_xmalloc(n + strlen(e->d_name) + 2);
     sprintf(q, "%s/%s", p, e->d_name);
     r = wiz_sys_rm_rf(q);
     free(q);
@@ -200,6 +211,7 @@ static int wiz_sys_write_path(const char *p, const char *s, size_t n, int append
 static char *wiz_sys_read_fd(int fd, size_t *len) {
   size_t cap = 4096, n = 0;
   char *b = (char *)malloc(cap);
+  if (!b) { errno = ENOMEM; return NULL; }
   for (;;) {
     if (n + 1 >= cap) {
       char *nb = (char *)realloc(b, cap * 2);
@@ -262,19 +274,28 @@ WIZ_API void wiz_sys_file_free(void *p) {
   pthread_mutex_destroy(&h->mu);
   free(h);
 }
-/* fopen modes ("r", "w", "a", "r+", …); NULL with the error */
+/* fopen modes ("r", "w", "a", "r+", …); NULL with the error. The descriptor is
+   close-on-exec, as `Fd.open` and the pipes are: a child does not inherit this program's
+   files (only the std streams, which a child can be given, stay open across `exec`). */
 WIZ_API void *wiz_sys_file_open(const char *p, const char *mode) {
   FILE *f = fopen(p, mode);
   if (!f) { wiz_sys_err = errno; return NULL; }
+  int fd = fileno(f);
+  int flags = fcntl(fd, F_GETFD);
+  if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+    wiz_sys_err = errno;
+    fclose(f);
+    return NULL;
+  }
   wiz_sys_err = 0;
-  wiz_sys_file *h = (wiz_sys_file *)malloc(sizeof *h);
+  wiz_sys_file *h = (wiz_sys_file *)wiz_xmalloc(sizeof *h);
   h->f = f; h->owned = 1;
   pthread_mutex_init(&h->mu, NULL);
   return h;
 }
 /* 0 stdin, 1 stdout, 2 stderr (never closed) */
 WIZ_API void *wiz_sys_file_std(uint64_t i) {
-  wiz_sys_file *h = (wiz_sys_file *)malloc(sizeof *h);
+  wiz_sys_file *h = (wiz_sys_file *)wiz_xmalloc(sizeof *h);
   h->f = i == 0 ? stdin : i == 1 ? stdout : stderr;
   h->owned = 0;
   pthread_mutex_init(&h->mu, NULL);
@@ -305,12 +326,17 @@ WIZ_API const char *wiz_sys_file_read_all(void *p) {
   if (!h->f) { pthread_mutex_unlock(&h->mu); wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
   size_t cap = 4096, n = 0, k;
   char *b = (char *)malloc(cap);
+  if (!b) { pthread_mutex_unlock(&h->mu); wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
   while ((k = fread(b + n, 1, cap - n - 1, h->f)) > 0) {
     n += k;
-    if (n + 1 >= cap) { cap *= 2; b = (char *)realloc(b, cap); }
+    if (n + 1 >= cap) {
+      char *nb = (char *)realloc(b, cap * 2);
+      if (!nb) { free(b); pthread_mutex_unlock(&h->mu); wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
+      cap *= 2; b = nb;
+    }
   }
   b[n] = 0;
-  wiz_sys_err = ferror(h->f) ? EIO : 0;
+  wiz_sys_err = ferror(h->f) ? (errno ? errno : EIO) : 0;
   pthread_mutex_unlock(&h->mu);
   return wiz_sys_keep(b);
 }
@@ -384,16 +410,16 @@ static char **wiz_sys_child_env(wiz_val changes, int clear) {
   size_t n = 0, m = 0;
   if (!clear) for (char **e = environ; *e; e++) n++;
   for (char **c = ch; *c; c++) m++;
-  char **env = (char **)malloc((n + m + 1) * sizeof(char *));
+  char **env = (char **)wiz_xmalloc((n + m + 1) * sizeof(char *));
   size_t k = 0;
-  if (!clear) for (char **e = environ; *e; e++) env[k++] = strdup(*e);
+  if (!clear) for (char **e = environ; *e; e++) env[k++] = wiz_xstrdup(*e);
   for (char **c = ch; *c; c++) {
     const char *kv = *c + 1;
     size_t klen = strcspn(kv, "=");
     /* drop an earlier binding of the same name */
     for (size_t i = 0; i < k; i++)
       if (strncmp(env[i], kv, klen) == 0 && env[i][klen] == '=') { free(env[i]); env[i] = env[--k]; break; }
-    if (**c == '+') env[k++] = strdup(kv);
+    if (**c == '+') env[k++] = wiz_xstrdup(kv);
   }
   env[k] = NULL;
   wiz_sys_free_strings(ch);
@@ -504,8 +530,11 @@ static int wiz_sys_fork_spawn(pid_t *pid, const char *cmd, char **argv, char **e
 #endif
 static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
                               const char *cwd, char **envp, uint64_t group) {
-  static int sigpipe_ignored = 0;
-  if (!sigpipe_ignored) { signal(SIGPIPE, SIG_IGN); sigpipe_ignored = 1; }
+  /* this program ignores SIGPIPE (a write to a closed pipe is an EPIPE error, not a
+     death), and a child gets the default action back above. Set it on every spawn: a
+     failed `wiz_sys_exec` restores whatever this program had, and another thread may
+     have run one since the last spawn. */
+  signal(SIGPIPE, SIG_IGN);
   char **argv = wiz_sys_strings(args, cmd);
   uint64_t modes[3] = {in, out, err};
   int pipes[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
@@ -557,7 +586,7 @@ static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64
   wiz_sys_free_strings(argv);
   wiz_sys_child *c = NULL;
   if (r == 0) {
-    c = (wiz_sys_child *)calloc(1, sizeof *c);
+    c = (wiz_sys_child *)wiz_xcalloc(1, sizeof *c);
     c->pid = pid;
     for (int i = 0; i < 3; i++) pthread_mutex_init(&c->fdmu[i], NULL);
     pthread_mutex_init(&c->mu, NULL);
@@ -614,17 +643,31 @@ WIZ_API const char *wiz_sys_child_read(void *p, uint64_t i) {
   return wiz_sys_keep(b);
 }
 /* write `input` to stdin and close it, while collecting stdout and stderr (whichever are
-   pipes) to their ends, without deadlocking on full pipes */
+   pipes) to their ends, without deadlocking on full pipes. `input` with no stdin pipe is
+   an error (`EBADF`), not silently dropped: the child never saw it. */
 WIZ_API uint64_t wiz_sys_child_communicate(void *p, const char *input) {
   wiz_sys_child *c = (wiz_sys_child *)p;
   /* all three pipes, in order (the lock order is fdmu[0] before fdmu[1] before fdmu[2]) */
   for (int i = 0; i < 3; i++) pthread_mutex_lock(&c->fdmu[i]);
   size_t inlen = strlen(input), inpos = 0;
+  if (inlen > 0 && c->fd[0] < 0) {
+    for (int i = 2; i >= 0; i--) pthread_mutex_unlock(&c->fdmu[i]);
+    return EBADF;
+  }
   size_t cap[2] = {0, 0}, len[2] = {0, 0};
   char *buf[2] = {NULL, NULL};
   int r = 0;
   /* the streams that are pipes get a buffer, even if nothing comes */
-  for (int i = 1; i < 3; i++) if (c->fd[i] >= 0) { cap[i - 1] = 8192; buf[i - 1] = (char *)malloc(cap[i - 1]); }
+  for (int i = 1; i < 3; i++) if (c->fd[i] >= 0) {
+    cap[i - 1] = 8192;
+    buf[i - 1] = (char *)malloc(cap[i - 1]);
+    if (!buf[i - 1]) { r = ENOMEM; break; }
+  }
+  if (r) {
+    free(buf[0]); free(buf[1]);
+    for (int i = 2; i >= 0; i--) pthread_mutex_unlock(&c->fdmu[i]);
+    return (uint64_t)r;
+  }
   if (c->fd[0] >= 0 && inlen == 0) wiz_sys_close_fd(&c->fd[0]);
   while (c->fd[0] >= 0 || c->fd[1] >= 0 || c->fd[2] >= 0) {
     struct pollfd pf[3];
@@ -751,17 +794,26 @@ WIZ_API uint64_t wiz_sys_child_take(void *p, uint64_t i) {
   wiz_sys_err = 0;
   return (uint64_t)fd;
 }
-/* replace this program (returns only with an error) */
+/* replace this program (returns only with an error). The replaced program starts with
+   SIGPIPE at its default action; if `exec` fails, this program's disposition is put
+   back -- otherwise one failed `exec` would leave SIGPIPE able to kill us, and every
+   later write to a pipe with no reader would die instead of returning EPIPE. */
 WIZ_API uint64_t wiz_sys_exec(const char *cmd, wiz_val args) {
   char **argv = wiz_sys_strings(args, cmd);
   fflush(stdout); fflush(stderr);
-  signal(SIGPIPE, SIG_DFL);
+  struct sigaction def, old;
+  memset(&def, 0, sizeof def);
+  def.sa_handler = SIG_DFL;
+  sigemptyset(&def.sa_mask);
+  int saved = sigaction(SIGPIPE, &def, &old) == 0;
   execvp(cmd, argv);
   int e = errno;
+  if (saved) sigaction(SIGPIPE, &old, NULL);
   wiz_sys_free_strings(argv);
   return (uint64_t)e;
 }
-WIZ_API void wiz_sys_exit(uint64_t code) { exit((int)code); }
+/* `Process.exit`: an armed boundary (rt_core.inc) catches it; native builds exit. */
+WIZ_API void wiz_sys_exit(uint64_t code) { wiz_clean_exit((int)code); }
 WIZ_API uint64_t wiz_sys_getpid(void) { return (uint64_t)getpid(); }
 
 /* ---- (sys-bytes) paths, the program's own path, clocks ---- */
@@ -785,7 +837,7 @@ WIZ_API const char *wiz_sys_app_path(void) {
 #elif defined(__APPLE__)
   uint32_t n = 0;
   _NSGetExecutablePath(NULL, &n);
-  char *b = (char *)malloc(n + 1);
+  char *b = (char *)wiz_xmalloc(n + 1);
   if (_NSGetExecutablePath(b, &n) != 0) { free(b); wiz_sys_err = ENAMETOOLONG; return wiz_sys_keep(NULL); }
   char *r = realpath(b, NULL);
   free(b);
@@ -822,7 +874,7 @@ WIZ_API wiz_val wiz_bytes_slice(wiz_val v, uint64_t start, uint64_t len) {
   wiz_bytes *b = (wiz_bytes *)v;
   size_t s = start < b->len ? start : b->len;
   size_t n = len < b->len - s ? len : b->len - s;
-  unsigned char *d = n ? (unsigned char *)malloc(n) : NULL;
+  unsigned char *d = n ? (unsigned char *)wiz_xmalloc(n) : NULL;
   if (n) memcpy(d, b->data + s, n);
   wiz_dec(v);
   return wiz_bytes_adopt(d, n, n);
@@ -836,7 +888,7 @@ WIZ_API wiz_val wiz_bytes_append(wiz_val a, wiz_val b) {
   if (x->len + y->len > x->cap) {
     size_t cap = x->cap ? x->cap : 8;
     while (cap < x->len + y->len) cap *= 2;
-    x->data = (unsigned char *)realloc(x->data, cap); x->cap = cap;
+    x->data = (unsigned char *)wiz_xrealloc(x->data, cap); x->cap = cap;
   }
   memcpy(x->data + x->len, y->data, y->len);
   x->len += y->len;
@@ -916,7 +968,7 @@ WIZ_API void wiz_sys_fd_free(void *p) {
   free(h);
 }
 static void *wiz_sys_fd_wrap(int fd, int owned) {
-  wiz_sys_fdh *h = (wiz_sys_fdh *)malloc(sizeof *h);
+  wiz_sys_fdh *h = (wiz_sys_fdh *)wiz_xmalloc(sizeof *h);
   h->fd = fd; h->owned = owned; h->eio_eof = 0;
   return h;
 }
@@ -938,8 +990,19 @@ WIZ_API void *wiz_sys_fd_open(const char *path, uint64_t access, uint64_t flags,
 }
 /* 0 stdin, 1 stdout, 2 stderr (never closed) */
 WIZ_API void *wiz_sys_fd_std(uint64_t i) { return wiz_sys_fd_wrap((int)(i < 3 ? i : 2), 0); }
-/* take over a descriptor number made elsewhere (a C shim, `pipe`): closed with it */
-WIZ_API void *wiz_sys_fd_adopt(uint64_t fd) { return wiz_sys_fd_wrap((int)fd, 1); }
+/* take over a descriptor number made elsewhere (a C shim, `pipe`): closed with it.
+   A number above INT_MAX is not a descriptor: narrowing it would wrap (2^32 + 1 becomes
+   1, which is stdout), so it is EINVAL and an already-closed handle (every operation on
+   it is EBADF), never a handle over a wrapped number. Adopting 0/1/2 takes over a
+   standard stream (the handle closes it). */
+WIZ_API void *wiz_sys_fd_adopt(uint64_t fd) {
+  if (fd > (uint64_t)INT_MAX) {
+    wiz_sys_err = EINVAL;
+    return wiz_sys_fd_wrap(-1, 0);
+  }
+  wiz_sys_err = 0;
+  return wiz_sys_fd_wrap((int)fd, 1);
+}
 /* the descriptor number, for C shims (-1 once closed: a huge Nat) */
 WIZ_API uint64_t wiz_sys_fd_raw(void *p) { return (uint64_t)(int64_t)((wiz_sys_fdh *)p)->fd; }
 /* a pseudo-terminal's controller: EIO from a read is the end of the file (Linux says
@@ -1078,7 +1141,7 @@ WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int bac
 WIZ_API wiz_val wiz_sys_fd_poll(wiz_val fds, wiz_val events, int timed, uint64_t ns) {
   size_t n = 0;
   for (wiz_val c = fds; wiz_tag(c) == 1; c = wiz_field_ref(c, 1)) n++;
-  struct pollfd *pf = (struct pollfd *)calloc(n ? n : 1, sizeof *pf);
+  struct pollfd *pf = (struct pollfd *)wiz_xcalloc(n ? n : 1, sizeof *pf);
   size_t i = 0;
   wiz_val e = events;
   for (wiz_val c = fds; wiz_tag(c) == 1; c = wiz_field_ref(c, 1), i++) {
