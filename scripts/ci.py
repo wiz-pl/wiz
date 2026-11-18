@@ -11,13 +11,27 @@
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
                                      cases balanced by .github/test-timings.json (needs
-                                     the test driver BIN; default .lake/build/bin/tests)
+                                     the test driver BIN; default .lake/build/bin/tests).
+                                     A shard with "parts": N becomes N shards NAME-1 …
+                                     NAME-N that select the same cases and carry
+                                     "part": "i/N" for the driver's `--part i/N`, which
+                                     splits one case's work by index inside the case
+                                     (selfhost-libdiff)
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
-                                     shard (after splitting), and that every selector
+                                     shard (after splitting; the N jobs of a `parts`
+                                     shard count as that one shard, because the case
+                                     partitions its own files), and that every selector
                                      of a shard selects something. A group that no
                                      selector picks goes to the shard it names
                                      (`Group.shard`) or to the shard with
                                      "default": true (`resolved`)
+  scripts/ci.py libdiff-union TXT JSONL..
+                                     prove that the selfhost-libdiff `parts` cover the
+                                     corpus once: the part.txt headers agree on the
+                                     total, the parts are 1..N, the records' files are
+                                     .github/libdiff-corpus.txt with no duplicate, the
+                                     verdicts sum to the total (a whole run's summary,
+                                     recomputed) and none is `bounded`
   scripts/ci.py plan [BIN]           the split shards' parts with their estimated times
   scripts/ci.py changes BASE [HEAD]  what a change needs (path filters): reads the files
                                      that differ between BASE and HEAD (git diff
@@ -86,6 +100,10 @@ NOTE_BUILT = "built "
 # machines (iverilog, an ARM toolchain) is not here: the allow-list excuses it instead.
 REQUIRED_TOOLS = [
     ("no toolchain", "cc and GMP (the C toolchain)"),
+    # `=selfhost-libdiff`'s sweep says this when `selfhostCompiler` cannot find gmp.h;
+    # with the case split into parts, only that case skips, so the group's ratio would
+    # hide it (1 of 5 cases per part): the reason alone must fail the lint.
+    ("no c toolchain", "cc and GMP (the C toolchain)"),
     ("no garbage collector", "Boehm GC (--gc-cflags)"),
     ("no yosys", "yosys"),
     ("no node", "node"),
@@ -222,43 +240,60 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
-    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
-    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
-    mode (selfhost-libdiff) can tell "not given" from "--jobs 1".)"""
+    estimated seconds or None, jobs, part)]; `jobs` is the shard's "--jobs" (None unless
+    the shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at
+    a time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1". `part` is the "i/n"
+    for the driver's `--part` (None unless the shard says "parts": N), which splits one
+    case's work by index inside the case; every part selects the same cases and there is
+    no case to balance (the estimated cost is None)."""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
         jobs = s.get("jobs")
+        nparts = s.get("parts", 1)
+        if not isinstance(nparts, int) or isinstance(nparts, bool) or nparts < 1:
+            sys.exit(f"{SHARDS}: shard {s['name']!r}: \"parts\" must be an integer >= 1")
+        if nparts > 1:
+            if n > 1:
+                sys.exit(f"{SHARDS}: shard {s['name']!r} has both \"split\" and \"parts\": "
+                         "one splits cases, the other splits a case's work")
+            for i in range(1, nparts + 1):
+                out.append((f"{s['name']}-{i}", s["select"], None, jobs, f"{i}/{nparts}"))
+            continue
         if n <= 1:
-            out.append((s["name"], s["select"], None, jobs))
+            out.append((s["name"], s["select"], None, jobs, None))
             continue
         base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
         for k, p in enumerate(partition(items, n, base["builds"]), 1):
             if p:
-                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
+                out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]),
+                            jobs, None))
     return out
 
 
 def matrix(binary, only=None):
-    # "heavy": true shards (and the parts of a split one) may run on the self-hosted
-    # runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
+    shard_list = expanded(binary)  # first: it validates "parts"
+    # "heavy": true shards (and the parts of a split or `parts` one) may run on the
+    # self-hosted runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
     heavy = {s["name"] for s in shards() if s.get("heavy")}
     split = {s["name"] for s in shards() if s.get("split", 1) > 1}
+    parts = {s["name"] for s in shards() if s.get("parts", 1) > 1}
     def is_heavy(n):
         base = n.rsplit("-", 1)[0]
-        return n in heavy or (base in split and base in heavy)
+        return n in heavy or (base in (split | parts) and base in heavy)
     def wanted(n):
-        return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
+        base = n.rsplit("-", 1)[0]
+        return only is None or n in only or (base in (split | parts) and base in only)
     print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n),
-                                 "jobs": jobs}
-                                for n, sel, _, jobs in expanded(binary) if wanted(n)]}, ensure_ascii=False))
+                                 "jobs": jobs, "part": part}
+                                for n, sel, _, jobs, part in shard_list if wanted(n)]}, ensure_ascii=False))
 
 
 def plan(binary):
     base = baseline()
-    for name, sel, est, _ in expanded(binary, base):
+    for name, sel, est, _, _ in expanded(binary, base):
         if est is None:
             continue
         cases = list_cases(binary, sel)
@@ -284,7 +319,18 @@ def check_shards(binary):
                 errors.append(f"shard {s['name']!r}: selector {sel!r} selects no group")
     runs = {(g, i): [] for g, i, _ in list_cases(binary, [])}
     parts = expanded(binary)
-    for name, sel, _, _ in parts:
+    # A `parts` shard runs the same case in all of its N jobs by construction (the case
+    # partitions its own file list with `--part i/n`), so for "each case in exactly one
+    # shard" count the N jobs as the one shard they came from. Without this, a split
+    # case would be reported as run by six shards.
+    parts_bases = {s["name"] for s in shards() if s.get("parts", 1) > 1}
+    def shard_base(name):
+        return split_of(name, parts_bases) or name
+    names_seen = set()
+    for name, sel, *_ in parts:
+        if name in names_seen:
+            errors.append(f"shard {name!r} is used twice")
+        names_seen.add(name)
         for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
@@ -293,8 +339,9 @@ def check_shards(binary):
             errors.append(f"group {g!r}: {'all' if len(missing) == sum(1 for h, _ in runs if h == g) else len(missing)} "
                           f"of its cases are in no shard")
     for (g, i), by in runs.items():
-        if len(by) > 1:
-            errors.append(f"case {g} #{i} is run by several shards: {', '.join(by)}")
+        distinct = sorted({shard_base(n) for n in by})
+        if len(distinct) > 1:
+            errors.append(f"case {g} #{i} is run by several shards: {', '.join(distinct)}")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -631,6 +678,314 @@ def balance(args):
     return 1 if problems and strict else 0
 
 
+# --- The `selfhost-libdiff` parts (`libdiff-union`) ----------------------------------
+# The corpus one whole run compares: `libDiffFiles` sorts every `*.wiz` under lib/ and
+# scry/. The manifest makes the union check prove coverage of *that* list, so a split
+# that quietly drops a file (or a change to `libDiffFiles` that trims the corpus) fails
+# instead of passing with a smaller, self-consistent total.
+LIBDIFF_CORPUS = os.path.join(ROOT, ".github", "libdiff-corpus.txt")
+PART_HEADER = re.compile(
+    r"part=(\d+)/(\d+) files=(\d+) total=(\d+) ok=(\d+) rejected=(\d+) "
+    r"diverging=(\d+) bounded=(\d+) workers=(\d+)")
+PART_KEYS = ["part", "parts", "files", "total", "ok", "rejected", "diverging",
+             "bounded", "workers"]
+VERDICTS = ("ok", "rejected", "diverging", "bounded")
+
+
+def part_header(path):
+    """The fields of a `.lake/libdiff/part.txt` header, or None if it is not one."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError:
+        return None
+    m = PART_HEADER.fullmatch(text)
+    return dict(zip(PART_KEYS, map(int, m.groups()))) if m else None
+
+
+def part_stem(path):
+    """`logs/libdiff-selfhost-libdiff-2.jsonl` -> `selfhost-libdiff-2`."""
+    b = os.path.basename(path)
+    for ext in (".jsonl", ".txt"):
+        if b.endswith(ext):
+            b = b[:-len(ext)]
+    return b[len("libdiff-"):] if b.startswith("libdiff-") else b
+
+
+def libdiff_counts(recs):
+    """The counts `libDiffSummarize` computes, from the union of the parts' records."""
+    out = {k: 0 for k in VERDICTS}
+    out["host_ok_self_error"] = out["host_error_self_ok"] = 0
+    out["same_code"] = out["same_span"] = out["same_message"] = 0
+    by_construct, by_code, blockers = {}, {}, []
+    for r in recs:
+        v = r.get("verdict", "")
+        if v in VERDICTS:
+            out[v] += 1
+        host, self_ = r.get("host") or {}, r.get("self") or {}
+        if v == "rejected":
+            code = self_.get("code", "")
+            by_code[code] = by_code.get(code, 0) + 1
+            # `libDiffStep`: "" means same code, span and message; "span" keeps the
+            # code; "message" keeps the code and the span
+            d = r.get("divergence", "")
+            if d in ("", "span", "message"):
+                out["same_code"] += 1
+            if d in ("", "message"):
+                out["same_span"] += 1
+            if d == "":
+                out["same_message"] += 1
+        elif v == "diverging":
+            if host.get("accepted") and not self_.get("accepted"):
+                out["host_ok_self_error"] += 1
+                k = r.get("class", "")
+                by_construct[k] = by_construct.get(k, 0) + 1
+                blockers.append((r.get("file", ""), k, (self_.get("msg") or "")[:110]))
+            elif not host.get("accepted") and self_.get("accepted"):
+                out["host_error_self_ok"] += 1
+    rank = lambda k: by_construct.get(k, 0)
+    blockers.sort(key=lambda b: (-rank(b[1]), b[0]))
+    return out, by_construct, by_code, blockers[:10]
+
+
+def libdiff_union_self_test():
+    """Check the union rule on synthetic part artifacts, without a CI run: a clean
+    three-part split, a duplicate file, a missing file, a bounded record, a wrong total,
+    a missing part, and a header that disagrees with its records."""
+    import contextlib, io, tempfile
+    global LIBDIFF_CORPUS
+    saved, corpus = LIBDIFF_CORPUS, [f"g/{i}.wiz" for i in range(7)]
+
+    def write(d, n, drop=None, dup=None, bounded=None, total=7, header_shift=0):
+        for i in range(1, n + 1):
+            files = [f for k, f in enumerate(corpus) if k % n == i - 1]
+            if drop in files:
+                files.remove(drop)
+            if dup is not None and dup[1] == i:
+                files.append(dup[0])
+            recs = []
+            for f in files:
+                v = "bounded" if f == bounded else "rejected" if f.endswith("1.wiz") else \
+                    "diverging" if f.endswith("2.wiz") else "ok"
+                recs.append({"file": f, "verdict": v, "divergence": "", "class": "",
+                             "host": {"accepted": v != "rejected"},
+                             "self": {"accepted": v != "rejected", "code": "e"}})
+            c = {k: sum(1 for r in recs if r["verdict"] == k) for k in VERDICTS}
+            with open(os.path.join(d, f"p-{i}.jsonl"), "w") as f:
+                f.write("".join(json.dumps(r) + "\n" for r in recs))
+            with open(os.path.join(d, f"p-{i}.txt"), "w") as f:
+                f.write(f"part={i}/{n} files={len(recs) + header_shift} total={total} "
+                        f"ok={c['ok']} rejected={c['rejected']} diverging={c['diverging']} "
+                        f"bounded={c['bounded']} workers=1\n")
+
+    trials = [
+        ("a clean three-part split", True, dict(n=3)),
+        ("a file in two parts", False, dict(n=3, dup=(corpus[0], 2))),
+        ("a file in no part", False, dict(n=3, drop=corpus[1])),
+        ("a bounded record", False, dict(n=3, bounded=corpus[3])),
+        ("a wrong total", False, dict(n=3, total=8)),
+        ("a part that wrote nothing", False, dict(n=3, nopart=3)),
+        ("a header that disagrees with its records", False, dict(n=3, header_shift=1)),
+    ]
+    bad = 0
+    with tempfile.TemporaryDirectory() as d:
+        corpus_path = os.path.join(d, "corpus.txt")
+        with open(corpus_path, "w") as f:
+            f.write("\n".join(corpus) + "\n")
+        LIBDIFF_CORPUS = corpus_path
+        for k, (name, want, kw) in enumerate(trials):
+            sub = os.path.join(d, f"t{k}")
+            os.mkdir(sub)
+            kw = dict(kw)
+            nopart = kw.pop("nopart", None)
+            write(sub, **kw)
+            if nopart:
+                for ext in (".jsonl", ".txt"):
+                    try:
+                        os.remove(os.path.join(sub, f"p-{nopart}{ext}"))
+                    except FileNotFoundError:
+                        pass
+            paths = [os.path.join(sub, f) for f in sorted(os.listdir(sub))]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = libdiff_union(paths)
+            ok = (rc == 0) == want
+            bad += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {name}: exit {rc}"
+                  + ("" if ok else f", expected {'success' if want else 'failure'}"))
+    LIBDIFF_CORPUS = saved
+    print(f"libdiff-union self-test: {len(trials)} checks, {len(trials) - bad} ok")
+    return 1 if bad else 0
+
+
+def libdiff_union(args):
+    """Prove that the `parts` of =selfhost-libdiff cover the corpus once.
+
+    Reads the shards' `logs/libdiff-*.txt` (the `part.txt` header: part=i/n, files,
+    total and the verdict counts) and `logs/libdiff-*.jsonl` (one record per file), and
+    checks: the headers agree on n and total, the parts are 1..n exactly once, every
+    header's files equal its records and its verdict counts, the records' `file`s are
+    the corpus in `.github/libdiff-corpus.txt` with no duplicate, the verdicts sum to
+    the total (a whole run's summary, recomputed from the union), and no record is
+    `bounded` (a bounded file was not compared: lower `jobs`, do not accept it). The
+    aggregated summary is printed in the same shape as a single run's, so it can be
+    compared with the last single-case run before switching.
+
+    With one part (1/1) it is the whole-run check over that one part.
+    """
+    if args == ["--self-test"]:
+        return libdiff_union_self_test()
+    if not args:
+        error("no part artifacts (was the shard's log written?)", "selfhost-libdiff")
+        return 1
+    problems, headers, records = [], {}, {}
+    for p in args:
+        stem = part_stem(p)
+        if p.endswith(".txt"):
+            h = part_header(p)
+            if h is None:
+                problems.append(f"{p}: not a part header (expected 'part=i/n files=K total=T "
+                                f"ok=... rejected=... diverging=... bounded=...')")
+            elif stem in headers:
+                problems.append(f"{p}: a second header for part {stem}")
+            else:
+                headers[stem] = h
+        elif p.endswith(".jsonl"):
+            if stem in records:
+                problems.append(f"{p}: a second record file for part {stem}")
+            else:
+                try:
+                    records[stem] = read_timings([p])
+                except (OSError, json.JSONDecodeError) as e:
+                    problems.append(f"{p}: cannot read the records: {e}")
+                    records[stem] = []
+        else:
+            problems.append(f"{p}: neither a .txt header nor a .jsonl record file")
+
+    n_parts = {h["parts"] for h in headers.values()}
+    if not headers:
+        problems.append("no part headers: cannot tell which parts ran or what the whole is")
+    elif len(n_parts) != 1:
+        problems.append(f"the parts disagree on n: {sorted(n_parts)}")
+    else:
+        n = n_parts.pop()
+        got = sorted(h["part"] for h in headers.values())
+        if got != list(range(1, n + 1)):
+            problems.append(f"the parts are {got}, not 1..{n}: a part is missing or ran twice")
+    totals = {h["total"] for h in headers.values()}
+    total = next(iter(totals)) if len(totals) == 1 else None
+    if len(totals) > 1:
+        problems.append(f"the parts disagree on the corpus size: {sorted(totals)}")
+    try:
+        with open(LIBDIFF_CORPUS, encoding="utf-8") as f:
+            corpus = [l for l in f.read().split("\n") if l and not l.startswith("#")]
+    except FileNotFoundError:
+        corpus = None
+        problems.append(f"{LIBDIFF_CORPUS} is missing")
+
+    all_recs, seen = [], {}
+    for stem in sorted(set(headers) | set(records)):
+        h, recs = headers.get(stem), records.get(stem)
+        if h is None:
+            problems.append(f"part {stem}: records but no part.txt (killed before the report?)")
+        if recs is None:
+            recs = []
+            if h is not None and h["files"] != 0:
+                problems.append(f"part {stem}: its header says {h['files']} files but it wrote no records")
+        if h is not None:
+            if len(recs) != h["files"]:
+                problems.append(f"part {stem}: {len(recs)} records, header says {h['files']}")
+            counts, _, _, _ = libdiff_counts(recs)
+            for k in VERDICTS:
+                if counts[k] != h[k]:
+                    problems.append(f"part {stem}: {counts[k]} {k} records, header says {h[k]}")
+        for r in recs:
+            f = r.get("file", "")
+            if not f:
+                problems.append(f"part {stem}: a record names no file")
+            elif f in seen:
+                problems.append(f"{f} is in part {seen[f]} and part {stem}")
+            else:
+                seen[f] = stem
+            if r.get("verdict") not in VERDICTS:
+                problems.append(f"{f or '?'}: verdict {r.get('verdict')!r} is not one of "
+                                f"{', '.join(VERDICTS)}")
+        all_recs += recs
+
+    if total is not None and len(seen) != total:
+        problems.append(f"the parts cover {len(seen)} distinct files, not the {total} of a whole run")
+    if corpus is not None:
+        missing = sorted(set(corpus) - set(seen))
+        extra = sorted(set(seen) - set(corpus))
+        if missing:
+            problems.append(f"{len(missing)} file(s) of .github/libdiff-corpus.txt are in no part: "
+                            + ", ".join(missing[:8]) + (" …" if len(missing) > 8 else ""))
+        if extra:
+            problems.append(f"{len(extra)} file(s) the parts checked are not in "
+                            f".github/libdiff-corpus.txt: " + ", ".join(extra[:8])
+                            + (" …" if len(extra) > 8 else "")
+                            + " (add them to the manifest in the same change)")
+    bounded = sorted(r.get("file", "?") for r in all_recs if r.get("verdict") == "bounded")
+    if bounded:
+        problems.append(f"{len(bounded)} bounded record(s): a run hit its time or memory bound, so the "
+                        f"file was not compared: " + ", ".join(bounded[:8])
+                        + (" …" if len(bounded) > 8 else "") + " (lower \"jobs\", do not accept it)")
+    agg, by_construct, by_code, blockers = libdiff_counts(all_recs)
+    classified = sum(agg[k] for k in VERDICTS)
+    if classified != len(all_recs):
+        problems.append(f"{len(all_recs) - classified} record(s) have no verdict")
+    if total is not None and classified != total:
+        problems.append(f"the verdicts sum to {classified}, not the {total} files of a whole run")
+    # the identities `libDiffSummarize` guarantees for one run: a by-construct row per
+    # host-accepts/self-rejects file, and a by-code row per both-reject file
+    if sum(by_construct.values()) != agg["host_ok_self_error"]:
+        problems.append(f"the by-construct table sums to {sum(by_construct.values())}, not the "
+                        f"{agg['host_ok_self_error']} gap files")
+    if agg["host_ok_self_error"] + agg["host_error_self_ok"] > agg["diverging"]:
+        problems.append("the host/self acceptance counts exceed the diverging count")
+    if sum(by_code.values()) != agg["rejected"]:
+        problems.append(f"the by-code table sums to {sum(by_code.values())}, not the "
+                        f"{agg['rejected']} rejected files")
+
+    lines = ["### selfhost-libdiff parts", ""]
+    if problems:
+        lines.append(f"❌ **{len(problems)} problem(s): the parts do not cover the one case they replace.**")
+        lines += [f"- {p}" for p in problems]
+        error("; ".join(problems[:6]) + (" …" if len(problems) > 6 else ""), "selfhost-libdiff")
+        print("\n".join(lines))
+        return 1
+    lines.append(f"✅ **{len(seen)} files, each checked once** by {len(headers)} part(s); "
+                 f"{agg['bounded']} bounded. This is the whole-run summary, recomputed from the union.")
+    lines += ["", "| part | files | ok | rejected | diverging | bounded | workers |",
+              "|---|---:|---:|---:|---:|---:|---:|"]
+    for stem in sorted(headers, key=lambda s: headers[s]["part"]):
+        h = headers[stem]
+        lines.append(f"| {h['part']}/{h['parts']} | {h['files']} | {h['ok']} | {h['rejected']} | "
+                     f"{h['diverging']} | {h['bounded']} | {h['workers']} |")
+    lines.append(f"| **total** | **{len(seen)}** | **{agg['ok']}** | **{agg['rejected']}** | "
+                 f"**{agg['diverging']}** | **{agg['bounded']}** | |")
+    lines += ["", f"ok: {agg['ok']}",
+              f"rejected: {agg['rejected']} (both reject; {agg['same_code']} same code, "
+              f"{agg['same_span']} same span, {agg['same_message']} same message)",
+              f"diverging: {agg['diverging']} (host accepts, self rejects: "
+              f"{agg['host_ok_self_error']}; host rejects, self accepts: "
+              f"{agg['host_error_self_ok']})",
+              f"bounded: {agg['bounded']}"]
+    if by_construct:
+        lines += ["", "by missing construct (files whose verdicts differ):", ""]
+        lines += [f"- {k or '(none)'}: {v}" for k, v in
+                  sorted(by_construct.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if by_code:
+        lines += ["", "by error class (both reject):", ""]
+        lines += [f"- {k or '(no code)'}: {v}" for k, v in
+                  sorted(by_code.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if blockers:
+        lines += ["", "top 10 blockers (host accepts, self-hosted frontend rejects):", ""]
+        lines += [f"{i}. {md(f)} — {md(k)} — {md(m)}" for i, (f, k, m) in enumerate(blockers, 1)]
+    print("\n".join(lines))
+    return 0
+
+
 # --- Skip lint (`check-skips`) -------------------------------------------------------
 SKIP_DETAIL = re.compile(r"^      skipped \((.*)\)$")
 NO_REASON = "(the case printed no reason)"
@@ -902,6 +1257,14 @@ def self_test():
         ("case-named entry excuses its case only",
          {"selfhost-1.log": log([("zeta", [("z0", "parity: named"), ("z1", "parity: named"), "z2"])])}, 1,
          "group `zeta`: 1 of 3"),
+        # the split sweep skips alone (its group's other cases pass), so the ratio cannot
+        # be what fails it: the reason names a tool the CI dev shell must provide
+        ("a skipped libdiff sweep (no C toolchain)",
+         {"selfhost-libdiff-1.log": log([("selfhost-libdiff",
+                                          [("the library through both compilers",
+                                            "no C toolchain (no self-hosted compiler)"),
+                                           "part i/n: the parts partition the file list"])])},
+         1, "cc and GMP"),
         ("--timings file", {"library-2.jsonl": timing("library-2", "wasm",
                                                       [(f"m{i}", "no node") for i in range(25)])}, 1, "node"),
     ]
@@ -1062,6 +1425,8 @@ def main(args):
         return 0
     if args[:1] == ["changes"] and len(args) >= 2:
         return changes(args[1:])
+    if args[:1] == ["libdiff-union"]:
+        return libdiff_union(args[1:])
     binary = args[1] if len(args) > 1 else DEFAULT_BIN
     if args[:1] == ["matrix"]:
         matrix(binary)
