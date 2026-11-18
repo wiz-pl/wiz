@@ -17,6 +17,13 @@ runs the tools a Wiz agent needs:
   completion, signature_help, inlay_hints     read-only language-server queries
   code_actions, rename     edits proposed, never applied
 
+Opt-in runners (phase 3; each listed only with its flag, run through `heavy`/`light`
+and a `bwrap` sandbox without network, see wiz_runners.py):
+
+  test_groups, test_group, trust_ledger_live   --allow-tests (the built test driver)
+  run        {path}        --allow-run (`wiz run`, the home directory hidden)
+  job_status, job_cancel   follow or stop a runner's job
+
 The text tools are one `wiz` process per call. The language-server tools
 share **one** lazily started `wiz lsp` daemon on its own stdin/stdout (no socket),
 belonging to this process and therefore to this workspace. It is killed after
@@ -50,6 +57,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -60,6 +68,7 @@ sys_path_entry = os.path.dirname(os.path.abspath(__file__))
 if sys_path_entry not in sys.path:
     sys.path.insert(0, sys_path_entry)
 import wiz_index  # noqa: E402  (the library index; stdlib only, beside this file)
+import wiz_runners  # noqa: E402  (phase 3: scheduled, sandboxed runners; stdlib only)
 from typing import Any, Iterable, Optional
 
 # ---------------------------------------------------------------------------
@@ -94,6 +103,16 @@ INSTRUCTIONS = (
     "error codes (wiz://error-codes/{code}) and the design stages. Use diagnostics/hover/goals when you need the "
     "language server's view. The language-server tools share one lazy `wiz lsp` "
     "daemon for this worktree and can be slow on a cold cache."
+)
+
+
+#: Appended to INSTRUCTIONS when a runner flag is on.
+RUNNER_INSTRUCTIONS = (
+    " Runners are enabled: test_group/trust_ledger_live/run go through the heavy scheduler with a "
+    "declared `mem` and `timeout` in a sandbox without network. They are refused with heavy_busy when "
+    "heavy would not start them now (pass queue=true to wait in its queue); a call returns a job after "
+    "`wait` seconds, which job_status follows and job_cancel stops. Selectors are exact (=NAME); a skipped "
+    "test is not a pass."
 )
 
 
@@ -141,6 +160,14 @@ class Config:
     pass_env: tuple[str, ...] = ()
     #: an elaborated library index (`wiz doc --lib -o DIR`'s api.json, or DIR); never built here
     doc_index: Optional[str] = None
+    #: Phase 3 runners: the test driver's groups and the live trust ledger (through heavy).
+    allow_tests: bool = False
+    #: Phase 3 runners: `wiz run` of a workspace file (through heavy, in a sandbox).
+    allow_run: bool = False
+    #: The built test driver (never built by the server); relative to the workspace.
+    tests: str = os.path.join(".", ".lake", "build", "bin", "tests")
+    #: The scheduler, the sandbox and the caller's limits.
+    runner: wiz_runners.RunnerConfig = wiz_runners.RunnerConfig()
 
 
 def resolve_path(workspace: str, path: str) -> str:
@@ -1461,15 +1488,113 @@ TOOLS += [
         },
     },
 ]
+#: Annotations of the opt-in runners: they execute code and write caches, but never
+#: outside the sandbox's writable directories, and never reach the network.
+RUNNER_ANNOTATIONS = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+#: The scheduling arguments every heavy runner takes.
+JOB_PROPS: dict[str, Any] = {
+    "mem": {"type": "string", "pattern": "^[1-9][0-9]*[MG]$",
+            "description": "the declared peak for heavy --mem, e.g. 6G (at most the server's --max-mem)"},
+    "timeout": {"type": "integer", "minimum": 1, "description": "time limit in seconds, inside heavy (at most --max-runtime)"},
+    "queue": {"type": "boolean", "description": "when heavy is busy, wait in its FIFO queue instead of being refused"},
+    "wait": {"type": "integer", "minimum": 0, "description": "seconds to wait for the result before returning the job (default 20)"},
+}
+
+
+def _runner_tool(name: str, title: str, description: str, properties: dict[str, Any], required: list[str],
+                 job: bool = True) -> dict[str, Any]:
+    props = dict(properties, **(JOB_PROPS if job else {}))
+    return {
+        "name": name,
+        "annotations": dict(RUNNER_ANNOTATIONS, title=title),
+        "description": description,
+        "inputSchema": {"type": "object", "properties": props, "required": required, "additionalProperties": False},
+    }
+
+
+RUNNER_TOOLS: list[dict[str, Any]] = [
+    _runner_tool(
+        "test_groups", "List test groups or cases (needs --allow-tests)",
+        "The test driver's groups (`tests --list`), or with `selectors` the cases they pick "
+        "(`tests --list-cases`: group, index, name). Runs the built driver under light; never builds it.",
+        {"selectors": {"type": "array", "items": {"type": "string"}, "description": "exact selectors, e.g. [\"=native\"]"}},
+        [], job=False),
+    _runner_tool(
+        "test_group", "Run test groups (heavy; needs --allow-tests)",
+        "Run test groups with the built driver through heavy (declared `mem`, `timeout` inside heavy) in a "
+        "sandbox without network. Selectors are exact: `=NAME` or `=NAME#0,3`. Refused with heavy_busy when "
+        "heavy would not start it now (pass queue=true to wait in its queue). Returns the job; when it ends "
+        "within `wait`, also result.summary (passed/failed/skipped), per-group counts and the failed and "
+        "skipped cases with their output. A skipped case is not a pass (result.all_passed).",
+        {"selectors": {"type": "array", "items": {"type": "string"}},
+         "jobs": {"type": "integer", "minimum": 1, "maximum": 8, "description": "--jobs N for parallel groups (memory grows with it)"}},
+        ["selectors"]),
+    _runner_tool(
+        "trust_ledger_live", "Live trust ledger (heavy; needs --allow-tests)",
+        "Recompute the trusted base of lib/ (`tests --trust-ledger --print`, every declaration through "
+        "#print axioms) through heavy, and compare it with the checked-in ledger: result.unreviewed lists "
+        "sources with no ledger row, result.stale rows with no live source. Read-only: it never updates the ledger.",
+        {"lib_only": {"type": "boolean", "description": "lib/ only, without the examples (stale rows are then not reported)"}},
+        []),
+    _runner_tool(
+        "run", "Build and run a Wiz program (heavy, sandboxed; needs --allow-run)",
+        "`wiz run FILE`: build `main` and run it, through heavy in a sandbox with no network, the workspace "
+        "read-only and the home directory hidden (only the wiz cache is writable).",
+        {"path": {"type": "string"}, "target": {"type": "string", "enum": ["c", "llvm"]}},
+        ["path"]),
+    _runner_tool(
+        "job_status", "A runner job's state",
+        "A job's state (queued with its heavy queue position, running, done, failed, timeout, killed, "
+        "cancelled), its output tail and, once it ended, its parsed result. Without `job`: every job of this server.",
+        {"job": {"type": "string"}, "wait": {"type": "integer", "minimum": 0, "description": "seconds to wait for it to end"}},
+        [], job=False),
+    _runner_tool(
+        "job_cancel", "Stop a runner job",
+        "Stop a job this server started (its whole process group, including the heavy wrapper).",
+        {"job": {"type": "string"}}, ["job"], job=False),
+]
+RUNNER_TOOL_NAMES = {tool["name"] for tool in RUNNER_TOOLS}
+TOOLS += RUNNER_TOOLS
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
-#: Tools that write files or run the host toolchain, and the flag that enables each.
-GATED_TOOLS = {"build": "--allow-build"}
+#: Tools that write files, run the host toolchain or execute code: the flag that enables
+#: each, and what it does (for the refusal).
+GATED_TOOLS = {
+    "build": ("--allow-build", "writes files and runs the host toolchain"),
+    "test_groups": ("--allow-tests", "runs the test driver (under light, in a sandbox)"),
+    "test_group": ("--allow-tests", "runs test groups (under heavy, in a sandbox)"),
+    "trust_ledger_live": ("--allow-tests", "runs the trust ledger over lib/ (under heavy, in a sandbox)"),
+    "run": ("--allow-run", "compiles and executes a program (under heavy, in a sandbox)"),
+    "job_status": ("--allow-tests or --allow-run", "follows a runner's job"),
+    "job_cancel": ("--allow-tests or --allow-run", "stops a runner's job"),
+}
 
 
 def visible_tools(config: Config) -> list[dict[str, Any]]:
     """The tools this server lists: gated tools only when their flag was given."""
-    enabled = {"build": config.allow_build}
+    jobs = config.allow_tests or config.allow_run
+    enabled = {
+        "build": config.allow_build,
+        "test_groups": config.allow_tests,
+        "test_group": config.allow_tests,
+        "trust_ledger_live": config.allow_tests,
+        "run": config.allow_run,
+        "job_status": jobs,
+        "job_cancel": jobs,
+    }
     return [tool for tool in TOOLS if enabled.get(tool["name"], True)]
+
+
+def job_envelope(name: str, described: dict[str, Any], path: Optional[str] = None) -> dict[str, Any]:
+    """A runner job's description as the usual envelope: the output tails in stdout/stderr,
+    the rest in result. `ok` is false once the job failed (or its tests did not all pass)."""
+    stdout = described.pop("stdout_tail", "")
+    stderr = described.pop("stderr_tail", "")
+    state = described["state"]
+    ok = state in ("queued", "running") or (state == "done" and described.get("result_error") is None)
+    if state == "done" and isinstance(described.get("result"), dict) and described["result"].get("all_passed") is False:
+        ok = False
+    return make_envelope(name, ok=ok, path=path, exit_code=described.get("exit"), stdout=stdout, stderr=stderr,
+                         result=described)
 
 
 class Server:
@@ -1496,6 +1621,157 @@ class Server:
     def close(self) -> None:
         self._reaper_stop.set()
         self.daemon.close()
+        if self._runner is not None:
+            self._runner.close()
+
+    # -- phase 3 runners (opt-in; wiz_runners.py) ----------------------------
+
+    _runner: Optional["wiz_runners.Runner"] = None
+
+    @property
+    def runner(self) -> "wiz_runners.Runner":
+        """The scheduler/sandbox/jobs helper, with its private (0700) job directory."""
+        if self._runner is None:
+            base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+            root = tempfile.mkdtemp(prefix=f"wiz-mcp-jobs-{os.getpid()}-", dir=base if os.path.isdir(base) else None)
+            self._runner = wiz_runners.Runner(self.config.runner, root)
+        return self._runner
+
+    def tests_driver(self) -> str:
+        """The built test driver; the server never builds it."""
+        tests = self.config.tests
+        path = tests if os.path.isabs(tests) else os.path.normpath(os.path.join(self.config.workspace, tests))
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            raise ToolError(
+                "tests_not_found",
+                f"no test driver at {path}: build it first (`heavy lake build wiz tests` in the worktree), "
+                "or pass --tests PATH; the server never builds it",
+            )
+        return path
+
+    def cache_dir(self) -> str:
+        """The wiz cache the sandbox leaves writable (created if missing)."""
+        cache = self.config.cache or os.path.join(os.path.expanduser("~"), ".cache", "wiz")
+        os.makedirs(cache, exist_ok=True)
+        return cache
+
+    def sandbox(self, *, workspace_rw: bool, hide_home: bool, extra_readable: Iterable[str] = ()) -> "wiz_runners.Sandbox":
+        """The bwrap profile: the toolchain readable, the wiz cache writable."""
+        readable = list(self.read_roots()[1:]) + list(extra_readable)
+        wiz = resolve_wiz(self.config.workspace, self.config.wiz)
+        if wiz:
+            readable.append(os.path.dirname(os.path.dirname(os.path.realpath(wiz))))
+        writable = [self.cache_dir()]
+        if not hide_home:
+            grail_cache = os.path.join(os.path.expanduser("~"), ".cache", "grail")
+            if os.path.isdir(grail_cache):
+                writable.append(grail_cache)
+        return wiz_runners.Sandbox(
+            workspace=os.path.realpath(self.config.workspace), workspace_rw=workspace_rw, hide_home=hide_home,
+            readable=tuple(readable), writable=tuple(writable),
+        )
+
+    def _job_envelope(self, name: str, job: "wiz_runners.Job", wait: float, path: Optional[str] = None) -> dict[str, Any]:
+        if wait > 0:
+            self.runner.jobs.wait(job, wait)
+        described = self.runner.status_of(job.id, child_env(extra=self.config.pass_env))
+        return job_envelope(name, described, path)
+
+    def _runner_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        schema = next(t for t in RUNNER_TOOLS if t["name"] == name)["inputSchema"]
+        for key in args:
+            if key not in schema["properties"]:
+                raise ToolError("invalid_args", f"unknown argument `{key}`")
+        env = child_env(extra=self.config.pass_env)
+        if name == "job_status":
+            if args.get("job") is None:
+                return make_envelope(name, result={"jobs": self.runner.list_jobs()})
+            wait = args.get("wait", 0)
+            if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
+                raise ToolError("invalid_args", "`wait` must be a non-negative integer")
+            return job_envelope(name, self.runner.status_of(args["job"], env, float(min(wait, self.config.timeout))))
+        if name == "job_cancel":
+            return job_envelope(name, self.runner.cancel(args.get("job")))
+        if name == "test_groups":
+            driver = self.tests_driver()
+            selectors = args.get("selectors")
+            command = [driver, "--list"]
+            if selectors is not None:
+                command = [driver, "--list-cases"] + wiz_runners.check_selectors(selectors)
+            box = self.sandbox(workspace_rw=False, hide_home=False, extra_readable=[os.path.dirname(driver)])
+            run = self.runner.run_light(command, box, env, min(self.config.timeout, 200))
+            rows = [line.split("\t") for line in run["stdout"].splitlines() if line.strip()]
+            if selectors is None:
+                result: Any = {"groups": [row[0] for row in rows]}
+            else:
+                result = {"cases": [{"group": r[0], "index": int(r[1]), "name": r[2]}
+                                    for r in rows if len(r) == 3 and r[1].isdigit()]}
+            return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stderr=run["stderr"],
+                                 result=result if run["exit"] == 0 else None)
+        if name == "test_group":
+            driver = self.tests_driver()
+            selectors = wiz_runners.check_selectors(args.get("selectors"))
+            mem, timeout, queue, wait = wiz_runners.job_args(args, self.config.runner, self.config.timeout, "7G", 2400)
+            command = [driver] + selectors
+            jobs = args.get("jobs")
+            if jobs is not None:
+                if isinstance(jobs, bool) or not isinstance(jobs, int) or not 1 <= jobs <= 8:
+                    raise ToolError("invalid_args", "`jobs` must be an integer between 1 and 8")
+                command += ["--jobs", str(jobs)]
+            box = self.sandbox(workspace_rw=True, hide_home=False, extra_readable=[os.path.dirname(driver)])
+
+            def post(_job: Any, stdout: str, _stderr: str, _code: int) -> Any:
+                parsed = wiz_runners.parse_test_output(stdout)
+                parsed["failed"] = parsed["failed"][:50]
+                parsed["skipped"] = parsed["skipped"][:50]
+                return parsed
+
+            job = self.runner.start_heavy("test_group", " ".join(selectors), command, box, env,
+                                          mem=mem, timeout=timeout, queue=queue, post=post)
+            return self._job_envelope(name, job, wait)
+        if name == "trust_ledger_live":
+            driver = self.tests_driver()
+            lib_only = wiz_runners.check_bool(args, "lib_only")
+            mem, timeout, queue, wait = wiz_runners.job_args(args, self.config.runner, self.config.timeout, "6G", 1800)
+            command = [driver, "--trust-ledger", "--print"] + (["--lib-only"] if lib_only else [])
+            box = self.sandbox(workspace_rw=False, hide_home=False, extra_readable=[os.path.dirname(driver)])
+            resources = self.resources
+
+            def post(_job: Any, stdout: str, _stderr: str, code: int) -> Any:
+                if code != 0:
+                    return None
+                live = wiz_runners.parse_ledger_sources(stdout)
+                try:
+                    rows = parse_ledger(resources._text(".github/trust-baseline.tsv"))
+                except ToolError:
+                    rows = []
+                result = wiz_runners.compare_ledger(live, rows, complete=not lib_only)
+                for key in ("unreviewed", "stale"):
+                    if isinstance(result.get(key), list) and len(result[key]) > 200:
+                        result[key + "_total"] = len(result[key])
+                        result[key] = result[key][:200]
+                return result
+
+            job = self.runner.start_heavy("trust_ledger_live", "trust ledger --print" + (" --lib-only" if lib_only else ""),
+                                          command, box, env, mem=mem, timeout=timeout, queue=queue, post=post)
+            return self._job_envelope(name, job, wait)
+        if name == "run":
+            wiz = resolve_wiz(self.config.workspace, self.config.wiz)
+            if wiz is None:
+                raise ToolError("wiz_not_found", _wiz_missing_message(self.config.workspace, self.config.wiz))
+            path = confine(resolve_path(self.config.workspace, _require_str(args, "path")), self.read_roots())
+            if not os.path.isfile(path):
+                raise ToolError("invalid_args", f"{path} is not a file")
+            target = args.get("target")
+            if target is not None and target not in ("c", "llvm"):
+                raise ToolError("invalid_args", "`target` must be c or llvm")
+            mem, timeout, queue, wait = wiz_runners.job_args(args, self.config.runner, self.config.timeout, "4G", 300)
+            command = _wiz_command(wiz, self.config.cache, ["run", path] + (["--target", target] if target else []))
+            box = self.sandbox(workspace_rw=False, hide_home=True)
+            job = self.runner.start_heavy("run", f"wiz run {os.path.relpath(path, self.config.workspace)}", command,
+                                          box, env, mem=mem, timeout=timeout, queue=queue)
+            return self._job_envelope(name, job, wait, path=path)
+        raise ProtocolError(-32602, f"unknown tool {name!r}")
 
     # -- library search and docs (P2a) ---------------------------------------
 
@@ -1665,11 +1941,13 @@ class Server:
             return self._library_tool(name, args)
 
         if name in GATED_TOOLS and not any(tool["name"] == name for tool in visible_tools(self.config)):
+            flag, what = GATED_TOOLS[name]
             raise ToolError(
                 "not_enabled",
-                f"`{name}` writes files and runs the host toolchain; it is off unless the server "
-                f"is started with {GATED_TOOLS[name]}",
+                f"`{name}` {what}; it is off unless the server is started with {flag}",
             )
+        if name in RUNNER_TOOL_NAMES:
+            return self._runner_tool(name, args)
         path = confine(resolve_path(self.config.workspace, _require_str(args, "path")), self.read_roots())
         if name == "check":
             source = args.get("source", "cli")
@@ -1854,6 +2132,11 @@ class Server:
             return self._call_tool(name, args)
         except ProtocolError:
             raise
+        except wiz_runners.RunnerError as exc:
+            envelope = error_envelope(name, exc.kind, exc.message)
+            if exc.detail is not None:
+                envelope["result"] = {"heavy": exc.detail} if exc.kind in ("heavy_busy", "measurement_window") else exc.detail
+            return envelope
         except ToolError as exc:
             try:
                 if "path" in args and isinstance(args["path"], str):
@@ -1906,7 +2189,8 @@ class Server:
                             "resources": {"listChanged": False, "subscribe": False},
                         },
                         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                        "instructions": INSTRUCTIONS,
+                        "instructions": INSTRUCTIONS + (
+                            RUNNER_INSTRUCTIONS if self.config.allow_tests or self.config.allow_run else ""),
                     },
                 )
             ], False
@@ -2199,10 +2483,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         help="an elaborated library index for search/doc: the api.json (or its directory) that "
         "`wiz doc --lib -o DIR` writes; never built by the server",
     )
+    add_runner_args(parser, tests=True)
     args = parser.parse_args(argv)
     workspace = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(workspace):
         parser.error(f"--workspace is not a directory: {workspace}")
+    runner = runner_config(parser, args)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if args.idle < 0:
@@ -2231,7 +2517,50 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         extra_roots=tuple(extra_roots),
         pass_env=tuple(args.pass_env),
         doc_index=os.path.abspath(os.path.expanduser(args.doc_index)) if args.doc_index else None,
+        allow_tests=args.allow_tests,
+        allow_run=args.allow_run,
+        tests=args.tests,
+        runner=runner,
     )
+
+
+def add_runner_args(parser: argparse.ArgumentParser, tests: bool = False) -> None:
+    """The scheduler/sandbox options shared with scry-mcp (and, for wiz, the runner flags)."""
+    if tests:
+        parser.add_argument(
+            "--allow-tests", action="store_true",
+            help="list and allow test_groups, test_group and trust_ledger_live (the built test driver, "
+            "through heavy/light, in a sandbox without network)",
+        )
+        parser.add_argument(
+            "--allow-run", action="store_true",
+            help="list and allow `run` (`wiz run FILE` through heavy, sandboxed: no network, the home "
+            "directory hidden, only the wiz cache writable)",
+        )
+        parser.add_argument(
+            "--tests", default=os.path.join(".", ".lake", "build", "bin", "tests"),
+            help="the built test driver (relative to --workspace; never built by the server)",
+        )
+    parser.add_argument("--heavy", default=wiz_runners.DEFAULT_HEAVY,
+                        help=f"the heavy scheduler script (default {wiz_runners.DEFAULT_HEAVY})")
+    parser.add_argument("--light", default=wiz_runners.DEFAULT_LIGHT,
+                        help=f"the light scheduler script (default {wiz_runners.DEFAULT_LIGHT})")
+    parser.add_argument("--bwrap", default="bwrap", help="the bubblewrap executable for the sandbox (default: bwrap on PATH)")
+    parser.add_argument("--max-mem", default=wiz_runners.DEFAULT_MAX_MEM,
+                        help=f"the largest heavy --mem a caller may declare (default {wiz_runners.DEFAULT_MAX_MEM})")
+    parser.add_argument("--max-runtime", type=int, default=wiz_runners.DEFAULT_MAX_RUNTIME,
+                        help=f"the longest runner time limit in seconds (default {wiz_runners.DEFAULT_MAX_RUNTIME})")
+
+
+def runner_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> "wiz_runners.RunnerConfig":
+    try:
+        wiz_runners.parse_size_mib(args.max_mem, "--max-mem")
+    except wiz_runners.RunnerError as exc:
+        parser.error(exc.message)
+    if args.max_runtime < 1:
+        parser.error("--max-runtime must be positive")
+    return wiz_runners.RunnerConfig(heavy=args.heavy, light=args.light, bwrap=args.bwrap,
+                                    max_mem=args.max_mem, max_runtime=args.max_runtime)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -2239,7 +2568,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     wiz = resolve_wiz(config.workspace, config.wiz)
     log(
         f"wiz-mcp: workspace={config.workspace} wiz={wiz or config.wiz} idle={config.idle:g}s "
-        f"timeout={config.timeout:g}s build={'on' if config.allow_build else 'off'}"
+        f"timeout={config.timeout:g}s build={'on' if config.allow_build else 'off'} "
+        f"tests={'on' if config.allow_tests else 'off'} run={'on' if config.allow_run else 'off'}"
     )
     if wiz is None:
         log(f"wiz-mcp: warning: {_wiz_missing_message(config.workspace, config.wiz)}")

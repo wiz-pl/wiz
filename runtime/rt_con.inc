@@ -60,6 +60,9 @@ static pthread_mutex_t wiz_threads_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wiz_threads_cv = PTHREAD_COND_INITIALIZER;
 static int64_t wiz_threads_running = 0;
 static int64_t wiz_live_exited = 0;
+/* how many threads `Chan.fork` has started (monotone; `Chan.forks` reads it): an
+   observable the pure model does not have, so the `Proc.runLinked` case is differential */
+static int64_t wiz_threads_started = 0;
 
 typedef struct { wiz_val fn; wiz_val arg; } wiz_spawn_args;
 
@@ -94,10 +97,20 @@ static void wiz_spawn(wiz_val fn, wiz_val arg) {
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   pthread_mutex_lock(&wiz_threads_mu);
   wiz_threads_running++;
+  wiz_threads_started++;
   pthread_mutex_unlock(&wiz_threads_mu);
   pthread_t t;
   if (pthread_create(&t, &attr, wiz_thread_main, a) != 0) wiz_panic("can't start a thread");
   pthread_attr_destroy(&attr);
+}
+
+/* `Chan.forks`: how many threads `Chan.fork` has started in this program. The pure model
+   (`link`) starts none, so a compiled program can check that the native channel path ran. */
+WIZ_API uint64_t wiz_chan_forks(void) {
+  pthread_mutex_lock(&wiz_threads_mu);
+  uint64_t n = (uint64_t)wiz_threads_started;
+  pthread_mutex_unlock(&wiz_threads_mu);
+  return n;
 }
 
 static void wiz_wait_threads(void) {
@@ -596,4 +609,50 @@ WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
   if (pthread_create(&t, &attr, wiz_main_thread, &args) != 0) return wiz_main_thread(&args), args.rc;
   pthread_join(t, NULL);
   return args.rc;
+}
+
+/* ---- the recovery boundary (rt_core.inc) that an embedding host arms ----
+
+   `wiz_stop_run(f)` applies the Wiz closure `f : String → String` (the export wraps its
+   body in `fun _ => …`) with a `setjmp` armed, so a clean stop inside it (`wiz_no_threads`,
+   `Process.exit`, a failed write) longjmps back here instead of ending the module. It
+   returns the closure's text, or "" if it stopped; `wiz_stop_code_value` then has the
+   code (0 = none, otherwise code + 1, which keeps 0 as "ran to the end"). The strings
+   are copied: the export wrapper converts the result immediately. */
+
+static __thread char *wiz_stop_text = NULL;   /* the last call's text, for the wrapper */
+static __thread size_t wiz_stop_text_cap = 0;
+
+WIZ_API char *wiz_stop_run(wiz_val f) {
+  jmp_buf jb;
+  jmp_buf *volatile prev = wiz_stop_jmp;
+  wiz_stop_code = -1;
+  if (setjmp(jb) != 0) {
+    /* a clean stop: everything the call allocated is abandoned with it */
+    wiz_stop_jmp = prev;
+    return (char *)"";
+  }
+  wiz_stop_jmp = &jb;
+  wiz_val arg = wiz_out_string("");   /* the dummy the closure ignores: a Wiz function
+                                         type always has a parameter */
+  wiz_val r = wiz_apply(f, 1, &arg);
+  wiz_stop_jmp = prev;
+  char *s = wiz_in_string(r);          /* takes the String */
+  size_t n = strlen(s) + 1;
+  if (n > wiz_stop_text_cap) {
+    free(wiz_stop_text);
+    wiz_stop_text = (char *)wiz_xmalloc(n);
+    wiz_stop_text_cap = n;
+  }
+  memcpy(wiz_stop_text, s, n);
+  free(s);
+  wiz_stop_code = -1;
+  return wiz_stop_text;
+}
+
+/* The last `wiz_stop_run`'s clean-stop code: 0 for none, otherwise code + 1. The
+   argument is unused (a Wiz export cannot take no arguments; the page passes 0). */
+WIZ_API uint64_t wiz_stop_code_value(uint64_t unused) {
+  (void)unused;
+  return wiz_stop_code < 0 ? 0 : (uint64_t)wiz_stop_code + 1;
 }

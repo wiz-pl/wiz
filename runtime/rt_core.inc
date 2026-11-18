@@ -85,11 +85,65 @@ static void wiz_panic(const char *msg) {
   exit(3);
 }
 
+/* ---- clean stops and the recovery boundary ----
+
+   A program that ends on purpose is not a fault: `wiz_no_threads` (the one-threaded
+   build's refusal to fork or block), `wiz_sys_exit` (`Process.exit`) and a failed
+   `IO.writeFile` all print what happened and then stop. Native builds keep calling
+   `exit`, so the CLI's status, `atexit` and the stdio flush are unchanged. A host that
+   embeds the runtime (`web/playground-exports.wiz` in the Wasm playground) arms a
+   boundary with `wiz_stop_run` (rt_con.inc): a clean stop then `longjmp`s back to it
+   with the code, the module survives, and the next call still works.
+
+   `wiz_panic` (out of memory) is deliberately not in this list, and neither is a Wasm
+   trap: those leave the heap or the stack unusable, so the only reset is a new
+   instance. */
+static __thread jmp_buf *wiz_stop_jmp = NULL;   /* the armed boundary, or NULL */
+static __thread int wiz_stop_code = -1;         /* the last clean stop's code, -1: none */
+
+/* Stop cleanly with `code`: `exit` (native, as before) unless a boundary is armed.
+   `code` is masked to a byte, as an exit status is observed. */
+__attribute__((noreturn)) static void wiz_clean_exit(int code) {
+  if (wiz_stop_jmp) {
+    wiz_stop_code = code & 0xFF;
+    fflush(stdout);
+    fflush(stderr);
+    longjmp(*wiz_stop_jmp, 1);
+  }
+  exit(code);
+}
+
+/* The same failure policy for the runtime's own buffers (the OS-surface natives in
+   rt_sys.inc/rt_data.inc): a failed allocation is `wiz: out of memory` and exit 3,
+   never a NULL dereference later. A reader that can report an errno uses the error
+   path instead (ENOMEM); these are for the allocations that have no result to fail. */
+static void *wiz_xmalloc(size_t bytes) {
+  void *p = malloc(bytes ? bytes : 1);
+  if (!p) wiz_panic("out of memory");
+  return p;
+}
+static void *wiz_xcalloc(size_t n, size_t bytes) {
+  void *p = calloc(n ? n : 1, bytes ? bytes : 1);
+  if (!p) wiz_panic("out of memory");
+  return p;
+}
+static void *wiz_xrealloc(void *p, size_t bytes) {
+  void *q = realloc(p, bytes ? bytes : 1);
+  if (!q) wiz_panic("out of memory");
+  return q;
+}
+static char *wiz_xstrdup(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)wiz_xmalloc(n);
+  memcpy(p, s, n);
+  return p;
+}
+
 #ifdef WIZ_NO_THREADS
 /* `what` needs a second thread, and this build has none */
 __attribute__((noreturn)) static void wiz_no_threads(const char *what) {
   fprintf(stderr, "wiz: %s: threads are not available in this build (WIZ_NO_THREADS)\n", what);
-  exit(3);
+  wiz_clean_exit(3);
 }
 #endif
 
