@@ -1,14 +1,13 @@
 # scry C# frontend
 
 Status: **design + first slice, parsing on tree-sitter-c-sharp** (2026-11-16;
-the working copy of this note is `wiz-notes/scry-csharp.md`). The user chose option B
-of §1 on 2026-11-16: the hand-written parser of the first draft is gone, and
+the working copy of this note is `wiz-notes/scry-csharp.md`). Option B of §1 was chosen
+on 2026-11-16: the hand-written parser of the first draft is gone, and
 tree-sitter-c-sharp v0.23.5 (fetched by Nix, `.#tree-sitter-c-sharp`) parses C# through
-the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
-the pieces the frontend plugs into exist only there: `Scry.Cst` (the read-only CST view
-the C lowering walks), `Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every
-statement, and the rule-pack taint engine (`Scry.RuleTaint`, `Scry.Interproc`,
-`Scry.analyze`). The PR declares `Depends-on: #376`.
+the same shim as C. The analysis stack the frontend plugs into is on master (PR #376,
+merged 2026-11-16): `Scry.Cst` (the read-only CST view the C lowering walks),
+`Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every statement, and the rule-pack taint
+engine (`Scry.RuleTaint`, `Scry.Interproc`, `Scry.analyze`).
 
 Design context: `code-analysis-design.md` §4.8 (C# second, decided 2026-11-12, 3–4 wk),
 §4.3 (Wil), `scry-c2wil.md` (the C lowering this mirrors), `scry-taint.md` (the engine).
@@ -197,11 +196,13 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
 | `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 4 view goldens, lowering golden + execution, 4 taint cases |
 
-A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
+A spill is regenerated with `scry-cst FILE.cs > FILE.cst`. Build the tool with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
-toolchain's `--cflags`/`--ldflags`; this host's `grail` link of executables fails on a
-pre-existing `__isoc23_strtol` glibc/gmp mismatch). The freshness case fails when a
-spill's root does not span its `.cs` text. Goldens are regenerated with
+toolchain's `--cflags`/`--ldflags`. The C# grammar is the uncommitted out-link
+`scry/native/tree-sitter-c-sharp`, created with
+`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp` (what
+`.github/workflows/scry.yml` does before `grail build scry`). The freshness case fails
+when a spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
@@ -219,3 +220,34 @@ skips `finally`; `using var` does not call `Dispose`; `switch` labels are not co
 (tree-sitter gives `case 1: case 2:` as two sections; every section is reachable
 anyway); field initialisers are not run by constructors (each one gets a warning);
 lambdas are opaque.
+
+Out of scope for this slice (parse error, or an `ERROR` node plus a warning; §2): LINQ
+query syntax, `switch` expressions, patterns beyond `is T x`, `async`/`await`, iterators
+(`yield`), local functions, tuples and deconstruction, `unsafe`/pointers, events and
+delegates, and operator overloading. `ref`/`out` arguments parse, but their targets are
+havoc'd after the call; attribute semantics are ignored.
+
+### Coverage on this tree
+
+No repository-wide C# coverage report is checked in, and no CLI command on this tree
+lowers C#: `Scry.CsLower` is reached only by the test goldens, `scry taint` is the C
+pipeline (`TaintCmd.wiz` parses `"c"`), and M4 below is still open. The checked-in
+fixture corpus is the only coverage this page can substantiate:
+
+| directory | `.cs` files | spill | lowering evidence |
+|---|---:|---:|---|
+| `corpus/csharp/parse/` | 4 | 4 | 4 view goldens (`*.sexp`) |
+| `corpus/csharp/lower/` | 1 | 1 | `basic.wil` + `Wil.runFunction` |
+| `corpus/csharp/taint/` | 4 | 4 | 4 CWE-78 cases in the group |
+| **total** | **9** | **9** | 5 golden-lowering cases |
+
+Counted on 2026-11-18: `find scry/corpus/csharp -name '*.cs' | wc -l` and
+`find scry/corpus/csharp -name '*.cst' | wc -l` are both 9; the spills are 70,650 bytes
+(70 KB) by `du -cb $(find scry/corpus/csharp -name '*.cst')`. The `scry-csharp` group
+(11 cases, `lake test -- '=scry-csharp'`) checks spill freshness, the four views, the
+lowering golden and its execution, and the four taint cases. A real-code census needs the
+repository driver, which is not on this tree; its last measured run is commit `e3f27195`
+(2026-11-18). On `src/Crux.Api` (75 kept files) it reports 75 parsed, 57 lowered and 0
+failed; over all of Nexus (4,621 kept) it reports 4,605 parsed, 4,263 lowered and 16
+failed, and the 16 are two upstream grammar gaps. Those figures are cited for provenance,
+not as claims about this tree.

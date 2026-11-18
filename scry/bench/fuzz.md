@@ -1,6 +1,6 @@
 # Scry parse/lower fuzz findings
 
-This is a bounded bug search over the **Wiz side** of Scry: the native column store, `Scry.CstStore`, `Scry.lowerTU` (C -> Wil) and the taint pipeline reached by `scry taint`. It complements `scry/fuzz/run.py`, which fuzzes the vendored tree-sitter shim with libFuzzer. A run that finds nothing is not evidence of safety.
+This is a bounded bug search over the **Wiz side** of Scry: the native column store, `Scry.CstStore`, `Scry.lowerTU` (C -> Wil) and the taint pipeline reached by `scry taint`. It complements `scry/fuzz/run.py`, which fuzzes the vendored tree-sitter shim with libFuzzer. A run that finds nothing is not evidence of safety. The campaign below was measured on 2026-11-17 at commit `c249a8ad` with `scry 0.1.0-dev (S1)`; the regression replay is dated separately.
 
 ## Reproduce
 
@@ -10,11 +10,11 @@ python3 scry/scripts/fuzz-lower.py --regressions-only
 ```
 
 * scry: `scry 0.1.0-dev (S1)`
-* seed corpus: 122 C files from `bench/corpus`, `tests/fixtures`, `corpus` and `fuzz/lower/seeds`
+* seed corpus: 122 C files at the time, from `bench/corpus`, `tests/fixtures`, `corpus` and `fuzz/lower/seeds` (`find scry/bench/corpus scry/tests/fixtures scry/corpus scry/fuzz/lower/seeds -name '*.c' | wc -l` reports 147 on 2026-11-18; the corpus grew after the run)
 * executions: 400; wall time: 1245.9 s
 * per-run limits: 5 s, 256 MiB **resident** memory (the kernel-killed process is reported as `oom`), core dumps off, process group killed on timeout
 
-* categories: crash 0, hang 38, oom 19, wrong 0, refused 5, error 0, stalled 0, clean 338
+* categories: crash 0, hang 38, oom 19, wrong 0, refused 5, error 0, stalled 0, clean 338 (at the recorded run; see the replay status below)
 
 ## Findings
 
@@ -118,9 +118,12 @@ python3 scry/scripts/fuzz-lower.py --regressions-only
 * the hang fixtures replay at a 3 s budget and a 256 MiB RSS cap;
 * the OOM fixtures replay at the campaign's 256 MiB RSS cap and 5 s timeout.
 
-Checked at the time of writing: 25/25 `ok`. A fixture that starts terminating
-prints `fixed` (still exit 0); if the non-terminating boundary moves under load
-(`oom` vs `hang`) the replay prints `ok (hang)`/`ok (oom)`; any other change is
+Replayed on 2026-11-18 with `python3 scry/scripts/fuzz-lower.py --regressions-only`
+and a `scry` built from the tree at master `4ad29792`: 25/25 `ok`. The 13 hang
+fixtures now print `fixed` (they terminate under their 3 s budget), and the 12 OOM
+fixtures still print `ok` at the 256 MiB cap. A fixture that starts
+terminating prints `fixed` (still exit 0); if the non-terminating boundary moves under
+load (`oom` vs `hang`) the replay prints `ok (hang)`/`ok (oom)`; any other change is
 `MISMATCH` and exits 1.
 
 ## Method

@@ -29,8 +29,10 @@ spills and the rule pack are in `corpus/csharp/`; the tests are the `scry-csharp
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
-grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats,
-                                # taint, report, project, dynamic, fuzz spans, scale
+grail test                      # the 28 checked-in tests/*.wiz goldens (schema, cst,
+                                # native shim, preproc, codegen, CLI, parse --stats, taint,
+                                # bench, diff, report, project, dynamic, fuzz spans,
+                                # workflow, egraph, optics, repl, scale)
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
@@ -60,6 +62,43 @@ registers outside the original right-hand side, strictly cheaper terms) and prin
 transformation report. That program is an optional input to a later analysis;
 `lib/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
 authoritative. `parse --stats` prints counts only; the perf agent owns throughput numbers.
+
+## Command-line reference
+
+`scry help` prints the command list and `scry findings help` the subcommands. Exit status
+is 0 on success and 1 on an error, including a usage error (a `scry: …` line on stderr);
+`taint` with an expired `--timeout` exits 124, and `--fail-on-finding` exits 1 when a
+finding or a boundary/memory warning is shown. The accepted flags, grouped as the CLI
+groups them, are:
+
+| command | arguments and flags |
+|---|---|
+| `help`, `--help`, `--version` | print the command list, or `scry 0.1.0-dev (S1)` |
+| `facts` | `FILE` |
+| `query` | `FILE` + exactly one of `--kind KIND`, `--edge LABEL`, `--edge-src LABEL`, `--rel NAME` |
+| `explain` | `FILE NODE` |
+| `parse` | `FILE… --stats` (`--stats` is required and may appear anywhere) |
+| `cst` | `FILE OUT` (JSON fact store → `scry-cst 1` spill) |
+| `taint` | `FILE` + `--rules FILE`, `--sarif OUT`, `--json`, `--allow-errors`, `--fail-on-finding`, `--origin-map`, `--progress`, `--diff BASE\|all`, `--changed-lines FILE`, `--diff-context N`, `--timeout SECS` (300), `--max-nodes N` (2 000 000), `--max-rounds N` |
+| `dynamic` | `FILE` + `--cc PATH`, `--json`, `--sarif OUT`, `--timeout SECS`, `--no-coverage`, `--witness FILE`, `--keep`, `--work-dir DIR`, `--no-static` |
+| `bench` | `--corpus DIR`, `--baseline FILE`, `--extra DIR` (repeatable), `--json OUT` (`-` = stdout), `--markdown OUT`, `--update-baseline FILE`, `--no-baseline`, `--no-timing`, `--quiet`, `--fail-on-regression`, `--baseline-bootstrap`, `--dynamic`, `--cc PATH`, `--no-coverage` |
+| `report` | `FILE.c\|DIR` + `--out FILE` (`report.html`), `--rules FILE`, `--allow-errors`, `--diff BASE\|all`, `--changed-lines FILE`, `--diff-context N`, `--timeout SECS` (300), `--max-nodes N` (2 000 000), `--max-rounds N` |
+| `project` | `DIR` + `--compdb FILE`, `--cc CMD` (`cc`), `--allow-errors`, `--facts OUT`, `--taint`, `--rules FILE`, `--json`, `--sarif OUT`, `--cache[=DIR]` or `--cache-dir DIR` (`.scry-project-cache`), `--cache-stats`, `--fail-on-finding`, `--keep-system-headers`, `--skip-broken`, and `-I DIR`/`-IDIR`, `-D X`/`-DX`, `-U X`/`-UX`, `-include FILE` |
+| `project query` | `DIR` + `--rel NAME` or `--func NAME` (the same parser as `project`) |
+| `findings scan` | `FILE.c…` + `--rules FILE`, `--db FILE`, `--artifacts DIR`, `--allow-errors`, `--smt-model FILE`, `--json`, `--quiet` |
+| `findings list` | `--db FILE`, `--state STATE`, `--json` |
+| `findings show` | `ID` + `--db FILE`, `--json` |
+| `findings triage` | `ID --state new\|triaged\|confirmed\|false-positive\|fixed` + `--reason TEXT`, `--by NAME`, `--db FILE` |
+| `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--json` |
+| `findings verify` | `ID` + `--db FILE`, `--json` |
+| `fuzz-span` | `FILE` + `--offset N`, `--json`, `--out FILE` |
+| `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite` |
+| `repl` | `[FILE.c]`; the remaining arguments go to `wiz repl` (`--script FILE`, `--init CMD`, `--llvm`, `--prelude MODULE`) |
+
+Two flags are accepted by the parser but missing from the top-level `scry help` text:
+`bench --baseline-bootstrap` (it is in `scry bench --help`) and `project --cache-dir`
+(an alias for `--cache=DIR`). `bench --no-baseline` also appears only in
+`scry bench --help`. The default rule pack is `lib/Scry/rules/default.scry`.
 
 ## Optics and accessors
 
@@ -139,9 +178,11 @@ sink line is in `git diff -U0 BASE`; `repro ID` runs a recorded finding under th
 workflow reproducer.
 
 Errors are printed and the session continues: a missing file, a parse error, a bad rule
-pack or an unknown Wiz name does not end the REPL. `loadDir`/`--project` load several
-units, but a query and the taint record are still per active unit; cross-file points-to
-and a single project-wide store are the remaining work.
+pack or an unknown Wiz name does not end the REPL. `Scry.Repl.loadDir`, and `scry repl
+DIR` (which calls it), load several units, but a query and the taint record are still per
+active unit; cross-file points-to and a single project-wide store are the remaining work.
+There is no `--project` flag: `scry repl` passes its arguments to `wiz repl`, which does
+not define one.
 
 ## `scry taint`: C → Wil → taint → findings/SARIF
 
@@ -165,7 +206,8 @@ derivation with `Scry.Certify`; print findings with their source spans; and, wit
 
 Each finding names its **derivation status**: `checked` when its Datalog certificate
 verifies against the function's EDB, `unchecked` otherwise. `--fail-on-finding` exits 1
-when a finding or a lowering-boundary warning is present, so the command can gate CI.
+when a finding, a lowering-boundary warning or a memory warning is present, so the
+command can gate CI.
 
 **Boundary warnings are not false negatives.** The lowering is deliberately a subset:
 a struct field, array/subscript, cast, `?:`, `sizeof`, string literal, global, switch,
@@ -304,19 +346,20 @@ to the findings. A capped fixpoint adds a `scry/budget/points-to-incomplete` or
 cannot mistake a truncated run for a complete one. Every reported finding is still a
 real derivation; only recall can be reduced.
 
-Measured on this machine (`grail` build, cold-ish cache; wall time, informational;
-the table is `scry/bench/scale.md`, "Function-heavy files", on the base commit):
+The measured profile lives in `bench/scale.md` ("Restack measurements", 2026-11-16,
+master `d23473da`). These are wall-clock times from `scry taint FILE --json
+--allow-errors`; they are informational, not `perf-run` measurements:
 
-| input | nodes | before | after (warm / cold) | peak RSS |
+| input | nodes | before | after | peak RSS |
 |---|---:|---:|---:|---:|
-| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | **timeout at 300 s** | **≈ 1.2–2.2 s warm, 6–7.5 s cold** | 654 MiB |
-| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 117.7 s | 50.3 s / 56.4 s | 34 MiB |
-| `tree-sitter/lib/src/query.c` (34 k nodes, 113 functions) | 34 450 | 180.7 s | 15.6 s / 35–38 s | 71 MiB |
+| `tree-sitter/lib/src/parser.c` (17 k nodes, one huge function) | 17 163 | 69.4 s | 0.27 s | 73 MiB |
+| `tree-sitter/lib/src/query.c` (34 k nodes, 114 functions) | 34 450 | 19.2 s | 0.34 s | 88 MiB |
+| `tree-sitter-c/src/parser.c` (3.9 MB, generated tables) | 1 110 871 | not measurable under the light slot | 6.70 s | 1.16 GiB |
 
-Parsing and building the store account for ≈ 1.7 s of the 3.9 MB case; the rest is the
-lowering walk. One generated grammar function dominates the two tree-sitter runtime
-files: rule evaluation of a single very large function is the remaining hot spot, and
-`--timeout` (or a smaller `--max-nodes`) is the escape hatch.
+`--progress` prints the same stage breakdown for a run of your own (parse, lower,
+points-to, plans, summaries, origins). The 3.9 MB grammar spends most of its time in the
+lowering walk and in preparing the generated `ts_lex` plan; `--timeout` (or a smaller
+`--max-nodes`) is the escape hatch.
 
 `tests/scale.wiz` is the regression test: on a checkout with the vendored grammar it
 asserts the node count, that the run is complete under the default limit, that
@@ -377,7 +420,8 @@ header. The single-file `scry taint` SARIF writer is unchanged.
 key covers the source path/text and flags; the entry is validated against a digest of the
 **actual preprocessed text**, so a changed header or macro is a miss, not a stale hit.
 `--cache-stats` adds hit/miss/write/corrupt counts and implies `--cache`.
-`--fail-on-finding` returns exit 1 when a finding or boundary warning is reported.
+`--fail-on-finding` returns exit 1 when a finding, boundary warning or memory warning is
+reported.
 `--skip-broken` records a TU whose `cc -E`/parse fails in the `skipped` list and analyses
 the rest, which is how a real repository with optional platform headers stays usable;
 without it the first broken TU is a hard error.
@@ -593,32 +637,49 @@ witness (path condition, model, assumptions, budget) without solving or promotin
 
 ## Fuzzing the C front end (dynamic evidence)
 
-`fuzz/` runs a bounded libFuzzer campaign over the vendored C shim and tree-sitter,
-with `-fsanitize=fuzzer,address,undefined`. The target checks the struct-of-arrays
-contract (preorder ids, parent/CSR/edge agreement, in-range ids, spans inside the input,
-`ERROR`/`MISSING` flags); a violation, ASan report or UBSan report is minimised and
-deduplicated by stack signature. `scry fuzz-span FILE [--offset N] [--json]` maps an
-artifact to the same `start`/`stop` span shape the static findings use, including the
-smallest CST node containing an invariant's `input_offset`.
+Scry has two fuzz drivers with different scopes; neither is a verifier.
+
+* `fuzz/run.py` is a bounded libFuzzer campaign over the vendored C shim and
+  tree-sitter, with `-fsanitize=fuzzer,address,undefined`. The target checks the
+  struct-of-arrays contract (preorder ids, parent/CSR/edge agreement, in-range ids, spans
+  inside the input, `ERROR`/`MISSING` flags); a violation, ASan report or UBSan report is
+  minimised and deduplicated by stack signature. `fuzz/README.md` has its schema, bounds
+  and limits.
+* `scripts/fuzz-lower.py` fuzzes the Wiz side above the shim: the native column store,
+  `Scry.CstStore`, `Scry.lowerTU` (C → Wil) and the taint pipeline. It generates mutated
+  corpus files, random bytes, deeply nested expressions/declarations/control flow and
+  pathological sizes, runs each input in its own process group with a wall-clock and a
+  **resident-memory** cap, and minimises a finding under the same sandbox. The
+  2026-11-17 campaign (400 executions, seed `20261117`, 5 s and 256 MiB per run) is
+  `bench/fuzz.md`; its 25 minimised inputs are checked in under
+  `tests/fixtures/fuzz-regression/`. Replaying them on 2026-11-18 with
+  `--regressions-only` reports 25/25 `ok`: the 13 hang fixtures now report `fixed`, and
+  the 12 OOM fixtures still reproduce as `oom`. `--ci` is the bounded profile
+  for a nightly or CI run.
 
 ```sh
 cd scry
 ./.grail/bin/scry bench --no-timing --json build/bench.json
 python3 fuzz/run.py --build --runs 5000 --time 15 --seed 20261115 \
   --static build/bench.json --out build/fuzz
+python3 scripts/fuzz-lower.py --iterations 400 --seed 20261117 \
+  --timeout 5 --memory-mb 256
+python3 scripts/fuzz-lower.py --regressions-only
 ```
 
-The driver seeds from `bench/corpus/**/*.c` plus the taint fixtures, sweeps the static
+`fuzz/run.py` seeds from `bench/corpus/**/*.c` plus the taint fixtures, sweeps the static
 corpus once under the same sanitizers, and writes `build/fuzz/dynamic.json` and
 `dynamic.md` with a `dynamic` evidence section beside the static `scry bench` cases. A
 missing clang/libFuzzer is a clean skip (exit 0). Finding no crash in a bounded run is
 **not** evidence of safety; the target covers the C parser boundary, not the Wiz
-lowering/taint pipeline. `fuzz/README.md` has the schema, the exact bounds and the
-limits.
+lowering/taint pipeline.
 
-`tests/fuzz.wiz` checks the span mapper and the JSON shape on `fixtures/broken.c`. The
-first harness run found and this branch fixes a 744-byte leak on every successful parse
-in `native/ts_shim.c`; that is a dynamic finding, not a clean bill of health.
+`scry fuzz-span FILE [--offset N] [--json] [--out FILE]` maps an artifact to the same
+`start`/`stop` span shape the static findings use, including the smallest CST node
+containing an invariant's `input_offset`. `tests/fuzz.wiz` checks the span mapper and the
+JSON shape on `fixtures/broken.c`. The first `fuzz/run.py` run found (and the shim now
+fixes) a 744-byte leak on every successful parse in `native/ts_shim.c`; that is a dynamic
+finding, not a clean bill of health.
 
 Limits: the shim is sequential (one parser, one tree, one file) and tree-sitter-c is the
 only grammar. Threads, a native store shared across files, and tree-sitter queries are
