@@ -329,8 +329,8 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|warning 1 unmodelled-external"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
+     ++ "|warning 1 unmodelled-external"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
      ++ "|note 1 excluded: bin/"
