@@ -29,6 +29,39 @@ instance : Neg Z3 := Neg.mk (fun x => Z3.ofNat (3 - Z3.toNat x))
 instance : Sub Z3 := Sub.mk (fun x y => Z3.ofNat (Z3.toNat x + (3 - Z3.toNat y)))
 "
 
+/-- (class-extends) The optics precondition of
+`wiz-notes/reviews/2026-11-18-optics-profunctor.md` §2.2 (`scratch/FailSuperclass.wiz`),
+with `extends` instead of an instance parameter. -/
+def profunctorClasses : String := "import Prelude
+class Profunctor (p : Type → Type → Type) where
+  dimap : {A B C D : Type} → (A → B) → (C → D) → p B C → p A D
+class Strong (p : Type → Type → Type) extends Profunctor p where
+  first' : {A B C : Type} → p A B → p (A × C) (B × C)
+def Hom (A B : Type) : Type := A → B
+"
+
+def profunctorInsts : String := "instance : Profunctor Hom where
+  dimap := fun f g h => fun a => g (h (f a))
+instance : Strong Hom where
+  toProfunctor := Profunctor.mk (fun f g h a => g (h (f a)))
+  first' := fun h ac => (h ac.1, ac.2)
+"
+
+def profunctorSrc : String := profunctorClasses ++ profunctorInsts
+
+/-- The `FailSuperclass` program: a `Type 1` lens over `{p} → [Strong p] → …`, with no
+`[Profunctor p]` threaded, and `dimap` still resolved through `extends`. -/
+def lensSrc : String := "def Lens (S T A B : Type) : Type 1 :=
+  {p : Type → Type → Type} → [i : Strong p] → (p A B → p S T)
+def fstL {A B C : Type} : Lens (A × C) (B × C) A B :=
+  fun {p : Type → Type → Type} [i : Strong p] => @Strong.first' p i A B C
+def second' {A B C : Type} {p : Type → Type → Type} [i : Strong p] (x : p A B) :
+    p (C × A) (C × B) :=
+  Profunctor.dimap (fun ca => (ca.2, ca.1)) (fun bc => (bc.2, bc.1)) (Strong.first' x)
+#eval second' (p := Hom) (A := Nat) (B := Nat) (C := Bool) (fun n => n + 1) (Bool.true, 2)
+#eval fstL (p := Hom) (fun n => n + 1) (1, Bool.true)
+"
+
 def classGroup : Group where
   name := "classes"
   exercise := "Exercise 7.1"
@@ -117,7 +150,38 @@ def classGroup : Group where
         failsLib "import Prelude\ninstance instHAdd : Add Bool := Add.mk Bool.and" "'instHAdd' is declared by both" },
     { name := "7f: compiled: operators with defaulted numerals are native", run := fun _ =>
         okLib "import Prelude\ndef g := fun x => x * 2 + 1\n#ir g\ndef h (x : Nat) : Nat := x ^ 2 + 1\n#run h 5"
-          ["def g x0 :=\n  let x1 := 2\n  let x2 := prim nat.mul x0 x1\n  let x3 := 1\n  let x4 := prim nat.add x2 x3\n  ret x4", "26"] }
+          ["def g x0 :=\n  let x1 := 2\n  let x2 := prim nat.mul x0 x1\n  let x3 := 1\n  let x4 := prim nat.add x2 x3\n  ret x4", "26"] },
+    -- (class-extends) `extends`: the superclass is a stored dictionary field
+    { name := "extends: the class type takes no superclass parameter, and the field is a method", run := fun _ =>
+        okLib (profunctorClasses ++ "#check Strong\n#check Strong.mk\n#check Strong.toProfunctor\n#check instStrongToProfunctor")
+          ["Strong : (Type → Type → Type) → Type 1",
+           "Strong.mk : {p : Type → Type → Type} → Profunctor p → ({A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)) → Strong p",
+           "Strong.toProfunctor : {p : Type → Type → Type} → [self : Strong p] → Profunctor p",
+           "instStrongToProfunctor : {p : Type → Type → Type} → [self : Strong p] → Profunctor p"] },
+    { name := "extends: `Strong p` is a constraint without threading `[Profunctor p]`", run := fun _ =>
+        okLib (profunctorSrc ++ lensSrc)
+          ["(.true, 3)", "(2, .true)"] },
+    { name := "extends: the superclass implication chains", run := fun _ =>
+        okLib ("import Prelude\nclass A1 (x : Type) where\n  a : x\n" ++
+          "class B1 (x : Type) extends A1 x where\n  b : x\n" ++
+          "class C1 (x : Type) extends B1 x where\n  c : x\n" ++
+          "instance : C1 Nat where\n  toB1 := B1.mk (A1.mk 1) 2\n  c := 3\n" ++
+          "def abc {x : Type} [i : C1 x] : x × x × x := (A1.a, B1.b, C1.c)\n#eval abc (x := Nat)")
+          ["(1, 2, 3)"] },
+    { name := "extends: an instance that omits the superclass is an error", run := fun _ =>
+        failsLib (profunctorClasses ++ "instance : Strong Hom where\n  first' := fun h ac => (h ac.1, ac.2)")
+          "missing the superclass Profunctor (the field toProfunctor) in the instance for class Strong" },
+    { name := "extends: what is not a class, and a second superclass, are errors", run := fun _ => do
+        failsLib (profunctorClasses ++ "def NotAClass (p : Type → Type → Type) : Type := p Nat Nat\n" ++
+          "class Bad (p : Type → Type → Type) extends NotAClass p where\n  x : p Nat Nat")
+          "NotAClass is not a class: a superclass must be an application of a class"
+        failsLib (profunctorClasses ++ "class Bad (p : Type → Type → Type) extends Profunctor p, Profunctor p where\n  x : p Nat Nat")
+          "a class can extend one superclass (multiple inheritance is not implemented)" },
+    { name := "extends: a bare variable still needs its own instance, and says so", run := fun _ => do
+        failsLib (profunctorSrc ++ "def needsPro {p : Type → Type → Type} (x : p Nat Nat) : p Nat Nat :=\n  Profunctor.dimap (fun a => a) (fun a => a) x")
+          "failed to synthesize an instance of Profunctor p"
+        failsLib (profunctorSrc ++ "def needsStrong {p : Type → Type → Type} (x : p Nat Nat) : p (Nat × Nat) (Nat × Nat) :=\n  Strong.first' x")
+          "failed to synthesize an instance of Strong p" }
   ]
 
 builtin_initialize registerGroup classGroup

@@ -12,8 +12,9 @@ monad without more declarations. A type with a better `map` or `seq` (or one tha
 not a monad, such as a signal) declares its own instance: a later instance wins over
 the generic ones (stage 7b).
 
-`Monad` (in the Prelude) doesn't extend `Applicative`: classes have no `extends` yet,
-so its `pure` is its own field and `do` notation is unchanged. This module is separate
+`Monad` (in the Prelude) doesn't extend `Applicative`: its `pure` is its own field and
+`do` notation is unchanged (classes do have `extends` now, stage 30f, but changing the
+Prelude's `Monad` touches every instance and is separate work). This module is separate
 from the Prelude because the names `Functor`, `List.map` and the instances for
 `Option` are already used by programs that import only the Prelude.
 
