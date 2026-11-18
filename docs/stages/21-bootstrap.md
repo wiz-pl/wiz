@@ -1246,6 +1246,19 @@ mentions an axiom, a `sealed` type's native representation, and a foreign functi
 partial file checks that a partial definition's body is reached only as an implementation
 (so `modelA`, implemented by `loopA`, lists `pa`, while `loopA` and its users do not).
 
+`=selfhost-cli-diff` adds the driver's side: "#print axioms: the driver prints the
+host's line (chain, Classical.choice, implemented_by an axiom, a type-only dependency)"
+runs one file through `wiz check` and `wiz-selfhost check` and diffs the streams — a
+clean definition, a transitive chain, `Classical.choice`, an `implemented_by` whose target
+is an axiom, an axiom reached only through a dependency's **type**, and the unknown-name
+error — and "#print axioms: an imported module's axiom agrees (with -I)" does the same
+for a module. The driver prints the line without `--types` (`selfhost/Cli.wiz`,
+`printsInfo`, like `#check`); before that it dropped every info line but `#check`,
+`#reduce` and `#eval`, so `wiz-selfhost check` was silent where `wiz check` printed.
+"#print axioms does not list a written partial witness (the host does; A23 gap)" pins the
+recorded gap below: it asserts both the host's `[witA]` and this frontend's "does not
+depend on any axioms".
+
 **Not done (A23).**
 
 * `#erase`: the self-hosted *checker* is built from `Selfhost.checkerFiles`, which has the

@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost (A23, 21ai): `wiz-selfhost check` now prints `#print axioms` without
+  `--types`, like `#check`/`#reduce`/`#eval`, so it says the same line as `wiz check`
+  (it dropped the info line, since `printsInfo` knew only the three evaluation
+  commands). `=selfhost-cli-diff` pins the driver against the host on a clean
+  definition, a transitive chain to an axiom, `Classical.choice`, an `implemented_by`
+  whose target is an axiom, an axiom reached only through a dependency's type, an
+  imported module's axiom and the unknown-name error; `=selfhost` pins the recorded
+  written-partial-witness gap (the host lists the axiom the witness names, this
+  frontend discards the witness).
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

@@ -283,6 +283,40 @@ def cliDiffGroup : Group where
         cliDiffSame spec h s
         checkEq 0 s.code
         checkEq "f.wiz:3:1: info: two : Nat\n" s.out },
+    { name := "#print axioms: the driver prints the host's line (chain, Classical.choice, implemented_by an axiom, a type-only dependency)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let src := "import Prelude\n" ++
+          "def clean (n : Nat) : Nat := n\n" ++
+          "axiom root : Nat\ndef a : Nat := root\ndef c : Nat := a\n" ++
+          "axiom Classical.choice : (A : Type) → A\ndef x : Nat := Classical.choice Nat\n" ++
+          "axiom ext (n : Nat) : Nat\ndef plain (n : Nat) : Nat := n\n" ++
+          "attribute [implemented_by ext] plain\ndef usePlain : Nat := plain 1\n" ++
+          "axiom ATy : Type\naxiom av : ATy\ndef f (_ : ATy) : Nat := 0\ndef g : Nat := f av\n" ++
+          "#print axioms clean\n#print axioms c\n#print axioms x\n" ++
+          "#print axioms plain\n#print axioms usePlain\n#print axioms g\n#print axioms nope\n"
+        -- (the unknown name's position is the host's ident, the driver's command start)
+        let spec : CliDiffSpec := { files := #[("ax.wiz", src)]
+                                    args := #["check", "ax.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 s.code
+        let note := "(native: an implementation that compiled code runs, trusted to agree with its definition)\n"
+        checkEq ("ax.wiz:16:1: info: 'clean' does not depend on any axioms\n" ++
+                 "ax.wiz:17:1: info: 'c' depends on axioms: [root]\n" ++
+                 "ax.wiz:18:1: info: 'x' depends on axioms: [Classical.choice]\n" ++
+                 "ax.wiz:19:1: info: 'plain' depends on axioms: [native plain := ext]\n" ++ note ++
+                 "ax.wiz:20:1: info: 'usePlain' depends on axioms: [native plain := ext]\n" ++ note ++
+                 "ax.wiz:21:1: info: 'g' depends on axioms: [av, ATy]\n") s.out
+        checkEq "ax.wiz:22:1: error: unknown declaration 'nope' [unknown-declaration]\n" s.err },
+    { name := "#print axioms: an imported module's axiom agrees (with -I)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("lib/M.wiz", "import Prelude\naxiom seed : Nat\ndef fromM : Nat := seed\n"),
+                       ("main.wiz", "import Prelude\nimport M\ndef usesM : Nat := fromM\n#print axioms usesM\n")]
+        let spec : CliDiffSpec := { files := files, args := #["check", "-I", "lib", "main.wiz"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 s.code
+        checkEq "main.wiz:4:1: info: 'usesM' depends on axioms: [seed]\n" s.out },
     { name := "check: a parse error is at its token in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { files := #[("parse.wiz", cliParseFile)]

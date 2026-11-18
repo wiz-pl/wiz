@@ -2033,6 +2033,18 @@ def selfHostGroup : Group where
         selfhostSameLines partialAxiomsProgram },
     { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines setOptionProgram },
+    { name := "the self-hosted frontend: #print axioms does not list a written partial witness (the host does; A23 gap)", run := fun _ => do
+        let src := "import Prelude\naxiom witA : Nat\n" ++
+          "partial (default := witA) def p : Nat := p\n#print axioms p\n"
+        -- (the host walks a partial definition's witness, so it lists the axiom it names)
+        let loader ← preludeLoader
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let infos := (s.messages.toList.filter (·.severity == .info)).map (·.text)
+        check (infos.any fun l => (l.splitOn "'p' depends on axioms: [witA]").length > 1)
+          s!"the host does not list the written witness: {infos}"
+        -- (this frontend checks the written witness and discards it: the axiom it names is
+        -- not listed. Pinned so a fix changes this case; the recorded gap is in 21ai.)
+        selfhostCheckFile src "witA : Nat\np : Nat\n'p' does not depend on any axioms\n" },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"

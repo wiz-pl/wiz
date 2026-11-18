@@ -506,13 +506,14 @@ def infoPrefix (tab : List ModSrc) (m : String) (off : Nat) : String :=
       | .nil => ""
       | a => String.append (String.mk a) " : "
 
--- (`#check c`, `#reduce c` and `#eval c` print their result without `--types`, as the
--- Lean-hosted `wiz check` does; a declaration's own type line does not)
+-- (`#check c`, `#reduce c`, `#eval c` and `#print axioms d` print their result without
+-- `--types`, as the Lean-hosted `wiz check` does; a declaration's own type line does not)
 def printsInfo (tab : List ModSrc) (m : String) (off : Nat) : Bool :=
   match modTextOf tab m with
   | .none => .false
   | .some t => match cmdAt t off with
-    | s => Bool.or (strStarts "#check" s) (Bool.or (strStarts "#reduce" s) (strStarts "#eval" s))
+    | s => Bool.or (strStarts "#check" s) (Bool.or (strStarts "#reduce" s)
+        (Bool.or (strStarts "#eval" s) (strStarts "#print axioms" s)))
 
 def sevOfTagged (tab : List ModSrc) (m : String) (off : Nat) (rest : String) : Sev :=
   match sevOf rest with
