@@ -637,6 +637,14 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
+* **The examples are tests** (the `examples` shard, group `examples`): every
+  `examples/*.wiz` is compared with its `.expected` exactly as `grail test` does (the
+  same `runTests` helper the tour group uses), in three cases split by name, so a
+  library change that changes an example's output fails CI instead of only a command a
+  contributor runs by hand. An example with `-- test: skip REASON` (the benchmarks) is
+  reported as skipped, not passed; one with `-- test: run` has `main`'s compiled output
+  as its oracle. The shard runs when `examples/`, `lib/` or `drafts/feral/lib/` changes,
+  and (like every shard) when the Lean sources or the harness change.
 * **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
   absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
   worker roles, U+2705 status checkmarks, and decision/step phrases attributed to
@@ -679,9 +687,10 @@ the elan toolchain, so the setup action keeps the elan cache for those
   self-hosted checker or compiler, which the first case that needs it builds) stay in
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
-  baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
-  `scaling`; the last is a sweep over `lib/` and `examples/`, split 2 with its long case
-  in one part).
+  baseline holds only the split shards' cases, one per line (`selfhost`, `library`,
+  `scaling` and `examples`; the third is a sweep over `lib/` and `examples/`, split 2
+  with its long case in one part, and the last has the three name ranges of the root
+  examples).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
@@ -954,7 +963,9 @@ Markdown.
 
 **What it will not do.** The script never modifies the checkout, commits, or pushes;
 the workflow has no write permission outside the comment job. It re-runs only cases
-whose name (or failure output) is a `.wiz` under a `Package.tests` root, at most 12
+whose name (or failure output) is a `.wiz` under a `Package.tests` root (a group
+`examples` case names a name range, but its failure output names the example that
+failed), at most 12
 files with a 300 s limit each, and it reports a case that fails for another reason
 (a build error, a timeout, a missing toolchain) as "not diffed" instead of writing a
 `.expected` file: `grail test --update` never records a failure either. The diff is

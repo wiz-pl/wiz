@@ -159,8 +159,11 @@ def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain
     ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
   pure (root, dir, sha, { cacheDir := some cache })
 
-/-- Run `grail test` in-process on a package directory. -/
-def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false) (testTimeoutMs : Option Nat := none) :
+/-- Run `grail test` in-process on a package directory. `filters` are the same path
+substrings `grail test FILTER` takes (all the tests of the targets if empty), so a case
+can run the tests of a name range without copying the package. -/
+def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false)
+    (testTimeoutMs : Option Nat := none) (filters : List String := []) :
     IO (Array Grail.TestResult × Grail.Stats) := do
   let std : System.FilePath := "lib"
   match ← Grail.readConfig tc 7 std dir with
@@ -168,7 +171,7 @@ def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false) (
   | .ok (pkg, _) =>
     let r ← runner dir tc pkg 2 (← IO.mkRef "")
     let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs }
-    let res ← r.tests pkg.targets [] update
+    let res ← r.tests pkg.targets filters update
     pure (res, ← r.stats.get)
 
 def cmdTc : IO Toolchain := do pure { cacheDir := some (← IO.FS.createTempDir) }

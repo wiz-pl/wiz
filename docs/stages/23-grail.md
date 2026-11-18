@@ -122,7 +122,10 @@ needs no `.expected`, and is not a pass. A pass is a job like any other, keyed b
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
 `grail test --update` writes the actual output. Every example is a test
-(`examples/*.expected`). The Lean tests stay in `lake test`.
+(`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
+them in CI, in three cases over name ranges, so a change to a library that changes what
+an example prints fails the suite rather than only a command a person runs. The Lean
+tests stay in `lake test`.
 
 ## 23g: parallel jobs
 
