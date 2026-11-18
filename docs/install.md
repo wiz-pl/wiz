@@ -263,8 +263,11 @@ repository and are not in the release tarball:
   include; without `emcc` on `PATH` the script runs itself again under
   `nix shell nixpkgs#emscripten`), then `web/bridge.sh`, which starts `wiz lsp --ws`
   and serves the page; open the address it prints (it carries the server's token:
-  `wiz lsp --ws` refuses a client without it). The page edits its own documents, and
-  when your editor's server runs with `--ws` it also follows that editor's cursor.
+  `wiz lsp --ws` refuses a client without it). The page's language client is JavaScript
+  (`web/playground-lsp.js`, shared with the playground); the module `web/build.sh`
+  writes is the documentation's renderer, and the build also fills the directory
+  `wiz lsp --ws` serves. The page edits its own documents, and when your editor's server
+  runs with `--ws` it also follows that editor's cursor.
 
 Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 

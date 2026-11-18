@@ -231,11 +231,12 @@ page should open a URI of its own; the web infoview picks `file:///scratch-<rand
 - **The terminal infoview** (`infoview/Tui.wiz`) either connects to `--infoview SOCK` and
   follows `wiz/infoview/cursor`, or starts its own `wiz lsp` with `wizElaborated` set for
   a file and position given on the command line.
-- **The web infoview** (`web/infoview.js`, a Wiz program compiled to WebAssembly) talks to
-  `--ws`. It is its own editor by default; with `?follow=1` it shows the editor's cursor
-  instead. The playground (`web/lsp-client.js`, `web/goals.js`) uses the same requests and
-  falls back to the plain ones. Its rendering also accepts optional `range` fields on
-  hypotheses and tags, which `wiz lsp` does not send today.
+- **The web infoview** (`web/infoview.js` on top of `web/playground-lsp.js`,
+  `web/lsp-client.js` and `web/goals.js`) talks to `--ws`. It is its own editor by
+  default; with `?follow=1` it shows the editor's cursor instead and opens no document of
+  its own. The playground mounts the same pane (one implementation for both pages and for
+  both transports) and falls back to the plain requests. Its rendering also accepts
+  optional `range` fields on hypotheses and tags, which `wiz lsp` does not send today.
 
 ## Tests
 

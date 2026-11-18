@@ -32,6 +32,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* web: the standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`)
+  now mounts the playground's goals pane (`web/playground-lsp.js` on `web/lsp-client.js`
+  and `web/goals.js`) instead of the Wiz program `web/Web.wiz` stepped through
+  `wiz_web_step`. One implementation serves both pages and both transports (a WebSocket
+  URL or the playground's in-page server); the page's own half (`web/infoview.js`) is
+  only its URL rule (`?port=`, `?lsp=`), follow mode (`?follow=1`, no document of its
+  own, moved by `wiz/infoview/cursor`), the `#info` box and the status/cursor line; the
+  server's `?token=` (#430) still goes into the socket's URL.
+  Clicking a subterm now selects it the way the arrow keys do (`.sel`), and the page no
+  longer loads `wiz-infoview.mjs` — that module is the documentation's renderer now.
+  `web/playground_lsp_test.mjs` gains follow mode, the separate `info` box and the
+  `onRender` hook; `web/infoview_page_test.mjs` covers the page's URL and status text.
+  `wiz lsp --ws` serves the three extra scripts the page needs.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
