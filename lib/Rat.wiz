@@ -306,6 +306,11 @@ def Q.le_iff_mpr {ω p q : Q} (h : Q.NonNeg (q - p)) : p ≤ q :=
 /-- `p < q → q - p > 0`. -/
 def Q.lt_iff_mp {ω p q : Q} (h : p < q) : Q.Pos (q - p) :=
   Int.NonNeg.congr (int_ring! q.num * p.den - (p.num * q.den + 1) = q.num * p.den + -p.num * q.den - (0 + 1)) h
+/-- `Q.le_iff_mp` with explicit sides. -/
+def Q.le_iff_mp_ex (p q : Q) (h : p ≤ q) : Q.NonNeg (q - p) := Q.le_iff_mp h
+/-- `Q.lt_iff_mp` with explicit sides. -/
+def Q.lt_iff_mp_ex (p q : Q) (h : p < q) : Q.Pos (q - p) := Q.lt_iff_mp h
+
 /-- `q - p > 0 → p < q`. -/
 def Q.lt_iff_mpr {ω p q : Q} (h : Q.Pos (q - p)) : p < q :=
   Int.NonNeg.congr (int_ring! q.num * p.den + -p.num * q.den - (0 + 1) = q.num * p.den - (p.num * q.den + 1)) h
@@ -380,6 +385,25 @@ instance {p q r : Q} : Trans (p < q) (q < r) (p < r) :=
 /-- `≤` is antisymmetric, up to `≈`. -/
 def Q.le_antisymm {ω p q : Q} (h1 : p ≤ q) (h2 : q ≤ p) : p ≈ q :=
   Int.le_antisymm _ _ h1 h2
+/-- `Q.NonNeg.congr` with explicit arguments. -/
+def Q.nonneg_congr_ex (p q : Q) (e : p ≈ q) (h : Q.NonNeg p) : Q.NonNeg q := Q.NonNeg.congr e h
+/-- `Q.Pos.congr` with explicit arguments. -/
+def Q.pos_congr_ex (p q : Q) (e : p ≈ q) (h : Q.Pos p) : Q.Pos q := Q.Pos.congr e h
+/-- `Q.le_iff_mpr` with explicit sides. -/
+def Q.le_iff_mpr_ex (p q : Q) (h : Q.NonNeg (q - p)) : p ≤ q := Q.le_iff_mpr h
+/-- `Q.lt_iff_mpr` with explicit sides. -/
+def Q.lt_iff_mpr_ex (p q : Q) (h : Q.Pos (q - p)) : p < q := Q.lt_iff_mpr h
+/-- `Q.le_of_eq` with explicit sides. -/
+def Q.le_of_eq_ex (p q : Q) (h : p ≈ q) : p ≤ q := Q.le_of_eq h
+/-- `Q.pos_of_lt` with explicit argument. -/
+def Q.pos_of_lt_ex (p : Q) (h : 0 < p) : Q.Pos p := Q.pos_of_lt h
+/-- `Q.nonneg_of_le` with explicit argument. -/
+def Q.nonneg_of_le_ex (p : Q) (h : 0 ≤ p) : Q.NonNeg p := Q.nonneg_of_le h
+/-- `Q.le_antisymm` with explicit sides. -/
+def Q.le_antisymm_ex (p q : Q) (h1 : p ≤ q) (h2 : q ≤ p) : p ≈ q := Q.le_antisymm h1 h2
+/-- `Q.symm` with explicit sides. -/
+def Q.symm_ex (p q : Q) (h : p ≈ q) : q ≈ p := Q.symm h
+
 /-- `≤` is total. -/
 def Q.le_total (p q : Q) : p ≤ q ∨ q ≤ p := Int.le_total _ _
 /-- `p ≤ q` or `q < p`: the order is decidable. -/
@@ -406,6 +430,36 @@ def Q.add_lt_add_of_lt_of_le {ω p q r s : Q} (h1 : p < q) (h2 : r ≤ s) : p + 
 /-- Negation reverses `≤`. -/
 def Q.neg_le_neg {ω p q : Q} (h : p ≤ q) : -q ≤ -p :=
   Q.le_iff_mpr (Q.NonNeg.congr (q_ring! q - p ≈ -p - -q) (Q.le_iff_mp h))
+/-- `Q.NonNeg p` is `0 ≤ p.num`. -/
+def Q.nonnegNum {p : Q} (h : Q.NonNeg p) : Int.NonNeg p.num := h
+/-- `Q.Pos p` is `0 < p.num`. -/
+def Q.posNum {p : Q} (h : Q.Pos p) : Int.Lt 0 p.num := h
+/-- `0 ≤ p.num → Q.NonNeg p`. -/
+def Q.nonnegOfNum {p : Q} (h : Int.NonNeg p.num) : Q.NonNeg p := h
+/-- `0 < p.num → Q.Pos p`. -/
+def Q.posOfNum {p : Q} (h : Int.Lt 0 p.num) : Q.Pos p := h
+/-- The numerator of a product. -/
+def Q.mul_num (p q : Q) : (p * q).num = p.num * q.num := rfl
+
+/-- `c > 0 → 0 ≤ c · d → 0 ≤ d`. -/
+def Q.nonneg_of_mul_pos_left (c d : Q) (hc : Q.Pos c) (h : Q.NonNeg (c * d)) : Q.NonNeg d :=
+  Q.nonnegOfNum (Int.NonNeg.congr (int_ring! d.num - 0 = d.num)
+    (Int.le_of_mul_le_mul_left c.num 0 d.num hc
+      (Int.NonNeg.congr (int_ring! c.num * d.num = c.num * d.num - c.num * 0)
+        (Int.NonNeg.congr (Q.mul_num c d) (Q.nonnegNum h)))))
+/-- `c > 0 → 0 < c · d → 0 < d`. -/
+def Q.pos_of_mul_pos_left (c d : Q) (hc : Q.Pos c) (h : Q.Pos (c * d)) : Q.Pos d :=
+  Q.posOfNum (Int.lt_of_mul_lt_mul_left c.num 0 d.num (Int.nonneg_of_pos c.num hc)
+    (Int.Lt.congr (int_ring! 0 = c.num * 0) (Q.mul_num c d) (Q.posNum h)))
+/-- Cancel a positive factor on the left of `≤`. -/
+def Q.le_of_mul_le_mul_left (c a b : Q) (hc : 0 < c) (h : c * a ≤ c * b) : a ≤ b :=
+  Q.le_iff_mpr (Q.nonneg_of_mul_pos_left c (b - a) (Q.pos_of_lt hc)
+    (Q.NonNeg.congr (q_ring! c * b - c * a ≈ c * (b - a)) (Q.le_iff_mp h)))
+/-- Cancel a positive factor on the left of `<`. -/
+def Q.lt_of_mul_lt_mul_left (c a b : Q) (hc : 0 < c) (h : c * a < c * b) : a < b :=
+  Q.lt_iff_mpr (Q.pos_of_mul_pos_left c (b - a) (Q.pos_of_lt hc)
+    (Q.Pos.congr (q_ring! c * b - c * a ≈ c * (b - a)) (Q.lt_iff_mp h)))
+
 /-- Multiplying by a non-negative rational on the left is monotone. -/
 def Q.mul_le_mul_of_nonneg_left {ω q r : Q} (p : Q) (hp : 0 ≤ p) (h : q ≤ r) : p * q ≤ p * r :=
   Q.le_iff_mpr (Q.NonNeg.congr (q_ring! p * (r - q) ≈ p * r - p * q) (Q.nonneg_mul _ _ (Q.nonneg_of_le hp) (Q.le_iff_mp h)))
@@ -529,3 +583,49 @@ def Q.lt_ceil (p : Q) : p < Q.ofNat (Q.ceil p) :=
           (Int.mul_le_mul_of_nonneg_left (Int.abs p.num) 1 p.den (Int.abs_nonneg p.num) (Int.one_le_of_pos p.den p.pos))))
       (Int.Lt.congr (int_ring! Int.abs p.num * p.den + 0 = Int.abs p.num * p.den) (refl _)
         (Int.add_lt_add_left (Int.abs p.num * p.den) 0 p.den p.pos)))
+
+-- ## Explicit `Q.mul`/`Q.add` forms for `linarith`
+--
+-- The tactic builds expressions with the definitions (`Q.mul`, `Q.add`, `Q.sub`)
+-- rather than the `Mul`/`Add`/`Sub` projections, so these wrappers keep the statements
+-- in the same form. The proofs use the class-notation lemmas above; the kernel checks
+-- the conversion once, in the library.
+
+/-- `Q.nonneg_mul` with `Q.mul` in the statement. -/
+def Q.nonneg_mul_q (p q : Q) (hp : Q.NonNeg p) (hq : Q.NonNeg q) : Q.NonNeg (Q.mul p q) :=
+  Q.nonneg_mul p q hp hq
+/-- `Q.pos_mul` with `Q.mul` in the statement. -/
+def Q.pos_mul_q (p q : Q) (hp : Q.Pos p) (hq : Q.Pos q) : Q.Pos (Q.mul p q) :=
+  Q.pos_mul p q hp hq
+/-- `Q.nonneg_add` with `Q.add` in the statement. -/
+def Q.nonneg_add_q (p q : Q) (hp : Q.NonNeg p) (hq : Q.NonNeg q) : Q.NonNeg (Q.add p q) :=
+  Q.nonneg_add p q hp hq
+/-- `Q.pos_add` with `Q.add` in the statement. -/
+def Q.pos_add_q (p q : Q) (hp : Q.Pos p) (hq : Q.NonNeg q) : Q.Pos (Q.add p q) :=
+  Q.pos_add p q hp hq
+/-- `Q.Pos (Q.ofInt (n+1))`. -/
+def Q.pos_ofNat_ex (n : Nat) : Q.Pos (Q.ofInt (Int.ofNat (Nat.succ n))) := Int.ofNat_succ_pos n
+/-- `Q.pos_of_lt` with an explicit `Q.Lt`. -/
+def Q.pos_of_lt_q (p : Q) (h : Q.Lt (Q.ofInt (Int.ofNat 0)) p) : Q.Pos p :=
+  Q.pos_of_lt h
+/-- `Q.nonneg_of_le` with an explicit `Q.Le`. -/
+def Q.nonneg_of_le_q (p : Q) (h : Q.Le (Q.ofInt (Int.ofNat 0)) p) : Q.NonNeg p :=
+  Q.nonneg_of_le h
+/-- `Q.le_of_mul_le_mul_left` with `Q.mul` and `Q.Le`. -/
+def Q.le_of_mul_le_mul_left_q (c a b : Q) (hc : Q.Pos c) (h : Q.Le (Q.mul c a) (Q.mul c b)) :
+    Q.Le a b := Q.le_of_mul_le_mul_left c a b (Q.lt_of_pos hc) h
+/-- `Q.lt_of_mul_lt_mul_left` with `Q.mul` and `Q.Lt`. -/
+def Q.lt_of_mul_lt_mul_left_q (c a b : Q) (hc : Q.Pos c) (h : Q.Lt (Q.mul c a) (Q.mul c b)) :
+    Q.Lt a b := Q.lt_of_mul_lt_mul_left c a b (Q.lt_of_pos hc) h
+/-- `Q.le_iff_mpr` with `Q.sub` in the statement. -/
+def Q.le_iff_mpr_q (p q : Q) (h : Q.NonNeg (Q.sub q p)) : Q.Le p q := Q.le_iff_mpr h
+/-- `Q.lt_iff_mpr` with `Q.sub` in the statement. -/
+def Q.lt_iff_mpr_q (p q : Q) (h : Q.Pos (Q.sub q p)) : Q.Lt p q := Q.lt_iff_mpr h
+/-- `Q.le_iff_mpr` to the `≤` notation. -/
+def Q.le_iff_mpr_class (p q : Q) (h : Q.NonNeg (Q.sub q p)) : p ≤ q := Q.le_iff_mpr h
+/-- `Q.lt_iff_mpr` to the `<` notation. -/
+def Q.lt_iff_mpr_class (p q : Q) (h : Q.Pos (Q.sub q p)) : p < q := Q.lt_iff_mpr h
+/-- `Q.le_iff_mp` with `Q.sub` in the statement. -/
+def Q.le_iff_mp_q (p q : Q) (h : p ≤ q) : Q.NonNeg (Q.sub q p) := Q.le_iff_mp h
+/-- `Q.lt_iff_mp` with `Q.sub` in the statement. -/
+def Q.lt_iff_mp_q (p q : Q) (h : p < q) : Q.Pos (Q.sub q p) := Q.lt_iff_mp h

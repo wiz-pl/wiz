@@ -1,0 +1,999 @@
+import RingTactic
+/-!
+# Linarith
+
+`linarith`: linear arithmetic over `Nat`, `Int` and `Q` (`import Linarith`).
+
+```
+import Linarith
+
+def t (x y : Int) (h : x ≤ y) : x + 1 ≤ y + 1 := by linarith
+def u (p q : Q) (h : p ≤ q) : 2 * p ≤ 2 * q := by linarith
+def v (a b : Nat) (h : a ≤ b) : a + 2 ≤ b + 2 := by linarith
+```
+
+## What it proves
+
+The tactic reads a goal `lhs ≤ rhs`, `lhs < rhs` (at `Nat` or `Int`), `p ≤ q`,
+`p < q` or `p ≈ q` (at `Q`), or an equation at `Nat`/`Int`, and the hypotheses of the
+same shapes (and `False`). Every side must be **linear**: addition, subtraction and
+negation, numerals, and multiplication by a literal. Anything else is an atom. A
+product of two non-constant expressions is refused (`linarith: nonlinear term`).
+
+The search is Fourier–Motzkin over the linear forms. It is complete for the ordered
+field `Q` (and for `Int`, since a real-valued certificate is also an integer one), and
+for the fragment of `Nat` where the goal coefficient is `1`; a `Nat` goal that would
+need a division (`2*a ≤ 2*b ⊢ a ≤ b`) is refused, because `lib/Nat.wiz` has no
+multiplication-cancellation lemma.
+
+## The certificate boundary
+
+The search is **untrusted**: it only produces a list of nonnegative integer
+coefficients, one per hypothesis, and a nonnegative slack. The proof term the tactic
+assigns is built from the order lemmas of `Nat`, `Int` and `Q`
+(`Nat.mul_le_mul_left`, `Nat.add_le_add`, `Int.nonneg_mul`, `Int.nonneg_add`,
+`Q.nonneg_mul`, `Q.pos_add`, …); the kernel checks it. There is no `native_decide`,
+no SMT axiom and no `sorry`: `#print axioms` on a theorem proved by `linarith` reports
+“does not depend on any axioms”. The final algebraic identity (that the combination
+of hypotheses is the goal, up to a ring identity) is proved by the existing ring
+normalisers (`IntExpr.prove`, `NatExpr.prove`, `QExpr.prove`), whose soundness is
+kernel-checked by computation.
+
+The `norm_num` in `lib/NormNum.wiz` is the closed-arithmetic companion: it closes by
+the kernel's `rfl` (computation), never by `native_decide`.
+
+-/
+
+/-- A linear form: a sorted sparse list of `(atom index, integer coefficient)` and an
+integer constant. `coeff` has no zero coefficients and is sorted by index. -/
+structure Form where
+  coeff : List (Nat × Int)
+  cst : Int
+
+/-- Insert a monomial into a sorted coefficient list, adding equal indices. -/
+def Form.coeffInsert (p : Nat × Int) : List (Nat × Int) → List (Nat × Int)
+  | .nil => .cons p .nil
+  | .cons q qs =>
+    match Nat.cmp p.1 q.1 with
+    | .lt => .cons p (.cons q qs)
+    | .gt => .cons q (Form.coeffInsert p qs)
+    | .eq =>
+      let c := Int.add p.2 q.2
+      match Int.beq c (Int.ofNat 0) with
+      | .true => qs
+      | .false => .cons (p.1, c) qs
+
+/-- Merge two sorted coefficient lists, adding equal indices and dropping zeros. -/
+def Form.coeffAdd : List (Nat × Int) → List (Nat × Int) → List (Nat × Int)
+  | .nil, ys => ys
+  | .cons p ps, ys => Form.coeffInsert p (Form.coeffAdd ps ys)
+
+/-- Multiply every coefficient by `c`, dropping zeros. -/
+def Form.coeffScale (c : Int) : List (Nat × Int) → List (Nat × Int)
+  | .nil => .nil
+  | .cons (i, a) xs =>
+    let d := Int.mul c a
+    match Int.beq d (Int.ofNat 0) with
+    | .true => Form.coeffScale c xs
+    | .false => .cons (i, d) (Form.coeffScale c xs)
+
+/-- The coefficient of atom `i` (`0` if it does not occur). -/
+def Form.lookup (i : Nat) : List (Nat × Int) → Int
+  | .nil => .ofNat 0
+  | .cons (j, a) xs =>
+    match Nat.cmp i j with
+    | .lt => .ofNat 0
+    | .gt => Form.lookup i xs
+    | .eq => a
+
+/-- The zero form. -/
+def Form.zero : Form := Form.mk .nil (.ofNat 0)
+
+/-- A constant form. -/
+def Form.ofInt (n : Int) : Form := Form.mk .nil n
+
+/-- A natural literal. -/
+def Form.ofNat (n : Nat) : Form := Form.mk .nil (Int.ofNat n)
+
+/-- The atom `i`. -/
+def Form.atom (i : Nat) : Form := Form.mk (.cons (i, .ofNat 1) .nil) (.ofNat 0)
+
+/-- Sum of forms. -/
+def Form.add (a b : Form) : Form := Form.mk (Form.coeffAdd a.coeff b.coeff) (Int.add a.cst b.cst)
+
+/-- Multiply every term by an integer. -/
+def Form.scale (c : Int) (a : Form) : Form := Form.mk (Form.coeffScale c a.coeff) (Int.mul c a.cst)
+
+/-- Negation. -/
+def Form.neg (a : Form) : Form := Form.scale (Int.negSucc 0) a
+
+/-- Difference. -/
+def Form.sub (a b : Form) : Form := Form.add a (Form.neg b)
+
+/-- A constant expression as an integer (`lit n`, `-lit n`). -/
+def Form.constE : RingT.E → Option Int
+  | .lit n => .some (Int.ofNat n)
+  | .neg a => match Form.constE a with
+    | .some c => .some (Int.sub (Int.ofNat 0) c)
+    | .none => .none
+  | _ => .none
+
+/-- Read a ring expression as a linear form. `none` is a nonlinear product (a product
+of two expressions that are not constants). -/
+def Form.ofE : RingT.E → Option Form
+  | .atom i => .some (Form.atom i)
+  | .lit n => .some (Form.ofNat n)
+  | .add a b => match Form.ofE a with
+    | .some x => match Form.ofE b with
+      | .some y => .some (Form.add x y)
+      | .none => .none
+    | .none => .none
+  | .mul a b => match Form.constE a with
+    | .some c => match Form.ofE b with
+      | .some y => .some (Form.scale c y)
+      | .none => .none
+    | .none => match Form.constE b with
+      | .some c => match Form.ofE a with
+        | .some x => .some (Form.scale c x)
+        | .none => .none
+      | .none => .none
+  | .neg a => match Form.ofE a with
+    | .some x => .some (Form.neg x)
+    | .none => .none
+  | .sub a b => match Form.ofE a with
+    | .some x => match Form.ofE b with
+      | .some y => .some (Form.sub x y)
+      | .none => .none
+    | .none => .none
+
+/-- The integer constant as a ring expression. -/
+def Form.cstE (c : Int) : RingT.E := match c with
+  | .ofNat n => .lit n
+  | .negSucc m => .neg (.lit (Nat.succ m))
+
+/-- One monomial as a ring expression. -/
+def Form.monoE (i : Nat) (c : Int) : RingT.E := match c with
+  | .ofNat n => match Nat.beq n 1 with
+    | .true => .atom i
+    | .false => .mul (.lit n) (.atom i)
+  | .negSucc m => .neg (.mul (.lit (Nat.succ m)) (.atom i))
+
+/-- The monomials of a form, in front of `acc`. -/
+def Form.monosE : List (Nat × Int) → RingT.E → RingT.E
+  | .nil, acc => acc
+  | .cons (i, c) xs, acc => Form.monosE xs (.add (Form.monoE i c) acc)
+
+/-- A form as a ring expression. -/
+def Form.toE (a : Form) : RingT.E := Form.monosE a.coeff (Form.cstE a.cst)
+
+/-- An integer literal as an `Int` term. -/
+def Expr.intN (n : Nat) : Expr := Expr.mkApp (.const "Int.ofNat") (.cons (Expr.lit n) .nil)
+/-- `-1 : Int`. -/
+def Expr.intOne : Expr := Expr.intN 1
+/-- `a - b : Int`. -/
+def Expr.intSub (a b : Expr) : Expr := Expr.mkApp (.const "Int.sub") (.cons a (.cons b .nil))
+/-- `a + b : Int`. -/
+def Expr.intAdd (a b : Expr) : Expr := Expr.mkApp (.const "Int.add") (.cons a (.cons b .nil))
+/-- `a - b : Q`. -/
+def Expr.qSub (a b : Expr) : Expr := Expr.mkApp (.const "Q.sub") (.cons a (.cons b .nil))
+/-- `Nat.succ a`. -/
+def Expr.natSucc (a : Expr) : Expr := Expr.mkApp (.const "Nat.succ") (.cons a .nil)
+/-- `a * b : Int`. -/
+def Expr.intMul (a b : Expr) : Expr := Expr.mkApp (.const "Int.mul") (.cons a (.cons b .nil))
+/-- `a * b : Q`. -/
+def Expr.qMul (a b : Expr) : Expr := Expr.mkApp (.const "Q.mul") (.cons a (.cons b .nil))
+/-- `a + b : Q`. -/
+def Expr.qAdd (a b : Expr) : Expr := Expr.mkApp (.const "Q.add") (.cons a (.cons b .nil))
+/-- `-a : Q`. -/
+def Expr.qNeg (a : Expr) : Expr := Expr.mkApp (.const "Q.neg") (.cons a .nil)
+/-- `a + b : Nat`. -/
+def Expr.natAdd (a b : Expr) : Expr := Expr.mkApp (.const "Nat.add") (.cons a (.cons b .nil))
+/-- `a * b : Nat`. -/
+def Expr.natMul (a b : Expr) : Expr := Expr.mkApp (.const "Nat.mul") (.cons a (.cons b .nil))
+
+/-- A `Q` literal `n`. -/
+def Expr.qOfNat (n : Nat) : Expr := Expr.mkApp (.const "Q.ofInt") (.cons (Expr.intN n) .nil)
+
+/-- The `i`th element of a list, or `d`. -/
+def List.nthD {A : Type} (d : A) : Nat → List A → A
+  | _, .nil => d
+  | .zero, .cons x _ => x
+  | .succ n, .cons _ xs => List.nthD d n xs
+
+/-- One monomial as an object-language expression at `ty`. -/
+def Form.monoExpr (ty : String) (atoms : List Expr) (i : Nat) (c : Int) : Expr :=
+  let a := List.nthD (Expr.lit 0) i atoms
+  match ty with
+  | _ =>
+    match c with
+    | .ofNat n =>
+      match Nat.beq n 1 with
+      | .true => a
+      | .false =>
+        if Expr.nameEq ty "Int" then Expr.intMul (Expr.intN n) a
+        else if Expr.nameEq ty "Q" then Expr.qMul (Expr.qOfNat n) a
+        else Expr.natMul (.lit n) a
+    | .negSucc m =>
+      let n := Nat.succ m
+      let prod :=
+        if Expr.nameEq ty "Int" then Expr.intMul (Expr.intN n) a
+        else if Expr.nameEq ty "Q" then Expr.qMul (Expr.qOfNat n) a
+        else a
+      if Expr.nameEq ty "Int" then Expr.mkApp (.const "Int.neg") (.cons prod .nil)
+      else if Expr.nameEq ty "Q" then Expr.qNeg prod
+      else prod
+
+/-- The constant of a form as an object-language expression at `ty`. -/
+def Form.cstExpr (ty : String) (c : Int) : Expr := match c with
+  | .ofNat n =>
+    if Expr.nameEq ty "Int" then Expr.intN n
+    else if Expr.nameEq ty "Q" then Expr.qOfNat n
+    else .lit n
+  | .negSucc m =>
+    let n := Nat.succ m
+    if Expr.nameEq ty "Int" then Expr.mkApp (.const "Int.neg") (.cons (Expr.intN n) .nil)
+    else if Expr.nameEq ty "Q" then Expr.qNeg (Expr.qOfNat n)
+    else .lit 0
+
+/-- The monomials of a form as an object-language sum. -/
+def Form.monosExpr (ty : String) (atoms : List Expr) : List (Nat × Int) → Expr → Expr
+  | .nil, acc => acc
+  | .cons (i, c) xs, acc =>
+    let e := Form.monoExpr ty atoms i c
+    let acc' :=
+      if Expr.nameEq ty "Int" then Expr.intAdd e acc
+      else if Expr.nameEq ty "Q" then Expr.qAdd e acc
+      else Expr.natAdd e acc
+    Form.monosExpr ty atoms xs acc'
+
+/-- A form as an object-language expression at `ty`. -/
+def Form.toExpr (ty : String) (atoms : List Expr) (f : Form) : Expr :=
+  Form.monosExpr ty atoms f.coeff (Form.cstExpr ty f.cst)
+
+/-- The coefficient of `i` is nonnegative (for the two sides of a `Nat` inequality). -/
+def Form.coeffNonneg : List (Nat × Int) → Bool
+  | .nil => .true
+  | .cons (_, c) xs => Bool.and (Int.le (Int.ofNat 0) c) (Form.coeffNonneg xs)
+
+/-- The form is a `Nat` expression: no negative coefficients and no negative constant. -/
+def Form.natOK (a : Form) : Bool := Bool.and (Form.coeffNonneg a.coeff) (Int.le (Int.ofNat 0) a.cst)
+
+-- ## Constraints and the Fourier–Motzkin search
+
+/-- A source of a constraint: a hypothesis turned into a linear form. `proof` is a
+proof of `0 ≤ lin` (`Int`/`Q`), of `0 < lin` (`Q`, `strict`), or of the `Nat`
+inequality `left ≤ right`. `nat` distinguishes the `Nat` construction. -/
+structure Src where
+  lin : Form
+  orig : Expr
+  proof : Expr
+  strict : Bool
+  nat : Bool
+  left : Expr
+  right : Expr
+
+/-- A constraint `Σ coeffᵢ·xᵢ + cst ≥ 0` (or `> 0` when `strict`), with the
+nonnegative weights of the sources it is a combination of. -/
+structure Con where
+  coeff : List (Nat × Int)
+  cst : Int
+  strict : Bool
+  weight : List Int
+
+/-- A list of `n` zeros. -/
+def List.zeros : Nat → List Int
+  | .zero => .nil
+  | .succ n => .cons (.ofNat 0) (List.zeros n)
+
+/-- The unit weight vector of length `n` with a `1` at `i`. -/
+def List.unit : Nat → Nat → List Int
+  | .zero, _ => .nil
+  | .succ n, .zero => .cons (.ofNat 1) (List.zeros n)
+  | .succ n, .succ i => .cons (.ofNat 0) (List.unit n i)
+
+/-- Add two dense integer vectors. -/
+def List.addInts : List Int → List Int → List Int
+  | .nil, ys => ys
+  | xs, .nil => xs
+  | .cons a xs, .cons b ys => .cons (Int.add a b) (List.addInts xs ys)
+
+/-- Scale a dense integer vector. -/
+def List.scaleInts (c : Int) : List Int → List Int
+  | .nil => .nil
+  | .cons a xs => .cons (Int.mul c a) (List.scaleInts c xs)
+
+/-- The `i`th element of a dense integer vector (`0` past the end). -/
+def List.getInt (d : Int) : List Int → Nat → Int
+  | .nil, _ => d
+  | .cons a xs, .zero => a
+  | .cons _ xs, .succ i => List.getInt d xs i
+
+/-- Every coefficient is zero. -/
+def Con.allZero : List (Nat × Int) → Bool
+  | .nil => .true
+  | .cons (_, c) xs => Bool.and (Int.beq c (.ofNat 0)) (Con.allZero xs)
+
+/-- The constraint is a contradiction: `0 ≥ c` with `c < 0`, or `0 > c` with `c ≤ 0`. -/
+def Con.isContra (c : Con) : Bool :=
+  match Con.allZero c.coeff with
+  | .true => match c.strict with
+    | .true => Int.le c.cst (.ofNat 0)
+    | .false => Int.lt c.cst (.ofNat 0)
+  | .false => .false
+
+/-- The first contradiction in a list. -/
+def Con.findContra : List Con → Option Con
+  | .nil => .none
+  | .cons c cs => match c.isContra with
+    | .true => .some c
+    | .false => Con.findContra cs
+
+/-- Combine a positive-occurrence constraint `p` and a negative-occurrence one `n` so
+that variable `v` cancels: multiply `p` by `-nᵥ` and `n` by `pᵥ` (`a`, `b`). -/
+def Con.combine (p n : Con) (a b : Int) : Con :=
+  Con.mk (Form.coeffAdd (Form.coeffScale a p.coeff) (Form.coeffScale b n.coeff))
+    (Int.add (Int.mul a p.cst) (Int.mul b n.cst))
+    (Bool.or p.strict n.strict)
+    (List.addInts (List.scaleInts a p.weight) (List.scaleInts b n.weight))
+
+/-- Pair every positive-occurrence constraint with every negative one. -/
+def Con.pairOne (v : Nat) (p : Con) : List Con → List Con
+  | .nil => .nil
+  | .cons n ns =>
+    let pv := Form.lookup v p.coeff
+    let nv := Form.lookup v n.coeff
+    .cons (p.combine n (Int.sub (.ofNat 0) nv) pv) (Con.pairOne v p ns)
+
+/-- The pairs of two lists. -/
+def Con.pairs (v : Nat) : List Con → List Con → List Con
+  | .nil, _ => .nil
+  | .cons p ps, ns => List.append (Con.pairOne v p ns) (Con.pairs v ps ns)
+
+/-- Split constraints by the sign of the coefficient of `v`. -/
+def Con.partition (v : Nat) (xs : List Con) : List Con × List Con × List Con :=
+  match xs with
+  | .nil => (.nil, .nil, .nil)
+  | .cons con rest =>
+    let parts := Con.partition v rest
+    let cv := Form.lookup v con.coeff
+    match Int.lt (.ofNat 0) cv with
+    | .true => (.cons con parts.1, parts.2.1, parts.2.2)
+    | .false => match Int.lt cv (.ofNat 0) with
+      | .true => (parts.1, .cons con parts.2.1, parts.2.2)
+      | .false => (parts.1, parts.2.1, .cons con parts.2.2)
+
+/-- Eliminate variables `v, v+1, …` from `cons` (`fuel` bounds how many). A
+contradiction found on the way is returned with the constraints it came from. -/
+def Con.fmGo : Nat → Nat → List Con → Option (List Con × Con)
+  | v, .zero, cons => match Con.findContra cons with
+    | .some c => .some (cons, c)
+    | .none => .none
+  | v, .succ fuel, cons => match Con.findContra cons with
+    | .some c => .some (cons, c)
+    | .none =>
+      let parts := Con.partition v cons
+      let next := List.append parts.2.2 (Con.pairs v parts.1 parts.2.1)
+      Con.fmGo (Nat.succ v) fuel next
+
+/-- Eliminate `nvars` variables. -/
+def Con.fm (nvars : Nat) (cons : List Con) : Option (List Con × Con) := Con.fmGo 0 nvars cons
+
+-- ## Reading goals and hypotheses as linear relations
+
+/-- The relation of a goal or hypothesis. -/
+inductive RelKind where
+  | le
+  | lt
+  | eq
+  | equiv
+
+/-- A relation with its two sides. -/
+structure Rel where
+  kind : RelKind
+  lhs : Expr
+  rhs : Expr
+
+/-- The two arguments after `k` type/instance arguments. -/
+def Rel.pairArgs (k : Nat) (args : List Expr) : Option (Expr × Expr) :=
+  match List.dropN k args with
+  | .cons a (.cons b .nil) => .some (a, b)
+  | _ => .none
+
+/-- Read a relation from the head of a type, without the `=` fallback (which needs the
+elaborator, `TacticM.eqView`). -/
+def Rel.head (e : Expr) : Option Rel := match Expr.view e with
+  | .const n args =>
+    if Expr.nameEq n "LE.le" then
+      match Rel.pairArgs 2 args with
+      | .some ab => .some (Rel.mk .le ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "LT.lt" then
+      match Rel.pairArgs 2 args with
+      | .some ab => .some (Rel.mk .lt ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Equiv.equiv" then
+      match Rel.pairArgs 2 args with
+      | .some ab => .some (Rel.mk .equiv ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Nat.Le" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .le ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Nat.Lt" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .lt ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Int.Le" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .le ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Int.Lt" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .lt ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Q.Le" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .le ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Q.Lt" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .lt ab.1 ab.2)
+      | .none => .none
+    else if Expr.nameEq n "Q.Eq" then
+      match Rel.pairArgs 0 args with
+      | .some ab => .some (Rel.mk .equiv ab.1 ab.2)
+      | .none => .none
+    else .none
+  | _ => .none
+
+/-- The domain (`"Nat"`, `"Int"`, `"Q"`) of an expression, if it is one of them. -/
+def Rel.domOf (g : Nat) (e : Expr) : TacticM (Option String) :=
+  TacticM.bind (TacticM.inferType g e) fun ty =>
+    match Expr.view ty with
+    | .const n _ => TacticM.pure (.some n)
+    | _ => TacticM.pure .none
+
+/-- Read a relation from a type: its head, or an equation through `TacticM.eqView`. -/
+def Rel.ofType (g : Nat) (e : Expr) : TacticM (Option Rel) := match Rel.head e with
+  | .some r => TacticM.pure (.some r)
+  | .none => do
+    eqn ← TacticM.eqView g e;
+    match eqn with
+    | .some ab => TacticM.pure (.some (Rel.mk .eq ab.2.1 ab.2.2))
+    | .none => TacticM.pure .none
+
+/-- Reify `e` as a linear form, extending `atoms`. `none` is a nonlinear product or an
+unsupported operation. -/
+def reifyForm (ty : String) (e : Expr) (atoms : List Expr) : Option (Form × List Expr) :=
+  let signed := Bool.not (Expr.nameEq ty "Nat");
+  match RingT.reify signed 10000 e atoms with
+  | (re, atoms') => match Form.ofE re with
+    | .some f => .some (f, atoms')
+    | .none => .none
+
+/-- A form as an object-language expression at `ty`. -/
+def formExpr (ty : String) (atoms : List Expr) (f : Form) : Expr := Form.toExpr ty atoms f
+
+/-- A kernel-checked proof of `lhs = rhs` (or `lhs ≈ rhs` at `Q`) by the ring
+normaliser. The tactic checks the normal forms first (a clear error), and the kernel
+checks the term it assigns. -/
+def eqProof (ty : String) (lhs rhs : Expr) : TacticM Expr :=
+  let signed := Bool.not (Expr.nameEq ty "Nat");
+  match RingT.reify signed 10000 lhs .nil with
+  | (ea, atoms1) => match RingT.reify signed 10000 rhs atoms1 with
+    | (eb, atoms) =>
+      match RingT.agree ty (List.length atoms) ea eb with
+      | .false => TacticM.fail "linarith: internal certificate: the two sides are not ring-equal"
+      | .true =>
+        let pre := RingT.pre ty;
+        let ρ := RingT.listE (.const ty) atoms;
+        TacticM.pure (Expr.mkApp (.const (String.append pre ".prove"))
+          (.cons ρ (.cons (RingT.E.toExpr pre ea) (.cons (RingT.E.toExpr pre eb) (.cons (.const "Ring.trivial") .nil)))))
+
+
+-- ## Building sources and goals
+
+/-- The goal as a linear inequality: `lin` is `right - left`. -/
+structure Goal where
+  ty : String
+  kind : RelKind
+  lhs : Expr
+  rhs : Expr
+  lin : Form
+  left : Expr
+  right : Expr
+  strict : Bool
+
+/-- `Q.le_iff_mp h`, with the implicit sides inferred. -/
+def qLeProof (p q h : Expr) : Expr := Expr.mkApp (.const "Q.le_iff_mp_q") (.cons p (.cons q (.cons h .nil)))
+/-- `Q.lt_iff_mp h`. -/
+def qLtProof (p q h : Expr) : Expr := Expr.mkApp (.const "Q.lt_iff_mp_q") (.cons p (.cons q (.cons h .nil)))
+/-- `Q.le_of_eq_ex p q h`. -/
+def qLeEqProof (p q h : Expr) : Expr := Expr.mkApp (.const "Q.le_of_eq_ex") (.cons p (.cons q (.cons h .nil)))
+/-- `Q.symm_ex p q h`. -/
+def qSymm (p q h : Expr) : Expr := Expr.mkApp (.const "Q.symm_ex") (.cons p (.cons q (.cons h .nil)))
+/-- `Int.le_of_eq_ex a b h`. -/
+def intLeEqProof (a b h : Expr) : Expr := Expr.mkApp (.const "Int.le_of_eq_ex") (.cons a (.cons b (.cons h .nil)))
+
+/-- The `Nat` hypotheses. -/
+def makeSourcesNat (rel : Rel) (h : Expr) (fa fb : Form) (atoms : List Expr) : Option (List Src × List Expr) :=
+  match rel.kind with
+  | .le => .some (.cons (Src.mk (Form.sub fb fa) rel.rhs h .false .true rel.lhs rel.rhs) .nil, atoms)
+  | .lt =>
+    let left := Expr.natSucc rel.lhs
+    let fl := Form.add fa (Form.ofNat 1)
+    .some (.cons (Src.mk (Form.sub fb fl) rel.rhs h .false .true left rel.rhs) .nil, atoms)
+  | .eq =>
+    let s1 := Src.mk (Form.sub fb fa) rel.rhs (Expr.mkApp (.const "Nat.le_of_eq_ex") (.cons rel.lhs (.cons rel.rhs (.cons h .nil)))) .false .true rel.lhs rel.rhs
+    let s2 := Src.mk (Form.sub fa fb) rel.lhs (Expr.mkApp (.const "Nat.le_of_eq'_ex") (.cons rel.lhs (.cons rel.rhs (.cons h .nil)))) .false .true rel.rhs rel.lhs
+    .some (.cons s1 (.cons s2 .nil), atoms)
+  | .equiv => .none
+
+/-- The `Int` hypotheses. -/
+def makeSourcesInt (rel : Rel) (h : Expr) (fa fb : Form) (atoms : List Expr) : Option (List Src × List Expr) :=
+  match rel.kind with
+  | .le => .some (.cons (Src.mk (Form.sub fb fa) (Expr.intSub rel.rhs rel.lhs) h .false .false rel.lhs rel.rhs) .nil, atoms)
+  | .lt =>
+    let left := Expr.intAdd rel.lhs Expr.intOne
+    let fl := Form.add fa (Form.ofNat 1)
+    .some (.cons (Src.mk (Form.sub fb fl) (Expr.intSub rel.rhs left) h .false .false left rel.rhs) .nil, atoms)
+  | .eq =>
+    let s1 := Src.mk (Form.sub fb fa) (Expr.intSub rel.rhs rel.lhs) (intLeEqProof rel.lhs rel.rhs h) .false .false rel.lhs rel.rhs
+    let s2 := Src.mk (Form.sub fa fb) (Expr.intSub rel.lhs rel.rhs) (Expr.mkApp (.const "Int.le_of_eq'_ex") (.cons rel.lhs (.cons rel.rhs (.cons h .nil)))) .false .false rel.rhs rel.lhs
+    .some (.cons s1 (.cons s2 .nil), atoms)
+  | .equiv => .none
+
+/-- The `Q` hypotheses. -/
+def makeSourcesQ (rel : Rel) (h : Expr) (fa fb : Form) (atoms : List Expr) : Option (List Src × List Expr) :=
+  match rel.kind with
+  | .le => .some (.cons (Src.mk (Form.sub fb fa) (Expr.qSub rel.rhs rel.lhs) (qLeProof rel.lhs rel.rhs h) .false .false rel.lhs rel.rhs) .nil, atoms)
+  | .lt => .some (.cons (Src.mk (Form.sub fb fa) (Expr.qSub rel.rhs rel.lhs) (qLtProof rel.lhs rel.rhs h) .true .false rel.lhs rel.rhs) .nil, atoms)
+  | .eq => .none
+  | .equiv =>
+    let s1 := Src.mk (Form.sub fb fa) (Expr.qSub rel.rhs rel.lhs) (qLeProof rel.rhs rel.lhs (qLeEqProof rel.lhs rel.rhs h)) .false .false rel.lhs rel.rhs
+    let s2 := Src.mk (Form.sub fa fb) (Expr.qSub rel.lhs rel.rhs) (qLeProof rel.lhs rel.rhs (qLeEqProof rel.rhs rel.lhs (qSymm rel.lhs rel.rhs h))) .false .false rel.rhs rel.lhs
+    .some (.cons s1 (.cons s2 .nil), atoms)
+
+/-- Turn a hypothesis `h : rel` into constraints. -/
+def makeSources (g : Nat) (ty : String) (rel : Rel) (h : Expr) (atoms : List Expr) :
+    Option (List Src × List Expr) :=
+  match reifyForm ty rel.lhs atoms with
+  | .none => .none
+  | .some (fa, atoms1) => match reifyForm ty rel.rhs atoms1 with
+    | .none => .none
+    | .some (fb, atoms2) =>
+      if Expr.nameEq ty "Nat" then makeSourcesNat rel h fa fb atoms2
+      else if Expr.nameEq ty "Int" then makeSourcesInt rel h fa fb atoms2
+      else if Expr.nameEq ty "Q" then makeSourcesQ rel h fa fb atoms2
+      else .none
+
+/-- The `Nat` goal. -/
+def makeGoalNat (rel : Rel) (fa fb : Form) (atoms : List Expr) : Option (Goal × List Expr) :=
+  match rel.kind with
+  | .le => .some (Goal.mk "Nat" .le rel.lhs rel.rhs (Form.sub fb fa) rel.lhs rel.rhs .false, atoms)
+  | .lt =>
+    let left := Expr.natSucc rel.lhs
+    let fl := Form.add fa (Form.ofNat 1)
+    .some (Goal.mk "Nat" .lt rel.lhs rel.rhs (Form.sub fb fl) left rel.rhs .false, atoms)
+  | _ => .none
+
+/-- The `Int` goal. -/
+def makeGoalInt (rel : Rel) (fa fb : Form) (atoms : List Expr) : Option (Goal × List Expr) :=
+  match rel.kind with
+  | .le => .some (Goal.mk "Int" .le rel.lhs rel.rhs (Form.sub fb fa) rel.lhs rel.rhs .false, atoms)
+  | .lt =>
+    let left := Expr.intAdd rel.lhs Expr.intOne
+    let fl := Form.add fa (Form.ofNat 1)
+    .some (Goal.mk "Int" .lt rel.lhs rel.rhs (Form.sub fb fl) left rel.rhs .false, atoms)
+  | _ => .none
+
+/-- The `Q` goal. -/
+def makeGoalQ (rel : Rel) (fa fb : Form) (atoms : List Expr) : Option (Goal × List Expr) :=
+  match rel.kind with
+  | .le => .some (Goal.mk "Q" .le rel.lhs rel.rhs (Form.sub fb fa) rel.lhs rel.rhs .false, atoms)
+  | .lt => .some (Goal.mk "Q" .lt rel.lhs rel.rhs (Form.sub fb fa) rel.lhs rel.rhs .true, atoms)
+  | _ => .none
+
+/-- Turn an inequality goal into a linear form. -/
+def makeGoal (g : Nat) (ty : String) (rel : Rel) (atoms : List Expr) : Option (Goal × List Expr) :=
+  match reifyForm ty rel.lhs atoms with
+  | .none => .none
+  | .some (fa, atoms1) => match reifyForm ty rel.rhs atoms1 with
+    | .none => .none
+    | .some (fb, atoms2) =>
+      if Expr.nameEq ty "Nat" then makeGoalNat rel fa fb atoms2
+      else if Expr.nameEq ty "Int" then makeGoalInt rel fa fb atoms2
+      else if Expr.nameEq ty "Q" then makeGoalQ rel fa fb atoms2
+      else .none
+
+-- ## Building the proof from the certificate
+
+/-- A scaled `Int`/`Q` constraint: its expression, the proof of its order, and whether
+it is strict (`Q.Pos`). -/
+structure STerm where
+  expr : Expr
+  proof : Expr
+  pos : Bool
+
+/-- A scaled `Nat` inequality. -/
+structure NTerm where
+  left : Expr
+  right : Expr
+  proof : Expr
+
+/-- `Int.nonneg_ofNat n`. -/
+def nonnegNat (n : Nat) : Expr := Expr.mkApp (.const "Int.nonneg_ofNat") (.cons (.lit n) .nil)
+/-- `Int.ofNat_succ_pos (n-1)`: `0 < n` for `n > 0`. -/
+def posNat (n : Nat) : Expr := Expr.mkApp (.const "Int.ofNat_succ_pos") (.cons (.lit (Nat.pred n)) .nil)
+/-- `Q.nonneg_mul p q hp hq`. -/
+def qNonnegMul (p q hp hq : Expr) : Expr := Expr.mkApp (.const "Q.nonneg_mul_q") (.cons p (.cons q (.cons hp (.cons hq .nil))))
+/-- `Q.pos_mul p q hp hq`. -/
+def qPosMul (p q hp hq : Expr) : Expr := Expr.mkApp (.const "Q.pos_mul_q") (.cons p (.cons q (.cons hp (.cons hq .nil))))
+/-- `Q.nonneg_add p q hp hq`. -/
+def qNonnegAdd (p q hp hq : Expr) : Expr := Expr.mkApp (.const "Q.nonneg_add_q") (.cons p (.cons q (.cons hp (.cons hq .nil))))
+/-- `Q.pos_add p q hp hq`. -/
+def qPosAdd (p q hp hq : Expr) : Expr := Expr.mkApp (.const "Q.pos_add_q") (.cons p (.cons q (.cons hp (.cons hq .nil))))
+/-- `Q.nonneg_of_pos p h`. -/
+def qNonnegOfPos (p h : Expr) : Expr := Expr.mkApp (.const "Q.nonneg_of_pos") (.cons p (.cons h .nil))
+
+/-- Scale an `Int` source by a nonnegative coefficient. -/
+def scaleInt (atoms : List Expr) (s : Src) (w : Nat) : TacticM STerm :=
+  let wi := Expr.intN w
+  let le := formExpr "Int" atoms (Form.scale (.ofNat w) s.lin)
+  let scaledOrig := Expr.intMul wi s.orig
+  TacticM.bind (eqProof "Int" scaledOrig le) fun eq =>
+    let hScaled := Expr.mkApp (.const "Int.nonneg_mul") (.cons wi (.cons s.orig (.cons (nonnegNat w) (.cons s.proof .nil))))
+    let hNorm := Expr.mkApp (.const "Int.nonneg_congr_ex") (.cons scaledOrig (.cons le (.cons eq (.cons hScaled .nil))))
+    TacticM.pure (STerm.mk le hNorm .false)
+
+/-- Scale a `Q` source by a positive or nonnegative coefficient. -/
+def scaleQ (atoms : List Expr) (s : Src) (w : Nat) : TacticM STerm :=
+  let wq := Expr.qOfNat w
+  let le := formExpr "Q" atoms (Form.scale (.ofNat w) s.lin)
+  let scaledOrig := Expr.qMul wq s.orig
+  TacticM.bind (eqProof "Q" scaledOrig le) fun eq =>
+    match s.strict with
+    | .true =>
+      let hScaled := qPosMul wq s.orig (posNat w) s.proof
+      let hNorm := Expr.mkApp (.const "Q.pos_congr_ex") (.cons scaledOrig (.cons le (.cons eq (.cons hScaled .nil))))
+      TacticM.pure (STerm.mk le hNorm .true)
+    | .false =>
+      let hScaled := qNonnegMul wq s.orig (nonnegNat w) s.proof
+      let hNorm := Expr.mkApp (.const "Q.nonneg_congr_ex") (.cons scaledOrig (.cons le (.cons eq (.cons hScaled .nil))))
+      TacticM.pure (STerm.mk le hNorm .false)
+
+/-- Scale a `Nat` inequality. -/
+def scaleNat (s : Src) (w : Nat) : NTerm :=
+  NTerm.mk (Expr.natMul (.lit w) s.left) (Expr.natMul (.lit w) s.right)
+    (Expr.mkApp (.const "Nat.mul_le_mul_left") (.cons (.lit w) (.cons s.left (.cons s.right (.cons s.proof .nil)))))
+
+/-- The zero `Int`/`Q` term. -/
+def zeroS (ty : String) : STerm :=
+  if Expr.nameEq ty "Int" then
+    STerm.mk (Expr.intN 0) (nonnegNat 0) .false
+  else
+    STerm.mk (Expr.qOfNat 0) (nonnegNat 0) .false
+
+/-- Sum two nonnegative `Int`/`Q` terms (the `Int` case). -/
+def addSInt (a b : STerm) : STerm :=
+  STerm.mk (Expr.intAdd a.expr b.expr)
+    (Expr.mkApp (.const "Int.nonneg_add") (.cons a.expr (.cons b.expr (.cons a.proof (.cons b.proof .nil))))) .false
+
+/-- Sum two nonnegative `Q` terms. -/
+def addQ (a b : STerm) : STerm :=
+  STerm.mk (Expr.qAdd a.expr b.expr) (qNonnegAdd a.expr b.expr a.proof b.proof) .false
+
+/-- Sum `Q` terms, all nonnegative. -/
+def sumQNonNeg : STerm → List STerm → STerm
+  | acc, .nil => acc
+  | acc, .cons t ts => sumQNonNeg (addQ acc t) ts
+
+/-- Take the first strict term out of a list (the rest, strict terms included). -/
+def pickPos : List STerm → Option (STerm × List STerm)
+  | .nil => .none
+  | .cons t ts => match t.pos with
+    | .true => .some (t, ts)
+    | .false => match pickPos ts with
+      | .some (p, rest) => .some (p, .cons t rest)
+      | .none => .none
+
+/-- A term as nonnegative (converting a strict one). -/
+def toNonNeg (t : STerm) : STerm := match t.pos with
+  | .true => STerm.mk t.expr (qNonnegOfPos t.expr t.proof) .false
+  | .false => t
+
+/-- Turn every strict term into a nonnegative one. -/
+def toNonNegs : List STerm → List STerm
+  | .nil => .nil
+  | .cons t ts => .cons (toNonNeg t) (toNonNegs ts)
+
+/-- Sum `Q` terms; the result is strict if one of them is. -/
+def sumQ (terms : List STerm) : STerm :=
+  match pickPos terms with
+  | .none => sumQNonNeg (zeroS "Q") terms
+  | .some (p, rest) =>
+    let s := sumQNonNeg (zeroS "Q") (toNonNegs rest)
+    STerm.mk (Expr.qAdd p.expr s.expr) (qPosAdd p.expr s.expr p.proof s.proof) .true
+
+/-- Sum `Nat` inequalities. -/
+def sumNat : NTerm → List NTerm → NTerm
+  | acc, .nil => acc
+  | acc, .cons t ts =>
+    sumNat (NTerm.mk (Expr.natAdd acc.left t.left) (Expr.natAdd acc.right t.right)
+      (Expr.mkApp (.const "Nat.add_le_add")
+        (.cons acc.left (.cons acc.right (.cons t.left (.cons t.right (.cons acc.proof (.cons t.proof .nil)))))))) ts
+
+/-- The zero `Nat` inequality. -/
+def zeroN : NTerm :=
+  NTerm.mk (.lit 0) (.lit 0) (Expr.mkApp (.const "Nat.le_refl") (.cons (.lit 0) .nil))
+
+/-- Add a nonnegative slack to an `Int` term. -/
+def addKInt (t : STerm) (k : Nat) : STerm := match k with
+  | .zero => t
+  | .succ _ =>
+    STerm.mk (Expr.intAdd t.expr (Expr.intN k))
+      (Expr.mkApp (.const "Int.nonneg_add") (.cons t.expr (.cons (Expr.intN k) (.cons t.proof (.cons (nonnegNat k) .nil))))) .false
+
+/-- Add a positive slack to a `Q` term. -/
+def addKQ (t : STerm) (k : Nat) : STerm := match k with
+  | .zero => t
+  | .succ _ =>
+    let kq := Expr.qOfNat k
+    let hk := posNat k
+    match t.pos with
+    | .true =>
+      STerm.mk (Expr.qAdd t.expr kq) (qPosAdd t.expr kq t.proof (qNonnegOfPos kq hk)) .true
+    | .false =>
+      STerm.mk (Expr.qAdd kq t.expr) (qPosAdd kq t.expr hk t.proof) .true
+
+-- ## Gathering scaled constraints
+
+/-- Collect the scaled `Int` constraints (`w`th coefficient from the certificate). -/
+def gatherInt (atoms : List Expr) : List Src → List Int → Nat → TacticM (List STerm)
+  | .nil, _, _ => TacticM.pure .nil
+  | .cons s ss, ws, i =>
+    let w := List.getInt (.ofNat 0) ws i
+    match Int.le (.ofNat 0) w with
+    | .false => TacticM.fail "linarith: certificate has a negative coefficient (internal)"
+    | .true => match Int.beq w (.ofNat 0) with
+      | .true => gatherInt atoms ss ws (Nat.succ i)
+      | .false => TacticM.bind (scaleInt atoms s (Int.toNat w)) fun t =>
+        TacticM.bind (gatherInt atoms ss ws (Nat.succ i)) fun ts => TacticM.pure (.cons t ts)
+
+/-- Collect the scaled `Q` constraints. -/
+def gatherQ (atoms : List Expr) : List Src → List Int → Nat → TacticM (List STerm)
+  | .nil, _, _ => TacticM.pure .nil
+  | .cons s ss, ws, i =>
+    let w := List.getInt (.ofNat 0) ws i
+    match Int.le (.ofNat 0) w with
+    | .false => TacticM.fail "linarith: certificate has a negative coefficient (internal)"
+    | .true => match Int.beq w (.ofNat 0) with
+      | .true => gatherQ atoms ss ws (Nat.succ i)
+      | .false => TacticM.bind (scaleQ atoms s (Int.toNat w)) fun t =>
+        TacticM.bind (gatherQ atoms ss ws (Nat.succ i)) fun ts => TacticM.pure (.cons t ts)
+
+/-- Collect the scaled `Nat` inequalities. -/
+def gatherNat : List Src → List Int → Nat → TacticM (List NTerm)
+  | .nil, _, _ => TacticM.pure .nil
+  | .cons s ss, ws, i =>
+    let w := List.getInt (.ofNat 0) ws i
+    match Int.le (.ofNat 0) w with
+    | .false => TacticM.fail "linarith: certificate has a negative coefficient (internal)"
+    | .true => match Int.beq w (.ofNat 0) with
+      | .true => gatherNat ss ws (Nat.succ i)
+      | .false => TacticM.bind (gatherNat ss ws (Nat.succ i)) fun ts =>
+        TacticM.pure (.cons (scaleNat s (Int.toNat w)) ts)
+
+/-- Sum a list of `Int` terms. -/
+def sumSInt : STerm → List STerm → STerm
+  | acc, .nil => acc
+  | acc, .cons t ts => sumSInt (addSInt acc t) ts
+
+/-- The goal proof for `Int`: from the certificate build `0 ≤ right - left`. -/
+def proveIntGoal (goal : Goal) (srcs : List Src) (atoms : List Expr) (contra : Con) : TacticM Expr :=
+  let cg := List.getInt (.ofNat 0) contra.weight (List.length srcs)
+  match Int.lt (.ofNat 0) cg with
+  | .false => TacticM.fail "linarith: the goal does not follow (or the hypotheses are inconsistent); the certificate has no goal coefficient"
+  | .true =>
+    TacticM.bind (gatherInt atoms srcs contra.weight 0) fun terms =>
+      let sum := sumSInt (zeroS "Int") terms
+      let k := Int.toNat (Int.sub (.ofNat 0) contra.cst)
+      let sumK := addKInt sum k
+      let cgExpr := Expr.intN (Int.toNat cg)
+      let gPlain := formExpr "Int" atoms goal.lin
+      let gExpr := Expr.intMul cgExpr gPlain
+      TacticM.bind (eqProof "Int" sumK.expr gExpr) fun eq =>
+        let hCG := Expr.mkApp (.const "Int.nonneg_congr_ex") (.cons sumK.expr (.cons gExpr (.cons eq (.cons sumK.proof .nil))))
+        let cgZero := Expr.intMul cgExpr (Expr.intN 0)
+        TacticM.bind (eqProof "Int" gExpr (Expr.intSub gExpr cgZero)) fun eq2 =>
+          let hLe := Expr.mkApp (.const "Int.nonneg_congr_ex") (.cons gExpr (.cons (Expr.intSub gExpr cgZero) (.cons eq2 (.cons hCG .nil))))
+          let hc := posNat (Int.toNat cg)
+          let h0G := Expr.mkApp (.const "Int.le_of_mul_le_mul_left")
+            (.cons cgExpr (.cons (Expr.intN 0) (.cons gPlain (.cons hc (.cons hLe .nil)))))
+          TacticM.bind (eqProof "Int" (Expr.intSub gPlain (Expr.intN 0)) gPlain) fun eq3 =>
+            let hG := Expr.mkApp (.const "Int.nonneg_congr_ex") (.cons (Expr.intSub gPlain (Expr.intN 0)) (.cons gPlain (.cons eq3 (.cons h0G .nil))))
+            let origG := Expr.intSub goal.rhs goal.left
+            TacticM.bind (eqProof "Int" gPlain origG) fun eqG =>
+              TacticM.pure (Expr.mkApp (.const "Int.nonneg_congr_ex") (.cons gPlain (.cons origG (.cons eqG (.cons hG .nil)))))
+
+/-- The goal proof for `Q`: from the certificate build `left ≤ right` or `left < right`. -/
+def proveQGoal (goal : Goal) (srcs : List Src) (atoms : List Expr) (contra : Con) : TacticM Expr :=
+  let cg := List.getInt (.ofNat 0) contra.weight (List.length srcs)
+  match Int.lt (.ofNat 0) cg with
+  | .false => TacticM.fail "linarith: the goal does not follow (or the hypotheses are inconsistent); the certificate has no goal coefficient"
+  | .true =>
+    TacticM.bind (gatherQ atoms srcs contra.weight 0) fun terms =>
+      let sum := sumQ terms
+      let k := Int.toNat (Int.sub (.ofNat 0) contra.cst)
+      let sumK := addKQ sum k
+      let cgQ := Expr.qOfNat (Int.toNat cg)
+      let gPlain := formExpr "Q" atoms goal.lin
+      let gExpr := Expr.qMul cgQ gPlain
+      TacticM.bind (eqProof "Q" sumK.expr gExpr) fun eq =>
+        let hCG := match sumK.pos with
+          | .true => Expr.mkApp (.const "Q.pos_congr_ex") (.cons sumK.expr (.cons gExpr (.cons eq (.cons sumK.proof .nil))))
+          | .false => Expr.mkApp (.const "Q.nonneg_congr_ex") (.cons sumK.expr (.cons gExpr (.cons eq (.cons sumK.proof .nil))))
+        let cgZero := Expr.qMul cgQ (Expr.qOfNat 0)
+        let hc := Expr.mkApp (.const "Q.pos_ofNat_ex") (.cons (.lit (Nat.pred (Int.toNat cg))) .nil)
+        TacticM.bind (eqProof "Q" gExpr (Expr.qSub gExpr cgZero)) fun eq2 =>
+          match goal.strict with
+          | .true => match sumK.pos with
+            | .false => TacticM.fail "linarith: a strict Q goal needs a strict hypothesis or a positive slack"
+            | .true =>
+              let hPosScaled := Expr.mkApp (.const "Q.pos_congr_ex") (.cons gExpr (.cons (Expr.qSub gExpr cgZero) (.cons eq2 (.cons hCG .nil))))
+              let hLt := Expr.mkApp (.const "Q.lt_iff_mpr_q") (.cons cgZero (.cons gExpr (.cons hPosScaled .nil)))
+              let h0G := Expr.mkApp (.const "Q.lt_of_mul_lt_mul_left_q")
+                (.cons cgQ (.cons (Expr.qOfNat 0) (.cons gPlain (.cons hc (.cons hLt .nil)))))
+              let hPos0 := Expr.mkApp (.const "Q.pos_of_lt_q") (.cons gPlain (.cons h0G .nil))
+              let origG := Expr.qSub goal.rhs goal.lhs
+              TacticM.bind (eqProof "Q" gPlain origG) fun eqG =>
+                let hPos := Expr.mkApp (.const "Q.pos_congr_ex") (.cons gPlain (.cons origG (.cons eqG (.cons hPos0 .nil))))
+                TacticM.pure (Expr.mkApp (.const "Q.lt_iff_mpr_class") (.cons goal.lhs (.cons goal.rhs (.cons hPos .nil))))
+          | .false =>
+            let hNN := match sumK.pos with
+              | .true => Expr.mkApp (.const "Q.nonneg_of_pos") (.cons gExpr (.cons hCG .nil))
+              | .false => hCG
+            let hNNscaled := Expr.mkApp (.const "Q.nonneg_congr_ex") (.cons gExpr (.cons (Expr.qSub gExpr cgZero) (.cons eq2 (.cons hNN .nil))))
+            let hLeScaled := Expr.mkApp (.const "Q.le_iff_mpr_q") (.cons cgZero (.cons gExpr (.cons hNNscaled .nil)))
+            let h0G := Expr.mkApp (.const "Q.le_of_mul_le_mul_left_q")
+              (.cons cgQ (.cons (Expr.qOfNat 0) (.cons gPlain (.cons hc (.cons hLeScaled .nil)))))
+            let hNN0 := Expr.mkApp (.const "Q.nonneg_of_le_q") (.cons gPlain (.cons h0G .nil))
+            let origG := Expr.qSub goal.rhs goal.lhs
+            TacticM.bind (eqProof "Q" gPlain origG) fun eqG =>
+              let hNNorig := Expr.mkApp (.const "Q.nonneg_congr_ex") (.cons gPlain (.cons origG (.cons eqG (.cons hNN0 .nil))))
+              TacticM.pure (Expr.mkApp (.const "Q.le_iff_mpr_class") (.cons goal.lhs (.cons goal.rhs (.cons hNNorig .nil))))
+
+/-- The goal proof for `Nat`: the goal coefficient must be `1` (no division). -/
+def proveNatGoal (goal : Goal) (srcs : List Src) (contra : Con) : TacticM Expr :=
+  let cg := List.getInt (.ofNat 0) contra.weight (List.length srcs)
+  match Int.beq cg (.ofNat 1) with
+  | .false => TacticM.fail "linarith: a Nat goal that needs a division (the goal coefficient is not 1); lib/Nat.wiz has no multiplication cancellation"
+  | .true =>
+    TacticM.bind (gatherNat srcs contra.weight 0) fun terms =>
+      let sum := sumNat zeroN terms
+      let k := Int.toNat (Int.sub (.ofNat 0) contra.cst)
+      let l := goal.left
+      let r := goal.right
+      let h1 := Expr.mkApp (.const "Nat.add_le_add_left")
+        (.cons l (.cons sum.left (.cons sum.right (.cons sum.proof .nil))))
+      let lSR := Expr.natAdd l sum.right
+      let lSRk := Expr.natAdd lSR (.lit k)
+      let h2 := Expr.mkApp (.const "Nat.le_add_right") (.cons lSR (.cons (.lit k) .nil))
+      let h3 := Expr.mkApp (.const "Nat.le_trans")
+        (.cons (Expr.natAdd l sum.left) (.cons lSR (.cons lSRk (.cons h1 (.cons h2 .nil)))))
+      let rSL := Expr.natAdd r sum.left
+      TacticM.bind (eqProof "Nat" lSRk rSL) fun eq =>
+        let h4 := Expr.mkApp (.const "Nat.le_of_eq_right_ex") (.cons (Expr.natAdd l sum.left) (.cons lSRk (.cons rSL (.cons eq (.cons h3 .nil)))))
+        TacticM.pure (Expr.mkApp (.const "Nat.le_of_add_le_add_right")
+          (.cons sum.left (.cons l (.cons r (.cons h4 .nil)))))
+
+-- ## Constraints from the context, and the tactic
+
+/-- The initial constraints: one per source, and the negated goal. -/
+def initConsGo : Nat → Nat → List Src → List Con
+  | i, n, .nil => .nil
+  | i, n, .cons s ss =>
+    .cons (Con.mk s.lin.coeff s.lin.cst s.strict (List.unit n i)) (initConsGo (Nat.succ i) n ss)
+
+/-- The initial constraints for a goal form `g`; `negStrict` is whether the negation
+of the goal is strict (true unless the goal itself is strict at `Q`). -/
+def initCons (srcs : List Src) (g : Form) (negStrict : Bool) : List Con :=
+  let n := Nat.succ (List.length srcs)
+  let ng := Form.neg g
+  List.append (initConsGo 0 n srcs)
+    (.cons (Con.mk ng.coeff ng.cst negStrict (List.unit n (List.length srcs))) .nil)
+
+/-- Prove an inequality goal by Fourier–Motzkin and the certificate. -/
+def solveLe (g : Nat) (ty : String) (srcs : List Src) (atoms : List Expr) (rel : Rel) : TacticM Expr :=
+  match makeGoal g ty rel atoms with
+  | .none => TacticM.fail "linarith: nonlinear term (a product of two non-constant expressions) or unsupported operation"
+  | .some (goal, atoms') =>
+    match Con.fm (List.length atoms') (initCons srcs goal.lin (Bool.not goal.strict)) with
+    | .none => TacticM.fail "linarith: the goal does not follow by linear arithmetic"
+    | .some (_, contra) =>
+      if Expr.nameEq ty "Int" then proveIntGoal goal srcs atoms' contra
+      else if Expr.nameEq ty "Nat" then proveNatGoal goal srcs contra
+      else proveQGoal goal srcs atoms' contra
+
+/-- Close an equality (or `≈` at `Q`) goal: the ring normaliser first, then two
+inequalities and antisymmetry. -/
+def solveEq (g : Nat) (ty : String) (srcs : List Src) (atoms : List Expr) (rel : Rel) : TacticM Unit :=
+  TacticM.tryCatch
+    (TacticM.bind (eqProof ty rel.lhs rel.rhs) fun e =>
+      TacticM.bind (TacticM.assignLate g e) fun _ => TacticM.replaceMainGoal .nil)
+    fun _ =>
+      TacticM.bind (solveLe g ty srcs atoms (Rel.mk .le rel.lhs rel.rhs)) fun h1 =>
+        TacticM.bind (solveLe g ty srcs atoms (Rel.mk .le rel.rhs rel.lhs)) fun h2 =>
+          let p :=
+            if Expr.nameEq ty "Nat" then
+              Expr.mkApp (.const "Nat.le_antisymm") (.cons rel.lhs (.cons rel.rhs (.cons h1 (.cons h2 .nil))))
+            else if Expr.nameEq ty "Int" then
+              Expr.mkApp (.const "Int.le_antisymm") (.cons rel.lhs (.cons rel.rhs (.cons h1 (.cons h2 .nil))))
+            else
+              Expr.mkApp (.const "Q.le_antisymm_ex") (.cons rel.lhs (.cons rel.rhs (.cons h1 (.cons h2 .nil))))
+          TacticM.bind (TacticM.assignLate g p) fun _ => TacticM.replaceMainGoal .nil
+
+/-- Collect the linear constraints of the hypotheses (hypotheses of another domain, or
+that are not relations, are ignored). -/
+def collectSources (g : Nat) (ty : String) :
+    List Expr → List (String × Expr) → Nat → TacticM (List Src × List Expr)
+  | atoms, .nil, _ => TacticM.pure (.nil, atoms)
+  | atoms, .cons (_, hty) rest, i =>
+    TacticM.bind (Rel.ofType g hty) fun r =>
+      match r with
+      | .none => collectSources g ty atoms rest (Nat.succ i)
+      | .some rel =>
+        TacticM.bind (Rel.domOf g rel.lhs) fun dom =>
+          match dom with
+          | .none => collectSources g ty atoms rest (Nat.succ i)
+          | .some d =>
+            if Expr.nameEq d ty then
+              match makeSources g ty rel (.var i) atoms with
+              | .none => TacticM.fail "linarith: nonlinear term (a product of two non-constant expressions) in a hypothesis"
+              | .some (ss, atoms') =>
+                TacticM.bind (collectSources g ty atoms' rest (Nat.succ i)) fun rec =>
+                  TacticM.pure (List.append ss rec.1, rec.2)
+            else collectSources g ty atoms rest (Nat.succ i)
+
+/-- The first `False` hypothesis, as a term. -/
+def findFalse : List (String × Expr) → Nat → Option Expr
+  | .nil, _ => .none
+  | .cons (_, hty) rest, i =>
+    match Expr.isAppOf "False" hty with
+    | .true => .some (.var i)
+    | .false => findFalse rest (Nat.succ i)
+
+syntax (name := linarith) "linarith" : tactic
+/-- `linarith`: close a linear arithmetic goal at `Nat`, `Int` or `Q`. The search is
+untrusted; the kernel checks the proof term (see the module doc). -/
+def Tactic.linarith : Tactic := fun _ => do
+  g0 ← TacticM.mainGoal;
+  g ← RingT.introAll 1000 g0;
+  ty ← TacticM.goalType g;
+  hyps ← TacticM.goalHyps g;
+  match findFalse hyps 0 with
+  | .some h => do
+    TacticM.assignLate g (Expr.mkApp (.const "False.elimEx") (.cons ty (.cons h .nil)));
+    TacticM.replaceMainGoal .nil
+  | .none => do
+    r ← Rel.ofType g ty;
+    match r with
+    | .none => TacticM.fail "linarith: the goal is not a linear inequality or equation"
+    | .some rel => do
+      dom ← Rel.domOf g rel.lhs;
+      match dom with
+      | .none => TacticM.fail "linarith: the goal is not at Nat, Int or Q"
+      | .some dty => do
+        cs ← collectSources g dty .nil hyps 0;
+        match rel.kind with
+        | .le => do
+          p ← solveLe g dty cs.1 cs.2 rel;
+          TacticM.assignLate g p;
+          TacticM.replaceMainGoal .nil
+        | .lt => do
+          p ← solveLe g dty cs.1 cs.2 rel;
+          TacticM.assignLate g p;
+          TacticM.replaceMainGoal .nil
+        | .eq => solveEq g dty cs.1 cs.2 rel
+        | .equiv => solveEq g dty cs.1 cs.2 rel
+attribute [tactic tactic.linarith] Tactic.linarith

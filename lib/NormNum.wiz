@@ -1,0 +1,59 @@
+import Rat
+/-!
+# NormNum
+
+`norm_num`: close a goal whose arithmetic is **closed**, by the kernel's computation
+(`import NormNum`).
+
+```
+import NormNum
+
+def a : 2 + 2 = 4 := by norm_num
+def b : (3 : Int) * 4 - 5 = 7 := by norm_num
+def c : Q.mk 1 2 rfl + Q.mk 1 3 rfl ≈ Q.mk 5 6 rfl := by norm_num
+def d (x : Nat) : x + (2 + 3) = x + 5 := by norm_num
+```
+
+## What it does
+
+`norm_num` runs the kernel's `rfl`: it computes the closed arithmetic subterms of the
+goal and checks that the two sides (or the order proposition) are definitionally equal
+after that computation. It does **not** use the hypotheses (`linarith` does), does not
+call `native_decide`, and introduces no `sorry` or axiom: `#print axioms` on a theorem
+proved by `norm_num` reports “does not depend on any axioms”.
+
+The tactic is deliberately small. A closed proposition that is false fails with
+`norm_num: the closed arithmetic proposition is false`; a goal with free variables that
+does not compute fails with a message saying that `norm_num` does not use hypotheses
+(use `linarith` for linear facts with variables). It is the companion of
+`lib/Linarith.wiz`: `norm_num` decides closed arithmetic, `linarith` reasons about
+linear forms in variables.
+
+-/
+
+/-- No free variables and no binders: a closed, first-order term. -/
+def NormNum.closed : Expr → Bool
+  | .var _ => .false
+  | .const _ => .true
+  | .sort _ => .true
+  | .pi _ _ _ _ _ => .false
+  | .lam _ _ => .false
+  | .app f a => Bool.and (NormNum.closed f) (NormNum.closed a)
+  | .lit _ => .true
+  | .opaque _ => .true
+
+/-- The `rfl` term, as syntax (the elaborator turns it into a proof by computation). -/
+def NormNum.rflSyntax : Syntax := Syntax.mkNode "term.rfl" .nil
+
+syntax (name := normNum) "norm_num" : tactic
+/-- `norm_num`: close a closed arithmetic goal by computation (`rfl`). -/
+def Tactic.normNum : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  TacticM.tryCatch
+    (TacticM.bind (TacticM.exact g NormNum.rflSyntax) fun _ => TacticM.replaceMainGoal .nil)
+    fun _ =>
+      match NormNum.closed ty with
+      | .true => TacticM.fail "norm_num: the closed arithmetic proposition is false (or it does not compute to a proof)"
+      | .false => TacticM.fail "norm_num: the goal does not compute to a proof; norm_num does not use hypotheses (use linarith for linear facts with variables)"
+attribute [tactic tactic.normNum] Tactic.normNum

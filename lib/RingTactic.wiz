@@ -80,6 +80,21 @@ def RingT.op (e : Expr) : RingT.Op := match Expr.view e with
     else if Bool.or (Expr.nameEq n "Int.neg") (Expr.nameEq n "Q.neg") then RingT.op1 RingT.Op.neg 0 args
     else if Expr.nameEq n "Nat.succ" then RingT.op1 RingT.Op.succ 0 args
     else if Expr.nameEq n "OfNat.ofNat" then RingT.numeral args
+    else if Expr.nameEq n "Int.ofNat" then match args with
+      | .cons a .nil => match Expr.view a with
+        | .lit k => RingT.Op.lit k
+        | _ => RingT.Op.none
+      | _ => RingT.Op.none
+    else if Expr.nameEq n "Q.ofInt" then match args with
+      | .cons a .nil => match Expr.view a with
+        | .lit k => RingT.Op.lit k
+        | .const m (.cons b .nil) =>
+          if Expr.nameEq m "Int.ofNat" then match Expr.view b with
+            | .lit k => RingT.Op.lit k
+            | _ => RingT.Op.none
+          else RingT.Op.none
+        | _ => RingT.Op.none
+      | _ => RingT.Op.none
     else .none
   | _ => .none
 /-- The index of `e` among the atoms (added at the end if it is new). -/
