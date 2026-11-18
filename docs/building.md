@@ -955,18 +955,26 @@ setup action keeps the elan cache for those
 the generated reference manual (`result/index.md`, and `result/site`).
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
-  `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo and `a-w`
-  permissions. Both wrappers (`wiz` and `grail`) add
+  `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo or `roots/` pointer
+  index (both are write-cache aids) and `a-w` permissions. Both wrappers (`wiz` and
+  `grail`) add
   `--cache-ro $out/share/wiz/cache` after their toolchain flags, so a packaged run
   replays the standard library instead of elaborating it; a user's `--cache` (the
-  default `~/.cache/wiz`) is still written, so the store cache is only ever read.
+  default `~/.cache/wiz`) is still written, so the store cache is only ever read. The
+  warm runs pass the *same* toolchain flags the wrappers add: `Toolchain.tag` hashes
+  exactly those fields and is part of every manifest's strong key, so a cache warmed
+  with default flags is rejected by every wrapper invocation (it would be a clean miss
+  for the whole layer).
   There are two sets of entries in that one directory, because `wiz` and `grail` are
   different executables and the cache mixes the running binary's hash into every key
   (`Cache.binaryId`; an entry written by one is never read by the other):
-  * **wiz**: every module of `lib/` (all 61 `.wiz` files today, in sorted order: one
-    `wiz check` of a one-line `import M` for each module `M`), about 4,200 entries and
-    50 MB. Checking a module's own file would key its commands by the main text, which
-    an importer never looks up, so the warm run imports it instead.
+  * **wiz**: every module of `lib/` (one `wiz check` of a one-line `import M` for each
+    module `M`), about 5,000 entries and 50 MB. Checking a module's own file would key
+    its commands by the main text, which an importer never looks up, so the warm run
+    imports it instead. The checks run concurrently, at most `NIX_BUILD_CORES` (capped
+    at 8) at a time, and share the one cache directory: its keys are content-addressed
+    and every file is renamed into place, so concurrent writers of one entry write the
+    same bytes.
   * **grail**: a minimal package in `$TMPDIR` whose `grail.wiz` imports `Grail` and
     whose check target imports `Std` (about 440 entries, 3.3 MB, about 3 s). grail
     elaborates in-process, so even a `grail build` of a one-target package would
