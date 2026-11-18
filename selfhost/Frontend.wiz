@@ -1583,7 +1583,10 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
                 -- (stage 21n: a private declaration's kernel name, in the terms it is
                 -- built into)
                 let Tn := Globals.declName gs T;
-                let gs1 := Globals.add gs (.mk T us ty val valI .nil .nil);
+                -- (A9) the type's own parameters are named too (`L (A := Nat)`), with the
+                -- same binder kinds a definition's parameters use
+                let gs1 := Globals.add gs (.mk T us ty val valI
+                  (paramMask (kids (kid stx 3))) ps);
                 let Tc : Tm := .const Tn us (lvlArgs us) val ty;
                 -- (U2b) which fields the description lifted
                 let lifts := descLiftsAll (mkD ds);
