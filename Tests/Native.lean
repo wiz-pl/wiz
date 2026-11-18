@@ -803,7 +803,23 @@ def group : Group where
         -- cases above do that).
         let out ← IO.Process.output { cmd := "sh", args := #["Tests/trust-ledger/run.sh"] }
         unless out.exitCode == 0 do
-          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
+          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") },
+    { name := "the FFI audit: every extern's signature matches its C prototype (scripts/trust-ffi-audit.sh --check)", run := fun _ => do
+        -- (docs/trust-ledger.md, "The numeric/container FFI audit"; stage 22b/9.) The
+        -- ledger's `builtin extern:SYM:kinds:result` rows are only prose until this
+        -- script compiles a function pointer of the marshalled C signature against the
+        -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
+        -- this case nothing ran it — no test group and no CI job named it — so a
+        -- marshalling width that drifted from its C definition would have been silent.
+        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
+        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
+        -- not evidence (a pass here must have compiled the signatures).
+        let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
+        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
+          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        unless out.exitCode == 0 do
+          throw (IO.userError
+            s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat
