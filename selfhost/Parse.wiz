@@ -514,6 +514,11 @@ def surfaceCats (cats : List Cat) : List Cat :=
     (.seq (.atom "&&") (.cat "term" 35))) cats;
   let cats := addTrailingTo "term" (.mk "term.boolOr" 30 31 0
     (.seq (.atom "||") (.cat "term" 30))) cats;
+  -- (A17) `[a, b]`: the host gets this from lib/Prelude.wiz's
+  -- `syntax (name := listLit) "[" sepBy(term, ",") "]"`, which this frontend does not
+  -- process; the shape is the one that rule generates
+  let cats := addLeadingTo "term" (.mk "term.listLit" 1024 0
+    (.seq (.atom "[") (.seq (.sepBy (.cat "term" 0) "," .false) (.atom "]")))) cats;
   -- `if c then a else b`: the branches are `term`s, not application arguments, so a
   -- branch may start on the next line at the `if`'s column (Lean's syntax rule has the
   -- same shape; as an application it was only accepted when indented further)

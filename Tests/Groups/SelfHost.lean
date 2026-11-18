@@ -145,6 +145,16 @@ def selfhostCompileRun (file expected : String) (flags : Array String := #[]) (p
     unless run.exitCode == 0 do throw (IO.userError s!"the program failed ({run.exitCode}): {run.stderr}")
     checkEq expected run.stdout
 
+/-- (A17/A18) A program compiled and run by the Lean host and by the self-hosted compiler:
+their outputs must agree (the expected output is the host's, not a literal). The C is
+built at `-O0`: these are output differentials, and the program (with the prelude) is
+large enough that `-O2` only slows them down. -/
+def selfhostAgreesHost (file : String) : IO Unit := do
+  let cell ← IO.mkRef (none : Option String)
+  ioRunWith file fun out => cell.set (some out)
+  let some expected ← cell.get | return
+  selfhostCompileRun file expected (opt := "-O0")
+
 /-- (15j) Reads of a wide structure's fields for the self-hosted backend: every field
 (`sumW`), the root consumed before the last read through a prefix (`early`), the root's
 cell reused by a rebuild while fields read through the prefix are live (`upd`), reads in
@@ -262,6 +272,73 @@ reference counting, which also checks that every object was freed). -/
 def ffiAgrees (src expected : String) (gc : Bool := true) : IO Unit := do
   ioRun src expected
   if gc then selfhostCompileRun src expected
+  selfhostCompileRun src expected (flags := #["--rc"])
+
+/-- (25a, D1) The concurrency natives (`runtime/rt_con.inc`) on the self-hosted runtime:
+the same program forks a thread per element, sends its number over the channel (the
+parent closes its end once every child has finished), bumps a counter under a lock, and
+rendezvouses on an MVar; the Lean and the self-hosted runtimes print the same sum and
+count. The program declares the natives with `lib/MVar.wiz`'s and `lib/Session.wiz`'s
+types, minus the phantom indices and linear holes the self-hosted frontend cannot express
+yet (a type family `{A : Type} → MVar A → Type`); `MVar.take acc` passes no type argument
+(its implicit `A` is written in the extern's type, which the frontend now inserts at the
+use). It does not `recv` from the channel: a `do` bind whose value is a pair needs the
+self-hosted frontend to solve a metavariable applied to the local context, which it
+cannot yet (a P1 frontend gap). -/
+def concNatives : String :=
+  "import IO\n" ++
+  "axiom MVar : Type → Type\naxiom Lock : Type\naxiom Guard : Type\naxiom Chan : Type\n" ++
+  "extern \"wiz_mvar_new\" MVar.new : {0 A : Type} → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_new_full\" MVar.newFull : {0 A : Type} → (a : A) → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_take\" MVar.take : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_mvar_put\" MVar.put : {0 A : Type} → (m : MVar A) → (a : A) → IO Unit\n" ++
+  "extern \"wiz_mvar_read\" MVar.read : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_lock_new\" Lock.new : IO Lock\n" ++
+  "extern \"wiz_lock_acquire\" Lock.acquire : (l : Lock) → IO Guard\n" ++
+  "extern \"wiz_lock_release\" Lock.release : (l : Lock) → (g : Guard) → IO Unit\n" ++
+  "extern \"wiz_chan_fork\" Chan.fork : (child : (c : Chan) → IO Unit) → IO Chan\n" ++
+  "extern \"wiz_chan_send\" Chan.send : {0 A : Type} → (c : Chan) → (a : A) → IO Chan\n" ++
+  "extern \"wiz_chan_close\" Chan.close : (c : Chan) → IO Unit\n" ++
+  "def child (n : Nat) (acc : MVar Nat) (l : Lock) (done : MVar Nat) : (c : Chan) → IO Unit :=\n" ++
+  "  fun c => do\n" ++
+  "    g ← Lock.acquire l;\n" ++
+  "    x ← MVar.take acc;\n" ++
+  "    MVar.put (A := Nat) acc (x + 1);\n" ++
+  "    Lock.release l g;\n" ++
+  "    c' ← Chan.send (A := Nat) c n;\n" ++
+  "    Chan.close c';\n" ++
+  "    MVar.put (A := Nat) done n\n" ++
+  "def main : IO Unit := do\n" ++
+  "  acc ← MVar.newFull (A := Nat) 0;\n" ++
+  "  l ← Lock.new;\n" ++
+  "  done ← MVar.new (A := Nat);\n" ++
+  "  c1 ← Chan.fork (child 1 acc l done);\n" ++
+  "  c2 ← Chan.fork (child 2 acc l done);\n" ++
+  "  c3 ← Chan.fork (child 3 acc l done);\n" ++
+  "  c4 ← Chan.fork (child 4 acc l done);\n" ++
+  "  c5 ← Chan.fork (child 5 acc l done);\n" ++
+  "  c6 ← Chan.fork (child 6 acc l done);\n" ++
+  "  c7 ← Chan.fork (child 7 acc l done);\n" ++
+  "  c8 ← Chan.fork (child 8 acc l done);\n" ++
+  "  v1 ← MVar.take (A := Nat) done;\n" ++
+  "  v2 ← MVar.take (A := Nat) done;\n" ++
+  "  v3 ← MVar.take (A := Nat) done;\n" ++
+  "  v4 ← MVar.take (A := Nat) done;\n" ++
+  "  v5 ← MVar.take (A := Nat) done;\n" ++
+  "  v6 ← MVar.take (A := Nat) done;\n" ++
+  "  v7 ← MVar.take (A := Nat) done;\n" ++
+  "  v8 ← MVar.take (A := Nat) done;\n" ++
+  "  Chan.close c1;\n  Chan.close c2;\n  Chan.close c3;\n  Chan.close c4;\n" ++
+  "  Chan.close c5;\n  Chan.close c6;\n  Chan.close c7;\n  Chan.close c8;\n" ++
+  "  n ← MVar.take (A := Nat) acc;\n" ++
+  "  IO.println (Nat.toString (v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8));\n" ++
+  "  IO.println (Nat.toString n)\n"
+
+/-- The same program gives the same output in the Lean compiler and in the self-hosted
+one, in both memory modes (the `--rc` run also checks that every object was freed). -/
+def bothRuntimes (src expected : String) : IO Unit := do
+  ioRun src expected
+  selfhostCompileRun src expected
   selfhostCompileRun src expected (flags := #["--rc"])
 
 /-- (21l) Foreign functions: headers, prototypes, numbers, strings, `Bool`, `Unit`, `IO`. -/
@@ -1646,6 +1723,95 @@ def setOptionProgram : String :=
   "set_option pp.all 1\n" ++
   "set_option pp.other true\n" ++
   "set_option pp.notation false\n#print axioms f\n"
+-- ------------------------------------------------------------------------------------
+-- (A17/A18) Surface syntax: list literals, `&&`/`||`, as-patterns, tuple patterns,
+-- `let (x, y)`, `let ()`. The host and the self-hosted frontend compile each program,
+-- and their outputs must agree.
+
+/-- (A17) List literals, including nested and empty lists and a literal pattern. -/
+def surfaceListProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def sum : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + sum xs\n" ++
+  "def sum3 : List (List Nat) → Nat\n  | .nil => 0\n  | .cons l ls => sum l + sum3 ls\n" ++
+  "def two : List Nat → Nat\n  | [x, y] => x * 10 + y\n  | _ => 0\n" ++
+  "def mapS (f : Nat → Nat) : List Nat → List Nat\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapS f xs)\n" ++
+  "def empty : List Nat := []\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (sum [1, 2, 3, 4]));\n" ++
+  "  IO.println (Nat.toString (List.length empty));\n" ++
+  "  IO.println (Nat.toString (sum3 [[1, 2], [], [3, 4, 5]]));\n" ++
+  "  IO.println (Nat.toString (two [6, 7]));\n" ++
+  "  IO.println (Nat.toString (two [8]));\n" ++
+  "  IO.println (Nat.toString (sum (mapS (fun x => x + 1) [1, 2, 3])))\n"
+
+/-- (A17) `&&`/`||` short-circuit and bind as on the host (`!` too). -/
+def surfaceBoolProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "partial def boom : Bool := boom\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (if Bool.true && Bool.false then \"t\" else \"f\");\n" ++
+  "  IO.println (if Bool.false && boom then \"boom\" else \"short\");\n" ++
+  "  IO.println (if Bool.true || boom then \"short\" else \"boom\");\n" ++
+  "  IO.println (if !Bool.false then \"not\" else \"no\");\n" ++
+  "  IO.println (if Bool.true || Bool.false && Bool.false then \"prec\" else \"bad\");\n" ++
+  "  IO.println (if (Bool.false && boom) || Bool.true then \"mixed\" else \"no\");\n" ++
+  "  IO.println (Nat.toString (if Bool.true && Bool.true then 1 else 0))\n"
+
+/-- (A18) As-patterns: over a constructor in equations and in a `match`, in a tuple, and
+`x@y` over a variable. -/
+def surfaceAsProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "inductive T where\n  | leaf (n : Nat)\n  | node (l : T) (r : T)\n" ++
+  "def size : T → Nat\n  | .leaf _ => 1\n" ++
+  "  | t@(.node l r) => size l + size r + (match t with\n" ++
+  "      | .node _ _ => 0\n      | .leaf _ => 0)\n" ++
+  "def headOr (d : Nat) : List Nat → Nat\n" ++
+  "  | xs@(.cons x _) => x + (match xs with\n      | .cons y _ => y\n      | .nil => 0)\n" ++
+  "  | .nil => d\n" ++
+  "def sumP (p : Nat × Nat) : Nat := match p with\n  | (x@a, y@b) => x + y + a + b\n" ++
+  "def dup (n : Nat) : Nat := match n with\n  | k@_ => k + k\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (size (.node (.leaf 1) (.node (.leaf 2) (.leaf 3)))));\n" ++
+  "  IO.println (Nat.toString (headOr 0 (.cons 5 .nil)));\n" ++
+  "  IO.println (Nat.toString (headOr 9 .nil));\n" ++
+  "  IO.println (Nat.toString (sumP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (dup 6))\n"
+
+/-- (A18) Tuple patterns: a pair, a right-nested triple, a tuple rebuilt, and a tuple in
+a list. -/
+def surfaceTupleProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\n" ++
+  "def three : Nat × (Nat × Nat) → Nat\n  | (a, (b, c)) => a * 100 + b * 10 + c\n" ++
+  "def swap : Nat × Nat → Nat × Nat\n  | (a, b) => (b, a)\n" ++
+  "def head : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, _) _ => a\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (fstP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (match swap (5, 6) with\n    | (a, b) => a + b));\n" ++
+  "  IO.println (Nat.toString (head (.cons (7, 8) .nil)))\n"
+
+/-- (A18) `let (x, y) := e; b`, including three components and a nested pair. -/
+def surfaceLetPairProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def addP (p : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  x + y\n" ++
+  "def three (p : Nat × (Nat × Nat)) : Nat :=\n  let (a, b, c) := p;\n  a * 100 + b * 10 + c\n" ++
+  "def nested (p q : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  let (u, v) := q;\n  (x + y) * 10 + (u + v)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (addP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (nested (10, 20) (1, 2)))\n"
+
+/-- (A18) `let () := u; b` (the kernel's unit eliminator). -/
+def surfaceLetUnitProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def use (u : Unit) : Nat :=\n  let () := u;\n  7\n" ++
+  "def twice (n : Nat) : Nat :=\n  let () := ();\n  n + n\n" ++
+  "def through (u : Unit) (n : Nat) : Nat :=\n  let () := u;\n  n * 3\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (use ()));\n" ++
+  "  IO.println (Nat.toString (twice 21));\n" ++
+  "  IO.println (Nat.toString (through () 5))\n"
 
 def selfHostGroup : Group where
   name := "selfhost"
@@ -1945,6 +2111,8 @@ def selfHostGroup : Group where
           "14\n2\n0\n5\n3486784401\n8\n14\n6\n3145728\n125\n10\nset\n" },
     { name := "foreign functions: the Lean and the self-hosted compilers agree (21l)", run := fun _ =>
         ffiAgrees ffiProgram1 ffiExpected1 },
+    { name := "threads: the channel, MVar and lock natives agree in both runtimes (25a, D1)", run := fun _ =>
+        bothRuntimes concNatives "36\n8\n" },
     { name := "foreign pointers: the finalizer runs with the last reference, in both compilers (21l)", run := fun _ =>
         ffiAgrees (ffiProgramFin false) "line\nline\nline\n" (gc := false) },
     { name := "foreign pointers passed around and flushed, with either collector (21l)", run := fun _ =>
@@ -2862,6 +3030,19 @@ def selfHostGroup : Group where
     { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
         selfhostCompileRun ("import Prelude\npartial def boom : Bool := boom\ndef fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\ndef pairHead : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, b) _ => a\ndef main : IO Unit := do\n  IO.println (if Bool.true && Bool.false then \"and-t\" else \"and-f\");\n  IO.println (if Bool.false && boom then \"and-boom\" else \"and-short\");\n  IO.println (if Bool.true || boom then \"or-short\" else \"or-boom\");\n  IO.println (if !Bool.false then \"not-t\" else \"not-f\");\n  IO.println (if Bool.true || Bool.false && Bool.false then \"prec-ok\" else \"prec-bad\");\n  IO.println (Nat.toString (fstP (3, 4)));\n  IO.println (Nat.toString (pairHead (.cons (5, 6) .nil)))\n")
           "and-f\nand-short\nor-short\nnot-t\nprec-ok\n3\n5\n" },
+    -- (A17/A18) The host and the self-hosted compiler agree on the same program
+    { name := "A17: list literals (nested, empty, in a pattern) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceListProgram },
+    { name := "A17: `&&`/`||` short-circuit, bind as on the host and agree with it", run := fun _ =>
+        selfhostAgreesHost surfaceBoolProgram },
+    { name := "A18: as-patterns (in equations, nested, over a variable, in a tuple) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceAsProgram },
+    { name := "A18: tuple patterns (a pair, a nested triple, a tuple in a list) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceTupleProgram },
+    { name := "A18: `let (x, y)` (and three components, nested) agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetPairProgram },
+    { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetUnitProgram },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
