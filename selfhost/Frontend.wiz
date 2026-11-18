@@ -6884,23 +6884,29 @@ def classFieldErr : List Syntax → Option String
 def classCmd (gs : Globals) (stx : Syntax) : Step :=
   let T := identOf' (kid stx 1);
   let bs := kids (kid stx 3);
-  let fs := kids (kid stx 6);
-  match classFieldErr fs with
+  let exts := kids (kid stx 4);
+  let fs := kids (kid stx 8);
+  let unsupported := match exts with
+    | .cons _ _ => .some "a class's `extends` is not supported by the self-hosted frontend (A10 of docs/stages/30-selfhost-typeclasses.md)"
+    | .nil => .none;
+  match unsupported with
   | .some m => errStep gs m
-  | .none =>
-    let ps := fieldNames (fieldsOf bs);
-    let sTy := match ps with
-      | .nil => identStx T
-      | .cons _ _ => mkNode "term.app" (.cons (identStx T) (one (mkNull (strIdents ps))));
-    let ctor := mkNode "inductive.ctor" (.cons (.atom "|") (.cons (mkNull .nil) (.cons (.ident "mk") (.cons (mkNull (fieldBinders fs)) (one (mkNull .nil))))));
-    let ind := mkNode "command.inductive" (.cons (.atom "inductive") (.cons (kid stx 1) (.cons (kid stx 2) (.cons (kid stx 3)
-      (.cons (kid stx 4) (.cons (.atom "where") (.cons (mkNull (one ctor)) (one (.atom "structure")))))))));
-    let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
-    match defsSteps gs (.cons ind (instProjections T (kid stx 2) bs sTy pat fs)) with
-    -- (the class type former keeps its binders' kinds: an instance parameter of the
-    -- class is a class problem at every use, `MyCommute e₁ e₂ m`)
-    | .mk out gs' => .mk out (Globals.addClass (Globals.setMask (Globals.markStruct gs' T) T (paramMask bs))
-        T (.mk (classFieldNames fs)))
+  | .none => match classFieldErr fs with
+    | .some m => errStep gs m
+    | .none =>
+      let ps := fieldNames (fieldsOf bs);
+      let sTy := match ps with
+        | .nil => identStx T
+        | .cons _ _ => mkNode "term.app" (.cons (identStx T) (one (mkNull (strIdents ps))));
+      let ctor := mkNode "inductive.ctor" (.cons (.atom "|") (.cons (mkNull .nil) (.cons (.ident "mk") (.cons (mkNull (fieldBinders fs)) (one (mkNull .nil))))));
+      let ind := mkNode "command.inductive" (.cons (.atom "inductive") (.cons (kid stx 1) (.cons (kid stx 2) (.cons (kid stx 3)
+        (.cons (kid stx 5) (.cons (.atom "where") (.cons (mkNull (one ctor)) (one (.atom "structure")))))))));
+      let pat := mkNode "term.app" (.cons (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")))) (one (mkNull (fieldIdents fs))));
+      match defsSteps gs (.cons ind (instProjections T (kid stx 2) bs sTy pat fs)) with
+      -- (the class type former keeps its binders' kinds: an instance parameter of the
+      -- class is a class problem at every use, `MyCommute e₁ e₂ m`)
+      | .mk out gs' => .mk out (Globals.addClass (Globals.setMask (Globals.markStruct gs' T) T (paramMask bs))
+          T (.mk (classFieldNames fs)))
 
 -- (A10) Instances. `instance [priority] [name] {bs} : C a… := v` (or `where f := v …`) is
 -- an ordinary definition of the class type `C a…`: the dictionary. It is checked to be a

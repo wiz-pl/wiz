@@ -39,6 +39,10 @@ structure ClassInfo where
   name : Name
   outParams : List Bool
   fields : List Name
+  /-- (class-extends) the superclasses `extends D α`: the field that stores the
+  superclass dictionary (`toD`), and the class `D` it is for. The fields come first, in
+  `extends` order. -/
+  supers : List (Name × Name) := []
   /-- (7f) `attribute [binop] C.f`: an operator whose numeral operands take the type of its
   other operands (or of its result), as Lean's `binop%` (`HAdd`, not `HPow`) -/
   binop : Bool := false

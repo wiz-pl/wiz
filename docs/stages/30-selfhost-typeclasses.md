@@ -315,3 +315,51 @@ unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
 (`mutualInductiveCmd`); and the result universe of a data type whose field is itself
 `Type u` is not inferred. A generic instance's level is printed unnormalised
 (`Repr.{max(0, 0)} (List x0)`): the printer does not simplify it.
+
+## 30f: `extends` (host only)
+
+`class C (α) extends D α where f : F` declares `D α` as a **superclass**: `C`'s
+dictionary stores a `D` dictionary instead of `C`'s type taking one as a parameter.
+This is the host frontend's rule; the self-hosted frontend shares the grammar (so its
+parser accepts the form) and rejects it in `classCmd` with
+`a class's extends is not supported by the self-hosted frontend`.
+
+* **The class type.** `C`'s type keeps only the binders written before `extends`:
+  `C α : Type`. Forming `C α` does *not* require a `D α`; that is the point of the
+  feature. Before it, the only spelling was `class C (α) [i : D α]`, which makes every
+  use of `C α` insert an instance problem for `D α` — so a type that quantifies over a
+  variable `p` could not mention `Strong p` (see
+  `lib/Optic.wiz`'s consumer and `wiz-notes/reviews/2026-11-18-optics-profunctor.md`
+  §2.2).
+* **The dictionary.** One leading field per superclass, named `toD` (`Profunctor` →
+  `toProfunctor`), of type `D α`; then the class's own fields, in order. So
+  `C.mk : {α} → (toD : D α) → F → C α`, and `C.toD` is an ordinary class method (its
+  `self` binder is instance-implicit like every method's). An instance written with
+  `where` must supply the superclass field; omitting it is
+  `missing the superclass D (the field toD) in the instance for class C`.
+* **Instance lookup.** The dictionary is *stored*, not re-synthesised per use: the
+  `class` command also declares the global instance
+  `instCToD : {α} → [self : C α] → D α := C.toD`, registered like a user instance. So
+  ordinary resolution finds `D α` from a `C α` (local or global) and chains along
+  `extends` (`C extends B extends A`: `A.a` under `[i : C x]` resolves `C x → B x`, then
+  `B x → A x`). Nothing is cached beyond the dictionary itself, so it is shared, and
+  there is no new kernel term former: a class is a structure, a superclass is a field,
+  and the generated instance is a projection applied to `self`.
+* **What is printed.** Wiz has no `#print <decl>` (only `#print axioms`). The printed
+  evidence is `#check C` (the type former, with no superclass parameter),
+  `#check C.mk` (the superclass is the first field), `#check C.toD`, and
+  `#check instCToD`.
+* **Boundaries.** One superclass: the grammar takes a comma-separated list, but the
+  elaborator rejects a second one (`a class can extend one superclass (multiple
+  inheritance is not implemented)`) because a diamond would need a coherence rule and
+  the host has no duplicate-instance check to fall back on. A class that also declares
+  its own instance parameters keeps them in the type former (30a), so both spellings
+  coexist; `extends` is the one to prefer. `deriving` of a class with a superclass is
+  not special-cased (the derivers emit `C.mk` in field order, so they must pass the
+  superclass dictionary first).
+
+Tests (`=classes`, the host group): `Profunctor`/`Strong` with `Strong p` as a
+constraint in a `Type 1` lens (no `[Profunctor p]` threaded), `dimap` used under only
+`[i : Strong p]`, the printed `#check`s, the chained `C extends B extends A` case, a
+missing superclass field, and the negative that a bare variable `p` still has no
+`Profunctor p` (the implication works only when a `C p` dictionary is in scope).

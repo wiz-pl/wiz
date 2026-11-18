@@ -22,7 +22,8 @@ punctuation that nothing reads. `[]`: the kind has no named children (yet). -/
 def childNames : Name → List Name
   | "command.inductive" => ["_", "name", "univParams", "binders", "sig", "_", "ctors", "deriving"]
   | "command.structure" => ["_", "name", "univParams", "binders", "sig", "where", "fields", "deriving"]
-  | "command.class" | "command.coinductive" => ["_", "name", "univParams", "binders", "sig", "_", "fields"]
+  | "command.class" => ["_", "name", "univParams", "binders", "extends", "sig", "_", "fields"]
+  | "command.coinductive" => ["_", "name", "univParams", "binders", "sig", "_", "fields"]
   | "inductive.ctor" => ["_", "private", "name", "binders", "sig"]
   | "structure.field" => ["private", "quantity", "name", "_", "type"]
   | "structure.where" => ["_", "ctor"]
