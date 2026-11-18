@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
+  `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
+  `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
+  Wasm exports are `wiz_loom_init`/`wiz_loom_html`/`wiz_loom_step`. There is **no
+  compatibility alias**: the framework has not appeared in a tagged release, so
+  imports and the documented `React.*` names change with the rename. `Web.Widget`,
+  `web/framework`, the Jupyter widget front end, examples and docs use the new
+  names (11s, `docs/libraries.md`).
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal

@@ -75,7 +75,7 @@
     "=native",
     "=natives",
     "=nvim",
-    "=react",
+    "=loom",
     "optic",
     "persistent",
     "phantom",

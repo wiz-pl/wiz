@@ -151,7 +151,7 @@ The reviewed base falls into these groups:
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
 * **Mutual recursion and `partial`, 182 rows.** The rows come from `Feral` (70: 67
-  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.React` (14), the `Scry` modules
+  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.Loom` (14), the `Scry` modules
   (49), `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`), `SatTactic` (7),
   `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3), `Prelude` (3),
   `Ring` (2) and `IO` (1). Wiz's kernel treats a `partial`
