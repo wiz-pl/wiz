@@ -159,40 +159,21 @@ wiz build Main.wiz -o hello && ./hello
 ```
 
 A **grail package** is a directory with a `grail.wiz`, which is itself a Wiz program:
-`package` lists the targets. There is no `grail new` yet; the files are short:
+`package` lists the targets. `grail new NAME [--dir DIR]` writes the smallest package
+(`grail.wiz`, `src/Main.wiz`, `tests/hello.wiz`, `README.md`, `.gitignore`) into
+`./NAME`, or `DIR/NAME` with `--dir`:
 
 ```sh
-mkdir -p src tests
-echo nightly > wiz-toolchain                  # optional: the toolchain of this project
-cat > src/Greet.wiz <<'EOF'
-import Prelude
-def greeting : String := "hello from grail"
-EOF
-cat > App.wiz <<'EOF'
-import IO
-import Greet
-def main : IO Unit := IO.println greeting
-EOF
-cat > tests/greet.wiz <<'EOF'
-import Greet
-#eval greeting
-EOF
-cat > grail.wiz <<'EOF'
-import Grail
-def package : Package := Package.new "hello"
-  |> Package.lib "greet" "src"           -- every module under src/ (import Greet)
-  |> Package.exe "app" "App.wiz"         -- compile main: .grail/bin/app
-  |> Package.tests "tests" "tests"       -- each tests/*.wiz against its .expected
-EOF
-grail build               # 6 jobs run
-grail run app             # hello from grail
-grail test --update       # writes tests/greet.expected: the messages of the file
+grail new hello
+cd hello
+grail build               # the library, the executable and the test's program
+grail run hello           # hello from hello
 grail test                # 1 passed, 0 failed
 ```
 
 `grail build` again runs nothing: every job is keyed by its inputs. `grail targets`
-lists the targets, and `grail config` prints the C toolchain grail uses. Add `.grail/` to
-your `.gitignore`.
+lists the targets, and `grail config` prints the C toolchain grail uses. `grail new`
+already puts `.grail/` in the package's `.gitignore`.
 
 ### Dependencies
 

@@ -32,9 +32,7 @@ def reprAll (src expected : String) (unbox : Bool := false) (libs : Bool := fals
     let dir ← IO.FS.createTempDir
     match ← Build.runGlobal (← toolchain) s "main" dir llvm with
     | .ok v => checkEq expected v
-    | .error e =>
-      let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-      if missing then skip "no toolchain" else throw (IO.userError e)
+    | .error e => failRun e
 
 /-- The audit's probe: a hand-written Σ of a structure's shape, converted both ways. -/
 def r3Marker : String := "import Prelude

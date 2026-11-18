@@ -38,10 +38,10 @@ self-hosted runner executes that pull request's code on the machine. So:
   it checks `MemAvailable` before the run and fails clearly on a smaller
   runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
   and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
-  to all but two CPUs).
-* **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. Use Nix 2.19
-  or later: the workflow's `nix shell --inputs-from .` and `nix build --inputs-from .`
-  take `nixpkgs` from `flake.lock`, not the global registry. The workflow
+  to all but two CPUs). The nightly compiler reproducibility check
+  (`.github/workflows/repro.yml`, two `lake build wiz grail` runs under two absolute
+  roots) needs **5 GiB free** and checks `MemAvailable` the same way.
+* **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means
   the image already has the dev shell's packages.
@@ -222,7 +222,8 @@ untrusted.**
 `wiz-pl` must **not** be added to `trusted-public-keys` anywhere: no `nix.conf`, no
 image, no docs/tower instruction. The shards' `cachix-action` adds its key per job, and
 that is the only place it belongs. Two independent properties keep a PR away from the
-trusted cache: the workflow gives a PR no `CACHIX_AUTH_TOKEN`, and
+trusted cache: a PR's push steps get no `CACHIX_AUTH_TOKEN` (the setup action's
+`cachix-token` is for substitution only, `skipPush: true`, and never writes), and
 `CACHIX_PR_AUTH_TOKEN` has **Read** (not Write) on `badlydrawnwizards`, so even a
 mistake in the workflow cannot push to the trusted cache with it.
 

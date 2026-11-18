@@ -22,6 +22,9 @@ permissions:
   actions: read
 
 concurrency:
+  # One report per failed run (its id in the group): a re-run of the *same* run would
+  # only replace its own comment, so cancelling it is safe. Two different runs never
+  # share a group and never cancel each other.
   group: golden-diff-${{ github.event.workflow_run.id }}
   cancel-in-progress: true
 
@@ -39,6 +42,7 @@ jobs:
     name: did a test shard fail?
     if: github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
+    # 5 min: one API call
     timeout-minutes: 5
     permissions:
       actions: read
@@ -64,12 +68,14 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.tests-failed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 75 min: build grail, then up to 12 failing cases at the 300 s cap each (60 min) plus
+    # the diff engine's own work
+    timeout-minutes: 75
     permissions:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # The failing commit, not the default branch: this is the tree whose output the
           # diff must reproduce. `persist-credentials: false`: the read-only token is not
@@ -78,7 +84,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
       - name: The failing run's test logs
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           pattern: test-log-*
           path: logs
@@ -123,7 +129,7 @@ jobs:
               --out golden-diff.md --comment-out golden-diff-comment.md "${logs[@]}"
           fi
           cat golden-diff.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && hashFiles('golden-diff.md') != ''
         with:
           name: golden-diff
@@ -140,13 +146,14 @@ jobs:
     # summary (the diff job did that).
     if: needs.diff.result == 'success' && github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    # 5 min: one or two API calls
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
       pull-requests: write
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: golden-diff
           path: report

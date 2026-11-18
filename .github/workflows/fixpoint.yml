@@ -35,6 +35,8 @@ permissions:
   contents: read
 
 concurrency:
+  # One run at a time and never cancelled: each run checks a different master commit, so
+  # a newer run does not supersede an older one (and the job is too long to lose).
   group: fixpoint
   cancel-in-progress: false
 
@@ -53,6 +55,7 @@ jobs:
   preflight:
     name: preflight
     runs-on: ubuntu-latest
+    # 5 min: read one repository variable
     timeout-minutes: 5
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -76,9 +79,10 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.run == 'true'
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 240 min: up to four self-compiles at ~5.4 GiB peak
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -95,7 +99,7 @@ jobs:
             exit 1
           fi
       - name: Cache the Lake build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .lake
           key: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'selfhost/*.wiz', 'lib/*.wiz') }}
@@ -121,7 +125,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the C files of a failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fixpoint-artifacts
           path: |

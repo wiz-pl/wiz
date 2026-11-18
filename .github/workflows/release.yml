@@ -45,13 +45,21 @@ on:
         default: ""
 
 concurrency:
-  # a newer master push cancels an older one (which then never moves nightly back);
-  # a dispatched snapshot runs alongside
-  group: release-${{ github.ref }}-${{ inputs.commit }}
-  cancel-in-progress: true
+  # One group per commit: every master commit gets a snapshot-<sha> (docs/release.md,
+  # "Snapshots"), so a newer push must never cancel an older run — a cancelled run
+  # leaves that commit permanently unpinnable and makes nightly.yml wait 3600 s for a
+  # snapshot that will not appear (review ci-04). A pull request only builds the
+  # tarball, where a superseded run is genuinely useless, so it still cancels.
+  # Grouping by sha (not only ref) also keeps GitHub from replacing a *pending* master
+  # run with a newer one, which would lose that commit's snapshot too.
+  group: release-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}-${{ inputs.commit }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege: the exercises job only reads. The tarball job publishes releases
+# (tags, snapshots, the bundle-inputs mirror), so it asks for write itself; on a pull
+# request every publish step is skipped.
 permissions:
-  contents: write # creating releases and uploading assets
+  contents: read
 
 jobs:
   # The exercise tree, generated from this one (docs/exercises.md): it must build, checked
@@ -63,6 +71,7 @@ jobs:
     name: exercise tree
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # 60 min: generate the exercise tree and Lake-build wiz, grail and tests
     timeout-minutes: 60
     permissions:
       contents: read
@@ -70,14 +79,14 @@ jobs:
       run:
         shell: nix develop --command bash -eo pipefail {0}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: badlydrawnwizards
       - name: Generate the exercise tree
         run: python3 scripts/mkexercises.py . "$RUNNER_TEMP/exercises"
       - name: Cache its Lake build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/exercises/.lake
           key: exercises-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.*', '**/*.lean') }}
@@ -92,21 +101,27 @@ jobs:
 
   tarball:
     name: release tarball (x86_64-linux)
-    # after the exercise tree for a tag; without one (master, PRs, dispatch) it is skipped
+    # A tag publishes only when the exercise tree built: for a tag the exercise job is
+    # not optional, so a skip is a failure, not a pass. Without one (master, PRs,
+    # dispatch) the job is skipped by its own `if` and the tarball still runs.
     needs: exercises
-    if: ${{ !cancelled() && (needs.exercises.result == 'success' || needs.exercises.result == 'skipped') }}
+    if: ${{ !cancelled() && (needs.exercises.result == 'success' || (needs.exercises.result == 'skipped' && !startsWith(github.ref, 'refs/tags/v'))) }}
     runs-on: ubuntu-latest
+    # 90 min: a cold Lake build plus the cc bundle, the two Wasm builds, the tarball's
+    # three-container smoke test and (on a tag/master) the publish steps.
     timeout-minutes: 90
+    permissions:
+      contents: write # gh release create/upload/delete: the tag, snapshot and mirror publishes
     env:
       LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
       # the commit built: the pushed one, or the dispatched `commit`
       OLD_COMMIT: ${{ inputs.commit }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit || github.sha }}
       # this workflow's own scripts (a dispatched old commit may predate them)
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           path: .release-tools
           sparse-checkout: scripts
@@ -121,25 +136,21 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$OLD_COMMIT" ] || { echo "commit: give the full 40-hex sha"; exit 1; }
           st=$(gh api "repos/${{ github.repository }}/compare/$OLD_COMMIT...master" --jq .status)
           case $st in ahead|identical) ;; *) echo "$OLD_COMMIT is not on master ($st)"; exit 1 ;; esac
-      # elan, from the official x86_64-linux release asset, pinned by version and sha256
-      # (no installer script is fetched from a branch). Do not use nixpkgs' elan here:
-      # its patch rewrites the downloaded toolchain's cc/leanc to Nix's gcc wrapper, and
-      # the C_INCLUDE_PATH below then feeds gcc clang's __stddef_* headers ("missing
-      # binary operator before token '('"). The official toolchain has no bin/cc: lake
-      # compiles C through the clang-based leanc, which is what this job needs.
-      - name: elan (official release, hash-pinned)
+      - name: elan
+        # Pinned to the elan v4.3.0 commit, not `master`, and checked by hash: this
+        # script is fetched over the network and run with `sh` (deps-02/03). To bump it,
+        # resolve the new release tag to a commit, update both lines and the digest.
         env:
-          ELAN_VERSION: v4.2.4
-          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+          ELAN_INIT_SHA256: a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/elan.tar.gz" \
-            "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz"
-          echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/elan-init" -y --default-toolchain none
+          curl -sSfL -o elan-init.sh \
+            https://raw.githubusercontent.com/leanprover/elan/84d03798dd00e4f887183add4b577dac8ceebdcd/elan-init.sh
+          echo "$ELAN_INIT_SHA256  elan-init.sh" | sha256sum -c -
+          sh elan-init.sh -y --default-toolchain none
+          rm -f elan-init.sh
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Cache the Lake build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .lake
           key: release-lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}
@@ -193,13 +204,13 @@ jobs:
       # needs no outside server; master also copies them to the release bundle-inputs
       - name: Cache the bundle's downloads
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: bundle-downloads
           key: bundle-inputs-${{ hashFiles('.release-tools/scripts/bundle-cc.sources') }}
       - name: Cache the bundled C toolchain
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: cc-bundle
           key: release-cc-${{ runner.os }}-${{ hashFiles('lean-toolchain', '.release-tools/scripts/bundle-cc.sh', '.release-tools/scripts/bundle-cc.sources') }}
@@ -344,7 +355,7 @@ jobs:
             [ -f "$f" ] || continue
             echo "$have" | grep -qxF "$(basename "$f")" || gh release upload bundle-inputs $r "$f"
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wiz-x86_64-linux
           path: dist/
