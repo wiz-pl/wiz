@@ -207,10 +207,10 @@ untrusted.**
   the image's `nix.conf` and in the docs/tower instructions
   (`cachix use badlydrawnwizards`).
 * A pull request publishes only to the PR cache `wiz-pl` (repository variable
-  `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's shards
-  add that cache as an extra substituter for that job only, so its key is trusted in
-  that job and nowhere else; master, the docs job and tower never add it as a
-  substituter.
+  `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
+  shards, trust-ledger and web jobs add that cache as an extra substituter for that job
+  only, so its key is trusted in that job and nowhere else; master, the docs job and
+  tower never add it as a substituter.
 * If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
   the step prints "the store paths are not published" and continues, and the shards
   build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.

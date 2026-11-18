@@ -680,8 +680,10 @@ nothing and its shards build the paths. A merge-queue run publishes nothing eith
 its shards build too. The `docs` job builds `.#reference` (the standard library's
 reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
-only (`skipPush: true`); a PR's shards also add the PR cache as an extra substituter
-for that job only. No job on the critical path runs `lake build` directly or saves a
+only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
+the jobs that substitute this commit's store paths (the test shards, `trust-ledger` and
+`web`) also add the PR cache as an extra substituter for that job only. No job on the
+critical path runs `lake build` directly or saves a
 `.lake` Actions cache. The shards run the Nix-built test driver (`packages.tests`), not
 `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
