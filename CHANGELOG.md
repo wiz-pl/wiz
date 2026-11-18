@@ -118,6 +118,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `@file`, `-Xclang` or `-cc1` no longer executes code through `scry_project`, whose
   tools are `readOnlyHint: true`. `Scry.parseCompdbFlags` and the scry-mcp bridge check
   the same list (security-01).
+* runtime, tests: the `Proc.runLinked` case is now really differential. `Chan.forks`
+  reads a new native counter (`wiz_chan_forks`, the threads `Chan.fork` started), and the
+  compiled case prints `45150 forks 1`: removing `implemented_by` leaves the result and
+  prints `0`, so the case fails. Both channel layers' differential claim is in the
+  docstrings and 25c. The one-thread build (`WIZ_NO_THREADS`, 25k) is exercised further:
+  the `conc` group adds abort cases for a full MVar and a held lock, and
+  `scripts/test-runtime.sh` links it with stub pthreads (`-Wl,--wrap=`, no pthread
+  symbols), runs a channel program that sends before receiving, checks the empty
+  channel and full MVar / held lock stops, and compiles the header's Emscripten
+  auto-enable's translation unit (there is no `emcc` build; 25k).
 * trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
   per block (compiled-only general recursion, an inhabited witness at 22f, no
   termination claim, and the de-mutualisation or measure that would remove the row), and

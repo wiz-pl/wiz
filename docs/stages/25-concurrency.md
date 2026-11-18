@@ -138,8 +138,12 @@ channel, `link` is the claim as a total program.
 **Pure model vs threads.** `Proc.run p proc c` runs a pure process over a real endpoint,
 and `Proc.runLinked p a b : IO (A × B)` is `IO.pure (link p a b)` for the kernel, `#eval`
 and `#run`, but `implemented_by` threads in compiled code (the peer in a new thread, its
-result back through an MVar). A compiled program printing it is a differential test of the
-natives against the pure semantics (`conc` group). A model of the whole `Chan` API (a
+result back through an MVar). The model starts no thread and the native `wiz_chan_forks`
+counts the threads `Chan.fork` started, exposed as `Chan.forks : IO Nat`; a compiled
+program that prints the result *and* the fork count is a differential test of the natives
+against the pure semantics: it must print the same value with `1` fork, and dropping the
+`implemented_by` attribute prints it with `0` and fails the `conc` case. (A result alone
+would not: both sides evaluate the same pure `link`.) A model of the whole `Chan` API (a
 deterministic scheduler) needs one-shot linear continuations (plan C5, `LEff`).
 
 **Sequencing and current workarounds.** Linear steps sequence with `do1` or `IO.bind`
@@ -195,3 +199,38 @@ differential test; structured scopes (C4); a concurrency effect with a pure sche
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
 proof (C7); `selfhost/rt.c` threads.
+
+## 25k: the one-thread build (`WIZ_NO_THREADS`)
+
+The WebAssembly pages (the playground and the self-hosted frontend's build) have no
+`-pthread`, so they compile the runtime with `WIZ_NO_THREADS` (`web/build.sh`,
+`web/build-playground.sh`; `runtime/wiz_rt.h` also turns it on by itself for Emscripten
+without `__EMSCRIPTEN_PTHREADS__`). It is a build with **one thread because the first
+thing that needs a second thread stops**, not a scheduler:
+
+* `wiz_mark_mt` does nothing, so nothing ever becomes shared: counts stay positive and
+  every count operation is plain arithmetic (`WIZ_RC` is a read).
+* `wiz_run_main` runs `main` on the calling thread, and `wiz_thunk_lock`/`wiz_caf_init`
+  have no lock and no atomics (nothing can race).
+* `Chan.fork` and every wait only another thread could end — taking from an empty MVar,
+  reading one, putting into a full one, acquiring a held `Lock`, receiving on an empty
+  channel — prints `wiz: <what>: threads are not available in this build
+  (WIZ_NO_THREADS)` and exits 3 instead of hanging. Sending never blocks, so a message
+  queued before its receive goes through on one thread.
+
+The `conc` group runs the compiled cases with `-DWIZ_NO_THREADS` as well: an MVar/lock
+program that never waits prints its result, and `Chan.fork`, taking from an empty MVar,
+putting into a full one and re-acquiring a held lock each stop with their message.
+`scripts/test-runtime.sh` links the one-thread runtime **with stub pthreads** (every
+pthread entry point the runtime names is redirected with `-Wl,--wrap=` to a no-op, and
+`pthread_create` exits 99 if it is ever reached), checks that the binary has no pthread
+symbols, and runs a channel program that sends before receiving, plus the abort paths
+above. `scripts/test-runtime.sh` also compiles the header's `__EMSCRIPTEN__`
+auto-enable's translation unit with `-D__EMSCRIPTEN__` (the macro must be on, and off
+with `__EMSCRIPTEN_PTHREADS__`), but there is no `emcc` or Emscripten sysroot here, so
+no real Emscripten build is checked.
+
+Not covered: the one-thread build is not a concurrency model. `Chan.fork` stops there,
+so no Wiz-level program can create a channel or a second thread; the channel program in
+`scripts/test-runtime.sh` makes one with both ends in the same thread, through the
+native API. Neither the script nor the `conc` group runs a WebAssembly build.

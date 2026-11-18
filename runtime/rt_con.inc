@@ -60,6 +60,9 @@ static pthread_mutex_t wiz_threads_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wiz_threads_cv = PTHREAD_COND_INITIALIZER;
 static int64_t wiz_threads_running = 0;
 static int64_t wiz_live_exited = 0;
+/* how many threads `Chan.fork` has started (monotone; `Chan.forks` reads it): an
+   observable the pure model does not have, so the `Proc.runLinked` case is differential */
+static int64_t wiz_threads_started = 0;
 
 typedef struct { wiz_val fn; wiz_val arg; } wiz_spawn_args;
 
@@ -94,10 +97,20 @@ static void wiz_spawn(wiz_val fn, wiz_val arg) {
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   pthread_mutex_lock(&wiz_threads_mu);
   wiz_threads_running++;
+  wiz_threads_started++;
   pthread_mutex_unlock(&wiz_threads_mu);
   pthread_t t;
   if (pthread_create(&t, &attr, wiz_thread_main, a) != 0) wiz_panic("can't start a thread");
   pthread_attr_destroy(&attr);
+}
+
+/* `Chan.forks`: how many threads `Chan.fork` has started in this program. The pure model
+   (`link`) starts none, so a compiled program can check that the native channel path ran. */
+WIZ_API uint64_t wiz_chan_forks(void) {
+  pthread_mutex_lock(&wiz_threads_mu);
+  uint64_t n = (uint64_t)wiz_threads_started;
+  pthread_mutex_unlock(&wiz_threads_mu);
+  return n;
 }
 
 static void wiz_wait_threads(void) {
