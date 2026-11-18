@@ -39,7 +39,9 @@ self-hosted runner executes that pull request's code on the machine. So:
   and fails clearly on a smaller
   runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
   and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
-  to all but two CPUs).
+  to all but two CPUs). The nightly compiler reproducibility check
+  (`.github/workflows/repro.yml`, two `lake build wiz grail` runs under two absolute
+  roots) needs **5 GiB free** and checks `MemAvailable` the same way.
 * **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means

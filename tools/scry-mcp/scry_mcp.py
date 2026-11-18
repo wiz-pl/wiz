@@ -6,13 +6,16 @@ confinement and environment filtering by importing it). Every tool is read-only
 with respect to the workspace:
 
 * `scry_taint` analyses one C file (`scry taint FILE --json --sarif …`), with an
-  optional `diff` filter (the bridge runs `git diff` itself, without external diff
-  drivers, and hands Scry the saved diff).
+  optional `diff` filter (the bridge runs `git diff` itself, with every config
+  hook and external driver pinned off, and hands Scry the saved diff).
 * `scry_project` analyses a compile_commands.json project (`scry project DIR
   --taint --json --sarif …`). It runs the host preprocessor (`cc -E`) on the
-  project's files; Scry keeps only `-I`/`-D`/`-U`/`-include`/`-isystem` from the
-  database, and the bridge refuses a database whose files, directories or
-  include paths leave the readable roots.
+  project's files. The database's flags are checked against an explicit allowlist
+  first: `-I`/`-isystem`/`-iquote`/`-idirafter`/`-include` (their paths must stay
+  inside the readable roots), `-D`/`-U` and `-std=`; the driver's `-c`/`-o`/`-M…`
+  structure is dropped, and any other flag (`-B<dir>`, `-fplugin=`, `-specs=`,
+  `-wrapper`, `@file`, `-Xclang`, `-cc1`, …) is refused by name. That is what
+  keeps a repository-supplied database from choosing which program `cc` runs.
 * `scry_query`, `scry_explain` and `scry_facts` read a JSON fact store.
 * `scry_findings` lists or shows the findings database (`scry findings
   list|show`); it never scans, triages, reproduces or verifies.
@@ -82,12 +85,23 @@ SERVER_VERSION = "1.0.0"
 DEFAULT_TIMEOUT = 300.0
 #: Reports kept as resources (the oldest go first).
 MAX_RUNS = 20
+#: A compile database larger than this is refused before it is parsed (the read
+#: happens in the parent, where the child's timeout cannot bound it).
+MAX_COMPDB_BYTES = 64 * 1024 * 1024
+#: And a database with more entries than this.
+MAX_COMPDB_ENTRIES = 100_000
+#: A report/SARIF served through `resources/read` larger than this.
+MAX_RESOURCE_BYTES = 64 * 1024 * 1024
+#: A findings database parsed by the bridge for `findings show`.
+MAX_FINDINGS_BYTES = 64 * 1024 * 1024
 #: Include directories a compile database may name besides the readable roots.
-SYSTEM_INCLUDE_PREFIXES = ("/usr/include", "/usr/local/include", "/nix/store")
+SYSTEM_INCLUDE_DIRS = ("/usr/include", "/usr/local/include", "/nix/store")
 #: A `diff` base: a ref, a commit or `HEAD~2`-style; never an option.
 DIFF_BASE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/@^~{}-]*$")
 FINDING_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 FINDING_STATES = ("new", "triaged", "confirmed", "false-positive", "fixed")
+#: An absolute path token in a diagnostic line (cc's stderr names headers).
+PATH_TOKEN = re.compile(r"(?<![\w.-])(/[^\s:'\",;()<>]+)")
 
 INSTRUCTIONS = (
     "Scry static analysis for this workspace, read-only. scry_taint analyses one C file and "
@@ -124,14 +138,19 @@ def _is_executable(path: str) -> bool:
 
 
 def resolve_scry(workspace: str, scry: Optional[str]) -> Optional[str]:
-    """`--scry`, `$SCRY_BIN`, the workspace's own build (`scry/.grail/bin/scry`), or PATH."""
+    """`--scry`, `$SCRY_BIN`, or PATH: never a binary inside the workspace.
+
+    The workspace is the tree under review, so executing a program from it would
+    turn a read-only tool call into repo-controlled code execution. A build in
+    `scry/.grail/bin/scry` is therefore not found automatically; pass `--scry` or
+    set `$SCRY_BIN` to it explicitly.
+    """
     candidates = []
     if scry:
         candidates.append(scry if os.path.isabs(scry) or os.sep not in scry else os.path.join(workspace, scry))
     else:
         if os.environ.get("SCRY_BIN"):
             candidates.append(os.environ["SCRY_BIN"])
-        candidates.append(os.path.join(workspace, "scry", ".grail", "bin", "scry"))
         candidates.append("scry")
     for candidate in candidates:
         if os.sep not in candidate:
@@ -193,6 +212,131 @@ def _finding_paths(finding: dict[str, Any], root: Optional[str]) -> list[str]:
     return paths
 
 
+def _as_path(value: Any, root: Optional[str] = None) -> Optional[str]:
+    """A path named by a report/database value; None for a bare relative name."""
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith("file:"):
+        value = base.uri_to_path(value) or ""
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        if not root:
+            return None
+        value = os.path.join(root, value)
+    return value
+
+
+def _is_outside(value: Any, roots: list[str], root: Optional[str] = None) -> bool:
+    path = _as_path(value, root)
+    if path is None:
+        return False
+    try:
+        return not base._allowed(path, roots)
+    except (OSError, ValueError):
+        return True
+
+
+def _names_outside(text: str, roots: list[str]) -> bool:
+    """True when a diagnostic line names an absolute path outside `roots`."""
+    for match in PATH_TOKEN.finditer(text):
+        if _is_outside(match.group(1), roots):
+            return True
+    return False
+
+
+def _record_sources(record: dict[str, Any]) -> list[str]:
+    """The paths a findings record names for the finding itself."""
+    out = []
+    finding = record.get("finding")
+    for value in (record.get("source"), finding.get("source") if isinstance(finding, dict) else None):
+        if isinstance(value, str) and value:
+            out.append(value)
+    return out
+
+
+def _confine_environment(environment: Any, roots: list[str]) -> None:
+    """Replace the host facts `findings show` records with a marker.
+
+    `cwd` is the private run directory, `uname` is the host kernel and
+    `tool.binary` is the executable's path; none is a workspace path.
+    """
+    if not isinstance(environment, dict):
+        return
+    for key in ("cwd", "uname"):
+        if key in environment:
+            environment[key] = "(withheld)"
+    tool = environment.get("tool")
+    if isinstance(tool, dict):
+        binary = tool.get("binary")
+        if isinstance(binary, dict):
+            binary["path"] = "(withheld)"
+        elif isinstance(binary, str):
+            tool["binary"] = "(withheld)"
+
+
+def _wf_join(directory: str, rel: str) -> str:
+    """Scry's `Path.join`: plain concatenation, not `os.path.join`."""
+    return directory + "/" + rel
+
+
+def _evidence_target(run_dir: str, artifacts: str, rel: str) -> str:
+    """The path Scry will read for one evidence name (its cwd is `run_dir`)."""
+    joined = _wf_join(artifacts, rel)
+    return joined if os.path.isabs(joined) else os.path.join(run_dir, joined)
+
+
+def sanitise_record(record: dict[str, Any], roots: list[str], run_dir: str) -> dict[str, Any]:
+    """A copy of a findings record whose evidence Scry can only read from `roots`.
+
+    `wfRootBundle` reads `artifacts + "/" + {static,dynamic,verify}` and
+    `artifacts + "/repro.json"`; `artifacts` may be absolute or relative to
+    Scry's cwd (the private run dir). If any of those targets leaves `roots`,
+    point `artifacts` at an empty directory inside the run dir and drop the
+    relative names: Scry then finds nothing and returns `null` for every payload
+    instead of reading outside.
+    """
+    clean = dict(record)
+    artifacts = clean.get("artifacts") if isinstance(clean.get("artifacts"), str) else ""
+    names = ["repro.json"] + [clean[key] for key in ("static", "dynamic", "verify")
+                              if isinstance(clean.get(key), str)]
+    if any(_is_outside(_evidence_target(run_dir, artifacts, name), roots) for name in names):
+        clean["artifacts"] = os.path.join(run_dir, "artifacts")
+        for key in ("static", "dynamic", "verify"):
+            clean.pop(key, None)
+    return clean
+
+
+def load_finding_record(path: str, finding_id: str, roots: list[str], run_dir: str) -> dict[str, Any]:
+    """The one record `findings show` will show, sanitised for `roots`.
+
+    The bridge parses the database itself and hands Scry a store containing only
+    this record, so the record Scry reads is exactly the one validated here (a
+    crafted `artifacts`/`static` cannot slip past in a second parse).
+    """
+    try:
+        size = os.stat(path).st_size
+    except OSError as exc:
+        raise ToolError("not_found", f"cannot read the findings database {path}: {exc}") from exc
+    if size > MAX_FINDINGS_BYTES:
+        raise ToolError("invalid_args",
+                        f"the findings database {path} is {size} bytes; the limit is {MAX_FINDINGS_BYTES}")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ToolError("invalid_args", f"cannot read the findings database {path}: {exc}") from exc
+    if not isinstance(store, dict) or store.get("schema") != "scry-workflow-store/1":
+        raise ToolError("invalid_args", f"{path} is not a scry-workflow-store/1 findings database")
+    records = store.get("findings")
+    if not isinstance(records, list):
+        raise ToolError("invalid_args", f"{path}: `findings` must be an array")
+    for record in records:
+        if isinstance(record, dict) and record.get("id") == finding_id:
+            return sanitise_record(record, roots, run_dir)
+    return {}
+
+
 def confine_findings(report: Any, roots: list[str], root: Optional[str] = None) -> int:
     """Drop findings outside `roots` from a Scry JSON report, in place; the count dropped."""
     withheld = 0
@@ -222,6 +366,21 @@ def confine_findings(report: Any, roots: list[str], root: Optional[str] = None) 
                         entry["file"] = "(withheld)"
                     else:
                         withheld += confine_findings(entry, roots, root)
+        # A skipped translation unit names the file and cc's stderr, which names
+        # any outside header the file included.
+        skipped = report.get("skipped")
+        if isinstance(skipped, list):
+            for entry in skipped:
+                if not isinstance(entry, dict):
+                    continue
+                if _is_outside(entry.get("file"), roots, root):
+                    entry["file"] = "(withheld)"
+                reason = entry.get("reason")
+                if isinstance(reason, str) and _names_outside(reason, roots):
+                    entry["reason"] = "(withheld)"
+        cache = report.get("cache")
+        if isinstance(cache, dict) and _is_outside(cache.get("dir"), roots, root):
+            cache["dir"] = "(withheld)"
     return withheld
 
 
@@ -267,25 +426,177 @@ def confine_sarif(sarif: Any, roots: list[str], root: Optional[str] = None) -> i
 # Compile databases
 
 
+#: Flags whose value names a path. The value (joined, `-Iinc`, or separate, `-I inc`)
+#: must stay inside the readable roots; system include directories are also allowed.
+PATH_FLAGS = ("-I", "-isystem", "-iquote", "-idirafter", "-include")
+#: Flags whose value is a macro name (`-DFOO=1`, `-U FOO`). They name no path.
+MACRO_FLAGS = ("-D", "-U")
+#: Flags that select the language version; they change predefined macros, nothing else.
+STD_PREFIXES = ("-std=", "--std=")
+#: The compile driver's own structure: consumed by Scry, never passed to `cc -E` (so
+#: `-o` cannot redirect the preprocessed text to a file and `-M` cannot replace it with
+#: make rules). Every real compile database has these.
+DROPPED_FLAGS = ("-c", "-M", "-MM", "-MD", "-MMD", "-MP", "-MG", "-s")
+#: Driver flags whose value is the next word or attached (`-oFILE`, `-MFdep`).
+DROPPED_VALUE_FLAGS = ("-o", "-MF", "-MT", "-MQ", "-MJ")
+
+
+def _joined(arg: str, flags: Iterable[str]) -> Optional[str]:
+    """The value attached to `arg` when it starts with one of `flags` (`-Iinc` → `inc`)."""
+    for flag in flags:
+        if arg.startswith(flag) and len(arg) > len(flag):
+            return arg[len(flag):]
+    return None
+
+
 def _include_paths(args: list[str]) -> list[str]:
+    """The include paths of a compile command (`-I`, `-isystem`, `-iquote`, `-idirafter`,
+    `-include`), in order, joined or separate."""
     out = []
     i = 0
     while i < len(args):
         arg = args[i]
-        for flag in ("-I", "-isystem", "-include", "-iquote", "-idirafter"):
-            if arg == flag and i + 1 < len(args):
+        if arg in PATH_FLAGS:
+            if i + 1 < len(args):
                 out.append(args[i + 1])
-                i += 1
-                break
-            if arg.startswith(flag) and len(arg) > len(flag) and flag in ("-I", "-isystem"):
-                out.append(arg[len(flag):])
-                break
+            i += 2
+            continue
+        value = _joined(arg, PATH_FLAGS)
+        if value is not None:
+            out.append(value)
         i += 1
     return out
 
 
-def check_compdb(path: str, roots: list[str]) -> int:
-    """Refuse a compile database that reaches outside the readable roots; its entry count."""
+def _has_control(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def _check_text(value: str, what: str, path: str) -> None:
+    """A NUL (or any control character) in a path/argument is `invalid_args`."""
+    if _has_control(value):
+        raise ToolError("invalid_args", f"{path}: {what} contains a control character")
+
+
+def _split_command(command: str, path: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError as exc:
+        raise ToolError("invalid_args", f"{path}: unparsable command: {exc}") from exc
+
+
+def _entry_arguments(entry: dict[str, Any], path: str) -> list[str]:
+    """The argv Scry would run, with Scry's `entryArguments` fallback made explicit.
+
+    Scry uses `arguments` only when it contains at least one string and falls
+    back to `command` otherwise. The bridge parses that choice once and hands
+    Scry a normalised entry, so the two never disagree about which vector is
+    checked. A malformed list (non-string elements) is refused rather than
+    filtered, because filtering can change flag/value adjacency.
+    """
+    if "arguments" in entry:
+        raw = entry["arguments"]
+        if not isinstance(raw, list):
+            raise ToolError("invalid_args", f"{path}: `arguments` must be an array of strings")
+        if raw:
+            if not all(isinstance(arg, str) for arg in raw):
+                raise ToolError("invalid_args", f"{path}: every `arguments` element must be a string")
+            return list(raw)
+        # `arguments: []` is what Scry reads as "use `command`"; mirror it here.
+        command = entry.get("command")
+        if command is None:
+            raise ToolError("invalid_args", f"{path}: `arguments` is empty and there is no `command`")
+        if not isinstance(command, str):
+            raise ToolError("invalid_args", f"{path}: `command` must be a string")
+        return _split_command(command, path)
+    command = entry.get("command")
+    if isinstance(command, str):
+        return _split_command(command, path)
+    return []
+
+
+def _refused(file: str, arg: str) -> str:
+    return (f"compile_commands.json: refusing the flag {arg!r} for {file}: it is not on the "
+            f"allowlist for cc -E ({', '.join(PATH_FLAGS + MACRO_FLAGS + STD_PREFIXES)}); "
+            "the compile driver's -c/-o/-M options are dropped, anything else is refused")
+
+
+def _value(file: str, arg: str) -> str:
+    """A flag's separate value. A value that starts like another option is refused: `cc`
+    must never re-read `-I -Bbin` (or an `@file` expansion) as a flag Scry did not see."""
+    if arg.startswith(("-", "@")):
+        raise ToolError("invalid_args", _refused(file, arg))
+    return arg
+
+
+def _check_flags(file: str, args: list[str]) -> None:
+    """Refuse a compile command word outside the preprocessor allowlist.
+
+    `args` excludes the compiler (`argv[0]`). `-I`/`-isystem`/`-iquote`/`-idirafter`/
+    `-include` (with their value), `-D`/`-U` and `-std=`/`--std=` are allowed; the
+    driver's `-c`/`-o`/`-M…` structure and the source argument are dropped; every other
+    word — `-B`, `-fplugin`, `-specs`, `-wrapper`, `@file`, `-Xclang`, `-cc1`,
+    `-Xlinker`, `-imacros`, `--sysroot`, any other `-f…`/`-m…` — is refused by name.
+    This mirrors `Scry.parseCompdbFlags` in `scry/src/Scry/Project.wiz`.
+    """
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("@"):
+            raise ToolError("invalid_args", _refused(file, arg))
+        if arg in DROPPED_FLAGS:
+            i += 1
+            continue
+        if arg in DROPPED_VALUE_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            i += 2
+            continue
+        if _joined(arg, DROPPED_VALUE_FLAGS) is not None:
+            i += 1
+            continue
+        if arg in PATH_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            _value(file, args[i + 1])
+            i += 2
+            continue
+        if _joined(arg, PATH_FLAGS) is not None:
+            i += 1
+            continue
+        if arg in MACRO_FLAGS:
+            if i + 1 >= len(args):
+                raise ToolError("invalid_args", f"compile_commands.json: {arg!r} needs a value")
+            _value(file, args[i + 1])
+            i += 2
+            continue
+        if _joined(arg, MACRO_FLAGS) is not None:
+            i += 1
+            continue
+        if arg.startswith(STD_PREFIXES):
+            i += 1
+            continue
+        if arg == file or arg == os.path.basename(file) or arg.endswith("/" + file):
+            i += 1
+            continue
+        raise ToolError("invalid_args", _refused(file, arg))
+
+
+def parse_compdb(path: str, roots: list[str]) -> list[dict[str, Any]]:
+    """Validate a compile database and return the normalised entries Scry will run.
+
+    Every `directory`, `file` and include path is confined to `roots`, and every
+    word Scry would pass to `cc -E` must be on the allowlist; the returned
+    entries carry only `{directory, file, arguments}` so Scry cannot re-interpret
+    the original `command` or its `arguments` fallback.
+    """
+    try:
+        size = os.stat(path).st_size
+    except OSError as exc:
+        raise ToolError("invalid_args", f"cannot read the compile database {path}: {exc}") from exc
+    if size > MAX_COMPDB_BYTES:
+        raise ToolError("invalid_args",
+                        f"the compile database {path} is {size} bytes; the limit is {MAX_COMPDB_BYTES}")
     try:
         with open(path, encoding="utf-8") as handle:
             entries = json.load(handle)
@@ -293,34 +604,43 @@ def check_compdb(path: str, roots: list[str]) -> int:
         raise ToolError("invalid_args", f"cannot read the compile database {path}: {exc}") from exc
     if not isinstance(entries, list):
         raise ToolError("invalid_args", f"{path} is not a JSON array of compile commands")
+    if len(entries) > MAX_COMPDB_ENTRIES:
+        raise ToolError("invalid_args",
+                        f"{path} has {len(entries)} entries; the limit is {MAX_COMPDB_ENTRIES}")
     db_dir = os.path.dirname(path)
+    normalised = []
     for entry in entries:
         if not isinstance(entry, dict):
             raise ToolError("invalid_args", f"{path}: an entry is not an object")
         directory = entry.get("directory") or db_dir
         if not isinstance(directory, str):
             raise ToolError("invalid_args", f"{path}: `directory` must be a string")
+        _check_text(directory, "`directory`", path)
         directory = os.path.normpath(os.path.join(db_dir, directory))
         confine(directory, roots, "a compile command's directory")
         file = entry.get("file")
         if not isinstance(file, str):
             raise ToolError("invalid_args", f"{path}: `file` must be a string")
+        _check_text(file, "`file`", path)
         confine(os.path.normpath(os.path.join(directory, file)), roots, "a compiled file")
-        if isinstance(entry.get("arguments"), list):
-            args = [str(a) for a in entry["arguments"]]
-        elif isinstance(entry.get("command"), str):
-            try:
-                args = shlex.split(entry["command"])
-            except ValueError as exc:
-                raise ToolError("invalid_args", f"{path}: unparsable command: {exc}") from exc
-        else:
-            args = []
-        for include in _include_paths(args):
+        args = _entry_arguments(entry, path)
+        for arg in args:
+            _check_text(arg, "an argument", path)
+        # `args[0]` is the compiler: Scry drops it, so it never reaches `cc -E`.
+        _check_flags(file, args[1:])
+        for include in _include_paths(args[1:]):
             full = os.path.normpath(os.path.join(directory, include))
-            if os.path.realpath(full).startswith(SYSTEM_INCLUDE_PREFIXES):
+            real = os.path.realpath(full)
+            if any(base._is_under(real, d) for d in SYSTEM_INCLUDE_DIRS):
                 continue
             confine(full, roots, "an include path")
-    return len(entries)
+        normalised.append({"directory": directory, "file": file, "arguments": args})
+    return normalised
+
+
+def check_compdb(path: str, roots: list[str]) -> int:
+    """Refuse a compile database that reaches outside the readable roots; its entry count."""
+    return len(parse_compdb(path, roots))
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +694,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Run Scry over a C project with a compile_commands.json (cross-file taint): per-file and "
             "project findings, symbols and counts. Runs the host preprocessor (cc -E) on the project's "
-            "files; the compile database must stay inside the workspace. The SARIF is kept as a resource."
+            "files; the compile database must stay inside the workspace and its flags must be on the "
+            "preprocessor allowlist (-I/-isystem/-iquote/-idirafter/-include, -D/-U, -std=); any other "
+            "flag is refused, not stripped. The SARIF is kept as a resource."
         ),
         "inputSchema": {
             "type": "object",
@@ -554,6 +876,7 @@ class Server:
         value = args.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ToolError("invalid_args", f"`{key}` must be a non-empty string")
+        _check_text(value, f"`{key}`", "argument")
         return confine(resolve_path(self.config.workspace, value), self.read_roots(), what)
 
     def _rules(self, args: dict[str, Any]) -> str:
@@ -613,11 +936,23 @@ class Server:
         if not DIFF_BASE.match(base_ref) or ".." in base_ref:
             raise ToolError("invalid_args", "`diff` must be a git ref or commit (e.g. HEAD~1, origin/master)")
         env = child_env()
+        # The workspace's own `.git/config` is attacker-controlled (a crafted
+        # tree), and `core.fsmonitor` is a shell command git runs on `diff`. Pin
+        # every config source and every hook that could execute something, and
+        # forbid the lazy fetch a partial clone would otherwise perform.
         env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+        env["GIT_NO_LAZY_FETCH"] = "1"
+        env["GIT_ATTR_NOSYSTEM"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_OPTIONAL_LOCKS"] = "0"
         try:
             result = subprocess.run(
-                ["git", "-C", self.config.workspace, "diff", "--no-ext-diff", "--no-textconv",
+                ["git",
+                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
+                 "-c", "protocol.allow=never", "-c", "core.pager=cat",
+                 "-C", self.config.workspace, "diff", "--no-ext-diff", "--no-textconv",
                  "--no-color", "-U0", "-M", base_ref, "--", file],
                 env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
             )
@@ -636,6 +971,8 @@ class Server:
         sarif_uri = None
         if os.path.isfile(sarif_path):
             try:
+                if os.stat(sarif_path).st_size > MAX_RESOURCE_BYTES:
+                    raise ValueError("SARIF is over the resource size limit")
                 with open(sarif_path, encoding="utf-8") as handle:
                     sarif = json.load(handle)
                 confine_sarif(sarif, roots, root)
@@ -911,11 +1248,17 @@ class Server:
         if not os.path.isfile(compdb):
             raise ToolError("invalid_args", f"no compile database at {compdb}")
         confine(compdb, self.read_roots(), "compile database")
-        units = check_compdb(compdb, self.read_roots())
+        entries = parse_compdb(compdb, self.read_roots())
         rules = self._rules(args)
         run_id, run_dir = self._new_run_dir()
+        # Hand Scry the bridge's own parse: it never sees the original `command`
+        # (or an `arguments` list it would ignore), so the checked argv is the one
+        # that runs.
+        normalized = os.path.join(run_dir, "compile_commands.json")
+        with open(normalized, "w", encoding="utf-8") as handle:
+            json.dump(entries, handle)
         sarif = os.path.join(run_dir, "report.sarif")
-        argv = ["project", path, "--compdb", compdb, "--taint", "--rules", rules, "--json", "--sarif", sarif]
+        argv = ["project", path, "--compdb", normalized, "--taint", "--rules", rules, "--json", "--sarif", sarif]
         if base._optional_bool(args, "allow_errors"):
             argv.append("--allow-errors")
         if base._optional_bool(args, "skip_broken"):
@@ -927,7 +1270,7 @@ class Server:
                                  stderr=run["stderr"], error={"kind": "scry_error", "message": _first_line(run["stderr"])})
         report = self._json_report(run, "scry project")
         kept = self._keep(run_id, run_dir, "project", path, report, sarif)
-        kept["units"] = units
+        kept["units"] = len(entries)
         return make_envelope("scry_project", ok=run["exit"] == 0, path=path, exit_code=run["exit"],
                              stderr=_quiet(run["stderr"]), result=dict(report, **{"_run": kept}))
 
@@ -949,6 +1292,7 @@ class Server:
             key, value = given[0]
             if not isinstance(value, str) or not value.strip() or value.startswith("-"):
                 raise ToolError("invalid_args", f"`{key}` must be a name")
+            _check_text(value, f"`{key}`", "argument")
             argv = ["query", path, "--" + key.replace("_", "-"), value]
         _, run_dir = self._new_run_dir()
         try:
@@ -982,9 +1326,22 @@ class Server:
             if action == "list":
                 return make_envelope("scry_findings", path=db, result={"findings": [], "withheld": 0, "db": "absent"})
             raise ToolError("not_found", f"no findings database at {db}")
-        argv += ["--db", db, "--json"]
+        roots = self.read_roots()
         _, run_dir = self._new_run_dir()
         try:
+            if action == "show":
+                # Parse the database once here and hand Scry a store containing
+                # only this record; Scry then reads exactly the evidence paths
+                # validated above, not a second interpretation of the file.
+                record = load_finding_record(db, finding, roots, run_dir)
+                if any(_is_outside(source, roots, self.config.workspace) for source in _record_sources(record)):
+                    raise ToolError("path_denied", "that finding's source is outside the readable roots")
+                safe_db = os.path.join(run_dir, "findings.json")
+                with open(safe_db, "w", encoding="utf-8") as handle:
+                    json.dump({"schema": "scry-workflow-store/1", "findings": [record]}, handle)
+                argv += ["--db", safe_db, "--json"]
+            else:
+                argv += ["--db", db, "--json"]
             run = self._run(argv, run_dir, min(self.config.timeout, 120))
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -992,20 +1349,25 @@ class Server:
             return make_envelope("scry_findings", ok=False, path=db, exit_code=run["exit"], stderr=run["stderr"],
                                  error={"kind": "scry_error", "message": _first_line(run["stderr"])})
         report = self._json_report(run, "scry findings")
-        roots = self.read_roots()
         withheld = 0
         items = report if isinstance(report, list) else [report]
         kept = []
         for item in items:
-            source = item.get("source") if isinstance(item, dict) else None
-            if isinstance(source, str) and os.path.isabs(source) and not base._allowed(source, roots):
-                withheld += 1
-            else:
+            if not isinstance(item, dict):
                 kept.append(item)
+                continue
+            if any(_is_outside(source, roots, self.config.workspace) for source in _record_sources(item)):
+                withheld += 1
+                continue
+            if _is_outside(item.get("artifacts"), roots, self.config.workspace):
+                item["artifacts"] = "(withheld)"
+            kept.append(item)
         if action == "show":
             if not kept:
                 raise ToolError("path_denied", "that finding's source is outside the readable roots")
-            return make_envelope("scry_findings", path=db, result=kept[0])
+            bundle = kept[0]
+            _confine_environment(bundle.get("environment"), roots)
+            return make_envelope("scry_findings", path=db, result=bundle)
         return make_envelope("scry_findings", path=db, result={"findings": kept, "withheld": withheld})
 
     # -- resources -------------------------------------------------------------
@@ -1029,8 +1391,15 @@ class Server:
         path = run["sarif"] if match.group(2) == "sarif" else run["json"]
         if not path:
             raise ToolError("not_found", f"run {run['id']} has no SARIF")
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
+        try:
+            if os.stat(path).st_size > MAX_RESOURCE_BYTES:
+                raise ToolError("invalid_args", f"{uri} is over the {MAX_RESOURCE_BYTES}-byte resource limit")
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read(MAX_RESOURCE_BYTES + 1)
+        except OSError as exc:
+            raise ToolError("not_found", f"cannot read {uri}: {exc}") from exc
+        if len(text) > MAX_RESOURCE_BYTES:
+            raise ToolError("invalid_args", f"{uri} is over the {MAX_RESOURCE_BYTES}-byte resource limit")
         mime = "application/sarif+json" if match.group(2) == "sarif" else "application/json"
         return [{"uri": uri, "mimeType": mime, "text": text}]
 
@@ -1124,7 +1493,7 @@ def _quiet(stderr: str) -> str:
 def parse_args(argv: Optional[list[str]] = None) -> Config:
     parser = argparse.ArgumentParser(description="Read-only MCP server for Scry (stdio).")
     parser.add_argument("--workspace", default=os.getcwd())
-    parser.add_argument("--scry", help="the scry executable (default: $SCRY_BIN, scry/.grail/bin/scry, PATH)")
+    parser.add_argument("--scry", help="the scry executable (default: $SCRY_BIN, then PATH; never the workspace)")
     parser.add_argument("--rules", help="the default rule pack (default: lib/Scry/rules/default.scry)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--allow-root", action="append", default=[], metavar="DIR")

@@ -343,6 +343,15 @@ lowered; the units are then merged:
   definition is reported in `duplicates`, not silently merged, and is not analysed;
 * a call with no definition anywhere is `unresolved` and its callee is `0` in the EDB.
 
+A database is repository-supplied, so its flags are filtered by an explicit allowlist
+before `cc -E` sees them: `-I`, `-isystem`, `-iquote`, `-idirafter`, `-include` (their
+paths are confined by the MCP), `-D`, `-U` and `-std=`/`--std=` are kept, the compile
+driver's `-c`/`-o`/`-M…` structure is dropped, and **any other word is refused** with a
+diagnostic naming it. In particular `-B<dir>` (which would make `cc` run a committed
+`cc1`), `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang` and `-cc1` cannot reach the
+preprocessor. `-include` still reads a header named by the database, which is code
+influence (a macro or an inline body) but not a choice of program.
+
 ```sh
 grail run scry -- project corpus/project
 grail run scry -- project corpus/project --facts -          # project EDB

@@ -10,6 +10,52 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* runtime/FFI boundary (the 2026-11-17 review, 9h/9k): `Process.exec` saves the
+  `SIGPIPE` disposition and restores it when `exec` fails, and a spawn re-asserts the
+  ignore every time, so a failed exec no longer leaves the next write to a broken pipe
+  able to kill the program (`EPIPE` again). `File.open` sets `FD_CLOEXEC` (children no
+  longer inherit every `File`). `Fd.adopt` rejects a number above `INT_MAX` with
+  `EINVAL` (an already-closed handle, never fd 1: `4294967297` used to become stdout).
+  The sys/IO allocations fail like the runtime's (`wiz: out of memory`, exit 3) or take
+  the `ENOMEM` error path, never a NULL dereference; `FS.listDir` reports a `readdir`
+  error instead of a truncated listing; `Child.communicate` with input but no stdin
+  pipe is `EBADF`; `IO.writeFile` writes the text up to its first NUL and prints
+  `wiz: <path>: <message>` and exits 1 when the write fails (it used to ignore every
+  failure); `Handle`'s `Child.releaseOwned`/`waitOwned` drain a piped stream before
+  waiting (no deadlock), and `Child.communicateOwned` collects it first.
+* tests: a compiled program that fails at run time is a **failed case**, not a skipped
+  one. `Build.runGlobal` now returns a `Build.RunError` that says whether the failure was
+  the build (`.build`, or `.toolchain` when the compiler, `llc` or GMP's `gmp.h` could not
+  be found) or the program (`.run` with its exit code and stderr, `.timeout`,
+  `.readback`), and the test helpers in `Tests/Elab.lean` skip only a `.toolchain`
+  failure. Before, any error containing "No such file" was recorded as
+  `⊘ skipped (no toolchain)`, so a `conc`/`Handle` program (or any test program) that
+  failed with ENOENT hid as a missing toolchain. The failure now reports the program's
+  exit code and stderr. New `conc` cases pin a run-time ENOENT failure, a pass whose
+  program writes "No such file" on stderr but exits 0, and the genuine missing-compiler
+  skip.
+* web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
+  `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
+  `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
+  Wasm exports are `wiz_loom_init`/`wiz_loom_html`/`wiz_loom_step`. There is **no
+  compatibility alias**: the framework has not appeared in a tagged release, so
+  imports and the documented `React.*` names change with the rename. `Web.Widget`,
+  `web/framework`, the Jupyter widget front end, examples and docs use the new
+  names (11s, `docs/libraries.md`).
+* scroll (11s): the documentation generator shows **every command that declares a name**,
+  not only `def`: `def` (equations too), `partial def`, `axiom`, `extern`,
+  `foreign_type`, `glue`, `c_struct`, `structure`, `class`, `inductive`, `coinductive`,
+  `sealed inductive` and named or anonymous `instance`s, plus a user's own command
+  (`syntax … : command`, so `theorem`/`lemma`/`abbrev` written as command macros appear
+  with their own kind). Kinds are labelled consistently (`c struct`, `foreign type`, a
+  `lemma` as `theorem`), an entry's signature is the declaration's type or statement and
+  never its body, and private constructors and fields are left out as private
+  declarations already were. The `doc` group has a fixture with one declaration of each
+  kind, checking the module page, `api.html`/`api.json`, the search index, the reference
+  manual and deterministic output. Wiz has no `abbrev`, `opaque`, `theorem`, `lemma` or
+  `namespace` command: `theorem`, `lemma` and `abbrev` written as command macros are
+  shown with those kinds (a `lemma` as `theorem`), and dotted names (`T.f`) stay fully
+  qualified since there is no namespace syntax.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
@@ -24,6 +70,26 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   are split eight ways by the measured times. A case of a group that does not opt in
   to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
   workers.
+* concurrency (25a, 25d): `Lock` is now tested for mutual exclusion, not just for its
+  linear `Guard`. The `conc` group's new cases run eight threads that bump a plain,
+  non-atomic C counter a thousand times each under `Lock.with` and assert the exact total
+  (`8000`) plus an overlap detector that must stay `0`, and a contended case that holds the
+  lock while another thread announces it is acquiring, then pins the order of the printed
+  lines (the waiter's first line comes after the holder released) and the same overlap
+  detector. The critical sections yield to the scheduler (`sched_yield`), so a lock that
+  does not exclude shows up in a one-CPU job too. With `wiz_lock_acquire`/`wiz_lock_release`
+  made no-ops the counter case loses increments (`4962` of `8000` in the recorded run) and
+  reports `overlap 1`; with `Lock.with l body` replaced by `body` both cases report
+  `overlap 1` and fail. `scripts/tsan-conc.sh` is the ThreadSanitizer run that
+  `docs/stages/25-concurrency.md` used to claim without a command: it builds the
+  `Tests/tsan/` programs with `--cflags "-O1 -g -fsanitize=thread"` and fails on a report or
+  a wrong total; the `conc` group also runs those programs under ThreadSanitizer as a case.
+  The `signal(SIGPIPE, SIG_IGN)` before a process spawn, which two threads spawning
+  children raced on (ThreadSanitizer reported the race on the old one-shot flag), is now
+  re-asserted by `wiz_sys_spawn_in` before **every** spawn, with no shared flag at all
+  (`wiz_sys_exec` saves the disposition with `sigaction` and restores it if `exec` fails,
+  rt-ffi); `Tests/tsan/spawn.wiz` is the case that exercises it under TSan.
+
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
@@ -74,6 +140,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 * runtime: `IO.arg` past the end returns `""` without the `i + 1` overflow at 2^64-1;
   `Child.killGroup` after `Child.wait` is `ESRCH` instead of a signal to a possibly
   reused process group; `Pty.name` uses a thread-local buffer (FFI audit).
+* scry project: a `compile_commands.json` is repository-supplied, so its flags are now
+  filtered by an explicit allowlist before they reach `cc -E`. `-I`, `-isystem`,
+  `-iquote`, `-idirafter`, `-include`, `-D`, `-U` and `-std=`/`--std=` are kept (the MCP
+  bridge also confines the path-valued ones), the compile driver's `-c`/`-o`/`-M…`
+  structure is consumed, and every other word is **refused by name**. A database with
+  `-B<dir>` (which selected a committed `cc1`), `-fplugin=`, `-specs=`, `-wrapper`,
+  `@file`, `-Xclang` or `-cc1` no longer executes code through `scry_project`, whose
+  tools are `readOnlyHint: true`. `Scry.parseCompdbFlags` and the scry-mcp bridge check
+  the same list (security-01).
+* runtime, tests: the `Proc.runLinked` case is now really differential. `Chan.forks`
+  reads a new native counter (`wiz_chan_forks`, the threads `Chan.fork` started), and the
+  compiled case prints `45150 forks 1`: removing `implemented_by` leaves the result and
+  prints `0`, so the case fails. Both channel layers' differential claim is in the
+  docstrings and 25c. The one-thread build (`WIZ_NO_THREADS`, 25k) is exercised further:
+  the `conc` group adds abort cases for a full MVar and a held lock, and
+  `scripts/test-runtime.sh` links it with stub pthreads (`-Wl,--wrap=`, no pthread
+  symbols), runs a channel program that sends before receiving, checks the empty
+  channel and full MVar / held lock stops, and compiles the header's Emscripten
+  auto-enable's translation unit (there is no `emcc` build; 25k).
 * trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
   per block (compiled-only general recursion, an inhabited witness at 22f, no
   termination claim, and the de-mutualisation or measure that would remove the row), and

@@ -12,12 +12,19 @@ that bridge's transport, its path confinement and its environment filter, so
 
 `.mcp.json` registers it for Claude Code as `scry`:
 `sh tools/scry-mcp/scry-mcp.sh --timeout 300`. It needs a built `scry` (`grail
-build` in `scry/`). The first of these that exists is used:
+build` in `scry/`) that lives outside the workspace, or an explicit `--scry` /
+`$SCRY_BIN`. The first of these that exists is used:
 
 1. `--scry PATH`
 2. `$SCRY_BIN`
-3. `./scry/.grail/bin/scry`
-4. `scry` on `PATH`
+3. `scry` on `PATH`
+
+The workspace's own build (`scry/.grail/bin/scry`) is **not** found
+automatically: the workspace is the tree under review, and a server whose first
+tool call executes a program from that tree would run repository-controlled
+code. Point `--scry` or `$SCRY_BIN` at it explicitly if that is what you want.
+That is the one intentional trust decision in the server: everything else it
+starts is `cc` (the host preprocessor), `git diff`, or `uname`.
 
 The default rule pack is `--rules`, else `./lib/Scry/rules/default.scry`, else
 the `default.scry` in the library of the `wiz` the workspace would use.
@@ -48,9 +55,19 @@ Results:
   others are counted under `result.diff.findings.suppressed`. The bridge runs
   `git diff --no-ext-diff --no-textconv -U0 BASE -- FILE` in the workspace and
   passes the saved diff to Scry. `BASE` must be a ref or commit, not an option or
-  a range. `diff: "all"` treats every line as changed.
+  a range. Git runs with every config source pinned (`GIT_CONFIG_NOSYSTEM`,
+  `GIT_CONFIG_GLOBAL=/dev/null`), `core.fsmonitor=false`,
+  `core.hooksPath=/dev/null`, `protocol.allow=never` and `GIT_NO_LAZY_FETCH=1`,
+  so the workspace's own `.git/config` cannot run a command or fetch objects.
+  `diff: "all"` treats every line as changed.
 * `scry_findings` reads `scry-workflow/findings.json` unless `db` names another
-  file. A missing database lists as empty.
+  file. A missing database lists as empty. Before `show`, the bridge parses the
+  database itself (refusing one over 64 MiB or without the
+  `scry-workflow-store/1` schema) and hands Scry a store containing only that
+  record. If the record's `artifacts` + `static`/`dynamic`/`verify`/`repro.json`
+  would resolve outside the readable roots, `artifacts` is pointed at an empty
+  directory in the private run dir, so Scry reads nothing outside and the
+  evidence payloads come back `null`. Evidence inside the roots is returned.
 
 ## Runners (opt-in)
 
@@ -111,16 +128,36 @@ Every tool except the runners is annotated `readOnlyHint: true`,
   inside the workspace, the rule pack's directory, or an `--allow-root DIR`.
   Real paths are compared, so an absolute path, `..` or a symlink out is
   `path_denied`.
-* **The compile database is checked first.** Before `scry_project` runs, each
-  entry's `directory`, `file`, and each `-I`, `-isystem`, `-include`,
-  `-iquote` and `-idirafter` path must be inside those roots. System include
-  directories (`/usr/include`, `/usr/local/include`, `/nix/store`) are also
-  allowed. Scry itself keeps only `-I`/`-D`/`-U`/`-include`/`-isystem` from the
-  database and runs `cc -E -ffreestanding`, the host preprocessor. That is the
-  one host program the server can start besides `scry` and `git diff`.
+* **The compile database is checked first.** The bridge parses the database once,
+  refuses it over 64 MiB or 100 000 entries, and hands Scry a normalised copy
+  (`directory`, `file`, `arguments`) in the run directory, so Scry never
+  re-parses the original `command` or falls back to it when `arguments` is
+  empty. Each entry's `directory`, `file`, and each `-I`, `-isystem`,
+  `-include`, `-iquote` and `-idirafter` path must be inside those roots, and a
+  `directory`/`file`/argument with a NUL or other control character is
+  `invalid_args`. System include directories (`/usr/include`,
+  `/usr/local/include`, `/nix/store`) are also allowed, by containment, not by
+  string prefix.
+* **The database's flags are on an allowlist.** Only the preprocessing flags
+  Scry needs reach `cc -E`: `-I`, `-isystem`, `-iquote`, `-idirafter`,
+  `-include`, `-D`, `-U` and `-std=`/`--std=`. The compile driver's own `-c`,
+  `-o` and `-M…` structure is consumed (never forwarded, so `-o` cannot write a
+  file and `-M` cannot replace the preprocessed text). **Every other word is
+  refused by name**, not stripped: `-B<dir>` (with a committed `cc1`),
+  `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, `-cc1`, `-Xlinker`,
+  `-imacros`, `--sysroot` and any other `-f…`/`-m…` option could change which
+  program runs or what it reads. The refusal is `invalid_args` and names the
+  flag; Scry's own parser enforces the same list
+  (`scry/src/Scry/Project.wiz`). `cc -E -ffreestanding` is the one host program
+  the server can start besides `scry` and `git diff`.
 * **Outputs are confined.** Findings, SARIF results and findings-database
   records whose file is outside the roots are withheld: counted, never named.
-  `show` of such a finding is `path_denied`.
+  `show` of such a finding is `path_denied`. Within a report, `skipped[].file`
+  and `skipped[].reason` (cc's stderr, which names headers), `cache.dir`, and in
+  a `show` bundle `environment.cwd`, `environment.uname` and
+  `environment.tool.binary` are replaced with `(withheld)`.
+* **Reports are capped.** A resource (`scry://runs/{id}/…`) over 64 MiB is
+  refused instead of being read into memory.
 * **The environment is filtered** as in wiz-mcp: an allowlist, and no name that
   looks like a credential (`TOKEN`, `SECRET`, `PASSW`, `AUTH`, `API_KEY`, …),
   even with `--pass-env`.
@@ -166,12 +203,17 @@ The unit tests use a fake `scry` that records its argv, working directory and
 environment. They check:
 
 * confinement of inputs and outputs, including symlinks;
-* compile-database checks;
+* compile-database checks, including the `arguments`/`command` parser and the
+  normalised copy Scry is handed;
 * that the temporary directory is private and removed on exit;
 * that secrets are filtered;
-* `diff` validation, and that `git diff` runs in the workspace;
-* the limits, and the retention of runs;
-* that the findings database is never written by the read-only tools;
+* `diff` validation, that `git diff` runs in the workspace, and that a
+  workspace `.git/config` cannot run a command through `core.fsmonitor` or a
+  hook;
+* that a `scry` planted in the workspace is never executed;
+* the limits, the retention of runs, and the size caps;
+* that the findings database is never written, and that its records, a `show`
+  bundle's host facts and a project report's skipped reasons are redacted;
 * the runners, with stand-in `heavy`/`light`/`bwrap` scripts: the gating, the
   argument vectors (no `--cc`/`--harness`/`--env`), the sandbox's writable
   directories, the database checks, confinement of dynamic reports, and

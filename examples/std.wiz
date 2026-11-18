@@ -14,6 +14,6 @@ def main : IO Unit := do
   IO.println (Nat.toString (Str.size t));
   let m := countWords (.cons "a" (.cons "b" (.cons "a" .nil))) StrMap.empty;
   IO.println (Nat.toString (StrMap.findD m (Str.ofString "a") 0));
-  IO.writeFile "/tmp/claude-1000/wiz_std.txt" "saved";
-  s ← IO.readFile "/tmp/claude-1000/wiz_std.txt";
+  IO.writeFile "/tmp/wiz_std.txt" "saved";
+  s ← IO.readFile "/tmp/wiz_std.txt";
   IO.println s
