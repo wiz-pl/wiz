@@ -27,7 +27,9 @@ OUT=$(mkdir -p "${OUT_DIR:-$ROOT/web/out}" && cd "${OUT_DIR:-$ROOT/web/out}" && 
 if [ -n "$FROM" ]; then
   [ -f "$FROM/wiz-infoview.mjs" ] || {
     echo "build: $FROM/wiz-infoview.mjs is missing (--from $FROM)" >&2; exit 1; }
-  cp -R "$FROM"/. "$OUT"/
+  # the store's files are read-only and its `gmp/` is a 0555 directory: `--no-preserve=mode`
+  # (GNU cp) copies them writable, so this OUT can be built into later
+  cp -R --no-preserve=mode "$FROM"/. "$OUT"/
   echo "copied $OUT/wiz-infoview.mjs from $FROM"
   exit 0
 fi
