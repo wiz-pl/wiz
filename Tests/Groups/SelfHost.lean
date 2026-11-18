@@ -1057,6 +1057,36 @@ def classDupExpected : String :=
   "instDefaultNat : (Default Nat)\n" ++
   "error: duplicate instance: instDefaultNat already has the type of this one ((Default Nat))\n"
 
+/-- (A10) A class over a type constructor. Its method is a function at `f`'s result, so
+the method's type is in `Sort 2` although every written `Type` is `Type 0`: the class's
+structure must be at `Type 1` (the host infers the level from the fields). The instance
+is found by matching the constructor (`Functor List`). -/
+def classHigherKind : String :=
+  "import Prelude\nclass Functor (f : Type → Type) where\n  map : {A B : Type} → (A → B) → f A → f B\n" ++
+  "def mapList {A B : Type} (g : A → B) : List A → List B\n" ++
+  "  | .nil => .nil\n  | .cons x xs => .cons (g x) (mapList g xs)\n" ++
+  "instance instFunctorList : Functor List := Functor.mk mapList\n" ++
+  "class UsesFunctor (f : Type → Type) [i : Functor f] where\n  uses : Nat\n" ++
+  "instance instUsesFunctorList : UsesFunctor List where\n  uses := 1\n" ++
+  "def bump (xs : List Nat) : List Nat := @Functor.map List instFunctorList Nat Nat (fun n => n + 1) xs\n" ++
+  "#reduce Nat.beq (List.length (bump (List.cons 1 (List.cons 2 .nil)))) 2\n"
+
+def classHigherKindExpected : String :=
+  "Functor : (x0 : (x0 : U0) → U0) → U1\n" ++
+  "Functor.map : (x0 :0 (x0 : U0) → U0) → (x1 : (Functor x0)) → (x2 :0 U0) → (x3 :0 U0) → (x4 : (x4 : x2) → x3) → (x5 : (x0 x2)) → (x0 x3)\n" ++
+  "mapList : (x0 :0 U0) → (x1 :0 U0) → (x2 : (x2 : x0) → x1) → (x3 : (List x0)) → (List x1)\n" ++
+  "instFunctorList : (Functor List)\n" ++
+  "UsesFunctor : (x0 : (x0 : U0) → U0) → (x1 : (Functor x0)) → U0\n" ++
+  "UsesFunctor.uses : (x0 :0 (x0 : U0) → U0) → (x1 : (Functor x0)) → (x2 : ((UsesFunctor x0) x1)) → Nat\n" ++
+  "instUsesFunctorList : ((UsesFunctor List) instFunctorList)\n" ++
+  "bump : (x0 : (List Nat)) → (List Nat)\n" ++
+  "con((#1, (tt, tt)))\n"
+
+/-- (A10) The header for the higher-kinded differential: a class over a type
+constructor. -/
+def classHigherKindHeader : String :=
+  "class Functor (f : Type → Type) where\n  map : {A B : Type} → (A → B) → f A → f B\n"
+
 /-- (A10) The header for the verdict-parity cases (a class with a method each). -/
 def classAgreeHeader : String :=
   "class Base (A : Type) where\n  b : A\n"
@@ -2853,6 +2883,12 @@ def selfHostGroup : Group where
         selfhostCheckFile classMissing classMissingExpected },
     { name := "the self-hosted frontend: a duplicate instance is an error (A10)", run := fun _ =>
         selfhostCheckFile classDup classDupExpected },
+    { name := "the self-hosted frontend: a class over a type constructor (`Functor`) elaborates and resolves (A10)", run := fun _ => do
+        selfhostCheckFile classHigherKind classHigherKindExpected
+        selfhostAgrees classHigherKindHeader [
+          ("def mapList {A B : Type} (g : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (g x) (mapList g xs)\ninstance instFunctorList : Functor List := Functor.mk mapList\nclass UsesFunctor (f : Type → Type) [i : Functor f] where\n  uses : Nat\ninstance instUsesFunctorList : UsesFunctor List where\n  uses := 1\ndef bump (xs : List Nat) : List Nat := @Functor.map List instFunctorList Nat Nat (fun n => n + 1) xs\n#reduce Nat.beq (List.length (bump (List.cons 1 (List.cons 2 .nil)))) 2\n", true),
+          -- a constructor-kind parameter still has a kind: `Nat` is not `Type → Type`
+          ("instance instFunctorNat : Functor Nat := Functor.mk (fun g xs => xs)\n", false)] },
     { name := "type classes and instances agree with the Lean frontend (A10)", run := fun _ =>
         selfhostAgrees classAgreeHeader [
           ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ndef get {A : Type} [Default A] : A := Default.d\ndef seven : Nat := get\n", true),

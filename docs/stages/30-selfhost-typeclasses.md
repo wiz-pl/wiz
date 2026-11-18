@@ -78,9 +78,61 @@ Prelude` still loads the self-hosted prelude, which has no classes), **no `outPa
 (that is A15). A class with an instance parameter works, and its instance's own
 parameters are solved by ordinary resolution (the `Commute` shape).
 
+### Class parameters of constructor kind
+
+A class may take a type constructor, as `lib/Functor.wiz` does:
+`class Functor (f : Type → Type) where map : {a b} → (a → b) → f a → f b` (the same
+shape appears in `Eff`'s `Handler` and `Hdl`'s `Hw`). The self-hosted frontend rejected
+every one of them: a class is a structure, and a structure with no written result
+universe took its level from the largest `Type u` written anywhere in the declaration
+(`maxTypeLvl`). `Functor`'s method lives in `Sort 2` even though every written `Type`
+is `Type 0`, because its domain is the parameter `f : Type → Type`; the description then
+tried to lift a `Sort 2` field into `Sort 1` and the kernel refused it
+(`ULift.… can't lift … which is in Sort imax(2, …)`), so the class was never
+registered (`unknown identifier Functor`).
+
+`inferredDataLevel` now infers the level as the host does (`Elab/Inductive.lean`): for a
+declaration without a written result universe it elaborates each non-recursive field in
+the parameter and field context and takes `predBound` of the field's sort (`ctorLvl`,
+with `lvlPred`/`lvlJoin`); a recursive field is at the type's own level and does not
+raise it. When the level the declaration already had covers the fields it is kept (so a
+symbolic `Type (max 0 u)` keeps that spelling), and a field that needs more raises it
+(`lvlAtLeast`). So `Functor : (Type → Type) → Type 1`, and its method is an ordinary
+field of the description rather than a lifted one.
+`Functor.map` is the projection with an instance binder and `instance instFunctorList :
+Functor List` is a dictionary of type `Functor List`, found by matching the constructor.
+An instance declaration for a class whose telescope has `[Functor f]`
+(`class UsesFunctor (f : Type → Type) [i : Functor f] where …`,
+`instance … : UsesFunctor List`) inserts the class problem `Functor List`, and resolution
+picks `instFunctorList`; a method call spells the dictionary out with
+`@Functor.map List instFunctorList …` (named implicit arguments on a class method are not
+implemented here). An instance field whose value is a polymorphic definition
+(`Functor.mk mapList`, `map := Option.map`) is checked as a bare identifier against the
+field's type (`checkIdentRaw`), rather than instantiated first.
+
+The boundary is unchanged for shapes that need more than a level: `outParam`, default
+instances, a user `deriving` deriver, and a class problem whose constructor argument is
+only known up to a λ (`Functor (fun A => …)`) are still rejected or stuck — spell the
+constructor out (`@Functor.map List instFunctorList …`). Higher-rank fields themselves
+work: a field of type `((A : Type) → f A) → Nat` is a field of the description like any
+other, and `structure S where f : Type → Type` is at `Type 1`. The one instance shape that remains
+rejected is a λ with only explicit binders checked against a field with implicit ones:
+`Functor.mk (fun g x => …)` (host-accepted). The Pi value carries a quantity but not a
+binder's implicitness (that is in the global's mask), so this frontend cannot insert the
+implicit λ binders the host inserts; pass a polymorphic definition instead
+(`Functor.mk mapList`, `map := Option.map` — `checkIdentRaw` checks a bare identifier
+against the expected type before inserting its implicits), or write `fun {A B} …`, which
+the Lean frontend does not accept. Higher-rank fields are therefore closed; the λ shape
+and the rest of the list above are not.
+
+The optics review that found this gap measured 80 prebuilt checkers rejecting its
+`Functor` probe; those checkers predate the change and still reject it, and a checker
+built from this tree accepts it (the `=selfhost` cases below).
+
 ### Tests
 
-The `selfhost` group (`Tests/Groups/SelfHost.lean`) gains seven cases (117–123 of 124):
+The `selfhost` group (`Tests/Groups/SelfHost.lean`) gains eight class cases (the numbers
+below are the stage's original case numbering):
 
 * a class with one method, instances for `Nat` and `Bool`, and a generic function using
   the class (`get : Nat`, `get : Bool`), with the exact checked output of `#check` and
@@ -90,13 +142,17 @@ The `selfhost` group (`Tests/Groups/SelfHost.lean`) gains seven cases (117–123
   and a class with instance parameters (the `Commute` shape) (118);
 * a missing instance: `failed to synthesize an instance of (Default ?m0)` (119);
 * a duplicate instance: an error naming the first one and the type (120);
+* a class over a type constructor: `Functor`'s method at `Sort 2`, the class at
+  `Type 1`, an instance for `List` found by matching the constructor, and the
+  reduction's value; a differential with the Lean frontend on the same program, and a
+  rejection that still fails (a `Functor` instance at `Nat`) (121);
 * verdict parity with the Lean frontend on eight declarations (accept: the core, `where`
   and an instance-parameter class; reject: a private field, missing/extra `where`
-  fields, an instance for a non-class, a missing instance) (121);
+  fields, an instance for a non-class, a missing instance) (122);
 * pinned differences: a duplicate instance (Lean accepts, this frontend rejects) and
-  `outParam` (Lean accepts, this frontend does not) (122);
+  `outParam` (Lean accepts, this frontend does not) (123);
 * the self-hosted *backend* compiles a class program and runs it: dictionary passing
-  really passes the structure value (123).
+  really passes the structure value (124).
 
 The self-check case (93) is the regression test that matters most: the whole frontend,
 with the new code, still checks itself.

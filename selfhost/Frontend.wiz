@@ -1440,6 +1440,74 @@ partial def maxTypeLvl (acc : Lvl) (ws : List Syntax) : Lvl := match ws with
 def dataLevel (stx : Syntax) : Lvl := match sigLevel stx with
   | .some l => l
   | .none => maxTypeLvl (.lnum 0) (.cons stx .nil)
+-- (U2) the small level `k` with `l ≤ k+1` (the Lean frontend's `Level.predBound`)
+def lvlJoin (a b : Lvl) : Lvl := match lvlLe b a with
+  | .true => a
+  | .false => match lvlLe a b with
+    | .true => b
+    | .false => .lmax a b
+def lvlPred : Lvl → Lvl
+  | .lnum n => match n with
+    | .zero => .lnum 0
+    | .succ k => .lnum k
+  | .lsucc l => l
+  | .lmax a b => lvlJoin (lvlPred a) (lvlPred b)
+  | .limax a b => lvlJoin (lvlPred a) (lvlPred b)
+  | l => l
+-- (U2) keep the written level when it already holds the fields (so a symbolic
+-- `Type (max 0 u)` keeps that spelling), and raise it only when a field needs more
+def lvlAtLeast (written inferred : Lvl) : Lvl := match lvlEquiv written inferred with
+  | .true => written
+  | .false => match lvlLe written inferred with
+    | .true => inferred
+    | .false => written
+-- (U2) **The level a data type's fields need.** When no result universe is written, the
+-- host infers it from the fields (`Inductive.lean`: a field in `Sort k` needs `l ≥ k-1`;
+-- a recursive field is `T … : Sort (l+1)` and does not raise it). The self-hosted
+-- `maxTypeLvl` above only sees written `Type u`s, so it misses a parameter used at a
+-- function type: `class Functor (f : Type → Type)` has a method in `Sort 2`, not `Sort 1`
+-- (`Functor : (Type → Type) → Type 1`). Fields are elaborated like `ctorDesc`, in the
+-- context of the parameters and the fields before; a field `ctorDesc` rejects is skipped
+-- (it reports its own error).
+def ctorLvl (gs : Globals) (T : String) (ps : List String) (nidx : Nat)
+    : TCtx → Scope → Nat → List Field → Lvl
+  | _, _, _, .nil => .lnum 0
+  | c, sc, d, .cons (.mk x q _ ty) rest => match recField T ps nidx ty with
+    | .yes _ => ctorLvl gs T ps nidx c sc d rest
+    | .no => match typeOccurs T ty with
+      | .true => ctorLvl gs T ps nidx c sc d rest
+      | .false => match elab sc ty with
+        | .err _ => ctorLvl gs T ps nidx c sc d rest
+        | .ok A =>
+          let Acl : Tm := closeG .false gs d A;
+          let own : Lvl := match sortOf c (eval (TCtx.env c) Acl) with
+            | .some k => lvlPred k
+            | .none => .lnum 0;
+          lvlJoin own (ctorLvl gs T ps nidx (TCtx.bind c (eval (TCtx.env c) Acl)) (Scope.bind sc x) (d + 1) rest)
+def ctorLvls (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (c : TCtx)
+    (sc : Scope) (d : Nat) : List Syntax → Lvl
+  | .nil => .lnum 0
+  | .cons ctor rest => lvlJoin (ctorLvl gs T ps nidx c sc d (ctorFields ctor))
+      (ctorLvls gs T ps nidx c sc d rest)
+-- (U2) a data type's level when no result universe is written: as the host infers it
+-- from the fields (see `ctorLvl`). If the parameters do not elaborate, fall back to the
+-- syntactic `dataLevel`; the declaration reports the parameter's error.
+def inferredDataLevel (gs : Globals) (stx : Syntax) : Lvl := match sigLevel stx with
+  | .some l => l
+  | .none =>
+    let params := fieldsOf (kids (kid stx 3));
+    let ps := fieldNames params;
+    let nidx := match sigOf stx with
+      | .indexed _ => 1
+      | _ => 0;
+    match elabTele gs (Globals.scope gs) 0 params with
+    | .err _ => dataLevel stx
+    | .ok pts =>
+      let T := match kid stx 1 with
+        | .ident n => n
+        | _ => "_";
+      lvlAtLeast (dataLevel stx) (ctorLvls gs T ps nidx (paramCtx empty pts)
+        (bindAll (Globals.scope gs) ps) (List.length ps) (kids (kid stx 6)))
 -- in an indexed family `T : I → Type`, an index `.c` (the last argument of `T …` in the
 -- constructors) is `I.c`: the constructors are scope-checked, not typed (stage 19d)
 def takeS : Nat → List Syntax → List Syntax
@@ -1519,7 +1587,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
       | .indexed _ => 1
       | _ => 0;
     let us := univParamsOf stx0;
-    let lv := dataLevel stx0;
+    let lv := inferredDataLevel gs stx0;
     match elabTele gs (Globals.scope gs) 0 params with
     | .err m => errStep gs m
     | .ok pts =>
@@ -4939,6 +5007,34 @@ def letT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val)
       | .ok v _ es2 => body A Av v es2
       | e => e
     | e => e
+-- an identifier's source name, as `inferHead` reads it (an atom or a `term.ident` node)
+def identSourceName : Syntax → Option String
+  | .ident n => .some n
+  | s => match strEq (kindOf s) "term.ident" with
+    | .true => .some (identOf s)
+    | .false => .none
+-- (A10) Check an identifier against `ty` **without** inserting its implicit arguments:
+-- the expected type may already have the implicit binders the declaration wants
+-- (`Functor.mk mapList`, where `mapList : {A B} → …` and the constructor's field has the
+-- same type; `inferT` would instantiate `A`/`B` and then compare a different shape).
+-- `none` when the identifier is not a good fit, or the expected type is a metavariable
+-- (there insertion is what inference needs).
+def checkIdentRaw (gs : Globals) (es : ES) (cx : Cx) (n : String) (ty : Val) : Option TE :=
+  match metaApp es (force es ty) with
+  | .mk _ _ => .none
+  | .none => match identHead gs es cx n with
+    | .ok t ty' es' _ => match unify es' cx ty' ty with
+      | .some es2 => .some (.ok t ty es2)
+      | .none => .none
+    | .err _ => .none
+-- the ordinary check: infer `s` (inserting implicit arguments) and unify with `ty`
+def checkInferred (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match inferT gs es cx s with
+  | .ok t ty' es' => match unify es' cx ty' ty with
+    | .some es2 => .ok t ty es2
+    | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
+        (String.append ", got " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty')))))
+  | e => e
 -- check `s` against `ty`
 def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
   let k := kindOf s;
@@ -4967,7 +5063,11 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
           | .true => match inferHead gs es cx (kid s 0) with
             | .ok f fty es1 m => appExpected gs es1 cx (kid s 0) f fty m (kids (kid s 1)) ty
             | .err msg => TE.err msg
-          | .false => inferT gs es cx s) with
+          | .false => match identSourceName s with
+            | .some n => match checkIdentRaw gs es cx n ty with
+              | .some r => r
+              | .none => checkInferred gs es cx s ty
+            | .none => checkInferred gs es cx s ty) with
           | .ok t ty' es' => match unify es' cx ty' ty with
             | .some es2 => .ok t ty es2
             | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
