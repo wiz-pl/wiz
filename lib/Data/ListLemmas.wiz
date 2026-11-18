@@ -5,7 +5,7 @@ import Nat
 /-!
 # List lemmas
 
-Lemmas about the list functions of `lib/Text.wiz` (`import ListLemmas`): how `map`,
+Lemmas about the list functions of `lib/Text.wiz` (`import Data.ListLemmas`): how `map`,
 `filter`, `any`, `all`, `append`, `reverse` and `length` interact, and membership.
 
 Membership is the proposition `List.Mem` (`x ∈ l`, and `∀ x ∈ l, P x` with the binder
@@ -15,7 +15,7 @@ notation), not a Boolean test: `List.any`/`List.all` are the Boolean versions, a
 The lemmas are ordinary definitions, proved by structural recursion (no axiom and no
 `sorry`; the trust ledger is unchanged). They are stated left to right, the way `rw` uses
 them (`rw h; rfl`) and the way `simp` (stage 6h) orients them, and the safe ones are
-registered with `attribute [simp]` at the end of the file: `import ListLemmas` gives
+registered with `attribute [simp]` at the end of the file: `import Data.ListLemmas` gives
 `simp` a terminating normal form for `map`, `append`, `reverse`, `filter`, `any` and
 `all`. The rules that are deliberately not registered — identities whose left side
 computes away, associativity, the `↔` membership lemmas, and the `_cons_true`/

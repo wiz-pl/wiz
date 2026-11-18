@@ -1081,7 +1081,7 @@ covers ordinary inductives only), no rewriting in hypotheses, no
 (A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
 type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
 whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
-written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+written ones), so the exact `unfold List.filter` steps of `lib/Data/ListLemmas` are not
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.

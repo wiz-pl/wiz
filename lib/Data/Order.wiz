@@ -2,7 +2,7 @@ import Logic
 /-!
 # Order
 
-Notation for orders and equivalences (`import Order`): `a ≤ b`, `a < b` and `a ≈ b`,
+Notation for orders and equivalences (`import Data.Order`): `a ≤ b`, `a < b` and `a ≈ b`,
 each a class with one instance per type. The relations are propositions.
 
 Instances: `Nat` (lib/Nat.wiz), `Int` (lib/IntOrder.wiz), and the rationals `Q`
