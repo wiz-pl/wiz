@@ -736,8 +736,9 @@ setup action keeps the elan cache for those
   Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
   docs-only run is seconds and a toolchain change invalidates it.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
-  modules (the infoview's and the playground's), the standard library's pages with
+  only (not a pull request, the weekly run or a manual run), `docs` copies the two Wasm
+  modules that `web_modules` built (`wiz-web`, `wiz-playground`), the standard library's
+  pages with
   `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
   a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
