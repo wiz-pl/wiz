@@ -2,6 +2,7 @@
 
 ## 10a: effects as a library, commutation as proofs
 
+<!-- no-check: the program is a fragment: `Eff` and its row operations come from the page's library -->
 ```wiz no-check
 import Eff
 def prog : Eff (Row.cons (State Nat) (Row.cons (Exn String) (Row.cons Console Row.nil))) Nat := do
@@ -41,6 +42,7 @@ a monad (`StateT S IO`, `ReaderT E IO`, `IO`), where every operation is a plain 
 and no tree is built. In a 200,000-step state loop the fused version is about 4.5×
 faster.
 
+<!-- no-check: the body is abbreviated with an ellipsis to contrast the tree and fused runs -->
 ```wiz no-check
 def prog {m : Type → Type} [Monad m] [MonadState Nat m] [MonadConsole m] : m Nat := …
 runConsole (runState (prog : Eff (Row.cons (State Nat) (Row.cons Console Row.nil)) Nat) 0)   -- tree
@@ -49,6 +51,7 @@ runConsole (runState (prog : Eff (Row.cons (State Nat) (Row.cons Console Row.nil
 
 ## 10c: one-shot effects
 
+<!-- no-check: a fragment: `Coin`, `Eff1` and its operations are the page's example -->
 ```wiz no-check
 structure Coin where
   value : Nat

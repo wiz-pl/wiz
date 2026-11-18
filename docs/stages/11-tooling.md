@@ -205,6 +205,7 @@ after it).
   imports, *add the missing import*, and `@f` / dropping the `@` when the argument count
   is off by the implicit parameters.
 
+<!-- no-check: editor demonstrations: the second line is an error, and the comments show diagnostics -->
 ```wiz no-check
 def k : Nat → Bool → Nat := by
   intro n         -- wiz/plainGoal here:  n : Nat ⊢ Bool → Nat
@@ -358,6 +359,7 @@ the `nvim` group runs it as its second case.
 Hovers, go to definition and the infoview used to know only about terms. Now (as in
 Lean) they also know about syntax:
 
+<!-- no-check: a syntax and macro demonstration for the editor, not a standalone module -->
 ```wiz no-check
 syntax (name := twice) "twice" term:max : term       -- declaration of `twice`
 macro_rules
@@ -658,6 +660,7 @@ package's `lib` targets with its module roots (dependencies included), into
   loaded) turns on Neovim 0.11's own LSP completion (after `.`, and `<C-Space>` in insert
   mode); the README lists what completion and the code actions offer.
 
+<!-- no-check: the cursor mark is an editor position, so the text is not Wiz source -->
 ```wiz no-check
 def foo (n : Nat) (pt : Point) : Nat := Nat.add n pt.‸   -- pt.px : Nat, pt.py : Nat, pt.norm
 def p : Point := _                                     -- [Fill with an anonymous constructor] ⟨?px, ?py⟩
@@ -675,6 +678,7 @@ it (named arguments `(x := e)` aside) say which explicit binder comes next. A gl
 binders come from its declaration; a local function's type from the info tree of the
 text cut after it, with its open brackets closed. In Neovim 0.11, `<C-s>` in insert mode.
 
+<!-- no-check: the cursor mark is an editor position, so the text is not Wiz source -->
 ```wiz no-check
 def b (xs : List Nat) : Nat := List.length ‸    -- List.length {A : Type} [(_ : List A)] : Nat
 ```

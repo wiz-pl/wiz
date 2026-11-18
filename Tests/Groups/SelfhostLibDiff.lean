@@ -30,8 +30,11 @@ The host side runs the Lean frontend in a child process (`--libdiff-host FILE`, 
 the compiler binary the `selfhost` group builds (`selfhostCompiler`), `check FILE
 --types`, whose info lines are the per-declaration reports.
 
-The group never fails because of a gap: it measures. It fails only when the harness
-itself cannot run (a toolchain problem is a skip, the way the `selfhost` group skips).
+The group never fails because of a gap: it measures. A compiler that *dies* (a signal,
+or a runtime give-up that is not the declared memory limit) is not a gap but a failure,
+counted apart from `bounded`; the sweep case fails on a death, on no file reaching a
+verdict, and on `scry/tests/ReplPrelude.wiz` (accepted by both with one declaration)
+not being `ok`. A toolchain problem is a skip, the way the `selfhost` group skips.
 
 Usage (a work list, not a gate):
 
@@ -84,8 +87,8 @@ def libDiffPicks (arg file : String) : Bool :=
 
 /-! ## A side's verdict -/
 
-/-- One compiler's verdict on a file. `status` is `ok`, `timeout` or `crash` (a signal
-or an allocation failure). -/
+/-- One compiler's verdict on a file. `status` is `ok`, a declared bound (`timeout`,
+`memory`), or `died` (a signal or a runtime give-up that is not the memory limit). -/
 structure Side where
   accepted : Bool := false
   exitCode : UInt32 := 0
@@ -180,7 +183,7 @@ def libDiffHostMain (args : List String) : IO UInt32 := do
     IO.eprintln "usage: tests --libdiff-host FILE"
     return 2
   let side ← try libDiffHost file
-    catch e => pure ({ status := "crash", note := toString e } : Side)
+    catch e => pure ({ status := "died", note := toString e } : Side)
   IO.println (Lean.Json.compress (jsonOfSide side))
   return 0
 
@@ -219,13 +222,15 @@ def libDiffParseDiag (line : String) : Option LibDiag :=
     | _, _ => none
   | _ => none
 
-/-- The declaration lines of the self-hosted `--types` report: its info lines for
-`file`, without the projections (`T.f`) a structure also reports. -/
+/-- The declaration lines of the self-hosted `--types` report: every info line for
+`file`. A dotted name is an ordinary declaration (`BitVec.add`, `Scry.Foo.bar`), not a
+projection: the self-hosted frontend prints no line for a structure's fields or
+projections (the host's `libDiffHostDecls` excludes those too), so dropping names with a
+`.` dropped `Nat.repr`, `BitVec.add`, … and made the counts disagree for 114 of the 117
+`lib` files. (Projection lines do appear, at 1:1, only in a graph that failed to load,
+where the file is rejected anyway.) -/
 def libDiffSelfDecls (file : String) (diags : List LibDiag) : Nat :=
-  (diags.filter fun d =>
-    d.sev == "info" && d.file == file &&
-      (let head := (d.msg.splitOn " : ").headD ""
-       head.contains ' ' || !head.contains '.')).length
+  (diags.filter fun d => d.sev == "info" && d.file == file).length
 
 /-- Bounded run: a wall-clock limit (`timeout -k 5`) and, with `memMB > 0`, a
 virtual-memory limit. -/
@@ -237,21 +242,34 @@ def libDiffRun (cmd : String) (args : Array String) (secs memMB : Nat) :
     { cmd := "sh", args := #["-c", script, cmd] ++ args, stdin := .null }
   pure (out.exitCode, out.stdout, out.stderr)
 
-/-- `status` from a bounded run's exit code. 3 is the self-hosted runtime giving up
-(`die`/`unreach` in selfhost/rt.c, `wiz_panic` in runtime/rt_core.inc): "out of memory"
-when a `malloc` fails under the `ulimit -v` bound, or "applying a non-function". It
-prints `wiz: REASON` and no diagnostics, so read as an exit status it looked like an
-accepted file with no declarations (lib/BitVecAdd.wiz: "self ok (0 decls)"). -/
-def libDiffStatus (code : UInt32) : String :=
-  if code == 124 then "timeout"
-  else if code == 137 || code == 139 || code == 3 then "crash"
-  else "ok"
-
 /-- The runtime's `wiz: REASON` line on stderr, if it gave up (exit 3). -/
 def libDiffRuntimeNote (err : String) : String :=
   match (err.splitOn "\n").reverse.find? (·.startsWith "wiz: ") with
   | some l => (l.take 200).toString
   | none => ""
+
+/-- `status` from a bounded run's exit code and stderr.
+`timeout`/`memory` are the *declared* limits: `124`, or `137` after `timeout -k`'s kill;
+exit 3 with the runtime's `wiz: out of memory` is the `ulimit -v` bound. Those are a
+bound, not a verdict.
+`died` is the compiler dying: a signal (`139` segfault, `134` abort), exit 3 for another
+`wiz:` reason (`applying a non-function`), or any other non-0/non-1 exit. A death is a
+failure; the old code put it in `bounded`.
+`ok`: 0 (accepted) or 1 (diagnostics). -/
+def libDiffStatus (code : UInt32) (err : String := "") : String :=
+  if code == 124 || code == 137 then "timeout"
+  else if code == 3 then
+    if (libDiffRuntimeNote err).contains "out of memory" then "memory" else "died"
+  else if code == 0 || code == 1 then "ok"
+  else "died"
+
+/-- The reason a run did not reach a verdict: the runtime's `wiz:` line, else the exit
+code for a signal; a declared time bound has no note (the limit is the reason). -/
+def libDiffRunNote (code : UInt32) (err : String) : String :=
+  let why := libDiffRuntimeNote err
+  if !why.isEmpty then why
+  else if code == 124 || code == 137 then ""
+  else s!"exit {code}"
 
 /-- Run the self-hosted compiler's `check FILE --types` and read its diagnostics. -/
 def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat) : IO Side := do
@@ -264,6 +282,7 @@ def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat) : IO 
   let errs := diags.filter (·.sev == "error")
   -- the first error in the file itself if there is one, else the first import error
   let first := (errs.find? (·.file == file)).orElse (fun _ => errs[0]?)
+  let status := libDiffStatus code err
   pure { accepted := errs.isEmpty, exitCode := code, errors := errs.length,
          decls := libDiffSelfDecls file diags,
          code := first.map (·.code) |>.getD "",
@@ -271,8 +290,8 @@ def libDiffSelf (exe : System.FilePath) (file : String) (secs memMB : Nat) : IO 
          line := first.map (·.line) |>.getD 0,
          col := first.map (·.col) |>.getD 0,
          msg := first.map (·.msg) |>.getD "",
-         status := libDiffStatus code,
-         note := if libDiffStatus code == "crash" then libDiffRuntimeNote err else "" }
+         status,
+         note := if status == "ok" || status == "timeout" then "" else libDiffRunNote code err }
 
 /-! ## Comparing the two -/
 
@@ -341,9 +360,9 @@ structure LibRec where
   host : Side
   self : Side
   /-- `ok`, `rejected` (both reject), `diverging` (the verdicts differ), `bounded`
-  (a run hit the time or memory limit) -/
+  (a run hit the declared time or memory limit), or `died` (a compiler died: a failure) -/
   verdict : String
-  /-- `acceptance`, `code`, `span`, `message`, `decls`, `run`, or `""` (agreement) -/
+  /-- `acceptance`, `code`, `span`, `message`, `decls`, `run`, `died`, or `""` (agreement) -/
   divergence : String
   /-- the missing construct, for a divergence and for a rejection -/
   klass : String
@@ -351,14 +370,18 @@ structure LibRec where
   deriving Inhabited
 
 def libDiffCompare (file : String) (h s : Side) : LibRec :=
-  let bounded := h.status != "ok" || s.status != "ok"
+  let bound := fun (x : Side) => x.status == "timeout" || x.status == "memory"
+  let died := h.status == "died" || s.status == "died"
+  let bounded := bound h || bound s
   let verdict :=
-    if bounded then "bounded"
+    if died then "died"
+    else if bounded then "bounded"
     else if h.accepted && s.accepted then if h.decls == s.decls then "ok" else "diverging"
     else if h.accepted != s.accepted then "diverging"
     else "rejected"
   let divergence :=
-    if bounded then "run"
+    if died then "died"
+    else if bounded then "run"
     else if h.accepted && s.accepted then (if h.decls == s.decls then "" else "decls")
     else if h.accepted != s.accepted then "acceptance"
     else if h.code != s.code then "code"
@@ -366,11 +389,16 @@ def libDiffCompare (file : String) (h s : Side) : LibRec :=
     else if libDiffNormMsg h.msg != libDiffNormMsg s.msg then "message"
     else ""
   let klass := if s.accepted then "" else libDiffClassOf s
+  -- a bound or a death on either side, named with its reason
+  let runSide (side : String) (x : Side) : String :=
+    if x.status == "ok" then "" else
+      s!"{side} {x.status}" ++ (if x.note.isEmpty then "" else s!" ({x.note})")
+  let hn := runSide "host" h
+  let sn := runSide "self" s
   let note :=
-    if bounded then
-      (if h.status != "ok" then s!"host {h.status}" else "") ++
-      (if s.status != "ok" then (if h.status != "ok" then "; " else "") ++ s!"self {s.status}" ++
-        (if s.note.isEmpty then "" else s!" ({s.note})") else "")
+    if died || bounded then
+      (if hn.isEmpty then "" else hn) ++
+      (if sn.isEmpty then "" else (if hn.isEmpty then "" else "; ") ++ sn)
     else if !s.accepted && s.efile != "" && s.efile != file then s!"in {s.efile}"
     else ""
   { file, host := h, self := s, verdict, divergence, klass, note }
@@ -405,6 +433,7 @@ def libDiffRender (r : LibRec) : String :=
     | "rejected" => "reject "
     | "diverging" => "DIVERGE"
     | "bounded" => "BOUNDED"
+    | "died" => "DIED   "
     | v => v
   let hostTex := if h.accepted then s!"host ok ({h.decls} decls)" else s!"host error [{h.code}]"
   let selfTex := if s.accepted then s!"self ok ({s.decls} decls)" else
@@ -433,11 +462,13 @@ def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Arra
       -- the time bound, and the heavy job's memory cap, not a ulimit
       let h : Side ← match ← libDiffRun self.toString (#["--libdiff-host", file] ++ flags) o.hostSecs 0 with
         | (c, out, err) =>
-          if libDiffStatus c != "ok" then
-            pure ({ status := libDiffStatus c, exitCode := c, note := (err.trimAscii.toString.take 200).toString } : Side)
+          let st := libDiffStatus c err
+          if st != "ok" then
+            pure ({ status := st, exitCode := c,
+                    note := if st == "timeout" then "" else libDiffRunNote c err } : Side)
           else match (out.splitOn "\n").findSome? (fun l => (Lean.Json.parse l).toOption) with
             | some j => pure (sideOfJson j)
-            | none => pure ({ status := "crash", note := s!"no host record: {(err.take 200).toString}" } : Side)
+            | none => pure ({ status := "died", note := s!"no host record: {(err.take 200).toString}" } : Side)
       let s ← libDiffSelf exe file o.selfSecs o.memMB
       let r := libDiffCompare file h s
       recs := recs.push r
@@ -453,6 +484,8 @@ structure LibSummary where
   rejected : Nat := 0
   diverging : Nat := 0
   bounded : Nat := 0
+  /-- the compiler died (not a bound: a failure) -/
+  died : Nat := 0
   sameCode : Nat := 0
   sameSpan : Nat := 0
   sameMsg : Nat := 0
@@ -486,6 +519,7 @@ def libDiffStep (s : LibSummary) (r : LibRec) : LibSummary :=
     if r.host.accepted && !r.self.accepted then { s with hostOkSelfErr := s.hostOkSelfErr + 1 }
     else if !r.host.accepted && r.self.accepted then { s with hostErrSelfOk := s.hostErrSelfOk + 1 }
     else s
+  | "died" => { s with died := s.died + 1 }
   | _ => { s with bounded := s.bounded + 1 }
 
 def libDiffSummarize (recs : Array LibRec) : LibSummary :=
@@ -514,7 +548,8 @@ def libDiffSummaryText (s : LibSummary) : String :=
     s!"  ok          {s.ok}",
     s!"  rejected    {s.rejected}   (both reject; {s.sameCode} same code, {s.sameSpan} same span, {s.sameMsg} same message)",
     s!"  diverging   {s.diverging}   (host accepts, self rejects: {s.hostOkSelfErr}; host rejects, self accepts: {s.hostErrSelfOk})",
-    s!"  bounded     {s.bounded}   (a run hit its time or memory bound)"]
+    s!"  bounded     {s.bounded}   (a run hit its declared time or memory bound)",
+    s!"  died        {s.died}   (a compiler died: a failure, not a gap)"]
   let byC := if s.byConstruct.isEmpty then [] else
     "\nby missing construct (files whose verdicts differ):" ::
       s.byConstruct.map (fun (k, n) => s!"  {libDiffPad k 24}{n}")
@@ -533,11 +568,20 @@ def libDiffSig (r : LibRec) : String :=
 /-- How a file stands against a baseline signature. -/
 def libDiffDelta (before after : String) : String :=
   let ok (s : String) : Bool := s.startsWith "ok/"
-  if before == "" then "new"
-  else if before == after then "same"
+  if before == after then "same"
+  -- a compiler death is a regression even when the file was not `ok` before: it is a
+  -- failure, not a parity gap the baseline may absorb
+  else if after.startsWith "died/" then "regressed"
+  else if before == "" then "new"
   else if !ok before && ok after then "fixed"
   else if ok before && !ok after then "regressed"
   else "changed"
+
+/-- The records whose signature differs from the baseline (`fixed`, `regressed`,
+`changed` or `new`): what makes the `--baseline` gate fail. A missing baseline is the
+update path, so it was already written and this is not called for it. -/
+def libDiffChanged (before : Std.HashMap String String) (recs : Array LibRec) : List LibRec :=
+  recs.toList.filter fun r => libDiffDelta (before.getD r.file "") (libDiffSig r) != "same"
 
 /-- The baseline diff: `fixed`, `regressed`, `changed`, `new`, `same`. -/
 def libDiffBaselineText (before : Std.HashMap String String) (recs : Array LibRec) : String := Id.run do
@@ -624,6 +668,7 @@ def libDiffMain (args : List String) : IO UInt32 := do
         ("summary", Lean.Json.mkObj [
           ("files", .num recs.size), ("ok", .num sum.ok), ("rejected", .num sum.rejected),
           ("diverging", .num sum.diverging), ("bounded", .num sum.bounded),
+          ("died", .num sum.died),
           ("host_ok_self_error", .num sum.hostOkSelfErr), ("host_error_self_ok", .num sum.hostErrSelfOk),
           ("by_construct", Lean.Json.mkObj (sum.byConstruct.map (fun (k, n) => (k, .num n)))),
           ("by_code", Lean.Json.mkObj (sum.byCode.map (fun (k, n) => (k, .num n)))),
@@ -635,6 +680,14 @@ def libDiffMain (args : List String) : IO UInt32 := do
       unless o.json do IO.println ""
       if existed then
         unless o.json do IO.println (libDiffBaselineText before recs)
+        -- The gate: a stored baseline that no longer matches is a failure. Updating it
+        -- is the missing-baseline path (remove the file, run again), so a green run
+        -- always means "the signatures are the ones recorded".
+        let changed := libDiffChanged before recs
+        unless changed.isEmpty do
+          IO.eprintln s!"selfhost-libdiff: {changed.length} file(s) differ from the baseline {f}"
+          IO.eprintln s!"  update: rm {f} && tests --libdiff --baseline {f}"
+          return 1
       else do
         let text := String.intercalate "\n" (recs.toList.map fun r =>
           Lean.Json.compress (Lean.Json.mkObj [("file", .str r.file), ("sig", .str (libDiffSig r))]))
@@ -666,18 +719,73 @@ def libDiffGroup : Group where
         | some recs =>
           let sum := libDiffSummarize recs
           libDiffWriteReport recs sum
-          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded}" },
-    { name := "a self-hosted run that exits 3 (the runtime gave up) is bounded, with its reason; not accepted", run := fun _ => do
-        checkEq "crash" (libDiffStatus 3)
+          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} died={sum.died}"
+          -- The case is not only a report: a compiler that died, or a sweep that
+          -- decided nothing, is a harness failure. (`--baseline`'s non-empty diff is
+          -- enforced by libDiffMain and its own case below.)
+          check (sum.died == 0) s!"the self-hosted compiler died on {sum.died} file(s); see .lake/libdiff/records.jsonl"
+          check (sum.ok + sum.rejected + sum.diverging > 0)
+            "no file reached a verdict (every run was bounded or died)"
+          -- A parity measurement whose `ok` bucket is unreachable measures nothing.
+          -- `scry/tests/ReplPrelude.wiz` is the smallest real module in the sweep and
+          -- both compilers accept it with one declaration: it must be `ok` (not bounded,
+          -- not diverging). The `lib/` side of the same check is
+          -- `lib/BitVecAdd.wiz`, whose declarations are all dotted; the old filter made
+          -- it `self ok (0 decls)` and the unit case below pins that count.
+          check (sum.ok > 0) "no file is accepted by both compilers"
+          match recs.find? (·.file == "scry/tests/ReplPrelude.wiz") with
+          | none => throw (IO.userError "scry/tests/ReplPrelude.wiz is missing from the sweep")
+          | some r =>
+            check (r.verdict == "ok")
+              s!"scry/tests/ReplPrelude.wiz: expected ok (both compilers accept it with one declaration), got {r.verdict}/{r.divergence} ({r.host.decls} vs {r.self.decls} declarations)" },
+    { name := "--baseline: any difference from a stored baseline fails; an identical one does not", run := fun _ => do
+        let recOf (file verdict diverg klass : String) : LibRec :=
+          { file, host := {}, self := {}, verdict, divergence := diverg, klass }
+        let before : Std.HashMap String String :=
+          (({} : Std.HashMap String String).insert "lib/A.wiz" "ok//").insert "lib/B.wiz" "rejected/code/by"
+        checkEq 0 (libDiffChanged before #[recOf "lib/A.wiz" "ok" "" ""]).length
+        checkEq 1 (libDiffChanged before #[recOf "lib/A.wiz" "diverging" "acceptance" "by"]).length
+        -- progress is a difference too: it must be recorded, not hidden by a green run
+        checkEq 1 (libDiffChanged before #[recOf "lib/B.wiz" "ok" "" ""]).length
+        checkEq 1 (libDiffChanged before #[recOf "lib/C.wiz" "ok" "" ""]).length
+        -- a death is a regression, even for a file that was not `ok` before
+        checkEq "regressed" (libDiffDelta "rejected/code/by" "died/died/")
+        checkEq "regressed" (libDiffDelta "" "died/died/")
+        checkEq "same" (libDiffDelta "died/died/" "died/died/") },
+    { name := "dotted names (`BitVec.add`, a module path) count as declarations, not projections", run := fun _ => do
+        let d (file sev msg : String) : LibDiag := { file, line := 1, col := 1, sev, msg, code := "" }
+        checkEq 3 (libDiffSelfDecls "f.wiz" [
+          d "f.wiz" "info" "BitVec.add : (x : Nat) → Nat",
+          d "f.wiz" "info" "Scry.Foo.bar : Nat",
+          d "f.wiz" "info" "plain : Nat"])
+        checkEq 0 (libDiffSelfDecls "f.wiz" [d "other.wiz" "info" "x : Nat"]) },
+    { name := "a compiler death is `died` (a failure); only the declared limits are `bounded`", run := fun _ => do
+        checkEq "died" (libDiffStatus 3)
+        checkEq "died" (libDiffStatus 139)
+        checkEq "died" (libDiffStatus 134)
+        checkEq "died" (libDiffStatus 2)
+        checkEq "ok" (libDiffStatus 0)
         checkEq "ok" (libDiffStatus 1)
+        checkEq "timeout" (libDiffStatus 124)
+        checkEq "timeout" (libDiffStatus 137)
+        checkEq "memory" (libDiffStatus 3 "partial\nwiz: out of memory\n")
+        checkEq "died" (libDiffStatus 3 "wiz: applying a non-function\n")
         checkEq "wiz: out of memory" (libDiffRuntimeNote "partial\nwiz: out of memory\n")
         let h : Side := { accepted := true, decls := 30 }
-        let s : Side := { accepted := true, exitCode := 3, status := libDiffStatus 3,
-                          note := libDiffRuntimeNote "wiz: out of memory\n" }
-        let r := libDiffCompare "lib/BitVecAdd.wiz" h s
+        -- the declared memory bound: `bounded`, with the runtime's reason
+        let mem : Side := { accepted := true, exitCode := 3, status := libDiffStatus 3 "wiz: out of memory\n",
+                            note := libDiffRunNote 3 "wiz: out of memory\n" }
+        let r := libDiffCompare "lib/BitVecAdd.wiz" h mem
         checkEq "bounded" r.verdict
         checkEq "run" r.divergence
-        checkEq "self crash (wiz: out of memory)" r.note }
+        checkEq "self memory (wiz: out of memory)" r.note
+        -- a death has its own verdict, so the summary and the group fail on it
+        let dead : Side := { accepted := false, exitCode := 139, status := libDiffStatus 139,
+                             note := libDiffRunNote 139 "" }
+        let d := libDiffCompare "lib/BitVecAdd.wiz" h dead
+        checkEq "died" d.verdict
+        checkEq "died" d.divergence
+        checkEq "self died (exit 139)" d.note }
   ]
 
 builtin_initialize registerGroup libDiffGroup

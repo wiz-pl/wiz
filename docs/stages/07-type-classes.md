@@ -149,6 +149,7 @@ inductive Box.{u} (A : Type u) where          -- Box : Type u → Type u (inferr
 
 ## 7e: numeric classes
 
+<!-- no-check: a fragment: `UIntN`, `Add` and the instances live in `lib/`, imported by the page -->
 ```wiz no-check
 class Add (A : Type) where
   add : A → A → A                      -- also Sub, Mul, Div, Mod, Neg
@@ -216,6 +217,7 @@ for a look-alike type applies too; numerals as patterns: see 13q (`docs/stages/1
 
 ## 7f: heterogeneous operators, default instances
 
+<!-- no-check: a fragment: the library's `HAdd` instances and attributes are quoted, not imported -->
 ```wiz no-check
 class HAdd (A B : Type) (C : outParam Type) where
   hAdd : A → B → C                     -- also HSub, HMul, HDiv, HMod, HPow, HAppend

@@ -4,6 +4,7 @@
 contents of a text file. It is the Wiz equivalent of Rust's `include_str!` and Lean's
 `include_str`, without a build script:
 
+<!-- no-check: `include_str` reads `node-types.json`, which is not in the repository; the page shows the syntax -->
 ```wiz no-check
 import Prelude
 

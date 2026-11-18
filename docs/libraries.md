@@ -127,6 +127,7 @@ the board; its findings G1–G10 are the requirements). Design notes:
 `wiz-notes/hdl-usability.md`. Everything is in `lib/Hdl/Core.wiz`; examples and
 tests in `examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
 
+<!-- no-check: uses `Hw`, `HwTy` and the bundle derivers from `lib/Hdl/Core.wiz`, imported on the page -->
 ```wiz no-check
 structure Tx (r : HwTy → Type) where      -- a bundle: a structure of signals
   line : r Bit
@@ -250,6 +251,7 @@ SVA. `lib/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Tr
 examples and tests in `examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
 `wiz-notes/hdl-temporal.md`.
 
+<!-- no-check: the theorem refers to the page's `Uart`, `TL` and `Mealy` definitions above -->
 ```wiz no-check
 def Uart.onlyThat_a5 :     -- the loopback reports byte 0xa5 and nothing else, for ever
     TL.always (TL.nowB (fun o => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
@@ -650,6 +652,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   width (a value, not an instance, as `Bundle`). For an **enumeration** (no parameters,
   constructors without fields) constructor `i` is the number `i` in
   `⌈log₂ #constructors⌉` bits (Clash's encoding):
+  <!-- no-check: the `deriving BitPack` fragment needs `BitPack` and `HwTy`; the listing documents the generated names -->
   ```wiz no-check
   inductive Phase where | idle | start | data | stop  deriving BitPack
   -- Phase.width = 2, Phase.code = HwTy.bits 2, Phase.toNat, Phase.ofNat (out of range:

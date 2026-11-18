@@ -11,8 +11,9 @@ runs them through the real toolchain:
                     next fenced block is a plain/text/output block, its standard output
                     must match it (a leading `$ wiz run ...` line is ignored)
   ```wiz no-check   deliberately not checked: a fragment, an error demonstration, or a
-                    block that needs the page's earlier definitions.  The reason belongs
-                    in the prose or in a `-- ...` line right above the fence.
+                    block that needs the page's earlier definitions.  The reason is a
+                    comment line right above the fence (`<!-- no-check: … -->` or
+                    `-- …`), or text after the marker; an unexplained skip fails.
 
 Other fenced blocks (shell commands, output, syntax diagrams, file trees) are not Wiz
 blocks and are ignored.  A block marked `wiz` with no `import` line gets `import
@@ -37,6 +38,12 @@ starts warm.
 Limits.  One block is 64 KiB and 2000 lines at most (`wiz check` is not a fuzz target),
 and each command has a 120-second timeout; both are flags.  A block over a limit is a
 failure rather than a silent skip, so a real example cannot hide by being large.
+
+Skips.  A `wiz no-check` block must carry a reason: text after the marker, or a
+comment line (`<!-- no-check: … -->` or `-- …`) immediately above the fence.  An
+unexplained skip is a problem.  The number of skips also has a committed ceiling
+(`NO_CHECK_CEILING`, the count when this lint was added): a new skip must either
+compile or be explained and counted, and the ceiling only goes down.
 
 Usage
   scripts/check-docs-examples.py                 check this checkout
@@ -75,6 +82,10 @@ MAX_BLOCK_BYTES = 64 * 1024
 MAX_BLOCK_LINES = 2000
 DEFAULT_TIMEOUT = 120
 CACHE_VERSION = 1
+# The `wiz no-check` blocks in the documentation when the skip lint was added.  Every
+# skip must now state its reason, and this ceiling makes a new one visible: it may only
+# be lowered (when a fragment becomes checkable), never raised without a reviewed change.
+NO_CHECK_CEILING = 55
 
 
 # --------------------------------------------------------------------------------------
@@ -90,6 +101,7 @@ class Fence:
     info: str
     body: str
     end: int  # the closing fence (or the last line when unclosed)
+    above: str = ""  # the line above the opening fence
 
     @property
     def mode(self) -> str | None:
@@ -99,9 +111,31 @@ class Fence:
             return None
         if len(parts) == 1:
             return "check"
+        # `no-check` takes a trailing reason (`wiz no-check -- a fragment`); the other
+        # modes do not, so a typo there is still an unknown marker.
+        if parts[1] == "no-check":
+            return "no-check"
         if len(parts) == 2 and parts[1] in CHECK_MODES:
             return parts[1]
         return "bad-marker"
+
+    @property
+    def skip_reason(self) -> str | None:
+        """Why this block is not checked: after the marker, or a comment above it."""
+        if self.mode != "no-check":
+            return None
+        parts = self.info.split(None, 2)
+        if len(parts) == 3 and parts[2].strip():
+            return parts[2].strip()
+        above = self.above.strip()
+        if above.startswith("<!--") and above.endswith("-->"):
+            inner = above[4:-3].strip()
+            if inner.startswith("no-check:"):
+                return inner[len("no-check:"):].strip() or None
+            return None
+        if above.startswith("--"):
+            return above[2:].strip() or None
+        return None
 
     @property
     def marker_problem(self) -> str | None:
@@ -138,7 +172,7 @@ def parse_fences(path: Path, text: str) -> list[Fence]:
             line[indent:] if line[:indent].strip() == "" else line for line in body_lines
         )
         end = min(j + 1, len(lines))
-        out.append(Fence(path, i + 1, info, body, end))
+        out.append(Fence(path, i + 1, info, body, end, above=lines[i - 1] if i else ""))
         i = j + 1
     return out
 
@@ -265,6 +299,7 @@ class Report:
     cached: int = 0
     run: int = 0
     no_check: int = 0
+    no_check_reasoned: int = 0
     links: int = 0
     refs: int = 0
     problems: list[str] = field(default_factory=list)
@@ -408,6 +443,13 @@ def check_blocks(
         rel = fence.path.relative_to(root).as_posix()
         if mode == "no-check":
             report.no_check += 1
+            if fence.skip_reason is None:
+                problems.append(
+                    f"{rel}:{fence.line}: `wiz no-check` block has no reason; put one "
+                    "after the marker or on the line above"
+                )
+            else:
+                report.no_check_reasoned += 1
             continue
         over = _too_big(fence.body)
         if over is not None:
@@ -458,6 +500,12 @@ def check_blocks(
                 "stdout": stdout if mode == "run" else "",
             }
 
+    if report.no_check > NO_CHECK_CEILING:
+        problems.append(
+            f"check-docs-examples: {report.no_check} `wiz no-check` blocks, over the "
+            f"committed ceiling of {NO_CHECK_CEILING}; make a skipped block compile, or "
+            "state a reviewed reason and lower the ceiling only when a skip is repaired"
+        )
     if cache_file is not None:
         _save_cache(cache_file, new_entries)
     report.seconds = time.monotonic() - started
@@ -511,13 +559,16 @@ def print_report(report: Report, problems: list[str], quiet: bool = False) -> in
         print(
             f"\ncheck-docs-examples: {len(problems)} problem(s); "
             f"{report.checked} checked ({report.cached} cached, {report.run} run), "
-            f"{report.no_check} no-check; {report.links} links, {report.refs} example references",
+            f"{report.no_check} no-check ({report.no_check_reasoned} with a reason, "
+            f"ceiling {NO_CHECK_CEILING}); {report.links} links, "
+            f"{report.refs} example references",
             file=sys.stderr,
         )
         return 1
     print(
         f"check-docs-examples: clean ({report.checked} checked: {report.cached} cached, "
-        f"{report.run} run; {report.no_check} no-check; {report.links} links, "
+        f"{report.run} run; {report.no_check} no-check ({report.no_check_reasoned} with a "
+        f"reason, ceiling {NO_CHECK_CEILING}); {report.links} links, "
         f"{report.refs} example references; {report.seconds:.1f} s)"
     )
     return 0
@@ -587,13 +638,32 @@ def self_test() -> int:
         # An unknown marker is a usage error, not a silently ignored block.
         bad = fixture / "docs" / "bad.md"
         bad_text = bad.read_text(encoding="utf-8")
-        bad.write_text(bad_text + "\n```wiz wat\nx\n```\n", encoding="utf-8")
+        bad.write_text(
+            bad_text
+            + "\n```wiz wat\nx\n```\n"
+            + "\n```wiz no-check\ndef an_unexplained_fragment : Nat := 1\n```\n",
+            encoding="utf-8",
+        )
         try:
             _, extra = run_check(fixture, wiz, Path(tmp) / "cache2", 30)
             if not any("unknown Wiz block marker" in p for p in extra):
                 failures.append("a `wiz wat` block was not reported after it was added")
+            if not any("has no reason" in p for p in extra):
+                failures.append("a `wiz no-check` block without a reason was not reported")
         finally:
             bad.write_text(bad_text, encoding="utf-8")
+
+        # A skip ceiling that is already reached is a problem, so a new skip cannot
+        # appear without the count being revisited.
+        global NO_CHECK_CEILING
+        saved_ceiling = NO_CHECK_CEILING
+        NO_CHECK_CEILING = 0
+        try:
+            _, over = run_check(fixture, wiz, Path(tmp) / "cache3", 30)
+            if not any("over the committed ceiling" in p for p in over):
+                failures.append("a skip over the ceiling was not reported")
+        finally:
+            NO_CHECK_CEILING = saved_ceiling
 
     if failures:
         for failure in failures:

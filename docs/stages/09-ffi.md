@@ -121,6 +121,7 @@ def finish (1 t : Tok) : IO Nat := do1
   expression `x w` and so `w`, ω times (stage 4b; CoreSpec §7.1, R1). The same goes for
   every function that hands a resource back in a pair (`B × Uniq ρ S` in
   `lib/Region.wiz`): a caller holding the pair linearly must split it.
+  <!-- no-check: an error demonstration: `peek` must be rejected for projecting a linear pair -->
   ```wiz no-check
   def peek {A : Type} (1 x : IO A) (1 w : World) : A := (x w).1
   -- error: cannot project (x w).1: a projection needs an unrestricted pair …,

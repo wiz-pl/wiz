@@ -195,6 +195,7 @@ def k : (n : Nat) → (b : Bool) → Nat → Nat := by
 
 ## 6f: `unfold`, `whnf`, `change`, `rw`
 
+<!-- no-check: a proof fragment whose statement the page abbreviates with an ellipsis -->
 ```wiz no-check
 def MList : List Nat → Nat → Pred
   | .nil, p => fun h => p = 0

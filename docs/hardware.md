@@ -21,6 +21,7 @@ controller. The libraries are described in [libraries.md](libraries.md) (section
 The state and the inputs are *bundles*: structures parameterised by the representation,
 so one definition is a simulation model (at `HwTy.El`, values) and a netlist (at `Wire`).
 
+<!-- no-check: uses `B2`, `Bit`, `Hw` and the bundle derivers from `lib/Hdl/Core.wiz`, imported on the page -->
 ```wiz no-check
 structure Light (r : HwTy → Type) where
   phase : r B2

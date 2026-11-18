@@ -122,6 +122,7 @@ toolchain process, and the browser half is `web/framework/runtime.js`.
 The block below is a notebook cell, not a file: its last line is a bare expression whose
 value the kernel displays, so it is not checked as a Wiz file.
 
+<!-- no-check: a notebook cell whose last line is a bare expression, not a Wiz file -->
 ```wiz no-check
 import Web.Widget
 

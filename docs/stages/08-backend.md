@@ -2,6 +2,7 @@
 
 ## 8a: IR and Perceus reference counting
 
+<!-- no-check: `#ir` and `#run` demonstrations, which need the page's `twice` and `fact` -->
 ```wiz no-check
 #ir twice          -- def twice x0 x1 :=  dup x0;  let x2 := ap x0 x1;  let x3 := ap x0 x2;  ret x3
 #run fact 10       -- 3628800, through the IR, on a heap that checks reference counts
@@ -92,6 +93,7 @@ description).
 
 ## 8e: borrowed parameters and drop specialisation
 
+<!-- no-check: an `#ir` demonstration that needs the page's `len` -->
 ```wiz no-check
 #ir len            -- def len @&x0 :=  case x0 of | 0 => … | 1 => let x2 := proj 1 x0;  let x3 := len x2; …
 ```

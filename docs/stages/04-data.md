@@ -51,6 +51,7 @@ available only on unrestricted pairs**: `p.1` keeps one component and drops the 
 of an expression (`(act w).1` uses `w` ω times). A pair held at quantity 1 (or at a
 quantity variable) is taken apart with the split form, which binds both components:
 
+<!-- no-check: an error demonstration: `bad` must be rejected for projecting a linear pair -->
 ```wiz no-check
 axiom Tok : Type
 def swap {A : Type} (1 p : A × Tok) : (1 t : Tok) × A := let 1 (a, t) := p; (t, a)
@@ -207,6 +208,7 @@ Optional:
 Inductive and coinductive types are **anonymous**: `μ D i` and `ν D i` for a
 *description* `D : Desc I`. Constructors are tags of a finite `Enum`:
 
+<!-- no-check: a fragment: `Desc`, `Enum`, `ecase`, `mu` and `con` are introduced on this page, not imported -->
 ```wiz no-check
 def NatD : Desc Unit :=
   Desc.arg 1 (Enum [zero, succ]) (fun t => ecase t [Desc.ret (), Desc.rec 1 () (Desc.ret ())])
@@ -322,6 +324,7 @@ positivity check applies unchanged).
 
 ## 4e (part 2): pattern matching and structural recursion
 
+<!-- no-check: a fragment: `Nat` and `Vec` here are the page's encodings, defined above -->
 ```wiz no-check
 def add : Nat → Nat → Nat
   | .zero, n => n
@@ -368,6 +371,7 @@ A copattern definition with **no corecursive observation** is not recursive at a
 it compiles to `cocon`, one cell in front of the values given, and `f` may not occur
 on its right-hand sides. That is how a delay is written:
 
+<!-- no-check: a fragment: `Stream` here is the page's coinductive encoding, defined above -->
 ```wiz no-check
 def register {A : Type} (init : A) (s : Stream A) : Stream A
   | .head => init
@@ -432,6 +436,7 @@ your choice over `Acc`/`termination_by` and guarded recursion. `μ` and `ν` car
 
 Definitions with a sized signature use all of this automatically:
 
+<!-- no-check: a fragment: `fib` uses the page's `Nat`, `add` and sized `Nat` above -->
 ```wiz no-check
 def fib {i : Size} : Nat^i → Nat
   | .zero => .succ .zero
@@ -451,6 +456,7 @@ as-patterns (size-preserving functions like `minus` want `x@.zero`).
 
 ## 4g: equality of descriptions
 
+<!-- no-check: a fragment: `List`, `UIntN` and `Empty` come from the library; it shows the equality reduction -->
 ```wiz no-check
 def refute (e : List Nat = List Bool) : Empty := absurd (((e.2.1.2 'cons).1).2.1.2 'succ)
 def ne (e : UIntN 8 = UIntN 16) : Empty := absurd ((e.1.1.2 16).1 (refl 16))
@@ -519,6 +525,7 @@ design in `wiz-notes/linear-case-design.md`, K1 and the unit eliminator (K2a wit
   bound at 1 (the scrutinee is then bound at 1 too), and a field bound at 1 is linear
   again for a nested match.
 
+<!-- no-check: a fragment: `Res1` and `Tok` are the page's example; the match demonstrates linear field quantities -->
 ```wiz no-check
 inductive Res1 (A : Type) where
   | ok (1 a : A)

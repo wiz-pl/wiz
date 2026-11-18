@@ -42,6 +42,7 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 
 ## 13b: private declarations and private constructors
 
+<!-- no-check: a fragment: the `private` declaration is an illustration, not a module -->
 ```wiz no-check
 private def secret : Nat := 42          -- visible only in this module
 structure Shr (ρ : Region) (A : Type) where
@@ -127,6 +128,7 @@ scope or an operation of the library, and hand-written Wiz can't forge one
 (`drafts/rust/rejected/forge_handle.wiz`; test group `regions`). `MutOpt`'s constructors
 stay public: their fields are handles already.
 
+<!-- no-check: a fragment: `Tok` and `Signal` illustrate private constructors -->
 ```wiz no-check
 inductive Tok where
   | num (n : Nat)
@@ -199,6 +201,7 @@ Tests: group `language`.
 
 ## 13d: `Functor` and `Applicative` (`import Functor`)
 
+<!-- no-check: a fragment: it draws on the page's `Functor`/`Applicative` imports and library instances -->
 ```wiz no-check
 import Functor
 #eval Nat.add <$> Option.some 1 <*> Option.some 2          -- .some 3
@@ -250,6 +253,7 @@ lemmas with them (`hexists J h` is `∃ a : A, J a h`; `star` is
 
 ## 13f: `let` with tuple patterns of any length
 
+<!-- no-check: a fragment: `Tok` is the page's linear token, defined above -->
 ```wiz no-check
 def f (p : Nat × Nat × Nat) : Nat := let (a, b, c) := p; a + b * c
 def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
@@ -370,6 +374,7 @@ structure pattern …"), `parser: terms`.
 
 ## 13i: structure update `{ s with f := v }`
 
+<!-- no-check: a fragment: `Stats` is the page's example structure, defined above -->
 ```wiz no-check
 def bump (s : Stats) : Stats := { s with hits := Nat.succ s.hits }
 def reset (s : Stats) : Stats := { s with hits := 0, misses := 0 }
@@ -623,6 +628,7 @@ Tests: `language` ("13p: …"), `lsp` ("13p–q: an updated field's hover and de
 
 ## 13q: numeral and literal patterns
 
+<!-- no-check: a fragment: `Nat` and its numerals come from the library; the page explains the patterns -->
 ```wiz no-check
 def cls : Nat → Nat
   | 0 => 10
@@ -724,6 +730,7 @@ the chain proves the last step's relation between its first left endpoint and it
 right endpoint. It is a term (`term.calc`, `Wiz/Parser/Builtin.lean`, `elabCalc` in
 `Wiz/Elab/Term.lean`):
 
+<!-- no-check: a fragment: the `calc` term is shown without the page's surrounding definitions -->
 ```wiz no-check
 import Nat
 
@@ -751,6 +758,7 @@ def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c = d) : a < d :=
   `lib/Nat.wiz`, `lib/IntOrder.wiz` and `lib/Rat.wiz`. A program registers its own
   relation the same way:
 
+  <!-- no-check: a fragment: `Same` and the `Trans` instance are the page's example, not an import -->
   ```wiz no-check
   def Same (a b : Nat) : Prop := (a ≤ b) ∧ (b ≤ a)
   infix:50 " ≈≈ " => Same

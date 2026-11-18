@@ -15,6 +15,7 @@ $ wiz run examples/hello.wiz
 hello from fixture
 ```
 
+<!-- no-check: a fragment that uses a definition from the page's prose -->
 ```wiz no-check
 def a_fragment : Nat := the_page_defines_this_above
 ```

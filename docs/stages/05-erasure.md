@@ -1,5 +1,6 @@
 # Stage 5: erasure and the interpreter
 
+<!-- no-check: `#eval` and `#erase` demonstrations that use the `fib` and `Vec.cons` defined on the page -->
 ```wiz no-check
 #eval fib (.succ (.succ (.succ (.succ (.succ .zero)))))   -- .succ (… 8 …)
 #erase Vec.cons                                          -- the erased code

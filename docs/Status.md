@@ -342,6 +342,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   `((%q x : N) → N) = ((1 x : N) → N)` computed to `False` for a variable `q`, and the
   instance `q := 1` made it provable:
 
+  <!-- no-check: the pre-fix program is an error demonstration (`boom` proves False), so it must not compile -->
   ```wiz no-check
   def flip {q : Qty} (e : ((%q x : N) → N) = ((1 x : N) → N)) : False := e
   def boom : False := flip (q := 1) rfl

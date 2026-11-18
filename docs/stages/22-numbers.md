@@ -117,6 +117,7 @@ as the runtime number itself, possibly big). **A word is its bits**:
 
 ## 22e: phantom parameters
 
+<!-- no-check: a fragment that includes a deliberate type mismatch (`f`) to show phantom parameters -->
 ```wiz no-check
 inductive UIntN (w : Nat) where
   | mk (toNat : Nat)                     -- no field mentions `w`
@@ -214,6 +215,7 @@ Two ways to prove `False` without writing `axiom` are closed.
 
 ## 22g: regions: borrow checking as typing
 
+<!-- no-check: a fragment: `Outlives`, `Shr`, `Result` and `Region` are introduced by the page -->
 ```wiz no-check
 def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
@@ -301,6 +303,7 @@ live on after the borrow), and with the second it also has to request the instan
 
 `BitVec n` (`lib/BitVec.wiz`) and `UIntN n` (`lib/Word.wiz`) are one type:
 
+<!-- no-check: a fragment: it quotes `lib/Word.wiz` and `lib/BitVec.wiz` definitions -->
 ```wiz no-check
 inductive UIntN (w : Nat) where | mk (toNat : Nat)   -- lib/Word.wiz: the model + natives
 def BitVec (n : Nat) : Type := UIntN n               -- lib/BitVec.wiz: the HDL/proof names
@@ -333,6 +336,7 @@ def w (x : U32) : BitVec 32 := BitVec.add x (BitVec.ofNat 32 1)   -- no conversi
 
 ## 22i: unboxed newtypes and `attribute [inline]`
 
+<!-- no-check: a fragment: `Uniq`, `Region` and `#ir` need the page's Feral library -->
 ```wiz no-check
 structure Uniq (ρ : Region) (A : Type) where
   val : A                                  -- at run time, a Uniq ρ A is its A
@@ -407,6 +411,7 @@ design). The self-hosted toolchain doesn't have phantom tails at all yet.
 
 ## 22j: Feral, the surface language
 
+<!-- no-check: a fragment: the `feral ... end` block is abbreviated with an ellipsis and needs `FeralCore` -->
 ```wiz no-check
 import FeralCore
 import Feral
@@ -439,6 +444,7 @@ loops, `?`, `U64`, and functions that return borrows.
   and elaborated like anything else. `#lower feral … end` also shows that text: the
   function above becomes
 
+  <!-- no-check: the `#lower` output of the Feral function above, not a source file -->
   ```wiz no-check
   def swap {ρa ρb : Region} (x : (Uniq ρa U64)) (y : (Uniq ρb U64)) : Result (Unit × ((Uniq ρa U64) × (Uniq ρb U64))) :=
     let t := x.val;

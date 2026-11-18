@@ -1102,9 +1102,12 @@ The first divergence is reported per file. A file both compilers accept with the
 declaration count is `ok`; one both reject is `rejected` (the counts of the same code,
 same span and same message are reported apart, because D6's positioning differs by
 design); one whose verdicts differ is `diverging` — that is the gap list. A run that
-hits the per-file time or memory bound is `bounded`, not a gap. That includes exit
-status 3, the self-hosted runtime giving up (`wiz: out of memory` when an allocation
-fails under the memory bound); the report carries its `wiz:` line.
+hits the *declared* per-file time or memory bound is `bounded`, not a gap: `124`, or
+`137` after `timeout -k`, and exit status 3 with the runtime's `wiz: out of memory`
+(an allocation failed under the memory bound). A compiler that *dies* is `died` instead
+— a signal (`139`, `134`), exit 3 for another `wiz:` reason (`applying a non-function`),
+or any other non-0/non-1 exit; the summary counts it and the sweep case fails on one.
+The report carries each run's `wiz:` line.
 
 The host side is the Lean frontend in a child process (`tests --libdiff-host FILE`, the
 same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/
@@ -1112,14 +1115,21 @@ same `runFrontend` `wiz check` runs, with `Module.loadClosure`/`includeTable`/
 bound it; its declaration count is the file's `declSites` in module `""` without a
 structure's constructors, fields and projections, plus its `#check` info messages. The
 self-hosted side is the compiler binary `selfhostCompiler` builds, `check FILE --types`:
-its info lines are the per-declaration reports (a structure's projections dropped), so
-the two counts are the same notion.
+its info lines are the per-declaration reports, including dotted names (`BitVec.add`,
+and a module path such as `Scry.Foo.bar` is part of the name, not a structure
+projection); a structure's own fields and projections have no info line, so the two
+counts are the same notion. (Dropping dotted names, as the first version did, dropped
+every `Nat.repr`/`BitVec.add` and made the counts disagree for 114 of the 117 `lib`
+files, so `ok` — and every `fixed` baseline delta — was unreachable there.)
 
 The files are found by walking the tree (not a list), `--only` takes a path, a path
-suffix or a module name, and `--limit N` the first N — a work list, not a gate. To make
+suffix or a module name, and `--limit N` the first N. The group is a work list, not a
+gate; the command line's `--baseline FILE` mode is one. To make
 progress a diff rather than a number, `--baseline FILE` writes the current
 `verdict/divergence/class` per file when the file does not exist, and reports
-`fixed`/`regressed`/`changed`/`new` against it when it does. `--json` writes one record
+`fixed`/`regressed`/`changed`/`new` against it when it does; a stored baseline that no
+longer matches exits 1, so the diff is a gate and the update path is the missing-baseline
+write (`rm FILE` and run again). `--json` writes one record
 per file (both sides: acceptance, exit, errors, decls, first error code/span/message;
 plus the verdict, the first divergence, the missing construct and the note) and a final
 summary record. `--timeout`/`--host-timeout`/`--self-timeout` (seconds) and `--mem`

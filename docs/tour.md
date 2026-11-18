@@ -477,6 +477,7 @@ def trip (1 t : Ticket) : IO Unit := do1
 (`axiom` declares a type or a function without defining it; a real library would
 implement them with `extern`, section 9.) Try to cheat and the checker stops you:
 
+<!-- no-check: an error demonstration: the ticket is used twice and then dropped -->
 ```wiz no-check
 def twice (1 t : Ticket) : IO Unit := do1
   Ticket.ride t;
@@ -494,6 +495,7 @@ Pairs can have linear components. A pair held linearly is taken apart with `let 
 which binds both components at once. A projection `p.1` would quietly drop the other
 component, so the checker refuses it on a linear pair:
 
+<!-- no-check: a fragment: `Ticket` and the linear pair are the page's example -->
 ```wiz no-check
 def swap {0 A : Type} (1 p : A × Ticket) : (1 t : Ticket) × A :=
   let 1 (a, t) := p;
@@ -547,6 +549,7 @@ as every observation answers in finitely many steps (it is *productive*). The ch
 makes sure each `.tail` is a call of the function being defined, *guarded* by the
 observation. A definition that would spin forever is rejected:
 
+<!-- no-check: an error demonstration: the corecursive call is not guarded -->
 ```wiz no-check
 def stuck (n : Nat) : Stream Nat
   | .head => n

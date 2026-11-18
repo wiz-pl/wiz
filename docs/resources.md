@@ -60,6 +60,7 @@ in the lowered program, by the kernel ([22j](stages/22-numbers.md)).
 `#lower` shows what `swap` is: a function of two linear borrow handles (`Uniq1`: used
 once, handed back on every path, `Result1`) that hands both back.
 
+<!-- no-check: the `#lower` output of `swap`, not a source file (it uses `Uniq1` from `lib/Feral`) -->
 ```wiz no-check
 def swap {ρa ρb : Region} (1 x : (Uniq1 ρa U64)) (1 y : (Uniq1 ρb U64)) : Result1 Unit ((1 _ : (Uniq1 ρa U64)) × (Uniq1 ρb U64)) :=
   let 1 (d_2, x) := Uniq1.peek x;
@@ -75,6 +76,7 @@ so no handle outlives it. There is no heap here: a `&mut` is a value passed in a
 back (the Aeneas reading), so the specification is about values, and is proved by
 computation:
 
+<!-- no-check: a `feral ... end` block that names the page's `swap`; the page shows the sections around it -->
 ```wiz no-check
 feral
   …
@@ -94,6 +96,7 @@ reachable by consuming it with `Uniq1.peek`/`end`), so `Spec` takes the `&mut` a
 clauses on the values the scopes hand back (`final x` is the lender's final value, so no
 prophecy is needed). `swap.Spec a b` is
 
+<!-- no-check: the specification refers to `swap` and the borrow combinators defined above -->
 ```wiz no-check
 def swap.Spec (x : U64) (y : U64) : Prop :=
   Result.Holds (fun (r : ((Unit × U64) × U64)) => (r.2 = y) × (r.1.2 = x)) (
@@ -110,6 +113,7 @@ On a heap whose cells `p` and `q` hold the two numbers, calling the function is:
 cells, run it, write the final values back. `lib/HeapBorrow.wiz` names that
 (`Prog.borrowMut`, `Prog.borrowMut2`, and `Prog.borrowShr` for a `&`):
 
+<!-- no-check: a fragment: `Prog.borrowMut2`, `swap_vals` and `Result` come from the page's earlier sections -->
 ```wiz no-check
 def swapCells (p q : Nat) : Prog U64 Unit :=
   Prog.borrowMut2 p q (fun a b => Result.map (fun (r : U64 × U64) => ((), r)) (swap_vals a b))
@@ -118,6 +122,7 @@ def swapCells (p q : Nat) : Prog U64 Unit :=
 It can be verified two ways. The `x`-tactics ([24d](stages/24-separation-logic.md)) step
 through it, computing the Feral function as they go:
 
+<!-- no-check: the proof is a fragment that steps through `swapCells` with the `xgo` tactic; the full session is in `lib/HoareExamples.wiz` -->
 ```wiz no-check
 def swapCells_spec (p q : Nat) (a b : U64) :
     Triple ((p ↦ a) ⋆ (q ↦ b)) (swapCells p q) (fun _ => (p ↦ b) ⋆ (q ↦ a)) := by

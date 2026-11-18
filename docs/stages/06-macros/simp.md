@@ -105,6 +105,7 @@ that part stays host-side (the Wiz driver never sees a metavariable). The Prelud
 declares (an excerpt: `RewriteResult` and two of `Tac`'s constructors, so not checked
 on its own):
 
+<!-- no-check: an excerpt of `Tac`'s declaration, as the page says, so it is not a complete file -->
 ```wiz no-check
 inductive RewriteResult where
   | noMatch

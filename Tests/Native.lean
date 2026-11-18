@@ -33,13 +33,6 @@ def msgs (input : String) (trust : Bool := true) : IO (List String) := do
   pure (s.messages.toList.map fun m =>
     s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}")
 
-/-- `msgs` with every module of `lib/` importable (Hdl.Verified, …). -/
-def msgsLibs (input : String) (trust : Bool := true) : IO (List String) := do
-  let loader ← Elab.libLoader
-  let s := runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule, trustNative := trust }
-  pure (s.messages.toList.map fun m =>
-    s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}")
-
 def has (ms : List String) (fragment : String) : Bool := ms.any fun m => (m.splitOn fragment).length > 1
 
 def expect (ms : List String) (fragment : String) : IO Unit :=
@@ -523,6 +516,24 @@ def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany)
   let rows := (← readTrustRows trustBaseline).filter fun r => r.module == path
   compareTrust path actual rows today
 
+/-- Pin one theorem the example's prose says it checks: it must be declared in the
+example (not imported), be a definition (a proof, not an axiom), and have exactly the
+type the page states. A deleted, renamed or weakened theorem then fails this case
+instead of leaving the group green. The expected text is `Term.pretty` without notation,
+the way the declaration reads in the file. -/
+def pinTheorem (g : Globals ZeroOneMany) (path : String) (n : Name) (ty : String) : IO Unit := do
+  match g.find? n with
+  | none =>
+    throw (IO.userError s!"{path}: `{n}` is missing (the page claims it is checked here)")
+  | some d =>
+    if d.value.isNone then
+      throw (IO.userError s!"{path}: `{n}` is an axiom, not a checked theorem")
+    if (g.declModule[n]?).isSome then
+      throw (IO.userError s!"{path}: `{n}` is imported, not declared here")
+    let got := d.type.pretty []
+    unless got == ty do
+      throw (IO.userError s!"{path}: `{n}` has the wrong type\n  expected {ty}\n  got      {got}")
+
 /-- `--update`: regenerate the ledger, preserving the metadata of rows that stay. A row
 that appears for the first time is refused unless `reason` is non-empty; the new row
 gets `owner` (or the git user) and `review` (or today + 180 days). An explicit `review`
@@ -825,14 +836,41 @@ def hdlVerifiedGroup : Group where
         if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}")
         -- the trust ledger's part for this file: it must add no source of trust
         let _ ← checkExampleTrustLedger path s.globals
+        -- Every theorem the page says this file checks is a dependency of this case:
+        -- deleting or renaming one, or weakening its statement, fails the group (the
+        -- old case only ran the file, and deleted theorems left it green).
+        pinTheorem s.globals path "sminK_eq"
+          "(d1 : BitVec 12) → (d2 : BitVec 12) → sminK HwTy.El instHwHwTyEl d1 d2 = BitVec.sub 12 (BitVec.sub 12 (smin12 HwTy.El instHwHwTyEl d1 d2) (zext HwTy.El instHwHwTyEl 5 7 (sminCorr HwTy.El instHwHwTyEl (abs12 HwTy.El instHwHwTyEl (BitVec.sub 12 d2 d1))))) (BitVec.ofNat 12 1)"
+        pinTheorem s.globals path "norm2_eq"
+          "(a : BitVec 12) → (c : BitVec 12) → norm2 HwTy.El instHwHwTyEl a c = max12 HwTy.El instHwHwTyEl (max12 HwTy.El instHwHwTyEl a c) (elevenOf HwTy.El instHwHwTyEl (BitVec.add 12 a c))"
+        pinTheorem s.globals path "squares_all" "allBelow Hv.sqOk 1024 = Bool.true"
+        pinTheorem s.globals path "root_all" "allBelow Hv.rtOk 401 = Bool.true"
+        pinTheorem s.globals path "root"
+          "(n : Nat) → Nat.lt n 401 = Bool.true → Hv.isqrtOk (UIntN.toNat 11 (rtRun (BitVec.ofNat 11 n))) n = Bool.true"
+        pinTheorem s.globals path "table_all" "allBelow Hv.romOk 32 = Bool.true"
+        pinTheorem s.globals path "corr_all" "allBelow Hv.corrOk 64 = Bool.true"
+        pinTheorem s.globals path "eleven_all" "allBelow Hv.octOk 2048 = Bool.true"
         pure () },
     { name := "V1: full widths by native_refl, each an axiom #print axioms names (examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "examples/hdl-verified-native.wiz")
+        let path := "examples/hdl-verified-native.wiz"
+        let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
+          { loader := ← Elab.libLoader, trustedModule := Tests.libModule, trustNative := true }
+        let ms := s.messages.toList.map fun m =>
+          s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"
         expect ms "smin_256 is accepted on the strength of native evaluation"
-        expect ms "'smin_256' depends on axioms: [smin_256.native✝" } ]
+        expect ms "'smin_256' depends on axioms: [smin_256.native✝"
+        -- Every declaration this case claims to check, not just the three the messages
+        -- name: deleting or renaming one fails the group.
+        pinTheorem s.globals path "root_full" "allBelow Hv.rtOk 1024 = Bool.true"
+        pinTheorem s.globals path "blobRoot_full" "allBelow Hv.aRootOk 8192 = Bool.true"
+        pinTheorem s.globals path "rho_full" "allBelow Hv.rhoOk 1024 = Bool.true"
+        pinTheorem s.globals path "norm_256" "allBelow (Hv.normOk 256) 65536 = Bool.true"
+        pinTheorem s.globals path "smin_256" "allBelow (Hv.sminOk 256) 65536 = Bool.true"
+        pinTheorem s.globals path "corr_full" "allBelow Hv.corrOk 4096 = Bool.true"
+        pinTheorem s.globals path "eleven_full" "allBelow Hv.octOk 4096 = Bool.true" } ]
 
 def groups : List Group := [group, hdlVerifiedGroup]
 
