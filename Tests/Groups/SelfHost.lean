@@ -1612,6 +1612,20 @@ def selfHostGroup : Group where
         let file ← IO.FS.readFile "selfhost/Tables.wiz"
         unless file == Selfhost.tablesFile do
           throw (IO.userError s!"selfhost/Tables.wiz is stale: run `lake build genSelfhostTables` and commit it (file {file.length} bytes, the tables now {Selfhost.tablesFile.length})") },
+    { name := "the embedded prelude is current (regenerate with `lake build genSelfhostPrelude`)", run := fun _ => do
+        -- `selfhost/Prelude.wiz` is the readable source; `preludeText` in
+        -- `selfhost/Frontend.wiz` is its generated string form (the selfhost has no
+        -- `include_str`, and the playground has no filesystem). Comparing the two
+        -- catches an edit to the source that was not regenerated: that would ship a
+        -- compiler and a page whose prelude differs from the file a reader reviews.
+        let source ← IO.FS.readFile Selfhost.preludeSourcePath
+        let frontend ← IO.FS.readFile Selfhost.preludeFrontendPath
+        let expected := Selfhost.preludeBinding source
+        match Selfhost.frontendPreludeBinding frontend with
+        | .error e => throw (IO.userError e)
+        | .ok line =>
+          unless line == expected do
+            throw (IO.userError s!"the embedded prelude is stale: run `lake build genSelfhostPrelude` and commit it ({Selfhost.preludeFrontendPath} has {line.length} bytes, {Selfhost.preludeSourcePath} renders {expected.length})") },
     { name := "the checked-in tables accept the corpus the Lean parser accepts", run := fun _ => do
         -- the semantic check of the file: not "the text is the same" but "the tables in
         -- selfhost/Tables.wiz parse, on the differential's corpus, exactly what the Lean

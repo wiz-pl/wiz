@@ -733,8 +733,9 @@ the input file. The frontend now loads a module graph. A module's name is a path
 (`A.B.C` is `A/B/C.wiz`), resolved under the roots in order and then in the working
 directory; the root module is `Main` (the file `input.wiz`). A root is written `-I DIR`
 (or `-IDIR`) or `--include DIR` (or `--include=DIR`), and the first root with the file
-wins. `Prelude` is still the embedded `preludeText`: the self-hosted frontend cannot
-check `lib/Prelude.wiz` yet (A9-A23). The other library imports the corpus uses (`IO`,
+wins. `Prelude` is still the embedded `preludeText` (generated from
+`selfhost/Prelude.wiz`, 21ah): the self-hosted frontend cannot check `lib/Prelude.wiz`
+yet (A9-A23). The other library imports the corpus uses (`IO`,
 `Std`, `Sys`) are canonicalised to `Prelude` when imports are scanned, since the
 embedded prelude declares
 the `IO` names and no real `IO.wiz` is checkable yet (without it, every existing
@@ -1153,7 +1154,7 @@ files whose verdicts differ by the construct the self-hosted frontend names
 
 `Bytes` (9d/9k, `lib/IO.wiz`) now checks and compiles in the self-hosted toolchain.
 
-* **Prelude** (`Frontend.wiz`, `preludeText`). `axiom Bytes : Type` and the nine
+* **Prelude** (`selfhost/Prelude.wiz`, embedded as `preludeText`). `axiom Bytes : Type` and the nine
   operations the Lean toolchain declares as `extern`s (`Bytes.empty`, `push`, `size`,
   `get`, `ofString`, `toString`, `slice`, `append`, `eq`), plus the pure helpers
   `isEmpty`, `at`, `take`, `drop`, `ofList`, `toList`, `singleton` and `show`, copied
@@ -1211,3 +1212,42 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: the embedded prelude's source (A1)
+
+The self-hosted frontend does not read `lib/Prelude.wiz`. Its loader substitutes one
+text, `preludeText`, for every `import Prelude` (`selfhost/Frontend.wiz`,
+`moduleRootSourcesAs`; `checkFile` for the one-shot path), and canonicalises `IO`, `Std`
+and `Sys` to it, so the self-hosted compiler checks against a monomorphic model of the
+library's data types and functions. That text used to be a hand-written 16 KB
+single-line string literal at `selfhost/Frontend.wiz:7488`: the one part of the
+self-hosted toolchain that no diff could show.
+
+It is now `selfhost/Prelude.wiz`, 352 lines of ordinary Wiz, the readable source of the
+model. `selfhost/Frontend.wiz` still carries the string, because the self-hosted
+frontend has no `include_str` (the parser's tables have a `term.includeStr` entry; the
+frontend does not implement it — `docs/notes/dogfood-new-features.md`, W7) and the
+WebAssembly playground has no filesystem to read a file from, so the text has to be
+compiled in. The literal is generated:
+
+    lake build genSelfhostPrelude && .lake/build/bin/genSelfhostPrelude
+
+`scripts/GenSelfhostPrelude.lean` rewrites exactly one line, `def preludeText : String
+:= "…"`, from `selfhost/Prelude.wiz`; every other byte of `Frontend.wiz` is preserved.
+The line stays in `Frontend.wiz` rather than moving to a generated module because the
+loader, `frontendFiles` (hence `web/build-playground.sh`) and the prelude drift check
+all read `preludeText` there. `selfhost/Prelude.wiz` is not a compiler module: it is
+never in `frontendFiles` or `compilerFiles`.
+
+The extraction is lossless: decoding the generated literal gives the 352 lines back
+byte for byte (16,144 characters, ending in a newline), and the only escapes it uses are
+`\"` and `\n`. `selfhost/Prelude.wiz` is now the file to edit; the `selfhost` group's
+"the embedded prelude is current" case renders the binding in-process and fails when the
+two disagree, so a source edit without regeneration cannot land. `toolchainId` hashes
+the selfhost sources, so the added comment alone makes the driver's cache cold and the
+bootstrap fixpoint is rerun.
+
+This does not make the embedded prelude equal to `lib/Prelude.wiz`: it is still a
+subset model with monomorphic arithmetic and no classes, and the surface comparison (the
+prelude drift check) still governs the difference. It makes the second copy a
+reviewable file whose string form cannot drift from it.

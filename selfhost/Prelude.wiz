@@ -1,0 +1,352 @@
+inductive Nat where
+  | zero
+  | succ (n : Nat)
+inductive Bool where
+  | false
+  | true
+inductive List (A : Type) where
+  | nil
+  | cons (head : A) (tail : List A)
+inductive Option (A : Type) where
+  | none
+  | some (val : A)
+structure Prod (A B : Type) where
+  fst : A
+  snd : B
+structure Char where
+  code : Nat
+structure String where
+  data : List Char
+def Nat.add : Nat → Nat → Nat
+  | .zero, n => n
+  | .succ m, n => .succ (Nat.add m n)
+def Nat.mul : Nat → Nat → Nat
+  | .zero, _ => .zero
+  | .succ m, n => Nat.add n (Nat.mul m n)
+def Nat.pred : Nat → Nat
+  | .zero => .zero
+  | .succ n => n
+def Nat.sub : Nat → Nat → Nat
+  | m, .zero => m
+  | m, .succ n => Nat.pred (Nat.sub m n)
+infixl:65 " + " => Nat.add
+infixl:65 " - " => Nat.sub
+infixl:70 " * " => Nat.mul
+def Nat.beq : Nat → Nat → Bool
+  | .zero, .zero => .true
+  | .succ m, .succ n => Nat.beq m n
+  | _, _ => .false
+def Nat.blt : Nat → Nat → Bool
+  | _, .zero => .false
+  | .zero, .succ _ => .true
+  | .succ m, .succ n => Nat.blt m n
+def Nat.lt : Nat → Nat → Bool
+  | _, .zero => .false
+  | .zero, .succ _ => .true
+  | .succ m, .succ n => Nat.lt m n
+def Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)
+def Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m
+def Bool.not : Bool → Bool
+  | .true => .false
+  | .false => .true
+def Bool.and : Bool → Bool → Bool
+  | .true, b => b
+  | .false, _ => .false
+def Bool.or : Bool → Bool → Bool
+  | .true, _ => .true
+  | .false, b => b
+def Nat.divGo : Nat → Nat → Nat → Nat
+  | .zero, _, _ => .zero
+  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)
+def Nat.div (n m : Nat) : Nat := match m with
+  | .zero => .zero
+  | .succ _ => Nat.divGo n n m
+def Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))
+infixl:70 " / " => Nat.div
+def Nat.pow : Nat → Nat → Nat
+  | _, .zero => .succ .zero
+  | b, .succ e => Nat.mul b (Nat.pow b e)
+def Bool.xor : Bool → Bool → Bool
+  | .true, b => Bool.not b
+  | .false, b => b
+def Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1
+def Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat
+  | .zero, _, _ => .zero
+  | .succ fuel, a, b =>
+    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));
+    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest
+def Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b
+def Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b
+def Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b
+def Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)
+def Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)
+def Nat.log2Go : Nat → Nat → Nat
+  | .zero, _ => .zero
+  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))
+def Nat.log2 (n : Nat) : Nat := Nat.log2Go n n
+def Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)
+def List.length {A : Type} : List A → Nat
+  | .nil => .zero
+  | .cons _ t => .succ (List.length t)
+def List.append {A : Type} : List A → List A → List A
+  | .nil, ys => ys
+  | .cons x xs, ys => .cons x (List.append xs ys)
+infixr:67 " ++ " => List.append
+def List.map {A B : Type} (f : A → B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => .cons (f x) (List.map f xs)
+def String.append (a b : String) : String := .mk (List.append a.data b.data)
+def String.length (s : String) : Nat := List.length s.data
+def memo {A : Type} (f : Unit → A) : Unit → A := f
+axiom Array : Type → Type
+axiom Array.empty {A : Type} : Array A
+axiom Array.push {A : Type} (a : Array A) (x : A) : Array A
+axiom Array.size {A : Type} (a : Array A) : Nat
+axiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A
+axiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A
+axiom World : Type
+def IO (A : Type) : Type := World → Prod A World
+def IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w
+def IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>
+  let r := x w;
+  f r.fst r.snd
+axiom IO.println : String → IO Unit
+axiom IO.print : String → IO Unit
+axiom IO.ePrintln : String → IO Unit
+axiom Process.exit : Nat → IO Unit
+axiom IO.readFile : String → IO String
+axiom IO.argCount : IO Nat
+axiom IO.arg : Nat → IO String
+def IO.argsFrom : Nat → Nat → IO (List String)
+  | .zero, _ => IO.pure .nil
+  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))
+def IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)
+def Callback (T : Type) : Type := T
+axiom Nat.toString : Nat → String
+axiom UInt64 : Type
+extern "wiz_u64_id" UInt64.ofNat : Nat → UInt64
+extern "wiz_u64_id" UInt64.toNat : UInt64 → Nat
+extern "wiz_u64_add" UInt64.add : UInt64 → UInt64 → UInt64
+extern "wiz_u64_sub" UInt64.sub : UInt64 → UInt64 → UInt64
+extern "wiz_u64_mul" UInt64.mul : UInt64 → UInt64 → UInt64
+extern "wiz_u64_div" UInt64.div : UInt64 → UInt64 → UInt64
+extern "wiz_u64_mod" UInt64.mod : UInt64 → UInt64 → UInt64
+extern "wiz_u64_lt" UInt64.lt : UInt64 → UInt64 → Bool
+extern "wiz_u64_eq" UInt64.eq : UInt64 → UInt64 → Bool
+axiom Float64 : Type
+extern "wiz_f64_of_nat" Float64.ofNat : Nat → Float64
+extern "wiz_f64_add" Float64.add : Float64 → Float64 → Float64
+extern "wiz_f64_sub" Float64.sub : Float64 → Float64 → Float64
+extern "wiz_f64_mul" Float64.mul : Float64 → Float64 → Float64
+extern "wiz_f64_div" Float64.div : Float64 → Float64 → Float64
+extern "wiz_f64_lt" Float64.lt : Float64 → Float64 → Bool
+extern "wiz_f64_show" Float64.toString : Float64 → String
+axiom Str : Type
+axiom Str.ofString : String → Str
+axiom StrMap : Type → Type
+axiom StrMap.empty {V : Type} : StrMap V
+axiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V
+axiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V
+axiom StrMap.size {V : Type} (m : StrMap V) : Nat
+inductive Bytes where
+  | private mk (data : List Nat)
+inductive Except (E A : Type) where
+  | error (e : E)
+  | ok (val : A)
+def Bytes.getAux : List Nat → Nat → Nat
+  | .nil, _ => 0
+  | .cons x xs, i => match i with
+    | .zero => x
+    | .succ j => Bytes.getAux xs j
+def Bytes.empty : Bytes := .mk .nil
+def Bytes.push (b : Bytes) (x : Nat) : Bytes := match b with
+  | .mk bs => .mk (List.append bs (.cons (Nat.mod x 256) .nil))
+def Bytes.size (b : Bytes) : Nat := match b with
+  | .mk bs => List.length bs
+def Bytes.get (b : Bytes) (i : Nat) : Nat := match b with
+  | .mk bs => Bytes.getAux bs i
+def Bytes.dropN : Nat → List Nat → List Nat
+  | .zero, xs => xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => Bytes.dropN k xs
+def Bytes.takeN : Nat → List Nat → List Nat
+  | .zero, _ => .nil
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (Bytes.takeN k xs)
+def Bytes.slice (b : Bytes) (start len : Nat) : Bytes := match b with
+  | .mk bs => .mk (Bytes.takeN len (Bytes.dropN start bs))
+def Bytes.append (a b : Bytes) : Bytes := match a with
+  | .mk xs => match b with
+    | .mk ys => .mk (List.append xs ys)
+def Bytes.eqAux : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => match Nat.beq x y with
+    | .true => Bytes.eqAux xs ys
+    | .false => .false
+  | _, _ => .false
+def Bytes.eq (a b : Bytes) : Bool := match a with
+  | .mk xs => match b with
+    | .mk ys => Bytes.eqAux xs ys
+def Bytes.pushCp (b : Bytes) (c : Nat) : Bytes :=
+  match Nat.lt c 128 with
+  | .true => Bytes.push b c
+  | .false => match Nat.lt c 2048 with
+    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)
+    | .false => match Nat.lt c 65536 with
+      | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+      | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))
+          (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+def Bytes.ofStringAux : List Char → Bytes → Bytes
+  | .nil, acc => acc
+  | .cons c cs, acc => match Nat.beq (Char.code c) 0 with
+    | .true => acc
+    | .false => Bytes.ofStringAux cs (Bytes.pushCp acc (Char.code c))
+def Bytes.ofString (s : String) : Bytes := match s with
+  | .mk cs => Bytes.ofStringAux cs Bytes.empty
+def Bytes.cont : Nat → Nat → List Nat → Nat
+  | .zero, cp, _ => cp
+  | .succ k, cp, .nil => cp
+  | .succ k, cp, .cons x xs => Bytes.cont k (Nat.lor (Nat.shiftLeft cp 6) (Nat.land x 63)) xs
+def Bytes.revChars : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => Bytes.revChars cs (.cons c acc)
+def Bytes.beforeNul : List Nat → List Nat
+  | .nil => .nil
+  | .cons c cs => match Nat.beq c 0 with
+    | .true => .nil
+    | .false => .cons c (Bytes.beforeNul cs)
+def Bytes.decodeFrom : Nat → List Nat → List Char → List Char
+  | .zero, _, acc => acc
+  | .succ fuel, .nil, acc => acc
+  | .succ fuel, .cons c xs, acc => match Nat.beq c 0 with
+    | .true => acc
+    | .false => match Nat.lt c 128 with
+      | .true => Bytes.decodeFrom fuel xs (.cons (Char.mk c) acc)
+      | .false => match Nat.beq (Nat.div c 32) 6 with
+        | .true => Bytes.decodeFrom fuel (Bytes.dropN 1 xs) (.cons (Char.mk (Bytes.cont 1 (Nat.land c 31) xs)) acc)
+        | .false => match Nat.beq (Nat.div c 16) 14 with
+          | .true => Bytes.decodeFrom fuel (Bytes.dropN 2 xs) (.cons (Char.mk (Bytes.cont 2 (Nat.land c 15) xs)) acc)
+          | .false => Bytes.decodeFrom fuel (Bytes.dropN 3 xs) (.cons (Char.mk (Bytes.cont 3 (Nat.land c 7) xs)) acc)
+def Bytes.toString (b : Bytes) : String := match b with
+  | .mk bs => let t := Bytes.beforeNul bs; .mk (Bytes.revChars (Bytes.decodeFrom (List.length t) t .nil) .nil)
+def Bytes.isEmpty (b : Bytes) : Bool := Nat.beq (Bytes.size b) 0
+def Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b) with
+  | .true => .some (Bytes.get b i)
+  | .false => .none
+def Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n
+def Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)
+def Bytes.ofListAux : List Nat → Bytes → Bytes
+  | .nil, acc => acc
+  | .cons x xs, acc => Bytes.ofListAux xs (Bytes.push acc x)
+def Bytes.ofList (l : List Nat) : Bytes := Bytes.ofListAux l Bytes.empty
+def Bytes.toListAux (b : Bytes) : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ k, acc => Bytes.toListAux b k (.cons (Bytes.get b k) acc)
+def Bytes.toList (b : Bytes) : List Nat := Bytes.toListAux b (Bytes.size b) .nil
+def Bytes.singleton (x : Nat) : Bytes := Bytes.push Bytes.empty x
+def Bytes.rangeAux : Nat → Nat → Bytes → Bytes
+  | .zero, _, acc => acc
+  | .succ k, i, acc => Bytes.rangeAux k (Nat.succ i) (Bytes.push acc i)
+def Bytes.range (n : Nat) : Bytes := Bytes.rangeAux n 0 Bytes.empty
+def Bytes.showAux : List Nat → String
+  | .nil => "]"
+  | .cons x .nil => String.append (Nat.toString x) "]"
+  | .cons x xs => String.append (Nat.toString x) (String.append ", " (Bytes.showAux xs))
+def Bytes.show (b : Bytes) : String := String.append "[" (Bytes.showAux (Bytes.toList b))
+def Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=
+  match Nat.lt c 128 with
+  | .true => Bytes.push b c
+  | .false => match Nat.lt c 2048 with
+    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)
+    | .false => match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with
+      | .true => Bytes.push (Bytes.push (Bytes.push b 239) 191) 189
+      | .false => match Nat.lt c 65536 with
+        | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+        | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))
+            (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)
+def Bytes.ofCharsUtf8 : List Char → Bytes → Bytes
+  | .nil, acc => acc
+  | .cons c cs, acc => Bytes.ofCharsUtf8 cs (Bytes.pushUtf8 acc (Char.code c))
+def Bytes.ofUtf8 (s : String) : Bytes := match s with
+  | .mk cs => Bytes.ofCharsUtf8 cs Bytes.empty
+def Bytes.contOp (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with
+  | .some x => match Bool.and (Nat.lt 127 x) (Nat.lt x 192) with
+    | .true => .some (Nat.sub x 128)
+    | .false => .none
+  | .none => .none
+def Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=
+  let x := Bytes.get b i;
+  match Nat.lt x 128 with
+  | .true => .some (x, 1)
+  | .false => match Bool.and (Nat.lt 193 x) (Nat.lt x 224) with
+    | .true => (match Bytes.contOp b (i + 1) with
+      | .some y => .some ((Nat.sub x 192) * 64 + y, 2)
+      | .none => .none)
+    | .false => match Bool.and (Nat.lt 223 x) (Nat.lt x 240) with
+      | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2) with
+        | .some y, .some z =>
+          let c := (Nat.sub x 224) * 4096 + y * 64 + z;
+          (match Bool.or (Nat.lt c 2048) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with
+          | .true => .none
+          | .false => .some (c, 3))
+        | _, _ => .none)
+      | .false => match Bool.and (Nat.lt 239 x) (Nat.lt x 245) with
+        | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2), Bytes.contOp b (i + 3) with
+          | .some y, .some z, .some w =>
+            let c := (Nat.sub x 240) * 262144 + y * 4096 + z * 64 + w;
+            (match Bool.or (Nat.lt c 65536) (Nat.lt 1114111 c) with
+            | .true => .none
+            | .false => .some (c, 4))
+          | _, _, _ => .none)
+        | .false => .none
+def Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat String
+  | .zero, _, acc => .ok (.mk (Bytes.revChars acc .nil))
+  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with
+    | .false => .ok (.mk (Bytes.revChars acc .nil))
+    | .true => match Bytes.utf8At b i with
+      | .some p => Bytes.decodeUtf8 b fuel (i + p.2) (.cons (Char.mk p.1) acc)
+      | .none => .error i
+def Bytes.toUtf8 (b : Bytes) : Except String String :=
+  match Bytes.decodeUtf8 b (Bytes.size b) 0 .nil with
+  | .ok s => .ok s
+  | .error i => .error (String.append "invalid UTF-8 at byte " (Nat.toString i))
+def Bytes.latin1Chars (b : Bytes) : Nat → List Char → List Char
+  | .zero, acc => acc
+  | .succ k, acc => Bytes.latin1Chars b k (.cons (Char.mk (Bytes.get b k)) acc)
+def Bytes.toLatin1 (b : Bytes) : String := .mk (Bytes.latin1Chars b (Bytes.size b) .nil)
+def Bytes.ofLatin1Aux : Nat → List Char → Bytes → Except String Bytes
+  | _, .nil, acc => .ok acc
+  | i, .cons c cs, acc => match Nat.lt (Char.code c) 256 with
+    | .true => Bytes.ofLatin1Aux (Nat.succ i) cs (Bytes.push acc (Char.code c))
+    | .false => .error (String.append "not Latin-1: character " (String.append (Nat.toString i)
+        (String.append " is U+" (Nat.toString (Char.code c)))))
+def Bytes.ofLatin1 (s : String) : Except String Bytes := match s with
+  | .mk cs => Bytes.ofLatin1Aux 0 cs Bytes.empty
+def Bytes.ofArrayAux (a : Array Nat) : Nat → Nat → Bytes → Bytes
+  | .zero, _, acc => acc
+  | .succ fuel, i, acc => match Nat.lt i (Array.size a) with
+    | .true => Bytes.ofArrayAux a fuel (Nat.succ i) (Bytes.push acc (Array.getD a i 0))
+    | .false => acc
+def Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a (Array.size a) 0 Bytes.empty
+def Bytes.toArrayAux (b : Bytes) : Nat → Nat → Array Nat → Array Nat
+  | .zero, _, acc => acc
+  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with
+    | .true => Bytes.toArrayAux b fuel (Nat.succ i) (Array.push acc (Bytes.get b i))
+    | .false => acc
+def Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b (Bytes.size b) 0 Array.empty
+inductive SyntaxF : Bool → Type where
+  | missing : SyntaxF .true
+  | atom (val : String) : SyntaxF .true
+  | ident (val : String) : SyntaxF .true
+  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true
+  | nil : SyntaxF .false
+  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false
+def Syntax : Type := SyntaxF .true
+def SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax
+  | .cons x t, n => match n with
+    | .zero => x
+    | .succ m => SyntaxF.nth t m
+  | _, _ => .missing
+def Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with
+  | .node _ args => SyntaxF.nth args i
+  | _ => .missing

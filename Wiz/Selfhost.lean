@@ -11,15 +11,29 @@ imports dropped: they are concatenated) — including the parser tables
 subcommands, module roots, `-o`, a cache, positioned diagnostics, exit codes) — and a
 `main` (`selfhost/Main.wiz`, `selfhost/Check.wiz`). The tests (`Tests/Elab.lean`) and
 grail (`Grail/Selfhost.lean`) both build them from here.
+
+`selfhost/Prelude.wiz` is not one of those modules: it is the readable source of the
+prelude the self-hosted frontend substitutes for `import Prelude`, and
+`scripts/GenSelfhostPrelude.lean` writes its escaped string form (`preludeText`) into
+`selfhost/Frontend.wiz`. See `preludeBinding` below.
 -/
 
 namespace Wiz.Selfhost
 
 open ParserDescr
 
-/-- A Wiz string literal. -/
+/-- A Wiz string literal. Every escape the lexer decodes for a character that would not
+survive raw is used (`\n`, `\r`, `\t`, `\0`, `\\`, `\"`), so decoding the literal gives
+the input back character for character. -/
 def wizLit (s : String) : String :=
-  "\"" ++ String.join (s.toList.map fun c => if c == '"' then "\\\"" else if c == '\\' then "\\\\" else if c == '\n' then "\\n" else c.toString) ++ "\""
+  "\"" ++ String.join (s.toList.map fun c =>
+    if c == '"' then "\\\""
+    else if c == '\\' then "\\\\"
+    else if c == '\n' then "\\n"
+    else if c == '\r' then "\\r"
+    else if c == '\t' then "\\t"
+    else if c == Char.ofNat 0 then "\\0"
+    else c.toString) ++ "\""
 
 /-- A grammar descriptor as a Wiz `PD` (`selfhost/Parse.wiz`): sequences become binary. -/
 partial def wizPD : ParserDescr → String
@@ -116,6 +130,44 @@ self-hosted programs read as one more module (the fixpoint's input set therefore
 no generated Wiz text). `lake build genSelfhostTables` regenerates it and the `selfhost`
 group fails when it is stale (`selfhost/Tables.wiz` vs `tablesFile`). -/
 def tablesFile : String := tablesFileHeader ++ tablesSource
+
+/-- The readable source of the self-hosted frontend's prelude: the text its loader
+substitutes for `import Prelude` (`selfhost/Frontend.wiz`, "A14"). It is not a compiler
+module (never in `frontendFiles`): it is the input to `lake build genSelfhostPrelude`,
+which writes the escaped literal the loader reads. -/
+def preludeSourcePath : String := "selfhost/Prelude.wiz"
+
+/-- The file whose one generated line carries the embedded prelude. It stays there
+rather than in a generated module so the loader and the drift check read the same
+`preludeText`, and the playground gets it through `frontendFiles`. -/
+def preludeFrontendPath : String := "selfhost/Frontend.wiz"
+
+/-- The start of that line: the only part of `selfhost/Frontend.wiz` the prelude
+generator owns. -/
+def preludeBindingPrefix : String := "def preludeText : String := "
+
+/-- The `def preludeText` line for a prelude source: a Wiz string literal, because the
+self-hosted frontend has no `include_str` and the WebAssembly page has no filesystem,
+so the text has to be in the source the frontend is compiled from. -/
+def preludeBinding (source : String) : String :=
+  preludeBindingPrefix ++ wizLit source
+
+/-- The generated `preludeText` line of a frontend source. Exactly one is expected:
+none means the binding moved or was deleted, several would make the generator's rewrite
+ambiguous. -/
+def frontendPreludeBinding (frontend : String) : Except String String :=
+  match (frontend.splitOn "\n").filter (·.startsWith preludeBindingPrefix) with
+  | [line] => .ok line
+  | [] => .error s!"{preludeFrontendPath}: no `{preludeBindingPrefix}…` line"
+  | _ => .error s!"{preludeFrontendPath}: more than one `{preludeBindingPrefix}…` line"
+
+/-- `frontend` with its generated prelude line replaced by `preludeBinding source`; every
+other byte is preserved. -/
+def replacePreludeBinding (frontend source : String) : Except String String := do
+  let _ ← frontendPreludeBinding frontend
+  let line := preludeBinding source
+  return "\n".intercalate ((frontend.splitOn "\n").map fun l =>
+    if l.startsWith preludeBindingPrefix then line else l)
 
 /-- The language: the modules the self-hosted frontend is made of, without an entry
 point. Probes that build their own `main` use this list; the programs use

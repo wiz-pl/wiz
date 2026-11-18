@@ -67,6 +67,12 @@ owner runs it. -/
 lean_exe genSelfhostTables where
   root := `scripts.GenSelfhostTables
 
+/-- `lake build genSelfhostPrelude`: rewrite the embedded `preludeText` line of
+`selfhost/Frontend.wiz` from `selfhost/Prelude.wiz`
+(`scripts/GenSelfhostPrelude.lean`). Not a default target. -/
+lean_exe genSelfhostPrelude where
+  root := `scripts.GenSelfhostPrelude
+
 @[default_target] lean_exe grail where
   root := `Grail.Main
   moreLinkObjs := #[`@/sockets, `@/proc]

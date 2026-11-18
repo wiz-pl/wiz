@@ -17,7 +17,7 @@ items have landed since the audit:
 | item in this note | on `master` now |
 |---|---|
 | `calc` + `Trans` (inventory; top 10 #1, W1) | **landed** (13s, `257c1b33`; `term.calc` in `Wiz/Parser/Builtin.lean`). `Trans` instances in `lib/Logic.wiz`, `IntOrder` and `Rat`; proofs use `calc` in `lib/Nat.wiz`, `Ring` and `IntRing`, not yet in `BitVecShift`, `BitBlast` or `Rat`. |
-| `include_str` | **landed**, in the self-hosted parser too (`term.includeStr`). `preludeText` is still an inline string in `selfhost/Frontend.wiz` (W7's extraction is open). |
+| `include_str` | **landed**, in the self-hosted parser too (`term.includeStr`). `preludeText` is generated into `selfhost/Frontend.wiz` from `selfhost/Prelude.wiz` by `lake build genSelfhostPrelude` (W7's extraction). |
 | `wiz fmt` | **landed** (11aa, `Wiz/Format.lean`, `b818b94a`). |
 | `wiz lint` | not on `master` (no `Wiz/Lint.lean`, no `lint` command). |
 | `--split N` (top 10 #6) | **landed** in `wiz build` (`666b4437`); `scripts/fixpoint.sh` does not pass it yet. |
@@ -240,9 +240,12 @@ the e-graph benchmarks.
   shadows in `Eq.subst`/`Eq.substBack` (found by the linter's prototype); fix those 2 and run lint over `lib/`
   in CI (the import-shadowing bug is a frontend error already, so lint's shadow rule is the one
   that pays).
-* After `include_str` merges: extract `preludeText` (`selfhost/Frontend.wiz:4650` at the audit, a 6.7 kB
-  single-line string that duplicates `lib/Prelude.wiz` and already differs definitionally, e.g.
-  the embedded `Nat.sub` recurses on its second argument) to `selfhost/prelude.wiz` and embed it.
+* **Done:** `preludeText` (a single-line string that duplicated part of `lib/Prelude.wiz`
+  and already differed definitionally, e.g. the embedded `Nat.sub` recurses on its second
+  argument) is extracted to `selfhost/Prelude.wiz` and generated back into
+  `selfhost/Frontend.wiz` by `lake build genSelfhostPrelude`; the `selfhost` group fails
+  when the two differ (21ah). The embedded copy is still a subset model, not the host
+  prelude: making the frontend read `lib/Prelude.wiz` needs the elaboration gaps closed.
   This is the biggest single readability/maintenance win in `selfhost` and removes a silent
   divergence risk between the two preludes.
 
@@ -288,7 +291,7 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 | `Region`/`Result`/`Eff`/`IO` | `Region.wiz:133-215` nests `match` on the handle inside the result match; `Sys.wiz` uses 31 explicit binds | region scopes are `[inline]` and unboxed (`Region.wiz:73-76`); `Eff` interprets a tree (no native path), unused outside `EffHeap` | `Region` has 6 documented lifetime axioms; `Result1` and `Outlives` are the only unsafe surface; `IO1`/`Monad1` are the linear I/O story |
 | `Grail` | one-job is in (`Graph.lean:51-56`); `addCheck` and `addCheckImports` (`:102-124`) read and parse the same imports twice | region cache not used (main gap); `-j` default `min(cores,4)` (`Cli.lean:107`) is deliberate: 8 jobs only bought 1.27× (informal) | scheduler is serial for keys but measured at 1.3 s for a 59-node no-op build (informal), not a bottleneck |
 | `tower` | 613-line CLI with a few `List.length (String.splitOn …)` idioms (`Cli.wiz:373,490,580`); fine | file sizes are tiny (settings/toolchain files); `git ls-remote` dominates installs | the port follows the Lean reference definition by definition; `tower/tests/pure.wiz` covers settings parsing, while `update`/`install` need git/nix and have no unit tests |
-| `selfhost` | embedded prelude (`preludeText`, `Frontend.wiz:4650` at the audit) duplicates `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps tracked with the selfhost work; the embedded prelude is the drift risk (W7) |
+| `selfhost` | embedded prelude (`preludeText`, now generated from `selfhost/Prelude.wiz`, 21ah) is still a model of `lib/Prelude.wiz`; Feral-style helpers are duplicated in `Backend`/`Frontend` | `Scope.lookup`/`Env.lookup` linear; `Str.ofString` per map op; 19 `List.length` in Frontend loops; non-tail `List.map` over big declaration lists (stack depth is fine at these sizes) | parity gaps tracked with the selfhost work; the embedded prelude is generated but still a model, and the surface drift check governs the difference (W7) |
 | `scry` | the stack's modules are documented and tested; `Store`/`Egraph` are deliberately pure list models | store/e-graph are O(n²); the native columns are already used in CstStore; the Wiz-side copy is 85% of parse time | native store/egraph work is in progress; no axioms beyond the documented natives |
 | `wiz-rv`/`wiz-reals`/`wiz-cats` | wiz-rv already derives `Bundle` everywhere (43-field `CoreSt`, `src/Rv/Core.wiz:61-105`) and has no `.1/.2` chains; wiz-reals has 4 `Eq.trans` (`QSeq.wiz:31-35`); wiz-cats carries `Cats/Eq.wiz` because of G1 | wiz-rv's emulator/sim uses `Hdl.Sim`; no list hot spots found; the pinned toolchain (`wiz-toolchain: … master-50cd3e7`) predates the newest lib | wiz-cats `FINDINGS.md` G1–G8 are the best source of library papercuts (G1 fixed by W1/W7; G2 proof-usage, G3 implicit quantities, G4 transp-computed equations remain language-level) |
 

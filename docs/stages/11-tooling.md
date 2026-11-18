@@ -842,7 +842,9 @@ page runs.
   `scripts/GenSelfhostTables.lean`, 39 KB), so building the module needs no Lean step
   beyond the `lake build wiz` every checkout needs.
 * **What it runs.** The self-hosted frontend's embedded Prelude (Nat, Bool, List,
-  Option, Prod, arithmetic, `String`), definitions with patterns and `match`, inductive
+  Option, Prod, arithmetic, `String`; its source is `selfhost/Prelude.wiz`, generated
+  into `preludeText` by `lake build genSelfhostPrelude`), definitions with patterns and
+  `match`, inductive
   types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
   are accepted but only Prelude is available (there is no module loader in the page);
   without any import the page prepends `import Prelude`, so a bare `def two : Nat := 1 + 1`
