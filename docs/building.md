@@ -27,6 +27,15 @@ as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skippe
 not a pass. A selector that picks no group, a case index the group lacks, and an unknown
 flag are errors (exit code 2), not an empty run.
 
+A case whose name claims **linear** time must measure it. `Tests.checkScaling`
+(`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
+start-up floor measured at `f 0`), prints both times, and requires
+`t(2n) ≤ 3·t(n) + 250 ms` for a linear claim (`bound` 6 for `n log n`, 10 for
+quadratic). An absolute millisecond bound is a timeout guard, not a complexity test: a
+quadratic implementation passes it. Name a timeout-guarded case accordingly ("… within
+N s"), and give a new scaling case the input that grows the suspect dimension
+(`Tests/Scaling.lean`).
+
 `tests --run GROUP INDEX` runs one case as `lake test -- '=GROUP#INDEX'` does: in a child
 process, with the toolchain of `grail.local.wiz` (toolchain flags after it override it),
 printing the case's name and result, a failure's output, and a last line

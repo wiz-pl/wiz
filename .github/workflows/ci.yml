@@ -104,16 +104,21 @@ jobs:
   # (seconds, no build) Documentation style: no authoring-environment paths, no
   # agent roles and no status checkmarks (scripts/check-docs-style.py), and every
   # relative link and anchor in the docs resolves (scripts/check-doc-links.py;
-  # external links are reported but not fetched). Runs on every pull request too,
-  # including docs-only ones, which build and test skip.
+  # external links are reported but not fetched). The same job runs the quadratic-shape
+  # lint on the pull request's changed `.lean`/`.wiz` lines only
+  # (scripts/check-complexity --diff HEAD^1; the existing sites are its allowlist), so a
+  # new append-in-loop or eraseDups fails a PR before the build starts.
+  # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: two Python checks on the checkout; no build
+    # 5 min: four Python checks on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2 # the diff base for scripts/check-complexity
       - name: Check the docs, and the checker's fixtures
         shell: bash
         run: |
@@ -121,6 +126,8 @@ jobs:
           python3 scripts/check-docs-style.py
           python3 scripts/check-doc-links.py --self-test
           python3 scripts/check-doc-links.py --quiet
+          python3 scripts/check-complexity --self-test
+          python3 scripts/check-complexity --diff HEAD^1
 
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
