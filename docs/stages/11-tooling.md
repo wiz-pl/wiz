@@ -110,6 +110,7 @@ The layout is one manifest per module (the note's P2) plus a per-layer generatio
 ```
 <cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
 <cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/roots/<hash path>.rootp                             -- a root file's last manifest
 <cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
 ```
 
@@ -132,13 +133,22 @@ A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `
 `module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
 `target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
 `valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
-entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+entries, so editing `prev`/`valid-until` breaks the root too. A **root file's** manifest
+is keyed by its text as well as its headers (`wiz-cache/root-manifest-v1`), so two files
+that differ only in their text do not share one: sharing it made that manifest grow with
+every root file checked (12.7 MB in one cache here), rewrote it per root miss and lost a
+concurrent writer's entries, which made a fresh file miss on every run.
+`manifest.sexpr` records the
 generation number, the previous root, the optional expiry and one record per module (fast
 key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
-**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
-because the number of writing processes (and `-j`) is not an input; a manifest that is
-extended keeps the base it started from rather than chaining to an intermediate partial
-write. Only the write cache is ever written; a
+**snapshot** of the layer's manifests, written by `wiz cache manifest` (and, for a
+read-only layer, sealed by the package) — not by an ordinary run: rebuilding it means
+reading and re-validating every manifest in the layer, which is O(cache) (about a minute
+on a shared cache of thousands of manifests), and nothing a run does reads its module
+list (only its expiry, which a run never changes). Its generation is the module count and
+its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
+manifest that is extended keeps the base it started from rather than chaining to an
+intermediate partial write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.

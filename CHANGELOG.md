@@ -10,6 +10,18 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* cache: a fresh root file no longer misses the shared `~/.cache/wiz` on every check.
+  Its manifest was keyed by its headers only, so every file with the same headers shared
+  one manifest (12.7 MB in one cache here): it grew without bound, was parsed and
+  rewritten on every root miss, and two concurrent checks of different files lost each
+  other's entries, so a fresh file re-elaborated every run. A root file's manifest is now
+  keyed by its text too (`wiz-cache/root-manifest-v1`); the command keys and `.wizc`
+  entries are unchanged. A run no longer rebuilds `manifest.sexpr` from a full scan of
+  `manifest.d` (thousands of files, hundreds of MB, ~a minute per writing run): the index
+  is written by `wiz cache manifest` (and sealed by a Nix package), and nothing a run
+  reads needs its module list.
+  `=tooling` has a case for each (a fresh file hits on the second check, an edit misses
+  and keeps its unchanged prefix warm, and two root files get two root manifests).
 * selfhost: the driver's cache is per module and keyed on content, not paths (D5). One
   `<key>.mcheck` entry holds a module's tagged output lines; the key is the module's
   name and text, its `import_c` header texts, the contents of its `include_str` files,

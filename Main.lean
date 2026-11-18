@@ -314,7 +314,8 @@ def elaborate (tc : Toolchain) (path : String) (input : String) : IO (CommandSta
     pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
-      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)).1
+      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
+      (rootPath := path)).1
   else
     Cache.elaborateUncached input init
 /-- (27a) `--trust-native` and `--native-fuel N`. -/
