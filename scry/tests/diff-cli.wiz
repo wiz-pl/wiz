@@ -71,8 +71,11 @@ def main : IO Unit := EIO.toIO (do
   | .ok _ => check "diff base: parse refuses an option" .false;
   evilRun ← EIO.lift (Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--diff",
     "--output=build/evil.sarif"]);
-  check "diff base: the run refuses it"
-    (match evilRun with | .error _ => .true | .ok _ => .false);
+  let evilRefused :=
+    match evilRun with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "diff base: the run refuses it" evilRefused;
   evilWritten ← EIO.lift (FS.exists "build/evil.sarif");
   check "diff base: git never wrote a file" (Bool.not evilWritten);
 

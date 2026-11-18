@@ -2,7 +2,7 @@
   {
     "directory": ".",
     "file": "main.c",
-    "arguments": ["cc", "-I", "include", "-DANSWER=42", "-std=c11", "-O2", "-Wall",
-                  "-fPIC", "-c", "main.c", "-o", "main.o", "-MMD", "-MP"]
+    "arguments": ["cc", "-I", "include", "-DANSWER=42", "-std=c11",
+                  "-c", "main.c", "-o", "main.o", "-MMD", "-MP"]
   }
 ]

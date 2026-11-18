@@ -39,6 +39,10 @@ wrote HTML report: build/report-diff-all.html (1 file(s), 1 finding(s); no times
 diff all: exit 0: ok
 diff all: header: ok
 diff all: no suppressed block: ok
+out symlink: refused: ok
+out symlink: the target is unchanged: ok
+out input: refused: ok
+out input: the source is unchanged: ok
 wrote HTML report: build/walk.html (1 file(s), 0 finding(s); no timestamp, stable finding ids)
 walk: exit 0: ok
 walk: an outside tree behind a symlink stays out: ok

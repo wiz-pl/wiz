@@ -115,30 +115,34 @@ def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
 imports this module, so it cannot be used here). -/
 def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 
-/-- A `--diff` base is a git revision, never an option and never a range: a leading
-`-` (so `--output=FILE` and `--ext-diff` cannot be spliced into git's argv), `..`
-(a revision range), whitespace, `;`, `$` and the rest are refused. The same shape
-`tools/scry-mcp`'s `DIFF_BASE` accepts. -/
-def Scry.validDiffBaseGo (first : Bool) : List Char → Bool
-  | .nil => Bool.not first
-  | .cons c cs =>
-    let n := Char.code c;
-    let alnum := Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57))
-      (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 90)) (Bool.and (Nat.le 97 n) (Nat.le n 122)));
-    let okFirst := Bool.or alnum (Nat.beq n 95);
-    let okRest := Bool.or okFirst (Bool.or (Nat.beq n 46) (Bool.or (Nat.beq n 47)
-      (Bool.or (Nat.beq n 64) (Bool.or (Nat.beq n 94) (Bool.or (Nat.beq n 126)
-        (Bool.or (Nat.beq n 123) (Bool.or (Nat.beq n 125) (Nat.beq n 45))))))));
-    let ok := match first with
-      | .true => okFirst
-      | .false => okRest;
-    match ok with
-    | .false => .false
-    | .true => Scry.validDiffBaseGo .false cs
+/-- Whether one character of a `--diff` base is allowed, given whether it is the first.
+The first must be alphanumeric or `_`; later ones may also be `.`, `/`, `@`, `^`, `~`,
+`{`, `}` or `-` (revisions such as `origin/master`, `HEAD~1`, `{HEAD}`). -/
+def Scry.validDiffBaseChar (first : Bool) (c : Char) : Bool :=
+  let n := Char.code c;
+  let alnum := Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57))
+    (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 90)) (Bool.and (Nat.le 97 n) (Nat.le n 122)));
+  let okFirst := Bool.or alnum (Nat.beq n 95);
+  let okRest := Bool.or okFirst (Bool.or (Nat.beq n 46) (Bool.or (Nat.beq n 47)
+    (Bool.or (Nat.beq n 64) (Bool.or (Nat.beq n 94) (Bool.or (Nat.beq n 126)
+      (Bool.or (Nat.beq n 123) (Bool.or (Nat.beq n 125) (Nat.beq n 45))))))));
+  match first with
+  | .true => okFirst
+  | .false => okRest
 
-/-- Whether `base` is a plausible git revision (see `Scry.validDiffBaseGo`). -/
+/-- Every character after the first is an allowed non-first character. -/
+def Scry.validDiffBaseRest : List Char → Bool
+  | .nil => .true
+  | .cons c cs => Bool.and (Scry.validDiffBaseChar .false c) (Scry.validDiffBaseRest cs)
+
+/-- Whether `base` is a plausible git revision (see `Scry.validDiffBaseChar`): a
+non-empty revision with no `..`, whose first character is alphanumeric or `_`. -/
 def Scry.validDiffBase (base : String) : Bool :=
-  Bool.and (Bool.not (String.contains base "..")) (Scry.validDiffBaseGo .true (String.chars base))
+  Bool.and (Bool.not (String.contains base ".."))
+    (match String.chars base with
+      | .nil => .false
+      | .cons c cs => Bool.and (Scry.validDiffBaseChar .true c)
+          (Scry.validDiffBaseRest cs))
 
 /-- The refusal for a bad `--diff` base. -/
 def Scry.diffBaseError (base : String) : String :=

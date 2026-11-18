@@ -278,9 +278,10 @@ The pane waits for the server, then follows the editor's cursor. Without an edit
 `infoview/test.sh` (in the `infoview` test group) runs the terminal infoview against
 `infoview/stub_server.py` (canned goals; as text and in a pseudo-terminal) and against
 the real `wiz lsp --infoview`, with `infoview/editor_stub.py` as the editor.
-`web/test.sh` (needs nix: Emscripten, Chromium; not in CI) runs the Wasm module under
+`web/test.sh` (needs nix: Emscripten, Chromium) runs the Wasm module under
 Node (against the stub), then the page in headless Chromium over the DevTools protocol,
-against the real `wiz lsp --ws`.
+against the real `wiz lsp --ws`. The browser-free half (`WIZ_WEB_NO_BROWSER=1 sh web/test.sh`) is CI's `web` job, with
+`web/framework/test.sh` beside it; the Chromium half stays local.
 
 ### 11o: the infoview over a WebSocket
 
@@ -592,7 +593,8 @@ package's `lib` targets with its module roots (dependencies included), into
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
   comment, and each has a module doc). The search box's ranking and result rendering
-  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh` and by
+  CI's `web` job.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
@@ -827,7 +829,7 @@ page runs.
 * **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
   definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
   error. `web/test.sh` now builds both Wasm modules and runs this test beside the
-  infoview's Node and Chromium tests.
+  infoview's Node and Chromium tests; CI's `web` job runs the browser-free part.
 * **Goals, optionally.** With `?lsp=ws://host:port` the page is also a language client:
   `web/lsp-client.js` speaks JSON-RPC 2.0 over a WebSocket (one message per text frame,
   no `Content-Length`), and `web/playground-lsp.js` shows the tactic state in a Goals
@@ -875,7 +877,8 @@ page runs.
   Scry.Repl`). A module that does not resolve is reported at startup and the REPL exits 2
   instead of failing on the first input. That is how a tool becomes "the ordinary Wiz REPL
   with an extra prelude" rather than forking the loop: it ships a prelude module, and e.g.
-  `scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`.
+  `scry repl`, run from `scry/`, is `wiz repl -I src -I ../lib --prelude Scry.Repl`
+  (from the repository root, `wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 * **Limits.** Input is one line per command (`IO.FS.Stream.getLine`): no continuation
   for a definition that spans lines, no readline (history, line editing or completion),
@@ -892,7 +895,8 @@ page runs.
   `.lake/build/bin/tests`), else `.lake/build/bin/tests` in the current directory. Without
   a driver it says how to build one (`lake build wiz tests`) and exits 2. It is not a
   second runner: selectors, `--jobs`, `--list`, `--timings` and the summary are the
-  driver's. (The single-file form `wiz test FILE` is 11ah.)
+  driver's. (The single-file form `wiz test FILE` is still a proposal; there is no
+  11ah section and no `wiz test` command.)
 
 ```
 $ wiz repl

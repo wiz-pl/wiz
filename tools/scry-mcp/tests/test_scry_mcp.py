@@ -51,6 +51,30 @@ if argv[0] == "findings":
 print("unknown", file=sys.stderr); sys.exit(2)
 '''
 
+#: A fake scry in the vulnerable shape: it reads a compile database and, for a `-B<dir>`
+#: flag, runs `<dir>/cc1`, which is what `cc` would do. It records nothing; the marker
+#: file that `cc1` touches is the evidence that the payload ran.
+FAKE_SCRY_WITH_B = r'''#!/usr/bin/env python3
+import json, os, shlex, subprocess, sys
+argv = sys.argv[1:]
+open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ran"), "w").write("x")
+if argv[:1] == ["--version"]:
+    print("scry 0.0.0-fake"); sys.exit(0)
+if argv[:1] == ["project"]:
+    root = argv[1]
+    db = json.load(open(os.path.join(root, "compile_commands.json")))
+    for entry in db:
+        args = entry.get("arguments")
+        if not isinstance(args, list):
+            args = shlex.split(entry.get("command", ""))
+        for arg in args[1:]:
+            if arg.startswith("-B") and len(arg) > 2:
+                subprocess.run([os.path.join(entry.get("directory") or root, arg[2:], "cc1")], check=False)
+    print(json.dumps({"tool": "scry", "counts": {"findings": 0}, "findings": []}))
+    sys.exit(0)
+print("unknown", file=sys.stderr); sys.exit(2)
+'''
+
 
 class Base(unittest.TestCase):
     def setUp(self) -> None:
@@ -230,6 +254,41 @@ class ProjectTests(Base):
         self.assertNotIn("--cache", " ".join(argv))
         self.assertEqual(out["result"]["_run"]["units"], 1)
 
+    def test_allowlisted_flags_still_run(self) -> None:
+        self.compdb([{"directory": str(self.ws / "src"), "file": "a.c", "arguments": [
+            "cc", "-I.", "-Iinclude", "-isystem", "/usr/include", "-iquote", "q",
+            "-DNDEBUG", "-U", "OLD", "-DPAIR(x,y)=x", "-include", "force.h", "-std=c11",
+            "-c", "a.c", "-o", "a.o", "-MF", "a.d"]}])
+        out = self.call("scry_project", {"path": "src"})
+        self.assertTrue(out["ok"], out)
+
+    def test_flags_outside_the_allowlist_are_refused_by_name(self) -> None:
+        vectors = [
+            (["cc", "-Bbin", "a.c"], "-Bbin"),
+            (["cc", "-B", "bin", "a.c"], "-B"),
+            (["cc", "-fplugin=bin/p.so", "a.c"], "-fplugin=bin/p.so"),
+            (["cc", "-specs=bin/p.specs", "a.c"], "-specs=bin/p.specs"),
+            (["cc", "-wrapper", "bin/w", "a.c"], "-wrapper"),
+            (["cc", "@bin/args.rsp", "a.c"], "@bin/args.rsp"),
+            (["cc", "-Xclang", "-load", "a.c"], "-Xclang"),
+            (["cc", "-cc1", "a.c"], "-cc1"),
+            (["cc", "-Xlinker", "-rpath", "a.c"], "-Xlinker"),
+            (["cc", "-imacros", "x.h", "a.c"], "-imacros"),
+            (["cc", "--sysroot=.", "a.c"], "--sysroot=."),
+            (["cc", "-O2", "a.c"], "-O2"),
+            (["cc", "-fPIC", "a.c"], "-fPIC"),
+            (["cc", "stray.o", "a.c"], "stray.o"),
+            # a separate value that looks like an option must not be re-read by cc
+            (["cc", "-I", "-Bbin", "a.c"], "-Bbin"),
+            (["cc", "-D", "@bin/args", "a.c"], "@bin/args"),
+        ]
+        for args, refused in vectors:
+            self.compdb([{"directory": str(self.ws / "src"), "file": "a.c", "arguments": args}])
+            out = self.call("scry_project", {"path": "src"})
+            self.assertEqual(out["error"]["kind"], "invalid_args", args)
+            self.assertIn(refused, out["error"]["message"], args)
+        self.assertEqual(self.calls(), [])
+
     def test_compdb_that_leaves_the_roots_is_refused(self) -> None:
         cases = [
             [{"directory": str(self.outside), "file": "secret.c"}],
@@ -250,8 +309,13 @@ class ProjectTests(Base):
         self.assertEqual(self.call("scry_project", {"path": "src"})["error"]["kind"], "invalid_args")
         self.assertEqual(self.call("scry_project", {"path": "store.json"})["error"]["kind"], "invalid_args")
 
-    def test_forbidden_flags_are_refused_by_name(self) -> None:
-        """security-01: a read-only tool must not pass -B/-fplugin/@file to cc -E."""
+    def test_execution_vectors_and_allowlist_outsiders_are_refused_by_name(self) -> None:
+        """security-01 + #478: the deny list runs first, then the allowlist.
+
+        Both refuse a compile-database word by name before `scry` is spawned. The
+        allowlist is the policy (master, #478): an option outside it (`-O2`, `-Wall`,
+        `-fPIC`) is refused too, not silently dropped.
+        """
         cases = [
             (["cc", "-Bbin", "a.c"], "-Bbin"),
             (["cc", "@args.rsp", "a.c"], "@args.rsp"),
@@ -261,6 +325,14 @@ class ProjectTests(Base):
             (["cc", "-wrapper", "evil", "a.c"], "-wrapper"),
             (["cc", "-Xclang", "-load", "evil.so", "a.c"], "-Xclang"),
             (["cc", "-Wp,-Dfoo", "a.c"], "-Wp,"),
+            # outside the allowlist: a real command line is refused, not stripped, and
+            # the first such word is named.
+            (["cc", "-O2", "-Wall", "-fPIC", "-I.", "-DX", "-std=c11",
+              "-c", "a.c", "-o", "a.o"], "-O2"),
+            (["cc", "-Wall", "-O2", "-fPIC", "-I.", "-DX", "-std=c11",
+              "-c", "a.c", "-o", "a.o"], "-Wall"),
+            (["cc", "-fPIC", "-O2", "-Wall", "-I.", "-DX", "-std=c11",
+              "-c", "a.c", "-o", "a.o"], "-fPIC"),
         ]
         for args, named in cases:
             self.compdb([{"directory": str(self.ws / "src"), "file": "a.c", "arguments": args}])
@@ -270,8 +342,9 @@ class ProjectTests(Base):
             self.assertIn(named, out["error"]["message"], args)
             self.assertIn("refusing", out["error"]["message"], args)
         self.assertEqual(self.calls(), [])  # refused before spawning scry
+        # A whole command line whose every word is on the allowlist still runs.
         self.compdb([{"directory": str(self.ws / "src"), "file": "a.c",
-                      "command": "cc -O2 -Wall -fPIC -I. -DX -std=c11 -c a.c -o a.o -MMD -MP"}])
+                      "command": "cc -I. -DX -std=c11 -c a.c -o a.o -MMD -MP"}])
         self.assertTrue(self.call("scry_project", {"path": "src"})["ok"])
 
 
@@ -308,6 +381,43 @@ class BoundedOutputTests(Base):
         self.assertTrue(out["truncated"], out)
         self.assertLessEqual(len(out["stdout"]), scry_mcp.MAX_TEXT)
         self.assertIn("truncated:", out["stdout"])
+
+
+class ProjectFlagExecutionTests(Base):
+    """security-01: a database's `-Bbin` must not reach a `cc` that would run `bin/cc1`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.payload = self.ws / "src" / "bin"
+        self.payload.mkdir()
+        self.marker = Path(self.tmp.name) / "cc1-ran"
+        cc1 = self.payload / "cc1"
+        cc1.write_text(f"#!/bin/sh\ntouch '{self.marker}'\nexit 0\n")
+        cc1.chmod(0o755)
+        self.fake = self.scry.parent / "scry-with-b"
+        self.fake.write_text(FAKE_SCRY_WITH_B)
+        self.fake.chmod(0o755)
+        self.server.close()
+        self.server = scry_mcp.Server(scry_mcp.Config(workspace=str(self.ws), scry=str(self.fake), timeout=30))
+        (self.ws / "src" / "compile_commands.json").write_text(json.dumps([
+            {"directory": str(self.ws / "src"), "file": "a.c",
+             "arguments": ["cc", "-Bbin", "-E", "a.c"]}]))
+
+    def test_the_payload_would_run_if_the_database_reached_scry(self) -> None:
+        # Control: this is the vulnerable shape the MCP must refuse. A scry that honours
+        # the database's -B runs bin/cc1, which touches the marker.
+        subprocess.run([str(self.fake), "project", str(self.ws / "src")], check=True,
+                       stdout=subprocess.DEVNULL)
+        self.assertTrue(self.marker.exists())
+        self.marker.unlink()
+
+    def test_the_mcp_refuses_the_database_and_never_runs_the_payload(self) -> None:
+        out = self.call("scry_project", {"path": "src"})
+        self.assertEqual(out["error"]["kind"], "invalid_args")
+        self.assertIn("-Bbin", out["error"]["message"])
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.fake.parent / "ran").exists())
+        self.assertEqual(self.calls(), [])
 
 
 class StoreAndFindingsTests(Base):

@@ -74,15 +74,23 @@ Every tool is annotated `readOnlyHint: true`, `destructiveHint: false` and
   `path_denied`.
 * **The compile database is checked first.** Before `scry_project` runs, each
   entry's `directory`, `file`, and each `-I`, `-isystem`, `-include`,
-  `-iquote`, `-idirafter`, `-isysroot` and `--sysroot` path must be inside those
-  roots. System include directories (`/usr/include`, `/usr/local/include`,
-  `/nix/store`) are also allowed. Scry itself forwards only preprocessing flags
-  (`-I`, `-D`, `-U`, `-std=`, `-include`, `-isystem`, …) and drops the rest. A
-  flag that can execute code or choose a driver (`-B`, `-specs=`, `-wrapper`,
-  `-fplugin`, `@file`, `-Xclang`, `-Wp,`) refuses the database with the flag's
-  name, before `scry` is spawned; a normal `-O2 -Wall -fPIC -c` command still
-  runs. Scry runs `cc -E -ffreestanding`, the one host program the server can
-  start besides `scry` and `git diff`.
+  `-iquote` and `-idirafter` path must be inside those roots. System include
+  directories (`/usr/include`, `/usr/local/include`, `/nix/store`) are also
+  allowed.
+* **The database's flags are on an allowlist.** Only the preprocessing flags
+  Scry needs reach `cc -E`: `-I`, `-isystem`, `-iquote`, `-idirafter`,
+  `-include`, `-D`, `-U` and `-std=`/`--std=`. The compile driver's own `-c`,
+  `-o` and `-M…` structure is consumed (never forwarded, so `-o` cannot write a
+  file and `-M` cannot replace the preprocessed text). **Every other word is
+  refused by name**, not stripped: `-B<dir>` (with a committed `cc1`),
+  `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, `-cc1`, `-Xlinker`,
+  `-imacros`, `--sysroot` and any other `-f…`/`-m…` option could change which
+  program runs or what it reads. The branch's explicit deny list of execution
+  vectors runs before the allowlist, so a refusal names the vector even if the
+  allowlist grows. The refusal is `invalid_args` and names the flag; Scry's own
+  parser enforces the same list (`scry/src/Scry/Project.wiz`). `cc -E
+  -ffreestanding` is the one host program the server can start besides `scry`
+  and `git diff`.
 * **Child output is bounded.** `stdout`/`stderr` are drained in chunks and only
   the first 64 KiB of each is kept; past 8 MiB on either stream the child's
   process group is killed, so a repository-chosen output size cannot OOM the

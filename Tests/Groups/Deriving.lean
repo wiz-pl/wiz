@@ -56,6 +56,7 @@ attribute [macro command.shape] shapeM
 def derivingGroup : Group where
   name := "deriving"
   exercise := "HD8"
+  parallel := true
   cases := [
     { name := "a command macro expands into several commands", run := fun _ =>
         okLib ("import Prelude\nsyntax (name := two) \"two_defs\" ident ident : command\n" ++

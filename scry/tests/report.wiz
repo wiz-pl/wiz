@@ -112,15 +112,21 @@ def main : IO Unit := EIO.toIO (do
   FS.writeFile (tmp ++ "/victim.txt") "keep me\n";
   FS.symlink (tmp ++ "/victim.txt") (tmp ++ "/page.html");
   badLink ← EIO.lift (run [tmp ++ "/src.c", "--out", tmp ++ "/page.html"]);
-  check "out symlink: refused"
-    (match badLink with | .error _ => .true | .ok _ => .false);
+  let linkRefused :=
+    match badLink with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out symlink: refused" linkRefused;
   victim ← read (tmp ++ "/victim.txt");
   check "out symlink: the target is unchanged" (String.eq victim "keep me\n");
 
   sourceBefore ← read (tmp ++ "/src.c");
   badInput ← EIO.lift (run [tmp ++ "/src.c", "--out", tmp ++ "/src.c"]);
-  check "out input: refused"
-    (match badInput with | .error _ => .true | .ok _ => .false);
+  let inputRefused :=
+    match badInput with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out input: refused" inputRefused;
   sourceAfter ← read (tmp ++ "/src.c");
   check "out input: the source is unchanged" (String.eq sourceBefore sourceAfter);
 
@@ -137,8 +143,11 @@ def main : IO Unit := EIO.toIO (do
     (Bool.not (String.contains walked "secret.c"));
   check "walk: the skipped link is reported" (String.contains walked "symbolic link");
   badCorpus ← EIO.lift (run ["build/walk-corpus", "--out", "build/walk-corpus/page.c"]);
-  check "out corpus .c: refused"
-    (match badCorpus with | .error _ => .true | .ok _ => .false);
+  let corpusRefused :=
+    match badCorpus with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out corpus .c: refused" corpusRefused;
   FS.removeAll "build/walk-corpus";
   FS.removeAll "build/walk-outside";
   FS.removeAll tmp;
