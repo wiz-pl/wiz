@@ -221,7 +221,10 @@ def entries (c : Ctx) (src : String) : Array Entry := Id.run do
     k := k + 1
     let mut kids : Array Entry := #[]
     for m in mine do
-      if (st.declDocs.get? m).bind (·.parent) == some n then
+      let md := st.declDocs.get? m
+      -- (a private constructor or field is not documented either)
+      if (md.bind (·.parent)) == some n && !hidden m md &&
+          !st.globals.privates.contains m then
         if let some ke := entry c src m k then
           kids := kids.push ke
           k := k + 1
