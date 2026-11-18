@@ -678,3 +678,109 @@ The repo fixture's finding (`src/Helper.cs`, `Console.ReadLine` → `Process.Sta
 fires, and its `unmodelled-external` row drops from 5 to 1 (only `Process.Start` is
 left). The `taint/cwe78-stringop-unsafe` case pins the pair: `Substring` between the
 source and the sink is no longer a warning, and the finding still fires.
+
+## 10. Known expansions (2026-11-19)
+
+C# has no preprocessor macros, so "macro expansion" here is the narrower thing the
+frontend can do honestly: a **table of known expansions** (`Scry.Cs.expansions`) mapping
+a callee spelling to a *term template over the call's already-lowered arguments*
+(receiver first, the convention everywhere else in this frontend). It is not a C#
+preprocessor. It cannot invent resolution: an entry is used only for an exact spelling,
+and a name with no entry keeps its ordinary call — and, when nothing models it, the
+analysis's `unmodelled-external` warning. The one shape rule is a method group, whose
+name is looked up in the unit's own method table (the `methodOwner` used by every call);
+an unknown name is still a havoc with a warning, never a silent value.
+
+### 10.1 Where the warnings are (`src/Crux.Api`, 75 files, 240 functions)
+
+Measured with `scry cs src/Crux.Api --no-taint --json` (lowering warnings) and
+`scry-externals` (the merged program's unmodelled callees), at the head of this branch
+(which includes §9's models). The brief's guess — that macro-shaped constructs are a
+large warning source — is mostly wrong. The lowering warnings are dominated by semantic
+gaps, not by macros:
+
+| class | count | macro? |
+|---|---|---|
+| `unknown name … havoc` | 173 | mixed: 93 are method groups (this section); the rest are unbound `is { } x` designations, `out var` targets and §7.8's byte→char shift (36 in one non-ASCII file) |
+| `is` test | 88 | no (pattern matching) |
+| lambda body | 60 | no (a function body, not a name→template) |
+| field initialiser | 48 | no (constructor semantics) |
+| target-typed `new()` | 30 | no |
+| tuple expression | 30 | no |
+| `out`/`ref` | 20 | no (needs an address) |
+| property initialiser | 10 | no |
+| everything else | 54 | — |
+
+The macro-shaped family itself:
+
+| construct | sites | warnings before | after |
+|---|---|---|---|
+| property-like accessor (`x.P`, `x[i]`, `get_*`) | 1,943 lowered call sites | 1,943 `unmodelled-external` | 0 by §9's read model — **not** by an expansion: the lowering already emitted `get_P` |
+| method group (`Foo.Sink` in delegate position) | 93 | 1 `unknown name … havoc` each | 0 (this section) |
+| `nameof(x)` | 76 | 0, but every site was one shared `$str:nameof` constant | 0, now one constant per name |
+| `string.Format` | 0 in `Crux.Api` | — | — |
+| exception message formatting | 6 `new …Exception(…)`, none interpolated | an unmodelled constructor, deliberately (§9.3) | refused |
+| `ArgumentNullException.ThrowIfNull(x)` | 6 | `unmodelled-external` | 0 (a guard) |
+| `ConfigureAwait` / `Task.FromResult` | 5 / 2 | `unmodelled-external` | 0 (pass-through) |
+
+So the largest class (property-like accessors) needed a *model*, not an expansion, and
+the expansion for it already existed. The largest class that was **lowered to a havoc**
+is the method group: 93 of the 173 `unknown name` warnings are `unknown name <a unit
+method>` (31 of them are `.MapGet("/", Handler)` / `.MapPost(…, Handler)` route-handler
+arguments; the rest are `.Select(ResponseOf)`, `var h = Method` and other delegate
+positions), and the expansion is a function value, not a call.
+
+Numbers to reproduce (the same lowering-only probe built twice, `-I src` and with the
+previous `CsLower`): lowering warnings 513 → 420 and `unknown name` 173 → 80 on the 75
+files; every one of the 93 that disappears is `unknown name <a unit method>`, and no
+other warning class changes. The unmodelled-external table falls 917 → 906: the method
+groups were not external calls (a `get_Handler` read was modelled), so only the 6
+`ThrowIfNull` and 5 `ConfigureAwait` call sites leave it. The taint fixture
+`cwe78-macro-unsafe` goes from 0 to 1 finding: before, `handler(input)` called a local
+the analysis could not resolve and the sink inside `Sink` was unreachable; after, the
+call reaches `Dispatcher.Sink`.
+
+### 10.2 What is expanded
+
+* **Method group → function value.** A bare identifier or `Type.M` that names a method
+  of a unit class is `fnptr "$method:<Ns.Class.Method>"` (`Scry.Cs.methodGroup`). The
+  unit's `methodOwner` (which walks `base_list`) is the only lookup, so no new symbol
+  resolution is introduced. A local initialised from a **static** method group remembers
+  the target; a later `handler(x)` is the direct call `Ns.Class.M(x)`, and an assignment
+  to the local updates or clears the target (a re-assigned delegate must not keep
+  calling the old method — `cwe78-macro-unsafe` pins this). An instance method group
+  still gets its function value, but not the target: the receiver would have to be
+  captured, and the value alone does not say how.
+* **`nameof(x)`** → `$str:<name>` (the argument's spelling after the last `.`), instead
+  of the one shared `$str:nameof`. A complex or generic argument is approximated by its
+  spelling; no symbol is resolved.
+* **A small call table** (`Scry.Cs.expansions`), each entry a template over the
+  lowered arguments:
+  `String.Format(fmt, …)` → `System.String.Concat(fmt, …)` (the shape §3 already
+  promised); `ConfigureAwait` and `Task.FromResult` → argument 0; and
+  `ArgumentNullException.ThrowIfNull(x)` / `ArgumentException.ThrowIfNullOrEmpty(x)` →
+  `assume x != null` (the call either returns with a non-null argument or throws).
+
+### 10.3 What is refused
+
+* **Property-like accessors.** The lowering already expands `x.P` to `get_P(x)`; the
+  missing piece was the *model* (§9), not a term template. An external object's fields
+  are not in the points-to model, so "expand `get_P` to a field load" would invent a
+  layout.
+* **Exception message formatting.** `new XException($"…")` is a constructor call; §9.3
+  refuses to model constructors because they write the object they return. The message
+  value does not become a sink-visible flow by calling it a macro.
+* **Lambdas and local functions.** Their bodies are functions, not name→template
+  expansions; lowering them is M5's work (captures, parameters, a new `Wil.Func`).
+* **`is { } x`, tuples, deconstruction, `out`/`ref`, target-typed `new()`.** These are
+  binding or address problems. A template cannot bind a name, and `out` needs a location
+  the lowering does not have.
+* **Unknown names.** A bare name that is not a local, a field or a unit method — an
+  external method group, a `using static` import, a missing local-function body — stays
+  a havoc with `unknown name … not modelled` (`lower/expansions`'s `Mystery`). The table
+  never turns an unknown into a value.
+
+Method groups in the table are recognised by the unit's method table, so the guard is
+structural: remove a method and the name falls back to the warning; there is no
+permissive suffix rule.
+
