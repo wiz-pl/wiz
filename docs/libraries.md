@@ -1393,9 +1393,11 @@ operations: `File.writeOwned`, `readLineOwned`, `readAllOwned` and `flushOwned`;
 Each returns `(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
 `Child.waitOwned`.
 
-`Child.releaseOwned` drains a piped stdout/stderr (`Child.communicate c ""`) before it
-waits, so a child that fills its pipe cannot deadlock the release; use
-`Child.communicateOwned` first if you want that output.
+A child from `Process.spawnOwned` is released by `Child.waitOwned` (through
+`Child.releaseOwned`), which drains a piped stdout and stderr — `Child.communicate c ""` —
+before it waits, so a child that fills a pipe cannot deadlock the release. The drained
+output is dropped: collect it first with `Child.communicateOwned` (or `Handle.use c o
+(fun c => Child.communicate c input)`).
 
 ```
 File.withOwned p "w" (fun f o => do1
@@ -1510,6 +1512,58 @@ operations on a `ByteArray` (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`)
 Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model of
 `Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
 uses the same nine runtime natives (`selfhost/rt.c`).
+
+## Hashing and encodings (`lib/Sha.wiz`, `lib/Encoding.wiz`)
+
+`import Sha` and `import Encoding` are pure and total (`#eval` runs them; no `partial`,
+no axiom, no `implemented_by`), so a release's `.sha256` and an archive's hash are
+computed by the same code a proof can see. Both are checked by the `library` group
+(`lake test -- '=library'`).
+
+| module | contents | test group |
+|--------|----------|------------|
+| `lib/Sha.wiz` (`import Sha`) | SHA-256 (FIPS 180-4) of a byte string: `Sha.sha256 : List U8 → List U8` is the 32-byte digest, big-endian as the standard writes it; `Sha.sha256Hex` renders it in lower-case hex (64 characters); `Sha.sha256Bytes` and `Sha.sha256BytesHex` are the same over a `Bytes` buffer | `=library` |
+| `lib/Encoding.wiz` (`import Encoding`) | base64 (RFC 4648, standard alphabet with `=` padding) and hex, in both directions, over `List U8` and over `Bytes`: `hexEncode`/`hexDecode`, `base64Encode`/`base64Decode`, and the four `…Bytes` forms | `=library` |
+
+The two directions are separate functions, not a `Codec` class: a decoder has to report
+why the text is not valid, so it returns `Except String` — the bytes in `.ok`, the reason
+in `.error`. A byte is a `U8`, a `Nat` below 256 (`lib/Word.wiz`); `Sha` imports
+`Encoding` (for `sha256Hex`), and neither module needs I/O.
+
+**Lengths and padding.** `Sha.sha256` pads the bytes it is given (a `1` bit, zeros up to
+56 mod 64, then the 64-bit big-endian bit length), so a caller hashes the message and not
+a block. The digest is 32 raw bytes; `Sha.sha256Hex` is `Encoding.hexEncode` of it.
+`Tests/Groups/Library.lean` pins the FIPS 180-4 vectors — the empty message, `"abc"`, the
+448-bit `"abcdbcde…"` message — and the quick-brown-fox and 64-`a` messages.
+
+**Strict decoders.** `Encoding.hexDecode` takes either case and rejects an odd number of
+digits (`"hex: odd number of digits"`) and any character outside `0-9a-fA-F`
+(`"hex: not a hex digit"`). `Encoding.base64Decode` takes the standard alphabet with
+padding: the length is a multiple of four, only the last group may carry `=`, and there is
+no whitespace (strip a line-wrapped source first). Every violation is an `error`
+that names the rule (`length is not a multiple of 4`, `misplaced padding`,
+`data after padding`, `invalid character`), never a silently shortened result. The unused
+low bits of the last character are ignored, as RFC 4648 permits a decoder to do.
+
+```wiz
+import Sha
+import Encoding
+
+def toBytes : List Char → List U8
+  | .nil => .nil
+  | .cons c cs => .cons (U8.ofNat (Char.code c)) (toBytes cs)
+def bytes (s : String) : List U8 := toBytes (String.chars s)
+
+def hexOf (r : Except String (List U8)) : String := match r with
+  | .ok bs => Encoding.hexEncode bs
+  | .error e => e
+
+#eval Sha.sha256Hex .nil                                    -- "e3b0c442…b855"
+#eval Sha.sha256Hex (bytes "abc")                           -- "ba7816bf…15ad"
+#eval hexOf (Encoding.hexDecode (Sha.sha256Hex (bytes "abc")))  -- the digest, as bytes
+#eval hexOf (Encoding.base64Decode "Zm9vYmFy")              -- "666f6f626172"
+#eval hexOf (Encoding.base64Decode "Zg")     -- "base64: length is not a multiple of 4"
+```
 
 ## 9j: list lemmas (`lib/ListLemmas.wiz`)
 

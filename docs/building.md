@@ -36,7 +36,8 @@ only a `.toolchain` failure and otherwise fail the case, reporting the exit code
 program's stderr. Never look for `No such file` in a program's stderr to decide "no
 toolchain": a program may print that itself (a missing fixture, a `File.open`, a
 `Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
-has a case for each half.
+has a case for each half: a run-time ENOENT failure, a pass whose program writes that
+text on stderr and exits 0, and a build that cannot find the compiler.
 
 A case whose name claims **linear** time must measure it. `Tests.checkScaling`
 (`Tests/Harness.lean`) runs the same action at `n` and `2n` (best of three, the fixed
@@ -567,8 +568,11 @@ python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-chec
 | `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
 | `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
 | `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
-| `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz` (elaborate, lower, C, `cc`) | 2 GiB |
+| `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz -o bench-out/stdlib-bench` (elaborate, lower, C, `cc`) | 2 GiB |
 | `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
+
+The `build-stdlib-bench` row is `scripts/mem-bench.py`'s own invocation (its `{out}` is a
+temporary path), and `wiz build` accepts only `FILE -o OUT` (`Main.lean`).
 
 The checks are cold (`--no-cache`): a warm content-addressed cache hides the
 elaboration a CI runner does on every build. Peak RSS is sampled every 20 ms as the
@@ -1150,22 +1154,27 @@ exist and the landing page's and benchmark page's local links resolve; no server
 uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
 then publishes that artifact.
 
-`wiz doc --lib` elaborates the whole library once when its cache is cold, and that is
-the bulk of the job (10-19 min in recent runs; 43 min on a loaded machine). So the job
-restores `wiz`'s elaboration cache from the Actions cache and passes it as a read-only
-layer (`.wiz-doc-cache/ro`, `--cache-ro`); this run's misses go to
-`.wiz-doc-cache/write`, which a miss publishes as the next run's layer. The key is
+`wiz doc --lib` elaborates the whole library when its cache is cold, and that is the bulk
+of the docs job (10-19 min in recent runs). The job therefore restores `wiz`'s
+elaboration cache from the Actions cache into `.wiz-doc-cache/ro` and passes it with
+`--cache-ro`, a layer `wiz` only ever reads: the job cannot corrupt the published layer,
+and this run's misses go to `.wiz-doc-cache/write`. A run that missed publishes its
+write cache as the next run's layer; a hit publishes nothing. The key is
 `wiz-doc-v1-<os>-<SHA-256 of the wiz binary>-<git tree of lib/>`. The first half is the
-cache's own namespace (`Wiz/Cache.lean`: an entry is named by `binaryId`, a hash of the
-running binary; manifests carry its SHA-256, `toolchainTag`), so an identical build of
-the same source hits and a changed compiler misses; the second half only decides when a
-new snapshot is saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still
-serves the modules a `lib/` change did not touch. A restored run replays the cache in a
-few minutes instead of elaborating (roughly a tenth of the cold time; ~2 min with
-`--jobs 4`, once `wiz doc` has that flag). `--cache-verify off` is deliberate: the layer
-is this job's own and its entries are content-keyed; the manifest check would bind them
-to the toolchain's store paths (cc, llc) and throw a same-binary rebuild away. The
-toolchain's own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
+cache's own namespace (an entry is named by `binaryId`, a hash of the running binary, and
+manifests carry its SHA-256), so an identical build of the same source hits and a changed
+compiler misses by construction; the second half only decides when a new snapshot is
+saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still serves the modules
+a `lib/` change did not touch. `--cache-verify off` is deliberate. The layer is published
+by a job that runs with it off, so the layer carries no manifests; with verification on
+(the default, `warn`) an entry that no manifest lists is a miss, and a read-only layer is
+only read through its manifests — the restored layer would be ignored. The entries are
+content-keyed and namespaced by the binary's hash anyway (each module's text is in the
+key), and a manifest would also bind each entry to the toolchain's tag, which includes
+the `cc` and `llc` paths (`Wiz/Toolchain.lean`): a rebuild of the same ELF against a
+different store path would throw its entries away. A miss costs one cold elaboration
+(10-19 min on the runner); a hit replays the entries in about 2-4 min. The toolchain's
+own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
 
 The benchmark page is **generated, not written**: `web/build-bench.py` renders
 `web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
@@ -1203,10 +1212,13 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
-`wiz doc --jobs N` elaborates and renders N modules at once (`0`: auto); the tree is the
-same as with `--jobs 1`. `-v` (`-vv`, `-q`) turns on the progress log on stderr, which
-names each phase, each module's elaboration/rendering time and cache hits, and ends with
-the wall time and peak RSS.
+`wiz doc --jobs N` elaborates and renders N modules at once; the default is 1, and
+`--jobs 0` (or `--jobs auto`) takes the CPUs the process may run on, at most 8. The tree
+is byte-for-byte the same for every N (the modules' outputs are assembled in the order
+`run` was given them); only the `-v` log follows completion order. `-v` writes that log to
+**stderr** — stdout and the pages are unchanged — and names each phase, each module's
+elaboration and rendering time and cache hits, every 25th declaration, and a summary with
+the wall time and peak RSS. `-vv` lists every declaration; `-q` is the quiet default.
 
 **Live documentation (`wiz doc --serve`).** The generated documentation is static by
 default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port

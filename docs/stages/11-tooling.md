@@ -456,8 +456,11 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 
 ## 11r: printing notation (unexpanders)
 
-Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
-messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
+`#check`, messages (`type mismatch`, kernel errors), hovers and the infoview's goals
+print terms as the notation they were written with. Data values from `#eval`/`#reduce`
+are constructor payloads, not applications, so they print as before (below;
+`Wiz/Core/Pretty.lean` prints `.con` without consulting an unexpander, and the `tour`
+case `01-basics` pins the list output).
 
 ```wiz
 import Logic
@@ -524,7 +527,7 @@ Like Lean's doc-gen4: a static site from a set of modules. Design notes:
 `wiz-notes/scroll.md`.
 
     wiz doc [MODULE|FILE|DIR …] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
-            [--reference DIR [--check]]
+            [--serve [--port N] [--lsp PORT]] [--reference DIR [--check]] [--jobs N] [-v] [-q]
     grail doc [TARGET…] [-o OUT] [--source-url URL] [--title T]
 
 `--lib` documents the toolchain's library; a directory, every module under it (it is a
@@ -647,20 +650,23 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
-* **Cost: one elaboration per module, and `--jobs`.** The site needs each module's
-  declarations as that module's own file sees them, so `run` elaborates `import M` once
-  per module (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from
-  `~/.cache/wiz` (median closure: 8 modules), so the work is one elaboration per module,
-  not one for the library; the pages, the API index and the reference then pretty-print
-  every declaration and run `Wiz.infer` on every subterm of every signature
-  (`LSP.subtermType:532`, `Site.lean:130`), once per declaration. `--jobs N` elaborates
-  and renders N modules at once (`0`: auto, the CPUs available, at most 8); the output is
-  assembled in the modules' own order, so `OUT` is byte-for-byte the same as `--jobs 1`
-  (only the `-v` log follows completion order, and every line names its module). `-v`
-  writes a progress log to stderr — per module its elaboration and rendering time and
-  cache hits, every 25th declaration, the phase boundaries, and a summary with the wall
-  time and peak RSS; `-vv` lists every declaration, `-q` is the quiet default. Stdout and
-  the pages are unchanged in every mode.
+* **Cost, `--jobs` and the progress log.** The site needs each module's declarations as
+  that module's own file sees them, so `run` elaborates `import M` once per module
+  (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from `~/.cache/wiz`
+  (median closure: 8 modules), so the work is one elaboration per module, not one for the
+  library; the pages, the API index and the reference then pretty-print every declaration
+  and run `Wiz.infer` on every subterm of every signature (`LSP.subtermType:532`,
+  `Site.lean:130`), once per declaration. `--jobs N` elaborates and renders N modules at
+  once; the default is 1, and `--jobs 0` (or `--jobs auto`) takes the CPUs this process
+  may run on (`Cpus_allowed_list`, so a cgroup or `taskset` is respected), capped at 8
+  because each job holds a whole elaboration state. The pages, `api.html`, `api.json` and
+  `search.js` are assembled in the modules' order, whichever job finishes first, so `OUT`
+  is byte-for-byte the same at every N; only the log's line order follows completion.
+  `-v` writes that log to stderr: the discovery pass (a line per module, then a phase
+  total), each module's elaboration and rendering time and its cache hits, every 25th
+  declaration, the phase boundaries, and a summary with the wall time and peak RSS. `-vv`
+  lists every declaration; `-q` is the quiet default. Stdout and the pages are unchanged
+  in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); a fixture with one declaration of every command kind
