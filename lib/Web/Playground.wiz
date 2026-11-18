@@ -35,7 +35,7 @@ structure Model where
 
 /-- The pane has no events yet. The clear control is the first one it will gain; the
 run and the engine stay on the page's side because they are effects. -/
-inductive Msg where
+inductive PlaygroundMsg where
   | clear
 
 def Model.empty : Model := Model.mk List.nil 0 "" "" "0 lines"
@@ -101,11 +101,11 @@ def Model.ofFailure (text : String) (status : String) (count : String) (kind : S
   let ls := linesOf text;
   Model.mk ls (countOf ls) status kind count
 
-def Line.view (l : Line) : Loom.VNode Msg :=
+def Line.view (l : Line) : Loom.VNode PlaygroundMsg :=
   Loom.el "div" [Loom.class (Line.cls l)] [Loom.text l.text]
 
 /-- The pane: the page's `#output` element, one `.line` div per line. -/
-def Model.view (s : Model) : Loom.VNode Msg :=
+def Model.view (s : Model) : Loom.VNode PlaygroundMsg :=
   Loom.el "div"
     [Loom.class "output", Loom.attr "id" "output", Loom.attr "aria-live" "polite"]
     (List.map Line.view s.lines)
@@ -113,6 +113,6 @@ def Model.view (s : Model) : Loom.VNode Msg :=
 /-- SSR of the pane at `s`, and its patches between two states. The app exists so
 that the pane can be mounted through the same driver as any other Loom page once the
 playground serves it from its own Wasm instance. -/
-def app : Loom.App Model Msg := Loom.App.mk Model.empty
+def app : Loom.App Model PlaygroundMsg := Loom.App.mk Model.empty
   (fun _ s => s)
   Model.view
