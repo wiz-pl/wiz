@@ -212,6 +212,7 @@ def sealLayer3 (bad : Decl ZeroOneMany) (fragment : Option String) : IO Unit := 
 def reprGroup : Group where
   name := "repr"
   exercise := "Representations and conversion (R3)"
+  parallel := true
   cases := [
     { name := "R3: a hand-written Σ of a structure's shape converts to the structure and back", run := fun _ =>
         reprAll r3Marker "75" },

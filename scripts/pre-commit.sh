@@ -1,8 +1,9 @@
 #!/bin/sh
 # The checks CI runs first, in one command, before a commit or a push.
 #
-#   scripts/pre-commit.sh --fast      docs style, `wiz fmt` on changed files, the
-#                                     ledger fixtures, the skip lint and `.github/` YAML
+#   scripts/pre-commit.sh --fast      docs style and links, `wiz fmt` on changed
+#                                     files, the ledger fixtures, the skip lint and
+#                                     `.github/` YAML
 #   scripts/pre-commit.sh --full      the fast checks, then the trust ledger, the
 #                                     reproducibility corpus and the formatter's tests
 #   scripts/pre-commit.sh --staged    only the files in `git diff --cached` (the
@@ -137,6 +138,10 @@ changed_files() {
 
 check_docs_style() {
   python3 "$root/scripts/check-docs-style.py" --root "$root" --quiet
+}
+
+check_doc_links() {
+  python3 "$root/scripts/check-doc-links.py" --root "$root" --quiet
 }
 
 check_format() {
@@ -395,6 +400,15 @@ else
   run_check "docs style" check_docs_style
 fi
 
+# docs links and anchors (no build, no network: Python 3 standard library only)
+if ! have python3; then
+  skip_check "docs links" "python3 not found"
+elif [ ! -f "$root/scripts/check-doc-links.py" ]; then
+  skip_check "docs links" "scripts/check-doc-links.py is missing"
+else
+  run_check "docs links" check_doc_links
+fi
+
 # wiz fmt --check, only the changed .wiz files (one file at a time)
 if [ ! -s "$work/wiz-files" ]; then
   skip_check "wiz fmt" "no changed .wiz files"
@@ -432,6 +446,16 @@ elif [ ! -f "$root/scripts/ci.py" ]; then
   skip_check "skip lint self-test" "scripts/ci.py is missing"
 else
   run_check "skip lint self-test" python3 "$root/scripts/ci.py" check-skips --self-test
+fi
+
+# check-repro's own rules, and its JSON reader, on synthetic input (no compiler needed)
+if ! have python3; then
+  skip_check "repro self-tests" "python3 not found"
+elif [ ! -f "$root/scripts/check-repro.sh" ] || [ ! -f "$root/scripts/check-repro-report.py" ]; then
+  skip_check "repro self-tests" "scripts/check-repro{,-report} is missing"
+else
+  run_check "repro self-tests" bash -c '"$1" --self-test && python3 "$2" --self-test' _ \
+    "$root/scripts/check-repro.sh" "$root/scripts/check-repro-report.py"
 fi
 
 # every .github/*.yml parses (PyYAML is a dev tool, not a hard dependency)

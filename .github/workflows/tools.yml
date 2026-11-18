@@ -28,9 +28,12 @@ on:
 permissions:
   contents: read
 
+# Concurrency: a newer commit on a pull request supersedes the old head (that head can no
+# longer merge, so cancelling it is safe). A push carries its sha, so a master commit's
+# run is never cancelled or replaced: it is that commit's only tools check.
 concurrency:
-  group: tools-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: tools-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CACHIX_NAME: badlydrawnwizards
@@ -39,9 +42,10 @@ jobs:
   unit:
     name: unit (python)
     runs-on: ubuntu-latest
+    # 10 min: three Python unittest runs; no build
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: tools/wiz-mcp
         run: python3 -m unittest discover -s tools/wiz-mcp/tests -p 'test_*.py' -v
       - name: tools/scry-mcp
@@ -59,9 +63,10 @@ jobs:
     name: smoke (nix, workflow_dispatch)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # 90 min: substitute/build wiz, then the stdio smoke test
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
