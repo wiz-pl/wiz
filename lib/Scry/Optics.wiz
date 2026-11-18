@@ -4,6 +4,7 @@ import Functor
 import Scry.Wil
 import Scry.Analysis
 import Scry.PointsTo
+import WordMap
 /-!
 # Scry.Optics: read-only accessors and traversals over Wil and analyses
 
@@ -448,7 +449,7 @@ def Scry.PointsTo.ptIdF (func : String) (var : Nat) : Scry.Fold Scry.PtResult Na
 
 /-- The registers that have a location, as a read-only fold. -/
 def Scry.PointsTo.ptVarsF : Scry.Fold Scry.PtState (Scry.VarKey × List Scry.Loc) :=
-  Scry.Fold.mk (fun st => st.pt)
+  Scry.Fold.mk (fun st => List.map (fun e => e.2) (U64Map.toList st.pt))
 
 /-- The resolved targets of an indirect call. -/
 def Scry.PointsTo.indirectF (func : String) (point : Nat) : Scry.Fold Scry.PtResult String :=

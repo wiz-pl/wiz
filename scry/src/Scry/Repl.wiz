@@ -161,6 +161,9 @@ def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := 
       | .none => IO.pure .none
       | .some cst => do
         let p := Scry.Repl.pjoin Scry.Repl.dir (String.append "u" (String.append (Nat.repr i) ".cst"));
+        -- (the first `load` in a fresh directory: `saveUnits` creates the directory too,
+        -- but only after this write)
+        Scry.Repl.ensureDir Scry.Repl.dir;
         Scry.Repl.write p (Scry.CstStore.render cst);
         IO.pure (.some (Scry.Repl.Unit.mk path p))
 
