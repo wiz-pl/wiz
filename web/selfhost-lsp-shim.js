@@ -9,8 +9,10 @@
 //   * the handshake (`initialize`/`initialized`, `shutdown`/`exit`);
 //   * full-text `didOpen`/`didChange`/`didClose`, each answered with
 //     `textDocument/publishDiagnostics` (and `wiz/elaborated` when the client asked);
-//   * `wiz/plainGoal`/`wiz/plainTermGoal` answered `null` ("nothing at the cursor"), and
-//     the interactive methods with `MethodNotFound`, so the panel takes its plain path.
+//   * `wiz/plainTermGoal` answered from the check's position index (the expected type at
+//     the caret; a later stage adds tactic states), and the other infoview methods with
+//     `MethodNotFound`, so the panel takes its plain path;
+//   * `textDocument/completion` from `wiz_playground_names` (below).
 //
 // The diagnostics come from `wiz_playground_eval`'s text: one line per command (an
 // `import` or a grammar command prints none), errors start with `error:` or

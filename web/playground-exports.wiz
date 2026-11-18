@@ -28,8 +28,10 @@ export "wiz_playground_eval" playgroundEval
 -- and `text` is the line as `wiz_playground_eval` prints it (it may contain newlines: a
 -- tactic error lists the goals left). The page's in-page server
 -- (web/selfhost-lsp-shim.js) turns this into LSP diagnostics; the document state stays
--- in JavaScript and this export is pure (text in, JSON out). A later stage adds an
--- `index` field (positions → expected types and goal states) beside `lines`.
+-- in JavaScript and this export is pure (text in, JSON out). (stage 2) The answer also
+-- carries `index`, the positions the frontend recorded while elaborating: each checked
+-- node's expected type (a later stage adds tactic states). The page answers
+-- `wiz/plainTermGoal` from it with no further Wasm call.
 
 -- one hexadecimal digit, for `\u00XX`
 def pgcHex (n : Nat) : Char := match Nat.lt n 10 with
@@ -107,11 +109,32 @@ def pgcLines : List String → String
     | .nil => pgcLine l
     | .cons _ _ => String.append (pgcLine l) (String.append "," (pgcLines rest))
 
+-- (stage 2) the position index beside the lines: each `Info` the frontend recorded while
+-- elaborating (a checked node's expected type, later a tactic state before a step) as
+-- `{"s","e","kind","expected"|"goals"}`; `s`/`e` are code-point offsets into the checked
+-- text, end-exclusive. The page's server turns them into UTF-16 ranges.
+def pgiBody (t : String) : String := String.append ",\"expected\":" (pgcStr t)
+
+def pgiEntry (i : Info) : String := match i with
+  | .mk s e k t => String.append "{\"s\":" (String.append (Nat.toString s)
+      (String.append ",\"e\":" (String.append (Nat.toString e)
+        (String.append ",\"kind\":" (String.append (pgcStr k)
+          (String.append (pgiBody t) "}"))))))
+
+def pgiEntries : List Info → String
+  | .nil => ""
+  | .cons i rest => match rest with
+    | .nil => pgiEntry i
+    | .cons _ _ => String.append (pgiEntry i) (String.append "," (pgiEntries rest))
+
+-- the check, with the position index: watching on records the spans and expected types
+-- (the compiler path leaves it off, so it pays one Bool check per command)
 def playgroundCheck (text : String) : String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
-  | .mk out _ _ _ _ => String.append "{\"v\":1,\"lines\":["
-      (String.append (pgcLines (List.reverseOf out .nil)) "]}")
+      (String.codes text) 0 (Globals.watching (Globals.setModule Globals.empty "input")) .nil with
+  | .mk out gs _ _ _ => String.append "{\"v\":1,\"lines\":["
+      (String.append (pgcLines (List.reverseOf out .nil))
+        (String.append "],\"index\":[" (String.append (pgiEntries (Globals.infos gs)) "]}")))
 
 export "wiz_playground_check" playgroundCheck
 
@@ -129,44 +152,43 @@ export "wiz_playground_check" playgroundCheck
 -- in the answer. The names are read from the same `runCommands` as
 -- `wiz_playground_check`, so a name the check accepted is one this list has.
 
-def pgnHas (x : String) : List String → Bool
-  | .nil => .false
-  | .cons y ys => match strEq x y with
-    | .true => .true
-    | .false => pgnHas x ys
-
 def pgnKind (gs : Globals) (n : String) (ty : Tm) : Nat := match Globals.ind gs n with
   | .some _ => 7
   | .none => match ty with
     | .pi _ _ _ _ _ => 3
     | _ => 6
 
-def pgnEntry (gs : Globals) (n : String) (ty : Tm) (pns : List String) : String :=
+def pgnEntry (gs : Globals) (n : String) (ty : Tm) : String :=
   String.append "{\"label\":" (String.append (pgcStr n) (String.append ",\"kind\":"
-    (String.append (Nat.toString (pgnKind gs n ty)) (String.append ",\"detail\":"
-      (String.append (pgcStr (show pns 0 ty)) "}")))))
+    (String.append (Nat.toString (pgnKind gs n ty)) "}")))
 
--- the globals from the newest back, skipping a source name already emitted
-partial def pgnGo (gs : Globals) (all : Array Global) (i : Nat) (seen : List String) (acc : String) : String :=
-  match Nat.lt i (Array.size all) with
+-- The globals in declaration order (oldest to newest, the order `Globals.add` pushes),
+-- each entry **prepended** to the answer: the final string is newest first, and every
+-- `String.append` copies one entry, never the growing answer (copying the whole answer
+-- once per entry would recurse once per character of it and overflow the wasm stack).
+-- `k` is a loop counter, so this is one tail-recursive loop, not a recursion over the list.
+partial def pgnGo (gs : Globals) (all : Array Global) (k : Nat) (acc : String) : String :=
+  match Nat.lt k (Array.size all) with
   | .false => acc
-  | .true => match Array.getD all (Nat.sub (Array.size all) (Nat.add i 1))
-      (.mk "" .nil .star .star .star .nil .nil) with
-    | .mk n _ ty _ _ _ pns =>
-      let label := privBase n;
-      match pgnHas label seen with
-      | .true => pgnGo gs all (Nat.add i 1) seen acc
-      | .false =>
-        let entry := pgnEntry gs label ty pns;
-        let acc' := match strEq acc "" with
-          | .true => entry
-          | .false => String.append acc (String.append "," entry);
-        pgnGo gs all (Nat.add i 1) (.cons label seen) acc'
+  | .true => match Array.getD all k (.mk "" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty _ _ _ _ =>
+      let entry := pgnEntry gs (privBase n) ty;
+      let acc' := match strEq acc "" with
+        | .true => entry
+        | .false => String.append entry (String.append "," acc);
+      pgnGo gs all (Nat.add k 1) acc'
 
 def playgroundNames (text : String) : String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
   | .mk _ gs _ _ _ => String.append "{\"v\":1,\"names\":["
-      (String.append (pgnGo gs (Globals.all gs) 0 .nil "") "]}")
+      (String.append (pgnGo gs (Globals.all gs) 0 "") "]}")
 
-export "wiz_playground_names" playgroundNames
+-- NOTE: not exported yet. `wiz_playground_names` enumerates the frontend's environment, and
+-- the first wasm build of it overflowed the module's stack while printing a global (the
+-- crash is in the C runtime's list handling, not in this function's control flow). The
+-- page's server treats a missing export as "no completions" (an empty list), so the page
+-- is safe with this line absent; re-enable it with
+-- `export "wiz_playground_names" playgroundNames` once the wasm path is fixed.
+
+

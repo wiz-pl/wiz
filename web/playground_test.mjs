@@ -5,6 +5,7 @@
 //   usage: node web/playground_test.mjs OUT_DIR
 import { pathToFileURL } from "node:url";
 import { renderValue } from "./playground-values.js";
+import { PositionIndex } from "./selfhost-lsp-shim.js";
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;
@@ -47,6 +48,52 @@ check("an error", out[4], "error: unknown identifier nope");
 const bare = run("import Prelude\ndef one : Nat := 1\n#eval one\n");
 check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
+
+// (stage 2/3) the check's position index and the names export. The page adds the Prelude
+// line itself (`withPrelude`), so the checked text is that source.
+function call(name, source) {
+  const p = wasm.stringToNewUTF8(source);
+  const r = wasm[name](big(p));
+  wasm._free(big(p));
+  const text = r ? wasm.UTF8ToString(Number(r)) : "";
+  if (r) wasm._free(r);
+  return text;
+}
+function checkThat(name, condition, detail) {
+  if (condition) console.log(`ok: ${name}`);
+  else { failed++; console.log(`FAIL: ${name}${detail ? "\n  " + detail : ""}`); }
+}
+{
+  const body = "def twice (n : Nat) : Nat := n + n\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + body));
+  checkThat("check: an index", Array.isArray(answer.index) && answer.index.length > 0,
+    JSON.stringify(answer).slice(0, 400));
+  const index = new PositionIndex(body, answer.index);
+  const at = body.indexOf("n + n");
+  const last = body.lastIndexOf("n");
+  check("index: the body's expected type", (index.termGoal(at + 2) || {}).goal, "Nat");
+  check("index: at the body's end", (index.termGoal(at + 4) || {}).goal, "Nat");
+  // `n + n` is an infix macro: the rewritten node keeps its range but not its children
+  check("index: the rewrite's span is the whole body",
+    (index.termGoal(last) || { range: { start: {} } }).range.start.character, at);
+  check("index: nothing before it", index.termGoal(0), null);
+}
+{
+  // a plain application is not rewritten: its arguments keep their spans
+  const src = "def ap (f : Nat → Nat) (x : Nat) : Nat := f x\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + src));
+  const index = new PositionIndex(src, answer.index);
+  const body = src.indexOf("f x");
+  const arg = src.lastIndexOf("x");
+  check("app: the body's expected type", (index.termGoal(body) || {}).goal, "Nat");
+  check("app: the argument's expected type", (index.termGoal(arg) || {}).goal, "Nat");
+  check("app: the argument's own span", (index.termGoal(arg) || { range: { start: {} } }).range.start.character, arg);
+}
+{
+  // the names export is not wired into the build yet (it enumerated the environment and
+  // overflowed the wasm stack); the page's server treats that as an empty completion list
+  check("names: the export is not wired yet", typeof wasm._wiz_playground_names, "undefined");
+}
 
 if (failed) process.exit(1);
 console.log("playground: all checks passed");

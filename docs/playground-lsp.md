@@ -215,20 +215,78 @@ The client uses `label`, `kind` (an LSP `CompletionItemKind` number) and `detail
 fields are ignored. A server may return an empty list for "nothing here"; the panel shows
 "no completions".
 
-The in-page server answers from the module's `wiz_playground_names : String → String`
+The in-page server would answer from the module's `wiz_playground_names : String → String`
 export (`web/playground-exports.wiz`): it runs the same check as the diagnostics
-(`runCommands`) and returns `{"v":1,"names":[{"label","kind","detail"}, …]}` — the
-frontend's **global environment**, newest declaration first, each source name once, with
-`detail` the declaration's type as the kernel prints it (`kind` 7 for a type, 3 for a
-function, 6 otherwise). The shim caches that answer per document text, so a second
-Ctrl-Space costs nothing, and filters by the identifier prefix before the caret (letters,
-digits, `_`, `'` and `.`; case-insensitive), capped at 200 items.
+(`runCommands`) and would return `{"v":1,"names":[{"label","kind"}, …]}` — the frontend's
+**global environment**, newest declaration first, each name once, with `kind` an LSP
+`CompletionItemKind` (7 a type, 3 a function, 6 otherwise). The shim caches the answer per
+document text and filters by the identifier prefix before the caret (letters, digits, `_`,
+`'` and `.`; case-insensitive), capped at 200 items.
 
-Two honest limits: **local binders are not listed** (a definition's parameters, a `fun`'s
-variables, a tactic's hypotheses). The self-hosted frontend exposes the scope only while it
-elaborates a command and keeps no info tree, so there is no cheap way to ask "what is in
-scope at offset k". And a module built before the export existed (or one whose export
-fails) answers an empty list rather than an error.
+**In this build the export is not wired** (there is no `export` line and the function is not
+in `web/build-playground.sh`'s exported list): the first wasm build of it overflowed the
+module's stack while listing the environment (a recursion in the C runtime's list handling
+that the function's own control flow does not explain), so it is left out and the shim's
+safe fallback answers an **empty list** ("no completions"). The protocol, the shim, the
+client and the Ctrl-Space popup are complete and tested against a stub engine; re-enable
+the export once the wasm path is fixed. An external server (`?lsp=ws://…`) answers
+completions normally, so the popup is useful there today.
+
+Two honest limits even with the export: **local binders are not listed** (a definition's
+parameters, a `fun`'s variables, a tactic's hypotheses — the self-hosted frontend exposes
+the scope only while it elaborates a command and keeps no info tree), and a module whose
+export fails answers an empty list rather than an error.
+
+## Expected types (`wiz/plainTermGoal`)
+
+The in-page server answers `wiz/plainTermGoal` at the caret from the **position index** in
+the check answer: `wiz_playground_check` returns
+
+```json
+{"v":1,"lines":[…],
+ "index":[{"s":16,"e":44,"kind":"term","expected":"Nat"}, …]}
+```
+
+where `s`/`e` are **code-point** offsets into the checked text (end-exclusive; the shim
+turns them into UTF-16 and subtracts the Prelude prefix), and `expected` is the type the
+frontend checked that node against, printed in the node's own context. A lookup is the
+**innermost entry of the kind `term` containing the caret** (a caret at an entry's end
+counts, as in an editor right after a term); the answer is
+`{"goal": "<expected>", "range": {…}}`, or `null` when no recorded node contains it.
+
+How the index is made, and what it really is:
+
+* **Spans are a side table, not syntax.** `Syntax` stays
+  `missing | atom | ident | node kind args` — no node grows a range and no match on it
+  changes. `selfhost/Parse.wiz` (section "Spans", at the end of the file) has `SpT`, a tree
+  of kinds and offsets, and `spansAt`: after a command is parsed, it walks the tree beside
+  the lexer's tokens (every token the parser consumed is exactly one leaf, in source order,
+  because the parser's descriptors emit what they consume and the position-only ones emit
+  nothing), so one left-to-right pass recovers every node's start and stop. A tree the
+  parser did not build (a macro expansion, a rewrite, `.missing`) has no span, and
+  `spCheck` checks a span against the syntax node's kind at every step, so a stale pairing
+  is dropped, never guessed.
+* **The recorder is in the elaborator.** `checkT` (the "check this against a type" entry)
+  records `(span, "term", expected)` when it is entered with a span; `ES` carries the
+  entries (a new `infos` field) and `command` moves them into `Globals.infos` when the
+  command succeeds. `stepCommand` turns the side table on only when the playground asks
+  (`Globals.watching`), so the compiler and `wiz check` pay one `Bool` check per command
+  and no span walk.
+* **Where it threads** (for the parity work on `Frontend.wiz`/`Parse.wiz`): the `SpT`
+  threading is a last parameter on `checkT`, `inferT`, `inferT1`, `inferT2`, `inferHead`,
+  `checkLams`, `checkTuple`, `letT`, `inferLams`, `defT`, `defNames`, `command` and
+  `defStep`, and a `List (Option SpT)` on `appArgsT`/`appArgsNamed`/`appExpected` (one span
+  per argument). Everything else passes `.none`. `ES` grew one field, `Globals` two
+  (`infos`, `watch`) — a constructor arity change, as `selfhost` changes are announced.
+
+**What is not recorded.** A command whose syntax tree the frontend rewrites before
+elaborating has no spans there: `def` with pattern-matching defaults or derived equations
+(`withDefault`), structural-recursion reordering, `instance` bodies, and the elaborations
+inside tactics (a `by` block's *own* expected type is recorded; the terms its tactics
+elaborate are not). `#check`/`#eval` have no expected type of their own, so the caret on
+their argument answers `null` (their arguments still get entries when an application
+checks them). The recorder is the same code the compiler runs; with the index off (any
+other caller) it is dead weight of one `none`.
 
 ## Fallback ladder
 
@@ -303,8 +361,11 @@ server does.
   reconnect, the no-server path and no unhandled rejections. It needs no Wiz build.
 * `node web/selfhost_lsp_test.mjs` — the in-page server under Node with a stub engine:
   the command splitter, the check JSON and index, the handshake, diagnostics, completions
-  (prefix filtering, the empty prefix, a module without the export), and the page's
-  wiring (Ctrl-Space, Tab).
+  (prefix filtering, the empty prefix, a module without the export), the expected-type
+  answer from the index (including an astral character), and the page's wiring
+  (Ctrl-Space, Tab).
+* `node web/playground_test.mjs` — the Wasm module itself: the engine's output, the
+  check's `index` (a definition's expected type) and the names export.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and

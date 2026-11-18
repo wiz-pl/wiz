@@ -535,7 +535,32 @@ check("filter: a cap", filterCompletions(parseNames(NAMES), "", 2).length, 2);
   app.stop();
 }
 
-// ## 10. Nothing escaped
+// ## 10. Stage 2: the index's UTF-16 edge
+
+{
+  // a code-point offset after an astral character: the entry is inside the checked text,
+  // the caret is a UTF-16 position
+  const text = "-- 😀\ndef f (n : Nat) : Nat := n\n";
+  const p = withPrelude(text).prefix.length;
+  const caret = text.length - 2;                    // the last `n`
+  const cp = Array.from(text.slice(0, caret)).length;
+  const index = [{ s: p + cp, e: p + cp + 1, kind: "term", expected: "Nat" }];
+  const c6 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+  }) });
+  await c6.connect();
+  const got6 = waitFor(c6, "diagnostics");
+  c6.openDocument(uri, text);
+  await got6;
+  const at = positionOf(text, caret);
+  check("astral: the expected type", (await c6.plainTermGoal(uri, at)).goal, "Nat");
+  check("astral: its UTF-16 range", (await c6.plainTermGoal(uri, at)).range.start, at);
+  check("astral: elsewhere it is null", await c6.plainTermGoal(uri, { line: 1, character: 4 }), null);
+  c6.close();
+}
+
+// ## 11. Nothing escaped
+
 
 
 await sleep(30);
