@@ -1,0 +1,74 @@
+import IO
+-- Shared state between threads: `import MVar` (stage 25d, docs/stages/25-concurrency.md).
+--
+-- A peer of the session-typed channels in lib/Session.wiz (decision CS1), for the
+-- programs channels don't fit: many threads sharing one cell, a work queue, a lock
+-- around output. What each API guarantees (25d has the table):
+--
+--  * `MVar A`: a cell that is empty or holds an `A` (Haskell's `MVar`). `take` waits
+--    until it is full and empties it, `put` waits until it is empty and fills it.
+--    Values are immutable, so there are no data races; values cross threads safely
+--    (the runtime marks them shared, 25a). **No deadlock freedom**: two threads can
+--    each wait for the other's `put`.
+--  * `MVar.borrow`/`MVar.fill`: the linear discipline. `borrow` takes the value and
+--    hands out a `Hole m`, a linear obligation to refill `m`: it can't be dropped or
+--    used twice, so a borrower refills the cell exactly once on every path (no cell left
+--    empty for ever by a forgotten `put`). Still no deadlock freedom.
+--  * `Lock`: a mutex with a linear `Guard`. `acquire` gives a guard, `release` consumes
+--    it: every acquisition is released exactly once (no leaked lock, no double unlock),
+--    from any thread. **No deadlock freedom**: lock order is up to the program.
+--
+-- Programs that use these are outside the deadlock-freedom claim of lib/Session.wiz.
+-- In compiled code the natives are `wiz_mvar_*` and `wiz_lock_*` in runtime/wiz.c; the
+-- interpreters (`#eval`, `#run`) can't run them.
+
+-- ## MVars
+
+axiom MVar : Type → Type
+
+-- a new cell, empty or holding `a`
+extern "wiz_mvar_new" MVar.new : {0 A : Type} → IO (MVar A)
+extern "wiz_mvar_new_full" MVar.newFull : {0 A : Type} → (a : A) → IO (MVar A)
+-- wait until the cell is full, and empty it
+extern "wiz_mvar_take" MVar.take : {0 A : Type} → (m : MVar A) → IO A
+-- wait until the cell is empty, and fill it
+extern "wiz_mvar_put" MVar.put : {0 A : Type} → (m : MVar A) → (a : A) → IO Unit
+-- wait until the cell is full, and read it without emptying it
+extern "wiz_mvar_read" MVar.read : {0 A : Type} → (m : MVar A) → IO A
+
+-- The obligation to refill `m`: no constructor, no ω producer.
+axiom MVar.Hole : {A : Type} → MVar A → Type
+private extern "wiz_mvar_take_hole" MVar.takeHole : {0 A : Type} → (m : MVar A) →
+  IO ((a : A) × MVar.Hole m)
+private extern "wiz_mvar_fill" MVar.fillRaw : {0 A : Type} → (m : MVar A) →
+  (1 h : MVar.Hole m) → (a : A) → IO Unit
+
+-- Take the value out of `m`; `k` gets it and the hole it must fill.
+def MVar.borrow {A B : Type} (m : MVar A) (1 k : (a : A) → (1 h : MVar.Hole m) → IO B) : IO B :=
+  fun w => let 1 (r, w') := MVar.takeHole m w; k r.1 r.2 w'
+-- Fill the hole, then continue.
+def MVar.fill {A B : Type} (m : MVar A) (1 h : MVar.Hole m) (a : A) (1 next : IO B) : IO B :=
+  fun w => let 1 (u, w') := MVar.fillRaw m h a w; next w'
+-- Replace the value by `f` of it, atomically with respect to other borrowers; returns
+-- the old value.
+def MVar.modify {A : Type} (m : MVar A) (f : A → A) : IO A :=
+  MVar.borrow m (fun a h => MVar.fill m h (f a) (IO.pure a))
+
+-- ## Locks
+
+axiom Lock : Type
+extern "wiz_lock_new" Lock.new : IO Lock
+
+-- Holding the lock `l`: no constructor, no ω producer.
+axiom Lock.Guard : Lock → Type
+private extern "wiz_lock_acquire" Lock.acquireRaw : (l : Lock) → IO (Lock.Guard l)
+private extern "wiz_lock_release" Lock.releaseRaw : (l : Lock) → (1 g : Lock.Guard l) → IO Unit
+
+-- Wait for the lock; `k` holds it until it releases the guard.
+def Lock.acquire {B : Type} (l : Lock) (1 k : (1 g : Lock.Guard l) → IO B) : IO B :=
+  fun w => let 1 (g, w') := Lock.acquireRaw l w; k g w'
+def Lock.release {B : Type} (l : Lock) (1 g : Lock.Guard l) (1 next : IO B) : IO B :=
+  fun w => let 1 (u, w') := Lock.releaseRaw l g w; next w'
+-- Run `body` holding the lock.
+def Lock.with {B : Type} (l : Lock) (body : IO B) : IO B :=
+  Lock.acquire l (fun g => fun w => let 1 (b, w') := body w; Lock.release l g (IO.pure b) w')

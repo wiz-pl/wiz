@@ -1,0 +1,147 @@
+import IO
+import MVar
+-- Session-typed linear channels: `import Session` (stage 25b–c, docs/stages/25-concurrency.md).
+--
+-- A protocol `Proto` says what happens on a channel, step by step, from one end's point
+-- of view; what comes next may depend on the value just exchanged (dependent session
+-- types, Toninho–Caires–Pfenning 2011). The other end follows the `dual`. Two layers:
+--
+--  1. A pure semantics: a process following `p` is a `Proc R p`, and `link` runs a
+--     process against one following the dual, to completion. `link` is total (structural
+--     on `p`): two processes on the two ends of one channel can't get stuck.
+--  2. Linear channels in `IO`: `Chan p` is one end of a channel whose remaining protocol
+--     is `p`. Endpoints are used exactly once (quantity 1, which is exact in Wiz: an
+--     endpoint can be neither dropped nor copied), so every step of the protocol happens,
+--     in order, and the channel is closed at the end. `Chan.fork` is the only way to make
+--     a channel, and it hands the two ends to two different threads. In compiled code a
+--     channel is a native queue and `fork` starts a thread (runtime/wiz.c, `wiz_chan_*`, 25a);
+--     `#eval`/`#run` can't run threads, and run `Proc.runLinked`'s model (`link`) instead.
+--
+-- Sequence linear steps with `do1` or `IO.bind` (both take the action and the continuation
+-- at quantity 1, 9e); plain `do` can't capture an endpoint.
+--
+-- The API is in continuation-passing style (decision CS3): every operation takes the rest
+-- of the program as a function of the endpoint's next state, so no linear value has to sit
+-- in a data structure (Σ fields are ω, and `match` can't bind fields linearly yet).
+--
+-- **Deadlock freedom by construction** (decision CS2; the argument and its scope are in
+-- docs/stages/25-concurrency.md, 25c): a program that uses only this API — no `MVar`,
+-- no `Lock` (lib/MVar.wiz), no other blocking primitive, no `partial` definitions — can't
+-- deadlock: channels form a forest (each `fork` adds one channel between a new thread
+-- and its parent, and an endpoint moves only into the child a `fork` starts), endpoints
+-- are linear (nobody waits for an end that was dropped), and every process is total. The
+-- claim is a meta-theorem from the literature (Wadler 2012, Lindley–Morris 2015, Jacobs–
+-- Balzer–Krebbers 2022), not a proof in Wiz.
+
+-- ## 1. Protocols and their pure semantics
+
+inductive Proto : Type 1 where
+  | send (A : Type) (k : A → Proto)
+  | recv (A : Type) (k : A → Proto)
+  | done
+
+-- the other end's view
+def Proto.dual : Proto → Proto
+  | .send A k => .recv A (fun a => Proto.dual (k a))
+  | .recv A k => .send A (fun a => Proto.dual (k a))
+  | .done => .done
+
+-- A process that follows `p` and returns `R`: sending is choosing a value (Σ), receiving
+-- is being ready for any value (Π). This is the "propositions as sessions" reading.
+def Proc (R : Type) : Proto → Type
+  | .send A k => (a : A) × Proc R (k a)
+  | .recv A k => (a : A) → Proc R (k a)
+  | .done => R
+
+-- Run two processes on the two ends of one channel (cut elimination, as a program).
+-- Total: every exchange moves both to the continuation of the same constructor.
+def link {A B : Type} : (p : Proto) → Proc A p → Proc B (Proto.dual p) → A × B
+  | .send T k => fun x f => link (k x.1) x.2 (f x.1)
+  | .recv T k => fun f y => link (k y.1) (f y.1) y.2
+  | .done => fun a b => (a, b)
+
+-- Choice is a dependent protocol: send a `Bool` (or any label type) and continue by it.
+def Proto.choose (p q : Proto) : Proto := .send Bool (fun b => match b with
+  | .true => p
+  | .false => q)
+def Proto.offer (p q : Proto) : Proto := .recv Bool (fun b => match b with
+  | .true => p
+  | .false => q)
+
+-- **Cancellation** (decision CS13): a protocol that may fail offers an explicit cancel
+-- branch at the points where one side sends. `Proto.sendC A k` sends either a value
+-- (and continues with `k`) or `Msg.cancel` (and the channel is done). Quantity 1 means a
+-- process can't just abandon a channel on an error path: it must say so to its peer.
+inductive Msg (A : Type) where
+  | val (a : A)
+  | cancel
+def Msg.next {A : Type} (k : A → Proto) : Msg A → Proto
+  | .val a => k a
+  | .cancel => .done
+def Proto.sendC (A : Type) (k : A → Proto) : Proto := .send (Msg A) (Msg.next k)
+def Proto.recvC (A : Type) (k : A → Proto) : Proto := .recv (Msg A) (Msg.next k)
+
+-- ## 2. Linear channels
+
+-- an endpoint whose remaining protocol is `p`; opaque: no constructor, no ω producer
+axiom Chan : Proto → Type
+
+-- The natives return the endpoint inside `IO`'s result pair, whose components are ω, so
+-- they are private: the public operations below pass the endpoint straight on to a
+-- continuation that takes it at quantity 1.
+private extern "wiz_chan_fork" Chan.forkRaw : {0 p : Proto} →
+  (1 child : (1 c : Chan (Proto.dual p)) → IO Unit) → IO (Chan p)
+private extern "wiz_chan_send" Chan.sendRaw : {0 A : Type} → {0 k : A → Proto} →
+  (1 c : Chan (Proto.send A k)) → (a : A) → IO (Chan (k a))
+private extern "wiz_chan_recv" Chan.recvRaw : {0 A : Type} → {0 k : A → Proto} →
+  (1 c : Chan (Proto.recv A k)) → IO ((a : A) × Chan (k a))
+private extern "wiz_chan_close" Chan.closeRaw : (1 c : Chan Proto.done) → IO Unit
+
+-- Make a channel following `p`: a new thread runs `child` on the dual end, and `parent`
+-- continues here with the other end. Both functions are linear, so they may capture other
+-- endpoints (that is how an endpoint moves to another thread).
+def Chan.fork {B : Type} (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → IO Unit)
+    (1 parent : (1 c : Chan p) → IO B) : IO B := fun w =>
+  let 1 (c, w') := Chan.forkRaw child w; parent c w'
+
+-- Send `a`, then continue with the endpoint at `k a`. Sending never blocks (a channel
+-- buffers its messages).
+def Chan.send {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.send A k)) (a : A)
+    (1 next : (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
+  let 1 (c', w') := Chan.sendRaw c a w; next c' w'
+
+-- Wait for a value, then continue with it and the endpoint at `k a`.
+def Chan.recv {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.recv A k))
+    (1 next : (a : A) → (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
+  let 1 (r, w') := Chan.recvRaw c w; next r.1 r.2 w'
+
+-- A finished channel must be closed (it can't be dropped); then continue with `next`.
+def Chan.close {B : Type} (1 c : Chan Proto.done) (1 next : IO B) : IO B := fun w =>
+  let 1 (u, w') := Chan.closeRaw c w; next w'
+
+-- Cancel at a send point of a cancellable protocol: tell the peer, and close.
+def Chan.cancel {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.sendC A k))
+    (1 next : IO B) : IO B :=
+  Chan.send (k := Msg.next k) c Msg.cancel (fun c' => Chan.close c' next)
+
+-- ## 3. Pure processes over real channels, and the model
+
+-- Run a pure process on an endpoint: the same `Proc` that `link` runs purely.
+def Proc.run {R : Type} : (p : Proto) → Proc R p → (1 c : Chan p) → IO R
+  | .send A k => fun x c => Chan.send (k := k) c x.1 (fun c' => Proc.run (k x.1) x.2 c')
+  | .recv A k => fun f c => Chan.recv (k := k) c (fun a c' => Proc.run (k a) (f a) c')
+  | .done => fun r c => Chan.close c (IO.pure r)
+
+-- Run a process and a peer following the dual, and return both results. The model (what
+-- the kernel, proofs, `#eval` and `#run` see) is `link`; compiled code runs the peer in a
+-- new thread over a real channel (`Proc.runLinkedThreads`, by `implemented_by`), so a
+-- compiled program that prints `Proc.runLinked`'s result is a differential test of the
+-- native channels against the pure semantics.
+def Proc.runLinked {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
+  IO.pure (link p a b)
+-- (the peer's result comes back through an MVar, written once and read once)
+def Proc.runLinkedThreads {A B : Type} (p : Proto) (a : Proc A p) (b : Proc B (Proto.dual p)) : IO (A × B) :=
+  IO.bind (MVar.new (A := B)) (fun m =>
+    Chan.fork p (fun c => IO.bind (Proc.run (Proto.dual p) b c) (fun y => MVar.put m y))
+      (fun c => IO.bind (Proc.run p a c) (fun x => IO.bind (MVar.take m) (fun y => IO.pure (x, y)))))
+attribute [implemented_by Proc.runLinkedThreads] Proc.runLinked
