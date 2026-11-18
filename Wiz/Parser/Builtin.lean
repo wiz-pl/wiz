@@ -282,7 +282,6 @@ continue onto a line starting at the command's column.
 | `command.syntax`             | "syntax" [":" prec] [name] [priority] [stx+] ":" ident |
 | `command.inductive`          | "inductive" ident [".{" us "}"] [binders] [":" T] "where" [ctors] ["deriving" C,+] |
 | `command.structure`          | "structure" ident [".{" us "}"] [binders] [":" T] where [fields] ["deriving" C,+] (where: `structure.where`, "where" [["private"] ident "::"]) |
-| `command.class`              | "class" ident [".{" us "}"] [binders] ["extends" D α,+] [":" T] "where" [fields] (the `extends` terms become the leading fields) |
 | `command.private`            | "private" command (every name it declares is private to the module) |
 | `command.sealed`             | "sealed" command (an `inductive`: no other declaration is this type) |
 | `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module; 6h: `attribute [simp]`) |
@@ -394,11 +393,9 @@ def commandLeading : List LeadingParser := [
     p := seqs ["structure", ident, univParams, many (bracketedBinder false), optional (seqs [":", term]),
       structureWhere, many (structureField),
       derivingClause] },
-  -- stage 7: a class is a structure whose values are found by instance resolution.
-  -- (class-extends) `extends D α, E β`: the superclasses, as the class's leading fields
+  -- stage 7: a class is a structure whose values are found by instance resolution
   { kind := "command.class", prec := maxPrec,
-    p := seqs ["class", ident, univParams, many (bracketedBinder false),
-      optional (seqs ["extends", sepBy1 (cat "term" 0) ","]), optional (seqs [":", term]),
+    p := seqs ["class", ident, univParams, many (bracketedBinder false), optional (seqs [":", term]),
       "where", many (structureField)] },
   { kind := "command.instance", prec := maxPrec,
     p := seqs ["instance", optional (seqs ["(", nonReserved "priority", ":=", num, ")"]),

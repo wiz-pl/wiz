@@ -1071,6 +1071,33 @@ def classProgram : String :=
   "def get {A : Type} [Default A] : A := Default.d\n" ++
   "def main : IO Unit := do\n  IO.println (Nat.toString (get : Nat));\n" ++
   "  IO.println (Nat.toString (List.length (get : List Nat)))\n"
+
+/-- (30f) A superclass is an instance-implicit parameter of the class's telescope:
+`Loud : (A : Type) → [Show A] → Type`, so `#check Loud` shows the extra binder and each
+method re-inserts it. A signature that forms `Loud A` carries `[d : Show A]` too: the
+parameter form's cost, paid. -/
+def superclassParam : String :=
+  "import Prelude\nclass Show (A : Type) where\n  show : A → Nat\n" ++
+  "class Loud (A : Type) [super : Show A] where\n  loud : A → Nat\n" ++
+  "instance instShowNat : Show Nat := Show.mk (fun n => n)\n" ++
+  "instance instLoudNat : Loud Nat := Loud.mk (fun n => n + 1)\n" ++
+  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := Loud.loud x + Show.show x\n" ++
+  "#check Loud\n#check Loud.loud\n#check both\n#reduce Nat.beq (both (A := Nat) 2) 3\n"
+
+def superclassParamExpected : String :=
+  "Loud : (x0 : U0) → (x1 : (Show x0)) → U0\n" ++
+  "Loud.loud : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : (Loud x0 x1)) → (x3 : x0) → Nat\n" ++
+  "both : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : (Loud x0 x1)) → (x3 : x0) → Nat\n" ++
+  "con((#1, (tt, tt)))\n"
+
+/-- (30f) The same class compiles and runs with both dictionaries; `both 2` is 3. -/
+def superclassProgram : String :=
+  "import Prelude\nclass Show (A : Type) where\n  show : A → Nat\n" ++
+  "class Loud (A : Type) [super : Show A] where\n  loud : A → Nat\n" ++
+  "instance instShowNat : Show Nat := Show.mk (fun n => n)\n" ++
+  "instance instLoudNat : Loud Nat := Loud.mk (fun n => n + 1)\n" ++
+  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := Loud.loud x + Show.show x\n" ++
+  "def main : IO Unit := do\n  IO.println (Nat.toString (both (A := Nat) 2))\n"
 /-- (A9) Named arguments: explicit, implicit, reordered, with `@f` and after other
 positional arguments. -/
 def namedArgHeader : String :=
@@ -3177,7 +3204,12 @@ def selfHostGroup : Group where
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+
+    { name := "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)", run := fun _ =>
+        selfhostCheckFile superclassParam superclassParamExpected },
+    { name := "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)", run := fun _ =>
+        selfhostCompileRun superclassProgram "3\n" }
 
   ]
 

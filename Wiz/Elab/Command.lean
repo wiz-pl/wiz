@@ -1096,24 +1096,6 @@ def mkMetaCode (g : Globals R) (builtins procMacros tactics : List (Name × Name
     let roots := "TacticM.run" :: "Macro.run" :: (procMacros ++ tactics).map (·.2) ++ more
     (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the macros and tactics: {·}")
 
-/-- The head identifier of a term (`D` in `D α`). -/
-partial def termHead? : Syntax → Option Name
-  | .node _ k as =>
-    match k with
-    | "term.ident" => (as[0]?).bind Syntax.getId?
-    | "term.app" => termHead? (as[0]?.getD .missing)
-    | "term.paren" => termHead? (as[1]?.getD .missing)
-    | _ => none
-  | _ => none
-
-/-- (class-extends) The field that stores a superclass dictionary: `Profunctor` → `toProfunctor`. -/
-def superFieldName (D : Name) : Name := "to" ++ ((D.splitOn ".").getLast?.getD D)
-
-/-- (class-extends) The `structure.field` for a superclass: `toD : D α`. -/
-def superField (x : Name) (t : Syntax) : Syntax :=
-  Syntax.node t.info "structure.field"
-    #[Syntax.mkNull #[], Syntax.mkNull #[], .ident t.info x, .atom t.info ":", t]
-
 /-- The projection `t.2…2.1` of a right-nested Σ, with `i` projections: field `i` of a
 value of a structure whose value is `x₀, (x₁, …)`. -/
 def projField (i : Nat) (t : Term R) : Term R :=
@@ -2020,87 +2002,31 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                         opaques := g.opaques.insert name s.module }
         modify fun s => { s with globals := g, coinductives := s.coinductives ++ [(name, obs)] }
   | "command.class" =>
-    let name := ((cmd.child "name").getId?).getD "_"
-    let levelParams := ((cmd.child "univParams").getArg 1).args.toList.filterMap Syntax.getId?
-    -- (class-extends) `extends D α, E β`: each superclass becomes a leading field
-    -- `toD : D α`, so the class *type* keeps no superclass dictionary parameter. The
-    -- child is `null ["extends", null [D α, ",", E β]]`, empty without `extends`.
-    let superTerms : List Syntax :=
-      match (cmd.child "extends").args[1]? with
-      | some ns => ns.args.toList.zipIdx.filterMap fun (t, i) => if i % 2 == 0 then some t else none
-      | none => []
-    let superFields : List (Name × Syntax) := superTerms.map fun t =>
-      let D := (termHead? t).getD "Super"
-      (superFieldName D, t)
-    let unnamed := superTerms.find? fun t => (termHead? t).isNone
-    -- one superclass: two would need a coherence rule for a diamond (`D` reachable twice)
-    let extraSuper := superTerms[1]?
-    let fieldClash := superFields.find? fun (x, _) =>
-      (cmd.child "fields").args.any fun f => (f.child "name").getId? == some x
+    let name := ((cmd.getArg 1).getId?).getD "_"
+    let levelParams := ((cmd.getArg 2).getArg 1).args.toList.filterMap Syntax.getId?
     if s.globals.contains name then
-      reportDup (cmd.child "name").info name
-    else if let some t := unnamed then
-      report .error t.info "a superclass must be an application of a class, such as `Profunctor p`"
-    else if let some t := extraSuper then
-      report .error t.info "a class can extend one superclass (multiple inheritance is not implemented)"
-    else if let some (x, _) := fieldClash then
-      report .error (cmd.child "name").info s!"a class can't declare the field {x}: it holds the superclass dictionary"
+      reportDup (cmd.getArg 1).info name
+    else if let some f := (cmd.getArg 6).args.find? fun f => !(f.getArg 0).args.isEmpty then
+      report .error f.info "a class's methods can't be private (make the class private instead)"
     else
-      let superNodes : Array Syntax := (superFields.map fun (x, t) => superField x t).toArray
-      let cmd := if superFields.isEmpty then cmd else
-        cmd.setArg 7 (Syntax.mkNull (superNodes ++ (cmd.child "fields").args))
-      if let some f := (cmd.child "fields").args.find? fun f => !(f.getArg 0).args.isEmpty then
-        report .error f.info "a class's methods can't be private (make the class private instead)"
-      else
-        match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
-            (elabStructure cmd levelParams) levelParams with
-        | .error e => reportErr e
-        | .ok decls =>
-          let decls := decls ++ classMethods (decls[0]!) levelParams
-          -- (class-extends) the stored superclass dictionary, passed on by an instance
-          -- `instCToD : {Δ} → [self : C Δ] → D Δ := C.toD` (a projection applied to self),
-          -- which is how a `C α` instance supplies a `D α` one to ordinary synthesis
-          let mut supers : List (Name × Name) := []
-          let mut insts : List (Decl R × Name) := []
-          let mut bad : Option (String × SourceInfo) := none
-          for (x, t) in superFields do
-            let projName := name ++ "." ++ x
-            match decls.find? (·.name == projName) with
-            | none => bad := some (s!"the superclass field {x} has no projection", t.info)
-            | some pd =>
-              let (_, concl) := peelPis pd.type
-              match (Term.spine concl).1 with
-              | .const D _ =>
-                if !s.classes.any (·.name == D) then
-                  bad := some (s!"{D} is not a class: a superclass must be an application of a class", t.info)
-                else
-                  supers := supers ++ [(x, D)]   -- complexity: ok (superFields has at most one entry: a second superclass is rejected above)
-                  let taken (n : Name) : Bool := s.globals.contains n || insts.any fun (d, _) => d.name == n
-                  let base := "inst" ++ Globals.privateBase name ++ "To" ++ ((D.splitOn ".").getLast?.getD D)
-                  let instName := if !taken base then base else
-                    ((List.range 1000).map (s!"{base}_{·}")).find? (!taken ·) |>.getD base
-                  -- complexity: ok (the same one-entry loop as `supers` above)
-                  insts := insts ++ [({ name := instName, levelParams, type := pd.type,
-                                        value := some (.const projName (levelParams.map Level.param)) }, D)]
-              | _ => bad := some (s!"{x} is not an application of a class", t.info)
-          match bad with
-          | some (msg, info) => report .error info msg
-          | none =>
-            let decls := decls ++ insts.map fun (d, _) => d
-            let mut g := s.globals
-            for d in decls do
-              match addDeclSorted g d with
-              | .ok g' => g := g'
-              | .error e =>
-                reportKernel cmd.info (d.name) e
-                return
-            let (Δ, _) := peelPis (decls[0]!).type
-            let outParams := Δ.map fun (_, _, _, A) => match (Term.spine A).1 with
-              | .const n _ => n == "outParam"
-              | _ => false
-            let fields := (cmd.child "fields").args.toList.filterMap fun f => (f.child "name").getId?
-            let newInsts : List InstanceInfo := insts.map fun (d, D) => { name := d.name, cls := D }
-            modify fun s => { s with globals := g, classes := { name, outParams, fields, supers } :: s.classes, instances := s.instances ++ newInsts.toArray }
+      match runElab (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) s.globals
+          (elabStructure cmd levelParams) levelParams with
+      | .error e => reportErr e
+      | .ok decls =>
+        let decls := decls ++ classMethods (decls[0]!) levelParams
+        let mut g := s.globals
+        for d in decls do
+          match addDeclSorted g d with
+          | .ok g' => g := g'
+          | .error e =>
+            reportKernel cmd.info (d.name) e
+            return
+        let (Δ, _) := peelPis (decls[0]!).type
+        let outParams := Δ.map fun (_, _, _, A) => match (Term.spine A).1 with
+          | .const n _ => n == "outParam"
+          | _ => false
+        let fields := (cmd.getArg 6).args.toList.filterMap fun f => (f.getArg 2).getId?
+        modify fun s => { s with globals := g, classes := { name, outParams, fields } :: s.classes }
   | "command.instance" =>
     let prioOpt := cmd.getArg 1
     let priority := if prioOpt.isNone then 1000 else ((prioOpt.getArg 3).getNat?).getD 1000
@@ -2150,10 +2076,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           seen := seen.insert x
         let args ← info.fields.mapM fun x => match given.find? (·.1 == x) with
           | some (_, _, v) => pure (Syntax.node v.info "term.paren" #[.atom {} "(", v, .atom {} ")"])
-          | none => match info.supers.find? (·.1 == x) with
-            | some (_, D) => throw (s!"missing the superclass {D} (the field {x}) in the instance for class {C}",
-                ErrorCode.missingField, cmd.info)
-            | none => throw (s!"missing field {x}", ErrorCode.missingField, cmd.info)
+          | none => throw (s!"missing field {x}", ErrorCode.missingField, cmd.info)
         let head := Syntax.node cmd.info "term.ident" #[.ident cmd.info (C ++ ".mk")]
         pure (if args.isEmpty then head else .node cmd.info "term.app" #[head, .node {} "null" args.toArray])
     -- the universe names in the binders and the type are the instance's universe

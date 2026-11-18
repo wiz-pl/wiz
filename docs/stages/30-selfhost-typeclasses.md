@@ -316,50 +316,47 @@ unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
 `Type u` is not inferred. A generic instance's level is printed unnormalised
 (`Repr.{max(0, 0)} (List x0)`): the printer does not simplify it.
 
-## 30f: `extends` (host only)
+## 30f: superclasses are instance-implicit parameters
 
-`class C (α) extends D α where f : F` declares `D α` as a **superclass**: `C`'s
-dictionary stores a `D` dictionary instead of `C`'s type taking one as a parameter.
-This is the host frontend's rule; the self-hosted frontend shares the grammar (so its
-parser accepts the form) and rejects it in `classCmd` with
-`a class's extends is not supported by the self-hosted frontend`.
+A class takes its superclass as an ordinary **instance-implicit parameter**, the same
+shape as 30a's `Commute`:
 
-* **The class type.** `C`'s type keeps only the binders written before `extends`:
-  `C α : Type`. Forming `C α` does *not* require a `D α`; that is the point of the
-  feature. Before it, the only spelling was `class C (α) [i : D α]`, which makes every
-  use of `C α` insert an instance problem for `D α` — so a type that quantifies over a
-  variable `p` could not mention `Strong p` (see
-  `lib/Optic.wiz`'s consumer and `wiz-notes/reviews/2026-11-18-optics-profunctor.md`
-  §2.2).
-* **The dictionary.** One leading field per superclass, named `toD` (`Profunctor` →
-  `toProfunctor`), of type `D α`; then the class's own fields, in order. So
-  `C.mk : {α} → (toD : D α) → F → C α`, and `C.toD` is an ordinary class method (its
-  `self` binder is instance-implicit like every method's). An instance written with
-  `where` must supply the superclass field; omitting it is
-  `missing the superclass D (the field toD) in the instance for class C`.
-* **Instance lookup.** The dictionary is *stored*, not re-synthesised per use: the
-  `class` command also declares the global instance
-  `instCToD : {α} → [self : C α] → D α := C.toD`, registered like a user instance. So
-  ordinary resolution finds `D α` from a `C α` (local or global) and chains along
-  `extends` (`C extends B extends A`: `A.a` under `[i : C x]` resolves `C x → B x`, then
-  `B x → A x`). Nothing is cached beyond the dictionary itself, so it is shared, and
-  there is no new kernel term former: a class is a structure, a superclass is a field,
-  and the generated instance is a projection applied to `self`.
-* **What is printed.** Wiz has no `#print <decl>` (only `#print axioms`). The printed
-  evidence is `#check C` (the type former, with no superclass parameter),
-  `#check C.mk` (the superclass is the first field), `#check C.toD`, and
-  `#check instCToD`.
-* **Boundaries.** One superclass: the grammar takes a comma-separated list, but the
-  elaborator rejects a second one (`a class can extend one superclass (multiple
-  inheritance is not implemented)`) because a diamond would need a coherence rule and
-  the host has no duplicate-instance check to fall back on. A class that also declares
-  its own instance parameters keeps them in the type former (30a), so both spellings
-  coexist; `extends` is the one to prefer. `deriving` of a class with a superclass is
-  not special-cased (the derivers emit `C.mk` in field order, so they must pass the
-  superclass dictionary first).
+```
+class Profunctor (p : Type → Type → Type) where …
+class Strong (p : Type → Type → Type) [super : Profunctor p] where …
+```
 
-Tests (`=classes`, the host group): `Profunctor`/`Strong` with `Strong p` as a
-constraint in a `Type 1` lens (no `[Profunctor p]` threaded), `dimap` used under only
-`[i : Strong p]`, the printed `#check`s, the chained `C extends B extends A` case, a
-missing superclass field, and the negative that a bare variable `p` still has no
-`Profunctor p` (the implication works only when a `C p` dictionary is in scope).
+There is no `extends` in the language. Neither frontend's grammar accepts it, so
+`class Strong (p) extends Profunctor p` is a parse error; both frontends implement the
+parameter form above.
+
+* **The type former.** `Strong : (p : Type → Type → Type) → [super : Profunctor p] →
+  Type 1`: `#check Strong` prints the extra binder. `Strong.mk` takes it as a parameter
+  (`{super : Profunctor p}`), and each method carries the class's binders before
+  `[self : Strong p super]`, so `Strong.first'` re-inserts the `Profunctor p` problem
+  wherever it is used with a variable `p`.
+* **The instance.** `instance : Strong Hom where …` needs `Profunctor Hom` in scope when
+  its type is formed; the dictionary is not stored in the instance, and no
+  `instCToD`-style global is declared. Nothing chains from `Strong p` to
+  `Profunctor p`: resolution finds a superclass only where the class type is formed.
+* **The cost at a use site.** Every signature that mentions `C a` must also carry
+  `[D a]` in front of it, because forming `C a` synthesizes `D a`. A context holding
+  only `[i : C a]` fails at that binder (`lean` 4.35.0: `failed to synthesize instance
+  of type class D a`), which is why the accepted spelling is
+  `def f {a} [d : D a] [i : C a] …`. This is the measured price of the form, and it is
+  accepted.
+* **Why `extends` is not the rule.** The optics work wanted `Strong p` usable in a
+  `{p} → [Strong p] → …` lens without threading `[Profunctor p]`. An `extends`
+  experiment existed on an integration branch only: a superclass was a stored leading
+  dictionary field (`toProfunctor`) plus a generated `instCToD` instance, so that
+  ordinary synthesis chained `Strong p → Profunctor p`. It was dropped before reaching
+  `master` in favour of the parameter form, which needs no new grammar, no stored
+  dictionary, no second instance per class and no coherence rule, and which both
+  frontends already have. The threading cost above is the reason the feature was
+  dropped, not a defect of this rule.
+
+Tests (`=classes`): `#check Strong` showing the extra parameter and `Strong.mk` taking
+it; a `Type 1` lens that supplies both `[d : Profunctor p]` and `[i : Strong p]` and
+runs through `Hom`; and the missing-`Profunctor` error. `=selfhost` checks the same
+declaration's frontend output and compiles and runs the same program with the
+self-hosted toolchain.
