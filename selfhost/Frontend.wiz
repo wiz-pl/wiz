@@ -553,50 +553,51 @@ def builtinDerivers : StrMap (Option String) :=
     (Str.ofString "Compare") (.some "deriveCompare")
 -- the globals so far: by position (the first is `0`), their names in scope, the
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
--- reads them, since the frontend is pure), and the derivers by class
+-- reads them, since the frontend is pure), the derivers by class, and (C15) whether
+-- `--trust-smt` was given (it selects the `smt` refusal)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String))
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+       (priv : Bool) (ders : StrMap (Option String)) (smtTrust : Bool)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .false
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ _ => sc
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d t
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins hs _ d t => .mk all sc inds ffi cls ins hs p d t
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match g with
+  | .mk all sc inds ffi cls ins hs p d t => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d t
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d =>
+  | .mk all sc inds ffi cls ins hs p d t =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d t
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds (.cons f ffi) cls ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds (.cons f ffi) cls ins hs p d t
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d t
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -605,33 +606,39 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d => .mk all sc inds ffi cls ins hs p d
+  | .mk all sc inds ffi cls ins _ p d t => .mk all sc inds ffi cls ins hs p d t
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d t
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f))
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) t
+-- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
+-- frontend can parse and refuse but not run; the flag says which refusal to give
+def Globals.smtTrust : Globals → Bool
+  | .mk _ _ _ _ _ _ _ _ _ t => t
+def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d _ => .mk all sc inds ffi cls ins hs p d t
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls (.cons i ins) hs p d
+  | .mk all sc inds ffi cls ins hs p d t => .mk all sc inds ffi cls (.cons i ins) hs p d t
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d t => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d t
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -640,13 +647,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -658,7 +665,7 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
@@ -720,7 +727,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -2292,6 +2299,9 @@ inductive STacOp where
 inductive STac where
   | done
   | fail (msg : String)
+  -- (C15) a refusal that is not about the goal state: the host's `smt` error is an
+  -- elaboration error, not a tactic failure, so no goals are listed after it
+  | abort (msg : String)
   | op (o : STacOp)
   | eval (stx : Syntax)
   | seq (a b : STac)
@@ -2484,10 +2494,25 @@ def optionalTerm (s : Syntax) : Option Syntax := match strEq (kindOf s) "null" w
     | .cons t _ => .some t
   | .false => .some s
 
+-- (C15) `smt` (stage 28a) is a library tactic: `lib/Prelude.wiz` declares the syntax and
+-- `Tactic.smt` sends the request `Tac.smt`. This frontend has no SMT translation, solver
+-- or answer cache, so it refuses. Without `--trust-smt` the host refuses at the same
+-- point with this message; with the flag it would ask the solver and add an axiom (out
+-- of reach here, so the message says what is missing). `sat_decide` (28b) is not even
+-- syntax here: it comes from `lib/SatTactic.wiz` and needs `Tac.satSolve`.
+def smtRefusal : String := "SMT solving is not enabled: `smt` closes a goal on an SMT solver's word, which the kernel does not check; run with --trust-smt to allow it"
+def smtUnsupported : String := "smt: the self-hosted toolchain has no SMT translation or solver (C15); --trust-smt cannot close a goal here"
+def smtRefusalFor (gs : Globals) : String := match Globals.smtTrust gs with
+  | .true => smtUnsupported
+  | .false => smtRefusal
 -- one tactic of a script, as a request
 mutual
-def tacOfStx (stx : Syntax) : STac :=
+def tacOfStx (gs : Globals) (stx : Syntax) : STac :=
   let k := kindOf stx;
+  match strEq k "tactic.smt" with
+  | .true => STac.abort (smtRefusalFor gs)
+  | .false => tacOfStxCore k stx
+def tacOfStxCore (k : String) (stx : Syntax) : STac :=
   match strEq k "tactic.intro" with
   | .true => match identNameOf (kid stx 1) with
     | .some x => STacticM.op (STacOp.intro x)
@@ -2546,9 +2571,12 @@ def tacticSeq (xs : List Syntax) : STac := match xs with
 end
 
 -- what an interpreter step answered: the state and the elaborator state, or a failure
+-- (`err`: a tactic failure, which lists the remaining goals; `abort`: a refusal that is
+-- the host's elaboration error, printed alone)
 inductive STacR where
   | ok (st : STacState) (es : ES)
   | err (msg : String)
+  | abort (msg : String)
 -- the endpoints of a `calc` step's equation
 inductive CalcEnd where
   | mk (A a b : Tm)
@@ -2642,6 +2670,8 @@ partial def goalIntros (es : ES) (st : STacState) (g : Nat) (fuel : Nat) : STacR
       | .vpi _ _ _ _ _ _ => match goalIntroFresh es st g with
         | .ok st' es' => goalIntros es' st' g k
         | .err m => .err m
+        -- (`goalIntroFresh` never aborts; the case is here because `STacR` is total)
+        | .abort m => .abort m
       | _ => .ok st es
 partial def goalApply (es : ES) (st : STacState) (g : Nat) (f : Tm) (ty : Val) (fuel : Nat)
     (acc : List Nat) : STacR :=
@@ -2664,6 +2694,7 @@ partial def goalApply (es : ES) (st : STacState) (g : Nat) (f : Tm) (ty : Val) (
         | .some es' => match assignInto es' st g f with
           | .ok st' es'' => .ok (STacState.mk (STacState.goals st') (openReplace g acc (STacState.open st)) (STacState.unchecked st')) es''
           | .err m => .err m
+          | .abort m => .abort m
 def checkUncheckedGo : List SUnchecked → ES → Option String
   | .nil, _ => .none
   | .cons (.mk gl t) rest, es =>
@@ -2956,11 +2987,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -3595,7 +3626,7 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ _ =>
+    | .mk _ _ inds _ _ _ _ _ _ _ =>
       match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
@@ -4249,6 +4280,7 @@ def tryCtors (gs : Globals) (es : ES) (st : STacState) (g : Nat) (cx : Cx) : Lis
     | .ok f ty es1 => match goalApply es1 st g f ty 64 .nil with
       | .ok st' es' => .ok st' es'
       | .err _ => tryCtors gs es st g cx rest
+      | .abort m => .abort m
 def runOpConstructor (gs : Globals) (es : ES) (st : STacState) (g : Nat) : STacR :=
   match STacState.getGoal st g with
   | .none => tacGoalError
@@ -4294,33 +4326,41 @@ def runRepeat (gs : Globals) (es : ES) (st : STacState) (body : STac) : Nat → 
   | .zero => .ok st es
   | .succ k => match runTac gs es st body with
     | .ok st' es' => runRepeat gs es' st' body k
+    -- (the host's `repeat` is `TacticM.tryCatch`, and `Tac.catch` catches any error,
+    -- the `smt` refusal included)
     | .err _ => .ok st es
+    | .abort _ => .ok st es
 def runTac (gs : Globals) (es : ES) (st : STacState) (t : STac) : STacR := match t with
   | .done => .ok st es
   | .fail m => .err m
+  | .abort m => .abort m
   | .op o => runOp gs es st o
   | .eval stx => evalTacticStx gs es st stx
   | .seq a b => match runTac gs es st a with
     | .ok st' es' => runTac gs es' st' b
     | .err m => .err m
+    | .abort m => .abort m
   | .tryTac body => match runTac gs es st body with
     | .ok st' es' => .ok st' es'
     | .err _ => .ok st es
+    | .abort _ => .ok st es
   | .firstTac a b => match runTac gs es st a with
     | .ok st' es' => .ok st' es'
     | .err _ => runTac gs es st b
+    | .abort _ => runTac gs es st b
   | .repeatTac body => runRepeat gs es st body 64
 
 def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) : STacR :=
   match stx with
   | .atom _ => .ok st es
-  | _ => runTac gs es st (tacOfStx stx)
+  | _ => runTac gs es st (tacOfStx gs stx)
 
 def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (steps : List Syntax) : STacR := match steps with
   | .nil => .ok st es
   | .cons t rest => match evalTacticStx gs es st t with
     | .ok st' es' => runTacticSteps gs es' st' rest
     | .err m => .err (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st)))
+    | .abort m => .abort m
 
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by the tactic script, and
 checked by the kernel as an ordinary term. -/
@@ -4330,6 +4370,7 @@ def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) : 
     let st0 := STacState.mk (.cons (TacGoal.mk cx expected m) .nil) (.cons 0 .nil) .nil;
     match runTacticSteps gs es0 st0 (tacticSteps stx) with
     | .err msg => .err msg
+    | .abort msg => .err msg
     | .ok st es' => match goalListOpen es' st (STacState.open st) with
       | .cons _ _ => .err (unsolvedGoals es' st)
       | .nil => match checkUnchecked es' st with
@@ -6240,7 +6281,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -6586,8 +6627,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -6654,7 +6695,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -8877,10 +8918,12 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- driver and `checkFile` keep this path; the module loader is `moduleCheck` below).
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
-def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+def checkFileWith (smtTrust : Bool) (cats : List Cat) (tokens : List String) (text : String) : List String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+      (String.codes text) 0 (Globals.setModule (Globals.withSmtTrust Globals.empty smtTrust) "input") .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
+def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+  checkFileWith .false cats tokens text
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
 -- root that has it, else in the working directory (`A.B` is `A/B.wiz`). Each module is
@@ -9104,10 +9147,13 @@ end
 
 -- the whole graph from `roots`, in order: dependencies first, each module once; its
 -- output lines, globals and tables (the load order is in `order`)
+def modCheckRunT (smtTrust : Bool) (cats : List Cat) (tokens : List String) (headers : List Header)
+    (tab : List ModSrc) (roots : List String) : ModLoad :=
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withSmtTrust (Globals.withHeaders Globals.empty headers) smtTrust)
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
-    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
+  modCheckRunT .false cats tokens headers tab roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)
@@ -9228,11 +9274,14 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
+  -- (C15) `--trust-smt` changes the `smt` refusal (the host accepts the flag; this
+  -- frontend has no solver, so the flag selects the message)
+  let trustSmt := modHasFlag args "--trust-smt";
   match modHasFlag args "--oneshot" with
   -- (21n) the one-shot path (`checkFile`: the embedded Prelude inline, one module
   -- `input`), kept reachable for the checker's own tests; the loader is the default
-  | .true => modPrint (checkFile cats tokens text)
-  | .false => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  | .true => modPrint (checkFileWith trustSmt cats tokens text)
+  | .false => match modCheckRunT trustSmt cats tokens hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)
