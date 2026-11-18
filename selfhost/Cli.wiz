@@ -1110,11 +1110,13 @@ def legacyCmd (args : List String) : IO Unit := do
 -- (`textDocumentSync` 1: full text, `wizInfoview` v1), `textDocument/didOpen`,
 -- `didChange`, `didClose`, `textDocument/publishDiagnostics`, the `wiz/elaborated`
 -- notification when the client asks for it, and the infoview's plain queries
--- (`wiz/plainGoal`, `wiz/plainTermGoal`), which answer `null`: the self-hosted frontend
--- keeps no info tree (a tactic's goals live only while its `by` block is checked), so
--- there is nothing at a cursor, as in the shim's stage-0 path when its check has no
--- index. `textDocument/hover` is `null` and the interactive infoview methods are
--- `MethodNotFound`, as in the shim. Diagnostics are `check`'s, with `source: "wiz"`,
+-- (`wiz/plainGoal`, `wiz/plainTermGoal`): a check with the collection on records each
+-- definition body's expected type (`LspEntry` in `selfhost/Frontend.wiz`), and
+-- `plainTermGoal` answers from those entries in the host's shape (`Wiz/LSP.lean`):
+-- `{goal, range}` of the innermost term at the cursor. `plainGoal` still answers `null`
+-- (the tactic snapshots are the next step). `textDocument/hover` is `null` and the
+-- interactive infoview methods are `MethodNotFound`, as in the shim.
+-- Diagnostics are `check`'s, with `source: "wiz"`,
 -- the code `check` prints, and a range from the diagnostic's position to the end of its
 -- line. An imported module's diagnostics are not published: open that module. A
 -- document's URI need not name a file (the playground's is `file:///playground-*.wiz`):
@@ -1560,6 +1562,8 @@ structure LspDoc where
   path : String
   text : String
   version : Nat
+  /-- (D8 goals) what the last check recorded: body expected types and tactic states -/
+  entries : List LspEntry
 
 structure LspState where
   docs : List LspDoc
@@ -1609,6 +1613,53 @@ def lspRange (text : String) (ln col : Nat) : J :=
       (.ocons "character" (.jnum (Nat.toString c0)) .onil)))
     (.ocons "end" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
       (.ocons "character" (.jnum (Nat.toString e)) .onil))) .onil))
+
+-- (D8 goals) a range from character offsets, as the host's `range` (`Wiz/LSP.lean`):
+-- start at `start`, end at `stop` (at least one character on, as an empty range is not
+-- clickable)
+def lspPosJ (p : Pos) : J := match p with
+  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
+    (.ocons "character" (.jnum (Nat.toString (Nat.sub col 1))) .onil))
+def lspRangeOff (text : String) (start stop : Nat) : J :=
+  .jobj (.ocons "start" (lspPosJ (lineCol text start))
+    (.ocons "end" (lspPosJ (lineCol text (Nat.max stop (Nat.add start 1)))) .onil))
+
+-- (D8 goals) the innermost term entry at `off` (a caret at an entry's end counts, as
+-- `Query.termGoalAt`'s `endIn`; ties go to the later entry, and the list is newest
+-- first)
+structure LspTerm where
+  start : Nat
+  stop : Nat
+  goal : String
+
+def lspTermAt (es : List LspEntry) (off : Nat) : Option LspTerm :=
+  match es with
+  | .nil => .none
+  | .cons e rest => match e with
+    | .term s t g => match Bool.and (Nat.le s off) (Nat.le off t) with
+      | .false => lspTermAt rest off
+      | .true => match lspTermAt rest off with
+        | .some b => match Nat.le (Nat.sub t s) (Nat.sub b.stop b.start) with
+          | .true => .some (LspTerm.mk s t g)
+          | .false => .some b
+        | .none => .some (LspTerm.mk s t g)
+    | .goal _ _ _ => lspTermAt rest off
+
+-- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
+partial def lspOffGo : List Char → Nat → Nat → Nat
+  | .nil, _, i => i
+  | .cons _ _, .zero, i => i
+  | .cons c cs, .succ k, i => match strEqC c 10 with
+    | .true => lspOffGo cs k (i + 1)
+    | .false => lspOffGo cs (.succ k) (i + 1)
+def lspOffOf (text : String) (line col : Nat) : Nat :=
+  match text with
+  | .mk cs => Nat.add (lspOffGo cs line 0) col
+
+-- the host's `plainTermGoal`: the expected type and the range of the term it belongs to
+def lspTermJson (text : String) (g : LspTerm) : J :=
+  .jobj (.ocons "goal" (.jstr g.goal)
+    (.ocons "range" (lspRangeOff text g.start g.stop) .onil))
 
 def lspCodeField (code : String) : JObj := match strEq code "" with
   | .true => .onil
@@ -1723,8 +1774,10 @@ def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
   hs ← moduleHeaderTexts doc.text;
   let roots := List.cons (lspDir doc.path) st.roots;
   tab ← moduleRootSourcesAs cats tokens roots "Main" doc.path doc.text;
-  let run := match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  let run := match modCheckRunHLsp cats tokens hs tab (.cons "Main" .nil) with
     | .mk r _ _ _ => r;
+  -- (D8 goals) the document's entries: its body expected types and tactic snapshots
+  let doc := { doc with entries := Globals.lspEntries (Run.gs run) };
   let ds := lspOnlyFile doc.path (diagsOf tab (linesOf run));
   let session := Nat.succ st.session;
   lspSend (lspNotifyMsg "textDocument/publishDiagnostics"
@@ -1736,7 +1789,7 @@ def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
           (.ocons "version" (.jnum (Nat.toString doc.version))
           (.ocons "session" (.jnum (Nat.toString session)) .onil)))))
     | .false => IO.pure ();
-  IO.pure (LspState.mk st.docs st.roots st.elaborated session st.closed)
+  IO.pure (LspState.mk (lspPut st.docs doc) st.roots st.elaborated session st.closed)
 
 def lspDidOpen (st : LspState) (msg : J) : IO LspState := do
   let td := jAt msg (.cons "params" (.cons "textDocument" .nil));
@@ -1746,7 +1799,7 @@ def lspDidOpen (st : LspState) (msg : J) : IO LspState := do
   match strEq uri "" with
   | .true => IO.pure st
   | .false => do
-    let doc := LspDoc.mk uri (lspUriPath uri) text version;
+    let doc := LspDoc.mk uri (lspUriPath uri) text version (.nil : List LspEntry);
     lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
 
 def lspDidChange (st : LspState) (msg : J) : IO LspState := do
@@ -1758,7 +1811,7 @@ def lspDidChange (st : LspState) (msg : J) : IO LspState := do
   match Bool.and (Bool.not (strEq uri "")) (lspHasChanges changes) with
   | .false => IO.pure st
   | .true => do
-    let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version;
+    let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version (.nil : List LspEntry);
     lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
 
 def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState :=
@@ -1775,12 +1828,20 @@ def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspStat
       IO.pure st
     | .false => match strEq method "wiz/plainGoal" with
       | .true => do
-        -- nothing at the cursor: there is no info tree (see the section's comment)
+        -- (D8 goals: step 2) the tactic snapshots are not retained yet
         lspSend (lspReply id .jnull);
         IO.pure st
       | .false => match strEq method "wiz/plainTermGoal" with
         | .true => do
-          lspSend (lspReply id .jnull);
+          -- (D8 goals) the innermost recorded term's expected type at the cursor
+          let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+          let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+          let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+          match lspFind st.docs uri with
+          | .some doc => match lspTermAt doc.entries (lspOffOf doc.text line col) with
+            | .some g => lspSend (lspReply id (lspTermJson doc.text g))
+            | .none => lspSend (lspReply id .jnull)
+          | .none => lspSend (lspReply id .jnull);
           IO.pure st
         | .false => match strEq method "textDocument/hover" with
           | .true => do
