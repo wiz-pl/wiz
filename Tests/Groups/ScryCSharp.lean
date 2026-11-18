@@ -114,6 +114,7 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
+   ("lower", "primary-ctor"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
@@ -360,6 +361,8 @@ def group : Group where
       run := fun _ => lowerGolden "toplevel" },
     { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
       run := fun _ => lowerGolden "unsupported" },
+    { name := "lower: a record's and a primary constructor's implicit constructor (field stores, base call)",
+      run := fun _ => lowerGolden "primary-ctor" },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []
