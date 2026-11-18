@@ -9,6 +9,9 @@ import { loadWasm, stepper, delegate } from "./tagged.js";
 
 const params = new URLSearchParams(location.search);
 const port = params.get("port") || "8765";
+// (#430) the server's token (`wiz lsp` prints the page's URL with it; `wiz/browserInfoview`
+// puts it there): the WebSocket presents it, or the server refuses the connection
+const token = params.get("token") || "";
 // (one server serves every page, and documents are shared: a URI of our own)
 const uri = params.get("uri") || `file:///scratch-${Math.random().toString(36).slice(2, 10)}.wiz`;
 
@@ -76,13 +79,14 @@ globalThis.wizSetHtml = (id, html) => {
 function setStatus(text) { document.getElementById("status").textContent = text; }
 
 function connect() {
-  sock = new WebSocket(`ws://127.0.0.1:${port}/`);
+  sock = new WebSocket(`ws://127.0.0.1:${port}/` + (token ? `?token=${encodeURIComponent(token)}` : ""));
   sock.onopen = () => {
     setStatus("connected");
     for (const b of outbox.splice(0)) sock.send(b);
   };
   sock.onmessage = (m) => received(m.data);
-  sock.onclose = () => setStatus("disconnected (is `wiz lsp --ws` running?)");
+  sock.onclose = () => setStatus(token ? "disconnected (is `wiz lsp --ws` running?)"
+    : "disconnected (no ?token= in this page's URL: use the URL `wiz lsp --ws` printed)");
   sock.onerror = () => setStatus("cannot connect to ws://127.0.0.1:" + port);
 }
 

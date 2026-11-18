@@ -8,23 +8,27 @@ import Scry.Bench
 scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...
            [--json OUT] [--markdown OUT] [--update-baseline FILE]
            [--no-timing] [--quiet] [--fail-on-regression]
+           [--baseline-bootstrap]
 ```
 
 Defaults are relative to `scry/` (`bench/corpus`, `bench/baseline.json`,
 `build/bench.json`, `build/bench.md`); when run from the repository root the same
 relative paths are tried under `scry/`. A missing corpus is a clean skip (exit 0); a
-malformed manifest is an error. `--fail-on-regression` makes a baseline mismatch exit 1.
+malformed manifest is an error. `--fail-on-regression` fails closed: a baseline
+mismatch, a missing or invalid baseline, a run that is not `ok`, or a baseline case
+missing from the run exits 1. `--baseline-bootstrap` allows a missing baseline with
+`--fail-on-regression` (an explicit first run) and does not weaken any other check.
 -/
 
 def Scry.benchUsage : String :=
   "usage: scry bench [--corpus DIR] [--baseline FILE] [--extra DIR]...\n"
   ++ "                 [--json OUT] [--markdown OUT] [--update-baseline FILE]\n"
   ++ "                 [--no-baseline] [--no-timing] [--quiet] [--fail-on-regression]\n"
-  ++ "                 [--dynamic] [--cc PATH] [--no-coverage]\n"
+  ++ "                 [--baseline-bootstrap] [--dynamic] [--cc PATH] [--no-coverage]\n"
 
 def Scry.benchDefaultOpts : Scry.BenchOpts :=
   Scry.BenchOpts.mk "bench/corpus" (.some "bench/baseline.json") .nil .none .none .none
-    .false .false .false .false .none .true
+    .false .false .false .false .false .none .true
 
 partial def Scry.benchArgsGo (o : Scry.BenchOpts) : List String → Except String Scry.BenchOpts
   | .nil => .ok o
@@ -50,6 +54,7 @@ partial def Scry.benchArgsGo (o : Scry.BenchOpts) : List String → Except Strin
     | "--no-timing" => Scry.benchArgsGo { o with noTiming := .true } rest
     | "--quiet" => Scry.benchArgsGo { o with quiet := .true } rest
     | "--fail-on-regression" => Scry.benchArgsGo { o with failOnRegression := .true } rest
+    | "--baseline-bootstrap" => Scry.benchArgsGo { o with bootstrap := .true } rest
     | "--dynamic" => Scry.benchArgsGo { o with dynamic := .true } rest
     | "--cc" => match rest with
       | .cons p more => Scry.benchArgsGo { o with cc := .some p } more
@@ -113,6 +118,19 @@ def Scry.benchSummaryLine (run : Scry.BenchRun) : String :=
           ++ Nat.repr (Scry.dynBenchCount d "clean") ++ " clean/"
           ++ Nat.repr (Scry.dynBenchCount d "skipped") ++ " skipped")
     ++ ", " ++ Nat.repr run.totalMs ++ " ms (informational)"
+    ++ ", baseline " ++ run.baseline.status
+    ++ (match String.eq run.baseline.status "compared" with
+      | .true => match run.baseline.matches with
+        | .true => " (matches)"
+        | .false => " (does not match: " ++ Nat.repr (List.length run.baseline.changes)
+            ++ " change(s))"
+      | .false => "")
+    ++ (match run.baseline.missingFromRun with
+      | .nil => ""
+      | _ => ", present→absent: " ++ Scry.benchJoinIds run.baseline.missingFromRun)
+    ++ (match run.baseline.addedInRun with
+      | .nil => ""
+      | _ => ", absent→present: " ++ Scry.benchJoinIds run.baseline.addedInRun)
 
 def Scry.benchResolveBaseline (b : Option String) : EIO (Option String) :=
   match b with
@@ -157,10 +175,9 @@ def Scry.benchCmd (args : List String) : EIO Nat :=
     let show := Bool.and (Bool.not o.quiet)
       (Bool.and (Bool.not (String.eq jsonPath "-")) (Bool.not (String.eq mdPath "-")));
     Scry.benchMaybePrint show run;
-    let failed : Bool := match o.failOnRegression with
-      | .true => Bool.and (String.eq run.status "ok")
-          (Bool.and (String.eq run.baseline.status "compared")
-            (Bool.not run.baseline.matches))
-      | .false => .false;
-    if failed then EIO.pure 1 else EIO.pure 0
+    match Scry.benchGateFailure opts run with
+    | .none => EIO.pure 0
+    | .some msg => do
+      EIO.lift (IO.ePrintln msg);
+      EIO.pure 1
 

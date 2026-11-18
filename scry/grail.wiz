@@ -58,6 +58,17 @@ def package : Package := Package.new "scry"
        |> Command.arg "--json"
        |> Command.input "fixtures/broken.c"
        |> Command.stdout "build/fuzz-span.json")
+  -- The e-graph layer (S12): lowered Wil terms, folds/rewrites, deterministic report.
+  |> Package.command (Command.new "egraph" (Tool.exe "scry")
+       |> Command.arg "egraph"
+       |> Command.input "fixtures/egraph-const.c"
+       |> Command.stdout "build/egraph.txt")
+  -- The checked extraction back to Wil (S12): the same fixture, `--rewrite` mode.
+  |> Package.command (Command.new "egraph-rewrite" (Tool.exe "scry")
+       |> Command.arg "egraph"
+       |> Command.input "fixtures/egraph-const.c"
+       |> Command.arg "--rewrite"
+       |> Command.stdout "build/egraph-rewrite.txt")
   -- Schema codegen (design §4.2): `gen/C/Schema.wiz` is the checked-in output of this
   -- command, and `schema-check` (phony) refuses a stale one.
   |> Package.command (Command.new "schema" (Tool.exe "scry-schema")

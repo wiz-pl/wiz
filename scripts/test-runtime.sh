@@ -131,6 +131,15 @@ static wiz_chan *one_chan(void) {
   for (int s = 0; s < 2; s++) { ch->end[s].ch = ch; ch->end[s].side = s; }
   return ch;
 }
+/* The recovery boundary (rt_con.inc, `wiz_stop_run`): a Wiz closure String → String. */
+static wiz_val guard_ok(wiz_val *a) { wiz_dec(a[0]); return wiz_out_string("survived"); }
+static wiz_val guard_exit(wiz_val *a) { wiz_dec(a[0]); wiz_sys_exit(7); }
+static wiz_val guard_write(wiz_val *a) { wiz_dec(a[0]); wiz_io_write_file("/nonexistent-wiz-test/x", "x"); }
+#ifdef WIZ_NO_THREADS
+static wiz_val guard_stop(wiz_val *a) { wiz_dec(a[0]); wiz_no_threads("Guard.test"); }
+#endif
+static wiz_val guard_closure(wiz_val (*fn)(wiz_val *)) { return wiz_clo_new(fn, 1, 0, NULL); }
+
 #define EXPECT(c) do { if (!(c)) { fprintf(stderr, "nothreads.c:%d: %s\n", __LINE__, #c); return 1; } } while (0)
 int main(int argc, char **argv) {
   const char *what = argc > 1 ? argv[1] : "";
@@ -180,6 +189,31 @@ int main(int argc, char **argv) {
     EXPECT(same_thread == one_thread);
     return 0;
   }
+  if (!strcmp(what, "guard")) {
+    /* a clean stop inside the boundary longjmps back with its code; the runtime (and
+       whatever the embedding host keeps beside it) survives; the next call runs */
+    char *t = wiz_stop_run(guard_closure(guard_exit));
+    EXPECT(t != NULL && t[0] == 0);
+    EXPECT(wiz_stop_code_value(0) == 8);       /* exit 7 is reported as 7 + 1 */
+    EXPECT(!strcmp(wiz_stop_run(guard_closure(guard_ok)), "survived"));
+    EXPECT(wiz_stop_code_value(0) == 0);       /* ran to the end */
+    EXPECT(!strcmp(wiz_stop_run(guard_closure(guard_write)), ""));
+    EXPECT(wiz_stop_code_value(0) == 2);       /* the failed write exits 1 */
+    EXPECT(!strcmp(wiz_stop_run(guard_closure(guard_ok)), "survived"));
+    puts("survived");
+    return 0;
+  }
+#ifdef WIZ_NO_THREADS
+  if (!strcmp(what, "guard-nothreads")) {
+    /* the one-threaded refusal is caught the same way, after printing its message */
+    EXPECT(wiz_stop_run(guard_closure(guard_stop))[0] == 0);
+    EXPECT(wiz_stop_code_value(0) == 4);       /* exit 3 is reported as 3 + 1 */
+    EXPECT(!strcmp(wiz_stop_run(guard_closure(guard_ok)), "survived"));
+    puts("survived");
+    return 0;
+  }
+#endif
+  if (!strcmp(what, "sysexit")) { wiz_sys_exit(7); puts("not reached"); return 0; }
   if (!strcmp(what, "fork")) { wiz_chan_fork(WIZ_BOX(0)); puts("forked"); return 0; }
   if (!strcmp(what, "take")) { wiz_mvar_take(wiz_mvar_new()); puts("took"); return 0; }
   if (!strcmp(what, "put")) { wiz_mvar_put(wiz_mvar_new_full(WIZ_BOX(1)), WIZ_BOX(2)); puts("put"); return 0; }
@@ -250,5 +284,12 @@ expect "WIZ_NO_THREADS: putting into a full MVar stops" 3 "" \
   "wiz: MVar.put into a full MVar would wait forever: threads are not available" "$tmp/st" put
 expect "WIZ_NO_THREADS: acquiring a held lock stops" 3 "" \
   "wiz: Lock.acquire of a held lock would wait forever: threads are not available" "$tmp/st" lock
+# The recovery boundary (rt_con.inc): an armed `wiz_stop_run` catches a clean stop, so
+# the runtime survives with the code; with no boundary armed, `exit` is still `exit`.
+expect "the boundary catches Process.exit and the next call runs" 0 survived \
+  "wiz: /nonexistent-wiz-test/x: No such file or directory" "$tmp/mt" guard
+expect "WIZ_NO_THREADS: the boundary catches the refusal" 0 survived \
+  "wiz: Guard.test: threads are not available in this build (WIZ_NO_THREADS)" "$tmp/st" guard-nothreads
+expect "no boundary: Process.exit still exits with its code" 7 "" "" "$tmp/mt" sysexit
 
 echo "test-runtime: all checks passed"
