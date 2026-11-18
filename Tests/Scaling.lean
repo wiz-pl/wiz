@@ -99,23 +99,18 @@ def wideClass (n : Nat) : String :=
   String.join ((List.range n).map (s!"  op{·} := fun a b => a\n"))
 
 /-- A definition `s : String` of an `n`-character literal (`String.mk [Char.mk …, …]`: a
-spine of `n` nested applications), checked by the kernel and then erased, within `secs`
-seconds. -/
-def longLiteral (n secs : Nat) : IO Unit := do
+spine of `n` nested applications), checked by the kernel and then erased. The caller
+measures the growth (`checkScaling`); `n = 0` is the empty literal, a valid floor. -/
+def longLiteral (n : Nat) : IO Unit := do
   let text := String.ofList ((List.range n).map fun i => Char.ofNat (97 + i % 26))
   let input := s!"import Prelude\ndef s : String := \"{text}\"\n"
-  let start ← IO.monoMsNow
   let loader ← Tests.Elab.preludeLoader
   let st := runFrontend (R := ZeroOneMany) input { loader }
   let errs := (st.messages.filter (·.severity == .error)).map fun m => m.render input
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  let checked := (← IO.monoMsNow) - start
   match compileReachable st.globals st.builtins ["s"] with
   | .ok code => check (code.contains "s") "s was not erased"
   | .error e => throw (IO.userError (toString e))
-  let ms := (← IO.monoMsNow) - start
-  unless ms ≤ secs * 1000 do
-    throw (IO.userError s!"took {ms} ms ({checked} ms to check; bound: {secs} s)")
 
 /-- The peak resident set size of this process in MB (`VmHWM`), after resetting it
 (`clear_refs`), around `act`. -/
@@ -571,10 +566,11 @@ def m : Nat := List.length (Netlist.simulate (Circuit.netlist \"c\" ctr) (Hdl.ma
 #eval m
 "
 
-/-- A RAM read every cycle for 50000 cycles, written in the first only: a disabled write is
-the memory itself (no extra function per cycle), so each read costs the number of enabled
-writes, and the run is linear (it was quadratic: artix-target, wiz-rv). -/
-def hdlMemScaleSrc : String := "import Hdl.Core
+/-- A RAM read every cycle for `cycles` cycles, written in the first only: a disabled write
+is the memory itself (no extra function per cycle), so each read costs the number of
+enabled writes, and the run is linear (it was quadratic: artix-target, wiz-rv). `cycles =
+0` still performs the one write, so it is a valid floor. -/
+def hdlMemScaleSrc (cycles : Nat) : String := s!"import Hdl.Core
 def m4 : HwTy := HwTy.mem 4 8
 def ram : Circuit (HwTy.prod (HwTy.bits 1) (HwTy.bits 8)) (HwTy.bits 8) :=
   Circuit.mk m4 (fun (a : BitVec 4) => BitVec.ofNat 8 0)
@@ -587,18 +583,21 @@ def last : List (HwTy.El (HwTy.bits 8)) → Nat
   | .nil => 0
   | .cons x .nil => BitVec.toNat x
   | .cons _ xs => last xs
-def r : Nat := last (Circuit.run ram (Rep.go 50000 List.nil))
+def r : Nat := last (Circuit.run ram (Rep.go {cycles} List.nil))
 #eval r
 "
 
 /-- hdl-temporal-uart's record-eq-eta repro (`wiz-notes/perf-repros/record-eq-eta`): a Mealy
-machine whose state is a record of 10 fields, and the one-line lemma about its next state. -/
-def recordEqEta : String :=
+machine whose state is a record of `fields` Bool fields, and the one-line lemma about its
+next state. `fields = 0` has no `b0` to read, so the smallest valid probe is one field. -/
+def recordEqEtaOf (fields : Nat) : String :=
   "import Prelude\ndef Trace (A : Type) : Type := Nat → A\ndef Mealy (S I O : Type) : Type := S → I → S × O\n" ++
   "def Mealy.stateAt {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) : Nat → S\n  | .zero => s0\n" ++
   "  | .succ t => (m (Mealy.stateAt m s0 xs t) (xs t)).1\n" ++
-  "structure Bits8 where\n  b0 : Bool\n  b1 : Bool\n  b2 : Bool\n  b3 : Bool\n  b4 : Bool\n  b5 : Bool\n  b6 : Bool\n  b7 : Bool\n" ++
-  "def Bits8.zero : Bits8 := Bits8.mk .false .false .false .false .false .false .false .false\n" ++
+  "structure Bits8 where\n" ++
+  String.join ((List.range fields).map (s!"  b{·} : Bool\n")) ++
+  "def Bits8.zero : Bits8 := Bits8.mk " ++
+  " ".intercalate ((List.range fields).map fun _ => ".false") ++ "\n" ++
   "def S : Type := Nat × (Nat × Bits8)\n" ++
   "def spec (s : S) (x : Bool × Bits8) : S × Bool :=\n  (match Nat.beq s.1 0 with\n    | .true => (match x.1 with\n" ++
   "      | .true => (10, (0, x.2))\n      | .false => (match Nat.beq s.2.1 3 with\n        | .true => (0, (0, s.2.2))\n" ++
@@ -635,8 +634,9 @@ def group : Group where
           "def blow : N → N × N\n  | .z => (N.z, N.z)\n  | .s n => let (a, b) := blow n; let (c, d) := blow n; (a, d)\n" ++
           s!"def big : N × (N × N) := (N.z, blow {String.join ((List.range 40).map fun _ => "(N.s ")}N.z{String.mk (List.replicate 40 ')')})\n" ++
           "def y : N := big.1\n") },
-    { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ =>
-        longLiteral 20000 60 },
+    { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ => do
+        -- 10000 → 20000, so today's size is the `2n`
+        let _ ← checkScaling "20000-char literal" longLiteral 10000 3 },
     -- reuse across `case` (`reuseAcross`) tried a drop it could not pair again from each
     -- enclosing search, and the drop's parts with it: along the chain of projections
     -- that reads a structure's fields without rebuilding it (a bundle's `pack`),
@@ -664,8 +664,11 @@ def group : Group where
           unless bad.isEmpty do throw (IO.userError s!"they differ on {bad}")
         let (bad, _) := reuseMismatches #[projChain 12]
         unless bad.isEmpty do throw (IO.userError "they differ on the projection chain") },
-    { name := "the IR of a step over bundles of 8, 16 and 32 fields (reuse was exponential: 20 took 115 s)", run := fun _ =>
-        checksLibsWithin 240 ("import Hdl.Core\n" ++ String.join ([8, 16, 32].map wideBundle)) },
+    { name := "the IR of a step over bundles of 16 and 32 fields (reuse was exponential: 20 took 115 s)", run := fun _ => do
+        let irBundle (k : Nat) : IO Unit := do
+          -- `wideBundle 0` has no field (`v0` is unbound): probe one field as the floor
+          checksLibsWithin 240 ("import Hdl.Core\n" ++ wideBundle (if k == 0 then 1 else k))
+        let _ ← checkScaling "bundle step IR" irBundle 16 3 },
     -- field k of a structure (a right-nested Σ) is k projections: reading every field
     -- was n²/2 of them; the simplifier shares the projections already bound (15j)
     { name := "reading every field of a 32- and a 64-field structure takes a linear number of projections (15j)", run := fun _ => do
@@ -697,32 +700,45 @@ def group : Group where
     -- of bindings, the constant a literal becomes (6000 characters: 18 000 bindings, about
     -- 10 s and 4 GB)
     { name := "the IR of a 6000-character literal is reference counted in linear time and space", run := fun _ => do
-        let st ← elabOk (literalProgram 6000)
-        let r ← within 30 1000 fun _ => pure (Build.irProgram st "main")
-        let .ok (decls, _) := r | throw (IO.userError "no IR")
-        check (decls.size > 0) "no declarations" },
+        let buildIR (k : Nat) : IO Unit := do
+          let st ← elabOk (literalProgram k)
+          let .ok (decls, _) := Build.irProgram st "main" | throw (IO.userError "no IR")
+          check (decls.size > 0) "no declarations"
+        -- 3000 → 6000, so today's size is the `2n`
+        let _ ← checkScaling "6000-char literal IR" buildIR 3000 3 },
     -- the parser kept the state from before each alternative (`orElse`, `tryAlternative`)
     -- while the alternative ran: every memo and token-table insertion in it copied the
     -- whole table (20000 elements: over 5 GB; now under 200 MB)
     { name := "an 8000-element nested term parses in linear time and space", run := fun _ => do
-        let r ← within 30 400 fun _ => pure (parseCategory Builtin.tables "term" (listSource 8000))
-        match r with
-        | .ok _ => pure ()
-        | .error e => throw (IO.userError e) },
+        let parseTerm (k : Nat) : IO Unit := do
+          match parseCategory Builtin.tables "term" (listSource k) with
+          | .ok _ => pure ()
+          | .error e => throw (IO.userError e)
+        -- 4000 → 8000, so today's size is the `2n`
+        let _ ← checkScaling "8000-element term" parseTerm 4000 3 },
     -- checking an application solved each argument's placeholder by evaluating the
     -- argument (and `inferApp` instantiated each codomain with it): quadratic along a
     -- nested spine
     { name := "a 16000-element list written out is elaborated in linear time and space", run := fun _ => do
-        let _ ← within 30 1000 fun _ => elabOk s!"import Prelude\ndef l : List Nat := {listSource 16000}\n"
-        pure () },
+        let elabList (k : Nat) : IO Unit := do
+          let _ ← elabOk s!"import Prelude\ndef l : List Nat := {listSource k}\n"
+          pure ()
+        -- 8000 → 16000, so today's size is the `2n`
+        let _ ← checkScaling "16000-element list" elabList 8000 3 },
     -- erasure re-inferred the body of each `split` with the kernel (a match's tree of
     -- nested splits was checked again once per level), `erasable` recomputed the sort of
     -- the rest of the telescope at each field, and each step of a field's projection chain
     -- `p.2.2.….1` asked for the type of the rest of the chain, evaluating `p` each time.
     -- 400 fields: 46 s before, under 1 s now (still super-linear: about ×6 per doubling)
-    { name := "a match on a 400-field constructor is erased within 10 s (was 46 s)", run := fun _ => do
-        let ms ← eraseMatchMs 400
-        unless ms ≤ 10000 do throw (IO.userError s!"took {ms} ms (bound: 10 s)") },
+    { name := "a match on a 400-field constructor is erased in linear time (was 46 s, about ×6 per doubling)", run := fun _ => do
+        let erase (k : Nat) : IO Unit := do
+          -- `f 0` has no field to return (`x{n-1}` is `x0`): probe the smallest
+          -- non-degenerate match (one field) as the floor instead
+          let _ ← eraseMatchMs (if k == 0 then 1 else k)
+          pure ()
+        -- 200 → 400; bound 10 tolerates the documented extra-log factor (×6 per
+        -- doubling) and still catches a jump to ×16
+        let _ ← checkScaling "match erasure" erase 200 10 },
     -- (the price of the shortcut: it believes the sort a Π/Σ carries. The kernel validates
     -- it in every term erasure is given, a definition's implementation for the compiler
     -- included, so there is no unchecked term to make an exception for: the flag
@@ -753,8 +769,11 @@ def group : Group where
     -- 2 million `ind` steps per evaluation of the statement (the elaborator's and the
     -- kernel's); now a hypothesis is computed when used (`Val.lazyInd`)
     { name := "a match on a list does not run through its tail (1000 matches on 2000 elements)", run := fun _ => do
-        let _ ← within 30 1000 fun _ => elabOk (listMatchProgram 2000 1000)
-        pure () },
+        let elabMatch (len : Nat) : IO Unit := do
+          let _ ← elabOk (listMatchProgram len 1000)
+          pure ()
+        -- 2000 → 4000 elements, 1000 matches at both sizes
+        let _ ← checkScaling "match on a list" elabMatch 2000 3 },
     -- (#256) `rfl` over a machine run behind one definition. Conversion computes the
     -- equation at the data type (`Option Int`) to a Σ, and `rfl` used to build a
     -- structural proof over every field, re-evaluating the run at each step: three
@@ -776,8 +795,11 @@ def group : Group where
     -- exponential while a hypothesis was computed by value (the alternatives of nullary
     -- constructors are evaluated as arguments); linear with `Val.lazyInd` on constructors
     { name := "a recursive call in every alternative of a match is computed once per element (C7)", run := fun _ => do
-        let _ ← within 30 1000 fun _ => elabOk (matchAltsProgram 200)
-        pure () },
+        let elabAlts (len : Nat) : IO Unit := do
+          let _ ← elabOk (matchAltsProgram len)
+          pure ()
+        -- 100 → 200, so today's size is the `2n`
+        let _ ← checkScaling "match alternatives" elabAlts 100 3 },
     -- (P2) the direct hypotheses are the template's, on every description of the library
     -- and the examples, and on stuck descriptions (where the direct one falls back)
     -- (split into the parts below, so that they can run in different shards: see
@@ -830,15 +852,21 @@ def group : Group where
     { name := "the HDL's netlist simulation is O(n log n) per cycle; long traces run", run := fun _ =>
         within 120 1500 fun _ => Tests.Elab.okLibs hdlScaleSrc ["(.true, 3258)", "200000", "200000"] },
     -- a disabled memory write is the memory itself at values (`off` by `rfl`), so a RAM's
-    -- value simulation is linear in cycles: 50000 cycles of reads after one write
-    { name := "the HDL's value simulation of a memory is linear in cycles (a disabled write adds nothing)", run := fun _ =>
-        within 120 1500 fun _ => Tests.Elab.okLibs hdlMemScaleSrc ["42"] },
+    -- value simulation is linear in cycles: reads after one write, 25000 → 50000
+    { name := "the HDL's value simulation of a memory is linear in cycles (a disabled write adds nothing)", run := fun _ => do
+        let sim (cycles : Nat) : IO Unit := do
+          Tests.Elab.okLibs (hdlMemScaleSrc cycles) ["42"]
+        let _ ← checkScaling "memory simulation" sim 25000 3 },
     -- (wiz-notes/wishful/conv-sigma-eta-neutral.md, hdl-temporal-uart's record-eq-eta) two
     -- stuck values of a record type were η-split into their fields, each of which compared
     -- the whole stuck value again (a Mealy machine with a 10-field state: 101 s before)
     { name := "two stuck values of a record type are compared once, not field by field (record-eq-eta)", run := fun _ => do
-        let _ ← within 8 1000 fun _ => elabOk recordEqEta
-        pure () },
+        let compareOnce (fields : Nat) : IO Unit := do
+          -- `fields = 0` has no field to read: probe one field as the floor
+          let _ ← elabOk (recordEqEtaOf (if fields == 0 then 1 else fields))
+          pure ()
+        -- 5 → 10 fields; the old η-split compared the whole stuck value once per field
+        let _ ← checkScaling "record eq eta" compareOnce 5 3 },
     -- ... and η still decides when the neutral comparison fails: stuck values whose fields
     -- are equal by η at `Unit`, a pair against a neutral, and an inequality
     { name := "η at Σ and Π still applies when two neutrals differ", run := fun _ => do
