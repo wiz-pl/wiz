@@ -914,6 +914,18 @@ setup action keeps the elan cache for those
   the build with itself, and "Run workflow" with `bootstrap: true` does that again
   after a deliberate change to the benchmark program. The JSONs, `bench/history.jsonl`
   (one line per run) and the baseline executable are artifacts, not committed files.
+* **The nightly complexity gate** (`.github/workflows/perf.yml`) runs on the same
+  runner and never on a pull request. `scripts/perf-report.py` measures the three
+  cx size sweeps (structure fields, inductive constructors, match columns) at `n`
+  and `2n`, best of three with the start-up floor subtracted, and gates
+  `t(2n)/t(n)`; it also times `scry taint` on the vendored parser, `wiz doc` on one
+  module and `trust-ledger --lib-only` against absolute guards. A ratio row is
+  **red** when it is over its rule (3× per doubling is linear) and fails the gate
+  only when it is over its recorded ceiling, so the known superlinear cases are
+  reported honestly without failing every night. The measurement takes about
+  6 minutes; the workflow substitutes `.#wiz` and `.#tests`, then builds `scry`.
+  The report is a job-summary table and a `perf-report` artifact, not a commit.
+  See [perf.md](perf.md).
 * **The Nix package** (the `build` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)

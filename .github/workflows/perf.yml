@@ -1,0 +1,153 @@
+# Nightly complexity gate: the six workloads of docs/perf.md.
+#
+# A complexity regression is invisible to an absolute millisecond bound: a
+# quadratic implementation passes one.  This job measures the three size sweeps
+# from reviews/2026-11-18-complexity-patterns.md §A.1 (structure fields,
+# inductive constructors, match columns) at n and 2n and gates each on
+# t(2n)/t(n), plus three one-size workloads with an absolute guard.  The ratio
+# is machine-independent; the absolute times never are.
+#
+# It runs on `master` once a night and from "Run workflow", never on a pull
+# request: the job needs a self-hosted runner (WIZ_RUNNER_HEAVY, the same
+# preflight as bench.yml) and ~6 minutes of measurement on top of the build on an
+# idle runner (a shared runner measures the same ratios, more slowly).
+#
+# The rule and the gate are deliberately different.  A row is red in the report
+# when it is over its complexity rule (3x per doubling is linear).  The gate
+# fails only when it is over its ceiling, which is today's measured shape with
+# headroom: cx-01/02/03 are known superlinear, so the report says so every night
+# and the gate catches a further regression instead of failing on a known bug.
+# When one is fixed, lower its ceiling to its rule (scripts/perf-report.py,
+# RATIO_WORKLOADS).
+#
+# The report is an artifact and the job summary, never a commit: the run
+# measures this commit, and a checked-in page would claim yesterday's numbers
+# are today's.
+name: perf
+
+on:
+  schedule:
+    - cron: "43 5 * * *" # nightly, after bench.yml (04:17)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time and never cancelled: the best-of-three times need the runner
+  # to itself, and an older night is not superseded-useless (it measured a
+  # different commit).
+  group: perf
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  # The three sweeps hold their input in one process; the largest (1000 fields)
+  # peaked at 469 MiB in the review.  8 GiB leaves room for the build steps and
+  # a noisy neighbour.  The measurement itself is single-process.
+  WIZ_PERF_MEM_GIB: "8"
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    # 5 min: read one repository variable
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Is there a heavy runner?
+        id: gate
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ vars.WIZ_RUNNER_HEAVY }}
+        run: |
+          if [ -n "$RUNNER_LABEL" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self-hosted runner: $RUNNER_LABEL (the perf job declares ${WIZ_PERF_MEM_GIB} GiB)"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=perf skipped::WIZ_RUNNER_HEAVY is unset. The nightly complexity gate needs a self-hosted runner; set the repository variable to run it (docs/ci-runner.md)."
+          fi
+
+  perf:
+    name: perf (self-hosted)
+    needs: preflight
+    if: needs.preflight.outputs.run == 'true'
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 90 min: substitute or build wiz and the test driver, build scry (the large
+    # step, a few minutes), then ~6 min of measurement on an idle runner
+    # (scripts/perf-report.py).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # No Lake: the Nix-built wiz and tests driver are what the job measures.
+          lean: false
+
+      - name: Check the memory requirement
+        shell: bash
+        run: |
+          need_kib=$((WIZ_PERF_MEM_GIB * 1024 * 1024))
+          avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          echo "MemAvailable: $((avail_kib / 1024)) MiB; the perf job declares ${WIZ_PERF_MEM_GIB} GiB"
+          if [ "$avail_kib" -lt "$need_kib" ]; then
+            echo "::error title=not enough memory::the perf job declares ${WIZ_PERF_MEM_GIB} GiB and this runner has $((avail_kib / 1024)) MiB available"
+            exit 1
+          fi
+
+      - name: The toolchain of this commit
+        id: toolchain
+        shell: bash
+        run: |
+          # CI's build job publishes both store paths to Cachix on master, so this
+          # is normally a substitution.  They are the same build the test shards run.
+          nix build .#wiz .#tests --no-link -L
+          wiz=$(nix path-info .#wiz)
+          tests=$(nix path-info .#tests)
+          mkdir -p .lake/build/bin
+          ln -sf "$wiz/bin/wiz" .lake/build/bin/wiz
+          ln -sf "$wiz/bin/grail" .lake/build/bin/grail
+          ln -sf "$tests/bin/tests" .lake/build/bin/tests
+          echo "$wiz/bin" >> "$GITHUB_PATH"
+          "$wiz/bin/wiz" --version 2>/dev/null || true
+          "$wiz/bin/grail" --version 2>/dev/null || true
+
+      - name: Build the scry CLI
+        shell: bash
+        run: |
+          # The scale workload times the built binary, not `grail run` (which would
+          # include the build check).  scry/README.md's quick start; tests/scale.wiz
+          # needs the same .grail/bin/scry.  The C# grammar is an uncommitted
+          # out-link that `src/Scry/Native.wiz` links against (scry/native/README.md).
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
+          cd scry
+          cp ../grail.local.wiz .
+          grail build scry
+
+      - name: Measure (scripts/perf-report.py)
+        id: report
+        shell: bash
+        run: |
+          mkdir -p bench-out
+          python3 scripts/perf-report.py --check \
+            --out bench-out/perf.md --json bench-out/perf.json \
+            --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            bench-out/perf.md
+            bench-out/perf.json
+          if-no-files-found: ignore
+          retention-days: 90

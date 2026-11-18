@@ -31,6 +31,9 @@ published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 * [bench/README.md](../bench/README.md): the standard-library benchmark harness, its
   modes and how to compare two builds; the published page is generated from the JSON
   the harness writes (web/build-bench.py)
+* [perf.md](perf.md): the complexity-ratio workloads (`scripts/perf-report.py`), the
+  rule for each, the numbers with the date they were measured, and the nightly gate
+  (`.github/workflows/perf.yml`)
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards
 * [exercises.md](exercises.md): generating the exercise tree from this one
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property
