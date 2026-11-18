@@ -1114,7 +1114,7 @@ type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.
 erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
 the cases that cannot — they call the Lean kernel API in process, need the additive
 eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
-`selfhost` shard split 6) selects both groups.
+`selfhost` shard split 8) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 
