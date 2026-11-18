@@ -76,6 +76,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   throws is caught. The two shims are covered under Node with a stub module
   (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`): no emcc, no Wiz build,
   no browser.
+* scry C#: the frontend survives real code. Re-checked against a real solution's
+  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  files under `src/`), the lowering no longer drops constructs silently. The headline
+  find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
+  function and no warning** — `typeDecls` recursed into the namespace node, but
+  tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type
+  in the project was dropped. Fixed, and `lower/{modern,unsupported}` pin it. Top-level
+  statements (the whole of a minimal-API `Program.cs`) become `<stem>.Main`
+  (`Program.Main` for `Program.cs`); a record's or primary constructor's positional
+  parameters become fields and `new R(a)` lowers and stores its arguments instead of
+  discarding them; `partial` parts in one file are merged; `: base(…)` / `: this(…)`
+  evaluates its arguments and calls the target constructor; an inherited call resolves
+  through `base_list`; collection expressions unwrap all three element wrappers;
+  `with` initialisers lower their values; `var (a, b) = …` evaluates its right-hand side
+  and binds each name to a havoc with a warning; an indexer, an operator, a destructor,
+  an event with accessors, a nested delegate and a `#if`-guarded member are each
+  reported by name. `switch` expressions, collection expressions, `with` expressions, LINQ query
+  syntax and target-typed `new()` in a declaration are lowered with their value flow
+  (taint included) instead of havoc'd. New fixtures
+  `lower/{modern,toplevel,unsupported}` and `taint/cwe78-modern-{unsafe,safe}`; the
+  `silent skip` case fails when any of the out-of-scope warnings disappears
+  (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
+  (frequencies, and per-file parse/lower/taint given a native build).
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's

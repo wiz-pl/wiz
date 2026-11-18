@@ -87,11 +87,17 @@ Parser (one node per construct, tree-sitter-c-sharp names):
   `this_expression`, `base_expression`, `typeof_expression`, `default_expression`,
   `lambda_expression` (parsed, lowered as an opaque value in slice 1).
 
-Out of the first subset (parse error or `ERROR` node + warning, never a guess):
-LINQ query syntax, `switch` expressions and patterns beyond `is T x`, `async`/`await`
-(parsed as a prefix later), iterators (`yield`), local functions, tuples and
-deconstruction, `ref`/`out` arguments (parsed, lowered as havoc of the target),
-`unsafe`/pointers, events and delegates, operator overloading, attributes' semantics.
+Out of the first subset, each either lowered since or reported by name (§7): LINQ query
+syntax, `switch` expressions and patterns beyond `is T x`, `async`/`await` (parsed as a
+prefix), iterators (`yield`), local functions, tuples and deconstruction, `ref`/`out`
+arguments (parsed, lowered as havoc of the target), `unsafe`/pointers, events and
+delegates, operator overloading, attributes' semantics.
+
+The rule for everything outside the subset: **a warning that names the construct**, never
+a silent skip. A construct that lowers to nothing without a diagnostic is worse than a
+parse error, because the analysis then reports "no findings" about code it never read.
+`tests =scry-csharp` has a case ("silent skip") that fails when one of the warnings in §7
+disappears.
 
 ## 3. C# semantics on Wil
 
@@ -191,11 +197,11 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/tools/CstMain.wiz` | `scry-cst FILE.cs` spills a C# store (refuses a tree with `ERROR`/`MISSING` nodes, as for C) |
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
 | `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
-| `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions` (`.cs` + `.cst` spill + `.sexp` view golden) |
-| `scry/corpus/csharp/lower/basic.{cs,cst,wil}` | classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed (`Sum`, `Fact`) under `Wil.runFunction` |
-| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases |
+| `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions`, `modern` (`.cs` + `.cst` spill + `.sexp` view golden) |
+| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `unsupported` (the warnings for everything out of scope) |
+| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, and the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy) |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
-| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 4 view goldens, lowering golden + execution, 4 taint cases |
+| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 4 lowering goldens + execution, 6 taint cases, and the "silent skip" case (§2) |
 
 A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
@@ -205,7 +211,7 @@ spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
-The spills are tool output, but they stay checked in as small goldens (9 files, 70 KB):
+The spills are tool output, but they stay checked in as small goldens (15 files, 164 KB):
 the test groups run Wiz in the Lean interpreter, which can't call the native shim, and
 neither the `.#tests` closure nor CI builds `scry-cst` (it needs the out-link, a C
 compile of the grammar and a `wiz build` of `CstMain`). This is the same arrangement as
@@ -219,3 +225,213 @@ skips `finally`; `using var` does not call `Dispose`; `switch` labels are not co
 (tree-sitter gives `case 1: case 2:` as two sections; every section is reachable
 anyway); field initialisers are not run by constructors (each one gets a warning);
 lambdas are opaque.
+
+## 7. Real-code coverage (`Crux.Api`, 2026-11-18)
+
+The slice was checked against a real solution, not a language tour: `Nexus`
+(`Crux.slnx`, 2,483 `.cs` files under `src/`) and, as the starting project,
+`src/Crux.Api` (75 files; `node_modules/`, `bin/` and `obj/` excluded). The numbers
+below are reproduced by
+
+```
+scry/scripts/cs-coverage.sh /workspace/Nexus/src/Crux.Api
+scry/scripts/cs-coverage.sh /workspace/Nexus/src
+```
+
+which prints the per-construct regular expressions (and, given `CS_COVER`, runs the
+parse → lower → taint pipeline over every file). Regular-expression counts are a lower
+bound: a construct in a comment or split across lines is missed, an English `is` in a
+comment is counted. The table quotes the count and the file count, not a claim of
+semantic precision.
+
+### 7.1 The failure this pass exists to prevent
+
+The first honest run over `Crux.Api` produced **no functions and no warnings** — a
+clean-looking result over code that was never analysed. The cause: every one of the 75
+files uses a file-scoped namespace (`namespace X;`), and `typeDecls` treated
+`file_scoped_namespace_declaration` as a container and recursed into its children.
+tree-sitter-c-sharp v0.23.5 gives that node only the name (`namespace X;` is 29 bytes
+in the spill); the declarations that follow it are its **siblings** in the
+`compilation_unit`. So nothing was scanned, nothing was lowered, and nothing was
+reported — for the whole project. `lower/basic` never caught it (block namespace), and
+`parse/members` covers the syntax but not the lowering.
+
+`typeDecls` now prefixes the *remaining siblings* with the namespace name, and
+`lower/modern` and `lower/unsupported` are file-scoped fixtures whose goldens fail if
+it regresses. This is the task's hard rule in practice: **a construct that cannot be
+lowered must produce a warning naming it, never a silent skip**; a clean "no findings"
+over unanalysed code is the failure mode, not the goal.
+
+### 7.2 Frequencies (regex, occurrences / files)
+
+| construct | `src/Crux.Api` | `src/` |
+|---|---|---|
+| nullable annotation (`string?`, `T?`) | 339 / 44 | 13,358 / 1,328 |
+| `is` pattern | 165 / 39 | 12,032 / 1,405 |
+| `await` | 228 / 38 | 8,733 / 1,058 |
+| `record` / `record struct` | 149 / 27 | 2,799 / 860 |
+| `async` | 121 / 37 | 3,734 / 1,052 |
+| file-scoped `namespace X;` | 74 / 74 | 2,464 / 2,464 |
+| LINQ method call (`.Where(`, `.Select(`, …) | 68 / 28 | 6,584 / 1,001 |
+| string interpolation (`$"…"`) | 59 / 27 | 5,451 / 1,038 |
+| attribute list (`[Foo]` at line start) | 47 / 14 | 9,730 / 338 |
+| collection expression (`[…]`) | 10 / 7 | 867 / 301 |
+| `switch` expression | 6 / 5 | 541 / 322 |
+| `with` expression | 4 / 3 | 99 / 72 |
+| target-typed `new()` | 4 / 4 | 149 / 105 |
+| `lock` | 2 / 1 | 68 / 25 |
+| generic constraint (`where T : …`) | 1 / 1 | 124 / 63 |
+| `partial` type | 1 / 1 | 1,321 / 158 |
+| primary-constructor class (`class C(T t)`) | 1 / 1 | 335 / 259 |
+| `using static` | 0 / 0 | 16 / 14 |
+| LINQ query syntax (`from x in …`) | 0 / 0 | 35 / 17 |
+| `yield` | 0 / 0 | 215 / 37 |
+| `unsafe` | 0 / 0 | 11 / 8 |
+| `goto` | 0 / 0 | 0 / 0 |
+
+### 7.3 Construct → parses / lowers / taints / silence
+
+`parses` is tree-sitter-c-sharp with no `ERROR`/`MISSING` node; `lowers` is what
+`Scry.CsLower` does with it; `taints` is whether a source → sink flow through the
+construct is preserved (the `taint/cwe78-*` fixtures are the evidence); `silent before`
+is what happened **before this pass** — a construct that lowered to nothing without a
+diagnostic.
+
+| construct | parses | lowers | taints | silent before? |
+|---|---|---|---|---|
+| file-scoped `namespace X;` | yes (74/74) | prefix of every function name | flows | **yes: every type in the file dropped** (all 75 files) → fixed |
+| `record` / `record struct` | yes | positional parameters become leading fields; `new R(a, b)` stores the arguments | flows (`cwe78-modern`) | **yes: parameters and arguments dropped** → fixed |
+| primary-constructor class | yes | positional parameters become fields (as a record) | flows | **yes** → fixed |
+| `partial` parts in one file | yes | parts merged by qualified name | flows | **yes: the second part was shadowed** → fixed |
+| top-level statements | yes | `<stem>.Main` (`Program.Main` for `Program.cs`) | flows | **yes: not a type, so ignored; a minimal API `Program.cs` produced no functions** → fixed |
+| `async` method | yes | body lowered synchronously | flows | no (by design) |
+| `await e` | yes | the value of `e` | flows | no (by design) |
+| nullable `T?` | yes | erased to `T` | n/a | no (no nullness domain yet, documented) |
+| generic parameters/constraints | yes | erased to `dyn` | n/a | no (as C# erases them) |
+| `is T x` (and every other pattern) | yes | `x` bound to the left value; the boolean is havoc'd (both branches reachable) + warning | flows through `x` | no (warning) |
+| `switch` expression | yes | nondeterministic choice among the arms, each value copied to one register + warning | flows (`cwe78-modern`) | no (warning) |
+| `with { P = e }` | yes | `e` evaluated; the result is a copy of the source + warning (members not updated) | flows (same object) | no (warning) |
+| collection expression `[a, ..b]` | yes | `System.Array.$new(a, b)` | flows | was havoc per element with a warning → fixed |
+| LINQ query syntax | yes (none in `Crux.Api`) | source, range variable, `where`/`let`/`select`; `join`/`group`/`orderby` warn | flows (`cwe78-modern`) | no (warning) |
+| string interpolation | yes | `System.String.Concat(holes…)` | flows | no |
+| attributes | yes | parsed and ignored (no rule depends on one) | n/a | no (documented) |
+| `using static` | yes | directive ignored; a bare imported call is named in a "not a method" warning | n/a | warning |
+| target-typed `new()` in a declaration | yes | the declared type is used | flows | no |
+| target-typed `new()` in an expression | yes | havoc + warning | n/a | no (warning) |
+
+### 7.4 The 75-file run, in numbers
+
+`CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh /workspace/Nexus/src/Crux.Api`:
+
+* 75/75 files parse (no `ERROR`/`MISSING` node) and 75/75 lower;
+* 240 functions, 513 warnings, 0 findings (the pack's only rule is CWE-78; these
+  endpoints do not build a command line from a request value);
+* 14 files produce no function: every one is `Dtos/*.cs`, and the 14 contain 83
+  `public sealed record` declarations and nothing with a `=>` or `{` body. A
+  declaration-only file is not a silent skip;
+* **0 files with an executable member and neither a function nor a warning** — the
+  number that must be zero. Before the file-scoped-namespace fix it was every non-DTO
+  file (61 of them), all silently empty;
+* the warning groups (all named, none silent): `unknown name` 162 (mostly method groups
+  passed as delegates, plus §7.8), `is` test 88, lambda body 60, field initialiser 47,
+  `tuple_expression` 30, target-typed `new()` 30, `out`/`ref` 19, property initialiser
+  10, deconstruction 8, switch labels/arms 6, `with` 3, throw expression 4,
+  `range_expression` 3, `initializer_expression` 3, `lock_statement` 2.
+
+### 7.5 Fixes in this pass
+
+* **File-scoped namespaces** (§7.1) — the whole file was dropped silently.
+* **Top-level statements** are unwrapped from `global_statement` (they were a
+  `global_statement not modelled` warning with no code) and lowered as `<stem>.Main`.
+* **Records and primary constructors**: the parameter list becomes the leading fields;
+  `new R(a, b)` allocates, stores each argument into its field, then calls a declared
+  constructor if there is one.
+* **`partial` parts in one file** are merged by qualified name.
+* **Collection expressions**: the element wrappers are
+  `collection_element → expression_element|spread_element → expression`; only the first
+  was unwrapped, so every element was a havoc (with a warning). All three are unwrapped
+  now, so an element's taint reaches the array.
+* **`with` initialisers**: the initialiser is a `with_initializer` per member
+  (`member_name expression`); the first attempt lowered the member name as an
+  expression (a spurious "unknown name" havoc). Only the value is lowered, for every
+  member.
+* **Inherited calls** (`Reject(…)` in a derived class) resolve through `base_list` to
+  the declaring class instead of a "not a method" warning.
+* **Deconstruction** (`var (a, b) = …`) evaluates the right-hand side (so a sink inside
+  it is analysed), binds each name to a fresh havoc and names the construct; the names
+  used to be unknown at every later use, which turned one tuple into a trail of
+  `unknown name` warnings and lost their flow.
+* **A nested `delegate` member** now warns (`delegate_declaration member not modelled`)
+  instead of being treated as lowered code.
+* **A `switch` expression** names its approximation (arms not compared) like a
+  `switch` statement already did.
+* **`switch` expressions**, **LINQ query syntax** and **target-typed `new()` in a
+  declaration** are lowered with their value flow (a nondeterministic choice among the
+  arms, the query's source/range variable/`select`, the declared type) instead of being
+  havoc'd.
+* **Constructor initialisers** (`: base(…)`, `: this(…)`) evaluate their arguments and
+  call the target constructor; unsupported members (indexer, operator, destructor,
+  event with accessors, `#if`-guarded member) are each named.
+
+### 7.6 Still out of scope, with the warning each produces
+
+| construct | warning |
+|---|---|
+| lambda body | `lambda body not lowered: an opaque function value` |
+| local function | `local function NAME not modelled: its body is not lowered and calls to it are unknown` |
+| indexer | `indexer_declaration member not modelled: no code is lowered for it` |
+| operator / conversion operator | `operator_declaration member not modelled: …` |
+| destructor | `destructor_declaration member not modelled: …` |
+| event with accessors | `event_declaration member not modelled: …` |
+| nested delegate / `#if`-guarded member | `delegate_declaration member not modelled: …`, `preproc_if not modelled: …` |
+| `#if` / `#else` block (top level) | `preproc_if not modelled: no code is lowered for it` |
+| `lock`, `goto`, a label | `lock_statement not modelled`, `goto_statement not modelled`, `labeled_statement not modelled` |
+| `yield return` | `yield_statement not modelled` |
+| `unsafe`, `fixed`, `checked` | `unsafe_statement not modelled`, … |
+| `is` test | `is test not modelled: havoc` (both branches stay reachable) |
+| `switch` statement labels / expression arms | `switch labels are not compared: every section is reachable`, `switch expression arms are not compared: every arm is reachable` |
+| target-typed `new()` in an expression | `target-typed new() without a declared type not modelled: havoc` |
+| `join`/`group`/`orderby` in a query | `… in a query is not modelled: its value is havoc` |
+| field/property initialiser | `field initialiser of X not modelled: the field starts as its default` |
+| deconstruction `var (a, b) = …` | `deconstruction not modelled: each name is a havoc` |
+| `out`/`ref` target | `out/ref argument not modelled: havoc` |
+| `with` member updates | `with expression: the copy's members are not updated (it keeps the original's values)` |
+| a bare `using static` import call | `call to M: not a method of T (delegate or unknown)` |
+| `base.M(…)` / a delegate-valued call | `base_expression not modelled: havoc`, `call through a delegate value: unknown target` |
+
+`async`/`await`, nullable annotations and generics are modelled by design and
+deliberately produce **no** warning: the body is lowered synchronously, nullness is a
+later slice, and generics are erased exactly as C# erases them. Attributes are parsed
+and ignored.
+
+### 7.7 What runs today
+
+There is **no command on this branch that analyses a directory of `.cs` files**. C# is
+not wired into `scry taint`; `scry parse --stats` reads a spill. Two things exist:
+
+```
+# 1. the measurement harness (this section's numbers; needs the native grammar)
+nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp   # once per checkout
+cd scry && wiz build tools/CsCover.wiz -I src -I ../lib -o build/cs-cover
+        # (add --cc /path/to/cc and, if GMP's headers are not in the default
+        #  search path, --cflags/--ldflags as `grail.local.wiz` lists them)
+cd .. && CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh DIR
+
+# 2. the test group (checked-in spills, no native build)
+./.lake/build/bin/tests '=scry-csharp'
+```
+
+A `scry cs PATH` driver (`scry/src/Scry/CsCmd.wiz`, which walks a directory,
+`.csproj` or `.sln`, prints per-file coverage rows and exits 3 when nothing could be
+analysed) is being added on the sibling branch `agent/cs-driver`; it is not part of
+this branch.
+
+### 7.8 A known caveat: non-ASCII text
+
+Two of the 75 files contain non-ASCII text (an em dash in a comment, a `§`). `Scry.Cst`
+slices a node's text by **character** index while tree-sitter's spans are **byte**
+offsets (`Scry.Cst.textOf`'s doc says so; the C frontend has the same limitation). Every
+identifier after such a character is read shifted — `outcome` becomes `ome` — so those
+two files report `unknown name …` warnings for real locals. It is loud, not silent, but
+it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
+it is left as its own change because it is shared with C.
