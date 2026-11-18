@@ -584,6 +584,20 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
+* **Cost: one elaboration per module, and `--jobs`.** The site needs each module's
+  declarations as that module's own file sees them, so `run` elaborates `import M` once
+  per module (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from
+  `~/.cache/wiz` (median closure: 8 modules), so the work is one elaboration per module,
+  not one for the library; the pages, the API index and the reference then pretty-print
+  every declaration and run `Wiz.infer` on every subterm of every signature
+  (`LSP.subtermType:532`, `Site.lean:130`), once per declaration. `--jobs N` elaborates
+  and renders N modules at once (`0`: auto, the CPUs available, at most 8); the output is
+  assembled in the modules' own order, so `OUT` is byte-for-byte the same as `--jobs 1`
+  (only the `-v` log follows completion order, and every line names its module). `-v`
+  writes a progress log to stderr — per module its elaboration and rendering time and
+  cache hits, every 25th declaration, the phase boundaries, and a summary with the wall
+  time and peak RSS; `-vv` lists every declaration, `-q` is the quiet default. Stdout and
+  the pages are unchanged in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); every cross-link resolves; every declaration is in the

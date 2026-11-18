@@ -1137,6 +1137,11 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
+`wiz doc --jobs N` elaborates and renders N modules at once (`0`: auto); the tree is the
+same as with `--jobs 1`. `-v` (`-vv`, `-q`) turns on the progress log on stderr, which
+names each phase, each module's elaboration/rendering time and cache hits, and ends with
+the wall time and peak RSS.
+
 **Live documentation (`wiz doc --serve`).** The generated documentation is static by
 default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port
 8000, `--port N`; `0` takes a free one), and `--lsp PORT` makes the module pages ask a
