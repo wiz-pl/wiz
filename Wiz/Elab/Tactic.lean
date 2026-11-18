@@ -82,6 +82,8 @@ def nativeDecide := 38
 def rewriteAt := 39
 -- (stage 6h S2) the registered `[simp]` lemmas, for the default set
 def getSimpLemmas := 40
+-- (stage 6j) a case split on a Boolean expression
+def byCases := 41
 end TacTag
 
 structure Goal (R : Type) where

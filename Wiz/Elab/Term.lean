@@ -4120,6 +4120,44 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       st := st'
       ls := ls.push (encodePair (encodeString e.name) r)
     return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
+  if tag == TacTag.byCases then
+    -- (6j) `fun _ => G` at `Bool.casesOn`, with a branch hypothesis `e = false`/`e = true`
+    let eT ← zonk lvl (← reify st.handles (fld 1) lvl)
+    let hint ← str (fld 2)
+    let boolT : Term R := .const "Bool" []
+    let w : Term R := .qlit QuantitySyntax.explicitDefault
+    let goalT ← zonk lvl (quote g lvl gl.ty)
+    let isBool ← match (← get).kernelInfer (gl.kernelCtx g) eT with
+      | .ok ty => match ← force (← evalIn gl.ctx ty) with
+        | .const "Bool" _ => pure true
+        | _ => pure false
+      | .error _ => pure false
+    unless isBool do
+      throwAt info "by_cases: expected a Bool expression" ErrorCode.tacticFailed
+    let hf := introName gl.ctx.names hint "h" true false
+    let ht := introName gl.ctx.names hint "h" true false
+    let tyF ← evalIn gl.ctx (.eq boolT eT (.const "Bool.false" []))
+    let ctxF := gl.ctx.bind hf tyF
+    let mF ← freshMeta ctxF "by_cases" (← evalIn ctxF (goalT.lift 1))
+    let tyT ← evalIn gl.ctx (.eq boolT eT (.const "Bool.true" []))
+    let ctxT := gl.ctx.bind ht tyT
+    let mT ← freshMeta ctxT "by_cases" (← evalIn ctxT (goalT.lift 1))
+    -- `fun (b : Bool) => (e = b) → G`
+    let motive : Term R := .lam "b" (.pi "h" .default w
+      (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
+    let some d := g.find? "Bool.casesOn"
+      | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
+    let us ← d.levelParams.mapM fun _ => freshLevelMeta
+    -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
+    let proof : Term R :=
+      .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))
+        (.lam ht mT)) eT) (.refl boolT eT)
+    let tyT' ← evalIn ctxT (goalT.lift 1)
+    let tyF' ← evalIn ctxF (goalT.lift 1)
+    unifyGoal gl proof
+    let (st, idT) := addGoal st { ctx := ctxT, ty := tyT', tm := mT }
+    let (st, idF) := addGoal st { ctx := ctxF, ty := tyF', tm := mF }
+    return ← runTac code info st (apply code (fld 3) (encodeList [.nat idT, .nat idF]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty

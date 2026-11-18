@@ -361,35 +361,29 @@ def List.all_cons_false {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p
 def List.any_append {A : Type} (p : A → Bool) : (l m : List A) →
     List.any p (List.append l m) = Bool.or (List.any p l) (List.any p m)
   | .nil, m => rfl
-  | .cons x xs, m =>
-      @Or.elim (p x = .true) (p x = .false)
-        (List.any p (List.append (List.cons x xs) m) = Bool.or (List.any p (List.cons x xs)) (List.any p m))
-        (Bool.cases (p x))
-        (fun hp =>
-          let lhs := @List.any_cons_true A p x (List.append xs m) hp;
-          let rhs := Eq.congrArg (fun t => Bool.or t (List.any p m)) (@List.any_cons_true A p x xs hp);
-          Eq.trans lhs (Eq.symm rhs))
-        (fun hp =>
-          let lhs := Eq.trans (@List.any_cons_false A p x (List.append xs m) hp) (List.any_append p xs m);
-          let rhs := Eq.congrArg (fun t => Bool.or t (List.any p m)) (@List.any_cons_false A p x xs hp);
-          Eq.trans lhs (Eq.symm rhs))
+  | .cons x xs, m => by
+      by_cases p x
+      · rw (List.any_cons_true p x (List.append xs m) h)
+        rw (List.any_cons_true p x xs h)
+        rfl
+      · rw (List.any_cons_false p x (List.append xs m) h)
+        rw (List.any_cons_false p x xs h)
+        rw (List.any_append p xs m)
+        rfl
 
 /-- `all` over `++` is the `Bool.and` of the two. -/
 def List.all_append {A : Type} (p : A → Bool) : (l m : List A) →
     List.all p (List.append l m) = Bool.and (List.all p l) (List.all p m)
   | .nil, m => rfl
-  | .cons x xs, m =>
-      @Or.elim (p x = .true) (p x = .false)
-        (List.all p (List.append (List.cons x xs) m) = Bool.and (List.all p (List.cons x xs)) (List.all p m))
-        (Bool.cases (p x))
-        (fun hp =>
-          let lhs := Eq.trans (@List.all_cons_true A p x (List.append xs m) hp) (List.all_append p xs m);
-          let rhs := Eq.congrArg (fun t => Bool.and t (List.all p m)) (@List.all_cons_true A p x xs hp);
-          Eq.trans lhs (Eq.symm rhs))
-        (fun hp =>
-          let lhs := @List.all_cons_false A p x (List.append xs m) hp;
-          let rhs := Eq.congrArg (fun t => Bool.and t (List.all p m)) (@List.all_cons_false A p x xs hp);
-          Eq.trans lhs (Eq.symm rhs))
+  | .cons x xs, m => by
+      by_cases p x
+      · rw (List.all_cons_true p x (List.append xs m) h)
+        rw (List.all_cons_true p x xs h)
+        rw (List.all_append p xs m)
+        rfl
+      · rw (List.all_cons_false p x (List.append xs m) h)
+        rw (List.all_cons_false p x xs h)
+        rfl
 
 /-- `any p l` is true exactly when some element satisfies `p`. -/
 def List.any_eq_true {A : Type} (p : A → Bool) : (l : List A) →

@@ -300,3 +300,48 @@ the algorithm is Wiz (`lib/Prelude.wiz`), and the host adds two requests:
 transport) and `Tac.getSimpLemmas` (the default set registered with `attribute [simp]`,
 including `local` scoping). There is no automatic closer; fuel bounds the rewrites.
 Full section: [`06-macros/simp.md`](06-macros/simp.md).
+
+## 6j: `by_cases`
+
+`by_cases e` (`e : Bool`) is a case split on a Boolean expression: two goals, one with
+`e = .true` and one with `e = .false` as a hypothesis. The surface is in
+`lib/Prelude.wiz`; the host adds one request, `Tac.byCases` (tag 41), which builds the
+proof with the kernel's own `Bool.casesOn` eliminator.
+
+```wiz
+import Prelude
+
+def split (p : Nat → Bool) (n : Nat) (R : Prop)
+    (ht : p n = .true → R) (hf : p n = .false → R) : R := by
+  by_cases p n            -- h : p n = .true, then h : p n = .false
+  exact ht h
+  exact hf h
+
+def splitAs (p : Nat → Bool) (n : Nat) (R : Prop)
+    (ht : p n = .true → R) (hf : p n = .false → R) : R := by
+  by_cases hp : p n       -- the hypotheses are called `hp`
+  exact ht hp
+  exact hf hp
+```
+
+* The proof is `Bool.casesOn (fun b => e = b → G) (fun h => m_false) (fun h => m_true)
+  e (refl e)`: the motive is the goal with the branch equation added, the two method
+  holes are the new goals, and the kernel checks the finished term. Nothing is trusted.
+* The hypotheses take fresh **accessible** names from the binder (`h`, `h1`, …), or the
+  name in `by_cases h : e`; either way a name already in the context is made fresh
+  (`n`, `n1`, …), so nothing is shadowed.
+* It replaces the `@Or.elim (e = .true) (e = .false) … (Bool.cases e) (fun h => …)
+  (fun h => …)` a manual proof used to spell out. `lib/ListLemmas.wiz` uses it in
+  `List.any_append` and `List.all_append`: the cons case of each is 12 lines of
+  `Or.elim`/`Bool.cases`/`Eq.trans` before, 9 lines after.
+* The branch hypothesis is put in the goal's context; the binders of `G` are not
+  introduced, so a goal that is itself a function type keeps them for the next tactic.
+* The connectives are library definitions (a Σ and Church encodings), not inductives,
+  so this is not a general `cases`: case analysis on an arbitrary inductive value, and
+  `induction`, are still not implemented. The self-hosted frontend has no `by_cases`
+  (its grammar is generated in `Wiz/Selfhost.lean`), which `=selfhost-libdiff` reports as
+  a gap.
+
+Tests: `=tactics`, "by_cases splits a Bool expression into its two equations", "by_cases:
+a named hypothesis, and a goal that is a function type", and "by_cases rejects a non-Bool
+expression".

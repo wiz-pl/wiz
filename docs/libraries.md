@@ -308,7 +308,8 @@ delivers each byte 41 cycles after it is accepted, for every input trace and byt
 Not done: sequences with repetition (SEREs; planned as monitor circuits), stuttering
 invariance as a theorem, a deep embedding printable as SVA, notation (□, ◇, `|->`:
 dsl-ergo, stacked on this), case splits on neutral bits (they need the range of `UIntN` in
-the sealed type; wishful `uintn-range-proof`), a tactic for the Bool case splits.
+the sealed type; wishful `uintn-range-proof`). Bool case splits have `by_cases`
+(`lib/Prelude.wiz`; docs/stages/06-macros.md, 6j).
 
 ## H14 T2: the iCEstick UART, temporal properties
 
