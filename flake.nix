@@ -102,43 +102,17 @@
               # elaborates it as the main file, whose commands are keyed by the main
               # text and never hit by an importer. `import M` stores M's effect under
               # M's module key and writes its seen marker, which is what a user hits.
-              # Run one check per module concurrently. The cache is content-addressed:
-              # a key is the chained hash of the text (and of the imports' keys), and every
-              # file is written to a temporary name and renamed into place
-              # (`Cache.writeAtomic`), so two processes that elaborate one import write the
-              # same bytes and a reader sees either the old file or the whole new one. Each
-              # module is still checked exactly once; the order only decides how much of an
-              # import's closure is already warm, not what is stored. `NIX_BUILD_CORES` is
-              # the build's `--cores` (4 on the CI runner); the cap keeps a very wide host
-              # from starting one wiz process per module.
-              # A lib module that does not check is a real failure: xargs runs the rest and
-              # exits non-zero, and the phase fails.
+              # Each check reads what earlier ones wrote, so this is one pass over lib/.
+              # A lib module that does not check is a real failure: stop at the first.
               export HOME=$TMPDIR
               cd $share
               cache=$share/cache
               mkdir -p "$cache"
-              jobs=''${NIX_BUILD_CORES:-0}
-              [ -n "$jobs" ] || jobs=0
-              case "$jobs" in *[!0-9]*) jobs=0 ;; esac
-              if [ "$jobs" -le 0 ]; then jobs=4; fi
-              [ "$jobs" -le 8 ] || jobs=8
-              echo "prewarm: $jobs concurrent wiz check processes"
-              cat > "$TMPDIR/check-module.sh" <<'EOF'
-#!/bin/sh
-# check-module.sh WIZ CACHE LIB TMP MODULE: check `import MODULE` through a fresh root
-# file (a module's own file would be keyed as a main file, never hit by an importer).
-set -e
-wiz=$1 cache=$2 lib=$3 tmp=$4 module=$5
-root=$(mktemp "$tmp/lib-import.XXXXXX.wiz")
-trap 'rm -f "$root"' EXIT
-printf 'import %s\n' "$module" > "$root"
-"$wiz" --cache "$cache" -I "$lib" check "$root"
-EOF
-              find lib -name '*.wiz' | LC_ALL=C sort | while IFS= read -r f; do
+              while IFS= read -r f; do
                 m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
-                printf '%s\n' "$m"
-              done | xargs -P "$jobs" -n 1 sh "$TMPDIR/check-module.sh" \
-                "$PWD/.lake/build/bin/wiz" "$cache" "$share/lib" "$TMPDIR"
+                printf 'import %s\n' "$m" > "$TMPDIR/lib-import.wiz"
+                .lake/build/bin/wiz --cache "$cache" -I "$share/lib" check "$TMPDIR/lib-import.wiz"
+              done < <(find lib -name '*.wiz' | LC_ALL=C sort)
               # grail elaborates in-process under its *own* binary hash (the build file,
               # Grail and Prelude, before every command, and each `check` job), so it
               # hits none of the entries above: the two namespaces are disjoint by
@@ -156,10 +130,9 @@ EOF
                 '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
               printf 'import Std\n' > "$warm/main.wiz"
               .lake/build/bin/grail -C "$warm" --cache "$cache" build
-              # The binary's memo names the build-time executable path in its stamp, and the
-              # per-root pointers name the build-time import files; both are write-cache
-              # aids that a `--cache-ro` layer never reads, so the store ships neither.
-              rm -rf "$cache/bin" "$cache/roots"
+              # The binary's memo names the build-time executable path in its stamp; it
+              # is for the write cache, so the store ships none.
+              rm -rf "$cache/bin"
               chmod -R a-w "$cache"
               # wiz's module roots: ./lib (a checkout's), then the packaged standard library
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
