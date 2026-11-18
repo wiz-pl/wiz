@@ -41,6 +41,27 @@ def testRunnerGroup : Group where
         let (res, st) ← runTests dir tc
         check (res.all (·.cached)) "a pass was not recorded"
         checkEq 0 st.ran },
+    { name := "a filter that matches no test file is an error, not a vacuous pass", run := fun _ => do
+        let dir ← mkTree (testPkg ++ [("tests/two.expected", "tests/two.wiz:2:1: info: 2\n")])
+        let cache ← IO.FS.createTempDir
+        let self ← IO.appPath
+        let run (args : Array String) : IO (UInt32 × String) := do
+          let o ← IO.Process.output { cmd := self.toString, args }
+          pure (o.exitCode, o.stdout ++ o.stderr)
+        let grailTest (filters : Array String) : IO (UInt32 × String) :=
+          run (#["--grail", "-C", dir.toString, "--cache", cache.toString, "test"] ++ filters)
+        let (code, out) ← grailTest #["no-such-test"]
+        checkEq 2 code
+        check ((out.splitOn "no test file matches no-such-test").length > 1) s!"no diagnostic:\n{out}"
+        check (!((out.splitOn "0 passed, 0 failed").length > 1)) s!"a vacuous summary:\n{out}"
+        -- an option that is not grail's (`--jobs N` is the test driver's) is two filters
+        let (code, out) ← grailTest #["--jobs", "4"]
+        checkEq 2 code
+        check ((out.splitOn "no test file matches --jobs, 4").length > 1) s!"no diagnostic:\n{out}"
+        -- a filter that does match still runs (this is not "reject every filter")
+        let (code, out) ← grailTest #["two"]
+        checkEq 0 code
+        check ((out.splitOn "1 passed, 0 failed").length > 1) s!"not a pass:\n{out}" },
     { name := "a wrong output fails, with the first difference", run := fun _ => do
         let dir ← mkTree (testPkg ++ [("tests/two.expected", "tests/two.wiz:2:1: info: 3\n")])
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }

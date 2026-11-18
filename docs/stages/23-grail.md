@@ -121,8 +121,9 @@ cannot check (it needs `--trust-native`, or it takes minutes): it is reported as
 needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
-`grail test --update` writes the actual output. Every example is a test
-(`examples/*.expected`). The Lean tests stay in `lake test`.
+`grail test --update` writes the actual output. A filter that matches no test file is an
+error (exit 2, `grail test: no test file matches …`), not a run of nothing. Every example
+is a test (`examples/*.expected`). The Lean tests stay in `lake test`.
 
 ## 23g: parallel jobs
 

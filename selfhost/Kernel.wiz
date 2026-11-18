@@ -2948,7 +2948,8 @@ mutual
 -- recursion) is rejected; `ν` does not use this check (`ν X. X` is a valid coinductive
 -- type; its productivity is `cocon`/`out`). A description whose head is not a spine (a
 -- variable, `dret`, …) is left alone: the kernel cannot see its spine. A constant is
--- looked through to its inline value (depth-bounded), so a `def` cannot hide it.
+-- looked through to its inline value (depth-bounded), and so is a constant applied to
+-- arguments, so a `def` (even a parameterised `def`) cannot hide it.
 def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
   | .darg _ _ E => descGuarded depth .true E
   | .drec _ _ E => Bool.and guarded (descGuarded depth guarded E)
@@ -2959,6 +2960,12 @@ def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
   | .letE _ _ b => descGuarded depth guarded b
   | .letq _ _ _ b => descGuarded depth guarded b
   | .const _ _ _ v _ => match depth with
+    | .zero => .true
+    | .succ k => descGuarded k guarded v
+  -- a constant applied to arguments (`T.desc A`): the spine is in the value (the
+  -- arguments are type parameters; substituting them cannot turn a `darg` into a
+  -- `drec`), so its value is checked
+  | .app (.const _ _ _ v _) _ => match depth with
     | .zero => .true
     | .succ k => descGuarded k guarded v
   | _ => .true

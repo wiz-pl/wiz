@@ -1604,9 +1604,15 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
   description whose head is not a constructor spine — a variable or a global (`μ
   Chain.desc i`, `μ c.2.1 c.2.2` in the codes tests) — is not visible to the check and is
   accepted; so is a nested `arg` field of another family (`List A`, …). Constants are
-  looked through (depth-bounded), so `def D := Desc.rec …; μ D ()` cannot hide it. The
-  check is conservative: it sees only the `arg`/`rec`/`hrec` spine (and the branches of an
-  `ecase` in it). `Kernel.wiz` has the same function and verdicts (`=selfhost`).
+  looked through (depth-bounded), and so are constants applied to arguments (their value
+  β-reduced with the arguments), so `def D := Desc.rec …; μ D ()` and
+  `def D (A : Type) := …; μ (D X) ()` cannot hide it. The check is conservative: it sees only
+  the `arg`/`rec`/`hrec` spine (and the branches of an `ecase` in it). A *declared*
+  inductive's description starts with its constructor tag (`Desc.arg (Enum …) …`), which
+  is a genuine `arg` field, so its constructors are guarded (`Nat`, `List`); a type whose
+  constructors are all recursive (`inductive Bad where | mk (x : Bad)`) is the empty
+  inductive Lean also accepts, not `μ X. X` (which has no constructor layer at all).
+  `Kernel.wiz` has the same function and verdicts (`=selfhost`).
 * The method's usage is scaled by ω (`QRig.many?`) because the method may run once per
   node (§5.3; Status.md, Q2).
 * `x` is checked against `μ^∞`; a value of a smaller size is accepted by subtyping.

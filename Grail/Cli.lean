@@ -27,7 +27,8 @@ def usage : String := "usage:
                           bootstrap check, which takes minutes)
   grail test [FILTER…] [--update]
                           run the tests (of `tests` targets) whose path contains a
-                          filter; --update writes the actual output to .expected
+                          filter; --update writes the actual output to .expected;
+                          a filter that matches no test file is an error (exit 2)
   grail update [--locked] resolve the dependencies again and write grail.lock
                           (builds use the lock only); --locked fails if the lock
                           would change
@@ -553,7 +554,12 @@ def cliMain (args : List String) : IO UInt32 := do
       let filters := rest.filter (· != "--update")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
-      let results ← r.tests pkg.targets filters update
+      let (files, results) ← r.tests pkg.targets filters update
+      -- a filter that selects no file is a usage error, not a pass: a typo (`grail test
+      -- --jobs 4`, where `--jobs` is not a grail flag) must not look like a green run
+      if !filters.isEmpty && files.isEmpty then
+        IO.eprintln s!"grail test: no test file matches {", ".intercalate filters}"
+        return 2
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
       let failed := results.size - passed - skipped

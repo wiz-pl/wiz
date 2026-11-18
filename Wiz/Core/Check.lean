@@ -536,9 +536,18 @@ is `cocon`/`out`'s productivity rule, plus the surface copattern check.)
 A description whose head is not a constructor (a variable, `ret`, or an
 application/projection) is left alone: its spine is not visible to the kernel (the `μ`
 over `c.2.1` in the codes test, `μ Chain.desc i`, …). A *constant* is looked through to
-its value, so `def D := Desc.rec …; μ D ()` cannot hide an unguarded description
+its value, and so is a constant *applied to arguments* (the value β-reduced with them:
+a declared `T.desc A …` is an application), so `def D := Desc.rec …; μ D ()` and
+`def D (A : Type) := …; μ (D Unit) ()` cannot hide an unguarded description
 (depth-bounded, so recursive globals stop). The check is conservative: it only rejects a
 `rec`/`hrec` it can see at the head of a constructor spine. -/
+private partial def applyArgsT (t : Term R) (args : List (Term R)) : Term R :=
+  match args with
+  | [] => t
+  | a :: as => match t with
+    | .lam _ b => applyArgsT (b.instantiateAt 0 a) as
+    | _ => (a :: as).foldl .app t
+
 partial def descGuarded (g : Globals R) (depth : Nat) (guarded : Bool) : Term R → Bool
   | .darg _ _ E => descGuarded g depth true E
   | .drec _ _ E => guarded && descGuarded g depth guarded E
@@ -555,6 +564,19 @@ partial def descGuarded (g : Globals R) (depth : Nat) (guarded : Bool) : Term R 
         | some v => descGuarded g k guarded v
         | none => true
       | none => true
+  | t@(.app _ _) =>
+    -- `T.desc A`: a constant applied to arguments (a parameterised description)
+    let (head, args) := t.spine
+    match head with
+    | .const n _ =>
+      match depth with
+      | 0 => true
+      | k + 1 => match g.find? n with
+        | some d => match d.value with
+          | some v => descGuarded g k guarded (applyArgsT v args)
+          | none => true
+        | none => true
+    | _ => true
   | _ => true
 
 /-- The error a `μ` whose description is not guarded gets. -/

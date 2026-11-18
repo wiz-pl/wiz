@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* grail: `grail test FILTER` whose filter matches no test file is an error (exit 2,
+  `grail test: no test file matches …`) instead of `0 passed, 0 failed` with exit 0;
+  a typo'd selector (for example `grail test --jobs 4`, where `--jobs` is the test
+  driver's flag) no longer looks like a green run. There is no `--allow-empty`: no
+  caller in `scry/` or `.github/` selects tests that may legitimately be absent.
+* kernel: the `μ` guard (`descGuarded`) looks through a constant applied to arguments,
+  so `def D (u : Unit) := Desc.rec …; μ (D ()) ()` gets the unguarded-description error
+  like the direct `μ (Desc.rec …) ()`. A declared `inductive` is unchanged: its
+  constructor tag is a genuine `Desc.arg` field, so `Nat`/`List` are guarded and
+  `inductive Bad where | mk (x : Bad)` (the empty type Lean also accepts) still is.
 * web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
   `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
   `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the

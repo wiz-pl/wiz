@@ -687,19 +687,27 @@ def Runner.runTarget (r : Runner) (all : List Target) (t : Target) (extra : Arra
     spawn exe (renderArgs { c with inOutDir := false } pkgAbs pkgAbs ++ extra) c.env
   | _ => r.err s!"grail run: {t.name} is not an exe or a command target\n"; pure 2
 
-/-- Run the tests of these targets whose path contains one of `filters` (all, if none). -/
-def Runner.tests (r : Runner) (targets : List Target) (filters : List String) (update : Bool) :
-    IO (Array TestResult) := do
+/-- The test files of these targets whose path contains one of `filters` (all, if none). -/
+def Runner.selectTestFiles (r : Runner) (targets : List Target) (filters : List String) :
+    IO (Array String) := do
   let mut files := #[]
   for t in targets do
     if let .tests _ root := t then
       for f in ← testFiles r.ctx.dir root do
         if filters.isEmpty || filters.any (fun p => (f.splitOn p).length > 1) then files := files.push f
+  pure files
+
+/-- Run the tests of these targets whose path contains one of `filters` (all, if none).
+Also returns the selected files: a filter that selects none is not a pass, and the CLI
+makes it an error (`Grail/Cli.lean`). -/
+def Runner.tests (r : Runner) (targets : List Target) (filters : List String) (update : Bool) :
+    IO (Array String × Array TestResult) := do
+  let files ← r.selectTestFiles targets filters
   let (_, g) ← (files.forM fun f => do let _ ← addTest r.ctx.dir (libsOf targets) f).run {}
   let results : TestResults ← IO.mkRef {}
   let res ← r.schedule g (r.prep update results)
   let got ← results.get
-  pure (files.map fun f => match got[f]? with
+  pure (files, files.map fun f => match got[f]? with
     | some t => t
     | none =>
       let msg := match g.ids[s!"test {f}"]? >>= (res[·]?) with

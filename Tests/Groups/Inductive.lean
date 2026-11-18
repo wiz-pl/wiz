@@ -73,6 +73,12 @@ def inductiveGroup : Group where
         fails "def Bad : Type := μ (Desc.rec 1 () (Desc.ret ()) : Desc Unit) ()" "unguarded recursive description" },
     { name := "… also when the description is a definition (the check looks through it)", run := fun _ =>
         fails "def D : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef Bad : Type := μ D ()" "unguarded recursive description" },
+    { name := "… also when the definition is applied to a parameter (a declared T.desc A …)", run := fun _ =>
+        fails "def D (A : Type) : Desc Unit := Desc.rec 1 () (Desc.ret ())\ndef Bad : Type := μ (D Unit) ()" "unguarded recursive description" },
+    { name := "a guarded description through an applied definition is accepted", run := fun _ =>
+        ok "def D (A : Type) : Desc Unit := Desc.arg 1 A (fun _ => Desc.rec 1 () (Desc.ret ()))\ndef Good : Type := μ (D Unit) ()" },
+    { name := "a nested-but-positive inductive is accepted", run := fun _ =>
+        ok (indPrelude ++ "inductive Rose where\n  | leaf\n  | node (children : MyList Rose)\n") },
     { name := "a size variable that escapes its binder is rejected", run := fun _ =>
         fails (indPrelude ++ "def bad : Type := (Nat)^i") "unknown identifier" },
     { name := "a size must be a Size (a data variable is rejected)", run := fun _ =>

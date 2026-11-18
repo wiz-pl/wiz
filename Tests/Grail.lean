@@ -168,7 +168,7 @@ def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false) (
   | .ok (pkg, _) =>
     let r ← runner dir tc pkg 2 (← IO.mkRef "")
     let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs }
-    let res ← r.tests pkg.targets [] update
+    let (_, res) ← r.tests pkg.targets [] update
     pure (res, ← r.stats.get)
 
 def cmdTc : IO Toolchain := do pure { cacheDir := some (← IO.FS.createTempDir) }
