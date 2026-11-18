@@ -3386,8 +3386,9 @@ def selfHostGroup : Group where
     { name := "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals", run := fun _ => do
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         -- the ratio is measured on the host build (the clock is not in the embedded
-        -- prelude, so the self-hosted program below prints the verdicts only)
-        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) checkEkTiming
+        -- prelude, so the self-hosted program below prints the verdicts only); the unary
+        -- side is the slow one, so give the loaded-shard machine a longer budget
+        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) (timeout := 600) checkEkTiming
         -- and the self-hosted pipeline must decide the literal equation (the unary
         -- side is a 10 000-numeral reduction: at -O0 it does not fit the 60 s run
         -- budget, and the ratio above is the host build's claim anyway)
@@ -3579,7 +3580,7 @@ def selfHostGroup : Group where
         let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
           "def pf : Head := .hprf .nil .star\n" ++
           "def rf : Head := .hrefl (.venum 2) (.vtag 2 0)\n" ++
-          "def sameVal (a b : Val) : Bool := tmEq (quoteM .false 0 a) (quoteM .false 0 b)\n" ++
+          "def sameVal (a b : Val) : Bool := tmEq (quoteM .false .false 0 a) (quoteM .false .false 0 b)\n" ++
           "def ab (sp : Spine) : Spine := .sabsurd sp (.venum 2)\n" ++
           "def main : IO Unit := do\n" ++
           "  IO.println (b2s (sameVal (.vne pf (.sfst .snil)) (.vne pf (.ssnd .snil))));\n" ++
@@ -3891,7 +3892,7 @@ def selfHostGroup : Group where
         -- the backend test does not need the CLI driver (which expects the generated
         -- parser tables and toolchain constants): checker + Backend only
         let src ← (Selfhost.frontendFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
-        let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
+        let show1 (q : String) := s!"(match eraseCheck .nil empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
         let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
           s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"
         let kept := "(let " ++ "#0" ++ "; "
