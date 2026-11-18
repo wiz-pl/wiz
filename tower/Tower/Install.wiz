@@ -125,20 +125,37 @@ def Tower.resolveSpec (s : Settings) (spec : String) : EIO Want :=
 
 -- ## Wrappers
 
--- the flag words a wrapper passes (` --cflags '…'`)
-def Tower.flagWords (flags : List (String × String)) : String :=
-  String.join (List.map (fun (k : String) => match String.lookup k flags with
-    | .some v => " --" & k & " " & Tower.shQuote v
-    | .none => "") Tower.flagKeys)
+-- the flags one setting stands for: `-I` for a search path (`root`), the bare
+-- `--region-cache` when it is on, and `--KEY VALUE` otherwise
+def Tower.flagWord (k v : String) : String :=
+  match String.eq k "root" with
+  | .true => " -I " & Tower.shQuote v
+  | .false => match String.eq k "region-cache" with
+    | .true => match String.eq v "true" with
+      | .true => " --region-cache"
+      | .false => ""
+    | .false => " --" & k & " " & Tower.shQuote v
 
--- `bin/wiz` and `bin/grail` of a toolchain whose binaries are in `binDir` and whose
--- standard library is `lib`: they run the binary with the toolchain's flags.
-def Tower.writeWrappers (tc binDir lib name : String) (flags : List (String × String)) : EIO Unit := do
+-- the flag words a wrapper passes (` --cflags '…'`; `root` and `cache-ro` may repeat)
+def Tower.flagWords (flags : List (String × String)) : String :=
+  String.join (List.map (fun (k : String) =>
+    String.join (List.map (fun (p : String × String) => Tower.flagWord p.1 p.2)
+      (List.filter (fun (p : String × String) => String.eq p.1 k) flags))) Tower.flagKeys)
+
+-- `bin/wiz` and `bin/grail` of a toolchain whose binaries are in `binDir`, whose
+-- standard library is `lib` and whose read-only cache is `cache` (it is at `cacheHave`
+-- now: an install writes the wrappers in the temporary `tc` and then renames it). When
+-- the cache exists, both wrappers pass it, as the Nix package's wrapper does.
+def Tower.writeWrappers (tc binDir lib cacheHave cache name : String) (flags : List (String × String)) : EIO Unit := do
   let head := "#!/bin/sh\n# toolchain " & name & ", written by tower: the binary with this toolchain's flags\n";
+  ex ← EIO.lift (FS.isDir cacheHave);
+  let ro := (match ex with
+    | .true => " --cache-ro " & Tower.shQuote cache
+    | .false => "" : String);
   Tower.writeScript (Path.join tc "bin/wiz")
-    (head & "exec " & Tower.shQuote (Path.join binDir "wiz") & Tower.flagWords flags & " -I " & Tower.shQuote lib & " \"$@\"\n");
+    (head & "exec " & Tower.shQuote (Path.join binDir "wiz") & Tower.flagWords flags & " -I " & Tower.shQuote lib & ro & " \"$@\"\n");
   Tower.writeScript (Path.join tc "bin/grail")
-    (head & "exec " & Tower.shQuote (Path.join binDir "grail") & Tower.flagWords flags & " \"$@\"\n")
+    (head & "exec " & Tower.shQuote (Path.join binDir "grail") & Tower.flagWords flags & ro & " \"$@\"\n")
 
 -- ## Sources
 
@@ -425,7 +442,8 @@ def Tower.finish (e : TEnv) (spec final work tc : String) (r : Info × Option St
   let info := r.1;
   FS.writeFile (Path.join tc "tower.info") (Info.render info);
   (match r.2 with
-    | .none => Tower.writeWrappers tc (Path.join final "share/wiz/.lake/build/bin") (Path.join final "share/wiz/lib") spec info.flags
+    | .none => Tower.writeWrappers tc (Path.join final "share/wiz/.lake/build/bin") (Path.join final "share/wiz/lib")
+      (Path.join tc "share/wiz/cache") (Path.join final "share/wiz/cache") spec info.flags
     | .some p => EIO.pure () : EIO Unit);
   Tower.removeAll final;
   FS.rename tc final;
@@ -495,7 +513,8 @@ def Tower.link (e : TEnv) (name dir0 : String) (flags : List (String × String))
   checkout ← EIO.lift (FS.exists (Path.join dir ".lake/build/bin/wiz"));
   layout ← EIO.lift (FS.exists (Path.join dir "bin/wiz"));
   (match checkout with
-    | .true => Tower.writeWrappers work (Path.join dir ".lake/build/bin") (Path.join dir "lib") name flags
+    | .true => Tower.writeWrappers work (Path.join dir ".lake/build/bin") (Path.join dir "lib")
+      (Path.join dir "share/wiz/cache") (Path.join dir "share/wiz/cache") name flags
     | .false => match layout with
       | .true => Tower.linkBins work dir ("bin" :> "share" :> .nil)
       | .false => do
