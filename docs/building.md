@@ -643,6 +643,34 @@ step only substitutes (`--max-jobs 0`): `wiz` comes from the timing job's build 
 the same runner or from Cachix, and a Lean compile never runs under this budget.
 `--phases` (about 6 GiB, the in-process checker build) is not part of the nightly.
 
+## Nix builds on a second host
+
+A Nix build's output is content-addressed, so a second machine with its own store
+does not have to compile what this one already built: it substitutes `.#wiz`/`.#tests`
+from Cachix (`https://badlydrawnwizards.cachix.org`), and its `nixpkgs`-pinned
+dependencies from `https://cache.nixos.org`. Paths that no cache has — a worktree
+build, a branch CI has not pushed — are copied explicitly with
+`nix copy --from ssh://<host>` from a machine whose store has them. That copy is
+also how a machine gets the *inputs* for a build it must do itself.
+
+Two things are worth knowing before trusting a build to a second host:
+
+* **A multi-user Nix daemon ignores `substituters` from an untrusted user.** If the
+  daemon's `trusted-users` does not include the build user, `~/.config/nix/nix.conf`
+  can enable `nix-command`/`flakes` but its cache list is ignored ("ignoring
+  untrusted substituter") and `nix build` refuses to fetch. Either add the user to
+  `trusted-users` once (as root) or copy explicitly with `nix copy --from`, which
+  works for any user.
+* **Build output belongs in the store, the source may not.** `nix build` first copies
+  the tree into the store, so a worktree on a slow (sshfs) mount pays one source copy
+  per changed tree: measured on a 3 MB/s link, `nix flake metadata` took about five
+  minutes cold and 4.8 s once the tree was in the store; `git status` over the same
+  1,690 files took 80 s. The output then goes to the store, so later builds in the
+  same tree do not cross the network. `nix develop` is a bigger first step: its
+  closure includes LLVM, Python, Node, yosys and Neovim (17.6 GiB), and elan then
+  downloads the Lean toolchain separately; `nix build .#tests` needs 10.4 GiB of
+  build inputs instead.
+
 ## Continuous integration
 
 `nix develop` (or direnv: `.envrc` is `use flake`) gives the toolchain the tests need
