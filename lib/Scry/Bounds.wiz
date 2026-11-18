@@ -113,6 +113,17 @@ def Scry.boundsUntrustedAt (r : Scry.FuncResult) (point var : Nat) : Bool :=
 
 -- ## Constants reached at a point
 
+/-- The definitions of register `var` that reach its use at `point`. The production
+taint engine builds a flow-only `Scry.FnInfo` (`Scry.fnInfoFlowWithG`: `rd` and `dom`
+empty, because the point-level tables are quadratic on a huge function), so the def-use
+index answers the question; a full `Scry.fnInfo` (the tests) still uses `rd`. Every
+query here is at a point that uses `var` (an access's pointer, a copy's source, a branch
+condition), which is exactly where the index has the reaching definitions. -/
+def Scry.boundsReaching (info : Scry.FnInfo) (point var : Nat) : List Nat :=
+  match info.rd with
+  | .nil => Scry.mapListGet info.depIdx (UIntN.toNat (Scry.depKey point var))
+  | _ => Scry.rdForVar info.defs info.rd point var
+
 def Scry.boundsValNat (v : Wil.Val) : Option Nat :=
   match v with
   | .int _ _ bits => .some bits
@@ -125,7 +136,7 @@ partial def Scry.boundsConstAt (info : Scry.FnInfo) (g : Scry.Fn) (point var fue
   match fuel with
   | .zero => .none
   | .succ k =>
-    let defs := Scry.rdForVar info.defs info.rd point var;
+    let defs := Scry.boundsReaching info point var;
     match Scry.ptFilterMap (fun d =>
         match Scry.nodeStmt g d with
         | .none => .none
@@ -247,7 +258,7 @@ def Scry.boundsIndexSites (info : Scry.FnInfo) (g : Scry.Fn) (point var : Nat) :
     | .some s => match s with
       | .assign _ (.gepVar base idx scale) _ =>
         .some (Scry.BoundsIndexSite.mk d base idx scale)
-      | _ => .none) (Scry.rdForVar info.defs info.rd point var)
+      | _ => .none) (Scry.boundsReaching info point var)
 
 /-- `(base location, recorded capacity / stride)` for a pointer register. A capacity of
 `0` means "unknown". -/
@@ -389,9 +400,19 @@ def Scry.boundsOfFunc (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.P
   | .none => Scry.boundsEmpty
   | .some r =>
     let g := r.plan.info.g;
-    List.foldr (fun n acc => Scry.boundsAppend acc
-      (Scry.boundsStmtAt writeRule readRule pt sizes r fn g n))
-      Scry.boundsEmpty (Scry.range g.count)
+    let run := fun (r1 : Scry.FuncResult) => List.foldr (fun n acc => Scry.boundsAppend acc
+      (Scry.boundsStmtAt writeRule readRule pt sizes r1 fn g n))
+      Scry.boundsEmpty (Scry.range g.count);
+    let first := run r;
+    -- A flow-only plan has no dominator sets, so no guard can be proved in `first`.
+    -- Guards only remove findings (the unknown-size diagnostics do not consult them), so
+    -- the dominators are computed, once, only for a function that has a candidate.
+    match first.findings, r.plan.info.dom with
+    | .nil, _ => first
+    | _, .cons _ _ => first
+    | _, .nil =>
+      let info := { r.plan.info with dom := Scry.dominators g };
+      run { r with plan := { r.plan with info := info } }
 
 /-- Run the two out-of-bounds rules of `pack`. Neither rule in the pack means no
 findings and no diagnostics; the pack is still the only way to enable the family. -/

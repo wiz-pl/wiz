@@ -703,7 +703,8 @@ WIZ_API uint64_t wiz_sys_exec(const char *cmd, wiz_val args) {
   wiz_sys_free_strings(argv);
   return (uint64_t)e;
 }
-WIZ_API void wiz_sys_exit(uint64_t code) { exit((int)code); }
+/* `Process.exit`: an armed boundary (rt_core.inc) catches it; native builds exit. */
+WIZ_API void wiz_sys_exit(uint64_t code) { wiz_clean_exit((int)code); }
 WIZ_API uint64_t wiz_sys_getpid(void) { return (uint64_t)getpid(); }
 
 /* ---- (sys-bytes) paths, the program's own path, clocks ---- */

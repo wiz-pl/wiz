@@ -25,9 +25,11 @@ def usage : String := "usage:
                           letters, digits, '_' or '-'
   grail build [TARGET…]   build the package's targets (by default all but the
                           bootstrap check, which takes minutes)
-  grail test [FILTER…] [--update]
+  grail test [FILTER…] [--update] [--rerun]
                           run the tests (of `tests` targets) whose path contains a
-                          filter; --update writes the actual output to .expected
+                          filter; --update writes the actual output to .expected;
+                          --rerun runs tests with a recorded pass again (and records
+                          the new result: a pass, or no pass)
   grail update [--locked] resolve the dependencies again and write grail.lock
                           (builds use the lock only); --locked fails if the lock
                           would change
@@ -79,7 +81,8 @@ def usage : String := "usage:
 options: -C DIR (the package directory), --dir DIR (with `new`: where to write the
   package, instead of ./NAME), --std DIR (the standard library),
   -j N (jobs at once; default: the number of cores, at most 4),
-  --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300),
+  --timeout SECS (a job's time limit, default 1800), --test-timeout SECS (default 300;
+  a test's `-- test: run timeout SECS` line may ask for more),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
   a read-only cache, searched in order after the write cache), --no-cache (both),
@@ -557,10 +560,12 @@ def cliMain (args : List String) : IO UInt32 := do
       -- runner at its 300 s default — a "timed out (300 s)" that no flag could raise.
       let (topts, rest) := grailOpts {} rest
       let update := rest.contains "--update"
-      let filters := rest.filter (· != "--update")
+      let rerun := rest.contains "--rerun"
+      let filters := rest.filter (fun a => a != "--update" && a != "--rerun")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
           (1000 * (topts.testTimeout.getD 300))
+      let r : Runner := { r with rerunTests := rerun }
       let results ← r.tests pkg.targets filters update
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size

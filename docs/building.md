@@ -705,7 +705,9 @@ setup action keeps the elan cache for those
   no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting). See
+  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting, and
+  again end to end on the matrix the jobs are started from; `check-shards --self-test`
+  checks the check on a stand-in driver). See
   "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
@@ -790,6 +792,27 @@ setup action keeps the elan cache for those
   `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
+* **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
+  (after a perf fix, or when a group grows), fetch the last runs and rebalance:
+
+  ```sh
+  r=$(mktemp -d)
+  scripts/ci.py fetch-runs --branch 'master|integration/.*' 14 "$r"
+                                               # $r/RUN/timings.jsonl and jobs.json
+  scripts/ci.py rebalance "$r"/*               # report only
+  scripts/ci.py rebalance --write "$r"/*       # .github/test-timings.json, test-shards.json
+  ```
+
+  A case's time is its median over the runs, and each part's prediction is scaled by
+  its shard's measured wall time over its case sum (`"jobs"` overlaps cases: `library`
+  runs at about 0.86 of its case sum). The split counts grow a part at a time, to the
+  shard with the longest part, until the job budget (`--jobs`, default the current
+  number of test jobs) is used or another part would not shorten the longest one; a
+  long job that cannot be split does not stop it. It exits with an error if the parts
+  do not cover every case of the split shards exactly once. The case list is the test driver's (`--bin`), or the last run's; cases that no
+  run has measured yet (a case just split) can be given with `--assume TSV`
+  (`GROUP<TAB>CASE<TAB>SECONDS`, or `drop` for a case that is gone). It prints the
+  predicted time of every job under the current and the new counts.
 * **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
   opted-in groups run N cases at a time, and a lone case may use N workers itself.
   Only set it on a shard whose groups were verified (and opted in) to be safe in
@@ -828,9 +851,13 @@ setup action keeps the elan cache for those
   limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
   minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
   3-worker auto pool (splitting it into cases would make each part build the
-  self-hosted compiler again). `scaling`'s sweep used to be a single case; it is now
-  nine cases over the same inputs, measured on CI in `.github/test-timings.json`
-  (1330 s in total, the longest 229 s), so the shard's parts can each hold one.
+  self-hosted compiler again). Split such a case in its test instead, into cases over
+  parts of its input that together check the same things: `scaling`'s sweep of the
+  induction hypotheses over `lib/` and `examples/` (up to 31 min as one case) was one
+  case; it is now nine cases (one for `lib/`, one for the modules checked apart, six
+  over the examples, and one that checks that the six cover every example once), measured
+  on CI in `.github/test-timings.json` (1330 s in total, the longest 229 s), so the
+  shard's parts can each hold one.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
@@ -1207,10 +1234,14 @@ with `didOpen`, so the positions are the ones the page was generated from. Start
 language server from the module root, or with `-I` roots, so its imports resolve:
 
 ```sh
-.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib &
+.lake/build/bin/wiz lsp --ws 8765 --no-stdio -I lib --token-file lsp-token &
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out --serve --lsp 8765
-# then http://127.0.0.1:8000/
+# then http://127.0.0.1:8000/?token=T, with T from lsp-token
 ```
+
+The language server lets in only clients that present its token (`?token=` in the
+page's URL is passed on to the socket; docs/playground-lsp.md, "The token"); the pages
+never carry it themselves.
 
 `--serve` without `--lsp` writes the same documentation plus the inert client: there is
 no socket and no fetch, and the pages read without JavaScript. `?lsp=PORT` (or

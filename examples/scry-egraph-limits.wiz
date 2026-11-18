@@ -1,0 +1,55 @@
+import Scry.EgraphNative
+-- Saturation limits and stop reasons (`scry-egraph-limits`): `saturateLimited` reports
+-- whether it hit a fixpoint, the round (fuel) cap, the node cap or the clock cap. Both
+-- were given the same small graph. `main` is the digest.
+
+-- ops: 0 = x, 1 = f, 2 = g, 3 = add, 4 = mul, 5 = zero, 6 = one
+def pF : Scry.Pat := .pnode 1 (.pcons (.var 0) .pnil)
+def pGx : Scry.Pat := .pnode 2 (.pcons (.var 0) .pnil)
+def rGrow : Scry.Rewrite := Scry.Rewrite.mk pF (.pnode 1 (.pcons pGx .pnil))
+
+def growGraph : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let fx := Scry.EGraph.add x.1 (Scry.ENode.mk 1 [x.2]);
+  fx.1
+
+def pZero : Scry.Pat := .pnode 5 .pnil
+def pOne : Scry.Pat := .pnode 6 .pnil
+def rAddZero : Scry.Rewrite := Scry.Rewrite.mk
+  (.pnode 3 (.pcons (.var 0) (.pcons pZero .pnil))) (.var 0)
+def rMulOne : Scry.Rewrite := Scry.Rewrite.mk
+  (.pnode 4 (.pcons (.var 0) (.pcons pOne .pnil))) (.var 0)
+
+def fixGraph : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let z := Scry.EGraph.add x.1 (Scry.ENode.leaf 5);
+  let o := Scry.EGraph.add z.1 (Scry.ENode.leaf 6);
+  let mx := Scry.EGraph.add o.1 (Scry.ENode.mk 4 [x.2, o.2]);
+  let root := Scry.EGraph.add mx.1 (Scry.ENode.mk 3 [mx.2, z.2]);
+  root.1
+
+/-- A stop reason as a digit (`fixpoint = 1`, `fuel = 2`, `nodeCap = 3`, `timeCap = 4`). -/
+def reasonCode (r : Scry.StopReason) : Nat :=
+  match r with
+  | .fixpoint => 1
+  | .fuel => 2
+  | .nodeCap => 3
+  | .timeCap => 4
+
+def main : Nat :=
+  let fuel := Scry.EGraph.saturateLimited (fun _ => 0)
+    (Scry.Limits.mk 1 1000 .none) growGraph [rGrow];
+  let cap := Scry.EGraph.saturateLimited (fun _ => 0)
+    (Scry.Limits.mk 20 2 .none) growGraph [rGrow];
+  let timed := Scry.EGraph.saturateLimited (fun r => Nat.mul r 100)
+    (Scry.Limits.mk 20 1000 (.some 50)) growGraph [rGrow];
+  let fix := Scry.EGraph.saturateLimited (fun _ => 0)
+    (Scry.Limits.mk 20 1000 .none) fixGraph [rAddZero, rMulOne];
+  reasonCode fix.reason * 100000 +
+  reasonCode fuel.reason * 10000 +
+  reasonCode cap.reason * 1000 +
+  reasonCode timed.reason * 100 +
+  fuel.rounds * 10 +
+  Scry.EGraph.numNodes fix.g

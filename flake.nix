@@ -374,9 +374,28 @@
               platforms = systems;
             };
           };
-        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz; };
+          # The self-hosted toolchain chain (docs/bootstrap-chain.md): a prototype, not built
+          # by CI and not pinned by any commit until the chain's root is declared.
+          # `wizc` is the fixpoint compiler built from the Lean host's seed, `wizc-release`
+          # its self-contained release tarball; `legacyPackages.SYSTEM.bootstrapChain` has
+          # the functions (`step`, `fetchToolchain`).
+          bootstrapChain = import ./nix/bootstrap-chain.nix {
+            inherit pkgs lib;
+            hostWiz = wiz;
+            selfhostSrc = fs.toSource { root = ./.; fileset = ./selfhost; };
+            inherit (unwrapped) version;
+          };
+        in {
+          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz;
+          wizc = bootstrapChain.wizc;
+          wizc-seed = bootstrapChain.seed;
+          wizc-release = bootstrapChain.release { };
+          inherit bootstrapChain;
+        };
     in {
-      packages = forAll packagesFor;
+      # (packages without the function set, which is not a derivation)
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
 
       apps = forAll (pkgs:
         let

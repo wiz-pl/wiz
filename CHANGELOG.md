@@ -10,6 +10,28 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
+  the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
+  `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,
+  `runtime/rt_con.inc`) with its exit code instead of calling `exit`. The runtime still
+  prints its `wiz: …` message on stderr, `web/playground-engine.js` returns the code as
+  `wiz_playground_exit` (code + 1, 0 for none), and the pane shows it as a failure while
+  the module and the page's state survive: the next run works on the same instance.
+  Only an out-of-memory `wiz_panic` (an `ExitStatus` outside the boundary) and a trap
+  (`unreachable`, out-of-bounds access, stack overflow) still drop and re-instantiate the
+  module from the cached Wasm. Native builds are unchanged: with no boundary armed,
+  `exit` is still `exit`, so the CLI's status, `atexit` and the stdio flush are as
+  before. The guard is covered under Node with a stub module
+  (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`); the runtime boundary,
+  the native exit status and the unarmed `exit` are in `scripts/test-runtime.sh`. No
+  emcc, no Wiz build and no browser are needed for the stubs.
+* CI: the quadratic-shape lint (`scripts/check-complexity`) takes its excuses inline, on
+  the hit's line or the line above it (`-- complexity: ok (why it is bounded)`);
+  `scripts/complexity-allow.tsv` is gone. A row in a table keyed by a line hash could not
+  survive a move or a reformat — the row went stale, or the moved line read as new — so a
+  pull request that touched a reviewed site failed on a defect it had not introduced. The
+  reason now travels with the code it excuses and appears in the same diff. `--all` lists
+  the remaining backlog (152 sites) rather than hiding it behind rows.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
@@ -139,6 +161,36 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one
   side deleted and the other modified is a conflict the driver refuses (22f).
+* grail test (23f): `--rerun` runs tests whose pass is recorded again instead of reporting
+  the recorded pass; the result replaces the record (a failure removes it). Before, forcing
+  a cached test meant `--update` and a `git diff` of the `.expected` files.
+* grail test (23f): a test may declare its own time limit, `-- test: run timeout 900`
+  (or `check … timeout SECS`); the larger of it and `--test-timeout` applies to the test's
+  job and to its program, so one long test no longer needs a large flag on every run.
+* `wiz lsp --ws` (breaking for its clients) requires a token: an upgrade without
+  `?token=T` or `Authorization: Bearer T` gets `401`, so a local program can no longer
+  connect, open documents and have them elaborated as you. The token is fresh per launch
+  and printed on stderr, or read from `--token-file FILE` (created 0600 if missing);
+  `--ws-insecure` (loopback only) turns the check off. `wiz/browserInfoview`, the web
+  infoview, the playground and `wiz doc --serve`'s panel pass it on (11o, #430).
+* LSP: references, document highlights, `prepareRename` and rename work with the cursor
+  on a declaration's own name (a `def`/`inductive`/`structure` header, a constructor, a
+  structure field), with the same answer as from a use; a constructor or field renamed
+  within its namespace is edited where it is declared too (11y, #434).
+* LSP: two one-shot requests that need no session or ref: `wiz/typeAt` (the innermost
+  elaborated term at a position, its type and range) and `wiz/coreTerm` (a
+  declaration's type and value as core terms, its kind, native implementation and
+  axioms); both are infoview methods too (11, #435).
+* `=selfhost-libdiff` reports its progress while it runs: the compiler build, one line per
+  file as it finishes (verdict, seconds), a heartbeat every 60 s (files done, elapsed, free
+  memory) and the counts at the end. A case's `Tests.progress` lines go to the driver's
+  standard error at once, indented; they are not notes or output and change no verdict.
+* `=selfhost-libdiff` checks its files N at a time under the driver's `--jobs N` (and
+  `tests --libdiff --jobs N`), capped by the CPUs and by the free memory (cgroup-aware) at
+  `--mem` per file; each file once, records in file order, the same verdicts (exit 3
+  stays `bounded`). A case of a group that runs its cases one at a time now receives
+  `--jobs` (`Tests.caseJobs`). The records carry each side's `ms`, the summary the
+  slowest runs (21ae).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
@@ -303,6 +355,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   no sharing between worktrees). It is opt-in (not in the dev shell), and
   `.github/workflows/tools.yml` runs its unit tests on every change under `tools/`,
   with the end-to-end smoke test on manual dispatch.
+
+* scry: a `Wil` e-graph layer (`Scry.EgraphWil`, `Scry.EgraphExtract`,
+  `Scry.EgraphTaint`). `wgSaturate` folds constants and identities on a read-only view;
+  `wgeRewriteProgram` writes back only checked single-statement rewrites (one-block
+  function, operands already registers of the right-hand side with a single earlier
+  definition, strictly cheaper extracted term); and `wgeTaintDiff` compares taint alerts
+  before and after (`added = 0` by construction, `removed` is a precision gain).
+  `scry egraph FILE.c [--fuel N] [--rewrite]` runs it from the CLI. The native-table
+  e-graph (`Scry.EgraphNative`, with analyses, explanations, limits and `Option`
+  extraction costs) and the equality-sort Datalog planner (`Scry.EqPlan`) are the second
+  S12 slice. `Scry.Egraph` and `Scry.EgraphNative` share names but not the record type
+  (seven fields against five) or the `applyAt`/`applyMatches` signature, and cannot be
+  imported into one program; they are not drop-in replacements. Six of the seventeen
+  e-graph examples are differential. Groups `scry-egraph` and `scry-taint` cover them.
 
 ## [0.1.0] - unreleased (draft)
 

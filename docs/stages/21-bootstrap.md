@@ -1142,6 +1142,7 @@ heavy --mem 4G .lake/build/bin/tests --libdiff --limit 10      # a first look
 heavy --mem 4G .lake/build/bin/tests --libdiff --only lib/Hoare.wiz
 heavy --mem 4G .lake/build/bin/tests --libdiff --json > gap.jsonl
 heavy --mem 4G .lake/build/bin/tests --libdiff --baseline libdiff-baseline.json
+heavy --mem 14G .lake/build/bin/tests --libdiff --jobs 3       # three files at a time
 lake test -- '=selfhost-libdiff'                               # the same, as a group
 ```
 
@@ -1150,6 +1151,21 @@ self-hosted compiler, and never fails because of a gap; it writes the full repor
 `.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
 case's output. CI runs it as its own shard (`selfhost-libdiff` in
 `.github/test-shards.json`).
+
+The sweep is one case, because building the self-hosted compiler takes minutes and
+every file needs it, so it is split inside the case: `--jobs N` (on `tests --libdiff`, or
+the driver's `--jobs N`, which a group that runs its cases one at a time passes on to
+them; in CI the shard's `"jobs"`) checks N files at a time. The workers take the files off
+one list, each exactly once, and the records come back in the files' order, so the
+report, the verdicts and the baseline signatures are a sequential sweep's. Each file
+keeps its own bounds, which start when its run starts. What could change a verdict is
+an oversubscribed machine, so the workers are capped by the CPUs (`nproc`) and by the
+free memory at `--mem` per file: the least of `MemAvailable` and each enclosing cgroup's
+`memory.max` minus `memory.current`, so a `heavy --mem 7G` job runs one file at a time
+and a 16 GB runner three. A worker also starts its next file only while that much memory
+is free or no other file is running. The summary reports the slowest host and
+self-hosted runs (and `ms` per side in the records), the margin to the 60 s and 120 s
+bounds.
 
 `--only` and `--limit` make it usable as the A13 work list: the gap list groups the
 files whose verdicts differ by the construct the self-hosted frontend names

@@ -34,9 +34,21 @@ def wfjoin(a, b):
 log = os.environ.get("FAKE_LOG_PATH") or open(os.path.join(os.path.dirname(__file__), "log-path")).read().strip()
 with open(log, "a") as h:
     h.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ)}) + "\n")
+files = open(os.path.join(os.path.dirname(__file__), "files")).read().split(",")
+if argv[:1] == ["dynamic"]:
+    if "--sarif" in argv:
+        json.dump({"version": "2.1.0", "runs": [{"results": [
+            {"ruleId": "asan", "locations": [{"physicalLocation": {"artifactLocation": {"uri": "file://" + f}}}]}
+            for f in files]}]}, open(argv[argv.index("--sarif") + 1], "w"))
+    print(json.dumps({"tool": "scry", "events": [{"kind": "heap-use-after-free"}],
+                      "findings": [{"rule": "asan", "location": {"uri": f, "startLine": 3}} for f in files]}))
+    sys.exit(0)
+if argv[:2] in (["findings", "repro"], ["findings", "verify"]):
+    print(json.dumps({"finding": argv[2], "source": files[0], "verdict": argv[1] + "-ok"})); sys.exit(0)
+if argv[:2] == ["findings", "triage"]:
+    print(argv[2] + ": new -> " + argv[argv.index("--state") + 1]); sys.exit(0)
 # stray writes land in the cwd and HOME; the test checks they stay in the temp dir
 open("stray.txt", "w").write("x")
-files = open(os.path.join(os.path.dirname(__file__), "files")).read().split(",")
 if argv[:1] == ["--version"]:
     print("scry 0.0.0-fake"); sys.exit(0)
 if argv[0] in ("taint", "project"):
@@ -190,7 +202,13 @@ class ToolListTests(Base):
 
     def test_unknown_arguments_and_tools(self) -> None:
         self.assertEqual(self.call("scry_taint", {"path": "src/a.c", "sarif": "/tmp/x"})["error"]["kind"], "invalid_args")
-        self.assertIn("error", self.rpc("tools/call", {"name": "scry_dynamic", "arguments": {}}))
+        self.assertIn("error", self.rpc("tools/call", {"name": "scry_nope", "arguments": {}}))
+        # The phase 3 runners are known tools, but off without their flags: refused before anything runs.
+        for name in ("scry_dynamic", "scry_repro", "scry_verify", "scry_triage", "job_status", "job_cancel"):
+            reply = self.rpc("tools/call", {"name": name, "arguments": {}})["result"]
+            self.assertTrue(reply["isError"], name)
+            self.assertEqual(reply["structuredContent"]["error"]["kind"], "not_enabled", name)
+        self.assertEqual(self.calls(), [])
 
 
 class TaintTests(Base):
@@ -610,6 +628,135 @@ class StoreAndFindingsTests(Base):
         self.assertEqual(db.read_text(), before)
         argv = self.calls()[-1]["argv"]
         self.assertIn("--json", argv)
+
+
+sys.path.insert(0, str(HERE.parent.parent / "wiz-mcp" / "tests"))
+from test_wiz_runners import FAKE_BWRAP, FAKE_HEAVY, FAKE_LIGHT, STATUS_BUSY, STATUS_IDLE, write_exe  # noqa: E402
+
+import wiz_runners  # noqa: E402
+
+
+class RunnerTests(Base):
+    """The phase 3 runners against stand-in heavy/light/bwrap scripts (no compiler, no real run)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bin = self.scry.parent
+        self.heavy = write_exe(self.bin, "heavy", FAKE_HEAVY)
+        self.light = write_exe(self.bin, "light", FAKE_LIGHT)
+        self.bwrap = write_exe(self.bin, "bwrap", FAKE_BWRAP)
+        (self.bin / "status.txt").write_text(STATUS_IDLE)
+        self.db = self.ws / "scry-workflow" / "findings.json"
+        self.db.parent.mkdir()
+        self.db.write_text(json.dumps({"findings": [{"id": "f_0123456789abcdef", "source": str(self.ws / "src" / "a.c")}]}))
+        self.server.close()
+        self.server = self.runner_server()
+
+    def runner_server(self, **overrides) -> "scry_mcp.Server":
+        options = dict(workspace=str(self.ws), scry=str(self.scry), timeout=30, allow_dynamic=True, allow_triage=True,
+                       runner=wiz_runners.RunnerConfig(heavy=self.heavy, light=self.light, bwrap=self.bwrap))
+        options.update(overrides)
+        return scry_mcp.Server(scry_mcp.Config(**options))
+
+    def lines(self, name: str) -> list[str]:
+        path = self.bin / name
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_runners_are_listed_only_with_their_flags(self) -> None:
+        names = {t["name"] for t in self.rpc("tools/list", {})["result"]["tools"]}
+        self.assertTrue({"scry_dynamic", "scry_repro", "scry_verify", "scry_triage", "job_status", "job_cancel"} <= names)
+        only_triage = self.runner_server(allow_dynamic=False)
+        try:
+            listed = {t["name"] for t in only_triage.dispatch(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})[0][0]["result"]["tools"]}
+        finally:
+            only_triage.close()
+        self.assertIn("scry_triage", listed)
+        self.assertFalse({"scry_dynamic", "scry_repro", "scry_verify", "job_status"} & listed)
+        for tool in scry_mcp.RUNNER_TOOLS:
+            self.assertFalse(tool["annotations"]["readOnlyHint"], tool["name"])
+            self.assertFalse(tool["annotations"]["openWorldHint"], tool["name"])
+
+    def test_dynamic_runs_through_heavy_in_a_sandbox_and_confines_its_report(self) -> None:
+        self.set_files([str(self.ws / "src" / "a.c"), str(self.outside / "secret.c")])
+        out = self.call("scry_dynamic", {"path": "src/a.c", "wait": 10})
+        self.assertTrue(out["ok"], out)
+        heavy = self.lines("heavy.argv")
+        self.assertEqual(heavy[:6], ["--mem", "4G", "timeout", "-k", "30", "600"])
+        command = heavy[heavy.index("--") + 1:]
+        self.assertEqual(command[:3], [str(self.scry), "dynamic", str(self.ws / "src" / "a.c")])
+        self.assertIn("--no-coverage", command)
+        self.assertEqual(command[command.index("--timeout") + 1], "10")
+        bwrap = " ".join(self.lines("bwrap.argv"))
+        self.assertIn("--unshare-net", bwrap)
+        self.assertIn("--tmpfs " + os.path.realpath(os.path.expanduser("~")), bwrap)
+        self.assertIn(f"--ro-bind {self.ws} {self.ws}", bwrap)
+        result = out["result"]["result"]
+        self.assertEqual(result["_run"]["withheld"], 1)
+        self.assertEqual(len(result["findings"]), 1)
+        sarif = self.rpc("resources/read", {"uri": result["_run"]["sarif_uri"]})["result"]["contents"][0]["text"]
+        self.assertNotIn("secret.c", sarif)
+
+    def test_dynamic_outside_the_workspace_is_refused(self) -> None:
+        for path in (str(self.outside / "secret.c"), "../outside/secret.c"):
+            self.assertEqual(self.call("scry_dynamic", {"path": path})["error"]["kind"], "path_denied")
+        self.assertEqual(self.call("scry_dynamic", {"path": "src/a.c", "run_timeout": 999})["error"]["kind"], "invalid_args")
+        self.assertEqual(self.lines("heavy.argv"), [])
+
+    def test_repro_takes_no_compiler_harness_or_environment(self) -> None:
+        for extra in ({"cc": "sh"}, {"harness": "x.sh"}, {"env": "LD_PRELOAD=x"}):
+            out = self.call("scry_repro", dict({"id": "f_0123456789abcdef"}, **extra))
+            self.assertEqual(out["error"]["kind"], "invalid_args", extra)
+        self.assertEqual(self.lines("heavy.argv"), [])
+        out = self.call("scry_repro", {"id": "f_0123456789abcdef", "sanitize": "address", "wait": 10})
+        self.assertEqual(out["result"]["state"], "done", out)
+        self.assertEqual(out["result"]["result"]["verdict"], "repro-ok")
+        command = self.lines("heavy.argv")
+        command = command[command.index("--") + 1:]
+        self.assertEqual(command[1:4], ["findings", "repro", "f_0123456789abcdef"])
+        for flag in ("--cc", "--harness", "--env"):
+            self.assertNotIn(flag, command)
+        bwrap = " ".join(self.lines("bwrap.argv"))
+        self.assertIn(f"--bind {self.db.parent} {self.db.parent}", bwrap)
+
+    def test_finding_database_must_be_a_real_file_in_the_workspace(self) -> None:
+        (self.outside / "db.json").write_text("{}")
+        (self.ws / "link.json").symlink_to(self.outside / "db.json")
+        for db in (str(self.outside / "db.json"), "link.json", "missing.json"):
+            out = self.call("scry_verify", {"id": "f_0123456789abcdef", "db": db})
+            self.assertIn(out["error"]["kind"], ("path_denied", "not_found"), db)
+        self.assertEqual(self.call("scry_verify", {"id": "--db=/x"})["error"]["kind"], "invalid_args")
+        self.assertEqual(self.call("scry_repro", {"id": "f_0123456789abcdef", "input": str(self.outside / "secret.c")})
+                         ["error"]["kind"], "path_denied")
+        self.assertEqual(self.lines("heavy.argv"), [])
+
+    def test_verify_withholds_a_source_outside_the_roots(self) -> None:
+        self.set_files([str(self.outside / "secret.c")])
+        out = self.call("scry_verify", {"id": "f_0123456789abcdef", "wait": 10})
+        self.assertEqual(out["result"]["result"]["withheld"], 1, out)
+        self.assertNotIn("secret.c", json.dumps(out["result"]["result"]))
+
+    def test_triage_goes_through_light_and_validates_its_arguments(self) -> None:
+        for bad in ({"id": "f_0123456789abcdef", "state": "wontfix", "reason": "x"},
+                    {"id": "f_0123456789abcdef", "state": "confirmed", "reason": " "},
+                    {"id": "f_0123456789abcdef", "state": "confirmed"}):
+            self.assertEqual(self.call("scry_triage", bad)["error"]["kind"], "invalid_args", bad)
+        self.assertEqual(self.lines("light.argv"), [])
+        out = self.call("scry_triage", {"id": "f_0123456789abcdef", "state": "confirmed", "reason": "ASAN repro"})
+        self.assertTrue(out["ok"], out)
+        self.assertIn("new -> confirmed", out["stdout"])
+        light = self.lines("light.argv")
+        self.assertEqual(light[0], self.bwrap)
+        command = light[light.index("--") + 1:]
+        self.assertEqual(command[command.index("--by") + 1], "scry-mcp")
+        self.assertEqual(self.lines("heavy.argv"), [])
+
+    def test_busy_heavy_is_refused(self) -> None:
+        (self.bin / "status.txt").write_text(STATUS_BUSY)
+        out = self.call("scry_dynamic", {"path": "src/a.c"})
+        self.assertEqual(out["error"]["kind"], "heavy_busy")
+        self.assertEqual(out["result"]["heavy"]["jobs"], 2)
+        self.assertEqual(self.lines("heavy.argv"), [])
 
 
 class HelperTests(unittest.TestCase):
