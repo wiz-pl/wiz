@@ -205,9 +205,9 @@ def cliMain (args : List String) : IO UInt32 := do
   let dir : System.FilePath := opts.dir.getD "."
   let std ← findStd opts.std
   let jobs := opts.jobs.getD (max 1 (min 4 (System.Platform.Internal.getHardwareConcurrency ()).toNat))
-  let mkRunner (ctx : Ctx) : IO Runner := do
+  let mkRunner (ctx : Ctx) (testTimeoutMs : Nat := 1000 * opts.testTimeout.getD 300) : IO Runner := do
     pure { ctx, stats := ← IO.mkRef {}, memo := ← IO.mkRef {}, jobs, self := ← IO.appPath,
-           timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs := 1000 * opts.testTimeout.getD 300 }
+           timeoutMs := 1000 * opts.timeout.getD 1800, testTimeoutMs }
   -- the flags win over the build files; read them now, apply them last
   let raw := args
   let (flagged, args) := defaults.parseFlags args
@@ -557,9 +557,7 @@ def cliMain (args : List String) : IO UInt32 := do
       let filters := rest.filter (· != "--update")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
-      let r := { r with
-        testTimeoutMs := 1000 * (topts.testTimeout.getD 300)
-        jobs := topts.jobs.getD r.jobs }
+          (1000 * (topts.testTimeout.getD 300))
       let results ← r.tests pkg.targets filters update
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
