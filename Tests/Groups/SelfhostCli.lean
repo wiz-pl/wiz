@@ -536,8 +536,8 @@ def cliGroup : Group where
         cliCheck err "native evaluation is not enabled" "build's refusal"
         unless !(← (dir / "out.c").pathExists) do throw (IO.userError "build wrote the C of an untrusted native_refl")
         -- an unknown trust flag is the host's usage error (exit 2); the value form is not
-        -- one in the host either, and `--trust-smt` is a host flag this toolchain has not got
-        for bad in ["--trust-native=1", "--trust-smt"] do
+        -- one in the host either (`--trust-smt` itself is taken: C15)
+        for bad in ["--trust-native=1"] do
           let (c, out, err) ← cliRun exe files #["check", "native.wiz", bad]
           checkEq 2 c
           checkEq "" out
