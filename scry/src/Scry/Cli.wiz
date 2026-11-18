@@ -11,6 +11,7 @@ import Scry.WorkflowCmd
 import Scry.Repl
 import Scry.FuzzCmd
 import Scry.ReportCmd
+import Scry.CsCmd
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -83,6 +84,10 @@ def Scry.usage : String :=
   ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                             self-contained HTML page of the taint evidence\n"
+  ++ "  cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]\n"
+  ++ "                             walk a directory/.csproj/.sln for *.cs, parse and lower\n"
+  ++ "                             each, and report findings plus a coverage section\n"
+  ++ "                             (exit 3 when nothing could be analysed)\n"
   ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
   ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
   ++ "  help, --help               this text\n"
@@ -239,6 +244,7 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "repl" rest => Scry.replCmd rest
   | .cons "findings" rest => Scry.findingsCmd rest
   | .cons "report" rest => Scry.reportCmd rest
+  | .cons "cs" rest => Scry.Cs.run rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 

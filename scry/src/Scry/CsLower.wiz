@@ -1415,7 +1415,9 @@ partial def Scry.Cs.typeDecls (c : Scry.Cst) (ns : String) : List Nat → List (
       let nm : String := match Scry.childF c i "name" with
         | .some x => c.textOf x
         | .none => "";
-      Scry.Cs.typeDecls c (join ns nm) (List.drop 1 (Scry.kids c i))
+      -- A file-scoped namespace is a prefix, not a container: its declarations are
+      -- the following siblings of the compilation unit.
+      Scry.Cs.typeDecls c (join ns nm) rest
     else if Scry.Cs.isTypeDecl k then
       let nested : List (String × Nat) := match Scry.childF c i "body" with
         | .some b => Scry.Cs.typeDecls c (join ns (Scry.Cs.memberName c i)) (Scry.kids c b)
