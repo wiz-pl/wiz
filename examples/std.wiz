@@ -1,4 +1,6 @@
+-- test: run
 import Std
+import Sys
 def fill : Nat → Array Nat → Array Nat
   | .zero, a => a
   | .succ n, a => Array.push (fill n a) (n * n)
@@ -14,6 +16,12 @@ def main : IO Unit := do
   IO.println (Nat.toString (Str.size t));
   let m := countWords (.cons "a" (.cons "b" (.cons "a" .nil))) StrMap.empty;
   IO.println (Nat.toString (StrMap.findD m (Str.ofString "a") 0));
-  IO.writeFile "/tmp/wiz_std.txt" "saved";
-  s ← IO.readFile "/tmp/wiz_std.txt";
-  IO.println s
+  -- the temporary directory, so the program runs on any machine (and in CI);
+  -- the name is fixed, the text is the same for every run, so a concurrent run is safe
+  root ← FS.tempRoot;
+  let path := Path.join root "wiz-std-example.txt";
+  IO.writeFile path "saved";
+  s ← IO.readFile path;
+  IO.println s;
+  r ← FS.removeFile path;
+  IO.pure ()

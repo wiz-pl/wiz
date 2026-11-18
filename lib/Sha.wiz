@@ -1,7 +1,7 @@
 import Word
 import Text
 import Encoding
-import WordBytes
+import Data.WordBytes
 /-!
 # Sha
 
@@ -11,7 +11,7 @@ release's `.sha256` and an archive's hash are computed by the same code that a p
 see.
 
 The byte type is `List U8`; the `Bytes` functions at the end are the same algorithm
-through lib/WordBytes.wiz's conversions. The digest is returned as bytes (big-endian, as
+through lib/Data/WordBytes.wiz's conversions. The digest is returned as bytes (big-endian, as
 the standard writes it); `Sha.sha256Hex` renders it in lower-case hex with
 lib/Encoding.wiz's `Encoding.hexEncode`.
 

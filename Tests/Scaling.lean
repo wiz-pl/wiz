@@ -344,9 +344,10 @@ def elabOk (src : String) (unbox : Bool := false) : IO (CommandState ZeroOneMany
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
   let stdLib ← IO.FS.readFile "lib/Std.wiz"
   let effLib ← IO.FS.readFile "lib/Eff.wiz"
+  let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   let loader : Name → Option String := fun m =>
     if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Std" then some stdLib
-    else if m == "Eff" then some effLib else none
+    else if m == "Eff" then some effLib else if m == "Sys" then some sysLib else none
   let st := runFrontend (R := ZeroOneMany) src { loader, globals := { unboxStructs := unbox } }
   let errs := (st.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")

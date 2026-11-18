@@ -114,6 +114,11 @@
   {"name": "scaling", "split": 3, "select": [
     "=scaling"
   ]},
+  {"name": "examples", "split": 3,
+   "inputs": ["examples/*", "lib/*", "drafts/feral/lib/*"],
+   "select": [
+    "=examples"
+  ]},
   {"name": "prop", "select": [
     "=prop"
   ]},
