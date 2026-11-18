@@ -1,8 +1,31 @@
 
 /* objects allocated minus objects freed, per thread (see `wiz_live_exited`) */
 static __thread int64_t wiz_live = 0;
+/* WIZ_NO_THREADS (concurrency plan R2): a build with one thread only, for Wasm without
+   -pthread (web/build.sh, web/build-playground.sh). Starting a thread, or blocking on an
+   MVar, a lock or a channel (which only another thread could release), stops the program
+   with a clear message (`wiz_no_threads`). Nothing is ever shared (`wiz_mark_mt` does
+   nothing), so counts stay positive and every count operation is plain. */
+#ifdef WIZ_NO_THREADS
+#define WIZ_RC(h) ((h)->rc)
+#define WIZ_RC_SHARED_INC(h) ((h)->rc--)
+#define WIZ_RC_SHARED_DEC(h) (++(h)->rc)
+#else
 /* read a count that another thread may be changing (if the object is shared) */
 #define WIZ_RC(h) __atomic_load_n(&(h)->rc, __ATOMIC_RELAXED)
+#define WIZ_RC_SHARED_INC(h) __atomic_fetch_sub(&(h)->rc, 1, __ATOMIC_RELAXED)
+#define WIZ_RC_SHARED_DEC(h) __atomic_add_fetch(&(h)->rc, 1, __ATOMIC_ACQ_REL)
+#endif
+/* A thread-owned count (rc > 0) changes with plain arithmetic. WIZ_RC_ATOMIC makes it
+   atomic too, as if every count were atomic: a debugging build (for TSan triage) and the
+   upper bound in the single-thread cost measurement (scripts/rc-cost-bench.sh). */
+#ifdef WIZ_RC_ATOMIC
+#define WIZ_RC_OWNED_INC(h, n) __atomic_fetch_add(&(h)->rc, 1, __ATOMIC_RELAXED)
+#define WIZ_RC_OWNED_DEC(h, n) __atomic_fetch_sub(&(h)->rc, 1, __ATOMIC_ACQ_REL)
+#else
+#define WIZ_RC_OWNED_INC(h, n) ((h)->rc = (n) + 1)
+#define WIZ_RC_OWNED_DEC(h, n) ((h)->rc = (n) - 1)
+#endif
 
 /* with WIZ_LEAKS set, remember every live object, to list the leaked ones at exit */
 static int wiz_leaks = -1;
@@ -88,6 +111,14 @@ static char *wiz_xstrdup(const char *s) {
   return p;
 }
 
+#ifdef WIZ_NO_THREADS
+/* `what` needs a second thread, and this build has none */
+__attribute__((noreturn)) static void wiz_no_threads(const char *what) {
+  fprintf(stderr, "wiz: %s: threads are not available in this build (WIZ_NO_THREADS)\n", what);
+  exit(3);
+}
+#endif
+
 static void *wiz_alloc(size_t bytes, uint32_t tag, uint32_t size) {
   wiz_hdr *h = (wiz_hdr *)malloc(bytes);
   if (!h) wiz_panic("out of memory");
@@ -113,8 +144,8 @@ WIZ_API void wiz_inc(wiz_val v) {
   if (!WIZ_IS_SCALAR(v)) {
     wiz_hdr *h = (wiz_hdr *)v;
     int64_t rc = WIZ_RC(h);
-    if (rc > 0) h->rc = rc + 1;
-    else if (rc < 0) __atomic_fetch_sub(&h->rc, 1, __ATOMIC_RELAXED);
+    if (rc > 0) WIZ_RC_OWNED_INC(h, rc);
+    else if (rc < 0) WIZ_RC_SHARED_INC(h);
   }
   if (wiz_watch) wiz_watch_log("inc", v, __builtin_return_address(0));
 }
@@ -126,9 +157,9 @@ WIZ_API void wiz_dec(wiz_val v) {
   if (WIZ_IS_SCALAR(v)) return;
   wiz_hdr *h = (wiz_hdr *)v;
   int64_t rc = WIZ_RC(h);
-  if (rc > 1) h->rc = rc - 1;
+  if (rc > 1) WIZ_RC_OWNED_DEC(h, rc);
   else if (rc == 1) wiz_free(v);
-  else if (rc < 0 && __atomic_add_fetch(&h->rc, 1, __ATOMIC_ACQ_REL) == 0) wiz_free(v);
+  else if (rc < 0 && WIZ_RC_SHARED_DEC(h) == 0) wiz_free(v);
 }
 
 static void wiz_free(wiz_val v) {
@@ -227,6 +258,15 @@ static void wiz_immortal(wiz_val v) {
    definition that uses itself while it is being built builds itself again (as it did
    without the cache): it loops exactly when it looped before. */
 WIZ_API wiz_val wiz_caf_init(wiz_val *slot, wiz_val (*build)(void)) {
+#ifdef WIZ_NO_THREADS
+  wiz_val v = *slot;
+  if (!v) {
+    v = build();
+    wiz_immortal(v);
+    if (*slot) v = *slot; /* the build used itself and published first: keep that one */
+    else *slot = v;
+  }
+#else
   wiz_val v = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
   if (!v) {
     wiz_val z = 0;
@@ -234,11 +274,17 @@ WIZ_API wiz_val wiz_caf_init(wiz_val *slot, wiz_val (*build)(void)) {
     wiz_immortal(v);
     if (!__atomic_compare_exchange_n(slot, &z, v, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) v = z;
   }
+#endif
   wiz_inc(v); /* (nothing, unless the value was shared between threads already) */
   return v;
 }
 
 static void wiz_mark_mt(wiz_val v);
+#ifdef WIZ_NO_THREADS
+/* no thunk is ever shared, so these are never called; no once-init */
+static void wiz_thunk_lock(void) {}
+static void wiz_thunk_unlock(void) {}
+#else
 static pthread_mutex_t wiz_thunk_mu;
 static pthread_once_t wiz_thunk_once = PTHREAD_ONCE_INIT;
 static void wiz_thunk_mu_init(void) {
@@ -249,6 +295,7 @@ static void wiz_thunk_mu_init(void) {
 }
 static void wiz_thunk_lock(void) { pthread_once(&wiz_thunk_once, wiz_thunk_mu_init); pthread_mutex_lock(&wiz_thunk_mu); }
 static void wiz_thunk_unlock(void) { pthread_mutex_unlock(&wiz_thunk_mu); }
+#endif
 
 WIZ_API uint32_t wiz_tag(wiz_val v) {
   return WIZ_IS_SCALAR(v) ? (uint32_t)WIZ_UNBOX(v) : ((wiz_hdr *)v)->tag;

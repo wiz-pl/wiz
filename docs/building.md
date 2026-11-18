@@ -237,7 +237,9 @@ rebuild all of it); `scripts/test-embed.sh` checks the setup (a local
 `nix develop -c scripts/test-embed.sh` check, since it needs an incremental Lake build;
 CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles the
 runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
-(the header's prototypes are checked against the parts).
+(the header's prototypes are checked against the parts), each also with
+`-DWIZ_NO_THREADS`, and runs a small C program against the threaded and the one-thread
+runtime.
 
 ## Test layout
 
@@ -1183,7 +1185,18 @@ TLS or authentication. Live search results and code actions are not part of it â
 need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
-slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Both web
+builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
+are compiled without `-pthread` (the header also turns it on by itself for Emscripten
+without `-pthread`): the runtime then has one thread, nothing is ever
+marked shared (so every count operation is plain), `main` runs on the calling thread,
+and `Chan.fork`, or a wait that no other thread could end (taking from an empty `MVar`,
+putting into a full one, acquiring a held `Lock`, receiving on an empty channel), stops
+the program with `wiz: â€¦: threads are not available in this build (WIZ_NO_THREADS)` and
+exit code 3 instead of hanging. `-DWIZ_RC_ATOMIC` is the opposite debugging build:
+thread-owned counts change atomically too. `scripts/test-runtime.sh` checks all three;
+`scripts/rc-cost-bench.sh` times them against each other (the single-thread cost of
+thread-safe counts). Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
 `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
 stays for 3 days for debugging; the site keeps the newest deployed tree until the next

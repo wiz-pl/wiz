@@ -183,6 +183,36 @@ def lockOrderFiles : IO (List (String × String)) := do
   pure [("main.wiz", ← IO.FS.readFile "Tests/tsan/lock-order.wiz"),
         ("lock.c", ← IO.FS.readFile "Tests/tsan/lock.c")]
 
+/-- (R2) Build `main` with the C backend and extra C flags, with every library
+importable; the program's output, or why it failed. `none`: no C toolchain. Only a
+*build* failure that is a `.toolchain` one skips (9c); a program that ran and failed is
+returned as `.error` (its stderr may mention a missing file and is still a failure). -/
+def cRunLibsFlags (src : String) (cflags : List String) :
+    IO (Option (Except Build.RunError String)) := do
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let dir ← IO.FS.createTempDir
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir (timeout := some 120) with
+  | .error e =>
+    if e.isToolchain then
+      skip "no toolchain"
+      pure none
+    else pure (some (.error e))
+  | r => pure (some r)
+
+/-- (R2) Built with `-DWIZ_NO_THREADS` (the Wasm pages' one-thread runtime), `main` stops
+with exit 3 and `message` on stderr. -/
+def noThreadsFails (src : String) (message : String) : IO Unit := do
+  match ← cRunLibsFlags src ["-DWIZ_NO_THREADS"] with
+  | none => pure ()
+  | some (.ok out) => throw (IO.userError s!"expected the program to stop, it printed: {out}")
+  | some (.error e) =>
+    unless (e.message.splitOn "the program failed (3)").length > 1 &&
+        (e.message.splitOn message).length > 1 do
+      throw (IO.userError s!"expected exit 3 and '{message}', got: {e.message}")
+
 def concGroup : Group where
   name := "conc"
   exercise := "lib/Session.wiz, lib/MVar.wiz, runtime threads (stage 25)"
@@ -270,6 +300,20 @@ def concGroup : Group where
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>
         cRunLibs concCaf "3198400000\n" },
+    { name := "WIZ_NO_THREADS (R2): forking stops with a clear message; MVars and locks that never wait work", run := fun _ => do
+        noThreadsFails concCounter "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)"
+        noThreadsFails (concSum ++ "def main : IO Unit := Chan.fork sumProto serve (fun c =>\n" ++
+          "  IO.bind (runClient 10 c) (fun s => IO.println (Nat.toString s)))")
+          "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)"
+        noThreadsFails ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.new (A := Nat);\n" ++
+          "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n")
+          "wiz: MVar.take of an empty MVar would wait forever: threads are not available in this build"
+        match ← cRunLibsFlags ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.newFull 41;\n" ++
+            "  l ← Lock.new;\n  k ← MVar.modify m (fun x => x + 1);\n  u ← Lock.with l (IO.pure ());\n" ++
+            "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n") ["-DWIZ_NO_THREADS"] with
+        | some (.ok out) => checkEq "42\n" out
+        | some (.error e) => throw (IO.userError e.message)
+        | none => pure () },
     { name := "an endpoint can't be used twice, dropped, or closed twice", run := fun _ => do
         failsLibs (concSum ++ "def twice (1 c : Chan sumProto) : IO Nat :=\n" ++
           "  Chan.send c 1 (fun c' => runClient 1 c)") "quantity 1"
