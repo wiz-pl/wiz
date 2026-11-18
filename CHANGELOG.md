@@ -86,8 +86,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   a wrong total; the `conc` group also runs those programs under ThreadSanitizer as a case.
   The `signal(SIGPIPE, SIG_IGN)` before a process spawn, which two threads spawning
   children raced on (ThreadSanitizer reported the race on the old one-shot flag), is now
-  re-asserted on every spawn with no flag at all; `Tests/tsan/spawn.wiz` is the case that
-  exercises it under TSan.
+  re-asserted by `wiz_sys_spawn_in` before **every** spawn, with no shared flag at all
+  (`wiz_sys_exec` saves the disposition with `sigaction` and restores it if `exec` fails,
+  rt-ffi); `Tests/tsan/spawn.wiz` is the case that exercises it under TSan.
 
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not

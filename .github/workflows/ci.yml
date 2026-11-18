@@ -550,11 +550,11 @@ jobs:
           #   would additionally bind them to the toolchain tag, which embeds the store
           #   paths of cc/llc and so needlessly invalidates a rebuild with the same ELF.
           #   The store's own `share/wiz/cache` layer (the wrapper's default) is read too.
-          # No --jobs N: master's `wiz doc` has no such flag yet. When it lands, add
-          # `--jobs 4`: the output is byte-identical (245 files SHA-256-equal at jobs 1
-          # and 4) and the warm run drops from ~333 s to ~162 s.
+          # --jobs 4: modules elaborate and render four at a time. The output is
+          #   byte-identical to `--jobs 1` (245 files SHA-256-equal at jobs 1 and 4), and
+          #   the warm run drops from ~333 s to ~162 s.
           mkdir -p .wiz-doc-cache/write .wiz-doc-cache/ro
-          "$WIZ" doc --lib -o doc-site/docs --web web/out \
+          "$WIZ" doc --lib --jobs 4 -o doc-site/docs --web web/out \
             --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/" \
             --cache .wiz-doc-cache/write --cache-ro .wiz-doc-cache/ro \
             --cache-verify off
