@@ -4,6 +4,11 @@ uri: a space is percent-encoded: ok
 compdb: two entries: ok
 compdb: -I and -D kept, -c/-o/-MMD dropped: ok
 compdb: command form keeps -Iinc2 and -DBAR=2: ok
+compdb: -Bbin is refused by name: ok
+compdb: -fplugin is refused by name: ok
+compdb: @file is refused: ok
+compdb: an option-shaped value is refused: ok
+compdb: -std=c11 kept, -o/-c dropped: ok
 duplicate: two units: ok
 duplicate: one duplicate name: ok
 duplicate: both definitions in symbols: ok
