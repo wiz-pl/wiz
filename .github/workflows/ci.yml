@@ -122,6 +122,27 @@ jobs:
           python3 scripts/check-doc-links.py --self-test
           python3 scripts/check-doc-links.py --quiet
 
+  # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
+  # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground
+  # compiles that frontend, so a name added to lib/Prelude.wiz but not to the embedded
+  # copy is invisible on the page and a new `selfhost-libdiff` gap. This ratchets the
+  # surface (coverage, no invented names, reviewed exceptions); the script's docstring
+  # says what is and is not compared.
+  prelude_drift:
+    name: prelude drift
+    needs: changes
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # 5 min: two Python checks on the checkout; no build
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Check the embedded prelude's surface
+        shell: bash
+        run: |
+          python3 scripts/check-prelude-drift.py --self-test
+          python3 scripts/check-prelude-drift.py
+
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
   # same store path `build` publishes) and checks the snippets. A pull request that
@@ -589,7 +610,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, docs_examples, build, test, web, docs]
+    needs: [changes, docs_style, prelude_drift, docs_examples, build, test, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -673,6 +694,7 @@ jobs:
         run: |
           echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, web: ${{ needs.changes.outputs.web }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
+          echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
           echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
@@ -694,6 +716,7 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
+          check "prelude drift" "${{ needs.prelude_drift.result }}" true
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"

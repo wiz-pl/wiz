@@ -1211,3 +1211,170 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## The two preludes, and the drift check
+
+`import Prelude` names two different values depending on which compiler reads it.
+
+**The host copy.** `lib/Prelude.wiz` (1,574 lines, hand-written) is the library's
+prelude. `wiz` reads the `lib/` next to its binary (`Wiz/Module.lean:163`,
+`Module.toolchainLib`); the Nix package stages the checkout's `lib/` into
+`share/wiz/lib` with a plain copy (`flake.nix:94`), so the installed file is the same
+bytes as the source — a staged copy, not a second one that can drift. `Tests/`, the
+documentation examples and `wiz check` all see this one (the `check-prelude` corpus
+entry in [building.md](../building.md#the-wiz-memory-corpus) is `wiz check
+lib/Prelude.wiz`).
+
+**The embedded copy.** `selfhost/Frontend.wiz:7488` defines
+
+```wiz no-check
+def preludeText : String := "inductive Nat where\n…"
+```
+
+a single-line Wiz string literal (352 lines, about 16 KB when decoded;
+`scripts/check-prelude-drift.py --dump-embedded` prints it). It is hand-written from
+stage 19a, not generated. The self-hosted module loader substitutes it for every
+`import Prelude` (`Frontend.wiz:9210`) and canonicalises `IO`, `Std` and `Sys` to it
+(`Frontend.wiz:8963`–`8967`); the comment at `Frontend.wiz:8889` is explicit: "the
+self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`".
+
+**The page's copy is the embedded one.** `web/build-playground.sh` concatenates
+`frontendFiles` from `Wiz/Selfhost.lean:123` (which includes `Frontend.wiz`) into the
+Wasm engine, and `web/selfhost-lsp-shim.js:68` prepends `import Prelude` to a program
+that has no import. There is no third copy under `web/`: the page runs `preludeText`.
+The drift check fails if a `web/**/*prelude*.wiz` ever appears, because that would be a
+copy it does not compare.
+
+### The divergence, demonstrated
+
+The two are a subset and a superset at once.
+
+* The page is **ahead** of `import Prelude` on the host for two names: `List.map`
+  (`lib/Text.wiz:45`) and `String.length` (`lib/Text.wiz:191`) are in the embedded
+  prelude, so with only `import Prelude` a page program accepts them and `wiz check`
+  rejects them:
+
+  ```text
+  $ wiz check maptest.wiz
+  maptest.wiz:3:39: error: unknown identifier 'List.map'
+  maptest.wiz:4:31: error: unknown identifier 'String.length'
+  ```
+
+  (with `wiz 0.1.0-dev (aeaa34ef…)`). `import Text` makes the host accept them. The
+  page's Wasm engine is the mirror image: `#check List.map` gives a type, and
+  `#check Nat.subFrom` gives `error: unknown identifier Nat.subFrom`. So the roadmap's
+  example has the direction reversed: the playground tour's `List.map` works on the
+  page and is exactly what `wiz check` rejects. The tour file itself is on an unmerged
+  playground branch, not on `master`.
+
+* `Nat.blt` is the sharper case: `lib/Prelude.wiz:174` registers
+  `builtin nat.blt := Nat.lt`, but the host has no identifier `Nat.blt` (`#check`
+  rejects it; "did you mean `Nat.lt`"). The embedded prelude defines one, so the page
+  accepts a name the library does not have.
+
+* The page is **behind** on the library's runtime surface: `Nat.subFrom`
+  (`lib/Prelude.wiz:89`), `Nat.powFrom` (221), `pipe` (140), `outParam` (331),
+  `castRefl` (37), `Eq.cast`/`Eq.subst`/`Eq.substBack` (45, 52, 55) and all 27 classes
+  (283–475) are not in `preludeText`. A `lib/` file that uses them is one of
+  `selfhost-libdiff`'s gaps. This is partly deliberate: the embedded prelude is a
+  model, its arithmetic is monomorphic (`infixl " + " => Nat.add`), where the host has
+  `HAdd`/`Add` and instances.
+
+The checker reports 71 runtime declarations in `lib/Prelude.wiz`, 40 of them embedded,
+23 classes, and 8 reviewed gaps. `preludeText` has 162 names: 147 are also declared
+under `lib/`, 15 are reviewed embedded-only names (the `Bytes` model's helpers, `Prod`
+and its projections, `String.data`, `Nat.blt`). 87 names are *promoted*: the page
+offers them with `import Prelude`, while the host declares them in `lib/IO.wiz` (66),
+`lib/Std.wiz` (17), `lib/Sys.wiz` (2) or `lib/Text.wiz` (2, the two above).
+
+### The check
+
+`scripts/check-prelude-drift.py` compares the **semantic surface**, not bytes. Bytes —
+or a hash of either file — would fail forever, because the copies are not meant to be
+equal: one is a class/notation/metaprogramming library, the other a monomorphic model
+for a frontend that has none of those. A checked-in hash is the right comparison only
+for a *generated* file, and there is no generator, because one would have to elaborate
+the host prelude first.
+
+The script parses `lib/Prelude.wiz` (declarations, inductive constructors, structure
+and class fields; the line `-- (end of the Boolean section)` at line 479 separates the
+runtime surface from the metaprogramming layer) and the decoded `preludeText`, then
+enforces three invariants:
+
+1. **coverage** — every runtime `def`/`axiom`/`extern`/`inductive`/`structure` is in
+   the embedded copy with the same kind and the same constructors and fields, unless
+   it is in the script's `EXEMPT` list with a reason. A PR that adds a value
+   declaration to `lib/Prelude.wiz` without touching the embedded copy fails here.
+   (Classes and notation are out of scope by design: the embedded prelude defines a
+   fixed set of infix operators and no classes.)
+2. **origin** — every name in `preludeText` is declared somewhere under `lib/`, or is
+   in `EMBEDDED_ONLY` with a reason. The page cannot invent library surface, and a
+   private helper added to the embedded copy needs a reviewed entry.
+3. **staleness** — an `EXEMPT`, `EMBEDDED_ONLY` or `META_ROOTS` entry that matches
+   nothing is an error, so the lists cannot rot into a blanket exemption. `META_ROOTS`
+   is the set of namespaces after the runtime marker; it makes appending a declaration
+   at the end of the file a reviewed decision instead of an escape from coverage.
+
+Run it with `python3 scripts/check-prelude-drift.py`. It takes well under a second and
+needs only Python 3. `--self-test` runs ten fixtures (a clean pair, a new library
+name, an invented embedded name, a runtime declaration appended after the marker, a
+changed kind, a lost constructor, a stale and a matching exemption, and a redundant
+`EMBEDDED_ONLY` entry); `--verbose` lists every name, `--dump-embedded` prints the decoded
+prelude, `--root DIR` checks another checkout. CI runs `--self-test` and then the check
+in the `prelude_drift` job (`.github/workflows/ci.yml`), and `CI result` requires it. A
+failure names the line and the remedy:
+
+```text
+[coverage] lib/Prelude.wiz:182: def Nat.flatMap is not in preludeText
+(selfhost/Frontend.wiz:7488). Add it there, or add a reviewed EXEMPT entry with a
+reason in scripts/check-prelude-drift.py.
+```
+
+### What the real fix costs
+
+The destination is one prelude: the self-hosted compiler loads the library's own
+`lib/Prelude.wiz`, and the page embeds that same text instead of a second model. Three
+routes, cheapest first:
+
+1. **Extract the literal to `selfhost/Prelude.wiz`, and generate the string from it.**
+   `include_str` exists in the host but not in the self-hosted frontend
+   (`selfhost/Frontend.wiz` has no `term.includeStr`;
+   [dogfood notes](../notes/dogfood-new-features.md) item W7 is this extraction), so the
+   embedding has to happen where the selfhost sources are assembled. The repo already
+   has the pattern: `scripts/GenSelfhostTables.lean` writes `selfhost/Tables.wiz`, a
+   checked-in generated source that the `selfhost` group fails when stale. A small
+   generator can instead write `selfhost/PreludeText.wiz` — the escaped literal — from
+   a hand-maintained `selfhost/Prelude.wiz`; the source list gains that file before
+   `Frontend.wiz`, and `web/build-playground.sh` picks it up through `frontendFiles`
+   with no change. About a day: the generator, the lake target, the staleness test, and
+   moving 352 lines. The drift check then compares two real files. The bootstrap
+   identity changes (`toolchainId` hashes the sources), so caches go cold and the
+   fixpoint must be rerun. This does not make the two preludes equal; it makes the
+   second one readable, diffable, and still checked.
+2. **Load `lib/Prelude.wiz` through the `-I` roots (`--prelude-from-roots`).** This is
+   the real fix for the native compiler. There is a working opt-in for stage 21af on an
+   unmerged branch (669 lines in `Frontend.wiz`, 55 in `Cli.wiz`, 134 test lines and a
+   doc section). It is blocked by three elaboration gaps in `lib/Prelude.wiz` itself (a
+   constructor field of function type returning the type being defined, `×` in a
+   constructor field, a class field in `Type 1`), by `outParam` and default instances,
+   and by the Backend not knowing the library's externs and builtins. Cost: that branch
+   plus those fixes, and a re-run of `selfhost-libdiff` until `lib/` checks; weeks, not
+   days. It also cannot fix the page by itself: Wasm has no filesystem, so the browser
+   still needs the prelude text embedded at build time — the same splice as (1), but
+   reading `lib/Prelude.wiz`.
+3. **A checked-in generated file with a hash.** Only meaningful if a generator can
+   produce the embedded subset from `lib/Prelude.wiz`; today it cannot, because the
+   frontend cannot elaborate the host prelude. A hash of `lib/Prelude.wiz` in
+   `selfhost/Frontend.wiz` would pin an input to a copy that still has to be maintained
+   by hand. The surface check above is the honest version of that idea.
+
+Recommendation: keep the check (this change); do (1) next, so the embedded copy is a
+reviewable source file; do (2) when the 21af blockers land, and make the page embed
+`lib/Prelude.wiz` at build time. Only then is `selfhost-libdiff` on a prelude-only
+change a pure no-op.
+
+**Not covered.** Signature and body drift under the same name (the embedded `Nat.sub`
+recurses on a different argument than the host's), notations and operator precedence,
+and the class/instance layer (a new class or notation in the host prelude does not fail
+the check). Those need elaboration, not a regexp; `selfhost-libdiff`
+measures their consequences, and the check's report names the known gaps on every run.

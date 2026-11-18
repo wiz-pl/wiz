@@ -684,6 +684,18 @@ setup action keeps the elan cache for those
   those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
   to `wiz-notes/...` are reported as external notes (the notes live outside the
   repository) and `http(s)` links are reported but not fetched, so CI needs no network.
+* **The preludes** (the `prelude_drift` job): the self-hosted frontend's embedded
+  prelude (`preludeText`, `selfhost/Frontend.wiz`) is a hand-written subset of
+  `lib/Prelude.wiz`, and the Wasm playground compiles that frontend. Every CI run
+  (including docs-only pull requests) runs `scripts/check-prelude-drift.py`, which
+  compares the two semantic surfaces
+  (names, kinds, constructors and fields), fails a `lib/` prelude value declaration
+  that is not mirrored in the embedded copy or reviewed in the script's exception list,
+  and fails when a reviewed exception goes stale. It also reports the names the page
+  promotes without their library import (`List.map`, `String.length`, the
+  `IO`/`Std`/`Bytes` names). No build, well under a second, and `CI result` requires it;
+  the copies, the current gaps and what the real fix costs are in
+  [stages/21-bootstrap.md](stages/21-bootstrap.md#the-two-preludes-and-the-drift-check).
 * **Documentation examples** (the `docs_examples` job, and a step in `build`):
   `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
   and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
@@ -974,7 +986,7 @@ the generated reference manual (`result/index.md`, and `result/site`).
 ### Before you push
 
 `scripts/pre-commit.sh` runs the cheap gates CI would run first, in one command, so a
-formatting, ledger or docs problem is found in seconds instead of in CI. It needs no
+formatting, ledger, prelude or docs problem is found in seconds instead of in CI. It needs no
 build for the fast tier:
 
 ```sh
@@ -986,7 +998,7 @@ scripts/pre-commit.sh --self-test      # the tiers on a throwaway repository
 
 | tier | checks |
 |---|---|
-| `--fast` | docs style and links (`scripts/check-docs-style.py`, `scripts/check-doc-links.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, the check-repro and check-repro-report self-tests, and a parse of every YAML file under `.github/` |
+| `--fast` | docs style and links (`scripts/check-docs-style.py`, `scripts/check-doc-links.py`), the embedded prelude's surface (`scripts/check-prelude-drift.py`), `wiz fmt --check` on the changed `.wiz` files, the trust ledger's fixtures (`Tests/trust-ledger/run.sh`), the host-side unsafe ledger and its fixtures (`scripts/host-unsafe-ledger.py --check`, `Tests/host-unsafe-ledger/run.sh`), `scripts/ci.py check-skips --self-test`, the check-repro and check-repro-report self-tests, and a parse of every YAML file under `.github/` |
 | `--full` | everything in `--fast`, then `scripts/trust-ledger.sh --check`, `scripts/check-repro.sh` when a compiler is built, and the formatter's test group (`=fmt`, or `=format` on a tree from before that group was renamed) |
 
 Without `--staged`, the changed files are what the branch adds since its merge base with

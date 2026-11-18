@@ -10,6 +10,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* tooling: the self-hosted frontend's embedded prelude (`preludeText`,
+  `selfhost/Frontend.wiz`) is checked against `lib/Prelude.wiz` by
+  `scripts/check-prelude-drift.py`, a CI job (`prelude_drift`). It fails when a value
+  declaration is added to the library prelude without the embedded copy, when the
+  embedded copy invents a name, or when a reviewed exception goes stale; it prints the
+  known gaps and the names the page promotes. The two preludes are not meant to be
+  equal (the embedded one is a monomorphic model for the self-hosted frontend), so the
+  check compares the semantic surface, not bytes (21y, `docs/stages/21-bootstrap.md`).
 * web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
   `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
   `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the
