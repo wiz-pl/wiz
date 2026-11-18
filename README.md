@@ -44,7 +44,9 @@ The parts of the toolchain have names from the wizard theme; the binaries stay `
 
 Three names are reserved for parts in review: **glyph** for the formatter (`wiz fmt`),
 **alembic** for scry's e-graph, and **sigil** for scry's derivation-certificate checker.
-**grimoire**, a package registry, stays deferred: no part of it is in this tree.
+**grimoire**, the hosted package registry, stays deferred: the client is in this tree
+(`grail`'s index, lock and `publish`; [docs/packages.md](docs/packages.md)), a server is
+not.
 
 ## Quick start
 
@@ -81,6 +83,10 @@ See [docs/building.md](docs/building.md) for the details, CI and caches.
 
 * [docs/install.md](docs/install.md): installing Wiz (tower, Nix), editors, a first package.
 * [docs/tour.md](docs/tour.md): a tour of the language, with checked examples.
+* [docs/packages.md](docs/packages.md): creating a package, dependencies and
+  `grail.lock`, publishing to an index, and choosing a toolchain with tower.
+* [docs/selfhost-compiler.md](docs/selfhost-compiler.md): the self-hosted compiler,
+  the bootstrap fixpoint, and what parity with the Lean toolchain does and does not mean.
 * [docs/index.md](docs/index.md): the stage-by-stage docs, one file per stage.
 * [docs/CoreSpec.md](docs/CoreSpec.md): the kernel's calculus as inference rules.
 * [docs/Status.md](docs/Status.md): what is proved, what is conjectured, and the known

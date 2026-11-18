@@ -1101,13 +1101,14 @@ the temporary copy, and `--out FILE` writes the report.
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
-<https://wiz-pl.github.io/wiz/>. The tree has four parts, and every link in it is
+<https://wiz-pl.github.io/wiz/>. The tree has five parts, and every link in it is
 relative, so the project-site prefix (or a custom domain root) works either way:
 
 | URL | what it is | built from |
 |---|---|---|
 | `/` | the landing page: introduction, features, quickstart | `web/landing/index.html`, `web/landing/landing.css` |
 | `/docs/` | the standard library's API documentation | `wiz doc --lib` |
+| `/guide/` | the repository's prose documentation, as pages | `docs/**/*.md`, `README.md`, `ROADMAP.md`, `CHANGELOG.md`; `web/build-docs.py` |
 | `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
@@ -1117,11 +1118,22 @@ interactive signatures, `web/build-playground.sh` for the playground), runs `wiz
 reference manual's Markdown from the flake's `reference` package (`nix build
 .#reference`, a Cachix hit when the build job already built it) to
 `doc-site/docs/reference.md`, assembles the
-landing page, the benchmark page and the playground with `web/build-site.sh doc-site
-web/out`, checks the result with `web/check-site.sh doc-site` (the four entry points
-exist and the landing page's and benchmark page's local links resolve; no server), and
-uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
-then publishes that artifact.
+landing page, the benchmark page, the playground and the guide with `web/build-site.sh
+doc-site web/out`, checks the result with `web/check-site.sh doc-site` (the five entry
+points exist; `web/check-links.py` then crawls every page and fails on a Markdown link,
+an internal link that does not resolve — fragment included — or a module, guide or
+notebook page with no source link), and uploads `doc-site` as the artifact `wiz-docs` (3 days, for
+debugging). `deploy-docs` then publishes that artifact.
+
+The guide exists because the site must not link a reader to a repository Markdown file:
+a link on the site resolves to a rendered page, and a rendered page may link to its
+source `.md` in the repository (its `class="src"` link, the one Markdown link the
+checker allows). `web/build-docs.py` renders the subset of Markdown the repository uses
+and rewrites a relative `foo.md` link to `foo.html`; a link to any other file (a `.wiz`
+source, a directory) becomes an absolute link to the repository, except an exported
+notebook, which links to the site's `/notebooks/` copy. It also rewrites the copied
+notebook pages' `.md` links, so `/notebooks/tour.html` points at `/guide/docs/…`. Each page's source link names the commit the tree was built from
+(`git rev-parse HEAD`); `WIZ_SOURCE_URL` overrides the prefix.
 
 `wiz doc --lib` elaborates the whole library once when its cache is cold, and that is
 the bulk of the job (10-19 min in recent runs; 43 min on a loaded machine). So the job
@@ -1149,6 +1161,9 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | path | what it is |
 |---|---|
 | `index.html`, `landing.css` | the landing page |
+| `guide/docs/index.html` | the guide's index: the repository's documentation as pages (one per `docs/**/*.md`, plus the README and what they link to) |
+| `guide/**/*.html` | one page per rendered Markdown file: its own source link, and links rewritten from `.md` to `.html` |
+| `guide/guide.css` | the guide's stylesheet |
 | `bench/index.html` | the benchmark page (generated from the JSON in `bench/` and `scry/bench/`) |
 | `docs/index.html` | the documentation index: the documented modules and their summaries |
 | `docs/api.html` | the API index: every module and declaration, with signatures and doc summaries |
@@ -1170,8 +1185,8 @@ sh web/build.sh web/out                         # the infoview module, scroll as
 sh web/build-playground.sh web/out              # the playground module
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
 cp "$(nix build .#reference --no-link --print-out-paths)/index.md" doc-site/docs/reference.md
-sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
-sh web/check-site.sh doc-site                   # the entry points and the links
+sh web/build-site.sh doc-site web/out           # landing, /guide/, /bench/ and /playground/
+sh web/check-site.sh doc-site                   # five entry points, every link, source links
 sh web/test-bench.sh                            # the generator's fixtures and /bench/
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
