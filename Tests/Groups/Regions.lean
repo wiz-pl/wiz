@@ -230,7 +230,8 @@ def regionsGroup : Group where
         checkEq [".ok ((), .cons 1 .nil)", ".ok ((), .cons 1 .nil)", ".ok (.nil, .cons 1 .nil)", ".ok 4"] msgs
         -- `x.val` is `x`: no projection
         let getIR ← libsIR s "get"
-        check (getIR.all fun d => (d.splitOn "proj").length == 1) s!"a projection:\n{"\n".intercalate getIR}"
+        check (!getIR.isEmpty && getIR.all fun d => (d.splitOn "proj").length == 1)
+          s!"no `get` declaration to check, or a projection:\n{"\n".intercalate getIR}"
         -- a shared borrow's scope is its body run in place: no closure, nothing lifted
         let shIR ← libsIR s "shared"
         check (shIR.length == 1 && shIR.all fun d => (d.splitOn "pap").length == 1)

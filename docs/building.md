@@ -727,7 +727,9 @@ the elan toolchain, so the setup action keeps the elan cache for those
   * a group's cases all skipped and the group is not in
     `.github/skip-allowlist.json` (each entry names the group, the reason it may skip
     for and an owner, and may name the one `case` it excuses; the self-host parity
-    entries do, with their `parity` code);
+    entries do, with their `parity` code; a skip is explained only when its lowercased
+    reason starts with the entry's reason, so a second skip path in the same case must
+    use the same prefix);
   * a skip names a tool the dev shell must provide (`cc`, GMP, Boehm GC, yosys, Node,
     nix, `llc`, z3, cadical, the `wiz`/`grail` binaries): that is a gap in `flake.nix`'s
     `devShells.default`, not an environment skip, even for an allow-listed group. A tool
