@@ -18,8 +18,9 @@ in the order of the old `runtime/wiz.c`:
 `runtime` is the header's representation part followed by the parts, in that order —
 byte for byte what `wiz.c` used to be, so every generated C program is unchanged.
 The header's prototypes (after the marker) are not inlined: a translation unit includes
-the header instead (`scripts/test-runtime.sh`), which is also the ABI of the object mode
-in `wiz-notes/runtime-in-wiz.md`.
+the header instead (`scripts/test-runtime.sh`), which is also the ABI a planned object
+mode would use (generated C that includes the header and links a prebuilt runtime
+object instead of pasting the runtime; not implemented).
 
 This module is a library of its own, `WizRuntime` in `lakefile.lean`, whose `needs` names
 these files as input files: Lake mixes their content hashes into this module's trace, so

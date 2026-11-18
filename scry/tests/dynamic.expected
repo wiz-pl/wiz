@@ -1,0 +1,14 @@
+asan: one validated crash: ok
+ubsan: one validated ub: ok
+leak: validated: ok
+coverage: 2/2 lines: ok
+coverage: line 3 hits: ok
+correlation: same line: ok
+correlation: line executed: ok
+witness: pcChecked: ok
+witness: claim none: ok
+skip: no compiler is clean: ok
+toolchain: requested compiler missing: ok
+e2e: crash or clean skip: ok
+e2e: evidence kind dynamic: ok
+e2e: no absence claim: ok

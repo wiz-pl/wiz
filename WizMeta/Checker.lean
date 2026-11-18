@@ -25,7 +25,9 @@ obviously right, not fast:
 Nothing is proved about it yet (metatheory-plan M2 is soundness against the spec).
 
 Not implemented (the term is rejected, or the redex stays stuck): usage checking (quantities
-are labels), sizes, `ν`, `split`, numerals. The rules of PR #40 (equality at `Desc`, `μ ≡ μ`
+are labels), sizes and the guard on a `μ` description that goes with them (the kernel's
+`descGuarded`: `μ X. X` is accepted here; `Tests/Meta.lean` counts that apart, as `guard`),
+`ν`, `split`, numerals. The rules of PR #40 (equality at `Desc`, `μ ≡ μ`
 by codes, casts at `Desc`/`μ`) are `Spec/DescEq.lean`.
 -/
 

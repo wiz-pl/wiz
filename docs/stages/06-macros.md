@@ -2,7 +2,7 @@
 
 ## 6a: macros by example
 
-```
+```wiz
 infixl:65 " + " => add
 notation "two" => Nat.succ (Nat.succ Nat.zero)
 syntax "if" term "then" term "else" term : term
@@ -25,7 +25,7 @@ macro_rules
 
 ## 6b: the prelude, literals and procedural macros
 
-```
+```wiz
 import Prelude
 #eval 100 * 100 * 100 - 1          -- 999999, computed natively
 def t : 2 + 2 = 4 := refl 4         -- the kernel computes on literals too
@@ -83,7 +83,7 @@ checking and `ctorDesc`), add the `hrec` cases.
 
 **Tactics** (`examples/tactics.wiz`):
 
-```
+```wiz
 def ap : (A B : Type) → (A → B) → A → B := by
   intro A; intro B; intro f; intro a
   apply f
@@ -124,7 +124,7 @@ Next: typeclasses with tabled resolution (stage 7), which also make `do` generic
 
 ## 6d: `trace` and `trace_state`
 
-```
+```wiz
 def k : Nat → Bool → Nat := by
   intro n
   trace "hello"          -- t.wiz:3:3: info: hello
@@ -166,7 +166,7 @@ A tactic that introduces variables must call them something. Coq's answer (gener
 hygiene: a name nobody chose is *inaccessible* (`n✝`), and a proof that wants to use
 it says so (`rename_i`, `intro n`). Wiz follows Lean, with predictable base names.
 
-```
+```wiz
 def k : (n : Nat) → (b : Bool) → Nat → Nat := by
   intros                 -- n✝ : Nat, b✝ : Bool, x✝ : Nat
   rename_i c, m          -- names the last inaccessible hypotheses: b✝ ↦ c, x✝ ↦ m
@@ -195,7 +195,7 @@ def k : (n : Nat) → (b : Bool) → Nat → Nat := by
 
 ## 6f: `unfold`, `whnf`, `change`, `rw`
 
-```
+```wiz no-check
 def MList : List Nat → Nat → Pred
   | .nil, p => fun h => p = 0
   | .cons x L, p => ex (fun n => star (cell p x n) (MList L n))
@@ -291,3 +291,12 @@ different handles.
   constructor (its type, number of parameters and of fields), `TacticM.ctorApp e` gives
   a constructor application's name and fields, and `TacticM.whnfCtorApp g e` computes
   first: `Prog.swap p q` is read as the `Prog.get p …` it computes to, in one request.
+
+## 6h: `simp`
+
+`simp` / `simp [h₁, …]` / `simp only [h₁, …]` rewrite the goal until no rule applies:
+the algorithm is Wiz (`lib/Prelude.wiz`), and the host adds two requests:
+`Tac.rewriteAt` (match a rule's `∀` telescope against a subterm and build the
+transport) and `Tac.getSimpLemmas` (the default set registered with `attribute [simp]`,
+including `local` scoping). There is no automatic closer; fuel bounds the rewrites.
+Full section: [`06-macros/simp.md`](06-macros/simp.md).

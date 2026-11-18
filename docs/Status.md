@@ -11,6 +11,15 @@ plus the results of the probes listed in the "Probes" section. The page was firs
 written at `9717950` (2026-11-09); the [ledger](#0-ledger) lists every item with its
 status and PR, and section 9 lists what open PRs will change here when they merge.
 
+> **Not yet refreshed for later merges.** Checked against `master` at `d23473da`
+> (2026-11-16): every PR that section 9 lists as open has since been decided. #120, #121,
+> #128, #129, #130, #135, #136, #138 and #145 merged (2026-11-11 to 11-13), mandatory
+> sorts merged as #203 (2026-11-14), and #144 was closed without merging. Their
+> paragraphs in section 9 have not been folded into the sections they name yet, so ledger
+> rows that cite those PRs in *italics* or mark O4, U5, U5b and D2 (meta-review) as open
+> issues, and the summary's O4 bullet, describe the state before those merges. The
+> refresh is queued behind the soundness branches that edit this page.
+
 > **How to keep this page current.**
 > * A PR that fixes, finds or changes the status of a soundness item edits this page in
 >   the same PR: its row in the [ledger](#0-ledger) (status, PR number), and its section
@@ -148,7 +157,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
 |---|---|---|
 | Π, λ, application, `let`, Σ with η, `Unit` with η | **published** | Martin-Löf type theory [ML84]; η for Σ and Unit with type-directed conversion is standard (unverified which paper first). |
 | Universes `Sort l`, `imax`, impredicative `Prop`, non-cumulative, universe-polymorphic declarations | **published** for CIC-like systems; **folklore** for Wiz's exact algorithm | Lean 4's universe design; Wiz's level normaliser (§4) is sound by construction (it case-splits) and incomplete for `imax`, as in Lean (unverified against Lean's source). |
-| Definitional proof irrelevance for `Prop` | **published** | [PT22], [PT23] (TTobs, CCobs); Gilbert et al. POPL 2019 (unverified). Wiz has no inductive propositions, so the Lean 4 `Acc` problem does not arise. |
+| Definitional proof irrelevance for `Prop` | **published** | [PT22], [PT23] (TTobs, CCobs); Gilbert et al. POPL 2019 (unverified). Wiz has inductive propositions since #252, with singleton elimination; the Lean 4 `Acc` problem is handled by the same subsingleton test. |
 | Observational equality: `eq` computing by type, `cast`, `transp`, funext, propext | **published** | [PT22] (predicative TTobs), [PT23] (impredicative CCobs: decidability of conversion). Earlier: [AMS07]. |
 | Propositions compared by equivalence inside type equality (§8.3) | **conjecture** | This is how TTobs and CCobs treat propositions (rule Eq-Ω: `A ∼ B ⇒ (A → B) ∧ (B → A)`; checked in [PT22] §2.3 and [PT23] Fig. 4). Wiz's version depends on **sort annotations** that the kernel checks; that mechanism is Wiz's own. |
 | Quantities in type equality (`(1 x : A) → B ≢ (ω x : A) → B`) | **conjecture** | Not in any OTT paper we know. It is consistent with a model where quantities are part of a type's code. |
@@ -333,7 +342,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   `((%q x : N) → N) = ((1 x : N) → N)` computed to `False` for a variable `q`, and the
   instance `q := 1` made it provable:
 
-  ```
+  ```wiz no-check
   def flip {q : Qty} (e : ((%q x : N) → N) = ((1 x : N) → N)) : False := e
   def boom : False := flip (q := 1) rfl
   ```
@@ -942,6 +951,14 @@ check `Γ⁰ ⊢ s ⇐ Size` (one line in each kernel).
 **Fix**: both kernels now check `Γ⁰ ⊢ s ⇐ Size` in the `mu`/`nu` rule. Regression tests:
 `MTm.sizeArgs` (`tt` and `Enum 2` as sizes are rejected) in the Lean verdicts and the
 differential samples.
+
+**Guard (TT-06).** The size alone does not reject `μ X. X`: a `μ` description must also
+be guarded (every `rec`/`hrec` under a non-recursive `arg` field). Both kernels check it
+(`descGuarded`, "unguarded recursive description"); `ν` is not constrained (`ν X. X` is a
+valid coinductive type; its productivity is `cocon`/`out`). The surface elaborators still
+own positivity, and the self-hosted one now reports the Lean message. Tests:
+`MTm.muSize` (also in the differential samples), the `inductive` group, and the selfhost
+positivity case; see `wiz-notes/mu-size.md`.
 
 ### Q1 / R1. Projections drop linear components — **fixed**: projections need an unrestricted pair (lin-proj; both kernels)
 

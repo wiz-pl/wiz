@@ -35,6 +35,8 @@ end
 * `message TEXT` takes the rest of the line.
 * `source NAME result|arg K`, `sanitise NAME result|arg K` (also spelled `sanitize`),
   `sink NAME arg K`. `result` is the default when the argument selector is omitted.
+  `sink NAME args` checks every argument, for a variadic callee such as `execl`. A
+  finding still names the concrete argument index that carried the taint.
 * `call NAME` (§`kind forbidden` only) names a forbidden callee.
 * Blank lines and lines starting with `#` are comments; unknown keywords are ignored.
 
@@ -84,10 +86,13 @@ def Scry.ArgRef.show : Scry.ArgRef → String
 inductive Scry.FindingKind where
   | taint
   | forbidden
+  /-- A memory-lifetime finding (use after free): the rule's `check` names the analysis. -/
+  | memory
 
 def Scry.FindingKind.show : Scry.FindingKind → String
   | .taint => "taint"
   | .forbidden => "forbidden"
+  | .memory => "memory"
 
 /-- A step of a source -> sink path (the `origin`-carrying location is a separate map,
 see `Scry.Sarif`). `var` is the register that carries the value, `point` the program
@@ -103,6 +108,10 @@ inductive Scry.PathKind where
   | store
   /-- A load from a memory location: the path leaves memory here. -/
   | load
+  /-- An allocation site (`malloc`/`calloc`/`realloc`/`strdup`). -/
+  | alloc
+  /-- A `free` (direct or through a callee/callback). -/
+  | free
   | sink
   | recursion
   | assumed
@@ -116,6 +125,8 @@ def Scry.PathKind.show : Scry.PathKind → String
   | .flow => "flow"
   | .store => "store"
   | .load => "load"
+  | .alloc => "alloc"
+  | .free => "free"
   | .sink => "sink"
   | .recursion => "recursion"
   | .assumed => "assumed"
@@ -145,9 +156,20 @@ structure Scry.RuleFinding where
 
 -- ## The rules
 
+/-- Which argument(s) of a call a sink names. `one k` is the fixed index `k`; `any` is
+every argument, for a variadic callee such as `execl(path, arg0, …, NULL)` where any of
+the command-line words can carry attacker data. `any` is spelled `args` in the pack. -/
+inductive Scry.SinkArg where
+  | one (index : Nat)
+  | any
+
+def Scry.SinkArg.show : Scry.SinkArg → String
+  | .one k => Nat.repr k
+  | .any => "any"
+
 structure Scry.RuleSink where
   name : String
-  arg : Nat
+  arg : Scry.SinkArg
 
 structure Scry.TaintRule where
   id : String
@@ -165,25 +187,38 @@ structure Scry.ForbiddenRule where
   message : String
   calls : List String
 
+/-- A memory-kind rule: `check NAME` selects the analysis (`use-after-free`). Unlike a
+taint rule it has no sources/sinks; the analysis itself supplies the evidence. -/
+structure Scry.MemoryRule where
+  id : String
+  severity : Scry.Severity
+  message : String
+  check : String
+
 inductive Scry.PackRule where
   | taint (r : Scry.TaintRule)
   | forbidden (r : Scry.ForbiddenRule)
+  | memory (r : Scry.MemoryRule)
 
 def Scry.PackRule.id : Scry.PackRule → String
   | .taint r => r.id
   | .forbidden r => r.id
+  | .memory r => r.id
 
 def Scry.PackRule.severity : Scry.PackRule → Scry.Severity
   | .taint r => r.severity
   | .forbidden r => r.severity
+  | .memory r => r.severity
 
 def Scry.PackRule.message : Scry.PackRule → String
   | .taint r => r.message
   | .forbidden r => r.message
+  | .memory r => r.message
 
 def Scry.PackRule.kind : Scry.PackRule → Scry.FindingKind
   | .taint _ => .taint
   | .forbidden _ => .forbidden
+  | .memory _ => .memory
 
 structure Scry.RulePack where
   rules : List Scry.PackRule
@@ -195,12 +230,25 @@ def Scry.rulePackConcat {A B : Type} (f : A → List B) : List A → List B
 def Scry.RulePack.taintRules (p : Scry.RulePack) : List Scry.TaintRule :=
   Scry.rulePackConcat (fun r => match r with
     | .taint t => List.cons t .nil
-    | .forbidden _ => .nil) p.rules
+    | .forbidden _ => .nil
+    | .memory _ => .nil) p.rules
 
 def Scry.RulePack.forbiddenRules (p : Scry.RulePack) : List Scry.ForbiddenRule :=
   Scry.rulePackConcat (fun r => match r with
     | .taint _ => .nil
-    | .forbidden f => List.cons f .nil) p.rules
+    | .forbidden f => List.cons f .nil
+    | .memory _ => .nil) p.rules
+
+def Scry.RulePack.memoryRules (p : Scry.RulePack) : List Scry.MemoryRule :=
+  Scry.rulePackConcat (fun r => match r with
+    | .taint _ => .nil
+    | .forbidden _ => .nil
+    | .memory m => List.cons m .nil) p.rules
+
+/-- The first memory rule whose `check` the analysis implements. -/
+def Scry.RulePack.memoryRuleFor (p : Scry.RulePack) (check : String) :
+    Option Scry.MemoryRule :=
+  List.find (fun m => String.eq m.check check) (Scry.RulePack.memoryRules p)
 
 /-- Does the pack declare the C `argv` parameter as a source? The spelling is
 `source argv result`; it is not a call pattern (no call is named `argv`), it asks the
@@ -261,13 +309,16 @@ structure Scry.PartialRule where
   sanitisers : List (String × Scry.ArgRef)
   sinks : List Scry.RuleSink
   calls : List String
+  check : String
 
 def Scry.PartialRule.fresh (id : String) : Scry.PartialRule :=
-  Scry.PartialRule.mk id "taint" .warning "" .nil .nil .nil .nil
+  Scry.PartialRule.mk id "taint" .warning "" .nil .nil .nil .nil ""
 
 def Scry.PartialRule.finish (r : Scry.PartialRule) : Scry.PackRule :=
   if String.eq r.kind "forbidden" then
     .forbidden (Scry.ForbiddenRule.mk r.id r.severity r.message r.calls)
+  else if String.eq r.kind "memory" then
+    .memory (Scry.MemoryRule.mk r.id r.severity r.message r.check)
   else
     .taint (Scry.TaintRule.mk r.id r.severity r.message r.sources r.sanitisers r.sinks)
 
@@ -282,13 +333,26 @@ def Scry.PackState.finish (st : Scry.PackState) : Scry.PackState :=
   | .none => st
   | .some r => Scry.PackState.mk .none (List.cons (Scry.PartialRule.finish r) st.rules)
 
+/-- Parse a sink's argument selector: `arg K` (the default) or `args` (every
+argument). -/
+def Scry.parseSinkArg (rest : List String) : Scry.SinkArg :=
+  match rest with
+  | .cons sel (.cons idx _) =>
+    if String.eq sel "args" then .any
+    else if String.eq sel "arg" then
+      match String.parseNat (String.trim idx) with
+      | .some n => .one n
+      | .none => .one 0
+    else .one 0
+  | .cons sel _ => if String.eq sel "args" then .any else .one 0
+  | .nil => .one 0
+
 def Scry.PartialRule.addSink (name : String) (rest : List String)
     (r : Scry.PartialRule) : Scry.PartialRule :=
   match rest with
-  | .cons _ (.cons idx _) => match String.parseNat (String.trim idx) with
-    | .some n => { r with sinks := List.cons (Scry.RuleSink.mk name n) r.sinks }
-    | .none => r
-  | _ => r
+  | .nil => r
+  | .cons _ _ => { r with sinks := List.cons
+      (Scry.RuleSink.mk name (Scry.parseSinkArg rest)) r.sinks }
 
 def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry.PartialRule :=
   match words with
@@ -316,6 +380,10 @@ def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry
     else if String.eq kw "call" then
       match rest with
       | .cons name _ => { r with calls := List.cons name r.calls }
+      | .nil => r
+    else if String.eq kw "check" then
+      match rest with
+      | .cons name _ => { r with check := name }
       | .nil => r
     else r
   | .nil => r
@@ -367,7 +435,9 @@ def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) : String :=
       " arg ") (Nat.repr k)
 
 def Scry.RuleSink.render (s : Scry.RuleSink) : String :=
-  String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr s.arg)
+  match s.arg with
+  | .one k => String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr k)
+  | .any => String.append (String.append "  sink " s.name) " args"
 
 def Scry.PackRule.render (r : Scry.PackRule) : String :=
   match r with
@@ -386,6 +456,11 @@ def Scry.PackRule.render (r : Scry.PackRule) : String :=
       (Scry.Severity.show f.severity)) "\n  message ") f.message) "\n";
     let calls := String.join (List.map (fun c => String.append "  call " c) f.calls);
     String.append (String.append head calls) "\nend"
+  | .memory m =>
+    let head := String.append (String.append (String.append (String.append
+      (String.append "rule " m.id) "\n  kind memory\n  severity ")
+      (Scry.Severity.show m.severity)) "\n  message ") m.message;
+    String.append (String.append head "\n  check ") (String.append m.check "\nend")
 
 def Scry.RulePack.render (p : Scry.RulePack) : String :=
   String.join (List.map (fun r => String.append (Scry.PackRule.render r) "\n") p.rules)

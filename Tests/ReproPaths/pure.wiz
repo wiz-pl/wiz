@@ -1,0 +1,21 @@
+-- A path-reproducibility corpus program: recursion, lists, arithmetic, no IO in the
+-- compiled body (scripts/check-repro.sh builds it under two absolute roots).
+import Prelude
+import IO
+import Text
+
+def fibStep : Nat → Nat → Nat → Nat
+  | .zero, a, _ => a
+  | .succ n, a, b => fibStep n b (a + b)
+
+def fib (n : Nat) : Nat := fibStep n 0 1
+
+def squares : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ n, acc => squares n (.cons (n * n) acc)
+
+def sum : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x + sum xs
+
+def main : Nat := sum (squares 16 .nil) + fib 12

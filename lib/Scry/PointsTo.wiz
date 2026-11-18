@@ -361,12 +361,32 @@ def Scry.storeMems (st : Scry.PtState) (func : String) (p v : Wil.Var) :
   | .true => List.map (fun l => (l, Scry.ptGet st (Scry.vk func v.index)))
       (Scry.ptGet st (Scry.vk func p.index))
 
+/-- External pointer-returning calls whose result aliases argument 0: a pointer *into*
+the first argument (a substring/byte search, `dirname`) or the destination of a copy.
+Modelling these is what makes `end = strchr(buf, '/')` remain an alias of `buf`. -/
+def Scry.aliasArg0Calls : List String :=
+  .cons "strchr" (.cons "strrchr" (.cons "strstr" (.cons "memchr"
+    (.cons "dirname" (.cons "strcpy" (.cons "strncpy" (.cons "strcat"
+      (.cons "mempcpy" (.cons "memcpy" (.cons "memmove" .nil))))))))))
+
+def Scry.isAliasArg0Call (name : String) : Bool :=
+  List.any (fun n => String.eq n name) Scry.aliasArg0Calls
+
+/-- `strdup` returns a fresh heap object; the allocation site is the call point. -/
+def Scry.isFreshAllocCall (name : String) : Bool := String.eq name "strdup"
+
+/-- `realloc` frees its argument (on success) and returns a fresh object at the call
+site. The old location stays in `freed`; the result is a different location, so
+`p = realloc(p, n)` does not make `p` dangling. -/
+def Scry.isReallocCall (name : String) : Bool := String.eq name "realloc"
+
 /-- Parameter and result flow of one call into the given `Contrib`. -/
-def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
+def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (point : Nat)
     (r : Option Wil.Var) (callee : Wil.Callee) (args : List Wil.Var) : Scry.Contrib :=
   let targets := Scry.callTargets p st func callee;
   /-- A **direct** call to a function outside the unit: its result is `unknown` when it is
-  a pointer (the unit has no body to analyse), never "no alias". -/
+  a pointer (the unit has no body to analyse), never "no alias". A small library model
+  replaces that for the pointer-returning functions listed above. -/
   let externalResult : List (Scry.VarKey × List Scry.Loc) := match callee with
     | .indirect _ => .nil
     | .direct name => match Wil.findFunc p name with
@@ -375,7 +395,22 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
         | .none => .nil
         | .some rv => match Scry.ptrLike rv.ty with
           | .false => .nil
-          | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+          | .true => match Scry.isAliasArg0Call name, Wil.listNth args 0 with
+            | .true, .some a =>
+              List.cons (Scry.vk func rv.index, Scry.ptGet st (Scry.vk func a.index)) .nil
+            | _, _ => match Scry.isFreshAllocCall name with
+              | .true => List.cons (Scry.vk func rv.index, List.cons (.heap func point) .nil) .nil
+              | .false => match Scry.isReallocCall name with
+                | .true => List.cons (Scry.vk func rv.index, List.cons (.heap func point) .nil) .nil
+                | .false => List.cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
+  let externalFrees : List Scry.Loc := match callee with
+    | .indirect _ => .nil
+    | .direct name =>
+      if Bool.and (Scry.isReallocCall name) (Bool.not (List.isEmpty args)) then
+        match Wil.listNth args 0 with
+        | .some a => Scry.ptGet st (Scry.vk func a.index)
+        | .none => .nil
+      else .nil;
   let perTarget := Scry.concatLists (fun name =>
     match Wil.findFunc p name with
     | .none => .nil
@@ -399,7 +434,7 @@ def Scry.callContrib (p : Wil.Program) (st : Scry.PtState) (func : String)
           | .false => .nil
           | .true => .cons (Scry.vk func rv.index, Scry.unknownLocs) .nil;
   Scry.Contrib.mk (List.append externalResult (List.append perTarget unknownResult))
-    .nil .nil
+    .nil externalFrees
 
 /-- The constraints one call adds (see `Scry.callContrib`). -/
 def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (point : Nat)
@@ -412,7 +447,7 @@ def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (poin
     Scry.Contrib.mk .nil (Scry.storeMems st func ptr v) .nil
   | .free ptr _ =>
     Scry.Contrib.mk .nil .nil (Scry.ptGet st (Scry.vk func ptr.index))
-  | .call r callee args _ => Scry.callContrib p st func r callee args
+  | .call r callee args _ => Scry.callContrib p st func point r callee args
   | _ => Scry.noContrib
 
 -- ## The fixpoint
@@ -436,6 +471,19 @@ def Scry.ptStep (p : Wil.Program) (st : Scry.PtState) : Scry.PtState :=
 /-- The number of program points of a program (the fixpoint's fuel bound). -/
 def Scry.totalPoints (p : Wil.Program) : Nat :=
   List.foldr (fun fn acc => Nat.add acc (Scry.flatten fn).count) 0 p.funcs
+
+/-- `ptLoop`, also reporting whether it reached a fixpoint (`complete`) and how many
+rounds it ran. A `complete = false` result is a **sound partial** solution: the sets are
+a lower bound, so every finding derived from them is real, but recall may be reduced. -/
+partial def Scry.ptLoopB (p : Wil.Program) (fuel : Nat) (st : Scry.PtState)
+    (rounds : Nat) : Scry.PtState × Nat × Bool :=
+  match fuel with
+  | .zero => (st, rounds, .false)
+  | .succ k =>
+    let st' := Scry.ptStep p st;
+    match Scry.stateEq st st' with
+    | .true => (st', Nat.succ rounds, .true)
+    | .false => Scry.ptLoopB p k st' (Nat.succ rounds)
 
 partial def Scry.ptLoop (p : Wil.Program) (fuel : Nat) (st : Scry.PtState) : Scry.PtState :=
   match fuel with
@@ -484,6 +532,32 @@ def Scry.ptSolve (p : Wil.Program) : Scry.PtState :=
   | .true => st
   | .false => Scry.ptLoop p fuel st2
 
+/-- `ptSolve` with an explicit round cap: the result, the number of rounds it ran, and
+whether it converged. `none` keeps the historical `2 * program points + 8` bound (which
+is finite but far too large for a million-point file); `some n` is the `--max-rounds`
+contract. Exhausting the cap is reported, never hidden. -/
+def Scry.ptSolveBounded (p : Wil.Program) (maxRounds : Option Nat) :
+    Scry.PtState × Nat × Bool :=
+  match maxRounds with
+  | .none =>
+    let fuel := Nat.add 8 (Nat.mul 2 (Scry.totalPoints p));
+    let r := Scry.ptLoopB p fuel Scry.ptEmpty 0;
+    let st2 := Scry.ptSeeds p r.1;
+    match Scry.stateEq r.1 st2 with
+    | .true => (r.1, r.2.1, r.2.2)
+    | .false =>
+      let r2 := Scry.ptLoopB p fuel st2 r.2.1;
+      (r2.1, r2.2.1, Bool.and r.2.2 r2.2.2)
+  | .some cap =>
+    let r := Scry.ptLoopB p cap Scry.ptEmpty 0;
+    let st2 := Scry.ptSeeds p r.1;
+    match Scry.stateEq r.1 st2 with
+    | .true => (r.1, r.2.1, r.2.2)
+    | .false =>
+      let left := Nat.sub cap r.2.1;
+      let r2 := Scry.ptLoopB p left st2 r.2.1;
+      (r2.1, r2.2.1, Bool.and r.2.2 r2.2.2)
+
 -- ## The location table and ids
 
 /-- Every location the solution mentions, deduplicated. -/
@@ -522,6 +596,11 @@ structure Scry.PtResult where
   state : Scry.PtState
   locs : List Scry.Loc
   indirect : List (Scry.CallKey × Scry.IndirectTargets)
+  /-- The number of fixpoint rounds the solution took. -/
+  rounds : Nat
+  /-- False when the round cap stopped the fixpoint before it converged. The sets are
+  then a lower bound: findings are real, recall is reduced, and the caller must say so. -/
+  complete : Bool
 
 def Scry.locId (r : Scry.PtResult) (l : Scry.Loc) : Option Nat := Scry.locIdFrom l 0 r.locs
 
@@ -589,8 +668,9 @@ def Scry.ptVarCount (r : Scry.PtResult) : Nat :=
 def Scry.ptLocCount (r : Scry.PtResult) : Nat := List.length r.locs
 
 /-- The whole analysis: solve, build the table, resolve the indirect calls. -/
-def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
-  let st := Scry.ptSolve p;
+def Scry.pointsToBounded (p : Wil.Program) (maxRounds : Option Nat) : Scry.PtResult :=
+  let solved := Scry.ptSolveBounded p maxRounds;
+  let st := solved.1;
   let locs := Scry.locSort (Scry.locTable st);
   let indirect := Scry.concatLists (fun fn =>
     let g := Scry.flatten fn;
@@ -603,4 +683,8 @@ def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
           | .indirect v => .cons (Scry.CallKey.mk fn.name n,
               Scry.targetsOf (Scry.ptGet st (Scry.vk fn.name v.index))) .nil
         | _ => .nil) (Scry.range g.count)) p.funcs;
-  Scry.PtResult.mk st locs indirect
+  Scry.PtResult.mk st locs indirect solved.2.1 solved.2.2
+
+/-- The default analysis: the historical (finite) round bound. -/
+def Scry.pointsTo (p : Wil.Program) : Scry.PtResult :=
+  Scry.pointsToBounded p .none

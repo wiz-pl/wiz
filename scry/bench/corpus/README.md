@@ -13,6 +13,9 @@ This directory is the checked-in S0/S2 corpus (48 cases on `agent/scry-models`) 
   argv, `sprintf`'s formatted destination and format argument, the `strcpy` copy, the
   `read`/`recv` buffer source, `realloc`, a policy sanitiser, and the explicit
   unmodelled-external warning. They are referenced from the manifest, not duplicated.
+* `../../tests/fixtures/taint-*.c` — the S0 fixtures the taint test group already uses,
+  including the `taint-exec-{unsafe,safe}.c` command-sink family and the
+  `taint-entry-{unsafe,safe}.c` exported-C-ABI-entry controls.
 
 The fixtures are deliberately small and hand-authored. They are a regression and
 debugging corpus, not evidence of real-world precision; S1/S3/S4 are optional external
@@ -75,6 +78,13 @@ The C frontend in this slice lowers a deliberate subset and reports the rest as
 
 This split is a measurement decision, not a soundness claim. `wiz-notes/scry-bench.md`
 records the limitation and the cases that are `unknown` today.
+
+## Dynamic evidence
+
+`scry bench --dynamic` also runs the separate corpus in `../dynamic/` (ASan/UBSan/
+coverage). It is reported in its own `dynamic` section and does not change the static
+TPR/FPR metrics or the baseline comparison; a clean dynamic run is not a negative
+static case. See `../dynamic/README.md`.
 
 ## External suites
 

@@ -1,0 +1,38 @@
+# scry's out-of-bounds rule pack (CWE-787 writes, CWE-125 reads)
+#
+# Two `kind memory` rules name the analyses with `check`; `Scry.Bounds` supplies the
+# evidence (allocation size, tainted index/length, dominating bound check). Keep this
+# pack separate from default.scry so a bounds claim is an explicit opt-in:
+#
+#   scry taint FILE.c --rules lib/Scry/rules/oob.scry
+#
+# The analysis is a may-analysis over the points-to locations. It reports only when the
+# allocation's cell count is statically known; an unknown size is a
+# `scry/memory/unknown-memory` diagnostic, not a finding.
+
+rule out-of-bounds-write
+  kind memory
+  severity error
+  message An attacker-controlled index writes outside an allocation
+  check out-of-bounds-write
+end
+
+rule out-of-bounds-read
+  kind memory
+  severity error
+  message An attacker-controlled index reads outside an allocation
+  check out-of-bounds-read
+end
+
+# The pack must trust the cap sanitisers it expects an author to use; scry's model table
+# only treats a model sanitiser as a kill when the pack names it. This rule has no
+# sources or sinks: it exists only so `clamp_len`/`checked_size`/`clamp_size` clean the
+# length they return.
+rule oob-trusted-cap
+  kind taint
+  severity note
+  message A length capped by a trusted policy model
+  sanitise clamp_len result
+  sanitise checked_size result
+  sanitise clamp_size result
+end

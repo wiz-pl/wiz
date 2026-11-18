@@ -415,6 +415,16 @@ def identLabel (doc : Doc) (off : Nat) (n : Name) : String :=
     if src != n && !src.contains '\n' && src.length ≤ 60 && !src.isEmpty then src else n
   | _ => n
 
+/-- The hover of a declaration's own name: unlike a use, it is not an identifier in the
+info tree, so the hover falls back to the declaration's type and doc comment (11s: the
+documentation server asks exactly there). -/
+def declHover (doc : Doc) (n : Name) : Option String := do
+  let d ← doc.state.globals.find? n
+  let docs := match doc.state.docOf? n with
+    | some ds => s!"\n\n---\n\n{ds}"
+    | none => ""
+  pure s!"```wiz\n{n} : {d.type.pretty [] (some doc.state.globals)}\n```{docs}"
+
 /-- The hover of a use of syntax or an `import` (`Query.syntaxAt`), as Markdown. -/
 def syntaxHover (srv : Server) (uri : String) (doc : Doc) (es : Array (Info ZeroOneMany)) : Option String := do
   let e ← es[0]?
@@ -826,7 +836,8 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     | "textDocument/hover" =>
       let md? := match syntaxHover srv uri doc (Query.syntaxAt doc.state off) with
         | some md => some md
-        | none => (Query.hoverAt doc.state off).map fun (n, ty) =>
+        | none => match Query.hoverAt doc.state off with
+          | some (n, ty) =>
             -- (11s) a global's doc comment, as Markdown under its type (a local has none)
             let isLocal := match Query.identAt doc.state off with
               | some (.ident _ _ true _ _) => true
@@ -834,7 +845,9 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
             let docs := if isLocal then "" else match doc.state.docOf? n with
               | some d => s!"\n\n---\n\n{d}"
               | none => ""
-            s!"```wiz\n{identLabel doc off n} : {ty}\n```{docs}"
+            some s!"```wiz\n{identLabel doc off n} : {ty}\n```{docs}"
+          -- a declaration's own name (a `def`'s, a structure's): its type and doc
+          | none => (Query.declsAt doc.state off).findSome? (declHover doc)
       match md? with
       | some md => pure (srv, #[reply (Json.mkObj [("contents", Json.mkObj [("kind", "markdown"), ("value", md)])])])
       | none => pure (srv, #[reply Json.null])
