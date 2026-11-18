@@ -1,0 +1,108 @@
+import Sys
+import Text
+import Scry.Wil
+import Scry.Native
+import Scry.CstStore
+import Scry.CsCst
+import Scry.CsLower
+import Scry.Rules
+import Scry.Models
+import Scry.RuleTaint
+import Scry.Interproc
+/-!
+# cs-cover: a coverage probe for the C# frontend (a measurement tool, not a driver)
+
+Walks a directory of `.cs` files, parses each with tree-sitter-c-sharp, lowers it with
+`Scry.CsLower`, runs the rule pack over the file's lowered program, and prints one record
+per file plus one line per warning and per finding:
+
+    FILE <path> <functions> <warnings> <findings>
+    WARN <path> <message>
+    FIND <path> <rule> <func> <name> <arg>
+    PARSE <path> <error-nodes>
+
+used to build `scry/CSHARP.md` §7's table on a real corpus. It is what
+`scripts/cs-coverage.sh` runs (`CS_COVER=…`). A file that lowers to no function and no
+warning is exactly the silent skip §7 is about, so the caller counts `FILE` rows with
+`functions 0 warnings 0`.
+-/
+
+/-- The subdirectories of `dir` worth walking (`node_modules`, `bin`, `obj` and `.git`
+are skipped). -/
+partial def Scry.coverSubdirs (dir : String) : List String → EIO (List String)
+  | .nil => EIO.pure .nil
+  | .cons e rest => do
+    let p := dir ++ "/" ++ e;
+    isD ← EIO.lift (FS.isDir p);
+    tail ← Scry.coverSubdirs dir rest;
+    match isD with
+    | .true => (match String.elem e ["node_modules", "bin", "obj", ".git"] with
+      | .true => EIO.pure tail
+      | .false => EIO.pure (List.cons p tail))
+    | .false => EIO.pure tail
+
+/-- The `.cs` files in `dir`. -/
+partial def Scry.coverFiles (dir : String) : List String → EIO (List String)
+  | .nil => EIO.pure .nil
+  | .cons e rest => do
+    let p := dir ++ "/" ++ e;
+    isD ← EIO.lift (FS.isDir p);
+    tail ← Scry.coverFiles dir rest;
+    match isD with
+    | .true => EIO.pure tail
+    | .false => (match String.endsWith p ".cs" with
+      | .true => EIO.pure (List.cons p tail)
+      | .false => EIO.pure tail)
+
+/-- Every `.cs` file under the directories in `work`, depth first. -/
+partial def Scry.coverWalk (work : List String) (acc : List String) : EIO (List String) :=
+  match work with
+  | .nil => EIO.pure acc
+  | .cons dir rest => do
+    es ← FS.listDir dir;
+    subs ← Scry.coverSubdirs dir es;
+    fs ← Scry.coverFiles dir es;
+    Scry.coverWalk (List.append subs rest) (List.append fs acc)
+
+/-- One file's record, its warnings and its findings. -/
+def Scry.coverFile (pack : Scry.RulePack) (p : String) : EIO Unit := do
+  text ← FS.readFile p;
+  st ← Scry.Native.parse "c_sharp" text;
+  match Nat.beq (Scry.Native.errorCount st) 0 with
+  | .false => EIO.lift (IO.println ("PARSE\t" ++ p ++ "\t" ++ Nat.repr (Scry.Native.errorCount st)))
+  | .true => do
+    store ← EIO.lift (Scry.Native.toCstStore p st);
+    let cst := Scry.Cs.ofStore text store;
+    let l := Scry.Cs.lowerCst p text cst;
+    let fs := Scry.programFindings (Scry.analyze (Wil.program l.funcs) pack);
+    EIO.lift (IO.println ("FILE\t" ++ p ++ "\t" ++ Nat.repr (List.length l.funcs) ++ "\t"
+      ++ Nat.repr (List.length l.warnings) ++ "\t" ++ Nat.repr (List.length fs)));
+    EIO.lift (IO.print (String.intercalate ""
+      (List.map (fun (w : Scry.Warning) => "WARN\t" ++ p ++ "\t" ++ w.message ++ "\n") l.warnings)));
+    EIO.lift (IO.print (String.intercalate ""
+      (List.map (fun (f : Scry.RuleFinding) => "FIND\t" ++ p ++ "\t" ++ f.rule ++ "\t" ++ f.func
+        ++ "\t" ++ f.name ++ "\t" ++ Nat.repr f.arg ++ "\n") fs)))
+
+partial def Scry.coverAll (pack : Scry.RulePack) : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons p rest => do
+    Scry.coverFile pack p;
+    Scry.coverAll pack rest
+
+def Scry.coverUsage : EIO Unit :=
+  EIO.lift (IO.ePrintln "usage: cs-cover DIR PACK.scry   (one record per .cs file)")
+
+/-- `cs-cover DIR PACK` as an `EIO` action (kept out of `main` so the arguments' types
+are not inferred through a lambda/match). -/
+def Scry.coverMain (args : List String) : EIO Unit :=
+  match args with
+  | .cons dir rest => match rest with
+    | .cons packPath _ => do
+      packText ← FS.readFile packPath;
+      let pack := Scry.parseRulePack packText;
+      files ← Scry.coverWalk (List.cons dir .nil) .nil;
+      Scry.coverAll pack files
+    | .nil => Scry.coverUsage
+  | .nil => Scry.coverUsage
+
+def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.coverMain)

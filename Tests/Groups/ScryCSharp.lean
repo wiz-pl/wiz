@@ -16,7 +16,14 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   sees it (named nodes, field tokens, and the normalised fields of `Scry.CsCst`).
 * **Lowering golden**: `lower/*.cs` against `*.wil` (every lowered function and the
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
-  and returns the value C# would.
+  and returns the value C# would. `lower/modern` covers records, partial parts, switch
+  expressions, LINQ, `with`, collection expressions and a constructor initialiser;
+  `lower/toplevel` covers top-level statements (lowered as `<stem>.Main`);
+  `lower/unsupported` is the warning golden for everything out of scope.
+* **Silent skip**: `lower/{modern,toplevel,unsupported}` must each keep the warning that
+  names every out-of-scope construct they contain. The case fails when one of them
+  regresses from a warning to a silent skip (a construct that lowers to nothing without
+  a diagnostic, so the analysis reports nothing about code it never read).
 * **End-to-end taint**: `taint/cwe78-process-unsafe.cs` (console input reaches
   `Process.Start` through string concatenation) fires the `command-injection` rule of
   `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
@@ -102,8 +109,11 @@ def fixtureDefs (src spill : String) : String :=
 /-- Every fixture, as `(dir, name)`. -/
 def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
-   ("lower", "basic"), ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
-   ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe")]
+   ("parse", "modern"),
+   ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
+   ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
+   ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
+   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -128,6 +138,39 @@ def lowerGolden (name : String) : IO Unit := do
       s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.wil" (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The rendering of a lowered fixture (functions and warnings), read from the lowering
+itself rather than from its golden. -/
+def loweredText (name : String) : IO String := do
+  let (src, spill) ← fixture "lower" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- `(fixture, message substring)` pairs the lowering must still report. Every construct
+of the first slice's out-of-scope list is here: the case fails when one of them regresses
+from a warning to a **silent skip** (the analysis then says nothing about code it never
+looked at), which is the failure mode this table exists to prevent. -/
+def requiredWarnings : List (String × String) :=
+  [("modern", "target-typed new() without a declared type"),
+   ("modern", "local function Label not modelled"),
+   ("modern", "is test not modelled"),
+   ("modern", "switch expression arms are not compared"),
+   ("modern", "with expression: the copy's members are not updated"),
+   ("toplevel", "is test not modelled"),
+   ("unsupported", "indexer_declaration member not modelled"),
+   ("unsupported", "operator_declaration member not modelled"),
+   ("unsupported", "destructor_declaration member not modelled"),
+   ("unsupported", "delegate_declaration not modelled"),
+   ("unsupported", "local function Local not modelled"),
+   ("unsupported", "lambda body not lowered"),
+   ("unsupported", "lock_statement not modelled"),
+   ("unsupported", "goto_statement not modelled"),
+   ("unsupported", "labeled_statement not modelled"),
+   ("unsupported", "yield_statement not modelled"),
+   ("unsupported", "preproc_if not modelled"),
+   ("unsupported", "is test not modelled")]
 
 /-- A spill's freshness, read from its text (no Wiz evaluation): the `language` is
 `c_sharp`, the `bytes` row is the `.cs` file's UTF-8 size, and the root's span starts at
@@ -188,8 +231,25 @@ def group : Group where
       run := fun _ => parseGolden "statements" },
     { name := "view: precedence, casts, is/as, new forms, lambdas, generic calls, ref/out, interpolation",
       run := fun _ => parseGolden "expressions" },
+    { name := "view: record, switch expression, with, collection expression, query syntax",
+      run := fun _ => parseGolden "modern" },
     { name := "lower: classes, fields, constructors, calls, strings, control flow, try/catch to Wil",
       run := fun _ => lowerGolden "basic" },
+    { name := "lower: record and record struct, partial parts, switch expression, LINQ, with, collection, ctor init, async",
+      run := fun _ => lowerGolden "modern" },
+    { name := "lower: top-level statements become <stem>.Main (with the file's classes)",
+      run := fun _ => lowerGolden "toplevel" },
+    { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
+      run := fun _ => lowerGolden "unsupported" },
+    { name := "silent skip: every out-of-scope construct keeps the warning that names it",
+      run := fun _ => do
+        let mut missing : List String := []
+        for name in ["modern", "toplevel", "unsupported"] do
+          let text ← loweredText name
+          for (n, sub) in requiredWarnings do
+            if n == name && !((text.splitOn sub).length > 1) then
+              missing := missing ++ [s!"{name}: no warning contains \"{sub}\""]
+        checkEq ([] : List String) missing },
     { name := "lower: a lowered C# loop runs under Wil.runFunction (Sum(10) = 45, Fact(5) = 120)",
       run := fun _ => do
         let (src, spill) ← fixture "lower" "basic"
@@ -216,7 +276,15 @@ def group : Group where
     { name := "taint: CWE-78 across an instance helper (parameter and return summary)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-helper-unsafe"
-        checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs }
+        checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 through a LINQ query, a switch expression, a record field and a with copy",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-unsafe"
+        checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-safe"
+        checkEq ([] : List String) fs }
   ]
 
 builtin_initialize registerGroup group
