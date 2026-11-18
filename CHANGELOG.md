@@ -17,6 +17,45 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* loom: a form control's live value now reaches a pure `step`. `web/framework/driver.js`
+  sends the event string `event "\n" index "\n" payload` — a control's `value` for
+  `input`/`change`, the key for `keydown`/`keyup`, nothing otherwise — and
+  `lib/Web/Loom.wiz` parses it with `Loom.splitEvent`; an app that reads it is a
+  `Loom.LiveApp` (`update msg payload state`, `Loom.LiveApp.step`/`patches`). The driver
+  also grew `onStep` (the page's effect hook), `setState` (handing back a state the page
+  changed through its own entry point) and a `parse` argument (the DOM double in tests).
+  `web/framework/driver_test.mjs` pins the strings, and `web/framework/test.sh` runs it.
+* playground: the editor is a Loom component (`lib/Web/Editor.wiz`): the page's
+  `section.pane`, `#editor` textarea, its label and hint, `#run` and `#count`, with the
+  text arriving as the input event's payload and Run counting requests. It is tested the
+  way the output pane is: `web/playground_editor_gen.wiz` renders and steps it and
+  `web/playground_editor_test.mjs` applies the patches to the SSR in the DOM double
+  (both run in `web/playground-loom-test.sh`).
+* playground: `?ui=loom` mounts the whole page as one Loom app (`web/playground-ui.wiz`,
+  built by `web/build-playground-ui.sh` into `wiz-playground-ui.mjs`): the header and
+  `#status`, the editor, the goals pane's container, the output pane and the footer's
+  `#engine`. The page (`web/playground.js`) keeps the effects (the engine, the goals
+  client) and reports their results through the module's `wiz_loom_*` entry points; the
+  UI is its own Wasm instance, so neither a trap in the engine nor an engine restart
+  touches it. The static markup stays the default and the fallback when the module is
+  missing. The UI state is one opaque Wasm value passed by ownership (stage 9g's C ABI
+  consumes an argument): the driver takes an extra `wiz_retain` for the read-only first
+  paint, and the page hands each state to its `wiz_loom_*` calls and keeps the result.
+  `web/playground_ui_test.mjs` mounts the real module under Node with the driver and the
+  DOM double and checks the panes, the status pair, the count, the value classes and
+  the entry points.
+* web: the standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`)
+  now mounts the playground's goals pane (`web/playground-lsp.js` on `web/lsp-client.js`
+  and `web/goals.js`) instead of the Wiz program `web/Web.wiz` stepped through
+  `wiz_web_step`. One implementation serves both pages and both transports (a WebSocket
+  URL or the playground's in-page server); the page's own half (`web/infoview.js`) is
+  only its URL rule (`?port=`, `?lsp=`), follow mode (`?follow=1`, no document of its
+  own, moved by `wiz/infoview/cursor`), the `#info` box and the status/cursor line.
+  Clicking a subterm now selects it the way the arrow keys do (`.sel`), and the page no
+  longer loads `wiz-infoview.mjs` — that module is the documentation's renderer now.
+  `web/playground_lsp_test.mjs` gains follow mode, the separate `info` box and the
+  `onRender` hook; `web/infoview_page_test.mjs` covers the page's URL and status text.
+  `wiz lsp --ws` serves the three extra scripts the page needs.
 * playground: the output pane's first piece now exists as a Loom component,
   `lib/Web/Playground.wiz`: `Model.ofText` splits a run's output into classified lines
   and produces the page's `#count` text verbatim (`2 lines · 1 error`), `Model.ofFailure`

@@ -1549,15 +1549,38 @@ rendering and a keyed diff to DOM patches. Nodes are `Loom.VNode M` (`text`, `ra
 `Loom.Rendered.diff` a `List Loom.Patch` (`replace`, `text`, `setAttr`,
 `removeAttr`, `insert`, `remove`, `move`) that `Loom.patchesJson` hands to
 `web/framework/runtime.js`. An app is `Loom.App S M` (`init`, `update`, `view`); a
+`Loom.LiveApp S M` takes the browser event's payload too (`update msg payload state`:
+a form control's live value for `input`/`change`, the key for `keydown`/`keyup`, parsed
+from the driver's `event\nindex\npayload` string by `Loom.splitEvent`); a
 component is `Loom.Component P S M`. Local state is a lens into the app state
 (`Loom.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
 commute), and a one-shot resource is `Loom.Owned S`, a quantity-1 token the kernel
 makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
 the only trust boundary (and must be one element); all other text and attribute values
-are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
-no effects, and `value`/`checked` would need property patches. Tests: group `loom`
-and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
-`wiz-notes/react-framework.md`.
+are escaped by `Tagged.esc`. An empty text node is dropped from a sibling chain: the DOM
+has no node for it, so a patch path could not address it. There is no hydration yet
+(SSR then a re-render/mount), no effects, and `value`/`checked` would need property
+patches. An exported `wiz_loom_*` function owns the state it is given (stage 9g's C
+ABI): the browser half transfers it on every step and takes a `wiz_retain` for a
+read-only call. Tests: group `loom`
+and `web/framework/test.sh` (Node DOM; `driver_test.mjs` pins the event strings).
+Design, survey and migration analysis: `wiz-notes/react-framework.md`.
+
+## Web: the playground's Loom components (`lib/Web/Playground.wiz`, `lib/Web/Editor.wiz`)
+
+`import Web.Playground` is the playground's output pane: `Line` (the engine's text, the
+`err`/`val` classes, what the line shows and its tooltip), `Model` (the lines, the error
+count, the page's status pair and `#count` text), `Model.ofText`/`Model.ofFailure`, and
+`Model.view` for `#output`. The value grammar (`web/playground-values.js`) lives in it
+too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, and stays
+raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
+with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
+`#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
+`web/playground-ui.wiz` composes them into the whole page (`?ui=loom`) and exports its
+`wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
+module, so a user program's trap in the engine cannot touch the UI state. Tests:
+`web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
+(the page, mounted from the built module under Node).
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
@@ -1579,7 +1602,9 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
 widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
 held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
-the raw `Loom.on`/`Loom.App.event` path passes only a handler index.
+the raw `Loom.on`/`Loom.App.event` path passes only a handler index, and an app that
+wants a control's live value uses `Loom.LiveApp` (the driver puts it in the event
+string).
 
 ## Numbers: classes, integers, words
 

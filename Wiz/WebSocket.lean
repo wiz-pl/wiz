@@ -115,10 +115,15 @@ def localOrigin (origin : String) : Bool :=
         host == h || host.startsWith (h ++ ":")
 
 /-- (11w) The files of the web infoview a server may hand out over HTTP (`web/build.sh`'s
-output), with their media types: only these, by exact name, so no other file is reachable. -/
+output), with their media types: only these, by exact name, so no other file is reachable.
+The page's language client is the playground's (`web/playground-lsp.js`), so its modules are
+served too. -/
 def webAssets : List (String × String) :=
   [("infoview.html", "text/html; charset=utf-8"), ("infoview.js", "text/javascript; charset=utf-8"),
-   -- (11s) the part infoview.js shares with the documentation's pages
+   -- (11s) the parts infoview.js shares with the playground and the documentation's pages
+   ("playground-lsp.js", "text/javascript; charset=utf-8"),
+   ("lsp-client.js", "text/javascript; charset=utf-8"),
+   ("goals.js", "text/javascript; charset=utf-8"),
    ("tagged.js", "text/javascript; charset=utf-8"),
    ("wiz-infoview.mjs", "text/javascript; charset=utf-8"), ("wiz-infoview.wasm", "application/wasm")]
 
