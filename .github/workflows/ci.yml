@@ -570,6 +570,10 @@ jobs:
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
         run: sh web/framework/test.sh
+      - name: The playground's output pane as a Loom component
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: sh web/playground-loom-test.sh
 
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
