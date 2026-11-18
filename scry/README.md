@@ -399,7 +399,16 @@ grail run scry -- bench --no-timing --json -    # deterministic report on stdout
 grail run scry -- bench --extra /path/to/subset # an external manifest
 grail run scry -- bench --fail-on-regression    # exit 1 if the baseline changed
 grail run scry -- bench --update-baseline bench/baseline.json
+grail run scry -- bench --fail-on-regression --baseline-bootstrap  # first run only
 ```
+
+`--fail-on-regression` fails closed: a **missing** baseline, an **invalid** one, a run whose
+status is not `ok` (for example a missing corpus), and a case that appears or disappears
+between the baseline and the run all exit 1 with the reason. Presence is compared in both
+directions (`present→absent` and `absent→present`) and is reported in the JSON and the
+Markdown summary. `--baseline-bootstrap` is the explicit first-run escape: it allows an
+absent baseline and nothing else. Without the flag, every one of those shapes still exits 0,
+so the gate is a mode of the benchmark, not a different command.
 
 Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, precision,
 F1, macro averages, path validity (the path ends at the reported sink; a taint path also
