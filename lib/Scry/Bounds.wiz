@@ -1,3 +1,4 @@
+import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
 import Scry.RuleTaint
@@ -389,8 +390,14 @@ def Scry.boundsOfFunc (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.P
   | .none => Scry.boundsEmpty
   | .some r =>
     let g := r.plan.info.g;
+    -- The taint plan is flow-only (no point-level rd/dom). The opt-in bounds rules
+    -- need both for constant indices and dominating guards; compute them here so the
+    -- default pack never pays for them, and keep the old precision when they are on.
+    let info : Scry.FnInfo := { r.plan.info with rd := Scry.rdIn g r.plan.info.defs,
+                                            dom := Scry.dominators g };
+    let r2 : Scry.FuncResult := { r with plan := { r.plan with info := info } };
     List.foldr (fun n acc => Scry.boundsAppend acc
-      (Scry.boundsStmtAt writeRule readRule pt sizes r fn g n))
+      (Scry.boundsStmtAt writeRule readRule pt sizes r2 fn g n))
       Scry.boundsEmpty (Scry.range g.count)
 
 /-- Run the two out-of-bounds rules of `pack`. Neither rule in the pack means no

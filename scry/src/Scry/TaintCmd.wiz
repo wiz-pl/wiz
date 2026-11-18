@@ -975,6 +975,9 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
   | .false => do
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
+    Scry.reportStage o startMs "rules" (Nat.repr (List.length (Scry.RulePack.taintRules pack))
+      ++ " taint rule(s), " ++ Nat.repr (List.length (Scry.RulePack.memoryRules pack))
+      ++ " memory rule(s)");
     let c := Scry.Cst.ofStore text cst;
     let tu := Scry.lowerTU o.file c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
