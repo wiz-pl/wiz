@@ -39,16 +39,18 @@ partial def countBoundary (bs : List Scry.BoundaryFinding) : Nat :=
   | .nil => 0
   | .cons _ rest => Nat.succ (countBoundary rest)
 
-/-- The hard `--timeout` path, end to end: the runtime parser's largest function takes
-far more than one second, so the alarm must exit 124 with a message (not hang, not print
-a partial JSON). Skipped when the CLI has not been built in this checkout. -/
-def timeoutCheck : EIO Unit := do
+/-- The hard `--timeout` path, end to end: parsing and lowering the 3.9 MB generated
+grammar takes more than one second, so the alarm must exit 124 with a message (not hang,
+not print a partial JSON). (It used to use the tree-sitter runtime `parser.c`; after the
+large-function fixes that file finishes in a fraction of a second, so the generated
+grammar is the reliably-slow input.) Skipped when the CLI has not been built. -/
+def timeoutCheck (path : String) : EIO Unit := do
   bin ← EIO.lift (FS.exists ".grail/bin/scry");
   match bin with
   | .false => say "scale: timeout skip (.grail/bin/scry absent)"
   | .true => do
     out ← Process.output ".grail/bin/scry"
-      (List.cons "taint" (List.cons "native/tree-sitter/lib/src/parser.c"
+      (List.cons "taint" (List.cons path
         (List.cons "--allow-errors" (List.cons "--timeout" (List.cons "1"
           (List.cons "--json" .nil)))))) "";
     say ("scale: timeout status=" ++ ExitStatus.toString out.status
@@ -98,6 +100,6 @@ def scale : EIO Unit := do
       ++ " summaryRounds=" ++ Nat.repr rep3.summaryRounds);
     unless "scale: max-rounds marks partial" rep3.truncated;
     unless "scale: max-rounds note" (Nat.lt 0 (List.length rep3.budgetNotes));
-    timeoutCheck
+    timeoutCheck path
 
 def main : IO Unit := EIO.toIO scale

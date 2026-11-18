@@ -26,6 +26,15 @@ check("?lsp= wins over ?port=", endpointOf("?port=1&lsp=ws://h:2").url, "ws://h:
 check("?lsp=: a bare port", endpointOf("?lsp=9999").url, "ws://127.0.0.1:9999");
 // `off` is the pane with no server, as in the playground.
 check("?lsp=off: no server", endpointOf("?lsp=off"), null);
+// (#430) the server's token rides along to the WebSocket, and the label leaves it out.
+check("?port= with a token: the socket URL carries it",
+  new URL(endpointOf("?port=1234&token=t0k").url).searchParams.get("token"), "t0k");
+check("?port= with a token: the label hides it", endpointOf("?port=1234&token=t0k").label,
+  "ws://127.0.0.1:1234/");
+check("?lsp= with a token: the socket URL carries it",
+  new URL(endpointOf("?lsp=ws://h:2&token=t0k").url).searchParams.get("token"), "t0k");
+check("a token already in the ?lsp= URL is kept",
+  new URL(endpointOf("?lsp=ws://h:2?token=in-url").url).searchParams.get("token"), "in-url");
 
 // The status line's vocabulary (the page's `#status`).
 check("status: open", statusText({ state: "open" }, false), "connected");
@@ -34,6 +43,9 @@ check("status: following", statusText({ state: "connecting" }, true), "following
 check("status: closed", statusText({ state: "closed" }, false), "disconnected (is `wiz lsp --ws` running?)");
 check("status: failed", statusText({ state: "failed", endpoint: "ws://127.0.0.1:1" }, false),
   "cannot connect to ws://127.0.0.1:1");
+// (#430) a refusal with no token in the page's URL is most likely the server's check.
+check("status: failed without a token", statusText({ state: "failed", endpoint: "ws://127.0.0.1:1" }, false, false),
+  "disconnected (no ?token= in this page's URL: use the URL `wiz lsp --ws` printed)");
 check("status: no server", statusText({ state: "no-server" }, false), "no server");
 
 if (failed) {

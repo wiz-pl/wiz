@@ -18,24 +18,30 @@
 // page needs no `wiz-infoview.mjs` of its own (the documentation's pages still do).
 "use strict";
 import { startInfoview } from "./playground-lsp.js";
-import { parseEndpoint } from "./lsp-client.js";
+import { endpointFromSearch } from "./lsp-client.js";
 
 // The server the page's URL names: `?lsp=` wins (the playground's spelling, `off` turns
 // the pane into "no server"), else `?port=` (this page's old parameter), else 8765.
+// `endpointFromSearch` also carries the server's token (#430: `wiz lsp --ws` prints the
+// page's URL with it; the WebSocket presents it or the server refuses the connection)
+// and keeps it out of the label the page shows.
 export function endpointOf(search) {
   const params = new URLSearchParams(search || "");
-  const lsp = params.get("lsp");
-  if (lsp !== null) return parseEndpoint(lsp);
-  return parseEndpoint(params.get("port") || "8765");
+  return params.has("lsp") ? endpointFromSearch(search)
+    : endpointFromSearch(search, "port", "8765");
 }
 
 // The page's `#status` text for a view (the standalone page has no engine status).
-export function statusText(view, follow) {
+// Without a `?token=` in the page's URL a refused WebSocket is most likely the server's
+// token check, so say that instead of blaming a server that is not running (#430).
+export function statusText(view, follow, hasToken = true) {
   switch (view.state) {
     case "open": return "connected";
     case "connecting": return follow ? "following the editor" : "connecting";
     case "closed": return "disconnected (is `wiz lsp --ws` running?)";
-    case "failed": return "cannot connect to " + (view.endpoint || "the language server");
+    case "failed":
+      return hasToken ? "cannot connect to " + (view.endpoint || "the language server")
+        : "disconnected (no ?token= in this page's URL: use the URL `wiz lsp --ws` printed)";
     default: return "no server";
   }
 }
@@ -53,16 +59,21 @@ export function startPage(doc = globalThis.document, loc = globalThis.location) 
   const pos = doc.getElementById("pos");
   if (follow && editor) editor.style.display = "none";
 
+  const endpoint = endpointOf(loc ? loc.search : "");
+  // (#430) Is the server's token in this page's URL? If not, a refusal is probably that.
+  let hasToken = false;
+  try { hasToken = !!(endpoint && new URL(endpoint.url).searchParams.has("token")); } catch (_) { hasToken = false; }
+
   const app = startInfoview({
     editor,
     panel,
     info,
-    config: endpointOf(loc ? loc.search : ""),
+    config: endpoint,
     follow,
     // Following: the document is the editor's, not ours; the server announces it.
     uri: follow ? null : undefined,
     onRender(view) {
-      if (status) status.textContent = statusText(view, follow);
+      if (status) status.textContent = statusText(view, follow, hasToken);
       if (pos && view.position) {
         pos.textContent = `${view.position.line + 1}:${view.position.character + 1}`;
       }

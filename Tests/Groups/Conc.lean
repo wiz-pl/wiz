@@ -373,6 +373,15 @@ def concGroup : Group where
                 pure true
               catch _ => pure false
             check (!skipped) "cRunLibs recorded a run-time failure as a skip" },
+    -- (engine-trampoline) Native builds arm no boundary: `Process.exit` still ends the
+    -- process with its own code (the Wasm playground is the one place `wiz_stop_run`
+    -- catches it, runtime/rt_con.inc).
+    { name := "a program's own exit is still the process's exit status", run := fun _ => do
+        match ← cRunLibsOut "import IO\nimport Sys\ndef main : IO Unit := Process.exit 3\n" with
+        | .ok v => throw (IO.userError s!"the program ran to the end: {v}")
+        | .error e =>
+          if e.isToolchain then skip "no toolchain"
+          else check ((e.message.splitOn "the program failed (3)").length > 1) e.message },
     { name := "a program that writes 'No such file' on stderr and exits 0 still passes", run := fun _ =>
         cRunLibs ("import IO\nimport Sys\n" ++
           "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => IO.println \"ok\")\n") "ok\n" },

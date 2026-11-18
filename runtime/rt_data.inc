@@ -745,8 +745,10 @@ WIZ_API wiz_val wiz_itab_of_list(wiz_val l) {
 
 /* `IO.writeFile`: the text as UTF-8 up to its first NUL (the `String` representation
    ends there; `FS.writeBytes` is for binary data). An `IO Unit` call has no error
-   channel, so a failure is reported and the program exits 1: a bad path, a full disk
-   (a short write, or `fclose` flushing the last buffer) must not look like success. */
+   channel, so a failure is reported and the program stops with 1: a bad path, a full
+   disk (a short write, or `fclose` flushing the last buffer) must not look like
+   success. The stop is clean (`wiz_clean_exit`, rt_core.inc): an armed boundary catches
+   it, the native CLI exits. */
 WIZ_API void wiz_io_write_file(const char *path, const char *text) {
   FILE *f = fopen(path, "wb");
   int e = 0;
@@ -758,7 +760,7 @@ WIZ_API void wiz_io_write_file(const char *path, const char *text) {
   }
   if (e) {
     fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
-    exit(1);
+    wiz_clean_exit(1);
   }
 }
 

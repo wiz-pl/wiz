@@ -1,0 +1,30 @@
+import Scry.EqPlan
+-- The canonicalise step on its own (`scry-egraph-canon`): a database with equality
+-- facts `eq(1, 2)` and `eq(2, 3)` is merged into the sort's e-graph and every `eqsort`
+-- column is rewritten to its representative. `q(2)` and `q(3)` become one `q` row.
+-- Canonicalising a second time changes nothing. `main` is the digest.
+
+-- relations: 0 = eq (eqsort 0, eqsort 0), 1 = q (ordinary)
+def u (n : Nat) : U64 := U64.ofNat n
+
+def ops : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+def prog : Scry.Program Nat := Scry.Program.mk ops [2, 1] [] [] []
+def plan : Scry.Plan Nat :=
+  Scry.Plan.mk prog [Scry.EqCol.mk 0 0 0, Scry.EqCol.mk 0 1 0, Scry.EqCol.mk 1 0 0]
+
+def db : Scry.State Nat :=
+  let st := Scry.State.addTuple (Scry.State.addTuple Scry.State.empty 0 [u 1, u 2]) 0 [u 2, u 3];
+  Scry.State.addTuple (Scry.State.addTuple st 1 [u 2]) 1 [u 3]
+
+def main : Nat :=
+  let r := Scry.Plan.canonicalise plan (Scry.Plan.sorts plan) db;
+  let again := Scry.Plan.canonicalise plan r.2.1 r.1;
+  let g := Scry.EqSorts.graph r.2.1 0;
+  Scry.Db.relSize r.1.db 0 * 100000 +
+  Scry.Db.relSize r.1.db 1 * 10000 +
+  (if r.2.2 then 1000 else 0) +
+  (if again.2.2 then 100 else 0) +
+  (if Scry.EGraph.sameClass g 1 3 then 10 else 0) +
+  Scry.EGraph.numClasses g

@@ -76,10 +76,12 @@ kill $HTTP
 for want in 'interactive: true' 'hover: <span class="kind">const</span> <code>' 'selected: <span class="tt ' 'search name: 1' 'search docs: 1' 'search signature: 1'; do
   if grep -qF "$want" "$OUT/doc-chrome.txt"; then echo "ok (doc, chromium): $want"; else echo "FAIL (doc, chromium): missing $want"; cat "$OUT/doc-chrome.txt"; exit 1; fi
 done
-WIZ_WEB_OUT=$OUT "$ROOT/web/bridge.sh" "$PORT" "$WIZ" > "$OUT/bridge.log" 2>&1 &
+# (#430) the server's token: the page's URL carries it to its WebSocket
+TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+WIZ_LSP_TOKEN=$TOKEN WIZ_WEB_OUT=$OUT "$ROOT/web/bridge.sh" "$PORT" "$WIZ" > "$OUT/bridge.log" 2>&1 &
 BRIDGE=$!
 sleep 3
-node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT" > "$OUT/chrome.txt"
+node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT&token=$TOKEN" > "$OUT/chrome.txt"
 ok=1
 # The page's markup is web/goals.js's (the playground's renderer) since the two infoviews
 # were unified: a goal's hypothesis is a `.names` span (with its own title/span

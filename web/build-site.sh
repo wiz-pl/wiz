@@ -7,6 +7,7 @@
 #                          (web/build-bench.py → web/bench/index.html)
 #   /playground/           the static playground: web/playground.html and its scripts,
 #                          plus web/build-playground.sh's wiz-playground.mjs/.wasm
+#   /licenses/             the Wasm modules' notice (mini-gmp) and licence texts
 #
 # The documentation is generated separately, into SITE/docs:
 #
@@ -51,6 +52,12 @@ for f in wiz-playground.mjs wiz-playground.wasm; do
   fi
   cp "$WEB/$f" "$SITE/playground/$f"
 done
+
+# The licences page: the Wasm modules (playground/, docs/) include GMP's mini-gmp, so
+# the site carries its notice, the LGPL v3 and the GPL v3 (Wiz's LICENSE).
+mkdir -p "$SITE/licenses"
+cp "$ROOT/web/licenses/index.html" "$ROOT/web/licenses/LGPL-3.0.txt" "$SITE/licenses/"
+cp "$ROOT/LICENSE" "$SITE/licenses/GPL-3.0.txt"
 
 # The Loom UI module (`?ui=loom`, web/build-playground-ui.sh): optional. The page falls
 # back to its static markup when it is missing, so a build that did not make it still

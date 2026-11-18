@@ -30,7 +30,7 @@ let engineEl = null;
 let ui = null;
 let app = null;
 
-let wasm = null;   // web/playground-engine.js: every call guarded, restarted after an exit
+let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
 let busy = false;
 
 const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
@@ -88,7 +88,8 @@ function withPrelude(text) {
 // `wiz_playground_eval` on a source: the module's one call, shared by Run and the
 // in-page language server. (stage 1) `wiz_playground_check`: the same check as JSON with
 // each line's offset, for the in-page language server; null with a module built before
-// it existed. Both reject with an `EngineFailure` when the module exits, aborts or traps.
+// it existed. Both reject with an `EngineFailure` when the program exits (the module is
+// kept), aborts or traps (the module is replaced).
 const evalSource = (src) => wasm.evaluate(src);
 const checkSource = (src) => wasm.check(src);
 

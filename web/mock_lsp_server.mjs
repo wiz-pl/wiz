@@ -222,6 +222,16 @@ export async function startMockServer(options = {}) {
       socket.destroy();
       return;
     }
+    // (#430) like `wiz lsp --ws`: with `options.token`, no 101 without `?token=` equal to it
+    if (options.token !== undefined) {
+      const presented = new URL(req.url || "/", "http://x").searchParams.get("token");
+      if (presented !== options.token) {
+        stats.refused = (stats.refused || 0) + 1;
+        socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+    }
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\n" +
       "Upgrade: websocket\r\n" +
