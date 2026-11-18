@@ -16,11 +16,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `drafts/feral/lib/`) that `CI result` requires. A library change that shifts an
   example's printed value now fails the suite instead of only a command a person runs.
   The four benchmarks (`closed-table-bench`, `hdl-sim-bench`, `natives-bench`,
-  `scry-datalog-bench`) declare `-- test: skip` with a reason; `io`, `std`, `effects`,
-  `foreign`, `glue` and `import_c` declare `-- test: run`, so their goldens are program
-  output rather than a silent `check`; `plot.wiz`'s SVG is compared byte for byte with
-  `docs/assets/plot-example.svg` by group `plot`; and `std.wiz`/`foreign.wiz` write to
-  `FS.tempRoot` instead of a hard-coded scratch path, so they run on any machine.
+  `scry-datalog-bench`) declare `-- test: skip` with a reason; the executable examples
+  (`io`, `std`, `effects`, `foreign`, `glue`, `import_c`, and `hdl-spi`/`hdl-stream`,
+  whose goldens were program output but were read as `check`s) declare `-- test: run`,
+  so their goldens are program output rather than a silent `check`; `plot.wiz`'s SVG is
+  compared byte for byte with `docs/assets/plot-example.svg` by group `plot`; and
+  `std.wiz`/`foreign.wiz` write to `FS.tempRoot` instead of a hard-coded scratch path,
+  so they run on any machine.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal

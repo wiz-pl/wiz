@@ -1,3 +1,4 @@
+-- test: run
 -- The SPI master in all four CPOL/CPHA modes (`import Hdl.Spi`, `Hdl.SpiLaw`): a
 -- divider sweep, the byte round-trip through a mock slave, the mosi/sclk timing law, the
 -- loopback, and the byte-level transfer model. Run by the `bus-protocol` test group;
