@@ -63,10 +63,39 @@ partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array
       acc := acc.push e.path.toString
   pure acc
 
-/-- Every `*.wiz` under `lib/` and `scry/`, sorted. -/
+/-- Every `*.wiz` under `lib/` and `scry/`, sorted. The sort is what makes `--part`
+deterministic across jobs: the partition is by index into this one list. -/
 def libDiffFiles : IO (Array String) := do
   let all := (← libDiffWalk "lib" #[]) ++ (← libDiffWalk "scry" #[])
   pure (all.qsort (· < ·))
+
+/-- The files of part `part` (1-based) of `parts`: index `k` belongs to part
+`k % parts + 1`. The filter is on the index in the sorted list and the order is kept, so
+the partition is deterministic and independent of the runner, the workers and the cache;
+`k % n = i - 1` holds for exactly one `i`, so every index is in exactly one part: the
+union of the parts is `xs`, with no file twice. `parts ≤ 1` is the whole list. -/
+def libDiffPart (parts part : Nat) (xs : Array String) : Array String :=
+  if parts ≤ 1 then xs else
+    (xs.toList.zipIdx.filter (fun (_, k) => k % parts == part - 1)).map (·.1)
+      |>.toArray
+
+/-- Parse `--part i/n`. `i` is 1-based, so `i = n` is the last part and valid; `n = 0`,
+`i = 0` and `i > n` are not. -/
+def libDiffParsePart (s : String) : Except String (Nat × Nat) :=
+  match s.splitOn "/" with
+  | [i, n] =>
+    match i.toNat?, n.toNat? with
+    | some i, some n =>
+      if n == 0 then throw s!"--part {s}: there must be at least one part (n ≥ 1)"
+      else if i == 0 then throw s!"--part {s}: parts are numbered from 1 (i ≥ 1)"
+      else if i > n then throw s!"--part {s}: part {i} of {n} does not exist"
+      else pure (i, n)
+    | _, _ => throw s!"--part needs i/n with numbers, not {s}"
+  | _ => throw s!"--part needs i/n, not {s}"
+
+/-- `--part` as the harness passes it: empty means the whole list (`1/1`). -/
+def libDiffParsePartOf (s : String) : Except String (Nat × Nat) :=
+  if s.isEmpty then pure (1, 1) else libDiffParsePart s
 
 /-- The module a file's path names, for `--only`: `lib/Hdl/Uart.wiz` is `Hdl.Uart`. -/
 def libDiffModule (file : String) : String :=
@@ -401,6 +430,12 @@ structure LibDiffOpts where
   capped by the free memory at `memMB` per file); an explicit `--jobs N` (or the
   driver's `--jobs N`) overrides it -/
   jobs : Nat := 0
+  /-- which part of the sorted file list to check (`--part i/n`), 1-based; `1/1` is the
+  whole sweep. The parts are a partition by index (`libDiffPart`), so their union is the
+  list with no file twice -/
+  part : Nat := 1
+  /-- how many parts the list is split into (`--part i/n`); `1` is the whole sweep -/
+  parts : Nat := 1
   deriving Inhabited
 
 /-- A record as one line of the report: verdict, the two sides, and the first divergence. -/
@@ -552,14 +587,29 @@ partial def libDiffPool {α : Type} (n jobs : Nat) (canStart : IO Bool)
     let _ ← IO.wait t
   return out
 
+/-- What one sweep produced. `total` is the number of selected files *before* `--part`:
+every part of one run computes the same `total` (the group's parts select the whole
+corpus), which is what `scripts/ci.py libdiff-union` checks the parts against. -/
+structure LibDiffRun where
+  recs : Array LibRec
+  workers : Nat
+  total : Nat
+
 /-- Run both compilers over the selected files, `libDiffWorkers` at a time; the records,
-and the number of workers. `none` when the self-hosted compiler could not be built for a
-toolchain reason (the caller skips). -/
-def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Array LibRec × Nat)) := do
+the number of workers, and the size of the whole the part was taken from. `onRec` sees
+each record as it arrives (the group appends it to `records.jsonl`, so a part that is
+killed leaves the files it finished). `none` when the self-hosted compiler could not be
+built for a toolchain reason (the caller skips). -/
+def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit)
+    (onRec : LibRec → IO Unit := fun _ => pure ()) : IO (Option LibDiffRun) := do
   let all ← libDiffFiles
   let picked := all.filter fun f =>
     (o.only.isEmpty || o.only.any (libDiffPicks · f)) && f.endsWith ".wiz"
   let picked := if o.limit == 0 then picked else picked.take o.limit
+  -- the whole is the selected list before the split; every part partitions that same
+  -- list, so together the parts are `picked` (once each) and their totals agree
+  let total := picked.size
+  let picked := libDiffPart o.parts o.part picked
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then return none else throw (IO.userError e)
@@ -577,10 +627,12 @@ def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Arra
     let cache (w : Nat) : String := s!"/tmp/wiz-libdiff-cache-{w}"
     let recs ← libDiffPool picked.size workers canStart
       (fun i w => libDiffFile o self.toString flags exe (cache w) picked[i]!)
-      (fun _ r => if o.json then IO.println (Lean.Json.compress (jsonOfRec r)) else say (libDiffRender r))
+      (fun _ r => do
+        if o.json then IO.println (Lean.Json.compress (jsonOfRec r)) else say (libDiffRender r)
+        onRec r)
     unless recs.size == picked.size && (recs.map (·.file)) == picked do
       throw (IO.userError s!"selfhost-libdiff: {recs.size} records for {picked.size} files")
-    pure (some (recs, workers))
+    pure (some { recs, workers, total })
 
 /-- The counts the summary prints. -/
 structure LibSummary where
@@ -737,7 +789,11 @@ def libDiffParseOptsGo (o : LibDiffOpts) : List String → Except String LibDiff
     | some k => if k > 0 then libDiffParseOptsGo { o with jobs := k } r
       else throw "--jobs needs a count of at least 1"
     | none => throw s!"--jobs needs a count, not {n}"
-  | a :: _ => throw s!"unknown argument {a}\nusage: tests --libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N]"
+  | "--part" :: s :: r =>
+    match libDiffParsePart s with
+    | .ok (part, parts) => libDiffParseOptsGo { o with part := part, parts := parts } r
+    | .error e => throw e
+  | a :: _ => throw s!"unknown argument {a}\nusage: tests --libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]"
 
 def libDiffParseOpts (args : List String) : Except String LibDiffOpts :=
   libDiffParseOptsGo {} args
@@ -761,21 +817,24 @@ def libDiffMain (args : List String) : IO UInt32 := do
       | some f => (System.FilePath.mk f).pathExists
     let start ← IO.monoMsNow
     let res ← libDiffSweep o fun line => IO.println line
-    let some (recs, workers) := res | do
+    let some run := res | do
       IO.eprintln "selfhost-libdiff: no self-hosted compiler (no C toolchain: --gc-cflags)"
       return 3
+    let recs := run.recs
     let sum := libDiffSummarize recs
     if o.json then
       IO.println (Lean.Json.compress (Lean.Json.mkObj [
         ("summary", Lean.Json.mkObj [
-          ("files", .num recs.size), ("ok", .num sum.ok), ("rejected", .num sum.rejected),
+          ("files", .num recs.size), ("total", .num run.total),
+          ("part", .num o.part), ("parts", .num o.parts),
+          ("ok", .num sum.ok), ("rejected", .num sum.rejected),
           ("diverging", .num sum.diverging), ("bounded", .num sum.bounded),
           ("host_ok_self_error", .num sum.hostOkSelfErr), ("host_error_self_ok", .num sum.hostErrSelfOk),
           ("by_construct", Lean.Json.mkObj (sum.byConstruct.map (fun (k, n) => (k, .num n)))),
           ("by_code", Lean.Json.mkObj (sum.byCode.map (fun (k, n) => (k, .num n)))),
-          ("seconds", .num ((← IO.monoMsNow) - start)), ("workers", .num workers)])]))
+          ("seconds", .num ((← IO.monoMsNow) - start)), ("workers", .num run.workers)])]))
     else
-      IO.println s!"\n── selfhost-libdiff: {recs.size} files ({showMs ((← IO.monoMsNow) - start)} s, {workers} at a time)"
+      IO.println s!"\n── selfhost-libdiff: {recs.size} of {run.total} files ({showMs ((← IO.monoMsNow) - start)} s, {run.workers} at a time, part {o.part}/{o.parts})"
       IO.println (libDiffSummaryText sum)
     if let some f := o.baseline then
       unless o.json do IO.println ""
@@ -790,14 +849,25 @@ def libDiffMain (args : List String) : IO UInt32 := do
 
 /-! ## The group -/
 
+/-- The one-line header the `--timings` note and `.lake/libdiff/part.txt` carry: which
+part, the files it checked, the whole it partitioned, and its verdicts.
+`scripts/ci.py libdiff-union` reads it to prove that the parts cover the corpus once:
+every part names the same `total`, the `files` sum to it, and no record is `bounded`. -/
+def libDiffPartLine (o : LibDiffOpts) (run : LibDiffRun) (sum : LibSummary) : String :=
+  s!"part={o.part}/{o.parts} files={run.recs.size} total={run.total} " ++
+  s!"ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} " ++
+  s!"bounded={sum.bounded} workers={run.workers}"
+
 /-- The report the group leaves behind (its own output is hidden when it passes). -/
-def libDiffWriteReport (recs : Array LibRec) (sum : LibSummary) : IO Unit := do
+def libDiffWriteReport (o : LibDiffOpts) (run : LibDiffRun) (sum : LibSummary) : IO Unit := do
   let dir : System.FilePath := ".lake/libdiff"
   IO.FS.createDirAll dir
   IO.FS.writeFile (dir / "records.jsonl")
-    (String.intercalate "\n" (recs.toList.map fun r => Lean.Json.compress (jsonOfRec r)) ++ "\n")
+    (String.intercalate "\n" (run.recs.toList.map fun r => Lean.Json.compress (jsonOfRec r)) ++ "\n")
   IO.FS.writeFile (dir / "summary.txt")
-    (s!"{recs.size} files\n" ++ libDiffSummaryText sum ++ "\n")
+    (s!"{run.recs.size} of {run.total} files (part {o.part}/{o.parts})\n" ++
+     libDiffSummaryText sum ++ "\n")
+  IO.FS.writeFile (dir / "part.txt") (libDiffPartLine o run sum ++ "\n")
 
 def libDiffGroup : Group where
   name := "selfhost-libdiff"
@@ -809,14 +879,26 @@ def libDiffGroup : Group where
         -- shard may set it, and `--jobs 1` is the serial control); else auto
         let cj ← caseJobs
         let given ← caseJobsGiven
-        let o : LibDiffOpts := { jobs := if given then cj else 0 }
+        -- the CI shard's part of the split (`--part i/n`); empty is the whole sweep
+        let (part, parts) ← match libDiffParsePartOf (← casePart) with
+          | .ok p => pure p
+          | .error e => throw (IO.userError e)
+        let o : LibDiffOpts := { jobs := if given then cj else 0, part, parts }
         let say := fun (_ : String) => pure ()
-        match ← libDiffSweep o say with
+        let dir : System.FilePath := ".lake/libdiff"
+        IO.FS.createDirAll dir
+        -- write each record as it arrives (in file order), so a part that the job's
+        -- timeout kills still leaves the files it finished for `libdiff-union`
+        let res ← IO.FS.withFile (dir / "records.jsonl") .write fun h =>
+          libDiffSweep o say fun r => do
+            h.putStrLn (Lean.Json.compress (jsonOfRec r))
+            h.flush
+        match res with
         | none => skip "no C toolchain (no self-hosted compiler)"
-        | some (recs, workers) =>
-          let sum := libDiffSummarize recs
-          libDiffWriteReport recs sum
-          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}" },
+        | some run =>
+          let sum := libDiffSummarize run.recs
+          libDiffWriteReport o run sum
+          note (libDiffPartLine o run sum) },
     { name := "the sweep's worker pool: every file exactly once, results in order, any worker count", run := fun _ => do
         for jobs in [1, 2, 3, 8, 40] do
           let n := 17
@@ -833,6 +915,46 @@ def libDiffGroup : Group where
           checkEq ((List.range n).map (fun i => i * i)) out.toList
           checkEq (List.range n) (← seen.get).toList
           check ((← workers.get).size == n) "not every item ran" },
+    { name := "part i/n: the parts partition the sorted file list, for n = 1…8, with no toolchain", run := fun _ => do
+        -- the flag's bounds: empty is 1/1, i = n is the last part, 0 and i > n are not
+        let parsed (s : String) (i n : Nat) : Bool :=
+          match libDiffParsePartOf s with
+          | .ok (i', n') => i' == i && n' == n
+          | .error _ => false
+        let bad (s : String) : Bool :=
+          match libDiffParsePart s with | .error _ => true | .ok _ => false
+        check (parsed "" 1 1) "an empty --part is not 1/1"
+        check (parsed "1/6" 1 6) "1/6 does not parse"
+        check (parsed "6/6" 6 6) "6/6 does not parse"
+        check (bad "0/6") "part 0 was accepted"
+        check (bad "7/6") "a part beyond n was accepted"
+        check (bad "1/0") "n = 0 was accepted"
+        check (bad "2") "a malformed --part was accepted"
+        -- The design's corpus is 181 files (119 lib/, 62 scry/); a clean checkout of
+        -- this commit has 180 tracked (118 + 62), because the 181st in that measurement
+        -- was an untracked lib/ file. Pinning the index arithmetic on a synthetic
+        -- 181-element list proves the property without a C toolchain or the 3664 s
+        -- sweep: for every n, part i is exactly the indices k with k % n = i - 1, so
+        -- the parts are disjoint and their union is the whole list, in part order.
+        let expected : Nat → Nat → List String := fun n i =>
+          ((List.range 181).filter (fun k => k % n == i - 1)).map toString
+        let checkParts (n : Nat) (xs : Array String) (exact : Bool) : IO Unit := do
+          let mut all : List String := []
+          for i in [1:n + 1] do
+            let p := (libDiffPart n i xs).toList
+            if exact then checkEq (expected n i) p
+            checkEq p.length p.eraseDups.length      -- a part has no file twice
+            check (p.all (fun f => xs.contains f)) "a part invented a file"
+            all := all ++ p
+          checkEq xs.size all.length                 -- every file is in some part
+          checkEq all.length all.eraseDups.length    -- and no file is in two
+        let corpus : Array String := ((List.range 181).map toString).toArray
+        for n in [1:9] do checkParts n corpus true
+        -- the real corpus too, where the checkout has one; its size is not pinned
+        -- (a new lib/ file must be covered, not break the arithmetic)
+        let real ← libDiffFiles
+        unless real.isEmpty do
+          for n in [1:9] do checkParts n real false },
     { name := "the sweep's workers: as asked (or auto), but no more than the CPUs and the free memory hold", run := fun _ => do
         checkEq 3 (libDiffAsked 0 4)
         checkEq 1 (libDiffAsked 0 1)
