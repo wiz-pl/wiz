@@ -549,10 +549,17 @@ def cliMain (args : List String) : IO UInt32 := do
         | _ => IO.println s!"{t.name}\t{repr t}"
       pure 0
     | "test" :: rest =>
+      -- Flags after the subcommand are not seen by the parser above (it stops at `test`),
+      -- so `grail test --test-timeout 900 …` used to leave the flag in `filters` and the
+      -- runner at its 300 s default — a "timed out (300 s)" that no flag could raise.
+      let (topts, rest) := grailOpts {} rest
       let update := rest.contains "--update"
       let filters := rest.filter (· != "--update")
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
+      let r := { r with
+        testTimeoutMs := 1000 * (topts.testTimeout.getD 300)
+        jobs := topts.jobs.getD r.jobs }
       let results ← r.tests pkg.targets filters update
       let skipped := results.filter (·.skipped) |>.size
       let passed := results.filter (fun x => x.ok && !x.skipped) |>.size
