@@ -417,7 +417,7 @@ def zeroFieldDecls : String :=
 /-- Build `main : IO _` with the C backend (and the `IO` library), run it, and hand its
 output to `k`. -/
 def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit := do
+    (cflags : List String := []) (split : Nat := 0) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
   let effLib ← IO.FS.readFile "lib/Eff.wiz"
@@ -438,7 +438,7 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   let tc ← toolchain
-  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) (split := split) with
   | .ok v => k v
   | .error e =>
     let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
@@ -446,8 +446,8 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
 def ioRun (src : String) (expected : String) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit :=
-  ioRunWith src (checkEq expected ·) args llvm cflags
+    (cflags : List String := []) (split : Nat := 0) : IO Unit :=
+  ioRunWith src (checkEq expected ·) args llvm cflags (split := split)
 
 def ioFails (src : String) (fragment : String) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
