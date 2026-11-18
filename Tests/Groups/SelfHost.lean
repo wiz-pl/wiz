@@ -1384,6 +1384,29 @@ def namedArgCases : List (String × Nat) := [
   ("const2 (B := Bool) 7 .true", 7),
   ("mixed (B := Bool) 3 .true", 3)]
 
+/-- (A9) A constructor's fields (and its parameters) are named arguments too:
+`P.mk (y := 2) (x := 1)` fills them in any order — the telescope is walked in its own
+order, so a later field's type may mention an earlier named one — and a missing,
+unknown or repeated field is an error, as in Lean. -/
+def ctorNamedHeader : String :=
+  "inductive P where\n  | mk (x : Nat) (y : Nat)\n" ++
+  "def getX : P → Nat\n  | .mk x _ => x\n" ++
+  "def getY : P → Nat\n  | .mk _ y => y\n" ++
+  "inductive Pair (A B : Type) where\n  | mk (a : A) (b : B)\n" ++
+  "inductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A Nat.zero\n" ++
+  "  | cons (n : Nat) (a : A) (v : Vec A n) : Vec A (Nat.succ n)\n" ++
+  "def vhead : Vec Nat 1 → Nat\n  | .cons _ a _ => a\n" ++
+  "inductive Imp where\n  | mk {n : Nat} (v : Nat)\n"
+
+def ctorNamedDecls : List (String × Bool) := [
+  ("def a : P := P.mk (y := 2) (x := 1)", true),
+  ("def b : P := P.mk (x := 1)", false),
+  ("def c : P := P.mk (z := 1)", false),
+  ("def d : P := P.mk (x := 1) (x := 2)", false),
+  ("def p : Pair Nat Bool := Pair.mk (B := Bool) (b := .true) (a := 1)", true),
+  ("def v1 : Vec Nat 2 := Vec.cons (v := Vec.cons .zero 5 Vec.nil) (n := 1) (a := 7)", true),
+  ("def i1 : Imp := Imp.mk (n := 3) 7", true)]
+
 /-- The parser differential's corpus (`selfhost` group): the category and the input. The
 Lean parser is the oracle; the tables generated here and the checked-in
 `selfhost/Tables.wiz` must both accept it and produce the same tree. -/
@@ -2299,6 +2322,20 @@ def selfHostGroup : Group where
     { name := "the self-hosted frontend: a named argument for a binder written in the type (A9)", run := fun _ =>
         selfhostCheckFile "import Prelude\naxiom f : {A : Type} → A → A\ndef g : Nat := f (A := Nat) 3\n"
           "f : (x0 :0 U0) → (x1 : x0) → x0\ng : Nat\n" },
+    { name := "the self-hosted frontend: named arguments of a constructor (A9)", run := fun _ => do
+        selfhostAgrees ctorNamedHeader ctorNamedDecls
+        selfhostSameNats (ctorNamedHeader ++ "def a : P := P.mk (y := 2) (x := 1)\n")
+          [("getX a", 1), ("getY a", 2)]
+        selfhostSameNats ctorNamedHeader
+          [("vhead (Vec.cons (v := Vec.nil) (n := 0) (a := 5))", 5)] },
+    { name := "the self-hosted frontend: constructor named-argument errors (A9)", run := fun _ => do
+        let p := "import Prelude\ninductive P where\n  | mk (x : Nat) (y : Nat)\n"
+        selfhostCheckFile (p ++ "def c : P := P.mk (z := 1)\n")
+          "P : U0\nerror: no parameter named 'z'\n"
+        selfhostCheckFile (p ++ "def d : P := P.mk (x := 1) (x := 2)\n")
+          "P : U0\nerror: argument 'x' was already given\n"
+        selfhostCheckFile (p ++ "def e : P := P.mk (y := 2)\n")
+          "P : U0\nerror: named argument 'y' comes after the explicit parameter 'x', which has no argument\n" },
     { name := "constructors by their names (.c) and @f, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ndef two : Nat := .succ (.succ .zero)\n#reduce two\ndef xs : List Nat := .cons .zero (.cons two .nil)\n#reduce xs\ndef id {A : Type} (x : A) : A := x\n#reduce @id Nat .zero\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add two two\ndef map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons h t => .cons (f h) (map f t)\n#reduce map (add two) xs\ndef bad : Nat := .nil\n"
           "Nat : U0\nList : (x0 : U0) → U0\ntwo : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\nxs : (List Nat)\ncon((#1, (con((#0, (tt, tt))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nid : (x0 :0 U0) → (x1 : x0) → x0\ncon((#0, (tt, tt)))\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nmap : (x0 :0 U0) → (x1 :0 U0) → (x2 : (x2 : x0) → x1) → (x3 : (List x0)) → (List x1)\ncon((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))\nerror: unknown identifier Nat.nil\n" },

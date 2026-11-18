@@ -2471,7 +2471,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2988,7 +2988,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
              "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;
