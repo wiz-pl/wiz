@@ -278,9 +278,13 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `exists`, `isDir`, `isFile`, `tempRoot` (`$TMPDIR` or `/tmp`), `createTempDir`
   (`mkdtemp`), and whole files: `readFile`, `writeFile`, `appendFile`, and `readBytes`,
   `writeBytes` for binary data (text stops at a NUL byte). `Path.join` puts a `/`
-  between two paths.
+  between two paths. A `readdir` failure part-way through a listing is that listing's
+  error (`EIO`, the same message shape as the rest), not the end of the directory: a
+  short `listDir` result is never reported as success.
 * **File handles.** `foreign_type File` (closed by its finalizer, or `File.close`):
-  `File.open path mode` (`fopen` modes), `File.stdin`/`stdout`/`stderr`,
+  `File.open path mode` (`fopen` modes; the descriptor is close-on-exec, like `Fd.open`
+  and the pipes, so a child this program starts does not inherit it — only the std
+  streams pass to a child, when it is given them), `File.stdin`/`stdout`/`stderr`,
   `readLine` (`none` at the end), `readAll`, `write`, `flush`. `IO.ePrintln` prints
   to stderr.
 * **Processes.** `Process.spawn cmd args stdin stdout stderr` starts `cmd` (searched in
@@ -288,13 +292,24 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `Child` (a foreign type: its pipes close and a finished child is reaped when it
   goes). `Child.write`, `closeStdin`, `readStdout`/`readStderr` (to the end),
   `communicate input` (writes stdin while collecting stdout and stderr with `poll`, so
-  a child that fills one pipe doesn't deadlock), `wait` (an `ExitStatus`: `exited code`
-  or `signaled n`), `kill`, `pid`. `Process.output cmd args input` runs a command to the
-  end and returns its status and output; `Process.run` runs one with this program's
-  streams; `Process.exec` replaces the program; `Process.exit`, `Process.id`. The
-  runtime ignores `SIGPIPE` once a child has been started (a write to a closed pipe is
-  then an `EPIPE` error), and the pipes are close-on-exec, so other children don't keep
-  them open.
+  a child that fills one pipe doesn't deadlock; an `input` whose stdin is not a pipe —
+  `.inherit`/`.null`, taken, or already closed — is `EBADF`, not dropped), `wait` (an
+  `ExitStatus`: `exited code` or `signaled n`), `kill`, `pid`. `Process.output cmd args
+  input` runs a command to the end and returns its status and output; `Process.run` runs
+  one with this program's streams; `Process.exec` replaces the program; `Process.exit`,
+  `Process.id`. The runtime ignores `SIGPIPE` (a write to a closed pipe is then an
+  `EPIPE` error), asserts that ignore on every spawn, and restores it when `exec` fails
+  (the program being replaced starts with the default action, but a failed `exec` must
+  not leave this program able to be killed by a broken pipe); the pipes and the
+  `File`/`Fd` handles are close-on-exec, so other children don't keep them open.
+* **Allocation failure.** The OS-surface natives take the runtime's out-of-memory exit
+  (`wiz: out of memory`, code 3) instead of dereferencing NULL, and the readers that
+  have an error channel (`FS.readFile`, `File.readAll`, `IO.readFile`) report `ENOMEM`
+  as an `EIO` error (`read: Cannot allocate memory`). `IO.writeFile` (`lib/Std.wiz`, the
+  `IO Unit` writer `Hdl`'s docs use) writes the text as UTF-8 up to its first NUL and,
+  having no error channel, prints `wiz: <path>: <message>` and exits 1 when `fopen`,
+  the write, or the final flush fails — a bad path or a full disk is not success. For
+  binary data use `FS.writeBytes`.
 * `#eval` and `#run` can't do any of this (they are pure and can't call C): there are
   no models for system calls, since a model of the file system or of processes would
   give answers the real program wouldn't. The pure helpers (`Path.join`,
@@ -302,7 +317,14 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
 
 Tests: the `sys` group (spawning `echo`, a pipe through `cat`, exit codes and spawn
 errors, the environment, a temporary directory's life: files, links, stat, listing,
-removal, handles), on both backends.
+removal, handles), on both backends. The runtime/FFI review's cases pin the boundary
+rules: after a failed `Process.exec` a write to a dead child's stdin is `EPIPE` and the
+program survives; a `File` handle is not inherited by a child (it does not see it in
+`/proc/self/fd`); `communicate` with `input` but no stdin pipe is `EBADF`; an
+allocation failure under a capped address space makes `File.readAll` an `EIO` error,
+not a `SIGSEGV`; `IO.writeFile` writes the text up to a NUL and exits 1 on a failure; a
+`readdir` error is the listing's error; `Process.spawnOwned` + `Child.releaseOwned`
+drains 200 KB of piped output without deadlocking.
 
 Binary data on handles, descriptors with time limits, spawn options and serial ports
 came later: 9k.
@@ -409,15 +431,12 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
 * **Text and bytes.** A `String` crossing the FFI is UTF-8 and ends at the first NUL:
   `File.write`, `Child.write` and every other `String` argument write the characters'
   UTF-8 and stop at code point 0; `readLine`, `readAll` and other `String` results
-  decode UTF-8 leniently (an invalid sequence becomes U+FFFD, not an error; the rule is
-  below and in `docs/libraries.md`) and stop at a NUL byte. A code point that is not a
-  scalar value (a surrogate or above U+10FFFF) is written as U+FFFD on the way out, by
-  every encoder. So binary data goes as `Bytes`, and text and bytes
+  decode UTF-8 without checking (bytes that aren't UTF-8 become wrong characters, not
+  an error) and stop at a NUL byte. So binary data goes as `Bytes`, and text and bytes
   meet only through a named encoding: `Bytes.ofUtf8 : String → Bytes` (every string,
   NUL included; a code point that isn't a scalar value becomes U+FFFD),
-  `Bytes.toUtf8 : Bytes → Except String String` (checked: a byte that is not a lead,
-  an overlong form, a surrogate, a value above U+10FFFF and a truncated sequence are
-  `"invalid UTF-8 at byte k"`), `Bytes.ofLatin1 : String →
+  `Bytes.toUtf8 : Bytes → Except String String` (checked: overlong forms, surrogates,
+  truncated sequences are `"invalid UTF-8 at byte k"`), `Bytes.ofLatin1 : String →
   Except String Bytes` (fails on a character above 255) and `Bytes.toLatin1` (total).
   `Bytes.ofString`/`toString` (9d) still go through a C string.
 * **Bytes** also got `slice b start len`, `take`, `drop`, `append` (in place when the
@@ -437,7 +456,9 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
   `create`, `truncate`, `append`, `exclusive`, `noControllingTty`, `nonBlockingOpen`;
   `OpenFlags.none`, `.createNew`, `.device`), `Fd.stdin`/`stdout`/`stderr`, `Fd.pipe :
   EIO (Fd × Fd)`, `Child.takePipe c i` (a child's pipe as an `Fd`), `Fd.close`,
-  `Fd.seek`, and:
+  `Fd.adopt n` (take over a number a C shim made; a `Nat` above `INT_MAX` is `EINVAL`
+  and an already-closed handle rather than a wrapped descriptor, and adopting one
+  number twice makes two owners that both close it), `Fd.seek`, and:
 
   | read | result |
   |---|---|
@@ -519,26 +540,22 @@ buffer for the call*:
 
 * **In.** A prototype's buffer pointer and its length (a `size_t`/integer parameter
   right after it, named `n`, `len`, `nbytes` or `length`, with or without `__`) fold
-  into **one** `Bytes` parameter: the wrapper passes the buffer's `data` and `len` as
+  into **one** `Bytes` parameter: the runtime passes the buffer's `data` and `len` as
   the two C arguments. The pointer may be `const void *`, `const char *`/`char *`,
-  `const unsigned char *`/`unsigned char *`, `signed char *` or `uint8_t *` (a typedef
+  `unsigned char *`/`const unsigned char *`, `signed char *` or `uint8_t *` (a typedef
   for `unsigned char`, resolved by the header parser). A `char *` *without* a length is
-  still the C-string `String`. A function whose parameter is named `C.f` takes the
-  buffer as one argument, so a `char *, int n` import used to have arity two and now has
-  one (`#check C.f` is `Bytes → …`).
-* **Ownership: borrowed or copied, never shared.** A `const` pointer is borrowed for the
-  call (`y`): the pointer is the Wiz value's storage, C must not keep it (in a static, a
-  struct, a callback it registers) and must not `free` it, and the reference the call
-  takes is released when it returns. A *writable* pointer (`Y`) is given a **copy**: the
-  wrapper `malloc`s `len` bytes, copies the buffer into them, hands those to C, and
-  frees them after the call, so whatever C writes is discarded and cannot change the Wiz
-  `Bytes` (which is functional; a shared buffer must not change). A caller that still
-  uses the buffer keeps it alive (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`).
-  Returning bytes therefore needs a `foreign_type` or a runtime read (below), not a
-  writable buffer argument.
+  still the C-string `String`.
+* **Ownership: borrowed, not given.** The pointer stays the Wiz value's storage for the
+  duration of the call only. C must not keep it (in a static, a struct, a callback it
+  registers) and must not `free` it: the reference the call takes is released when it
+  returns. A caller that still uses the buffer keeps it alive
+  (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`). No copy is made, so writing
+  through a non-`const` pointer is only well defined on a buffer the caller built for
+  the call and does not share (`Bytes` is functional: a shared buffer must not change).
+  Returning bytes needs a `foreign_type` or a caller-supplied buffer (below).
 * **Out.** There is no `Bytes` *result* kind. C that produces bytes returns a
-  `foreign_type` pointer; `FS.readBytes`, `File.readBytes` and `Fd.read` (9k) are the
-  runtime's own.
+  `foreign_type` pointer, or fills a buffer the caller passes; `FS.readBytes`,
+  `File.readBytes` and `Fd.read` (9k) are the runtime's own.
 * **A `c_struct` field.** `unsigned char f[N]` or `char f[N]` is a `Bytes` field (the
   `c_struct` needs a header, so the array's length is known): the wrapper copies the
   buffer into the C array, cut or zero-padded to `N`, and a struct coming back gets a
@@ -547,10 +564,9 @@ buffer for the call*:
   frontend's `declared` does). A `Bytes` field without a header is rejected by both
   frontends (the length would be unknown).
 
-Both toolchains implement the kinds: the Lean frontend/backends in `Elab/Command.lean`
+Both toolchains implement the kind: the Lean frontend/backends in `Elab/Command.lean`
 and `Compiler/C.lean`, the self-hosted one in `selfhost/Frontend.wiz`/`Backend.wiz` with
-the same two C arguments (21ag; `y` is a `const` buffer, `Y` a writable one, copied).
-Tests: `=selfhost` "Bytes (21ag): a char*/uint8_t*/unsigned char* buffer and its length,
-borrowed for the call" (it also writes through a writable pointer and shows the Wiz
-buffer unchanged) and "Bytes (21ag): a c_struct with a Bytes field through glue" (host
-and self-hosted, collector and reference counting), plus the `ffi-structs` buffer case.
+the same two C arguments (21ag). Tests: `=selfhost` "Bytes (21ag): a
+char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call" and "Bytes
+(21ag): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
+reference counting), plus the `ffi-structs` buffer case.

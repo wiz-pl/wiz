@@ -1,0 +1,69 @@
+import Scry.EgraphExtract
+-- The guard on a redefined operand (`scry-egraph-extract-guard`): the first `v0 + 0`
+-- becomes a copy of `v0`, but `v0` is then redefined, so the second `v0 + 0` must not
+-- become the same copy through the may-equality view. The checked extraction refuses it
+-- (`rejected: 1`) and leaves the right-hand side alone; `main` records both.
+
+def v0 : Wil.Var := Wil.var 0 Wil.i32
+def v1 : Wil.Var := Wil.var 1 Wil.i32
+def v2 : Wil.Var := Wil.var 2 Wil.i32
+def v3 : Wil.Var := Wil.var 3 Wil.i32
+
+def fn : Wil.Func :=
+  Wil.func "guard" [] [v0, v1, v2, v3]
+    [ Wil.block
+        [ Wil.num v0 2
+        , Wil.num v1 0
+        , Wil.binop v2 .add v0 v1
+        , Wil.num v0 7
+        , Wil.binop v3 .add v0 v1 ]
+        (Wil.ret (.some v3)) ]
+
+def p : Wil.Program := Wil.program [fn]
+def s : Scry.WgeStats := Scry.wgeRewriteProgram 8 p
+
+def stmtAt : List Wil.Stmt → Nat → Option Wil.Stmt
+  | .nil, _ => .none
+  | .cons st _, .zero => .some st
+  | .cons _ rest, .succ n => stmtAt rest n
+
+def rhsAt (i : Nat) : Option Wil.Rhs :=
+  match p.funcs with
+  | .cons f .nil => match f.blocks with
+    | .cons b .nil => match stmtAt b.stmts i with
+      | .some (.assign _ e _) => .some e
+      | _ => .none
+    | _ => .none
+  | _ => .none
+
+def rewrittenRhsAt (i : Nat) : Option Wil.Rhs :=
+  match s.program.funcs with
+  | .cons f .nil => match f.blocks with
+    | .cons b .nil => match stmtAt b.stmts i with
+      | .some (.assign _ e _) => .some e
+      | _ => .none
+    | _ => .none
+  | _ => .none
+
+def isVar (r : Option Wil.Rhs) (n : Nat) : Bool :=
+  match r with
+  | .some (.use v) => Nat.beq v.index n
+  | _ => .false
+
+def isBin (r : Option Wil.Rhs) (a b : Nat) : Bool :=
+  match r with
+  | .some (.bin _ x y) => Bool.and (Nat.beq x.index a) (Nat.beq y.index b)
+  | _ => .false
+
+def bit (x : Bool) : Nat := if x then 1 else 0
+def d (n k : Nat) : Nat := Nat.mul n (Nat.pow 10 k)
+
+def main : Nat :=
+  d s.rounds 7
+  + d s.rewritten 6
+  + d s.rejected 5
+  + d s.skipped 4
+  + d (bit (String.eq s.stop "fixpoint")) 3
+  + d (bit (isVar (rewrittenRhsAt 2) 0)) 2
+  + d (bit (isBin (rewrittenRhsAt 4) 0 1)) 1
+  + d (bit (isBin (rhsAt 4) 0 1)) 0

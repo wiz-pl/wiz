@@ -1,7 +1,7 @@
 #!/bin/sh
 # Test the widget half with no browser: render every widget kind and an update with the
 # Wiz compiler, then apply the patches in Node using web/framework/runtime.js and
-# web/framework/minidom.mjs (the same pair the React framework test uses).
+# web/framework/minidom.mjs (the same pair the Loom framework test uses).
 #
 #   usage: web/widget/test.sh
 #          WIZ=/path/to/wiz web/widget/test.sh

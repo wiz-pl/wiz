@@ -39,7 +39,7 @@ The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL
 | `--cache-ro` (read-only cache layers) | **now** | `Wiz/Toolchain.lean:29-31,104-111`; grail passes it to jobs (`Grail/Elab.lean:67`); `docs/building.md:258`. CI never passes it; the Nix package ships no store cache. |
 | `--region-cache`, `--region-stats` | **now, `wiz` only** | `Main.lean:148-157,223-227,309-311`; `Wiz/Cache.lean:603-853`. Grail never builds a `RegionStore` (`elaborate` in `Grail/Elab.lean`). |
 | `--split N` for `wiz build` | **after stack** | now [15k](../stages/15-performance.md). CI's shard `"split"` is a different feature (`.github/test-shards.json`). |
-| Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; measured 262.3 s → 160.7 s (informal). |
+| Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; informal measurement: one job avoids repeating the IR pipeline. |
 | tower / Nix packaging | **now** | `tower/`, `flake.nix:83-109`. No warmed cache; `source nix` and `toolchain link` are in `docs/building.md`. |
 | `calc` + `Trans` | **after stack** | now [13s](../stages/13-language.md). No `term.calc` in `Wiz/Parser` or `Wiz/Elab` today; the workaround is `Eq.via` (`lib/Nat.wiz:57`) and nested `Eq.trans`. |
 | `include_str` | **after stack** | now [include-str.md](../stages/13-language/include-str.md); at the audit, selfhost parity was not implemented. |
@@ -75,7 +75,7 @@ the workstreams' main prizes and should not be read as rejected.
 | 3 | Delete the duplicated Text utilities (**now**) | `lib/Json.wiz:57-88` (`divMod`, `natChars`, `charsEq`, `revOnto`, despite `import Text` at `:2`); `lib/Feral.wiz:137-175,160-168,1016-1024` (`leq`, `seq`, `lpre`, `map`, `any`, `splitGo`, `wordsOf`) | 1 | −~90 lines, one copy of list/string helpers; `Json.divMod` becomes the native `Nat.div`/`Nat.mod`, and the two O(n²) one-char-at-a-time accumulates in Feral become linear | 10.0 |
 | 4 | `do` blocks in the I/O library (**now**) | `lib/Sys.wiz` (31 `IO.bind`/`EIO.bind`, e.g. `:205-236`), `lib/IO.wiz:189-194`, `lib/Handle.wiz` | 1 | −~40 lines of `bind (fun x => …)`; `Monad IO`/`Monad1 IO` already exist (`lib/IO.wiz:52-59`), so this is semantics-preserving | 10.0 |
 | 5 | Modernize the HDL examples and drop the local list helpers (**now**) | `examples/hdl-gaps.wiz:145-154`, `examples/hdl-mem.wiz:65-72`, `examples/hdl-sim.wiz:62`, `examples/hdl-compose.wiz:67,115-116`; `lib/Hdl/Core.wiz:63-70` (`Hdl.map`/`Hdl.rev`), `:81` (`Hdl.natsEq`), `:948` (`Hdl.wEq`) | 1 | a `Circuit.RstEn`/`HwTy.rstEn` alias next to `withResetEnable` (`Core.wiz:1771`) removes the 3-line `prod (named "rst") (prod (named "en") …)` from 5 files; `BEq` for `List Nat`/triples removes 3 hand-written equalities (~40 lines) | 10.0 |
-| 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | stage-1 selfhost compile 146.9 → 85.8 s at `--split 8` (1.71×), net −48 s for the fixpoint after the built binary's +12.5 s regression (informal) | 9.0 |
+| 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | the stage-1 selfhost compile is faster at `--split 8` (informal), but the built binary is slower, so the net fixpoint gain is smaller | 9.0 |
 | 7 | Ship the Nix package with a warmed read-only cache (**after stack**) | `flake.nix:88-103` (installPhase), plus `--cache-ro $out/share/wiz/cache` in the wrappers | 1 | clean-`HOME` `grail build` of a one-target package 3.2 → 0.9 s, 437 store entries hit (informal) | 8.0 |
 | 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; informal), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
 | 9 | Thread the hash through `HTrie`, cheapen `NatList.hash` (**now**) | `lib/Hdl/Core.wiz:761-766` (hash), `:785-810` (find/insert: 20 × `Nat.testBit h d`, each a division by `2^d`) | 1 | one shift per level instead of 20 `div`+`pow` per emitted node; est. 5–15% off `Circuit.netlist` on big designs (measure `examples/hdl-temporal.wiz`) | 6.0 |
@@ -318,8 +318,7 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
    `examples/hdl-compose.wiz`'s package (or `wiz check --region-cache` on hdl-compose), 2–3
    interleaved rounds, wall + peak RSS; plus `--region-stats` hits/misses.
 3. **`--split`**: `scripts/fixpoint.sh` stage 1/2 wall on base vs `--split 4/8`, and the built
-   binary's run time (the known regression is 38.0 → 50.5 s on `compiler-self.wiz`,
-   informal).
+   binary's run time (the known regression on `compiler-self.wiz`, informal).
 4. **Nix store cache**: clean-`HOME` `grail build` of a one-target package, installPhase wall,
    store hits.
 5. **HTrie/ring**: `Circuit.netlist` on `examples/hdl-temporal.wiz` (wall/RSS), and `wiz check` of

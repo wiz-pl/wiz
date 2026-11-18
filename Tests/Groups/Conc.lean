@@ -93,7 +93,9 @@ def main : IO Unit := Chan.fork (items 3) (serveItems 3 0) (fun c => client c)
 "
 
 /-- Eight threads bump one counter a thousand times each (MVar.modify: the linear
-borrow/fill discipline), under a lock, and report through an MVar. -/
+borrow/fill discipline), under a lock, and report through an MVar. The counter is the
+MVar, which is atomic by itself, so this case does not test that the lock excludes; the
+two cases below do. -/
 def concCounter : String := "import IO
 import Session
 import MVar
@@ -169,19 +171,64 @@ def main : IO Unit := do1
   IO.println (Nat.toString n)
 "
 
+/-- The lock tests of `Tests/tsan/` (the programs `scripts/tsan-conc.sh` also runs under
+ThreadSanitizer, 25a): a plain, non-atomic C counter that only the lock protects.
+`link_c "lock.c"` resolves relative to `main.wiz`, so both go in the temporary tree. -/
+def lockSumFiles : IO (List (String × String)) := do
+  pure [("main.wiz", ← IO.FS.readFile "Tests/tsan/lock-sum.wiz"),
+        ("lock.c", ← IO.FS.readFile "Tests/tsan/lock.c")]
+
+/-- The contended case: a second thread must wait for the holder to release. -/
+def lockOrderFiles : IO (List (String × String)) := do
+  pure [("main.wiz", ← IO.FS.readFile "Tests/tsan/lock-order.wiz"),
+        ("lock.c", ← IO.FS.readFile "Tests/tsan/lock.c")]
+
+/-- (R2) Build `main` with the C backend and extra C flags, with every library
+importable; the program's output, or why it failed. `none`: no C toolchain. Only a
+*build* failure that is a `.toolchain` one skips (9c); a program that ran and failed is
+returned as `.error` (its stderr may mention a missing file and is still a failure). -/
+def cRunLibsFlags (src : String) (cflags : List String) :
+    IO (Option (Except Build.RunError String)) := do
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let dir ← IO.FS.createTempDir
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir (timeout := some 120) with
+  | .error e =>
+    if e.isToolchain then
+      skip "no toolchain"
+      pure none
+    else pure (some (.error e))
+  | r => pure (some r)
+
+/-- (R2) Built with `-DWIZ_NO_THREADS` (the Wasm pages' one-thread runtime), `main` stops
+with exit 3 and `message` on stderr. -/
+def noThreadsFails (src : String) (message : String) : IO Unit := do
+  match ← cRunLibsFlags src ["-DWIZ_NO_THREADS"] with
+  | none => pure ()
+  | some (.ok out) => throw (IO.userError s!"expected the program to stop, it printed: {out}")
+  | some (.error e) =>
+    unless (e.message.splitOn "the program failed (3)").length > 1 &&
+        (e.message.splitOn message).length > 1 do
+      throw (IO.userError s!"expected exit 3 and '{message}', got: {e.message}")
+
 def concGroup : Group where
   name := "conc"
   exercise := "lib/Session.wiz, lib/MVar.wiz, runtime threads (stage 25)"
+  parallel := true
   cases := [
     { name := "a dependent protocol: the pure semantics `link` runs it", run := fun _ =>
         okLibs (concSum ++ "#eval (link sumProto (client 100) server).1") ["5050"] },
     { name := "the same protocol over a channel, server in a new thread", run := fun _ =>
         cRunLibs (concSum ++ "def main : IO Unit := Chan.fork sumProto serve (fun c =>\n" ++
           "  IO.bind (runClient 1000 c) (fun s => IO.println (Nat.toString s)))") "500500\n" },
-    { name := "Proc.runLinked: the model is `link`, compiled code runs threads (differential)", run := fun _ => do
+    { name := "Proc.runLinked: the model is `link` and starts no thread; compiled code runs one (differential: the fork count must be 1)", run := fun _ => do
         okLibs (concSum ++ "#eval (link sumProto (client 300) server).1") ["45150"]
         cRunLibs (concSum ++ "def main : IO Unit := IO.bind (Proc.runLinked sumProto (client 300) server)\n" ++
-          "  (fun r => IO.println (Nat.toString r.1))") "45150\n" },
+          "  (fun r => IO.bind Chan.forks (fun k =>\n" ++
+          "    IO.println (String.append (Nat.toString r.1) (String.append \" forks \" (Nat.toString k)))))")
+          "45150 forks 1\n" },
     { name := "a chain of 51 threads; endpoints move into children", run := fun _ =>
         cRunLibs concChain "9950\n4950\n" },
     { name := "cancellation is a branch of the protocol", run := fun _ => do
@@ -242,10 +289,40 @@ def concGroup : Group where
         failsLibs "import Ref\n-- a stale token can't read: the cell was written, the old token is gone\ndef stale : IO Nat := Ref.new 1 (fun p tp => Ref.set p 5 tp (fun tp' => Ref.get p tp (fun x _ t => Ref.free p t (Ref.free p tp' (IO.pure x)))))" "quantity 1" },
     { name := "MVars and locks: eight threads, one counter", run := fun _ =>
         cRunLibs concCounter "8000\n" },
+    { name := "a lock is mutual exclusion: eight threads bump a non-atomic C counter", run := fun _ => do
+        linkRun (← lockSumFiles) "counter 8000\noverlap 0\n" },
+    { name := "a lock makes the second thread wait (ordering, not timing)", run := fun _ => do
+        linkRun (← lockOrderFiles) "holder in\nsecond wants\nholder checks\nholder out\nsecond in\noverlap 0\nsecond got it\n" },
+    { name := "the same programs under ThreadSanitizer report no data races", run := fun _ => do
+        let tsan := ["-O1", "-g", "-fsanitize=thread"]
+        linkRun (← lockSumFiles) "counter 8000\noverlap 0\n" (cflags := tsan)
+        linkRun (← lockOrderFiles) "holder in\nsecond wants\nholder checks\nholder out\nsecond in\noverlap 0\nsecond got it\n" (cflags := tsan)
+        cRunLibs (← IO.FS.readFile "Tests/tsan/spawn.wiz") "spawned 20\n" (cflags := tsan) },
     { name := "a lazy stream shared between threads", run := fun _ =>
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>
         cRunLibs concCaf "3198400000\n" },
+    { name := "WIZ_NO_THREADS (R2): forking, and the waits only another thread could end (empty MVar, full MVar, held lock), stop with a clear message; MVars and locks that never wait work", run := fun _ => do
+        noThreadsFails concCounter "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)"
+        noThreadsFails (concSum ++ "def main : IO Unit := Chan.fork sumProto serve (fun c =>\n" ++
+          "  IO.bind (runClient 10 c) (fun s => IO.println (Nat.toString s)))")
+          "wiz: Chan.fork: threads are not available in this build (WIZ_NO_THREADS)"
+        noThreadsFails ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.new (A := Nat);\n" ++
+          "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n")
+          "wiz: MVar.take of an empty MVar would wait forever: threads are not available in this build"
+        noThreadsFails ("import IO\nimport MVar\n-- a contended cell: it is already full\ndef main : IO Unit := do1\n" ++
+          "  m ← MVar.newFull 1;\n  MVar.put m 2\n")
+          "wiz: MVar.put into a full MVar would wait forever: threads are not available in this build"
+        noThreadsFails ("import IO\nimport MVar\n-- a contended lock: acquired again while held\ndef main : IO Unit := do1\n" ++
+          "  l ← Lock.new;\n  Lock.acquire l (fun g =>\n    Lock.acquire l (fun g2 =>\n" ++
+          "      Lock.release l g2 (Lock.release l g (IO.pure ()))))\n")
+          "wiz: Lock.acquire of a held lock would wait forever: threads are not available in this build"
+        match ← cRunLibsFlags ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.newFull 41;\n" ++
+            "  l ← Lock.new;\n  k ← MVar.modify m (fun x => x + 1);\n  u ← Lock.with l (IO.pure ());\n" ++
+            "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n") ["-DWIZ_NO_THREADS"] with
+        | some (.ok out) => checkEq "42\n" out
+        | some (.error e) => throw (IO.userError e.message)
+        | none => pure () },
     { name := "an endpoint can't be used twice, dropped, or closed twice", run := fun _ => do
         failsLibs (concSum ++ "def twice (1 c : Chan sumProto) : IO Nat :=\n" ++
           "  Chan.send c 1 (fun c' => runClient 1 c)") "quantity 1"
@@ -273,7 +350,73 @@ def concGroup : Group where
         failsLibs ("import IO\nimport MVar\ndef bad {B : Type} (l : Lock) (b : B) : IO B :=\n" ++
           "  Lock.acquire l (fun g => Lock.release l g (Lock.release l g (IO.pure b)))") "quantity 1"
         failsLibs "import IO\nimport MVar\ndef bad (m : MVar Nat) : IO Nat := MVar.borrow m (fun a h => IO.pure a)" "quantity 1"
-        failsLibs "import IO\nimport MVar\ndef forge (l : Lock) : IO (Lock.Guard l) := Lock.acquireRaw l" "private" }
+        failsLibs "import IO\nimport MVar\ndef forge (l : Lock) : IO (Lock.Guard l) := Lock.acquireRaw l" "private" },
+    -- (conc-05) The harness used to treat *any* error containing "No such file" as a
+    -- missing toolchain: a program that failed at run time with ENOENT (a Handle test, a
+    -- missing fixture, a `Process.output` of a command not on PATH) was recorded as
+    -- `⊘ skipped (no toolchain)`, not as a failure. Only a *build* failure that names the
+    -- compiler or the headers may skip; the program's stderr never can.
+    { name := "a program that fails with ENOENT at run time is a failure, not a missing toolchain", run := fun _ => do
+        let src := "import IO\nimport Sys\n" ++
+          "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => Process.exit 3)\n"
+        match ← cRunLibsOut src with
+        | .ok v => throw (IO.userError s!"the program passed: {v}")
+        | .error e =>
+          if e.isToolchain then skip "no toolchain"
+          else do
+            -- the failure reports the exit code and the program's own stderr
+            check ((e.message.splitOn "the program failed (3)").length > 1) e.message
+            check ((e.message.splitOn "open log.txt: No such file or directory").length > 1) e.message
+            -- and `cRunLibs` fails the case instead of recording a skip
+            let skipped ← try
+                cRunLibs src ""
+                pure true
+              catch _ => pure false
+            check (!skipped) "cRunLibs recorded a run-time failure as a skip" },
+    -- (engine-trampoline) Native builds arm no boundary: `Process.exit` still ends the
+    -- process with its own code (the Wasm playground is the one place `wiz_stop_run`
+    -- catches it, runtime/rt_con.inc).
+    { name := "a program's own exit is still the process's exit status", run := fun _ => do
+        match ← cRunLibsOut "import IO\nimport Sys\ndef main : IO Unit := Process.exit 3\n" with
+        | .ok v => throw (IO.userError s!"the program ran to the end: {v}")
+        | .error e =>
+          if e.isToolchain then skip "no toolchain"
+          else check ((e.message.splitOn "the program failed (3)").length > 1) e.message },
+    { name := "a program that writes 'No such file' on stderr and exits 0 still passes", run := fun _ =>
+        cRunLibs ("import IO\nimport Sys\n" ++
+          "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => IO.println \"ok\")\n") "ok\n" },
+    -- The other half: a build that cannot start the compiler is still a genuine "no
+    -- toolchain" skip. Run the passing case above in a child driver whose `--cc` does not
+    -- exist, and check that it is reported SKIPPED (exit 3), not failed.
+    { name := "a build that cannot find the compiler is still a 'no toolchain' skip", run := fun _ => do
+        let self ← IO.appPath
+        let target := "a program that writes 'No such file' on stderr and exits 0 still passes"
+        let listed ← IO.Process.output { cmd := self.toString, args := #["--list-cases", "=conc"] }
+        let some i := (listed.stdout.splitOn "\n").findSome? fun l =>
+            match l.splitOn "\t" with
+            | [g, i, n] => if g == "conc" && n == target then i.toNat? else none
+            | _ => none
+          | throw (IO.userError s!"`--list-cases =conc` has no case named {target}")
+        let args := #["--run", "conc", toString i, "--cc", "/nonexistent/wiz-test-cc"]
+        let r ← IO.Process.output { cmd := self.toString, args }
+        check (r.exitCode == 3) s!"exit {r.exitCode}, not 3 (a skip):\n{r.stdout}{r.stderr}"
+        check ((r.stdout.splitOn "⊘").length > 1) r.stdout
+        check ((r.stdout.splitOn "SKIPPED (no toolchain)").length > 1) r.stdout },
+    -- The classifier itself: a build that cannot start a program, or cannot find GMP's
+    -- header, is a missing toolchain; a compiler that ran and rejected the program (or a
+    -- missing test input file) is not; and no program failure ever is.
+    { name := "only a missing compiler, llc or gmp.h is classified as 'no toolchain'", run := fun _ => do
+        let tc : Wiz.Toolchain := {}
+        check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"
+        check (Build.missingToolchain tc "llc failed:\ncould not execute external process 'llc'") "a missing llc"
+        check (Build.missingToolchain tc "cc: no such file or directory (error code: 2)") "cc could not start"
+        check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
+        check (!Build.missingToolchain tc "cc failed:\ncc: error: c/helper.c: No such file or directory") "a missing link_c file"
+        check (!Build.missingToolchain tc "cc failed:\nmain.c:3:1: error: 'x' undeclared") "a rejected program"
+        check (!(Build.RunError.run 3 "No such file or directory").isToolchain) "a program failure"
+        check (!(Build.RunError.build "cc failed").isToolchain) "a build failure"
+        check (!(Build.RunError.timeout).isToolchain) "a timeout"
+        check (!(Build.RunError.readback "could not read").isToolchain) "a readback failure" }
   ]
 
 builtin_initialize registerGroup concGroup

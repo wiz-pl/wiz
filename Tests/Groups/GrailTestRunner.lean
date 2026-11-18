@@ -11,6 +11,7 @@ def testPkg : List (String × String) :=
 def testRunnerGroup : Group where
   name := "testrunner"
   exercise := "Stage 23f"
+  parallel := true
   cases := [
     { name := "tests are files with expected output; --update writes it", run := fun _ => do
         let dir ← mkTree testPkg
@@ -40,6 +41,34 @@ def testRunnerGroup : Group where
         let (res, st) ← runTests dir tc
         check (res.all (·.cached)) "a pass was not recorded"
         checkEq 0 st.ran },
+    { name := "--rerun runs recorded passes again and records the new result", run := fun _ => do
+        let dir ← mkTree testPkg
+        let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
+        let _ ← runTests dir tc (update := true)
+        let _ ← runTests dir tc
+        let (res, st) ← runTests dir tc
+        check (res.all fun t => t.ok && t.cached) s!"not recorded: {res.toList.map (·.message)}"
+        checkEq 0 st.ran
+        let expected ← IO.FS.readFile (dir / "tests/two.expected")
+        -- every test runs again, none is reported from the record, and the passes are
+        -- recorded again (the plain run after it runs nothing)
+        let (res, st) ← runTests dir tc (rerun := true)
+        check (res.all (·.ok)) s!"the rerun failed: {res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "--rerun reported a recorded pass"
+        checkEq 2 st.ran
+        let (res, st) ← runTests dir tc
+        check (res.all (·.cached)) "--rerun did not record its passes"
+        checkEq 0 st.ran
+        -- a rerun that fails (here: under a 1 ms limit) leaves no pass behind: the next
+        -- plain run runs the tests instead of reporting the old record
+        let (res, _) ← runTests dir tc (rerun := true) (testTimeoutMs := some 1)
+        check (res.all (!·.ok)) s!"the 1 ms rerun passed: {res.toList.map (·.message)}"
+        let (res, st) ← runTests dir tc
+        check (res.all (·.ok)) s!"{res.toList.map (·.message)}"
+        check (res.all (!·.cached)) "a pass survived a failed rerun"
+        checkEq 2 st.ran
+        -- --rerun leaves the .expected files alone
+        checkEq expected (← IO.FS.readFile (dir / "tests/two.expected")) },
     { name := "a wrong output fails, with the first difference", run := fun _ => do
         let dir ← mkTree (testPkg ++ [("tests/two.expected", "tests/two.wiz:2:1: info: 3\n")])
         let tc : Toolchain := { cacheDir := some (← IO.FS.createTempDir) }
@@ -86,6 +115,29 @@ def testRunnerGroup : Group where
         let (res, _) ← runTests dir tc false
         check (res.size == 1) s!"expected one test, got {res.toList.map (·.file)}"
         check (res.all (·.ok)) s!"{res.toList.map (·.message)}" },
+    { name := "-- test: … timeout SECS: parsed, and a declared limit over --test-timeout applies", run := fun _ => do
+        let parse (src : String) := Grail.TestKind.parseLine src
+        check (parse "-- test: run timeout 900\n" matches .ok (.run, some 900)) "run timeout 900"
+        check (parse "-- test: check  timeout 5\n" matches .ok (.check, some 5)) "check timeout 5"
+        check (parse "-- test: run\n" matches .ok (.run, none)) "run"
+        check (parse "-- test: skip slow, timeout 900\n" matches .ok (.skip _, none)) "a skip's reason is kept"
+        check (parse "-- test: run timeout x\n" matches .error _) "timeout x"
+        check (parse "-- test: run timeout 0\n" matches .error _) "timeout 0"
+        check (parse "-- test: run slowly\n" matches .error _) "run slowly"
+        checkEq 900000 (Grail.testLimitMs 300000 "-- test: run timeout 900\n")
+        checkEq 300000 (Grail.testLimitMs 300000 "-- test: run timeout 5\n")
+        checkEq 300000 (Grail.testLimitMs 300000 "-- test: run\n")
+        -- under a 1 ms --test-timeout the undeclared test times out, the declared one passes
+        let tc : Toolchain := { (← toolchain) with cacheDir := some (← IO.FS.createTempDir) }
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
+          ("tests/slow.wiz", "import Prelude\ndef n : Nat := 1\n"),
+          ("tests/declared.wiz", "-- test: check timeout 600\nimport Prelude\ndef n : Nat := 1\n")]
+        let (res, _) ← runTests dir tc (update := true) (testTimeoutMs := some 1)
+        match res.find? (·.file == "tests/slow.wiz"), res.find? (·.file == "tests/declared.wiz") with
+        | some slow, some declared =>
+          check (!slow.ok && (slow.message.splitOn "timed out").length > 1) s!"slow: {slow.message}"
+          check declared.ok s!"declared: {declared.message}"
+        | _, _ => throw (IO.userError s!"results: {res.toList.map (·.file)}") },
     { name := "-- test: run compiles and runs main", run := fun _ => do
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/hello.wiz", "-- test: run\nimport IO\ndef main : IO Unit := IO.println \"hi\"\n"),

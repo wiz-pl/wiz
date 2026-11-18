@@ -92,6 +92,21 @@ structure MetaEntry (R : Type) where
   know the type, and such a guess is left to `checkGuessedDecl` -/
   type? : Option (LocalCtx R × VTy R) := none
 
+/-- (13b, #411) A guess whose type comparison met an unsolved hole (`checkGuessTypes`):
+the comparison, kept to be made again at the end of the declaration, when its holes are
+solved (`recheckDeferredGuesses`). The guess `?m sp := guess` was made at level `l`, where
+the variables have the types `tys` (by level) and the names `names` (innermost first, for
+the message); `inferred` is the guess's type and `expected` the hole's. -/
+structure DeferredGuess (R : Type) where
+  l : Lvl
+  tys : Array (VTy R)
+  inferred : VTy R
+  expected : VTy R
+  m : Nat
+  sp : Array (Elim R)
+  guess : Val R
+  names : List Name
+
 /-- (7f) An instance problem not solved yet: the hole, in its context, and its class type.
 `blockers` are the unsolved holes in its (non-output) class arguments when it was last
 tried: it is tried again only once one of them is solved (`Elab/Class.lean`). -/
@@ -296,6 +311,11 @@ structure ElabState (R : Type) where
   solution `?m x := t` found under a binder `n` is `fun n => t`, not `fun x7 => t`, so a
   goal a tactic makes from it shows (and `intro` takes) the name the user wrote -/
   binderNames : List (Lvl × Name) := []
+  /-- the names of the context a unification problem was posed in (innermost first), when
+  its caller knows them (`unifyAt0`): a message unification writes itself
+  (`checkGuessTypes`) names the free variables with them, and with `binderNames` under the
+  binders it went under. Messages only: nothing else reads it -/
+  unifyCtxNames : List Name := []
   /-- the kernel's type inference, for complete terms (supplied by the command elaborator) -/
   kernelInfer : Ctx R → Term R → Except String (VTy R) := fun _ _ => .error "no kernel here"
   /-- set when unification meets an unsolved (term or level) metavariable. A failure that
@@ -308,6 +328,13 @@ structure ElabState (R : Type) where
   declaration is then checked again where opaque types have no definition
   (`checkGuessedDecl`), which closes a shape-based forgery in that case too. -/
   unifyGuessed : Bool := false
+  /-- why each guess was left untyped (`markGuessed`), for `--trace-guess-fallback`. It is
+  state, so a guess that unification backtracks out of takes its reason with it -/
+  guessReasons : Array String := #[]
+  /-- (#411) the guesses whose type comparison met a hole, to be compared again at the end
+  of the declaration (`recheckDeferredGuesses`). State, like `guessReasons`, so a guess that
+  unification backtracks out of takes its comparison with it -/
+  deferredGuesses : Array (DeferredGuess R) := #[]
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
   while the globals stay as they are (the elaborator clears it when it changes them). -/
@@ -617,6 +644,16 @@ def freshLevelMeta (info : SourceInfo := {}) (desc : String := "") : ElabM R Lev
   modify fun s => { s with levelMetas := s.levelMetas.push none,
                            levelMetaInfo := s.levelMetaInfo.push (info, desc) }
   pure (.mvar m)
+
+/-- (13b) A fresh hole for a type: its recorded type is `Sort ?u` (`MetaEntry.type?`),
+with `?u` a fresh level hole. `?u` occurs only in that record: a guess's check may solve
+it, nothing else reads it, so it never reaches a declaration (no default, no "could not
+infer a universe level"). A level comparison that fails on it is not final
+(`unifyLevel` notes the hole), so it can't reject a guess, only leave it to
+`checkGuessedDecl`. -/
+def freshTypeMeta (ctx : LocalCtx R) (desc : String) : ElabM R (Term R) := do
+  let u ← freshLevelMeta
+  freshMeta ctx desc (some (.sort u))
 
 /-- Replace solved level metavariables. -/
 def instLevel (l : Level) : ElabM R Level := do
