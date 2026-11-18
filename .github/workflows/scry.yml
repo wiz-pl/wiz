@@ -118,7 +118,7 @@ jobs:
           rc=$?
           set -e
           exit "$rc"
-      - name: Failing goldens (the diff)
+      - name: Failing goldens (expected/actual)
         # `grail test` prints each failing case and the first line that differs, but this
         # job runs 28 cases and can spend most of an hour before it reaches them: repeat
         # that part in the run's summary, where the next person looks first, instead of
