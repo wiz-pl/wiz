@@ -1,0 +1,202 @@
+import Word
+import Text
+import Encoding
+import WordBytes
+/-!
+# Sha
+
+SHA-256 (FIPS 180-4) in Wiz (`import Sha`): a byte string in, its 32-byte digest out.
+Pure and total (`#eval` runs it; no `partial`, no axiom, no `implemented_by`), so a tag
+release's `.sha256` and an archive's hash are computed by the same code that a proof can
+see.
+
+The byte type is `List U8`; the `Bytes` functions at the end are the same algorithm
+through lib/WordBytes.wiz's conversions. The digest is returned as bytes (big-endian, as
+the standard writes it); `Sha.sha256Hex` renders it in lower-case hex with
+lib/Encoding.wiz's `Encoding.hexEncode`.
+
+* `Sha.sha256 : List U8 → List U8`: the 32-byte digest.
+* `Sha.sha256Hex : List U8 → String`: the digest in lower-case hex.
+* `Sha.sha256Bytes`, `Sha.sha256BytesHex`: the same over `Bytes`.
+
+The message is padded here (`Sha.pad`), so callers hash the bytes they have: the length
+is taken in bits, a `1` bit and the zeros follow, and the 64-bit big-endian bit length is
+appended. The tests in `Tests/Groups/Library.lean` are the standard vectors (the empty
+message, `"abc"`, and the 448-bit `"abcdbcde…"` message).
+
+```
+import Sha
+
+#eval Sha.sha256Hex .nil                                    -- "e3b0c442…b855"
+#eval Sha.sha256Hex (.cons 97 (.cons 98 (.cons 99 .nil)))    -- "ba7816bf…15ad"
+```
+-/
+
+/-- The `i`th element of `xs` (from 0), or `d` past the end. -/
+def Sha.nth : List U32 → Nat → U32 → U32
+  | .nil, _, d => d
+  | .cons x xs, .zero, _ => x
+  | .cons x xs, .succ n, d => Sha.nth xs n d
+
+/-- A 32-bit rotation to the right by `n` places: `(x >>> n) ||| (x <<< (32 - n))`. -/
+def Sha.rotr (x : U32) (n : Nat) : U32 := (x >>> n) ||| (x <<< (32 - n))
+
+/-- The round function's choice: bits of `f` where `e` is set, of `g` where it is not. -/
+def Sha.ch (e f g : U32) : U32 := (e &&& f) ^^^ ((~~~ e) &&& g)
+
+/-- The round function's majority: a bit is set when at least two of `a`, `b`, `c` are. -/
+def Sha.maj (a b c : U32) : U32 := (a &&& b) ^^^ (a &&& c) ^^^ (b &&& c)
+
+/-- `Σ0` of the round function: `ROTR 2`, `ROTR 13`, `ROTR 22`, xor. -/
+def Sha.bigSigma0 (x : U32) : U32 := Sha.rotr x 2 ^^^ Sha.rotr x 13 ^^^ Sha.rotr x 22
+/-- `Σ1` of the round function: `ROTR 6`, `ROTR 11`, `ROTR 25`, xor. -/
+def Sha.bigSigma1 (x : U32) : U32 := Sha.rotr x 6 ^^^ Sha.rotr x 11 ^^^ Sha.rotr x 25
+/-- `σ0` of the message schedule: `ROTR 7`, `ROTR 18`, `SHR 3`, xor. -/
+def Sha.smallSigma0 (x : U32) : U32 := Sha.rotr x 7 ^^^ Sha.rotr x 18 ^^^ (x >>> 3)
+/-- `σ1` of the message schedule: `ROTR 17`, `ROTR 19`, `SHR 10`, xor. -/
+def Sha.smallSigma1 (x : U32) : U32 := Sha.rotr x 17 ^^^ Sha.rotr x 19 ^^^ (x >>> 10)
+
+/-- The working state of one compression: the eight words `a`–`h`. -/
+structure Sha.State where
+  a : U32
+  b : U32
+  c : U32
+  d : U32
+  e : U32
+  f : U32
+  g : U32
+  h : U32
+
+/-- One round: `k` is the round constant, `w` the scheduled message word. -/
+def Sha.step (k w : U32) (s : Sha.State) : Sha.State :=
+  let t1 := s.h + Sha.bigSigma1 s.e + Sha.ch s.e s.f s.g + k + w;
+  let t2 := Sha.bigSigma0 s.a + Sha.maj s.a s.b s.c;
+  Sha.State.mk (t1 + t2) s.a s.b s.c (s.d + t1) s.e s.f s.g
+
+/-- The 64 rounds: the constants and the scheduled words are consumed together. -/
+def Sha.rounds : List U32 → List U32 → Sha.State → Sha.State
+  | .nil, _, s => s
+  | _, .nil, s => s
+  | .cons k ks, .cons w ws, s => Sha.rounds ks ws (Sha.step k w s)
+
+/-- The initial state: the first 32 bits of the fractional parts of the square roots of
+the first eight primes. -/
+def Sha.initial : Sha.State :=
+  Sha.State.mk (U32.ofNat 0x6a09e667) (U32.ofNat 0xbb67ae85)
+    (U32.ofNat 0x3c6ef372) (U32.ofNat 0xa54ff53a)
+    (U32.ofNat 0x510e527f) (U32.ofNat 0x9b05688c)
+    (U32.ofNat 0x1f83d9ab) (U32.ofNat 0x5be0cd19)
+
+/-- The 64 round constants: the first 32 bits of the fractional parts of the cube roots
+of the first sixty-four primes. -/
+def Sha.k : List U32 :=
+  .cons (U32.ofNat 0x428a2f98) (.cons (U32.ofNat 0x71374491)
+  (.cons (U32.ofNat 0xb5c0fbcf) (.cons (U32.ofNat 0xe9b5dba5)
+  (.cons (U32.ofNat 0x3956c25b) (.cons (U32.ofNat 0x59f111f1)
+  (.cons (U32.ofNat 0x923f82a4) (.cons (U32.ofNat 0xab1c5ed5)
+  (.cons (U32.ofNat 0xd807aa98) (.cons (U32.ofNat 0x12835b01)
+  (.cons (U32.ofNat 0x243185be) (.cons (U32.ofNat 0x550c7dc3)
+  (.cons (U32.ofNat 0x72be5d74) (.cons (U32.ofNat 0x80deb1fe)
+  (.cons (U32.ofNat 0x9bdc06a7) (.cons (U32.ofNat 0xc19bf174)
+  (.cons (U32.ofNat 0xe49b69c1) (.cons (U32.ofNat 0xefbe4786)
+  (.cons (U32.ofNat 0x0fc19dc6) (.cons (U32.ofNat 0x240ca1cc)
+  (.cons (U32.ofNat 0x2de92c6f) (.cons (U32.ofNat 0x4a7484aa)
+  (.cons (U32.ofNat 0x5cb0a9dc) (.cons (U32.ofNat 0x76f988da)
+  (.cons (U32.ofNat 0x983e5152) (.cons (U32.ofNat 0xa831c66d)
+  (.cons (U32.ofNat 0xb00327c8) (.cons (U32.ofNat 0xbf597fc7)
+  (.cons (U32.ofNat 0xc6e00bf3) (.cons (U32.ofNat 0xd5a79147)
+  (.cons (U32.ofNat 0x06ca6351) (.cons (U32.ofNat 0x14292967)
+  (.cons (U32.ofNat 0x27b70a85) (.cons (U32.ofNat 0x2e1b2138)
+  (.cons (U32.ofNat 0x4d2c6dfc) (.cons (U32.ofNat 0x53380d13)
+  (.cons (U32.ofNat 0x650a7354) (.cons (U32.ofNat 0x766a0abb)
+  (.cons (U32.ofNat 0x81c2c92e) (.cons (U32.ofNat 0x92722c85)
+  (.cons (U32.ofNat 0xa2bfe8a1) (.cons (U32.ofNat 0xa81a664b)
+  (.cons (U32.ofNat 0xc24b8b70) (.cons (U32.ofNat 0xc76c51a3)
+  (.cons (U32.ofNat 0xd192e819) (.cons (U32.ofNat 0xd6990624)
+  (.cons (U32.ofNat 0xf40e3585) (.cons (U32.ofNat 0x106aa070)
+  (.cons (U32.ofNat 0x19a4c116) (.cons (U32.ofNat 0x1e376c08)
+  (.cons (U32.ofNat 0x2748774c) (.cons (U32.ofNat 0x34b0bcb5)
+  (.cons (U32.ofNat 0x391c0cb3) (.cons (U32.ofNat 0x4ed8aa4a)
+  (.cons (U32.ofNat 0x5b9cca4f) (.cons (U32.ofNat 0x682e6ff3)
+  (.cons (U32.ofNat 0x748f82ee) (.cons (U32.ofNat 0x78a5636f)
+  (.cons (U32.ofNat 0x84c87814) (.cons (U32.ofNat 0x8cc70208)
+  (.cons (U32.ofNat 0x90befffa) (.cons (U32.ofNat 0xa4506ceb)
+  (.cons (U32.ofNat 0xbef9a3f7) (.cons (U32.ofNat 0xc67178f2) .nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+/-- The message schedule: 48 more words from the 16 of a block, whose words arrive
+newest first in `rev`. -/
+def Sha.extend : Nat → List U32 → List U32
+  | .zero, rev => rev
+  | .succ n, rev =>
+    let w16 := Sha.nth rev 15 (U32.ofNat 0);
+    let w15 := Sha.nth rev 14 (U32.ofNat 0);
+    let w7 := Sha.nth rev 6 (U32.ofNat 0);
+    let w2 := Sha.nth rev 1 (U32.ofNat 0);
+    let next := w16 + Sha.smallSigma0 w15 + w7 + Sha.smallSigma1 w2;
+    Sha.extend n (.cons next rev)
+
+/-- One 64-byte block, whose sixteen words are in `rev` newest first: extend the
+schedule, run the 64 rounds, and add the result to `s`. -/
+def Sha.compress (s : Sha.State) (rev : List U32) : Sha.State :=
+  let t := Sha.rounds Sha.k (List.reverse (Sha.extend 48 rev)) s;
+  Sha.State.mk (s.a + t.a) (s.b + t.b) (s.c + t.c) (s.d + t.d)
+    (s.e + t.e) (s.f + t.f) (s.g + t.g) (s.h + t.h)
+
+/-- The bytes of the padded message, four at a time as big-endian words and sixteen words
+at a time as blocks. `count` bytes are in `word`, `words` holds the block newest first. -/
+def Sha.process : List U8 → Sha.State → Nat → Nat → List U32 → Sha.State
+  | .nil, s, _, _, _ => s
+  | .cons b rest, s, count, word, words =>
+    let word' := Nat.add (Nat.mul word 256) b.toNat;
+    let count' := Nat.add count 1;
+    match Nat.beq count' 4 with
+    | .true => match Nat.beq (List.length words) 15 with
+      | .true => Sha.process rest (Sha.compress s (.cons (U32.ofNat word') words)) 0 0 .nil
+      | .false => Sha.process rest s 0 0 (.cons (U32.ofNat word') words)
+    | .false => Sha.process rest s count' word' words
+
+/-- `k` zero bytes. -/
+def Sha.zeros : Nat → List U8
+  | .zero => .nil
+  | .succ n => .cons (U8.ofNat 0) (Sha.zeros n)
+
+/-- Bits `shift`–`shift+7` of `n`, as a byte (the byte at position `shift` from the bottom). -/
+def Sha.beByte (n shift : Nat) : U8 := U8.ofNat (Nat.mod (Nat.div n (Nat.pow 2 shift)) 256)
+
+/-- The low 64 bits of `n` as eight bytes, most significant first. -/
+def Sha.be64 (n : Nat) : List U8 :=
+  .cons (Sha.beByte n 56) (.cons (Sha.beByte n 48) (.cons (Sha.beByte n 40)
+  (.cons (Sha.beByte n 32) (.cons (Sha.beByte n 24) (.cons (Sha.beByte n 16)
+  (.cons (Sha.beByte n 8) (.cons (Sha.beByte n 0) .nil)))))))
+
+/-- A 32-bit word as four bytes, most significant first. -/
+def Sha.be32 (n : Nat) : List U8 :=
+  .cons (Sha.beByte n 24) (.cons (Sha.beByte n 16)
+  (.cons (Sha.beByte n 8) (.cons (Sha.beByte n 0) .nil)))
+
+/-- The message with FIPS 180-4's padding: the bytes, a `1` bit, zeros up to 56 mod 64,
+and the 64-bit bit length. -/
+def Sha.pad (msg : List U8) : List U8 :=
+  let bits := Nat.mul (List.length msg) 8;
+  let r := Nat.mod (Nat.add (List.length msg) 1) 64;
+  let zeros := Nat.mod (Nat.sub 120 r) 64;
+  List.append msg (.cons (U8.ofNat 128) (List.append (Sha.zeros zeros) (Sha.be64 bits)))
+
+/-- The 32-byte digest of `msg`, big-endian, as the standard writes it. -/
+def Sha.digest (s : Sha.State) : List U8 :=
+  List.append (Sha.be32 s.a.toNat) (List.append (Sha.be32 s.b.toNat)
+  (List.append (Sha.be32 s.c.toNat) (List.append (Sha.be32 s.d.toNat)
+  (List.append (Sha.be32 s.e.toNat) (List.append (Sha.be32 s.f.toNat)
+  (List.append (Sha.be32 s.g.toNat) (Sha.be32 s.h.toNat)))))))
+
+/-- The SHA-256 digest of `msg`: 32 bytes. -/
+def Sha.sha256 (msg : List U8) : List U8 :=
+  Sha.digest (Sha.process (Sha.pad msg) Sha.initial 0 0 .nil)
+
+/-- The SHA-256 digest of `msg` in lower-case hex: 64 characters. -/
+def Sha.sha256Hex (msg : List U8) : String := Encoding.hexEncode (Sha.sha256 msg)
+
+/-- `Sha.sha256` over a `Bytes` buffer. -/
+def Sha.sha256Bytes (b : Bytes) : Bytes := Bytes.ofU8s (Sha.sha256 (Bytes.toU8s b))
+/-- `Sha.sha256Hex` over a `Bytes` buffer. -/
+def Sha.sha256BytesHex (b : Bytes) : String := Sha.sha256Hex (Bytes.toU8s b)

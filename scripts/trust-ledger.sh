@@ -24,8 +24,16 @@
 #                                       regenerate the ledger and add the new rows
 #                                       (an explicit --review also renews migration rows)
 #
+# `--cache DIR` is the elaboration cache the walk writes and `--cache-ro DIR` (repeatable)
+# a read-only layer it searches, in the order given (the same flags as `wiz`). The walk
+# elaborates every module of `lib/`, so a warm cache replays an unchanged module instead of
+# elaborating it; entries are keyed by the module's exact text, its imports, the driver's
+# bytes and the trust options, so a changed source cannot be served an old effect. A
+# `--cache-ro`-only run writes nothing (CI restores the layer that way).
+# `--no-cache` clears both.
+#
 # `--tree DIR --ledger FILE --today DATE` point at a fixture tree (Tests/trust-ledger/)
-# and fix the date; they are for the gate's own tests.
+# and fix the date; they are for the gate's own tests (a fixture tree is never cached).
 #
 # Build the driver first: `lake build wiz tests` (`lake build` alone does not build it).
 # `TESTS_BIN` overrides the driver path (the same variable Tests/trust-ledger/run.sh takes).
