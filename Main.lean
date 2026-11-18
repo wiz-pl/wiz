@@ -318,7 +318,8 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) :
     pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
-      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag))
+      (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
+      (rootPath := path))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 

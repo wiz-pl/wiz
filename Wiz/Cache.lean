@@ -1241,6 +1241,34 @@ def readGeneration (dir : System.FilePath) : IO (Option Generation) := do
     try pure (parseGeneration (← IO.FS.readFile f)) catch _ => pure none
   else pure none
 
+/-- The write cache's pointer from a root file's path to its last root manifest. A root
+manifest is per **text** (so every root file does not share one manifest, which grew
+without bound and lost concurrent writers' entries); this pointer is what lets an edit
+reuse the unchanged prefix's entries: the previous text's manifest is loaded too, and the
+new manifest records the entries that hit. A missing or stale pointer only costs a cold
+root, never a wrong result. -/
+def rootPointerFile (dir : System.FilePath) (path : String) : System.FilePath :=
+  dir / "roots" / s!"{hash path}.rootp"
+
+def readRootPointer (dir : System.FilePath) (path : String) : IO (Option Key) := do
+  let f := rootPointerFile dir path
+  if !(← f.pathExists) then return none
+  let text ← try pure (← IO.FS.readFile f) catch _ => pure ""
+  match text.splitOn "\n" with
+  | k :: sha :: _ =>
+    match k.toNat? with
+    | some k =>
+      if sha.length == 64 then
+        pure (some ({ fast := k.toUInt64, strong := sha } : Key))
+      else pure none
+    | none => pure none
+  | _ => pure none
+
+def writeRootPointer (dir : System.FilePath) (path : String) (k : Key) : IO Unit := do
+  let f := rootPointerFile dir path
+  IO.FS.createDirAll (f.parent.getD dir)
+  try writeAtomic f s!"{k.fast}\n{k.strong}\n" catch _ => pure ()
+
 def unixNow : IO Nat := do
   pure (← Std.Time.Timestamp.now).val.toSeconds.toInt.toNat
 
@@ -1279,8 +1307,6 @@ structure ManifestStore where
   present : IO.Ref (Std.HashSet String)
   /-- module keys whose manifest validated in some layer -/
   valid : IO.Ref (Std.HashSet String)
-  /-- manifests written this process: (key, module, file, digest), for the generation index -/
-  written : IO.Ref (Array (Key × Name × String × String))
   /-- a layer's generation expiry, cached per layer -/
   expiry : IO.Ref (Std.HashMap String Nat)
   /-- read-only layers already warned about, so a missing manifest is reported once -/
@@ -1299,7 +1325,6 @@ def ManifestStore.create (write : Option System.FilePath) (reads : List System.F
          poisoned := ← IO.mkRef ({} : Std.HashSet String),
          present := ← IO.mkRef ({} : Std.HashSet String),
          valid := ← IO.mkRef ({} : Std.HashSet String),
-         written := ← IO.mkRef #[],
          expiry := ← IO.mkRef ({} : Std.HashMap String Nat),
          warnedRo := ← IO.mkRef ({} : Std.HashSet String),
          broken := ← IO.mkRef 0, stats }
@@ -1466,39 +1491,6 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
   if let some e := m0.region then do
     m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
-  m.written.modify (·.push (key, module, f.fileName.getD "", Smt.Sha256.hexBytes text.toUTF8))
-
-/-- Write or refresh the layer's `manifest.sexpr` (P1). It lists the per-module manifests
-this process wrote (merged with an existing index), with a generation number and a Merkle
-root over the module records. Best-effort: it is an index, not a lock. -/
-def ManifestStore.flush (m : ManifestStore) : IO Unit := do
-  let some dir := m.write | return
-  let ws ← m.written.get
-  if ws.isEmpty then return
-  let old ← readGeneration dir
-  -- (the index is a snapshot of every valid module manifest in the layer, not just the
-  -- ones this process wrote: with `-j` the jobs write their manifests concurrently, and
-  -- a last-writer index of only its own writes would miss the others.)
-  let mdir := dir / manifestDirName
-  let files ← if ← mdir.pathExists then mdir.readDir else pure #[]
-  let mut mods : Array (UInt64 × String × String × String × String) := #[]
-  for e in files do
-    if !e.fileName.endsWith ".wizmf" then continue
-    let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile e.path)).getD "") catch _ => pure ""
-    match parseManifest text with
-    | some man =>
-      if man.valid { fast := man.key, strong := man.keySha,
-                     toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
-        mods := mods.push (man.key, man.keySha, (toString man.module), e.fileName,
-          Smt.Sha256.hexBytes text.toUTF8)
-    | none => pure ()
-  -- (a write-cache index is a snapshot, not a log: its generation and previous root
-  -- cannot record how many processes or `-j` jobs wrote it, or the cache bytes would
-  -- depend on scheduling.)
-  let g0 := Generation.mk (max 1 mods.size) ""
-    (old.map (·.validUntil) |>.getD 0) mods ""
-  let g := { g0 with root := g0.rootOf }
-  writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
 
 /-- Verify the keyed files of one layer against its manifests (the full-scan tool). This
 is what `wiz cache verify` reports; normal runs verify only what they read. -/
@@ -2167,10 +2159,13 @@ def smtKey (c : Smt.Config) : Option UInt64 :=
 final state and how many commands came from the store. `key₀` identifies what the
 file can see besides its imports (for example its C headers); `toolchain` is mixed into
 every module's key. `strongToolchain`/`targetTag`/`rootTag`/`binaryTag` are the SHA-256
-namespaces a new manifest or region records; they do not change a fast key. -/
+namespaces a new manifest or region records; they do not change a fast key. `rootPath`
+(the root file's path, when the caller has one) only names the pointer that lets an edit
+reuse its unchanged prefix's manifest entries. -/
 partial def elaborateWith (store : Store R) (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (strongToolchain : String := "") (targetTag : String := "")
-    (rootTag : String := "") (binaryTag : String := "") : IO (CommandState R × Nat) := do
+    (rootTag : String := "") (binaryTag : String := "") (rootPath : String := "") :
+    IO (CommandState R × Nat) := do
   let keys ← IO.mkRef ({} : Std.HashMap Name Key)
   -- recording every term's expected type changes the effects: a different chain
   let salt' := if init.termInfo then mixHash salt 1 else salt
@@ -2194,13 +2189,37 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
         [toString salt', toString toolchain, strongToolchain', targetTag, toString key₀Fast,
          rootTag, s!"includes:{key₀Strong}"]
       toolchain := strongToolchain', target := targetTag, binary := binaryTag }
-  -- (a root file's manifest is keyed by the chain key: the file is not an imported module)
-  if let some ms := store.manifests then ms.load chainKey
+  -- (a root file's manifest is keyed by the chain key **and its text**: the chain key does
+  -- not contain the text (the commands chain it), so without this every root file with the
+  -- same headers shared one manifest. That manifest grew with every file checked (12.7 MB
+  -- in one cache here), was parsed and rewritten per root miss, and two concurrent checks
+  -- of different files lost each other's entries -- a fresh file then missed on every run.
+  -- The strong half alone separates the files; the fast half stays the old key.)
+  let manifestKey : Key := chainKey.mixDomain "wiz-cache/root-manifest-v1" [input]
+  -- (an edit keeps the unchanged prefix warm: the pointer names the previous text's
+  -- manifest for this path, and loading it indexes the prefix's entries for this run)
+  let prevKey ← match store.manifests with
+    | some ms => match ms.write with
+      | some dir => if rootPath.isEmpty then pure none else readRootPointer dir rootPath
+      | none => pure none
+    | none => pure none
+  -- (a root file's manifest is keyed by the chain key and its text: the file is not an
+  -- imported module)
+  if let some ms := store.manifests then
+    ms.load manifestKey
+    if let some pk := prevKey then
+      unless pk.strong == manifestKey.strong do ms.load pk
   let rootSink : Option (RegionSink R) ← match store.manifests with
     | some _ => pure (some { module := init.module, effects := ← IO.mkRef #[], keys := ← IO.mkRef #[],
                              rerun := ← IO.mkRef #[], region := false, entries := ← IO.mkRef #[] })
     | none => pure none
-  go keys init [] input init chainKey .write none rootSink
+  let result ← go keys init [] input init chainKey .write manifestKey none rootSink
+  match store.manifests with
+  | some ms =>
+    if !rootPath.isEmpty then
+      if let some dir := ms.write then writeRootPointer dir rootPath manifestKey
+  | none => pure ()
+  pure result
 where
   nativeKey (s : CommandState R) : UInt64 := mixHash (hash "trust-native") (hash s.nativeFuel)
   keyOf (keys : IO.Ref (Std.HashMap Name Key)) (m : Name) : IO Key := do
@@ -2240,7 +2259,7 @@ where
                        rerun := ← IO.mkRef #[], region := store.region.isSome,
                        entries := ← IO.mkRef #[] })
         else pure none
-      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write none sink
+      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
       store.markSeen k m
       pure (some h)
     -- (the isolated run above wrote the artifact if it was missing or unusable)
@@ -2252,7 +2271,7 @@ where
       | none => pure 0
     -- (the command loop still runs: imports, keys and duplicate checks are unchanged; the
     -- effects come from the region when it has them)
-    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay region
+    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay k region
     let brokenAfter ← match store.manifests with
       | some ms => ms.broken.get
       | none => pure brokenBefore
@@ -2266,13 +2285,13 @@ where
                            rerun := ← IO.mkRef #[], region := true,
                            entries := ← IO.mkRef #[] })
             else pure none
-          let _ ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write none sink
+          let _ ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
           pure ()
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
     pure (s', fresh.getD h)
   go (keys : IO.Ref (Std.HashMap Name Key)) (base : CommandState R) (stack : List Name) (input : String)
-      (s₀ : CommandState R) (key₀ : Key) (mode : Mode)
+      (s₀ : CommandState R) (key₀ : Key) (mode : Mode) (mkey : Key)
       (region : Option (ModuleArtifact R) := none) (sink : Option (RegionSink R) := none) :
       IO (CommandState R × Nat) := do
     let chars := input.toList.toArray
@@ -2390,22 +2409,23 @@ where
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
         pos := stop
-    -- (write the module's region and its manifest once: after a complete isolated run)
+    -- (write the module's region after a complete isolated run; a manifest is written even
+    -- for an aborted run: the entries before a parse error were elaborated and their bytes
+    -- are valid, and without a manifest every run re-elaborated the file's whole prefix)
     if let some sink := sink then
-      unless aborted do
-        let regionEntry ←
-          if sink.region then
-            store.putRegion { magic := regionMagic, format := regionFormat, module := sink.module,
-                              key := key₀.fast, keySha := key₀.strong,
-                              binarySha := key₀.binary, toolchainSha := key₀.toolchain,
-                              targetSha := key₀.target,
-                              effects := ← sink.effects.get, keys := ← sink.keys.get,
-                              complete := allCacheable, rerun := ← sink.rerun.get }
-          else pure none
-        if let some ms := store.manifests then
-          -- (the root pseudo-module's manifest is shared by files with the same headers)
-          ms.writeManifest key₀ sink.module (← sink.entries.get) regionEntry
-            (merge := (toString sink.module).isEmpty)
+      let regionEntry ←
+        if sink.region && !aborted then
+          store.putRegion { magic := regionMagic, format := regionFormat, module := sink.module,
+                            key := key₀.fast, keySha := key₀.strong,
+                            binarySha := key₀.binary, toolchainSha := key₀.toolchain,
+                            targetSha := key₀.target,
+                            effects := ← sink.effects.get, keys := ← sink.keys.get,
+                            complete := allCacheable, rerun := ← sink.rerun.get }
+        else pure none
+      if let some ms := store.manifests then
+        -- (the root pseudo-module's manifest is per root file: `mkey` has the file's text)
+        ms.writeManifest mkey sink.module (← sink.entries.get) regionEntry
+          (merge := (toString sink.module).isEmpty)
     pure (s, hits)
 
 /-- `elaborateWith`, through the layered cache: `write` is the directory that is written
@@ -2417,22 +2437,28 @@ read-only caches, and are only written to the write cache. With `verify`, output
 are written to the write cache and checked on load (`rig` is the rig's tag).
 `strongToolchain`/`targetTag` are the SHA-256 namespaces (`Toolchain.tag`,
 `Toolchain.targetTag`); `rootTag` is a strong version of `key₀` (the root file's headers),
-so a root manifest is bound to its actual inputs too. -/
+so a root manifest is bound to its actual inputs too. `rootPath` is the root file's path,
+used only for the manifest pointer an edit follows to keep its unchanged prefix warm. -/
 def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
     (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
     (region : Option RegionOptions := none) (verify : VerifyMode := .off) (rig : String := "")
     (stats : Option (IO.Ref VerifyCounts) := none)
-    (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "") :
+    (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "")
+    (rootPath : String := "") :
     IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
   let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
   let store ← match region with
     | some opts => Store.layeredRegion write reads binary opts verify rig stats
     | none => Store.layered write reads binary verify rig stats
-  let result ← elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag
-  if let some ms := store.manifests then ms.flush
-  pure result
+  -- (the layer's `manifest.sexpr` is not refreshed here: rebuilding it reads and
+  -- re-validates every manifest in the layer, which is O(cache) per run — about a minute
+  -- on a shared cache of thousands of manifests. Nothing a run does reads its module
+  -- list (only its expiry, which a run never changes); `wiz cache manifest` rebuilds it.
+  -- `agent/cold-check` 7ecc48b2 made the same change; this branch keeps it while fixing
+  -- the root manifest's key.)
+  elaborateWith store input init key₀ toolchain strongToolchain targetTag rootTag binaryTag rootPath
 
 /-- `elaborateWith`, without a cache: modules are elaborated in isolation all the same. -/
 def elaborateUncached (input : String) (init : CommandState R) (toolchain : UInt64 := 0)
