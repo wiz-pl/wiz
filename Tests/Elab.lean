@@ -478,12 +478,15 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
       includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
-/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
-def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let (s, src, dir) ← elabTree files
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
   | .error e =>
     let missing := ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1
@@ -2078,13 +2081,16 @@ def failsLibs (input : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
-/-- Build `main` with the C backend (or LLVM), with every library importable. -/
-def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- Build `main` with the C backend (or LLVM), with every library importable. `cflags` are
+appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibs (src : String) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
   | .error e =>
     if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"

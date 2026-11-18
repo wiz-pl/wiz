@@ -461,10 +461,15 @@ static int wiz_sys_fork_spawn(pid_t *pid, const char *cmd, char **argv, char **e
   return r;
 }
 #endif
+/* Ignore SIGPIPE once per process (a write to a dead child's pipe gives EPIPE instead of
+   killing the program).  The one-shot has to be thread-safe: several threads may spawn
+   children at once, and a plain `static int` flag here was a data race (docs/stages/
+   25-concurrency.md, 25a). */
+static pthread_once_t wiz_sigpipe_once = PTHREAD_ONCE_INIT;
+static void wiz_sigpipe_ignore(void) { signal(SIGPIPE, SIG_IGN); }
 static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64_t out, uint64_t err,
                               const char *cwd, char **envp, uint64_t group) {
-  static int sigpipe_ignored = 0;
-  if (!sigpipe_ignored) { signal(SIGPIPE, SIG_IGN); sigpipe_ignored = 1; }
+  pthread_once(&wiz_sigpipe_once, wiz_sigpipe_ignore);
   char **argv = wiz_sys_strings(args, cmd);
   uint64_t modes[3] = {in, out, err};
   int pipes[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
