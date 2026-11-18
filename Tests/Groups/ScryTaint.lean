@@ -212,6 +212,7 @@ def rulePrelude : String := prelude ++
 def group : Group where
   name := "scry-taint"
   exercise := "Scry S4 (intraprocedural dataflow, rule pack, interprocedural taint, SARIF, certificates)"
+  parallel := true
   cases := [
     { name := "real flow: getenv -> copy -> add -> system, with its path",
       run := fun _ => evalNats (prelude ++

@@ -103,6 +103,18 @@ are the same as a sequential run, and a failing case does not stop the others. A
 exception kills the cases still running, and the cases stay in the driver's process
 group, so Ctrl-C reaches them as it did sequentially.
 
+A case of a group that did not opt in is told the driver's `--jobs` when it was given
+(`Tests.caseJobs`), and may use N workers of its own inside its one process.
+`=selfhost-libdiff` is the one that does: it builds the self-hosted compiler once, then
+checks N files at a time (each file still runs its host and self-hosted sides in child
+processes, so the verdicts are the same). With no `--jobs`, N is **auto**: the CPUs
+minus one, capped by the free memory at its `--mem` MB per file (4096 by default,
+`/proc/meminfo` and any cgroup limit). So a 4 vCPU / 16 GiB CI runner gets 3 workers.
+`--jobs N` overrides it (`--jobs 1` is the serial control), and a worker starts its next
+file only while that memory is free; a log's records stay in the files' order, so
+parallel and sequential runs report the same records. The cases of an opted-in group
+get 1 (N already run at once). A file's timeout is per file, not for the pool.
+
 The opt-in is `parallel := true` on a `Group` (`Tests/Harness.lean`). Enable it only for a
 group whose cases share no mutable state: every case's files must be its own (its own temp
 directory, or a fixed path that no other case touches), and a group has no build
@@ -111,9 +123,6 @@ program another case builds; no case
 may assert on wall time or on the machine's load (a `scaling`-style bound). A case that
 needs a shared program the first case builds (the self-hosted checker, the Wiz `tower` in
 `.lake/build/tower-wiz`) is not parallel-safe: N processes would build it N times.
-A case of a group that did not opt in is told N (`Tests.caseJobs`) and may split
-its own work: the `selfhost-libdiff` sweep builds the self-hosted compiler once and then
-checks N files at a time, capped by the CPUs and the free memory (docs/stages/21-bootstrap.md, 21ae).
 `--jobs-all` also parallelizes the
 groups that did not opt in, for auditing one group's isolation — not for CI. On a 4-core
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
@@ -685,7 +694,8 @@ the elan toolchain, so the setup action keeps the elan cache for those
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
   baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
-  `scaling`).
+  `scaling`; the last is a sweep over `lib/` and `examples/`, split into cases for `lib/`,
+  `libApart` and six chunks of `examples/`, so its parts can run in different shards).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
@@ -714,11 +724,16 @@ the elan toolchain, so the setup action keeps the elan cache for those
   (`GROUP<TAB>CASE<TAB>SECONDS`, or `drop` for a case that is gone). It prints the
   predicted time of every job under the current and the new counts.
 * **`"jobs"`.** A shard may say `"jobs": N` to give the test driver `--jobs N` (above): its
-  opted-in groups run N cases at a time. Only set it on a shard whose groups were
-  verified (and opted in) to be safe in parallel; `core`, `library` and `backends` use
-  4 on the 4-core hosted runner. A shard of one long case (`grail-selfhost`,
-  `hdl-verified`) and the shards that build a shared program (`selfhost`) keep 1. A
-  case's `seconds` stays its own process's time, so shard balance is unaffected.
+  opted-in groups run N cases at a time, and a lone case may use N workers itself.
+  Only set it on a shard whose groups were verified (and opted in) to be safe in
+  parallel; `core`, `library` and `backends` use 4 on the 4-core hosted runner.
+  `selfhost-libdiff` needs no `"jobs"`: its one case picks auto (the CPUs minus one,
+  capped by the free memory), so a 4 vCPU / 16 GB runner runs 3 files at `--mem`
+  (4096 MB) and a 20 GB one could run more; a matrix of six heavy shards on 16 GB
+  runners cannot OOM it. A shard of one long case
+  (`grail-selfhost`, `hdl-verified`) and the shards that build a shared program
+  (`selfhost`) keep 1. A case's `seconds` stays its own process's time, so shard
+  balance is unaffected.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's test time is over 1.5× the median shard's**. Every split shard's cases
   have an entry in `.github/test-timings.json`, and no shared program is built by two
@@ -743,12 +758,15 @@ the elan toolchain, so the setup action keeps the elan cache for those
 
   If a shard stays over the limit after the refresh, raise its `"split"` or make it a
   split shard. `scripts/ci.py plan` shows the predicted parts. One case longer than the
-  limit cannot be split by the shards: `grail-selfhost` is one case of several minutes.
-  Split such a case in its test instead, into cases over parts of its input that
-  together check the same things: `scaling`'s sweep of the induction hypotheses over
-  `lib/` and `examples/` (up to 31 min as one case) is a case for `lib/`, one for the
-  modules checked apart, and six over the examples, with a case that checks that the
-  six cover every example once.
+  limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
+  minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
+  3-worker auto pool (splitting it into cases would make each part build the
+  self-hosted compiler again). Split such a case in its test instead, into cases over
+  parts of its input that together check the same things: `scaling`'s sweep of the
+  induction hypotheses over `lib/` and `examples/` (up to 31 min as one case) was one
+  case; it is now nine cases (one for `lib/`, one for the modules checked apart, six
+  over the examples, and one that checks that the six cover every example once), so the
+  shard's parts can each hold one.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when

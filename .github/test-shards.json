@@ -1,5 +1,5 @@
 [
-  {"name": "selfhost", "split": 4, "heavy": true,
+  {"name": "selfhost", "split": 8, "heavy": true,
    "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
@@ -25,7 +25,7 @@
    "select": [
     "=grail-selfhost"
   ]},
-  {"name": "selfhost-libdiff", "heavy": true, "jobs": 3,
+  {"name": "selfhost-libdiff", "heavy": true,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
               "Tests/Main.lean", "Tests/Harness.lean"],
    "select": [
@@ -109,7 +109,7 @@
     "vec",
     "word"
   ]},
-  {"name": "scaling", "split": 2, "select": [
+  {"name": "scaling", "split": 3, "select": [
     "=scaling"
   ]},
   {"name": "prop", "select": [

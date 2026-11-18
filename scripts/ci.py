@@ -249,12 +249,14 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
-    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
+    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
+    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1".)"""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
-        jobs = s.get("jobs", 1)
+        jobs = s.get("jobs")
         if n <= 1:
             out.append((s["name"], s["select"], None, jobs))
             continue
