@@ -427,19 +427,9 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
       unless a == b do bad := s!"{name}: {a.pretty []} vs {b.pretty []}" :: bad
   pure (n, bad)
 
-/-- Modules of `lib/` that can't be imported together with all the others (`Json`
-declares its own `Nat.repr`), checked on their own. -/
-def libApart : List String := ["Json", "Infoview"]
-
-/-- Every other module of `lib/` imported at once. -/
-def allLibSource : IO String := do
-  let mut ms := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  pure (String.join (((ms.qsort (· < ·)).toList.filter (!libApart.contains ·)).map (s!"import {·}\n")))
+/- `libApart`, `libSourceExcept` and `allLibSource` live in `Tests.Elab`, so every
+whole-library loader (this Desc sweep and the trust ledger) uses the same per-module
+exclusions. -/
 
 /-! The Desc sweep (direct induction hypotheses against the template, P2) is one check
 over three inputs: `lib/` imported at once, the `libApart` modules, and every example.
@@ -467,13 +457,14 @@ def exampleChunk (fs : Array System.FilePath) (k : Nat) : Array System.FilePath 
     if i % descExampleChunks == k then out := out.push fs[i]!
   pure out
 
-/-- The Desc sweep on `lib/` imported at once (all modules but `libApart`), with the
-stuck descriptions, and the check that a wrong variant is caught. The count is a floor
-on this part alone (`lib/` has 762 descriptions today; the old single case's `> 1000`
-bound counted `lib/`, `libApart` and the examples together). -/
+/-- The Desc sweep on `lib/` imported at once (all modules but the apart backends), with
+the stuck descriptions, and the check that a wrong variant is caught. The pre-split case
+asserted one bound over lib, the apart backends and the examples together (`> 1000`);
+since the parts run as separate cases, this part asserts its own floor: it compares 787
+descriptions (measured), and `> 700` catches a loader that stopped early. -/
 def descSweepLib : IO Unit := do
   let loader ← Tests.Elab.libLoader
-  let lib := runFrontend (R := ZeroOneMany) (← allLibSource) { trustedModule := Tests.libModule, loader }
+  let lib := runFrontend (R := ZeroOneMany) (← Tests.Elab.allLibSource) { trustedModule := Tests.libModule, loader }
   let errs := lib.messages.filter (·.severity == .error)
   unless errs.isEmpty do throw (IO.userError s!"the library has errors: {(errs.toList.take 3).map (·.text)}")
   -- (the comparison can fail: a variant with the pairs swapped is caught)
@@ -488,16 +479,26 @@ def descSweepLib : IO Unit := do
     ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
   let (n, bad) := hypsMismatches lib.globals stuck
   unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
-  check (n > 500) s!"only {n} cases"
+  check (n > 700) s!"only {n} cases"
 
-/-- The Desc sweep on each `libApart` module, imported on its own. -/
+/-- The Desc sweep on each alternative backend of `lib/` (`Tests.Elab.libApart`), loaded
+with every other module except the backends it replaces (`Tests.Elab.libSourceExcept`).
+Its reference family (`Scry.Egraph`) declares the same top-level names, so the two cannot
+be imported into one program. -/
 def descSweepApart : IO Unit := do
   let loader ← Tests.Elab.libLoader
-  for m in libApart do
-    let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
-    unless st.messages.all (·.severity != .error) do throw (IO.userError s!"lib/{m} has errors")
-    let (_, bad) := hypsMismatches st.globals
+  let ms ← Tests.Elab.libModuleNames
+  let mut seenApart : List (List String) := []
+  for (m, skip) in Tests.Elab.libApart do
+    if seenApart.contains skip then continue
+    seenApart := skip :: seenApart
+    check (ms.contains m) s!"{m} is not a module of lib/"
+    let st := runFrontend (R := ZeroOneMany) (← Tests.Elab.libSourceExcept skip) { trustedModule := Tests.libModule, loader }
+    unless st.messages.all (·.severity != .error) do
+      throw (IO.userError s!"lib/ with {m} (without {skip}) has errors")
+    let (n, bad) := hypsMismatches st.globals
     unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
+    check (n > 0) s!"{m}: no descriptions were compared"
 
 /-- The Desc sweep on chunk `k` of the examples (an example with errors is skipped, as
 an example of an error). -/
@@ -784,7 +785,7 @@ def group : Group where
     -- `descSweepLib`, `descSweepApart`, `descSweepExamples`)
     { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
         descSweepLib },
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/'s modules checked apart (Json, Infoview)", run := fun _ =>
+    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (each alternative backend loaded on its own)", run := fun _ =>
         descSweepApart }] ++
     (List.range descExampleChunks).map (fun k => ({
         name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>

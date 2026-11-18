@@ -1,5 +1,5 @@
 {
- "builds": {"checker": 324.028, "compiler": 354.327, "tower-wiz": 25.857},
+ "builds": {"checker": 295.238, "compiler": 354.327, "parser": 12.757, "tower-wiz": 25.857},
  "cases": {
   "audit-kernels": {
    "K10 (closed by 21m): both frontends reject a dropped and a duplicated linear variable": {"seconds": 0.084, "uses": ["checker"]},
@@ -681,6 +681,7 @@
    "instance: a cycle is tabulated, not followed": {"seconds": 2.379},
    "instance: a definition is not a class": {"seconds": 2.622},
    "instance: a field given twice": {"seconds": 0.697},
+   "instance: a field given twice is accepted": {"seconds": 9.519},
    "instance: a field has the wrong type": {"seconds": 0.494},
    "instance: missing field": {"seconds": 0.688},
    "instance: missing instance": {"seconds": 9.337},
@@ -688,6 +689,7 @@
    "instance: unknown field": {"seconds": 2.037},
    "modules: two modules declaring one name": {"seconds": 0.192},
    "opaque: a first-order solution cannot forge a private value": {"seconds": 0.766},
+   "opaque: a first-order solution forges a private value": {"seconds": 2.226},
    "opaque: a first-order solution in equations cannot forge either": {"seconds": 0.748},
    "opaque: a look-alike does not convert": {"seconds": 0.58},
    "opaque: a private constructor cannot be called": {"seconds": 2.5},
@@ -789,8 +791,8 @@
    "direct induction hypotheses agree with the template on every Desc in examples/, part 4 of 6": {"seconds": 196.0},
    "direct induction hypotheses agree with the template on every Desc in examples/, part 5 of 6": {"seconds": 200.0},
    "direct induction hypotheses agree with the template on every Desc in examples/, part 6 of 6": {"seconds": 229.0},
+   "direct induction hypotheses agree with the template on every Desc in lib/ (each alternative backend loaded on its own)": {"seconds": 14.0},
    "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions": {"seconds": 119.0},
-   "direct induction hypotheses agree with the template on every Desc in lib/'s modules checked apart (Json, Infoview)": {"seconds": 14.0},
    "erasure believes a Π's sort, and the kernel rejects a wrong one wherever erasure could read it": {"seconds": 0.041},
    "one-pass reference counting agrees with the specification (insertRC)": {"seconds": 2.307},
    "p.1 is checked without evaluating p": {"seconds": 0.113},

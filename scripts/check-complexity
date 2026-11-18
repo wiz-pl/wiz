@@ -34,42 +34,33 @@ Rules (all in files ending `.lean` or `.wiz`):
 Changed lines only
   By default the check is diff-scoped (`--diff origin/master`): it scans the whole
   file for context but reports a hit only when its line is added or changed since
-  BASE.  `--all` scans every tracked `.lean`/`.wiz` file.  The existing sites are in
-  `scripts/complexity-allow.tsv`, so a pull request fails only on a *new* shape.
+  BASE.  `--all` scans every tracked `.lean`/`.wiz` file and lists the whole backlog,
+  which is what an audit wants.
 
-The allowlist
-  `scripts/complexity-allow.tsv` has one entry per line,
+Silencing a hit
+  There is no separate allowlist file.  A site that is bounded but cannot be
+  restructured carries its reason next to it, on the hit's line or the line above:
 
-      path<TAB>line-hash<TAB>reason
+      out := out ++ [d]   -- complexity: ok (the list has at most 4 entries here)
 
-  where `line-hash` is the first 12 hex digits of SHA-256 over the line with runs of
-  whitespace collapsed and its ends trimmed (`" ".join(line.split())`).  The hash is
-  of the *text*, not the line number, so reindenting a file, inserting lines above a
-  site, or moving the site to another line does not invalidate its entry; changing
-  the line itself does, which is the review it should get.  One entry covers every
-  line in that file with that exact text.  In `--all` mode an entry that matches no
-  current hit is an error, so fixed sites lose their row.
-
-  Removing a row for a site that is now clean is the intended way to shrink the
-  baseline; the reason column is free text (owner, date, why it is bounded).
+  The reason is the review: it travels with the code through moves and reindents,
+  it appears in the same diff as the line it excuses, and deleting the line deletes
+  the excuse.  A hit without one is a violation.
 
 Usage
   scripts/check-complexity                    # diff against origin/master
   scripts/check-complexity --diff BASE         # diff against BASE
   scripts/check-complexity --all               # every tracked .lean/.wiz file
   scripts/check-complexity --self-test         # fixtures; exact expected output
-  scripts/check-complexity --allow FILE        # another allowlist
-  scripts/check-complexity --list-baseline     # print rows for unreviewed hits
 
-Exit status: 0 clean, 1 violations (or a failing self-test), 2 usage or a malformed
-allowlist, 3 the check could not run (not a git checkout, unknown BASE, no files in
-`--all`).  A diff with no changed source lines is a pass (0): there was nothing to
-report, which is not the same as an unusable checkout.
+Exit status: 0 clean, 1 violations (or a failing self-test), 2 usage, 3 the check
+could not run (not a git checkout, unknown BASE, no files in `--all`).  A diff with
+no changed source lines is a pass (0): there was nothing to report, which is not the
+same as an unusable checkout.
 """
 
 import argparse
 import contextlib
-import hashlib
 import io
 import re
 import subprocess
@@ -80,7 +71,6 @@ from pathlib import Path
 
 SUFFIXES = (".lean", ".wiz")
 DEFAULT_BASE = "origin/master"
-DEFAULT_ALLOW = "scripts/complexity-allow.tsv"
 
 # --- patterns ---------------------------------------------------------------------
 
@@ -225,11 +215,6 @@ def strip_literals(code: str) -> str:
         else:
             out.append(c)
     return "".join(out)
-
-
-def line_hash(line: str) -> str:
-    """Stable hash of a line: whitespace collapsed, ends trimmed, SHA-256, 12 hex."""
-    return hashlib.sha256(" ".join(line.split()).encode("utf-8")).hexdigest()[:12]
 
 
 # --- scanning ---------------------------------------------------------------------
@@ -496,29 +481,7 @@ def changed_lines(root: Path, base: str) -> dict[str, set[int]] | None:
     return out
 
 
-# --- allowlist --------------------------------------------------------------------
-
-def read_allowlist(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
-    """(entries, errors) from a `path<TAB>hash<TAB>reason` file."""
-    entries: dict[tuple[str, str], str] = {}
-    errors: list[str] = []
-    if not path.exists():
-        return entries, errors
-    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        parts = raw.split("\t")
-        if len(parts) != 3 or not parts[2].strip():
-            errors.append(f"{path}:{n}: expected `path<TAB>line-hash<TAB>reason`, "
-                          f"got {raw!r}")
-            continue
-        p, h, why = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if not re.fullmatch(r"[0-9a-f]{12}", h):
-            errors.append(f"{path}:{n}: {h!r} is not 12 lowercase hex digits")
-            continue
-        entries[(p, h)] = why
-    return entries, errors
-
+# --- silencing --------------------------------------------------------------------
 
 def allowed_by_comment(lines: list[str], line: int) -> bool:
     """Whether the hit is silenced by `complexity: ok` on its line or the one above."""
@@ -528,22 +491,13 @@ def allowed_by_comment(lines: list[str], line: int) -> bool:
     return False
 
 
-def filter_hits(hits: list[Hit], texts: dict[str, list[str]],
-                allow: dict[tuple[str, str], str]) -> list[Hit]:
-    kept = []
-    for h in hits:
-        lines = texts[h.path]
-        if allowed_by_comment(lines, h.line):
-            continue
-        if (h.path, line_hash(lines[h.line - 1])) in allow:
-            continue
-        kept.append(h)
-    return kept
+def filter_hits(hits: list[Hit], texts: dict[str, list[str]]) -> list[Hit]:
+    return [h for h in hits if not allowed_by_comment(texts[h.path], h.line)]
 
 
 # --- the check --------------------------------------------------------------------
 
-def run(root: Path, base: str | None, allow_path: Path, all_files: bool) -> int:
+def run(root: Path, base: str | None, all_files: bool) -> int:
     files = tracked_files(root)
     if files is None:
         print("check-complexity: not a git checkout; nothing could be checked",
@@ -569,12 +523,6 @@ def run(root: Path, base: str | None, allow_path: Path, all_files: bool) -> int:
                   f"{base or DEFAULT_BASE}; nothing to report")
             return 0
 
-    allow, errors = read_allowlist(allow_path)
-    if errors:
-        for e in errors:
-            print(f"check-complexity: {e}", file=sys.stderr)
-        return 2
-
     texts: dict[str, list[str]] = {}
     hits: list[Hit] = []
     for path in sorted(changed):
@@ -590,24 +538,13 @@ def run(root: Path, base: str | None, allow_path: Path, all_files: bool) -> int:
                 hits.append(h)
 
     hits.sort(key=lambda h: (h.path, h.line, h.rule))
-    lookup = {(h.path, line_hash(texts[h.path][h.line - 1])) for h in hits}
-    stale: list[str] = []
-    if all_files:
-        for (path, h), why in sorted(allow.items()):
-            if (path, h) not in lookup:
-                stale.append(f"stale allowlist entry {path} {h} ({why}): no hit has "
-                             f"that line; remove the row")
-
-    kept = filter_hits(hits, texts, allow)
-    for s in stale:
-        print(f"check-complexity: {s}", file=sys.stderr)
+    kept = filter_hits(hits, texts)
     for h in kept:
         print(h.render())
     if kept:
         print(f"check-complexity: {len(kept)} violation(s)", file=sys.stderr)
-    if kept or stale:
         return 1
-    print(f"check-complexity: ok ({len(hits)} allowlisted/silenced hit(s), "
+    print(f"check-complexity: ok ({len(hits) - len(kept)} silenced hit(s), "
           f"{len(changed)} file(s) checked)")
     return 0
 
@@ -664,12 +601,9 @@ tests/fixtures/Bad.lean:31: append-in-loop — accumulate reversed (`x :: acc`) 
 # the five patterns and drops it.
 EXPECTED_FILTERED = "\n".join(EXPECTED.splitlines()[:-1])
 
-# The allowlisted fixture line: same shape as the fifth hit, grandfathered.
-ALLOW_FIXTURE = "tests/fixtures/Grandfathered.lean\t{hash}\tappend-in-loop: fixed table (fixture)"
-
 
 def self_test() -> int:
-    """Exact-output fixtures for every rule, the allowlist and exit 3."""
+    """Exact-output fixtures for every rule, the inline marker and exit 3."""
     bad_path = "tests/fixtures/Bad.lean"
     bad = scan_file(bad_path, FIXTURE.splitlines())
     got = "\n".join(h.render() for h in bad)
@@ -680,33 +614,13 @@ def self_test() -> int:
         print("--- got ---")
         print(got)
         return 1
-    kept = filter_hits(bad, {bad_path: FIXTURE.splitlines()}, {})
+    kept = filter_hits(bad, {bad_path: FIXTURE.splitlines()})
     if "\n".join(h.render() for h in kept) != EXPECTED_FILTERED:
         print("FAIL complexity self-test: the allowed site (line 31, `complexity: ok`) "
               "was not suppressed")
         return 1
     print(f"ok   five rules, one hit each, and one allowed site ({len(bad)} raw hits, "
           f"{len(kept)} reported, exact output)")
-
-    # an allowlisted site is suppressed
-    grant = ("tests/fixtures/Grandfathered.lean",
-             "def grown (xs : List Nat) : List Nat :=\n"
-             "  let mut out := []\n"
-             "  for x in xs do\n"
-             "    out := out ++ [x]   -- reviewed: at most 4 entries\n"
-             "  pure out\n")
-    gpath, gtext = grant
-    glines = gtext.splitlines()
-    ghits = scan_file(gpath, glines)
-    if len(ghits) != 1:
-        print(f"FAIL complexity self-test: the allowlist fixture has {len(ghits)} hits, "
-              f"expected 1")
-        return 1
-    h = line_hash(glines[ghits[0].line - 1])
-    if filter_hits(ghits, {gpath: glines}, {(gpath, h): "fixture"}):
-        print("FAIL complexity self-test: an allowlisted line was not suppressed")
-        return 1
-    print("ok   an allowlisted line is suppressed")
 
     # a line marker on the line above the hit
     marked = ["def f (xs : List Nat) : List Nat :=",
@@ -716,14 +630,14 @@ def self_test() -> int:
               "    out := out ++ [x]",
               "  pure out"]
     mhits = scan_file("tests/fixtures/Marked.lean", marked)
-    if not mhits or filter_hits(mhits, {"tests/fixtures/Marked.lean": marked}, {}):
+    if not mhits or filter_hits(mhits, {"tests/fixtures/Marked.lean": marked}):
         print("FAIL complexity self-test: `complexity: ok` on the line above did not "
               "silence the hit")
         return 1
     print("ok   `complexity: ok` on the line above silences a hit")
 
-    # end-to-end in a real (temporary) checkout: --all reports the hit, the allowlist
-    # suppresses it, a stale row fails, and an unknown diff base exits 3
+    # end-to-end in a real (temporary) checkout: --all reports the hit, an inline
+    # reason suppresses it, and an unknown diff base exits 3
     try:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -737,28 +651,24 @@ def self_test() -> int:
             _git(["add", "a.lean"], root)
             _git(["-c", "user.email=t@example.com", "-c", "user.name=t",
                   "commit", "-qm", "x"], root)
-            allowp = root / "allow.tsv"
 
             def attempt(base: str | None, all_files: bool) -> tuple[int, str, str]:
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = run(root, base, allowp, all_files=all_files)
+                    rc = run(root, base, all_files=all_files)
                 return rc, out.getvalue(), err.getvalue()
 
             rc, out, _ = attempt(None, True)
             if rc != 1 or "a.lean:4: append-in-loop" not in out:
                 print(f"FAIL complexity self-test: --all on a new hit exited {rc}:\n{out}")
                 return 1
-            allowp.write_text(f"a.lean\t{line_hash(src.splitlines()[3])}\tfixture\n")
+            (root / "a.lean").write_text(src.replace(
+                "    out := out ++ [x]",
+                "    out := out ++ [x]   -- complexity: ok (fixture: at most 4)"))
             rc, out, _ = attempt(None, True)
             if rc != 0 or "append-in-loop" in out:
-                print(f"FAIL complexity self-test: the allowlist did not suppress the "
-                      f"hit (exit {rc}):\n{out}")
-                return 1
-            allowp.write_text("a.lean\t000000000000\tstale fixture\n")
-            rc, _, err = attempt(None, True)
-            if rc != 1 or "stale allowlist entry" not in err:
-                print(f"FAIL complexity self-test: a stale row exited {rc}:\n{err}")
+                print(f"FAIL complexity self-test: an inline reason did not suppress "
+                      f"the hit (exit {rc}):\n{out}")
                 return 1
             rc, _, _ = attempt("no-such-ref", False)
             if rc != 3:
@@ -768,39 +678,10 @@ def self_test() -> int:
     except OSError as e:
         print(f"FAIL complexity self-test: cannot create the fixture repo: {e}")
         return 3
-    print("ok   --all reports a hit, the allowlist suppresses it, a stale row fails, "
-          "an unknown base exits 3")
+    print("ok   --all reports a hit, an inline reason suppresses it, an unknown base "
+          "exits 3")
 
-    print("check-complexity self-test: 5 checks, 5 ok")
-    return 0
-
-
-def list_baseline(root: Path, allow_path: Path) -> int:
-    """Print TSV rows for every current hit that has no allowlist entry."""
-    files = tracked_files(root)
-    if files is None:
-        print("check-complexity: not a git checkout", file=sys.stderr)
-        return 3
-    allow, errors = read_allowlist(allow_path)
-    if errors:
-        for e in errors:
-            print(e, file=sys.stderr)
-        return 2
-    rows = []
-    for path in files:
-        try:
-            lines = (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for h in scan_file(path, lines):
-            key = (h.path, line_hash(lines[h.line - 1]))
-            if key in allow or allowed_by_comment(lines, h.line):
-                continue
-            rows.append(f"{path}\t{key[1]}\t{h.rule}: grandfathered 2026-11-18 "
-                        f"(pre-existing; reviews/2026-11-18-complexity-patterns.md)")
-    for r in rows:
-        print(r)
-    print(f"# {len(rows)} unreviewed hit(s)", file=sys.stderr)
+    print("check-complexity self-test: ok")
     return 0
 
 
@@ -810,10 +691,6 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--diff", nargs="?", const=DEFAULT_BASE, default=None, metavar="BASE",
                     help=f"report only lines changed since BASE (default {DEFAULT_BASE})")
     ap.add_argument("--all", action="store_true", help="scan every tracked .lean/.wiz file")
-    ap.add_argument("--allow", default=DEFAULT_ALLOW, metavar="FILE",
-                    help=f"allowlist TSV (default {DEFAULT_ALLOW})")
-    ap.add_argument("--list-baseline", action="store_true",
-                    help="print TSV rows for current hits without an entry")
     ap.add_argument("--self-test", action="store_true", help="run the fixtures")
     ap.add_argument("--root", default=".", help="the checkout to check (default .)")
     args = ap.parse_args(argv)
@@ -821,16 +698,11 @@ def main(argv: list[str]) -> int:
     if args.self_test:
         return self_test()
     root = Path(args.root).resolve()
-    allow = Path(args.allow)
-    if not allow.is_absolute():
-        allow = root / args.allow
-    if args.list_baseline:
-        return list_baseline(root, allow)
     if args.all and args.diff is not None:
         print("check-complexity: --all and --diff are exclusive", file=sys.stderr)
         return 2
     base = args.diff if args.diff is not None else DEFAULT_BASE
-    return run(root, base, allow, all_files=args.all)
+    return run(root, base, all_files=args.all)
 
 
 if __name__ == "__main__":

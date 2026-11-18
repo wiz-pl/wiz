@@ -7,7 +7,6 @@
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
-    "=selfhost-host",
     "=audit-kernels",
     "=selfhost-macro"
   ]},
@@ -30,7 +29,7 @@
   ]},
   {"name": "selfhost-libdiff", "heavy": true,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
-              "Tests/Main.lean"],
+              "Tests/Main.lean", "Tests/Harness.lean"],
    "select": [
     "=selfhost-libdiff"
   ]},
