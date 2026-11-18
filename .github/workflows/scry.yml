@@ -104,9 +104,10 @@ jobs:
           fi
           echo "${#tests[@]} goldens"
           # --update is deliberately absent: a drifted golden must be red, not rewritten.
-          # `tests/scale.wiz` parses the 3.9 MB generated grammar; on a hosted runner
-          # it needs more than grail's default 300 s per test (the file's own cap).
-          grail test --test-timeout 900 "${tests[@]}"
+          # `tests/scale.wiz` parses the 3.9 MB generated grammar: the test gives the
+          # analysis a 900 s budget, so the harness must allow the whole case more than
+          # that (its own default is 300 s per test).
+          grail test --test-timeout 1200 "${tests[@]}"
       - name: No golden was rewritten
         # Belt and braces: if anything in the run writes a .expected (a tool calling
         # --update, or a test doing it itself), the job fails instead of accepting it.
