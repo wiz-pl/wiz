@@ -60,7 +60,9 @@ done
 # built before it existed still works; copy it when `web/build-playground.sh` made it.
 if [ -f "$WEB/wiz-playground-ui.mjs" ]; then
   cp "$WEB/wiz-playground-ui.mjs" "$SITE/playground/wiz-playground-ui.mjs"
-  [ -f "$WEB/wiz-playground-ui.wasm" ] && cp "$WEB/wiz-playground-ui.wasm" "$SITE/playground/"
+  if [ -f "$WEB/wiz-playground-ui.wasm" ]; then
+    cp "$WEB/wiz-playground-ui.wasm" "$SITE/playground/wiz-playground-ui.wasm"
+  fi
 fi
 
 # The licences page: the Wasm modules (playground/, docs/) include GMP's mini-gmp, so
