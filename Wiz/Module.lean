@@ -46,6 +46,89 @@ def resolve (roots : List System.FilePath) (m : Name) : IO (Option System.FilePa
     if ← p.pathExists then return some p
   pure none
 
+/-- The `include_str "f"` paths of a source text, in order (without duplicates). The
+boundary check keeps `my_include_str` out; like `cSourcesOf`, this is a scan of the text,
+not a parse, so a path written inside a string literal or a comment is found too (a
+harmless extra file to read, never a missing one). -/
+def includesOf (src : String) : List String := Id.run do
+  let mut out : Array String := #[]
+  let mut prev : Option Char := none
+  let parts := src.splitOn "include_str"
+  for p in parts, i in [0:parts.length] do
+    if i > 0 then
+      let boundary := match prev with
+        | none => true
+        | some c => !(c.isAlphanum || c == '_' || c == '\'' || c == '.')
+      let after := p.trimAsciiStart.toString
+      if boundary && after.startsWith "\"" then
+        let path := ((after.drop 1).toString).splitOn "\"" |>.headD ""
+        if !path.isEmpty && !out.contains path then out := out.push path
+    prev := p.toList.getLast?
+  pure out.toList
+
+/-- Normalise a relative path (`a/./b`, `a/../b`), or `none` if it climbs above its
+directory. Include paths may not leave the directory of the `.wiz` file. -/
+def normalizeRel (rel : String) : Option String :=
+  let rec go (segs : List String) (acc : List String) : Option (List String) :=
+    match segs with
+    | [] => some acc.reverse
+    | "" :: rest | "." :: rest => go rest acc
+    | ".." :: rest => match acc with
+      | [] => none
+      | _ :: acc' => go rest acc'
+    | s :: rest => go rest (s :: acc)
+  match go (rel.splitOn "/") [] with
+  | some [] => none
+  | some segs => some ("/".intercalate segs)
+  | none => none
+
+/-- Read the file `rel` names, resolved against `base` (the including `.wiz` file's
+directory). A missing file, a directory, a non-UTF-8 file, an absolute path, or a path
+that leaves `base` is an error message (shown at the `include_str`). -/
+def readInclude (base : System.FilePath) (rel : String) : IO (Except String String) := do
+  if rel.isEmpty then return .error "include_str: give a path"
+  if System.FilePath.isAbsolute rel then
+    return .error s!"include_str: {rel} is an absolute path (paths are relative to the .wiz file)"
+  match normalizeRel rel with
+  | none => return .error s!"include_str: {rel} leaves the directory of the .wiz file"
+  | some norm =>
+    let f := base / norm
+    if !(← f.pathExists) then
+      return .error s!"include_str: no file {rel} (paths are relative to the .wiz file)"
+    if ← f.isDir then return .error s!"include_str: {rel} is a directory"
+    match String.fromUTF8? (← IO.FS.readBinFile f) with
+    | some text => return .ok text
+    | none => return .error s!"include_str: {rel} is not UTF-8 text"
+
+/-- The key of an `include_str` path in `includeTable`: the module (`""`: the main file)
+and the path as written. -/
+def includeKey (m : Name) (rel : String) : String := m ++ "\x00" ++ rel
+
+/-- Resolve the `include_str` files of the main file (in `dir`) and of the modules it
+reaches (with their paths): each relative to its own file. The result holds the file's
+contents, or the error to report at the include. -/
+def includeTable (dir : System.FilePath) (src : String)
+    (mods : Std.HashMap Name (System.FilePath × String)) : IO (Std.HashMap String (Except String String)) := do
+  let mut t : Std.HashMap String (Except String String) := {}
+  for (m, base, text) in ("", dir, src) :: mods.toList.map (fun (n, p, txt) => (n, p.parent.getD ".", txt)) do
+    for rel in includesOf text do
+      t := t.insert (includeKey m rel) (← readInclude base rel)
+  pure t
+
+/-- `includeTable` as the elaborator's resolver (`CommandState.includes`). -/
+def includeResolver (t : Std.HashMap String (Except String String)) : String → String → Except String String :=
+  fun m rel => t.getD (includeKey m rel) (.error s!"include_str: no file {rel} (paths are relative to the .wiz file)")
+
+/-- What the `include_str` files of `src` contribute to a cache key: their contents (so
+editing one invalidates the module or file), or the error they produce (so a missing file
+that appears later does too). Mixed into the key of the module, and of the main file, by
+the cache (`Cache.moduleKeys`, `Cache.elaborateWith`) and the isolated-module cache
+(`Frontend.isoKey`). -/
+def includesKey (resolve : String → String → Except String String) (m : Name) (src : String) : UInt64 :=
+  (includesOf src).foldl (fun k rel => mixHash k (hash (match resolve m rel with
+    | .ok text => "include-ok\x00" ++ text
+    | .error e => "include-error\x00" ++ e))) (hash "include_str")
+
 /-- The `link_c "f.c"` files of a source text (9f), as written. -/
 def cSourcesOf (src : String) : List String :=
   ((src.splitOn "link_c \"").drop 1).filterMap fun part =>

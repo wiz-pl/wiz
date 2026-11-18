@@ -2,7 +2,7 @@
 
 ## 9a: IO, machine types, foreign functions
 
-```
+```wiz
 import IO
 extern "strlen" (header := "string.h") strlen : String → Nat
 def main : IO Unit := do
@@ -96,7 +96,8 @@ value and more of a header's pointer types are 9i.
 
 ## 9e: linear sequencing
 
-```
+```wiz
+import IO
 axiom Tok : Type
 axiom Tok.close : (1 t : Tok) → IO Unit
 def finish (1 t : Tok) : IO Nat := do1
@@ -120,7 +121,7 @@ def finish (1 t : Tok) : IO Nat := do1
   expression `x w` and so `w`, ω times (stage 4b; CoreSpec §7.1, R1). The same goes for
   every function that hands a resource back in a pair (`B × Uniq ρ S` in
   `lib/Region.wiz`): a caller holding the pair linearly must split it.
-  ```
+  ```wiz no-check
   def peek {A : Type} (1 x : IO A) (1 w : World) : A := (x w).1
   -- error: cannot project (x w).1: a projection needs an unrestricted pair …,
   -- but this one uses w, which has quantity 1; take the pair apart with
@@ -168,7 +169,7 @@ Not done: `pkg-config` names (`link_pkg "gtk+-3.0"`) — for now, give their fla
 
 ## 9g: callbacks and exported functions
 
-```
+```wiz
 import IO
 -- C calls Wiz: a symbol for a definition
 def greet (who : String) : String := String.append "hello, " who
@@ -242,7 +243,7 @@ program linked with a `--lib` build, both backends), `web/test.sh`.
 
 ## 9h: system interfaces: processes, environment, files
 
-```
+```wiz
 import Sys
 def main : IO Unit := EIO.toIO (do
   o ← Process.output "cat" .nil "piped through cat\n";
@@ -277,9 +278,13 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `exists`, `isDir`, `isFile`, `tempRoot` (`$TMPDIR` or `/tmp`), `createTempDir`
   (`mkdtemp`), and whole files: `readFile`, `writeFile`, `appendFile`, and `readBytes`,
   `writeBytes` for binary data (text stops at a NUL byte). `Path.join` puts a `/`
-  between two paths.
+  between two paths. A `readdir` failure part-way through a listing is that listing's
+  error (`EIO`, the same message shape as the rest), not the end of the directory: a
+  short `listDir` result is never reported as success.
 * **File handles.** `foreign_type File` (closed by its finalizer, or `File.close`):
-  `File.open path mode` (`fopen` modes), `File.stdin`/`stdout`/`stderr`,
+  `File.open path mode` (`fopen` modes; the descriptor is close-on-exec, like `Fd.open`
+  and the pipes, so a child this program starts does not inherit it — only the std
+  streams pass to a child, when it is given them), `File.stdin`/`stdout`/`stderr`,
   `readLine` (`none` at the end), `readAll`, `write`, `flush`. `IO.ePrintln` prints
   to stderr.
 * **Processes.** `Process.spawn cmd args stdin stdout stderr` starts `cmd` (searched in
@@ -287,13 +292,24 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `Child` (a foreign type: its pipes close and a finished child is reaped when it
   goes). `Child.write`, `closeStdin`, `readStdout`/`readStderr` (to the end),
   `communicate input` (writes stdin while collecting stdout and stderr with `poll`, so
-  a child that fills one pipe doesn't deadlock), `wait` (an `ExitStatus`: `exited code`
-  or `signaled n`), `kill`, `pid`. `Process.output cmd args input` runs a command to the
-  end and returns its status and output; `Process.run` runs one with this program's
-  streams; `Process.exec` replaces the program; `Process.exit`, `Process.id`. The
-  runtime ignores `SIGPIPE` once a child has been started (a write to a closed pipe is
-  then an `EPIPE` error), and the pipes are close-on-exec, so other children don't keep
-  them open.
+  a child that fills one pipe doesn't deadlock; an `input` whose stdin is not a pipe —
+  `.inherit`/`.null`, taken, or already closed — is `EBADF`, not dropped), `wait` (an
+  `ExitStatus`: `exited code` or `signaled n`), `kill`, `pid`. `Process.output cmd args
+  input` runs a command to the end and returns its status and output; `Process.run` runs
+  one with this program's streams; `Process.exec` replaces the program; `Process.exit`,
+  `Process.id`. The runtime ignores `SIGPIPE` (a write to a closed pipe is then an
+  `EPIPE` error), asserts that ignore on every spawn, and restores it when `exec` fails
+  (the program being replaced starts with the default action, but a failed `exec` must
+  not leave this program able to be killed by a broken pipe); the pipes and the
+  `File`/`Fd` handles are close-on-exec, so other children don't keep them open.
+* **Allocation failure.** The OS-surface natives take the runtime's out-of-memory exit
+  (`wiz: out of memory`, code 3) instead of dereferencing NULL, and the readers that
+  have an error channel (`FS.readFile`, `File.readAll`, `IO.readFile`) report `ENOMEM`
+  as an `EIO` error (`read: Cannot allocate memory`). `IO.writeFile` (`lib/Std.wiz`, the
+  `IO Unit` writer `Hdl`'s docs use) writes the text as UTF-8 up to its first NUL and,
+  having no error channel, prints `wiz: <path>: <message>` and exits 1 when `fopen`,
+  the write, or the final flush fails — a bad path or a full disk is not success. For
+  binary data use `FS.writeBytes`.
 * `#eval` and `#run` can't do any of this (they are pure and can't call C): there are
   no models for system calls, since a model of the file system or of processes would
   give answers the real program wouldn't. The pure helpers (`Path.join`,
@@ -301,7 +317,14 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
 
 Tests: the `sys` group (spawning `echo`, a pipe through `cat`, exit codes and spawn
 errors, the environment, a temporary directory's life: files, links, stat, listing,
-removal, handles), on both backends.
+removal, handles), on both backends. The runtime/FFI review's cases pin the boundary
+rules: after a failed `Process.exec` a write to a dead child's stdin is `EPIPE` and the
+program survives; a `File` handle is not inherited by a child (it does not see it in
+`/proc/self/fd`); `communicate` with `input` but no stdin pipe is `EBADF`; an
+allocation failure under a capped address space makes `File.readAll` an `EIO` error,
+not a `SIGSEGV`; `IO.writeFile` writes the text up to a NUL and exits 1 on a failure; a
+`readdir` error is the listing's error; `Process.spawnOwned` + `Child.releaseOwned`
+drains 200 KB of piped output without deadlocking.
 
 Binary data on handles, descriptors with time limits, spawn options and serial ports
 came later: 9k.
@@ -362,9 +385,10 @@ c_struct "struct pair" Pair where     -- no header: the C definition is generate
 | `struct foo` / `foo_t` by value | a structure `C.struct_foo` / `C.foo_t`, made with `c_struct` from the header's definition (every field must map: numbers, `char *`, `char f[N]` → `Bytes`, nested structs); a struct with bit fields or anonymous members is left out |
 | `struct foo *`, `FILE *`     | a foreign type `C.struct_foo` / `C.FILE` (no finalizer) |
 | `const void *buf, size_t n`  | one `Bytes` argument (the pointer and the length come from the buffer; only when the length parameter right after is named `n`, `len`, `nbytes` or `length`, with or without `__`) |
+| `char *buf, size_t n`, `unsigned char *`, `signed char *`, `uint8_t *` | one `Bytes` argument, by the same rule (a `char *` **with** a length is a buffer; without one it is the NUL-terminated `String`) |
 
-`const char *` stays `String`; other pointers (`int *`, `void *`, output buffers) are
-still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
+`const char *` without a length parameter stays `String`; other pointers (`int *`,
+`void *`, output buffers) are still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
 bodies, array lengths, typedef names of structs and parameter names for this.
 
 Opt-outs:
@@ -386,7 +410,7 @@ opt-outs, and the glue checks).
 
 ## 9k: bytes on handles, time limits, spawn options, serial ports
 
-```
+```wiz
 import Serial
 def main : IO Unit := EIO.toIO (do
   port ← Serial.open "/dev/ttyUSB1" (SerialConfig.raw8N1 .b115200);
@@ -432,7 +456,9 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
   `create`, `truncate`, `append`, `exclusive`, `noControllingTty`, `nonBlockingOpen`;
   `OpenFlags.none`, `.createNew`, `.device`), `Fd.stdin`/`stdout`/`stderr`, `Fd.pipe :
   EIO (Fd × Fd)`, `Child.takePipe c i` (a child's pipe as an `Fd`), `Fd.close`,
-  `Fd.seek`, and:
+  `Fd.adopt n` (take over a number a C shim made; a `Nat` above `INT_MAX` is `EINVAL`
+  and an already-closed handle rather than a wrapped descriptor, and adopting one
+  number twice makes two owners that both close it), `Fd.seek`, and:
 
   | read | result |
   |---|---|
@@ -506,3 +532,41 @@ clocks) and the new `serial` group (a pseudo-terminal: all 256 values both ways 
 the raw settings read back; a terminal that doesn't answer in time and a discarded
 input queue; every rate, stop bits and flow control read back, and the errors), on both
 backends, no hardware needed.
+
+## 9l: byte buffers through the FFI (kind `y`)
+
+`Bytes` (`lib/IO.wiz`) meets C through one marshalling kind, `y`. It is a *borrowed
+buffer for the call*:
+
+* **In.** A prototype's buffer pointer and its length (a `size_t`/integer parameter
+  right after it, named `n`, `len`, `nbytes` or `length`, with or without `__`) fold
+  into **one** `Bytes` parameter: the runtime passes the buffer's `data` and `len` as
+  the two C arguments. The pointer may be `const void *`, `const char *`/`char *`,
+  `unsigned char *`/`const unsigned char *`, `signed char *` or `uint8_t *` (a typedef
+  for `unsigned char`, resolved by the header parser). A `char *` *without* a length is
+  still the C-string `String`.
+* **Ownership: borrowed, not given.** The pointer stays the Wiz value's storage for the
+  duration of the call only. C must not keep it (in a static, a struct, a callback it
+  registers) and must not `free` it: the reference the call takes is released when it
+  returns. A caller that still uses the buffer keeps it alive
+  (`let b := Bytes.range 3; C.f b; Bytes.size b` is `3`). No copy is made, so writing
+  through a non-`const` pointer is only well defined on a buffer the caller built for
+  the call and does not share (`Bytes` is functional: a shared buffer must not change).
+  Returning bytes needs a `foreign_type` or a caller-supplied buffer (below).
+* **Out.** There is no `Bytes` *result* kind. C that produces bytes returns a
+  `foreign_type` pointer, or fills a buffer the caller passes; `FS.readBytes`,
+  `File.readBytes` and `Fd.read` (9k) are the runtime's own.
+* **A `c_struct` field.** `unsigned char f[N]` or `char f[N]` is a `Bytes` field (the
+  `c_struct` needs a header, so the array's length is known): the wrapper copies the
+  buffer into the C array, cut or zero-padded to `N`, and a struct coming back gets a
+  fresh `Bytes` of `N` bytes. `glue` may take and return such a struct, and pass it to C,
+  but cannot read the buffer field (`glueDeclFields` leaves it out, as the Lean
+  frontend's `declared` does). A `Bytes` field without a header is rejected by both
+  frontends (the length would be unknown).
+
+Both toolchains implement the kind: the Lean frontend/backends in `Elab/Command.lean`
+and `Compiler/C.lean`, the self-hosted one in `selfhost/Frontend.wiz`/`Backend.wiz` with
+the same two C arguments (21ag). Tests: `=selfhost` "Bytes (21ag): a
+char*/uint8_t*/unsigned char* buffer and its length, borrowed for the call" and "Bytes
+(21ag): a c_struct with a Bytes field through glue" (host and self-hosted, collector and
+reference counting), plus the `ffi-structs` buffer case.

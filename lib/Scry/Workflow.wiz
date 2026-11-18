@@ -1,0 +1,452 @@
+import Json
+import Text
+import Scry.Rules
+import Scry.Sarif
+/-!
+# Scry.Workflow: finding identity, triage and the local evidence store
+
+This module is the **workflow/evidence layer** around the existing analyses. It does not
+run anything: `scry taint` (or any other producer) supplies a `Scry.RuleFinding` and an
+origin map, and this module gives it
+
+* a deterministic **semantic id** (`f_<16 hex>`) built from the rule, the normalized
+  path, the sink callee and argument, and the path's coarse shape. Line and column are
+  deliberately excluded, so moving a sink within a function keeps the finding;
+* a separate **primary-line hash** for the GitHub-compatible alert identity;
+* the **triage state machine** (`new -> triaged -> confirmed -> fixed`, with
+  `false-positive` and reopen edges), checked rather than free-form;
+* the JSON shape of a **record** and of the **local store**
+  (`scry-workflow/findings.json`).
+
+The store and the artifact writer live in `scry/src/Scry/WorkflowCmd.wiz`; this module is
+pure, so the identity and state rules are testable without C or a compiler.
+
+## What an id is, and is not
+
+The id is a *stable handle for triage*, not a claim that two runs found the same bug in
+the sense of a proof. It excludes absolute paths, line/column, program-point numbers,
+timestamps and rule-array indices. It includes the rule id, the normalized file path,
+the sink function/callee/argument and the path shape. A rename of the sink or a change
+from `source -> sink` to `source -> store -> load -> sink` is a new id: that is a
+deliberate review event, not a silent match.
+-/
+
+-- ## Identity
+
+/-- Normalize a path for identity: forward slashes, no leading `./`. Absolute paths are
+kept (the caller should pass a repository-relative path when it has one). -/
+def Scry.wfNormalizePath (p : String) : String :=
+  let q := String.replace p "\\" "/";
+  match String.stripPrefix q "./" with
+  | .some r => r
+  | .none => q
+
+/-- Collapse runs of whitespace to one space and trim: the normalized primary line. -/
+partial def Scry.wfNormLineGo (lastSpace : Bool) : List Char → List Char
+  | .nil => .nil
+  | .cons c cs =>
+    match Char.isSpace c with
+    | .true =>
+      match lastSpace with
+      | .true => Scry.wfNormLineGo .true cs
+      | .false => List.cons (Char.mk 32) (Scry.wfNormLineGo .true cs)
+    | .false => List.cons c (Scry.wfNormLineGo .false cs)
+
+/-- The normalized primary line: whitespace runs collapsed, trimmed. -/
+def Scry.wfNormLine (s : String) : String :=
+  String.trim (String.ofChars (Scry.wfNormLineGo .false (String.chars s)))
+
+/-- FNV-1a over a string's code points, modulo 2^64. Not a cryptographic hash; the
+record says `fnv1a64` next to it so nothing claims otherwise. -/
+def Scry.wfFnvStep (h : Nat) (c : Char) : Nat :=
+  Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) (Nat.pow 2 64)
+
+def Scry.wfFnv (s : String) : Nat :=
+  List.foldl Scry.wfFnvStep 14695981039346656037 (String.chars s)
+
+/-- 16 lower-case hex digits (64 bits). -/
+partial def Scry.wfHexGo (n : Nat) (fuel : Nat) : List Char :=
+  match fuel with
+  | .zero => .nil
+  | .succ k =>
+    List.cons (Json.hexDigit (Nat.mod n 16)) (Scry.wfHexGo (Nat.div n 16) k)
+
+/-- A stable 16-hex-digit rendering of an FNV-1a value. -/
+def Scry.wfHex (n : Nat) : String :=
+  String.ofChars (List.reverse (Scry.wfHexGo n 16))
+
+/-- The coarse role path (`source>flow>sink`): roles, not program points. -/
+def Scry.wfPathShape (path : List Scry.PathNode) : String :=
+  String.intercalate ">" (List.map (fun p => Scry.PathKind.show p.kind) path)
+
+def Scry.wfFirstFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p _ => p.func
+
+def Scry.wfLastFunc : List Scry.PathNode → String
+  | .nil => ""
+  | .cons p .nil => p.func
+  | .cons _ ps => Scry.wfLastFunc ps
+
+/-- The identity inputs, rendered for debugging and for the record. No line, column,
+program point or timestamp. The source callee is not carried by `RuleFinding` today
+(`PathNode` has `func`/`point`/`var`/`kind` only); the path shape and the first function
+are the available coarse source identity. -/
+def Scry.wfSemanticKey (f : Scry.RuleFinding) (file : String) : String :=
+  String.intercalate "|"
+    [ String.append "scry/c/" f.rule
+    , Scry.wfNormalizePath file
+    , f.func
+    , f.name
+    , Nat.repr f.arg
+    , Scry.wfPathShape f.path
+    , Scry.wfFirstFunc f.path
+    , Scry.wfLastFunc f.path ]
+
+/-- `f_<16 hex>`: the semantic id. -/
+def Scry.wfId (f : Scry.RuleFinding) (file : String) : String :=
+  String.append "f_" (Scry.wfHex (Scry.wfFnv (Scry.wfSemanticKey f file)))
+
+/-- The GitHub-compatible line identity: rule + normalized primary line + function. A
+whitespace-only change keeps it; a line move keeps it (there is no line number); a
+changed sink creates a new one. -/
+def Scry.wfLineKey (f : Scry.RuleFinding) (lineText : String) : String :=
+  String.intercalate "|"
+    [ String.append "scry/c/" f.rule, f.func, Scry.wfNormLine lineText ]
+
+def Scry.wfLineHash (f : Scry.RuleFinding) (lineText : String) : String :=
+  Scry.wfHex (Scry.wfFnv (Scry.wfLineKey f lineText))
+
+/-- The rest of a line (up to the newline) as characters. -/
+partial def Scry.wfLineTakeGo : List Char → List Char
+  | .nil => .nil
+  | .cons c cs =>
+    match Nat.beq (Char.code c) 10 with
+    | .true => .nil
+    | .false => List.cons c (Scry.wfLineTakeGo cs)
+
+/-- The 1-based source line `line`, or `""` when it is out of range. Used for the
+primary-line hash; the analysis itself uses byte spans. -/
+partial def Scry.wfLineAtGo (want : Nat) (line : Nat) : List Char → String
+  | .nil => ""
+  | .cons c cs =>
+    match Nat.beq line want with
+    | .true =>
+      match Nat.beq (Char.code c) 10 with
+      | .true => ""
+      | .false => String.ofChars (List.cons c (Scry.wfLineTakeGo cs))
+    | .false =>
+      match Nat.beq (Char.code c) 10 with
+      | .true => Scry.wfLineAtGo want (Nat.succ line) cs
+      | .false => Scry.wfLineAtGo want line cs
+
+def Scry.wfLineAt (text : String) (line : Nat) : String :=
+  Scry.wfLineAtGo line 1 (String.chars text)
+
+-- ## Triage state machine
+
+inductive Scry.WfState where
+  | new
+  | triaged
+  | confirmed
+  | falsePositive
+  | fixed
+
+/-- `new` is the initial state; `triaged` is a human label; `confirmed` is accepted as
+a real finding; `falsePositive` is rejected (and may be reopened); `fixed` is the
+remediation claim (and may be reopened on a regression). -/
+def Scry.WfState.show : Scry.WfState → String
+  | .new => "new"
+  | .triaged => "triaged"
+  | .confirmed => "confirmed"
+  | .falsePositive => "false-positive"
+  | .fixed => "fixed"
+
+def Scry.WfState.parse (s : String) : Option Scry.WfState :=
+  match s with
+  | "new" => .some .new
+  | "triaged" => .some .triaged
+  | "confirmed" => .some .confirmed
+  | "false-positive" => .some .falsePositive
+  | "false_positive" => .some .falsePositive
+  | "falsepositive" => .some .falsePositive
+  | "fixed" => .some .fixed
+  | _ => .none
+
+/-- The allowed edges. Same-state updates are idempotent (history is still appended).
+`new -> fixed` is refused: a fix claim needs a triage/confirmation first. A rejected or
+fixed finding can be reopened to `triaged` when new evidence arrives. -/
+def Scry.wfAllowed (from to : Scry.WfState) : Bool :=
+  match from, to with
+  | .new, .new => .true
+  | .new, .triaged => .true
+  | .new, .confirmed => .true
+  | .new, .falsePositive => .true
+  | .triaged, .triaged => .true
+  | .triaged, .confirmed => .true
+  | .triaged, .falsePositive => .true
+  | .confirmed, .confirmed => .true
+  | .confirmed, .fixed => .true
+  | .confirmed, .falsePositive => .true
+  | .falsePositive, .falsePositive => .true
+  | .falsePositive, .triaged => .true
+  | .fixed, .fixed => .true
+  | .fixed, .triaged => .true
+  | _, _ => .false
+
+/-- A transition, or an explanation of why the edge is not in the machine. -/
+def Scry.wfTransition (from to : Scry.WfState) : Except String Scry.WfState :=
+  match Scry.wfAllowed from to with
+  | .true => .ok to
+  | .false =>
+    .error (String.append "illegal triage transition "
+      (String.append (Scry.WfState.show from) (String.append " -> " (Scry.WfState.show to))))
+
+-- ## Evidence authority and kind
+
+/-- The authority ladder of `prior-art/symbolic-execution.md` §10.5. Scry never uses L4
+or L5: an absent finding is not an absence certificate. A checked derivation is L2; a
+concrete recorded run is L1 (a reproducible experiment, not a solver proof); a future
+concolic witness with a checked `Wil.run` trace is L3; a validated SMT model is L2. -/
+inductive Scry.WfAuthority where
+  | l0
+  | l1
+  | l2
+  | l3
+  | l4
+  | l5
+
+def Scry.WfAuthority.show : Scry.WfAuthority → String
+  | .l0 => "L0"
+  | .l1 => "L1"
+  | .l2 => "L2"
+  | .l3 => "L3"
+  | .l4 => "L4"
+  | .l5 => "L5"
+
+def Scry.WfAuthority.parse (s : String) : Option Scry.WfAuthority :=
+  match s with
+  | "L0" => .some .l0
+  | "L1" => .some .l1
+  | "L2" => .some .l2
+  | "L3" => .some .l3
+  | "L4" => .some .l4
+  | "L5" => .some .l5
+  | _ => .none
+
+/-- What an evidence item is. Static and dynamic evidence are never merged; a witness
+is a separate item so `repro`/`verify` can prefer it without pretending a recorded
+trace is a witness. -/
+inductive Scry.WfEvidenceKind where
+  | staticAnalysis
+  | dynamicObserved
+  | smtModel
+  | concolicWitness
+  | certificate
+
+def Scry.WfEvidenceKind.show : Scry.WfEvidenceKind → String
+  | .staticAnalysis => "static"
+  | .dynamicObserved => "dynamic-observed"
+  | .smtModel => "smt-model"
+  | .concolicWitness => "concolic-witness"
+  | .certificate => "certificate"
+
+/-- The CWE tiers of `prior-art/symbolic-execution.md` §11.5. The pack has no CWE
+metadata on this base; this maps the known rule ids and is deliberately conservative.
+`N/A` means a concrete input adds nothing (the call is the bug) or the class is out of
+scope; it is not a statement about severity. -/
+def Scry.wfCweTier (rule : String) : String :=
+  match rule with
+  | "command-injection" => "T1"
+  | "format-string" => "T1"
+  | "path-traversal" => "T2"
+  | "use-after-free" => "T2"
+  | "integer-overflow" => "T3"
+  | "buffer-overflow" => "T3"
+  | "gets-overflow" => "N/A"
+  | "strcpy-overflow" => "N/A"
+  | _ => "unknown"
+
+-- ## Records
+
+structure Scry.WfHistory where
+  state : Scry.WfState
+  /-- Wall clock, nanoseconds since the epoch. -/
+  at : Nat
+  actor : String
+  reason : String
+
+structure Scry.WfRecord where
+  id : String
+  /-- The semantic key the id was computed from (debugging/reproduction). -/
+  key : String
+  lineHash : String
+  state : Scry.WfState
+  history : List Scry.WfHistory
+  source : String
+  rules : Option String
+  allowErrors : Bool
+  /-- The latest finding snapshot (the `scry taint` JSON shape). -/
+  finding : Json
+  /-- Relative artifact directory (`scry-workflow/<id>`). -/
+  artifacts : String
+  staticRel : Option String
+  dynamicRel : Option String
+  verifyRel : Option String
+  firstSeen : Nat
+  lastSeen : Nat
+
+-- ## JSON rendering
+
+def Scry.wfOptStrJson : Option String → Json
+  | .some s => Json.mkStr s
+  | .none => Json.mkNull
+
+def Scry.wfHistoryJson (h : Scry.WfHistory) : Json :=
+  Json.mkObj
+    [ ("state", Json.mkStr (Scry.WfState.show h.state))
+    , ("at", Json.ofNat h.at)
+    , ("by", Json.mkStr h.actor)
+    , ("reason", Json.mkStr h.reason) ]
+
+def Scry.wfRecordJson (r : Scry.WfRecord) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-record/1")
+    , ("id", Json.mkStr r.id)
+    , ("key", Json.mkStr r.key)
+    , ("lineHash", Json.mkStr r.lineHash)
+    , ("state", Json.mkStr (Scry.WfState.show r.state))
+    , ("history", Json.mkArr (List.map Scry.wfHistoryJson r.history))
+    , ("source", Json.mkStr r.source)
+    , ("rules", Scry.wfOptStrJson r.rules)
+    , ("allowErrors", Json.mkBool r.allowErrors)
+    , ("finding", r.finding)
+    , ("artifacts", Json.mkStr r.artifacts)
+    , ("static", Scry.wfOptStrJson r.staticRel)
+    , ("dynamic", Scry.wfOptStrJson r.dynamicRel)
+    , ("verify", Scry.wfOptStrJson r.verifyRel)
+    , ("firstSeen", Json.ofNat r.firstSeen)
+    , ("lastSeen", Json.ofNat r.lastSeen) ]
+
+structure Scry.WfStore where
+  findings : List Scry.WfRecord
+
+def Scry.wfEmptyStore : Scry.WfStore := Scry.WfStore.mk .nil
+
+def Scry.wfStoreJson (st : Scry.WfStore) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-store/1")
+    , ("findings", Json.mkArr (List.map Scry.wfRecordJson st.findings)) ]
+
+def Scry.wfStoreText (st : Scry.WfStore) : String :=
+  String.append (Json.render (Scry.wfStoreJson st)) "\n"
+
+def Scry.wfFind (st : Scry.WfStore) (id : String) : Option Scry.WfRecord :=
+  List.find (fun r => String.eq r.id id) st.findings
+
+/-- Replace the record with the same id, or append it. -/
+def Scry.wfUpsert (st : Scry.WfStore) (r : Scry.WfRecord) : Scry.WfStore :=
+  match Scry.wfFind st r.id with
+  | .none => Scry.WfStore.mk (List.append st.findings (List.cons r .nil))
+  | .some _ =>
+    Scry.WfStore.mk (List.map (fun x => match String.eq x.id r.id with
+      | .true => r
+      | .false => x) st.findings)
+
+-- ## JSON parsing (lenient, but the schema and id are checked)
+
+def Scry.wfGetOptStr (j : Json) (k : String) : Option String :=
+  match Json.get j k with
+  | .some (.str s) => .some s
+  | _ => .none
+
+def Scry.wfGetNatD (j : Json) (k : String) (d : Nat) : Nat :=
+  match Json.get j k with
+  | .some (.int _ n) => n
+  | _ => d
+
+def Scry.wfStateOfString (s : String) : Scry.WfState :=
+  match s with
+  | "triaged" => .triaged
+  | "confirmed" => .confirmed
+  | "false-positive" => .falsePositive
+  | "fixed" => .fixed
+  | _ => .new
+
+def Scry.wfHistoryOfJson (j : Json) : Scry.WfHistory :=
+  let state := Scry.wfStateOfString (Json.getStr j "state");
+  Scry.WfHistory.mk state (Scry.wfGetNatD j "at" 0)
+    (Json.getStr j "by") (Json.getStr j "reason")
+
+def Scry.wfRecordOfJson (j : Json) : Option Scry.WfRecord :=
+  match Json.getStr j "id" with
+  | "" => .none
+  | id =>
+    let state := match Scry.WfState.parse (Json.getStr j "state") with
+      | .some s => s
+      | .none => (.new : Scry.WfState);
+    let histories := List.map Scry.wfHistoryOfJson (Json.getList j "history");
+    .some (Scry.WfRecord.mk id (Json.getStr j "key") (Json.getStr j "lineHash") state
+      histories (Json.getStr j "source") (Scry.wfGetOptStr j "rules")
+      (match Json.get j "allowErrors" with | .some (.bool b) => b | _ => .false)
+      (match Json.get j "finding" with | .some f => f | _ => Json.mkNull)
+      (Json.getStr j "artifacts")
+      (Scry.wfGetOptStr j "static") (Scry.wfGetOptStr j "dynamic")
+      (Scry.wfGetOptStr j "verify")
+      (Scry.wfGetNatD j "firstSeen" 0) (Scry.wfGetNatD j "lastSeen" 0))
+
+partial def Scry.wfFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .some y => List.cons y (Scry.wfFilterMap f xs)
+    | .none => Scry.wfFilterMap f xs
+
+def Scry.wfStoreOfText (text : String) : Except String Scry.WfStore :=
+  match Json.parse text with
+  | .error e => .error (String.append "findings store: " e)
+  | .ok j =>
+    match Json.getStr j "schema" with
+    | "scry-workflow-store/1" =>
+      .ok (Scry.WfStore.mk
+        (Scry.wfFilterMap Scry.wfRecordOfJson (Json.getList j "findings")))
+    | other => .error (String.append "findings store: unsupported schema \"" (String.append other "\""))
+
+/-- Append a triage history entry and move the state, or return the machine's error. -/
+def Scry.wfTriage (r : Scry.WfRecord) (to : Scry.WfState) (actor : String) (reason : String)
+    (at : Nat) : Except String Scry.WfRecord :=
+  match Scry.wfTransition r.state to with
+  | .error e => .error e
+  | .ok state =>
+    let h := Scry.WfHistory.mk state at actor reason;
+    .ok { r with state := state, history := List.append r.history (List.cons h .nil) }
+
+-- ## Small helpers used by the command and its tests
+
+/-- The first line of `s` (without its newline). -/
+def Scry.wfFirstLine (s : String) : String :=
+  match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+/-- Lines of `s` (no trailing empty line for a final newline). -/
+def Scry.wfLines (s : String) : List String :=
+  String.splitOn s "\n"
+
+def Scry.wfInterestingLine (l : String) : Bool :=
+  Bool.or (String.contains l "AddressSanitizer")
+    (Bool.or (String.contains l "UndefinedBehaviorSanitizer")
+      (Bool.or (String.contains l "runtime error:")
+        (String.contains l "SUMMARY: ")))
+
+/-- First `n` elements, without a multi-argument pattern. -/
+partial def Scry.wfTakeGo (n : Nat) : List String → List String
+  | .nil => .nil
+  | .cons x xs =>
+    match n with
+    | .zero => .nil
+    | .succ k => List.cons x (Scry.wfTakeGo k xs)
+
+/-- The lines that carry a sanitizer or an error marker, in order, at most `n`. This is
+the dynamic "trace" the bundle keeps; it is a pointer to the log, not the whole log. -/
+def Scry.wfInteresting (n : Nat) (s : String) : List String :=
+  Scry.wfTakeGo n (List.filter Scry.wfInterestingLine (Scry.wfLines s))

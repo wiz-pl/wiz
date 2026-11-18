@@ -1,0 +1,466 @@
+import Prelude
+import Word
+import Text
+import WordArray
+import WordMap
+/-!
+# Scry.Store
+
+The relation store for scry's Datalog engine (`import Scry.Store`): a **pure list
+model** of the relations a Datalog program derives.
+
+A `Db L` has one `TupleRel` for each ordinary (set-valued) relation and one `LatRel L`
+for each lattice-valued relation, both looked up by the relation's number (the schema's
+`arities` list fixes the arities; nothing here checks them). A tuple is a `List U64`, so
+ids, `U32`/`U64` columns and interned-string ids all use one representation.
+
+The model keeps each tuple relation as a list of distinct rows, and each lattice
+relation as one entry per key. The interface is still the pure list model: the row list
+is the authoritative, insertion-ordered value used by tests and by the certificate
+checker. Two **indexes** are derived data, maintained on every update once a relation is
+big enough to pay for them:
+
+* a `U64Map` from a row's FNV-1a hash to the rows with that hash, so duplicate
+  suppression is expected `O(1)` instead of a scan of every row;
+* a `U64Map` from `(column, value)` to the rows with that value in that column, so a
+  join can fetch only the rows matching an already-bound column.
+
+Both indexes bucket with newest row first, exactly the order of the row list, so a
+lookup that scans a bucket returns candidates in full-scan order. Index results are
+**deterministic**: the evaluator never iterates a `U64Map`, and candidate buckets are
+ordered by insertion. A hash collision only makes a bucket larger; row equality still
+decides membership.
+
+> The model is deliberately still `List`-backed. The compiled `U64Map` is the native
+> open-addressing hash table, so the indexes are expected `O(1)` there; in the kernel
+> and the interpreter the map is its sorted-list model. The indexes are an
+> implementation detail of this module: `toList` and `size` keep the old shape.
+
+Below `indexThreshold` rows (24) a relation stays a plain list: the kernel's map is a
+sorted list, and scanning a handful of rows is cheaper than hashing and maintaining
+indexes. At 24 rows or more it builds both indexes once from the existing rows.
+
+The constructor of each relation is private, so the model is the only accessor and a
+user cannot break the distinctness invariant.
+-/
+
+/-- Relations smaller than this are cheaper to scan than to index. -/
+def Scry.indexThreshold : Nat := 24
+
+def Scry.eqU64 (a b : U64) : Bool := UIntN.beq a b
+
+/-- Whether two rows (`List U64`) are equal, element by element. -/
+def Scry.rowEq : List U64 → List U64 → Bool
+  | .nil, .nil => .true
+  | .nil, .cons _ _ => .false
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => if UIntN.beq a b then Scry.rowEq as bs else .false
+
+/-- Whether `row` is one of `rows`. -/
+def Scry.memRow (row : List U64) (rows : List (List U64)) : Bool :=
+  List.any (fun r => Scry.rowEq row r) rows
+
+/-- FNV-1a over a row, starting from `seed`. A hash is only a bucket selector: equality
+is always checked against the stored rows, so collisions cannot change an answer. -/
+def Scry.rowHash (seed : U64) (row : List U64) : U64 :=
+  List.foldl (fun h x => UIntN.mul (UIntN.xor h x) (U64.ofNat 1099511628211)) seed row
+
+/-- A row's hash. The seed is the FNV offset basis. -/
+def Scry.hashRow (row : List U64) : U64 := Scry.rowHash (U64.ofNat 14695981039346656037) row
+
+/-- The index key for column `c` holding `v`. -/
+def Scry.colKey (c : Nat) (v : U64) : U64 :=
+  Scry.hashRow (List.cons (U64.ofNat c) (List.cons v .nil))
+
+/-- The first element at index `n`, if any. -/
+def Scry.listGetOpt {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ n => Scry.listGetOpt xs n
+
+/-- The first row equal to `row`, if any. -/
+def Scry.findRow (row : List U64) (rows : List (List U64)) : Option (List U64) :=
+  match rows with
+  | .nil => .none
+  | .cons r rest => if Scry.rowEq row r then .some r else Scry.findRow row rest
+
+/-- Take the entry for `k` out of an association list. The returned list is the input
+without the entry, so an update of the returned value owns it (important for a
+copy-on-write `U64Map`). -/
+def Scry.assocTake {A : Type} (k : Nat) : List (Nat × A) → List (Nat × A) × Option A
+  | .nil => (.nil, .none)
+  | .cons e rest =>
+    if Nat.beq k e.1 then (rest, .some e.2)
+    else match Scry.assocTake k rest with
+      | (rest', v) => (.cons e rest', v)
+
+-- ## Tuple relations
+
+/-- A set-valued relation: its distinct rows, most recent first, plus the hash and
+column indexes described above. `arity` is `0` when the column index is not usable
+(a zero-column row, or a relation that mixed arities); the hash index is independent. -/
+sealed inductive Scry.TupleRel where
+  | private mk (rows : List (List U64)) (hashes : U64Map (List (List U64)))
+      (cols : U64Map (List (List U64))) (arity : Nat) (count : Nat)
+
+def Scry.TupleRel.rows : Scry.TupleRel → List (List U64)
+  | .mk rows _ _ _ _ => rows
+def Scry.TupleRel.hashesOf : Scry.TupleRel → U64Map (List (List U64))
+  | .mk _ hashes _ _ _ => hashes
+def Scry.TupleRel.colsOf : Scry.TupleRel → U64Map (List (List U64))
+  | .mk _ _ cols _ _ => cols
+def Scry.TupleRel.arityOf : Scry.TupleRel → Nat
+  | .mk _ _ _ arity _ => arity
+def Scry.TupleRel.countOf : Scry.TupleRel → Nat
+  | .mk _ _ _ _ count => count
+
+def Scry.TupleRel.toList (t : Scry.TupleRel) : List (List U64) :=
+  Scry.TupleRel.rows t
+def Scry.TupleRel.empty : Scry.TupleRel := .mk .nil U64Map.empty U64Map.empty 0 0
+def Scry.TupleRel.size (t : Scry.TupleRel) : Nat := Scry.TupleRel.countOf t
+
+/-- Is this relation large enough to be index-maintained? -/
+def Scry.TupleRel.indexed (t : Scry.TupleRel) : Bool :=
+  Nat.le Scry.indexThreshold (Scry.TupleRel.countOf t)
+
+def Scry.TupleRel.hasRowIn (count : Nat) (rows : List (List U64))
+    (hashes : U64Map (List (List U64))) (row : List U64) : Bool :=
+  if Nat.le Scry.indexThreshold count then
+    Scry.memRow row (U64Map.findD hashes (Scry.hashRow row) .nil)
+  else Scry.memRow row rows
+
+def Scry.TupleRel.hasRow (t : Scry.TupleRel) (row : List U64) : Bool :=
+  Scry.TupleRel.hasRowIn (Scry.TupleRel.countOf t) (Scry.TupleRel.rows t)
+    (Scry.TupleRel.hashesOf t) row
+
+def Scry.TupleRel.mem (t : Scry.TupleRel) (row : List U64) : Bool :=
+  Scry.TupleRel.hasRow t row
+
+/-- Add `row` to the hash bucket. -/
+def Scry.TupleRel.addHash (m : U64Map (List (List U64))) (row : List U64) :
+    U64Map (List (List U64)) :=
+  let h := Scry.hashRow row;
+  U64Map.insert m h (.cons row (U64Map.findD m h .nil))
+
+/-- Add `row` to every column's index. A `foldl` with the column number as the
+accumulator keeps the recursion in the library (the store's own well-founded checker does
+not have to relate two decreasing lists). -/
+def Scry.TupleRel.addCols (cols : U64Map (List (List U64))) (row : List U64) :
+    U64Map (List (List U64)) :=
+  (List.foldl (fun (acc : Nat × U64Map (List (List U64))) (v : U64) =>
+    let key := Scry.colKey acc.1 v;
+    (Nat.succ acc.1,
+      U64Map.insert acc.2 key (.cons row (U64Map.findD acc.2 key .nil))))
+    (0, cols) row).2
+
+/-- Build both indexes from an insertion-ordered row list (newest first). Folding from
+the right processes the oldest row first, so each bucket ends newest-first like the
+authoritative list. -/
+def Scry.TupleRel.buildHashes (rows : List (List U64)) : U64Map (List (List U64)) :=
+  List.foldr (fun (row : List U64) (m : U64Map (List (List U64))) =>
+    let h := Scry.hashRow row;
+    U64Map.insert m h (.cons row (U64Map.findD m h .nil))) U64Map.empty rows
+
+/-- Does every row have `arity` columns? A store user can bypass `Program.check`, so
+the index builder verifies this instead of returning incomplete buckets. -/
+def Scry.TupleRel.sameArity (arity : Nat) : List (List U64) → Bool
+  | .nil => .true
+  | .cons row rest =>
+    if Nat.beq (List.length row) arity then Scry.TupleRel.sameArity arity rest
+    else .false
+
+def Scry.TupleRel.buildCols (arity : Nat) (rows : List (List U64)) :
+    U64Map (List (List U64)) :=
+  if Scry.TupleRel.sameArity arity rows then
+    List.foldr (fun (row : List U64) (cs : U64Map (List (List U64))) =>
+      Scry.TupleRel.addCols cs row) U64Map.empty rows
+  else U64Map.empty
+
+/-- `t` with `row`; the flag says whether it was new. Below `indexThreshold` the
+relation is a plain list; crossing it builds the indexes once, and later inserts update
+them. -/
+def Scry.TupleRel.insert (t : Scry.TupleRel) (row : List U64) : Scry.TupleRel × Bool :=
+  match t with
+  | .mk oldRows hashes cols arity count =>
+    if Scry.TupleRel.hasRowIn count oldRows hashes row then
+      (.mk oldRows hashes cols arity count, .false)
+    else
+      let rows := List.cons row oldRows;
+      let count' := Nat.succ count;
+      let wasIndexed := Nat.le Scry.indexThreshold count;
+      if Nat.le Scry.indexThreshold count' then
+        (if wasIndexed then
+          if Nat.beq (List.length row) arity then
+            (.mk rows (Scry.TupleRel.addHash hashes row)
+              (Scry.TupleRel.addCols cols row) arity count', .true)
+          else
+            -- Mixed arities: keep the hash index, drop the column index rather than
+            -- return incomplete candidates.
+            (.mk rows (Scry.TupleRel.addHash hashes row) U64Map.empty 0 count', .true)
+        else
+          let ar := List.length row;
+          let ok := Scry.TupleRel.sameArity ar rows;
+          (.mk rows (Scry.TupleRel.buildHashes rows)
+            (Scry.TupleRel.buildCols ar rows) (if ok then ar else 0) count', .true))
+      else (.mk rows U64Map.empty U64Map.empty 0 count', .true)
+
+/-- The candidate rows whose column `c` is `v`, if that column is indexed. -/
+def Scry.TupleRel.candidatesAt (t : Scry.TupleRel) (c : Nat) (v : U64) :
+    Option (List (List U64)) :=
+  if Scry.TupleRel.indexed t then
+    (if Nat.beq (Scry.TupleRel.arityOf t) 0 then .none
+     else match U64Map.find (Scry.TupleRel.colsOf t) (Scry.colKey c v) with
+       | .none => .some .nil
+       | .some rows => .some rows)
+  else .none
+
+/-- The shortest candidate list over the bound `(column, value)` pairs, or `none` when
+no such column is indexed. A `some []` short-circuits: no row can match. Ties keep the
+earlier column, so the choice is deterministic. -/
+def Scry.TupleRel.candidatesGo (t : Scry.TupleRel) :
+    List (Nat × U64) → Option (List (List U64)) → Option (List (List U64))
+  | .nil, best => best
+  | .cons (c, v) rest, best =>
+    match Scry.TupleRel.candidatesAt t c v with
+    | .none => Scry.TupleRel.candidatesGo t rest best
+    | .some rows =>
+      match rows with
+      | .nil => .some .nil
+      | .cons _ _ =>
+        match best with
+        | .none => Scry.TupleRel.candidatesGo t rest (.some rows)
+        | .some b =>
+          if Nat.lt (List.length rows) (List.length b)
+          then Scry.TupleRel.candidatesGo t rest (.some rows)
+          else Scry.TupleRel.candidatesGo t rest (.some b)
+
+def Scry.TupleRel.candidates (t : Scry.TupleRel) (bound : List (Nat × U64)) :
+    Option (List (List U64)) :=
+  Scry.TupleRel.candidatesGo t bound .none
+
+-- ## Lattice relations
+
+/-- A lattice-valued relation: a value for each key, with a value's key its columns.
+`bot` is the value of a key that is not stored (see `Scry.Datalog.LatOps`). Entries and
+the key-hash/column indexes are kept in step; the entry list is authoritative. -/
+sealed inductive Scry.LatRel (L : Type) where
+  | private mk (entries : List (List U64 × L)) (hashes : U64Map (List (List U64 × L)))
+      (cols : U64Map (List (List U64 × L))) (arity : Nat) (count : Nat)
+
+def Scry.LatRel.entries {L : Type} : Scry.LatRel L → List (List U64 × L)
+  | .mk es _ _ _ _ => es
+def Scry.LatRel.hashesOf {L : Type} : Scry.LatRel L → U64Map (List (List U64 × L))
+  | .mk _ hashes _ _ _ => hashes
+def Scry.LatRel.colsOf {L : Type} : Scry.LatRel L → U64Map (List (List U64 × L))
+  | .mk _ _ cols _ _ => cols
+def Scry.LatRel.arityOf {L : Type} : Scry.LatRel L → Nat
+  | .mk _ _ _ arity _ => arity
+def Scry.LatRel.countOf {L : Type} : Scry.LatRel L → Nat
+  | .mk _ _ _ _ count => count
+
+def Scry.LatRel.toList {L : Type} (t : Scry.LatRel L) : List (List U64 × L) :=
+  Scry.LatRel.entries t
+def Scry.LatRel.empty {L : Type} : Scry.LatRel L :=
+  .mk .nil U64Map.empty U64Map.empty 0 0
+def Scry.LatRel.size {L : Type} (t : Scry.LatRel L) : Nat := Scry.LatRel.countOf t
+
+/-- The first entry whose key is `key` (the old list model, kept for callers that hold
+the entry list directly). -/
+def Scry.LatRel.findL {L : Type} (key : List U64) : List (List U64 × L) → Option L
+  | .nil => .none
+  | .cons e rest => if Scry.rowEq key e.1 then .some e.2 else Scry.LatRel.findL key rest
+
+def Scry.LatRel.hashBucket {L : Type} (t : Scry.LatRel L) (h : U64) :
+    List (List U64 × L) :=
+  U64Map.findD (Scry.LatRel.hashesOf t) h .nil
+
+/-- Is this lattice relation large enough to be index-maintained? -/
+def Scry.LatRel.indexed {L : Type} (t : Scry.LatRel L) : Bool :=
+  Nat.le Scry.indexThreshold (Scry.LatRel.countOf t)
+
+def Scry.LatRel.find {L : Type} (t : Scry.LatRel L) (key : List U64) : Option L :=
+  if Scry.LatRel.indexed t then
+    Scry.LatRel.findL key (Scry.LatRel.hashBucket t (Scry.hashRow key))
+  else Scry.LatRel.findL key (Scry.LatRel.entries t)
+
+def Scry.LatRel.mem {L : Type} (t : Scry.LatRel L) (key : List U64) : Bool :=
+  match Scry.LatRel.find t key with
+  | .none => .false
+  | .some _ => .true
+
+/-- `es` with `key` mapped to `v`, replacing an existing entry (the first one). -/
+def Scry.LatRel.setL {L : Type} : List (List U64 × L) → List U64 → L → List (List U64 × L)
+  | .nil, k, v => .cons (k, v) .nil
+  | .cons e rest, k, v =>
+    if Scry.rowEq k e.1 then .cons (k, v) rest else .cons e (Scry.LatRel.setL rest k v)
+
+/-- Replace the entry for `key` in a bucket (in place), or add it at the front. -/
+def Scry.LatRel.setBucket {L : Type} :
+    List (List U64 × L) → List U64 → L → List (List U64 × L)
+  | .nil, k, v => .cons (k, v) .nil
+  | .cons e rest, k, v =>
+    if Scry.rowEq k e.1 then .cons (k, v) rest
+    else .cons e (Scry.LatRel.setBucket rest k v)
+
+def Scry.LatRel.setHashes {L : Type} (m : U64Map (List (List U64 × L))) (k : List U64)
+    (v : L) : U64Map (List (List U64 × L)) :=
+  let h := Scry.hashRow k;
+  U64Map.insert m h (Scry.LatRel.setBucket (U64Map.findD m h .nil) k v)
+
+/-- Put the new value at every column's index for `key`. -/
+def Scry.LatRel.addCols {L : Type} (cols : U64Map (List (List U64 × L)))
+    (key : List U64) (v : L) : U64Map (List (List U64 × L)) :=
+  (List.foldl (fun (acc : Nat × U64Map (List (List U64 × L))) (x : U64) =>
+    let ck := Scry.colKey acc.1 x;
+    (Nat.succ acc.1,
+      U64Map.insert acc.2 ck
+        (Scry.LatRel.setBucket (U64Map.findD acc.2 ck .nil) key v)))
+    (0, cols) key).2
+
+def Scry.LatRel.buildHashes {L : Type} (es : List (List U64 × L)) :
+    U64Map (List (List U64 × L)) :=
+  List.foldr (fun (e : List U64 × L) (m : U64Map (List (List U64 × L))) =>
+    let h := Scry.hashRow e.1;
+    U64Map.insert m h (.cons e (U64Map.findD m h .nil))) U64Map.empty es
+
+def Scry.LatRel.sameArity {L : Type} (arity : Nat) : List (List U64 × L) → Bool
+  | .nil => .true
+  | .cons e rest =>
+    if Nat.beq (List.length e.1) arity then Scry.LatRel.sameArity arity rest
+    else .false
+
+def Scry.LatRel.buildCols {L : Type} (arity : Nat) (es : List (List U64 × L)) :
+    U64Map (List (List U64 × L)) :=
+  if Scry.LatRel.sameArity arity es then
+    List.foldr (fun (e : List U64 × L) (cs : U64Map (List (List U64 × L))) =>
+      Scry.LatRel.addCols cs e.1 e.2) U64Map.empty es
+  else U64Map.empty
+
+def Scry.LatRel.hasKeyL {L : Type} (key : List U64) : List (List U64 × L) → Bool
+  | .nil => .false
+  | .cons e rest => if Scry.rowEq key e.1 then .true else Scry.LatRel.hasKeyL key rest
+
+/-- Candidate entries whose key column `c` is `v`, if indexed. -/
+def Scry.LatRel.candidatesAt {L : Type} (t : Scry.LatRel L) (c : Nat) (v : U64) :
+    Option (List (List U64 × L)) :=
+  if Scry.LatRel.indexed t then
+    (if Nat.beq (Scry.LatRel.arityOf t) 0 then .none
+     else match U64Map.find (Scry.LatRel.colsOf t) (Scry.colKey c v) with
+       | .none => .some .nil
+       | .some es => .some es)
+  else .none
+
+def Scry.LatRel.candidatesGo {L : Type} (t : Scry.LatRel L) :
+    List (Nat × U64) → Option (List (List U64 × L)) → Option (List (List U64 × L))
+  | .nil, best => best
+  | .cons (c, v) rest, best =>
+    match Scry.LatRel.candidatesAt t c v with
+    | .none => Scry.LatRel.candidatesGo t rest best
+    | .some es =>
+      match es with
+      | .nil => .some .nil
+      | .cons _ _ =>
+        match best with
+        | .none => Scry.LatRel.candidatesGo t rest (.some es)
+        | .some b =>
+          if Nat.lt (List.length es) (List.length b)
+          then Scry.LatRel.candidatesGo t rest (.some es)
+          else Scry.LatRel.candidatesGo t rest (.some b)
+
+def Scry.LatRel.candidates {L : Type} (t : Scry.LatRel L) (bound : List (Nat × U64)) :
+    Option (List (List U64 × L)) :=
+  Scry.LatRel.candidatesGo t bound .none
+
+def Scry.LatRel.set {L : Type} (t : Scry.LatRel L) (key : List U64) (v : L) :
+    Scry.LatRel L :=
+  match t with
+  | .mk oldEs hashes cols arity count =>
+    let wasIndexed := Nat.le Scry.indexThreshold count;
+    let present := if wasIndexed then
+        (match U64Map.find hashes (Scry.hashRow key) with
+          | .none => .false
+          | .some bucket => Scry.LatRel.hasKeyL key bucket)
+      else Scry.LatRel.hasKeyL key oldEs;
+    let es := Scry.LatRel.setL oldEs key v;
+    let count' := if present then count else Nat.succ count;
+    if Nat.le Scry.indexThreshold count' then
+      (if wasIndexed then
+        if Nat.beq (List.length key) arity then
+          (.mk es (Scry.LatRel.setHashes hashes key v)
+            (Scry.LatRel.addCols cols key v) arity count')
+        else
+          (.mk es (Scry.LatRel.setHashes hashes key v) U64Map.empty 0 count')
+      else
+        let ar := List.length key;
+        let ok := Scry.LatRel.sameArity ar es;
+        (.mk es (Scry.LatRel.buildHashes es) (Scry.LatRel.buildCols ar es)
+          (if ok then ar else 0) count'))
+    else (.mk es U64Map.empty U64Map.empty 0 count')
+
+-- ## The database
+
+/-- Set the value at a relation number in an association list, adding the entry if it
+is absent. -/
+def Scry.assocSet {A : Type} (k : Nat) (v : A) : List (Nat × A) → List (Nat × A)
+  | .nil => .cons (k, v) .nil
+  | .cons e rest => if Nat.beq k e.1 then .cons (k, v) rest else .cons e (Scry.assocSet k v rest)
+
+def Scry.assocGet {A : Type} (d : A) (k : Nat) : List (Nat × A) → A
+  | .nil => d
+  | .cons e rest => if Nat.beq k e.1 then e.2 else Scry.assocGet d k rest
+
+/-- The database: tuple relations and lattice relations, by relation number. Only the
+relations that have facts need an entry. -/
+structure Scry.Db (L : Type) where
+  tuples : List (Nat × Scry.TupleRel)
+  lats : List (Nat × Scry.LatRel L)
+
+def Scry.Db.empty {L : Type} : Scry.Db L := Scry.Db.mk .nil .nil
+
+def Scry.Db.tupleAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.TupleRel :=
+  Scry.assocGet Scry.TupleRel.empty r db.tuples
+def Scry.Db.latAt {L : Type} (db : Scry.Db L) (r : Nat) : Scry.LatRel L :=
+  Scry.assocGet Scry.LatRel.empty r db.lats
+def Scry.Db.setTupleAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.TupleRel) : Scry.Db L :=
+  Scry.Db.mk (Scry.assocSet r t db.tuples) db.lats
+def Scry.Db.setLatAt {L : Type} (db : Scry.Db L) (r : Nat) (t : Scry.LatRel L) : Scry.Db L :=
+  Scry.Db.mk db.tuples (Scry.assocSet r t db.lats)
+
+/-- Take relation `r` out of the database (the empty relation if it had none), so the
+update owns its maps and the native kernel mutates them in place instead of copying. -/
+def Scry.Db.takeTupleAt {L : Type} (db : Scry.Db L) (r : Nat) :
+    Scry.Db L × Scry.TupleRel :=
+  match Scry.assocTake r db.tuples with
+  | (rest, .some t) => (Scry.Db.mk rest db.lats, t)
+  | (rest, .none) => (Scry.Db.mk rest db.lats, Scry.TupleRel.empty)
+
+def Scry.Db.takeLatAt {L : Type} (db : Scry.Db L) (r : Nat) :
+    Scry.Db L × Scry.LatRel L :=
+  match Scry.assocTake r db.lats with
+  | (rest, .some t) => (Scry.Db.mk db.tuples rest, t)
+  | (rest, .none) => (Scry.Db.mk db.tuples rest, Scry.LatRel.empty)
+
+/-- Add `row` to relation `r`; the flag says whether it was new. The relation is taken
+out before the insert so the update owns the maps (the reference evaluator would
+otherwise copy a shared `U64Map` on every insert, which is quadratic). -/
+def Scry.Db.insertTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Scry.Db L × Bool :=
+  match Scry.Db.takeTupleAt db r with
+  | (db1, t) => match Scry.TupleRel.insert t row with
+    | (t', new) => (Scry.Db.setTupleAt db1 r t', new)
+
+def Scry.Db.memTuple {L : Type} (db : Scry.Db L) (r : Nat) (row : List U64) : Bool :=
+  Scry.TupleRel.mem (Scry.Db.tupleAt db r) row
+
+def Scry.Db.findLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) : Option L :=
+  Scry.LatRel.find (Scry.Db.latAt db r) key
+
+def Scry.Db.setLat {L : Type} (db : Scry.Db L) (r : Nat) (key : List U64) (v : L) : Scry.Db L :=
+  match Scry.Db.takeLatAt db r with
+  | (db1, t) => Scry.Db.setLatAt db1 r (Scry.LatRel.set t key v)
+
+/-- The number of rows in a tuple relation and the number of entries in a lattice
+relation; handy for tests and for a fixpoint's progress report. -/
+def Scry.Db.relSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat :=
+  Scry.TupleRel.size (Scry.Db.tupleAt db r)
+def Scry.Db.latSize {L : Type} (db : Scry.Db L) (r : Nat) : Nat :=
+  Scry.LatRel.size (Scry.Db.latAt db r)

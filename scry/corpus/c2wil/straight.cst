@@ -1,0 +1,102 @@
+scry-cst 1
+language	c
+kinds	22
+translation_unit
+function_definition
+primitive_type
+function_declarator
+identifier
+parameter_list
+(
+parameter_declaration
+)
+compound_statement
+{
+declaration
+init_declarator
+=
+binary_expression
+number_literal
++
+*
+;
+return_statement
+return
+}
+fields	10
+<>
+type
+declarator
+parameters
+body
+value
+left
+operator
+right
+child
+paths	1
+corpus/c2wil/straight.c
+bytes	1
+52
+nodes	30
+0	0	1	0	0	0	52
+1	0	1	1	0	0	51
+2	1	1	2	0	0	3
+3	2	1	2	0	4	14
+4	2	1	4	0	4	8
+5	3	1	4	0	8	14
+6	0	0	6	0	8	9
+7	0	1	6	0	9	13
+2	1	1	8	0	9	13
+8	0	0	6	0	13	14
+9	4	1	2	0	15	51
+10	0	0	11	0	15	16
+11	0	1	11	0	19	37
+2	1	1	13	0	19	22
+12	2	1	13	0	23	36
+4	2	1	15	0	23	24
+13	0	0	15	0	25	26
+14	5	1	15	0	27	36
+15	6	1	18	0	27	28
+16	7	0	18	0	29	30
+14	8	1	18	0	31	36
+15	6	1	21	0	31	32
+17	7	0	21	0	33	34
+15	8	1	21	0	35	36
+18	0	0	13	0	36	37
+19	0	1	11	0	40	49
+20	0	0	26	0	40	46
+4	0	1	26	0	47	48
+18	0	0	26	0	48	49
+21	0	0	11	0	50	51
+edges	29
+0	1	9
+1	2	1
+1	3	2
+3	4	2
+3	5	3
+5	6	9
+5	7	9
+7	8	1
+5	9	9
+1	10	4
+10	11	9
+10	12	9
+12	13	1
+12	14	2
+14	15	2
+14	16	9
+14	17	5
+17	18	6
+17	19	7
+17	20	8
+20	21	6
+20	22	7
+20	23	8
+12	24	9
+10	25	9
+25	26	9
+25	27	9
+25	28	9
+10	29	9
+relations	0

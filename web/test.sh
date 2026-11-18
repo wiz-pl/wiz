@@ -1,6 +1,7 @@
 #!/bin/sh
 # Smoke tests of the web infoview and the playground: build the pages (web/build.sh,
-# web/build-playground.sh); run the infoview's Wasm module under Node with
+# web/build-playground.sh); the generated benchmark page's fixtures and the site check
+# (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
 # playground's under Node (web/playground_test.mjs); the playground's pure state and
 # URL encoding (web/playground-state_test.mjs) run first; then serve the infoview with
@@ -23,6 +24,27 @@ if grep -qF 'playground state: all checks passed' "$OUT/playground-state.txt"; t
 else
   echo "FAIL (playground state, node)"; cat "$OUT/playground-state.txt"; exit 1
 fi
+# (11s) the search box's ranking and rendering (no build or browser needed)
+node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
+grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
+  echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (bench) the benchmark page's generator fixtures and the site check's rules for it
+"$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
+grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
+  echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
+# (playground-lsp) the language client and goals panel against a mock WebSocket server
+# (no Wasm build, no browser)
+node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
+if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
+  echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
+# (playground-selfhost-lsp) ?lsp=selfhost: the in-page server shim, with a stub engine
+node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
+if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
+  echo "FAIL (playground, selfhost lsp)"; cat "$OUT/selfhost-lsp.txt"; exit 1; fi
+# (playground-exit) the engine guard: exit(3), abort/OOM and traps from a stub module
+node "$ROOT/web/playground_engine_test.mjs" > "$OUT/engine.txt"
+if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo "ok (playground, engine guard)"; else
+  echo "FAIL (playground, engine guard)"; cat "$OUT/engine.txt"; exit 1; fi
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
@@ -53,13 +75,15 @@ HTTP=$!
 sleep 1
 node "$ROOT/web/doc_chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 2))/Col.html" > "$OUT/doc-chrome.txt"
 kill $HTTP
-for want in 'interactive: true' 'hover: <span class="kind">const</span> <code>' 'selected: <span class="tt '; do
+for want in 'interactive: true' 'hover: <span class="kind">const</span> <code>' 'selected: <span class="tt ' 'search name: 1' 'search docs: 1' 'search signature: 1'; do
   if grep -qF "$want" "$OUT/doc-chrome.txt"; then echo "ok (doc, chromium): $want"; else echo "FAIL (doc, chromium): missing $want"; cat "$OUT/doc-chrome.txt"; exit 1; fi
 done
-WIZ_WEB_OUT=$OUT "$ROOT/web/bridge.sh" "$PORT" "$WIZ" > "$OUT/bridge.log" 2>&1 &
+# (#430) the server's token: the page's URL carries it to its WebSocket
+TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+WIZ_LSP_TOKEN=$TOKEN WIZ_WEB_OUT=$OUT "$ROOT/web/bridge.sh" "$PORT" "$WIZ" > "$OUT/bridge.log" 2>&1 &
 BRIDGE=$!
 sleep 3
-node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT" > "$OUT/chrome.txt"
+node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT&token=$TOKEN" > "$OUT/chrome.txt"
 ok=1
 for want in 'status: connected' 'class="names">A</span>' 'data-ref="' 'tt k-const sel' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/chrome.txt"; then echo "ok (chromium): $want"; else echo "FAIL (chromium): missing $want"; ok=0; fi

@@ -1,8 +1,3 @@
-# Devenv
-.devenv*
-devenv.local.nix
-devenv.local.yaml
-
 # direnv
 .direnv
 
@@ -13,6 +8,7 @@ devenv.local.yaml
 .lake
 .wiz-cache/
 web/out/
+doc-site/
 
 # grail
 .grail/
@@ -22,3 +18,12 @@ __pycache__/
 
 # tower: a developer's own toolchain override (docs/stages/26-tower.md, 26a)
 wiz-toolchain.local
+
+# nightly benchmark outputs (artifacts; see .github/workflows/bench.yml)
+bench-out/
+bench/history.jsonl
+# benchmark build outputs
+bench/.build/
+
+# scry: the fetched C# grammar, an out-link to `nix build .#tree-sitter-c-sharp` (scry/native/README.md)
+/scry/native/tree-sitter-c-sharp

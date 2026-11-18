@@ -8,9 +8,10 @@ import Wiz.Parser.DocComment
 `wiz doc` makes a static site from a set of modules: one page per module, every
 declaration with its kind, its signature (the infoview's tagged printer,
 `Term.prettyTagged`), its doc comment (Markdown), a link to its source, the instances of
-each class and for each type, cross-links on every constant of a signature, a search
-index (`search.js`) and an index page. See `wiz-notes/scroll.md` and
-`docs/stages/11-tooling.md`, 11s.
+each class and for each type, cross-links on every constant of a signature, an API
+index (`api.html`, `api.json`) of every module and declaration, a search index
+(`search.js`, over names, doc comments and signatures) and a landing page. See
+`wiz-notes/scroll.md` and `docs/stages/11-tooling.md`, 11s.
 
 Each page is complete HTML (readable without JS). It also carries its data as JSON: per
 declaration its signature as tagged text (the infoview protocol's format) and the table
@@ -40,9 +41,35 @@ structure Options where
   title : String := "Wiz documentation"
   /-- the Wasm module and its JS (`web/build.sh`'s output) -/
   web : Option System.FilePath := none
-  /-- the site's own files (scroll.css, scroll.js, tagged.js): `web/` of the checkout,
-  or share/wiz/web -/
-  assets : Option System.FilePath := none
+  /-- where the site's own files are (scroll.css, scroll.js, tagged.js, and with
+  `--serve` lsp-client.js, goals.js, doc-live.js, doc-live.css): searched in order,
+  `web/` of a checkout or share/wiz/web of a release -/
+  assets : List System.FilePath := []
+  /-- (11s) `--serve`: the pages carry the live documentation client, which asks a
+  `wiz lsp --ws` for a declaration's type and doc in a panel -/
+  serve : Bool := false
+  /-- the port of the language server (`--lsp PORT`); `none`: the client stays inert -/
+  lsp : Option Nat := none
+  /-- write the reference manual (`Reference.markdown`) to this directory (`--reference`) -/
+  reference : Option System.FilePath := none
+  /-- with `--reference`: write nothing, and report the files that differ (`--check`) -/
+  check : Bool := false
+  /-- the manual's own title (`--title`, else "Wiz standard library reference") -/
+  referenceTitle : String := "Wiz standard library reference"
+  /-- `-v` (1) and `-vv` (2): the progress log on stderr (`0`: quiet, the default) -/
+  verbose : Nat := 0
+  /-- modules elaborated and rendered at once (`--jobs`; `1`: one at a time) -/
+  jobs : Nat := 1
+
+/-- What `run` made: the site's pages, the reference files that are not up to date (with
+`--check`), and the reference files it wrote. -/
+structure RunResult where
+  pages : Nat
+  /-- the reference manual files that differ from what the modules say (paths) -/
+  stale : Array String := #[]
+  /-- the committed manual that was written (empty when `--check` wrote nothing) -/
+  written : Array String := #[]
+  deriving Inhabited
 
 /-- A page's file name. -/
 def pageOf (m : String) : String := s!"{m}.html"
@@ -57,11 +84,20 @@ structure Entry where
   kind : String
   doc : Option String
   line : Nat
+  /-- where the declaration's name is: 0-based line and column, for the live client -/
+  line0 : Nat
+  col : Nat
   /-- the DOM id of its signature (`sig-N`), and the signature as JSON (`sig`, `subs`) -/
   sigId : String
   data : Json
   /-- the fallback signature (links, no tags) -/
   sigHtml : String
+  /-- the signature as tagged text and its subterms, so that it can be rendered again in
+  another context (the API index: every signature links to its module's page) -/
+  tt : TT
+  subs : Array (Subterm ZeroOneMany)
+  /-- the signature as plain text, for the search index -/
+  sigText : String
   children : Array Entry := #[]
   instances : Array Name := #[]
 
@@ -130,8 +166,20 @@ def instanceTypes (t : Term ZeroOneMany) : List Name :=
   let (_, args) := spine (body t)
   args.filterMap fun a => match (spine a).1 with
     | .const n _ => some n
-    | .mu _ _ _ _ _ (some (n, _, _)) | .nu _ _ _ _ _ (some (n, _, _)) => some n
+    | .mu _ _ _ _ _ (some (n, _, _)) _ | .nu _ _ _ _ _ (some (n, _, _)) => some n
     | _ => none
+
+/-- The character offset of the declaration's name in the command at `site`: the last
+component of the name as written (`Shape.area` → `area`, `Point.x` → `x`), or the
+command's start when it is not there (a constructor, whose name is generated). -/
+def identOffset (src : String) (site : SourceInfo) (n : Name) : Nat :=
+  let stop := if site.stop > site.start then site.stop else site.start
+  let text := String.ofList ((src.toList.drop site.start).take (stop - site.start))
+  let name := s!"{n}"
+  let last := ((name.splitOn ".").getLast?).getD name
+  if last.isEmpty then site.start else
+  let before := (text.splitOn last).headD ""
+  if before.length < text.length then site.start + before.length else site.start
 
 /-- Make the entry of declaration `n`; `counter` numbers the signatures. -/
 def entry (c : Ctx) (src : String) (n : Name) (counter : Nat) : Option Entry := do
@@ -145,8 +193,10 @@ def entry (c : Ctx) (src : String) (n : Name) (counter : Nat) : Option Entry := 
   let start := match dd with
     | some d => if d.start > 0 then d.start else site.start
     | none => site.start
-  pure { name := n, kind := kindOf c.st n, doc := dd.bind (·.doc), line := (lineCol src start).1 + 1,
-         sigId, data, sigHtml := fallbackHtml c subs tt }
+  let (line0, _) := lineCol src start
+  let col := (lineCol src (identOffset src site n)).2
+  pure { name := n, kind := kindOf c.st n, doc := dd.bind (·.doc), line := line0 + 1, line0, col,
+         sigId, data, sigHtml := fallbackHtml c subs tt, tt, subs, sigText := tt.flatten }
 
 /-- The documented declarations of the module (in source order), with their
 constructors and fields. -/
@@ -175,7 +225,10 @@ def entries (c : Ctx) (src : String) : Array Entry := Id.run do
     k := k + 1
     let mut kids : Array Entry := #[]
     for m in mine do
-      if (st.declDocs.get? m).bind (·.parent) == some n then
+      let md := st.declDocs.get? m
+      -- (a private constructor or field is not documented either)
+      if (md.bind (·.parent)) == some n && !hidden m md &&
+          !st.globals.privates.contains m then
         if let some ke := entry c src m k then
           kids := kids.push ke
           k := k + 1
@@ -213,33 +266,89 @@ def sigBlock (c : Ctx) (e : Entry) (short : String) : String :=
     | none => e.name
   s!"<pre class=\"sig\"><code><span class=\"decl-name\">{htmlEscape shown}</span> : <span class=\"sig-type\" id=\"{e.sigId}\">{e.sigHtml}</span></code></pre>"
 
+/-- (11s) With `--serve`, where the declaration's name is in its module's source: the
+live client asks the language server about that position. Empty otherwise, so a plain
+`wiz doc` page is exactly the static one. -/
+def declAttrs (o : Options) (e : Entry) : String :=
+  if o.serve then s!" data-doc-line=\"{e.line0}\" data-doc-col=\"{e.col}\"" else ""
+
 def entryHtml (c : Ctx) (o : Options) (m : Module) (e : Entry) : String :=
   let kids := if e.children.isEmpty then "" else
     let items := e.children.toList.map fun k =>
       let short := match k.name.splitOn "." |>.getLast? with
         | some s => s
         | none => k.name
-      s!"<li class=\"{htmlEscape k.kind}\" id=\"{htmlEscape k.name}\">{sigBlock c k short}{docHtml c k.doc}</li>"
+      s!"<li class=\"{htmlEscape k.kind}\" id=\"{htmlEscape k.name}\"{declAttrs o k}>{sigBlock c k short}{docHtml c k.doc}</li>"
     let what := if e.children.all (·.kind == "field") then "Fields" else
       if e.children.all (·.kind == "constructor") then "Constructors" else "Constructors and fields"
     s!"<div class=\"children\"><div class=\"children-title\">{what}</div><ul>{String.join items}</ul></div>"
-  s!"<div class=\"decl\" id=\"{htmlEscape e.name}\" data-kind=\"{htmlEscape e.kind}\">" ++
-  s!"<div class=\"decl-head\"><span class=\"kind\">{htmlEscape e.kind}</span> <a class=\"anchor\" href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a>{sourceLink o m e.line}</div>" ++
+  s!"<div class=\"decl\" id=\"{htmlEscape e.name}\" data-kind=\"{htmlEscape e.kind}\"{declAttrs o e}>" ++
+  s!"<div class=\"decl-head\"><span class=\"kind\">{htmlEscape e.kind}</span> <a class=\"anchor\" href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a>" ++
+  s!"<a class=\"ref\" href=\"reference.html#{htmlEscape e.name}\">reference</a>{sourceLink o m e.line}</div>" ++
   sigBlock c e "" ++ docHtml c e.doc ++ kids ++ instancesHtml c e.instances ++ "</div>\n"
+
+/-- The first paragraph of a doc comment that is not a heading, as plain text. -/
+def docSummary (doc : Option String) : String :=
+  match doc with
+  | some d =>
+    let p := ((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD ""
+    (p.replace "\n" " ").trimAscii.toString
+  | none => ""
+
+/-- A doc comment as one line of plain text, for the search index. -/
+def docText (doc : Option String) : String :=
+  match doc with
+  | some d => (d.replace "\n" " ").trimAscii.toString
+  | none => ""
+
+/-- Where a declaration is documented: always its module's page, even from `api.html`. -/
+def apiHref (m : Module) (e : Entry) : String := s!"{pageOf m.name}#{e.name}"
+
+/-- One declaration in the API index: kind, name, signature (with cross-links) and the
+first paragraph of its doc. -/
+def apiRow (c : Ctx) (m : Module) (e : Entry) (child : Bool) : String :=
+  let cls := if child then "api-decl child" else "api-decl"
+  s!"<tr class=\"{cls}\" id=\"api-{htmlEscape e.name}\">" ++
+  s!"<td class=\"kind\">{htmlEscape e.kind}</td>" ++
+  s!"<td class=\"name\"><a href=\"{htmlEscape (apiHref m e)}\"><code>{htmlEscape e.name}</code></a></td>" ++
+  s!"<td class=\"api-sig\"><code>{fallbackHtml c e.subs e.tt}</code></td>" ++
+  s!"<td class=\"summary\">{inline (docLink c) ((docSummary e.doc).take 200 |>.toString)}</td></tr>"
+
+/-- A module's section of the API index: every declaration and its constructors or
+fields, with links back to the module page. -/
+def apiSection (c : Ctx) (m : Module) (es : Array Entry) : String :=
+  let count := es.foldl (fun n e => n + 1 + e.children.size) 0
+  let rows := es.toList.map fun e =>
+    apiRow c m e false ++ String.join (e.children.toList.map fun k => apiRow c m k true)
+  let plural := if count == 1 then "" else "s"
+  s!"<section class=\"api-module\" id=\"module-{htmlEscape m.name}\">" ++
+  s!"<h2><a href=\"{htmlEscape (pageOf m.name)}\">{htmlEscape m.name}</a>" ++
+  s!" <span class=\"count\">{count} declaration{plural}</span></h2>" ++
+  s!"<table class=\"api-table\"><thead><tr><th>kind</th><th>name</th><th>signature</th><th>docs</th></tr></thead>" ++
+  s!"<tbody>{String.join rows}</tbody></table></section>\n"
+
+/-- The API index's rows as JSON (`api.json`): the machine-readable form of `api.html`. -/
+def apiRows (m : Module) (es : Array Entry) : Array Json :=
+  es.flatMap fun e => (#[e] ++ e.children).map fun x =>
+    Json.mkObj [("name", x.name), ("module", m.name), ("kind", x.kind),
+      ("sig", x.sigText), ("doc", docText x.doc), ("href", apiHref m x)]
 
 /-- JSON inside `<script>`: `</` can't end the element. -/
 def scriptJson (j : Json) : String := (j.compress.replace "</" "<\\/")
 
-def head (o : Options) (title : String) (wasm : Bool) : String :=
+def head (o : Options) (title : String) (wasm : Bool) (live : Bool := false) : String :=
   s!"<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">" ++
   s!"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
   s!"<title>{htmlEscape title}</title><link rel=\"stylesheet\" href=\"scroll.css\">" ++
+  (if live then "<link rel=\"stylesheet\" href=\"doc-live.css\">" else "") ++
   -- the search (a classic script: it works from file:// too), and with the Wasm module
   -- the interactive signatures (a module script: needs http)
   "<script src=\"search.js\" defer></script><script src=\"scroll-search.js\" defer></script>" ++
   (if wasm then "<script type=\"module\" src=\"scroll.js\"></script>" else "") ++
   s!"</head><body>\n<header><a class=\"site\" href=\"index.html\">{htmlEscape o.title}</a>" ++
-  "<input id=\"search\" type=\"search\" placeholder=\"Search declarations\" autocomplete=\"off\" aria-label=\"Search\">" ++
+  "<a class=\"api-link\" href=\"api.html\">API index</a>" ++
+  "<a class=\"api-link\" href=\"reference.html\">Reference</a>" ++
+  "<input id=\"search\" type=\"search\" placeholder=\"Search declarations, docs and signatures\" autocomplete=\"off\" aria-label=\"Search declarations, docs and signatures\">" ++
   "<div id=\"results\" hidden></div></header>\n"
 
 def nav (mods : List String) (current : String) : String :=
@@ -251,71 +360,70 @@ def nav (mods : List String) (current : String) : String :=
 def modulePage (c : Ctx) (o : Options) (m : Module) (es : Array Entry) (wasm : Bool) : String :=
   let data := Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]
   let toc := es.toList.map fun e => s!"<li><a href=\"#{htmlEscape e.name}\">{htmlEscape e.name}</a></li>"
-  head o s!"{m.name} — {o.title}" wasm ++ nav c.modules m.name ++
-  s!"<main><h1>{htmlEscape m.name}</h1>" ++ s!"<div class=\"module-src\">{sourceLink o m 1}</div>" ++
+  -- (11s) the live client: where it asks, and the source it opens in the server
+  let live := o.serve
+  let serveData := Json.mkObj [("module", m.name), ("src", s!"sources/{m.name}.wiz"),
+    ("lsp", match o.lsp with | some p => Json.str s!"ws://127.0.0.1:{p}" | none => Json.null)]
+  head o s!"{m.name} — {o.title}" wasm live ++ nav c.modules m.name ++
+  s!"<main><h1>{htmlEscape m.name}</h1>" ++
+  s!"<div class=\"module-src\"><a class=\"ref\" href=\"reference.html#module-{htmlEscape m.name}\">reference</a> " ++
+  s!"{sourceLink o m 1}</div>" ++
   docHtml c (moduleDocOf m.src) ++
   (if es.isEmpty then "<p class=\"nothing\">No public declarations.</p>" else "") ++
   String.join (es.toList.map (entryHtml c o m)) ++
   s!"</main><aside class=\"toc\"><div class=\"nav-title\">On this page</div><ul>{String.join toc}</ul></aside>" ++
   "<div id=\"info\" hidden></div>" ++
-  s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n</body></html>\n"
+  s!"<script type=\"application/json\" id=\"wiz-doc-data\">{scriptJson data}</script>\n" ++
+  (if live then
+    s!"<script type=\"application/json\" id=\"wiz-doc-serve\">{scriptJson serveData}</script>\n" ++
+    "<script type=\"module\" src=\"doc-live.js\"></script>\n"
+   else "") ++
+  "</body></html>\n"
 
-def indexPage (o : Options) (mods : List (String × Option String)) (wasm : Bool) : String :=
+def indexPage (o : Options) (mods : List (String × Option String)) : String :=
   let items := mods.map fun (m, doc) =>
     -- (the first paragraph that is not a heading)
     let summary := match doc with
       | some d => inline (fun _ => none) ((((d.splitOn "\n\n").find? fun (p : String) => !p.startsWith "#").getD "").replace "\n" " ")
       | none => ""
     s!"<li><a href=\"{htmlEscape (pageOf m)}\">{htmlEscape m}</a><div class=\"summary\">{summary}</div></li>"
-  head o o.title wasm ++ nav (mods.map (·.1)) "" ++
-  s!"<main><h1>{htmlEscape o.title}</h1><ul class=\"modules\">{String.join items}</ul></main>\n</body></html>\n"
+  head o o.title false ++ nav (mods.map (·.1)) "" ++
+  s!"<main><h1>{htmlEscape o.title}</h1>" ++
+  s!"<p class=\"lede\">{mods.length} module{(if mods.length == 1 then "" else "s")}. " ++
+  s!"Browse the <a href=\"api.html\">API index</a> for every declaration and signature, " ++
+  s!"the <a href=\"reference.html\">reference manual</a> for full signatures, doc comments " ++
+  s!"and the notation table, " ++
+  s!"or search names, doc comments and signatures from the box above.</p>" ++
+  s!"<ul class=\"modules\">{String.join items}</ul></main>\n</body></html>\n"
 
-/-- The search index: every documented declaration (name, module, kind, the first line
-of its doc), as a script (so that it loads from `file://` too). -/
+/-- The API/library index: every documented module with all its declarations, their
+kinds, signatures (with the same cross-links as the pages) and doc summaries. It is
+generated from the same data as `A.B.json` and written with them (`api.json`). -/
+def apiPage (o : Options) (mods : List String) (sections : Array String)
+    (moduleCount declCount : Nat) : String :=
+  let mp := if moduleCount == 1 then "" else "s"
+  let dp := if declCount == 1 then "" else "s"
+  head o s!"API index — {o.title}" false ++ nav mods "" ++
+  s!"<main class=\"api\"><h1>API index</h1>" ++
+  s!"<p class=\"lede\">{moduleCount} module{mp}, {declCount} declaration{dp}. " ++
+  s!"Every name links to its signature on its module page; the search box above also " ++
+  s!"matches doc comments and signatures. <a href=\"index.html\">Back to the modules</a>; " ++
+  s!"the same index is <a href=\"api.json\">api.json</a>.</p>" ++
+  String.join sections.toList ++ "</main>\n</body></html>\n"
+
+/-- The search index: every documented module and declaration, with its name, module,
+kind, doc summary, signature text and target, as a script (so that it loads from
+`file://` too). `scroll-search.js` matches names first, then doc comments and
+signatures. -/
 def searchJs (rows : Array Json) : String :=
   s!"window.wizSearchIndex = {(Json.arr rows).compress};\n"
 
-/-- Copy a file if it exists; whether it did. -/
-def copyIf (src dst : System.FilePath) : IO Bool := do
-  if ← src.pathExists then
-    IO.FS.writeBinFile dst (← IO.FS.readBinFile src); pure true
-  else pure false
-
-/-- Make the site. `elabMod m` elaborates `import m` (with the module roots that find every
-module of `mods`). Returns the number of pages made. -/
-def run (elabMod : String → IO St) (mods : Array Module) (o : Options) : IO Nat := do
-  IO.FS.createDirAll o.out
-  let names := mods.toList.map (·.name)
-  -- the Wasm module and the site's scripts
-  let mut wasm := false
-  if let some w := o.web then
-    if ← (w / "wiz-infoview.mjs").pathExists then
-      for f in ["wiz-infoview.mjs", "wiz-infoview.wasm"] do
-        discard <| copyIf (w / f) (o.out / f)
-      wasm := true
-  if let some a := o.assets then
-    for f in ["scroll.css", "scroll.js", "tagged.js", "scroll-search.js"] do
-      discard <| copyIf (a / f) (o.out / f)
-  let mut rows : Array Json := #[]
-  let mut summaries : Array (String × Option String) := #[]
-  for m in mods do
-    let st ← elabMod m.name
-    for msg in st.messages do
-      if msg.severity == .error then IO.eprintln s!"{m.name}: {msg.text}"
-    let c : Ctx := { st, modules := names, current := m.name }
-    let es := entries c m.src
-    IO.FS.writeFile (o.out / pageOf m.name) (modulePage c o m es wasm)
-    IO.FS.writeFile (o.out / s!"{m.name}.json")
-      (Json.mkObj [("module", m.name), ("decls", Json.arr (es.flatMap fun e => #[e.data] ++ e.children.map (·.data)))]).compress
-    summaries := summaries.push (m.name, moduleDocOf m.src)
-    for e in es do
-      for x in #[e] ++ e.children do
-        let first := match x.doc with
-          | some d => (d.splitOn "\n\n").headD "" |>.replace "\n" " "
-          | none => ""
-        rows := rows.push (Json.mkObj [("n", x.name), ("m", m.name), ("k", x.kind), ("d", (first.take 160).toString)])
-  IO.FS.writeFile (o.out / "search.js") (searchJs rows)
-  IO.FS.writeFile (o.out / "index.html") (indexPage o summaries.toList wasm)
-  pure mods.size
+/-- Copy `f` from the first of `dirs` that has it; whether one did. -/
+def copyFirst (dirs : List System.FilePath) (f : String) (out : System.FilePath) : IO Bool := do
+  for d in dirs do
+    if ← (d / f).pathExists then
+      IO.FS.writeBinFile (out / f) (← IO.FS.readBinFile (d / f))
+      return true
+  pure false
 
 end Wiz.Doc

@@ -118,6 +118,9 @@ test('typing one key at a time (an embedded nvim): expansions run between keys',
   local col = req('nvim_win_get_cursor', 0)[2]
   req('nvim_input', '<Esc>')
   vim.fn.jobstop(chan)
+  -- Reap it: a job still exiting while nvim tears down is one way `nvim -l` ends
+  -- with exit status 1 after a clean summary (run.sh reports that as a harness anomaly).
+  vim.fn.jobwait({ chan }, 5000)
   eq('f λ x →× y⟨a\\>', line, 'the line')
   eq(#line, col, 'the cursor at the end')
 end)
@@ -306,31 +309,44 @@ else
     vim.ui.open = real_open
     local b = iv.state.browser
     eq(true, type(b.port) == 'number' and b.port > 0, 'a port: ' .. vim.inspect(b))
+    -- (#430) the server's token for this launch, which the page passes on to its socket
+    eq(true, type(b.token) == 'string' and b.token:find('^%x+$') ~= nil and #b.token == 32, 'a token: ' .. vim.inspect(b))
     if b.url ~= vim.NIL and b.url ~= nil then
       eq({ b.url }, opened, 'the page opened')
-      eq(true, b.url:find('^http://127%.0%.0%.1:' .. b.port .. '/infoview%.html%?port=' .. b.port .. '&follow=1$') ~= nil, 'url ' .. b.url)
+      eq(true, b.url:find('^http://127%.0%.0%.1:' .. b.port .. '/infoview%.html%?port=' .. b.port .. '&follow=1&token=' .. b.token .. '$') ~= nil, 'url ' .. b.url)
     else
       eq({}, opened, 'nothing opened without a built page')
     end
-    -- the port answers a WebSocket handshake (a page would connect there)
-    local got = nil
-    local tcp = vim.uv.new_tcp()
-    tcp:connect('127.0.0.1', b.port, function(e)
-      if e then
-        got = 'connect: ' .. e
-        return
-      end
-      tcp:read_start(function(_, data)
-        got = got or data
-        tcp:close()
+    -- the port answers a WebSocket handshake with the token (a page would connect there),
+    -- and refuses one without it
+    local function handshake(target)
+      local got = nil
+      local tcp = vim.uv.new_tcp()
+      tcp:connect('127.0.0.1', b.port, function(e)
+        if e then
+          got = 'connect: ' .. e
+          tcp:close()
+          return
+        end
+        tcp:read_start(function(_, data)
+          got = got or data or 'closed'
+          tcp:close()
+        end)
+        tcp:write('GET ' .. target .. ' HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+          .. 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
       end)
-      tcp:write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-        .. 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
-    end)
-    wait(10000, function()
-      return got ~= nil
-    end, 'the handshake')
+      wait(10000, function()
+        return got ~= nil
+      end, 'the handshake')
+      if not tcp:is_closing() then
+        tcp:close() -- (the read callback closes it on the success path)
+      end
+      return got
+    end
+    local got = handshake('/?token=' .. b.token)
     eq(true, got:find('101 Switching Protocols', 1, true) ~= nil, 'answer: ' .. got)
+    got = handshake('/')
+    eq(true, got:find('401 Unauthorized', 1, true) ~= nil, 'answer without the token: ' .. got)
   end)
 
   test('toggle closes and reopens the window', function()

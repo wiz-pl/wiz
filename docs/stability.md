@@ -112,7 +112,8 @@ The same holds for the toolchain flags, which may go before or after the command
 Not covered:
 
 * **Experimental flags**: `--regularity`, `--predicative-prop`, `--eager-proofs`,
-  `--inert`, `--unbox-structs`, `--strict-privacy`, `--pp-all`, every `--trust-*` flag,
+  `--inert`, `--unbox-structs`, `--strict-privacy`, `--pp-all`, `--trace-guess-fallback`,
+  every `--trust-*` flag,
   and any flag the usage text marks experimental. These may change or go away in a patch
   release.
 * What the commands print: error messages, the syntax tree, warnings. Do not parse them.
@@ -140,7 +141,8 @@ Anything not listed above may change in a 0.1.z release. In particular:
 * **The C FFI ABI**: object layouts, `export` and `--lib` headers, runtime symbols.
   Rebuild C code against the toolchain that builds the Wiz side.
 * **The elaboration cache** (`~/.cache/wiz`). It is keyed by the binary, so toolchains
-  never share entries; it may be deleted at any time.
+  never share entries; its region/manifest format includes SHA-256 key and toolchain/target
+  fields, and an old file is a miss that regenerates. It may be deleted at any time.
 * **The self-hosted toolchain** (`selfhost/*.wiz`), the HDL and separation-logic
   libraries, Feral, and everything documented as experimental in the stage docs.
 * **Platforms**: x86_64 Linux only, glibc 2.27 or later (2.30 or later for `wiz build`

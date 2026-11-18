@@ -20,26 +20,19 @@ variable in scope (not the `let`-bound ones, whose values are known). A solution
 then a closed function `fun x₁ … xₙ => rhs`. This makes scoping explicit and lets the
 kernel's evaluator handle metas as ordinary stuck neutrals (`Head.mvar`).
 
-Metas are untyped here, because the stage 1 kernel re-checks every elaborated
+Metas are mostly untyped here, because the stage 1 kernel re-checks every elaborated
 declaration. The elaborator only has to produce *candidates*; the kernel is the
 trusted judge (the "de Bruijn criterion"). Quantities are likewise left to the
-kernel.
+kernel. The exception (13b) is a solution unification *guesses* by shape: the kernel
+sees private types of other modules unfolded, so it would accept a look-alike the
+elaborator must not. A hole records its type when its maker knows it
+(`MetaEntry.type?`), and such a guess is type-checked against it in the elaborator's
+view (`checkGuess`, `Unify.lean`).
 -/
 
 namespace Wiz
 
 variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
-
-structure MetaEntry (R : Type) where
-  solution : Option (Val R) := none
-  /-- where the hole came from, for "could not infer" errors -/
-  info : SourceInfo := {}
-  /-- the name of a `?x` hole, or a description like "implicit argument A" -/
-  desc : String := "_"
-  /-- how many bound variables it is applied to -/
-  arity : Nat := 0
-  /-- (7e) the hole of an instance problem (`addInstProblem`) -/
-  isInst : Bool := false
 
 /-- A type class: its parameters' output flags (`outParam`) and its fields, in order. -/
 structure ClassInfo where
@@ -81,6 +74,38 @@ structure LocalCtx (R : Type) where
   `match` with one in scope uses the additive case `T.casesOnA`, so that each branch may
   use it once -/
   linearLvls : List Lvl := []
+
+structure MetaEntry (R : Type) where
+  solution : Option (Val R) := none
+  /-- where the hole came from, for "could not infer" errors -/
+  info : SourceInfo := {}
+  /-- the name of a `?x` hole, or a description like "implicit argument A" -/
+  desc : String := "_"
+  /-- how many bound variables it is applied to -/
+  arity : Nat := 0
+  /-- (7e) the hole of an instance problem (`addInstProblem`) -/
+  isInst : Bool := false
+  /-- (13b) the hole's type, in the context it was made in (`freshMeta`: the hole stands
+  for a function of that context's bound variables). A solution unification guesses by
+  shape (the first-order approximation, the flex-flex last resort) is checked against it
+  where the guess is made (`checkGuess`, `Unify.lean`); `none` when the maker didn't
+  know the type, and such a guess is left to `checkGuessedDecl` -/
+  type? : Option (LocalCtx R × VTy R) := none
+
+/-- (13b, #411) A guess whose type comparison met an unsolved hole (`checkGuessTypes`):
+the comparison, kept to be made again at the end of the declaration, when its holes are
+solved (`recheckDeferredGuesses`). The guess `?m sp := guess` was made at level `l`, where
+the variables have the types `tys` (by level) and the names `names` (innermost first, for
+the message); `inferred` is the guess's type and `expected` the hole's. -/
+structure DeferredGuess (R : Type) where
+  l : Lvl
+  tys : Array (VTy R)
+  inferred : VTy R
+  expected : VTy R
+  m : Nat
+  sp : Array (Elim R)
+  guess : Val R
+  names : List Name
 
 /-- (7f) An instance problem not solved yet: the hole, in its context, and its class type.
 `blockers` are the unsolved holes in its (non-output) class arguments when it was last
@@ -213,6 +238,16 @@ inductive Approx where
   | none | default | last
   deriving BEq, Inhabited
 
+/-- (6h S2) A lemma registered for `simp`'s default set: its name, its priority (higher
+is tried first; 1000 unless given), and whether it is used right to left. The lemmas
+are registered by `attribute [simp]`; the set itself is Wiz data, read with
+`Tac.getSimpLemmas`. -/
+structure SimpLemma where
+  name : Name
+  priority : Nat := 1000
+  rtl : Bool := false
+  deriving Repr, Inhabited
+
 structure ElabState (R : Type) where
   globals : Globals R
   metas : Array (MetaEntry R) := #[]
@@ -249,6 +284,9 @@ structure ElabState (R : Type) where
     fun _ _ _ => (#[], .error "procedural macros can't run here")
   /-- tactics: node kind and the Wiz function that runs it, latest first -/
   tactics : List (Name × Name) := []
+  /-- (6h S2) the `[simp]` lemmas, latest first (`Tac.getSimpLemmas`; the Wiz driver
+  owns the order, the priority and the policy) -/
+  simpLemmas : List SimpLemma := []
   /-- erase what is reachable from these globals, for the interpreter (supplied by the
   command elaborator) -/
   compileCode : List Name → Except String Code := fun _ => .error "tactics can't run here"
@@ -273,12 +311,30 @@ structure ElabState (R : Type) where
   solution `?m x := t` found under a binder `n` is `fun n => t`, not `fun x7 => t`, so a
   goal a tactic makes from it shows (and `intro` takes) the name the user wrote -/
   binderNames : List (Lvl × Name) := []
+  /-- the names of the context a unification problem was posed in (innermost first), when
+  its caller knows them (`unifyAt0`): a message unification writes itself
+  (`checkGuessTypes`) names the free variables with them, and with `binderNames` under the
+  binders it went under. Messages only: nothing else reads it -/
+  unifyCtxNames : List Name := []
   /-- the kernel's type inference, for complete terms (supplied by the command elaborator) -/
   kernelInfer : Ctx R → Term R → Except String (VTy R) := fun _ _ => .error "no kernel here"
   /-- set when unification meets an unsolved (term or level) metavariable. A failure that
   never met one is final: no other order of unfolding can succeed (see `unifyGlued`).
   Unification's own backtracking keeps it (`keepLearnt`). -/
   unifySawMeta : Bool := false
+  /-- set when unification solved a hole by the first-order approximation (or the
+  flex-flex last resort) and could not type-check the solution where it guessed it
+  (`checkGuess`: the hole had no recorded type, or the comparison met a hole). The
+  declaration is then checked again where opaque types have no definition
+  (`checkGuessedDecl`), which closes a shape-based forgery in that case too. -/
+  unifyGuessed : Bool := false
+  /-- why each guess was left untyped (`markGuessed`), for `--trace-guess-fallback`. It is
+  state, so a guess that unification backtracks out of takes its reason with it -/
+  guessReasons : Array String := #[]
+  /-- (#411) the guesses whose type comparison met a hole, to be compared again at the end
+  of the declaration (`recheckDeferredGuesses`). State, like `guessReasons`, so a guess that
+  unification backtracks out of takes its comparison with it -/
+  deferredGuesses : Array (DeferredGuess R) := #[]
   /-- comparisons of two glued values without metavariables that failed, with the failure's
   message: the two sides quoted (with levels for free variables), bucketed by their head. Valid
   while the globals stay as they are (the elaborator clears it when it changes them). -/
@@ -555,17 +611,22 @@ def solveMeta (m : Nat) (v : Val R) : ElabM R Unit :=
     | some ps => { s with instWaiters := s.instWaiters.erase m, instReadyQ := s.instReadyQ ++ ps }
     | none => s
 
-/-- A fresh metavariable applied to all the bound variables of `ctx`. -/
-def freshMeta (ctx : LocalCtx R) (desc : String := "_") : ElabM R (Term R) := do
-  let m := (← get).metas.size
-  let arity := (ctx.bound.filter id).length
-  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity } }
+/-- The metavariable `m` applied to all the bound variables of `ctx`. -/
+def metaApp (ctx : LocalCtx R) (m : Nat) : Term R := Id.run do
   -- `bound` is innermost first; walk it from the outside in, i.e. by level
   let flags := ctx.bound.reverse
   let mut t : Term R := .mvar m
   for b in flags, lvl in [0:ctx.lvl] do
     if b then t := .app t (.var (ctx.lvl - lvl - 1))
   pure t
+
+/-- A fresh metavariable applied to all the bound variables of `ctx`; `ty`, when the
+caller knows it, is the hole's type in `ctx` (`MetaEntry.type?`). -/
+def freshMeta (ctx : LocalCtx R) (desc : String := "_") (ty : Option (VTy R) := none) : ElabM R (Term R) := do
+  let m := (← get).metas.size
+  let arity := (ctx.bound.filter id).length
+  modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity, type? := ty.map (ctx, ·) } }
+  pure (metaApp ctx m)
 
 /-- Record that the hole `t` (in `ctx`) must have type `Sort l`. -/
 def addSortConstraint (ctx : LocalCtx R) (t : Term R) (l : Level) : ElabM R Unit :=
@@ -583,6 +644,16 @@ def freshLevelMeta (info : SourceInfo := {}) (desc : String := "") : ElabM R Lev
   modify fun s => { s with levelMetas := s.levelMetas.push none,
                            levelMetaInfo := s.levelMetaInfo.push (info, desc) }
   pure (.mvar m)
+
+/-- (13b) A fresh hole for a type: its recorded type is `Sort ?u` (`MetaEntry.type?`),
+with `?u` a fresh level hole. `?u` occurs only in that record: a guess's check may solve
+it, nothing else reads it, so it never reaches a declaration (no default, no "could not
+infer a universe level"). A level comparison that fails on it is not final
+(`unifyLevel` notes the hole), so it can't reject a guess, only leave it to
+`checkGuessedDecl`. -/
+def freshTypeMeta (ctx : LocalCtx R) (desc : String) : ElabM R (Term R) := do
+  let u ← freshLevelMeta
+  freshMeta ctx desc (some (.sort u))
 
 /-- Replace solved level metavariables. -/
 def instLevel (l : Level) : ElabM R Level := do

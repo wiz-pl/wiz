@@ -37,6 +37,16 @@ variable {R : Type} [QRig R] [DecidableEq R] [QuantitySyntax R]
 
 abbrev B (R : Type) := Nat → Term R
 
+/-- β-reduce a term applied to arguments, syntactically: `(fun x => b) a` becomes
+`b[a/x]`. Used for the description templates, whose applications the kernel cannot
+infer (a lambda has no inferable type) and which `norm` would re-quote with sorts that
+may lose the fixed point's `Prop` flag. -/
+partial def betaApps (t : Term R) : List (Term R) → Term R
+  | [] => t
+  | a :: as => match t with
+    | .lam _ b => betaApps (b.instantiateAt 0 a) as
+    | _ => (a :: as).foldl .app t
+
 namespace B
 
 def bvar (lvl : Nat) : B R := fun d => .var (d - lvl - 1)
@@ -45,6 +55,12 @@ def app (f : B R) (as : List (B R)) : B R := fun d => as.foldl (fun acc a => .ap
 def lam (x : Name) (body : B R → B R) : B R := fun d => .lam x (body (bvar d) (d + 1))
 def pi (x : Name) (bi : BinderInfo) (q : B R) (A : B R) (body : B R → B R) : B R :=
   fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) .hole
+
+/-- A Π with its component sorts written (`BinderSorts`): used below an `ecase` motive,
+which the sorts pass does not enter (a lambda has no inferred type). -/
+def piS (x : Name) (bi : BinderInfo) (q : B R) (A : B R) (lA : Level) (body : B R → B R)
+    (lB : Level) : B R :=
+  fun d => .pi x bi (q d) (A d) (body (bvar d) (d + 1)) ⟨lA, lB⟩
 def fst (t : B R) : B R := fun d => .fst (t d)
 def snd (t : B R) : B R := fun d => .snd (t d)
 def pair (a b : B R) : B R := fun d => .pair (a d) (b d)
@@ -120,8 +136,25 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
   let some descD := g.find? (T ++ ".desc") | throw s!"{T} has no description"
   let ps := Td.levelParams
   let us := ps.map Level.param
+  -- (issue #252) the inductive's result sort: `Prop` (`.sort 0`) or `Type l`
+  let (tele0, resultSort) := peelPis Td.type
+  let prop := match resultSort with
+    | .sort l => l.isZero
+    | _ => false
+  if prop && (sized || additive || linear) then
+    throw s!"sized or linear elimination from the inductive proposition {T} is not supported"
+  -- a proposition's eliminator may target a sort other than `Prop` only when the type is
+  -- a subsingleton (Lean's singleton elimination). `descSingleton` is the kernel's check,
+  -- repeated here to decide whether the recursor takes a motive level parameter.
+  let singleton := !prop || (match descD.value with
+    | none => false
+    | some dv =>
+      let (teleD, _) := peelPis descD.type
+      let vD := (List.range teleD.length).foldl (fun f a => vApp g f (Val.var a)) (eval g [] dv)
+      descSingleton g 0 vD)
   let vName := (["v", "v'", "v''", "w"].find? (!ps.contains ·)).getD "v_rec"
-  let v : Level := .param vName
+  let v : Level := if prop && !singleton then .zero else .param vName
+  let ps := if prop && !singleton then ps else ps ++ [vName]
   let (Δ, descTy) := peelPis descD.type
   let .desc l I := descTy | throw "malformed description type"
   let nΔ := Δ.length
@@ -139,7 +172,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
     | n + 1, .pair _ b => dropPairs n b
     | _, t => t
   let tailTm : Term R := match Td.value.map (stripN (nΔ + nΞ)) with
-    | some (.mu _ _ _ idx _ _) => dropPairs nΞ idx
+    | some (.mu _ _ _ idx _ _ _) => dropPairs nΞ idx
     | _ => .tt
   let tuple (as : List (B R)) : B R := as.foldr pair (closed tailTm)
   -- `λ t. ecase …` from `T.desc`'s value: `fun Δ => Desc.arg w (Enum ls) F`
@@ -191,7 +224,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
   -- `T Δ js` at size `sz`, keeping the display hint
   let sizedT (Δv : Array (B R)) (js : List (B R)) (sz : B R) : B R := fun d =>
     .mu l ((ofTele I Δv) d) ((app (closed (.const (T ++ ".desc") us)) Δv.toList) d) (tuple js d) (sz d)
-      (some (T, us, (Δv.toList ++ js).map (· d)))
+      (some (T, us, (Δv.toList ++ js).map (· d))) prop
   let build (binder : Name → BinderInfo → B R → B R → (B R → B R) → B R)
       (body : Option (B R) → Array (B R) → B R → Array (B R) → Array (B R) → B R → B R) : B R :=
     bindTele binder Δ #[] (some .implicit) (some (qlit 0)) fun Δv =>
@@ -260,9 +293,10 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
   let ty := build (fun x bi q A k => B.pi x bi q A k) fun _ _ mot _ ξ xv => motApp mot (ξ.toList ++ [xv])
   -- the value
   let val := build (fun x _ _ _ k => B.lam x k) fun sv? Δv mot ms ξ xv =>
+    let l1 : Level := .succ l
     let Iv := ofTele I Δv
     let Dv := app (closed (.const (T ++ ".desc") us)) Δv.toList
-    let familyAt (sz : B R) : B R := B.lam "j" fun j => fun d => .mu l (Iv d) (Dv d) (j d) (sz d) none
+    let familyAt (sz : B R) : B R := B.lam "j" fun j => fun d => .mu l (Iv d) (Dv d) (j d) (sz d) none prop
     let unpack (i : B R) : List (B R) := (List.range nΞ).map (proj i)
     let P := B.lam "i" fun i => B.lam "y" fun y => motApp mot (unpack i ++ [y])
     let Fv := ofTele F Δv
@@ -273,54 +307,82 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
       -- (it then subtypes into the motive's `μ^∞`)
       let conAt (idx payload : B R) : B R := fun d =>
         match jv? with
-        | some jv => .ann (.con (payload d)) (.mu l (Iv d) (Dv d) (idx d) (.szSuc (jv d)) none)
+        | some jv => .ann (.con (payload d)) (.mu l (Iv d) (Dv d) (idx d) (.szSuc (jv d)) none prop)
         | none => .con (payload d)
-      let interpOf (Dz : B R) := app (closed (Templates.interpTm l)) [Iv, Dz, X, i]
-      let allOf (Dz r : B R) := app (closed (Templates.allTm l v)) [Iv, Dz, X, P, i, r]
+      let interpOf (Dz : B R) : B R := app (closed (Templates.interpTm l prop)) [Iv, Dz, X, i]
+      let allOf (Dz r : B R) : B R := app (closed (Templates.allTm l v prop)) [Iv, Dz, X, P, i, r]
       let motiveZ : B R := fun d =>
         -- under the ecase binder `z`, which is variable `d - 1` at depth `d`
         let z := bvar (d - 1)
-        let Dz := app Fv [upTag z]
+        let Dz : B R := if prop then (fun d' => betaApps (Fv d') [upTag z d']) else app Fv [upTag z]
         -- normalise only the template parts: evaluation would drop `conAt`'s annotation
-        (B.pi "rest" .default (qlit (if linear then 1 else w)) (norm g (interpOf Dz)) fun r =>
-          let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
-          if ih?.isSome then B.pi "h" .default (qlit w) (norm g (allOf Dz r)) fun _ => goal else goal) d
+        -- (an inductive proposition writes the binder sorts out; a `Type` inductive
+        -- leaves them as holes, as before #252)
+        if prop then
+          (B.piS "rest" .default (qlit (if linear then 1 else w))
+            (norm g (interpOf Dz)) l1 (fun r =>
+              let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
+              if ih?.isSome then
+                B.piS "h" .default (qlit w) (norm g (allOf Dz r)) (.max l1 v)
+                  (fun _ => goal) v
+              else goal) v) d
+        else
+          (B.pi "rest" .default (qlit (if linear then 1 else w)) (norm g (interpOf Dz)) fun r =>
+            let goal := motApp mot (unpack i ++ [conAt i (pair (upTag z) r)])
+            if ih?.isSome then B.pi "h" .default (qlit w) (norm g (allOf Dz r)) fun _ => goal
+            else goal) d
       let branches : List (B R) := cinfo.toList.zipIdx.map fun ((c, fields, idx), ci) =>
         let withH (k : B R → B R) : B R := if ih?.isSome then B.lam "h" k else k (closed .tt)
         B.lam "rest" fun r => withH fun h =>
           let n := fields.length
           let lifts := ctorLifts[ci]?.getD []
-          let rawFs := (List.range n).map (proj r)
-          let fs : List (B R) := rawFs.zipIdx.map fun (f, k) => fun d => (lifts[k]?.getD .none).unwrap (f d)
-          let e := proj r n
+          let tag : B R := upTag (closed (.tag ls ci))
+          let goalWith (pay : B R) : B R := motApp mot (unpack i ++ [conAt i (pair tag pay)])
           let recIx := (fields.zipIdx.filter fun ((_, _, _, A), _) => isRec A).length
           -- (an infinitary field's hypotheses take the lifted domain too)
           let recLifts := (fields.zip lifts).filterMap fun ((_, _, _, A), fl) => if isRec A then some fl else none
-          let ihs : List (B R) := (List.range recIx).map fun k => fun d =>
-            (if recLifts[k]? == some .hrec then FieldLift.hrec else FieldLift.none).unwrap (proj h k d)
-          let σ := Δv ++ fs.toArray
-          let idxB := idx.map (ofTele · σ)
-          let ctorApp := app (closed (.const (ctorConst T c) us)) (Δv.toList ++ fs)
-          let A := norm g (motApp mot (idxB ++ [ctorApp]))
-          let tag : B R := upTag (closed (.tag ls ci))
-          let Bty := motApp mot (unpack i ++ [conAt i (pair tag r)])
-          -- Q j e' := A = motive j (con (tag, f…, e', ()))
-          let Q := B.lam "j" fun j => B.lam "e" fun e' => fun d =>
-            .eqTy (A d) ((motApp mot (unpack j ++
-              [conAt j (pair tag ((rawFs ++ [e']).foldr pair (closed .tt)))])) d)
-          let prf : B R := fun d => .transp (Iv d) (tuple idxB d) (Q d) (.reflTy (A d)) (i d) (e d)
-          let inner := app (ms[ci]!) ((if additive then [] else jv?.toList) ++ fs ++ (if withIH then ihs else []))
-          -- without indices the two motives agree (`con (tag, r)` is the constructor
-          -- applied to `r`'s fields, by η), so no cast: then the recursor computes on a
-          -- constructor even at a neutral motive, without regularity
-          if !linear then
+          let bodyFor (rawFs : List (B R)) (e : B R) : B R :=
+            let fs : List (B R) := rawFs.zipIdx.map fun (f, k) => fun d => (lifts[k]?.getD .none).unwrap (f d)
+            let ihs : List (B R) := (List.range recIx).map fun k => fun d =>
+              (if recLifts[k]? == some .hrec then FieldLift.hrec else FieldLift.none).unwrap (proj h k d)
+            let σ := Δv ++ fs.toArray
+            let idxB := idx.map (ofTele · σ)
+            let ctorApp := app (closed (.const (ctorConst T c) us)) (Δv.toList ++ fs)
+            let A := norm g (motApp mot (idxB ++ [ctorApp]))
+            -- Q j e' := A = motive j (con (tag, f…, e', ()))
+            let Q := B.lam "j" fun j => B.lam "e" fun e' => fun d =>
+              .eqTy (A d) ((motApp mot (unpack j ++
+                [conAt j (pair tag ((rawFs ++ [e']).foldr pair (closed .tt)))])) d)
+            let prf : B R := fun d => .transp (Iv d) (tuple idxB d) (Q d) (.reflTy (A d)) (i d) (e d)
+            let inner := app (ms[ci]!) ((if additive then [] else jv?.toList) ++ fs ++ (if withIH then ihs else []))
+            -- without indices the two motives agree (`con (tag, r)` is the constructor
+            -- applied to `r`'s fields, by η), so no cast: then the recursor computes on a
+            -- constructor even at a neutral motive, without regularity
             if nΞ == 0 || nondep then inner else
-            fun d => .cast (A d) (Bty d) (prf d) (inner d)
+            fun d => .cast (A d) (goalWith ((rawFs ++ [e]).foldr pair (closed .tt)) d) (prf d) (inner d)
+          -- A field at a quantity variable cannot be projected (`1 ≤ q` is not known):
+          -- take the payload apart with `split`s at 1, which give each field at its
+          -- declared quantity (split at 1 of a pair `(q a : A) × B` gives `a` at `q`).
+          -- Only a non-literal quantity takes this path; all-literal types keep the
+          -- projection-based recursor unchanged (so `Vec` and the library do not move).
+          -- (A *recursive* field in a q-variable type is not supported yet: the kernel's
+          -- hypothesis `h` is about `proj r k`, which `split` cannot identify with its
+          -- variable when `r` is neutral.)
+          let allLit := fields.all fun (_, _, q, _) => match q with | .qlit _ => true | _ => false
+          if !linear then
+            if allLit then bodyFor ((List.range n).map (proj r)) (proj r n)
+            else
+              let rec chainV (k : Nat) (cur : B R) (acc : List (B R)) : B R :=
+                B.split (qlit 1) cur (fun z => goalWith (acc.foldr pair z)) fun f r' =>
+                  if k < n then chainV (k + 1) r' (acc ++ [f])
+                  else
+                    let consume (body : B R) : B R := fun d => .letUnit (r' d) (body d)
+                    consume (bodyFor acc f)
+              chainV 0 r []
           else
           -- (casesOn1) `let 1 (f₁, r₁) := rest; …; let 1 (e, u) := rₙ; m 'c f…`: the
           -- `k`-th split's motive is the goal with the payload rebuilt from the fields so
           -- far and the remainder `z`; the final `u : Unit` is consumed by `let () := u`
-          let goalWith (pay : B R) : B R := motApp mot (unpack i ++ [conAt i (pair tag pay)])
           let rec chain (k : Nat) (cur : B R) (acc : List (B R)) : B R :=
             B.split (qlit 1) cur (fun z => goalWith (acc.foldr pair z)) fun f r' =>
               if k < n then chain (k + 1) r' (acc ++ [f])
@@ -328,21 +390,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
                 -- `f` is the equation `e`, `r'` the final `()`, consumed by the unit
                 -- eliminator `let () := r'; …`
                 let consume (body : B R) : B R := fun d => .letUnit (r' d) (body d)
-                consume <|
-                let rawFs := acc
-                let fs : List (B R) := rawFs.zipIdx.map fun (f, k) => fun d => (lifts[k]?.getD .none).unwrap (f d)
-                let σ := Δv ++ fs.toArray
-                let idxB := idx.map (ofTele · σ)
-                let ctorApp := app (closed (.const (ctorConst T c) us)) (Δv.toList ++ fs)
-                let A := norm g (motApp mot (idxB ++ [ctorApp]))
-                let inner := app (ms[ci]!) fs
-                if nΞ == 0 || nondep then inner else
-                let Bty := goalWith ((rawFs ++ [f]).foldr pair (closed .tt))
-                let Q := B.lam "j" fun j => B.lam "e" fun e' => fun d =>
-                  .eqTy (A d) ((motApp mot (unpack j ++
-                    [conAt j (pair tag ((rawFs ++ [e']).foldr pair (closed .tt)))])) d)
-                let prf : B R := fun d => .transp (Iv d) (tuple idxB d) (Q d) (.reflTy (A d)) (i d) (f d)
-                fun d => .cast (A d) (Bty d) (prf d) (inner d)
+                consume (bodyFor acc f)
           chain 0 r []
       if linear then
         -- `let 1 (t, rest) := xs; (ecase t […] : (1 rest : …) → …) rest`
@@ -364,7 +412,8 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
       -- (`casesOn` ignores the hypotheses: then the compiler can skip computing them)
       let M := B.lam "i" fun i => B.lam "xs" fun xs => B.lam "ih" fun ih =>
         methodBody none i xs (if withIH then some ih else none)
-      fun d => .ind l (Iv d) (Dv d) v (P d) (M d) (tuple ξ.toList d) (xv d)
-  pure { name := recName, levelParams := ps ++ [vName], type := ty 0, value := some (val 0) }
+      fun d => .ind l (Iv d) (Dv d) v (P d) (M d) (tuple ξ.toList d) (xv d) prop
+  let out : Decl R := { name := recName, levelParams := ps, type := ty 0, value := some (val 0) }
+  pure out
 
 end Wiz.Elab

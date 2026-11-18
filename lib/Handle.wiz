@@ -3,7 +3,7 @@ import Sys
 /-!
 # Handle
 
-Owned handles (`import Handle`; cohesion step M6, /workspace/wiz-notes/cohesion-resources.md;
+Owned handles (`import Handle`; cohesion step M6, wiz-notes/cohesion-resources.md;
 docs/libraries.md).
 
 An OS handle (a `File`, an `Fd`, a `Child`) is an ordinary (ω) value in lib/Sys.wiz,
@@ -30,6 +30,11 @@ checked. Making the handles themselves linear (and
 the operations direct style, `(1 o : Owned f) → … → IO (Owned f)`) needs linear Σ fields
 (linear-case stage 2); then lib/Sys.wiz and lib/Serial.wiz move onto this module.
 
+A piped `Process.spawnOwned` cannot deadlock its release: `Child.releaseOwned` drains
+stdout and stderr (`Child.communicate c ""`) before waiting. The drained output is
+dropped then, so collect it first with `Child.communicateOwned` (or
+`Handle.use c o (fun c => Child.communicate c input)`) if you need it.
+
 Trusted: the two natives `wiz_handle_own`/`wiz_handle_disown` (runtime/: an empty
 box, as an MVar hole) and their private `extern`s; nothing else reaches `Owned`. Extern
 privacy is by name only: another module could bind `wiz_handle_own` with any type (it
@@ -51,15 +56,15 @@ private def Handle.releaseWith {H B : Type} (close : H → EIO Unit) (h : H) (1 
     (1 k : (r : Except String Unit) → IO B) : IO B :=
   fun w => let 1 (u, w') := Owned.burn o w; IO.bind (close h) k w'
 /-- An operation on an owned handle: the token goes in and comes back. -/
-def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B :=
-  IO.bind (act h) (fun a => k a o)
+def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B := do1
+  a ← act h;
+  k a o
 -- acquire a fresh handle with `acquire` (an error owns nothing), then `k` owns it. `k` is
 -- an ordinary function (it runs only if `acquire` succeeds), so it can't capture another
 -- linear value: an acquisition that fails would leave that value unused.
-private def Handle.with {H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B :=
-  IO.bind acquire (fun r => match r with
-    | .ok h => Handle.own h (k h)
-    | .error e => EIO.fail e)
+private def Handle.with {H B : Type} (acquire : EIO H) (k : (h : H) → (1 o : Owned h) → EIO B) : EIO B := do
+  h ← acquire;
+  Handle.own h (k h)
 
 -- ## The handles of lib/Sys.wiz: owned constructors and their releases
 
@@ -76,14 +81,18 @@ def Fd.withOwned {B : Type} (p : String) (a : Access) (fl : OpenFlags) (k : (f :
 /-- Close the descriptor; `k` gets the close's result. -/
 def Fd.releaseOwned {B : Type} (f : Fd) (1 o : Owned f) (1 k : (r : Except String Unit) → IO B) : IO B :=
   Handle.releaseWith (fun (f : Fd) => Fd.close f) f o k
-/-- `Process.spawn …`, owned: released by waiting for the child. -/
+/-- `Process.spawn …`, owned: released by waiting for the child. A piped stdout or stderr
+is drained by the release (so a child that fills the pipe cannot deadlock it); to keep
+that output, `Child.communicate` it first (`Handle.use c o` or `Child.communicateOwned`). -/
 def Process.spawnOwned {B : Type} (cmd : String) (args : List String) (stdin stdout stderr : Stdio)
     (k : (c : Child) → (1 o : Owned c) → EIO B) : EIO B :=
   Handle.with (Process.spawn cmd args stdin stdout stderr) k
 -- wait for it; `k` gets the exit status, or the error
-/-- Wait for the child; `k` gets the exit status, or the error. -/
+/-- Wait for the child, draining its pipes first: `k` gets the exit status, or the error
+(the drain's, or the wait's). -/
 def Child.releaseOwned {B : Type} (c : Child) (1 o : Owned c) (1 k : (r : Except String ExitStatus) → IO B) : IO B :=
-  fun w => let 1 (u, w') := Owned.burn o w; IO.bind (Child.wait c) k w'
+  fun w => let 1 (u, w') := Owned.burn o w;
+    IO.bind (EIO.bind (Child.communicate c "") (fun _ => Child.wait c)) k w'
 
 -- ## Direct style: operations on owned handles as `IO1` actions (cohesion M6 part 2)
 --
@@ -113,6 +122,10 @@ def File.flushOwned (f : File) (1 o : Owned f) : IO1 ((r : Except String Unit) �
 /-- `Fd.write`, owned (direct style). -/
 def Fd.writeOwned (f : Fd) (1 o : Owned f) (b : Bytes) : IO1 ((r : Except String Unit) × Owned f) :=
   Handle.use1 f o (fun (f : Fd) => Fd.write f b)
+/-- `Child.communicate`, owned (direct style): collect the output while keeping the token
+(`Child.readStdout`/`Child.readStderr` then give it), before the release. -/
+def Child.communicateOwned (c : Child) (1 o : Owned c) (input : String) : IO1 ((r : Except String Unit) × Owned c) :=
+  Handle.use1 c o (fun (c : Child) => Child.communicate c input)
 /-- `Fd.read`, owned (direct style). -/
 def Fd.readOwned (f : Fd) (1 o : Owned f) (n : Nat) : IO1 ((r : Except String (Option Bytes)) × Owned f) :=
   Handle.use1 f o (fun (f : Fd) => Fd.read f n)

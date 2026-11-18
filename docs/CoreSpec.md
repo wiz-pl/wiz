@@ -1012,7 +1012,7 @@ made both kernels loop (Status.md, D1). Regularity is now off in both kernels
 
 The Prelude declares
 
-```
+```wiz no-check
 axiom castRefl.{u} {0 A : Type u} (0 e : A = A) (0 a : A) : (cast e a : A) = a
 ```
 
@@ -1244,14 +1244,16 @@ At a type that is a proposition, any two elements are convertible (§11.2):
      Γ ⊢ a ≡ b : A
 ```
 
-There are **no inductive propositions** (`μ` always lives in `Sort (l+1)`, §9), so there
-is no large elimination out of `Prop` except through `absurd` (from `False`) and `split`
-on a Σ of propositions (whose components are propositions too: subsingleton elimination).
+An **inductive proposition** (§9.3) may be eliminated into `Prop` always, and into any
+other sort only when it is a subsingleton: no constructor, or one constructor whose
+fields are all (sub)singleton types. So large elimination out of `Prop` is exactly
+singleton elimination; beyond it there are only `absurd` (from `False`) and `split` on
+a Σ of propositions (whose components are propositions too).
 
 ### 8.6 Proofs are never evaluated (P2)
 
 The evaluator does not run proofs. This is the design of TTobs, CCobs and CICobs
-[PT22, PT23, PLT25]: there is no reduction relation on terms of a proposition, and
+\[PT22, PT23, PLT25\]: there is no reduction relation on terms of a proposition, and
 conversion never compares two proofs. It is `Globals.lazyProofs` in the Lean kernel and
 `kernelLazyProofs` in `Kernel.wiz`, both on by default.
 
@@ -1270,9 +1272,11 @@ conv at a proposition       true, before either side is unfolded
   rule needs a proof's value.
 * **Why no rule needs it.** Every elimination of a proof yields a proof: Σ is
   predicative, so a Σ that is a proposition has proof components; a Π into `Prop`
-  applied to anything is a proof; there are no inductive propositions; `absurd` is
-  stuck; `eq` is rejected at propositions. `split` with a relevant motive is the one
-  exception, and η for Σ covers it.
+  applied to anything is a proof; an inductive proposition eliminates into `Prop` (or,
+  when it is a subsingleton, into any sort, in which case `vInd` forces the proof's
+  body once to reach its constructor); `absurd` is stuck; `eq` is rejected at
+  propositions. `split` with a relevant motive is the one exception, and η for Σ
+  covers it.
 * **Reading back.** The kernel's own read-back (`quoteErasesProofs`; `quoteM .false` in
   `Kernel.wiz`) reads every proof head as `()`: it neither evaluates nor compares proofs.
   It is used by the kernel's messages and, in the Lean kernel, by the shortcut that
@@ -1460,7 +1464,10 @@ itself is not `μ` of a description).
 (`ω` stands for the rig's `explicitDefault`.) `rec` is a recursive field at index `j`;
 `hrec` is an infinitely branching recursive field `(h : H) → μ D (j h)`. Strict positivity
 holds by construction: there is no way to mention the type being defined except through
-`rec`/`hrec`. Fields carry quantities [wiz]; `ret`, `arg`, `rec` are levitation's
+`rec`/`hrec`. (A description is a term formed before the `μ`, so it cannot name that `μ`;
+the surface elaborator still rejects a type being defined in any other field position,
+`Inductive.lean`: "the type being defined may only occur as the type of a field or the
+result".) Fields carry quantities [wiz]; `ret`, `arg`, `rec` are levitation's
 constructors [std: CDMM10]; `hrec` is the usual infinitary extension (unverified which
 paper; Dagand's thesis has `Π`-fields).
 
@@ -1542,8 +1549,8 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
 ### 9.3 μ, con, ind
 
 ```
-     Γ ⊢ I type@k   ⊢ k ≡ l+1   Γ ⊢ D ⇐ Desc.{l} I   Γ ⊢ i ⇐ I
-     ───────────────────────────────────── mu       (the size s is NOT checked; see below)   Check.lean:527–533
+     Γ ⊢ I type@k   ⊢ k ≡ l+1   Γ ⊢ D ⇐ Desc.{l} I   D is guarded   Γ⁰ ⊢ s ⇐ Size   Γ ⊢ i ⇐ I
+     ───────────────────────────────────── mu                                                    Check.lean:527–533
      Γ ⊢ μ.{l} I D i ^s ⇒ Sort (l+1) ⊣ 0
 
      s = ↑s'  or  s = ∞ (then s' = ∞)      Γ ⊢ x ⇐ ⟦D⟧ (λj. μ^{s'} D j) i ⊣ U
@@ -1560,7 +1567,18 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
      ind P m i (con xs)  ⟶  m i xs (hyps D (μ D) P (λj y. ind P m j y) i xs)                vIndStep, Eval.lean:409–423
 ```
 
-* `μ` is always in `Sort (l+1)`: there are no inductive propositions.
+* `μ` is in `Sort (l+1)`, unless its `prop` flag is set, in which case it is an
+  **inductive proposition** in `Sort 0` (#252). The formation premises are unchanged:
+  `I` is still exactly in `Sort (l+1)` and `D ⇐ Desc.{l} I`, so a proposition's fields
+  may live in any `Sort (l+1)`; only its elimination is restricted. `ind` on a
+  proposition checks the same premises and allows a motive in `Sort v` only when
+  `v ≡ 0` or the description is a singleton (no constructor, or one whose fields are
+  all (sub)singleton types: `descSingleton` in `Eval.lean`). A non-singleton
+  proposition's generated eliminator therefore has no motive level parameter; a raw
+  core term with a larger motive is rejected ("large elimination from an inductive
+  proposition"). Singleton elimination evaluates a suspended proof (`vInd` forces its
+  body) because the elimination computes on its constructor; a proof motive stays
+  suspended.
 * **The hint** [impl, Lean kernel only]. A `μ`/`ν` term carries an optional hint
   `(T, us, args)`, its nominal form `T.{us} args`. Conversion ignores it; the elaborator
   reads it back (a type's name, constructors and arguments), and `eval` evaluates `args`.
@@ -1571,7 +1589,24 @@ never type-checks them, and their Π/Σ types carry hand-written component sorts
   levels). That the hint equals the type is not checked; nothing in the kernel relies on
   it. `Kernel.wiz` has no hints.
 * The size argument of `μ` (and `ν`) is checked erased: `Γ⁰ ⊢ s ⇐ Size` (since
-  `4605514`; Status.md, K3).
+  `4605514`; Status.md, K3). A size variable that is not bound (or a term of another type
+  in that position) is therefore rejected: a size may not escape its binder.
+* **The guarded inductive description (`descGuarded`, both kernels).** For `μ`, every
+  recursive field (`rec`, `hrec`) must occur under at least one non-recursive (`arg`)
+  field. The constructor has then taken a field before the recursive occurrence, so the
+  recursive position is a field of the value, not the value itself. A description that is
+  only recursion is the unguarded **`μ X. X`** (the identity functor): a recursive
+  occurrence with nothing consumed before it. It is rejected with
+  `unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur
+  under a non-recursive (Desc.arg) field`. The rule is **not** applied to `ν`: `ν X. X`
+  (one observation, itself) is a valid coinductive type, and its guardedness is the
+  productivity rule of `cocon`/`out` (§10.3) plus the surface copattern check. A
+  description whose head is not a constructor spine — a variable or a global (`μ
+  Chain.desc i`, `μ c.2.1 c.2.2` in the codes tests) — is not visible to the check and is
+  accepted; so is a nested `arg` field of another family (`List A`, …). Constants are
+  looked through (depth-bounded), so `def D := Desc.rec …; μ D ()` cannot hide it. The
+  check is conservative: it sees only the `arg`/`rec`/`hrec` spine (and the branches of an
+  `ecase` in it). `Kernel.wiz` has the same function and verdicts (`=selfhost`).
 * The method's usage is scaled by ω (`QRig.many?`) because the method may run once per
   node (§5.3; Status.md, Q2).
 * `x` is checked against `μ^∞`; a value of a smaller size is accepted by subtyping.
@@ -1816,8 +1851,9 @@ linear variable): a possible later stage.
 ### 10.3 ν, out, cocon, coit, scofix
 
 ```
-     (same premises as mu)
-     ───────────────────────────────────── nu   (size not checked)                          Check.lean:527–533
+     (same premises as mu, without the guard: the index level, the description,
+      Γ⁰ ⊢ s ⇐ Size; `ν X. X` is a valid coinductive type)
+     ───────────────────────────────────── nu                                                    Check.lean:527–533
      Γ ⊢ ν.{l} I D i ^s ⇒ Sort (l+1) ⊣ 0
 
      Γ ⊢ x ⇒ T ⊣ U    whnf T = ν D i ^s    s = ↑s' or s = ∞ (s' = ∞)
@@ -2098,7 +2134,7 @@ Each item says what the code does; the code is what the kernel checks.
 | size equality on non-variable bases | equal if the same metavariable | never (`sizeEq`, `Kernel.wiz:1388`) |
 | `app` | evaluates the argument | only if the codomain may mention it (`usesVar`) |
 | conversion fast path | none | `valSame`: bounded structural equality (`Kernel.wiz:1461`) |
-| μ/ν size argument | unchecked | unchecked (`Kernel.wiz:1918, 1967`) |
+| μ/ν size argument; μ's guarded description | `Γ⁰ ⊢ s ⇐ Size`; `descGuarded` rejects `μ X. X` (`ν X. X` is accepted) | the same (`infer`: the size is checked erased; `descGuarded` for μ, `Kernel.wiz`) |
 | equality of descriptions, `μ ≡ μ` (4g, §8.4b) | `vEqDesc`, `vEqType`, `famPayloadEq?` | the same rules (`vEqDesc`, `famEqTy`, `famPayload`; field quantities since 21x); levels are numerals |
 
 **The self-hosted frontend's quantities** (`Frontend.wiz`, stage 21m; finding K10 of audit 2,

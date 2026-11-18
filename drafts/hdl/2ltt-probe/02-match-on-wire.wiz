@@ -1,0 +1,15 @@
+import Hdl.Core
+
+def B8 : HwTy := HwTy.bits 8
+
+inductive Phase where
+  | idle | start | data | stop
+  deriving BitPack
+
+-- 1. what happens if you `match` on a wire (the residual gap)
+def phaseName {r : HwTy → Type} [Hw r] (p : r Phase.code) : r B8 :=
+  match p with
+  | .idle => Hw.lit 8 0
+  | .start => Hw.lit 8 1
+  | .data => Hw.lit 8 2
+  | .stop => Hw.lit 8 3

@@ -9,10 +9,11 @@ set_option compiler.extract_closed false
 namespace Tests.Elab
 
 /-- Linear-case stage 2 (K1: `scase` at a quantity, `T.casesOn1`; the unit eliminator
-`let () := u; b`): the M4 acceptance probes of `wiz-notes/cohesion-resources.md` §7, the
-negatives of the soundness argument (docs/CoreSpec.md §10.2, §10.2a): a linear variable is
-never used twice, nor dropped, an erased one never used at run time; and linear-review's
-counterexamples to the withdrawn K2a. -/
+`let () := u; b`): the acceptance probes for linear region handles (a linear field matched
+out of a linear scrutinee, a linear structure taken apart, the resource dropped or
+duplicated rejected), the negatives of the soundness argument (docs/CoreSpec.md §10.2,
+§10.2a): a linear variable is never used twice, nor dropped, an erased one never used at
+run time; and the counterexamples to the withdrawn K2a. -/
 def linearCaseHeader : String :=
   "import Prelude\naxiom Tok : Type\naxiom use : (1 t : Tok) → Nat\n" ++
   "inductive Res1 (A : Type) where\n  | ok (1 a : A)\n  | err (e : Nat) (1 back : A)\n"
@@ -63,6 +64,7 @@ def ticketSrc : String := ticketHeader ++
 def linearCaseGroup : Group where
   name := "linear-case"
   exercise := "docs/CoreSpec.md §10.2 (K1), §10.2a (the unit eliminator)"
+  parallel := true
   cases := [
     { name := "a2: a linear field matched out of a linear scrutinee, handed back in both alternatives (D8)", run := fun _ =>
         okLibs (linearCaseHeader ++ "def rebuild (1 r : Res1 Tok) : Res1 Tok := match r with\n  | .ok t => .ok t\n  | .err e t => .err e t\n") },

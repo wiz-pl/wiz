@@ -490,3 +490,42 @@ def parseCommandAt (cats : List Cat) (tokens : List String) (input : Array Nat) 
   | .ok items s => .ok (firstItem items) (St.pos s)
   | .err s => match s with
     | .mk _ e x _ => .err ("error " +++ Nat.toString e +++ ": expected " +++ showExpected x)
+
+-- Add a trailing or leading parser to a category.
+def addTrailingTo (cat : String) (t : Trailing) : List Cat → List Cat
+  | .nil => .nil
+  | .cons (.mk n ls ts) rest => match strEq n cat with
+    | .true => .cons (.mk n ls (List.append ts (.cons t .nil))) rest
+    | .false => .cons (.mk n ls ts) (addTrailingTo cat t rest)
+def addLeadingTo (cat : String) (l : Leading) : List Cat → List Cat
+  | .nil => .nil
+  | .cons (.mk n ls ts) rest => match strEq n cat with
+    | .true => .cons (.mk n (List.append ls (.cons l .nil)) ts) rest
+    | .false => .cons (.mk n ls ts) (addLeadingTo cat l rest)
+
+-- The surface forms the self-hosted frontend adds to the tables it is given: `if`, `!`,
+-- `&&` and `||` (the host gets them from `lib/Prelude.wiz`'s `syntax`/`notation`, which
+-- this frontend does not process), and (C15) the `smt` tactic. The kinds and shapes are
+-- the host's, so the parser differential compares the trees directly.
+def surfaceCats (cats : List Cat) : List Cat :=
+  -- (C15) `smt` is a `tactic` in lib/Prelude.wiz (`syntax (name := smt) "smt" : tactic`);
+  -- this frontend gets the host's kind and shape, so `by smt` parses as the host parses
+  -- it and the frontend refuses it at elaboration (Frontend.wiz, `tacOfStx`). `smt` is
+  -- an identifier here (the tables do not reserve it, as `if`/`then`/`else` are not)
+  let cats := addLeadingTo "tactic" (.mk "tactic.smt" 1024 0 (.nonReserved "smt")) cats;
+  let cats := addLeadingTo "term" (.mk "term.!" 1024 0
+    (.seq (.atom "!") (.cat "term" 1024))) cats;
+  let cats := addTrailingTo "term" (.mk "term.boolAnd" 35 36 0
+    (.seq (.atom "&&") (.cat "term" 35))) cats;
+  let cats := addTrailingTo "term" (.mk "term.boolOr" 30 31 0
+    (.seq (.atom "||") (.cat "term" 30))) cats;
+  -- `if c then a else b`: the branches are `term`s, not application arguments, so a
+  -- branch may start on the next line at the `if`'s column (Lean's syntax rule has the
+  -- same shape; as an application it was only accepted when indented further)
+  addLeadingTo "term" (.mk "term.ite" 1022 0
+    (.seq (.nonReserved "if") (.seq (.cat "term" 0) (.seq (.nonReserved "then")
+      (.seq (.cat "term" 0) (.seq (.nonReserved "else") (.cat "term" 0))))))) cats
+-- `if`/`then`/`else` are reserved too: as identifiers, the condition's application
+-- would swallow `then` (the host's `syntax` reserves them the same way)
+def surfaceTokens : List String :=
+  .cons "if" (.cons "then" (.cons "else" (.cons "!" (.cons "&&" (.cons "||" .nil)))))

@@ -1,0 +1,14 @@
+warnings: 0
+mapSpanAt disagreements: 0
+line-fallback origins compared: 1
+markers present: 1
+system markers: 0
+original files: 2
+main.c path: 1
+inc.h path: 1
+macro origin: int a = TWICE(3); (line 6)
+conditional origin: int b = a + OFFSET; (line 8)
+return origin: return bump(b); (line 12)
+main origin path: corpus/c2wil/preproc/main.c
+header origin: inc.h (line 4)
+main result: 12

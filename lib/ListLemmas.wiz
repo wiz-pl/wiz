@@ -1,0 +1,539 @@
+import Text
+import Logic
+import Nat
+
+/-!
+# List lemmas
+
+Lemmas about the list functions of `lib/Text.wiz` (`import ListLemmas`): how `map`,
+`filter`, `any`, `all`, `append`, `reverse` and `length` interact, and membership.
+
+Membership is the proposition `List.Mem` (`x ∈ l`, and `∀ x ∈ l, P x` with the binder
+notation), not a Boolean test: `List.any`/`List.all` are the Boolean versions, and
+`List.any_eq_true`/`List.all_eq_true` are the bridge between them.
+
+The lemmas are ordinary definitions, proved by structural recursion (no axiom and no
+`sorry`; the trust ledger is unchanged). They are stated left to right, the way `rw` uses
+them (`rw h; rfl`) and the way `simp` (stage 6h) orients them, and the safe ones are
+registered with `attribute [simp]` at the end of the file: `import ListLemmas` gives
+`simp` a terminating normal form for `map`, `append`, `reverse`, `filter`, `any` and
+`all`. The rules that are deliberately not registered — identities whose left side
+computes away, associativity, the `↔` membership lemmas, and the `_cons_true`/
+`_cons_false` equations whose premise (`p x = true`) needs a discharger (S3) — are listed
+at the end of the file with the reason.
+
+`simp` rewrites and leaves the closing step to the user, so a normal form is `simp; rfl`:
+
+```
+import ListLemmas
+
+def mapMap (f g : Nat → Nat) (l : List Nat) :
+    List.map f (List.map g l) = List.map (fun x => f (g x)) l :=
+  List.map_map f g l
+
+def appendNils {A : Type} (xs : List A) : (xs ++ []) ++ [] = xs := by
+  simp
+  rfl
+
+def allThree : (3 ∈ [1, 2, 3]) := Or.inr (Or.inr (Or.inl (refl 3)))
+```
+
+`appendNils` needs two `List.append_nil` rewrites, three lines by `rw`
+(`rw (List.append_nil (xs ++ []))`, then `rw (List.append_nil xs)`, then `rfl`); `simp`
+finds them and restarts after each rewrite.
+-/
+
+-- ## Membership
+
+/-- `x ∈ l`: `x` is one of the elements of `l`. A proposition (built from the
+impredicative `∨`), not a Boolean test. -/
+def List.Mem {A : Type} (x : A) (l : List A) : Prop :=
+  match l with
+  | .nil => False
+  | .cons y ys => x = y ∨ List.Mem x ys
+infix:50 " ∈ " => List.Mem
+
+/-- `∀ x ∈ l, P x` is `∀ x, x ∈ l → P x`. The binder is a parser rule in this module,
+over the built-in `∀`. -/
+syntax:lead (name := memForall) "∀" ident "∈" term "," term : term
+/-- The macro behind `∀ x ∈ l, P x`: it builds `∀ x, x ∈ l → P x`. -/
+def List.memForallMacro : Macro := fun stx => do
+  x ← Syntax.identName (Syntax.getArg stx 1);
+  let xi := Syntax.mkIdent x;
+  let xv := Syntax.mkVar x;
+  let l := Syntax.getArg stx 3;
+  let P := Syntax.getArg stx 5;
+  MacroM.pure (`(term| ∀ $xi, $xv ∈ $l → $P))
+attribute [macro term.memForall] List.memForallMacro
+
+/-- Every element of `l` satisfies `P`, as a proposition. -/
+def List.All {A : Type} (P : A → Prop) (l : List A) : Prop := ∀ x, x ∈ l → P x
+
+/-- Nothing is in the empty list. -/
+def List.not_mem_nil {A : Type} (x : A) : ¬ (x ∈ (List.nil : List A)) := fun h => h
+/-- The head is in the list. -/
+def List.mem_cons_self {A : Type} (x : A) (xs : List A) : x ∈ List.cons x xs := Or.inl (refl x)
+/-- Membership is preserved by `cons`. -/
+def List.mem_cons_of_mem {A : Type} (x y : A) (xs : List A) (h : x ∈ xs) :
+    x ∈ List.cons y xs := Or.inr h
+/-- `x` is in `y :: xs` exactly when it is `y` or in `xs`. -/
+def List.mem_cons_iff {A : Type} (x y : A) (xs : List A) :
+    ((x ∈ List.cons y xs) ↔ (x = y ∨ x ∈ xs)) := Iff.intro (fun h => h) (fun h => h)
+
+/-- `x` is in `l ++ m` exactly when it is in `l` or in `m`. -/
+def List.mem_append {A : Type} (x : A) : (l m : List A) →
+    ((x ∈ List.append l m) ↔ (x ∈ l ∨ x ∈ m))
+  | .nil, m => Iff.intro (fun h => Or.inr h) (fun h => Or.elim h (fun h' => False.elim h') (fun h' => h'))
+  | .cons y ys, m =>
+      Iff.intro
+        (fun h => Or.elim h
+          (fun e => Or.inl (Or.inl e))
+          (fun h' => Or.elim ((List.mem_append x ys m).1 h')
+            (fun hy => Or.inl (Or.inr hy))
+            (fun hm => Or.inr hm)))
+        (fun h => Or.elim h
+          (fun hl => Or.elim hl
+            (fun e => Or.inl e)
+            (fun hy => Or.inr ((List.mem_append x ys m).2 (Or.inl hy))))
+          (fun hm => Or.inr ((List.mem_append x ys m).2 (Or.inr hm))))
+
+-- ## Mapping
+
+/-- Mapping `f` over `[]` is `[]`. -/
+def List.map_nil {A B : Type} (f : A → B) : List.map f (List.nil : List A) = List.nil := rfl
+/-- `map f (x :: xs) = f x :: map f xs`. -/
+def List.map_cons {A B : Type} (f : A → B) (x : A) (xs : List A) :
+    List.map f (List.cons x xs) = List.cons (f x) (List.map f xs) := rfl
+/-- Mapping the identity is the identity. -/
+def List.map_id {A : Type} : (l : List A) → List.map (fun x => x) l = l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons x) (List.map_id xs)
+/-- Mapping twice is mapping the composition: `map f (map g l) = map (f ∘ g) l`. -/
+def List.map_map {A B C : Type} (g : B → C) (f : A → B) :
+    (l : List A) → List.map g (List.map f l) = List.map (fun x => g (f x)) l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons (g (f x))) (List.map_map g f xs)
+/-- Mapping distributes over `++`. -/
+def List.map_append {A B : Type} (f : A → B) : (l m : List A) →
+    List.map f (List.append l m) = List.append (List.map f l) (List.map f m)
+  | .nil, m => rfl
+  | .cons x xs, m => Eq.congrArg (List.cons (f x)) (List.map_append f xs m)
+
+/-- `map` keeps the length. -/
+def List.length_map {A B : Type} (f : A → B) : (l : List A) →
+    List.length (List.map f l) = List.length l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg Nat.succ (List.length_map f xs)
+
+-- ## Append
+
+/-- `++` is associative. -/
+def List.append_assoc {A : Type} : (l m n : List A) →
+    List.append (List.append l m) n = List.append l (List.append m n)
+  | .nil, m, n => rfl
+  | .cons x xs, m, n => Eq.congrArg (List.cons x) (List.append_assoc xs m n)
+/-- `l ++ [] = l`. -/
+def List.append_nil {A : Type} : (l : List A) → List.append l List.nil = l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons x) (List.append_nil xs)
+/-- `[] ++ l = l`, by computation. -/
+def List.nil_append {A : Type} (l : List A) : List.append List.nil l = l := rfl
+/-- `length (l ++ m) = length l + length m`. (`lib/WordArray.wiz` has the same fact as
+`List.length_append`; this name lets both modules be imported.) -/
+def List.length_append_eq {A : Type} : (l m : List A) →
+    List.length (List.append l m) = Nat.add (List.length l) (List.length m)
+  | .nil, m => rfl
+  | .cons x xs, m => Eq.congrArg Nat.succ (List.length_append_eq xs m)
+
+-- ## Reverse
+
+/-- `revApp` is `reverse` with an accumulator: `revApp l m` appends the reverse of `l`
+to `m`. -/
+def List.revApp_append {A : Type} : (l m acc : List A) →
+    List.revApp (List.append l m) acc = List.revApp m (List.revApp l acc)
+  | .nil, m, acc => rfl
+  | .cons x xs, m, acc => List.revApp_append xs m (List.cons x acc)
+
+/-- The length of `revApp l acc` is `length l + length acc`. -/
+def List.length_revApp {A : Type} : (l acc : List A) →
+    List.length (List.revApp l acc) = Nat.add (List.length l) (List.length acc)
+  | .nil, acc => rfl
+  | .cons x xs, acc =>
+      Eq.trans (List.length_revApp xs (List.cons x acc))
+        (Nat.add_succ (List.length xs) (List.length acc))
+/-- `reverse` keeps the length. -/
+def List.length_reverse {A : Type} (l : List A) :
+    List.length (List.reverse l) = List.length l :=
+  Eq.trans (List.length_revApp l List.nil) (Nat.add_zero (List.length l))
+
+/-- `map` commutes with `revApp`. -/
+def List.map_revApp {A B : Type} (f : A → B) : (l acc : List A) →
+    List.map f (List.revApp l acc) = List.revApp (List.map f l) (List.map f acc)
+  | .nil, acc => rfl
+  | .cons x xs, acc => List.map_revApp f xs (List.cons x acc)
+/-- `map` commutes with `reverse`. -/
+def List.map_reverse {A B : Type} (f : A → B) (l : List A) :
+    List.map f (List.reverse l) = List.reverse (List.map f l) :=
+  List.map_revApp f l List.nil
+
+/-- `revApp l acc = reverse l ++ acc`. -/
+def List.revApp_eq_append {A : Type} : (l acc : List A) →
+    List.revApp l acc = List.append (List.reverse l) acc
+  | .nil, acc => rfl
+  | .cons x xs, acc =>
+      Eq.trans (List.revApp_eq_append xs (List.cons x acc))
+        (Eq.trans
+          (Eq.symm (List.append_assoc (List.reverse xs) (List.cons x List.nil) acc))
+          (Eq.congrArg (fun t => List.append t acc)
+            (Eq.symm (List.revApp_eq_append xs (List.cons x List.nil)))))
+/-- `reverse (x :: xs) = reverse xs ++ [x]`. -/
+def List.reverse_cons {A : Type} (x : A) (xs : List A) :
+    List.reverse (List.cons x xs) = List.append (List.reverse xs) (List.cons x List.nil) :=
+  List.revApp_eq_append xs (List.cons x List.nil)
+/-- `reverse` turns `++` around: `reverse (l ++ m) = reverse m ++ reverse l`. -/
+def List.reverse_append {A : Type} : (l m : List A) →
+    List.reverse (List.append l m) = List.append (List.reverse m) (List.reverse l)
+  | .nil, m => Eq.symm (List.append_nil (List.reverse m))
+  | .cons x xs, m =>
+      Eq.trans (List.revApp_append (List.cons x xs) m List.nil)
+        (List.revApp_eq_append m (List.reverse (List.cons x xs)))
+/-- `reverse` is an involution. -/
+def List.reverse_reverse {A : Type} : (l : List A) → List.reverse (List.reverse l) = l
+  | .nil => rfl
+  | .cons x xs =>
+      Eq.trans
+        (Eq.congrArg List.reverse (List.reverse_cons x xs))
+        (Eq.trans
+          (List.reverse_append (List.reverse xs) (List.cons x List.nil))
+          (Eq.trans
+            (Eq.congrArg (fun t => List.append (List.reverse (List.cons x List.nil)) t)
+              (List.reverse_reverse xs))
+            rfl))
+
+-- ## Membership and `map`
+
+/-- `x ∈ l` gives `f x ∈ map f l`. -/
+def List.mem_map_of_mem {A B : Type} (f : A → B) (x : A) :
+    (l : List A) → x ∈ l → f x ∈ List.map f l
+  | .nil, h => h
+  | .cons y ys, h => Or.elim h
+      (fun e => Or.inl (Eq.congrArg f e))
+      (fun h' => Or.inr (List.mem_map_of_mem f x ys h'))
+
+/-- Carry an existential membership proof past a `cons` (a helper for `mem_of_mem_map`). -/
+def List.ex_mem_cons {A B : Type} (f : A → B) (y : A) (ys : List A) (z : B)
+    (h : ∃ w, w ∈ ys ∧ f w = z) : ∃ w, w ∈ List.cons y ys ∧ f w = z :=
+  Ex.elim h (fun w hw =>
+    Ex.intro (fun (u : A) => u ∈ List.cons y ys ∧ f u = z) w
+      (And.intro (Or.inr hw.1) hw.2))
+
+/-- An element of a mapped list is the image of an element of the list. -/
+def List.mem_of_mem_map {A B : Type} (f : A → B) (z : B) :
+    (l : List A) → z ∈ List.map f l → ∃ y, y ∈ l ∧ f y = z
+  | .nil, h => False.elim h
+  | .cons y ys, h => Or.elim h
+      (fun e => Ex.intro (fun (u : A) => u ∈ List.cons y ys ∧ f u = z) y
+        (And.intro (Or.inl (refl y)) (Eq.symm e)))
+      (fun h' => List.ex_mem_cons f y ys z (List.mem_of_mem_map f z ys h'))
+
+/-- `z ∈ map f l` exactly when `z = f x` for some `x ∈ l`. -/
+def List.mem_map {A B : Type} (f : A → B) (z : B) (l : List A) :
+    ((z ∈ List.map f l) ↔ ∃ x, x ∈ l ∧ f x = z) :=
+  Iff.intro (List.mem_of_mem_map f z l)
+    (fun h => Ex.elim h (fun x hx =>
+      @Eq.mp' B (f x) z (fun t => t ∈ List.map f l) hx.2
+        (List.mem_map_of_mem f x l hx.1)))
+
+-- ## Filtering
+
+/-- `filter p (x :: xs) = x :: filter p xs` when `p x` is true. -/
+def List.filter_cons_true {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .true) :
+    List.filter p (List.cons x xs) = List.cons x (List.filter p xs) := by
+  unfold List.filter; rw h; rfl
+/-- `filter p (x :: xs) = filter p xs` when `p x` is false. -/
+def List.filter_cons_false {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .false) :
+    List.filter p (List.cons x xs) = List.filter p xs := by
+  unfold List.filter; rw h; rfl
+
+/-- Everything `filter` keeps was in the list and satisfies the predicate. -/
+def List.filter_sound {A : Type} (p : A → Bool) (x : A) :
+    (l : List A) → x ∈ List.filter p l → x ∈ l ∧ p x = .true
+  | .nil, h => False.elim h
+  | .cons y ys, h =>
+      @Or.elim (p y = .true) (p y = .false) (x ∈ List.cons y ys ∧ p x = .true)
+        (Bool.cases (p y))
+        (fun hp =>
+          let h' := @Eq.mp' (List A) (List.filter p (List.cons y ys)) (List.cons y (List.filter p ys))
+            (fun t => x ∈ t) (@List.filter_cons_true A p y ys hp) h;
+          Or.elim h'
+            (fun e => And.intro (Or.inl e) (Eq.trans (Eq.congrArg p e) hp))
+            (fun h'' => let ih := List.filter_sound p x ys h''; And.intro (Or.inr ih.1) ih.2))
+        (fun hp =>
+          let h' := @Eq.mp' (List A) (List.filter p (List.cons y ys)) (List.filter p ys)
+            (fun t => x ∈ t) (@List.filter_cons_false A p y ys hp) h;
+          let ih := List.filter_sound p x ys h';
+          And.intro (Or.inr ih.1) ih.2)
+
+/-- An element of the list that satisfies the predicate survives `filter`. -/
+def List.filter_complete {A : Type} (p : A → Bool) (x : A) :
+    (l : List A) → x ∈ l → p x = .true → x ∈ List.filter p l
+  | .nil, h, hp => False.elim h
+  | .cons y ys, h, hp =>
+      @Or.elim (p y = .true) (p y = .false) (x ∈ List.filter p (List.cons y ys))
+        (Bool.cases (p y))
+        (fun hpy =>
+          let h' := Or.elim h
+            (fun e => Or.inl e)
+            (fun hy => Or.inr (List.filter_complete p x ys hy hp));
+          @Eq.mpr' (List A) (List.filter p (List.cons y ys)) (List.cons y (List.filter p ys))
+            (fun t => x ∈ t) (@List.filter_cons_true A p y ys hpy) h')
+        (fun hpy =>
+          let h' := Or.elim h
+            (fun e => False.elim (Bool.trueNeFalse (Eq.trans (Eq.symm hp) (Eq.trans (Eq.congrArg p e) hpy))))
+            (fun hy => List.filter_complete p x ys hy hp);
+          @Eq.mpr' (List A) (List.filter p (List.cons y ys)) (List.filter p ys)
+            (fun t => x ∈ t) (@List.filter_cons_false A p y ys hpy) h')
+
+/-- Membership after `filter`, both directions: soundness and completeness. -/
+def List.mem_filter {A : Type} (p : A → Bool) (x : A) (l : List A) :
+    ((x ∈ List.filter p l) ↔ (x ∈ l ∧ p x = .true)) :=
+  Iff.intro (List.filter_sound p x l) (fun h => List.filter_complete p x l h.1 h.2)
+
+/-- `filter` commutes with `map` when the predicate is pulled back along the map. -/
+def List.filter_map {A B : Type} (f : A → B) (q : B → Bool) : (l : List A) →
+    List.filter q (List.map f l) = List.map f (List.filter (fun x => q (f x)) l)
+  | .nil => rfl
+  | .cons x xs => Or.elim (Bool.cases (q (f x)))
+      (fun hq =>
+        let lhs1 := @List.filter_cons_true B q (f x) (List.map f xs) hq;
+        let lhs2 := Eq.congrArg (List.cons (f x)) (List.filter_map f q xs);
+        let rhs1 := Eq.congrArg (List.map f) (@List.filter_cons_true A (fun y => q (f y)) x xs hq);
+        Eq.trans (Eq.trans lhs1 lhs2) (Eq.symm (Eq.trans rhs1 rfl)))
+      (fun hq =>
+        let lhs1 := @List.filter_cons_false B q (f x) (List.map f xs) hq;
+        let lhs2 := List.filter_map f q xs;
+        let rhs1 := Eq.congrArg (List.map f) (@List.filter_cons_false A (fun y => q (f y)) x xs hq);
+        Eq.trans (Eq.trans lhs1 lhs2) (Eq.symm rhs1))
+
+/-- Two `filter`s: the second predicate is tested first (`&&` is `Bool.and`). -/
+def List.filter_filter {A : Type} (p q : A → Bool) : (l : List A) →
+    List.filter p (List.filter q l) = List.filter (fun x => Bool.and (q x) (p x)) l
+  | .nil => rfl
+  | .cons x xs => Or.elim (Bool.cases (q x))
+      (fun hq => Or.elim (Bool.cases (p x))
+        (fun hp =>
+          let lhs1 := Eq.congrArg (List.filter p) (@List.filter_cons_true A q x xs hq);
+          let lhs2 := @List.filter_cons_true A p x (List.filter q xs) hp;
+          let lhs3 := Eq.congrArg (List.cons x) (List.filter_filter p q xs);
+          let rhs1 := @List.filter_cons_true A (fun y => Bool.and (q y) (p y)) x xs
+            ((Bool.and_eq_true (q x) (p x)).2 (And.intro hq hp));
+          Eq.trans (Eq.trans lhs1 (Eq.trans lhs2 lhs3)) (Eq.symm rhs1))
+        (fun hp =>
+          let lhs1 := Eq.congrArg (List.filter p) (@List.filter_cons_true A q x xs hq);
+          let lhs2 := @List.filter_cons_false A p x (List.filter q xs) hp;
+          let lhs3 := List.filter_filter p q xs;
+          let rhs1 := @List.filter_cons_false A (fun y => Bool.and (q y) (p y)) x xs
+            ((Bool.and_eq_false (q x) (p x)).2 (Or.inr hp));
+          Eq.trans (Eq.trans lhs1 (Eq.trans lhs2 lhs3)) (Eq.symm rhs1)))
+      (fun hq =>
+        let lhs1 := Eq.congrArg (List.filter p) (@List.filter_cons_false A q x xs hq);
+        let lhs2 := List.filter_filter p q xs;
+        let rhs1 := @List.filter_cons_false A (fun y => Bool.and (q y) (p y)) x xs
+          ((Bool.and_eq_false (q x) (p x)).2 (Or.inl hq));
+        Eq.trans (Eq.trans lhs1 lhs2) (Eq.symm rhs1))
+
+-- ## `any` and `all`
+
+/-- `any p (x :: xs)` is true when `p x` is. -/
+def List.any_cons_true {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .true) :
+    List.any p (List.cons x xs) = .true := by unfold List.any; rw h; rfl
+/-- `any p (x :: xs)` is `any p xs` when `p x` is false. -/
+def List.any_cons_false {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .false) :
+    List.any p (List.cons x xs) = List.any p xs := by unfold List.any; rw h; rfl
+/-- `all p (x :: xs)` is `all p xs` when `p x` is true. -/
+def List.all_cons_true {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .true) :
+    List.all p (List.cons x xs) = List.all p xs := by unfold List.all; rw h; rfl
+/-- `all p (x :: xs)` is false when `p x` is. -/
+def List.all_cons_false {A : Type} (p : A → Bool) (x : A) (xs : List A) (h : p x = .false) :
+    List.all p (List.cons x xs) = .false := by unfold List.all; rw h; rfl
+
+/-- `any` over `++` is the `Bool.or` of the two. -/
+def List.any_append {A : Type} (p : A → Bool) : (l m : List A) →
+    List.any p (List.append l m) = Bool.or (List.any p l) (List.any p m)
+  | .nil, m => rfl
+  | .cons x xs, m =>
+      @Or.elim (p x = .true) (p x = .false)
+        (List.any p (List.append (List.cons x xs) m) = Bool.or (List.any p (List.cons x xs)) (List.any p m))
+        (Bool.cases (p x))
+        (fun hp =>
+          let lhs := @List.any_cons_true A p x (List.append xs m) hp;
+          let rhs := Eq.congrArg (fun t => Bool.or t (List.any p m)) (@List.any_cons_true A p x xs hp);
+          Eq.trans lhs (Eq.symm rhs))
+        (fun hp =>
+          let lhs := Eq.trans (@List.any_cons_false A p x (List.append xs m) hp) (List.any_append p xs m);
+          let rhs := Eq.congrArg (fun t => Bool.or t (List.any p m)) (@List.any_cons_false A p x xs hp);
+          Eq.trans lhs (Eq.symm rhs))
+
+/-- `all` over `++` is the `Bool.and` of the two. -/
+def List.all_append {A : Type} (p : A → Bool) : (l m : List A) →
+    List.all p (List.append l m) = Bool.and (List.all p l) (List.all p m)
+  | .nil, m => rfl
+  | .cons x xs, m =>
+      @Or.elim (p x = .true) (p x = .false)
+        (List.all p (List.append (List.cons x xs) m) = Bool.and (List.all p (List.cons x xs)) (List.all p m))
+        (Bool.cases (p x))
+        (fun hp =>
+          let lhs := Eq.trans (@List.all_cons_true A p x (List.append xs m) hp) (List.all_append p xs m);
+          let rhs := Eq.congrArg (fun t => Bool.and t (List.all p m)) (@List.all_cons_true A p x xs hp);
+          Eq.trans lhs (Eq.symm rhs))
+        (fun hp =>
+          let lhs := @List.all_cons_false A p x (List.append xs m) hp;
+          let rhs := Eq.congrArg (fun t => Bool.and t (List.all p m)) (@List.all_cons_false A p x xs hp);
+          Eq.trans lhs (Eq.symm rhs))
+
+/-- `any p l` is true exactly when some element satisfies `p`. -/
+def List.any_eq_true {A : Type} (p : A → Bool) : (l : List A) →
+    ((List.any p l = .true) ↔ ∃ x, x ∈ l ∧ p x = .true)
+  | .nil =>
+      Iff.intro
+        (fun h => False.elim h.1)
+        (fun h => Ex.elim h (fun x hx => False.elim hx.1))
+  | .cons y ys =>
+      @Or.elim (p y = .true) (p y = .false)
+        ((List.any p (List.cons y ys) = .true) ↔ ∃ x, x ∈ List.cons y ys ∧ p x = .true)
+        (Bool.cases (p y))
+        (fun hp =>
+          Iff.intro
+            (fun h => Ex.intro (fun (x : A) => x ∈ List.cons y ys ∧ p x = .true) y
+              (And.intro (Or.inl (refl y)) hp))
+            (fun h => @List.any_cons_true A p y ys hp))
+        (fun hp =>
+          Iff.intro
+            (fun h =>
+              let h' := @Eq.mp' Bool (List.any p (List.cons y ys)) (List.any p ys)
+                (fun t => t = .true) (@List.any_cons_false A p y ys hp) h;
+              Ex.elim ((List.any_eq_true p ys).1 h')
+                (fun x hx => Ex.intro (fun (z : A) => z ∈ List.cons y ys ∧ p z = .true) x
+                  (And.intro (Or.inr hx.1) hx.2)))
+            (fun h =>
+              let h' := Ex.elim h
+                (fun x hx => Or.elim hx.1
+                  (fun e => False.elim (Bool.trueNeFalse
+                    (Eq.trans (Eq.symm hx.2) (Eq.trans (Eq.congrArg p e) hp))))
+                  (fun hy => Ex.intro (fun (z : A) => z ∈ ys ∧ p z = .true) x
+                    (And.intro hy hx.2)));
+              @Eq.mpr' Bool (List.any p (List.cons y ys)) (List.any p ys)
+                (fun t => t = .true) (@List.any_cons_false A p y ys hp)
+                ((List.any_eq_true p ys).2 h')))
+
+/-- `all p l` is true exactly when every element satisfies `p`. -/
+def List.all_eq_true {A : Type} (p : A → Bool) : (l : List A) →
+    ((List.all p l = .true) ↔ (∀ x ∈ l, p x = .true))
+  | .nil =>
+      Iff.intro
+        (fun h x hx => False.elim hx)
+        (fun h => rfl)
+  | .cons y ys =>
+      @Or.elim (p y = .true) (p y = .false)
+        ((List.all p (List.cons y ys) = .true) ↔ (∀ x ∈ List.cons y ys, p x = .true))
+        (Bool.cases (p y))
+        (fun hp =>
+          Iff.intro
+            (fun h =>
+              let h' := @Eq.mp' Bool (List.all p (List.cons y ys)) (List.all p ys)
+                (fun t => t = .true) (@List.all_cons_true A p y ys hp) h;
+              fun x hx => Or.elim hx
+                (fun e => Eq.trans (Eq.congrArg p e) hp)
+                (fun hy => (List.all_eq_true p ys).1 h' x hy))
+            (fun h =>
+              @Eq.mpr' Bool (List.all p (List.cons y ys)) (List.all p ys)
+                (fun t => t = .true) (@List.all_cons_true A p y ys hp)
+                ((List.all_eq_true p ys).2 (fun x hx => h x (Or.inr hx)))))
+        (fun hp =>
+          Iff.intro
+            (fun h =>
+              let h' := @Eq.mp' Bool (List.all p (List.cons y ys)) .false
+                (fun t => t = .true) (@List.all_cons_false A p y ys hp) h;
+              fun x hx => False.elim h'.1)
+            (fun h =>
+              False.elim (Bool.trueNeFalse
+                (Eq.trans (Eq.symm (h y (Or.inl (refl y)))) hp))))
+
+-- ## Membership and `reverse`
+
+/-- `x` is in `revApp l acc` exactly when it is in `l` or in `acc`. -/
+def List.mem_revApp {A : Type} (x : A) : (l acc : List A) →
+    ((x ∈ List.revApp l acc) ↔ (x ∈ l ∨ x ∈ acc))
+  | .nil, acc =>
+      Iff.intro (fun h => Or.inr h) (fun h => Or.elim h (fun hx => False.elim hx) (fun ha => ha))
+  | .cons y ys, acc =>
+      Iff.intro
+        (fun h => Or.elim ((List.mem_revApp x ys (List.cons y acc)).1 h)
+          (fun hy => Or.inl (Or.inr hy))
+          (fun hc => Or.elim hc
+            (fun e => Or.inl (Or.inl e))
+            (fun ha => Or.inr ha)))
+        (fun h => Or.elim h
+          (fun hl => Or.elim hl
+            (fun e => (List.mem_revApp x ys (List.cons y acc)).2 (Or.inr (Or.inl e)))
+            (fun hy => (List.mem_revApp x ys (List.cons y acc)).2 (Or.inl hy)))
+          (fun ha => (List.mem_revApp x ys (List.cons y acc)).2 (Or.inr (Or.inr ha))))
+
+/-- `reverse` keeps the elements. -/
+def List.mem_reverse {A : Type} (x : A) (l : List A) :
+    ((x ∈ List.reverse l) ↔ x ∈ l) :=
+  Iff.intro
+    (fun h => Or.elim ((List.mem_revApp x l List.nil).1 h) (fun hx => hx) (fun hn => False.elim hn))
+    (fun h => (List.mem_revApp x l List.nil).2 (Or.inl h))
+
+-- ## The default `simp` set
+--
+-- The oriented equations above, in the order `simp` tries them within one priority
+-- (`docs/stages/06-macros/simp.md`): identities first, then the rules that push `map`,
+-- `reverse`, `filter`, `any` and `all` through `++` and through each other. Every rule
+-- here is a definitional equation or a structural induction that reduces the left side;
+-- none of them can grow a term without bound.
+--
+-- What is **not** registered, and why:
+--
+-- * `List.nil_append`: its left side `[] ++ l` computes to `l`, so the goal never
+--   contains `List.append List.nil l` to match (`List.nil_append` stays available to
+--   `rw` and `simp only [...]`).
+-- * `List.map_nil`, `List.map_cons`: `map f []` computes to `[]`, and
+--   `map f (x :: xs)` computes to a constructor carrying the rule's variables;
+--   `Tac.rewriteAt` refuses a constructor-valued pattern with variables (the goal has
+--   already computed it too). Both are used explicitly by `lib/Std` proofs and the
+--   `std` tests.
+-- * `List.append_assoc`: associativity has no normal form to aim at, for the same reason
+--   `Nat.add_assoc` stays out of the default set.
+-- * `List.revApp_append`, `List.revApp_eq_append`, `List.map_revApp`,
+--   `List.length_revApp`: `revApp` is the accumulator behind `reverse`. The user-facing
+--   normal form is stated for `reverse` (below); rewriting inside the accumulator is a
+--   proof device, so these stay explicit.
+-- * `List.mem_cons_iff`, `List.mem_append`, `List.mem_map`, `List.mem_filter`,
+--   `List.mem_revApp`, `List.mem_reverse`: they are `↔`, not equations; a simp rule is
+--   `∀ x₁ … xₙ, lhs = rhs`.
+-- * `List.not_mem_nil`, `List.mem_cons_self`, `List.mem_cons_of_mem`, `List.ex_mem_cons`,
+--   `List.mem_map_of_mem`, `List.mem_of_mem_map`, `List.filter_sound`,
+--   `List.filter_complete`, `List.All`: propositions (a negation, a membership, an
+--   existential, a conjunction), not equations.
+-- * `List.filter_cons_true`, `List.filter_cons_false`, `List.any_cons_true`,
+--   `List.any_cons_false`, `List.all_cons_true`, `List.all_cons_false`: an equation with a
+--   premise (`p x = .true`/`.false`) before it; a conditional rule needs a discharger
+--   (S3).
+
+attribute [simp] List.append_nil
+attribute [simp] List.map_id
+attribute [simp] List.map_map
+attribute [simp] List.map_append
+attribute [simp] List.length_map
+attribute [simp] List.length_append_eq
+attribute [simp] List.reverse_cons
+attribute [simp] List.reverse_append
+attribute [simp] List.reverse_reverse
+attribute [simp] List.map_reverse
+attribute [simp] List.length_reverse
+attribute [simp] List.filter_map
+attribute [simp] List.filter_filter
+attribute [simp] List.any_append
+attribute [simp] List.all_append

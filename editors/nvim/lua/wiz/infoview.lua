@@ -3,7 +3,7 @@
 -- else is there (`wiz/interactiveInfo`: syntax and its expansion, an import, instances,
 -- the command's declarations, messages) at it, as tagged text: every subterm is a range that knows its kind and its ref, so
 -- `K` in the infoview asks the server what the subterm under the cursor is
--- (`wiz/subtermInfo`). Protocol: wiz-notes/infoview-protocol.md.
+-- (`wiz/subtermInfo`). Protocol: docs/design/infoview-protocol.md.
 local config = require 'wiz.config'
 local lsp = require 'wiz.lsp'
 
@@ -641,7 +641,7 @@ end
 -- follows this editor's cursor.
 
 --- Open the web infoview for `buf`'s server (default: the current buffer). The result
---- (`{ port, url, message? }`) is kept in `M.state.browser`, for tests.
+--- (`{ port, url, token, message? }`; #430: the url carries the token) is kept in `M.state.browser`, for tests.
 function M.open_browser(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   lsp.request(buf, 'wiz/browserInfoview', vim.empty_dict(), function(err, result)

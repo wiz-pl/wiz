@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""`wiz-nb export FILE.ipynb` — the notebook exporter as a command.
+
+`tools/jupyter/` is opt-in and not on `PATH`; this wrapper keeps the command
+short.  The built-in `wiz` CLI does not know `nb` (it is a Lean binary), so the
+command is `tools/jupyter/wiz-nb` (or `python3 -m wiz_kernel.export`).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from wiz_kernel.export import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

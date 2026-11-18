@@ -1,0 +1,1197 @@
+import Sys
+import Json
+import Text
+import Int
+import Scry.TaintCmd
+import Scry.Dynamic
+import Scry.Interproc
+import Scry.Sarif
+/-!
+# Scry.Bench: the taint benchmark and metric harness (S0/S2, with room for S1/S3/S4)
+
+`scry bench` runs the same pipeline `scry taint` uses (`Scry.analyzeFile`) over a
+checked-in corpus, compares the findings with the manifest's expectations, and emits
+stable JSON and Markdown.
+
+The corpus is `bench/corpus/manifest.json`; each case names one C file, its suite
+(`S0`, `S2`, …), its CWE, and `expect` = `unsafe | safe | unknown`. An `unsafe` case
+lists the expected findings (`rule`, `function`, `callee`, `argument`, and optionally
+`sinkLine`/`sourceLine`). A `safe` case expects no finding. An `unknown` case is a
+documented coverage probe: it is reported, but it is not a true/false verdict.
+
+Metrics are computed per CWE and overall from **cases**, not raw alerts:
+
+* TP/FN for `unsafe` cases, TN/FP for `safe` cases; `unknown`, `error` and `skipped`
+  are reported separately and excluded from TPR/FPR.
+* path validity: a taint finding's path must end at the reported sink and start at a
+  source; a forbidden finding's path is the call itself. The source line and sink line
+  are checked when the manifest gives them.
+* certificate coverage: the `checked` fraction of reported findings.
+* runtime is wall clock from `Clock.monotonic`, marked informational. It is **not** a
+  `perf-run` measurement; the perf agent owns those numbers.
+
+A `safe` case with a blocking lowering boundary (an array, a struct field, a control
+flow construct, …) is `unknown`, not TN: the frontend's advice is honest about what it
+did not model. Routine externals, string literals and implicit conversions are advisory
+(they do not feed the taint rules) and are counted in `boundary` but do not block a
+verdict. `bench/corpus/README.md` has the full policy.
+-/
+
+-- ## Types
+
+/-- One expected finding: the identity the manifest can state without a program point.
+`sinkLine`/`sourceLine` are optional because a fixture edit that moves a line should be
+a deliberate expectation update, not a silent pass. -/
+structure Scry.BenchExpect where
+  rule : String
+  func : String
+  callee : String
+  arg : Nat
+  sinkLine : Option Nat
+  sourceLine : Option Nat
+
+/-- A manifest case. `path` is the resolved file on disk; `file` is the manifest's
+relative path, which is what the report shows. -/
+structure Scry.BenchCase where
+  id : String
+  suite : String
+  cwe : String
+  file : String
+  path : String
+  expect : String
+  findings : List Scry.BenchExpect
+  rules : Option String
+  reason : String
+  note : String
+  /-- A dynamic expectation (the `dynamic` object in the manifest), if any. -/
+  dynamic : Option Scry.DynExpect
+
+/-- A corpus is a manifest plus its root directory. -/
+structure Scry.BenchCorpus where
+  root : String
+  manifest : String
+  cases : List Scry.BenchCase
+
+/-- One actual finding, normalized for matching and evidence checks. -/
+structure Scry.BenchFinding where
+  rule : String
+  func : String
+  callee : String
+  arg : Nat
+  sinkPoint : Nat
+  kind : Scry.FindingKind
+  reachSink : Bool
+  startsAtSource : Bool
+  validPath : Bool
+  checked : Bool
+  sinkLine : Option Nat
+  sourceLine : Option Nat
+
+/-- The outcome of matching one case. -/
+structure Scry.BenchVerdict where
+  outcome : String
+  matched : Nat
+  extra : Nat
+  unknown : Bool
+
+/-- One case's result. `outcome` is `tp | fn | tn | fp | unknown | error | skipped`. -/
+structure Scry.BenchCaseResult where
+  caseId : String
+  suite : String
+  cwe : String
+  file : String
+  expect : String
+  outcome : String
+  findings : Nat
+  expected : Nat
+  matched : Nat
+  extra : Nat
+  taintFindings : Nat
+  forbiddenFindings : Nat
+  validPaths : Nat
+  reachSink : Nat
+  checked : Nat
+  boundary : Nat
+  blocking : Nat
+  unknown : Bool
+  bytes : Nat
+  ms : Nat
+  error : String
+  note : String
+
+/-- Case-level counts for one slice (a CWE, a suite, or the whole corpus). -/
+structure Scry.BenchCounts where
+  cases : Nat
+  tp : Nat
+  fn : Nat
+  tn : Nat
+  fp : Nat
+  unknown : Nat
+  error : Nat
+  skipped : Nat
+
+/-- Metrics derived from `BenchCounts`; the ratios are basis points (1/100 of a
+percent) so the computation is exact integer arithmetic and the baseline is stable. -/
+structure Scry.BenchMetrics where
+  counts : Scry.BenchCounts
+  tpr : Nat
+  fpr : Nat
+  youden : Int
+  precision : Nat
+  f1 : Nat
+
+/-- Per-slice aggregate: the counts, the metrics, and the evidence totals. -/
+structure Scry.BenchSlice where
+  name : String
+  counts : Scry.BenchCounts
+  metrics : Scry.BenchMetrics
+  findings : Nat
+  validPaths : Nat
+  checked : Nat
+
+/-- The whole run's deterministic summary. Timing is separate (see `BenchRun`). -/
+structure Scry.BenchSummary where
+  overall : Scry.BenchSlice
+  cwes : List Scry.BenchSlice
+  suites : List Scry.BenchSlice
+  macroTpr : Nat
+  macroFpr : Nat
+  macroYouden : Int
+  findings : Nat
+  taintFindings : Nat
+  forbiddenFindings : Nat
+  validPaths : Nat
+  reachSink : Nat
+  checked : Nat
+  boundary : Nat
+  blocking : Nat
+  casesWithBlocking : Nat
+  files : Nat
+  bytes : Nat
+
+/-- A baseline comparison change. -/
+structure Scry.BenchChange where
+  scope : String
+  name : String
+  field : String
+  before : String
+  after : String
+
+structure Scry.BenchBaseline where
+  status : String
+  path : String
+  matches : Bool
+  changes : List Scry.BenchChange
+  /-- Cases in the baseline that the run did not produce (`present→absent`). -/
+  missingFromRun : List String
+  /-- Cases in the run that the baseline did not have (`absent→present`). -/
+  addedInRun : List String
+
+/-- Everything one `scry bench` run produces. -/
+structure Scry.BenchRun where
+  status : String
+  reason : String
+  root : String
+  manifest : String
+  timingMeasured : Bool
+  totalMs : Nat
+  cases : List Scry.BenchCaseResult
+  summary : Scry.BenchSummary
+  baseline : Scry.BenchBaseline
+  dynamic : Option Scry.DynBenchRun
+  skippedSources : List String
+
+/-- The result of walking the main and extra corpora. -/
+structure Scry.BenchRunAll where
+  status : String
+  reason : String
+  cases : List Scry.BenchCaseResult
+  skipped : List String
+
+/-- The options `scry bench` accepts. -/
+structure Scry.BenchOpts where
+  corpus : String
+  baseline : Option String
+  extras : List String
+  jsonOut : Option String
+  markdownOut : Option String
+  updateBaseline : Option String
+  noTiming : Bool
+  quiet : Bool
+  failOnRegression : Bool
+  /-- Allow a missing baseline under `--fail-on-regression` (an explicit first run). -/
+  bootstrap : Bool
+  /-- Also run the dynamic corpus (`bench/dynamic`). -/
+  dynamic : Bool
+  /-- Compiler for dynamic cases (`--cc`). -/
+  cc : Option String
+  /-- Coverage for dynamic cases. -/
+  coverage : Bool
+
+-- ## Small helpers
+
+/-- `n` zeros as strings (no `List.replicate` in this slice). -/
+def Scry.benchZeros : Nat → List String
+  | .zero => .nil
+  | .succ k => .cons "0" (Scry.benchZeros k)
+
+/-- Right-align `n` in `w` digits (only used for metric decimals). -/
+def Scry.benchPad (w n : Nat) : String :=
+  let s := Nat.repr n;
+  String.append (String.join (Scry.benchZeros (Nat.sub w (String.length s)))) s
+
+/-- Basis points as a four-decimal fraction: `8750` is `0.8750`, `10000` is `1.0000`. -/
+def Scry.benchDec4 (bp : Nat) : String :=
+  let whole := Nat.div bp 10000;
+  let frac := Nat.sub bp (Nat.mul whole 10000);
+  String.append (Nat.repr whole) (String.append "." (Scry.benchPad 4 frac))
+
+/-- A signed basis-point fraction for Youden's J. -/
+def Scry.benchDec4Signed (bp : Int) : String :=
+  match bp with
+  | .ofNat n => Scry.benchDec4 n
+  | .negSucc n => String.append "-" (Scry.benchDec4 (Nat.succ n))
+
+/-- Basis points as a percentage with two decimals: `8750` is `87.50%`. -/
+def Scry.benchPct (bp : Nat) : String :=
+  let whole := Nat.div bp 100;
+  let frac := Nat.sub bp (Nat.mul whole 100);
+  String.append (Nat.repr whole) (String.append "." (String.append (Scry.benchPad 2 frac) "%"))
+
+def Scry.benchPctSigned (bp : Int) : String :=
+  match bp with
+  | .ofNat n => Scry.benchPct n
+  | .negSucc n => String.append "-" (Scry.benchPct (Nat.succ n))
+
+/-- A percentage, or an em dash when the denominator is empty. -/
+def Scry.benchDefinedPct (defined : Bool) (bp : Nat) : String :=
+  match defined with
+  | .true => Scry.benchPct bp
+  | .false => "—"
+
+def Scry.benchDefinedPctSigned (defined : Bool) (bp : Int) : String :=
+  match defined with
+  | .true => Scry.benchPctSigned bp
+  | .false => "—"
+
+/-- `num / den` in basis points, rounded to nearest; zero when `den = 0`. -/
+def Scry.benchRatio (num den : Nat) : Nat :=
+  match Nat.beq den 0 with
+  | .true => 0
+  | .false => Nat.div (Nat.add (Nat.mul num 10000) (Nat.div den 2)) den
+
+/-- The last element, if any. -/
+def Scry.benchLast {A : Type} : List A → Option A
+  | .nil => .none
+  | .cons x .nil => .some x
+  | .cons _ xs => Scry.benchLast xs
+
+/-- Whether `n` occurs in a `Nat` list. -/
+def Scry.benchMemNat (n : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons x xs => Bool.or (Nat.beq n x) (Scry.benchMemNat n xs)
+
+/-- Filter with the index. -/
+def Scry.benchFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .none => Scry.benchFilterMap f xs
+    | .some y => .cons y (Scry.benchFilterMap f xs)
+
+/-- Map with the index. -/
+def Scry.benchMapIndex {A B : Type} (f : Nat → A → B) : Nat → List A → List B
+  | _, .nil => .nil
+  | i, .cons x xs => .cons (f i x) (Scry.benchMapIndex f (Nat.succ i) xs)
+
+/-- Append a value to the end of a list (keeps first-appearance order). -/
+def Scry.benchSnoc {A : Type} (x : A) : List A → List A
+  | .nil => .cons x .nil
+  | .cons y ys => .cons y (Scry.benchSnoc x ys)
+
+-- ## JSON helpers
+
+def Scry.benchJsonStr (j : Json) (k : String) : String :=
+  match Json.get j k with
+  | .some x => match Json.asString x with
+    | .some s => s
+    | .none => ""
+  | .none => ""
+
+def Scry.benchJsonNat (j : Json) (k : String) : Option Nat :=
+  match Json.get j k with
+  | .some x => Json.asNat x
+  | .none => .none
+
+def Scry.benchJsonList (j : Json) (k : String) : List Json :=
+  match Json.get j k with
+  | .some x => Json.asList x
+  | .none => .nil
+
+def Scry.benchJsonNatD (j : Json) (k : String) (d : Nat) : Nat :=
+  match Scry.benchJsonNat j k with
+  | .some n => n
+  | .none => d
+
+-- ## The manifest
+
+def Scry.benchExpectOfJson (j : Json) : Scry.BenchExpect :=
+  Scry.BenchExpect.mk
+    (Scry.benchJsonStr j "rule")
+    (Scry.benchJsonStr j "function")
+    (Scry.benchJsonStr j "callee")
+    (Scry.benchJsonNatD j "argument" 0)
+    (Scry.benchJsonNat j "sinkLine")
+    (Scry.benchJsonNat j "sourceLine")
+
+def Scry.benchJsonStringD (j : Json) (k : String) (d : String) : String :=
+  match Json.get j k with
+  | .some x => match Json.asString x with
+    | .some s => s
+    | .none => d
+  | .none => d
+
+def Scry.benchCaseOfJson (root : String) (j : Json) : Scry.BenchCase :=
+  let file := Scry.benchJsonStr j "file";
+  let rules : Option String := match Json.get j "rules" with
+    | .some x => match Json.asString x with
+      | .some s => .some (Path.join root s)
+      | .none => .none
+    | .none => .none;
+  Scry.BenchCase.mk
+    (Scry.benchJsonStr j "id")
+    (Scry.benchJsonStringD j "suite" "S2")
+    (Scry.benchJsonStringD j "cwe" "unknown")
+    file
+    (Path.join root file)
+    (Scry.benchJsonStringD j "expect" "unsafe")
+    (List.map Scry.benchExpectOfJson (Scry.benchJsonList j "findings"))
+    rules
+    (Scry.benchJsonStr j "reason")
+    (Scry.benchJsonStr j "note")
+    (Scry.dynExpectOfJson j)
+
+/-- Load one manifest. `.none` means the manifest is not there (a clean skip);
+`.error` means it was found but malformed. -/
+def Scry.benchLoadCorpus (root : String) : EIO (Option Scry.BenchCorpus) := do
+  let manifest := Path.join root "manifest.json";
+  ok ← EIO.lift (FS.exists manifest);
+  match ok with
+  | .false => EIO.pure .none
+  | .true => do
+    text ← FS.readFile manifest;
+    match Json.parse text with
+    | .error e => EIO.fail (manifest ++ ": " ++ e)
+    | .ok j => do
+      let cases := List.map (Scry.benchCaseOfJson root) (Scry.benchJsonList j "cases");
+      EIO.pure (.some (Scry.BenchCorpus.mk root manifest cases))
+
+-- ## Boundary classification
+
+/-- Advice that does not feed the taint rules: an external call without a prototype,
+a string literal, an implicit conversion, a void implicit return, a typed external
+global, or an arity mismatch. These are counted but do not block a safe verdict. -/
+def Scry.benchAdvisory (msg : String) : Bool :=
+  Bool.or (String.startsWith msg "call to undeclared function ")
+    (Bool.or (String.startsWith msg "string literal")
+      (Bool.or (String.startsWith msg "implicit conversion")
+        (Bool.or (String.startsWith msg "implicit return")
+          (Bool.or (String.startsWith msg "arity mismatch calling ")
+            (Bool.or (String.eq msg "identifier stdin not modelled")
+              (Bool.or (String.eq msg "identifier stdout not modelled")
+                (String.eq msg "identifier stderr not modelled")))))))
+
+/-- A warning is blocking when it names a construct the taint layer cannot see through:
+arrays, aggregate fields, pointer operations, the unmodelled control-flow statements,
+or an unbound identifier. Everything else is advisory. -/
+def Scry.benchBlockingMsg (msg : String) : Bool := Bool.not (Scry.benchAdvisory msg)
+
+-- ## Path validity
+
+def Scry.benchPathReachesSink (f : Scry.RuleFinding) : Bool :=
+  match Scry.benchLast f.path with
+  | .none => .false
+  | .some p => Bool.and (Nat.beq p.point f.sink) (Bool.and (String.eq p.func f.func)
+      (match p.kind with | .sink => .true | _ => .false))
+
+def Scry.benchPathStartsAtSource (f : Scry.RuleFinding) : Bool :=
+  match f.path with
+  | .nil => .false
+  | .cons p _ => match p.kind with
+    | .source => .true
+    | _ => .false
+
+/-- A taint path is valid when it starts at a source and ends at the reported sink. A
+forbidden finding's evidence is the call itself, so only the sink end is required. -/
+def Scry.benchValidPath (f : Scry.RuleFinding) : Bool :=
+  Bool.and (Scry.benchPathReachesSink f)
+    (match f.kind with
+      | .forbidden => .true
+      | .memory => .true
+      | .taint => Scry.benchPathStartsAtSource f)
+
+/-- The line of the first path node, if the origin map has it. -/
+def Scry.benchSourceLine (m : Scry.OriginMap) (f : Scry.RuleFinding) : Option Nat :=
+  match f.path with
+  | .nil => .none
+  | .cons p _ => match Scry.originAt m p.func p.point with
+    | .some o => .some o.line
+    | .none => .none
+
+def Scry.benchSinkLine (m : Scry.OriginMap) (f : Scry.RuleFinding) : Option Nat :=
+  match Scry.originAt m f.func f.sink with
+  | .some o => .some o.line
+  | .none => .none
+
+def Scry.benchFindingOf (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool) :
+    Scry.BenchFinding :=
+  Scry.BenchFinding.mk f.rule f.func f.name f.arg f.sink f.kind
+    (Scry.benchPathReachesSink f)
+    (Scry.benchPathStartsAtSource f)
+    (Scry.benchValidPath f)
+    checked
+    (Scry.benchSinkLine m f)
+    (Scry.benchSourceLine m f)
+
+/-- `zip` findings with their checked flags; a missing flag is unchecked. -/
+def Scry.benchZipFindings (fs : List Scry.RuleFinding) (cs : List Bool) :
+    List (Scry.RuleFinding × Bool) :=
+  match fs, cs with
+  | .nil, _ => .nil
+  | .cons f rest, .cons c cs' => .cons (f, c) (Scry.benchZipFindings rest cs')
+  | .cons f rest, .nil => .cons (f, .false) (Scry.benchZipFindings rest .nil)
+
+def Scry.benchFindingsOf (rep : Scry.TaintReport) : List Scry.BenchFinding :=
+  List.map (fun p => Scry.benchFindingOf rep.origins p.1 p.2)
+    (Scry.benchZipFindings rep.findings rep.checks)
+
+-- ## Matching
+
+def Scry.benchLineOk (want : Option Nat) (got : Option Nat) : Bool :=
+  match want with
+  | .none => .true
+  | .some w => match got with
+    | .some g => Nat.beq w g
+    | .none => .false
+
+def Scry.benchSameIdentity (e : Scry.BenchExpect) (a : Scry.BenchFinding) : Bool :=
+  Bool.and (String.eq e.rule a.rule)
+    (Bool.and (String.eq e.func a.func)
+      (Bool.and (String.eq e.callee a.callee)
+        (Bool.and (Nat.beq e.arg a.arg) (Scry.benchLineOk e.sinkLine a.sinkLine))))
+
+def Scry.benchSameEvidence (e : Scry.BenchExpect) (a : Scry.BenchFinding) : Bool :=
+  Bool.and a.validPath (Scry.benchLineOk e.sourceLine a.sourceLine)
+
+def Scry.benchFindUnused (e : Scry.BenchExpect) (used : List Nat) :
+    List (Nat × Scry.BenchFinding) → Option (Nat × Scry.BenchFinding)
+  | .nil => .none
+  | .cons (i, a) rest =>
+    match Bool.and (Bool.not (Scry.benchMemNat i used))
+        (Scry.benchSameIdentity e a) with
+    | .true => .some (i, a)
+    | .false => Scry.benchFindUnused e used rest
+
+/-- Match expected findings to actual findings one-to-one, in manifest order. -/
+partial def Scry.benchMatchGo (as : List (Nat × Scry.BenchFinding)) (used : List Nat) :
+    List Scry.BenchExpect → List (Scry.BenchExpect × Option Scry.BenchFinding)
+  | .nil => .nil
+  | .cons e rest =>
+    match Scry.benchFindUnused e used as with
+    | .none => .cons (e, .none) (Scry.benchMatchGo as used rest)
+    | .some p => .cons (e, .some p.2) (Scry.benchMatchGo as (.cons p.1 used) rest)
+
+def Scry.benchPairsMatched : List (Scry.BenchExpect × Option Scry.BenchFinding) → Nat
+  | .nil => 0
+  | .cons p rest => match p.2 with
+    | .some _ => Nat.succ (Scry.benchPairsMatched rest)
+    | .none => Scry.benchPairsMatched rest
+
+def Scry.benchPairsEvidence : List (Scry.BenchExpect × Option Scry.BenchFinding) → Bool
+  | .nil => .true
+  | .cons p rest => match p.2 with
+    | .none => .false
+    | .some a => Bool.and (Scry.benchSameEvidence p.1 a) (Scry.benchPairsEvidence rest)
+
+/-- Outcome for one case, given its actual findings and warnings. -/
+def Scry.benchOutcome (expect : String) (expected : List Scry.BenchExpect)
+    (actual : List Scry.BenchFinding) (blocking : Nat) : Scry.BenchVerdict :=
+  let indexed := Scry.benchMapIndex (fun i a => (i, a)) 0 actual;
+  let pairs := Scry.benchMatchGo indexed .nil expected;
+  let matched := Scry.benchPairsMatched pairs;
+  let extra := Nat.sub (List.length actual) matched;
+  let unknownFlag := Nat.lt 0 blocking;
+  match expect with
+  | "unsafe" =>
+    if Nat.beq (List.length expected) 0 then
+      Scry.BenchVerdict.mk "error" 0 0 .true
+    else if Bool.and (Nat.beq matched (List.length expected))
+      (Bool.and (Scry.benchPairsEvidence pairs) (Nat.beq extra 0))
+    then Scry.BenchVerdict.mk "tp" matched extra unknownFlag
+    else Scry.BenchVerdict.mk "fn" matched extra unknownFlag
+  | "safe" =>
+    if Nat.lt 0 (List.length actual) then
+      Scry.BenchVerdict.mk "fp" 0 (List.length actual) .true
+    else if Nat.lt 0 blocking then Scry.BenchVerdict.mk "unknown" 0 0 .true
+    else Scry.BenchVerdict.mk "tn" 0 0 .false
+  | "unknown" => Scry.BenchVerdict.mk "unknown" matched extra .true
+  | _ => Scry.BenchVerdict.mk "error" 0 0 .true
+
+-- ## Counts and metrics
+
+def Scry.benchEmptyCounts : Scry.BenchCounts :=
+  Scry.BenchCounts.mk 0 0 0 0 0 0 0 0
+
+def Scry.benchCount (r : Scry.BenchCaseResult) (c : Scry.BenchCounts) : Scry.BenchCounts :=
+  let cases := Nat.succ c.cases;
+  match r.outcome with
+  | "tp" => { c with cases := cases, tp := Nat.succ c.tp }
+  | "fn" => { c with cases := cases, fn := Nat.succ c.fn }
+  | "tn" => { c with cases := cases, tn := Nat.succ c.tn }
+  | "fp" => { c with cases := cases, fp := Nat.succ c.fp }
+  | "unknown" => { c with cases := cases, unknown := Nat.succ c.unknown }
+  | "error" => { c with cases := cases, error := Nat.succ c.error }
+  | "skipped" => { c with cases := cases, skipped := Nat.succ c.skipped }
+  | _ => { c with cases := cases, error := Nat.succ c.error }
+
+def Scry.benchCountsOf (rs : List Scry.BenchCaseResult) : Scry.BenchCounts :=
+  List.foldl (fun c r => Scry.benchCount r c) Scry.benchEmptyCounts rs
+
+def Scry.benchMetricsOf (c : Scry.BenchCounts) : Scry.BenchMetrics :=
+  let tpr := Scry.benchRatio c.tp (Nat.add c.tp c.fn);
+  let fpr := Scry.benchRatio c.fp (Nat.add c.fp c.tn);
+  let prec := Scry.benchRatio c.tp (Nat.add c.tp c.fp);
+  let f1 := match Nat.beq (Nat.add prec tpr) 0 with
+    | .true => 0
+    | .false => Nat.div (Nat.mul 2 (Nat.mul prec tpr)) (Nat.add prec tpr);
+  Scry.BenchMetrics.mk c tpr fpr (Int.subNatNat tpr fpr) prec f1
+
+def Scry.benchSlice (name : String) (rs : List Scry.BenchCaseResult) : Scry.BenchSlice :=
+  let counts := Scry.benchCountsOf rs;
+  Scry.BenchSlice.mk name counts (Scry.benchMetricsOf counts)
+    (List.foldl (fun n r => Nat.add n r.findings) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.validPaths) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.checked) 0 rs)
+
+/-- Group results by a key, preserving first-appearance order. -/
+partial def Scry.benchGroupGo {A : Type} (key : A → String) (acc : List (String × List A)) :
+    List A → List (String × List A)
+  | .nil => List.reverse acc
+  | .cons x xs =>
+    let k := key x;
+    let acc' := match List.find (fun p => String.eq p.1 k) acc with
+      | .none => (.cons (k, (.cons x (.nil : List A))) acc : List (String × List A))
+      | .some _ => List.map (fun p => match String.eq p.1 k with
+          | .true => (p.1, List.append p.2 (.cons x .nil))
+          | .false => p) acc;
+    Scry.benchGroupGo key acc' xs
+
+def Scry.benchGroup {A : Type} (key : A → String) (xs : List A) :
+    List (String × List A) :=
+  Scry.benchGroupGo key .nil xs
+
+def Scry.benchSumNat (xs : List Nat) : Nat := List.foldl Nat.add 0 xs
+
+def Scry.benchMacroTpr (ss : List Scry.BenchSlice) : Nat :=
+  let vals := Scry.benchFilterMap (fun s =>
+    match Nat.beq (Nat.add s.counts.tp s.counts.fn) 0 with
+    | .true => .none
+    | .false => .some s.metrics.tpr) ss;
+  let n := List.length vals;
+  match Nat.beq n 0 with
+  | .true => 0
+  | .false => Nat.div (Scry.benchSumNat vals) n
+
+def Scry.benchMacroFpr (ss : List Scry.BenchSlice) : Nat :=
+  let vals := Scry.benchFilterMap (fun s =>
+    match Nat.beq (Nat.add s.counts.fp s.counts.tn) 0 with
+    | .true => .none
+    | .false => .some s.metrics.fpr) ss;
+  let n := List.length vals;
+  match Nat.beq n 0 with
+  | .true => 0
+  | .false => Nat.div (Scry.benchSumNat vals) n
+
+def Scry.benchSummaryOf (rs : List Scry.BenchCaseResult) : Scry.BenchSummary :=
+  let overall := Scry.benchSlice "overall" rs;
+  let cwes := List.map (fun p => Scry.benchSlice p.1 p.2) (Scry.benchGroup (fun r => r.cwe) rs);
+  let suites := List.map (fun p => Scry.benchSlice p.1 p.2) (Scry.benchGroup (fun r => r.suite) rs);
+  let macroTpr := Scry.benchMacroTpr cwes;
+  let macroFpr := Scry.benchMacroFpr cwes;
+  Scry.BenchSummary.mk overall cwes suites macroTpr macroFpr
+    (Int.subNatNat macroTpr macroFpr)
+    (List.foldl (fun n r => Nat.add n r.findings) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.taintFindings) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.forbiddenFindings) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.validPaths) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.reachSink) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.checked) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.boundary) 0 rs)
+    (List.foldl (fun n r => Nat.add n r.blocking) 0 rs)
+    (List.length (List.filter (fun r => Nat.lt 0 r.blocking) rs))
+    (List.length (List.filter (fun r => Bool.not (String.eq r.outcome "skipped")) rs))
+    (List.foldl (fun n r => Nat.add n r.bytes) 0 rs)
+
+-- ## Running the corpus
+
+def Scry.benchOptsFor (c : Scry.BenchCase) : Scry.TaintOpts :=
+  { Scry.emptyTaintOpts c.path with rules := c.rules }
+
+def Scry.benchCaseResult (c : Scry.BenchCase) (outcome : String) (findings expected
+    matched extra taint forbidden valid reach checked boundary blocking : Nat)
+    (unknown : Bool) (bytes ms : Nat) (error note : String) : Scry.BenchCaseResult :=
+  Scry.BenchCaseResult.mk c.id c.suite c.cwe c.file c.expect outcome findings expected
+    matched extra taint forbidden valid reach checked boundary blocking unknown bytes ms
+    error note
+
+/-- Analyse one case. Errors are data (a case can be a parse error or an unsupported
+frontend construct); a missing file is `skipped`, not an analysis failure. -/
+def Scry.benchRunCase (measure : Bool) (c : Scry.BenchCase) : EIO Scry.BenchCaseResult := do
+  fileExists ← EIO.lift (FS.exists c.path);
+  match fileExists with
+  | .false => EIO.pure (Scry.benchCaseResult c "skipped" 0 (List.length c.findings)
+      0 0 0 0 0 0 0 0 0 .true 0 0 ("missing file " ++ c.path) c.note)
+  | .true => do
+    text ← FS.readFile c.path;
+    let bytes := String.length text;
+    t0 ← EIO.lift Clock.monotonic;
+    rep ← EIO.lift (Scry.analyzeFile (Scry.benchOptsFor c));
+    t1 ← EIO.lift Clock.monotonic;
+    let ms := match measure with
+      | .true => Duration.toMillis (Duration.sub t1 t0)
+      | .false => 0;
+    match rep with
+    | .error e => EIO.pure (Scry.benchCaseResult c "error" 0 (List.length c.findings)
+        0 0 0 0 0 0 0 0 0 .true bytes ms e c.note)
+    | .ok r => do
+      let actual := Scry.benchFindingsOf r;
+      let boundary := List.length r.boundaries;
+      let blocking := List.length (List.filter (fun b => Scry.benchBlockingMsg b.message)
+        r.boundaries);
+      let v := Scry.benchOutcome c.expect c.findings actual blocking;
+      let taint := List.length (List.filter (fun f => match f.kind with
+        | .taint => .true | .forbidden => .false | .memory => .false) actual);
+      let forbidden := List.length (List.filter (fun f => match f.kind with
+        | .forbidden => .true | _ => .false) actual);
+      let valid := List.length (List.filter (fun f => f.validPath) actual);
+      let reach := List.length (List.filter (fun f => f.reachSink) actual);
+      let checked := List.length (List.filter (fun f => f.checked) actual);
+      let note := match String.eq c.note "" with
+        | .true => c.reason
+        | .false => c.note;
+      EIO.pure (Scry.benchCaseResult c v.outcome (List.length actual)
+        (List.length c.findings) v.matched v.extra taint forbidden valid reach checked
+        boundary blocking v.unknown bytes ms "" note)
+
+partial def Scry.benchRunCases (measure : Bool) (cs : List Scry.BenchCase) :
+    EIO (List Scry.BenchCaseResult) :=
+  match cs with
+  | .nil => EIO.pure .nil
+  | .cons c rest => do
+    r ← Scry.benchRunCase measure c;
+    rs ← Scry.benchRunCases measure rest;
+    EIO.pure (.cons r rs)
+
+partial def Scry.benchRunExtras (measure : Bool) (es : List String) :
+    EIO (List Scry.BenchCaseResult × List String) :=
+  match es with
+  | .nil => EIO.pure (.nil, .nil)
+  | .cons e rest => do
+    ec ← Scry.benchLoadCorpus e;
+    match ec with
+    | .none => do
+      r ← Scry.benchRunExtras measure rest;
+      EIO.pure (r.1, .cons ("no manifest at " ++ Path.join e "manifest.json") r.2)
+    | .some c => do
+      rs ← Scry.benchRunCases measure c.cases;
+      r ← Scry.benchRunExtras measure rest;
+      EIO.pure (List.append rs r.1, r.2)
+
+/-- Run every case of a corpus (and any `--extra` corpora), optionally measuring wall
+time. A missing corpus/extra is reported as skipped, never as a failure. -/
+def Scry.benchRunAll (measure : Bool) (root : String) (extras : List String) :
+    EIO Scry.BenchRunAll := do
+  main ← Scry.benchLoadCorpus root;
+  match main with
+  | .none => EIO.pure (Scry.BenchRunAll.mk "skipped"
+      ("no manifest at " ++ Path.join root "manifest.json") .nil .nil)
+  | .some corpus => do
+    rs ← Scry.benchRunCases measure corpus.cases;
+    ex ← Scry.benchRunExtras measure extras;
+    EIO.pure (Scry.BenchRunAll.mk "ok" "" (List.append rs ex.1) ex.2)
+
+-- ## Report JSON
+
+def Scry.benchMetricsJson (m : Scry.BenchMetrics) : Json :=
+  Json.mkObj
+    [ ("tp", Json.ofNat m.counts.tp)
+    , ("fn", Json.ofNat m.counts.fn)
+    , ("tn", Json.ofNat m.counts.tn)
+    , ("fp", Json.ofNat m.counts.fp)
+    , ("unknown", Json.ofNat m.counts.unknown)
+    , ("error", Json.ofNat m.counts.error)
+    , ("skipped", Json.ofNat m.counts.skipped)
+    , ("tpr", Json.dec (Scry.benchDec4 m.tpr))
+    , ("fpr", Json.dec (Scry.benchDec4 m.fpr))
+    , ("youden", Json.dec (Scry.benchDec4Signed m.youden))
+    , ("precision", Json.dec (Scry.benchDec4 m.precision))
+    , ("f1", Json.dec (Scry.benchDec4 m.f1))
+    , ("tpr_defined", Json.mkBool (Nat.lt 0 (Nat.add m.counts.tp m.counts.fn)))
+    , ("fpr_defined", Json.mkBool (Nat.lt 0 (Nat.add m.counts.fp m.counts.tn)))
+    , ("youden_defined", Json.mkBool
+        (Bool.and (Nat.lt 0 (Nat.add m.counts.tp m.counts.fn))
+          (Nat.lt 0 (Nat.add m.counts.fp m.counts.tn))))
+    , ("tpr_bp", Json.ofNat m.tpr)
+    , ("fpr_bp", Json.ofNat m.fpr)
+    , ("youden_bp", Json.ofNat (Int.natAbs m.youden))
+    , ("youden_negative", Json.mkBool (Int.isNeg m.youden)) ]
+
+def Scry.benchSliceJson (s : Scry.BenchSlice) : Json :=
+  Json.mkObj
+    [ ("name", Json.mkStr s.name)
+    , ("metrics", Scry.benchMetricsJson s.metrics)
+    , ("findings", Json.ofNat s.findings)
+    , ("valid_paths", Json.ofNat s.validPaths)
+    , ("checked", Json.ofNat s.checked) ]
+
+def Scry.benchCaseJson (r : Scry.BenchCaseResult) : Json :=
+  Json.mkObj
+    [ ("id", Json.mkStr r.caseId)
+    , ("suite", Json.mkStr r.suite)
+    , ("cwe", Json.mkStr r.cwe)
+    , ("file", Json.mkStr r.file)
+    , ("expect", Json.mkStr r.expect)
+    , ("outcome", Json.mkStr r.outcome)
+    , ("findings", Json.ofNat r.findings)
+    , ("expected", Json.ofNat r.expected)
+    , ("matched", Json.ofNat r.matched)
+    , ("extra", Json.ofNat r.extra)
+    , ("taint_findings", Json.ofNat r.taintFindings)
+    , ("forbidden_findings", Json.ofNat r.forbiddenFindings)
+    , ("valid_paths", Json.ofNat r.validPaths)
+    , ("reach_sink", Json.ofNat r.reachSink)
+    , ("checked", Json.ofNat r.checked)
+    , ("boundary", Json.ofNat r.boundary)
+    , ("blocking_boundary", Json.ofNat r.blocking)
+    , ("unknown", Json.mkBool r.unknown)
+    , ("bytes", Json.ofNat r.bytes)
+    , ("ms", Json.ofNat r.ms)
+    , ("error", Json.mkStr r.error)
+    , ("note", Json.mkStr r.note) ]
+
+def Scry.benchBaselineCaseJson (r : Scry.BenchCaseResult) : Json :=
+  Json.mkObj
+    [ ("id", Json.mkStr r.caseId)
+    , ("expect", Json.mkStr r.expect)
+    , ("outcome", Json.mkStr r.outcome)
+    , ("findings", Json.ofNat r.findings)
+    , ("expected", Json.ofNat r.expected)
+    , ("matched", Json.ofNat r.matched)
+    , ("extra", Json.ofNat r.extra)
+    , ("valid_paths", Json.ofNat r.validPaths)
+    , ("reach_sink", Json.ofNat r.reachSink)
+    , ("checked", Json.ofNat r.checked)
+    , ("boundary", Json.ofNat r.boundary)
+    , ("blocking_boundary", Json.ofNat r.blocking)
+    , ("unknown", Json.mkBool r.unknown) ]
+
+def Scry.benchBaselineJson (run : Scry.BenchRun) : Json :=
+  Json.mkObj
+    [ ("format", Json.mkStr "scry-bench-baseline")
+    , ("version", Json.ofNat 1)
+    , ("corpus", Json.mkStr run.root)
+    , ("cases", Json.mkArr (List.map Scry.benchBaselineCaseJson run.cases))
+    , ("overall", Scry.benchMetricsJson run.summary.overall.metrics)
+    , ("per_cwe", Json.mkArr (List.map Scry.benchSliceJson run.summary.cwes))
+    , ("path_validity", Json.mkObj
+        [ ("findings", Json.ofNat run.summary.findings)
+        , ("valid_paths", Json.ofNat run.summary.validPaths)
+        , ("reach_sink", Json.ofNat run.summary.reachSink) ])
+    , ("certificate", Json.mkObj
+        [ ("findings", Json.ofNat run.summary.findings)
+        , ("checked", Json.ofNat run.summary.checked) ]) ]
+
+def Scry.benchReportJson (run : Scry.BenchRun) : Json :=
+  Json.mkObj
+    [ ("format", Json.mkStr "scry-bench-report")
+    , ("version", Json.ofNat 1)
+    , ("status", Json.mkStr run.status)
+    , ("reason", Json.mkStr run.reason)
+    , ("corpus", Json.mkObj
+        [ ("root", Json.mkStr run.root)
+        , ("manifest", Json.mkStr run.manifest)
+        , ("cases", Json.ofNat (List.length run.cases))
+        , ("files", Json.ofNat run.summary.files)
+        , ("bytes", Json.ofNat run.summary.bytes) ])
+    , ("timing", Json.mkObj
+        [ ("measured", Json.mkBool run.timingMeasured)
+        , ("total_ms", Json.ofNat run.totalMs)
+        , ("note", Json.mkStr "informational wall clock; not a perf-run measurement") ])
+    , ("overall", Scry.benchMetricsJson run.summary.overall.metrics)
+    , ("macro", Json.mkObj
+        [ ("tpr", Json.dec (Scry.benchDec4 run.summary.macroTpr))
+        , ("fpr", Json.dec (Scry.benchDec4 run.summary.macroFpr))
+        , ("youden", Json.dec (Scry.benchDec4Signed run.summary.macroYouden)) ])
+    , ("path_validity", Json.mkObj
+        [ ("findings", Json.ofNat run.summary.findings)
+        , ("taint_findings", Json.ofNat run.summary.taintFindings)
+        , ("forbidden_findings", Json.ofNat run.summary.forbiddenFindings)
+        , ("valid_paths", Json.ofNat run.summary.validPaths)
+        , ("reach_sink", Json.ofNat run.summary.reachSink)
+        , ("valid_path_fraction", Json.dec (Scry.benchDec4
+            (Scry.benchRatio run.summary.validPaths run.summary.findings))) ])
+    , ("certificate", Json.mkObj
+        [ ("findings", Json.ofNat run.summary.findings)
+        , ("checked", Json.ofNat run.summary.checked)
+        , ("checked_fraction", Json.dec (Scry.benchDec4
+            (Scry.benchRatio run.summary.checked run.summary.findings))) ])
+    , ("dynamic", match run.dynamic with
+        | .some d => Scry.dynBenchJson d
+        | .none => Json.mkObj
+            [ ("status", Json.mkStr "disabled")
+            , ("reason", Json.mkStr "pass --dynamic to run bench/dynamic")
+            , ("claim", Json.mkStr "none") ])
+    , ("boundary", Json.mkObj
+        [ ("warnings", Json.ofNat run.summary.boundary)
+        , ("blocking", Json.ofNat run.summary.blocking)
+        , ("cases_with_blocking", Json.ofNat run.summary.casesWithBlocking) ])
+    , ("per_cwe", Json.mkArr (List.map Scry.benchSliceJson run.summary.cwes))
+    , ("per_suite", Json.mkArr (List.map Scry.benchSliceJson run.summary.suites))
+    , ("baseline", Json.mkObj
+        [ ("status", Json.mkStr run.baseline.status)
+        , ("path", Json.mkStr run.baseline.path)
+        , ("matches", Json.mkBool run.baseline.matches)
+        , ("missing_from_run", Json.mkArr (List.map Json.mkStr run.baseline.missingFromRun))
+        , ("new_in_run", Json.mkArr (List.map Json.mkStr run.baseline.addedInRun))
+        , ("changes", Json.mkArr (List.map (fun c => Json.mkObj
+            [ ("scope", Json.mkStr c.scope)
+            , ("name", Json.mkStr c.name)
+            , ("field", Json.mkStr c.field)
+            , ("before", Json.mkStr c.before)
+            , ("after", Json.mkStr c.after) ]) run.baseline.changes)) ])
+    , ("skipped_sources", Json.mkArr (List.map Json.mkStr run.skippedSources))
+    , ("cases", Json.mkArr (List.map Scry.benchCaseJson run.cases)) ]
+
+-- ## Markdown
+
+def Scry.benchBoolStr (b : Bool) : String := match b with
+  | .true => "true"
+  | .false => "false"
+
+def Scry.benchOutcomeLabel (outcome : String) : String :=
+  match outcome with
+  | "tp" => "TP"
+  | "fn" => "FN"
+  | "tn" => "TN"
+  | "fp" => "FP"
+  | "unknown" => "unknown"
+  | "error" => "error"
+  | "skipped" => "skipped"
+  | _ => outcome
+
+def Scry.benchJoinLines (ls : List String) : String :=
+  String.append (String.intercalate "\n" ls) "\n"
+
+def Scry.benchMarkdown (run : Scry.BenchRun) : String :=
+  let o := run.summary.overall.metrics;
+  let pathFrac := Scry.benchRatio run.summary.validPaths run.summary.findings;
+  let certFrac := Scry.benchRatio run.summary.checked run.summary.findings;
+  let header :=
+    [ "# Scry taint benchmark"
+    , ""
+    , String.append "Corpus: `" (String.append run.root (String.append "` ("
+        (String.append (Nat.repr (List.length run.cases)) (String.append " cases, "
+          (String.append (Nat.repr run.summary.files) (String.append " files, "
+            (String.append (Nat.repr run.summary.bytes) " bytes).")))))))
+    , String.append "Status: `" (String.append run.status (String.append "`."
+        (match String.eq run.reason "" with
+          | .true => ""
+          | .false => String.append " " run.reason)))
+    , "" ];
+  let overall :=
+    [ "## Overall"
+    , ""
+    , "| metric | value |"
+    , "|---|---:|"
+    , String.append "| cases | " (Nat.repr o.counts.cases ++ " |")
+    , String.append "| TP / FN | " (Nat.repr o.counts.tp ++ " / " ++ Nat.repr o.counts.fn ++ " |")
+    , String.append "| TN / FP | " (Nat.repr o.counts.tn ++ " / " ++ Nat.repr o.counts.fp ++ " |")
+    , String.append "| unknown / error / skipped | " (Nat.repr o.counts.unknown ++ " / "
+        ++ Nat.repr o.counts.error ++ " / " ++ Nat.repr o.counts.skipped ++ " |")
+    , String.append "| TPR | " (Scry.benchPct o.tpr ++ " |")
+    , String.append "| FPR | " (Scry.benchPct o.fpr ++ " |")
+    , String.append "| Youden J | " (Scry.benchPctSigned o.youden ++ " |")
+    , String.append "| precision | " (Scry.benchPct o.precision ++ " |")
+    , String.append "| F1 | " (Scry.benchPct o.f1 ++ " |")
+    , String.append "| macro TPR / FPR / J | " (Scry.benchPct run.summary.macroTpr ++ " / "
+        ++ Scry.benchPct run.summary.macroFpr ++ " / " ++ Scry.benchPctSigned run.summary.macroYouden ++ " |")
+    , String.append "| path valid | " (Nat.repr run.summary.validPaths ++ " / "
+        ++ Nat.repr run.summary.findings ++ " (" ++ Scry.benchPct pathFrac ++ ") |")
+    , String.append "| certificates checked | " (Nat.repr run.summary.checked ++ " / "
+        ++ Nat.repr run.summary.findings ++ " (" ++ Scry.benchPct certFrac ++ ") |")
+    , String.append "| boundary warnings | " (Nat.repr run.summary.boundary ++ " ("
+        ++ Nat.repr run.summary.blocking ++ " blocking, "
+        ++ Nat.repr run.summary.casesWithBlocking ++ " cases) |")
+    , String.append "| runtime | " (Nat.repr run.totalMs
+        ++ " ms (informational; not a perf-run measurement) |")
+    , "" ];
+  let cweHeader :=
+    [ "## Per CWE"
+    , ""
+    , "| CWE | cases | TP | FN | TN | FP | unknown | TPR | FPR | J | path valid | checked |"
+    , "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" ];
+  let cweRows := List.map (fun s =>
+    let tprDefined := Nat.lt 0 (Nat.add s.counts.tp s.counts.fn);
+    let fprDefined := Nat.lt 0 (Nat.add s.counts.fp s.counts.tn);
+    let jDefined := Bool.and tprDefined fprDefined;
+    String.append "| " (s.name ++ " | " ++ Nat.repr s.counts.cases ++ " | "
+      ++ Nat.repr s.counts.tp ++ " | " ++ Nat.repr s.counts.fn ++ " | "
+      ++ Nat.repr s.counts.tn ++ " | " ++ Nat.repr s.counts.fp ++ " | "
+      ++ Nat.repr s.counts.unknown ++ " | " ++ Scry.benchDefinedPct tprDefined s.metrics.tpr ++ " | "
+      ++ Scry.benchDefinedPct fprDefined s.metrics.fpr ++ " | "
+      ++ Scry.benchDefinedPctSigned jDefined s.metrics.youden ++ " | "
+      ++ Nat.repr s.validPaths ++ " / " ++ Nat.repr s.findings ++ " | "
+      ++ Nat.repr s.checked ++ " / " ++ Nat.repr s.findings ++ " |")) run.summary.cwes;
+  let caseHeader :=
+    [ ""
+    , "## Cases"
+    , ""
+    , "| case | suite | CWE | expect | outcome | findings | matched | extra | path | checked | boundary | ms |"
+    , "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|" ];
+  let caseRows := List.map (fun r =>
+    String.append "| " (r.caseId ++ " | " ++ r.suite ++ " | " ++ r.cwe ++ " | "
+      ++ r.expect ++ " | " ++ Scry.benchOutcomeLabel r.outcome ++ " | "
+      ++ Nat.repr r.findings ++ " | " ++ Nat.repr r.matched ++ " | "
+      ++ Nat.repr r.extra ++ " | " ++ Nat.repr r.validPaths ++ " / "
+      ++ Nat.repr r.findings ++ " | " ++ Nat.repr r.checked ++ " | "
+      ++ Nat.repr r.boundary ++ " | " ++ Nat.repr r.ms ++ " |")) run.cases;
+  let base :=
+    [ ""
+    , "## Baseline"
+    , ""
+    , String.append "Baseline `" (run.baseline.path ++ "`: " ++ run.baseline.status
+        ++ (match run.baseline.matches with
+          | .true => " (matches)"
+          | .false => " (does not match)")) ];
+  let presence : List String :=
+    List.append
+      (List.map (fun id => String.append "- case `" (id ++ "`: present→absent (in the baseline, missing from the run)"))
+        run.baseline.missingFromRun)
+      (List.map (fun id => String.append "- case `" (id ++ "`: absent→present (new in the run, not in the baseline)"))
+        run.baseline.addedInRun);
+  let presenceLines : List String := match presence with
+    | .nil => .nil
+    | _ => List.append [ "", "Presence changes:" ] presence;
+  let changes : List String := match run.baseline.changes with
+    | .nil => .nil
+    | _ =>
+      List.append [ "", "| scope | name | field | before | after |", "|---|---|---|---|---|" ]
+        (List.map (fun c => String.append "| " (c.scope ++ " | " ++ c.name ++ " | "
+          ++ c.field ++ " | " ++ c.before ++ " | " ++ c.after ++ " |")) run.baseline.changes);
+  let skipped : List String := match run.skippedSources with
+    | .nil => .nil
+    | _ => [ "", String.append "Skipped sources: " (String.intercalate ", " run.skippedSources) ];
+  let footer :=
+    [ ""
+    , "## Limitations"
+    , ""
+    , "This is a corpus result, not a whole-tool claim. The checked-in corpus is S0/S2 (hand-authored C); S1/S3/S4 are optional `--extra` corpora. A safe case with a blocking lowering boundary is `unknown`, not TN. Runtime is wall clock and informational; the perf agent owns real measurements. The `path valid` column checks that the reported path reaches the sink and starts at a source; it is not a proof of the C semantics."
+    ];
+  let dynSection : List String := match run.dynamic with
+    | .none => .nil
+    | .some d => String.splitOn (Scry.dynBenchMarkdown d) "\n";
+  let body0 := List.append header overall;
+  let body1 := List.append body0 dynSection;
+  let body2 := List.append body1 cweHeader;
+  let body3 := List.append body2 cweRows;
+  let body4 := List.append body3 caseHeader;
+  let body5 := List.append body4 caseRows;
+  let body6 := List.append body5 base;
+  let body6b := List.append body6 presenceLines;
+  let body7 := List.append body6b changes;
+  let body8 := List.append body7 skipped;
+  Scry.benchJoinLines (List.append body8 footer)
+
+-- ## Baseline comparison
+
+def Scry.benchJsonCaseField (j : Json) (k : String) : String :=
+  match Json.get j k with
+  | .some x => match x with
+    | .str s => s
+    | .int _ n => Nat.repr n
+    | .bool b => Scry.benchBoolStr b
+    | _ => ""
+  | .none => ""
+
+def Scry.benchFindBaselineCase (id : String) : List Json → Option Json
+  | .nil => .none
+  | .cons j rest => match String.eq (Scry.benchJsonCaseField j "id") id with
+    | .true => .some j
+    | .false => Scry.benchFindBaselineCase id rest
+
+def Scry.benchCompareCase (b : Json) (r : Scry.BenchCaseResult) : List Scry.BenchChange :=
+  Scry.benchFilterMap (fun p =>
+    let before := Scry.benchJsonCaseField b p.1;
+    match String.eq before p.2 with
+    | .true => .none
+    | .false => .some (Scry.BenchChange.mk "case" r.caseId p.1 before p.2))
+    [ ("outcome", r.outcome)
+    , ("findings", Nat.repr r.findings)
+    , ("matched", Nat.repr r.matched)
+    , ("extra", Nat.repr r.extra)
+    , ("valid_paths", Nat.repr r.validPaths)
+    , ("checked", Nat.repr r.checked)
+    , ("boundary", Nat.repr r.boundary)
+    , ("blocking_boundary", Nat.repr r.blocking)
+    , ("unknown", Scry.benchBoolStr r.unknown) ]
+
+def Scry.benchCompareOverall (b : Json) (run : Scry.BenchRun) : List Scry.BenchChange :=
+  Scry.benchFilterMap (fun p =>
+    let before := Scry.benchJsonCaseField b p.1;
+    match String.eq before p.2 with
+    | .true => .none
+    | .false => .some (Scry.BenchChange.mk "overall" "overall" p.1 before p.2))
+    [ ("tp", Nat.repr run.summary.overall.metrics.counts.tp)
+    , ("fn", Nat.repr run.summary.overall.metrics.counts.fn)
+    , ("tn", Nat.repr run.summary.overall.metrics.counts.tn)
+    , ("fp", Nat.repr run.summary.overall.metrics.counts.fp)
+    , ("unknown", Nat.repr run.summary.overall.metrics.counts.unknown)
+    , ("error", Nat.repr run.summary.overall.metrics.counts.error)
+    , ("skipped", Nat.repr run.summary.overall.metrics.counts.skipped) ]
+
+def Scry.benchFindRunCase (id : String) (run : Scry.BenchRun) : Bool :=
+  List.any (fun r => String.eq r.caseId id) run.cases
+
+/-- Baseline cases the run did not produce, in baseline order. -/
+def Scry.benchMissingFromRun (bcases : List Json) (run : Scry.BenchRun) : List String :=
+  Scry.benchFilterMap (fun b =>
+    let id := Scry.benchJsonCaseField b "id";
+    match Scry.benchFindRunCase id run with
+    | .true => .none
+    | .false => .some id) bcases
+
+/-- Run cases the baseline did not have, in run order. -/
+def Scry.benchAddedInRun (bcases : List Json) (run : Scry.BenchRun) : List String :=
+  Scry.benchFilterMap (fun r => match Scry.benchFindBaselineCase r.caseId bcases with
+    | .none => .some r.caseId
+    | .some _ => .none) run.cases
+
+def Scry.benchLoadBaseline (path : String) (run : Scry.BenchRun) : EIO Scry.BenchBaseline := do
+  ok ← EIO.lift (FS.exists path);
+  match ok with
+  | .false => EIO.pure (Scry.BenchBaseline.mk "absent" path .false .nil .nil .nil)
+  | .true => do
+    text ← FS.readFile path;
+    match Json.parse text with
+    | .error e => EIO.pure (Scry.BenchBaseline.mk "invalid" path .false
+        (.cons (Scry.BenchChange.mk "baseline" path "parse" e "") .nil) .nil .nil)
+    | .ok j => do
+      let fmt := Scry.benchJsonCaseField j "format";
+      match String.eq fmt "scry-bench-baseline" with
+      | .false => EIO.pure (Scry.BenchBaseline.mk "invalid" path .false
+          (.cons (Scry.BenchChange.mk "baseline" path "format" fmt "scry-bench-baseline") .nil)
+          .nil .nil)
+      | .true => do
+        let bcases := Scry.benchJsonList j "cases";
+        let perCase : List (List Scry.BenchChange) := List.map (fun r =>
+          (match Scry.benchFindBaselineCase r.caseId bcases with
+          | .none => .cons (Scry.BenchChange.mk "case" r.caseId "presence" "absent" "present") .nil
+          | .some b => Scry.benchCompareCase b r)) run.cases;
+        let missingBaselineCases : List (List Scry.BenchChange) :=
+          List.map (fun id =>
+            .cons (Scry.BenchChange.mk "case" id "presence" "present" "absent") .nil)
+            (Scry.benchMissingFromRun bcases run);
+        let overall : List Scry.BenchChange := match Json.get j "overall" with
+          | .some o => Scry.benchCompareOverall o run
+          | .none => .nil;
+        let changes := List.append (List.append (List.concat perCase)
+          (List.concat missingBaselineCases)) overall;
+        EIO.pure (Scry.BenchBaseline.mk "compared" path (List.isEmpty changes) changes
+          (Scry.benchMissingFromRun bcases run) (Scry.benchAddedInRun bcases run))
+
+def Scry.benchRun (opts : Scry.BenchOpts) : EIO Scry.BenchRun := do
+  t0 ← EIO.lift Clock.monotonic;
+  res ← Scry.benchRunAll (Bool.not opts.noTiming) opts.corpus opts.extras;
+  t1 ← EIO.lift Clock.monotonic;
+  let totalMs := match opts.noTiming with
+    | .true => 0
+    | .false => Duration.toMillis (Duration.sub t1 t0);
+  let summary := Scry.benchSummaryOf res.cases;
+  dyn ← match opts.dynamic with
+    | .true => do d ← Scry.dynBenchRun "bench/dynamic" opts.cc opts.coverage; EIO.pure (.some d)
+    | .false => EIO.pure (.none : Option Scry.DynBenchRun);
+  let blank := Scry.BenchRun.mk res.status res.reason opts.corpus
+    (Path.join opts.corpus "manifest.json") (Bool.not opts.noTiming) totalMs res.cases
+    summary (Scry.BenchBaseline.mk "absent" "" .false .nil .nil .nil) dyn res.skipped;
+  match opts.baseline with
+  | .none => EIO.pure blank
+  | .some b => match String.eq res.status "ok" with
+    | .false => EIO.pure blank
+    | .true => do
+      br ← Scry.benchLoadBaseline b blank;
+      EIO.pure { blank with baseline := br }
+
+def Scry.benchJoinIds (ids : List String) : String := String.intercalate ", " ids
+
+def Scry.benchChangeBrief (c : Scry.BenchChange) : String :=
+  c.scope ++ " " ++ c.name ++ " " ++ c.field ++ ": " ++ c.before ++ "→" ++ c.after
+
+def Scry.benchBaselineProblem (b : Scry.BenchBaseline) : String :=
+  match b.changes with
+  | .nil => b.status
+  | .cons c _ => match String.eq c.field "parse" with
+    | .true => "parse error: " ++ c.before
+    | .false => "format is `" ++ c.before ++ "`, expected `" ++ c.after ++ "`"
+
+/-- Why `--fail-on-regression` fails, or `.none` when the gate passes. A missing or
+invalid baseline, a run that is not `ok`, a baseline case missing from the run, and a
+new run case all fail closed; only an absent baseline with `bootstrap` set (an explicit
+first run) passes. -/
+def Scry.benchGateFailure (opts : Scry.BenchOpts) (run : Scry.BenchRun) : Option String :=
+  match opts.failOnRegression with
+  | .false => .none
+  | .true => match String.eq run.status "ok" with
+    | .false => .some ("scry bench: run status is `" ++ run.status ++ "`"
+        ++ (match String.eq run.reason "" with
+          | .true => ""
+          | .false => " (" ++ run.reason ++ ")")
+        ++ "; --fail-on-regression needs a complete run")
+    | .true => match String.eq run.baseline.status "compared" with
+      | .false => match String.eq run.baseline.status "absent" with
+        | .true => match opts.bootstrap with
+          | .true => .none
+          | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+              ++ "` is missing; create it with --update-baseline, or pass --baseline-bootstrap for a first run")
+        | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+            ++ "` is " ++ run.baseline.status ++ ": " ++ Scry.benchBaselineProblem run.baseline)
+      | .true => match run.baseline.missingFromRun with
+        | .cons _ _ => .some ("scry bench: " ++ Nat.repr (List.length run.baseline.missingFromRun)
+            ++ " baseline case(s) missing from the run (present→absent): "
+            ++ Scry.benchJoinIds run.baseline.missingFromRun
+            ++ (match run.baseline.addedInRun with
+              | .nil => ""
+              | _ => "; new in the run (absent→present): "
+                  ++ Scry.benchJoinIds run.baseline.addedInRun)
+            ++ "; update the baseline only after reviewing a real change")
+        | .nil => match run.baseline.addedInRun with
+          | .cons _ _ => .some ("scry bench: " ++ Nat.repr (List.length run.baseline.addedInRun)
+              ++ " case(s) absent from the baseline (absent→present): "
+              ++ Scry.benchJoinIds run.baseline.addedInRun
+              ++ "; update the baseline after reviewing them")
+          | .nil => match run.baseline.matches with
+            | .true => .none
+            | .false => .some ("scry bench: baseline `" ++ run.baseline.path
+                ++ "` does not match: " ++ Nat.repr (List.length run.baseline.changes)
+                ++ " change(s); first: " ++ (match run.baseline.changes with
+                  | .cons c _ => Scry.benchChangeBrief c
+                  | .nil => "(none)"))
+
+/-- The exit code `scry bench` returns. The gate has one implementation, so tests and
+the command cannot disagree about what fails. -/
+def Scry.benchExitCode (opts : Scry.BenchOpts) (run : Scry.BenchRun) : Nat :=
+  match Scry.benchGateFailure opts run with
+  | .some _ => 1
+  | .none => 0
+
+
+def Scry.benchBaselineText (run : Scry.BenchRun) : String :=
+  Json.render (Scry.benchBaselineJson run)

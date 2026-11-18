@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="wiz nb export">
+<title>A tour of Wiz</title>
+<style>
+:root { color-scheme: light dark; --paper: #fdfdfb; --ink: #1d1d1b;
+  --muted: #666; --line: #d9d9d4; --code: #f4f4ef; --accent: #7a3e00;
+  --error: #a11; --error-bg: #fff3f2; }
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #1d1d1b; --ink: #fdfdfb; --muted: #aaa; --line: #3a3a36;
+    --code: #262622; --accent: #ffb86b; --error: #ff8a80; --error-bg: #3a2020; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main.notebook { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+.notebook-header { border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
+.notebook-header h1 { margin: 0 0 .25rem; font-size: 1.9rem; line-height: 1.2; }
+.notebook-subtitle { color: var(--muted); margin: 0 0 1.25rem; font-size: .92rem; }
+.cell { margin: 0 0 1.4rem; }
+.cell-code { border-left: 3px solid var(--line); padding-left: 1rem; }
+.prompt { color: var(--muted); font: .8rem/1.4 ui-monospace, monospace;
+  user-select: none; }
+.cell-input { display: grid; grid-template-columns: 5.5rem 1fr; gap: .25rem;
+  align-items: start; }
+.cell-input .prompt { padding-top: .45rem; text-align: right; }
+pre { margin: .45rem 0; overflow-x: auto; background: var(--code);
+  border-radius: .25rem; padding: .65rem .75rem; }
+pre code { font: .88rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre; }
+.code { margin: 0; }
+.cell-outputs { margin-left: 5.75rem; }
+.output { margin: .4rem 0; }
+.output-result { display: grid; grid-template-columns: 4.5rem 1fr; gap: .5rem;
+  align-items: start; }
+.output-result .out-prompt { text-align: right; padding-top: .2rem; }
+.output-text, .output-json, .stream, .traceback { font: .85rem/1.45 ui-monospace,
+  SFMono-Regular, Menlo, monospace; }
+.stream-stderr { border-left: 3px solid var(--accent); }
+.output-error { background: var(--error-bg); border-left: 3px solid var(--error);
+  border-radius: .25rem; padding: .55rem .75rem; }
+.error-name { color: var(--error); font-weight: 600; margin: 0 0 .3rem; }
+.output-note { color: var(--muted); border-left: 3px solid var(--line);
+  padding: .2rem .75rem; }
+.output-caption { color: var(--muted); font-size: .85rem; margin: .2rem 0; }
+.output-html table { border-collapse: collapse; margin: .4rem 0; }
+.output-html th, .output-html td { border: 1px solid var(--line);
+  padding: .25rem .5rem; text-align: left; }
+.output-image img { max-width: 100%; height: auto; }
+.wiz-widget { border: 1px solid var(--line); border-radius: .3rem;
+  padding: .5rem .75rem; }
+.widget-title { font-weight: 600; margin-bottom: .3rem; }
+.widget-goal { font-size: .85rem; }
+.cell-raw pre { border: 1px dashed var(--line); }
+blockquote { margin: .5rem 0; padding-left: .9rem; border-left: 3px solid
+  var(--line); color: var(--muted); }
+.markdown-code { background: var(--code); }
+a { color: var(--accent); }
+@media print { .cell { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<main class="notebook">
+<header class="notebook-header">
+<p class="notebook-subtitle">Exported from <code>tour.ipynb</code>. Static export: code and stored outputs are reproduced; the kernel, its definitions and any interactive output are not.</p>
+</header>
+<section class="cell cell-markdown" id="cell-1">
+<h1>A tour of Wiz</h1>
+<p>This notebook is <a href="../tour.md"><code>docs/tour.md</code></a> made runnable: one chapter per section, each example a cell with its output. A cell is checked by <code>wiz check</code>, so definitions persist from one cell to the next. Cells that cannot run in the kernel are shown as code with a note: a <code>main</code> program that needs <code>wiz run</code>, a program the checker rejects, a shell command, or Verilog that is only printed.</p>
+</section>
+<section class="cell cell-markdown" id="cell-2">
+<h2>0: a program</h2>
+<p>The program from the tour. The cell checks it; <code>wiz run</code> is what prints the two lines, so the shell block below is shown rather than executed.</p>
+</section>
+<section class="cell cell-markdown" id="cell-3">
+<p>The whole program. A cell checks it; <code>wiz run</code> is what executes <code>main</code>.</p>
+</section>
+<section class="cell cell-code" id="cell-4">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[1]:</span><pre class="code"><code class="language-wiz">import IO
+
+def greet (name : String) : String := "hello, " ++ name
+
+def main : IO Unit := do
+  IO.println (greet "Wiz");
+  IO.println (Nat.toString (6 * 7))</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stderr">wiz kernel: backend batch
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-5">
+<p>This is the shell command and its output; the cell above only checks the program.</p>
+<pre class="markdown-code"><code class="language-text">$ wiz run examples/tour/00-hello.wiz
+hello, Wiz
+42</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-6">
+<p>A file is a list of commands. <code>import IO</code> brings in the module <code>lib/IO.wiz</code> and, through it, the Prelude. <code>def name : type := value</code> defines a name. <code>main</code> is an <code>IO</code> action, and <code>do</code> sequences its steps, separated by <code>;</code>. <code>wiz run</code> compiles the file to native code through C and runs it; <code>wiz build FILE -o OUT</code> keeps the executable. (<code>examples/tour/00-hello.wiz</code>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-7">
+<h2>1: values and functions</h2>
+</section>
+<section class="cell cell-markdown" id="cell-8">
+<p>Definitions are values. The <code>#eval</code> lines print the values in the comments; <code>#check @compose</code> prints the type with its implicit arguments.</p>
+</section>
+<section class="cell cell-code" id="cell-9">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[2]:</span><pre class="code"><code class="language-wiz">import Prelude
+
+def answer : Nat := 42
+#eval answer                                   -- 42
+
+def double (n : Nat) : Nat := n + n
+#eval double 21                                -- 42
+
+-- a function is a value; `fun` makes one
+def twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)
+#eval twice (fun n =&gt; n * 3) 2                 -- 18
+
+-- implicit arguments, in braces, are found by unification
+def compose {A B C : Type} (g : B → C) (f : A → B) : A → C := fun x =&gt; g (f x)
+#eval compose double double 5                  -- 20
+#check @compose</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">42
+42
+18
+20
+compose : {A : Type} → {B : Type} → {C : Type} → (B → C) → (A → B) → A → C
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-10">
+<p>Functions are curried, and application is juxtaposition: <code>twice f x</code>. Arguments in parentheses are explicit. Arguments in braces are <strong>implicit</strong>: you don&#x27;t write them, and the elaborator works them out from the others (here <code>A</code>, <code>B</code> and <code>C</code> from the types of <code>g</code> and <code>f</code>). <code>#eval e</code> evaluates <code>e</code> and prints its value; <code>#check e</code> prints its type, and <code>#check @compose</code> shows the implicit arguments too:</p>
+</section>
+<section class="cell cell-markdown" id="cell-11">
+<p>Types are values like any other, of type <code>Type</code>, which is why <code>A</code> can be an argument. The Prelude has the usual types: <code>Nat</code> (arbitrary precision), <code>Bool</code>, <code>String</code>, <code>List</code>, <code>Option</code>, pairs <code>A × B</code>. It also has <code>let</code>, <code>if … then … else</code>, <code>++</code> and list literals:</p>
+</section>
+<section class="cell cell-markdown" id="cell-12">
+<p><code>let</code>, <code>if</code>, <code>++</code> and list literals; values print as terms.</p>
+</section>
+<section class="cell cell-code" id="cell-13">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[3]:</span><pre class="code"><code class="language-wiz">def describe (n : Nat) : String :=
+  let big := Nat.lt 100 n;
+  if big then "big" else "small"
+#eval describe 7                               -- "small"
+#eval "wiz" ++ "ard"                           -- "wizard"
+#eval [1, 2, 3] ++ [4]                         -- .cons 1 (.cons 2 (.cons 3 (.cons 4 .nil)))</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">"small"
+"wizard"
+.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil)))
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-14">
+<p>Values are printed as terms: a list is its constructors. Comparisons on <code>Nat</code> are functions that return a <code>Bool</code> (<code>Nat.lt</code>, <code>Nat.le</code>, <code>Nat.beq</code>); there are no <code>&lt;</code> or <code>==</code> operators yet. (<code>examples/tour/01-basics.wiz</code>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-15">
+<h2>2: inductive types and pattern matching</h2>
+</section>
+<section class="cell cell-markdown" id="cell-16">
+<p>An inductive type and a function by cases. The <code>#eval</code> prints the area.</p>
+</section>
+<section class="cell cell-code" id="cell-17">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[4]:</span><pre class="code"><code class="language-wiz">inductive Shape where
+  | circle (r : Nat)
+  | rect (w h : Nat)
+
+-- `.circle` is `Shape.circle`: the type is known from the expected type
+def area : Shape → Nat
+  | .circle r =&gt; 3 * r * r
+  | .rect w h =&gt; w * h
+#eval area (.rect 3 4)                         -- 12</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">12
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-18">
+<p>An <code>inductive</code> type lists its constructors, which live in its namespace: <code>Shape.circle</code>, <code>Shape.rect</code>. Where the expected type is known you can write just <code>.circle</code>. A function can be defined by cases directly, as <code>area</code> is, or with <code>match e with | … =&gt; …</code>. Types take parameters, and recursion is fine as long as it is on a smaller piece of the argument (it is <em>structural</em>, so the checker knows it stops):</p>
+</section>
+<section class="cell cell-markdown" id="cell-19">
+<p>A recursive, parameterised type; <code>Tree.toList</code> walks it.</p>
+</section>
+<section class="cell cell-code" id="cell-20">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[5]:</span><pre class="code"><code class="language-wiz">inductive Tree (A : Type) where
+  | leaf
+  | node (l : Tree A) (x : A) (r : Tree A)
+
+def Tree.toList {A : Type} : Tree A → List A
+  | .leaf =&gt; []
+  | .node l x r =&gt; Tree.toList l ++ [x] ++ Tree.toList r
+
+def t : Tree Nat := .node (.node .leaf 1 .leaf) 2 (.node .leaf 3 .leaf)
+#eval Tree.toList t                            -- .cons 1 (.cons 2 (.cons 3 .nil))</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">.cons 1 (.cons 2 (.cons 3 .nil))
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-21">
+<p>Matching works on several values at once, with <code>_</code> for &quot;anything&quot;, and patterns nest:</p>
+</section>
+<section class="cell cell-markdown" id="cell-22">
+<p>Patterns on two lists at once, with <code>_</code> for anything.</p>
+</section>
+<section class="cell cell-code" id="cell-23">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[6]:</span><pre class="code"><code class="language-wiz">def zipWith {A B C : Type} (f : A → B → C) : List A → List B → List C
+  | .cons a as, .cons b bs =&gt; .cons (f a b) (zipWith f as bs)
+  | _, _ =&gt; .nil</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-24">
+<p>A match must cover every case: leave one out and <code>wiz check</code> says which (&quot;missing case for constructor …&quot;). Under the hood an inductive type is a <em>description</em>, a value that says what its constructors look like, and its least fixed point. That is how the kernel can stay small; <a href="../stages/04-data.md">stages/04-data.md</a> tells the story. (<code>examples/tour/02-data.wiz</code>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-25">
+<h2>3: structures</h2>
+</section>
+<section class="cell cell-markdown" id="cell-26">
+<p>A record: its constructor, projections, named arguments, an update and a pattern.</p>
+</section>
+<section class="cell cell-code" id="cell-27">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[7]:</span><pre class="code"><code class="language-wiz">import Deriving
+
+structure Point where
+  x : Nat
+  y : Nat
+  deriving Repr
+
+def origin : Point := ⟨0, 0⟩                -- `Point.mk 0 0`, from the expected type
+def p : Point := Point.mk (y := 4) (x := 3)  -- named arguments, in any order
+#eval p.x + p.y                              -- 7
+
+-- update a copy, and take a structure apart with a pattern
+def shiftRight (q : Point) : Point := { q with x := q.x + 1 }
+#eval Repr.repr (shiftRight p)               -- "Point.mk 4 4"
+
+def manhattan (q : Point) : Nat :=
+  let ⟨a, b⟩ := q
+  a + b
+#eval manhattan p</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">7
+"Point.mk 4 4"
+7
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-28">
+<p>A structure is a record: one constructor (<code>Point.mk</code>) and a projection per field (<code>p.x</code>). The anonymous constructor <code>⟨…⟩</code> builds one when the type is known, and also works as a pattern. <code>{ q with x := … }</code> is a copy with some fields replaced. <code>deriving Repr</code> writes the instance that turns a point into text (type classes are next). Wiz has no record literal of the form <code>{ x := 3, y := 4 }</code>; use the constructor, with named arguments if you like.</p>
+<p>A field&#x27;s type may mention earlier fields. Here the second field is a <em>proof</em> about the first (proofs are section 6):</p>
+</section>
+<section class="cell cell-markdown" id="cell-29">
+<p>A field whose type is a proof about an earlier field.</p>
+</section>
+<section class="cell cell-code" id="cell-30">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[8]:</span><pre class="code"><code class="language-wiz">structure Positive where
+  n : Nat
+  pos : Nat.lt 0 n = .true
+def five : Positive := ⟨5, rfl⟩</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-31">
+<p>In the kernel a structure is a Σ type, a dependent pair, so <code>⟨5, rfl⟩</code> is a pair whose second component&#x27;s type depends on the first. (<code>examples/tour/03-structures.wiz</code>; <a href="../stages/13-language.md">stages/13-language.md</a>, 13a, 13h, 13i.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-32">
+<h2>4: type classes and numerals</h2>
+</section>
+<section class="cell cell-markdown" id="cell-33">
+<p>A class and three instances; <code>#eval</code> uses instance resolution.</p>
+</section>
+<section class="cell cell-code" id="cell-34">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[9]:</span><pre class="code"><code class="language-wiz">class Describe (A : Type) where
+  describe : A → String
+
+instance : Describe Bool where
+  describe := fun b =&gt; if b then "yes" else "no"
+instance : Describe Nat where
+  describe := fun n =&gt; Nat.repr n
+-- an instance that needs another instance
+instance {A : Type} [Describe A] : Describe (List A) where
+  describe := fun xs =&gt; match xs with
+    | .nil =&gt; "nothing"
+    | .cons x _ =&gt; "starts with " ++ Describe.describe x
+
+#eval Describe.describe [Bool.true, Bool.false]   -- "starts with yes"
+
+def shout {A : Type} [Describe A] (a : A) : String := Describe.describe a ++ "!"
+#eval shout (7 : Nat)                              -- "7!"</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">"starts with yes"
+"7!"
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-35">
+<p>A class is a structure of operations, and an instance is a value of it. An argument in square brackets, <code>[Describe A]</code>, is an instance argument: the caller doesn&#x27;t pass it, the elaborator finds it by <strong>instance resolution</strong>, which also chains instances (the one for <code>List A</code> uses the one for <code>A</code>). <code>(7 : Nat)</code> is a type ascription.</p>
+<p>Arithmetic is built the same way. <code>a + b</code> is <code>Add.add a b</code>, and a numeral <code>5</code> at a type other than <code>Nat</code> is <code>OfNat.ofNat 5</code>, so the same syntax works at every numeric type that has instances:</p>
+</section>
+<section class="cell cell-markdown" id="cell-36">
+<p>The same arithmetic syntax at <code>Int</code> and <code>U8</code>, and a function generic over <code>Add</code> and <code>OfNat</code>.</p>
+</section>
+<section class="cell cell-code" id="cell-37">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[10]:</span><pre class="code"><code class="language-wiz">import Int
+import Word
+
+#eval (2 : Int) - 5                        -- -3
+#eval (-3 : Int) * 4 + 2                   -- -10
+#eval UIntN.toNat ((250 : U8) + 10)        -- 4: words wrap around
+def sum {A : Type} [Add A] [OfNat A 0] : List A → A
+  | .nil =&gt; 0
+  | .cons x xs =&gt; x + sum xs
+#eval sum [1, 2, 3]                        -- 6
+#eval sum [(1 : Int), -2, -3]              -- -4</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">-3
+-10
+4
+6
+-4
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-38">
+<p><code>Nat</code> subtraction stops at zero (<code>2 - 3 = 0</code>); <code>Int</code>, the machine words <code>U8</code> … <code>U64</code> and <code>I8</code> … <code>I64</code> (<code>lib/Word.wiz</code>) and bit vectors (<code>lib/BitVec.wiz</code>) are in the library. At <code>Nat</code> a numeral is a native number and <code>+</code> runs as native arithmetic, both in the checker and in compiled code. (<code>examples/tour/04-classes.wiz</code>; <a href="../stages/07-type-classes.md">stages/07-type-classes.md</a>; the table of numeric types in <a href="../libraries.md">libraries.md</a>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-39">
+<h2>5: dependent types</h2>
+<p>A type can depend on a value. The classic example is the vector, a list whose type says how long it is:</p>
+</section>
+<section class="cell cell-markdown" id="cell-40">
+<p>The tour defines the family inline:</p>
+<pre class="markdown-code"><code class="language-wiz">inductive Vec (A : Type) : Nat → Type where
+  | nil : Vec A .zero
+  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)
+
+-- `head` only takes vectors of length `n + 1` (`.succ n`): there is no `nil` case to write
+def Vec.head {A : Type} {0 n : Nat} : Vec A (.succ n) → A
+  | .cons x _ =&gt; x
+
+-- the types say that `map` keeps the length and `zip` needs two equal ones
+def Vec.zip {A B : Type} {0 n : Nat} : Vec A n → Vec B n → Vec (A × B) n
+  | .nil, .nil =&gt; .nil
+  | .cons a as, .cons b bs =&gt; .cons (a, b) (Vec.zip as bs)</code></pre>
+<p>This notebook imports <code>lib/Vec.wiz</code> instead: section 10 imports <code>Hdl.Core</code>, which imports the same module, so an inline definition would collide with it. <code>head</code>, <code>map</code> and <code>zip</code> keep the length in the type, as the tour explains.</p>
+</section>
+<section class="cell cell-code" id="cell-41">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[11]:</span><pre class="code"><code class="language-wiz">import Vec
+
+-- The tour defines `Vec` and its operations inline; this notebook imports
+-- `lib/Vec.wiz` instead, because section 10 imports `Hdl.Core`, which
+-- imports the same module. The types and the observations are the same.
+def v : Vec Nat 3 := .cons 1 (.cons 2 (.cons 3 .nil))
+#eval Vec.head v                           -- 1
+#eval Vec.toList (Vec.map (fun x =&gt; x * 10) v)
+#eval Vec.toList (Vec.zip v v)</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">1
+.cons 10 (.cons 20 (.cons 30 .nil))
+.cons (1, 1) (.cons (2, 2) (.cons (3, 3) .nil))
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-42">
+<p><code>Vec A</code> is a <em>family</em> of types, one for each length. The part after the colon, <code>: Nat → Type</code>, is the index, and each constructor says which member of the family it builds. <code>Vec.head</code> needs no case for <code>nil</code>, because a <code>Vec A (.succ n)</code> cannot be <code>nil</code>: the checker knows, and <code>Vec.head (Vec.nil : Vec Nat 0)</code> is a type error:</p>
+</section>
+<section class="cell cell-markdown" id="cell-43">
+<p>Not run: this is the rejected program from the tour, where <code>Vec.head</code> is applied to the empty vector.</p>
+<pre class="markdown-code"><code class="language-text">error: type mismatch
+  expected: Vec ?m0 (.succ ?m1)
+  inferred: Vec Nat 0
+  (tag mismatch)</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-44">
+<p>(<code>?m0</code> and <code>?m1</code> are the implicit arguments the elaborator was solving for.) In <code>Vec.zip</code> there are no mismatched cases either, because both vectors have length <code>n</code>. In <code>def v : Vec Nat 3</code> the numeral <code>3</code> and the length <code>.succ (.succ (.succ .zero))</code> that the three <code>cons</code> build are the same number, so the definition checks.</p>
+<p>The <code>0</code> in <code>{0 n : Nat}</code> is a <strong>quantity</strong>: the length is only used in types, so it is erased, and at run time a vector is just a list (section 7). Types can also be computed by ordinary functions:</p>
+</section>
+<section class="cell cell-markdown" id="cell-45">
+<p>A type computed by a function; the pair and <code>Unit</code> are the two cases.</p>
+</section>
+<section class="cell cell-code" id="cell-46">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[12]:</span><pre class="code"><code class="language-wiz">def NTuple : Nat → Type
+  | .zero =&gt; Unit
+  | .succ n =&gt; Nat × NTuple n
+def triple : NTuple 3 := (1, 2, 3, ())</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-47">
+<p><code>lib/Vec.wiz</code> has a complete <code>Vec</code> with lemmas about it. (<code>examples/tour/05-vec.wiz</code>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-48">
+<h2>6: propositions and proofs</h2>
+<p>Propositions are types, and a proof is a value of that type. <code>a = b</code> is the proposition that <code>a</code> and <code>b</code> are equal, and <code>rfl</code> proves it when both sides compute to the same value:</p>
+</section>
+<section class="cell cell-markdown" id="cell-49">
+<p>Propositions are types and <code>rfl</code> proves computation; <code>double</code> is from section 1.</p>
+</section>
+<section class="cell cell-code" id="cell-50">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[13]:</span><pre class="code"><code class="language-wiz">import Logic
+
+def two_plus_two : 2 + 2 = 4 := rfl
+
+def double_three : double 3 = 6 := rfl</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-51">
+<p>A statement about every <code>n</code> is a function from <code>n</code> to a proof, and a proof by induction is a recursive function. <code>zero_add</code> below recurses on <code>n</code>, and the case for <code>.succ n</code> uses the proof for <code>n</code>:</p>
+</section>
+<section class="cell cell-markdown" id="cell-52">
+<p>Induction is recursion; <code>#print axioms</code> shows the proof is axiom-free.</p>
+</section>
+<section class="cell cell-code" id="cell-53">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[14]:</span><pre class="code"><code class="language-wiz">def congrSucc {a b : Nat} (e : a = b) : Nat.succ a = Nat.succ b :=
+  transp (fun b _ =&gt; Nat.succ a = Nat.succ b) (refl (Nat.succ a)) e
+
+def zero_add : (n : Nat) → 0 + n = n
+  | .zero =&gt; rfl
+  | .succ n =&gt; congrSucc (zero_add n)
+#print axioms zero_add</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">'zero_add' does not depend on any axioms
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-54">
+<p><code>transp</code> is the eliminator of equality: from <code>a = b</code> and something that holds at <code>a</code>, it gives the same thing at <code>b</code>. <code>congrSucc</code> uses it to show that equal numbers have equal successors. <code>#print axioms zero_add</code> says the proof <code>does not depend on any axioms</code>.</p>
+<p>Chains of relations have their own notation, <strong><code>calc</code></strong>. Adjacent steps compose through an instance of <code>Trans</code>, and the last step&#x27;s relation is the result:</p>
+</section>
+<section class="cell cell-markdown" id="cell-55">
+<p>A <code>calc</code> chain: each step&#x27;s relation composes with the next.</p>
+</section>
+<section class="cell cell-code" id="cell-56">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[15]:</span><pre class="code"><code class="language-wiz">def lt_of_chain (a b c d : Nat) (h1 : a ≤ b) (h2 : b &lt; c) (h3 : c ≤ d) : a &lt; d :=
+  calc a ≤ b := h1
+       _ &lt; c := h2
+       _ ≤ d := h3
+#print axioms lt_of_chain</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">'lt_of_chain' does not depend on any axioms
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-57">
+<p><code>_</code> is the previous step&#x27;s right endpoint (an explicit middle term must be the same). <code>Trans</code> instances for <code>=</code> and <code>↔</code> are in <code>lib/Logic.wiz</code>; <code>Nat</code>, <code>Int</code> and <code>Q</code> register <code>=</code>, <code>≤</code> and <code>&lt;</code> (and <code>≈</code> at <code>Q</code>) in <code>lib/Nat.wiz</code>, <code>lib/IntOrder.wiz</code> and <code>lib/Rat.wiz</code>, and a program adds its own relation by declaring a <code>Trans</code> instance for it. A chain elaborates to nested <code>Trans.trans</code> applications, so it is checked like any other proof and names no axioms; a step whose proof has the wrong relation, or a pair of relations that no instance composes, is reported at that step. (<code>examples/tour/06b-calc.wiz</code>; <a href="../stages/13-language.md">stages/13-language.md</a>, 13s.)</p>
+<p>Proofs can also be written with <strong>tactics</strong>, after <code>by</code>. <code>intro</code>, <code>exact</code>, <code>apply</code>, <code>assumption</code>, <code>rfl</code>, <code>rw</code> and <code>unfold</code> are in the Prelude, and since a tactic is a Wiz function, you can write your own (<code>examples/tactics.wiz</code>):</p>
+</section>
+<section class="cell cell-markdown" id="cell-58">
+<p>The same proof with tactics.</p>
+</section>
+<section class="cell cell-code" id="cell-59">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[16]:</span><pre class="code"><code class="language-wiz">def same_double (m n : Nat) (h : m = n) : double m = double n := by
+  rw h
+  rfl</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-60">
+<p><code>rw h</code> rewrites <code>m</code> to <code>n</code> in the goal, which leaves <code>double n = double n</code>, and <code>rfl</code> closes it. In an editor with the infoview (see <a href="../install.md#editors">install.md</a>), the cursor on the <code>rfl</code> line shows the goal at that point:</p>
+</section>
+<section class="cell cell-markdown" id="cell-61">
+<p>Not a cell: this is the infoview&#x27;s goal at the <code>rfl</code> line.</p>
+<pre class="markdown-code"><code class="language-text">m : Nat
+n : Nat
+h : m = n
+⊢ double n = double n</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-62">
+<p>(The tactic <code>trace_state</code> prints the same as a message.)</p>
+<p><code>lib/Logic.wiz</code> defines the connectives with Lean&#x27;s names: <code>∧</code> (<code>And.intro</code>, <code>h.1</code>, <code>h.2</code>), <code>∨</code> (<code>Or.inl</code>, <code>Or.inr</code>, <code>Or.elim</code>), <code>¬</code>, <code>↔</code> and <code>∃</code>:</p>
+</section>
+<section class="cell cell-markdown" id="cell-63">
+<p>The connectives from <code>lib/Logic.wiz</code>.</p>
+</section>
+<section class="cell cell-code" id="cell-64">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[17]:</span><pre class="code"><code class="language-wiz">def and_swap {P Q : Prop} (h : P ∧ Q) : Q ∧ P := And.intro h.2 h.1
+def exists_double : ∃ n, double n = 8 := Ex.intro (fun n =&gt; double n = 8) 4 rfl</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-65">
+<p>Equality in Wiz is <strong>observational</strong>: <code>a = b</code> is not an inductive type but computes from the type of <code>a</code> and <code>b</code>. At a function type it is pointwise equality, so function extensionality is a definition, not an axiom:</p>
+</section>
+<section class="cell cell-markdown" id="cell-66">
+<p>Function extensionality is a definition here, not an axiom.</p>
+</section>
+<section class="cell cell-code" id="cell-67">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[18]:</span><pre class="code"><code class="language-wiz">def funext' {A B : Type} (f g : A → B) (h : (x : A) → f x = g x) : f = g := h</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-68">
+<p><code>Prop</code> is impredicative and proof-irrelevant: any two proofs of a proposition are equal, and proofs (like everything at quantity 0) are erased from compiled code. (<code>examples/tour/06-proofs.wiz</code>; <a href="../stages/04-data.md">stages/04-data.md</a>, 4c; <a href="../stages/24-separation-logic.md">stages/24-separation-logic.md</a> for the logic library and program verification with Hoare triples; <a href="../Status.md">Status.md</a> for what is known about soundness, and what isn&#x27;t.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-69">
+<h2>7: quantities and linear resources</h2>
+<p>Every binder in Wiz carries a <strong>quantity</strong>, which says how often the body may use the variable at run time:</p>
+<p>| quantity | means | for | |---|---|---| | <code>0</code> | never: erased | types, proofs, indices like <code>Vec</code>&#x27;s length | | <code>1</code> | exactly once: linear | resources: a file handle, a channel end, the world | | <code>ω</code> | any number of times | everything else; the default |</p>
+</section>
+<section class="cell cell-markdown" id="cell-70">
+<p>Quantities <code>0</code> and <code>1</code> on binders.</p>
+</section>
+<section class="cell cell-code" id="cell-71">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[19]:</span><pre class="code"><code class="language-wiz">def id {0 A : Type} (1 x : A) : A := x
+def dup {0 A : Type} (x : A) : A × A := (x, x)</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-72">
+<p><code>id</code> uses <code>x</code> once and <code>A</code> never (only in types), so both quantities are right. <code>dup</code> uses <code>x</code> twice, which is fine at the default <code>ω</code>. Written <code>(1 x : A)</code>, the checker would say <code>variable x declared with quantity 1 but used ω</code>. Quantities are checked by the kernel itself, and erasure follows them: an argument at <code>0</code> costs nothing at run time.</p>
+<p>Quantity <code>1</code> gives you <strong>linear</strong> types: a value that must be used exactly once, never copied and never dropped. That is the right type for a resource:</p>
+</section>
+<section class="cell cell-markdown" id="cell-73">
+<p>A linear resource: <code>Ticket</code> and <code>trip</code> use <code>t</code> exactly once with <code>do1</code>.</p>
+</section>
+<section class="cell cell-code" id="cell-74">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[20]:</span><pre class="code"><code class="language-wiz">import IO
+
+axiom Ticket : Type
+axiom Ticket.buy : Nat → IO Ticket
+axiom Ticket.ride : (1 t : Ticket) → IO Unit
+
+-- `do1` sequences actions whose later steps use linear values: `t` is used once
+def trip (1 t : Ticket) : IO Unit := do1
+  IO.println "boarding";
+  Ticket.ride t</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-75">
+<p>(<code>axiom</code> declares a type or a function without defining it; a real library would implement them with <code>extern</code>, section 9.) Try to cheat and the checker stops you:</p>
+</section>
+<section class="cell cell-markdown" id="cell-76">
+<p>Not run: these are the programs the checker rejects, with the errors the tour shows.</p>
+<pre class="markdown-code"><code class="language-text">def twice (1 t : Ticket) : IO Unit := do1
+  Ticket.ride t;
+  Ticket.ride t
+-- error: kernel rejected twice: variable t declared with quantity 1 but used ω
+def lose (1 t : Ticket) : IO Unit := IO.pure ()
+-- error: kernel rejected lose: variable t declared with quantity 1 but used 0</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-77">
+<p><code>do1</code> is <code>do</code> over <code>IO.bind</code>&#x27;s linear form (its continuation is used once, so it may capture <code>t</code>). The plain <code>do</code> uses an unrestricted continuation, so <code>trip</code> written with <code>do</code> is rejected too.</p>
+<p>Pairs can have linear components. A pair held linearly is taken apart with <code>let 1</code>, which binds both components at once. A projection <code>p.1</code> would quietly drop the other component, so the checker refuses it on a linear pair:</p>
+</section>
+<section class="cell cell-markdown" id="cell-78">
+<p>A linear pair taken apart with <code>let 1</code>.</p>
+</section>
+<section class="cell cell-code" id="cell-79">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[21]:</span><pre class="code"><code class="language-wiz">def swap {0 A : Type} (1 p : A × Ticket) : (1 t : Ticket) × A :=
+  let 1 (a, t) := p;
+  (t, a)</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-80">
+<p><code>IO</code> itself is built this way: <code>IO A</code> is <code>(1 w : World) → A × World</code>, a function that takes the world exactly once and hands back the next one, so effects happen in order and can be neither duplicated nor skipped. <code>#check @IO.bind</code> shows the linear binders:</p>
+</section>
+<section class="cell cell-markdown" id="cell-81">
+<p>Not a cell: this is output shown by the tour.</p>
+<pre class="markdown-code"><code class="language-text">IO.bind : {A : Type} → {B : Type} → (1 x : IO A) → (1 f : A → IO B) → IO B</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-82">
+<p>Linear matching on your own data types is not there yet (a <code>match</code> uses its scrutinee at <code>ω</code>), so linear data is written with pairs, as above, for now. (<code>examples/tour/07-quantities.wiz</code>; <a href="../stages/09-ffi.md">stages/09-ffi.md</a>, 9a and 9e; <a href="../stages/25-concurrency.md">stages/25-concurrency.md</a> for linear channels and session types.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-83">
+<h2>8: codata</h2>
+<p>An inductive type is defined by how you build its values, and a <strong>coinductive</strong> type by what you can observe of them. A stream has a head and a tail, forever:</p>
+</section>
+<section class="cell cell-markdown" id="cell-84">
+<p>Copatterns define an infinite stream; <code>Stream.take</code> observes a finite prefix.</p>
+</section>
+<section class="cell cell-code" id="cell-85">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[22]:</span><pre class="code"><code class="language-wiz">coinductive Stream (A : Type) where
+  head : A
+  tail : Stream A
+
+def Stream.from (n : Nat) : Stream Nat
+  | .head =&gt; n
+  | .tail =&gt; Stream.from (n + 1)
+
+def Stream.map {A B : Type} (f : A → B) (s : Stream A) : Stream B
+  | .head =&gt; f s.head
+  | .tail =&gt; Stream.map f s.tail
+
+def Stream.take {A : Type} : Nat → Stream A → List A
+  | .zero, _ =&gt; .nil
+  | .succ n, s =&gt; .cons s.head (Stream.take n s.tail)
+
+def squares : Stream Nat := Stream.map (fun n =&gt; n * n) (Stream.from 0)
+#eval Stream.take 6 squares                -- .cons 0 (.cons 1 (.cons 4 (.cons 9 (.cons 16 (.cons 25 .nil)))))
+#eval squares.tail.tail.tail.head          -- 9</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">.cons 0 (.cons 1 (.cons 4 (.cons 9 (.cons 16 (.cons 25 .nil)))))
+9
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-86">
+<p>The definitions use <strong>copatterns</strong>: instead of matching on an argument, they say what each observation (<code>.head</code>, <code>.tail</code>) of the result is. An infinite stream is fine as long as every observation answers in finitely many steps (it is <em>productive</em>). The checker makes sure each <code>.tail</code> is a call of the function being defined, <em>guarded</em> by the observation. A definition that would spin forever is rejected:</p>
+</section>
+<section class="cell cell-markdown" id="cell-87">
+<p>Not run: this definition is rejected for guardedness, as the tour explains.</p>
+<pre class="markdown-code"><code class="language-text">def stuck (n : Nat) : Stream Nat
+  | .head =&gt; n
+  | .tail =&gt; (stuck n).tail
+-- error: the observation .tail must be a corecursive call of stuck (guardedness)</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-88">
+<p>(<code>examples/tour/08-codata.wiz</code>; <code>examples/streams.wiz</code>, <code>examples/sized.wiz</code> for sized types, <a href="../stages/04-data.md">stages/04-data.md</a>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-89">
+<h2>9: the C FFI</h2>
+<p>The program from the tour. Foreign functions run only in compiled code, so this one is shown as a program, not a cell.</p>
+</section>
+<section class="cell cell-markdown" id="cell-90">
+<p>Not a cell: foreign functions run only in compiled code, so this is a program for <code>wiz run</code>, not an <code>#eval</code>.</p>
+<pre class="markdown-code"><code class="language-text">-- test: run
+import IO
+
+-- one C function, with its type in Wiz (`String` is a `char*`, `Nat` a `uint64_t`)
+extern "strlen" (header := "string.h") strlen : String → Nat
+
+-- C written inline, in a checked subset of C
+glue sumBelow (n : Nat) : Nat := "uint64_t s = 0; for (uint64_t i = 0; i &lt; n; i++) s += i; return s;"
+
+def main : IO Unit := do
+  IO.println (Nat.toString (strlen "hello, C"));
+  IO.println (Nat.toString (sumBelow 10))</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-91">
+<p>This is the shell command and its output; the program above is not run by a kernel cell.</p>
+<pre class="markdown-code"><code class="language-text">$ wiz run examples/tour/09-ffi.wiz
+8
+45</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-92">
+<p><code>extern &quot;cname&quot; name : T</code> declares a function implemented in C; the arguments are converted by their Wiz types. A foreign function that has effects should return <code>IO</code>. <code>glue</code> writes the C body inline, in a subset that the compiler checks. <code>import_c &quot;h&quot;</code> binds every function of a C header at once (<code>C.strlen</code>, …), <code>link_c &quot;file.c&quot;</code> and <code>link_lib &quot;m&quot;</code> link your own C, and <code>foreign_type</code> wraps a C pointer with a finalizer. Foreign functions run only in compiled code: <code>#eval</code> can&#x27;t call them, so this example is a program, and its test (the first line, <code>-- test: run</code>) runs it. (<code>examples/tour/09-ffi.wiz</code>; <code>examples/foreign.wiz</code>, <code>examples/import_c.wiz</code>, <code>examples/glue.wiz</code>; <a href="../stages/09-ffi.md">stages/09-ffi.md</a>.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-93">
+<h2>10: hardware</h2>
+<p><code>lib/Hdl/Core.wiz</code> is a hardware description library: circuits are Wiz values, simulated by evaluation and turned into Verilog.</p>
+</section>
+<section class="cell cell-markdown" id="cell-94">
+<p>A circuit written against any signal representation <code>r</code>; simulate it at values and at a netlist.</p>
+</section>
+<section class="cell cell-code" id="cell-95">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[23]:</span><pre class="code"><code class="language-wiz">import Hdl.Core
+
+def B4 : HwTy := HwTy.bits 4
+
+-- Combinational logic is a function over any representation `r` of signals: run it on
+-- values to simulate it, or on wires to get a netlist.
+def addThree {r : HwTy → Type} [Hw r] (x : r B4) : r B4 := Hw.add x (Hw.lit 4 3)
+
+-- A circuit is a state type, an initial state and a step: (state, input) ↦ (next, output).
+-- This one sums its inputs (mod 16) and outputs the sum so far.
+def acc : Circuit B4 B4 :=
+  Circuit.mk B4 (BitVec.ofNat 4 0) (fun s x =&gt; Hw.pair (Hw.add s x) s)
+
+-- circuits compose: `acc` after `addThree`
+def pipeline : Circuit B4 B4 := Circuit.seq (Circuit.comb addThree) acc
+
+#eval Circuit.runPacked pipeline [1, 2, 3, 4]          -- .cons 0 (.cons 4 (.cons 9 (.cons 15 .nil)))
+#eval Circuit.simNet Bool.true pipeline [1, 2, 3, 4]   -- the same, from the netlist
+def verilog : String := Verilog.emit (Circuit.netlist "pipeline" pipeline)</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">.cons 0 (.cons 4 (.cons 9 (.cons 15 .nil)))
+.cons 0 (.cons 4 (.cons 9 (.cons 15 .nil)))
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-96">
+<p><code>Hw r</code> is a type class whose instances are <em>representations</em> of signals. At values, <code>Hw.add</code> adds bit vectors. At wires, it adds a node to a netlist. A circuit written once against <code>[Hw r]</code> can be simulated, compiled to a netlist (with shared subterms detected), and printed as Verilog. <code>verilog</code> above is:</p>
+</section>
+<section class="cell cell-markdown" id="cell-97">
+<p>Not a cell: this is the Verilog that <code>Verilog.emit</code> prints for the circuit.</p>
+<pre class="markdown-code"><code class="language-text">module pipeline(input clk, input [3:0] x, output [3:0] y);
+  reg [3:0] r_1; initial r_1 = 4'd0;
+  wire [3:0] n4 = x + 4'd3;
+  wire [3:0] n5 = r_1 + n4;
+  always @(posedge clk) r_1 &lt;= n5;
+  assign y = r_1;
+endmodule</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-98">
+<p>The library also has bundles of named signals (<code>deriving Bundle</code>), reset and enable, test benches, waveforms (VCD) and pin constraints, and the combinators come with lemmas (<code>Circuit.run_seq</code>: running <code>seq a b</code> is running <code>b</code> on the outputs of <code>a</code>). A UART for a Lattice iCEstick FPGA board is written in it. (<code>examples/tour/10-hdl.wiz</code>; <code>examples/hdl.wiz</code>, <code>examples/hdl-compose.wiz</code>; <a href="../libraries.md">libraries.md</a>, H14.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-99">
+<h2>11: packages</h2>
+<p>A program bigger than one file is a <strong>grail package</strong>: a directory with a <code>grail.wiz</code>, which is itself Wiz:</p>
+</section>
+<section class="cell cell-markdown" id="cell-100">
+<p>A <code>grail.wiz</code> package description; <code>grail build</code> is what reads it.</p>
+</section>
+<section class="cell cell-code" id="cell-101">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[24]:</span><pre class="code"><code class="language-wiz">import Grail
+def package : Package := Package.new "hello"
+  |&gt; Package.lib "greet" "src"           -- the modules under src/: `import Greet` is src/Greet.wiz
+  |&gt; Package.exe "app" "App.wiz"         -- compile main to .grail/bin/app
+  |&gt; Package.tests "tests" "tests"       -- each tests/*.wiz against its .expected</code></pre></div>
+</section>
+<section class="cell cell-markdown" id="cell-102">
+<p><code>grail build</code> builds everything (in parallel, and only what changed since last time), <code>grail run app</code> builds and runs a program, and <code>grail test</code> runs the tests: a test is a <code>.wiz</code> file whose messages (or, with <code>-- test: run</code> on its first line, whose output) must match the <code>.expected</code> file beside it. <code>grail test --update</code> writes the <code>.expected</code> files. The tour&#x27;s own examples are tests of exactly this kind. A <code>wiz-toolchain</code> file next to <code>grail.wiz</code> pins the toolchain, and <code>Package.dep</code> adds a package from a git repository. <a href="../install.md#a-first-project-with-grail">install.md</a> walks through a first package; <a href="../stages/23-grail.md">stages/23-grail.md</a> has the rest.</p>
+<p>A new package starts with <code>grail new</code>:</p>
+</section>
+<section class="cell cell-markdown" id="cell-103">
+<p>Not a cell: this is a shell command and its output.</p>
+<pre class="markdown-code"><code class="language-text">$ grail new hello
+grail new: wrote hello (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gitignore)
+  cd hello &amp;&amp; grail build &amp;&amp; grail run hello</code></pre>
+</section>
+<section class="cell cell-markdown" id="cell-104">
+<p>It writes a library, an executable and a golden test; <code>grail run hello</code> prints <code>hello from hello</code>, and the test checks the same line. An existing non-empty directory is refused, so <code>new</code> never overwrites work, and the name must start with a letter. (<a href="../stages/23-grail.md">stages/23-grail.md</a>, 23o.)</p>
+<p>Modules are files: <code>import A.B</code> reads <code>A/B.wiz</code> from a module root (the standard library <code>lib/</code>, a package&#x27;s <code>lib</code> directories, <code>-I DIR</code>). Wiz has no namespaces yet, so one name can be declared only once among everything a file imports. Mark helpers <code>private</code> to keep them out of other modules.</p>
+</section>
+<section class="cell cell-markdown" id="cell-105">
+<h2>12: taint analysis with scry</h2>
+<p><code>scry</code> is a program analyser whose library is Wiz: <code>lib/Scry/*</code> has the three-address IR (<code>Scry.Wil</code>), the CFG and reaching definitions (<code>Scry.Analysis</code>), and taint analysis as Datalog (<code>Scry.Taint</code>). A <em>source</em> call&#x27;s result is attacker-controlled, a <em>sanitiser</em> cleans it, and a <em>sink</em> must not receive a tainted value:</p>
+</section>
+<section class="cell cell-markdown" id="cell-106">
+<p>A taint spec, a direct flow and a sanitised one.</p>
+</section>
+<section class="cell cell-code" id="cell-107">
+<div class="cell-input"><span class="prompt in-prompt">In&nbsp;[25]:</span><pre class="code"><code class="language-wiz">import Scry.Taint
+import Scry.TaintExamples
+
+def spec : Scry.TaintSpec :=
+  Scry.parseTaintSpec "source getenv\nsanitise sanitize\nsink system 0"
+
+#eval Scry.alertsInFunc Scry.directFn spec      -- .cons (4, 0) .nil
+#eval Scry.alertsInFunc Scry.sanitisedFn spec   -- .nil</code></pre></div>
+<div class="cell-outputs">
+<pre class="output stream stream-stdout">.cons (4, 0) .nil
+.nil
+</pre>
+</div>
+</section>
+<section class="cell cell-markdown" id="cell-108">
+<p>The first function copies and adds <code>getenv</code>&#x27;s result before passing it to <code>system</code>, so the analysis reports the sink and the argument; the second passes it through <code>sanitize</code>, which kills the flow. A finding also carries its source → sink path (<code>Scry.findings</code>). (<code>examples/tour/12-scry.wiz</code>; <a href="../libraries.md">libraries.md</a>, &quot;Scry&quot;.)</p>
+</section>
+<section class="cell cell-markdown" id="cell-109">
+<h2>Where next</h2>
+<ul><li>The <strong>examples</strong>: <a href="../../examples/"><code>examples/</code></a> has one file per feature, each checked by the test suite (<code>grail test</code> in the repository).</li><li>The <strong>libraries</strong>: <code>lib/</code>, described in <a href="../libraries.md">libraries.md</a>: text, JSON, arrays, processes and files (<code>Sys</code>), effects (<code>Eff</code>), concurrency (<code>MVar</code>, <code>Session</code>), separation logic (<code>HProp</code>, <code>Hoare</code>), the HDL.</li><li><strong>How it works</strong>: the stage docs (<a href="../index.md">index.md</a>) build the language up from the kernel, a stage at a time, with exercises. Stage 1 is the core calculus, stages 3–7 the elaborator, data, erasure, macros and classes, stage 8 the compiler, stages 12–21 the self-hosted toolchain. <a href="../CoreSpec.md">CoreSpec.md</a> has the rules.</li><li><strong>What is proved, and what isn&#x27;t</strong>: <a href="../Status.md">Status.md</a>.</li></ul>
+</section>
+</main>
+</body>
+</html>

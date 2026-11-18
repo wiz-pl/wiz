@@ -12,8 +12,9 @@ Tests: `lake test -- seplogic`.
 
 ## 24a: propositional logic over `Prop`
 
-`lib/Logic.wiz` (`import Logic`). Wiz has no inductive propositions (`μ` always lives in
-`Type`), so the connectives are built from what the kernel has:
+`lib/Logic.wiz` (`import Logic`). Wiz has inductive propositions since #252, but the
+library keeps the Church encodings it already had (`μ` in `Type`), so the connectives
+are built from what the kernel had before that:
 
 | | definition | rules |
 |---|---|---|
@@ -108,7 +109,7 @@ since 24d they live in `lib/HoareExamples.wiz` and are proved by the tactics (7 
 `lib/HoareTactics.wiz` (`import HoareTactics`), SLF chapters Himpl (`xsimpl`) and WPgen
 (the `x`-tactics); `lib/HoareExamples.wiz` has the verified programs. Plan S3.
 
-```
+```wiz no-check
 def Prog.swap_spec (p q a b : Nat) :
     Triple ((p ↦ a) ⋆ (q ↦ b)) (Prog.swap p q) (fun _ => (p ↦ b) ⋆ (q ↦ a)) := by
   xgo
@@ -216,7 +217,7 @@ SteelCore's action trees with `Par` nodes are the model for where concurrency go
 
 ## 24e: notation for specifications, and goals that print in it
 
-```
+```wiz no-check
 def Prog.read_spec (l v : Nat) : ⦃l ↦ v⦄ Prog.read l ⦃r, l ↦ v ⋆ ⌜r = v⌝⦄ := by xgo
 def MList' (p : Nat) : HProp Nat := ∃ʰ (n : Nat), p ↦ n ⋆ ⌜n = 0⌝
 ```

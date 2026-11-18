@@ -28,6 +28,10 @@ function check(name, got, want) {
   else { failed++; console.log(`FAIL: ${name}\n  want: ${JSON.stringify(want)}\n  got:  ${JSON.stringify(got)}`); }
 }
 
+// (engine-trampoline) The clean-stop boundary is armed: the module exports its status and
+// a normal check leaves it at 0 (no stop). web/playground_engine_test.mjs covers the
+// survival itself with a stub; this checks the script-built module carries the export.
+check("the exit boundary export is there", typeof wasm._wiz_playground_exit, "function");
 const out = run(`import Prelude
 
 def twice (n : Nat) : Nat := n + n
@@ -49,6 +53,7 @@ check("an error", out[4], "error: unknown identifier nope");
 const bare = run(withPrelude("def one : Nat := 1\n#eval one\n"));
 check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
+check("a normal run leaves no clean-stop code", Number(wasm._wiz_playground_exit(0n)), 0);
 
 // Every example is a program the page offers; each must check and evaluate without an
 // error line. This is the smoke test that keeps the Examples menu honest.

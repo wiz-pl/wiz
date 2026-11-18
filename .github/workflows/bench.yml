@@ -1,0 +1,453 @@
+# Nightly performance gate: the standard library and the Scry taint corpus.
+#
+# A timing regression is only caught when someone remembers to run the benchmark.
+# This workflow runs the two checked-in harnesses every night on `master` (and from
+# "Run workflow") on the self-hosted runner named by the repository variable
+# WIZ_RUNNER_HEAVY, and is a clean skip when that variable is unset (the same
+# preflight as fixpoint.yml). It never runs on a pull request.
+#
+# The standard-library A/B is a paired comparison: `scripts/stdlib-bench.py
+# --baseline-bin` alternates one run of the *previous green night's* executable
+# (restored from the Actions cache) with one run of tonight's build, mode by mode.
+# The decision is the median of the per-pair ratios, never the absolute times:
+# those move with the machine. A mode regresses when its median ratio is worse
+# than `fail_on` percent (default 10) and it has at least 5 pairs. Modes with too
+# few pairs, or whose checksum changed (the work itself changed), are reported but
+# not gated. On a green night tonight's executable becomes the next A side.
+#
+# `scry bench --no-timing --fail-on-regression` compares the corpus metrics with
+# the checked-in baseline; that is a deterministic corpus gate, not a timing one.
+#
+# Reproducibility: the per-mode sizes are read from bench/stdlib-baseline.json (the
+# same work as the reference run; the seeds are fixed in the benchmark program), the
+# measurement runs under taskset on WIZ_BENCH_CPUSET, and the machine id, CPU set and
+# CPU model are recorded in the run JSON (`environment`) and in every history line.
+#
+# Artifacts (not committed): the standard-library JSON, the Scry JSON, the baseline
+# executable and bench/history.jsonl, one line per run, so a trend is visible.
+#
+# First run: there is no cached A side, so the current build is compared with a copy
+# of itself (ratios 1.0) and becomes the baseline. A regression made before the first
+# run is therefore not detected; one made after it is. A deliberate change to the
+# benchmark program (a changed checksum) is accepted the same way: dispatch with
+# `bootstrap: true`, which ignores the cached A side for one run.
+name: bench
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # nightly: the benchmarks on master, on the heavy runner
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Paired A/B samples per mode (at least 5 for the gate)
+        type: number
+        default: 15
+      fail_on:
+        description: Fail when a mode's median paired ratio is worse than this percent
+        type: number
+        default: 10
+      bootstrap:
+        description: Ignore the cached A side and pair this build with itself (after a deliberate benchmark change)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time and never cancelled: the A/B pairs need the machine to itself, and
+  # a later night measures a different commit, so an earlier run is not superseded-useless.
+  group: bench
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+  # The runner must have this much MemAvailable; the Nix build of wiz/grail is the
+  # heavy part (a Cachix miss compiles it); the benchmark itself is single-process.
+  WIZ_BENCH_MEM_GIB: "6"
+  # The memory job's requirement. Its largest step is building the self-hosted
+  # checker with the Nix-built wiz: about 1.8 GB tree peak (2a36f87f, after the
+  # inlineTm fix; mem-bench records it each night as `checker_build`). The corpus
+  # peaks at 413 MiB. Its Nix step only substitutes (--max-jobs 0), so a Cachix miss
+  # cannot compile Lean under this budget. 3 GiB leaves ~60 % headroom on 1.8 GB.
+  WIZ_MEM_BENCH_GIB: "3"
+  BENCH_BASELINE_PREFIX: stdlib-bench-baseline-v1
+  BENCH_HISTORY_PREFIX: stdlib-bench-history-v1
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    # 5 min: read one repository variable
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Is there a heavy runner?
+        id: gate
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ vars.WIZ_RUNNER_HEAVY }}
+        run: |
+          if [ -n "$RUNNER_LABEL" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self-hosted runner: $RUNNER_LABEL (the benchmarks declare ${WIZ_BENCH_MEM_GIB} GiB)"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=bench skipped::WIZ_RUNNER_HEAVY is unset. The nightly benchmarks need a self-hosted runner; set the repository variable to run them (docs/ci-runner.md)."
+          fi
+
+  bench:
+    name: bench (self-hosted)
+    needs: preflight
+    if: needs.preflight.outputs.run == 'true'
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 180 min: the A/B pairs (~15 per mode) and the Scry corpus on one runner
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # The Nix-built wiz/grail need no Lake toolchain (the same rule as CI's
+          # build job); the elan cache is only for the fixpoint and release jobs.
+          lean: false
+
+      - name: Check the memory requirement
+        shell: bash
+        run: |
+          need_kib=$((WIZ_BENCH_MEM_GIB * 1024 * 1024))
+          avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          echo "MemAvailable: $((avail_kib / 1024)) MiB; the benchmarks declare ${WIZ_BENCH_MEM_GIB} GiB"
+          if [ "$avail_kib" -lt "$need_kib" ]; then
+            echo "::error title=not enough memory::the benchmarks declare ${WIZ_BENCH_MEM_GIB} GiB and this runner has $((avail_kib / 1024)) MiB available"
+            exit 1
+          fi
+
+      - name: Build wiz and grail
+        id: toolchain
+        shell: bash
+        run: |
+          # One derivation holds both (`nix build .#wiz` builds grail too); CI
+          # publishes it to Cachix on master, so this is a substitution.
+          wiz_path=$(nix build .#wiz --print-out-paths --no-link)
+          echo "WIZ=$wiz_path/bin/wiz" >> "$GITHUB_ENV"
+          echo "$wiz_path/bin" >> "$GITHUB_PATH"
+          "$wiz_path/bin/wiz" --version 2>/dev/null || "$wiz_path/bin/wiz" --help | head -1 || true
+          "$wiz_path/bin/grail" --version 2>/dev/null || true
+
+      - name: Restore the A-side executable
+        id: baseline
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/.build/bench-baseline
+          key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore the history
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/history.jsonl
+          key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.BENCH_HISTORY_PREFIX }}-
+
+      - name: Choose the measurement CPUs
+        id: cpus
+        shell: bash
+        env:
+          WANT: ${{ vars.WIZ_BENCH_CPUSET }}
+        run: |
+          want="${WANT:-}"
+          if [ -z "$want" ]; then
+            n=$(nproc)
+            # Leave two CPUs for the runner and the kernel when there are enough.
+            if [ "$n" -ge 4 ]; then want="2-$((n - 1))"; else want="0-$((n - 1))"; fi
+          fi
+          if ! taskset -c "$want" true 2>/dev/null; then
+            echo "::warning title=bench: cpuset unusable::taskset -c $want failed on this runner; measuring on its default affinity"
+            want=""
+          fi
+          echo "cpuset=$want" >> "$GITHUB_OUTPUT"
+          echo "measuring on ${want:-all available} of $(nproc) CPUs"
+
+      - name: Standard-library A/B
+        id: stdlib
+        shell: bash
+        env:
+          RUNS_INPUT: ${{ inputs.runs }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+          CPUSET: ${{ steps.cpus.outputs.cpuset }}
+        run: |
+          runs="${RUNS_INPUT:-15}"
+          if ! [[ "$runs" =~ ^[0-9]+$ ]] || [ "$runs" -lt 1 ]; then
+            echo "::error title=bench: bad runs input::runs must be a positive integer (got '$runs')"
+            exit 2
+          fi
+          if [ ! -f bench/stdlib-bench.wiz ] || [ ! -f scripts/stdlib-bench.py ]; then
+            echo "::notice title=stdlib bench skipped::bench/stdlib-bench.wiz or scripts/stdlib-bench.py is not in this revision; the gate resumes when the stdlib-bench harness lands"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Pin the work to the checked-in reference run's per-mode sizes. The
+          # harness's program fixes the seeds; the checksum proves same work.
+          if ! sizes_text=$(python3 scripts/bench-threshold.py \
+                --baseline bench/stdlib-baseline.json --print-sizes); then
+            echo "::error title=bench: cannot read the reference sizes::bench/stdlib-baseline.json is missing or malformed"
+            exit 2
+          fi
+          mapfile -t sizes <<< "$sizes_text"
+          mkdir -p bench-out bench/.build
+          base=bench/.build/bench-baseline
+          if [ "$BOOTSTRAP" = "true" ]; then
+            echo "bootstrap: ignoring the cached A side"
+            rm -f "$base"
+          fi
+          if [ ! -x "$base" ]; then
+            echo "no cached A side: bootstrapping from this build (tonight's pairs are 1.0)"
+            "${WIZ:-wiz}" build bench/stdlib-bench.wiz -o bench/.build/stdlib-bench
+            cp bench/.build/stdlib-bench "$base"
+          else
+            echo "A side: $(stat -c '%s bytes, mtime %y' "$base")"
+          fi
+
+          args=(--reps "$runs" --warmup 1 --json bench-out/stdlib-bench.json \
+                --baseline-bin "$base" --allow-checksum hash --quiet)
+          for s in "${sizes[@]}"; do
+            if [ -n "$s" ]; then args+=(--size "$s"); fi
+          done
+          cmd=(python3 scripts/stdlib-bench.py "${args[@]}")
+          if [ -n "$CPUSET" ]; then cmd=(taskset -c "$CPUSET" "${cmd[@]}"); fi
+          echo "running: ${cmd[*]}"
+          if ! "${cmd[@]}"; then
+            echo "::error title=standard-library benchmark failed::the A/B harness exited nonzero (a build error, a non-deterministic checksum, or a checksum change in a non-hash mode; after a deliberate change, dispatch with bootstrap: true)"
+            exit 1
+          fi
+
+      - name: Scry taint corpus
+        id: scry
+        shell: bash
+        env:
+          CPUSET: ${{ steps.cpus.outputs.cpuset }}
+        run: |
+          if [ ! -f scry/src/Scry/BenchCmd.wiz ]; then
+            echo "::notice title=scry bench skipped::Scry.benchCmd is not in this revision; the corpus gate resumes when scry bench lands"
+            echo "status=absent" >> "$GITHUB_OUTPUT"
+            echo "code=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p bench-out
+          cmd=(grail run scry -- bench --no-timing --fail-on-regression \
+               --json bench-out/scry-bench.json --markdown bench-out/scry-bench.md)
+          if [ -n "$CPUSET" ]; then cmd=(taskset -c "$CPUSET" "${cmd[@]}"); fi
+          echo "running: ${cmd[*]}"
+          if "${cmd[@]}"; then code=0; else code=$?; fi
+          echo "status=ran" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # Exit 1 is the baseline-mismatch gate (the JSON is still written). Any
+          # other failure is a build/corpus error: fail now, with that distinction.
+          if [ "$code" -ne 0 ] && [ ! -s bench-out/scry-bench.json ]; then
+            echo "::error title=scry bench failed::scry bench exited $code without writing bench-out/scry-bench.json (a build or corpus error, not a baseline change)"
+            exit "$code"
+          fi
+
+      - name: Paired-ratio threshold
+        id: threshold
+        # The gate is the Gate step below: this step still writes the summary,
+        # history and annotations when it fails. `always()` keeps it running after
+        # a Scry failure: the timing result is independent of the corpus result.
+        if: always() && steps.stdlib.outcome == 'success' && steps.stdlib.outputs.skip != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          FAIL_ON_INPUT: ${{ inputs.fail_on }}
+          RUNS_INPUT: ${{ inputs.runs }}
+          CPUSET: ${{ steps.cpus.outputs.cpuset }}
+          SCRY_CODE: ${{ steps.scry.outputs.code }}
+          MACHINE: ${{ vars.WIZ_BENCH_MACHINE_ID || runner.name }}
+          RUNNER_LABEL: ${{ vars.WIZ_RUNNER_HEAVY }}
+        run: |
+          fail_on="${FAIL_ON_INPUT:-10}"
+          runs="${RUNS_INPUT:-15}"
+          if ! python3 -c 'import sys; v = float(sys.argv[1]); sys.exit(0 if v >= 0 else 1)' "$fail_on"; then
+            echo "::error title=bench: bad fail_on input::fail_on must be a non-negative number (got '$fail_on')"
+            exit 2
+          fi
+          machine="${MACHINE:-$(hostname)}"
+          args=(--json bench-out/stdlib-bench.json
+                --baseline bench/stdlib-baseline.json
+                --fail-on "$fail_on" --min-samples 5 --runs "$runs"
+                --machine "$machine" --runner "$RUNNER_LABEL"
+                --cpuset "${CPUSET:-all}" --annotate-json
+                --markdown "$GITHUB_STEP_SUMMARY"
+                --history bench/history.jsonl)
+          if [ -s bench-out/scry-bench.json ]; then
+            args+=(--scry bench-out/scry-bench.json --scry-exit "${SCRY_CODE:-0}")
+          fi
+          set +e
+          python3 scripts/bench-threshold.py "${args[@]}"
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Roll the A side forward
+        if: always() && steps.threshold.outputs.code == '0' && steps.stdlib.outputs.skip != 'true'
+        shell: bash
+        run: |
+          if [ -x bench/.build/stdlib-bench ]; then
+            cp bench/.build/stdlib-bench bench/.build/bench-baseline
+            echo "tonight's build is the next A side"
+          fi
+
+      - name: Save the new A side
+        if: always() && steps.threshold.outputs.code == '0' && steps.stdlib.outputs.skip != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/.build/bench-baseline
+          key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save the history
+        if: always() && hashFiles('bench/history.jsonl') != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/history.jsonl
+          key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload the run
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            bench-out/stdlib-bench.json
+            bench-out/scry-bench.json
+            bench-out/scry-bench.md
+            bench/history.jsonl
+            bench/.build/bench-baseline
+            bench/.build/stdlib-bench
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Note the skipped standard-library gate
+        if: steps.stdlib.outputs.skip == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Standard-library A/B benchmark"
+            echo
+            echo "Skipped: \`bench/stdlib-bench.wiz\` or \`scripts/stdlib-bench.py\` is not in this revision."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate
+        if: always()
+        shell: bash
+        env:
+          STDLIB_OUTCOME: ${{ steps.stdlib.outcome }}
+          STDLIB_SKIP: ${{ steps.stdlib.outputs.skip }}
+          STDLIB_CODE: ${{ steps.threshold.outputs.code }}
+          SCRY_OUTCOME: ${{ steps.scry.outcome }}
+          SCRY_STATUS: ${{ steps.scry.outputs.status }}
+          SCRY_CODE: ${{ steps.scry.outputs.code }}
+        run: |
+          stdlib="${STDLIB_CODE:-0}"
+          scry="${SCRY_CODE:-0}"
+          failed=0
+          if [ "$STDLIB_OUTCOME" != "success" ] && [ "$STDLIB_OUTCOME" != "skipped" ]; then
+            echo "::error title=nightly benchmark failed::the standard-library benchmark step did not complete; see its log"
+            failed=1
+          fi
+          if [ "$STDLIB_SKIP" != "true" ] && [ "$stdlib" -ne 0 ]; then
+            echo "::error title=nightly benchmark failed::the standard-library A/B gate exited $stdlib; see the job summary, bench-out/stdlib-bench.json and bench/history.jsonl"
+            failed=1
+          fi
+          if [ "$SCRY_OUTCOME" != "success" ] && [ "$SCRY_OUTCOME" != "skipped" ]; then
+            echo "::error title=scry bench failed::the Scry corpus step did not complete; see its log"
+            failed=1
+          fi
+          if [ "$scry" -ne 0 ]; then
+            echo "::error title=scry bench regression::scry bench exited $scry; the corpus metrics no longer match scry/bench/baseline.json (see the summary and bench-out/scry-bench.json)"
+            failed=1
+          fi
+          if [ "$STDLIB_SKIP" = "true" ] && [ "$SCRY_STATUS" != "ran" ]; then
+            echo "bench: nothing to gate in this revision (both harnesses are absent)"
+          fi
+          exit "$failed"
+
+  # --- memory gate (scripts/mem-bench.py; docs/building.md, "Build time and memory") -
+  # Peak RSS, not wall time: the nightly timing job cannot see a build that would be
+  # killed by a 4 GiB cgroup. The baseline is checked in, so there is no cache to roll.
+  # It runs after `bench` whatever that job's result: on one runner the two would
+  # otherwise share the machine and disturb the timing pairs.
+  mem:
+    name: mem (self-hosted)
+    needs: [preflight, bench]
+    if: ${{ !cancelled() && needs.preflight.outputs.run == 'true' }}
+    runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 120 min: build the self-hosted checker once, then the corpus
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+
+      - name: Check the memory requirement
+        shell: bash
+        run: |
+          # The corpus itself is small; building the self-hosted checker (preparation)
+          # is the peak (see WIZ_MEM_BENCH_GIB).
+          need_kib=$((WIZ_MEM_BENCH_GIB * 1024 * 1024))
+          avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          echo "MemAvailable: $((avail_kib / 1024)) MiB; the memory bench declares ${WIZ_MEM_BENCH_GIB} GiB"
+          if [ "$avail_kib" -lt "$need_kib" ]; then
+            echo "::error title=not enough memory::the memory bench declares ${WIZ_MEM_BENCH_GIB} GiB and this runner has $((avail_kib / 1024)) MiB available"
+            exit 1
+          fi
+
+      - name: Build wiz and grail
+        id: toolchain
+        shell: bash
+        run: |
+          # Substitute only: the bench job built or fetched this path on the same
+          # runner, or Cachix has it. Compiling Lean here would not fit WIZ_MEM_BENCH_GIB.
+          if ! wiz_path=$(nix build .#wiz --print-out-paths --no-link --max-jobs 0); then
+            echo "::error title=mem bench: no wiz::.#wiz is neither in the local store nor on Cachix, and this job does not compile it (WIZ_MEM_BENCH_GIB)"
+            exit 1
+          fi
+          echo "WIZ=$wiz_path/bin/wiz" >> "$GITHUB_ENV"
+          echo "$wiz_path/bin" >> "$GITHUB_PATH"
+          "$wiz_path/bin/wiz" --version 2>/dev/null || "$wiz_path/bin/wiz" --help | head -1 || true
+
+      - name: Test the thresholds (synthetic series, one real sample)
+        shell: bash
+        run: python3 scripts/mem-bench.py --self-test
+
+      - name: Peak RSS against the baseline
+        shell: bash
+        run: |
+          if [ ! -f bench/mem-baseline.json ]; then
+            echo "::error title=mem bench: no baseline::bench/mem-baseline.json is missing; record it with scripts/mem-bench.py --update"
+            exit 2
+          fi
+          mkdir -p bench-out
+          python3 scripts/mem-bench.py --wiz "${WIZ:-wiz}" --check \
+            --json bench-out/mem-bench.json --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the run
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mem-bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-out/mem-bench.json
+          if-no-files-found: ignore
+          retention-days: 90

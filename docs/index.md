@@ -1,17 +1,38 @@
 # Wiz documentation
 
 The standard library's API documentation is published from `master` at
-<https://wiz-pl.github.io/wiz/> (one page per module, with interactive signatures;
-docs/building.md, "Documentation site").
+<https://wiz-pl.github.io/wiz/docs/> (one page per module, with interactive signatures;
+the [API index](https://wiz-pl.github.io/wiz/docs/api.html) lists every module and
+declaration, and search covers names, doc comments and signatures; docs/building.md,
+"Documentation site"). The site's root is a landing page
+(<https://wiz-pl.github.io/wiz/>) and <https://wiz-pl.github.io/wiz/playground/> is a
+static playground that runs the self-hosted checker in the browser;
+<https://wiz-pl.github.io/wiz/bench/> is the benchmark page, generated from the JSON
+checked into the repository. This file indexes the repository's documentation; the
+published `/docs/` is generated from `lib/` by `wiz doc --lib`.
 
 * [install.md](install.md): installing Wiz with tower or Nix, editor setup, a first
   grail package, troubleshooting
 * [tour.md](tour.md): a tour of the language for people who know a little functional
-  programming
+  programming; [`notebooks/tour.ipynb`](notebooks/tour.ipynb)
+  ([exported page](notebooks/tour.html)) is the same tour as a runnable notebook
 * [stability.md](stability.md): what a release promises (0.1.z)
 * [release.md](release.md): making a release (checklist, tagging, smoke test)
+* [bootstrap-chain.md](bootstrap-chain.md): the self-hosted toolchain chain (design, not active):
+  pins by commit and hash, the fixpoint release, attestations, reproducibility, the root
+* [release/v0.1.md](release/v0.1.md): the draft 0.1 release notes, and
+  [release/v0.1-prs.md](release/v0.1-prs.md): the pull requests merged since the
+  2026-11-14 candidate
+* [release/v0.1-checklist.md](release/v0.1-checklist.md): the 0.1 gate list, and
+  [release-manifest.json](release/release-manifest.json): the machine-readable record
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
+* [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that
+  gives an MCP client (OpenCode, Claude Code, Zed) type checking, formatting, building,
+  and the language server's diagnostics, hover and tactic state
+* [bench/README.md](../bench/README.md): the standard-library benchmark harness, its
+  modes and how to compare two builds; the published page is generated from the JSON
+  the harness writes (web/build-bench.py)
 * [ci-runner.md](ci-runner.md): a self-hosted runner for the heavy CI shards
 * [exercises.md](exercises.md): generating the exercise tree from this one
 * [hardware.md](hardware.md): hardware in Wiz, from a circuit to a proved temporal property
@@ -19,6 +40,8 @@ docs/building.md, "Documentation site").
 * [Status.md](Status.md)
 * [dsls.md](dsls.md): the embedded languages (DSLs) in Wiz, and the conventions they follow
 * [error-codes.md](error-codes.md): the error codes and their quick fixes
+* [playground-lsp.md](playground-lsp.md): the playground's goals panel and the language-server contract a self-hosted `wiz lsp` must implement
+* [tools/jupyter.md](tools/jupyter.md): the opt-in Jupyter kernels for Wiz (`wiz repl` or a `wiz check` batch fallback), the `%%scry` taint cell magic, and the deterministic notebook exporter (`wiz-nb export`)
 * [resources.md](resources.md): resources in Wiz: quantities, regions, optics, Feral and separation logic, with one running example
 * [ROADMAP.md](../ROADMAP.md)
 
@@ -52,7 +75,9 @@ line below.
 * [Stage 9: the C FFI](stages/09-ffi.md)
 * [Stage 10: effects](stages/10-effects.md)
 * [Stage 25: concurrency](stages/25-concurrency.md)
+* [Stage 32: concurrency as a model](stages/32-conc-model.md): the `Conc` effect, a pure scheduler, a model checker
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
+* [The trust ledger](trust-ledger.md): the reviewed trusted base of `lib/`, its gate and expiry policy
 * [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
 
 ### Self-hosting
@@ -67,6 +92,7 @@ line below.
 * [Stage 19: the frontend checks the self-hosted sources](stages/19-selfhost-checks-sources.md)
 * [Stage 20: the frontend checks itself, and gets faster](stages/20-selfhost-checks-itself.md)
 * [Stage 21: bootstrap](stages/21-bootstrap.md)
+* [Stage 30: type classes in the self-hosted toolchain](stages/30-selfhost-typeclasses.md)
 
 ### Tooling
 
@@ -77,8 +103,13 @@ line below.
 ### Numbers and libraries
 
 * [Stage 22: numbers for hardware and systems code](stages/22-numbers.md)
+* [The value-level semantics matrix](semantics-matrix.md): every numeric and textual
+  boundary, with the value the spec asks for and which backends were compared
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Libraries](libraries.md)
+* [Reference manual](https://wiz-pl.github.io/wiz/docs/reference.html): every
+  standard-library declaration with its full signature, doc comment and class instances,
+  and the notation table (generated, not committed: `nix build .#reference`)
 
 ### Verification
 

@@ -1,0 +1,751 @@
+import Eff
+import Text
+import ListLemmas
+
+/-!
+# Conc
+
+A concurrency effect over `Eff1` with a pure, deterministic scheduler, for testing and
+teaching (stage 32, docs/stages/32-conc-model.md). Nothing here runs a real thread: a
+program is a value, and a scheduler decides, one step at a time, which thread performs
+its next operation.
+
+```
+import Conc
+
+def worker (c : Conc.MVar) : Conc Nat Unit := do
+  v ← Conc.take c;
+  Conc.put c (Nat.succ v)
+def counter : Conc Nat Nat := do
+  c ← Conc.newMVarWith 0;
+  d1 ← Conc.newMVar;
+  d2 ← Conc.newMVar;
+  Conc.fork (do worker c; Conc.put d1 0);
+  Conc.fork (do worker c; Conc.put d2 0);
+  Conc.take d1;
+  Conc.take d2;
+  Conc.take c
+#eval Conc.Outcome.show Nat.repr (Conc.runRR 0 100 counter).outcome   -- "done 2"
+#eval Conc.Report.show Nat.repr
+  (Conc.check (Conc.Cfg.mk 0 100 1000) counter (Conc.returns (fun v => Nat.beq v 2)))
+  -- "ok: 39 runs, every interleaving"
+```
+
+The pieces:
+
+* **Operations** (`Conc V A`: a program whose MVars hold values of type `V`, with
+  result `A`): `fork`, `yield`, `newMVar`, `take`, `put`, and the derived `read` and
+  `newMVarWith`. An MVar is a box that is empty or full: `take` waits until it is full
+  and empties it, `put` waits until it is empty and fills it (as in Haskell). Programs
+  use `do` (the `Monad` of `Eff1 ω`), and `Monad1.bind1` when a continuation holds a
+  linear value.
+* **Schedulers**: `Conc.run` takes a *script*, a list of choices. At each step the
+  scheduler lists the threads that can move, in round-robin queue order, and the next
+  choice picks one of them (`0` is the first; a choice is taken modulo the number of
+  ready threads). An empty script is round-robin (`Conc.runRR`): always the first thread
+  that can move, which then goes to the back of the queue.
+* **A model checker**: `Conc.check` runs every interleaving (every script) up to a
+  bound, and returns the first run whose result fails a test, with its script and
+  trace; `Conc.findDeadlock` and `Conc.returns` are the usual tests.
+* **Proofs** about the policy (`Conc.pick_rr_progress`, `Conc.pick_ready`): a waiting
+  thread that can move gets strictly closer to the front at every round-robin step, so
+  it moves within as many steps as there are threads ahead of it; and every thread the
+  scheduler picks can move.
+
+**Why one-shot.** The operations' continuations are `Eff1`'s: each is resumed exactly
+once. A suspended thread is a linear value (`Conc.Thr`), so a thread may hold a linear
+resource across a `yield`, and the scheduler can neither run a thread twice nor forget
+one. Two consequences shape the design:
+
+1. The model checker cannot copy a state to try two continuations. It re-runs the
+   program from the start for each script instead (*stateless* model checking, as in
+   CHESS or dejafu). A program is a value, so a re-run is the same program.
+2. A run that stops early (a deadlock, or the step bound) still has suspended threads,
+   and those must be used up. Every continuation takes a `Conc.Wake`; one with
+   `killed = true` runs the rest of the thread at once, answering each of its
+   operations with a default, and returns `Conc.Thr.stop`. The type index of `Conc.Thr`
+   records which (`Thr V true` is a killed thread, so it is `stop`), and
+   `Conc.Thr.stopped` uses one up without recursion. Programs are total, so killing
+   terminates. The pool of suspended threads is indexed by its size, so it is used up
+   by recursion on a number (linear data has no structural recursion of its own).
+
+The main thread's result is the program's result (a `V`). When it returns, the run is
+over and the other threads are killed, as in Haskell's `main`. A run where no thread
+can move and main has not returned is a deadlock.
+-/
+
+-- ## Threads
+
+/-- What a suspended thread is woken with: whether it is being `killed`, a value `val`
+(the value taken, for `take`; the default, when killed) and a number `num` (the new
+thread's or MVar's id, for `fork` and `newMVar`). -/
+inductive Conc.Wake (V : Type) where
+  | mk (killed : Bool) (val : V) (num : Nat)
+
+/-- Whether a wake-up kills the thread. -/
+def Conc.Wake.killed {V : Type} : Conc.Wake V → Bool
+  | .mk b _ _ => b
+/-- The value a wake-up carries. -/
+def Conc.Wake.val {V : Type} : Conc.Wake V → V
+  | .mk _ v _ => v
+/-- The number a wake-up carries. -/
+def Conc.Wake.num {V : Type} : Conc.Wake V → Nat
+  | .mk _ _ n => n
+
+/-- A thread, stopped at its next operation, or finished. The index says whether it was
+killed: `Thr V false` is a live thread (`done`, `ret v` for the main thread, or waiting
+to perform an operation), and `Thr V true` is a killed one, which can only be `stop`.
+Each continuation `k` is linear (one-shot) and takes the `Conc.Wake`; its result is
+killed exactly when the wake-up was. A forked child is not started yet, so it is an
+ordinary (ω) function. -/
+inductive Conc.Thr (V : Type) : Bool → Type where
+  | stop : Conc.Thr V Bool.true
+  | done : Conc.Thr V Bool.false
+  | ret (v : V) : Conc.Thr V Bool.false
+  | yield (1 k : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)) : Conc.Thr V Bool.false
+  | fork (child : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w))
+      (1 k : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)) : Conc.Thr V Bool.false
+  | newMVar (1 k : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)) : Conc.Thr V Bool.false
+  | take (m : Nat) (1 k : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)) : Conc.Thr V Bool.false
+  | put (m : Nat) (v : V) (1 k : (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)) : Conc.Thr V Bool.false
+
+/-- A thread that has not been woken yet: given a wake-up, it runs to its next
+operation (or, killed, to its end). -/
+def Conc.Thread (V : Type) : Type := (w : Conc.Wake V) → Conc.Thr V (Conc.Wake.killed w)
+
+/-- Use up a killed thread. A `Thr V b` with `b = true` is `stop`; every other
+constructor has index `false`, so `h` is a proof of `false = true`, which is `False`,
+and the branch casts its continuation to `Unit` along it. No recursion. -/
+def Conc.Thr.stopped {V : Type} {b : Bool} (1 t : Conc.Thr V b) : (0 h : b = Bool.true) → Unit := match t with
+  | .stop => fun h => ()
+  | .done => fun h => ()
+  | .ret v => fun h => ()
+  | .yield k => fun h => (let () := Eq.cast.{0} (A := Conc.Thread V) (B := Unit) (absurd h.1) k; ())
+  | .fork c k => fun h => (let () := Eq.cast.{0} (A := Conc.Thread V) (B := Unit) (absurd h.1) k; ())
+  | .newMVar k => fun h => (let () := Eq.cast.{0} (A := Conc.Thread V) (B := Unit) (absurd h.1) k; ())
+  | .take m k => fun h => (let () := Eq.cast.{0} (A := Conc.Thread V) (B := Unit) (absurd h.1) k; ())
+  | .put m v k => fun h => (let () := Eq.cast.{0} (A := Conc.Thread V) (B := Unit) (absurd h.1) k; ())
+
+/-- Wake a thread to kill it: it runs to its end with `d` for every value it asks for. -/
+def Conc.kill {V : Type} (d : V) (1 k : Conc.Thread V) : Unit :=
+  Conc.Thr.stopped (k (Conc.Wake.mk Bool.true d 0)) (refl Bool.true)
+
+/-- Use up a live thread: kill it if it is waiting at an operation. -/
+def Conc.Thr.kill {V : Type} (d : V) (1 t : Conc.Thr V Bool.false) : Unit := match t with
+  | .done => ()
+  | .ret v => ()
+  | .yield k => Conc.kill d k
+  | .fork c k => Conc.kill d k
+  | .newMVar k => Conc.kill d k
+  | .take m k => Conc.kill d k
+  | .put m v k => Conc.kill d k
+
+/-- Wake a live thread with a value and a number. -/
+def Conc.wake {V : Type} (v : V) (n : Nat) (1 k : Conc.Thread V) : Conc.Thr V Bool.false :=
+  k (Conc.Wake.mk Bool.false v n)
+
+-- ## The effect
+
+/-- An MVar: a box, empty or full (its id in the store). -/
+inductive Conc.MVar where
+  | mk (id : Nat)
+/-- The MVar's id. -/
+def Conc.MVar.id : Conc.MVar → Nat
+  | .mk n => n
+
+/-- The operations of `Conc`. -/
+inductive Conc.Op (V : Type) where
+  | fork (child : Conc.Thread V)
+  | yield
+  | newMVar
+  | take (m : Nat)
+  | put (m : Nat) (v : V)
+
+/-- The concurrency effect: `fork` answers with the child's thread id, `newMVar` with
+the MVar's id, `take` with the value taken. -/
+def Conc.Eff (V : Type) : Effect := Effect.mk (Conc.Op V) (fun o => match o with
+  | .fork _ => Nat
+  | .yield => Unit
+  | .newMVar => Nat
+  | .take _ => V
+  | .put _ _ => Unit)
+
+/-- A concurrent program over MVars holding `V`s, with result `A`: a one-shot effectful
+computation whose answer type is a `Conc.Thread`. -/
+def Conc (V A : Type) : Type := Eff1 ω (Row.cons (Conc.Eff V) Row.nil) (Conc.Thread V) A
+
+-- How each operation suspends a thread. Live, the thread stops at a `Thr` node; killed,
+-- it goes on at once with a default answer.
+
+/-- Suspend at `yield`. -/
+def Conc.onYield {V : Type} (1 k : Unit → Conc.Thread V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.yield (fun w' => k () w')
+  | .mk .true d n => k () (Conc.Wake.mk Bool.true d n)
+/-- Suspend at `fork`. -/
+def Conc.onFork {V : Type} (c : Conc.Thread V) (1 k : Nat → Conc.Thread V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.fork c (fun w' => k (Conc.Wake.num w') w')
+  | .mk .true d n => k 0 (Conc.Wake.mk Bool.true d n)
+/-- Suspend at `newMVar`. -/
+def Conc.onNewMVar {V : Type} (1 k : Nat → Conc.Thread V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.newMVar (fun w' => k (Conc.Wake.num w') w')
+  | .mk .true d n => k 0 (Conc.Wake.mk Bool.true d n)
+/-- Suspend at `take`. -/
+def Conc.onTake {V : Type} (m : Nat) (1 k : V → Conc.Thread V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.take m (fun w' => k (Conc.Wake.val w') w')
+  | .mk .true d n => k d (Conc.Wake.mk Bool.true d n)
+/-- Suspend at `put`. -/
+def Conc.onPut {V : Type} (m : Nat) (v : V) (1 k : Unit → Conc.Thread V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.put m v (fun w' => k () w')
+  | .mk .true d n => k () (Conc.Wake.mk Bool.true d n)
+
+/-- The end of a forked thread. -/
+def Conc.onDone {V : Type} : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.done
+  | .mk .true d n => Conc.Thr.stop
+/-- The end of the main thread, with its result. -/
+def Conc.onRet {V : Type} (v : V) : Conc.Thread V := fun w => match w with
+  | .mk .false d n => Conc.Thr.ret v
+  | .mk .true d n => Conc.Thr.stop
+
+/-- The handler that turns a program into a thread. -/
+def Conc.handler {V : Type} : (o : Union (Row.cons (Conc.Eff V) Row.nil)) →
+    (1 k : RetU (Row.cons (Conc.Eff V) Row.nil) o → Conc.Thread V) → Conc.Thread V :=
+  fun o => match o with
+    | .inl (.fork c) => fun k => Conc.onFork c k
+    | .inl .yield => fun k => Conc.onYield k
+    | .inl .newMVar => fun k => Conc.onNewMVar k
+    | .inl (.take m) => fun k => Conc.onTake m k
+    | .inl (.put m v) => fun k => Conc.onPut m v k
+    | .inr e => fun k => k (absurd e)
+
+/-- A forked program as a thread (its result is dropped). -/
+def Conc.thread {V : Type} (m : Conc V Unit) : Conc.Thread V := m (fun _ => Conc.onDone) Conc.handler
+/-- The main program as a thread (its result is the run's). -/
+def Conc.mainThread {V : Type} (m : Conc V V) : Conc.Thread V := m (fun v => Conc.onRet v) Conc.handler
+
+-- ## Operations
+
+/-- A finished program. -/
+def Conc.ret {V A : Type} (a : A) : Conc V A := Eff1.pure a
+/-- Run `m`, then `n` (for `Unit` results). -/
+def Conc.andThen {V B : Type} (m : Conc V Unit) (n : Conc V B) : Conc V B := Eff1.bind m (fun _ => n)
+/-- Start `m` as a new thread; the answer is its thread id. -/
+def Conc.fork {V : Type} (m : Conc V Unit) : Conc V Nat := send1 (Conc.Eff V) (Conc.Op.fork (Conc.thread m))
+/-- Let the scheduler run another thread. -/
+def Conc.yield {V : Type} : Conc V Unit := send1 (Conc.Eff V) Conc.Op.yield
+/-- A new, empty MVar. -/
+def Conc.newMVar {V : Type} : Conc V Conc.MVar :=
+  Eff1.bind (send1 (Conc.Eff V) Conc.Op.newMVar) (fun n => Eff1.pure (Conc.MVar.mk n))
+/-- Wait until the MVar is full, and empty it: its value. -/
+def Conc.take {V : Type} (m : Conc.MVar) : Conc V V := send1 (Conc.Eff V) (Conc.Op.take (Conc.MVar.id m))
+/-- Wait until the MVar is empty, and fill it with `v`. -/
+def Conc.put {V : Type} (m : Conc.MVar) (v : V) : Conc V Unit := send1 (Conc.Eff V) (Conc.Op.put (Conc.MVar.id m) v)
+/-- A new MVar holding `v`. -/
+def Conc.newMVarWith {V : Type} (v : V) : Conc V Conc.MVar :=
+  Eff1.bind Conc.newMVar (fun m => Eff1.bind (Conc.put m v) (fun _ => Eff1.pure m))
+/-- The MVar's value, left in place: a `take` and then a `put` back (two steps, so
+another thread may run in between). -/
+def Conc.read {V : Type} (m : Conc.MVar) : Conc V V :=
+  Eff1.bind (Conc.take m) (fun v => Eff1.bind (Conc.put m v) (fun _ => Eff1.pure v))
+
+-- ## The round-robin queue (pure, and what the proofs are about)
+
+/-- Put `x` back in front of the rest of a queue that `Conc.pick` returned. -/
+def Conc.consSnd (x : Nat) : Option (Nat × List Nat) → Option (Nat × List Nat)
+  | .none => .none
+  | .some (t, ys) => .some (t, .cons x ys)
+
+/-- One step of `Conc.pick` at a thread `x` (in front of `xs`): `here` says whether `x`
+is ready, `rest c` is the pick from `xs`. (A separate function so that proofs can case on
+`here`.) -/
+def Conc.pickCons (x : Nat) (xs : List Nat) (here : Bool) (c : Nat) (rest : Nat → Option (Nat × List Nat)) :
+    Option (Nat × List Nat) := match here, c with
+  | .true, .zero => .some (x, xs)
+  | .true, .succ c' => Conc.consSnd x (rest c')
+  | .false, c => Conc.consSnd x (rest c)
+
+/-- `Conc.pick ready q c` removes the `c`-th thread of the queue `q` that is `ready`
+(counting from `0`), keeping the order of the others: the thread and the rest of the
+queue, or `none` when fewer than `c + 1` are ready. `pick ready q 0` is round-robin's
+choice, the first ready thread. -/
+def Conc.pick (ready : Nat → Bool) : List Nat → Nat → Option (Nat × List Nat)
+  | .nil, _ => .none
+  | .cons x xs, c => Conc.pickCons x xs (ready x) c (fun c' => Conc.pick ready xs c')
+
+/-- How many threads of the queue are `ready`. -/
+def Conc.countReady (ready : Nat → Bool) : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => match ready x with
+    | .true => Nat.succ (Conc.countReady ready xs)
+    | .false => Conc.countReady ready xs
+
+-- ## The scheduler's state
+
+/-- What a suspended thread waits for: nothing (`run`), a full MVar (`take`) or an empty
+one (`put`). -/
+inductive Conc.Want where
+  | run
+  | take (m : Nat)
+  | put (m : Nat)
+
+/-- One step of a run, for traces: which thread did what. -/
+inductive Conc.Ev (V : Type) where
+  | yield (t : Nat)
+  | fork (t child : Nat)
+  | newMVar (t m : Nat)
+  | take (t m : Nat) (v : V)
+  | put (t m : Nat) (v : V)
+  | exit (t : Nat)
+  | ret (t : Nat) (v : V)
+
+/-- How a run ended: main returned `v`; a `deadlock` (no thread can move; the ids of the
+blocked ones); the step bound ran out; or `stuck`, which a correct scheduler never
+reaches (a chosen thread could not move). -/
+inductive Conc.Outcome (V : Type) where
+  | done (v : V)
+  | deadlock (blocked : List Nat)
+  | outOfFuel
+  | stuck
+
+/-- The state of a run, apart from the threads themselves: the round-robin `queue` of
+live thread ids, what each waits for, the MVars (`none` is empty), the next thread id,
+the trace and the choices made so far (newest first), and what is left of the script. -/
+structure Conc.St (V : Type) where
+  queue : List Nat
+  wants : List (Nat × Conc.Want)
+  store : List (Option V)
+  next : Nat
+  trace : List (Conc.Ev V)
+  choices : List (Nat × Nat)
+  script : List Nat
+
+/-- A finished run: how it ended, the MVars, the trace, the script it followed (one
+choice per step, which replays it exactly) and how many threads were ready at each step. -/
+structure Conc.Res (V : Type) where
+  outcome : Conc.Outcome V
+  store : List (Option V)
+  trace : List (Conc.Ev V)
+  script : List Nat
+  ready : List Nat
+
+/-- The `n`-th element of a list. -/
+def Conc.nth {A : Type} : List A → Nat → Option A
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ n => Conc.nth xs n
+/-- The list with its `n`-th element replaced by `a`. -/
+def Conc.setNth {A : Type} : List A → Nat → A → List A
+  | .nil, _, _ => .nil
+  | .cons _ xs, .zero, a => .cons a xs
+  | .cons x xs, .succ n, a => .cons x (Conc.setNth xs n a)
+/-- What thread `t` waits for. -/
+def Conc.wantOf (t : Nat) : List (Nat × Conc.Want) → Option Conc.Want
+  | .nil => .none
+  | .cons (u, w) ws => match Nat.beq u t with
+    | .true => .some w
+    | .false => Conc.wantOf t ws
+/-- Set what thread `t` waits for (replacing the old entry, or adding one). -/
+def Conc.setWant (t : Nat) (w : Conc.Want) : List (Nat × Conc.Want) → List (Nat × Conc.Want)
+  | .nil => .cons (t, w) .nil
+  | .cons (u, w') ws => match Nat.beq u t with
+    | .true => .cons (t, w) ws
+    | .false => .cons (u, w') (Conc.setWant t w ws)
+/-- Forget thread `t`. -/
+def Conc.dropWant (t : Nat) : List (Nat × Conc.Want) → List (Nat × Conc.Want)
+  | .nil => .nil
+  | .cons (u, w) ws => match Nat.beq u t with
+    | .true => ws
+    | .false => .cons (u, w) (Conc.dropWant t ws)
+
+/-- Whether thread `t` can move: it waits for nothing, for a full MVar that is full, or
+for an empty MVar that is empty. -/
+def Conc.St.ready {V : Type} (st : Conc.St V) (t : Nat) : Bool := match Conc.wantOf t st.wants with
+  | .none => .false
+  | .some .run => .true
+  | .some (.take m) => match Conc.nth st.store m with
+    | .some (.some _) => .true
+    | _ => .false
+  | .some (.put m) => match Conc.nth st.store m with
+    | .some .none => .true
+    | _ => .false
+
+/-- Record an event. -/
+def Conc.St.log {V : Type} (st : Conc.St V) (e : Conc.Ev V) : Conc.St V := { st with trace := .cons e st.trace }
+
+/-- The result of a run that ended with `o`. -/
+def Conc.St.finish {V : Type} (st : Conc.St V) (o : Conc.Outcome V) : Conc.Res V :=
+  Conc.Res.mk o st.store (List.reverse st.trace) (List.reverse (List.map (fun p => p.1) st.choices))
+    (List.reverse (List.map (fun p => p.2) st.choices))
+
+-- ## The threads: a pool of linear values
+
+/-- The suspended threads, each with its id; the index is how many (so that the pool can
+be used up by recursion on a number). -/
+inductive Conc.Pool (V : Type) : Nat → Type where
+  | nil : Conc.Pool V 0
+  | cons {n : Nat} (tid : Nat) (1 t : Conc.Thr V Bool.false) (1 rest : Conc.Pool V n) : Conc.Pool V (Nat.succ n)
+
+/-- Kill every thread of the pool. Recursion on the size `n`; the pool's own size `m` is
+generalised with `h : m = n`, so a `cons` at `n = 0` is impossible (`h : succ m' = 0`,
+which is `False`) and its fields are cast away. -/
+def Conc.Pool.killAll {V : Type} (d : V) : (n : Nat) → {m : Nat} → (1 p : Conc.Pool V m) → (0 h : m = n) → Unit
+  | .zero, m, p => match p with
+    | .nil => fun h => ()
+    | .cons t th rest => fun h => (let () := Eq.cast.{0} (A := Conc.Thr V Bool.false) (B := Unit) (absurd h) th;
+        let () := Eq.cast.{0} (A := Conc.Pool V _) (B := Unit) (absurd h) rest; ())
+  | .succ n, m, p => match p with
+    | .nil => fun h => ()
+    | .cons t th rest => fun h => (let () := Conc.Thr.kill d th; Conc.Pool.killAll d n rest h)
+
+/-- The thread with id `tid`, taken out of a pool (with the rest), or the pool back. -/
+inductive Conc.Got (V : Type) where
+  | found (1 t : Conc.Thr V Bool.false) (n : Nat) (1 rest : Conc.Pool V n)
+  | missing (n : Nat) (1 p : Conc.Pool V n)
+
+/-- Put a thread back in front of what `extract` returned. -/
+def Conc.Got.consBack {V : Type} (tid : Nat) (1 th : Conc.Thr V Bool.false) (1 g : Conc.Got V) : Conc.Got V := match g with
+  | .found x n r => .found x (Nat.succ n) (.cons tid th r)
+  | .missing n r => .missing (Nat.succ n) (.cons tid th r)
+
+/-- Take the thread `tid` out of the pool (recursion on its size, as in `killAll`). -/
+def Conc.Pool.extract {V : Type} (tid : Nat) : (n : Nat) → {m : Nat} → (1 p : Conc.Pool V m) → (0 h : m = n) → Conc.Got V
+  | .zero, m, p => fun h => .missing 0 (Eq.subst (Conc.Pool V) h p)
+  | .succ n, m, p => match p with
+    | .nil => fun h => .missing 0 .nil
+    | .cons t th rest => fun h => match Nat.beq t tid with
+      | .true => .found th n (Eq.subst (Conc.Pool V) h rest)
+      | .false => Conc.Got.consBack t th (Conc.Pool.extract tid n rest h)
+
+/-- After a step: go on with a new state and pool, or stop with a result (every thread
+used up). -/
+inductive Conc.Next (V : Type) where
+  | go (st : Conc.St V) (n : Nat) (1 p : Conc.Pool V n)
+  | stop (r : Conc.Res V)
+
+/-- `a`, once `u` (killing the remaining threads) has run. -/
+def Conc.after {A : Type} (1 u : Unit) (a : A) : A := let () := u; a
+
+/-- Park a thread at the back of the queue, waiting for `w`. -/
+def Conc.Next.park {V : Type} (tid : Nat) (w : Conc.Want) (st : Conc.St V) (n : Nat) (1 p : Conc.Pool V (Nat.succ n)) : Conc.Next V :=
+  .go { st with queue := List.append st.queue (.cons tid .nil), wants := Conc.setWant tid w st.wants } (Nat.succ n) p
+
+/-- Put a thread that has just moved back: it goes to the back of the queue, waiting for
+its next operation. A forked thread that finished leaves; when main returns, the run is
+over (the other threads are killed). -/
+def Conc.settle {V : Type} (d : V) (tid : Nat) (st : Conc.St V) (1 th : Conc.Thr V Bool.false) :
+    (n : Nat) → (1 p : Conc.Pool V n) → Conc.Next V := match th with
+  | .done => fun n p => .go { (Conc.St.log st (Conc.Ev.exit tid)) with wants := Conc.dropWant tid st.wants } n p
+  | .ret v => fun n p => Conc.after (Conc.Pool.killAll d n p (refl n))
+      (Conc.Next.stop (Conc.St.finish (Conc.St.log st (Conc.Ev.ret tid v)) (Conc.Outcome.done v)))
+  | .yield k => fun n p => Conc.Next.park tid Conc.Want.run st n (.cons tid (.yield k) p)
+  | .fork c k => fun n p => Conc.Next.park tid Conc.Want.run st n (.cons tid (.fork c k) p)
+  | .newMVar k => fun n p => Conc.Next.park tid Conc.Want.run st n (.cons tid (.newMVar k) p)
+  | .take m k => fun n p => Conc.Next.park tid (Conc.Want.take m) st n (.cons tid (.take m k) p)
+  | .put m v k => fun n p => Conc.Next.park tid (Conc.Want.put m) st n (.cons tid (.put m v k) p)
+
+/-- Let thread `tid` perform the operation it is waiting at, and settle it (and a forked
+child) back. `d` is the default value for killed threads. -/
+/-- `fork`: the child gets the next thread id and is settled first (it runs to its first
+operation), then the parent, which is told the child's id. -/
+def Conc.stepFork {V : Type} (d : V) (tid : Nat) (st : Conc.St V) (c : Conc.Thread V) (1 k : Conc.Thread V)
+    (n : Nat) (1 p : Conc.Pool V n) : Conc.Next V :=
+  match Conc.settle d st.next { (Conc.St.log st (Conc.Ev.fork tid st.next)) with next := Nat.succ st.next }
+      (c (Conc.Wake.mk Bool.false d 0)) n p with
+  | .go st2 n2 p2 => Conc.settle d tid st2 (Conc.wake d st.next k) n2 p2
+  | .stop r => (let () := Conc.kill d k; .stop r)
+
+/-- `take`: the MVar's value, which empties it. -/
+def Conc.stepTake {V : Type} (d : V) (tid : Nat) (st : Conc.St V) (m : Nat) (1 k : Conc.Thread V)
+    (n : Nat) (1 p : Conc.Pool V n) : Conc.Next V := match Conc.nth st.store m with
+  | .some (.some v) =>
+    Conc.settle d tid { (Conc.St.log st (Conc.Ev.take tid m v)) with store := Conc.setNth st.store m .none }
+      (Conc.wake v 0 k) n p
+  | _ => (let () := Conc.kill d k; let () := Conc.Pool.killAll d n p (refl n); .stop (Conc.St.finish st Conc.Outcome.stuck))
+
+def Conc.stepThr {V : Type} (d : V) (tid : Nat) (st : Conc.St V) (1 th : Conc.Thr V Bool.false) :
+    (n : Nat) → (1 p : Conc.Pool V n) → Conc.Next V := match th with
+  | .done => fun n p => (let () := Conc.Pool.killAll d n p (refl n); .stop (Conc.St.finish st Conc.Outcome.stuck))
+  | .ret v => fun n p => (let () := Conc.Pool.killAll d n p (refl n); .stop (Conc.St.finish st Conc.Outcome.stuck))
+  | .yield k => fun n p => Conc.settle d tid (Conc.St.log st (Conc.Ev.yield tid)) (Conc.wake d 0 k) n p
+  | .fork c k => fun n p => Conc.stepFork d tid st c k n p
+  | .newMVar k => fun n p =>
+    Conc.settle d tid { (Conc.St.log st (Conc.Ev.newMVar tid (List.length st.store))) with
+        store := List.append st.store (.cons .none .nil) }
+      (Conc.wake d (List.length st.store) k) n p
+  | .take m k => fun n p => Conc.stepTake d tid st m k n p
+  | .put m v k => fun n p =>
+    Conc.settle d tid { (Conc.St.log st (Conc.Ev.put tid m v)) with store := Conc.setNth st.store m (.some v) }
+      (Conc.wake d 0 k) n p
+
+/-- The next choice: the script's head, taken modulo the number of ready threads `r`
+(so any script is valid), or `0` (round-robin) when the script is used up. -/
+def Conc.nextChoice (r : Nat) : List Nat → Nat × List Nat
+  | .nil => (0, .nil)
+  | .cons c cs => (Nat.mod c r, cs)
+
+/-- Run for at most `fuel` steps. Each step lists the ready threads in queue order,
+picks one by the script, takes it out of the pool and lets it move. -/
+def Conc.loop {V : Type} (d : V) : (fuel : Nat) → (n : Nat) → Conc.St V → (1 p : Conc.Pool V n) → Conc.Res V
+  | .zero, n, st, p => (let () := Conc.Pool.killAll d n p (refl n); Conc.St.finish st Conc.Outcome.outOfFuel)
+  | .succ fuel, n, st, p =>
+    let r := Conc.countReady (Conc.St.ready st) st.queue
+    match r with
+    | .zero => (let () := Conc.Pool.killAll d n p (refl n); Conc.St.finish st (Conc.Outcome.deadlock st.queue))
+    | .succ _ =>
+      let cs := Conc.nextChoice r st.script
+      match Conc.pick (Conc.St.ready st) st.queue cs.1 with
+      | .none => (let () := Conc.Pool.killAll d n p (refl n); Conc.St.finish st Conc.Outcome.stuck)
+      | .some (tid, rest) =>
+        let st1 := { st with queue := rest, choices := .cons (cs.1, r) st.choices, script := cs.2 }
+        match Conc.Pool.extract tid n p (refl n) with
+        | .missing n1 p1 => (let () := Conc.Pool.killAll d n1 p1 (refl n1); Conc.St.finish st1 Conc.Outcome.stuck)
+        | .found th n1 p1 => match Conc.stepThr d tid st1 th n1 p1 with
+          | .go st2 n2 p2 => Conc.loop d fuel n2 st2 p2
+          | .stop res => res
+
+/-- Run `main` for at most `fuel` steps, following `script` (one choice per step, an
+index into the ready threads in queue order; round-robin once it is used up). `d` is
+the value a killed thread gets for a `take`. Main is thread `0`. -/
+def Conc.run {V : Type} (d : V) (fuel : Nat) (script : List Nat) (main : Conc V V) : Conc.Res V :=
+  let st0 : Conc.St V := Conc.St.mk .nil .nil .nil 1 .nil .nil script
+  match Conc.settle d 0 st0 (Conc.mainThread main (Conc.Wake.mk Bool.false d 0)) 0 .nil with
+  | .go st n p => Conc.loop d fuel n st p
+  | .stop r => r
+
+/-- Round-robin: always the first ready thread in the queue, which then goes to the back. -/
+def Conc.runRR {V : Type} (d : V) (fuel : Nat) (main : Conc V V) : Conc.Res V := Conc.run d fuel .nil main
+
+-- ## The model checker
+
+/-- `pre ++ [c]` for every `c` from `lo` up to `hi - 1`. -/
+def Conc.alts (pre : List Nat) (lo : Nat) : Nat → List (List Nat)
+  | .zero => .nil
+  | .succ k => match Nat.lt k lo with
+    | .true => .nil
+    | .false => List.append (Conc.alts pre lo k) (.cons (List.append pre (.cons k .nil)) .nil)
+
+/-- The scripts that branch off a run: at every step `j` at or after the end `len` of the
+script it was given (the steps where it took the default `0`), each other choice
+`1 … r - 1`, after the same first `j` choices. `acc` is the choices before step `j`,
+newest first. Every script is reached exactly once from `[]` this way: a script's
+parent is the script without its last non-zero choice. -/
+def Conc.branches (len : Nat) : Nat → List Nat → List Nat → List Nat → List (List Nat)
+  | j, acc, .cons c cs, .cons r rs =>
+    let here := match Nat.lt j len with
+      | .true => .nil
+      | .false => Conc.alts (List.reverse acc) 1 r
+    List.append here (Conc.branches len (Nat.succ j) (.cons c acc) cs rs)
+  | _, _, _, _ => .nil
+
+/-- The bounds of a search: the default value `dflt` (what a killed thread's `take`
+gets), the steps per run (`fuel`) and the number of runs (`runs`). -/
+structure Conc.Cfg (V : Type) where
+  dflt : V
+  fuel : Nat
+  runs : Nat
+
+/-- What a search found: every run passed (`runs` of them; `complete` when they were
+all the interleavings: the run budget was not used up and no run hit the step bound),
+or the first run that failed (replay it with `Conc.run` and its `script`). -/
+inductive Conc.Report (V : Type) where
+  | ok (runs : Nat) (complete : Bool)
+  | bad (runs : Nat) (r : Conc.Res V)
+
+/-- Whether a run hit the step bound. -/
+def Conc.Res.outOfFuel {V : Type} (r : Conc.Res V) : Bool := match r.outcome with
+  | .outOfFuel => .true
+  | _ => .false
+
+/-- Depth-first over scripts: `todo` is a stack of scripts still to run. -/
+def Conc.checkGo {V : Type} (cfg : Conc.Cfg V) (main : Conc V V) (good : Conc.Res V → Bool) :
+    Nat → List (List Nat) → Nat → Bool → Conc.Report V
+  | .zero, todo, runs, cpl => .ok runs (Bool.and cpl (List.isEmpty todo))
+  | .succ _, .nil, runs, cpl => .ok runs cpl
+  | .succ b, .cons s todo, runs, cpl =>
+    let r := Conc.run cfg.dflt cfg.fuel s main
+    match good r with
+    | .false => .bad (Nat.succ runs) r
+    | .true => Conc.checkGo cfg main good b
+        (List.append (Conc.branches (List.length s) 0 .nil r.script r.ready) todo)
+        (Nat.succ runs) (Bool.and cpl (Bool.not (Conc.Res.outOfFuel r)))
+
+/-- Run every interleaving of `main` (up to `cfg`'s bounds) and test each run with
+`good`: the first run that fails, or how many passed. -/
+def Conc.check {V : Type} (cfg : Conc.Cfg V) (main : Conc V V) (good : Conc.Res V → Bool) : Conc.Report V :=
+  Conc.checkGo cfg main good cfg.runs (.cons .nil .nil) 0 .true
+
+/-- A test: the run is not a deadlock (a run that hit the step bound passes). -/
+def Conc.noDeadlock {V : Type} (r : Conc.Res V) : Bool := match r.outcome with
+  | .deadlock _ => .false
+  | .stuck => .false
+  | _ => .true
+
+/-- A test: main returned a value with property `p` (a run that hit the step bound
+passes; a deadlock fails). -/
+def Conc.returns {V : Type} (p : V → Bool) (r : Conc.Res V) : Bool := match r.outcome with
+  | .done v => p v
+  | .outOfFuel => .true
+  | _ => .false
+
+/-- Search for a deadlock. -/
+def Conc.findDeadlock {V : Type} (cfg : Conc.Cfg V) (main : Conc V V) : Conc.Report V :=
+  Conc.check cfg main Conc.noDeadlock
+
+-- ## Showing runs
+
+/-- An event as text, e.g. `1: take m0 = 3`. -/
+def Conc.Ev.show {V : Type} (sh : V → String) : Conc.Ev V → String
+  | .yield t => Nat.repr t ++ ": yield"
+  | .fork t c => Nat.repr t ++ ": fork " ++ Nat.repr c
+  | .newMVar t m => Nat.repr t ++ ": newMVar m" ++ Nat.repr m
+  | .take t m v => Nat.repr t ++ ": take m" ++ Nat.repr m ++ " = " ++ sh v
+  | .put t m v => Nat.repr t ++ ": put m" ++ Nat.repr m ++ " " ++ sh v
+  | .exit t => Nat.repr t ++ ": exit"
+  | .ret t v => Nat.repr t ++ ": return " ++ sh v
+
+/-- A list of strings, joined with `sep`. -/
+def Conc.join (sep : String) : List String → String
+  | .nil => ""
+  | .cons s .nil => s
+  | .cons s ss => s ++ sep ++ Conc.join sep ss
+
+/-- An outcome as text. -/
+def Conc.Outcome.show {V : Type} (sh : V → String) : Conc.Outcome V → String
+  | .done v => "done " ++ sh v
+  | .deadlock ts => "deadlock (blocked: " ++ Conc.join ", " (List.map Nat.repr ts) ++ ")"
+  | .outOfFuel => "out of fuel"
+  | .stuck => "stuck"
+
+/-- A run as text: the outcome, the script and the trace, one event per line. -/
+def Conc.Res.show {V : Type} (sh : V → String) (r : Conc.Res V) : String :=
+  Conc.Outcome.show sh r.outcome ++ "\nscript [" ++ Conc.join ", " (List.map Nat.repr r.script) ++ "]\n" ++
+    Conc.join "\n" (List.map (Conc.Ev.show sh) r.trace)
+
+/-- A report as text. -/
+def Conc.Report.show {V : Type} (sh : V → String) : Conc.Report V → String
+  | .ok n c => "ok: " ++ Nat.repr n ++ " runs" ++ (match c with
+    | .true => ", every interleaving"
+    | .false => ", bounded")
+  | .bad n r => "failed on run " ++ Nat.repr n ++ ": " ++ Conc.Res.show sh r
+
+-- ## Proofs about the round-robin policy
+
+/-- One step of `Conc.pos` at a thread `x`: `here` says whether `x` is the thread. -/
+def Conc.posCons (here : Bool) (rest : Nat) : Nat := match here with
+  | .true => 0
+  | .false => Nat.succ rest
+
+/-- Where thread `u` is in a queue: how many threads are ahead of it (the length of the
+queue when it is not there). -/
+def Conc.pos (u : Nat) : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => Conc.posCons (Nat.beq x u) (Conc.pos u xs)
+
+/-- `Nat.beq n n` is true. -/
+def Conc.beq_self : (n : Nat) → Nat.beq n n = .true
+  | .zero => rfl
+  | .succ n => Conc.beq_self n
+
+/-- A thread of `x :: xs` that is not `x` is in `xs`. -/
+def Conc.mem_tail (u x : Nat) (xs : List Nat) (he : Nat.beq x u = .false) (h : u ∈ List.cons x xs) : u ∈ xs :=
+  Or.elim h
+    (fun e => False.elim (Bool.trueNeFalse
+      (Eq.trans (Eq.symm (Eq.trans (congrArg (Nat.beq x) e) (Conc.beq_self x))) he)))
+    (fun h' => h')
+
+/-- The cons case of `Conc.pos_append`, for either answer `e` of `Nat.beq x u`. -/
+def Conc.pos_append_cons (u : Nat) (tl : List Nat) (x : Nat) (xs : List Nat) : (e : Bool) → Nat.beq x u = e →
+    u ∈ List.cons x xs → (u ∈ xs → Conc.pos u (List.append xs tl) = Conc.pos u xs) →
+    Conc.posCons e (Conc.pos u (List.append xs tl)) = Conc.posCons e (Conc.pos u xs)
+  | .true, he, h, ih => rfl
+  | .false, he, h, ih => congrArg Nat.succ (ih (Conc.mem_tail u x xs he h))
+
+/-- Adding threads at the back of a queue does not move a thread that is in it. -/
+def Conc.pos_append (u : Nat) (tl : List Nat) : (xs : List Nat) → u ∈ xs →
+    Conc.pos u (List.append xs tl) = Conc.pos u xs
+  | .nil, h => False.elim h
+  | .cons x xs, h => Conc.pos_append_cons u tl x xs (Nat.beq x u) rfl h (fun h' => Conc.pos_append u tl xs h')
+
+/-- A thread that is not ready is not the ready thread `u`. -/
+def Conc.not_here (ready : Nat → Bool) (u x : Nat) (hu : ready u = .true) (hb : ready x = .false) :
+    Nat.beq x u = .false :=
+  Or.elim (Bool.cases (Nat.beq x u))
+    (fun h1 => False.elim (Bool.trueNeFalse
+      (Eq.trans (Eq.symm (Eq.trans (congrArg ready (Nat.beq_eq x u h1)) hu)) hb)))
+    (fun h2 => h2)
+
+/-- What one round-robin step means for a ready thread `u` of the queue `q`, given what
+`Conc.pick ready q 0` returned: some thread `t` was picked (with the rest `ys`), and
+either it is `u`, or `u` is closer to the front of the new queue, whatever is added at
+its back (`t` itself, a forked child, or nothing when `t` finished). -/
+def Conc.RRStep (u : Nat) (q : List Nat) : Option (Nat × List Nat) → Prop
+  | .none => False
+  | .some (t, ys) => t = u ∨ ((tl : List Nat) → Nat.Lt (Conc.pos u (List.append ys tl)) (Conc.pos u q))
+
+/-- `u` is the head `x` (when `e`, `Nat.beq x u`, is true), or behind it and so one place
+closer after `x` is picked. -/
+def Conc.rr_here (u x : Nat) (xs : List Nat) : (e : Bool) → Nat.beq x u = e → u ∈ List.cons x xs →
+    (x = u ∨ ((tl : List Nat) → Nat.Lt (Conc.pos u (List.append xs tl)) (Conc.posCons e (Conc.pos u xs))))
+  | .true, he, h => Or.inl (Nat.beq_eq x u he)
+  | .false, he, h => Or.inr (fun tl =>
+      @Eq.mpr' Nat (Conc.pos u (List.append xs tl)) (Conc.pos u xs)
+        (fun k => Nat.Lt k (Nat.succ (Conc.pos u xs))) (Conc.pos_append u tl xs (Conc.mem_tail u x xs he h))
+        (Nat.lt_succ_self (Conc.pos u xs)))
+
+/-- Both positions one further back when the head `x` is not `u`. -/
+def Conc.succ_lt (a b : Nat) : (e : Bool) → e = .false → Nat.Lt a b → Nat.Lt (Conc.posCons e a) (Conc.posCons e b)
+  | .true, he, h => False.elim (Bool.trueNeFalse he)
+  | .false, he, h => h
+
+/-- A blocked head `x` stays in front: the step behind it carries over. -/
+def Conc.rr_later (u x : Nat) (xs : List Nat) (he : Nat.beq x u = .false) :
+    (o : Option (Nat × List Nat)) → Conc.RRStep u xs o → Conc.RRStep u (List.cons x xs) (Conc.consSnd x o)
+  | .none, h => False.elim h
+  | .some (t, ys), h => Or.elim h
+      (fun e => Or.inl e)
+      (fun k => Or.inr (fun tl => Conc.succ_lt (Conc.pos u (List.append ys tl)) (Conc.pos u xs) (Nat.beq x u) he (k tl)))
+
+/-- The cons case of `Conc.pick_rr_progress`, for either answer `b` of `ready x`. -/
+def Conc.rr_cons (ready : Nat → Bool) (u : Nat) (hu : ready u = .true) (x : Nat) (xs : List Nat) :
+    (b : Bool) → ready x = b → u ∈ List.cons x xs →
+    (u ∈ xs → Conc.RRStep u xs (Conc.pick ready xs 0)) →
+    Conc.RRStep u (List.cons x xs) (Conc.pickCons x xs b 0 (fun c' => Conc.pick ready xs c'))
+  | .true, hb, h, ih => Conc.rr_here u x xs (Nat.beq x u) rfl h
+  | .false, hb, h, ih =>
+    Conc.rr_later u x xs (Conc.not_here ready u x hu hb) (Conc.pick ready xs 0)
+      (ih (Conc.mem_tail u x xs (Conc.not_here ready u x hu hb) h))
+
+/-- **Round-robin is fair.** If thread `u` is in the queue and ready, a round-robin step
+picks some thread, and either picks `u` or moves `u` strictly closer to the front of the
+next queue. A position is a number, so while `u` stays ready it is picked within
+`Conc.pos u q + 1` steps: no ready thread waits for more steps than there are threads
+ahead of it. -/
+def Conc.pick_rr_progress (ready : Nat → Bool) (u : Nat) (hu : ready u = .true) :
+    (q : List Nat) → u ∈ q → Conc.RRStep u q (Conc.pick ready q 0)
+  | .nil, h => False.elim h
+  | .cons x xs, h => Conc.rr_cons ready u hu x xs (ready x) rfl h (fun h' => Conc.pick_rr_progress ready u hu xs h')
+
+/-- What `Conc.pick` returned is a ready thread (or nothing). -/
+def Conc.Picked (ready : Nat → Bool) : Option (Nat × List Nat) → Prop
+  | .none => True
+  | .some (t, _) => ready t = .true
+
+/-- Putting a blocked thread back in front keeps the pick. -/
+def Conc.picked_consSnd (ready : Nat → Bool) (x : Nat) : (o : Option (Nat × List Nat)) →
+    Conc.Picked ready o → Conc.Picked ready (Conc.consSnd x o)
+  | .none, h => h
+  | .some (t, ys), h => h
+
+/-- The cons case of `Conc.pick_ready`. -/
+def Conc.pick_ready_cons (ready : Nat → Bool) (x : Nat) (xs : List Nat) : (b : Bool) → ready x = b →
+    (c : Nat) → ((c' : Nat) → Conc.Picked ready (Conc.pick ready xs c')) →
+    Conc.Picked ready (Conc.pickCons x xs b c (fun c' => Conc.pick ready xs c'))
+  | .true, hb, .zero, ih => hb
+  | .true, hb, .succ c', ih => Conc.picked_consSnd ready x (Conc.pick ready xs c') (ih c')
+  | .false, hb, c, ih => Conc.picked_consSnd ready x (Conc.pick ready xs c) (ih c)
+
+/-- **The scheduler only runs ready threads**, whatever the script: every thread
+`Conc.pick` returns is ready. -/
+def Conc.pick_ready (ready : Nat → Bool) : (q : List Nat) → (c : Nat) → Conc.Picked ready (Conc.pick ready q c)
+  | .nil, c => True.intro
+  | .cons x xs, c => Conc.pick_ready_cons ready x xs (ready x) rfl c (fun c' => Conc.pick_ready ready xs c')

@@ -1,0 +1,304 @@
+import Json
+import Text
+import Web.Loom
+/-!
+# Web.Widget
+
+Interactive notebook widgets on top of `Web.Loom`.
+
+A widget is a **descriptor**, not a closure: an id, a kind (`slider`, `button`,
+`text`, `plot`), the DOM event it listens for, its current value, a label, and a
+**callback expression** naming a Wiz definition. `Widget.display` renders the
+descriptors as a `Loom.VNode` (the same typed VDOM `Web.Loom` renders and diffs),
+wraps the HTML and the descriptors in one JSON document and prefixes it with
+`WIZ_WIDGET:`. The Jupyter kernel (`tools/jupyter/wiz_kernel/widgets.py`) recognises
+that prefix, turns it into a notebook MIME bundle
+(`application/vnd.wiz.widget+json`) and opens a **comm** for the output.
+
+The front end never calls Wiz functions: it sends
+`{method: "event", widget_id, event, value}` on the comm. The kernel re-enters this
+session with `#eval Widget.handle (<callback>) <previous bundle> <id> <event> <value>`,
+which renders the old and the new widget list and **diffs** them with
+`Loom.Rendered.diff`. The patches come back on the same comm, so the browser applies
+them with `web/framework/runtime.js` — the same patch applier the Loom framework
+already uses.
+
+## Writing a widget cell
+
+```
+import Web.Widget
+
+-- The callback receives the event and the widget list as displayed last time, and
+-- returns the next list. It is pure: the kernel re-evaluates it on every event.
+def onGain (e : Widget.Event) (ws : List Widget.Widget) : List Widget.Widget :=
+  List.map (fun w => match String.eq w.id e.widget with
+    | .true => Widget.setValue w e.value
+    | .false => w) ws
+
+Widget.display [
+  Widget.slider "gain" "input" "0.50" "onGain",
+  Widget.plot "trace" "click" "{\"points\": []}" "onGain"
+]
+```
+
+`Widget.display` must be the cell's last expression (the kernel evaluates a bare final
+expression); `#eval Widget.display ws` also works, and the kernel finds the prefixed
+line in the stream. The callback argument is **source text spliced into the session**
+(the notebook author's own code, like the cell itself); everything the browser sends
+back is quoted as a Wiz string literal, so it cannot become source.
+
+## Limits
+
+* No client-side state: every event round-trips to the kernel. With the `batch`
+  driver that is a `wiz check` of the whole notebook per event.
+* A widget tree has no typed handlers (`Loom.on`); the VDOM is monomorphic in
+  `Widget.NoMsg`. Events travel over the comm because a Jupyter front end cannot
+  dispatch a Wiz inductive anyway.
+* **Values reach the callback.** `Widget.Event` carries the browser's `value` and
+  `Widget.handle` passes it through, so a slider callback can read the new number.
+  This is deliberately not the `Loom.on` / `delegate` / `Loom.App.event` path,
+  which passes only `(event, handler index)` and loses a control's value; that
+  index-only dispatch remains a `Web.Loom` limitation, not a widget one.
+* `plot` carries opaque JSON in `data-wiz-widget-data`; `lib/Plot.wiz` exists, but the
+  widget layer does not consume it yet, so the front end renders a placeholder. A
+  `Widget.plotOf` adapter is proposed, not implemented.
+* Text/range `value` is patched as an **attribute** (Loom's documented limit): after
+  a patch a live input's property may not follow the DOM attribute. Re-mount the
+  fragment when that matters.
+* Ids are keys: they must be unique among one display's widgets (the keyed diff
+  matches the first duplicate).
+-/
+
+/-- A widget descriptor. `kind` selects the control, `event` is the DOM event the front
+end forwards, `value` is the value the control starts with, `callback` is the name (or
+any Wiz expression) of a `Widget.Callback`, and `min`/`max`/`step`/`data` are
+kind-specific. -/
+structure Widget.Widget where
+  id : String
+  kind : String
+  event : String
+  value : String
+  label : String
+  callback : String
+  min : String
+  max : String
+  step : String
+  data : String
+
+/-- A slider (`input` event) with the default range 0–100, step 1. -/
+def Widget.slider (id event value callback : String) : Widget.Widget :=
+  Widget.Widget.mk id "slider" event value "" callback "0" "100" "1" ""
+
+/-- A slider with an explicit range. -/
+def Widget.sliderRange (id event value callback min max step : String) : Widget.Widget :=
+  Widget.Widget.mk id "slider" event value "" callback min max step ""
+
+/-- A button (`click` event). Its value is the empty string; the front end sends
+`"click"` unless `data-wiz-widget-value` says otherwise. -/
+def Widget.button (id event label callback : String) : Widget.Widget :=
+  Widget.Widget.mk id "button" event "" label callback "" "" "" ""
+
+/-- A button that carries a value (two buttons can share an id and differ by value). -/
+def Widget.buttonValue (id event value label callback : String) : Widget.Widget :=
+  Widget.Widget.mk id "button" event value label callback "" "" "" ""
+
+/-- A single-line text input (`input` event). -/
+def Widget.text (id event value callback : String) : Widget.Widget :=
+  Widget.Widget.mk id "text" event value "" callback "" "" "" ""
+
+/-- A plot. `data` is opaque JSON (a `Plot` value once an adapter consumes it; none
+exists yet) carried in `data-wiz-widget-data`; the front end decides how to draw it. -/
+def Widget.plot (id event data callback : String) : Widget.Widget :=
+  Widget.Widget.mk id "plot" event "" "plot" callback "" "" "" data
+
+/-- The descriptor with a new value. -/
+def Widget.setValue (w : Widget.Widget) (value : String) : Widget.Widget :=
+  Widget.Widget.mk w.id w.kind w.event value w.label w.callback w.min w.max w.step w.data
+
+/-- The descriptor with new plot data (or any other kind-specific payload). -/
+def Widget.setData (w : Widget.Widget) (data : String) : Widget.Widget :=
+  Widget.Widget.mk w.id w.kind w.event w.value w.label w.callback w.min w.max w.step data
+
+/-- The descriptor with a new label. -/
+def Widget.setLabel (w : Widget.Widget) (label : String) : Widget.Widget :=
+  Widget.Widget.mk w.id w.kind w.event w.value label w.callback w.min w.max w.step w.data
+
+-- ## JSON
+
+/-- The descriptor as a JSON object. The callback is included so the kernel can find
+it; a browser ignores it. -/
+def Widget.toJson (w : Widget.Widget) : Json :=
+  Json.mkObj [
+    Json.field "id" (Json.mkStr w.id),
+    Json.field "kind" (Json.mkStr w.kind),
+    Json.field "event" (Json.mkStr w.event),
+    Json.field "value" (Json.mkStr w.value),
+    Json.field "label" (Json.mkStr w.label),
+    Json.field "callback" (Json.mkStr w.callback),
+    Json.field "min" (Json.mkStr w.min),
+    Json.field "max" (Json.mkStr w.max),
+    Json.field "step" (Json.mkStr w.step),
+    Json.field "data" (Json.mkStr w.data)
+  ]
+
+/-- A descriptor from its JSON form (missing fields become the empty string). -/
+def Widget.ofJson (j : Json) : Widget.Widget :=
+  Widget.Widget.mk
+    (Json.getStr j "id") (Json.getStr j "kind") (Json.getStr j "event")
+    (Json.getStr j "value") (Json.getStr j "label") (Json.getStr j "callback")
+    (Json.getStr j "min") (Json.getStr j "max") (Json.getStr j "step")
+    (Json.getStr j "data")
+
+-- ## The VDOM
+
+/-- The message type of a widget tree. Widgets carry no `Loom.on` handlers (events go
+over the comm), so the tree is monomorphic in this empty type. -/
+inductive Widget.NoMsg where
+  | noMsg
+
+/-- The attributes every widget root carries: the id, kind and event are what the front
+end reads to build a comm message. -/
+def Widget.attrs (w : Widget.Widget) : List Loom.Attr :=
+  List.cons (Loom.attr "class" (String.append "wiz-widget wiz-" w.kind))
+    (List.cons (Loom.attr "data-wiz-widget" w.id)
+      (List.cons (Loom.attr "data-wiz-widget-kind" w.kind)
+        (List.cons (Loom.attr "data-wiz-widget-event" w.event)
+          (List.cons (Loom.attr "data-wiz-widget-value" w.value) List.nil))))
+
+/-- The slider control: a range input and an output that shows its value (the output's
+text is the node a value change patches). -/
+def Widget.sliderNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "span" (Widget.attrs w) [
+    Loom.el "input" [
+      Loom.attr "type" "range",
+      Loom.attr "min" w.min,
+      Loom.attr "max" w.max,
+      Loom.attr "step" w.step,
+      Loom.attr "value" w.value,
+      Loom.attr "data-wiz-widget-input" w.id
+    ] List.nil,
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
+  ]
+
+/-- The text control: an input and an output with the committed value. -/
+def Widget.textNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "span" (Widget.attrs w) [
+    Loom.el "input" [
+      Loom.attr "type" "text",
+      Loom.attr "value" w.value,
+      Loom.attr "data-wiz-widget-input" w.id
+    ] List.nil,
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
+  ]
+
+/-- The button control. -/
+def Widget.buttonNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "button" (List.append (Widget.attrs w) (List.cons (Loom.attr "type" "button") List.nil))
+    [Loom.text w.label]
+
+/-- The plot placeholder. The payload is an attribute (opaque JSON for now); the front
+end draws it. -/
+def Widget.plotNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "div" (List.append (Widget.attrs w)
+      (List.cons (Loom.attr "data-wiz-widget-data" w.data) List.nil)) [
+    Loom.el "div" [Loom.attr "class" "wiz-plot-canvas"] List.nil,
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
+  ]
+
+/-- One widget as a keyed element (keys are the widget ids, so a reorder is a `move`). -/
+def Widget.vnode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.keyed w.id
+    (match String.eq w.kind "button" with
+    | .true => Widget.buttonNode w
+    | .false => match String.eq w.kind "text" with
+      | .true => Widget.textNode w
+      | .false => match String.eq w.kind "plot" with
+        | .true => Widget.plotNode w
+        | .false => Widget.sliderNode w)
+
+/-- The fragment: one `div.wiz-widgets` whose children are the widgets. This is the
+container the browser mounts and the patches are relative to. -/
+def Widget.vnodes (ws : List Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "div" [
+    Loom.attr "class" "wiz-widgets",
+    Loom.attr "data-wiz-widget-root" ""
+  ] (List.map Widget.vnode ws)
+
+/-- The fragment's HTML (server-side render). -/
+def Widget.html (ws : List Widget.Widget) : String := Loom.toHtml (Widget.vnodes ws)
+
+-- ## The display bundle
+
+/-- The prefix that tells the kernel a string is a widget display, not plain output. -/
+def Widget.prefix : String := "WIZ_WIDGET:"
+
+/-- The bundle without the prefix: the schema, the rendered VDOM, and the descriptors. -/
+def Widget.bundle (ws : List Widget.Widget) : Json :=
+  Json.mkObj [
+    Json.field "schema" (Json.mkStr "wiz.widget/1"),
+    Json.field "html" (Json.mkStr (Widget.html ws)),
+    Json.field "widgets" (Json.mkArr (List.map Widget.toJson ws)),
+    Json.field "count" (Json.ofNat (List.length ws))
+  ]
+
+/-- A display value: `WIZ_WIDGET:` followed by the bundle JSON. The kernel turns this
+into `application/vnd.wiz.widget+json` and opens a comm. -/
+def Widget.display (ws : List Widget.Widget) : String :=
+  String.append Widget.prefix (Json.render (Widget.bundle ws))
+
+-- ## Events and callbacks
+
+/-- One event from the front end: which widget, which DOM event, and the value it
+carries (a slider number, a text input's text, a button's value). -/
+structure Widget.Event where
+  widget : String
+  event : String
+  value : String
+
+/-- The Wiz callback: the event and the widget list as displayed last time, giving the
+next widget list. Pure; the kernel re-evaluates it in the session on every event. -/
+def Widget.Callback : Type := Widget.Event → List Widget.Widget → List Widget.Widget
+
+/-- The JSON of a display string (with or without the prefix), if it parses. -/
+def Widget.parseDisplay (text : String) : Option Json :=
+  match String.stripPrefix text Widget.prefix with
+  | .some body => match Json.parse body with
+    | .ok j => .some j
+    | .error _ => .none
+  | .none => match Json.parse text with
+    | .ok j => .some j
+    | .error _ => .none
+
+/-- The descriptors in a previous display string (empty when it does not parse). -/
+def Widget.widgetsOf (text : String) : List Widget.Widget :=
+  match Widget.parseDisplay text with
+  | .some j => List.map Widget.ofJson (Json.getList j "widgets")
+  | .none => List.nil
+
+/-- The patches turning `old` into `new`, as a JSON value (for the same applier the
+Loom framework uses). -/
+def Widget.patches (old new : List Widget.Widget) : Json :=
+  match Json.parse (Loom.patchesJson
+      (Loom.Rendered.diff (Loom.render (Widget.vnodes old)) (Loom.render (Widget.vnodes new)))) with
+  | .ok j => j
+  | .error _ => Json.mkArr List.nil
+
+/-- The bundle for an update: the new HTML and descriptors, the previous HTML (for a
+full re-mount), and the patches from old to new. -/
+def Widget.updateBundle (old new : List Widget.Widget) : Json :=
+  Json.mkObj [
+    Json.field "schema" (Json.mkStr "wiz.widget/1"),
+    Json.field "html" (Json.mkStr (Widget.html new)),
+    Json.field "previous" (Json.mkStr (Widget.html old)),
+    Json.field "widgets" (Json.mkArr (List.map Widget.toJson new)),
+    Json.field "count" (Json.ofNat (List.length new)),
+    Json.field "patches" (Widget.patches old new)
+  ]
+
+/-- The update value the kernel evaluates: parse the previous display, run the callback,
+render both lists and diff them. The result is a `WIZ_WIDGET:` bundle carrying
+`patches`. -/
+def Widget.handle (cb : Widget.Callback) (previous widget event value : String) : String :=
+  let old := Widget.widgetsOf previous;
+  let new := cb (Widget.Event.mk widget event value) old;
+  String.append Widget.prefix (Json.render (Widget.updateBundle old new))

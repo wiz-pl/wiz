@@ -1,0 +1,1 @@
+tests/relations.wiz:24:1: info: "columns: cfg/2 (1 2)(2 3); flow/3 (1 2 3)(3 2 1); none/2  | tuples 4 stats 4\nspill: cfg/2 (1 2)(2 3); flow/3 (1 2 3)(3 2 1); none/2  | tuples 4 stats 4\nmodel: cfg/2 (1 2)(2 3); flow/3 (1 2 3)(3 2 1); none/2 "

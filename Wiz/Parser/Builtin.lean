@@ -62,6 +62,10 @@ def simpleBinder : ParserDescr := orelse (bracketedBinder false) binderIdent
 def matchAlt : ParserDescr :=
   node "match.alt" (seqs ["|", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
 
+/-- A `calc` step: a relation `a ≤ b` and its proof. The relation may start with `_`,
+the previous step's right endpoint. -/
+def calcStep : ParserDescr := node "calc.step" (seqs [term, ":=", term])
+
 def precedence : ParserDescr := node "prec" (orelse num ident)
 
 def level (prec : Nat := 0) : ParserDescr := cat "level" prec
@@ -102,6 +106,7 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 |----------------------|------|----------|
 | `term.ident`         | max  | ident |
 | `term.num`, `term.str` | max | literal |
+| `term.includeStr`    | max  | "include_str" str (a file's contents, read by the driver: see `include-str`) |
 | `term.type`          | max  | "Type" [level] |
 | `term.sort`          | max  | "Sort" [level] |
 | `term.prop`          | max  | "Prop" |
@@ -139,6 +144,7 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 | `term.ecase`         | lead | "ecase" term "[" [terms] "]" |
 | `term.dotIdent`      | max  | "." ident (a constructor of the expected type) |
 | `term.match`         | lead | "match" [terms] "with" [alts] |
+| `term.calc`          | lead | "calc" [`calc.step`: term ":=" term, aligned] |
 | `term.szInf`, `term.szSuc`, `term.sizeLt` | | "∞", "↑" s, "Size<" s |
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
 | `term.asPat` (trailing) | max | x "@" p, without spaces: an as-pattern (13g; patterns only) |
@@ -158,6 +164,10 @@ def termLeading : List LeadingParser := [
   { kind := "term.num", prec := maxPrec, p := num },
   { kind := "term.omega", prec := maxPrec, p := "ω" },
   { kind := "term.str", prec := maxPrec, p := str },
+  -- (include-str) `include_str "path"`: the contents of a file next to the .wiz file, as
+  -- a `String`. The command line reads it (the frontend is pure); `Elab.Command` replaces
+  -- the node by a string literal before elaborating the command.
+  { kind := "term.includeStr", prec := maxPrec, p := seqs ["include_str", str] },
   -- the level must be right of the enclosing position: in a structure, `op : Type` and a
   -- field `ret` on the next line are two fields, not `Type ret`
   { kind := "term.type", prec := maxPrec, p := seqs ["Type", optional (seqs [checkPrec leadPrec, colGt, level maxPrec])] },
@@ -224,6 +234,10 @@ def termLeading : List LeadingParser := [
   -- tactics line up (or are separated by `;`); the tactics themselves come from the prelude
   { kind := "term.by", prec := leadPrec,
     p := seqs ["by", withPosition (many1 (seqs [colGe, cat "tactic" 0, optional ";"]))] },
+  -- a chain of relations (`calc a ≤ b := h₁  _ < c := h₂`): the steps line up with the
+  -- first one, as `match`'s alternatives do
+  { kind := "term.calc", prec := leadPrec,
+    p := seqs [nonReserved "calc", withPosition (many1 (seqs [colGe, calcStep]))] },
   { kind := "term.ecase", prec := leadPrec,
     p := seqs [nonReserved "ecase", term maxPrec, "[", withoutPosition (sepBy term ","), "]"] }
 ]
@@ -270,12 +284,13 @@ continue onto a line starting at the command's column.
 | `command.structure`          | "structure" ident [".{" us "}"] [binders] [":" T] where [fields] ["deriving" C,+] (where: `structure.where`, "where" [["private"] ident "::"]) |
 | `command.private`            | "private" command (every name it declares is private to the module) |
 | `command.sealed`             | "sealed" command (an `inductive`: no other declaration is this type) |
-| `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module) |
+| `command.local`              | "local" command (13m: a `syntax`, `notation`, `infix…`, `macro_rules` or `attribute [macro …]` whose syntax stays in the module; 11w: an `instance` found only in the module; 6h: `attribute [simp]`) |
 | `command.deriving`           | "deriving" "instance" C,+ "for" T,+ |
 | `command.attrDeriver`        | "attribute" "[" "deriver" ident "]" ident |
 | `command.attrInline`         | "attribute" "[" "inline" "]" ident |
 | `command.attrDefaultInstance`| "attribute" "[" "default_instance" [num] "]" ident (7f) |
 | `command.attrBinop`          | "attribute" "[" "binop" "]" ident (7f) |
+| `command.attrSimp`           | "attribute" "[" "simp" [num] "]" ident (6h: the default `simp` set; 1000 unless a priority is given) |
 | `command.coinductive`        | like `structure`; the fields are observations |
 | `command.defEqns`            | "def" ident [".{" us "}"] [binders] ":" T [alts] |
 | `command.partial`            | "partial" ["(" "default" ":=" w ")"] command (a `def`) |
@@ -356,6 +371,9 @@ def commandLeading : List LeadingParser := [
     p := seqs ["attribute", "[", nonReserved "default_instance", optional num, "]", ident] },
   { kind := "command.attrBinop", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "binop", "]", ident] },
+  -- 6h (S2): `attribute [simp] f` (and `[simp 500] f`) puts a theorem in the default set
+  { kind := "command.attrSimp", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "simp", optional num, "]", ident] },
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },

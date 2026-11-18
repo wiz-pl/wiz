@@ -129,7 +129,7 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .exfalso m _ => .some (eval (TCtx.env c) m)
   | .coe _ B _ _ => .some (eval (TCtx.env c) B)
   | .tag k _ => .some (.venum k)
-  | .star => .some (.vunit 1)
+  | .star => .some (.vunit (ln 1))
   | .letE A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
   | .letq _ A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
   | .letUnit _ b => quickType c b
@@ -212,7 +212,7 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
       | e => e
     | _ => eraseInfer c t
   | .darg _ S D => match whnf ty with
-    | .vdesc l I => match eraseCheck c D (.vpi .qw (ln (l + 1)) (ln (l + 2)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
+    | .vdesc l I => match eraseCheck c D (.vpi .qw (lsucc l) (lsucc (lsucc l)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
       | .ok D' => .ok (.obj 1 (etms2 .erased D'))
       | e => e
     | _ => eraseInfer c t
@@ -224,7 +224,7 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
       | e => e
     | _ => eraseInfer c t
   | .dhrec _ H j D => match whnf ty with
-    | .vdesc l I => match eraseCheck c j (.vpi .qw (ln (l + 1)) (ln (l + 1)) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
+    | .vdesc l I => match eraseCheck c j (.vpi .qw (lsucc l) (lsucc l) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
       | .ok j' => match eraseCheck c D ty with
         | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
         | e => e
@@ -1419,12 +1419,7 @@ def capUses (bor : List Nat) (names : List String) (d : Nat) (live : List Nat) :
     | .mk rc rl => match Bool.or (lvMem (d - 1 - c) live) (lvMem (d - 1 - c) bor) with
       | .true => .mk (.t ("inc(" +++ nthName' names c +++ "); ") ⧺ rc) rl
       | .false => .mk rc (lvIns (d - 1 - c) rl)
-def headB : List Bool → Bool
-  | .nil => .false
-  | .cons b _ => b
-def tailB : List Bool → List Bool
-  | .nil => .nil
-  | .cons _ rest => rest
+-- (`headB`/`tailB` are in Frontend.wiz, U2b)
 -- the owned variables (levels) passed in borrowed positions: lent to the call
 def lentVars (bor : List Nat) (d : Nat) : List Bool → List ETm → List Nat
   | _, .nil => .nil
@@ -1824,8 +1819,8 @@ def implOf (n : String) : List Foreign → Option String
     | _ => implOf n rest
 partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
-  | .succ k => match Array.getD all k (.mk "?" .star .star .star .nil) with
-    | .mk n ty v _ _ => match Bool.or (elemStr n seen) (isNative n) with
+  | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
       | .true => eraseGlobals sl ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with
@@ -1987,7 +1982,10 @@ def ffiProtoParams (ffi : List Foreign) : List String → List String
     | .true => ffiProtoParams ffi rest
     | .false => match cbOf k with
       | .some c => .cons (cbPtrType c) (.cons "void *" (ffiProtoParams ffi rest))
-      | .none => .cons (extCType ffi k) (ffiProtoParams ffi rest)
+      -- (stage 30) a byte buffer is passed as a pointer and a length
+      | .none => match strEq k "y" with
+        | .true => .cons "const void *" (.cons "size_t" (ffiProtoParams ffi rest))
+        | .false => .cons (extCType ffi k) (ffiProtoParams ffi rest)
 inductive FfiIn where
   | mk (pre : String) (cargs : List String) (post : String)
 -- (stage 21q) a callback: its trampoline and the closure as the context; a borrowed one
@@ -1998,10 +1996,14 @@ def ffiInMore (ffi : List Foreign) (k a c pre : String) (cargs : List String) (p
     | .mk owned _ _ _ => match owned with
       | .true => post
       | .false => "rt_drop(" +++ a +++ "); " +++ post)
-  | .none => match kindStruct ffi k with
-    | .some f => .mk (structCType f +++ " " +++ c +++ "; wiz_sin_" +++ structMangled f +++ "(&" +++ c +++ ", " +++ a +++ "); " +++ pre) (.cons c cargs)
-        ("wiz_sfree_" +++ structMangled f +++ "(&" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)
-    | .none => .mk ("uint64_t " +++ c +++ " = rt_in_nat(" +++ a +++ "); " +++ pre) (.cons c cargs) post
+  | .none => match strEq k "y" with
+    -- (stage 30) a byte buffer: its data and length, borrowed for the call
+    | .true => .mk pre (.cons ("(const void *)((wiz_bytes *)" +++ a +++ ")->data")
+        (.cons ("(size_t)((wiz_bytes *)" +++ a +++ ")->len") cargs)) ("rt_drop(" +++ a +++ "); " +++ post)
+    | .false => match kindStruct ffi k with
+      | .some f => .mk (structCType f +++ " " +++ c +++ "; wiz_sin_" +++ structMangled f +++ "(&" +++ c +++ ", " +++ a +++ "); " +++ pre) (.cons c cargs)
+          ("wiz_sfree_" +++ structMangled f +++ "(&" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)
+      | .none => .mk ("uint64_t " +++ c +++ " = rt_in_nat(" +++ a +++ "); " +++ pre) (.cons c cargs) post
 -- the marshalling of the parameters: the statements before the call, the C arguments,
 -- and the statements after it
 partial def ffiIn (ffi : List Foreign) (i : Nat) : List String → FfiIn
@@ -2087,6 +2089,11 @@ def structIn (ffi : List Foreign) : Nat → List String → List String → Stri
     | .true => dup "rt_in_bool"
     | .false => match strEq k "s" with
     | .true => dup "rt_in_str"
+    | .false => match strEq k "y" with
+    -- (stage 30) a byte array `char f[N]`: copied, zero-padded or cut to size
+    | .true => "{ wiz_bytes *b = (wiz_bytes *)" +++ x +++ "; size_t m = b->len < sizeof " +++ lhs +++
+        " ? b->len : sizeof " +++ lhs +++ "; memset(" +++ lhs +++ ", 0, sizeof " +++ lhs +++
+        "); if (m) memcpy(" +++ lhs +++ ", b->data, m); } "
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sin_" +++ structMangled g +++ "(&" +++ lhs +++ ", " +++ x +++ "); "
     | .none => "") +++ structIn ffi (i + 1) fs ks
@@ -2111,6 +2118,9 @@ def structOut (ffi : List Foreign) : Nat → List String → List String → Str
     | .true => "rt_out_f64(" +++ x +++ ")"
     | .false => match strEq k "u" with
     | .true => "rt_out_u64(" +++ x +++ ")"
+    | .false => match strEq k "y" with
+    -- (stage 30) a byte array `char f[N]`: a new `Bytes` of the field's size
+    | .true => "rt_bytes_new((const void *)" +++ x +++ ", sizeof " +++ x +++ ")"
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sout_" +++ structMangled g +++ "(" +++ x +++ ")"
     | .none => "rt_out_nat(" +++ x +++ ")") +++ "; " +++ structOut ffi (i + 1) fs ks
@@ -2144,6 +2154,7 @@ partial def ffiDecls (ffi : List Foreign) (seen : List String) : List Foreign �
       | .false => match elemS header seen with
         | .true => List.append helpers (ffiDecls ffi seen rest)
         | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi (.cons header seen) rest))
+    | .code text => .cons (.t text) (ffiDecls ffi seen rest)
     | _ => ffiDecls ffi seen rest
 -- (stage 21q) A C function that applies the Wiz closure `f` (an owned value) to its C
 -- arguments `c0 …` of kinds `ps` (C values become Wiz values: `Nat`/`UInt64` from
@@ -2281,10 +2292,7 @@ def headerProtos : List Foreign → List Doc
         | .cons _ _ => commaSep ps') +++ ");")) (headerProtos rest)
     | _ => headerProtos rest
 def headerDocs (ffi : List Foreign) : List Doc :=
-  .cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */")
-  (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED")
-  (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);")
-  (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil))))))))))
+  (.cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */") (.cons (.t "/* ABI v1 (wiz-notes/prior-art/compilers-runtime-ffi.md, 2.2): kinds are explicit.") (.cons (.t "   n/u=uint64_t, f=double, s=const char* (borrowed in, caller-owned out), b=int,") (.cons (.t "   p=void* (+1 wrapped, borrowed for a call), w=wiz_val (+0 in, +1 out); e/v are omitted.") (.cons (.t "   Structs by value only through c_struct; native reps only on sealed types. */") (.cons (.t "#define WIZ_ABI_MAJOR 1") (.cons (.t "#define WIZ_ABI_MINOR 0") (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED") (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);") (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil)))))))))))))))))
 -- the C of a program's foreign functions (after the runtime)
 def ffiDocs (rc : Bool) (ffi : List Foreign) : List Doc :=
   let fs := List.reverseOf ffi .nil;
@@ -2337,7 +2345,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2855,7 +2863,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
              "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
              "); rt_root(&c); } inc(c); return c; }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;

@@ -151,9 +151,13 @@ def Ring.Key.prod_merge (ρ : List Nat) : (xs ys : List Nat) →
     Ring.Key.prod ρ (Ring.Key.merge xs ys) = Ring.Key.prod ρ xs * Ring.Key.prod ρ ys
   | .nil, ys => Eq.symm (Nat.add_zero (Ring.Key.prod ρ ys))
   | .cons x xs, ys =>
-    Eq.trans (Ring.Key.prod_insert ρ x (Ring.Key.merge xs ys))
-      (Eq.trans (congrArg (fun z => NatExpr.get ρ x * z) (Ring.Key.prod_merge ρ xs ys))
-        (Eq.symm (Nat.mul_assoc (NatExpr.get ρ x) (Ring.Key.prod ρ xs) (Ring.Key.prod ρ ys))))
+    calc Ring.Key.prod ρ (Ring.Key.merge (.cons x xs) ys)
+        = NatExpr.get ρ x * Ring.Key.prod ρ (Ring.Key.merge xs ys) :=
+          Ring.Key.prod_insert ρ x (Ring.Key.merge xs ys)
+         _ = NatExpr.get ρ x * (Ring.Key.prod ρ xs * Ring.Key.prod ρ ys) :=
+          congrArg (fun z => NatExpr.get ρ x * z) (Ring.Key.prod_merge ρ xs ys)
+         _ = NatExpr.get ρ x * Ring.Key.prod ρ xs * Ring.Key.prod ρ ys :=
+          Eq.symm (Nat.mul_assoc (NatExpr.get ρ x) (Ring.Key.prod ρ xs) (Ring.Key.prod ρ ys))
 
 /-- Soundness of `NatPoly.addMonoO`. -/
 def NatPoly.eval_addMonoO (ρ : List Nat) (c : Nat) (xs : List Nat) (d : Nat) (ys : List Nat) (p rec : NatPoly)
@@ -164,9 +168,14 @@ def NatPoly.eval_addMonoO (ρ : List Nat) (c : Nat) (xs : List Nat) (d : Nat) (y
   | .eq, h =>
     let e := Ring.Key.cmp_eq xs ys h;
     -- (c + d) * P xs + E = c * P xs + (d * P ys + E)
-    Eq.trans (congrArg (fun z => z + NatPoly.eval ρ p) (Nat.add_mul c d (Ring.Key.prod ρ xs)))
-      (Eq.trans (Nat.add_assoc (c * Ring.Key.prod ρ xs) (d * Ring.Key.prod ρ xs) (NatPoly.eval ρ p))
-        (congrArg (fun (zs : List Nat) => c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ zs + NatPoly.eval ρ p)) e))
+    calc NatPoly.eval ρ (NatPoly.addMonoO .eq c xs d ys p rec)
+        = (c + d) * Ring.Key.prod ρ xs + NatPoly.eval ρ p := rfl
+         _ = (c * Ring.Key.prod ρ xs + d * Ring.Key.prod ρ xs) + NatPoly.eval ρ p :=
+          congrArg (fun z => z + NatPoly.eval ρ p) (Nat.add_mul c d (Ring.Key.prod ρ xs))
+         _ = c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ xs + NatPoly.eval ρ p) :=
+          Nat.add_assoc (c * Ring.Key.prod ρ xs) (d * Ring.Key.prod ρ xs) (NatPoly.eval ρ p)
+         _ = c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ ys + NatPoly.eval ρ p) :=
+          congrArg (fun (zs : List Nat) => c * Ring.Key.prod ρ xs + (d * Ring.Key.prod ρ zs + NatPoly.eval ρ p)) e
   | .gt, _ =>
     Eq.trans (congrArg (fun z => d * Ring.Key.prod ρ ys + z) ih)
       (Nat.add_left_comm (d * Ring.Key.prod ρ ys) (c * Ring.Key.prod ρ xs) (NatPoly.eval ρ p))
@@ -181,33 +190,45 @@ def NatPoly.eval_addMono (ρ : List Nat) (c : Nat) (xs : List Nat) : (p : NatPol
 def NatPoly.eval_add (ρ : List Nat) : (p q : NatPoly) → NatPoly.eval ρ (NatPoly.add p q) = NatPoly.eval ρ p + NatPoly.eval ρ q
   | .nil, _ => rfl
   | .cons m p, q =>
-    Eq.trans (NatPoly.eval_addMono ρ m.1 m.2 (NatPoly.add p q))
-      (Eq.trans (congrArg (fun z => m.1 * Ring.Key.prod ρ m.2 + z) (NatPoly.eval_add ρ p q))
-        (Eq.symm (Nat.add_assoc (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ p) (NatPoly.eval ρ q))))
+    calc NatPoly.eval ρ (NatPoly.add (.cons m p) q)
+        = m.1 * Ring.Key.prod ρ m.2 + NatPoly.eval ρ (NatPoly.add p q) :=
+          NatPoly.eval_addMono ρ m.1 m.2 (NatPoly.add p q)
+         _ = m.1 * Ring.Key.prod ρ m.2 + (NatPoly.eval ρ p + NatPoly.eval ρ q) :=
+          congrArg (fun z => m.1 * Ring.Key.prod ρ m.2 + z) (NatPoly.eval_add ρ p q)
+         _ = m.1 * Ring.Key.prod ρ m.2 + NatPoly.eval ρ p + NatPoly.eval ρ q :=
+          Eq.symm (Nat.add_assoc (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ p) (NatPoly.eval ρ q))
 /-- `(a·c)·(b·d) = (a·b)·(c·d)`: coefficients and products of atoms rearranged. -/
 def NatPoly.mono_mul (a b c d : Nat) : a * c * (b * d) = a * b * (c * d) :=
-  Eq.trans (Nat.mul_assoc a c (b * d))
-    (Eq.trans (congrArg (fun z => a * z) (Nat.mul_left_comm c b d))
-      (Eq.symm (Nat.mul_assoc a b (c * d))))
+  calc a * c * (b * d)
+      = a * (c * (b * d)) := Nat.mul_assoc a c (b * d)
+       _ = a * (b * (c * d)) := congrArg (fun z => a * z) (Nat.mul_left_comm c b d)
+       _ = a * b * (c * d) := Eq.symm (Nat.mul_assoc a b (c * d))
 /-- Multiplying by a monomial multiplies by its value. -/
 def NatPoly.eval_mulMono (ρ : List Nat) (c : Nat) (xs : List Nat) : (q : NatPoly) →
     NatPoly.eval ρ (NatPoly.mulMono c xs q) = c * Ring.Key.prod ρ xs * NatPoly.eval ρ q
   | .nil => Eq.symm (Nat.mul_zero (c * Ring.Key.prod ρ xs))
   | .cons m q =>
-    Eq.trans (NatPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (NatPoly.mulMono c xs q))
-      (Eq.trans
-        (congrArg2 (fun y z => y + z)
-          (Eq.trans (congrArg (fun z => c * m.1 * z) (Ring.Key.prod_merge ρ xs m.2))
-            (NatPoly.mono_mul c (Ring.Key.prod ρ xs) m.1 (Ring.Key.prod ρ m.2)))
-          (NatPoly.eval_mulMono ρ c xs q))
-        (Eq.symm (Nat.mul_add (c * Ring.Key.prod ρ xs) (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ q))))
+    calc NatPoly.eval ρ (NatPoly.mulMono c xs (.cons m q))
+        = c * m.1 * Ring.Key.prod ρ (Ring.Key.merge xs m.2) + NatPoly.eval ρ (NatPoly.mulMono c xs q) :=
+          NatPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (NatPoly.mulMono c xs q)
+         _ = c * Ring.Key.prod ρ xs * (m.1 * Ring.Key.prod ρ m.2) + c * Ring.Key.prod ρ xs * NatPoly.eval ρ q :=
+          congrArg2 (fun y z => y + z)
+            (Eq.trans (congrArg (fun z => c * m.1 * z) (Ring.Key.prod_merge ρ xs m.2))
+              (NatPoly.mono_mul c (Ring.Key.prod ρ xs) m.1 (Ring.Key.prod ρ m.2)))
+            (NatPoly.eval_mulMono ρ c xs q)
+         _ = c * Ring.Key.prod ρ xs * (m.1 * Ring.Key.prod ρ m.2 + NatPoly.eval ρ q) :=
+          Eq.symm (Nat.mul_add (c * Ring.Key.prod ρ xs) (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ q))
 /-- `NatPoly.mul` is multiplication. -/
 def NatPoly.eval_mul (ρ : List Nat) : (p q : NatPoly) → NatPoly.eval ρ (NatPoly.mul p q) = NatPoly.eval ρ p * NatPoly.eval ρ q
   | .nil, _ => rfl
   | .cons m p, q =>
-    Eq.trans (NatPoly.eval_add ρ (NatPoly.mulMono m.1 m.2 q) (NatPoly.mul p q))
-      (Eq.trans (congrArg2 (fun y z => y + z) (NatPoly.eval_mulMono ρ m.1 m.2 q) (NatPoly.eval_mul ρ p q))
-        (Eq.symm (Nat.add_mul (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ p) (NatPoly.eval ρ q))))
+    calc NatPoly.eval ρ (NatPoly.mul (.cons m p) q)
+        = NatPoly.eval ρ (NatPoly.mulMono m.1 m.2 q) + NatPoly.eval ρ (NatPoly.mul p q) :=
+          NatPoly.eval_add ρ (NatPoly.mulMono m.1 m.2 q) (NatPoly.mul p q)
+         _ = m.1 * Ring.Key.prod ρ m.2 * NatPoly.eval ρ q + NatPoly.eval ρ p * NatPoly.eval ρ q :=
+          congrArg2 (fun y z => y + z) (NatPoly.eval_mulMono ρ m.1 m.2 q) (NatPoly.eval_mul ρ p q)
+         _ = (m.1 * Ring.Key.prod ρ m.2 + NatPoly.eval ρ p) * NatPoly.eval ρ q :=
+          Eq.symm (Nat.add_mul (m.1 * Ring.Key.prod ρ m.2) (NatPoly.eval ρ p) (NatPoly.eval ρ q))
 /-- A constant polynomial evaluates to its constant. -/
 def NatPoly.eval_const (ρ : List Nat) : (n : Nat) → NatPoly.eval ρ (NatPoly.const n) = n
   | .zero => rfl
@@ -255,7 +276,10 @@ def NatPoly.beq_eval (ρ : List Nat) : (p q : NatPoly) → NatPoly.beq p q = .tr
 /-- Expressions with the same normal form have the same value: the kernel checks
 `h` by computing both normal forms. -/
 def NatExpr.prove (ρ : List Nat) (a b : NatExpr) (h : NatPoly.beq (NatExpr.norm a) (NatExpr.norm b) = .true) : NatExpr.eval ρ a = NatExpr.eval ρ b :=
-  Eq.trans (Eq.symm (NatExpr.eval_norm ρ a)) (Eq.trans (NatPoly.beq_eval ρ (NatExpr.norm a) (NatExpr.norm b) h) (NatExpr.eval_norm ρ b))
+  calc NatExpr.eval ρ a
+      = NatPoly.eval ρ (NatExpr.norm a) := Eq.symm (NatExpr.eval_norm ρ a)
+       _ = NatPoly.eval ρ (NatExpr.norm b) := NatPoly.beq_eval ρ (NatExpr.norm a) (NatExpr.norm b) h
+       _ = NatExpr.eval ρ b := NatExpr.eval_norm ρ b
 
 -- ## The macro: `nat_ring! lhs = rhs`
 --
@@ -265,7 +289,7 @@ def NatExpr.prove (ρ : List Nat) (a b : NatExpr) (h : NatPoly.beq (NatExpr.norm
 
 /-- Equality of syntax trees, ignoring positions: two atoms are the same when
 their syntax is. -/
-partial def Ring.synEq : {ω b c : Bool} → SyntaxF b → SyntaxF c → Bool
+def Ring.synEq : {ω b c : Bool} → SyntaxF b → SyntaxF c → Bool
   | _, _, .missing, .missing => .true
   | _, _, .atom x, .atom y => Expr.nameEq x y
   | _, _, .ident x, .ident y => Expr.nameEq x y
@@ -279,7 +303,9 @@ have the same normal form. `nat_ring!` expands to this; its type is the equation
 written. -/
 def NatExpr.proveAt (x y : Nat) (ρ : List Nat) (a b : NatExpr) (hx : NatExpr.eval ρ a = x) (hy : NatExpr.eval ρ b = y)
     (h : NatPoly.beq (NatExpr.norm a) (NatExpr.norm b) = .true) : x = y :=
-  Eq.trans (Eq.symm hx) (Eq.trans (NatExpr.prove ρ a b h) hy)
+  calc x = NatExpr.eval ρ a := Eq.symm hx
+       _ = NatExpr.eval ρ b := NatExpr.prove ρ a b h
+       _ = y := hy
 
 /-- The index of `x` among the atoms, or their number if it is not there. -/
 def Ring.Reify.find (x : Syntax) : List Syntax → Nat

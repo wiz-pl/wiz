@@ -1,0 +1,16 @@
+(index
+  (package "text"
+    (summary "Text helpers, built on base")
+    (repo "https://example.org/wiz/text")
+    (version "1.0.0"
+      (source "packages/text-1.0.0.tar.gz")
+      (sha256 "2173664ba28f8d384340617a34639e457b03a8f41a21b6a78b2d3fa2971fa8ab")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Text" "Text.Value")
+      (deps (dep "base" "^0.1")))
+    (version "1.1.0"
+      (source "packages/text-1.1.0.tar.gz")
+      (sha256 "76f76fb3161871c256e02634df98519b469ee54a59acae5cc589ab1cad54858d")
+      (toolchain ">=0.1.0 <0.3.0")
+      (modules "Text" "Text.Value")
+      (deps (dep "base" "^0.1")))))

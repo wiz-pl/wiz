@@ -11,6 +11,11 @@ The protocol is small enough to write here, over the blocking handles of
   WebSockets can't be mistaken for one). Before that the server checks the `Origin`
   header: a page on any web site can open a WebSocket to `127.0.0.1`, so only local
   pages (and clients that send no `Origin`, which browsers always do) are let in.
+* **The token** (#430). The `Origin` check stops web pages, not local programs (they
+  simply leave the header out), so the upgrade must also carry the server's token: as
+  `?token=…` in the request target (what a browser can send) or as
+  `Authorization: Bearer …`. A missing or wrong token gets `401` before any `101`; the
+  comparison takes the same time wherever the first difference is.
 * **Frames.** After the handshake both sides send frames: a byte with the final-fragment
   bit and the opcode (text 1, binary 2, continuation 0, close 8, ping 9, pong 10), the
   payload length (7 bits, or 126 + 16 bits, or 127 + 64 bits), and, from the client
@@ -114,6 +119,50 @@ def localOrigin (origin : String) : Bool :=
       ["localhost", "127.0.0.1", "[::1]"].any fun h =>
         host == h || host.startsWith (h ++ ":")
 
+/-! ## The token (#430) -/
+
+/-- Lower-case hexadecimal. -/
+def hex (bs : ByteArray) : String := Id.run do
+  let digits := "0123456789abcdef".toList.toArray
+  let mut out := ""
+  for b in bs do
+    out := out.push digits[(b >>> 4).toNat]!
+    out := out.push digits[(b &&& 15).toNat]!
+  pure out
+
+/-- A fresh token: 128 random bits, in hex. -/
+def freshToken : IO String := do
+  pure (hex (← IO.getRandomBytes 16))
+
+/-- Equal strings, compared in a time that depends only on the lengths (not on where the
+first difference is), so a client can't find the token a byte at a time. -/
+def constantTimeEq (a b : String) : Bool := Id.run do
+  let (x, y) := (a.toUTF8, b.toUTF8)
+  if x.size != y.size then return false
+  let mut acc : UInt8 := 0
+  for i in [0:x.size] do
+    acc := acc ||| (x.get! i ^^^ y.get! i)
+  pure (acc == 0)
+
+/-- The value of `name` in a request target's query (`/path?a=1&token=…`), if any. -/
+def queryParam (target name : String) : Option String :=
+  match target.splitOn "?" with
+  | _ :: q :: _ =>
+    (q.splitOn "&").findSome? fun kv =>
+      match kv.splitOn "=" with
+      | k :: v => if k == name then some ("=".intercalate v) else none
+      | [] => none
+  | _ => none
+
+/-- The token a request presents: `?token=…` in its target, or `Authorization: Bearer …`. -/
+def presentedToken (target : String) (headers : List (String × String)) : Option String :=
+  match queryParam target "token" with
+  | some t => some t
+  | none => do
+    let a ← headers.lookup "authorization"
+    let a := a.trimAscii.toString
+    if a.toLower.startsWith "bearer " then some (a.drop 7).trimAscii.toString else none
+
 /-- (11w) The files of the web infoview a server may hand out over HTTP (`web/build.sh`'s
 output), with their media types: only these, by exact name, so no other file is reachable. -/
 def webAssets : List (String × String) :=
@@ -124,10 +173,13 @@ def webAssets : List (String × String) :=
 
 /-- The server's half of the handshake on a new connection: `true` if it is a WebSocket
 now. A request that is not a WebSocket upgrade, or comes from another origin
-(`localOrigin`), gets an HTTP error and `false`. (11w) With `web` (the directory of the
-web infoview), a plain `GET` of one of `webAssets` (`/infoview.html?…`) gets that file
-and `false`; any other path gets `404`. -/
-def accept (r w : IO.FS.Stream) (web : Option String := none) : IO Bool := do
+(`localOrigin`), gets an HTTP error and `false`. (#430) With `token`, an upgrade that
+does not present it (`presentedToken`) gets `401 Unauthorized` and `false`; `none` lets
+every local client in (`wiz lsp --ws-insecure` only). (11w) With `web` (the directory of
+the web infoview), a plain `GET` of one of `webAssets` (`/infoview.html?…`) gets that file
+and `false`, with or without a token (the files are the toolchain's own, the same for
+everyone); any other path gets `404`. -/
+def accept (r w : IO.FS.Stream) (token : Option String) (web : Option String := none) : IO Bool := do
   let some (line, headers) ← readHead r | return false
   let get (k : String) := (headers.lookup k).getD ""
   let refuse (status : String) : IO Bool := do
@@ -138,10 +190,10 @@ def accept (r w : IO.FS.Stream) (web : Option String := none) : IO Bool := do
   if let some o := headers.lookup "origin" then
     unless localOrigin o do return ← refuse "403 Forbidden"
   let key := get "sec-websocket-key"
+  -- `GET /name?query HTTP/1.1`
+  let target := ((line.drop 4).toString.splitOn " ").headD ""
   unless (get "upgrade").toLower == "websocket" && !key.isEmpty do
     let some dir := web | return ← refuse "426 Upgrade Required"
-    -- `GET /name?query HTTP/1.1`
-    let target := ((line.drop 4).toString.splitOn " ").headD ""
     let path : String := (target.splitOn "?").headD ""
     let name := if path.startsWith "/" then (path.drop 1).toString else path
     let name := if name.isEmpty then "infoview.html" else name
@@ -153,19 +205,26 @@ def accept (r w : IO.FS.Stream) (web : Option String := none) : IO Bool := do
     w.write body
     w.flush
     return false
+  if let some t := token then
+    let ok := match presentedToken target headers with
+      | some p => constantTimeEq p t
+      | none => false
+    unless ok do return ← refuse "401 Unauthorized"
   w.putStr ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
     s!"Sec-WebSocket-Accept: {acceptKey key}\r\n\r\n")
   w.flush
   pure true
 
 /-- The client's half (for tests and command-line clients): send the upgrade request for
-`path` on `host`, check the answer. -/
-def connect (r w : IO.FS.Stream) (host : String) (path : String := "/") (origin : Option String := none) :
-    IO (Except String Unit) := do
+`path` on `host`, check the answer. `bearer`: a token, sent as `Authorization: Bearer`
+(a token in `path`'s query works too). -/
+def connect (r w : IO.FS.Stream) (host : String) (path : String := "/") (origin : Option String := none)
+    (bearer : Option String := none) : IO (Except String Unit) := do
   let key := "dGhlIHNhbXBsZSBub25jZQ=="
   let originLine := match origin with | some o => s!"Origin: {o}\r\n" | none => ""
+  let authLine := match bearer with | some t => s!"Authorization: Bearer {t}\r\n" | none => ""
   w.putStr (s!"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
-    s!"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{originLine}\r\n")
+    s!"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{originLine}{authLine}\r\n")
   w.flush
   let some (line, headers) ← readHead r | return .error "the connection closed during the handshake"
   unless (line.splitOn " ")[1]? == some "101" do return .error line

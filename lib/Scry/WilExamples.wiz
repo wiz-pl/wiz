@@ -1,0 +1,220 @@
+import Scry.Wil
+/-!
+# A hand-built Wil corpus
+
+The programs below are the golden corpus of the Wil stage: they are written with
+`Scry.Wil`'s builder (`Wil.func`, `Wil.block`, `Wil.num`, `Wil.binop`, …) rather than
+lowered from C. Their expected results are in `Tests/Scry.lean`, and they exercise the
+features the concrete semantics claims:
+
+* `arith` — constants, `mul`, `add`;
+* `maxOf` — a two-way branch on `<`;
+* `incTwice` — direct calls, a return value used by the caller;
+* `sumTo` — direct recursion (the callee is the caller);
+* `facLoop` — a back edge, and a loop that terminates;
+* `storeLoad` / `gepLoad` — `alloc`, `store` and `load` through a block pointer;
+* `oobLoad`, `danglingLoad` — the two memory faults;
+* `assumeFalse` — an infeasible path;
+* `spin` — a `goto` that never leaves, so only fuel stops it.
+
+The tests run these with `Wil.runFunction` and compare the result against a direct Wiz
+computation (a differential check) or against the exact fault. When the C frontend lands
+(S2), the same corpus gains a third column: the value compiled C prints for the same
+source.
+-/
+
+
+def Scry.i32 (n : Nat) : Wil.Val := Wil.Val.ofNat 32 .true n
+
+-- 2 + 3 * 4 = 14
+def Scry.arith : Wil.Program :=
+  let two := Wil.var 0 Wil.i32;
+  let three := Wil.var 1 Wil.i32;
+  let four := Wil.var 2 Wil.i32;
+  let prod := Wil.var 3 Wil.i32;
+  let total := Wil.var 4 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [two, three, four, prod, total]
+        [ Wil.block
+            [ Wil.num two 2
+            , Wil.num three 3
+            , Wil.num four 4
+            , Wil.binop prod .mul three four
+            , Wil.binop total .add two prod ]
+            (Wil.retV total) ] ]
+
+-- max(x, y), by a branch
+def Scry.maxOf : Wil.Program :=
+  let x := Wil.var 0 Wil.i32;
+  let y := Wil.var 1 Wil.i32;
+  Wil.program
+    [ Wil.func "max" [x, y] []
+        [ Wil.block [] (Wil.branch (Wil.condLt x y) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+        , Wil.block [] (Wil.retV y)
+        , Wil.block [] (Wil.retV x) ] ]
+
+-- inc(x) = x + 1; main calls it twice: 2 -> 3 -> 4
+def Scry.incTwice : Wil.Program :=
+  let x := Wil.var 0 Wil.i32;
+  let one := Wil.var 1 Wil.i32;
+  let a := Wil.var 2 Wil.i32;
+  let b := Wil.var 3 Wil.i32;
+  let c := Wil.var 4 Wil.i32;
+  Wil.program
+    [ Wil.func "inc" [x] [one]
+        [ Wil.block [Wil.num one 1, Wil.binop x .add x one] (Wil.retV x) ]
+    , Wil.func "main" [] [a, b, c]
+        [ Wil.block
+            [ Wil.num a 2
+            , Wil.call (.some b) "inc" [a]
+            , Wil.call (.some c) "inc" [b] ]
+            (Wil.retV c) ] ]
+
+-- sumTo(n) = n + (n-1) + ... + 0, by direct recursion
+def Scry.sumTo : Wil.Program :=
+  let n := Wil.var 0 Wil.i32;
+  let m := Wil.var 1 Wil.i32;
+  let r := Wil.var 2 Wil.i32;
+  let zero := Wil.var 3 Wil.i32;
+  let one := Wil.var 4 Wil.i32;
+  Wil.program
+    [ Wil.func "sum" [n] [m, r, zero, one]
+        [ Wil.block
+            [ Wil.num zero 0 ]
+            (Wil.branch (Wil.Cond.cmp .le n zero) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+        , Wil.block [] (Wil.retV zero)
+        , Wil.block
+            [ Wil.num one 1
+            , Wil.binop m .sub n one
+            , Wil.call (.some r) "sum" [m]
+            , Wil.binop r .add n r ]
+            (Wil.retV r) ] ]
+
+-- 5!, iteratively: a back edge at block 1 and a branch at block 0
+def Scry.facLoop : Wil.Program :=
+  let acc := Wil.var 0 Wil.i32;
+  let i := Wil.var 1 Wil.i32;
+  let limit := Wil.var 2 Wil.i32;
+  let one := Wil.var 3 Wil.i32;
+  Wil.program
+    [ Wil.func "fac" [] [acc, i, limit, one]
+        [ Wil.block
+            [ Wil.num acc 1
+            , Wil.num i 1
+            , Wil.num limit 5
+            , Wil.num one 1 ]
+            (Wil.jump (Wil.mkBlockId 1))
+        , Wil.block [] (Wil.branch (Wil.Cond.cmp .le i limit) (Wil.mkBlockId 2) (Wil.mkBlockId 3))
+        , Wil.block
+            [ Wil.binop acc .mul acc i
+            , Wil.binop i .add i one ]
+            (Wil.jump (Wil.mkBlockId 1))
+        , Wil.block [] (Wil.retV acc) ] ]
+
+-- signed division and remainder: (-7) / 2 = -3, (-7) % 2 = -1
+def Scry.signedDiv : Wil.Program :=
+  let neg7 := Wil.var 0 Wil.i32;
+  let two := Wil.var 1 Wil.i32;
+  let q := Wil.var 2 Wil.i32;
+  let r := Wil.var 3 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [neg7, two, q, r]
+        [ Wil.block
+            [ Wil.cst neg7 (Wil.Val.ofNeg 32 .true 7)
+            , Wil.num two 2
+            , Wil.binop q .div neg7 two
+            , Wil.binop r .rem neg7 two ]
+            (Wil.retV q) ] ]
+
+-- the remainder of the same division: (-7) % 2 = -1
+def Scry.signedRem : Wil.Program :=
+  let neg7 := Wil.var 0 Wil.i32;
+  let two := Wil.var 1 Wil.i32;
+  let r := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [neg7, two, r]
+        [ Wil.block
+            [ Wil.cst neg7 (Wil.Val.ofNeg 32 .true 7)
+            , Wil.num two 2
+            , Wil.binop r .rem neg7 two ]
+            (Wil.retV r) ] ]
+
+-- unsigned wrap-around: (2^32 - 1) + 2 = 1
+def Scry.wrapAdd : Wil.Program :=
+  let big := Wil.var 0 (.int 32 .false);
+  let two := Wil.var 1 (.int 32 .false);
+  Wil.program
+    [ Wil.func "main" [] [big, two]
+        [ Wil.block
+            [ Wil.cst big (Wil.Val.ofNeg 32 .false 1)
+            , Wil.num two 2
+            , Wil.binop big .add big two ]
+            (Wil.retV big) ] ]
+
+-- p = alloc 4; *p = 7; return *p
+def Scry.storeLoad : Wil.Program :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let v := Wil.var 1 Wil.i32;
+  let x := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, v, x]
+        [ Wil.block
+            [ Wil.alloc p 4
+            , Wil.num v 7
+            , Wil.store p v
+            , Wil.load x p ]
+            (Wil.retV x) ] ]
+
+-- p = alloc 4; q = p + 2; *q = 5; return *q
+def Scry.gepLoad : Wil.Program :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let q := Wil.var 1 (.ptr Wil.i32);
+  let v := Wil.var 2 Wil.i32;
+  let x := Wil.var 3 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, q, v, x]
+        [ Wil.block
+            [ Wil.alloc p 4
+            , Wil.num v 5
+            , Wil.gep q p 2
+            , Wil.store q v
+            , Wil.load x q ]
+            (Wil.retV x) ] ]
+
+-- p = alloc 4; q = p + 4; return *q   (one past the end)
+def Scry.oobLoad : Wil.Program :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let q := Wil.var 1 (.ptr Wil.i32);
+  let x := Wil.var 2 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, q, x]
+        [ Wil.block
+            [ Wil.alloc p 4
+            , Wil.gep q p 4
+            , Wil.load x q ]
+            (Wil.retV x) ] ]
+
+-- p = alloc 1; free p; return *p   (use after free)
+def Scry.danglingLoad : Wil.Program :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let x := Wil.var 1 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [p, x]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.free p
+            , Wil.load x p ]
+            (Wil.retV x) ] ]
+
+-- assume false; return 0   (an infeasible path)
+def Scry.assumeFalse : Wil.Program :=
+  let x := Wil.var 0 Wil.i32;
+  Wil.program
+    [ Wil.func "main" [] [x]
+        [ Wil.block [Wil.num x 0, Wil.assume (.const .false)] (Wil.retV x) ] ]
+
+-- a goto that never leaves its block
+def Scry.spin : Wil.Program :=
+  Wil.program
+    [ Wil.func "main" [] [] [ Wil.block [] (Wil.jump (Wil.mkBlockId 0)) ] ]
+

@@ -1,0 +1,40 @@
+-- test: run
+import Sys
+import Scry.Repl
+
+-- A scripted Scry session: load once, then query the loaded unit as ordinary Wiz
+-- values. Errors (a missing file, a bad rule pack) are printed and the session goes on.
+-- The session cache is `.scry-repl/` in the working directory, which every test shares
+-- (it is the package root): a left-over cache changes the output (the triage state
+-- persists in findings.json) and a missing one hid the first `load`'s write. So the
+-- session runs in a fresh temporary directory, with `tests` linked to this package's
+-- (so the paths it prints are the same) and `lib` to the repository's (where `taint`
+-- finds the default rule pack, lib/Scry/rules/default.scry).
+def session : IO Unit := do
+  Scry.Repl.load "tests/fixtures/taint-unsafe.c";
+  Scry.Repl.facts;
+  ns ← Scry.Repl.kindNodes "function_definition";
+  IO.println ("query kind function_definition: " ++ Nat.repr (List.length ns) ++ " node(s)");
+  Scry.Repl.functions;
+  Scry.Repl.calls "system";
+  Scry.Repl.taint;
+  Scry.Repl.taintPaths;
+  Scry.Repl.findings;
+  Scry.Repl.triage "f_7d8634735dbe1cdb" "confirmed";
+  Scry.Repl.load "tests/fixtures/does-not-exist.c";
+  Scry.Repl.jsonOn;
+  Scry.Repl.facts;
+  Scry.Repl.jsonOff;
+  IO.println "repl session continued"
+
+def main : IO Unit := do
+  r ← EIO.bind FS.currentDir (fun here =>
+        EIO.bind FS.createTempDir (fun tmp =>
+          EIO.bind (FS.symlink (Path.join here "tests") (Path.join tmp "tests")) (fun _ =>
+          EIO.bind (FS.symlink (Path.join here "../lib") (Path.join tmp "lib")) (fun _ =>
+            EIO.bind (FS.setCurrentDir tmp) (fun _ =>
+              EIO.bind (EIO.lift session) (fun _ =>
+                EIO.bind (FS.setCurrentDir here) (fun _ => FS.removeAll tmp)))))));
+  match r with
+  | .ok _ => IO.pure ()
+  | .error e => IO.println ("repl session: " ++ e)

@@ -1,4 +1,6 @@
 
+#include <errno.h>
+
 /* a constructor value: a flat object ⟨tag f₁ … fₙ⟩, or just the tag without fields */
 static wiz_val wiz_con(uint32_t tag, uint32_t n, wiz_val *fields) {
   if (n == 0) return WIZ_BOX(tag);
@@ -741,9 +743,25 @@ WIZ_API wiz_val wiz_itab_of_list(wiz_val l) {
   return (wiz_val)t;
 }
 
+/* `IO.writeFile`: the text as UTF-8 up to its first NUL (the `String` representation
+   ends there; `FS.writeBytes` is for binary data). An `IO Unit` call has no error
+   channel, so a failure is reported and the program stops with 1: a bad path, a full
+   disk (a short write, or `fclose` flushing the last buffer) must not look like
+   success. The stop is clean (`wiz_clean_exit`, rt_core.inc): an armed boundary catches
+   it, the native CLI exits. */
 WIZ_API void wiz_io_write_file(const char *path, const char *text) {
   FILE *f = fopen(path, "wb");
-  if (f) { fputs(text, f); fclose(f); }
+  int e = 0;
+  if (!f) e = errno;
+  else {
+    size_t n = strlen(text);
+    if (fwrite(text, 1, n, f) != n) e = errno ? errno : EIO;
+    if (fclose(f) < 0 && !e) e = errno;
+  }
+  if (e) {
+    fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
+    wiz_clean_exit(1);
+  }
 }
 
 /* files, for the library */
@@ -751,13 +769,19 @@ WIZ_API const char *wiz_io_read_file(const char *path) {
   FILE *f = fopen(path, "rb");
   free(wiz_scratch);
   wiz_scratch = NULL;
-  if (!f) { wiz_scratch = (char *)calloc(1, 1); return wiz_scratch; }
+  if (!f) return wiz_scratch = (char *)wiz_xcalloc(1, 1);
   size_t cap = 1024, len = 0;
   wiz_scratch = (char *)malloc(cap);
+  if (!wiz_scratch) { fclose(f); return ""; }
   size_t n;
   while ((n = fread(wiz_scratch + len, 1, cap - len - 1, f)) > 0) {
     len += n;
-    if (len + 1 == cap) { cap *= 2; wiz_scratch = (char *)realloc(wiz_scratch, cap); }
+    if (len + 1 == cap) {
+      cap *= 2;
+      char *nb = (char *)realloc(wiz_scratch, cap);
+      if (!nb) { free(wiz_scratch); wiz_scratch = NULL; fclose(f); return ""; }
+      wiz_scratch = nb;
+    }
   }
   wiz_scratch[len] = 0;
   fclose(f);
@@ -769,7 +793,11 @@ static int wiz_argc;
 static char **wiz_argv;
 WIZ_API void wiz_set_args(int argc, char **argv) { wiz_argc = argc; wiz_argv = argv; }
 WIZ_API uint64_t wiz_io_arg_count(void) { return wiz_argc > 1 ? (uint64_t)(wiz_argc - 1) : 0; }
-WIZ_API const char *wiz_io_arg(uint64_t i) { return i + 1 < (uint64_t)wiz_argc ? wiz_argv[i + 1] : ""; }
+WIZ_API const char *wiz_io_arg(uint64_t i) {
+  /* `i + 1` overflows at 2^64-1: compare against the count instead (and never index
+     past argv) */
+  return i < (wiz_argc > 1 ? (uint64_t)(wiz_argc - 1) : 0) ? wiz_argv[i + 1] : "";
+}
 
 /* functions for the library to bind */
 WIZ_API void wiz_io_println(const char *s) { puts(s); fflush(stdout); }

@@ -18,7 +18,11 @@ axiom `X.native✝ : a = b` and `X := X.native✝` (`Command.lean`).
 4. The kernel checks each read-back term against `T` and decides `conv` between them
    (two normal forms of first-order data: cheap).
 
-What it trusts: see `wiz-notes/native-refl.md` and docs/Status.md ("Trusted base").
+What it trusts (see also docs/Status.md, "Trusted base"): erasure and the rewrites on
+erased terms, the interpreter (`Run.lean`) and Lean's `Nat` arithmetic under the `nat.*`
+natives, and every `implemented_by`, `builtin` native outside `lib/` and foreign
+function model the computation reaches (`#print axioms` lists the `.native✝` axiom). Not
+the IR, the C backend, the C runtime or the C compiler: none of them runs.
 -/
 
 namespace Wiz.Native
@@ -48,7 +52,7 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
   let rb (t : VTy R) (x : RVal) (f : Nat) := nativeReadback g builtins t x f
   let fuel := fuel - 1
   match whnf ty with
-  | .mu l I D i _ hint =>
+  | .mu l I D i _ hint prop =>
     if isNatTy { g with builtins := builtins } ty && hint.map (·.1) == builtins.lookup "nat" && hint.isSome then
       match v with
       | .nat n => return .natLit n
@@ -64,7 +68,7 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
       | .nat n => if isNatTy { g with builtins := builtins } ty then pure (RVal.natView n) else throw "a number where data was expected"
       | .obj .. => unflat D v
       | _ => throw "data was expected"
-    return .con (← rb (vInterp g l I D (muFamily l I D) i) v fuel)
+    return .con (← rb (vInterp g l I D (muFamily l I D prop) i prop) v fuel)
   | .sigma _ q A B _ =>
     if unboxedSigma g 1000000 ty then
       let a' ← rb A v fuel

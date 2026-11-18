@@ -1,0 +1,51 @@
+-- test: run
+import Sys
+import Scry.Sarif
+import Scry.Rules
+-- The SARIF baseline identity: `partialFingerprints.scry/v1` is the semantic id, which
+-- excludes line/column/program point, so a moved finding keeps its id and a changed sink
+-- or path shape does not. `baselineState` is present only with a diff baseline.
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def pathOf : List Scry.PathNode :=
+  List.cons (Scry.PathNode.mk "main" 1 0 Scry.PathKind.source)
+    (List.cons (Scry.PathNode.mk "main" 2 0 Scry.PathKind.sink) .nil)
+
+def finding (sink : Nat) (p : List Scry.PathNode) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "command-injection" .error "a message" .taint "main" sink "system" 0 p
+
+def main : IO Unit := EIO.toIO (do
+  let f1 := finding 7 pathOf;
+  let f2 := finding 99 pathOf;
+  check "semantic id ignores the sink point"
+    (String.eq (Scry.semanticId f1 "a.c") (Scry.semanticId f2 "a.c"));
+  check "semantic id normalizes ./"
+    (String.eq (Scry.semanticId f1 "./a.c") (Scry.semanticId f1 "a.c"));
+  check "semantic id changes with the file"
+    (Bool.not (String.eq (Scry.semanticId f1 "a.c") (Scry.semanticId f1 "b.c")));
+  check "semantic id changes with the path shape"
+    (Bool.not (String.eq (Scry.semanticId f1 "a.c")
+      (Scry.semanticId (finding 7 (List.cons (Scry.PathNode.mk "main" 3 0 Scry.PathKind.flow) pathOf)) "a.c")));
+  check "semantic id has the f_ prefix and 16 hex digits"
+    (Bool.and (String.startsWith (Scry.semanticId f1 "a.c") "f_")
+      (Nat.beq (String.length (Scry.semanticId f1 "a.c")) 18));
+  check "the boundary id is stable and b_-prefixed"
+    (Bool.and (String.eq (Scry.boundaryId "scry/memory/use-after-free" "a.c" "main" "detail")
+      (Scry.boundaryId "scry/memory/use-after-free" "./a.c" "main" "detail"))
+      (String.startsWith (Scry.boundaryId "scry/memory/use-after-free" "a.c" "main" "detail") "b_"));
+
+  let text := Scry.renderSarifWithBaselines "scry" .nil (Scry.RulePack.mk .nil)
+    (List.cons (Scry.SarifFinding.mk f1 .true (.some "new")) .nil) .nil;
+  check "sarif: partialFingerprints is present"
+    (String.contains text (Scry.semanticId f1 ""));
+  check "sarif: baselineState new is present"
+    (String.contains text "\"baselineState\":\"new\"");
+  let text2 := Scry.renderSarifWithBaselines "scry" .nil (Scry.RulePack.mk .nil)
+    (List.cons (Scry.SarifFinding.mk f1 .true (.some "unchanged")) .nil) .nil;
+  check "sarif: baselineState unchanged is present"
+    (String.contains text2 "\"baselineState\":\"unchanged\"")
+)

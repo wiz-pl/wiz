@@ -167,9 +167,14 @@ def preludeLoader : IO (Name → Option String) := do
   let functor ← IO.FS.readFile "lib/Functor.wiz"
   let logic ← IO.FS.readFile "lib/Logic.wiz"
   let text ← IO.FS.readFile "lib/Text.wiz"
+  -- (`IO`, `Std` and `Sys`: `#eval`/`#run` of a `Bytes` value needs `lib/IO.wiz`)
+  let io ← IO.FS.readFile "lib/IO.wiz"
+  let std ← IO.FS.readFile "lib/Std.wiz"
+  let sys ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "Word" then some word
     else if m == "Functor" then some functor else if m == "Logic" then some logic
-    else if m == "Text" then some text else none
+    else if m == "Text" then some text else if m == "IO" then some io
+    else if m == "Std" then some std else if m == "Sys" then some sys else none
 
 /-- `ok`, with `lib/` available to `import` (the tests run from the package root). -/
 
@@ -356,6 +361,14 @@ def twice : IO Unit := IO.bind hello (fun _ => hello)
 def main : IO Unit := IO.bind twice (fun _ => twice)
 "
 
+/-- Report a `Build.runGlobal` failure: skip (as "no toolchain") only when the *build*
+could not find the C toolchain; a program that ran and failed is the case's failure, with
+its exit code and stderr. Never match the program's stderr: a program may print "No such
+file or directory" itself, and that is then a failing test, not a missing toolchain. `what`
+prefixes the failure (`"(llvm) "`). -/
+def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
+  if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
+
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
 def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
@@ -365,9 +378,7 @@ def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat 
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
@@ -387,8 +398,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     else Build.compileC tc (C.program decls false (Build.extraC s)) exe
   match built with
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain tc e then skip "no toolchain" else throw (IO.userError e)
   | .ok () =>
     let out ← IO.Process.output { cmd := exe.toString, env := #[("WIZ_STACK_MB", some "1")] }
     unless out.exitCode == 0 do throw (IO.userError s!"the program failed ({out.exitCode}): {out.stderr.take 500}")
@@ -420,11 +430,13 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   let functorLib ← IO.FS.readFile "lib/Functor.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   let textLib ← IO.FS.readFile "lib/Text.wiz"
+  let logicLib ← IO.FS.readFile "lib/Logic.wiz"
   let derivingLib ← IO.FS.readFile "lib/Deriving.wiz"
   let loader : Name → Option String := fun m =>
     if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Eff" then some effLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else if m == "Functor" then some functorLib
-    else if m == "Text" then some textLib else if m == "Deriving" then some derivingLib else none
+    else if m == "Text" then some textLib else if m == "Logic" then some logicLib
+    else if m == "Deriving" then some derivingLib else none
   let headers ← Build.preprocessHeaders (← toolchain) src
   let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule, cHeaders := (headers[·]?) }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
@@ -433,9 +445,7 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   let tc ← toolchain
   match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
   | .ok v => k v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
 def ioRun (src : String) (expected : String) (args : Array String := #[]) (llvm : Bool := false)
@@ -454,7 +464,8 @@ def ioFails (src : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
 /-- (9f) Elaborate `main.wiz` in a fresh directory holding `files` (modules under it are
-importable), resolving `link_c` files as `wiz` does, relative to each file. -/
+importable), resolving `link_c` files as `wiz` does, relative to each file, and
+(include_str) `include_str` files too. -/
 def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany × String × System.FilePath) := do
   let dir ← IO.FS.createTempDir
   for (p, text) in files do
@@ -464,20 +475,35 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
   let src ← IO.FS.readFile (dir / "main.wiz")
   let mods ← Module.loadClosure ["lib", dir] src
   let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
   let s := runFrontend (R := ZeroOneMany) src
-    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources) }
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
-/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
-def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let (s, src, dir) ← elabTree files
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
+  | .error e => failRun e
+
+/-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
+def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
+  let (s, src, dir) ← elabTree files
+  let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  | .ok v => throw (IO.userError s!"expected a failure, got {v}")
   | .error e =>
-    let missing := ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if e.isToolchain then skip "no toolchain"
+    else unless (e.message.splitOn fragment).length > 1 do
+      throw (IO.userError s!"error does not mention '{fragment}':\n{e.message}")
 
 /-- A program that links a C file (with a static helper and a header the FFI can't bind)
 and the maths library. -/
@@ -534,11 +560,10 @@ def ioRunC (src csrc expected : String) (fails : Option String := none) : IO Uni
     match ← Build.runGlobal tc s "main" dir llvm (timeout := some 120) with
     | .ok v => if fails.isSome then throw (IO.userError s!"expected a failure, got {v}") else checkEq expected v
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if e.isToolchain then skip "no toolchain"
       else match fails with
-        | some frag => unless (e.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e}")
-        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
+        | some frag => unless (e.message.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e.message}")
+        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e.message}")
 
 /-- Build the exports of `src` as a library (`wiz build --lib`), link it with the C
 program `csrc` (which includes `lib.h`), run it. Both backends. -/
@@ -549,8 +574,7 @@ def libRunC (src csrc expected : String) : IO Unit := do
     let tc ← toolchain
     match ← Build.build tc s "main" (dir / "lib.o") llvm true with
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if Build.missingToolchain tc e then skip "no toolchain"
       else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
     | .ok _ =>
       IO.FS.writeFile (dir / "main.c") csrc
@@ -792,9 +816,9 @@ partial def toWiz : MTm → String
   | pair a b => s!"(.pair {a.toWiz} {b.toWiz})"
   | fst p => s!"(.fst {p.toWiz})"
   | snd p => s!"(.snd {p.toWiz})"
-  | unit n => s!"(.unit {n})"
+  | unit n => s!"(.unit (ln {n + 1}))"
   | star => ".star"
-  | empty n => s!"(.empty {n})"
+  | empty n => s!"(.empty (ln {n + 1}))"
   | exfalso m t => s!"(.exfalso {m.toWiz} {t.toWiz})"
   | letUnit u b => s!"(.letUnit {u.toWiz} {b.toWiz})"
   | enum k => s!"(.enum {k})"
@@ -815,15 +839,15 @@ partial def toWiz : MTm → String
     | t => t.toWiz
   | cast A B e t => s!"(.coe {A.toWiz} {B.toWiz} {e.toWiz} {t.toWiz})"
   | transp A a P p b e => s!"(.subst {A.toWiz} {a.toWiz} {P.toWiz} {p.toWiz} {b.toWiz} {e.toWiz})"
-  | desc l I => s!"(.descr {l} {I.toWiz})"
+  | desc l I => s!"(.descr (ln {l}) {I.toWiz})"
   | dret i => s!"(.dret {i.toWiz})"
   | darg S E q => s!"(.darg (.qlit {qWiz q}) {S.toWiz} {E.toWiz})"
   | drec j E q => s!"(.drec (.qlit {qWiz q}) {j.toWiz} {E.toWiz})"
   | dhrec H j E q => s!"(.dhrec (.qlit {qWiz q}) {H.toWiz} {j.toWiz} {E.toWiz})"
-  | delim v P a b c h D => s!"(.delim {v} {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
-  | mu l I D i => s!"(.mu {l} {I.toWiz} {D.toWiz} {i.toWiz})"
+  | delim v P a b c h D => s!"(.delim (ln {v}) {P.toWiz} {a.toWiz} {b.toWiz} {c.toWiz} {h.toWiz} {D.toWiz})"
+  | mu l I D i => s!"(.mu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz})"
   | con x => s!"(.con {x.toWiz})"
-  | ind l I D v P m i x => s!"(.ind {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
+  | ind l I D v P m i x => s!"(.ind (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {i.toWiz} {x.toWiz})"
   | const n ls => match globalDefs.find? (·.1 == n) with
     | some (_, ps, some v, ty) =>
       let psW := ps.foldr (fun p acc => s!"(.cons \"{p}\" {acc})") ".nil"
@@ -841,16 +865,16 @@ partial def toWiz : MTm → String
   | szInf => ".szInf"
   | szSuc s => s!"(.szSuc {s.toWiz})"
   | sizeLt s => s!"(.sizeLt {s.toWiz})"
-  | mus l I D i s => s!"(.mus {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
-  | sfix l I D v P f s i x => s!"(.sfix {l} {I.toWiz} {D.toWiz} {v} {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | nu l I D i s => s!"(.nu {l} {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | mus l I D i s => s!"(.mus (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
+  | sfix l I D v P f s i x => s!"(.sfix (ln {l}) {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | nu l I D i s => s!"(.nu (ln {l}) {I.toWiz} {D.toWiz} {i.toWiz} {s.toWiz})"
   | out x => s!"(.out {x.toWiz})"
   | cocon x => s!"(.cocon {x.toWiz})"
-  | scofix l I D A f s i a => s!"(.scofix {l} {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
-  | coit l I D S st i s => s!"(.coit {l} {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
-  | scaseq q l I D v P m s i x => s!"(.scase {l} {qWiz q} {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | scase l I D v P m s i x => s!"(.scase {l} .qw {I.toWiz} {D.toWiz} {v} {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
-  | ulift k l A => s!"(.ulift {k} {l} {A.toWiz})"
+  | scofix l I D A f s i a => s!"(.scofix (ln {l}) {I.toWiz} {D.toWiz} {A.toWiz} {f.toWiz} {s.toWiz} {i.toWiz} {a.toWiz})"
+  | coit l I D S st i s => s!"(.coit (ln {l}) {I.toWiz} {D.toWiz} {S.toWiz} {st.toWiz} {i.toWiz} {s.toWiz})"
+  | scaseq q l I D v P m s i x => s!"(.scase (ln {l}) {qWiz q} {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | scase l I D v P m s i x => s!"(.scase (ln {l}) .qw {I.toWiz} {D.toWiz} (ln {v}) {P.toWiz} {m.toWiz} {s.toWiz} {i.toWiz} {x.toWiz})"
+  | ulift k l A => s!"(.ulift (ln {k}) (ln {l}) {A.toWiz})"
   | up a => s!"(.up {a.toWiz})"
   | down t => s!"(.down {t.toWiz})"
   | prf l t => s!"(.prf {l.toWiz} {t.toWiz})"
@@ -894,9 +918,9 @@ partial def toTerm : MTm → Term ZeroOneMany
   | drec j E q => .drec (.qlit q) j.toTerm E.toTerm
   | dhrec H j E q => .dhrec (.qlit q) H.toTerm j.toTerm E.toTerm
   | delim v P a b c h D => .delim (Level.ofNat v) P.toTerm a.toTerm b.toTerm c.toTerm h.toTerm D.toTerm
-  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none
+  | mu l I D i => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm .szInf none false
   | con x => .con x.toTerm
-  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm
+  | ind l I D v P m i x => .ind (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm m.toTerm i.toTerm x.toTerm false
   | const n ls => .const n (ls.map Level.ofNat)
   | sortParam u => .sort (.param u)
   | sortLv l => .sort l.toLevel
@@ -907,7 +931,7 @@ partial def toTerm : MTm → Term ZeroOneMany
   | szInf => .szInf
   | szSuc s => .szSuc s.toTerm
   | sizeLt s => .sizeLt s.toTerm
-  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
+  | mus l I D i s => .mu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none false
   | sfix l I D v P f s i x => .sfix (Level.ofNat l) I.toTerm D.toTerm (Level.ofNat v) P.toTerm f.toTerm s.toTerm i.toTerm x.toTerm
   | nu l I D i s => .nu (Level.ofNat l) I.toTerm D.toTerm i.toTerm s.toTerm none
   | out x => .out x.toTerm
@@ -968,8 +992,8 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .drec (.qlit q) j E => return drec (← ofTerm j) (← ofTerm E) q
   | .dhrec (.qlit q) H j E => return dhrec (← ofTerm H) (← ofTerm j) (← ofTerm E) q
   | .delim v P a b c h D => return delim (← v.toNat?) (← ofTerm P) (← ofTerm a) (← ofTerm b) (← ofTerm c) (← ofTerm h) (← ofTerm D)
-  | .mu l I D i .szInf _ => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
-  | .mu l I D i s _ => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
+  | .mu l I D i .szInf _ false => return mu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i)
+  | .mu l I D i s _ false => return mus (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .nu l I D i s _ => return nu (← l.toNat?) (← ofTerm I) (← ofTerm D) (← ofTerm i) (← ofTerm s)
   | .out x => return out (← ofTerm x)
   | .cocon x => return cocon (← ofTerm x)
@@ -983,7 +1007,7 @@ partial def ofTerm : Term ZeroOneMany → Option MTm
   | .szSuc s => return szSuc (← ofTerm s)
   | .sizeLt s => return sizeLt (← ofTerm s)
   | .con x => return con (← ofTerm x)
-  | .ind l I D v P m i x => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
+  | .ind l I D v P m i x false => return ind (← l.toNat?) (← ofTerm I) (← ofTerm D) (← v.toNat?) (← ofTerm P) (← ofTerm m) (← ofTerm i) (← ofTerm x)
   | .const n us => return const n (← us.mapM Level.toNat?)
   | .ulift k l A => return ulift (← k.toNat?) (← l.toNat?) (← ofTerm A)
   | .up a => return up (← ofTerm a)
@@ -1134,6 +1158,31 @@ rejected, the rest accepted. -/
 def sizeArgs : List MTm :=
   [mus 0 (unit 0) natD star star, streamAt (enum 2),
    natAt szInf, ann (lam (natAt (var 0))) (pi size (univ 0)), ann (lam (streamAt (szSuc (var 0)))) (pi size (univ 0))]
+
+/-- The guarded inductive description: `μ` rejects a description whose recursive field is
+not under a non-recursive (`arg`) field — `μ X. X`, the identity functor, has no
+induction principle. `ν X. X` is a valid coinductive type (guardedness there is
+`cocon`/`out`), so the same description is accepted at `ν`. `Nat`, a list, a binary tree,
+a guarded stream and a bare-observation stream are accepted; a size that is not a `Size`
+and a size variable that escapes its binder are rejected by the size check (K3). -/
+def muSize : List (MTm × Bool) :=
+  let listD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (dret star)))]))
+  let treeD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (darg (enum 2) (lam (drec star (dret star))))))]))
+  [(natTy, true),
+   (mu 0 (unit 0) listD star, true),
+   (mu 0 (unit 0) treeD star, true),
+   (nu 0 (unit 0) streamD star szInf, true),
+   (streamAt (szSuc szInf), true),
+   -- unguarded for μ: a description that is only a recursive field (`μ X. X`); the same
+   -- description is a valid coinductive type (`ν X. X`: one observation, itself)
+   (mus 0 (unit 0) (drec star (dret star)) star szInf, false),
+   (nu 0 (unit 0) (drec star (dret star)) star szInf, true),
+   -- a size that is not a Size, and a size variable that escapes its binder
+   (mus 0 (unit 0) natD star star, false),
+   (mus 0 (unit 0) natD star (var 0), false),
+   (nu 0 (unit 0) streamD star (var 0), false)]
 
 /-- Q4 (fixed): a description field must live exactly in `Sort (l+1)`, the universe
 `Desc.elim`'s `marg` takes it from. It used to be enough for it to fit (`Sort k`,
@@ -1343,7 +1392,7 @@ def transpProp : List MTm :=
 /-- Terms the differential test always checks (well-typed ones the generator rarely
 builds whole), before the random ones. -/
 def samples : List MTm :=
-  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
+  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ muSize.map (·.1) ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
    natTy, natZero, natSucc natZero, natSucc (natSucc natZero), ann natD (desc 0 (unit 0)),
    eq natTy natZero (natSucc natZero), eq natTy (natSucc natZero) (natSucc natZero), refl natTy (natSucc natZero),
    delim 1 (lam (unit 0)) (lam star) (lams 4 star) (lams 4 star) (lams 5 star) (ann natD (desc 0 (unit 0))),
@@ -1919,6 +1968,48 @@ def selfhostOutput (file : String) : IO (Option String) := do
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
 
+/-- The self-hosted checker's output for `file`, and its child process's peak resident set
+size in MB; fails if that exceeds `boundMB`. The checker holds the elaborated globals for
+the whole input, so a regression in retention (the `mutual`/`partial` inline cache made
+the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
+def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
+  match ← selfhostChecker with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then
+      skip "no toolchain"
+      pure none
+    else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    IO.FS.writeFile (dir / "input.wiz") file
+    let outFile := dir / "out"
+    let errFile := dir / "err"
+    let child ← IO.Process.spawn
+      { cmd := "sh",
+        args := #["-c", "exec \"$0\" > \"$1\" 2> \"$2\"", exe.toString, outFile.toString, errFile.toString],
+        cwd := dir, stdout := .null, stderr := .null }
+    let mut code : Option UInt32 := none
+    let mut peak := 0
+    while code.isNone do
+      match ← child.tryWait with
+      | some c => code := some c
+      | none =>
+        try
+          let s ← IO.FS.readFile s!"/proc/{child.pid}/status"
+          for l in s.splitOn "\n" do
+            if l.startsWith "VmHWM:" then
+              let kb := ((l.drop 6).trimAscii.toString.takeWhile Char.isDigit).toNat!
+              peak := max peak (kb / 1024)
+        catch _ => pure ()
+        IO.sleep 20
+    let exitCode := code.getD 1
+    let out ← IO.FS.readFile outFile
+    let err ← IO.FS.readFile errFile
+    unless exitCode == 0 do throw (IO.userError s!"the checker failed ({exitCode}): {err}")
+    unless peak ≤ boundMB do
+      throw (IO.userError s!"the checker used {peak} MB (bound: {boundMB} MB)")
+    pure (some out)
+
 /-- (A14) The self-hosted checker's output for a set of module files: `input.wiz` is the
 root module, the others are modules (written beside it, subdirectories included). `args`
 go to the checker (`-I DIR`, `--key`). -/
@@ -1986,6 +2077,40 @@ def libLoader : IO (Name → Option String) := do
           m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
   pure fun n => m.lookup n
 
+/-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/
+def libModuleNames : IO (List String) := do
+  let mut ms : Array String := #[]
+  for e in ← System.FilePath.readDir "lib" do
+    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
+    else if ← e.path.isDir then
+      for f in ← System.FilePath.readDir e.path do
+        if f.path.extension == some "wiz" then
+          ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
+  pure ((ms.qsort (· < ·)).toList)
+
+/-- Modules of `lib/` that are alternative implementations and cannot be imported into
+one program, paired with the modules each must leave out. `Scry.EgraphNative` declares
+the same top-level names as `Scry.Egraph` (the reference list model), and `Scry.EqPlan`
+imports it; the modules built on the reference (`Scry.EgraphWil`/`Extract`/`Taint`)
+import it too. Every whole-library loader must go through `allLibSource` (or load an
+apart module with `libSourceExcept skip`) — importing all of `lib/` at once fails with
+"declared by both". (`Json` and `Infoview` used to be here when `Json` declared
+`Nat.repr`; `Text` owns it now, so they load with all the rest.) -/
+def libApart : List (String × List String) :=
+  [ ("Scry.EgraphNative",
+     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"])
+  , ("Scry.EqPlan",
+     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"]) ]
+
+/-- `import` lines for every module of `lib/` except `skip`. -/
+def libSourceExcept (skip : List String) : IO String := do
+  pure (String.join (((← libModuleNames).filter (!skip.contains ·)).map (s!"import {·}\n")))
+
+/-- Every module of `lib/` imported at once, except the alternative backends that
+cannot co-load (see `libApart`). -/
+def allLibSource : IO String := do
+  libSourceExcept (libApart.map (·.1))
+
 /-- No errors, and these messages, with every library importable. -/
 def okLibs (input : String) (infos : List String := []) : IO Unit := do
   let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← libLoader }
@@ -2001,17 +2126,30 @@ def failsLibs (input : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
-/-- Build `main` with the C backend (or LLVM), with every library importable. -/
-def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- Build `main` with the C backend (or LLVM), with every library importable, and return
+the run's outcome: its output, or why it failed. A frontend error is thrown (the source is
+wrong); a failure to *build* is `.build`/`.toolchain`, and a program that ran and failed is
+`.run` (its exit code and stderr). Never skips: `cRunLibs` decides that from the outcome.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibsOut (src : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO (Except Build.RunError String) := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120)
+
+/-- Build `main` with the C backend (or LLVM), with every library importable, and compare
+its output. Skips as "no toolchain" only when the *build* cannot find the compiler or GMP;
+a program that ran and failed is this case's failure, with its exit code and stderr (a
+program that prints "No such file or directory" itself is not a missing toolchain).
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibs (src : String) (expected : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO Unit := do
+  match ← cRunLibsOut src llvm cflags with
   | .ok v => checkEq expected v
-  | .error e =>
-    if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
-    else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build and run `main` with the whole library (`IO` …), through C or LLVM. -/
 def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
@@ -2021,9 +2159,7 @@ def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit :
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Reads of a wide structure's fields through shared projection prefixes (15j), where
 reference counting could go wrong: the root consumed (`keepW`) before the last read

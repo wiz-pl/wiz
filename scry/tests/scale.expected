@@ -1,0 +1,11 @@
+scale: nodes=1110871 parseErrors=31 funcs=2 findings=0 boundary=8063 memory=36 truncated=false pointsToRounds=3 summaryRounds=1
+scale: node count: ok
+scale: complete: ok
+scale: under default limit: ok
+scale: max-nodes refused: native/tree-sitter-c/src/parser.c: 1110871 CST nodes exceeds --max-nodes 1000; refusing to lower (raise --max-nodes explicitly)
+scale: max-rounds truncated=true notes=1 pointsToRounds=1 summaryRounds=1
+scale: max-rounds marks partial: ok
+scale: max-rounds note: ok
+scale: timeout status=exit code 124 stdoutBytes=0
+scale: timeout exit 124: ok
+scale: timeout message: ok

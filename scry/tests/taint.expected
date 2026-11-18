@@ -1,0 +1,188 @@
+unsafe: one finding: ok
+unsafe: checked: ok
+unsafe: rule command-injection: ok
+unsafe: sink function main: ok
+unsafe: sink span known: ok
+unsafe: no lowering-boundary warning: ok
+unsafe: no parse errors: ok
+safe: zero findings: ok
+safe: zero boundary warnings: ok
+chain: one finding: ok
+chain: checked: ok
+chain: rule command-injection: ok
+chain: sink function run: ok
+chain: sink span known: ok
+chain: path starts in main: ok
+chain: path ends in run: ok
+exec: eight findings: ok
+exec: every finding is command-injection: ok
+exec: every finding is checked: ok
+exec: covers execl/execlp/execv/execvp/execve/posix_spawn/posix_spawnp/system: ok
+exec: execl reports the tainted word at argument 3: ok
+exec: no memory warnings: ok
+exec sarif: eight command-injection results: ok
+exec sarif: namespaced command-injection id: ok
+exec sarif: execl descriptor has the any-argument selector: ok
+exec-safe: zero findings: ok
+entry: one finding: ok
+entry: checked: ok
+entry: rule command-injection: ok
+entry: sink function iv_spawn: ok
+entry: sink span known: ok
+entry: execl argument 3: ok
+entry: path starts at a source: ok
+entry-safe: zero findings: ok
+clean: zero findings: ok
+clean: zero boundary warnings: ok
+boundary: zero findings: ok
+boundary: two havoc warnings: ok
+boundary: warnings are unchecked: ok
+boundary: spans are on the offending statements: ok
+mem-slot: one finding: ok
+mem-slot: checked: ok
+mem-slot: rule command-injection: ok
+mem-slot: sink function main: ok
+mem-slot: sink span known: ok
+mem-slot: no memory warnings: ok
+mem-slot: path goes through memory: ok
+mem-slot: a stack slot is a location: ok
+mem-distinct: zero findings: ok
+mem-distinct: zero memory warnings: ok
+mem-distinct: two stack slots, no unknown: ok
+mem-struct: two findings (s.x and g.x): ok
+mem-struct: no memory warnings: ok
+mem-struct: both sinks are in main: ok
+mem-struct: field and global locations: ok
+mem-array: one finding: ok
+mem-array: no memory warnings: ok
+mem-heap: one finding: ok
+mem-heap: checked: ok
+mem-heap: rule command-injection: ok
+mem-heap: sink function main: ok
+mem-heap: sink span known: ok
+mem-heap: no memory warnings: ok
+mem-heap: a heap location: ok
+mem-ptrptr: one finding: ok
+mem-ptrptr: checked: ok
+mem-ptrptr: rule command-injection: ok
+mem-ptrptr: sink function main: ok
+mem-ptrptr: sink span known: ok
+mem-ptrptr: no memory warnings: ok
+mem-params: one finding: ok
+mem-params: checked: ok
+mem-params: rule command-injection: ok
+mem-params: sink function sink_q: ok
+mem-params: sink span known: ok
+mem-params: path starts in main: ok
+mem-free: one finding: ok
+mem-free: checked: ok
+mem-free: rule command-injection: ok
+mem-free: sink function main: ok
+mem-free: sink span known: ok
+mem-free: one use-after-free warning: ok
+mem-indirect: one finding: ok
+mem-indirect: checked: ok
+mem-indirect: rule command-injection: ok
+mem-indirect: sink function tainted_sink: ok
+mem-indirect: sink span known: ok
+mem-indirect: no memory warnings: ok
+mem-indirect: path starts in main: ok
+mem-ret: one finding: ok
+mem-ret: checked: ok
+mem-ret: rule command-injection: ok
+mem-ret: sink function main: ok
+mem-ret: sink span known: ok
+mem-ret: no memory warnings: ok
+mem-ret: a global location: ok
+mem-external: one finding: ok
+mem-external: no memory warnings: ok
+mem-external: no lowering-boundary warning: ok
+mem-array-var: one finding: ok
+mem-array-var: no memory warnings: ok
+model-exec: one finding: ok
+model-exec: checked: ok
+model-exec: rule command-injection: ok
+model-exec: sink function main: ok
+model-exec: sink span known: ok
+model-exec: the variadic argv argument is the sink: ok
+model-exec: no memory warnings: ok
+model-exec-safe: zero findings: ok
+model-sprintf-copy: one finding: ok
+model-sprintf-copy: checked: ok
+model-sprintf-copy: rule command-injection: ok
+model-sprintf-copy: sink function main: ok
+model-sprintf-copy: sink span known: ok
+model-sprintf-copy: the sink is system, not sprintf: ok
+model-sprintf-format: one finding: ok
+model-sprintf-format: checked: ok
+model-sprintf-format: rule format-string: ok
+model-sprintf-format: sink function main: ok
+model-sprintf-format: sink span known: ok
+model-sprintf-format: the format argument: ok
+model-snprintf-copy: one finding: ok
+model-snprintf-copy: checked: ok
+model-snprintf-copy: rule command-injection: ok
+model-snprintf-copy: sink function main: ok
+model-snprintf-copy: sink span known: ok
+model-snprintf-copy: the sink is system: ok
+model-snprintf-length: one buffer-overflow finding: ok
+model-calloc: forbidden and copy findings: ok
+model-strcpy: forbidden and copy findings: ok
+model-strncpy-safe: zero findings: ok
+model-read: one finding: ok
+model-read: checked: ok
+model-read: rule command-injection: ok
+model-read: sink function main: ok
+model-read: sink span known: ok
+model-read: no memory warnings: ok
+model-recv: one finding: ok
+model-recv: checked: ok
+model-recv: rule command-injection: ok
+model-recv: sink function main: ok
+model-recv: sink span known: ok
+model-recv: no memory warnings: ok
+model-realloc: forbidden and copy findings: ok
+model-realloc: no use-after-free from realloc: ok
+model-sanitise: zero findings: ok
+model-unknown: zero findings: ok
+model-unknown: an explicit unmodelled-external warning: ok
+mem-unknown: one finding (the flow is kept): ok
+mem-unknown: two unknown-memory warnings and one explicit unmodelled call: ok
+mem-unknown: an unknown location: ok
+mem-indirect-unknown: zero findings: ok
+mem-indirect-unknown: one unknown-indirect warning: ok
+mem-indirect-unknown: an unknown location: ok
+macro errors: refused without --allow-errors: ok
+macro errors: recovered with --allow-errors: ok
+macro errors: not a silent empty unit: ok
+recovery wizard: parse errors: ok
+recovery wizard: functions recovered: ok
+recovery wizard: two strcpy findings: ok
+recovery wizard: sink spans known: ok
+recovery wizard: parse-recovery warning: ok
+recovery droste: parse errors: ok
+recovery droste: functions recovered: ok
+recovery droste: two strcpy findings: ok
+recovery droste: sink spans known: ok
+recovery droste: parse-recovery warning: ok
+sarif: version 2.1.0: ok
+sarif: one run: ok
+sarif: driver name: ok
+sarif: six rule descriptors (four pack rules and two model rules): ok
+sarif: one result: ok
+sarif: rule id: ok
+sarif: namespaced rule descriptor: ok
+sarif: utf16 column kind: ok
+sarif: derivation checked: ok
+sarif: one primary location: ok
+sarif: primary span line: ok
+sarif: related spans present: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":6,"parseErrors":0,"truncated":false,"budget":{"nodes":72,"truncated":false,"pointsToRounds":2,"pointsToComplete":true,"summaryRounds":1,"summaryComplete":true,"notes":[]},"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"memory":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":0}}
+cli --sarif: exit 0: ok
+cli --sarif: file parses: ok
+{"tool":"scry","file":"tests/fixtures/taint-unsafe.c","rules":6,"parseErrors":0,"truncated":false,"budget":{"nodes":72,"truncated":false,"pointsToRounds":2,"pointsToComplete":true,"summaryRounds":1,"summaryComplete":true,"notes":[]},"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":3,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/taint-unsafe.c","startLine":7,"startColumn":3,"endLine":7,"endColumn":14},"path":[{"function":"main","point":1,"var":2,"kind":"source"},{"function":"main","point":2,"var":0,"kind":"flow"},{"function":"main","point":3,"var":0,"kind":"sink"}]}],"boundary":[],"memory":[],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":0}}
+cli --fail-on-finding: unsafe exits 1: ok
+{"tool":"scry","file":"tests/fixtures/taint-clean.c","rules":6,"parseErrors":0,"truncated":false,"budget":{"nodes":25,"truncated":false,"pointsToRounds":1,"pointsToComplete":true,"summaryRounds":1,"summaryComplete":true,"notes":[]},"findings":[],"boundary":[],"memory":[],"counts":{"findings":0,"checked":0,"unchecked":0,"boundary":0,"memory":0}}
+cli --fail-on-finding: clean exits 0: ok
+{"tool":"scry","file":"tests/fixtures/mem-free.c","rules":6,"parseErrors":0,"truncated":false,"budget":{"nodes":115,"truncated":false,"pointsToRounds":2,"pointsToComplete":true,"summaryRounds":2,"summaryComplete":true,"notes":[]},"findings":[{"rule":"command-injection","severity":"error","kind":"taint","message":"Attacker-controlled data reaches a command interpreter","function":"main","point":8,"callee":"system","argument":0,"derivation":"checked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":3,"endLine":12,"endColumn":13},"path":[{"function":"main","point":3,"var":3,"kind":"source"},{"function":"main","point":4,"var":3,"kind":"store"},{"function":"main","point":7,"var":5,"kind":"load"},{"function":"main","point":8,"var":5,"kind":"sink"}]}],"boundary":[],"memory":[{"rule":"scry/memory/use-after-free","severity":"warning","kind":"memory","message":"load to a location freed by free at point 6","function":"main","point":7,"derivation":"unchecked","location":{"uri":"tests/fixtures/mem-free.c","startLine":12,"startColumn":10,"endLine":12,"endColumn":12}}],"counts":{"findings":1,"checked":1,"unchecked":0,"boundary":0,"memory":1}}
+cli --json memory: exit 0: ok

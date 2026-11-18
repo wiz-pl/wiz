@@ -1,11 +1,19 @@
 [
-  {"name": "selfhost", "split": 4, "heavy": true,
-   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz"],
+  {"name": "selfhost", "split": 8, "heavy": true,
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "lib/Sys.wiz", "lib/Text.wiz",
+              "lib/Deriving.wiz", "Wiz/Parser/*", "scripts/GenSelfhostTables.lean"],
    "select": [
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
-    "=audit-kernels"
+    "=audit-kernels",
+    "=selfhost-macro"
+  ]},
+  {"name": "selfhost-parse-diff", "heavy": true,
+   "inputs": ["selfhost/*", "lib/*", "examples/*", "src/*", "scry/*"],
+   "select": [
+    "=selfhost-parse-diff"
   ]},
   {"name": "hdl-verified", "heavy": true, "select": [
     "=hdl-verified"
@@ -14,9 +22,16 @@
     "=hdl-uart-temporal"
   ]},
   {"name": "grail-selfhost", "heavy": true,
-   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz", "lib/Grail.wiz"],
+   "inputs": ["selfhost/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
+              "lib/Sys.wiz", "lib/Grail.wiz"],
    "select": [
     "=grail-selfhost"
+  ]},
+  {"name": "selfhost-libdiff", "heavy": true,
+   "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
+              "Tests/Main.lean", "Tests/Harness.lean"],
+   "select": [
+    "=selfhost-libdiff"
   ]},
   {"name": "backends", "jobs": 4, "select": [
     "backend",
@@ -29,21 +44,30 @@
     "llvm",
     "reuse",
     "serial",
-    "sys"
+    "sys",
+    "wasm"
   ]},
-  {"name": "library", "split": 5, "jobs": 4, "default": true, "select": [
+  {"name": "library", "split": 8, "jobs": 4, "default": true, "select": [
+    "=bus-crc",
+    "=bus-law",
+    "=bus-protocol",
     "builtins",
+    "calc",
     "classes",
     "deriving",
+    "=display",
     "=doc",
     "=feral",
     "=grail",
     "=grail-commands",
     "=grail-deps",
     "=grail-hygiene",
+    "=grail-index",
     "=grail-jobs",
+    "=grail-vendor",
     "=hdl",
     "infoview",
+    "=json",
     "language",
     "lsp",
     "macros",
@@ -51,13 +75,29 @@
     "=native",
     "=natives",
     "=nvim",
+    "=loom",
     "optic",
+    "persistent",
     "phantom",
+    "=plot",
     "regions",
+    "=reject",
+    "=scry-wil",
+    "=scry-c2wil",
+    "=scry-csharp",
+    "=scry-ai",
+    "=scry-taint",
+    "=scry-uaf",
+    "=scry-workflow",
     "=linear-case",
     "repr",
+    "result-q",
+    "=rune",
     "seplogic",
     "=sat",
+    "=scry-datalog",
+    "=scry-cert",
+    "=scry-egraph",
     "=smt",
     "std",
     "tactics",
@@ -71,7 +111,7 @@
     "vec",
     "word"
   ]},
-  {"name": "scaling", "split": 2, "select": [
+  {"name": "scaling", "split": 3, "select": [
     "=scaling"
   ]},
   {"name": "prop", "select": [
@@ -80,9 +120,15 @@
   {"name": "audit", "select": [
     "=audit"
   ]},
+  {"name": "semantics", "heavy": true,
+   "inputs": ["lib/*", "selfhost/*", "Tests/Semantics/*", "scripts/gen-semantics-matrix.py"],
+   "select": [
+    "=semantics"
+  ]},
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
-              "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*"],
+              "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*",
+              "lib/Text.wiz", "lib/Word.wiz", "lib/Functor.wiz", "lib/Deriving.wiz"],
    "select": [
     "check",
     "conv",
@@ -91,6 +137,7 @@
     "desceq",
     "elab",
     "eval",
+    "format",
     "inductive",
     "lexer",
     "lift",

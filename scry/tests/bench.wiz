@@ -1,0 +1,214 @@
+-- test: run
+import Sys
+import Int
+import Text
+import Scry.Bench
+import Scry.BenchCmd
+-- Tests for the benchmark *measurement* code, not for the taint analysis:
+--
+-- * the integer TPR/FPR/Youden/precision formulas (basis points);
+-- * the advisory/blocking boundary split;
+-- * path validity (ends at the sink, starts at a source; forbidden calls are the
+--   call itself);
+-- * the case outcome rules (TP/FN/TN/FP/unknown, including a safe case with a
+--   blocking boundary);
+-- * a missing corpus is a clean skip;
+-- * the checked-in corpus still matches the checked-in baseline.
+--
+-- The last check is the regression gate: update `bench/baseline.json` with
+-- `scry bench --update-baseline bench/baseline.json` after reviewing a change.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def path (kind : Scry.PathKind) (func : String) (point : Nat) : List Scry.PathNode :=
+  [Scry.PathNode.mk func point 0 kind]
+
+def taintFinding (path : List Scry.PathNode) : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "command-injection" Scry.Severity.error "m" Scry.FindingKind.taint "main" 3 "system" 0 path
+
+def forbiddenFinding : Scry.RuleFinding :=
+  Scry.RuleFinding.mk "gets-overflow" Scry.Severity.error "m" Scry.FindingKind.forbidden "main" 2 "gets" 0
+    (path Scry.PathKind.sink "main" 2)
+
+def benchFinding (rule : String) (kind : Scry.FindingKind) (valid : Bool) :
+    Scry.BenchFinding :=
+  Scry.BenchFinding.mk rule "main" "system" 0 3 kind .true .true valid .true .none .none
+
+def expectOne (rule : String) : List Scry.BenchExpect :=
+  [Scry.BenchExpect.mk rule "main" "system" 0 .none .none]
+
+def main : IO Unit := EIO.toIO (do
+  -- metrics: 8 TP, 2 FN, 8 TN, 2 FP; one positive slice and one negative slice
+  let c := { Scry.benchEmptyCounts with cases := 20, tp := 8, fn := 2, tn := 8, fp := 2 };
+  let m := Scry.benchMetricsOf c;
+  check "metric: tpr is 0.8000" (Nat.beq m.tpr 8000);
+  check "metric: fpr is 0.2000" (Nat.beq m.fpr 2000);
+  check "metric: youden is 0.6000" (Bool.and (Bool.not (Int.isNeg m.youden))
+    (Nat.beq (Int.natAbs m.youden) 6000));
+  check "metric: precision is 0.8000" (Nat.beq m.precision 8000);
+  check "metric: f1 is 0.8000" (Nat.beq m.f1 8000);
+  let cneg := { Scry.benchEmptyCounts with cases := 20, tp := 1, fn := 9, tn := 5, fp := 5 };
+  let mneg := Scry.benchMetricsOf cneg;
+  check "metric: negative youden" (Bool.and (Int.isNeg mneg.youden)
+    (Nat.beq (Int.natAbs mneg.youden) 4000));
+  check "metric: formatting" (Bool.and (String.eq (Scry.benchDec4 8750) "0.8750")
+    (Bool.and (String.eq (Scry.benchDec4Signed (Int.ofNat 8750)) "0.8750")
+      (String.eq (Scry.benchPct 8750) "87.50%")));
+
+  -- boundary policy
+  check "boundary: external call is advisory"
+    (Scry.benchAdvisory "call to undeclared function system (external)");
+  check "boundary: string literal is advisory"
+    (Scry.benchAdvisory "string literal not modelled: havoc i8*");
+  check "boundary: else is blocking"
+    (Scry.benchBlockingMsg "else not modelled: statement skipped");
+  check "boundary: array declarator is blocking"
+    (Scry.benchBlockingMsg "declarator not modelled: buf[16]");
+
+  -- path validity
+  check "path: taint source -> flow -> sink"
+    (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+       Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
+       Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink]));
+  check "path: taint without a source is invalid"
+    (Bool.not (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow,
+       Scry.PathNode.mk "main" 3 0 Scry.PathKind.sink])));
+  check "path: a path not ending at the sink is invalid"
+    (Bool.not (Scry.benchValidPath (taintFinding
+      [Scry.PathNode.mk "main" 1 0 Scry.PathKind.source,
+       Scry.PathNode.mk "main" 2 0 Scry.PathKind.flow])));
+  check "path: forbidden call is the sink"
+    (Scry.benchValidPath forbiddenFinding);
+
+  -- outcome rules
+  let vTp := Scry.benchOutcome "unsafe" (expectOne "command-injection")
+    [benchFinding "command-injection" Scry.FindingKind.taint .true] 0;
+  check "outcome: unsafe match is TP" (String.eq vTp.outcome "tp");
+  let vFn := Scry.benchOutcome "unsafe" (expectOne "command-injection") .nil 0;
+  check "outcome: unsafe miss is FN" (String.eq vFn.outcome "fn");
+  let vTn := Scry.benchOutcome "safe" .nil .nil 0;
+  check "outcome: safe clean is TN" (String.eq vTn.outcome "tn");
+  let vFp := Scry.benchOutcome "safe" .nil
+    [benchFinding "command-injection" Scry.FindingKind.taint .true] 0;
+  check "outcome: safe finding is FP" (String.eq vFp.outcome "fp");
+  let vUnknown := Scry.benchOutcome "safe" .nil .nil 1;
+  check "outcome: safe with a blocking boundary is unknown"
+    (String.eq vUnknown.outcome "unknown");
+  let vProbe := Scry.benchOutcome "unknown" .nil .nil 0;
+  check "outcome: unknown probe is unknown" (String.eq vProbe.outcome "unknown");
+
+  -- a missing corpus is a clean skip, not an error
+  missing ← Scry.benchRun { Scry.benchDefaultOpts with
+    corpus := "bench/corpus-does-not-exist", baseline := .none, noTiming := .true };
+  check "corpus: missing manifest skips" (String.eq missing.status "skipped");
+
+  -- the checked-in baseline is the regression gate
+  run ← Scry.benchRun { Scry.benchDefaultOpts with
+    baseline := .some "bench/baseline.json", noTiming := .true };
+  check "baseline: corpus run is ok" (String.eq run.status "ok");
+  check "baseline: checked-in baseline matches"
+    (Bool.and (String.eq run.baseline.status "compared") run.baseline.matches);
+  check "baseline: safe corpus is TP 32, FP 1, TN 17, FN 0"
+    (Bool.and (Nat.beq run.summary.overall.metrics.counts.tp 32)
+      (Bool.and (Nat.beq run.summary.overall.metrics.counts.fp 1)
+        (Bool.and (Nat.beq run.summary.overall.metrics.counts.tn 17)
+          (Nat.beq run.summary.overall.metrics.counts.fn 0))));
+
+  -- the gate fails closed: a deleted/invalid baseline, a non-ok run, and a baseline
+  -- case removed from the run all fail with --fail-on-regression, and pass without it.
+  dir ← FS.createTempDir;
+  let gateBase := { Scry.benchDefaultOpts with baseline := .some "", noTiming := .true,
+    failOnRegression := .true };
+
+  let deletedPath := Path.join dir "deleted-baseline.json";
+  let deletedOpts := { gateBase with baseline := .some deletedPath };
+  let deletedNoFlag := { deletedOpts with failOnRegression := .false };
+  baseText ← FS.readFile "bench/baseline.json";
+  FS.writeFile deletedPath baseText;
+  FS.removeFile deletedPath;
+  deletedBaseline ← Scry.benchLoadBaseline deletedPath run;
+  let deletedRun := { run with baseline := deletedBaseline };
+  check "gate: a deleted baseline fails with the flag"
+    (Nat.beq (Scry.benchExitCode deletedOpts deletedRun) 1);
+  check "gate: a deleted baseline names the path"
+    (match Scry.benchGateFailure deletedOpts deletedRun with
+      | .some m => String.contains m deletedPath
+      | .none => .false);
+  check "gate: a deleted baseline passes without the flag"
+    (Nat.beq (Scry.benchExitCode deletedNoFlag deletedRun) 0);
+  check "gate: bootstrap permits an explicit first run"
+    (Nat.beq (Scry.benchExitCode { deletedOpts with bootstrap := .true } deletedRun) 0);
+
+  let corruptPath := Path.join dir "corrupt-baseline.json";
+  let corruptOpts := { gateBase with baseline := .some corruptPath };
+  let corruptNoFlag := { corruptOpts with failOnRegression := .false };
+  FS.writeFile corruptPath "{ this is not json\n";
+  corruptBaseline ← Scry.benchLoadBaseline corruptPath run;
+  let corruptRun := { run with baseline := corruptBaseline };
+  check "gate: a corrupted baseline is invalid"
+    (String.eq corruptRun.baseline.status "invalid");
+  check "gate: a corrupted baseline fails with the flag"
+    (Nat.beq (Scry.benchExitCode corruptOpts corruptRun) 1);
+  check "gate: a corrupted baseline passes without the flag"
+    (Nat.beq (Scry.benchExitCode corruptNoFlag corruptRun) 0);
+
+  let missingCorpusOpts := { Scry.benchDefaultOpts with
+    corpus := "bench/corpus-does-not-exist", baseline := .some "bench/baseline.json",
+    noTiming := .true, failOnRegression := .true };
+  let missingCorpusNoFlag := { missingCorpusOpts with failOnRegression := .false };
+  missingCorpusRun ← Scry.benchRun missingCorpusOpts;
+  check "gate: a missing corpus is a skip" (String.eq missingCorpusRun.status "skipped");
+  check "gate: a missing corpus fails with the flag"
+    (Nat.beq (Scry.benchExitCode missingCorpusOpts missingCorpusRun) 1);
+  check "gate: a missing corpus names the status"
+    (match Scry.benchGateFailure missingCorpusOpts missingCorpusRun with
+      | .some m => String.contains m "skipped"
+      | .none => .false);
+  check "gate: a missing corpus passes without the flag"
+    (Nat.beq (Scry.benchExitCode missingCorpusNoFlag missingCorpusRun) 0);
+
+  -- remove the first run case: it is present in the baseline and absent from the run
+  let fullOpts := { Scry.benchDefaultOpts with baseline := .some "bench/baseline.json",
+    noTiming := .true, failOnRegression := .true };
+  let fullNoFlag := { fullOpts with failOnRegression := .false };
+  let droppedIds := List.map (fun c => c.caseId) (List.take 1 run.cases);
+  let droppedId := match droppedIds with
+    | .cons x _ => x
+    | .nil => "";
+  trimmedBaseline ← Scry.benchLoadBaseline "bench/baseline.json"
+    { run with cases := List.drop 1 run.cases };
+  let trimmedRun := { run with cases := List.drop 1 run.cases, baseline := trimmedBaseline };
+  check "gate: a removed case is present→absent"
+    (Bool.and (List.any (String.eq droppedId) trimmedRun.baseline.missingFromRun)
+      (List.any (fun c => Bool.and (String.eq c.field "presence")
+        (Bool.and (String.eq c.before "present") (String.eq c.after "absent")))
+        trimmedRun.baseline.changes));
+  check "gate: a removed case fails with the flag"
+    (Nat.beq (Scry.benchExitCode fullOpts trimmedRun) 1);
+  check "gate: a removed case is named"
+    (match Scry.benchGateFailure fullOpts trimmedRun with
+      | .some m => String.contains m droppedId
+      | .none => .false);
+  check "gate: a removed case passes without the flag"
+    (Nat.beq (Scry.benchExitCode fullNoFlag trimmedRun) 0);
+
+  -- the other direction: a run case absent from the baseline is absent→present
+  let extraCases := List.map (fun c => { c with caseId := "s2/gate/new-case" })
+    (List.take 1 run.cases);
+  addedBaseline ← Scry.benchLoadBaseline "bench/baseline.json"
+    { run with cases := List.append run.cases extraCases };
+  let addedRun := { run with cases := List.append run.cases extraCases, baseline := addedBaseline };
+  check "gate: a new case is absent→present"
+    (Bool.and (List.any (String.eq "s2/gate/new-case") addedRun.baseline.addedInRun)
+      (List.any (fun c => Bool.and (String.eq c.field "presence")
+        (Bool.and (String.eq c.before "absent") (String.eq c.after "present")))
+        addedRun.baseline.changes));
+  check "gate: a new case fails with the flag"
+    (Nat.beq (Scry.benchExitCode fullOpts addedRun) 1);
+  FS.removeAll dir)
