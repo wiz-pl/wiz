@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* CI: the quadratic-shape lint (`scripts/check-complexity`) takes its excuses inline, on
+  the hit's line or the line above it (`-- complexity: ok (why it is bounded)`);
+  `scripts/complexity-allow.tsv` is gone. A row in a table keyed by a line hash could not
+  survive a move or a reformat — the row went stale, or the moved line read as new — so a
+  pull request that touched a reviewed site failed on a defect it had not introduced. The
+  reason now travels with the code it excuses and appears in the same diff. `--all` lists
+  the remaining backlog (152 sites) rather than hiding it behind rows.
 * loom: a form control's live value now reaches a pure `step`. `web/framework/driver.js`
   sends the event string `event "\n" index "\n" payload` — a control's `value` for
   `input`/`change`, the key for `keydown`/`keyup`, nothing otherwise — and
