@@ -1,0 +1,496 @@
+-- Navigation for the self-hosted language server (D8): `textDocument/documentSymbol`,
+-- `textDocument/definition` and `textDocument/references`. Load it after the frontend
+-- and before the driver (`selfhost/Cli.wiz`, whose dispatch turns its `Nav*` data into
+-- the host's JSON -- `Wiz/LSP.lean`).
+--
+-- The frontend keeps the *command* boundaries (`parseCommandAt`'s start and stop, the
+-- same offsets `atLine` tags a check's output with) and the elaborated globals
+-- (`Globals`); a syntax tree has no per-node positions, and no occurrence index of
+-- resolved identifiers is retained. So:
+--
+-- * **documentSymbol** walks the root module's commands. A symbol's range is the
+--   command's (keyword to end of body), and its `selectionRange` is the first whole-word
+--   occurrence of the declared name in it. `inductive`/`coinductive` constructors and
+--   `structure`/`class` fields are `children`: they are the parser's own nested
+--   `inductive.ctor`/`structure.field` nodes, and -- as in the host's
+--   `Symbols.documentSymbols` -- they share their command's range (the frontend has no
+--   finer offsets). A command the parser rejects ends the walk, so a file with a parse
+--   error is outlined up to the error.
+-- * **definition** resolves the identifier at the cursor with the frontend's own
+--   resolver (`Scope.lookupV` over the final `Globals`), then finds the command that
+--   declares the resolved kernel name. The module loader keeps every imported module's
+--   text in the table (`ModSrc`), so a declaration in an imported module is found too
+--   and answers with its path. A `Prelude` declaration has no file (it is the embedded
+--   text) and yields no location; neither does a name bound locally (`fun`/`match`/
+--   `let`/a parameter) when no global has that name -- the frontend keeps no binder
+--   positions and the name is not in `Globals.scope`, so the answer is `null`. A local
+--   that shadows a global name resolves as that global (the frontend retains no
+--   per-occurrence resolution).
+-- * **references** is in-file only: the frontend has no occurrence index, so this
+--   scans the document's tokens (`readToken`, so comments and strings are skipped) for
+--   identifier tokens spelled like the name. A local name is limited to its enclosing
+--   command; a global one to the document. **Cross-module references are not covered**
+--   (the parent document is; imported modules are not). Like the host
+--   (`referencesOf`/`Refs.rangesIn`), `context.includeDeclaration` is ignored and the
+--   declaration's own name is always included. The scan cannot tell a local binder that
+--   shadows the global apart from a use of the global (no per-occurrence resolution is
+--   retained), so such a use would be listed too.
+
+-- ## Ranges and positions (0-based lines and characters, as LSP counts them)
+
+inductive NavPos where
+  | mk (line col : Nat)
+
+inductive NavRange where
+  | mk (startLine startChar endLine endChar : Nat)
+
+mutual
+inductive NavSym where
+  | sym (name : String) (kind : Nat) (sel : NavRange) (range : NavRange) (children : NavSymList)
+inductive NavSymList where
+  | nil
+  | cons (head : NavSym) (tail : NavSymList)
+end
+
+inductive NavLoc where
+  | mk (uri : String) (range : NavRange)
+
+def navSymListOf : List NavSym → NavSymList
+  | .nil => .nil
+  | .cons s rest => .cons s (navSymListOf rest)
+
+def navAt (input : Array Nat) (i : Nat) : Nat := Array.getD input i 0
+
+-- the offset of the start of (0-based) line `ln`
+partial def navLineStart (input : Array Nat) (i ln : Nat) : Nat :=
+  match Nat.beq ln 0 with
+  | .true => i
+  | .false => match Nat.beq (navAt input i) 0 with
+    | .true => i
+    | .false => match Nat.beq (navAt input i) 10 with
+      | .true => navLineStart input (i + 1) (Nat.sub ln 1)
+      | .false => navLineStart input (i + 1) ln
+
+-- `col` characters into the line at `i` (the end of the line when it is shorter)
+partial def navColFrom (input : Array Nat) (i k : Nat) : Nat :=
+  match Nat.beq k 0 with
+  | .true => i
+  | .false => match Nat.beq (navAt input i) 0 with
+    | .true => i
+    | .false => match Nat.beq (navAt input i) 10 with
+      | .true => i
+      | .false => navColFrom input (i + 1) (Nat.sub k 1)
+
+def navOffsetOf (text : String) (line col : Nat) : Nat :=
+  let input := String.codes text;
+  navColFrom input (navLineStart input 0 line) col
+
+partial def navLineColGo (input : Array Nat) (i stop ln col : Nat) : NavPos :=
+  match Nat.lt i stop with
+  | .false => NavPos.mk ln col
+  | .true => match Nat.beq (navAt input i) 10 with
+    | .true => navLineColGo input (i + 1) stop (ln + 1) 0
+    | .false => navLineColGo input (i + 1) stop ln (col + 1)
+
+-- the 0-based line and character of a character offset
+def navLineCol (text : String) (off : Nat) : NavPos :=
+  let input := String.codes text;
+  navLineColGo input 0 off 0 0
+
+def navRange (text : String) (start stop : Nat) : NavRange :=
+  match navLineCol text start with
+  | NavPos.mk sl sc => match navLineCol text stop with
+    | NavPos.mk el ec => NavRange.mk sl sc el ec
+
+def navLen (s : String) : Nat := match s with
+  | .mk cs => List.length cs
+
+-- ## Commands (the frontend's own boundaries)
+
+inductive NavCmd where
+  | mk (stx : Syntax) (start stop : Nat)
+
+partial def navCmdsGo (cats : List Cat) (tokens : List String) (input : Array Nat)
+    (pos : Nat) : List NavCmd :=
+  let start := skipWs input pos;
+  match Nat.lt start (Array.size input) with
+  | .false => .nil
+  | .true => match parseCommandAt cats tokens input pos with
+    | .err _ => .nil
+    | .ok stx stop => match Nat.lt pos stop with
+      | .false => .nil
+      | .true => .cons (NavCmd.mk stx start stop) (navCmdsGo cats tokens input stop)
+
+def navCmds (cats : List Cat) (tokens : List String) (text : String) : List NavCmd :=
+  navCmdsGo cats tokens (String.codes text) 0
+
+-- the command around an offset (the one whose range contains it)
+def navCommandAt : List NavCmd → Nat → Option NavCmd
+  | .nil, _ => .none
+  | .cons (.mk stx start stop) rest, off =>
+    match Bool.and (Nat.le start off) (Nat.le off stop) with
+    | .true => .some (NavCmd.mk stx start stop)
+    | .false => navCommandAt rest off
+
+-- ## Syntax helpers
+
+def navKidName (stx : Syntax) : Option String := match kid stx 1 with
+  | .ident n => .some n
+  | _ => .none
+
+mutual
+def navFirstIdentArgs : SyntaxF .false → Option String
+  | .nil => .none
+  | .cons h t => match navFirstIdent h with
+    | .some n => .some n
+    | .none => navFirstIdentArgs t
+
+def navFirstIdent (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node _ args => navFirstIdentArgs args
+  | _ => .none
+
+def navCollectKind (k : String) (s : Syntax) (acc : List Syntax) : List Syntax :=
+  match s with
+  | .node kd args => match strEq kd k with
+    | .true => .cons s (navCollectArgs k args acc)
+    | .false => navCollectArgs k args acc
+  | _ => acc
+
+def navCollectArgs (k : String) (args : SyntaxF .false) (acc : List Syntax) : List Syntax :=
+  match args with
+  | .nil => acc
+  | .cons h t => navCollectKind k h (navCollectArgs k t acc)
+end
+
+-- the name a declaration command introduces (its source name, `private`d or not)
+partial def navDeclName (stx : Syntax) : Option String :=
+  let k := kindOf stx;
+  if strEq k "command.def" then navKidName stx else
+  if strEq k "command.defEqns" then navKidName stx else
+  if strEq k "command.inductive" then navKidName stx else
+  if strEq k "command.coinductive" then navKidName stx else
+  if strEq k "command.structure" then navKidName stx else
+  if strEq k "command.class" then navKidName stx else
+  if strEq k "command.axiom" then navKidName stx else
+  if strEq k "command.foreignType" then navKidName stx else
+  -- `extern "c_name" (header := "h") f : T`
+  if strEq k "command.extern" then match kid stx 3 with
+    | .ident n => .some n
+    | _ => .none
+  -- `instance (priority := n) name …` (the name is optional)
+  else if strEq k "command.instance" then navFirstIdent (kid stx 2)
+  else if strEq k "command.private" then navDeclName (kid stx 1)
+  else if strEq k "command.local" then navDeclName (kid stx 1)
+  else if strEq k "command.sealed" then navDeclName (kid stx 1)
+  else if strEq k "command.partial" then navDeclName (kid stx 2)
+  else .none
+
+-- ## Symbols
+
+partial def navEndsInSort : Tm → Bool
+  | .pi _ _ _ _ cod => navEndsInSort cod
+  | .univ _ => .true
+  | .sortL _ => .true
+  | .prop => .true
+  | _ => .false
+
+-- the host's `Symbols.kindOf`: a type is `kindStruct` (23), everything else the
+-- command's fallback (`kindFunction` 12, a constructor 9, a field 8)
+def navDeclKind (gs : Globals) (fallback : Nat) (name : String) : Nat :=
+  match Scope.lookup (Globals.scope gs) name with
+  | .none => fallback
+  | .some i => match Array.getD (Globals.all gs)
+      (Nat.sub (Nat.sub (Array.size (Globals.all gs)) 1) i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk _ _ ty _ _ _ _ => match navEndsInSort ty with
+      | .true => 23
+      | .false => fallback
+
+-- the next offset a token scan moves to (an error token consumes nothing)
+def navStep (i e : Nat) : Nat := match Nat.lt i e with
+  | .true => e
+  | .false => i + 1
+
+-- the first whole-word token equal to `name` in [start, stop)
+partial def navNameFind (tokens : List String) (input : Array Nat) (i stop : Nat)
+    (name : String) : Option Nat :=
+  let j := skipWs input i;
+  match Nat.lt j stop with
+  | .false => .none
+  | .true => match readToken tokens input j with
+    | TokInfo.mk t s e => match t with
+      | .ident n => match strEq n name with
+        | .true => .some s
+        | .false => navNameFind tokens input (navStep j e) stop name
+      | _ => navNameFind tokens input (navStep j e) stop name
+
+def navNameRange (text : String) (tokens : List String) (start stop : Nat)
+    (name : String) : NavRange :=
+  let input := String.codes text;
+  match navNameFind tokens input start stop name with
+  | .some s => navRange text s (s + navLen name)
+  | .none => navRange text start start
+
+def navSym (text : String) (tokens : List String) (name : String) (kind : Nat)
+    (start stop : Nat) (children : List NavSym) : NavSym :=
+  NavSym.sym name kind (navNameRange text tokens start stop name) (navRange text start stop)
+    (navSymListOf children)
+
+mutual
+def navMemberSyms (text : String) (tokens : List String) (nodeKind : String) (kind : Nat)
+    (start stop : Nat) (stx : Syntax) : List NavSym :=
+  navMemberSymsGo text tokens kind start stop (navCollectKind nodeKind stx .nil)
+
+def navMemberSymsGo (text : String) (tokens : List String) (kind : Nat)
+    (start stop : Nat) : List Syntax → List NavSym
+  | .nil => .nil
+  | .cons s rest => match navFirstIdent s with
+    | .some n => .cons (navSym text tokens n kind start stop .nil)
+        (navMemberSymsGo text tokens kind start stop rest)
+    | .none => navMemberSymsGo text tokens kind start stop rest
+
+-- one declaration command's symbols; `mutual` members share the block's range (the
+-- frontend parses the block as one command)
+def navCmdSyms (gs : Globals) (text : String) (tokens : List String)
+    (stx : Syntax) (start stop : Nat) : List NavSym :=
+  let k := kindOf stx;
+  if strEq k "command.mutual" then
+    navMutualSyms gs text tokens (nonAtoms (kids (kid stx 1))) start stop
+  else if strEq k "command.private" then navCmdSyms gs text tokens (kid stx 1) start stop
+  else if strEq k "command.local" then navCmdSyms gs text tokens (kid stx 1) start stop
+  else if strEq k "command.sealed" then navCmdSyms gs text tokens (kid stx 1) start stop
+  else if strEq k "command.partial" then navCmdSyms gs text tokens (kid stx 2) start stop
+  else match navDeclName stx with
+    | .none => .nil
+    | .some name =>
+      let base := if strEq k "command.inductive" then 23 else
+        if strEq k "command.coinductive" then 23 else
+        if strEq k "command.structure" then 23 else
+        if strEq k "command.class" then 23 else 12;
+      let kind := navDeclKind gs base name;
+      let children := if strEq k "command.inductive" then
+          navMemberSyms text tokens "inductive.ctor" 9 start stop stx
+        else if strEq k "command.coinductive" then
+          navMemberSyms text tokens "inductive.ctor" 9 start stop stx
+        else if strEq k "command.structure" then
+          navMemberSyms text tokens "structure.field" 8 start stop stx
+        else if strEq k "command.class" then
+          navMemberSyms text tokens "structure.field" 8 start stop stx
+        else (.nil : List NavSym);
+      .cons (navSym text tokens name kind start stop children) .nil
+
+def navMutualSyms (gs : Globals) (text : String) (tokens : List String)
+    : List Syntax → Nat → Nat → List NavSym
+  | .nil, _, _ => .nil
+  | .cons d rest, start, stop =>
+    List.append (navCmdSyms gs text tokens d start stop)
+      (navMutualSyms gs text tokens rest start stop)
+
+def navSymCmds (gs : Globals) (text : String) (tokens : List String)
+    : List NavCmd → List NavSym
+  | .nil => .nil
+  | .cons (.mk stx start stop) rest =>
+    List.append (navCmdSyms gs text tokens stx start stop) (navSymCmds gs text tokens rest)
+end
+
+-- ## Elaboration (the document and the modules it imports, as `lspCheck` reads them)
+
+structure NavEnv where
+  tab : List ModSrc
+  gs : Globals
+  cats : List Cat
+  tokens : List String
+
+def navLoad (cats : List Cat) (tokens : List String) (path text : String)
+    (roots : List String) : IO NavEnv := do
+  hs ← moduleHeaderTexts text;
+  tab ← moduleRootSourcesAs cats tokens roots "Main" path text;
+  let run := match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+    | .mk r _ _ _ => r;
+  IO.pure (NavEnv.mk tab (Run.gs run) (Run.catsOf run) (Run.tokensOf run))
+
+def navDocumentSymbols (env : NavEnv) (text : String) : List NavSym :=
+  navSymCmds env.gs text env.tokens (navCmds env.cats env.tokens text)
+
+-- ## Definition: the frontend's resolver, then the command that declares the name
+
+-- the kernel name of a source name in the document's final scope (private names carry
+-- their module, as `Scope.lookupV` resolves them)
+def navKernelName (env : NavEnv) (name : String) : Option String :=
+  match Scope.lookupV (Globals.scope env.gs) name with
+  | .ok i => match Array.getD (Globals.all env.gs)
+      (Nat.sub (Nat.sub (Array.size (Globals.all env.gs)) 1) i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k _ _ _ _ _ _ => .some k
+  | _ => .none
+
+-- `_private.M._0.x` → `x` (a private kernel name's source name)
+def navBase (k : String) : String := match privSplit k with
+  | .some (.mk _ b) => b
+  | .none => k
+
+def navMemberNamed (full own : String) : List Syntax → Bool
+  | .nil => .false
+  | .cons s rest => match navFirstIdent s with
+    | .some m => match strEq (own +++ "." +++ m) full with
+      | .true => .true
+      | .false => navMemberNamed full own rest
+    | .none => navMemberNamed full own rest
+
+mutual
+-- whether the command declares the source name `name` (its own name, or `T.c`/`T.f`
+-- for a constructor or field of `T`)
+def navDeclares (name : String) (stx : Syntax) : Bool :=
+  let k := kindOf stx;
+  if strEq k "command.mutual" then navDeclaresIn name (nonAtoms (kids (kid stx 1)))
+  else if strEq k "command.private" then navDeclares name (kid stx 1)
+  else if strEq k "command.local" then navDeclares name (kid stx 1)
+  else if strEq k "command.sealed" then navDeclares name (kid stx 1)
+  else if strEq k "command.partial" then navDeclares name (kid stx 2)
+  else match navDeclName stx with
+    | .none => .false
+    | .some own => match strEq own name with
+      | .true => .true
+      | .false => navMemberNamed name own
+          (navCollectKind "inductive.ctor" stx
+            (navCollectKind "structure.field" stx .nil))
+
+def navDeclaresIn (name : String) : List Syntax → Bool
+  | .nil => .false
+  | .cons d rest => match navDeclares name d with
+    | .true => .true
+    | .false => navDeclaresIn name rest
+end
+
+inductive NavSite where
+  | mk (mod : String) (path : String) (text : String) (start stop : Nat)
+
+def navSiteInCmds (m : ModSrc) (name : String) : List NavCmd → Option NavSite
+  | .nil => .none
+  | .cons (.mk stx start stop) rest => match navDeclares name stx with
+    | .true => .some (NavSite.mk (modName m) (modPath m) (modText m) start stop)
+    | .false => navSiteInCmds m name rest
+
+def navSiteInMod (m : ModSrc) (cats : List Cat) (tokens : List String)
+    (name : String) : Option NavSite :=
+  navSiteInCmds m name (navCmds cats tokens (modText m))
+
+partial def navSiteInMods (cats : List Cat) (tokens : List String) (name : String)
+    : List ModSrc → Option NavSite
+  | .nil => .none
+  | .cons m rest => match navSiteInMod m cats tokens name with
+    | .some s => .some s
+    | .none => navSiteInMods cats tokens name rest
+
+-- every module but the embedded Prelude and the document itself (it is tried first)
+def navOthers : List ModSrc → List ModSrc
+  | .nil => .nil
+  | .cons m rest =>
+    if strEq (modName m) "Prelude" then navOthers rest
+    else if strEq (modName m) "Main" then navOthers rest
+    else .cons m (navOthers rest)
+
+def navDeclSite (env : NavEnv) (k : String) : Option NavSite :=
+  let base := navBase k;
+  match privSplit k with
+  | .some (.mk m _) => match modFind env.tab m with
+    | .some mm => navSiteInMod mm env.cats env.tokens base
+    | .none => .none
+  | .none => match modFind env.tab "Main" with
+    | .some mm => match navSiteInMod mm env.cats env.tokens base with
+      | .some s => .some s
+      | .none => navSiteInMods env.cats env.tokens base (navOthers env.tab)
+    | .none => navSiteInMods env.cats env.tokens base (navOthers env.tab)
+
+-- (`modJoin` may keep a root's trailing `/`, so `root + "/" + rel` can spell `//`;
+-- a file URI should name the same file the editor has open)
+partial def navSlashGo (prev : Bool) : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 47 with
+    | .true => match prev with
+      | .true => navSlashGo .true cs
+      | .false => .cons c (navSlashGo .true cs)
+    | .false => .cons c (navSlashGo .false cs)
+
+def navSlashPath (p : String) : String := match p with
+  | .mk cs => String.mk (navSlashGo .false cs)
+
+-- the location's URI: the document's own URI for `Main`, else the module's path (the
+-- host writes `"file://" ++ path`); an embedded module has none
+def navSiteUri (docUri : String) (site : NavSite) : String := match site with
+  | NavSite.mk m p _ _ _ =>
+    if strEq m "Main" then docUri
+    else if strEq p "" then "" else String.append "file://" (navSlashPath p)
+
+-- ## The identifier at a position
+
+inductive NavTok where
+  | mk (tok : Tok) (start stop : Nat)
+
+partial def navTokAt (tokens : List String) (input : Array Nat) (i off : Nat) : Option NavTok :=
+  let j := skipWs input i;
+  match Nat.lt j (Array.size input) with
+  | .false => .none
+  | .true => match readToken tokens input j with
+    | TokInfo.mk t s e => match Bool.and (Nat.le s off) (Nat.le off e) with
+      | .true => .some (NavTok.mk t s e)
+      | .false => navTokAt tokens input (navStep j e) off
+
+def navIdentAt (env : NavEnv) (text : String) (off : Nat) : Option NavTok :=
+  match navTokAt env.tokens (String.codes text) 0 off with
+  | .none => .none
+  | .some tok => match tok with
+    | NavTok.mk t _ _ => match t with
+      | .ident _ => .some tok
+      | _ => .none
+
+def navTokName : NavTok → Option String
+  | .mk (.ident n) _ _ => .some n
+  | _ => .none
+
+def navDefinition (env : NavEnv) (docUri : String) (text : String) (off : Nat) : List NavLoc :=
+  match navIdentAt env text off with
+  | .none => .nil
+  | .some tok => match navTokName tok with
+    | .none => .nil
+    | .some name => match navKernelName env name with
+      | .none => .nil
+      | .some k => match navDeclSite env k with
+        | .none => .nil
+        | .some site => match navSiteUri docUri site with
+          | uri => match strEq uri "" with
+            | .true => .nil
+            | .false => match site with
+              | NavSite.mk _ _ stext start stop =>
+                .cons (NavLoc.mk uri (navRange stext start stop)) .nil
+
+-- ## References (in-file)
+
+partial def navOccGo (tokens : List String) (input : Array Nat) (i limit : Nat)
+    (name uri text : String) (acc : List NavLoc) : List NavLoc :=
+  let j := skipWs input i;
+  match Nat.lt j limit with
+  | .false => acc
+  | .true => match readToken tokens input j with
+    | TokInfo.mk t s e => match t with
+      | .ident n => match strEq n name with
+        | .true => navOccGo tokens input e limit name uri text
+            (.cons (NavLoc.mk uri (navRange text s e)) acc)
+        | .false => navOccGo tokens input (navStep j e) limit name uri text acc
+      | _ => navOccGo tokens input (navStep j e) limit name uri text acc
+
+def navOccurrences (env : NavEnv) (uri text : String) (start stop : Nat)
+    (name : String) : List NavLoc :=
+  List.reverseOf (navOccGo env.tokens (String.codes text) start stop name uri text .nil) .nil
+
+def navReferences (env : NavEnv) (docUri : String) (text : String) (off : Nat) : List NavLoc :=
+  match navIdentAt env text off with
+  | .none => .nil
+  | .some tok => match navTokName tok with
+    | .none => .nil
+    | .some name => match navKernelName env name with
+      -- a global: its occurrences in this document
+      | .some _ => navOccurrences env docUri text 0 (navLen text) name
+      -- a local name: its occurrences in the enclosing command
+      | .none => match navCommandAt (navCmds env.cats env.tokens text) off with
+        | .some (NavCmd.mk _ start stop) => navOccurrences env docUri text start stop name
+        | .none => navOccurrences env docUri text 0 (navLen text) name

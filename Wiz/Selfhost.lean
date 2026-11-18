@@ -134,10 +134,12 @@ def checkEntryFiles : List String := ["selfhost/Check.wiz"]
 /-- The self-hosted checker's sources: the language, the tables and the entry point. -/
 def checkerFiles : List String := frontendFiles ++ tableFiles ++ checkEntryFiles
 
-/-- The driver (stage 21 D2-D7): the command line, as real Wiz source rather than
-generated strings. It comes last but one in `compilerFiles` (before `Main.wiz`), so
-`compilerSource` can put it after the parser tables (`cats`, `tokens`). -/
-def driverFiles : List String := ["selfhost/Cli.wiz"]
+/-- The driver files (stage 21 D2-D7): the command line, as real Wiz source rather than
+generated strings. `LspNav.wiz` (the language server's navigation) comes first: it only
+needs the frontend, and `Cli.wiz`'s dispatch calls it. The driver comes last but one in
+`compilerFiles` (before `Main.wiz`), so `compilerSource` can put these after the parser
+tables (`cats`, `tokens`). -/
+def driverFiles : List String := ["selfhost/LspNav.wiz", "selfhost/Cli.wiz"]
 
 /-- The compiler's entry point (`selfhost/Main.wiz`): `main` reads `IO.args` and calls
 the driver's `dispatch`. Last, so everything it uses is before it. -/

@@ -1114,7 +1114,9 @@ def legacyCmd (args : List String) : IO Unit := do
 -- keeps no info tree (a tactic's goals live only while its `by` block is checked), so
 -- there is nothing at a cursor, as in the shim's stage-0 path when its check has no
 -- index. `textDocument/hover` is `null` and the interactive infoview methods are
--- `MethodNotFound`, as in the shim. Diagnostics are `check`'s, with `source: "wiz"`,
+-- `MethodNotFound`, as in the shim. `textDocument/documentSymbol`, `definition` and
+-- `references` are `selfhost/LspNav.wiz` (its header states what it can and cannot
+-- resolve; references are in-file). Diagnostics are `check`'s, with `source: "wiz"`,
 -- the code `check` prints, and a range from the diagnostic's position to the end of its
 -- line. An imported module's diagnostics are not published: open that module. A
 -- document's URI need not name a file (the playground's is `file:///playground-*.wiz`):
@@ -1124,10 +1126,9 @@ def legacyCmd (args : List String) : IO Unit := do
 -- the frontend's, which count characters; as in the Lean server (`Wiz/LSP.lean`), that
 -- agrees with LSP's UTF-16 unit outside the BMP.
 --
--- Not here (see `wiz-notes/selfhost-parity.md` D8): definition, references,
--- completion, signature help, inlay hints, semantic tokens, document and workspace
--- symbols, folding, code actions, formatting (`fmt`), the documentation generator
--- (`doc`), and `repl`.
+-- Not here (see `wiz-notes/selfhost-parity.md` D8): document *workspace* symbols,
+-- completion, signature help, inlay hints, semantic tokens, folding, code actions,
+-- formatting (`fmt`), the documentation generator (`doc`), and `repl`.
 
 -- one byte of the client's stream. `getchar` is C's `int`; the return is read as
 -- `UInt64`, so the end of the file (a negative `int`, hence above any byte) is seen
@@ -1670,7 +1671,10 @@ def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
 def lspCaps : J := .jobj (.ocons "positionEncoding" (.jstr "utf-16")
   (.ocons "textDocumentSync" (.jnum "1")
   (.ocons "hoverProvider" (.jbool .false)
-  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))
+  (.ocons "definitionProvider" (.jbool .true)
+  (.ocons "referencesProvider" (.jbool .true)
+  (.ocons "documentSymbolProvider" (.jbool .true)
+  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil)))))))
 
 def lspServerInfo : J := .jobj (.ocons "name" (.jstr "wiz-selfhost")
   (.ocons "version" (.jstr wizVersion) .onil))
@@ -1761,6 +1765,76 @@ def lspDidChange (st : LspState) (msg : J) : IO LspState := do
     let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version;
     lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
 
+-- ## Navigation: `textDocument/documentSymbol`, `definition`, `references`
+--
+-- The frontend work and the shapes' data are in `selfhost/LspNav.wiz` (`nav*`); this is
+-- the JSON (`Wiz/LSP.lean`'s: a symbol is `name`/`kind`/`range`/`selectionRange` with
+-- optional `children`; a definition is one `Location`, or `null`; references are an
+-- array of `Location`s). The document is elaborated again for each request (the state
+-- keeps the buffer, not the loader's table), so an import resolves exactly as in
+-- `lspCheck`.
+
+def navJsonRange (r : NavRange) : J := match r with
+  | NavRange.mk sl sc el ec =>
+    .jobj (.ocons "start" (.jobj (.ocons "line" (.jnum (Nat.toString sl))
+        (.ocons "character" (.jnum (Nat.toString sc)) .onil)))
+      (.ocons "end" (.jobj (.ocons "line" (.jnum (Nat.toString el))
+        (.ocons "character" (.jnum (Nat.toString ec)) .onil))) .onil))
+
+mutual
+def navJsonSym (s : NavSym) : J := match s with
+  | NavSym.sym name kind sel range children =>
+    .jobj (.ocons "name" (.jstr name)
+      (.ocons "kind" (.jnum (Nat.toString kind))
+      (.ocons "range" (navJsonRange range)
+      (.ocons "selectionRange" (navJsonRange sel)
+      (match children with
+        | .nil => .onil
+        | .cons _ _ => .ocons "children" (.jarr (navJsonSymList children)) .onil)))))
+
+def navJsonSymList : NavSymList → JList
+  | .nil => .jnil
+  | .cons s rest => .jcons (navJsonSym s) (navJsonSymList rest)
+end
+
+def navJsonLoc (l : NavLoc) : J := match l with
+  | NavLoc.mk uri range =>
+    .jobj (.ocons "uri" (.jstr uri) (.ocons "range" (navJsonRange range) .onil))
+
+def navJsonLocList : List NavLoc → JList
+  | .nil => .jnil
+  | .cons l rest => .jcons (navJsonLoc l) (navJsonLocList rest)
+
+-- one navigation request: `req` is `"symbols"`, `"definition"` or `"references"`
+def lspNavRequest (st : LspState) (id : J) (req : String) (msg : J) : IO LspState := do
+  let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+  let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+  let char := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+  match lspFind st.docs uri with
+  -- (as the host: no document is an empty outline, and no location)
+  | .none => do
+    match strEq req "symbols" with
+    | .true => lspSend (lspReply id (.jarr .jnil))
+    | .false => lspSend (lspReply id .jnull);
+    IO.pure st
+  | .some doc => do
+    let roots := List.cons (lspDir doc.path) st.roots;
+    env ← navLoad cats tokens doc.path doc.text roots;
+    let off := navOffsetOf doc.text line char;
+    match strEq req "symbols" with
+    | .true => do
+      lspSend (lspReply id (.jarr (navJsonSymList (navSymListOf (navDocumentSymbols env doc.text)))));
+      IO.pure st
+    | .false => match strEq req "definition" with
+      | .true => do
+        match navDefinition env doc.uri doc.text off with
+        | .nil => lspSend (lspReply id .jnull)
+        | .cons l _ => lspSend (lspReply id (navJsonLoc l));
+        IO.pure st
+      | .false => do
+        lspSend (lspReply id (.jarr (navJsonLocList (navReferences env doc.uri doc.text off))));
+        IO.pure st
+
 def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState :=
   match strEq method "initialize" with
   | .true => do
@@ -1786,9 +1860,15 @@ def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspStat
           | .true => do
             lspSend (lspReply id .jnull);
             IO.pure st
-          | .false => do
-            lspSend (lspError id "-32601" (String.append "the self-hosted server has no " method));
-            IO.pure st
+          | .false => match strEq method "textDocument/documentSymbol" with
+            | .true => lspNavRequest st id "symbols" msg
+            | .false => match strEq method "textDocument/definition" with
+              | .true => lspNavRequest st id "definition" msg
+              | .false => match strEq method "textDocument/references" with
+                | .true => lspNavRequest st id "references" msg
+                | .false => do
+                  lspSend (lspError id "-32601" (String.append "the self-hosted server has no " method));
+                  IO.pure st
 
 def lspNotify (st : LspState) (method : String) (msg : J) : IO LspState :=
   match strEq method "textDocument/didOpen" with

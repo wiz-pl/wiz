@@ -15,9 +15,11 @@ namespace Tests.Elab
 
 `wiz-selfhost lsp` speaks the JSON-RPC subset the playground's self-hosted shim answers
 (`web/selfhost-lsp-shim.js`): `initialize`, full-text `didOpen`/`didChange`/`didClose`,
-`publishDiagnostics`, `wiz/elaborated`, and the plain infoview queries (which answer
-`null`). The cases drive the real binary over a pipe, as `Tests/Groups/Grail.lean` does
-for the Lean-hosted `grail lsp`: a session of messages in, the framed messages out.
+`publishDiagnostics`, `wiz/elaborated`, the plain infoview queries (which answer
+`null`), and the navigation methods (`textDocument/documentSymbol`, `definition`,
+`references`: `selfhost/LspNav.wiz`). The cases drive the real binary over a pipe, as
+`Tests/Groups/Grail.lean` does for the Lean-hosted `grail lsp`: a session of messages in,
+the framed messages out.
 
 The goldens pin the *messages* (order, method names, the shapes the host emits) and the
 framing (`Content-Length` is the body's UTF-8 byte count, so a reader that counted
@@ -94,6 +96,19 @@ def lspStrs (j : Lean.Json) (path : List String) : List String :=
   | some (.arr xs) => xs.toList.map (fun x => match x with | .str s => s | _ => "")
   | _ => []
 
+/-- The `fields` of each object in the array at `path`, as strings (`["name"]` for a
+symbol array's names). -/
+def lspArrayStrs (j : Lean.Json) (path fields : List String) : List String :=
+  match jpath j path with
+  | some (.arr xs) => xs.toList.map fun x => lspStr x fields
+  | _ => []
+
+/-- The `fields` of each object in the array at `path`, as natural numbers. -/
+def lspArrayNats (j : Lean.Json) (path fields : List String) : List Nat :=
+  match jpath j path with
+  | some (.arr xs) => xs.toList.map fun x => lspNat x fields
+  | _ => []
+
 /-- A request. -/
 def lspReq (id : Nat) (method : String) (params : Lean.Json := Lean.Json.mkObj []) : Lean.Json :=
   Lean.Json.mkObj [("jsonrpc", "2.0"), ("id", Lean.Json.num id), ("method", method), ("params", params)]
@@ -126,7 +141,7 @@ def lspLspMsgs (uri : String) : List Lean.Json :=
       ("position", Lean.Json.mkObj [("line", 2), ("character", 5)])]),
     lspReq 3 "wiz/plainGoal" (Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", uri)]),
       ("position", Lean.Json.mkObj [("line", 2), ("character", 5)])]),
-    lspReq 4 "textDocument/definition" (Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", uri)]),
+    lspReq 4 "textDocument/completion" (Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", uri)]),
       ("position", Lean.Json.mkObj [("line", 2), ("character", 5)])]),
     lspNote "textDocument/didChange" (Lean.Json.mkObj [
       ("textDocument", Lean.Json.mkObj [("uri", uri), ("version", 2)]),
@@ -153,6 +168,13 @@ def selfhostLspGroup : Group where
         let init ← lspAt msgs 0
         checkEq 1 ((jpath init ["id"]).bind (fun j => j.getNat?.toOption) |>.getD 0)
         checkEq 1 (lspNat init ["result", "capabilities", "textDocumentSync"])
+        -- the navigation methods' providers (`LspNav.wiz`), which the host enables too
+        check ((jpath init ["result", "capabilities", "definitionProvider"]) == some (.bool true))
+          "definitionProvider"
+        check ((jpath init ["result", "capabilities", "referencesProvider"]) == some (.bool true))
+          "referencesProvider"
+        check ((jpath init ["result", "capabilities", "documentSymbolProvider"]) == some (.bool true))
+          "documentSymbolProvider"
         checkEq 1 (lspNat init ["result", "capabilities", "experimental", "wizInfoview", "version"])
         checkEq ["wiz/plainGoal", "wiz/plainTermGoal"]
           (lspStrs init ["result", "capabilities", "experimental", "wizInfoview", "methods"])
@@ -220,6 +242,105 @@ def selfhostLspGroup : Group where
           | _ => 99)
         checkEq 2 (lspNat diag ["params", "diagnostics", "0", "range", "start", "line"])
         checkEq "unknown-identifier" (lspStr diag ["params", "diagnostics", "0", "code"]) },
+    { name := "lsp: documentSymbol, definition and references", run := fun _ =>
+        withSelfhostCli fun exe => do
+        -- one definition (`double`) and two uses; the body is on its own line, so the
+        -- symbol's range must cover it
+        let doc := "import Prelude\ndef double (n : Nat) : Nat :=\n  n\ndef one : Nat := double 1\ndef two : Nat := double 2\n"
+        let dir ← IO.FS.createTempDir
+        let path := (dir / "a.wiz").toString
+        let uri := s!"file://{path}"
+        let docUri := Lean.Json.mkObj [("uri", uri)]
+        let atUse := Lean.Json.mkObj [("textDocument", docUri),
+          ("position", Lean.Json.mkObj [("line", 3), ("character", 17)])]
+        let msgs :=
+          [ lspReq 1 "initialize" (Lean.Json.mkObj [("rootUri", s!"file://{dir}")]),
+            lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]),
+            lspReq 2 "textDocument/documentSymbol" (Lean.Json.mkObj [("textDocument", docUri)]),
+            lspReq 3 "textDocument/definition" atUse,
+            -- (the host ignores `context.includeDeclaration`; `Refs.rangesIn` includes
+            -- the declaration's name, so this does too)
+            lspReq 4 "textDocument/references" (Lean.Json.mkObj [("textDocument", docUri),
+              ("position", Lean.Json.mkObj [("line", 3), ("character", 17)]),
+              ("context", Lean.Json.mkObj [("includeDeclaration", Lean.Json.bool false)])]),
+            lspReq 5 "shutdown",
+            lspNote "exit" (Lean.Json.mkObj []) ]
+        let (code, out, err) ← selfhostLspSession exe dir #[] msgs
+        checkEq 0 code
+        checkEq "" err
+        let got ← lspMessages out
+        checkEq 6 got.length
+        -- documentSymbol: `DocumentSymbol[]` (the host's `symbolJson`), one per
+        -- declaration in source order, with the host's kinds (kindFunction 12)
+        let syms ← lspAt got 2
+        checkEq ["double", "one", "two"] (lspArrayStrs syms ["result"] ["name"])
+        checkEq [12, 12, 12] (lspArrayNats syms ["result"] ["kind"])
+        -- the range is the command's, so it covers the body (line 2, `  n`)
+        checkEq 1 (lspNat syms ["result", "0", "range", "start", "line"])
+        checkEq 0 (lspNat syms ["result", "0", "range", "start", "character"])
+        checkEq 2 (lspNat syms ["result", "0", "range", "end", "line"])
+        -- selectionRange is the name in the declaration
+        checkEq 1 (lspNat syms ["result", "0", "selectionRange", "start", "line"])
+        checkEq 4 (lspNat syms ["result", "0", "selectionRange", "start", "character"])
+        checkEq 10 (lspNat syms ["result", "0", "selectionRange", "end", "character"])
+        -- the host omits `children` when a declaration has none
+        check ((jpath syms ["result", "0", "children"]).isNone) "no children for a def"
+        -- definition: the use of `double` jumps to its declaration's whole range
+        let defn ← lspAt got 3
+        checkEq uri (lspStr defn ["result", "uri"])
+        checkEq 1 (lspNat defn ["result", "range", "start", "line"])
+        checkEq 0 (lspNat defn ["result", "range", "start", "character"])
+        checkEq 2 (lspNat defn ["result", "range", "end", "line"])
+        checkEq 3 (lspNat defn ["result", "range", "end", "character"])
+        -- references: the declaration's name and both uses, in source order (the third
+        -- line is the declaration, the fourth and fifth the uses at column 17)
+        let refs ← lspAt got 4
+        checkEq [uri, uri, uri] (lspArrayStrs refs ["result"] ["uri"])
+        checkEq [1, 3, 4] (lspArrayNats refs ["result"] ["range", "start", "line"])
+        checkEq [4, 17, 17] (lspArrayNats refs ["result"] ["range", "start", "character"]) },
+    { name := "lsp: definition crosses an import; a local has no location", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let doc := "import M\ndef three : Nat := fromM\ndef f (x : Nat) : Nat := x\n"
+        let mod := "import Prelude\ndef fromM : Nat := 7\n"
+        let dir ← IO.FS.createTempDir
+        let path := (dir / "a.wiz").toString
+        let uri := s!"file://{path}"
+        let docUri := Lean.Json.mkObj [("uri", uri)]
+        let msgs :=
+          [ lspReq 1 "initialize" (Lean.Json.mkObj [("rootUri", s!"file://{dir}")]),
+            lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]),
+            -- `fromM` on line 1 (0-based), column 20
+            lspReq 2 "textDocument/definition" (Lean.Json.mkObj [("textDocument", docUri),
+              ("position", Lean.Json.mkObj [("line", 1), ("character", 20)])]),
+            -- the use of the parameter `x` on line 2, column 25: no binder positions
+            lspReq 3 "textDocument/definition" (Lean.Json.mkObj [("textDocument", docUri),
+              ("position", Lean.Json.mkObj [("line", 2), ("character", 25)])]),
+            -- and its references are the binder and the use, in that command
+            lspReq 4 "textDocument/references" (Lean.Json.mkObj [("textDocument", docUri),
+              ("position", Lean.Json.mkObj [("line", 2), ("character", 25)])]),
+            lspReq 5 "shutdown",
+            lspNote "exit" (Lean.Json.mkObj []) ]
+        -- (`M.wiz` must be on disk: the loader reads the import; the open document
+        -- itself is the buffer's text, as in the shim)
+        let (code, out, err) ← selfhostLspSession exe dir #[("M.wiz", mod)] msgs
+        checkEq 0 code
+        checkEq "" err
+        let got ← lspMessages out
+        checkEq 6 got.length
+        -- the imported module's `Location`: its path as a file URI, the command's range
+        -- (`def fromM : Nat := 7` is line 1 there)
+        let defn ← lspAt got 2
+        checkEq s!"file://{dir}/M.wiz" (lspStr defn ["result", "uri"])
+        checkEq 1 (lspNat defn ["result", "range", "start", "line"])
+        checkEq 0 (lspNat defn ["result", "range", "start", "character"])
+        checkEq 20 (lspNat defn ["result", "range", "end", "character"])
+        -- a local name: no definition location (the frontend keeps no binder positions)
+        let loc ← lspAt got 3
+        check ((jpath loc ["result"]) == some .null) "a local definition is null"
+        -- but its references are in-file, within its command
+        let refs ← lspAt got 4
+        checkEq [2, 2] (lspArrayNats refs ["result"] ["range", "start", "line"])
+        checkEq [7, 25] (lspArrayNats refs ["result"] ["range", "start", "character"]) },
     { name := "lsp: no options, and a flag before it is the host's error", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, _, err) ← cliRun exe #[] #["lsp", "--bogus"]
