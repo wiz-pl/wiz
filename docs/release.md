@@ -2,7 +2,9 @@
 
 How a `vX.Y.Z` release is made. What a release promises is in
 [stability.md](stability.md), and what changed is in [CHANGELOG.md](../CHANGELOG.md).
-The release workflow is `.github/workflows/release.yml`.
+The release workflow is `.github/workflows/release.yml`. The concrete pass for 0.1 is
+[release/v0.1-checklist.md](release/v0.1-checklist.md), with its notes in
+[release/v0.1.md](release/v0.1.md).
 
 ## Before tagging
 
