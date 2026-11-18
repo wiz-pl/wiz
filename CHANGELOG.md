@@ -10,16 +10,21 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
-* playground: a Wasm call that exits, aborts or traps no longer takes the page with it.
-  `run`, `eval` and `check` now go through one guard (`web/playground-engine.js`): the
-  one-threaded runtime's `ExitStatus` (a program that forks a thread or blocks forever,
-  status 3), Emscripten's `Aborted(…)`/out-of-memory `RuntimeError`, and a trap
-  (`unreachable`, out-of-bounds access, stack overflow) all become a failure the pane
-  prints together with the runtime's own stderr; the module is then dropped and
-  re-instantiated from the cached Wasm, so the next run works. Nothing else the module
-  throws is caught. The two shims are covered under Node with a stub module
-  (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`): no emcc, no Wiz build,
-  no browser.
+* playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
+  the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
+  `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,
+  `runtime/rt_con.inc`) with its exit code instead of calling `exit`. The runtime still
+  prints its `wiz: …` message on stderr, `web/playground-engine.js` returns the code as
+  `wiz_playground_exit` (code + 1, 0 for none), and the pane shows it as a failure while
+  the module and the page's state survive: the next run works on the same instance.
+  Only an out-of-memory `wiz_panic` (an `ExitStatus` outside the boundary) and a trap
+  (`unreachable`, out-of-bounds access, stack overflow) still drop and re-instantiate the
+  module from the cached Wasm. Native builds are unchanged: with no boundary armed,
+  `exit` is still `exit`, so the CLI's status, `atexit` and the stdio flush are as
+  before. The guard is covered under Node with a stub module
+  (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`); the runtime boundary,
+  the native exit status and the unarmed `exit` are in `scripts/test-runtime.sh`. No
+  emcc, no Wiz build and no browser are needed for the stubs.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
