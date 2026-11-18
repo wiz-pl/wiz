@@ -960,6 +960,12 @@ def Scry.analyzeStoreC (o : Scry.TaintOpts) (startMs : Nat) (c : Scry.Cst) (star
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
     let tu := Scry.lowerTU o.file c;
+    -- Compute the recovery diagnostics here, while `cst` is still live: after this
+    -- point neither the CST view nor the column store is needed, so the analysis can
+    -- release them (a large file's columns are tens of MiB and the OOM fixtures sit just
+    -- over a 256 MiB cap).
+    let recovery := Scry.parseRecoveryFindings o.file starts cst errs
+      (List.length tu.funcs);
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
@@ -1015,8 +1021,7 @@ def Scry.analyzeStoreC (o : Scry.TaintOpts) (startMs : Nat) (c : Scry.Cst) (star
     let origins := Scry.originEntries o.file starts tu.funcs;
     Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
     Scry.checkDeadline o startMs "origins";
-    let boundaries := List.append (Scry.parseRecoveryFindings o.file starts cst errs
-      (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
+    let boundaries := List.append recovery (Scry.boundaryFindings o.file starts tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
     let checks := List.map Scry.certVerified certificates;
