@@ -40,6 +40,8 @@ grail test                      # schema, cst, native shim, preproc, codegen, CL
                                 # taint, report, project, dynamic, fuzz spans, scale
 grail build dos-check           # resource limits: RSS < 20x input on a 3 MiB file, and
                                 # 16/64/128/256 `a++;` statements in a small time budget
+grail build fuzz-regressions    # replay the minimised C parse/lower regressions
+grail build fuzz-ci             # the bounded 10-execution fuzz profile (no fixtures written)
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c
