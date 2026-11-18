@@ -244,8 +244,9 @@ def FS.tempRoot : IO String := do
     | .some d => d
     | .none => "/tmp")
 /-- A new, empty directory under `FS.tempRoot`, named `wiz-…`; remove it with `FS.removeAll`. -/
-def FS.createTempDir : EIO String :=
-  IO.bind FS.tempRoot (fun root => Sys.check root (FS.mkdtempRaw (Path.join root "wiz-")))
+def FS.createTempDir : EIO String := do
+  root ← EIO.lift FS.tempRoot;
+  Sys.check root (FS.mkdtempRaw (Path.join root "wiz-"))
 
 -- Whole files. (Text stops at a NUL byte: use `Bytes` for binary data.)
 /-- The contents of a file, as text (it stops at a NUL byte: use `FS.readBytes` for binary data). -/
@@ -291,12 +292,14 @@ loop f = do
   l ← File.readLine f;
   match l with | .some s => … | .none => …
 ``` -/
-def File.readLine (f : File) : EIO (Option String) :=
-  IO.bind (File.readLineRaw f) (fun l => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def File.readLine (f : File) : EIO (Option String) := do
+  l ← EIO.lift (File.readLineRaw f);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some l)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message "readLine" e))))
+      | .false => .error (Sys.message "readLine" e))
 /-- The rest of the file, as text. -/
 def File.readAll (f : File) : EIO String := Sys.check "read" (File.readAllRaw f)
 /-- Write text (UTF-8, up to the first NUL). -/
@@ -577,12 +580,14 @@ extern "wiz_sys_file_write_bytes" File.writeBytesRaw : File → Bytes → IO Nat
 /-- Raw `fseek`; use `File.seek`. -/
 extern "wiz_sys_file_seek" File.seekRaw : File → Nat → Nat → Bool → IO Nat
 /-- `Sys.check`, with the end of the file (errno 100000) as `none`. -/
-def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) :=
-  IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) := do
+  a ← EIO.lift x;
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some a)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message what e))))
+      | .false => .error (Sys.message what e))
 /-- Up to `n` bytes (fewer only at the end of the file); `none` at the end. -/
 def File.readBytes (f : File) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (File.readBytesRaw f n)
 /-- Write the bytes. -/
@@ -746,21 +751,27 @@ def Sys.readResult (what : String) (e : Nat) (b : Bytes) : Except String (Timed 
 /-- One read: up to `n` bytes, as many as are there (at least one, waiting for it); `none` at the end of the file. -/
 def Fd.read (f : Fd) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (Fd.readRaw f n .false 0)
 /-- One read like `Fd.read`, giving up when nothing has come within `d`. -/
-def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) :=
-  IO.bind (Fd.readRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (Sys.readResult "read" e b)))
+def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) := do
+  b ← EIO.lift (Fd.readRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (Sys.readResult "read" e b)
 /-- Exactly `n` bytes, unless the end of the file comes first. -/
-def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) :=
-  IO.bind (Fd.readExactRaw f n .false 0) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
+def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) := do
+  b ← EIO.lift (Fd.readExactRaw f n .false 0);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
     | .true, _ => .ok (.all b)
     | _, .true => .ok (.eof b)
-    | _, _ => .error (Sys.message "read" e))))
+    | _, _ => .error (Sys.message "read" e))
 /-- Exactly `n` bytes within `d` in all (or what came: `.eof`, `.timeout`). -/
-def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) :=
-  IO.bind (Fd.readExactRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
+def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) := do
+  b ← EIO.lift (Fd.readExactRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
     | .true, _, _ => .ok (.all b)
     | _, .true, _ => .ok (.eof b)
     | _, _, .true => .ok (.timeout b)
-    | _, _, _ => .error (Sys.message "read" e))))
+    | _, _, _ => .error (Sys.message "read" e))
 /-- Write all of the bytes. -/
 def Fd.write (f : Fd) (b : Bytes) : EIO Unit := Sys.lift "write" (Fd.writeRaw f b)
 /-- Write text, as UTF-8. -/
