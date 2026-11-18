@@ -670,6 +670,13 @@ Two things are worth knowing before trusting a build to a second host:
   closure includes LLVM, Python, Node, yosys and Neovim (17.6 GiB), and elan then
   downloads the Lean toolchain separately; `nix build .#tests` needs 10.4 GiB of
   build inputs instead.
+* **Which cache to copy from matters.** A Wiz output's closure is not in Cachix
+  alone — Cachix has the output, not its `nixpkgs` dependencies (a `nix copy` of a
+  `wiz` closure from Cachix fails on `llvm`), so a substitute needs
+  `cache.nixos.org` as well. On one slow link a 1.4 GiB dependency closure came
+  from `cache.nixos.org` in 2m45s and from another machine's store over the
+  tailnet in 5m41s: prefer the public cache for nixpkgs paths, and another
+  machine's store only for paths no cache has.
 
 ## Continuous integration
 
