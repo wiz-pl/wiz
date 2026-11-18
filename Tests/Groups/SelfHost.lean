@@ -3076,7 +3076,7 @@ def selfHostGroup : Group where
         check (has out "native_refl compares first-order data") s!"a function type was accepted:\n{out}"
         check (has out "native_refl proves an equation `a = b`; this type is not one") s!"native_refl at Nat was accepted:\n{out}"
         check (has out "native_refl can only be the whole body of a definition") s!"an ascription was accepted:\n{out}"
-        check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" }
+        check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" },
 
     -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
     -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet)
@@ -3116,7 +3116,7 @@ def selfHostGroup : Group where
                   throw (IO.userError s!"literals were not 10 times faster: {lit} ns against {unary} ns")
               | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
             | _ => throw (IO.userError s!"unexpected timing line: {t}")
-          | _ => throw (IO.userError s!"unexpected output: {out}") }
+          | _ => throw (IO.userError s!"unexpected output: {out}") },
     { name := "the lexer in Wiz agrees with the Lean lexer", run := fun _ => do
         let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
         let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
