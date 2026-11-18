@@ -287,7 +287,7 @@ def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
 
 def infoviewMethods : List String :=
   ["wiz/plainGoal", "wiz/plainTermGoal", "wiz/interactiveGoals", "wiz/interactiveTermGoal", "wiz/subtermInfo",
-   "wiz/interactiveInfo"]
+   "wiz/interactiveInfo", "wiz/typeAt", "wiz/coreTerm"]
 
 def capabilities : Json :=
   Json.mkObj [("capabilities", Json.mkObj [
@@ -537,6 +537,88 @@ def subtermType (g : Globals ZeroOneMany) (sub : Subterm ZeroOneMany) : Option (
   | .ok (ty, _) => some (quote g ctx.lvl ty)
   | .error _ => none
 
+/-! ## One-shot requests (#435): the type at a position, a declaration's core term
+
+Neither needs a session or a ref, so a client without an interactive table (an agent, a
+script) can ask them directly. -/
+
+/-- `wiz/typeAt`: the innermost term at `off` that the elaborator checked (an application,
+a `match`, a literal, a hole) or the identifier it resolved there, as the source wrote
+it (`term`, on one line), its type (`type`: the type it was checked against, which its
+own type is equal to, or an identifier's type), its range, and what it is (`kind`:
+`const`, `local`, `term` or `hole`; `name` for an identifier). The same place as
+`wiz/plainTermGoal`, without the hypotheses. `null` where nothing was elaborated. -/
+def typeAtJson (doc : Doc) (off : Nat) : Json :=
+  let st := doc.state
+  match Query.termGoalAt st off with
+  | none => Json.null
+  | some (r, g) =>
+    let same (r' : SourceInfo) := r'.start == r.start && r'.stop == r.stop
+    let ident := match Query.identAt st off with
+      | some (.ident r' n isLocal _ _) => if same r' then some (n, isLocal) else none
+      | _ => none
+    let hole := st.infos.any fun | .term r' _ true => same r' | _ => false
+    let kind := match ident with
+      | some (_, true) => "local"
+      | some (_, false) => "const"
+      | none => if hole then "hole" else "term"
+    let name : List (String × Json) := match ident with
+      | some (n, _) => [("name", Json.str n)]
+      | none => []
+    Json.mkObj ([("term", Json.str (rangeText doc r)), ("type", Json.str (g.target.pretty g.names (some st.globals))),
+                 ("range", range doc.text r), ("kind", Json.str kind)] ++ name)
+
+/-- The declaration `wiz/coreTerm` asks about at `off` when it names none: the global
+the identifier there resolves to, else the (first) declaration of the command there. -/
+def coreTermTarget (st : St) (off : Nat) : Option Name :=
+  match Query.identAt st off with
+  | some (.ident _ n false _ _) => some n
+  | _ => (Query.declsAt st off).find? (!auxiliaryDecl ·)
+
+/-- Is `d`'s value one of the kernel's encodings rather than a definition written in Wiz?
+A constructor's is its payload (`.con`/`.cocon` under its lambdas, `inline`), and an
+inductive or coinductive type's is its μ/ν (`.mu`/`.nu`): neither is a value the user can
+unfold, so `wiz/coreTerm` says `opaque` and reports no value for them (#435). -/
+def encodedDecl (d : Decl ZeroOneMany) : Bool :=
+  let rec head : Term ZeroOneMany → Term ZeroOneMany
+    | .lam _ b => head b
+    | t => t
+  match d.value with
+  | none => false
+  | some v => match head v with
+    | .con _ | .cocon _ => d.inline
+    | .mu .. | .nu .. => true
+    | _ => false
+
+/-- `wiz/coreTerm`: the declaration `n` as the kernel has it, after elaboration (macros
+expanded): its type and value printed as core terms (`notation`: with the notation in
+scope, as hovers print), what it is (`kind`: `definition`; `opaque` for one with no value
+the kernel may unfold (an axiom, a constructor, an inductive type, an `extern`), which
+is said rather than unfolded; `partial` for a partial definition, opaque with a
+witness), `native` (the implementation compiled code runs instead, if any), its universe
+parameters, where it is declared, the axioms it depends on (unless `axioms` is false),
+and (`raw`) the core syntax trees. `null` for an unknown name. -/
+def coreTermJson (srv : Server) (uri : String) (doc : Doc) (n : Name) (useNotation withRaw withAxioms : Bool) : Json :=
+  let st := doc.state
+  match st.globals.find? n with
+  | none => Json.null
+  | some d =>
+    let pp (t : Term ZeroOneMany) : String := t.pretty [] (if useNotation then some st.globals else none)
+    let encoded := encodedDecl d
+    let kind := if encoded then "opaque" else if d.value.isSome then "definition" else if d.witness.isSome then "partial" else "opaque"
+    let native : List (String × Json) := match d.nativeImpl? with
+      | some g => [("native", Json.str g)]
+      | none => []
+    let ax : List (String × Json) :=
+      if withAxioms then [("axioms", Json.arr ((st.globals.axiomsOf n).map Json.str).toArray)] else []
+    let rawF : List (String × Json) :=
+      if withRaw then [("raw", Json.mkObj [("type", Json.str (reprStr d.type)),
+        ("value", match d.value with | some v => Json.str (reprStr v) | none => Json.null)])] else []
+    Json.mkObj ([("name", Json.str n), ("type", Json.str (pp d.type)),
+      ("value", match d.value with | some v => if encoded then Json.null else Json.str (pp v) | none => Json.null),
+      ("kind", Json.str kind), ("levelParams", Json.arr (d.levelParams.map Json.str).toArray),
+      ("location", location srv uri doc n)] ++ native ++ ax ++ rawF)
+
 /-- Answer an infoview request on an open document. -/
 def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : Json) :
     Except (Int × String) (Doc × Json) := do
@@ -580,6 +662,18 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
           ("location", loc)])),
         ("session", doc.session)]
     pure (memo s!"info {off}" (withTable doc (infoItems srv uri doc off) k))
+  | "wiz/typeAt" => pure (memo s!"typeAt {off}" (doc, typeAtJson doc off))
+  | "wiz/coreTerm" =>
+    let flag (k : String) : Option Bool := match get? msg ["params", k] with
+      | some (.bool b) => some b
+      | _ => none
+    let (useNotation, withRaw, withAxioms) := ((flag "notation").getD false, (flag "raw").getD false, (flag "axioms").getD true)
+    let name := match get? msg ["params", "name"] with
+      | some (.str n) => some n
+      | _ => if (get? msg ["params", "position"]).isSome then coreTermTarget st off else none
+    match name with
+    | none => pure (doc, Json.null)
+    | some n => pure (memo s!"core {n} {useNotation} {withRaw} {withAxioms}" (doc, coreTermJson srv uri doc n useNotation withRaw withAxioms))
   | _ => -- wiz/subtermInfo
     let some session := (get? msg ["params", "session"]).bind (·.getNat?.toOption) | throw (-32602, "missing session")
     let some r := (get? msg ["params", "ref"]).bind (·.getNat?.toOption) | throw (-32602, "missing ref")
@@ -635,7 +729,7 @@ def packageModules (srv : Server) : IO (Server × Array (String × String × St)
 global's in every open document and the package's modules, a local's in `doc`. -/
 def referencesOf (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
     IO (Server × Option (Refs.Target × SourceInfo × Array (String × String × Array SourceInfo))) := do
-  let some (t, r) := Refs.targetAt doc.state off | return (srv, none)
+  let some (t, r) := Refs.targetAt doc.state doc.text off | return (srv, none)
   match t with
   | .local .. => pure (srv, some (t, r, #[(uri, doc.text, Refs.rangesIn doc.state doc.text t)]))
   | .global _ =>
@@ -749,15 +843,15 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
       Json.mkObj [("start", toPos text r.start), ("end", toPos text r.stop)]
     match method with
     | "textDocument/documentHighlight" =>
-      match Refs.targetAt doc.state off with
+      match Refs.targetAt doc.state doc.text off with
       | some (t, _) => pure (srv, #[reply (Json.arr ((Refs.rangesIn doc.state doc.text t).map fun r =>
           Json.mkObj [("range", rangeIn doc.text r), ("kind", (1 : Nat))]))])
       | none => pure (srv, #[reply Json.null])
     | "textDocument/prepareRename" =>
-      match Refs.targetAt doc.state off with
+      match Refs.targetAt doc.state doc.text off with
       | some (.global n, _) =>
         if inToolchain srv doc n then pure (srv, #[replyError (-32803) s!"{n} is declared in the toolchain's library"]) else
-        match Refs.targetAt doc.state off with
+        match Refs.targetAt doc.state doc.text off with
         | some (_, r) => pure (srv, #[reply (Json.mkObj [("range", rangeIn doc.text r), ("placeholder", Json.str (Refs.textAt doc.text r))])])
         | none => pure (srv, #[reply Json.null])
       | some (_, r) => pure (srv, #[reply (Json.mkObj [("range", rangeIn doc.text r), ("placeholder", Json.str (Refs.textAt doc.text r))])])
@@ -780,10 +874,11 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
         let name := match t with
           | .global n => n
           | .local x .. => x
-        -- edit the places that spell the whole name (not `p.norm` for `Point.norm`)
+        -- edit the places that spell the whole name (not `p.norm` for `Point.norm`), and
+        -- (#434) a constructor's or field's last component where it is declared
         let changes := docs.filterMap fun (u, text, rs) =>
-          let es := (rs.filter (Refs.textAt text · == name)).map fun r =>
-            Json.mkObj [("range", rangeIn text r), ("newText", Json.str new)]
+          let es := rs.filterMap fun r => (Refs.renameText name new (Refs.textAt text r)).map fun t =>
+            Json.mkObj [("range", rangeIn text r), ("newText", Json.str t)]
           if es.isEmpty then none else some (u, Json.arr es)
         pure (srv, #[reply (Json.mkObj [("changes", Json.mkObj changes.toList)])])
       | none => pure (srv, #[replyError (-32602) "nothing to rename here"])
@@ -812,7 +907,7 @@ def handle (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     let some a := doc.actions[k]? | return (srv, #[replyError (-32801) "unknown action"])
     pure (srv, #[reply (codeAction srv auri doc a none)])
   | "wiz/plainGoal" | "wiz/plainTermGoal" | "wiz/interactiveGoals" | "wiz/interactiveTermGoal" | "wiz/subtermInfo"
-  | "wiz/interactiveInfo" =>
+  | "wiz/interactiveInfo" | "wiz/typeAt" | "wiz/coreTerm" =>
     let some doc := srv.docs.get? uri | return (srv, #[replyError (-32602) s!"unknown document {uri}"])
     match infoview srv uri doc method msg with
     | .ok (doc, j) => pure ({ srv with docs := srv.docs.insert uri doc }, #[reply j])
@@ -973,6 +1068,11 @@ structure Listen where
   /-- (11w) the directory of the web infoview's files (`web/build.sh`'s output), which the
   WebSocket's port also serves over HTTP (`WebSocket.webAssets`) -/
   web : Option String := none
+  /-- (#430) the token a WebSocket client must present (`--token-file`); `none`: a fresh
+  random one per launch, which `ready` reports -/
+  token : Option String := none
+  /-- (#430) `--ws-insecure`: no token at all (any local process gets a full client) -/
+  insecure : Bool := false
 
 /-- Handle a message from a WebSocket client: like an infoview's, but documents may be
 opened and edited, and every request is answered. Its `initialize` changes only its own
@@ -989,14 +1089,20 @@ def handleWs (srv : Server) (wants : Bool) (msg : Json) : IO (Server × Array Js
 /-- Serve the editor on `stdio` (if any) until `exit`, and infoviews on the sockets of
 `listen`: several kinds of threads (the editor's reader, an acceptor per socket, a reader
 per infoview) feed one channel, and this loop handles the messages in order, so the
-server's state is never shared. `ready` gets the WebSocket's port once it listens.
+server's state is never shared. `ready` gets the WebSocket's port once it listens, and
+the token its clients must present (#430; `none` only with `listen.insecure`).
 Without `stdio`, the server runs until it is killed. -/
 partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Option (IO.FS.Stream × IO.FS.Stream))
-    (listen : Listen) (ready : UInt16 → IO Unit := fun _ => pure ()) (trusted : List String := [])
+    (listen : Listen) (ready : UInt16 → Option String → IO Unit := fun _ _ => pure ()) (trusted : List String := [])
     (native : Bool × Nat := (false, NativeRun.defaultFuel)) (smt : Smt.Config := {}) : IO Unit := do
   let ch ← Std.Channel.Sync.new (α := Event)
   let next ← IO.mkRef 0
   let fresh : IO Nat := next.modifyGet fun k => (k, k + 1)
+  -- (#430) the WebSocket's token: given, or fresh for this launch
+  let token : Option String ← if listen.insecure then pure none else
+    match listen.token with
+    | some t => pure (some t)
+    | none => some <$> WebSocket.freshToken
   let rec readEditor (input : IO.FS.Stream) : IO Unit := do
     match ← readMessage input with
     | none => ch.send .editorDone
@@ -1014,7 +1120,7 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
   -- a WebSocket: the handshake (on this connection's own thread), then a message per frame
   let wsConn (fd : UInt32) (r w : IO.FS.Handle) : IO Unit := do
     let (r, w) := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
-    unless ← (try WebSocket.accept r w listen.web catch _ => pure false) do Socket.shutdown fd; return
+    unless ← (try WebSocket.accept r w token listen.web catch _ => pure false) do Socket.shutdown fd; return
     let k ← fresh
     ch.send (.connected k { fd, send := fun j => WebSocket.sendText w j.compress, editing := true })
     readLoop k do
@@ -1034,7 +1140,7 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
   let wsRef ← IO.mkRef wsFd
   if let some (fd, port) := wsFd then
     let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
-    ready port
+    ready port token
   -- (11w) `wiz/browserInfoview` from the editor: listen on a WebSocket (on 127.0.0.1, a
   -- free port) unless already listening, and say where the page is
   let browser (msg : Json) : IO Json := do
@@ -1044,12 +1150,15 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
         let (fd, p) ← Socket.tcpListen Socket.loopback 0
         wsRef.set (some (fd, p))
         let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
-        ready p
+        ready p token
         pure p
+    -- (#430) the page passes the token on to its WebSocket (`web/infoview.js`)
+    let tokenArg := match token with | some t => s!"&token={t}" | none => ""
+    let tokenField : List (String × Json) := match token with | some t => [("token", Json.str t)] | none => []
     let res : Json := match listen.web with
-      | some _ => Json.mkObj [("port", port.toNat), ("url", s!"http://127.0.0.1:{port}/infoview.html?port={port}&follow=1")]
-      | none => Json.mkObj [("port", port.toNat), ("url", Json.null),
-          ("message", "the web infoview is not built: run web/build.sh in a checkout, or use a release toolchain")]
+      | some _ => Json.mkObj (([("port", port.toNat), ("url", s!"http://127.0.0.1:{port}/infoview.html?port={port}&follow=1{tokenArg}")] : List (String × Json)) ++ tokenField)
+      | none => Json.mkObj (([("port", port.toNat), ("url", Json.null),
+          ("message", "the web infoview is not built: run web/build.sh in a checkout, or use a release toolchain")] : List (String × Json)) ++ tokenField)
     pure (Json.mkObj [("jsonrpc", "2.0"), ("id", (msg.getObjVal? "id").toOption.getD Json.null), ("result", res)])
   if let some (input, _) := stdio then
     let _ ← IO.asTask (prio := .dedicated) (readEditor input)
@@ -1120,7 +1229,14 @@ partial def serve (libs : Std.HashMap String (String × String)) (listen : Liste
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   -- (11w) always through `serveWith`: `wiz/browserInfoview` may start a WebSocket later
-  let ready (port : UInt16) := IO.eprintln s!"wiz lsp: WebSocket on port {port}"
+  let ready (port : UInt16) (token : Option String) : IO Unit := do
+    IO.eprintln s!"wiz lsp: WebSocket on port {port}"
+    -- (#430) a fresh token is printed, for the person who started the server; one from
+    -- `--token-file` is not (they have it)
+    match token, listen.token with
+    | some t, none => IO.eprintln s!"wiz lsp: WebSocket token {t} (clients connect to /?token={t}; the web infoview: http://127.0.0.1:{port}/infoview.html?port={port}&token={t})"
+    | some _, some _ => IO.eprintln "wiz lsp: WebSocket token from --token-file"
+    | none, _ => IO.eprintln "wiz lsp: warning: --ws-insecure: any local process may connect and edit as you"
   serveWith libs (if stdio then some (stdin, stdout) else none) listen ready trusted native smt
 
 end Wiz.LSP

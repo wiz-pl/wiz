@@ -112,7 +112,8 @@ The same holds for the toolchain flags, which may go before or after the command
 Not covered:
 
 * **Experimental flags**: `--regularity`, `--predicative-prop`, `--eager-proofs`,
-  `--inert`, `--unbox-structs`, `--strict-privacy`, `--pp-all`, every `--trust-*` flag,
+  `--inert`, `--unbox-structs`, `--strict-privacy`, `--pp-all`, `--trace-guess-fallback`,
+  every `--trust-*` flag,
   and any flag the usage text marks experimental. These may change or go away in a patch
   release.
 * What the commands print: error messages, the syntax tree, warnings. Do not parse them.
