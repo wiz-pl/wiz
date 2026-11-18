@@ -2175,3 +2175,5 @@ def Scry.Cs.lowerRender (path : String) (text : String) (spill : String) : Strin
   match Scry.Cs.frontend path text spill with
   | .ok l => Scry.Cs.loweredText l
   | .err m => m
+      -- A file-scoped namespace is a prefix, not a container: its declarations are
+      -- the following siblings of the compilation unit.

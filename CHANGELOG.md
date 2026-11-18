@@ -99,6 +99,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `silent skip` case fails when any of the out-of-scope warnings disappears
   (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
   (frequencies, and per-file parse/lower/taint given a native build).
+* scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
+  reports a summary with a coverage section: `.cs` files before and after exclusions
+  (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
+  symbolic links), found/parsed/lowered/failed, findings by rule and severity, and every
+  construct or file that was skipped or warned about with a count and one example
+  location. `--json` is the same report, `--fail-on error|warning|note` gates findings
+  and coverage rows, and the exit status separates `0` clean, `1` gated, `2` usage/IO
+  from `3` nothing analysed (no `.cs`, or every file failed). Lowering warnings are
+  normalised to constructs, so a first run answers "what didn't you look at?" in one
+  screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
+  counts, coverage rows, JSON and every exit status.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
@@ -578,3 +589,11 @@ that pin each one):
   found no accepted closed `Empty` in either kernel and no verdict difference beyond the
   known quantity-only `Σ` observations (`Tests/FalseFuzz.lean:1-26`).
 * Not yet in Wiz: termination by measure, machine-integer and vector literals.
+* selfhost: a constructor's parameters and fields are named arguments too (A9). The
+  self-hosted frontend kept no binder names for a constructor's `Global`, so
+  `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
+  parameters followed by the constructor's fields, so fields can be given in any order
+  (a later field's type may mention an earlier named one), and an implicit field or a
+  parameter can be named. An inductive type's own parameters, a dot-constructor and a
+  local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
+  and rejected constructor forms against the Lean frontend (21ab, 13a).

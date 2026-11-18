@@ -435,3 +435,100 @@ identifier after such a character is read shifted — `outcome` becomes `ome` �
 two files report `unknown name …` warnings for real locals. It is loud, not silent, but
 it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
 it is left as its own change because it is shared with C.
+
+## 8. The repository driver: `scry cs`
+
+A single `.cs` file is useful for a fixture; a codebase is a tree. `scry cs`
+(`scry/src/Scry/CsCmd.wiz`) walks a directory, a `.csproj` or a `.sln`/`.slnx`, parses
+every file with the same native shim, lowers it with `Scry.CsLower`, runs the rule pack
+over the merged program, and writes a summary whose **coverage** section is the point:
+
+```
+scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+```
+
+`PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or one `.cs` file. An
+SDK-style project (no `<Compile Include=` items) is walked; an explicit item list is
+used when present. `<Compile Remove=` and `EnableDefaultCompileItems` are not
+interpreted.
+
+Discovery is sorted, so two runs over one tree report the same rows. The walk applies a
+built-in, `.gitignore`-style rule list (it does not read a `.gitignore` file):
+
+* any path segment `bin/`, `obj/` or `node_modules/`;
+* any hidden directory (a segment starting with `.`);
+* a basename ending `.g.cs` or `.Designer.cs`;
+* symbolic links.
+
+The report prints the number of `.cs` files **before** exclusions and **after** them, and
+each rule is a coverage row with its count and one example. An excluded directory is not
+descended for analysis, but its `.cs` files are still counted (names only) so the
+"before" number is real. An explicitly named `.cs`, `.csproj` or `.sln` is not excluded
+itself; files discovered inside it are.
+
+### What the summary says
+
+Measured on a real codebase (Nexus `src/Crux.Api`, 75 kept files):
+
+```
+walk: 79 .cs file(s) before exclusions; 75 kept, 4 excluded by rule
+files: 75 found, 75 parsed, 57 lowered, 0 failed
+functions: 239 lowered
+rules: scry/corpus/csharp/csharp.scry (4 rule(s))
+findings: 0 (error 0, warning 0, note 0)
+coverage: 25 row(s) — what was skipped or warned about
+  SEVERITY COUNT  CONSTRUCT                                   EXAMPLE
+  warning  2933   unmodelled-external                         Authentication/AuthenticatedPartner.cs:16:12
+  warning  205    await not modelled: havoc                   Dtos/TransactionDtos.cs:87:23
+  warning  168    unknown name not modelled: havoc            Dtos/SchemeIngressDtos.cs:16:31
+  ...
+  note     4      excluded: obj/                              obj/Debug/net10.0/…AssemblyAttributes.cs
+```
+
+The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
+in 311.8 s and about 4.1 GiB with `--no-taint`: 4 605 parsed, 4 250 lowered, 16 parse
+failures, 36 319 functions and 46 coverage rows. Taint dominates: Crux.Api took 219.8 s
+with taint and 2.0 s without, so a full tainted sweep of the tree is hours, not minutes,
+and is not attempted by default.
+
+`files found / parsed / lowered / failed` distinguishes native parsing from lowering:
+`failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered
+at all. A file that parses but produces no method is a `no functions lowered` warning, not
+a zero. An unreadable file or a directory that cannot be listed is a row, never an
+omission.
+
+Lowering messages interpolate identifiers and types; the coverage row normalises them to
+the construct (`lambda body not lowered: an opaque function value`, `out/ref argument not
+modelled: havoc`, `operator not modelled: havoc`, an unsupported statement kind, a
+field/property initialiser, …). The human report shows the construct and one example;
+the JSON has the same two fields per row.
+
+### Exit status and `--fail-on`
+
+* `0` at least one file was lowered, and nothing reaches `--fail-on`;
+* `1` a finding **or a coverage row** is at or above `--fail-on` (a parse failure is
+  `error`, a lowering/skip row is `warning`, an exclusion is `note`);
+* `2` usage or IO (a bad flag, a missing path, an unreadable project/solution);
+* `3` nothing could be analysed: no `.cs` file, or every discovered file failed.
+
+`3` is what tells "no findings" from "did not run". The native grammar is a build-time
+dependency (`native/tree-sitter-c-sharp`, §6): a binary built without it fails to link,
+so a grammar-less run cannot masquerade as a clean one; at run time the same class of
+failure surfaces as every file failing, which is also `3`.
+
+`--no-taint` stops after parse/lower and reports coverage only (the `taint not run`
+row says so). `--rules FILE` selects a pack; otherwise the walk tries
+`scry/corpus/csharp/csharp.scry`, then `../scry/corpus/csharp/csharp.scry`, then
+`lib/Scry/rules/csharp.scry`. With no pack the findings section is empty and a
+`taint not run: no rule pack found` row is printed.
+
+### Fixture and tests
+
+`scry/corpus/csharp/repo/` is a small tree: three analysable files (one with a real
+finding), one deliberately invalid file, and five excluded paths (`bin/`, `obj/`,
+`node_modules/`, `.g.cs`, `.Designer.cs`). The `scry-csharp` group enumerates it, applies
+`Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the driver's
+aggregation) to checked-in spills, and asserts the before/after counts, the coverage
+rows, both report renderings and all four exit statuses. The Lean interpreter cannot call
+the native shim, so the spills are checked in exactly as for the other C# fixtures; the
+invalid file has no spill and its `.err` result is built directly.

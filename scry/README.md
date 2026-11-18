@@ -23,7 +23,9 @@ tree-sitter-c-sharp (fetched by Nix; `native/README.md`) through the same shim (
 `src/Scry/CsCst.wiz` views the store as a `Scry.Cst` and `src/Scry/CsLower.wiz` lowers
 methods to Wil (receiver as argument 0, `using`-resolved BCL names). Its fixtures, their
 spills and the rule pack are in `corpus/csharp/`; the tests are the `scry-csharp` group
-(`tests =scry-csharp`).
+(`tests =scry-csharp`). `scry cs PATH` is the repository driver over a directory,
+`.csproj` or `.sln`/`.slnx`: one summary with a coverage section that names every file or
+construct that was skipped (design: `CSHARP.md` §7).
 
 ```sh
 cd scry
@@ -46,7 +48,9 @@ a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C �
 Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
 correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), `project` (a `compile_commands.json` multi-file C project:
-cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `report`
+cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `cs` (a
+directory, `.csproj` or `.sln`/`.slnx` of C#: one summary with a coverage section),
+`report`
 (one self-contained HTML page of the taint evidence), `fuzz-span` (map a fuzz artifact
 to CST spans for the dynamic-evidence report) and `repl` (the Wiz REPL with `Scry.Repl`
 preloaded). `parse --stats` prints counts only; the perf agent owns throughput numbers.
