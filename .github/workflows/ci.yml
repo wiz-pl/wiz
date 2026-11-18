@@ -106,8 +106,9 @@ jobs:
   # relative link and anchor in the docs resolves (scripts/check-doc-links.py;
   # external links are reported but not fetched). The same job runs the quadratic-shape
   # lint on the pull request's changed `.lean`/`.wiz` lines only
-  # (scripts/check-complexity --diff HEAD^1; the existing sites are its allowlist), so a
-  # new append-in-loop or eraseDups fails a PR before the build starts.
+  # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
+  # a PR before the build starts. A bounded site is excused inline, on the line or the
+  # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
   # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style

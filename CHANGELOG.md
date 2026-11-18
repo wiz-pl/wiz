@@ -25,6 +25,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`web/playground_engine_test.mjs`, `web/selfhost_lsp_test.mjs`); the runtime boundary,
   the native exit status and the unarmed `exit` are in `scripts/test-runtime.sh`. No
   emcc, no Wiz build and no browser are needed for the stubs.
+* CI: the quadratic-shape lint (`scripts/check-complexity`) takes its excuses inline, on
+  the hit's line or the line above it (`-- complexity: ok (why it is bounded)`);
+  `scripts/complexity-allow.tsv` is gone. A row in a table keyed by a line hash could not
+  survive a move or a reformat — the row went stale, or the moved line read as new — so a
+  pull request that touched a reviewed site failed on a defect it had not introduced. The
+  reason now travels with the code it excuses and appears in the same diff. `--all` lists
+  the remaining backlog (152 sites) rather than hiding it behind rows.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
