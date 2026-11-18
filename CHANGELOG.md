@@ -43,6 +43,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* scry C#: **`await` is sequencing, not havoc**. `await e` yields the value of `e` (a
+  tainted call result is still tainted after it, and the locals defined before it are
+  unchanged), and its static type is now the awaited `T` read from a unit method's raw
+  `Task<T>`/`ValueTask<T>`, a local declared as `Task<T>`, or the async BCL method-name
+  table. That type is what lets a member written after the await be the modelled
+  property: in `taint/cwe78-await-unsafe`, `psi = await ShellAsync()` is a
+  `ProcessStartInfo`, so `psi.Arguments = command` is the `set_Arguments` sink; with the
+  value typed as `Task` no sink matches. The havoc itself (every await used to be havoc
+  because its operand was read through a field name the grammar does not give it) is
+  fixed in the same feature: on `src/Crux.Api` the `await not modelled: havoc` class is
+  0, against 205 warnings on `origin/master`, with no other warning class changed and no
+  finding lost. An await of an unknown external stays one `unmodelled-external` warning
+  at its call site, not a havoc of the whole state (`scry/CSHARP.md` §7.4).
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
