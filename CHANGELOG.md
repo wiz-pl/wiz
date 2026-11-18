@@ -70,6 +70,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   are split eight ways by the measured times. A case of a group that does not opt in
   to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
   workers.
+* concurrency (25a, 25d): `Lock` is now tested for mutual exclusion, not just for its
+  linear `Guard`. The `conc` group's new cases run eight threads that bump a plain,
+  non-atomic C counter a thousand times each under `Lock.with` and assert the exact total
+  (`8000`) plus an overlap detector that must stay `0`, and a contended case that holds the
+  lock while another thread announces it is acquiring, then pins the order of the printed
+  lines (the waiter's first line comes after the holder released) and the same overlap
+  detector. The critical sections yield to the scheduler (`sched_yield`), so a lock that
+  does not exclude shows up in a one-CPU job too. With `wiz_lock_acquire`/`wiz_lock_release`
+  made no-ops the counter case loses increments (`4962` of `8000` in the recorded run) and
+  reports `overlap 1`; with `Lock.with l body` replaced by `body` both cases report
+  `overlap 1` and fail. `scripts/tsan-conc.sh` is the ThreadSanitizer run that
+  `docs/stages/25-concurrency.md` used to claim without a command: it builds the
+  `Tests/tsan/` programs with `--cflags "-O1 -g -fsanitize=thread"` and fails on a report or
+  a wrong total; the `conc` group also runs those programs under ThreadSanitizer as a case.
+  The `signal(SIGPIPE, SIG_IGN)` before a process spawn, which two threads spawning
+  children raced on (ThreadSanitizer reported the race on the old one-shot flag), is now
+  re-asserted on every spawn with no flag at all; `Tests/tsan/spawn.wiz` is the case that
+  exercises it under TSan.
+
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and

@@ -93,7 +93,9 @@ def main : IO Unit := Chan.fork (items 3) (serveItems 3 0) (fun c => client c)
 "
 
 /-- Eight threads bump one counter a thousand times each (MVar.modify: the linear
-borrow/fill discipline), under a lock, and report through an MVar. -/
+borrow/fill discipline), under a lock, and report through an MVar. The counter is the
+MVar, which is atomic by itself, so this case does not test that the lock excludes; the
+two cases below do. -/
 def concCounter : String := "import IO
 import Session
 import MVar
@@ -169,6 +171,18 @@ def main : IO Unit := do1
   IO.println (Nat.toString n)
 "
 
+/-- The lock tests of `Tests/tsan/` (the programs `scripts/tsan-conc.sh` also runs under
+ThreadSanitizer, 25a): a plain, non-atomic C counter that only the lock protects.
+`link_c "lock.c"` resolves relative to `main.wiz`, so both go in the temporary tree. -/
+def lockSumFiles : IO (List (String × String)) := do
+  pure [("main.wiz", ← IO.FS.readFile "Tests/tsan/lock-sum.wiz"),
+        ("lock.c", ← IO.FS.readFile "Tests/tsan/lock.c")]
+
+/-- The contended case: a second thread must wait for the holder to release. -/
+def lockOrderFiles : IO (List (String × String)) := do
+  pure [("main.wiz", ← IO.FS.readFile "Tests/tsan/lock-order.wiz"),
+        ("lock.c", ← IO.FS.readFile "Tests/tsan/lock.c")]
+
 def concGroup : Group where
   name := "conc"
   exercise := "lib/Session.wiz, lib/MVar.wiz, runtime threads (stage 25)"
@@ -243,6 +257,15 @@ def concGroup : Group where
         failsLibs "import Ref\n-- a stale token can't read: the cell was written, the old token is gone\ndef stale : IO Nat := Ref.new 1 (fun p tp => Ref.set p 5 tp (fun tp' => Ref.get p tp (fun x _ t => Ref.free p t (Ref.free p tp' (IO.pure x)))))" "quantity 1" },
     { name := "MVars and locks: eight threads, one counter", run := fun _ =>
         cRunLibs concCounter "8000\n" },
+    { name := "a lock is mutual exclusion: eight threads bump a non-atomic C counter", run := fun _ => do
+        linkRun (← lockSumFiles) "counter 8000\noverlap 0\n" },
+    { name := "a lock makes the second thread wait (ordering, not timing)", run := fun _ => do
+        linkRun (← lockOrderFiles) "holder in\nsecond wants\nholder checks\nholder out\nsecond in\noverlap 0\nsecond got it\n" },
+    { name := "the same programs under ThreadSanitizer report no data races", run := fun _ => do
+        let tsan := ["-O1", "-g", "-fsanitize=thread"]
+        linkRun (← lockSumFiles) "counter 8000\noverlap 0\n" (cflags := tsan)
+        linkRun (← lockOrderFiles) "holder in\nsecond wants\nholder checks\nholder out\nsecond in\noverlap 0\nsecond got it\n" (cflags := tsan)
+        cRunLibs (← IO.FS.readFile "Tests/tsan/spawn.wiz") "spawned 20\n" (cflags := tsan) },
     { name := "a lazy stream shared between threads", run := fun _ =>
         cRunLibs concStream "3998000\n" },
     { name := "closed definitions (CAFs, 15i) used by eight threads at once: a table and a memoised suspension in it", run := fun _ =>

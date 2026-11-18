@@ -42,9 +42,19 @@ test per `inc`/`dec`. The rest follows from that invariant:
   per thread.
 
 A spawned thread has a 256 MB stack (`WIZ_THREAD_STACK_MB`). The interpreters (`#eval`,
-`#run`) don't run threads. Checked with ThreadSanitizer (`--cflags -fsanitize=thread`) on
-the `conc` programs; the cost for single-threaded programs is queued for measurement
-(`perf-queue.md`). Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
+`#run`) don't run threads. The sanitiser evidence is `scripts/tsan-conc.sh`: it builds the
+programs in `Tests/tsan/` (eight threads under a lock around a plain, non-atomic C
+counter; the contended ordering case; four threads spawning children) with
+`--cflags "-O1 -g -fsanitize=thread"`, runs them, and fails on a ThreadSanitizer report or
+a wrong total. The `conc` group runs the same sources in the ordinary suite (so the lock's
+mutual exclusion is tested without a sanitiser too) and once more under ThreadSanitizer, so
+the claim is a test rather than a one-off run. `wiz_sys_spawn_in` re-asserts
+`signal(SIGPIPE, SIG_IGN)` on every spawn (a failed `exec` restores the program's
+disposition, and another thread may have spawned since), so concurrent spawns from
+several threads share no flag and are not a data race. The sanitiser's cost for
+single-threaded programs is queued for measurement (`perf-queue.md`).
+
+Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
 Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to a
 blackhole), and `rc == -1` counting as unique.
 
@@ -168,6 +178,15 @@ output. MVars and locks are ordinary (ω) values, shared freely.
 `MVar.modify m f` (borrow, then fill with `f a`) updates a cell atomically with respect to
 other borrowers. Deadlock-free locks (lock levels, or Jacobs & Balzer's POPL 2023 linear
 locks) are future work (plan C8).
+
+The linear discipline is not mutual exclusion, so the `conc` group tests the runtime's part
+too: eight threads bump a plain, non-atomic C counter a thousand times each under
+`Lock.with` and the case asserts the exact total (`8000`) and an overlap detector that must
+stay `0`; the critical section yields to the scheduler (`sched_yield`), so a lock that does
+not exclude shows up even in a one-CPU job. A second case holds the lock, waits for
+another thread to announce that it is acquiring, and pins the order in which the threads
+print (the waiter's first line comes after the holder released). `scripts/tsan-conc.sh`
+and one `conc` case run the same programs under ThreadSanitizer (25a).
 
 ## 25e: what's next
 

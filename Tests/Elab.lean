@@ -481,12 +481,15 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
       includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
-/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
-def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let (s, src, dir) ← elabTree files
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
   | .error e => failRun e
 
@@ -2093,20 +2096,25 @@ def failsLibs (input : String) (fragment : String) : IO Unit := do
 /-- Build `main` with the C backend (or LLVM), with every library importable, and return
 the run's outcome: its output, or why it failed. A frontend error is thrown (the source is
 wrong); a failure to *build* is `.build`/`.toolchain`, and a program that ran and failed is
-`.run` (its exit code and stderr). Never skips: `cRunLibs` decides that from the outcome. -/
-def cRunLibsOut (src : String) (llvm : Bool := false) : IO (Except Build.RunError String) := do
+`.run` (its exit code and stderr). Never skips: `cRunLibs` decides that from the outcome.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibsOut (src : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO (Except Build.RunError String) := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120)
+  let tc ← toolchain
+  Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120)
 
 /-- Build `main` with the C backend (or LLVM), with every library importable, and compare
 its output. Skips as "no toolchain" only when the *build* cannot find the compiler or GMP;
 a program that ran and failed is this case's failure, with its exit code and stderr (a
-program that prints "No such file or directory" itself is not a missing toolchain). -/
-def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
-  match ← cRunLibsOut src llvm with
+program that prints "No such file or directory" itself is not a missing toolchain).
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibs (src : String) (expected : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO Unit := do
+  match ← cRunLibsOut src llvm cflags with
   | .ok v => checkEq expected v
   | .error e => failRun e
 
