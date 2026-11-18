@@ -4,6 +4,7 @@ import Scry.PointsTo
 import Scry.Rules
 import Scry.Models
 import Scry.Lifetime
+import Scry.Bounds
 import Text
 /-!
 # Scry.Interproc
@@ -371,11 +372,14 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let warnings := Scry.dedupWarnings (List.filter (Scry.keepMemWarning hasLifetime)
-    (List.append
-      (Scry.concatLists (fun r => r.plan.memWarnings) results)
-      (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)));
-  let memoryFindings := Scry.lifetimeFindings p pt pack;
+  let bounds := Scry.boundsCheck p pt pack results;
+  let warnings := Scry.dedupWarnings (List.append
+    (List.filter (Scry.keepMemWarning hasLifetime)
+      (List.append
+        (Scry.concatLists (fun r => r.plan.memWarnings) results)
+        (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
+    bounds.warnings);
+  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/

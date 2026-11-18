@@ -2,7 +2,7 @@
 
 Automated solvers decide goals that are tedious to prove by hand: linear arithmetic side
 conditions, Boolean identities, bit-vector facts. Wiz uses them in three ways, which
-differ in what is trusted (design and survey: `wiz-notes/smt.md`):
+differ in what is trusted:
 
 * **`smt`** (28a) asks an SMT solver (Z3) and believes it: an axiom per
   use, behind a flag, as `native_refl` (stage 27) does for compiled evaluation;
@@ -70,7 +70,21 @@ type). The flag and the solver settings are in the cache keys (commands, modules
 jobs), so an acceptance is never replayed without the flag. `lib/` never uses `smt`
 (group *smt* greps it).
 
-**The self-hosted toolchain** has no `smt`: the request is the Lean host's.
+**The self-hosted toolchain** parses `smt` and refuses it, like the host does without
+`--trust-smt`. `selfhost/Parse.wiz` `surfaceCats` adds the host's `tactic.smt` shape, and
+`selfhost/Frontend.wiz` `tacOfStx` refuses the tactic at elaboration: without the flag
+with this section's message (`smtRefusal`, exit 1, no goals listed — the host's error is
+an elaboration error, not a tactic failure), and with the flag (accepted by the driver,
+`selfhost/Cli.wiz` `Opts.smtTrust`, and mixed into the cache key) with
+`smtUnsupported`, "no SMT translation or solver (C15)". The case
+"smt: without --trust-smt the refusal is the host's, at the command's start (C15)"
+(`Tests/Groups/SelfhostCliDiff.lean`) runs both toolchains and compares the message and
+exit code; the position is the command's start, not the `smt` token (the self-hosted
+frontend has no per-token positions, D6). Only the refusal is implemented: the
+translation (`Wiz/Smt/Translate.lean`), the solver process and the `X.smt✝…` axiom are
+not. `sat_decide` (28b) is further out: its syntax and tactic are `lib/SatTactic.wiz`,
+and it needs the requests `satSolve`, `eqView`, `define` and `assignLate`, which the
+self-hosted tactic engine has not got (`STacOp`, `selfhost/Frontend.wiz`).
 
 ## 28b: `sat_decide`: certified, with LRAT
 
@@ -216,7 +230,7 @@ only on `UIntN`'s seal and its natives, never on `smt`'s axiom or a `sorry`.
 **Kernel cost** (light probes, noise-level; distributivity of `&&&` over `|||`, three
 words, over the time to import the libraries): 4 bits ≈ 2 s, 8 bits ≈ 10 s, 16 bits ≈ 58 s.
 It grows faster than the circuit (3w inputs, ~5w gates): each kernel step costs
-~0.1–1 ms (wiz-notes/smt.md §10), so wide words are slow until the evaluator is faster.
+~0.1–1 ms (light probes on the SAT checkers, 2026-11-12), so wide words are slow until the evaluator is faster.
 Arithmetic and comparisons add gates per bit (a carry or comparison chain), so the same
 width costs more than a bitwise goal.
 
@@ -249,7 +263,7 @@ definitions, so the first check's axiom is normally `sat3.native✝`.
   plumbing are still not trusted: they can only make the tactic fail. `lib/` never uses
   `sat_decide_native` (group *native*).
 * **Stated as `IsTrue e`, not `e = .true`.** An equation type computes both sides when
-  the kernel evaluates it (`wiz-notes/kernel-eval.md`, F5), so every use of the axiom
+  the kernel evaluates it (`vEq` puts both sides in weak head normal form), so every use of the axiom
   would run the check again. `IsTrue e` is a definition too, but the use's expected type
   is the same term, so the constant rule compares its arguments, not the check. An
   axiom's type is checked as a type, not against a value, so adding it does not run the

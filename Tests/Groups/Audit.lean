@@ -190,8 +190,9 @@ def closedTemplates (l v : Nat) : IO (Globals ZeroOneMany) := do
     "T.map" (Templates.mapTm lv)
 
 /-- The types of the eliminators' arguments (`Conv.lean`): evaluated at variables, quoted,
-and checked to be types. `concrete`: the description is `rec i₀ (ret i₀)` instead of a
-variable (see `scaseMethodTy` below). -/
+and checked to be types. `concrete`: the description is `arg I (λ x. rec i₀ (ret i₀))`
+instead of a variable (see `scaseMethodTy` below); the `arg` field guards the recursive one,
+since the kernel rejects an unguarded description (`μ X. X`, `descGuarded`). -/
 def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let g : Globals ZeroOneMany := {}
   let lv : Level := Level.ofNat l
@@ -206,7 +207,8 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   let c1 := c0.bind "I" q (.sort (.succ lv))
   let I : Val ZeroOneMany := Val.var 0
   let c1 := c1.bind "i₀" q I
-  let dTm : Term ZeroOneMany := .drec (.qlit .many) (.var 0) (.dret (.var 0))
+  let dTm : Term ZeroOneMany :=
+    .darg (.qlit .many) (.var 1) (.lam "x" (.drec (.qlit .many) (.var 1) (.dret (.var 1))))
   let c2 := if concrete then c1.define "D" q (.desc lv I) (c1.eval dTm) else c1.bind "D" q (.desc lv I)
   let D : Val ZeroOneMany := if concrete then c1.eval dTm else Val.var 2
   -- Desc.elim
@@ -418,9 +420,8 @@ def compiled (src : String) (llvm : Bool) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 300) with
   | .ok v => pure (some v)
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then IO.println "    (skipped: no toolchain)"; pure none
-    else throw (IO.userError e)
+    if e.isToolchain then IO.println "    (skipped: no toolchain)"; pure none
+    else throw (IO.userError e.message)
 
 /-- What `#eval main` prints. -/
 def evaluated (src : String) : IO String := do

@@ -110,6 +110,7 @@ The layout is one manifest per module (the note's P2) plus a per-layer generatio
 ```
 <cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
 <cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/roots/<hash path>.rootp                             -- a root file's last manifest
 <cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
 ```
 
@@ -132,13 +133,22 @@ A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `
 `module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
 `target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
 `valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
-entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+entries, so editing `prev`/`valid-until` breaks the root too. A **root file's** manifest
+is keyed by its text as well as its headers (`wiz-cache/root-manifest-v1`), so two files
+that differ only in their text do not share one: sharing it made that manifest grow with
+every root file checked (12.7 MB in one cache here), rewrote it per root miss and lost a
+concurrent writer's entries, which made a fresh file miss on every run.
+`manifest.sexpr` records the
 generation number, the previous root, the optional expiry and one record per module (fast
 key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
-**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
-because the number of writing processes (and `-j`) is not an input; a manifest that is
-extended keeps the base it started from rather than chaining to an intermediate partial
-write. Only the write cache is ever written; a
+**snapshot** of the layer's manifests, written by `wiz cache manifest` (and, for a
+read-only layer, sealed by the package) — not by an ordinary run: rebuilding it means
+reading and re-validating every manifest in the layer, which is O(cache) (about a minute
+on a shared cache of thousands of manifests), and nothing a run does reads its module
+list (only its expiry, which a run never changes). Its generation is the module count and
+its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
+manifest that is extended keeps the base it started from rather than chaining to an
+intermediate partial write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.
@@ -278,9 +288,10 @@ The pane waits for the server, then follows the editor's cursor. Without an edit
 `infoview/test.sh` (in the `infoview` test group) runs the terminal infoview against
 `infoview/stub_server.py` (canned goals; as text and in a pseudo-terminal) and against
 the real `wiz lsp --infoview`, with `infoview/editor_stub.py` as the editor.
-`web/test.sh` (needs nix: Emscripten, Chromium; not in CI) runs the Wasm module under
+`web/test.sh` (needs nix: Emscripten, Chromium) runs the Wasm module under
 Node (against the stub), then the page in headless Chromium over the DevTools protocol,
-against the real `wiz lsp --ws`.
+against the real `wiz lsp --ws`. The browser-free half (`WIZ_WEB_NO_BROWSER=1 sh web/test.sh`) is CI's `web` job, with
+`web/framework/test.sh` beside it; the Chromium half stays local.
 
 ### 11o: the infoview over a WebSocket
 
@@ -518,6 +529,25 @@ package's `lib` targets with its module roots (dependencies included), into
   (`/` focuses the box): names first, then doc comments, then signatures, and a hit
   says which matched. The pages are complete HTML: they read without JS, and the
   search works from `file://`.
+* **What is documented.** Every command that declares a name, in source order: `def`
+  (with equations), `partial def`, `axiom`, `extern`, `foreign_type`, `glue`, `c_struct`,
+  `structure`, `class`, `inductive`, `coinductive`, `sealed inductive` and `instance`
+  (named or anonymous: the entry is the instance's name, and its signature is the class
+  applied to its arguments). A *user* command — `syntax … : command` with
+  `attribute [macro command.k] f`, as `lib/Feral.wiz` does — is documented with its own
+  kind, so a project can add `theorem`, `lemma` or `abbrev` as command macros and they
+  appear as such (`lemma` is shown as `theorem`). An entry's signature is the
+  declaration's elaborated type — the statement, for a theorem-like command — never its
+  body. Left out: private declarations and private constructors or fields, the
+  elaborator's auxiliary names (`T.rec`, `T.desc`, `T.casesOn`, …), instances a
+  `deriving` clause makes (they are still listed under their class and type) and commands
+  that declare nothing (`#check`, `#eval`, `syntax`, `notation`, `attribute`, `export`,
+  `link_c`, …); Wiz has no `example` command. Wiz also has no `namespace` command, so a
+  name written `T.f` is a top-level entry whose name, anchor and API row are the fully
+  qualified name (`#T.f`); grouping such names under `T` would need a grouping concept
+  the pages and the manual do not have, and source order is easier to follow. The shown
+  kind is the command's own, with `defEqns` as `def`, `foreignType` as `foreign type`,
+  `cStruct` as `c struct` and `lemma` as `theorem`.
 * **The reference manual** (`Wiz/Doc/Reference.lean`, `--reference DIR`). The pages are
   for browsing; the manual is for looking a name up. `DIR/index.md` has a contents list,
   the **notation table**, then one section per module and one subsection per declaration
@@ -583,16 +613,36 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
+* **Cost: one elaboration per module, and `--jobs`.** The site needs each module's
+  declarations as that module's own file sees them, so `run` elaborates `import M` once
+  per module (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from
+  `~/.cache/wiz` (median closure: 8 modules), so the work is one elaboration per module,
+  not one for the library; the pages, the API index and the reference then pretty-print
+  every declaration and run `Wiz.infer` on every subterm of every signature
+  (`LSP.subtermType:532`, `Site.lean:130`), once per declaration. `--jobs N` elaborates
+  and renders N modules at once (`0`: auto, the CPUs available, at most 8); the output is
+  assembled in the modules' own order, so `OUT` is byte-for-byte the same as `--jobs 1`
+  (only the `-v` log follows completion order, and every line names its module). `-v`
+  writes a progress log to stderr — per module its elaboration and rendering time and
+  cache hits, every 25th declaration, the phase boundaries, and a summary with the wall
+  time and peak RSS; `-vv` lists every declaration, `-q` is the quiet default. Stdout and
+  the pages are unchanged in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
-  links, instances, the index); every cross-link resolves; every declaration is in the
+  links, instances, the index); a fixture with one declaration of every command kind
+  (`Kinds/All.wiz`, including a user-defined `theorem`/`lemma`/`abbrev` and a private
+  definition), checking the kind and the signature (the type or statement, not the body)
+  on the page, in `api.html`/`api.json`, in the search index and in the reference manual,
+  that no non-declaring command makes an entry, and that two runs make the same bytes;
+  every cross-link resolves; every declaration is in the
   search index, with its doc summary and signature; the API index and `api.json` list
   every module and declaration; the reference manual and its `--check`; the pages without
   JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
   comment, and each has a module doc). The search box's ranking and result rendering
-  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh` and by
+  CI's `web` job.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
@@ -827,7 +877,7 @@ page runs.
 * **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
   definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
   error. `web/test.sh` now builds both Wasm modules and runs this test beside the
-  infoview's Node and Chromium tests.
+  infoview's Node and Chromium tests; CI's `web` job runs the browser-free part.
 * **Goals, optionally.** With `?lsp=ws://host:port` the page is also a language client:
   `web/lsp-client.js` speaks JSON-RPC 2.0 over a WebSocket (one message per text frame,
   no `Content-Length`), and `web/playground-lsp.js` shows the tactic state in a Goals
@@ -875,7 +925,8 @@ page runs.
   Scry.Repl`). A module that does not resolve is reported at startup and the REPL exits 2
   instead of failing on the first input. That is how a tool becomes "the ordinary Wiz REPL
   with an extra prelude" rather than forking the loop: it ships a prelude module, and e.g.
-  `scry repl` is `wiz repl -I <scry>/lib --prelude Scry.Repl`.
+  `scry repl`, run from `scry/`, is `wiz repl -I src -I ../lib --prelude Scry.Repl`
+  (from the repository root, `wiz repl -I scry/src -I lib --prelude Scry.Repl`).
 
 * **Limits.** Input is one line per command (`IO.FS.Stream.getLine`): no continuation
   for a definition that spans lines, no readline (history, line editing or completion),
@@ -892,7 +943,8 @@ page runs.
   `.lake/build/bin/tests`), else `.lake/build/bin/tests` in the current directory. Without
   a driver it says how to build one (`lake build wiz tests`) and exits 2. It is not a
   second runner: selectors, `--jobs`, `--list`, `--timings` and the summary are the
-  driver's. (The single-file form `wiz test FILE` is 11ah.)
+  driver's. (The single-file form `wiz test FILE` is still a proposal; there is no
+  11ah section and no `wiz test` command.)
 
 ```
 $ wiz repl

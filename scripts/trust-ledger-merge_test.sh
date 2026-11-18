@@ -174,6 +174,78 @@ cmp -s "$tmp/a" "$tmp/a-orig" || fail "two-reasoned: ours was modified on failur
 run 1 two-legacy "$tmp/o" "$tmp/a" "$tmp/b"
 has two-legacy "$tmp/err" 'K | k | axiom k'
 
+# --- a row deleted on one side and unchanged on the other is deleted (#377) --------
+# Master (theirs) made UInt64.ofNat total and Scry.rdLoop structural, so it removed
+# their rows; the branch (ours) left them alone and added its own. A union would
+# resurrect the removed rows; a three-way merge drops them.
+{
+  write_hdr
+  row IO UInt64.ofNat 'axiom UInt64.ofNat' "$legacy" unassigned 2027-05-14
+  row IO UInt64.toNat 'axiom UInt64.toNat' 'reviewed: kept' reviewer 2027-05-14
+  row Scry.Analysis Scry.rdLoop partial 'reviewed: fuel loop' reviewer 2027-05-14
+} >"$tmp/o"
+{
+  cat "$tmp/o"
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
+} >"$tmp/a"
+{
+  write_hdr
+  row IO UInt64.toNat 'axiom UInt64.toNat' 'reviewed: kept' reviewer 2027-05-14
+} >"$tmp/b"
+{
+  write_hdr
+  row IO UInt64.toNat 'axiom UInt64.toNat' 'reviewed: kept' reviewer 2027-05-14
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
+} >"$tmp/want"
+run 0 delete-theirs "$tmp/o" "$tmp/a" "$tmp/b"
+same delete-theirs "$tmp/want" "$tmp/a"
+
+# The mirror image: ours deleted the rows, theirs left them alone and added one.
+{
+  write_hdr
+  row IO UInt64.toNat 'axiom UInt64.toNat' 'reviewed: kept' reviewer 2027-05-14
+} >"$tmp/a"
+{
+  cat "$tmp/o"
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
+} >"$tmp/b"
+run 0 delete-ours "$tmp/o" "$tmp/a" "$tmp/b"
+same delete-ours "$tmp/want" "$tmp/a"
+
+# --- deleted on one side, modified on the other: refuse ---------------------------
+{
+  write_hdr
+  row K k 'axiom k' "$legacy" unassigned 2027-05-14
+  row K j 'axiom j' 'reviewed: base' reviewer 2027-05-14
+} >"$tmp/o"
+{
+  write_hdr
+  row K j 'axiom j' 'reviewed: base' reviewer 2027-05-14
+} >"$tmp/a"
+{
+  write_hdr
+  row K k 'axiom k' 'reviewed: theirs' reviewer 2027-05-14
+  row K j 'axiom j' 'reviewed: base' reviewer 2027-05-14
+} >"$tmp/b"
+cp "$tmp/a" "$tmp/a-orig"
+run 1 delete-modify "$tmp/o" "$tmp/a" "$tmp/b"
+has delete-modify "$tmp/err" 'K | k | axiom k  (deleted by ours, modified by theirs)'
+has delete-modify "$tmp/err" 'refusing to choose'
+cmp -s "$tmp/a" "$tmp/a-orig" || fail "delete-modify: ours was modified on failure"
+
+# The mirror image: ours modified the row, theirs deleted it.
+{
+  write_hdr
+  row K k 'axiom k' 'reviewed: ours' reviewer 2027-05-14
+  row K j 'axiom j' 'reviewed: base' reviewer 2027-05-14
+} >"$tmp/a"
+{
+  write_hdr
+  row K j 'axiom j' 'reviewed: base' reviewer 2027-05-14
+} >"$tmp/b"
+run 1 modify-delete "$tmp/o" "$tmp/a" "$tmp/b"
+has modify-delete "$tmp/err" 'K | k | axiom k  (deleted by theirs, modified by ours)'
+
 # --- comments and headers: kept once, base first, then the new ones ---------------
 {
   write_hdr
@@ -355,6 +427,32 @@ if grep -q '^<<<<<<<\|^=======$\|^>>>>>>>' "$repo/.github/trust-baseline.tsv"; t
 fi
 if git -C "$repo" ls-files -u | grep -q .; then
   fail "git: the merge left an unmerged path"
+fi
+
+# The #377 shape through git: one branch deletes a row, the other adds one.
+git -C "$repo" checkout -q -b del-a main
+{
+  write_hdr
+  row A a 'axiom a' "$legacy" unassigned 2027-05-14
+} >"$repo/.github/trust-baseline.tsv"
+git -C "$repo" commit -qam del-a
+git -C "$repo" checkout -q -b del-b main
+{
+  write_hdr
+  row A a 'axiom a' "$legacy" unassigned 2027-05-14
+  row A c 'axiom c' "$legacy" unassigned 2027-05-14
+  row A d 'axiom d' 'reviewed: added' reviewer 2027-05-14
+} >"$repo/.github/trust-baseline.tsv"
+git -C "$repo" commit -qam del-b
+n=$((n + 1))
+set +e
+git -C "$repo" merge --no-edit del-a >"$tmp/out" 2>"$tmp/err"
+got=$?
+set -e
+[ "$got" -eq 0 ] || fail "git-delete: the merge through the driver failed: $(cat "$tmp/err")"
+has git-delete "$repo/.github/trust-baseline.tsv" 'axiom d'
+if grep -q 'axiom c' "$repo/.github/trust-baseline.tsv"; then
+  fail "git-delete: the row deleted on one side came back"
 fi
 
 # The same registration refuses a real conflict: two reasoned rows for one key.

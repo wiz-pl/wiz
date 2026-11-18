@@ -18,8 +18,9 @@ The Datalog group's cases are:
 * the pure list model of the relation store.
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
-compiled (C and LLVM); the transitive-closure case runs both. The design is in
-`wiz-notes/scry-datalog.md`.
+compiled (C and LLVM); the transitive-closure case runs both. The embedding and the
+evaluator are described in the module docs of `lib/Scry/Datalog.wiz` and
+`lib/Scry/Eval.wiz`.
 -/
 
 open Wiz
@@ -59,6 +60,7 @@ def strataCase : IO Unit := do
 def scryEgraphGroup : Group where
   name := "scry-egraph"
   exercise := "S12: lib/Scry/Egraph.wiz"
+  parallel := true
   cases := [
     { name := "congruence: a = b also equates f a = f b and g (f a) = g (f b)", run := fun _ =>
         interp "scry-egraph-congruence" "14111" },
@@ -79,6 +81,7 @@ def scryEgraphGroup : Group where
 def scryGroup : Group where
   name := "scry-datalog"
   exercise := "S3: lib/Scry/Store.wiz, lib/Scry/Datalog.wiz, lib/Scry/Eval.wiz"
+  parallel := true
   cases := [
     { name := "transitive closure: the delta loop, and a witness for (1, 4) (interp)", run := fun _ =>
         interp "scry-datalog-tc" "600107" },

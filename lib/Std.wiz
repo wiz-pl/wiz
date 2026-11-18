@@ -68,5 +68,39 @@ extern "wiz_map_find" StrMap.findD : {V : Type} → StrMap V → Str → V → V
 /-- The number of keys. -/
 extern "wiz_map_size" StrMap.size : {V : Type} → StrMap V → Nat
 
-/-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. -/
+/-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. The text
+is written as UTF-8 up to its first NUL (use `FS.writeBytes` in lib/Sys.wiz for binary
+data). `IO Unit` has no error channel, so a failure (a bad path, a full disk) prints
+`wiz: <path>: <message>` on standard error and exits 1 rather than looking like
+success. -/
 extern "wiz_io_write_file" IO.writeFile : String → String → IO Unit
+
+-- ## Bytes and arrays
+
+-- `Bytes` (`lib/IO.wiz`) is a native buffer and `Array` is a native array of boxed
+-- values, so the conversion is a loop of `Bytes.push`/`Array.getD` (`Bytes` holds
+-- numbers below 256; `Bytes.push` keeps the low eight bits). `Array` lives here rather
+-- than in `IO`, which is why the conversions are in this module.
+
+/-- `Bytes.ofArrayAux a fuel i acc`: `acc` with the elements of `a` from `i` on pushed,
+at most `fuel` of them (a helper of `Bytes.ofArray`). -/
+def Bytes.ofArrayAux (a : Array Nat) : Nat → Nat → Bytes → Bytes
+  | .zero, _, acc => acc
+  | .succ fuel, i, acc => match Nat.lt i (Array.size a) with
+    | .true => Bytes.ofArrayAux a fuel (Nat.succ i) (Bytes.push acc (Array.getD a i 0))
+    | .false => acc
+
+/-- The bytes of an array of numbers, each mod 256: `Bytes.ofArray squares`. -/
+def Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a (Array.size a) 0 Bytes.empty
+
+/-- `Bytes.toArrayAux b fuel i acc`: `acc` with the bytes of `b` from `i` on pushed, at
+most `fuel` of them (a helper of `Bytes.toArray`). -/
+def Bytes.toArrayAux (b : Bytes) : Nat → Nat → Array Nat → Array Nat
+  | .zero, _, acc => acc
+  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with
+    | .true => Bytes.toArrayAux b fuel (Nat.succ i) (Array.push acc (Bytes.get b i))
+    | .false => acc
+
+/-- The bytes as an array of numbers: `Bytes.toArray (Bytes.ofArray a)` has the
+elements of `a`, each mod 256. -/
+def Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b (Bytes.size b) 0 Array.empty

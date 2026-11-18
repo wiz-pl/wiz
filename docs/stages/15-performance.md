@@ -7,8 +7,8 @@ the kernel and the interpreters it is the identity; compiled code makes it a thu
 object (`WIZ_TAG_THUNK`) that `wiz_apply` runs at most once, keeping the result. The
 Wiz kernel's glued values now hold their unfolding as `Unit → Val` built with `memo`, as
 the Lean kernel's `Val.unfold` holds a `Thunk`: a global is unfolded only when `whnf`
-looks through it, and once. Checking a term that mentions a large global 300 times
-(without needing its value) went from 206 s to 1 s.
+looks through it, and once. Checking a term that mentions a large global many times
+(without needing its value) no longer forces the global's unfolding.
 
 (`whnf` recurses into the forced unfolding: structural recursion through a function
 field. For a mutual family, that field's induction hypothesis wants the index equation
@@ -19,7 +19,8 @@ proof`.)
 
 A benchmark checks a file of 300 definitions (and one of 3000) with the self-hosted
 pipeline compiled to C, against the Lean-hosted `wiz check`. At first the self-hosted
-one took 1.5 s (and 32 s, so quadratic) against 0.08 s (0.68 s). Profiling the compiled
+one grew quadratically with the number of definitions and was much slower than the
+Lean-hosted checker. Profiling the compiled
 program with `gprof` (`WIZ_CFLAGS=-pg`):
 
 * the parser spent nearly all its time reading tokens, each read trying every token of
@@ -30,17 +31,16 @@ program with `gprof` (`WIZ_CFLAGS=-pg`):
   kernel's constants (checked in the empty context, unfolded lazily since 15a), found
   by name in a `StrMap` (`Scope`), and kept in an `Array`.
 
-Now 0.25 s (2.4 s): linear, within 3–4× of the Lean-hosted checker. The profile is flat;
-the largest share left is reference counting (about 1.4 billion `inc`/`dec` for the
-3000 definitions). Two things tried and left out:
+It is now linear in the number of definitions and within a small factor of the
+Lean-hosted checker. The profile is flat; the largest share left is reference counting
+(one `inc`/`dec` per use). Two things tried and left out:
 
 * *borrow inference* as a pass around `insertRC` (parameters never consumed are
-  borrowed; calls and boxed wrappers fixed up afterwards) removed only 4% of the
-  `inc`s, and cost 12% more allocations, since a borrowed cell can't be reused. The
-  gain needs borrowed *projections* and reuse-aware inference inside `insertRC`
-  itself;
-* `ap` of a known partial application: closures are applied only about a million
-  times here.
+  borrowed; calls and boxed wrappers fixed up afterwards) removed only a small
+  fraction of the `inc`s and cost more allocations, since a borrowed cell can't be
+  reused. The gain needs borrowed *projections* and reuse-aware inference inside
+  `insertRC` itself;
+* `ap` of a known partial application: closures are not the hot path here.
 
 Next: fewer index equations for mutual families (elaboration time and code size).
 
@@ -303,49 +303,31 @@ Lake builds independent Lean modules in parallel (its own job pool, shared artif
 cache) but never parallelises inside a module, so the frontend and backend passes
 above are serial in `wiz`/`grail` themselves.
 
-Probes (heavy, shared machine; approximate), `grail build std` (59 checks; cold
-unless said):
-
-| jobs | cold | warm cache | up to date |
-|---|---|---|---|
-| `-j1` | 174.1 s | | |
-| `-j4` | 55.7 s | 22.6 s | 1.27 s |
-| `-j8` | 44.0 s | | |
-
-So the existing job graph scales 3.1× at `-j4` and 4.0× at `-j8`: the checks form a
-depth-limited import DAG, and the marginal gain of 8 over 4 is small. Graph
-construction and per-node key computation for 59 nodes cost 1.3 s, so the serial
-scheduler is not a bottleneck. The warm-cache build spends 22.6 s replaying the
-modules' commands from their per-command cache files (one `.wizc` per command) in 59
-separate processes: each job re-reads the closure and re-preprocesses headers.
+More jobs help `grail build std` (59 checks), but the checks form a depth-limited import
+DAG, so the marginal gain from four to eight jobs is small and the serial scheduler is
+not the bottleneck. A warm-cache build spends its time replaying the modules' commands
+from their per-command cache files (one `.wizc` per command) in separate processes: each
+job re-reads the closure and re-preprocesses headers.
 
 The old `grail build` graph had `check F -> ir F -> c F` for an executable, three
 jobs and three processes. `ir` and `c` each re-ran the whole IR pipeline, not just
 elaboration. 23g now runs one `build F` job that checks F and writes its IR, C and
-link text (`ir F` remains for a file that is already checked as a module). Measured
-on the self-hosted compiler (`grail build selfhost-compiler -j4`, 641 KB generated
-source): **262.3 s -> 160.7 s (1.63×)**; six small examples at `-j1`: 19.8 -> 14.9 s.
-For the same source, `wiz check` is 34.1 s and `wiz build --cc true` (elaboration +
-IR + C, no C compiler) is 70.4 s, so the IR pipeline is ~36 s that the old graph ran
-once per `ir`/`c` job. The full `wiz build` of that file is 157.3 s: elaboration
-34 s, IR+C 36 s, and **one `cc -O2` process 87 s** (one core, one translation unit).
+link text (`ir F` remains for a file that is already checked as a module). That removes
+the repeated IR work; the full `wiz build` is still dominated by elaboration, the IR+C
+stage and one `cc -O2` process (one core, one translation unit).
 
 **Splitting the C** (`wiz build --split N`, implemented) compiles a support unit (the
 runtime with `-DWIZ_API=`, the foreign glue, the exports and `main`) plus `N` units of
-generated declarations, each a `cc -c -O2` task, then links. On the same 18.8 MB
-program (12934 declarations, cold cache): single **146.9 s**, `--split 2` 103.5 s,
-`--split 4` 91.6 s, `--split 8` **85.8 s** (1.71×; its `cc` stage 16.2 s against 87 s
-for one unit); warm cache 144.0 -> 81.1 s. The generated C each build prints is
-identical. The cost is that `cc` cannot inline across unit boundaries: the program
-built with `--split 8` runs 50.5 s against 38.0 s (1.33× slower). A one-unit program
-against the split runtime runs 42.3 s, so ~11% is runtime calls and ~16% generated
-cross-unit calls. `-fvisibility=hidden` does not help; `-flto` recovers the run time
-(40.5 s) but its link costs 84.2 s, so the build is no faster than single
-(`-flto=8`: 88.1 s / 43.2 s). The split is therefore **opt-in** (`--split N`,
-default 1), for fast iteration rather than release builds. The partition is
-deterministic (declaration order, balanced by C text), and each part keeps its object
-in `<out>.split/` with a stamp of its text and flags, so a rebuild to the same output
-compiles only the parts that changed (an example: 3.3 s -> 0.5 s on a second build).
+generated declarations, each a `cc -c -O2` task, then links. It builds faster as `N`
+grows because the `cc -O2` work is parallel; the generated C each build prints is
+identical. The cost is that `cc` cannot inline across unit boundaries, so the split
+program runs slower. A one-unit program against the split runtime shows the runtime-call
+and cross-unit call shares; `-fvisibility=hidden` does not help; `-flto` recovers the run
+time but its link costs more, so the build is no faster than single. The split is
+therefore **opt-in** (`--split N`, default 1), for fast iteration rather than release
+builds. The partition is deterministic (declaration order, balanced by C text), and each
+part keeps its object in `<out>.split/` with a stamp of its text and flags, so a rebuild
+to the same output compiles only the parts that changed.
 
 What is left:
 
@@ -356,19 +338,20 @@ What is left:
 2. **Module-effect bundles.** Have the check/build job write its modules' effects to
    one bundle per module key (derived from, and compatible with, the per-command
    cache), so a warm build or a `grail test` process replays one file per module
-   instead of one per command. Targets the measured 22.6 s warm build; no key
-   changes if the bundle is derived and validated by `binaryId`/module key.
+   instead of one per command. Targets the warm build; no key changes if the bundle
+   is derived and validated by `binaryId`/module key.
 3. **Batch the check-only tests of a `grail test` run** into a few worker jobs: the
    frontend already keeps isolated module states per process (`Frontend.isoKey`), so
    one process checking several test files replays the common imports once. This is
    orthogonal to the `--jobs` work in the Lean test driver.
 
-Parallelising the 36 s IR+C stage per declaration (after the serial borrow fixpoint)
-is the fallback if cross-unit inlining cannot be recovered: byte-identical output,
-~16% end to end.
+Parallelising the IR+C stage per declaration (after the serial borrow fixpoint) is the
+fallback if cross-unit inlining cannot be recovered: byte-identical output, at some
+end-to-end cost.
 
-Raising grail's `-j` default is not one of them: the 4 -> 8 gain is 1.27×, and
-memory per check job is the limit of the shared heavy slot.
+Raising grail's `-j` default is not one of them: the gain from four to eight jobs is
+small, and memory per check job is the limit of the shared heavy slot.
+
 ### 15l: the performance dashboard
 
 `scripts/perf-dashboard.py` turns the measurement log into one self-contained HTML page
@@ -376,16 +359,17 @@ memory per check job is the limit of the shared heavy slot.
 temporary name and a rename, so it is safe to re-run):
 
 ```sh
-python3 scripts/perf-dashboard.py                       # wiz-tools/perf-history.tsv
+python3 scripts/perf-dashboard.py --history RUNS.tsv     # a log you supply
 python3 scripts/perf-dashboard.py --timings RUNS --html out.html
 ```
 
-`--history TSV` is the measurement log (a row per run: date, commit, label, seconds, max
-RSS, exit code), `--repo DIR` the checkout whose `git log` orders commits and names them
-from their merge commits, `--gap MIN` the pause between measurements that starts a new
-window, and `--out`/`--html` the page to write. Labels lose their `@worktree` suffix;
-failed runs are counted but leave out the medians, and A/B pairs compare each measured
-commit with its nearest measured ancestor inside a window's interleaved rounds.
+No measurement log is checked in: `--history TSV` is a log you supply (a row per run:
+date, commit, label, seconds, max RSS, exit code). `--repo DIR` is the checkout whose
+`git log` orders commits and names them from their merge commits, `--gap MIN` the pause
+between measurements that starts a new window, and `--out`/`--html` the page to write.
+Labels lose their `@worktree` suffix; failed runs are counted but leave out the medians,
+and A/B pairs compare each measured commit with its nearest measured ancestor inside a
+window's interleaved rounds.
 
 **CI test timings.** `--timings FILE_OR_DIR` (repeatable) ingests `test-timings.jsonl`
 artifacts — the records `lake test --timings` writes and `scripts/ci.py summary` reads,
@@ -401,5 +385,5 @@ maximums. Since CI runs cases with `--jobs`, a group's total is test time, not w
 time; compare groups over runs, not runs on different runners.
 
 `scripts/test-perf-dashboard.sh` checks the two input formats and the self-contained
-output against the small fixtures in `scripts/fixtures/perf/` (under a second, no
-toolchain). The page is published from the notes directory (`wiz-notes/`).
+output against the small fixtures in `scripts/fixtures/perf/` (no toolchain). The page
+itself is published outside this repository.

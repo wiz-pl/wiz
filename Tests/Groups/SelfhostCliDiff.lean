@@ -16,7 +16,10 @@ namespace Tests.Elab
 toolchains over the same input tree in a fresh directory and compares what a user sees:
 the exit code, standard output, standard error, the cache entries and the artifacts.
 The cases are picked by what a user hits first — `check` on a bad file, `build` on a good
-one, the cache flags — and by D2–D7 of `wiz-notes/selfhost-parity.md`. The host's newer
+one, the cache flags — and by the driver items of the self-hosting parity audit, whose
+labels the cases cite: D2 subcommands, D3 flags, D4 build artifacts, D5 the elaboration
+cache, D6 diagnostics, D7 exit codes (and, for the skips, A14 modules, C5 the LLVM/IR
+backends, C9 `--lib`/`--no-main`, C12 the native operations, D8 LSP/doc). The host's newer
 flags are covered too: `--target c` works in both, `--target llvm|wasm` and
 `--cache-verify strict` are the host's backend/manifest features the self-hosted
 toolchain has not got (C5, D5), and each is an asserted skip rather than a silent pass.
@@ -321,6 +324,21 @@ def cliDiffGroup : Group where
         checkEq 1 s3.code
         cliCheck s3.err "tm.wiz:2:1: error: type mismatch" "type mismatch"
         skip "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+    { name := "smt: without --trust-smt the refusal is the host's, at the command's start (C15)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        -- `smt` (stage 28a) is a library tactic: the host parses it, elaborates it, and
+        -- refuses it unless `--trust-smt`; the self-hosted frontend parses the same tree
+        -- (Parse.wiz `surfaceCats`) and refuses it with the same message and exit code
+        let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
+        let spec : CliDiffSpec := { files := #[("f.wiz", src)], args := #["check", "f.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq ("f.wiz:2:1: error: SMT solving is not enabled: `smt` closes a goal on an " ++
+          "SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n") s.err
+        skip "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6); the message and the exit code are the same" },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,

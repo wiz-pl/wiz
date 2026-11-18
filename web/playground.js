@@ -5,7 +5,7 @@
 "use strict";
 import { isValue, renderValue } from "./playground-values.js";
 import { startInfoview } from "./playground-lsp.js";
-import { isSelfhostSearch, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
+import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
 
 const editor = document.getElementById("editor");
@@ -97,15 +97,15 @@ editor.addEventListener("keydown", (e) => {
   }
 });
 
-// The goals pane is independent of the Wasm engine: with `?lsp=ws://host:port` it is a
-// language client (web/playground-lsp.js); without one it says so and the page stays a
-// local checker. A failed connection is the same as no server. `?lsp=selfhost` is the
-// in-page server (web/selfhost-lsp-shim.js): the same Wasm engine answers the pane, so
-// there is nothing to start; it waits for the engine to load.
+// The goals pane is independent of the Wasm engine. By default it is the in-page server
+// (web/selfhost-lsp-shim.js): the same Wasm engine answers the pane, so there is nothing
+// to start, and it waits for the engine to load. `?lsp=ws://host:port` switches it to the
+// external language client (web/playground-lsp.js), and `?lsp=off` (or none/0/false)
+// leaves the pane with no server; a failed connection is the same as no server.
 let engineReady;
 const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
 engineLoaded.catch(() => { /* reported by start(); the shim reports it again */ });
-const selfhost = typeof location !== "undefined" && isSelfhostSearch(location.search)
+const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
   ? selfhostEndpoint({
     evaluate: (src) => engineLoaded.then(() => evalSource(src)),
     check: (src) => engineLoaded.then(() => checkSource(src)),

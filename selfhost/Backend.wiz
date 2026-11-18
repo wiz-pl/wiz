@@ -1982,7 +1982,10 @@ def ffiProtoParams (ffi : List Foreign) : List String → List String
     | .true => ffiProtoParams ffi rest
     | .false => match cbOf k with
       | .some c => .cons (cbPtrType c) (.cons "void *" (ffiProtoParams ffi rest))
-      | .none => .cons (extCType ffi k) (ffiProtoParams ffi rest)
+      -- (stage 30) a byte buffer is passed as a pointer and a length
+      | .none => match strEq k "y" with
+        | .true => .cons "const void *" (.cons "size_t" (ffiProtoParams ffi rest))
+        | .false => .cons (extCType ffi k) (ffiProtoParams ffi rest)
 inductive FfiIn where
   | mk (pre : String) (cargs : List String) (post : String)
 -- (stage 21q) a callback: its trampoline and the closure as the context; a borrowed one
@@ -1993,10 +1996,14 @@ def ffiInMore (ffi : List Foreign) (k a c pre : String) (cargs : List String) (p
     | .mk owned _ _ _ => match owned with
       | .true => post
       | .false => "rt_drop(" +++ a +++ "); " +++ post)
-  | .none => match kindStruct ffi k with
-    | .some f => .mk (structCType f +++ " " +++ c +++ "; wiz_sin_" +++ structMangled f +++ "(&" +++ c +++ ", " +++ a +++ "); " +++ pre) (.cons c cargs)
-        ("wiz_sfree_" +++ structMangled f +++ "(&" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)
-    | .none => .mk ("uint64_t " +++ c +++ " = rt_in_nat(" +++ a +++ "); " +++ pre) (.cons c cargs) post
+  | .none => match strEq k "y" with
+    -- (stage 30) a byte buffer: its data and length, borrowed for the call
+    | .true => .mk pre (.cons ("(const void *)((wiz_bytes *)" +++ a +++ ")->data")
+        (.cons ("(size_t)((wiz_bytes *)" +++ a +++ ")->len") cargs)) ("rt_drop(" +++ a +++ "); " +++ post)
+    | .false => match kindStruct ffi k with
+      | .some f => .mk (structCType f +++ " " +++ c +++ "; wiz_sin_" +++ structMangled f +++ "(&" +++ c +++ ", " +++ a +++ "); " +++ pre) (.cons c cargs)
+          ("wiz_sfree_" +++ structMangled f +++ "(&" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)
+      | .none => .mk ("uint64_t " +++ c +++ " = rt_in_nat(" +++ a +++ "); " +++ pre) (.cons c cargs) post
 -- the marshalling of the parameters: the statements before the call, the C arguments,
 -- and the statements after it
 partial def ffiIn (ffi : List Foreign) (i : Nat) : List String → FfiIn
@@ -2082,6 +2089,11 @@ def structIn (ffi : List Foreign) : Nat → List String → List String → Stri
     | .true => dup "rt_in_bool"
     | .false => match strEq k "s" with
     | .true => dup "rt_in_str"
+    | .false => match strEq k "y" with
+    -- (stage 30) a byte array `char f[N]`: copied, zero-padded or cut to size
+    | .true => "{ wiz_bytes *b = (wiz_bytes *)" +++ x +++ "; size_t m = b->len < sizeof " +++ lhs +++
+        " ? b->len : sizeof " +++ lhs +++ "; memset(" +++ lhs +++ ", 0, sizeof " +++ lhs +++
+        "); if (m) memcpy(" +++ lhs +++ ", b->data, m); } "
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sin_" +++ structMangled g +++ "(&" +++ lhs +++ ", " +++ x +++ "); "
     | .none => "") +++ structIn ffi (i + 1) fs ks
@@ -2106,6 +2118,9 @@ def structOut (ffi : List Foreign) : Nat → List String → List String → Str
     | .true => "rt_out_f64(" +++ x +++ ")"
     | .false => match strEq k "u" with
     | .true => "rt_out_u64(" +++ x +++ ")"
+    | .false => match strEq k "y" with
+    -- (stage 30) a byte array `char f[N]`: a new `Bytes` of the field's size
+    | .true => "rt_bytes_new((const void *)" +++ x +++ ", sizeof " +++ x +++ ")"
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sout_" +++ structMangled g +++ "(" +++ x +++ ")"
     | .none => "rt_out_nat(" +++ x +++ ")") +++ "; " +++ structOut ffi (i + 1) fs ks
@@ -2330,7 +2345,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2848,7 +2863,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
              "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
              "); rt_root(&c); } inc(c); return c; }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;

@@ -30,6 +30,7 @@ def bauds : List Baud → List SerialConfig
 def serialGroup : Group where
   name := "serial"
   exercise := "Stage 9k"
+  parallel := true
   cases := [
     { name := "a pseudo-terminal: every byte value both ways, raw settings read back", run := fun _ =>
         serialRun ["pty ← Pty.open", "let all := Bytes.range 256",

@@ -18,7 +18,11 @@ axiom `X.native✝ : a = b` and `X := X.native✝` (`Command.lean`).
 4. The kernel checks each read-back term against `T` and decides `conv` between them
    (two normal forms of first-order data: cheap).
 
-What it trusts: see `wiz-notes/native-refl.md` and docs/Status.md ("Trusted base").
+What it trusts (see also docs/Status.md, "Trusted base"): erasure and the rewrites on
+erased terms, the interpreter (`Run.lean`) and Lean's `Nat` arithmetic under the `nat.*`
+natives, and every `implemented_by`, `builtin` native outside `lib/` and foreign
+function model the computation reaches (`#print axioms` lists the `.native✝` axiom). Not
+the IR, the C backend, the C runtime or the C compiler: none of them runs.
 -/
 
 namespace Wiz.Native

@@ -49,6 +49,20 @@ export function isSelfhostSearch(search) {
   }
 }
 
+// The page's default: the in-page server when the URL names no endpoint at all (so the
+// published page has a Goals pane with nothing to start); `?lsp=selfhost` names it
+// explicitly. `?lsp=off`/`none`/`0`/`false` disables the pane, and a `ws://` URL or a
+// port keeps the external-server client.
+export function wantsSelfhost(search) {
+  try {
+    const value = new URLSearchParams(search || "").get("lsp");
+    if (value === null) return true;
+    return /^\s*selfhost\s*$/i.test(value);
+  } catch (_) {
+    return true;
+  }
+}
+
 // The page's rule (web/playground.js): a source without an `import` gets the embedded
 // Prelude. `prefix` is what was added, so offsets can be moved back into the editor.
 export function withPrelude(text) {

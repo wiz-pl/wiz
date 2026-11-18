@@ -172,6 +172,7 @@ def taintFindings (name : String) : IO (List String) := do
 def group : Group where
   name := "scry-csharp"
   exercise := "scry C# frontend (tree-sitter-c-sharp view, lowering, taint)"
+  parallel := true
   cases := [
     { name := "spills: every fixture's spill is tree-sitter-c-sharp and spans its text",
       run := fun _ => do

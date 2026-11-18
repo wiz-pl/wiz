@@ -1,8 +1,9 @@
 #!/bin/sh
 # The checks CI runs first, in one command, before a commit or a push.
 #
-#   scripts/pre-commit.sh --fast      docs style, `wiz fmt` on changed files, the
-#                                     ledger fixtures, the skip lint and `.github/` YAML
+#   scripts/pre-commit.sh --fast      docs style and links, the preludes' surface,
+#                                     `wiz fmt` on changed files, the ledger fixtures,
+#                                     the skip lint and `.github/` YAML
 #   scripts/pre-commit.sh --full      the fast checks, then the trust ledger, the
 #                                     reproducibility corpus and the formatter's tests
 #   scripts/pre-commit.sh --staged    only the files in `git diff --cached` (the
@@ -139,6 +140,14 @@ check_docs_style() {
   python3 "$root/scripts/check-docs-style.py" --root "$root" --quiet
 }
 
+check_prelude_drift() {
+  python3 "$root/scripts/check-prelude-drift.py" --root "$root" --quiet
+}
+
+check_doc_links() {
+  python3 "$root/scripts/check-doc-links.py" --root "$root" --quiet
+}
+
 check_format() {
   _pc_bad=0
   while IFS= read -r _pc_file; do
@@ -172,6 +181,11 @@ PY
 
 check_trust_fixtures() {
   TESTS_BIN="$tests_bin" "$root/Tests/trust-ledger/run.sh"
+}
+
+check_host_unsafe() {
+  python3 "$root/scripts/host-unsafe-ledger.py" --root "$root" --check &&
+    "$root/Tests/host-unsafe-ledger/run.sh"
 }
 
 check_trust_ledger() {
@@ -390,6 +404,27 @@ else
   run_check "docs style" check_docs_style
 fi
 
+# docs links and anchors (no build, no network: Python 3 standard library only)
+if ! have python3; then
+  skip_check "docs links" "python3 not found"
+elif [ ! -f "$root/scripts/check-doc-links.py" ]; then
+  skip_check "docs links" "scripts/check-doc-links.py is missing"
+else
+  run_check "docs links" check_doc_links
+fi
+
+# the self-hosted frontend's embedded prelude against lib/Prelude.wiz (no build:
+# Python 3 standard library only; a checkout of the library and the frontend is needed)
+if ! have python3; then
+  skip_check "prelude drift" "python3 not found"
+elif [ ! -f "$root/scripts/check-prelude-drift.py" ]; then
+  skip_check "prelude drift" "scripts/check-prelude-drift.py is missing"
+elif [ ! -f "$root/lib/Prelude.wiz" ] || [ ! -f "$root/selfhost/Frontend.wiz" ]; then
+  skip_check "prelude drift" "not a full checkout (no lib/Prelude.wiz or selfhost/Frontend.wiz)"
+else
+  run_check "prelude drift" check_prelude_drift
+fi
+
 # wiz fmt --check, only the changed .wiz files (one file at a time)
 if [ ! -s "$work/wiz-files" ]; then
   skip_check "wiz fmt" "no changed .wiz files"
@@ -410,6 +445,16 @@ else
   run_check "trust-ledger fixtures" check_trust_fixtures
 fi
 
+# the host-side unsafe ledger (the host Lean's `unsafe`/`implemented_by`/`extern`) and its
+# fixtures: python3 only, no build
+if ! have python3; then
+  skip_check "host unsafe ledger" "python3 not found"
+elif [ ! -f "$root/.github/host-unsafe.tsv" ] || [ ! -f "$root/scripts/host-unsafe-ledger.py" ]; then
+  skip_check "host unsafe ledger" "no .github/host-unsafe.tsv in this tree"
+else
+  run_check "host unsafe ledger" check_host_unsafe
+fi
+
 # the skip lint's own rules (synthetic logs: no test run needed)
 if ! have python3; then
   skip_check "skip lint self-test" "python3 not found"
@@ -417,6 +462,16 @@ elif [ ! -f "$root/scripts/ci.py" ]; then
   skip_check "skip lint self-test" "scripts/ci.py is missing"
 else
   run_check "skip lint self-test" python3 "$root/scripts/ci.py" check-skips --self-test
+fi
+
+# check-repro's own rules, and its JSON reader, on synthetic input (no compiler needed)
+if ! have python3; then
+  skip_check "repro self-tests" "python3 not found"
+elif [ ! -f "$root/scripts/check-repro.sh" ] || [ ! -f "$root/scripts/check-repro-report.py" ]; then
+  skip_check "repro self-tests" "scripts/check-repro{,-report} is missing"
+else
+  run_check "repro self-tests" bash -c '"$1" --self-test && python3 "$2" --self-test' _ \
+    "$root/scripts/check-repro.sh" "$root/scripts/check-repro-report.py"
 fi
 
 # every .github/*.yml parses (PyYAML is a dev tool, not a hard dependency)

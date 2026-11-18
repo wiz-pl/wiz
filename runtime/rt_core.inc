@@ -85,6 +85,32 @@ static void wiz_panic(const char *msg) {
   exit(3);
 }
 
+/* The same failure policy for the runtime's own buffers (the OS-surface natives in
+   rt_sys.inc/rt_data.inc): a failed allocation is `wiz: out of memory` and exit 3,
+   never a NULL dereference later. A reader that can report an errno uses the error
+   path instead (ENOMEM); these are for the allocations that have no result to fail. */
+static void *wiz_xmalloc(size_t bytes) {
+  void *p = malloc(bytes ? bytes : 1);
+  if (!p) wiz_panic("out of memory");
+  return p;
+}
+static void *wiz_xcalloc(size_t n, size_t bytes) {
+  void *p = calloc(n ? n : 1, bytes ? bytes : 1);
+  if (!p) wiz_panic("out of memory");
+  return p;
+}
+static void *wiz_xrealloc(void *p, size_t bytes) {
+  void *q = realloc(p, bytes ? bytes : 1);
+  if (!q) wiz_panic("out of memory");
+  return q;
+}
+static char *wiz_xstrdup(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)wiz_xmalloc(n);
+  memcpy(p, s, n);
+  return p;
+}
+
 #ifdef WIZ_NO_THREADS
 /* `what` needs a second thread, and this build has none */
 __attribute__((noreturn)) static void wiz_no_threads(const char *what) {

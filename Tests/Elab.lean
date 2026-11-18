@@ -167,9 +167,14 @@ def preludeLoader : IO (Name → Option String) := do
   let functor ← IO.FS.readFile "lib/Functor.wiz"
   let logic ← IO.FS.readFile "lib/Logic.wiz"
   let text ← IO.FS.readFile "lib/Text.wiz"
+  -- (`IO`, `Std` and `Sys`: `#eval`/`#run` of a `Bytes` value needs `lib/IO.wiz`)
+  let io ← IO.FS.readFile "lib/IO.wiz"
+  let std ← IO.FS.readFile "lib/Std.wiz"
+  let sys ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "Word" then some word
     else if m == "Functor" then some functor else if m == "Logic" then some logic
-    else if m == "Text" then some text else none
+    else if m == "Text" then some text else if m == "IO" then some io
+    else if m == "Std" then some std else if m == "Sys" then some sys else none
 
 /-- `ok`, with `lib/` available to `import` (the tests run from the package root). -/
 
@@ -356,6 +361,14 @@ def twice : IO Unit := IO.bind hello (fun _ => hello)
 def main : IO Unit := IO.bind twice (fun _ => twice)
 "
 
+/-- Report a `Build.runGlobal` failure: skip (as "no toolchain") only when the *build*
+could not find the C toolchain; a program that ran and failed is the case's failure, with
+its exit code and stderr. Never match the program's stderr: a program may print "No such
+file or directory" itself, and that is then a failing test, not a missing toolchain. `what`
+prefixes the failure (`"(llvm) "`). -/
+def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
+  if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
+
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
 def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
@@ -365,9 +378,7 @@ def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat 
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
@@ -387,8 +398,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     else Build.compileC tc (C.program decls false (Build.extraC s)) exe
   match built with
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain tc e then skip "no toolchain" else throw (IO.userError e)
   | .ok () =>
     let out ← IO.Process.output { cmd := exe.toString, env := #[("WIZ_STACK_MB", some "1")] }
     unless out.exitCode == 0 do throw (IO.userError s!"the program failed ({out.exitCode}): {out.stderr.take 500}")
@@ -435,9 +445,7 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   let tc ← toolchain
   match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
   | .ok v => k v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
 def ioRun (src : String) (expected : String) (args : Array String := #[]) (llvm : Bool := false)
@@ -473,16 +481,29 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
       includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
-/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
-def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let (s, src, dir) ← elabTree files
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
+  | .error e => failRun e
+
+/-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
+def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
+  let (s, src, dir) ← elabTree files
+  let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  | .ok v => throw (IO.userError s!"expected a failure, got {v}")
   | .error e =>
-    let missing := ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if e.isToolchain then skip "no toolchain"
+    else unless (e.message.splitOn fragment).length > 1 do
+      throw (IO.userError s!"error does not mention '{fragment}':\n{e.message}")
 
 /-- A program that links a C file (with a static helper and a header the FFI can't bind)
 and the maths library. -/
@@ -539,11 +560,10 @@ def ioRunC (src csrc expected : String) (fails : Option String := none) : IO Uni
     match ← Build.runGlobal tc s "main" dir llvm (timeout := some 120) with
     | .ok v => if fails.isSome then throw (IO.userError s!"expected a failure, got {v}") else checkEq expected v
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if e.isToolchain then skip "no toolchain"
       else match fails with
-        | some frag => unless (e.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e}")
-        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
+        | some frag => unless (e.message.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e.message}")
+        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e.message}")
 
 /-- Build the exports of `src` as a library (`wiz build --lib`), link it with the C
 program `csrc` (which includes `lib.h`), run it. Both backends. -/
@@ -554,8 +574,7 @@ def libRunC (src csrc expected : String) : IO Unit := do
     let tc ← toolchain
     match ← Build.build tc s "main" (dir / "lib.o") llvm true with
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if Build.missingToolchain tc e then skip "no toolchain"
       else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
     | .ok _ =>
       IO.FS.writeFile (dir / "main.c") csrc
@@ -1140,6 +1159,31 @@ def sizeArgs : List MTm :=
   [mus 0 (unit 0) natD star star, streamAt (enum 2),
    natAt szInf, ann (lam (natAt (var 0))) (pi size (univ 0)), ann (lam (streamAt (szSuc (var 0)))) (pi size (univ 0))]
 
+/-- The guarded inductive description: `μ` rejects a description whose recursive field is
+not under a non-recursive (`arg`) field — `μ X. X`, the identity functor, has no
+induction principle. `ν X. X` is a valid coinductive type (guardedness there is
+`cocon`/`out`), so the same description is accepted at `ν`. `Nat`, a list, a binary tree,
+a guarded stream and a bare-observation stream are accepted; a size that is not a `Size`
+and a size variable that escapes its binder are rejected by the size check (K3). -/
+def muSize : List (MTm × Bool) :=
+  let listD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (dret star)))]))
+  let treeD := darg (enum 2) (lam (ecase (desc 0 (unit 0)) (var 0)
+    [dret star, darg (enum 2) (lam (drec star (darg (enum 2) (lam (drec star (dret star))))))]))
+  [(natTy, true),
+   (mu 0 (unit 0) listD star, true),
+   (mu 0 (unit 0) treeD star, true),
+   (nu 0 (unit 0) streamD star szInf, true),
+   (streamAt (szSuc szInf), true),
+   -- unguarded for μ: a description that is only a recursive field (`μ X. X`); the same
+   -- description is a valid coinductive type (`ν X. X`: one observation, itself)
+   (mus 0 (unit 0) (drec star (dret star)) star szInf, false),
+   (nu 0 (unit 0) (drec star (dret star)) star szInf, true),
+   -- a size that is not a Size, and a size variable that escapes its binder
+   (mus 0 (unit 0) natD star star, false),
+   (mus 0 (unit 0) natD star (var 0), false),
+   (nu 0 (unit 0) streamD star (var 0), false)]
+
 /-- Q4 (fixed): a description field must live exactly in `Sort (l+1)`, the universe
 `Desc.elim`'s `marg` takes it from. It used to be enough for it to fit (`Sort k`,
 `k ≤ l+1`), and universes aren't cumulative, so `Desc.elim` could reduce to a term of the
@@ -1348,7 +1392,7 @@ def transpProp : List MTm :=
 /-- Terms the differential test always checks (well-typed ones the generator rarely
 builds whole), before the random ones. -/
 def samples : List MTm :=
-  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
+  propShapes ++ qtyApart ++ elimLevels ++ transpProp ++ sizeInf ++ sizeEq ++ sizeArgs ++ muSize.map (·.1) ++ smallField ++ projRule.map (·.1) ++ elimRule.map (·.1) ++ usageRule.map (·.1) ++ linearCaseRule.map (·.1) ++ [levelInEnv 0 0, levelInEnv 1 1, levelInEnv 0 1, levelInEnv 1 0,
    natTy, natZero, natSucc natZero, natSucc (natSucc natZero), ann natD (desc 0 (unit 0)),
    eq natTy natZero (natSucc natZero), eq natTy (natSucc natZero) (natSucc natZero), refl natTy (natSucc natZero),
    delim 1 (lam (unit 0)) (lam star) (lams 4 star) (lams 4 star) (lams 5 star) (ann natD (desc 0 (unit 0))),
@@ -2048,17 +2092,30 @@ def failsLibs (input : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
-/-- Build `main` with the C backend (or LLVM), with every library importable. -/
-def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- Build `main` with the C backend (or LLVM), with every library importable, and return
+the run's outcome: its output, or why it failed. A frontend error is thrown (the source is
+wrong); a failure to *build* is `.build`/`.toolchain`, and a program that ran and failed is
+`.run` (its exit code and stderr). Never skips: `cRunLibs` decides that from the outcome.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibsOut (src : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO (Except Build.RunError String) := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120)
+
+/-- Build `main` with the C backend (or LLVM), with every library importable, and compare
+its output. Skips as "no toolchain" only when the *build* cannot find the compiler or GMP;
+a program that ran and failed is this case's failure, with its exit code and stderr (a
+program that prints "No such file or directory" itself is not a missing toolchain).
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibs (src : String) (expected : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO Unit := do
+  match ← cRunLibsOut src llvm cflags with
   | .ok v => checkEq expected v
-  | .error e =>
-    if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
-    else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build and run `main` with the whole library (`IO` …), through C or LLVM. -/
 def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
@@ -2068,9 +2125,7 @@ def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit :
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Reads of a wide structure's fields through shared projection prefixes (15j), where
 reference counting could go wrong: the root consumed (`keepW`) before the last read

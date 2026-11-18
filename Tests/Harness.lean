@@ -14,6 +14,20 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+/-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
+`Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
+checks its files N at a time). `Group.run` passes it to each case's process; the cases
+of a parallel group (`Group.runJobs`) get 1, since N of them already run at once. -/
+initialize caseJobsRef : IO.Ref Nat ← IO.mkRef 1
+/-- Whether the driver was given `--jobs` (so a case can tell an explicit `--jobs 1`
+from the default, which means "choose for yourself"). -/
+initialize caseJobsSetRef : IO.Ref Bool ← IO.mkRef false
+
+/-- How many workers a case may use (`caseJobsRef`); at least 1. -/
+def caseJobs : IO Nat := do pure (max 1 (← caseJobsRef.get))
+
+/-- Whether `--jobs` was given on the command line. -/
+def caseJobsGiven : IO Bool := caseJobsSetRef.get
 
 def toolchain : IO Wiz.Toolchain := toolchainRef.get
 
@@ -59,6 +73,41 @@ def check (cond : Bool) (msg : String) : IO Unit :=
 def checkEq {α : Type} [BEq α] [ToString α] (expected actual : α) : IO Unit :=
   unless expected == actual do
     throw (IO.userError s!"expected {expected}\n      got {actual}")
+
+/-- The wall time of `f k` in milliseconds, best of `runs` (a shared machine stalls one
+run, not all of them). -/
+def bestMs (f : Nat → IO Unit) (k : Nat) (runs : Nat := 3) : IO Nat := do
+  let mut best := 1_000_000_000
+  for _ in [0:runs] do
+    let t0 ← IO.monoMsNow
+    f k
+    best := min best ((← IO.monoMsNow) - t0)
+  pure best
+
+/-- `checkScaling name f n bound`: a claim of "linear" measured at `n` and `2n`, not an
+absolute millisecond bound.
+
+Runs `f 0` once to measure the fixed floor (process start-up and the like; `f 0` must
+be a valid, minimal input), then `f n` and `f (2 * n)` best of three each, subtracts the
+floor, and requires `t(2n) ≤ bound * t(n) + slackMs`.  `bound` 3 is a claim of linear,
+6 of `n log n`, 10 of quadratic.  The measured pair is printed on success and repeated
+in the failure, so a failure can be diagnosed without re-running (and no timing claim
+depends on one machine's absolute numbers).
+
+The floor matters: a ~1 s start-up otherwise hides a 2× ratio at small `n`.  The
+`slackMs` allowance (default 250 ms) absorbs scheduler noise in the net times; it is
+not a subsidy for a real superlinear shape, which doubles with `n`. -/
+def checkScaling (name : String) (f : Nat → IO Unit) (n bound : Nat)
+    (slackMs : Nat := 250) : IO (Nat × Nat) := do
+  let floor ← bestMs f 0 1
+  let a ← bestMs f n
+  let b ← bestMs f (2 * n)
+  let na := max 1 (a - floor)
+  let nb := max 1 (b - floor)
+  IO.println s!"  {name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms, best of 3, bound {bound}×)"
+  unless nb ≤ bound * na + slackMs do
+    throw (IO.userError s!"{name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms): more than {bound}× plus {slackMs} ms")
+  pure (a, b)
 
 /-- Run one case in-process; used by the child process. -/
 def Case.runHere (c : Case) : IO UInt32 := do
@@ -150,13 +199,18 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let stdout ← IO.getStdout
   stdout.flush
   let self ← IO.appPath
+  -- a case of a group that runs its cases one at a time may use the driver's `--jobs`;
+  -- `runJobs` does not pass it, so N cases at once do not each start N workers
+  let given ← caseJobsGiven
+  let jobs ← caseJobs
+  let jobArgs := if given then #["--jobs", toString jobs] else #[]
   let mut results := #[]
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
     let start ← IO.monoMsNow
     let out ← IO.Process.output
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ (← flagsRef.get).toArray }
+      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ jobArgs ++ (← flagsRef.get).toArray }
     let ms := (← IO.monoMsNow) - start
     let r := caseResult c i out.exitCode out.stdout out.stderr ms
     IO.println (renderResult r)
@@ -254,7 +308,7 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
       try l.kill catch _ => pure ()
   pure (← results.get)
 
-/-- Cases with known outcomes for the test driver's own tests (`Tests/Grail.lean`,
+/-- Cases with known outcomes for the test driver's own tests (`Tests/Groups/GrailTestRunner.lean`,
 `testrunner`): `--run` finds this group, but no selector picks it, so it is never part
 of a suite run. -/
 def driverFixtures : Group where

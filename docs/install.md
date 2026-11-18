@@ -154,40 +154,21 @@ wiz build Main.wiz -o hello && ./hello
 ```
 
 A **grail package** is a directory with a `grail.wiz`, which is itself a Wiz program:
-`package` lists the targets. There is no `grail new` yet; the files are short:
+`package` lists the targets. `grail new NAME [--dir DIR]` writes the smallest package
+(`grail.wiz`, `src/Main.wiz`, `tests/hello.wiz`, `README.md`, `.gitignore`) into
+`./NAME`, or `DIR/NAME` with `--dir`:
 
 ```sh
-mkdir -p src tests
-echo nightly > wiz-toolchain                  # optional: the toolchain of this project
-cat > src/Greet.wiz <<'EOF'
-import Prelude
-def greeting : String := "hello from grail"
-EOF
-cat > App.wiz <<'EOF'
-import IO
-import Greet
-def main : IO Unit := IO.println greeting
-EOF
-cat > tests/greet.wiz <<'EOF'
-import Greet
-#eval greeting
-EOF
-cat > grail.wiz <<'EOF'
-import Grail
-def package : Package := Package.new "hello"
-  |> Package.lib "greet" "src"           -- every module under src/ (import Greet)
-  |> Package.exe "app" "App.wiz"         -- compile main: .grail/bin/app
-  |> Package.tests "tests" "tests"       -- each tests/*.wiz against its .expected
-EOF
-grail build               # 6 jobs run
-grail run app             # hello from grail
-grail test --update       # writes tests/greet.expected: the messages of the file
+grail new hello
+cd hello
+grail build               # the library, the executable and the test's program
+grail run hello           # hello from hello
 grail test                # 1 passed, 0 failed
 ```
 
 `grail build` again runs nothing: every job is keyed by its inputs. `grail targets`
-lists the targets, and `grail config` prints the C toolchain grail uses. Add `.grail/` to
-your `.gitignore`.
+lists the targets, and `grail config` prints the C toolchain grail uses. `grail new`
+already puts `.grail/` in the package's `.gitignore`.
 
 ### Dependencies
 
@@ -278,10 +259,11 @@ repository and are not in the release tarball:
 
 * **in a terminal**: `infoview/build.sh`, then `wiz-infoview SOCK` in a split next to
   the editor (or `wiz-infoview --file F.wiz --at LINE:COL` on its own);
-* **in a browser**: `web/build.sh` (needs Emscripten; `nix develop` has it), then
-  `web/bridge.sh`, which starts `wiz lsp --ws` and serves the page; open the address it
-  prints. The page edits its own documents, and when your editor's server runs with
-  `--ws` it also follows that editor's cursor.
+* **in a browser**: `web/build.sh` (needs Emscripten, which the dev shell does not
+  include; without `emcc` on `PATH` the script runs itself again under
+  `nix shell nixpkgs#emscripten`), then `web/bridge.sh`, which starts `wiz lsp --ws`
+  and serves the page; open the address it prints. The page edits its own documents,
+  and when your editor's server runs with `--ws` it also follows that editor's cursor.
 
 Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 
@@ -290,7 +272,7 @@ Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 `wiz lsp` is a standard language server on stdin/stdout. Any LSP client can use it: run
 `wiz lsp` (or `grail lsp` in a grail package) with the project root as the working
 directory. The infoview is extra protocol (`wiz/interactiveGoals` and friends,
-`wiz-notes/infoview-protocol.md`), so other clients get diagnostics, hover and the rest,
+[the infoview protocol](design/infoview-protocol.md)), so other clients get diagnostics, hover and the rest,
 but not the infoview, unless they run one of the clients above.
 
 ## Troubleshooting

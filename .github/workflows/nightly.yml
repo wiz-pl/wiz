@@ -12,10 +12,13 @@ on:
     branches: [master]
 
 concurrency:
-  # one at a time, in order; the forward-only check makes a late older run harmless
+  # One at a time, in order, never cancelled: a late (older) run is made harmless by the
+  # forward-only check in release-snapshots.sh, and it still moves nightly for its commit.
   group: nightly
   cancel-in-progress: false
 
+# Least privilege: moving the `nightly` tag and replacing the nightly release's assets
+# needs write; `actions: read` is for asking whether release.yml still runs on the commit.
 permissions:
   contents: write # moving the tag, replacing the nightly release's assets
   actions: read # whether release.yml still runs on the commit
@@ -25,9 +28,10 @@ jobs:
     name: move nightly to a commit whose CI passed
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    # 75 min: wait up to 3600 s for the snapshot, then two release API calls
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           sparse-checkout: scripts
       - name: nightly -> the snapshot of ${{ github.event.workflow_run.head_sha }}
