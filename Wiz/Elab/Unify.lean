@@ -40,6 +40,7 @@ checked again in that view (`checkGuessedDecl`).
 | problem | example | Wiz | Lean 4 |
 |---|---|---|---|
 | pattern (distinct variables) | `?m x =?= x + 1` | solve exactly (`solve`) | the same (`processAssignment`) |
+| the same variable in a hole's context and as its argument | `?p A B =?= A → B` (`A`, `B` in the context of `?p`) | solve exactly, by abstraction (`?p := (→)`): the first `arity` spine entries are the hole's context, and only the ones after them are its arguments (`invert`) | the same (a hole's context is not part of its application) |
 | variables, one repeated | `?m Γ i' =?= r i'` (`i'` in `Γ`) | solve without the repeated variable if the right side doesn't use it (pruning); else the first-order guess from the repeated variable on (`.default`) | not a pattern (`isDefEqPattern` wants distinct variables): first-order approximation, else postponed |
 | flex-rigid, not a pattern | `?m ?A =?= M Nat` (`do`) | first-order guess (`.default`) | `isDefEq` with `foApprox` (the elaborator's configuration): the same guess |
 | the same, in the "expected type first" pass of an application whose result type mentions placeholders of its explicit arguments | `?p ?k =?= ok (base + k)`, `?p`, `?k` the arguments `p`, `k` | no guess (`.none`): the speculative pass fails and is undone, the arguments decide, the result type is unified after them | the expected type is not propagated when the result type depends on explicit arguments (`propagateExpectedType`) |
@@ -139,31 +140,59 @@ def PRen.lift (p : PRen) : PRen :=
 /-- **Exercise 3.2.** Invert a spine into a partial renaming. `gamma` is the size of the
 current context. Every spine entry must be an application (`Elim.app v`) whose
 argument forces to a bound variable with an empty spine (`.neutral (.local x) #[]`),
-and a variable that occurs twice is left out of the renaming (the solution may not use
-it). Otherwise throw (at `{}`), saying the problem is outside the pattern fragment.
-The i-th spine variable maps to level i.
+and a variable that occurs twice among the *arguments* is left out of the renaming
+(the solution may not use it). Otherwise throw (at `{}`), saying the problem is outside
+the pattern fragment. The i-th spine variable maps to level i.
+
+The first `arity` entries of a hole's spine are the hole's own context (`metaApp`: a
+hole is a function of its context), not arguments to it. They are distinct when the hole
+is made, and the solution may use them. At a use, one variable can fill two of them
+(`?m7 S T S T l b s`, after `?m7`'s context was instantiated with `S` and `T`): that is
+not a repeated argument either — the equation only says what `?m7` is at that
+instantiation, and the *later* position (the more local parameter, the one the
+instantiation refined) is used. So a variable is only repeated when it occurs twice
+among the entries *after* `arity`; for a hole over no context (`arity = 0`, the whole
+spine is its arguments) this is exactly the old rule. An argument that names a variable
+of the hole's context (`?p A B` where `A` and `B` are also in the context of `?p`) is
+not a repeat: it is the argument at that position, and it shadows the context parameter
+of the same level. That is the pattern case `?p A B =?= A → B` (solved as `?p := (→)`,
+`?p` then restored by applying the solution to the spine); `?p a a =?= a → a` is still
+not a pattern, since the two *arguments* are the same variable (no most general
+solution), and `?p (f a) b` still is not one either.
 
 (Given) A lowered variable `down x` (`x : ULift A`) counts as a variable too: the
 solution's i-th parameter `y` stands for `down x`, and `x` itself for `up y` (η for
 `ULift`). Constructor fields with a lifted domain (`k : A → Proto` with `A : Type` in a
 `Type 1` inductive) are stored as `fun h => k (down h)`, so unifying two such fields
 meets `?k … (down h)`. -/
-def invert (gamma : Lvl) (sp : Array (Elim R)) : ElabM R PRen := do
+def invert (gamma : Lvl) (sp : Array (Elim R)) (arity : Nat := 0) : ElabM R PRen := do
   --<sol
   let mut ren : Std.HashMap Lvl Lvl := {}
   let mut downs : Std.HashMap Lvl Lvl := {}
   let mut repeated : Array Lvl := #[]
+  let mut seenArgs : Std.HashSet Lvl := {}
   let mut dom := 0
-  for e in sp do
+  for e in sp, i in [0:sp.size] do
     let .app v := e | throwAt {} "unification problem is outside the pattern fragment" "non-pattern"
+    -- the hole's own context entries are not arguments (see the docstring)
+    let isCtx := i < arity
     match ← force v with
     | .neutral (.local x) #[] =>
-      -- a repeated variable can't be used by the solution (which occurrence?)
-      if ren.contains x || downs.contains x then repeated := repeated.push x
+      if !isCtx then
+        -- a repeated *argument* can't be used by the solution (which occurrence?)
+        if seenArgs.contains x then repeated := repeated.push x
+        else
+          seenArgs := seenArgs.insert x
+          -- an argument shadows a context parameter of the same level
+          downs := downs.erase x
       ren := ren.insert x dom
       dom := dom + 1
     | .neutral (.local x) #[.down] =>
-      if ren.contains x || downs.contains x then repeated := repeated.push x
+      if !isCtx then
+        if seenArgs.contains x then repeated := repeated.push x
+        else
+          seenArgs := seenArgs.insert x
+          ren := ren.erase x
       downs := downs.insert x dom
       dom := dom + 1
     | _ => throwAt {} "unification problem is outside the pattern fragment" "non-pattern"
@@ -349,10 +378,16 @@ where
 
 /-- **Exercise 3.4.** Solve `?m sp =?= rhs` in a context of size `gamma`: invert the
 spine, rename `rhs`, wrap the result in `sp.size` lambdas, and evaluate it in the
-empty environment to get the solution. Record it with `solveMeta`. -/
+empty environment to get the solution. Record it with `solveMeta`.
+
+The inversion is told the hole's `arity`: its first `arity` spine entries are the
+hole's own context (`metaApp`), and only the entries after them are its arguments.
+That is what makes `?p A B =?= A → B` a pattern, with `?p := fun A B => A → B`
+(the solution is a function of the whole spine; applied to the context it is a
+function of the two arguments). -/
 def solve (gamma : Lvl) (m : Nat) (sp : Array (Elim R)) (rhs : Val R) : ElabM R Unit := do
   --<sol
-  let p ← invert gamma sp
+  let p ← invert gamma sp (← lookupMeta m).arity
   let body ← rename m p rhs
   -- a spine variable that is a binder unification went under keeps that binder's name
   let hints := (← get).binderNames
