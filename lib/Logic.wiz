@@ -29,7 +29,9 @@ the definitional `propext` and `funext`, and the Boolean algebra (`Bool.and_comm
 `Bool.or_assoc`, `Bool.and_absorb`, the De Morgan laws, …) with its bridges from
 `b = true` to `∧`, `∨` and `¬` (`Bool.and_eq_true`, `Bool.or_eq_true`, `Bool.not_eq_true`).
 The oriented Boolean identities are registered with `attribute [simp]` at the end of the
-file, so `simp` normalises Boolean goals without a rule list.
+file, so `simp` normalises Boolean goals without a rule list. The guarded disjunction
+`Bool.implies` and the `Option.some` injectivity lemmas `Option.some.inj`/`injEq` (with
+`some_ne_none`/`none_ne_some`) are here too.
 
 ```
 import Logic
@@ -496,3 +498,34 @@ attribute [simp] Bool.or_true_right
 attribute [simp] Bool.or_self
 attribute [simp] Bool.or_absorb
 attribute [simp] Bool.or_not_self
+
+/-- The left disjunct of a false `Bool.or`. -/
+def Bool.or_left : (a b : Bool) → Bool.or a b = .false → a = .false
+  | .true, _, h => absurd h.1
+  | .false, _, _ => rfl
+/-- The right disjunct of a false `Bool.or`. -/
+def Bool.or_right : (a b : Bool) → Bool.or a b = .false → b = .false
+  | .true, _, h => absurd h.1
+  | .false, _, h => h
+/-- A passed guard `!b || c`, at `b`: `b` holds and so does `c`. -/
+def Bool.implies : (b c : Bool) → Bool.or (Bool.not b) c = .true → b = .true → c = .true
+  | .true, _, h, _ => h
+  | .false, _, _, e => absurd e.1
+
+-- ## Options
+
+/-- `some` is injective: an equation of `some`s gives one of their values. (The kernel
+accepts the projection here: the equation's first field is the values' equation.) -/
+def Option.some.inj {A : Type} {v w : A}
+    (h : @Option.some A v = @Option.some A w) : v = w := h.1
+/-- `some v = some w` exactly when `v = w` (the `injEq` of `Option.some`). -/
+def Option.some.injEq {A : Type} (v w : A) :
+    (@Option.some A v = @Option.some A w) ↔ (v = w) :=
+  Iff.intro (fun h => h.1) (fun h => Eq.congrArg (@Option.some A) h)
+/-- `some` is not `none`. (`A` and `v` are explicit: they occur only in the hypothesis,
+which the elaborator does not use to solve them.) -/
+def Option.some_ne_none (A : Type) (v : A)
+    (h : @Option.some A v = @Option.none A) : False := h.1
+/-- `none` is not `some`. -/
+def Option.none_ne_some (A : Type) (v : A)
+    (h : @Option.none A = @Option.some A v) : False := h.1

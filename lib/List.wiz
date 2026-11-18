@@ -1,0 +1,142 @@
+import Text
+import Logic
+/-!
+# List lemmas
+
+The list facts every proof needs, next to the list functions of `lib/Text.wiz` (`import
+List` brings both): `List.append`'s unit and associativity, `map` over an append and a
+composition, and `filter`/`all`/`any` over an append. `List.Mem` is membership as a
+proposition (`x = y ∨ List.Mem x ys`), with the append lemmas. `List.cons.inj`,
+`List.cons.inj_tail` and `List.cons.injEq` project an equation of `cons` cells (issue
+#265).
+
+```
+import List
+
+def t {A : Type} (l : List A) : List.append l .nil = l := List.append_nil l
+def u (x : Nat) (xs ys : List Nat) : List.Mem x (List.append xs ys) :=
+  List.mem_append_left x xs ys (Or.inl rfl)
+```
+
+The `filter`/`all`/`any` proofs match on a helper of the test's value
+(`List.filterStep`, `List.allStep`, `List.anyStep`), because Wiz does not reduce a
+`match` on a computed test (`p x`) in a goal; the step functions are in `lib/Text.wiz`
+next to the definitions.
+-/
+
+-- ## Membership
+
+/-- `x` is an element of the list: `x = y` for the head, or a member of the tail. -/
+def List.Mem {A : Type} (x : A) : List A → Prop
+  | .nil => False
+  | .cons y ys => x = y ∨ List.Mem x ys
+/-- Nothing is in the empty list. -/
+def List.not_mem_nil {A : Type} (x : A) : ¬ List.Mem x .nil := fun h => h
+/-- A member of the left list is a member of the append. -/
+def List.mem_append_left {A : Type} (x : A) : (l k : List A) →
+    List.Mem x l → List.Mem x (List.append l k)
+  | .nil, _, h => absurd h
+  | .cons _ ys, k, h =>
+    Or.elim h (fun e => Or.inl e) (fun m => Or.inr (List.mem_append_left x ys k m))
+/-- A member of the right list is a member of the append. -/
+def List.mem_append_right {A : Type} (x : A) : (l k : List A) →
+    List.Mem x k → List.Mem x (List.append l k)
+  | .nil, _, h => h
+  | .cons _ ys, k, h => Or.inr (List.mem_append_right x ys k h)
+/-- A member of an append is in one of the two lists. -/
+def List.mem_append_elim {A : Type} (x : A) : (l k : List A) →
+    List.Mem x (List.append l k) → List.Mem x l ∨ List.Mem x k
+  | .nil, _, h => Or.inr h
+  | .cons _ ys, k, h =>
+    Or.elim h (fun e => Or.inl (Or.inl e))
+      (fun m => Or.elim (List.mem_append_elim x ys k m)
+        (fun ml => Or.inl (Or.inr ml)) (fun mk => Or.inr mk))
+
+-- ## Append
+
+/-- `l ++ [] = l`. -/
+def List.append_nil {A : Type} : (l : List A) → List.append l .nil = l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons x) (List.append_nil xs)
+/-- `++` is associative. -/
+def List.append_assoc {A : Type} : (l m k : List A) →
+    List.append (List.append l m) k = List.append l (List.append m k)
+  | .nil, _, _ => rfl
+  | .cons x xs, m, k => Eq.congrArg (List.cons x) (List.append_assoc xs m k)
+
+-- ## Map
+
+/-- `map` distributes over `++`. -/
+def List.map_append {A B : Type} (f : A → B) : (l k : List A) →
+    List.map f (List.append l k) = List.append (List.map f l) (List.map f k)
+  | .nil, _ => rfl
+  | .cons x xs, k => Eq.congrArg (List.cons (f x)) (List.map_append f xs k)
+/-- A composition of maps is one map. -/
+def List.map_map {A B C : Type} (g : B → C) (f : A → B) : (l : List A) →
+    List.map g (List.map f l) = List.map (fun x => g (f x)) l
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons (g (f x))) (List.map_map g f xs)
+/-- `map` keeps the length. -/
+def List.length_map {A B : Type} (f : A → B) : (l : List A) →
+    List.length (List.map f l) = List.length l
+  | .nil => rfl
+  | .cons _ xs => Eq.congrArg Nat.succ (List.length_map f xs)
+
+-- ## Filter, all and any
+
+/-- `filter` distributes over `++`. -/
+def List.filter_append {A : Type} (p : A → Bool) : (l k : List A) →
+    List.filter p (List.append l k) = List.append (List.filter p l) (List.filter p k)
+  | .nil, _ => rfl
+  | .cons x xs, k =>
+    let ih := List.filter_append p xs k;
+    let step : (b : Bool) → List.filterStep b x (List.filter p (List.append xs k))
+        = List.append (List.filterStep b x (List.filter p xs)) (List.filter p k) :=
+      fun b => match b with
+        | .true => Eq.congrArg (List.cons x) ih
+        | .false => ih;
+    step (p x)
+/-- `all` over an append is the conjunction of the two. -/
+def List.all_append {A : Type} (p : A → Bool) : (l k : List A) →
+    List.all p (List.append l k) = Bool.and (List.all p l) (List.all p k)
+  | .nil, _ => rfl
+  | .cons x xs, k =>
+    let ih := List.all_append p xs k;
+    let step : (b : Bool) → List.allStep b (List.all p (List.append xs k))
+        = Bool.and (List.allStep b (List.all p xs)) (List.all p k) :=
+      fun b => match b with
+        | .true => ih
+        | .false => rfl;
+    step (p x)
+/-- `any` over an append is the disjunction of the two. -/
+def List.any_append {A : Type} (p : A → Bool) : (l k : List A) →
+    List.any p (List.append l k) = Bool.or (List.any p l) (List.any p k)
+  | .nil, _ => rfl
+  | .cons x xs, k =>
+    let ih := List.any_append p xs k;
+    let step : (b : Bool) → List.anyStep b (List.any p (List.append xs k))
+        = Bool.or (List.anyStep b (List.any p xs)) (List.any p k) :=
+      fun b => match b with
+        | .true => rfl
+        | .false => ih;
+    step (p x)
+
+-- ## Constructors
+
+/-- Equal `cons` cells have equal heads. -/
+def List.cons.inj {A : Type} {x y : A} {xs ys : List A}
+    (h : @List.cons A x xs = @List.cons A y ys) : x = y := h.1
+/-- Equal `cons` cells have equal tails. (The raw projection `h.2.1` is a `cast` around
+the constructor's `Enum` proof, which the elaborator does not reduce to `xs = ys`; going
+through `List.drop 1` with `Eq.congrArg`'s type arguments spelled out avoids it, #265.) -/
+def List.cons.inj_tail {A : Type} {x y : A} {xs ys : List A}
+    (h : @List.cons A x xs = @List.cons A y ys) : xs = ys :=
+  @Eq.congrArg (List A) (List A) (@List.drop A 1)
+    (@List.cons A x xs) (@List.cons A y ys) h
+/-- `cons x xs = cons y ys` exactly when both fields are equal (the `injEq` of
+`List.cons`, as in Lean). -/
+def List.cons.injEq {A : Type} (x y : A) (xs ys : List A) :
+    (@List.cons A x xs = @List.cons A y ys) ↔ (x = y ∧ xs = ys) :=
+  Iff.intro (fun h => (h.1, List.cons.inj_tail h))
+    (fun p => Eq.trans (Eq.congrArg (fun t => @List.cons A x t) p.2)
+      (Eq.congrArg (fun z => @List.cons A z ys) p.1))

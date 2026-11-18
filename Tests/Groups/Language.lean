@@ -507,6 +507,17 @@ def languageGroup : Group where
         okLib ("import Prelude\ndef f {m : Type → Type} [Monad m] : m Nat := Monad.pure 1\n" ++
           "def g : (m : Type → Type) → [Monad m] → m Nat := fun m => Monad.pure 2\n" ++
           "def h : [inst : Monad TacticM] → Nat := 3\ndef E : Type := Enum [a, b]") },
+    -- (#265) `some v = some w` projects where the kernel accepts the projection
+    { name := "#265: some v = some w: Option.some.inj, h.1 and injEq", run := fun _ =>
+        okLibs ("import Logic\n" ++
+          "def inj1 (v w : Nat) (h : @Option.some Nat v = .some w) : v = w := Option.some.inj h\n" ++
+          "def inj2 (v w : Nat) (h : @Option.some Nat v = .some w) : v = w := h.1\n" ++
+          "def inj3 (v w : Nat) (h : @Option.some Nat v = .some w) : v = w := (Option.some.injEq v w).1 h\n" ++
+          "def ne1 (v : Nat) (h : @Option.some Nat v = @Option.none Nat) : False := Option.some_ne_none Nat v h\n" ++
+          "def ne2 (v : Nat) (h : @Option.none Nat = @Option.some Nat v) : False := h.1\n" ++
+          "#print axioms inj1\n#print axioms Option.some.injEq\n#print axioms ne2")
+          ["'inj1' does not depend on any axioms", "'Option.some.injEq' does not depend on any axioms",
+           "'ne2' does not depend on any axioms"] },
     -- (13l) `++` is a class method
     { name := "++ appends lists and strings (class Append)", run := fun _ =>
         okLib ("import Prelude\ndef a (ys : List Nat) : List Nat := .cons 1 .nil ++ ys ++ .nil\n" ++

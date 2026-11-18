@@ -45,12 +45,16 @@ def List.reverse {A : Type} (l : List A) : List A := List.revApp l .nil
 def List.map {A B : Type} (f : A → B) : List A → List B
   | .nil => .nil
   | .cons x xs => .cons (f x) (List.map f xs)
+/-- One step of `List.filter`: keep `x` when `b` is `.true`. Written as a helper of the
+test's value so that proofs can match on `b` (a `match` on a computed test can't be
+reduced in a goal; see lib/List.wiz's `List.filter_append`). -/
+def List.filterStep {A : Type} (b : Bool) (x : A) (xs : List A) : List A := match b with
+  | .true => .cons x xs
+  | .false => xs
 /-- The elements that satisfy `p`, in order. -/
 def List.filter {A : Type} (p : A → Bool) : List A → List A
   | .nil => .nil
-  | .cons x xs => match p x with
-    | .true => .cons x (List.filter p xs)
-    | .false => List.filter p xs
+  | .cons x xs => List.filterStep (p x) x (List.filter p xs)
 /-- Fold from the left: `List.foldl f b [x, y]` is `f (f b x) y`. -/
 def List.foldl {A B : Type} (f : B → A → B) : B → List A → B
   | b, .nil => b
@@ -59,18 +63,22 @@ def List.foldl {A B : Type} (f : B → A → B) : B → List A → B
 def List.foldr {A B : Type} (f : A → B → B) (b : B) : List A → B
   | .nil => b
   | .cons x xs => f x (List.foldr f b xs)
+/-- One step of `List.any`: `.true` when `b` is, else the rest's answer `r`. -/
+def List.anyStep (b r : Bool) : Bool := match b with
+  | .true => .true
+  | .false => r
 /-- Whether some element satisfies `p` (stops at the first). -/
 def List.any {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .false
-  | .cons x xs => match p x with
-    | .true => .true
-    | .false => List.any p xs
+  | .cons x xs => List.anyStep (p x) (List.any p xs)
+/-- One step of `List.all`: the rest's answer `r` when `b` is `.true`, else `.false`. -/
+def List.allStep (b r : Bool) : Bool := match b with
+  | .true => r
+  | .false => .false
 /-- Whether every element satisfies `p` (stops at the first that doesn't). -/
 def List.all {A : Type} (p : A → Bool) : List A → Bool
   | .nil => .true
-  | .cons x xs => match p x with
-    | .true => List.all p xs
-    | .false => .false
+  | .cons x xs => List.allStep (p x) (List.all p xs)
 /-- The first element that satisfies `p`, if any. -/
 def List.find {A : Type} (p : A → Bool) : List A → Option A
   | .nil => .none

@@ -258,7 +258,7 @@ def Mealy.findFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) 
     (n : Nat) → (s : S) → (xs : Trace I) → Mealy.findFrom m p n s xs = .true →
     ∃ k, Nat.lt k n = .true ∧ p (Mealy.stateAt m s xs k) (xs k) = .true
   | .zero, s, xs, h => absurd h.1
-  | .succ n, s, xs, h => Or.elim (Bool.or_true (p s (xs 0)) (Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h)
+  | .succ n, s, xs, h => Or.elim (Bool.or_eq_true (p s (xs 0)) (Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h)
       (fun (e : p s (xs 0) = .true) =>
         Ex.intro (fun (k : Nat) => Nat.lt k (Nat.succ n) = .true ∧ p (Mealy.stateAt m s xs k) (xs k) = .true) 0 (And.intro rfl e))
       (fun (e : Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs) = .true) =>

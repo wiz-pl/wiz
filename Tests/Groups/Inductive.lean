@@ -122,6 +122,12 @@ def inductiveGroup : Group where
           "DecidableEq is derived for an enumeration or a single-constructor record only"
         failsLibs ("import Deriving\ninductive Tree where\n  | leaf\n  | node (l : Tree) (n : Nat) (r : Tree)\n  deriving DecidableEq")
           "DecidableEq is derived for an enumeration or a single-constructor record only" },
+    { name := "an equation of constructors projects its fields (#265)", run := fun _ =>
+        ok (indPrelude ++
+          "def px (a a' b b' : Nat) (h : Point.mk a b = Point.mk a' b') : a = a' := h.1\n" ++
+          "def py (a a' b b' : Nat) (h : Point.mk a b = Point.mk a' b') : b = b' := h.2.1\n" ++
+          "#print axioms px\n#print axioms py")
+          ["'px' does not depend on any axioms", "'py' does not depend on any axioms"] },
     { name := "unknown constructor via dot", run := fun _ =>
         fails (indPrelude ++ "def bad : Nat := .three") "no constructor three" },
     -- (U2) a data type at a symbolic universe: its description's level is the declared
