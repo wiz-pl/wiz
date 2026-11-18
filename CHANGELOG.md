@@ -43,6 +43,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
   as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
   (`fib 40`) at 120 s in `check` and in the one-shot compile.
+* selfhost: the unit eliminator `let () := u; b` and `split` (`let q (x, y) := s; b`,
+  with a tuple `let (x, y, z)` as nested pairs) are in the self-hosted toolchain (21ah).
+  `Kernel.wiz` gained `split` (the stuck `ssplit` spine, `vSplit`, conversion, the
+  `q·p`/`q` usage), the frontend elaborates both forms, and the backend erases them (it
+  used to refuse `letUnit`), so a pair held at quantity 1 is consumed by
+  `let 1 (x, y) := p` and a linear `Unit` by `let () := u`, as in the Lean toolchain.
+  The `selfhost` group pins the verdicts against the Lean frontend and runs a program in
+  both compilers; its module-private case also checks the Lean frontend's message text
+  and the self-hosted compiler's rejection (21n).
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one

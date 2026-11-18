@@ -522,16 +522,18 @@ The `lam` rule is `Kernel.wiz:2116`. Quantities are the three literals only.
   compiled to nested splits, and tuple patterns in `match` compiled to `split`; both in
   `wiz-notes/linear-case-design.md`. The accepted follow-up is the linear-case plan (`wiz-notes/linear-case-design.md`): K2a (an unused variable may leave its binder when its type is `Unit`, so a linear `Unit` needs no consumer), re-encoding B of structures (the marker in a 0-quantity first component, so a nested `let 1` leaves no marker tail to consume), and a quantity on `scase` (`scase_π`: the scrutinee is used π times and its fields are bound at π·q), which gives structures a destructuring form and linear inductive values an eliminator. Landed (stage 4h): the quantity on `scase` (K1) and the unit eliminator `let () := u; b`; K2a was withdrawn (§10.2a), and re-encoding B is not done, so structures still have no linear destructuring form.
 
-*Kernel.wiz* has no `split` (no `let (x, y)` in its term syntax). Its `fst`/`snd` rules
-are the ones above (usage scaled by ω outside erased positions; no check at the
-projection, so the error surfaces when the variable's binder is left), and its `let` and
-`pair` rules use the same erased positions (`erasedIf`). Without `split`, **a pair held at
-quantity 1 cannot be consumed inside Kernel.wiz's fragment** (§15). The same holds
-for the self-hosted *language* (what `Frontend.wiz` elaborates): it has no
-`let (x, y) := …`, its `Prod` is a structure whose `.fst`/`.snd` are ω functions, and its
-`IO` is `World → Prod A World` at ω. So a linear pair cannot be consumed at all in the
-self-hosted language; programs that need one are checked by the Lean kernel only.
-`Backend.wiz` erases the value of a `letq .qz` (and of a 0 argument and a 0 field) as
+*Kernel.wiz* has the same `split` (its `Tm` carries `split` with the motive under one
+binder `z` and the body under `x` and `y`, its `Spine` a stuck `ssplit`, `vSplit`
+evaluates it, and `infer`/`check` apply the rule above). Its `fst`/`snd` rules are the
+ones above (usage scaled by ω outside erased positions; no check at the projection, so
+the error surfaces when the variable's binder is left), and its `let`, `split` and
+`pair` rules use the same erased positions (`erasedIf`). The self-hosted language
+elaborates `let q (x, y) := s; b` — and a tuple `let (x, y, z)` as nested pairs — to
+`split`, so a Σ held at quantity 1 can be consumed there (its `Prod` is still a
+structure whose `.fst`/`.snd` are ω functions: it is taken apart, not projected). The
+unit eliminator is `letUnit` in both kernels (`U_u + U_b`), produced by
+`Frontend.wiz`'s `letUnitT` and erased by `Backend.wiz`. `Backend.wiz` erases the value
+of a `letq .qz` (and of a 0 argument, a 0 field, and the scrutinee of a `split` at 0) as
 `Erase.lean` does; the frontend does not produce `letq` today.
 
 ### 7.2 Unit, Empty, True, False
@@ -1261,7 +1263,7 @@ conversion never compares two proofs. It is `Globals.lazyProofs` in the Lean ker
 eval (cast A B e t)        e is suspended:  neutral (prf ⟨env, e⟩ : A ≡ B)
 eval (transp A a P p b e)  p and e are suspended
 cast A B e t, A and B propositions   ⟶  stuck                       (the cast is a proof)
-let q (x, y) := p as z. M; u,  p a proof   ⟶  u[p.1/x, p.2/y]        (η for Σ; Lean kernel only: Kernel.wiz has no split)
+let q (x, y) := p as z. M; u,  p a proof   ⟶  u[p.1/x, p.2/y]        (η for Σ; both kernels)
 conv at a proposition       true, before either side is unfolded
 ```
 
@@ -2113,8 +2115,8 @@ Each item says what the code does; the code is what the kernel checks.
 | quantities | any `QRig`, quantity variables, `Qty` | binder quantities are literals `0, 1, ω` only (`Q`, `Kernel.wiz:19`). Since 21x there is `Qty : U 0` with its literals (`qty`, `qlit`), for description fields; a `Qty` variable (a `Desc.elim` method's `q`) is a neutral, and a `Σ` at one (`sigmaQ`, the template `⟦D⟧` at such a field) stays stuck (`ssigq`) where the Lean kernel builds a Σ at a polynomial quantity; it has the rules of a Σ at an unknown quantity (projections erased only, except `snd` at ω; η; a pair's first part counted ω times), only at a bare variable (as `qtyPoly`: a quantity that is another stuck term is rejected). Unlike the Lean kernel's Σ at a polynomial, it is not canonical: `cast`, `eqTy` and `eq` at it stay stuck (incomplete, never unsound) |
 | description fields | carry a quantity | the same (21x): `darg q S D`, `drec q j D`, `dhrec q H j D` with `q : Qty` checked as `checkQty` does (a literal or a variable), the methods receive `q`, and `⟦D⟧` puts it on the field's Σ; `vEqDesc`, conversion, cast, `groundEqDesc` compare it as `sameQty`/`qtyApart` do (`qtySame`: two literals by value, the same variable equal, anything else unknown) |
 | `scase` at a quantity (K1) | `q` a quantity term | `q` a literal (`Tm.scase l q …`, `Spine.sscase`); the same rule, `U_m + q·U_x`, payload at `q` |
-| the unit eliminator `let () := u; b` | `Term.letUnit`, `checkUnit`; erasure evaluates `u` | `Tm.letUnit`, `checkUnit`, the same rule; `Backend.wiz` refuses it (lazy `let`s), the frontend never produces it |
-| `split` (`let (x, y)`) | yes | **no**. Projections need an unrestricted pair in both kernels (§7.1, R1), so a pair held at quantity 1 cannot be consumed in Kernel.wiz's fragment, nor at all in the self-hosted language (no `let (x, y)`; its `IO` and `Prod` are at ω): every term that projects one is rejected by both kernels, and terms with `split` are outside the fragment (the differential test's term type `MTm` has no `split`) |
+| the unit eliminator `let () := u; b` | `Term.letUnit`, `checkUnit`; erasure evaluates `u` | `Tm.letUnit`, `checkUnit`, the same rule; `Frontend.wiz` produces it (`letUnitT`) and `Backend.wiz` erases `u` then `b` |
+| `split` (`let (x, y)`) | yes | yes (`Tm.split` with the motive under `z` and the body under `x`,`y`; `Spine.ssplit`; `vSplit` with η on a pair and on a proof; the same rule and erased positions). `Frontend.wiz` produces it for `let q (x, y) := s` and for a tuple `let (x, y, z)` (nested pairs), so a pair held at quantity 1 is consumed here too; projections still need an unrestricted pair in both kernels (§7.1, R1). The differential test's term type `MTm` has no `split` |
 | numerals, `natOp` | yes | no |
 | levels of data | `Level` | closed numerals (`descr l`, `mu l`, `ulift l`) |
 | `ULift` (Q4) | `ulift k l`/`up`/`down`, `cast` needs a level never `0` and `k ≡ k'` | `ulift k l`/`up`/`down` at closed levels (`vulift`, `vup`, `sdown`); the same rules |
