@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "main.c",
+    "arguments": ["cc", "@args.rsp", "main.c"]
+  }
+]
