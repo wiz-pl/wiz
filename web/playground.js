@@ -174,12 +174,13 @@ async function mountLoom() {
       throw new Error("wiz_loom_html did not return the pane");
     }
     const { mount, applyPatches } = await import("./framework/runtime.js");
-    uiRoot = document.createElement("div");
-    uiRoot.className = "loom-ui";
-    output.replaceWith(uiRoot);
-    mount(uiRoot, html);
+    const host = document.createElement("div");
+    host.className = "loom-ui";
+    mount(host, html);          // detached until it parsed: a failure leaves the page
+    output.replaceWith(host);
     // The app owns the status span now (the one it just rendered).
     status.remove();
+    uiRoot = host;
     ui = module;
     uiState = state;
     applyLoom = (json) => applyPatches(uiRoot, JSON.parse(json));
