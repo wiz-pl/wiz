@@ -25,12 +25,23 @@ methods to Wil (receiver as argument 0, `using`-resolved BCL names). Its fixture
 spills and the rule pack are in `corpus/csharp/`; the tests are the `scry-csharp` group
 (`tests =scry-csharp`).
 
+`scry taint` and `scry parse --stats` read C source as `Bytes` (`FS.readBytes`) and
+parse it in place (`Scry.Native.parseBytes`, `Scry.Cst.ofStoreBytes`), so a multi-MiB
+file is not turned into a `String` (`List Char`, two cons cells per character) before
+the parser or the lowering sees it. Node text is a `Bytes` slice. A file with
+preprocessor line markers falls back to the text path, and `scry repl`/`scry project`
+keep their text file tables for origin rendering.
+
 ```sh
 cd scry
 cp ../grail.local.wiz .         # this machine's toolchain (not committed)
 grail build                     # check src/gen, build .grail/bin/scry, run the commands
 grail test                      # schema, cst, native shim, preproc, codegen, CLI, parse --stats,
                                 # taint, report, project, dynamic, fuzz spans, scale
+grail build dos-check           # resource limits: RSS < 20x input on a 3 MiB file, and
+                                # 16/64/128/256 `a++;` statements in a small time budget
+grail build fuzz-regressions    # replay the minimised C parse/lower regressions
+grail build fuzz-ci             # the bounded 10-execution fuzz profile (no fixtures written)
 grail build schema              # regenerate gen/C/Schema.wiz from node-types.json
 grail build schema-check        # fail if the checked-in schema is stale
 grail run scry -- parse --stats fixtures/hello.c

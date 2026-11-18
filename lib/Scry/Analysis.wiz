@@ -1,6 +1,7 @@
 import Scry.Wil
 import Text
 import Word
+import WordMap
 /-!
 # Scry.Analysis
 
@@ -111,6 +112,14 @@ structure Scry.Fn where
   bases : List (Nat × Nat)
   /-- Number of program points (statements plus one terminator point per block). -/
   count : Nat
+  /-- Successors of each point, indexed by point (`U64Map`, so the lookup is the
+  runtime's hash table in compiled code). -/
+  succs : U64Map (List Nat)
+  /-- Predecessors of each point, indexed by point (`U64Map`, so the lookup is the
+  runtime's hash table in compiled code). `Scry.predsOf` used to rebuild this by
+  scanning every point's successors on each call, which made the reaching-definitions
+  and dominator fixpoints cubic in the statement count. -/
+  preds : U64Map (List Nat)
 
 /-- The base of every block, and the total point count, in one pass. -/
 def Scry.blockBases : Nat → Nat → List Wil.Block → List (Nat × Nat) × Nat
@@ -119,9 +128,47 @@ def Scry.blockBases : Nat → Nat → List Wil.Block → List (Nat × Nat) × Na
     match Scry.blockBases (Nat.succ i) (Nat.add base (Nat.succ (List.length b.stmts))) bs with
     | (rest, total) => (.cons (i, base) rest, total)
 
+/-- The CFG edges a block contributes: point to next point inside the block, then the
+terminator point to each target's base. -/
+def Scry.blockEdges (bases : List (Nat × Nat)) (base : Nat) (blk : Wil.Block) :
+    List (Nat × Nat) :=
+  let n := List.length blk.stmts;
+  let lin : List (Nat × Nat) :=
+    List.map (fun pc => (Nat.add base pc, Nat.add base (Nat.succ pc))) (Scry.range n);
+  let t := Nat.add base n;
+  let tail : List (Nat × Nat) := match blk.term with
+    | .goto target _ => .cons (t, Scry.lookupNatD 0 bases target.index) .nil
+    | .br _ x y _ => .cons (t, Scry.lookupNatD 0 bases x.index)
+        (.cons (t, Scry.lookupNatD 0 bases y.index) .nil)
+    | .ret _ _ => .nil
+    | .unreachable _ => .nil
+  List.append lin tail
+
+/-- Every CFG edge, in source order. This is `Scry.cfgEdges` without a `locate` and
+`List.length` per point. -/
+def Scry.blockEdgesAll (bases : List (Nat × Nat)) : Nat → List Wil.Block → List (Nat × Nat)
+  | _, .nil => .nil
+  | i, .cons blk rest =>
+    List.append (Scry.blockEdges bases (Scry.lookupNatD 0 bases i) blk)
+      (Scry.blockEdgesAll bases (Nat.succ i) rest)
+
+/-- Add `v` to `k`'s bucket, keeping each bucket in increasing order and free of
+duplicates (the order `Scry.predsOf` used to produce). -/
+def Scry.addSucc (m : U64Map (List Nat)) (k v : Nat) : U64Map (List Nat) :=
+  let key := U64.ofNat k;
+  let bucket := U64Map.findD m key .nil;
+  if Scry.memNat v bucket then m
+  else U64Map.insert m key (List.append bucket (.cons v .nil))
+
 def Scry.flatten (fn : Wil.Func) : Scry.Fn :=
   match Scry.blockBases 0 0 fn.blocks with
-  | (bases, total) => Scry.Fn.mk fn bases total
+  | (bases, total) =>
+    let edges := Scry.blockEdgesAll bases 0 fn.blocks;
+    let succs := List.foldl (fun (m : U64Map (List Nat)) (e : Nat × Nat) =>
+      Scry.addSucc m e.1 e.2) U64Map.empty edges;
+    let preds := List.foldl (fun (m : U64Map (List Nat)) (e : Nat × Nat) =>
+      Scry.addSucc m e.2 e.1) U64Map.empty edges;
+    Scry.Fn.mk fn bases total succs preds
 
 def Scry.baseOf (g : Scry.Fn) (b : Wil.BlockId) : Nat :=
   Scry.lookupNatD 0 g.bases b.index
@@ -177,26 +224,13 @@ def Scry.nodeTerm (g : Scry.Fn) (n : Nat) : Option Wil.Term :=
 -- ## The CFG
 
 def Scry.succs (g : Scry.Fn) (n : Nat) : List Nat :=
-  match Scry.locate g n with
-  | .none => .nil
-  | .some p =>
-    let b := p.1;
-    let pc := p.2;
-    match Nat.lt pc (Scry.blockLen g b) with
-    | .true => .cons (Nat.succ n) .nil
-    | .false => match Scry.blockAt g b with
-      | .none => .nil
-      | .some blk => match blk.term with
-        | .goto t _ => .cons (Scry.nodeOf g t 0) .nil
-        | .br _ t f _ => .cons (Scry.nodeOf g t 0) (.cons (Scry.nodeOf g f 0) .nil)
-        | .ret _ _ => .nil
-        | .unreachable _ => .nil
+  U64Map.findD g.succs (U64.ofNat n) .nil
 
 def Scry.predsOf (g : Scry.Fn) (n : Nat) : List Nat :=
-  List.filter (fun m => Scry.memNat n (Scry.succs g m)) (Scry.range g.count)
+  U64Map.findD g.preds (U64.ofNat n) .nil
 
 def Scry.cfgEdges (g : Scry.Fn) : List (Nat × Nat) :=
-  Scry.concatLists (fun n => List.map (fun m => (n, m)) (Scry.succs g n)) (Scry.range g.count)
+  Scry.blockEdgesAll g.bases 0 g.fn.blocks
 
 -- ## Definitions and uses
 
@@ -322,21 +356,48 @@ def Scry.mapsSetEq (g : Scry.Fn) (a b : List (Nat × List Nat)) : Bool :=
 def Scry.rdStep (defs : List (Nat × Nat)) (g : Scry.Fn) (n : Nat) (inp : List Nat) : List Nat :=
   Scry.unionNat (Scry.genOfD defs n) (Scry.diffNat inp (Scry.killOf defs g n))
 
+/-- Set point `n`'s set in a dense point→set map (kept as an association list). -/
+def Scry.setAt (m : List (Nat × List Nat)) (n : Nat) (v : List Nat) :
+    List (Nat × List Nat) :=
+  match m with
+  | .nil => .cons (n, v) .nil
+  | .cons e rest =>
+    match Nat.beq n e.1 with
+    | .true => .cons (n, v) rest
+    | .false => .cons e (Scry.setAt rest n v)
+
+/-- One point of an in-order reaching-definitions pass: compute the point's out set from
+its current in set and join it into its successors' in sets. A forward edge is therefore
+seen after its source was updated in the same pass, so a straight-line function converges
+in one pass instead of one edge per outer iteration (which made the old all-at-once loop
+O(points^3) on a chain). A back edge updates an earlier point and reports a change, so
+the caller runs another pass. -/
+def Scry.rdPoint (defs : List (Nat × Nat)) (g : Scry.Fn) (n : Nat)
+    (acc : List (Nat × List Nat) × Bool) : List (Nat × List Nat) × Bool :=
+  let out := Scry.rdStep defs g n (Scry.lookupSet acc.1 n);
+  let entry := Scry.entryNode g;
+  let step : List (Nat × List Nat) × Bool → Nat → List (Nat × List Nat) × Bool :=
+    fun a p =>
+      match Nat.beq p entry with
+      | .true => a
+      | .false =>
+        let cur := Scry.lookupSet a.1 p;
+        let nxt := Scry.unionNat cur out;
+        match Scry.setEq cur nxt with
+        | .true => a
+        | .false => (Scry.setAt a.1 p nxt, .true);
+  List.foldl step acc (Scry.succs g n)
+
 def Scry.rdLoop (defs : List (Nat × Nat)) (g : Scry.Fn) (fuel : Nat)
     (ins : List (Nat × List Nat)) : List (Nat × List Nat) :=
   match fuel with
   | .zero => ins
   | .succ k =>
-    let outs := Scry.mapSets g (fun n => Scry.rdStep defs g n (Scry.lookupSet ins n));
-    let ins' := Scry.mapSets g (fun n =>
-      match Nat.beq n (Scry.entryNode g) with
-      | .true => .nil
-      | .false =>
-        List.foldr (fun p acc => Scry.unionNat (Scry.lookupSet outs p) acc) .nil
-          (Scry.predsOf g n));
-    match Scry.mapsSetEq g ins ins' with
-    | .true => ins'
-    | .false => Scry.rdLoop defs g k ins'
+    let acc0 : List (Nat × List Nat) × Bool := (ins, .false);
+    match List.foldl (fun acc n => Scry.rdPoint defs g n acc) acc0
+        (Scry.range g.count) with
+    | (ins', .true) => Scry.rdLoop defs g k ins'
+    | (ins', .false) => ins'
 
 /-- The reaching definitions at every point. -/
 def Scry.rdIn (g : Scry.Fn) (defs : List (Nat × Nat)) : List (Nat × List Nat) :=
@@ -349,23 +410,34 @@ def Scry.interAll : List (List Nat) → List Nat
   | .nil => .nil
   | .cons s rest => List.foldr (fun x acc => Scry.interNat x acc) s rest
 
+/-- One point of an in-order dominator pass. A point's set is recomputed from its
+predecessors' *current* sets, so a forward chain converges in one pass (the old
+all-at-once update used the previous round's sets and needed one iteration per edge).
+Reports whether the set changed. -/
+def Scry.domPoint (g : Scry.Fn) (n : Nat)
+    (acc : List (Nat × List Nat) × Bool) : List (Nat × List Nat) × Bool :=
+  let nxt : List Nat := match Nat.beq n (Scry.entryNode g) with
+    | .true => .cons n .nil
+    | .false =>
+      match Scry.predsOf g n with
+      | .nil => .cons n .nil
+      | ps => Scry.insertNat n
+          (Scry.interAll (List.map (fun p => Scry.lookupSet acc.1 p) ps));
+  let cur := Scry.lookupSet acc.1 n;
+  match Scry.setEq cur nxt with
+  | .true => acc
+  | .false => (Scry.setAt acc.1 n nxt, .true)
+
 def Scry.domLoop (g : Scry.Fn) (fuel : Nat) (dom : List (Nat × List Nat)) :
     List (Nat × List Nat) :=
   match fuel with
   | .zero => dom
   | .succ k =>
-    let dom' := Scry.mapSets g (fun n =>
-      match Nat.beq n (Scry.entryNode g) with
-      | .true => .cons n .nil
-      | .false =>
-        let ps := Scry.predsOf g n;
-        match ps with
-        | .nil => .cons n .nil
-        | _ => Scry.insertNat n
-            (Scry.interAll (List.map (fun p => Scry.lookupSet dom p) ps)));
-    match Scry.mapsSetEq g dom dom' with
-    | .true => dom'
-    | .false => Scry.domLoop g k dom'
+    let acc0 : List (Nat × List Nat) × Bool := (dom, .false);
+    match List.foldl (fun acc n => Scry.domPoint g n acc) acc0
+        (Scry.range g.count) with
+    | (dom', .true) => Scry.domLoop g k dom'
+    | (dom', .false) => dom'
 
 /-- Dominator sets, `{n}` for unreachable points. -/
 def Scry.dominators (g : Scry.Fn) : List (Nat × List Nat) :=
