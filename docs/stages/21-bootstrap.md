@@ -898,7 +898,7 @@ start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib
 
 | form                            | declarations | files |
 |---------------------------------|-------------:|------:|
-| `syntax`                        | 123 | 13 |
+| `syntax`                        | 125 | 13 |
 | `attribute [tactic …]`          |  37 |  5 |
 | `macro_rules`                   |  27 |  5 |
 | `infix` (plain)                 |  18 |  4 |
@@ -914,7 +914,7 @@ start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib
 
 17 files use at least one of the forms (12 use `macro_rules`/`notation`/
 `attribute [macro]`; 15 without the plain infix operators). The `syntax` rules target
-`tactic` 39 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
+`tactic` 41 times, `term` 19, `doSeq` 9, `command` 3, `exBinder` 2 and 49 Feral DSL
 categories. `prefix`/`postfix` and a `macro` command do not exist in the Lean host
 either (a prefix operator is a `notation` whose first item is an atom; the host has only
 `macro_rules`), so there is nothing to mirror.
@@ -977,7 +977,7 @@ to importers (A14's module-local dropping is not wired to the new rules).
   command macro (`def_one one`).
 * a `syntax` rule whose items are a `sepBy(term, ",")` and the macro rule that matches
   the `null` node and splices both elements (`pair(1, 2)` = 3).
-* `syntax ... : tactic` rules (39 of the 123 in `lib/` target `tactic`), a `tactic`
+* `syntax ... : tactic` rules (41 of the 125 in `lib/` target `tactic`), a `tactic`
   reference and a `(keywords := …)` category, accepted by both frontends.
 * a second `infixl` on the Prelude's `+`: a fresh kind (`term.+_1`), and the later rule
   wins (`3 + 1` is 2 both places); `infix` (both operands `p + 1`) does not parse a

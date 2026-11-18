@@ -15,7 +15,7 @@ at the start of a line, comments skipped, 2026-11-15 at `24218ce4`):
 
 | form                    | declarations | files |
 |-------------------------|-------------:|------:|
-| `syntax`                | 123 | 13 |
+| `syntax`                | 125 | 13 |
 | `attribute [tactic …]`  |  37 |  5 |
 | `macro_rules`           |  27 |  5 |
 | `infix` (plain)         |  18 |  4 |
@@ -30,7 +30,7 @@ at the start of a line, comments skipped, 2026-11-15 at `24218ce4`):
 | `macro` (declaration)   |   0 | 0 (the host has only `macro_rules`) |
 
 17 files use one of these forms (15 without the plain infix operators). By target
-category, the `syntax` rules are `tactic` 39, `term` 19, `doSeq` 9, `command` 3,
+category, the `syntax` rules are `tactic` 41, `term` 19, `doSeq` 9, `command` 3,
 `exBinder` 2 and 49 Feral DSL categories (`lib/Feral.wiz`).
 
 The self-hosted frontend implements `notation`, `infixl`/`infixr`/`infix`,
@@ -167,7 +167,7 @@ def selfhostAccepts (src : String) : IO Unit := do
   | some l => throw (IO.userError s!"the self-hosted frontend rejects: {l}\n{out}")
   | none => pure ()
 
-/-- `syntax` rules for the `tactic` category: 39 of `lib/`'s 123 `syntax` rules target
+/-- `syntax` rules for the `tactic` category: 41 of `lib/`'s 125 `syntax` rules target
 `tactic` (the largest target), and declaring one must work even though `by` is A13. The
 last two declarations are the item grammar `lib/` uses: `sepBy(ident, ",")`, `term`, a
 `tactic` reference, and a declared category with `(keywords := …)` (accepted; the scope's
