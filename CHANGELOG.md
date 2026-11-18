@@ -61,6 +61,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `@file`, `-Xclang` or `-cc1` no longer executes code through `scry_project`, whose
   tools are `readOnlyHint: true`. `Scry.parseCompdbFlags` and the scry-mcp bridge check
   the same list (security-01).
+* scry: the C parse/lower pipeline is fuzzed (#478). `scry/scripts/fuzz-lower.py` drives
+  the native CstStore, `Scry.lowerTU` and the taint pipeline with generated and mutated C
+  (122 seed files, 400 executions, 5 s and 256 MiB resident per run), and commits the 25
+  regression fixtures under `scry/tests/fixtures/fuzz-regression/`; `--regressions-only`
+  replays them. `scry/bench/fuzz.md` records the campaign, the caps and every finding
+  (0 crashes, 38 hangs, 19 OOMs, 5 refusals, 338 clean). A clean run is not a safety
+  claim: it is a bounded search over the Wiz side, complementary to the tree-sitter
+  `fuzz/run.py`.
 * trust ledger: the 134 `mutual`/`partial` rows are reviewed as one group, with a reason
   per block (compiled-only general recursion, an inhabited witness at 22f, no
   termination claim, and the de-mutualisation or measure that would remove the row), and
@@ -113,6 +121,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   refuses a registry lock with no `(index-signature …)` even when its `(index …)` line
   is absent; `--locked` reads no index, so it checks the entry's shape only, and
   `grail index verify --locked` is the command that re-verifies the signature.
+* grail (23f, #390): the root `grail test` run is green (88 passed, 0 failed, 2 skipped).
+  A golden may be `-- test: skip REASON` (reported `⊘`, no `.expected`, not a pass); a
+  subdirectory with its own `grail.wiz` is a nested package, not a test of the parent; 38
+  missing goldens were added and 3 stale ones reviewed. `Package.tests` documents the
+  nested-package rule (`docs/stages/23-grail.md:116-125`).
 * selfhost: the parser tables are a checked-in Wiz source file (`selfhost/Tables.wiz`,
   rendered by `lake build genSelfhostTables`; the `selfhost` group checks that it is
   current and that its tables accept the same corpus as the Lean parser), and the
@@ -128,7 +141,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `2^k` (which panicked at `k >= 2^32`); `a >> k` is `0` once `k` passes the bit
   length of `a`. The matrix now pins `0, 1, w-1, w, w+1, 2^32-1, 2^32, 2^64-1`,
   and the rotate composition for `k >= w` (22a, 22c).
-
+* libraries: `lib/Plot.wiz` (#381), data plots as deterministic SVG. `Plot.Frame` takes
+  named `Series` (`line`, `scatter`, `bar`, `step`) over exact arithmetic (`Q` over
+  `Int`; no `Float64` in the core), so the same input renders byte-identically: no
+  timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
+  group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
+  `docs/libraries.md:1979` has the API.
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
@@ -158,6 +176,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   with the same 8.1 MiB peak where the old allocator would have needed 7.8 GiB. Freeing is
   iterative (through the dead object's own header), so a long chain does not recurse on
   the engine's stack. `scripts/wasm-peak.mjs` reports a module's peak and time.
+* wasm (8f, #372): tail calls and CAF caching. A self tail call compiles to `return_call`
+  (`return_call_indirect` for an indirect one), so a loop no longer grows the engine
+  stack, and a closed definition's value is built once and shared (`wiz_caf_builds`).
+  Ten million mutual tail calls run in 36.6 ms at one page of linear memory;
+  `web/wasm-host.mjs` implements both, and the `wasm` group checks 200k-deep recursion
+  and a CAF built once (`Tests/Groups/Wasm.lean:361-375`). The validator knows the
+  tail-call proposal (`docs/stages/08-backend/wasm.md:41-45`).
 * `wiz repl` (11ac): one command per line into one persistent frontend session
   (definitions, `syntax`, `macro`, `instance` and `import` stay in scope), with `:type`,
   `:load`, `:run` (C, or LLVM with `--llvm`), `:reset`, `:help` and `:quit`; a pipe is a
@@ -175,8 +200,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [0.1.0] - unreleased (draft)
 
-The first tagged release. Everything below is new in it; it collects stages 1–26 and the
-pull requests merged up to the tag. The repository is https://github.com/wiz-pl/wiz
+The first tagged release. Everything below is new in it; it collects the stage docs 1–30
+and 32 (`docs/stages/`; there is no stage 31) and the pull requests merged up to the tag.
+The repository is https://github.com/wiz-pl/wiz
 (moved from `badly-drawn-wizards/wiz`; GitHub redirects the old URLs).
 
 ### Stability
@@ -220,7 +246,8 @@ pull requests merged up to the tag. The repository is https://github.com/wiz-pl/
   #59), the eliminators' index levels (F9, #83), K3/Q1/Q2/Q3 (#14), projections only on
   unrestricted pairs (R1, #84), two declarations of one name (#104), a variable out of
   scope (#72), the self-hosted kernel's fast path at universe levels (W1, #76),
-  `Size ≡ Size` in the self-hosted kernel (O1).
+  `Size ≡ Size` in the self-hosted kernel (O1), and Π/Σ/`ULift` casts computing only
+  when their components are in one sort (D2, #203).
 * Kernel lint: every traversal handles every constructor; a panic is not a value (#78).
 * WizMeta: a specification of the core theory and a reference checker (#122);
   equations at propositions are `True`, and the Σ rule along a proof component uses
@@ -344,13 +371,15 @@ that pin each one):
 * Conjectures, not proved: regularity at inert types (D1; `--inert conv` is
   experimental), `μ` injective in its description (E1), and the rest of the core
   theory's combination (Status §1–2).
-* Open issues: the neutral case of NU-TRANSP; Π/Σ/`ULift` casts compute without
-  checking their components' sorts (D2, until mandatory sorts); an unannotated Π/Σ
-  makes type equality stuck (U5); Σ unboxing is not stable under substitution, so
-  `--unbox-structs` stays off (R3 open 1); duplicating a `&mut` and borrowing one
-  local twice in Feral are not rejected (pinned "KNOWN GAP" tests).
+* Open issues: the neutral case of NU-TRANSP; Σ unboxing is not stable under
+  substitution, so `--unbox-structs` stays off (R3 open 1); duplicating a `&mut` and
+  borrowing one local twice in Feral are not rejected (pinned "KNOWN GAP" tests).
 * "Stuck but sound" cases (Status §5) are incompleteness: some true equations don't
   compute.
-* No mechanised model, and no systematic search for proofs of `False` yet.
-* Not yet in Wiz: string patterns, `deriving` in the self-hosted frontend, termination
-  by measure, machine-integer and vector literals.
+* No mechanised model. A bounded search for `False` exists: `tests --false-fuzz` builds
+  closed terms that claim to inhabit `Empty` and asks both kernels, and the `false-fuzz`
+  group (20 samples per shape) runs in the `selfhost` shard
+  (`.github/test-shards.json:2,8`). A campaign of 1000 samples per shape (seed 20261114)
+  found no accepted closed `Empty` in either kernel and no verdict difference beyond the
+  known quantity-only `Σ` observations (`Tests/FalseFuzz.lean:1-26`).
+* Not yet in Wiz: termination by measure, machine-integer and vector literals.
