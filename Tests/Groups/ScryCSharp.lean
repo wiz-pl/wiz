@@ -231,11 +231,10 @@ partial def repoCs (dir : System.FilePath) (rel : String) : IO (List (String × 
     let name := e.fileName
     let relC := if rel.isEmpty then name else rel ++ "/" ++ name
     if ← e.path.isDir then
-      for c in ← repoCs e.path relC do
-        out := c :: out
+      out := out ++ (← repoCs e.path relC)
     else if name.endsWith ".cs" then
-      out := (relC, e.path.toString) :: out
-  pure out.reverse
+      out := out ++ [(relC, e.path.toString)]   -- complexity: ok (test helper: walks the 75-file fixture tree)
+  pure out
 
 def repoFiles : IO (List (String × String)) := do
   let fs ← repoCs ("scry/corpus/csharp/repo" : System.FilePath) ""
@@ -254,14 +253,14 @@ def repoDefs (files : List (String × String)) : IO String := do
     let spill? ← try some <$> IO.FS.readFile spillPath catch _ => pure none
     match spill? with
     | some spill =>
-      defs := defs ++ s!"def repoSpill{i} : String := {wizStr spill}\n"
-      entries := s!"  Scry.Cs.resultOfFront {wizStr rel} (Scry.Cs.frontend {wizStr rel} repoText{i} repoSpill{i})" :: entries
+      defs := defs ++ s!"def repoSpill{i} : String := {wizStr spill}\n"   -- complexity: ok (test helper: one chunk per fixture file)
+      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (Scry.Cs.frontend {wizStr rel} repoText{i} repoSpill{i})"]   -- complexity: ok (test helper: one row per fixture file)
     | none =>
-      entries := s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"deliberately invalid C#: the native parse fails\")" :: entries
+      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"deliberately invalid C#: the native parse fails\")"]   -- complexity: ok (test helper: one row per fixture file)
     i := i + 1
   let paths := "[" ++ ", ".intercalate (files.map fun (r, _) => s!"({wizStr r}, {wizStr r})") ++ "]"
   pure (defs ++ s!"def repoPaths : List (String × String) := {paths}\n"
-    ++ s!"def repoResults : List Scry.Cs.FileResult := [\n{",\n".intercalate entries.reverse}]\n")
+    ++ s!"def repoResults : List Scry.Cs.FileResult := [\n{",\n".intercalate entries}]\n")
 
 /-- The tree's report, built by the same functions `scry cs` calls. -/
 def repoBody (files : List (String × String)) : IO String := do
@@ -398,14 +397,6 @@ def group : Group where
       run := fun _ => do
         let fs ← taintFindings "cwe78-helper-unsafe"
         checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs },
-    { name := "taint: CWE-78 through a LINQ query, a switch expression, a record field and a with copy",
-      run := fun _ => do
-        let fs ← taintFindings "cwe78-modern-unsafe"
-        checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
-    { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
-      run := fun _ => do
-        let fs ← taintFindings "cwe78-modern-safe"
-        checkEq ([] : List String) fs },
     { name := "cs: the fixture tree's walk counts (before/after exclusions, parsed/lowered/failed)",
       run := fun _ => repoCounts },
     { name := "cs: the summary lists every skipped or warned construct with a count and an example",
@@ -415,7 +406,15 @@ def group : Group where
     { name := "cs: the JSON report (same counts, findings by rule and exit status)",
       run := fun _ => repoJsonGolden },
     { name := "cs: exit 0 clean, 1 gated, 2 usage, 3 nothing analysed",
-      run := fun _ => repoExitCodes }
+      run := fun _ => repoExitCodes },
+    { name := "taint: CWE-78 through a LINQ query, a switch expression, a record field and a with copy",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-unsafe"
+        checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-safe"
+        checkEq ([] : List String) fs }
   ]
 
 builtin_initialize registerGroup group
