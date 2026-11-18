@@ -110,6 +110,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   normalised to constructs, so a first run answers "what didn't you look at?" in one
   screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
   counts, coverage rows, JSON and every exit status.
+* tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
+  the test-side cases: `prop-kernels` now gates the generated normal forms (not only
+  accept/reject; a normal form the Lean kernel cannot print is counted as the known
+  PH-K2 shape), `hdl` pins the `stall_*`/`t1`–`t5` theorems it names, every `semantics`
+  pipeline requires a non-empty cell selection, `selfhost-cli-diff`'s "good file" case
+  requires exit 0 in both tools, and the `std` rows for `Nat.mul_assoc`, `Int.mul_add`
+  and `Q.lt_ceil` pin the statement as well as the axiom print; the `regions`
+  "no projection" check requires the lowering it inspects to exist. The alternate
+  `--lib`/`--llvm` skip reasons now start with their allow-list entries' reasons.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
