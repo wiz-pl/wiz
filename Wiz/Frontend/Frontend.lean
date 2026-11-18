@@ -232,7 +232,7 @@ the frontend — `Wiz.Format` and `Wiz.LSP` each held a 29–33 MB specialisatio
 cost is instance arguments in the frontend loop; the measurement is in
 `docs/building.md`, "The Lean build". -/
 @[nospecialize] partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
-  (go input s input.toList.toArray 0 s).checkUnclosedNamespaces
+  go input s input.toList.toArray 0 s
 where
   @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
     (go' input base chars pos s {}).1
@@ -256,10 +256,9 @@ where
             | some (some errs) => (errs, s.checked, memo.get? m, memo)
             | _ =>
               let isolate (_ : Unit) :=
-                let start := { base with imported := m :: base.imported, messages := #[], module := m,
-                                            checked := s.checked.insert m none }
-                let (iso, memo) := go' src base srcChars 0 start.atModuleStart memo
-                let iso := iso.checkUnclosedNamespaces
+                let (iso, memo) := go' src base srcChars 0
+                  { base with imported := m :: base.imported, messages := #[], module := m,
+                              checked := s.checked.insert m none } memo
                 (({ state := iso, errs := iso.messages.filter (·.severity == .error) } : Isolated R), iso.checked, memo)
               -- kept from an earlier run in this process, or elaborated (and kept)
               let (e, checked, memo) := match IsoCache.ref (R := R), isoKey base m with
@@ -275,13 +274,8 @@ where
             | some iso => if s.pristine then ({ iso with checked, loader := s.loader, cHeaders := s.cHeaders, cSources := s.cSources,
                                                           includes := s.includes,
                                                           imported := iso.imported.filter (!s.imported.contains ·) ++ s.imported }, memo) else
-                let start := { s with imported := m :: s.imported, messages := #[], module := m }
-                go' src base srcChars 0 start.atModuleStart memo
-            | none =>
-              let start := { s with imported := m :: s.imported, messages := #[], module := m }
-              go' src base srcChars 0 start.atModuleStart memo
-          -- (13t) a namespace the module left open is an error in it
-          let inner := inner.checkUnclosedNamespaces
+                go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
+            | none => go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
           let errs := if isoErrs.isEmpty then inner.messages.filter (·.severity == .error) else isoErrs
           -- (a declaration this file already has is reported as it is, at the import)
           let msg : Msg := match errs.find? (·.code == "duplicate-declaration") with
@@ -309,8 +303,6 @@ where
   (11s) what they are and their doc comments. -/
   @[nospecialize] step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
     let before := s.globals.order.size
-    -- (13t) a declaration in a namespace is named `Foo.bar`: prefix it here, once
-    let cmd := prefixDeclName s.globals.namespacePrefix cmd
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
     let s' := ((elabCommand cmd).run { s with pristine := false }).2

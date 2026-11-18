@@ -147,9 +147,6 @@ structure CommandState (R : Type) where
   declDocs : Std.HashMap Name DeclDoc := {}
   /-- the module being elaborated (`""` for the main file) -/
   module : String := ""
-  /-- (13t) the `namespace`s opened in this file, innermost first, with where each was
-  declared (for a missing `end` at the end of the file) -/
-  nsStack : List (Name × SourceInfo) := []
   /-- the modules whose `builtin` registrations are trusted: the toolchain's library
   (`lib/`). The main file never is, nor a module from a `-I` directory. -/
   trustedModule : String → Bool := fun _ => false
@@ -1235,16 +1232,7 @@ partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Exce
     let sig := d.getArg 4
     unless sig.args.isEmpty || sig.args.any (·.isOfKind "term.prop") do
       throw "mutual inductive types may not have indices (yet)"
-  -- (13t) in a namespace the members are `N.A`, `N.B`: one family `N.A_B` (the
-  -- namespace before the underscore, so that `N.A_B.Tag` parses as a name)
-  let last (n : Name) : Name := (n.splitOn ".").getLast!
-  let nsParts : List String :=
-    match names[0]? with
-    | some n => (n.splitOn ".").dropLast
-    | none => []
-  let shorts := names.toList.map last
-  let fam := if nsParts.isEmpty then "_".intercalate shorts
-    else ".".intercalate nsParts ++ "." ++ "_".intercalate shorts
+  let fam := "_".intercalate names.toList
   -- (issue #252) a block of inductive propositions is one propositional family
   let isPropCmd (d : Syntax) : Bool := (d.getArg 4).args.any (·.isOfKind "term.prop")
   let anyProp := defs.any isPropCmd
@@ -1405,15 +1393,12 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
   let simps := inner.localSimps.take (inner.localSimps.length - outer.localSimps.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
-  -- (11r) `set_option pp.…` is the module's own; (13t) so are its namespaces and opens
-  let g2 : PPTable := { inner.globals.pp with useNotation := outer.globals.pp.useNotation }
-  let g1 : Globals R := { inner.globals with pp := g2, namespacePrefix := outer.globals.namespacePrefix, opens := outer.globals.opens, aliases := outer.globals.aliases }
+  -- (11r) `set_option pp.…` is the module's own
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localSimps := outer.localSimps,
                             localPP := outer.localPP,
-                            nsStack := outer.nsStack,
-                            globals := g1 }
+                            globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
@@ -1473,79 +1458,6 @@ where
           (acc.1.push a', msgs)
         (.node info k args', msgs)
       | stx => (stx, msgs)
-
-/-- (13t) Prefix the name a declaration command declares with the current namespace, so
-that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
-rewritten once, where the command is elaborated (`Frontend.step`, `elabExpansion`); the
-recursive `elabCommand` calls of `private`, `partial`, `mutual`, … then see the full name,
-and references to `bar` in the body resolve through `Globals.namespacePrefix`
-(`Globals.resolveName`). Commands that declare no name (`open`, `end`, `#check`, …) are
-unchanged; a command that declares several names has one in the position handled here
-(`mutual` recurses into its members). -/
-partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
-  if p.isEmpty then cmd else
-  let namedAt (i : Nat) : Syntax :=
-    match (cmd.getArg i).getId? with
-    | some n => Syntax.ident (cmd.getArg i).info (p ++ "." ++ n)
-    | none => cmd.getArg i
-  -- an optional name: the `null` node `optional ident` makes, bare ident, or nothing
-  let optIdent (stx : Syntax) : Syntax :=
-    match stx.getId? with
-    | some n => Syntax.ident stx.info (p ++ "." ++ n)
-    | none => match stx.args[0]? with
-      | some x => match x.getId? with
-        | some n => stx.setArg 0 (Syntax.ident x.info (p ++ "." ++ n))
-        | none => stx
-      | none => stx
-  match cmd.kind with
-  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
-  | "command.foreignType" => cmd.setArg 1 (namedAt 1)
-  | "command.inductive" | "command.structure" | "command.class" | "command.coinductive" =>
-    -- the type's own name, written unqualified in its fields (`| mk : T → T`), is the
-    -- prefixed one: the elaborator binds `N.T`, not `T`, while checking them
-    let short? := (cmd.getArg 1).getId?
-    let cmd := cmd.setArg 1 (namedAt 1)
-    match short? with
-    | some sh => cmd.renameIdents fun n =>
-        if n == sh then some (p ++ "." ++ sh)
-        else if n.startsWith (sh ++ ".") then some (p ++ "." ++ n)
-        else none
-    | none => cmd
-  | "command.extern" | "command.cStruct" => cmd.setArg 3 (namedAt 3)
-  | "command.instance" => cmd.setArg 2 (optIdent (cmd.getArg 2))
-  | "command.partial" => cmd.setArg 2 (prefixDeclName p (cmd.getArg 2))
-  | "command.private" | "command.sealed" | "command.local" =>
-    cmd.setArg 1 (prefixDeclName p (cmd.getArg 1))
-  | "command.mutual" =>
-    let body := cmd.getArg 1
-    let members := body.args.map (prefixDeclName p)
-    -- the block's type names, as written (`A`, `B`): a member refers to the others
-    -- unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
-    let typeShorts := body.args.filterMap fun d =>
-      let d := if d.isOfKind "command.private" then d.getArg 1 else d
-      if ["command.inductive", "command.structure", "command.class", "command.coinductive"].contains d.kind then
-        (d.getArg 1).getId? else none
-    let rewrite (c : Syntax) : Syntax := c.renameIdents fun n =>
-      typeShorts.findSome? fun sh =>
-        if n == sh then some (p ++ "." ++ sh)
-        else if n.startsWith (sh ++ ".") then some (p ++ "." ++ n)
-        else none
-    cmd.setArg 1 (.node body.info body.kind (members.map rewrite))
-  | _ => cmd
-
-/-- (13t) Start elaborating a module: its `namespace`s and `open`s are its own (a file's
-`open` does not reach the modules it imports). -/
-def CommandState.atModuleStart (s : CommandState R) : CommandState R :=
-  { s with globals := { s.globals with namespacePrefix := "", opens := [], aliases := [] },
-           nsStack := [] }
-
-/-- (13t) A file must close every `namespace` it opens: report each unclosed one at the
-line of its `namespace` (the error belongs there, not at the end of the file). -/
-def CommandState.checkUnclosedNamespaces (s : CommandState R) : CommandState R :=
-  if s.nsStack.isEmpty then s else
-  { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info) =>
-      { info, severity := .error, code := ErrorCode.unclosedNamespace
-        text := s!"namespace {n} is not closed: add `end` (or `end {(n.splitOn ".").getLast!}`)" } }
 
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
@@ -1665,7 +1577,7 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .error e => report .error info s!"{what}: {e}"
     | .ok (cmds, next) =>
       modify fun s => { s with nextScope := next }
-      for c in cmds do elabCommand (prefixDeclName (← get).globals.namespacePrefix c)
+      for c in cmds do elabCommand c
   -- `deriving C` for the type `T`: run `C`'s deriver
   let derive (C T : Name) (info : SourceInfo) : StateM (CommandState R) Unit := do
     let s ← get
@@ -1700,42 +1612,6 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       reportKernel cmd.info name e (if ours then
         "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
   match cmd.kind with
-  | "command.namespace" =>
-    -- (13t) `namespace Foo`: declarations from here to the matching `end` are `Foo.x`
-    -- (nested: `A.B.x`). A namespace is only a prefix, not a privacy boundary.
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    let p := s.globals.namespacePrefix
-    let full := if p.isEmpty then n else p ++ "." ++ n
-    modify fun s => { s with nsStack := (full, cmd.info) :: s.nsStack,
-                             globals := { s.globals with namespacePrefix := full } }
-  | "command.end" =>
-    -- (13t) `end` closes the innermost `namespace`; `end Foo` must name it (its last
-    -- component, or its full name)
-    let given? := (cmd.getArg 1).args.filterMap Syntax.getId? |>.toList.head?
-    match s.nsStack with
-    | [] => reportC cmd.info "`end` without an open `namespace`" ""
-    | (full, _) :: rest =>
-      let short := (full.splitOn ".").getLast!
-      if let some g := given? then
-        unless g == short || g == full do
-          report .error cmd.info s!"`end {g}` does not close the namespace `{full}` (write `end` or `end {short}`)"
-      let outerNs := match rest with
-        | (p, _) :: _ => p
-        | [] => ""
-      let g1 : Globals R := { s.globals with namespacePrefix := outerNs }
-      modify fun s => { s with nsStack := rest, globals := g1 }
-  | "command.open" =>
-    -- (13t) `open M`: M's names are visible unqualified from here on (file-scoped).
-    -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    let asAlias? := (cmd.getArg 2).args.filterMap Syntax.getId? |>.toList.head?
-    if !s.globals.order.any fun d => d.startsWith (n ++ ".") then
-      report .error (cmd.getArg 1).info s!"unknown namespace '{n}': there is no declaration `{n}.…`"
-    else match asAlias? with
-    | some a =>
-      modify fun s => { s with globals := { s.globals with aliases := (a, n) :: s.globals.aliases } }
-    | none =>
-      modify fun s => { s with globals := { s.globals with opens := s.globals.opens ++ [n] } }
   | "command.private" =>
     -- (13b) every name the command declares is private to this module
     let before := s.globals.order.size
@@ -1753,22 +1629,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         (inner.getArg 1).args.filterMap (·.getArg 1 |>.getId?)
       else #[]
     let inner := if typeNames.isEmpty then inner else
-      let nsPrefix := s.globals.namespacePrefix
-      -- (13t) inside a namespace a declaration writes `T` for `Foo.T`: rename that
-      -- spelling too, so a private recursive type's fields still refer to the type
-      let shortOf (T : Name) : Option Name :=
-        if !nsPrefix.isEmpty && T.startsWith (nsPrefix ++ ".") then
-          some ((T.drop (nsPrefix.length + 1)).toString) else none
-      let renameOf (T : Name) : Name → Option Name := fun n =>
-        let kernel := Globals.privateName s.module T
-        if n == T then some kernel
-        else if n.startsWith (T ++ ".") then some (kernel ++ (n.drop T.length).toString)
-        else match shortOf T with
-          | some sh => if n == sh then some kernel
-            else if n.startsWith (sh ++ ".") then some (kernel ++ (n.drop sh.length).toString)
-            else none
-          | none => none
-      inner.renameIdents fun n => typeNames.findSome? fun T => renameOf T n
+      inner.renameIdents fun n => typeNames.findSome? fun T =>
+        if n == T then some (Globals.privateName s.module T)
+        else if n.startsWith (T ++ ".") then some (Globals.privateName s.module T ++ (n.drop T.length).toString)
+        else none
     elabCommand inner
     modify fun s =>
       let added := s.globals.order.extract before s.globals.order.size
@@ -2159,8 +2023,6 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- ((13b) this module's private types and classes by their kernel names, so that two
     -- modules' instances for their private `Color`s have different names)
     let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n => ((s.globals.resolve (stripScope n)).replace "." "").capitalize)
-    -- (13t) an anonymous instance declared in a namespace is `Foo.inst…` too
-    let base := if s.globals.namespacePrefix.isEmpty then base else s.globals.namespacePrefix ++ "." ++ base
     let given? : Option Name := if nameOpt.isNone then none else
       (if nameOpt.isOfKind "null" then nameOpt.getArg 0 else nameOpt).getId?
     let name := match given? with
@@ -2319,8 +2181,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         derivingClause (cmd.child "deriving") name
   | "command.builtin" =>
     let key := ((cmd.getArg 1).getId?).getD "_"
-    let n0 := ((cmd.getArg 3).getId?).getD "_"
-    let n := (s.globals.resolveName n0).toOption.getD n0
+    let n := ((cmd.getArg 3).getId?).getD "_"
     let known := ["nat", "nat.zero", "nat.succ", "nat.pred", "nat.add", "nat.sub", "nat.mul", "nat.beq", "nat.blt", "string", "memo", "int",
       "nat.div", "nat.mod", "nat.pow", "nat.land", "nat.lor", "nat.xor", "nat.shiftLeft", "nat.shiftRight", "nat.log2"]
     if !known.contains key then report .error cmd.info s!"unknown builtin {key}; known: {known}"
@@ -2349,24 +2210,21 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
   | "command.printAxioms" =>
-    let nStx := cmd.getArg 2
-    match s.globals.resolveName ((nStx.getId?).getD "_") with
-    | .error e => reportC nStx.info e ErrorCode.ambiguousName
-    | .ok n =>
-      if !s.globals.contains n then reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-      else match s.globals.axiomsOf n with
-        | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
-        | as =>
-          -- (a native implementation is trusted to agree with its definition; proofs
-          -- never run it, compiled code does)
-          let note := if as.any (·.startsWith "native ") then
-            "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
-          -- (27a) a `native_refl` axiom
-          let note := note ++ if as.any (·.endsWith ".native✝") then
-            "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
-          let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
-            "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
-          report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
+    let n := ((cmd.getArg 2).getId?).getD "_"
+    if !s.globals.contains n then reportC (cmd.getArg 2).info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+    else match s.globals.axiomsOf n with
+      | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
+      | as =>
+        -- (a native implementation is trusted to agree with its definition; proofs
+        -- never run it, compiled code does)
+        let note := if as.any (·.startsWith "native ") then
+          "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
+        -- (27a) a `native_refl` axiom
+        let note := note ++ if as.any (·.endsWith ".native✝") then
+          "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
+        let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
+          "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
+        report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
   | "command.foreignType" =>
     -- an opaque C pointer type; values are released with the finalizer
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2758,8 +2616,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9g) a C symbol for a Wiz function: the inverse of `extern`
     let cname := ((cmd.getArg 1).getStr?).getD "_"
     let fStx := cmd.getArg 2
-    let f0 := (fStx.getId?).getD "_"
-    let f := (s.globals.resolveName f0).toOption.getD f0
+    let f := (fStx.getId?).getD "_"
     match s.globals.find? f with
     | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -2804,8 +2661,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       remakeMetaCode
   | "command.appUnexpander" =>
     -- (11r) `app_unexpander c | `(term| $_ $x …) => `(term| …)`: printing notation for `c`
-    let c0 := ((cmd.getArg 1).getId?).getD "_"
-    let c := (s.globals.resolveName c0).toOption.getD c0
+    let c := ((cmd.getArg 1).getId?).getD "_"
+    let c := if s.globals.contains c then c else s.globals.resolve c
     let mut entries := #[]
     for alt in (cmd.getArg 2).args do
       let lhs := (alt.getArg 1).args[0]?.getD .missing
@@ -2828,8 +2685,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     modify fun s => CommandState.refreshPP { s with ppUser := entries.toList ++ s.ppUser }
   | "command.attrUnexpander" =>
     -- (11r) `attribute [app_unexpander c] f` with `f : Unexpander` (a `Macro`)
-    let c0 := ((cmd.getArg 3).getId?).getD "_"
-    let c := (s.globals.resolveName c0).toOption.getD c0
+    let c := ((cmd.getArg 3).getId?).getD "_"
+    let c := if s.globals.contains c then c else s.globals.resolve c
     let f := ((cmd.getArg 5).getId?).getD "_"
     let ok := runElab s.globals do
       let (_, ty) ← Elab.infer {} (.node cmd.info "term.ident" #[cmd.getArg 5])
@@ -2876,7 +2733,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let nStx := cmd.getArg 5
-    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
+    let n := s.globals.resolve ((nStx.getId?).getD "_")
     match s.globals.find? n with
     | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -3050,14 +2907,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       for C in ids (cmd.getArg 2) do
         derive (C.getId?.getD "_") (s.globals.resolve (T.getId?.getD "_")) C.info
   | "command.erase" =>
-    let nStx := cmd.getArg 1
-    match s.globals.resolveName ((nStx.getId?).getD "_") with
-    | .error e => reportC nStx.info e ErrorCode.ambiguousName
-    | .ok n => match s.globals.find? n with
-      | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-      | some d => match eraseDecl s.globals d with
-        | .ok e => report .info cmd.info s!"{n} := {e}"
-        | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
+    let n := ((cmd.getArg 1).getId?).getD "_"
+    match s.globals.find? n with
+    | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+    | some d => match eraseDecl s.globals d with
+      | .ok e => report .info cmd.info s!"{n} := {e}"
+      | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
   | "command.eval" =>
     -- elaborate, erase, run, and read the result back using its type
     let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
@@ -3109,20 +2964,17 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | .ok (ty, v) => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
       | .error err => report .error cmd.info s!"#run: {err}"
   | "command.ir" =>
-    let nStx := cmd.getArg 1
-    match s.globals.resolveName ((nStx.getId?).getD "_") with
-    | .error e => reportC nStx.info e ErrorCode.ambiguousName
-    | .ok n =>
-      let result : Except String (Array IR.Decl) := do
-        let code ← (compileReachable s.globals s.builtins [n]).mapError toString
-        IR.lowerProgram code (.global n)
-      match result with
-      | .ok decls =>
-        -- (not the owned wrappers for closures, stage 8e)
-        let mine := (IR.optimizeProgram decls).filter fun d =>
-          d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
-        report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
-      | .error err => report .error cmd.info s!"#ir: {err}"
+    let n := ((cmd.getArg 1).getId?).getD "_"
+    let result : Except String (Array IR.Decl) := do
+      let code ← (compileReachable s.globals s.builtins [n]).mapError toString
+      IR.lowerProgram code (.global n)
+    match result with
+    | .ok decls =>
+      -- (not the owned wrappers for closures, stage 8e)
+      let mine := (IR.optimizeProgram decls).filter fun d =>
+        d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
+      report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
+    | .error err => report .error cmd.info s!"#ir: {err}"
   | "command.syntax" | "command.declareSyntaxCat" =>
     match updateTables s.tables cmd with
     | .ok tables =>

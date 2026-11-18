@@ -2240,7 +2240,7 @@ where
                        rerun := ← IO.mkRef #[], region := store.region.isSome,
                        entries := ← IO.mkRef #[] })
         else pure none
-      let (_, h) ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write none sink
+      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write none sink
       store.markSeen k m
       pure (some h)
     -- (the isolated run above wrote the artifact if it was missing or unusable)
@@ -2252,7 +2252,7 @@ where
       | none => pure 0
     -- (the command loop still runs: imports, keys and duplicate checks are unchanged; the
     -- effects come from the region when it has them)
-    let (s', h) ← go keys base (m :: stack) src ({ s with imported := m :: s.imported, messages := #[], module := m }).atModuleStart k .replay region
+    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay region
     let brokenAfter ← match store.manifests with
       | some ms => ms.broken.get
       | none => pure brokenBefore
@@ -2266,7 +2266,7 @@ where
                            rerun := ← IO.mkRef #[], region := true,
                            entries := ← IO.mkRef #[] })
             else pure none
-          let _ ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write none sink
+          let _ ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write none sink
           pure ()
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
@@ -2390,8 +2390,6 @@ where
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
         pos := stop
-    -- (13t) a namespace the module left open is an error in it
-    s := s.checkUnclosedNamespaces
     -- (write the module's region and its manifest once: after a complete isolated run)
     if let some sink := sink then
       unless aborted do

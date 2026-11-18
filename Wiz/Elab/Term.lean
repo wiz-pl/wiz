@@ -598,21 +598,18 @@ def dotCtor? (g : Globals R) (tys : Array (VTy R)) (T c : Name) (expected : VTy 
     | _ => none
 
 partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
-  let ctorOf (n : Name) : Except String (Option (Name × Name)) := do
-    -- (13t) the name the current namespace and opens give it; (13b) this module's
-    -- private type's constructor, under its kernel name
-    let n ← g.resolveName n
-    let ofName : Option (Name × Name) :=
-      match (n.splitOn ".").reverse with
-      | c :: T@(_ :: _) =>
-        let T := ".".intercalate T.reverse
-        if g.contains (T ++ ".desc") && g.contains n then some (T, c)
-        -- (13h) a structure's constructor
-        else if c == "mk" && g.contains n && g.contains T then some (T, c)
-        -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
-        else (familyCtor? g n).map (·, n)
-      | _ => none
-    pure ofName
+  let ctorOf (n : Name) : Option (Name × Name) :=
+    -- (13b) this module's private type's constructor, under its kernel name
+    let n := g.resolve n
+    match (n.splitOn ".").reverse with
+    | c :: T@(_ :: _) =>
+      let T := ".".intercalate T.reverse
+      if g.contains (T ++ ".desc") && g.contains n then some (T, c)
+      -- (13h) a structure's constructor
+      else if c == "mk" && g.contains n && g.contains T then some (T, c)
+      -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
+      else (familyCtor? g n).map (·, n)
+    | _ => none
   match stx.kind with
   | "term.paren" => patView g (stx.getArg 1)
   | "term.tuple" =>
@@ -634,9 +631,8 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
   | "term.ident" =>
     let n := (stx.getArg 0).getId?.getD "_"
     match ctorOf n with
-    | .error e => .error e
-    | .ok (some (T, c)) => pure (.ctor (some T) c [])
-    | .ok none => pure (.var n)
+    | some (T, c) => pure (.ctor (some T) c [])
+    | none => pure (.var n)
   | "term.app" =>
     let h := stx.getArg 0
     let args := (stx.getArg 1).args.toList
@@ -645,13 +641,11 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     | "term.ident" =>
       let f := (h.getArg 0).getId?.getD "_"
       match ctorOf f with
-      | .error e => .error e
-      | .ok (some (T, c)) => pure (.ctor (some T) c args)
-      | .ok none =>
+      | some (T, c) => pure (.ctor (some T) c args)
+      | none =>
         -- (13q) `p + k`, as `+` expands (`Add.add p k`, or `HAdd.hAdd p k`), with a numeral `k`
         -- (`HAdd.hAdd` too: `+` of the heterogeneous classes)
-        let resolved := (g.resolveName f).toOption
-        match resolved == some "Add.add" || resolved == some "HAdd.hAdd", args with
+        match g.resolve f == "Add.add" || g.resolve f == "HAdd.hAdd", args with
         | true, [p, k] => match (if k.isOfKind "term.num" then (k.getArg 0).getNat? else none) with
           | some 0 => patView g p
           | some n => pure (.plusK p n)
@@ -3463,12 +3457,8 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
         return (.var ix, ty)
     -- a macro-scoped name that isn't a local refers to the global of its base name
     let x := stripScope x
-    -- (13t) this namespace's, this module's, and the open namespaces' declaration of the
-    -- name (an ambiguity is an error naming both); (13b) a private one of this module
-    -- resolves to its kernel name
-    let x ← match (← getGlobals).resolveName x with
-      | .ok x => pure x
-      | .error e => throwAt ctx.info e ErrorCode.ambiguousName
+    -- (13b) this module's private declaration of that name, if any
+    let x := (← getGlobals).resolve x
     match (← getGlobals).find? x with
     | some d =>
       -- (13b) a private name of another module
