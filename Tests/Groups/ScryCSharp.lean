@@ -248,8 +248,8 @@ def group : Group where
           let text ← loweredText name
           for (n, sub) in requiredWarnings do
             if n == name && !((text.splitOn sub).length > 1) then
-              missing := missing ++ [s!"{name}: no warning contains \"{sub}\""]
-        checkEq ([] : List String) missing },
+              missing := s!"{name}: no warning contains \"{sub}\"" :: missing
+        checkEq ([] : List String) missing.reverse },
     { name := "lower: a lowered C# loop runs under Wil.runFunction (Sum(10) = 45, Fact(5) = 120)",
       run := fun _ => do
         let (src, spill) ← fixture "lower" "basic"
