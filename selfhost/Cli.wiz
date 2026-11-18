@@ -10,6 +10,7 @@
 --            --cache-verify off|warn|strict, --target c (the backend the host names;
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
+--            --trust-smt (C15: the `smt` tactic is refused; there is no solver here),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
 --            --version, -h | --help
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
@@ -60,12 +61,15 @@ structure Opts where
   backend : List String
   verify : String
   target : Option String
+  -- (C15) the host's `--trust-smt`: accepted, and it selects the `smt` refusal (the
+  -- frontend has no solver; see `smtUnsupported`); it is in the cache key when set
+  trustSmt : Bool
 
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
   Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
-    "warn" .none
+    "warn" .none .false
 
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
@@ -239,15 +243,15 @@ def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
           someGraph (Graph.mk tab hs))))
 
-def runGraph (g : Graph) : Prepared := match g with
-  | .mk tab hs => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+def runGraph (smtTrust : Bool) (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunT smtTrust cats tokens hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => Prepared.mk tab run order
 
 -- the whole program: the loader, every module checked, and the run it produced
 def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
   IO.bind (loadGraph roots file) (fun g => match g with
     | .none => nonePrepared
-    | .some g => somePrepared (runGraph g))
+    | .some g => somePrepared (runGraph .false g))
 
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
@@ -636,10 +640,15 @@ def headerHash : List Header → Nat → Nat
 def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
   | .mk tab hs =>
     let names := tabNames tab;
+    -- (C15) the flag is part of the key when set, as the host's `smtKey` mixes in a
+    -- non-default `Smt.Config` (a refusal message is cached with the run that wrote it)
+    let smtFlag : List String := match o.trustSmt with
+      | .true => .cons "--trust-smt" .nil
+      | .false => .nil;
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append o.backend (modPathsOf tab names)))))) 2166136261)
+          (List.append o.backend (List.append smtFlag (modPathsOf tab names))))))) 2166136261)
 
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
@@ -836,17 +845,19 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   | .some m => match verifyOk m with
                                     | .true => parseOptsGo rest { o with verify := m } file extra
                                     | .false => .err (verifyErr m)
-                                  | .none => match isBackendFlag a with
-                                    | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                    | .false => match strStarts "-" a with
-                                      -- (A14) a root with its directory attached: `-IDIR`,
-                                      -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
-                                      | .true => match modAttachedRoot a with
-                                        | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                        | .none => .err (String.append "unknown flag: " a)
-                                      | .false => match file with
-                                        | .none => parseOptsGo rest o (.some a) extra
-                                        | .some _ => parseOptsGo rest o file (.cons a extra)
+                                  | .none => match strEq a "--trust-smt" with
+                                    | .true => parseOptsGo rest { o with trustSmt := .true } file extra
+                                    | .false => match isBackendFlag a with
+                                      | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                      | .false => match strStarts "-" a with
+                                        -- (A14) a root with its directory attached: `-IDIR`,
+                                        -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                        | .true => match modAttachedRoot a with
+                                          | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                          | .none => .err (String.append "unknown flag: " a)
+                                        | .false => match file with
+                                          | .none => parseOptsGo rest o (.some a) extra
+                                          | .some _ => parseOptsGo rest o file (.cons a extra)
 
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
@@ -868,7 +879,8 @@ def usageText : String :=
   "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS; backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
+  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 
@@ -894,7 +906,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
     -- no cache: do not even build the key (it hashes every module's text)
     | .none => do
       cacheMissMsg o .false "";
-      let p := runGraph g;
+      let p := runGraph o.trustSmt g;
       let ds := diagsOf p.tab (linesOf p.run);
       let st := statusOf ds;
       emitDiags o ds;
@@ -914,7 +926,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         | .false => Process.exit 1
       | .none => do
         if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-        let p := runGraph g;
+        let p := runGraph o.trustSmt g;
         let lines := linesOf p.run;
         let ds := diagsOf p.tab lines;
         let st := statusOf ds;
@@ -969,7 +981,7 @@ def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : Strin
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
   | .none => do
     cacheMissMsg o .false "";
-    buildMiss o .false "" "" out (runGraph g)
+    buildMiss o .false "" "" out (runGraph o.trustSmt g)
   | .some _ => do
     let key := keyOfGraph o "c" g;
     cached ← cacheRead o key ".c";
@@ -979,7 +991,7 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache w
       writeOut out ctext
     | .none => do
       cacheMissMsg o .true key;
-      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph g)
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustSmt g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -1056,7 +1068,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   match gopt with
   | .none => missingFile file
   | .some g => match o.cache with
-    | .none => runPrepared o .false "nocache" "" (runGraph g) extra
+    | .none => runPrepared o .false "nocache" "" (runGraph o.trustSmt g) extra
     | .some _ => do
       let cKey := keyOfGraph o "c" g;
       cached ← cacheRead o cKey ".c";
@@ -1064,7 +1076,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
       | .some (.mk st ctext) => do
         if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
         compileAndRun o cKey ctext extra
-      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph g) extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustSmt g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -1094,7 +1106,7 @@ def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  match modCheckRunT (modHasFlag args "--trust-smt") cats tokens hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
@@ -1151,7 +1163,7 @@ def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (strEq a "--types"))))
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types") (strEq a "--trust-smt")))))
 
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)
