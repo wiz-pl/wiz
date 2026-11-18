@@ -1,0 +1,49 @@
+-- A fixture for web/playground_loom_test.mjs: the playground's output pane
+-- (lib/Web/Playground.wiz) rendered and diffed, printed as JSON. The Node test parses
+-- `empty` with web/framework/minidom.mjs, applies each patch list with runtime.js and
+-- requires the serialization to be exactly the next state's SSR -- so the Wiz
+-- component, the diff and the browser half are checked together. No Wasm, no browser.
+--
+--   .lake/build/bin/wiz run web/playground_loom_gen.wiz
+import IO
+import Json
+import Web.Loom
+import Web.Playground
+
+def jstr (s : String) : Json := Json.mkStr s
+
+def s0 : Model := Model.empty
+def ok : Model := Model.ofText "ok\n3 : Nat" "done in 4 ms" "ready"
+def bad : Model :=
+  Model.ofText "error: unknown identifier nope\nparse error at 2:1" "done in 3 ms" "error"
+def failure : Model :=
+  Model.ofFailure "error: the program exited with code 3" "failed" "exit code 3" "error"
+
+-- A line the page marked as a value: the component keeps the kind it is handed.
+def marked : Model :=
+  Model.mk [Line.mk "42 : Nat" "val"] 0 "done in 1 ms" "ready" "1 line"
+
+def nasty : Model :=
+  Model.ofText "<script>alert('x')</script>" "done in 1 ms" "ready"
+
+def fields : List (String × Json) :=
+  [ Json.field "empty" (jstr (Loom.App.html app s0))
+  , Json.field "emptyCount" (jstr s0.count)
+  , Json.field "ok" (jstr (Loom.App.html app ok))
+  , Json.field "okCount" (jstr ok.count)
+  , Json.field "bad" (jstr (Loom.App.html app bad))
+  , Json.field "badCount" (jstr bad.count)
+  , Json.field "failure" (jstr (Loom.App.html app failure))
+  , Json.field "failureCount" (jstr failure.count)
+  , Json.field "failureStatus" (jstr (String.append failure.status (String.append " /" failure.statusKind)))
+  , Json.field "marked" (jstr (Loom.App.html app marked))
+  , Json.field "nasty" (jstr (Loom.App.html app nasty))
+  , Json.field "emptyToOk" (jstr (Loom.App.patches app s0 ok))
+  , Json.field "okToBad" (jstr (Loom.App.patches app ok bad))
+  , Json.field "badToEmpty" (jstr (Loom.App.patches app bad s0))
+  , Json.field "single" (jstr (Model.ofText "ok" "ready" "ready").count)
+  , Json.field "oneErr" (jstr (Model.ofText "error: x" "error" "error").count)
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

@@ -17,6 +17,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* playground: the output pane's first piece now exists as a Loom component,
+  `lib/Web/Playground.wiz`: `Model.ofText` splits a run's output into classified lines
+  and produces the page's `#count` text verbatim (`2 lines · 1 error`), `Model.ofFailure`
+  does the same for an engine failure with its own count (`exit code 3`), and
+  `Model.view` renders the `#output` element. It is pure, so `web/playground_loom_gen.wiz`
+  renders and diffs it and `web/playground_loom_test.mjs` applies the patches with the
+  same DOM double as the framework test; `web/playground-loom-test.sh` runs both in the
+  `web` job. The page still renders the pane by hand: the component needs its own Wasm
+  instance, because the engine's is deliberately dropped and re-instantiated after a
+  user `exit` (see `wiz-notes/playground-loom-plan.md`).
 * playground: a Wasm call that exits, aborts or traps no longer takes the page with it.
   `run`, `eval` and `check` now go through one guard (`web/playground-engine.js`): the
   one-threaded runtime's `ExitStatus` (a program that forks a thread or blocks forever,

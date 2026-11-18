@@ -1,0 +1,118 @@
+import IO
+import Text
+import Web.Loom
+
+/-!
+# Web.Playground
+
+The playground's output pane as a Loom app.
+
+The pane is pure presentation. The page owns the editor and the Wasm engine; it hands
+the engine's text to `Model.ofText` (a run) or `Model.ofFailure` (an exit, abort or
+trap) and renders the result. Nothing here calls the engine, so the component renders
+and diffs without WebAssembly (`web/playground_loom_gen.wiz` drives it under
+`web/playground_loom_test.mjs`).
+
+`Line.kind` is the CSS class the page already uses: `err` for an error line and `val`
+for a value this component was handed as one. `web/playground-values.js` still decides
+what a value looks like; moving that in is the next step, and it changes nothing here.
+-/
+
+/-- One output line: its text, and the class the page put on it. -/
+structure Line where
+  text : String
+  kind : String
+
+/-- The pane's state: the lines, how many of them are errors, the page's status pair
+(`setStatus(text, kind)`), and the `#count` text (the page writes `exit code 3` there
+for a failure instead of a line count). -/
+structure Model where
+  lines : List Line
+  failures : Nat
+  status : String
+  statusKind : String
+  count : String
+
+/-- The pane has no events yet. The clear control is the first one it will gain; the
+run and the engine stay on the page's side because they are effects. -/
+inductive PlaygroundMsg where
+  | clear
+
+def Model.empty : Model := Model.mk List.nil 0 "" "" "0 lines"
+
+def nonEmpty (s : String) : Bool :=
+  match String.isEmpty s with
+  | .true => .false
+  | .false => .true
+
+def isErr (l : Line) : Bool :=
+  match String.eq l.kind "err" with
+  | .true => .true
+  | .false => .false
+
+/-- `line`, plus `err`/`val` when the line has a kind (the page sets `line` and adds
+the kind separately). -/
+def Line.cls (l : Line) : String :=
+  match String.isEmpty l.kind with
+  | .true => "line"
+  | .false => String.append "line " l.kind
+
+/-- An output line, classified the way the page's `line()` does: `error:` and
+`parse error` are `err`; everything else keeps the kind it was given (`val` is set by
+the page before the text gets here, because rendering a value is still its job). -/
+def Line.ofText (text : String) : Line :=
+  match String.startsWith text "error:" with
+  | .true => Line.mk text "err"
+  | .false =>
+    match String.startsWith text "parse error" with
+    | .true => Line.mk text "err"
+    | .false => Line.mk text ""
+
+/-- The non-empty lines of `text`, classified. -/
+def linesOf (text : String) : List Line :=
+  List.map Line.ofText (List.filter nonEmpty (String.splitOn text "\n"))
+
+def countOf (ls : List Line) : Nat :=
+  List.length (List.filter isErr ls)
+
+/-- The `#count` text, exactly what the page writes today: `3 lines`, or
+`3 lines · 1 error`. -/
+def plainCount (ls : List Line) (failures : Nat) : String :=
+  let n := List.length ls;
+  let base := String.append (Nat.toString n) (match Nat.beq n 1 with
+    | .true => " line"
+    | .false => " lines");
+  match Nat.beq failures 0 with
+  | .true => base
+  | .false => String.append base (String.append " · " (String.append (Nat.toString failures)
+      (match Nat.beq failures 1 with
+        | .true => " error"
+        | .false => " errors")))
+
+/-- A run that produced output. `status`/`kind` are the page's `setStatus` pair. -/
+def Model.ofText (text : String) (status : String) (kind : String) : Model :=
+  let ls := linesOf text;
+  let f := countOf ls;
+  Model.mk ls f status kind (plainCount ls f)
+
+/-- A run that ended in the engine guard: its lines, the page's status, and the count
+the page shows instead of a line count (`exit code 3`, or the failure's kind). -/
+def Model.ofFailure (text : String) (status : String) (count : String) (kind : String) : Model :=
+  let ls := linesOf text;
+  Model.mk ls (countOf ls) status kind count
+
+def Line.view (l : Line) : Loom.VNode PlaygroundMsg :=
+  Loom.el "div" [Loom.class (Line.cls l)] [Loom.text l.text]
+
+/-- The pane: the page's `#output` element, one `.line` div per line. -/
+def Model.view (s : Model) : Loom.VNode PlaygroundMsg :=
+  Loom.el "div"
+    [Loom.class "output", Loom.attr "id" "output", Loom.attr "aria-live" "polite"]
+    (List.map Line.view s.lines)
+
+/-- SSR of the pane at `s`, and its patches between two states. The app exists so
+that the pane can be mounted through the same driver as any other Loom page once the
+playground serves it from its own Wasm instance. -/
+def app : Loom.App Model PlaygroundMsg := Loom.App.mk Model.empty
+  (fun _ s => s)
+  Model.view
