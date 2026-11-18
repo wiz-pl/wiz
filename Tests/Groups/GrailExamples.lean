@@ -32,8 +32,9 @@ def examplesCase (name : String) (keep : String → Bool) (skips : List String) 
       let files ← Grail.testFiles "." "examples"
       let sel := files.toList.filter fun f => !f.startsWith "examples/tour/" && keep f
       check (!sel.isEmpty) "no examples in this range (the range in Tests/Groups/GrailExamples.lean is stale)"
+      -- (the driver's elaboration cache, from `--cache`: the files share imports, so
+      -- the first one pays for `Prelude`, the rest replay it)
       let tc ← toolchain
-      let tc : Toolchain := { tc with cacheDir := some (← tc.cacheDir.getDM IO.FS.createTempDir) }
       let (res, _) ← runTests "." tc (filters := sel)
       checkEq sel.length res.size
       checkEq skips (res.filter (·.skipped) |>.toList.map (·.file))
