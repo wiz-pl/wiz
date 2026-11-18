@@ -137,7 +137,8 @@ partial def Scry.ProjectIO.stripLinesGo (paths : List String) :
 def Scry.ProjectIO.stripSystem (pre : Scry.Preprocessed) : Scry.Preprocessed :=
   let lines := Scry.ProjectIO.stripLinesGo pre.paths (String.splitOn pre.text "\n")
     pre.lineFile;
-  { pre with text := String.intercalate "\n" lines }
+  let text := String.intercalate "\n" lines;
+  { pre with text := text, textMap := Scry.ByteMap.ofString text }
 
 /-- Run the preprocessor on one source file: `cc -E -ffreestanding FLAGS FILE` in
 `cwd` (the compile command's directory, when it has one). -/

@@ -2175,5 +2175,19 @@ def Scry.Cs.lowerRender (path : String) (text : String) (spill : String) : Strin
   match Scry.Cs.frontend path text spill with
   | .ok l => Scry.Cs.loweredText l
   | .err m => m
+
+/-- The warnings with their full origin, one `func:line:col message` line each (oldest
+first): the location golden, which pins the column as well as the message. A byte column
+would move right by one for every multibyte character earlier on the line. -/
+def Scry.Cs.loweredLocations (l : Scry.Cs.Lowered) : String :=
+  String.intercalate "\n" (List.map (fun (w : Scry.Warning) =>
+    w.func ++ ":" ++ Nat.repr w.span.line ++ ":" ++ Nat.repr w.span.col ++ " " ++ w.message)
+    (List.reverse l.warnings))
+
+/-- The location golden of a fixture (`lowerRender` with `line:col`). -/
+def Scry.Cs.lowerLocations (path : String) (text : String) (spill : String) : String :=
+  match Scry.Cs.frontend path text spill with
+  | .ok l => Scry.Cs.loweredLocations l
+  | .err m => m
       -- A file-scoped namespace is a prefix, not a container: its declarations are
       -- the following siblings of the compilation unit.

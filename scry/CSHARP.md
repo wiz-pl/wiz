@@ -426,15 +426,27 @@ A `scry cs PATH` driver (`scry/src/Scry/CsCmd.wiz`, which walks a directory,
 analysed) is being added on the sibling branch `agent/cs-driver`; it is not part of
 this branch.
 
-### 7.8 A known caveat: non-ASCII text
+### 7.8 Non-ASCII text: byte spans, character columns
 
-Two of the 75 files contain non-ASCII text (an em dash in a comment, a `§`). `Scry.Cst`
-slices a node's text by **character** index while tree-sitter's spans are **byte**
-offsets (`Scry.Cst.textOf`'s doc says so; the C frontend has the same limitation). Every
-identifier after such a character is read shifted — `outcome` becomes `ome` — so those
-two files report `unknown name …` warnings for real locals. It is loud, not silent, but
-it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
-it is left as its own change because it is shared with C.
+A Wiz `String` is a list of characters, while tree-sitter's spans are UTF-8 **byte**
+offsets. `Scry.ByteMap` (`Scry.Preproc`) is the single conversion between the two: it is
+built once per text (`Scry.Preprocessed.textMap` for the preprocessed text and
+`fileMaps` for the originals) and every call site that slices a `String` or emits a
+column goes through it. `Scry.Cst.nodeText` maps the span's byte ends to character
+indices and slices the code-point array; `Scry.mapSpan` and `Scry.lineOrigin` slice and
+convert through the map. A `Wil.Span` range stays a **byte** offset, as `Scry.Schema`
+documents; its `col` is a 1-based **character** column. The SARIF report goes through
+`Scry.TextIndex`, which carries the same map, so `startColumn`/`endColumn` are character
+columns too. The C frontend shares `Scry.Cst.ofPreprocessed` and `Scry.mapSpan`, so it
+gets the same fix.
+
+Two of the 75 files of `src/Crux.Api` contain an em dash or a `§`; before this change
+every identifier after such a character was read shifted (`outcome` became `ome`) and
+those files reported `unknown name …` warnings for real locals. The corpus case
+`lower/unicode` keeps a local declared before the em dash and used after it; its
+`lower/unicode.loc` golden pins that the use still resolves and that the one genuine
+`unknown name Missing` warning is at the `M` (line 12, column 26), not at a byte
+column.
 
 ## 8. The repository driver: `scry cs`
 

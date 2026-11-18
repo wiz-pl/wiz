@@ -42,8 +42,12 @@ line the user wrote, never the preprocessed expansion. A file whose text the cal
 not supply (an unreadable system header, say) still maps to the right file/line/column;
 its byte range is empty (there is no text to index).
 
-The fixtures are ASCII, so byte offsets and character indices coincide (noted in
-`wiz-notes/scry-c2wil.md`).
+Offsets are **bytes** throughout (tree-sitter's convention), while a Wiz `String` is a
+list of characters. `Scry.ByteMap` is the one byte→character conversion: it is built
+once per text (`Scry.Preprocessed.textMap` for the preprocessed text and `fileMaps` for
+the original files) and every place that slices a `String` or emits a column goes
+through it. A non-ASCII character before a token therefore no longer shifts the token,
+and a column counts characters, not UTF-8 bytes.
 -/
 
 -- ## Line markers
@@ -164,10 +168,109 @@ def Scry.textOfPaths (files : List (String × String)) (p : String) : String :=
   | .some q => q.2
   | .none => ""
 
-/-- A blanked line: the same number of characters, all spaces. Marker lines are blanked
-so tree-sitter never sees a directive, while every later offset stays correct. -/
-def Scry.blankLine (l : String) : String :=
-  String.ofChars (List.map (fun _ => (Char.mk 32)) (String.chars l))
+/-- The UTF-8 length in bytes of code point `c` (1–4). A code point outside the scalar
+values (or a surrogate) is written as U+FFFD, three bytes, as `Bytes.pushUtf8` does. -/
+def Scry.utf8Length (c : Nat) : Nat :=
+  match Nat.lt c 128 with
+  | .true => 1
+  | .false => match Nat.lt c 2048 with
+    | .true => 2
+    | .false => match Nat.lt c 65536 with
+      | .true => 3
+      | .false => match Nat.lt c 1114112 with
+        | .true => 4
+        | .false => 3
+
+/-- The UTF-8 length in bytes of `s` (its size on disk, and the space tree-sitter's
+offsets index). -/
+def Scry.textByteLength (s : String) : Nat :=
+  List.foldl (fun acc c => Nat.add acc (Scry.utf8Length (Char.code c))) 0 (String.chars s)
+
+/-- `n` spaces, as a list (a helper of `Scry.spaces`). -/
+partial def Scry.spacesGo : Nat → List Char → List Char
+  | .zero, acc => acc
+  | .succ k, acc => Scry.spacesGo k (.cons (Char.mk 32) acc)
+
+/-- `n` spaces. -/
+def Scry.spaces (n : Nat) : String := String.ofChars (Scry.spacesGo n .nil)
+
+/-- A blanked line: the same number of **UTF-8 bytes**, all spaces. Marker lines are
+blanked so tree-sitter never sees a directive, while every later byte offset stays
+correct (a multibyte character becomes as many spaces as it took bytes). -/
+def Scry.blankLine (l : String) : String := Scry.spaces (Scry.textByteLength l)
+
+-- ## Byte offsets and character indices
+
+/-- A text with its byte→character index map. `Scry.Cst` spans and tree-sitter's spans
+are **byte** offsets into the UTF-8 encoding, while a Wiz `String` is a list of
+characters; this is the one conversion between the two. `byteToChar` has one entry per
+byte offset `0 … n` (`n` is the UTF-8 size): a continuation byte maps to the index of
+the character it continues, and entry `n` is the character count. -/
+structure Scry.ByteMap where
+  /-- The text the map indexes. -/
+  text : String
+  /-- `byteToChar[b]`: the character index containing byte `b` (see the structure
+  doc); its last entry is the character count. -/
+  byteToChar : U32Array
+
+/-- `a` with one character index per byte of `c` (a helper of `Scry.ByteMap.ofString`). -/
+def Scry.byteMapChar (c : Char) (i : Nat) (a : U32Array) : U32Array :=
+  U32Array.pushN (U32.ofNat i) (Scry.utf8Length (Char.code c)) a
+
+/-- Push one index per byte of each character, then the character count (a helper of
+`Scry.ByteMap.ofString`). -/
+def Scry.byteMapGo : List Char → Nat → U32Array → U32Array
+  | .nil, i, a => U32Array.push a (U32.ofNat i)
+  | .cons c cs, i, a => Scry.byteMapGo cs (Nat.succ i) (Scry.byteMapChar c i a)
+
+/-- The byte→character map of `text`, built in one pass over its characters. -/
+def Scry.ByteMap.ofString (text : String) : Scry.ByteMap :=
+  Scry.ByteMap.mk text (Scry.byteMapGo (String.chars text) 0 U32Array.empty)
+
+/-- The UTF-8 size of the mapped text. -/
+def Scry.ByteMap.byteLength (m : Scry.ByteMap) : Nat :=
+  Nat.sub (U32Array.size m.byteToChar) 1
+
+/-- The character index containing byte `offset` (`offset` past the end is the character
+count). -/
+def Scry.ByteMap.charOfByte (m : Scry.ByteMap) (offset : Nat) : Nat :=
+  let n := U32Array.size m.byteToChar;
+  match Nat.lt offset n with
+  | .true => UIntN.toNat (U32Array.get m.byteToChar offset)
+  | .false => Nat.sub n 1
+
+/-- The number of characters. -/
+def Scry.ByteMap.charCount (m : Scry.ByteMap) : Nat :=
+  Scry.ByteMap.charOfByte m (Scry.ByteMap.byteLength m)
+
+/-- Binary search for the first byte of character `c` (the map is non-decreasing). -/
+partial def Scry.ByteMap.byteOfCharGo (m : Scry.ByteMap) (c lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add lo hi) 2;
+    match Nat.le c (Scry.ByteMap.charOfByte m mid) with
+    | .true => Scry.ByteMap.byteOfCharGo m c lo mid
+    | .false => Scry.ByteMap.byteOfCharGo m c (Nat.succ mid) hi
+
+/-- The byte offset where character `c` starts (past the end: the UTF-8 size). -/
+def Scry.ByteMap.byteOfChar (m : Scry.ByteMap) (c : Nat) : Nat :=
+  Scry.ByteMap.byteOfCharGo m c 0 (Scry.ByteMap.byteLength m)
+
+/-- The characters of the byte range `[start, stop)`. The range must start and end on a
+character boundary (a tree-sitter node does); an out-of-range range is cut at the end.
+This is O(start) in the text, as any list slice is: for the hot `nodeText` path, index
+the code-point array with `charOfByte` instead. -/
+def Scry.ByteMap.slice (m : Scry.ByteMap) (start stop : Nat) : String :=
+  let a := Scry.ByteMap.charOfByte m start;
+  let b := Scry.ByteMap.charOfByte m stop;
+  String.take (Nat.sub b a) (String.drop a m.text)
+
+/-- The 1-based **character** column of byte `offset` on the line whose first byte is
+`lineStart`. A byte column would count a multibyte character as two or three. -/
+def Scry.ByteMap.colOf (m : Scry.ByteMap) (offset lineStart : Nat) : Nat :=
+  Nat.succ (Nat.sub (Scry.ByteMap.charOfByte m offset)
+    (Scry.ByteMap.charOfByte m lineStart))
 
 /-- The scan state: the file tables, the per-preprocessed-line origin, and the output
 lines, all accumulated in reverse (paths and texts in order). -/
@@ -187,13 +290,17 @@ structure Scry.ScanState where
 /-- A preprocessed translation unit: the blanked text tree-sitter parses, the original
 files and their texts, and the map from a preprocessed offset to its original line. -/
 structure Scry.Preprocessed where
-  /-- The preprocessed text with marker lines blanked (same length as the input). -/
+  /-- The preprocessed text with marker lines blanked (same byte length as the input). -/
   text : String
+  /-- The byte→character map of `text`: tree-sitter's spans are byte offsets into it. -/
+  textMap : Scry.ByteMap
   /-- Original file paths, by file index (0 is the unit's own path). -/
   paths : List String
   /-- Original file texts, by file index (`""` when not supplied). -/
   texts : List String
-  /-- Per preprocessed line: the offset of its first character. -/
+  /-- The byte→character maps of `texts`, by file index. -/
+  fileMaps : List Scry.ByteMap
+  /-- Per preprocessed line: the byte offset of its first byte. -/
   lineStart : List Nat
   /-- Per preprocessed line: the original file index. -/
   lineFile : List Nat
@@ -217,7 +324,7 @@ def Scry.scanLine (files : List (String × String)) (st : Scry.ScanState)
   match Scry.markerOf l with
   | .none => { st1 with
       out := .cons l st1.out,
-      offset := Nat.add (Nat.add st1.offset (String.length l)) 1,
+      offset := Nat.add (Nat.add st1.offset (Scry.textByteLength l)) 1,
       curLine := Nat.succ st1.curLine }
   | .some m =>
     let add : List String × List String × Nat := match m.path with
@@ -233,7 +340,7 @@ def Scry.scanLine (files : List (String × String)) (st : Scry.ScanState)
       curFile := add.2.2,
       curLine := m.line,
       out := .cons (Scry.blankLine l) st1.out,
-      offset := Nat.add (Nat.add st1.offset (String.length l)) 1,
+      offset := Nat.add (Nat.add st1.offset (Scry.textByteLength l)) 1,
       markers := Nat.succ st1.markers,
       systemMarkers := match m.system with
         | .true => Nat.succ st1.systemMarkers
@@ -255,8 +362,9 @@ path maps by line and column with an empty byte range). -/
 def Scry.preprocess (defaultPath : String) (raw : String)
     (files : List (String × String)) : Scry.Preprocessed :=
   let st := Scry.scanLines files (String.splitOn raw "\n") (Scry.scanStart files defaultPath);
-  Scry.Preprocessed.mk (String.intercalate "\n" (List.reverse st.out))
-    st.paths st.texts
+  let text := String.intercalate "\n" (List.reverse st.out);
+  Scry.Preprocessed.mk text (Scry.ByteMap.ofString text)
+    st.paths st.texts (List.map Scry.ByteMap.ofString st.texts)
     (List.reverse st.lineStart) (List.reverse st.lineFile) (List.reverse st.lineOrig)
     (List.map Scry.lineStarts st.texts) st.markers st.systemMarkers
 
@@ -279,8 +387,8 @@ partial def Scry.lineIndexFrom (off : Nat) : Nat → Nat → List Nat → Nat
     | .true => Scry.lineIndexFrom off (Nat.succ i) i rest
     | .false => best
 
-/-- A mapped position: the original file, 1-based line and column, and the byte offset
-those index in the original file's text. -/
+/-- A mapped position: the original file, 1-based line and **character** column, and the
+**byte** offset those index in the original file's text. -/
 structure Scry.Pos where
   file : Nat
   line : Nat
@@ -288,9 +396,9 @@ structure Scry.Pos where
   off : Nat
 
 /-- Map a preprocessed byte offset to its original position. The line is exact (from the
-markers); the column is the offset within the preprocessed line, which equals the
-original column when nothing on the line changed (the span check in `Scry.mapSpan`
-decides that). -/
+markers); the column is the character offset within the preprocessed line, which equals
+the original character column when nothing on the line changed (the span check in
+`Scry.mapSpan` decides that). `off` stays a byte offset: `Wil.Span` ranges are bytes. -/
 def Scry.posOf (pre : Scry.Preprocessed) (off : Nat) : Scry.Pos :=
   let i := Scry.lineIndexFrom off 0 0 pre.lineStart;
   let file := List.getD pre.lineFile i 0;
@@ -299,15 +407,12 @@ def Scry.posOf (pre : Scry.Preprocessed) (off : Nat) : Scry.Pos :=
     | .true => 1
     | .false => line0;
   let lo := List.getD pre.lineStart i 0;
-  let col := Nat.add (Nat.sub off lo) 1;
-  let text := List.getD pre.texts file "";
+  let col := Scry.ByteMap.colOf pre.textMap off lo;
+  let fm := List.getD pre.fileMaps file (Scry.ByteMap.ofString "");
   let starts := List.getD pre.fileLines file .nil;
-  let lineOff := List.getD starts (Nat.sub line 1) 0;
-  let off2 := Nat.add lineOff (Nat.sub col 1);
-  let off3 := match Nat.le off2 (String.length text) with
-    | .true => off2
-    | .false => String.length text;
-  Scry.Pos.mk file line col off3
+  let lineCharStart := List.getD starts (Nat.sub line 1) 0;
+  let charOff := Nat.add lineCharStart (Nat.sub col 1);
+  Scry.Pos.mk file line col (Scry.ByteMap.byteOfChar fm charOff)
 
 /-- The origin for a position that cannot be mapped exactly: the whole original line at
 `p.line`, trimmed (leading whitespace skipped so `spanText` starts with the statement). -/
@@ -319,7 +424,9 @@ def Scry.lineOrigin (pre : Scry.Preprocessed) (p : Scry.Pos) (node : Nat) : Wil.
   let len := String.length (String.trim l);
   let lo := Nat.add (List.getD starts (Nat.sub p.line 1) 0) lead;
   let hi := Nat.add lo len;
-  Wil.Span.mk p.file lo hi node p.line (Nat.add lead 1)
+  let fm := List.getD pre.fileMaps p.file (Scry.ByteMap.ofString "");
+  Wil.Span.mk p.file (Scry.ByteMap.byteOfChar fm lo) (Scry.ByteMap.byteOfChar fm hi)
+    node p.line (Nat.add lead 1)
 
 /-- Map a preprocessed span to an original `Wil.Span`. If the span's preprocessed text
 equals the original text at the mapped range, the range is exact; otherwise (a macro
@@ -327,9 +434,9 @@ expansion, a removed comment, a conditional) it is the original line of its star
 def Scry.mapSpan (pre : Scry.Preprocessed) (node start stop : Nat) : Wil.Span :=
   let a := Scry.posOf pre start;
   let b := Scry.posOf pre stop;
-  let ppTxt := String.take (Nat.sub stop start) (String.drop start pre.text);
-  let origTxt := List.getD pre.texts a.file "";
-  let cand := String.take (Nat.sub b.off a.off) (String.drop a.off origTxt);
+  let ppTxt := Scry.ByteMap.slice pre.textMap start stop;
+  let fm := List.getD pre.fileMaps a.file (Scry.ByteMap.ofString "");
+  let cand := Scry.ByteMap.slice fm a.off b.off;
   let exact : Bool := match Nat.beq a.file b.file with
     | .false => .false
     | .true => match Nat.le a.off b.off with
