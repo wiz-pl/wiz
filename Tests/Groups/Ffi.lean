@@ -82,6 +82,16 @@ def ffiGroup : Group where
     { name := "import_c binds a header's functions", run := fun _ =>
         ioRun ("import IO\nimport_c \"string.h\"\nimport_c \"stdlib.h\" (pure)\ndef main : IO Unit := do\n" ++
           "  n ← C.strlen \"hello, world\";\n  IO.println (Nat.toString n);\n  IO.println (Nat.toString (C.atoi \"42\"))") "12\n42\n" },
+    -- a header says nothing about nullability, and `strchr`/`strstr`/`getenv` return NULL
+    -- on a miss; the wrapper used to call `strlen(NULL)` and SIGSEGV (exit 139)
+    { name := "import_c: a NULL string result is empty (strchr on a miss, getenv unset)", run := fun _ => do
+        let src := "import IO\nimport_c \"stdlib.h\" (pure)\nimport_c \"string.h\" (pure)\n" ++
+          "def main : IO Unit := do\n" ++
+          "  IO.println (C.getenv \"WIZ_CGEN02_UNSET\");\n" ++
+          "  IO.println (Nat.toString (C.strlen (C.strchr \"abc\" 122)));\n" ++
+          "  IO.println (Nat.toString (C.strlen (C.strchr \"abc\" 98)))"
+        ioRun src "\n0\n2\n"
+        ioRun src "\n0\n2\n" (llvm := true) },
     { name := "the C subset parser (Exercise 9.1)", run := fun _ => do
         let fs := FFI.parseHeader "typedef unsigned long size_t;\nextern size_t strlen (const char *__s) __attribute__ ((__pure__));\nstruct S { int x; };\ntypedef int (*cmp_t)(const void *, const void *);\nvoid qsort(void *b, size_t n, size_t s, cmp_t c);\nstatic inline int twice(int x) { return 2 * x; }\nint printf(const char *f, ...);"
         checkEq "[strlen, qsort, twice, printf]" (toString (fs.toList.map (·.name)))

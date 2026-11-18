@@ -365,9 +365,12 @@ c_struct "struct pair" Pair where     -- no header: the C definition is generate
 | `const void *buf, size_t n`  | one `Bytes` argument (the pointer and the length come from the buffer; only when the length parameter right after is named `n`, `len`, `nbytes` or `length`, with or without `__`) |
 | `char *buf, size_t n`, `unsigned char *`, `signed char *`, `uint8_t *` | one `Bytes` argument, by the same rule (a `char *` **with** a length is a buffer; without one it is the NUL-terminated `String`) |
 
-`const char *` without a length parameter stays `String`; other pointers (`int *`,
-`void *`, output buffers) are still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
-bodies, array lengths, typedef names of structs and parameter names for this.
+`const char *` without a length parameter stays `String`; a NULL one (a C header
+carries no nullability, and `strchr`, `strstr` and `getenv` return NULL on a miss) is
+read as the empty `String`, as a struct's `char *` field and `Sys.Env.getRaw` already
+do; other pointers (`int *`, `void *`, output buffers) are still skipped. The C subset
+parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct bodies, array lengths,
+typedef names of structs and parameter names for this.
 
 Opt-outs:
 
