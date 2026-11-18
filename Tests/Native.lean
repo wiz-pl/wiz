@@ -228,33 +228,45 @@ structure TrustCache where
 
 def TrustCache.isEmpty (c : TrustCache) : Bool := c.write.isNone && c.reads.isEmpty
 
-/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
-library trusted). Both trust extensions are on so that a use is *recorded* by the
-ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
-and `lib/ never uses native_refl` still fail on a use).
+/-- The states of importing `lib/`, as `wiz check` does (the toolchain's library
+trusted). Both trust extensions are on so that a use is *recorded* by the ledger rather
+than merely an error; `lib/` is not allowed to use either (the cases below and `lib/
+never uses native_refl` still fail on a use).
 
-With a cache the state comes through `Cache.elaborateCached`, in the same namespaces
+`Scry.EgraphNative` and `Scry.EqPlan` are alternative backends that cannot be imported
+into one program with `Scry.Egraph` and its clients, so there is no single whole-library
+import: the reference family is loaded with everything else, then each distinct
+exclusion set among the apart modules (with those modules) is loaded with everything
+else. The ledger is the union of the states' sources, and every module is still checked
+against every module it can share a program with.
+
+With a cache each state comes through `Cache.elaborateCached`, in the same namespaces
 `wiz check` uses: a module is elaborated once and its effect replayed, so the walk sees
 the same declarations, builtins and `#print axioms` as the cold elaboration (the cache is
 keyed by each module's exact text, its imports, the binary and the trust options, so a
 changed source is never served an old effect). Returns how many commands the cache
 served. -/
-def libTrustState (cache : TrustCache := {}) : IO (CommandState ZeroOneMany × Nat) := do
-  let files ← wizFiles "lib"
-  let mods := files.filterMap fun f => do
-    let cs := (f.toString.toList.drop 4)
-    pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
-  let mods := mods.toArray.qsort (· ≤ ·) |>.toList
-  let input := String.join (mods.map (s!"import {·}\n"))
-  let init : CommandState ZeroOneMany :=
-    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
-      trustNative := true, smt := { trust := true } }
-  if cache.isEmpty then
-    pure (runFrontend (R := ZeroOneMany) input init, 0)
-  else
-    let tc : Toolchain := { cacheDir := cache.write, readCaches := cache.reads }
-    Cache.elaborateCached tc.cacheDir tc.readCaches input init 0
-      (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+def libTrustStates (cache : TrustCache := {}) :
+    IO (List (String × CommandState ZeroOneMany × Nat)) := do
+  let loader ← Elab.libLoader
+  let one (what input : String) : IO (String × CommandState ZeroOneMany × Nat) := do
+    let init : CommandState ZeroOneMany :=
+      { loader, trustedModule := Tests.libModule
+        trustNative := true, smt := { trust := true } }
+    if cache.isEmpty then
+      pure (what, runFrontend (R := ZeroOneMany) input init, 0)
+    else
+      let tc : Toolchain := { cacheDir := cache.write, readCaches := cache.reads }
+      let (s, hits) ← Cache.elaborateCached tc.cacheDir tc.readCaches input init 0
+        (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+      pure (what, s, hits)
+  let mut out := [← one "the library" (← Elab.allLibSource)]
+  let mut seen : List (List String) := []
+  for (m, skip) in Elab.libApart do
+    unless seen.contains skip do
+      seen := skip :: seen
+      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]   -- complexity: ok (libApart is a handful of module groups; test-only)
+  pure out
 
 /-- The state of elaborating `path` (an example) with every library module importable. -/
 def exampleTrustState (path : String) : IO (CommandState ZeroOneMany) := do
@@ -308,13 +320,20 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none)
   | none =>
     let libFiles ← wizFiles "lib"
     rejectSorry libFiles
-    let (s, hits) ← libTrustState cache
-    noTrustErrors "the library" s
-    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-    let libLabel (n : Name) : String := trustModuleOf s.globals n
-    let libSources := trustSources s.globals libLabel
-    checkCovered s.globals libSources
-    let mut sources := libSources
+    let states ← libTrustStates cache
+    let mut libSources : List TrustSource := []
+    let mut decls := 0
+    let mut hits := 0
+    for (what, s, h) in states do
+      noTrustErrors what s
+      decls := decls + s.globals.order.size
+      hits := hits + h
+      let libLabel (n : Name) : String := trustModuleOf s.globals n
+      let sources := trustSources s.globals libLabel
+      checkCovered s.globals sources
+      libSources := libSources ++ sources
+    check (decls > 1000) s!"only {decls} library declarations in all loads"
+    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList   -- complexity: ok (test-only: one dedup of the whole ledger, after the loop)
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
@@ -325,7 +344,7 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none)
         let ownSources := (trustSources es.globals labelOf own)
         -- an example's declarations may depend on the library's trusted base, so the
         -- walk checks against both; its own sources are what the baseline would gain
-        checkCovered es.globals (libSources ++ ownSources) own
+        checkCovered es.globals (sources ++ ownSources) own
         sources := sources ++ ownSources
     pure ((sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList, hits))
 

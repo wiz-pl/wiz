@@ -53,6 +53,30 @@ def spansOf (f : Wil.Func) : List Wil.Span :=
 def spanWith (t : Scry.TU) (f : Wil.Func) (text : String) : Option Wil.Span :=
   List.find (fun sp => String.eq (Scry.spanText t.files sp) text) (spansOf f)
 
+/-- Do two origins agree field by field? -/
+def spanEq (a b : Wil.Span) : Bool :=
+  List.all (fun p => Nat.beq p.1 p.2)
+    [(a.file, b.file), (a.start, b.start), (a.stop, b.stop), (a.node, b.node),
+     (a.line, b.line), (a.col, b.col)]
+
+/-- The nodes whose indexed origin (`Scry.mapSpanAt`, what `Scry.Cst.ofPreprocessed`
+uses) differs from the reference `Scry.mapSpan`, and how many reference origins took the
+line fallback (so both branches are compared). -/
+def spanDisagreements (pre : Scry.Preprocessed) (store : Scry.CstStore) : Nat × Nat :=
+  let ix := Scry.spanIndexOf pre;
+  List.foldl (fun acc i =>
+    let sp := Scry.CstStore.spanOf store i;
+    let want := Scry.mapSpan pre i sp.start sp.stop;
+    let got := Scry.mapSpanAt ix i sp.start sp.stop;
+    let exactWant := Nat.beq (Nat.sub want.stop want.start) (Nat.sub sp.stop sp.start);
+    (match spanEq want got with
+      | .true => acc.1
+      | .false => Nat.succ acc.1,
+     match exactWant with
+      | .true => acc.2
+      | .false => Nat.succ acc.2))
+    (0, 0) (Scry.schemaRange (Scry.CstStore.nodeCount store))
+
 def main : IO Unit := EIO.toIO (do
   let path := "corpus/c2wil/preproc/main.c";
   out ← Process.output "cc" ["-E", "-ffreestanding", "-DWITH_OFFSET=1", path] "";
@@ -67,6 +91,11 @@ def main : IO Unit := EIO.toIO (do
     let tu := Scry.lowerTU path cst;
     let real := List.length (List.filter (fun p => Bool.not (String.startsWith p "<")) pre.paths);
     EIO.lift (checkEq "warnings" (List.length tu.warnings) 0);
+    let dis := spanDisagreements pre store;
+    EIO.lift (checkEq "mapSpanAt disagreements" dis.1 0);
+    EIO.lift (match Nat.lt 0 dis.2 with
+      | .true => IO.println "line-fallback origins compared: 1"
+      | .false => fail "line-fallback origins compared: none");
     EIO.lift (match Nat.lt 0 pre.markers with
       | .true => IO.println "markers present: 1"
       | .false => fail "markers present: none");

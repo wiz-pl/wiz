@@ -45,7 +45,8 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
 
   const view = {
     state: endpoint ? "connecting" : "no-server",
-    endpoint: endpoint ? endpoint.url : null,
+    // (#430: the label leaves the token out)
+    endpoint: endpoint ? (endpoint.label || endpoint.url) : null,
     serverInfo: null,
     infoview: null,
     message: null,
