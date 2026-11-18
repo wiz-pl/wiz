@@ -58,8 +58,31 @@ ENGINE="$OUT/playground.wiz"
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
+
+# 4. The UI module: the pane and the status span as one Loom app
+# (web/playground-ui.wiz + web/playground-ui-exports.wiz), in its own instance so a
+# trap in the engine cannot lose the page's state. The page loads it only for
+# `?ui=loom`; without it the hand-written pane is the page.
+#
+# `_wiz_retain` is the runtime's own export (runtime/rt_data.inc): the exported entry
+# points consume the state they are given, so a read-only call (`wiz_loom_html`, and
+# the old state of a diff) takes an extra reference first.
+UI="$OUT/playground-ui.wiz"
+cat "$ROOT/web/playground-ui.wiz" "$ROOT/web/playground-ui-exports.wiz" > "$UI"
+(cd "$ROOT" && "$WIZ" -I "$ROOT/lib" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" \
+  --gmp "$OUT/gmp/mini-gmp.c" \
+  --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
+-sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
+-sEXPORTED_FUNCTIONS=_wiz_loom_init,_wiz_loom_html,_wiz_loom_show,_wiz_loom_fail,_wiz_loom_status,_wiz_loom_patches,_wiz_retain,_free \
+-sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
+-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
+  build "$UI" -o "$OUT/wiz-playground-ui.mjs" --no-main)
+
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
   "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
   "$ROOT/web/playground-engine.js" "$OUT/"
-echo "built $OUT/wiz-playground.mjs"
+# `?ui=loom` applies the UI module's patches with the framework's browser half.
+mkdir -p "$OUT/framework"
+cp "$ROOT/web/framework/runtime.js" "$OUT/framework/"
+echo "built $OUT/wiz-playground.mjs and $OUT/wiz-playground-ui.mjs"

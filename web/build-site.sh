@@ -42,6 +42,9 @@ for f in playground.js playground.css playground-values.js \
          playground-engine.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
+# `?ui=loom` patches its tree with the framework's browser half.
+mkdir -p "$SITE/playground/framework"
+cp "$ROOT/web/framework/runtime.js" "$SITE/playground/framework/runtime.js"
 
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
@@ -52,6 +55,13 @@ for f in wiz-playground.mjs wiz-playground.wasm; do
   fi
   cp "$WEB/$f" "$SITE/playground/$f"
 done
+
+# The Loom pane's module (`?ui=loom`). The page only loads it for that flag, so a site
+# built before it existed still works; copy it when `web/build-playground.sh` made it.
+if [ -f "$WEB/wiz-playground-ui.mjs" ]; then
+  cp "$WEB/wiz-playground-ui.mjs" "$SITE/playground/wiz-playground-ui.mjs"
+  [ -f "$WEB/wiz-playground-ui.wasm" ] && cp "$WEB/wiz-playground-ui.wasm" "$SITE/playground/"
+fi
 
 # The licences page: the Wasm modules (playground/, docs/) include GMP's mini-gmp, so
 # the site carries its notice, the LGPL v3 and the GPL v3 (Wiz's LICENSE).

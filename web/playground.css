@@ -44,6 +44,11 @@ button { font: inherit; padding: 4px 16px; border: 1px solid var(--line); border
 button:hover:not(:disabled) { border-color: var(--val); color: var(--val); }
 button:disabled { opacity: .5; cursor: default; }
 .output { flex: 1 1 54%; min-height: 0; overflow: auto; padding: 12px 16px; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* (playground-loom) ?ui=loom: the output pane and the status span are one Loom tree.
+   The host is layout-transparent, so both are children of the side pane's column; the
+   status line sits under the output, where the app renders it. */
+.loom-ui { display: contents; }
+.pane.side > .loom-ui > #status { padding: 4px 16px; border-top: 1px solid var(--line); }
 .line { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1px 0; }
 .line.err { color: var(--err); }
 .line.val { color: var(--val); }

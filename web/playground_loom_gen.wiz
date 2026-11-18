@@ -2,7 +2,11 @@
 -- (lib/Web/Playground.wiz) rendered and diffed, printed as JSON. The Node test parses
 -- `empty` with web/framework/minidom.mjs, applies each patch list with runtime.js and
 -- requires the serialization to be exactly the next state's SSR -- so the Wiz
--- component, the diff and the browser half are checked together. No Wasm, no browser.
+-- component, the diff and the browser half are checked together. It also compares the
+-- `value` rows with web/playground-values.js: that file is the oracle for which lines
+-- are values and what they look like, and the grammar now lives here.
+--
+-- No Wasm, no browser.
 --
 --   .lake/build/bin/wiz run web/playground_loom_gen.wiz
 import IO
@@ -21,10 +25,47 @@ def failure : Model :=
 
 -- A line the page marked as a value: the component keeps the kind it is handed.
 def marked : Model :=
-  Model.mk [Line.mk "42 : Nat" "val"] 0 "done in 1 ms" "ready" "1 line"
+  Model.mk [Line.mk "42 : Nat" "val" ""] 0 "done in 1 ms" "ready" "1 line"
 
 def nasty : Model :=
   Model.ofText "<script>alert('x')</script>" "done in 1 ms" "ready"
+
+-- One line's classification, for the oracle comparison in the Node test.
+def valueRow (raw : String) : Json :=
+  let l := Line.ofText raw;
+  Json.mkObj
+    [ Json.field "raw" (jstr raw)
+    , Json.field "text" (jstr l.text)
+    , Json.field "kind" (jstr l.kind)
+    , Json.field "title" (jstr l.title)
+    , Json.field "cls" (jstr (Line.cls l))
+    ]
+
+-- The corpus: every shape web/playground-values.js distinguishes (a Nat, `zero`,
+-- `true`, a tag that is not one, lists at the top and nested, a pair that is not a
+-- constructor, a malformed `con(`, blanks) plus the line kinds around them.
+def valueCorpus : List String :=
+  [ "con((#1, (con((#0, (tt, tt))), (tt, tt))))"
+  , "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))"
+  , "con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt))))"
+  , "con((#0, (tt, tt)))"
+  , "con((#1, (tt, tt)))"
+  , "con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))"
+  , "con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))"
+  , "con((#1, (con((#1, (tt, tt))), (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt))))), (con((#0, (tt, tt))), (tt, tt))))), (tt, tt)))))"
+  , "con((#2, (tt, tt)))"
+  , "(#1, tt)"
+  , "con((tt, tt))"
+  , "con("
+  , "con((#1, (tt, tt))"
+  , "  con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))  "
+  , "error: unknown identifier nope"
+  , "parse error at 2:1"
+  , "twice : (x0 : Nat) → Nat"
+  , ""
+  ]
+
+def valueRows : Json := Json.mkArr (List.map valueRow valueCorpus)
 
 def fields : List (String × Json) :=
   [ Json.field "empty" (jstr (Loom.App.html app s0))
@@ -43,6 +84,7 @@ def fields : List (String × Json) :=
   , Json.field "badToEmpty" (jstr (Loom.App.patches app bad s0))
   , Json.field "single" (jstr (Model.ofText "ok" "ready" "ready").count)
   , Json.field "oneErr" (jstr (Model.ofText "error: x" "error" "error").count)
+  , Json.field "values" valueRows
   ]
 
 def main : IO Unit := do

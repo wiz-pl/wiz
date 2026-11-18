@@ -10,6 +10,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* playground: the output pane can now be mounted as a Loom component, opt-in with
+  `?ui=loom`. The value grammar (`con((#1, …))` → `1`, a `true`, a list) moved from
+  `web/playground-values.js` into `lib/Web/Playground.wiz`, so `Line.ofText` alone
+  decides a line's error/value kind, its friendly text and its tooltip; the fixture
+  checks it against the JavaScript on a corpus of shapes (the JS stays as the default
+  pane's renderer and as that oracle). `web/playground-ui.wiz` renders the `#output`
+  pane and the `#status` span as one app, built by `web/build-playground.sh` into a
+  second module (`wiz-playground-ui.mjs`) whose instance is separate from the engine's,
+  so a trap or abort that replaces the engine keeps the page's state. The module's
+  entry points (`wiz_loom_init/html/show/fail/status/patches`) take the state by
+  ownership; a read-only call takes `_wiz_retain` first. `web/playground_test.mjs`
+  compares the Loom pane line by line with the hand-written one. The default page is
+  unchanged and still loads one module.
 * playground: the output pane's first piece now exists as a Loom component,
   `lib/Web/Playground.wiz`: `Model.ofText` splits a run's output into classified lines
   and produces the page's `#count` text verbatim (`2 lines · 1 error`), `Model.ofFailure`

@@ -1,0 +1,48 @@
+-- (playground-loom) The UI module's exports: web/build-playground.sh concatenates
+-- web/playground-ui.wiz and this file, then `wiz build --no-main` turns it into
+-- `wiz-playground-ui.mjs`. The page (`web/playground.js`) loads it only for `?ui=loom`
+-- and leaves the hand-written pane alone otherwise.
+--
+-- Every entry point takes the app's state **by ownership** and returns the next one:
+-- stage 9g's C ABI consumes an exported function's arguments, so the page passes its
+-- one reference and keeps the result. A call that only reads the state
+-- (`wiz_loom_html`, for the first paint, and the old state in a diff) needs an extra
+-- reference from `_wiz_retain` (the runtime's export, listed in the build script).
+-- Strings are borrowed (`const char *`: the module copies them), and a returned string
+-- is malloc'ed: the page frees it.
+--
+--   wiz_loom_init    : S                      the empty pane
+--   wiz_loom_html    : S -> String            SSR, for the first paint
+--   wiz_loom_show    : S -> String -> S       a run's text (classify + count)
+--   wiz_loom_fail    : S -> String -> String -> S   failure text + count label
+--   wiz_loom_status  : S -> String -> String -> S   the page's `setStatus(text, kind)`
+--   wiz_loom_patches : S -> S -> String       Loom's patch JSON (web/framework/runtime.js)
+
+def loomInit : Model := PlaygroundUi.initial
+
+def loomHtml (s : Model) : String := Loom.App.html PlaygroundUi.app s
+
+/-- A run's output: the rows are classified by `Line.ofText`; the page's status pair is
+kept (it sets that with `wiz_loom_status`). -/
+def loomShow (s : Model) (text : String) : Model :=
+  Model.ofText text s.status s.statusKind
+
+/-- An engine exit, abort or trap: its lines, and the `#count` text the page shows
+instead of a line count (`exit code 3`, or the failure's kind). -/
+def loomFail (s : Model) (text : String) (count : String) : Model :=
+  Model.ofFailure text s.status count s.statusKind
+
+/-- `setStatus(text, kind)`. -/
+def loomStatus (s : Model) (text : String) (kind : String) : Model :=
+  Model.mk s.lines s.failures text kind s.count
+
+/-- The patches from `s` to `s'`; the page applies them to the mounted tree. -/
+def loomPatches (s s' : Model) : String :=
+  Loom.App.patches PlaygroundUi.app s s'
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_show" loomShow
+export "wiz_loom_fail" loomFail
+export "wiz_loom_status" loomStatus
+export "wiz_loom_patches" loomPatches

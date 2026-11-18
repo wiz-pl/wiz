@@ -1,0 +1,48 @@
+import IO
+import Text
+import Web.Loom
+import Web.Playground
+
+/-!
+# The playground's pane and status span
+
+`web/playground.html`'s output pane (`Model.view`) and its `#status` span as one Loom
+app, so a line's kind, its friendly value form, its tooltip, the `#count` text and the
+status pair are all decided by `lib/Web/Playground.wiz` alone.
+
+The page owns the effects: it loads the engine, runs it and times it. It holds this
+app's state as one opaque value inside the UI module's own Wasm instance (never the
+engine's, which a trap or an abort drops), and calls the entry points in
+`web/playground-ui-exports.wiz` -- `wiz_loom_show` after a run, `wiz_loom_fail` after an
+engine failure, `wiz_loom_status` for the page's `setStatus(text, kind)`, and
+`wiz_loom_patches` between two states. `?ui=loom` is opt-in; the hand-written pane is
+still the default and the fallback.
+
+The `#goals` pane is not part of this app: the language client writes into it
+(`web/goals.js`), and a re-render must never clobber it.
+-/
+
+/-- The pane's first paint: the page's static markup's state (the header says
+`loading the engine…` and is `running`). -/
+def PlaygroundUi.initial : Model :=
+  Model.mk List.nil 0 "loading the engine…" "running" "0 lines"
+
+/-- The page's `#status` span: `setStatus(text, kind)` writes the text and appends the
+kind to `status`, so the stylesheet's `.running`/`.error`/`.ready` rules apply. -/
+def PlaygroundUi.statusView (s : Model) : Loom.VNode PlaygroundMsg :=
+  Loom.el "span"
+    [ Loom.id "status"
+    , Loom.class (String.append "status " s.statusKind)
+    , Loom.attr "role" "status"
+    ]
+    (List.cons (Loom.text s.status) List.nil)
+
+/-- The app's tree: the output pane, then the status span (the host is layout-
+transparent, so both are children of the pane's column in the page). -/
+def PlaygroundUi.view (s : Model) : Loom.VNode PlaygroundMsg :=
+  Loom.seq (List.cons (Model.view s) (List.cons (PlaygroundUi.statusView s) List.nil))
+
+/-- The app: the pane has no events yet (the clear control will be its first message),
+so the update is the identity. -/
+def PlaygroundUi.app : Loom.App Model PlaygroundMsg :=
+  Loom.App.mk PlaygroundUi.initial (fun _ s => s) PlaygroundUi.view
