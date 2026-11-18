@@ -26,7 +26,22 @@ def runGroup : Group where
     { name := "erased fields are gone at runtime", run := fun _ =>
         ok (runPrelude ++ "inductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n" ++
             "  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n#erase Vec.cons")
-          ["Vec.cons := (λA. (λn. (λx. (λxs. ⟨1 ◾ #1 #0⟩))))"] }
+          ["Vec.cons := (λA. (λn. (λx. (λxs. ⟨1 ◾ #1 #0⟩))))"] },
+    -- (erasure audit) A position of quantity `0` is **not evaluated**: the value of a
+    -- `let 0`, a `0` field of a constructor or structure, the scrutinee of a `split` at 0,
+    -- and an argument of a `0`-quantity binder. The kernel checks these positions in
+    -- erased mode and erasure replaces them by `◾`; both ask `QPoly.isErased`. This is the
+    -- intended semantics (`docs/stages/05-erasure.md`): an effect lives in `IO`, where the
+    -- world token is linear, so it cannot be in a 0 position; a call outside `IO` must be
+    -- pure (`docs/stages/09-ffi.md`). The tree interpreter (`#eval`) and the IR (`#run`)
+    -- both drop them; the native backends are pinned in group `ffi`.
+    { name := "a 0 position is never evaluated (let at 0, 0 fields, split at 0, 0 argument; #eval and #run)", run := fun _ =>
+        okLib ("import Prelude\n" ++ zeroFieldDecls ++
+            "def e5 : Nat := (fun (f : (0 x : Nat) → Nat) => f (loop ())) (fun _ => 4)\n" ++
+            "def e6 : Nat := let 0 (x, y) := ((loop (), 2) : Nat × Nat); 6\n" ++
+            "#eval e1\n#run e1\n#eval e2\n#run e2\n#eval e3\n#run e3\n#eval e4\n#run e4\n" ++
+            "#eval e5\n#run e5\n#eval e6\n#run e6")
+          ["7", "7", "8", "8", "9", "9", "2", "2", "4", "4", "6", "6"] }
   ]
 
 builtin_initialize registerGroup runGroup

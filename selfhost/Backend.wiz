@@ -64,13 +64,30 @@ def showEs : ETms → String
   | .cons t rest => String.append " " (String.append (showE t) (showEs rest))
 end
 
--- Has a value of this type no runtime content? (types, proofs, sizes, and their lifts)
+-- Is `ty` an **erased function into `Unit`**, `(0 x₁ : D₁) → … → (0 xₙ : Dₙ) → Unit`
+-- with `n ≥ 1` (or `n ≥ 0` with `allowUnit`)? Such a type has one inhabitant up to η,
+-- `fun _ … _ => ()`, so its values have no runtime content (`erasedFunTy` in
+-- `Wiz/Compiler/Erase.lean`, stage 22e): a phantom tail and a structure's marker are of
+-- this shape. A bare `Unit` is not erasable (`allowUnit`): the first binder is required.
+partial def erasedFunTy (c : TCtx) (ty : Val) (lvl : Nat) (allowUnit : Bool) : Bool :=
+  match whnf ty with
+  | .vunit _ => allowUnit
+  | .vpi q _ _ _ env cod => match q with
+    | .qz => erasedFunTy c (eval (.cons (fresh lvl) env) cod) (lvl + 1) .true
+    | _ => .false
+  | _ => .false
+
+-- Has a value of this type no runtime content? (types, proofs, sizes, quantities,
+-- erased functions into `Unit`, and their lifts)
 partial def erasable (c : TCtx) (ty : Val) : Bool := match whnf ty with
   | .vsort _ => .true
   | .vsize => .true
   | .vsizeLt _ => .true
+  | .vqty => .true
   | .vulift _ _ A => erasable c A
-  | t => isProp c t
+  | t => match t with
+    | .vpi _ _ _ _ _ _ => Bool.or (erasedFunTy c t (TCtx.lvl c) .false) (isProp c t)
+    | _ => isProp c t
 
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.
 def isNatDesc (D : Val) : Bool := match whnf D with
@@ -336,10 +353,12 @@ def eraseBranches (c : TCtx) (m : Tm) (k : Nat) : Tms → ERs
       | e => e
     | .err msg => .err msg
 -- an application: the head and the arguments, each erased against the head's type (an
--- argument of quantity `0`, or of an erasable type, is `◾`)
+-- argument of quantity `0`, or of an erasable type, is `◾`). An erased head (a function
+-- into `Unit`, a proof) applied is `◾`: nothing to run, as in `eraseSpine` (`Erase.lean`)
 def eraseApp (c : TCtx) (t : Tm) : ER := match quickType c (spineHead t) with
   | .none => .err "erasure: an ill-typed head"
   | .some hty => match eraseInfer c (spineHead t) with
+    | .ok .erased => .ok .erased
     | .ok h' => eraseArgs c h' hty (spineArgsTm t .nil)
     | e => e
 def eraseArgs (c : TCtx) (f : ETm) (fty : Val) : List Tm → ER
