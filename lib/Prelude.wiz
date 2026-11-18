@@ -1181,8 +1181,8 @@ attribute [tactic tactic.renameI] Tactic.renameI
 
 -- ## Case analysis (stage 6j)
 --
--- `by_cases e` splits on a Boolean expression: two goals, with `e = .false` and
--- `e = .true` as hypotheses. It is the `Bool.casesOn` eliminator at the motive
+-- `by_cases e` splits on a Boolean expression: two goals, with `e = .true` and
+-- `e = .false` as hypotheses. It is the `Bool.casesOn` eliminator at the motive
 -- `fun b => e = b → G`, applied to `refl e`; the kernel checks the term.
 /-- Split the goal at `stx`'s expression, naming the hypotheses from `hint`. -/
 def TacticM.byCasesAt (g : Nat) (hint : String) (stx : Syntax) : TacticM Unit := do

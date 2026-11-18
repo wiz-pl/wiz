@@ -4127,11 +4127,11 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let boolT : Term R := .const "Bool" []
     let w : Term R := .qlit QuantitySyntax.explicitDefault
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    let isBool ← match (← get).kernelInfer (gl.kernelCtx g) eT with
-      | .ok ty => match ← force (← evalIn gl.ctx ty) with
+    let isBool ← match ← typeOf? gl eT with
+      | some ty => match ← force ty with
         | .const "Bool" _ => pure true
         | _ => pure false
-      | .error _ => pure false
+      | none => pure false
     unless isBool do
       throwAt info "by_cases: expected a Bool expression" ErrorCode.tacticFailed
     let hf := introName gl.ctx.names hint "h" true false
