@@ -488,12 +488,12 @@ coverage: 25 row(s) — what was skipped or warned about
 The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
 in 311.8 s and about 4.1 GiB with `--no-taint` on the build that first ran the sweep:
 4 605 parsed, 4 250 lowered, 16 parse failures, 36 319 functions and 46 coverage rows.
-The 2026-11-18 re-run on the current build (which names all 16 failures, §8.2) reports the
-same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage rows: the lowering
-now names more constructs, and each failed file is its own row. Taint dominates: Crux.Api
-took 219.8 s with taint and 2.0 s without, so a full tainted sweep of the tree is hours,
-not minutes, and is not attempted by default. All 16 failures are two upstream grammar
-gaps, not malformed files and not our walker: §8.2.
+The 2026-11-18 re-run that named all 16 failures (commit `e3f27195`, before merging
+master) reports the same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage
+rows: the lowering now names more constructs, and each failed file is its own row. Taint
+dominates: Crux.Api took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
+the tree is hours, not minutes, and is not attempted by default. All 16 failures are two
+upstream grammar gaps, not malformed files and not our walker: §8.2.
 
 `files found / parsed / lowered / failed` distinguishes native parsing from lowering:
 `failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered
@@ -606,5 +606,5 @@ spill, and the sweep reports them as `parse failure` rows. Renaming the identifi
 the parse, or patching the generated `parser.c`, would hide a real gap (and a rewrite would
 move every span); the honest result is the named failure. When the grammar gains either
 construct, add the spill and delete the fixture's row from this section — the group's
-`repoCoverage`/`repoFailureRows` cases list the three failed files by name, so they change
-with it.
+`repoFailureRows` case names all three failed files (and `repoCoverage` counts them), so
+both change with it.

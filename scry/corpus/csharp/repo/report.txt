@@ -7,14 +7,13 @@ rules: scry/corpus/csharp/csharp.scry (4 rule(s))
 findings: 1 (error 1, warning 0, note 0)
   SEVERITY COUNT  RULE  EXAMPLE
   error    1      command-injection  src/Helper.cs:11:13
-coverage: 11 row(s) — what was skipped or warned about
+coverage: 10 row(s) — what was skipped or warned about
   SEVERITY COUNT  CONSTRUCT                                            EXAMPLE
   error    1      parse failure                                        src/Broken.cs
   error    1      parse failure                                        src/KeywordIdentifier.cs
   error    1      parse failure                                        src/SlicePattern.cs
-  warning  3      unmodelled-external                                  src/Helper.cs:10:26
+  warning  5      unmodelled-external                                  src/Helper.cs:10:26
   warning  1      lambda body not lowered: an opaque function value    src/Unsupported.cs:10:36
-  warning  1      query_expression not modelled: havoc                 src/Unsupported.cs:11:28
   note     1      excluded: *.Designer.cs                              src/Form1.Designer.cs
   note     1      excluded: *.g.cs                                     src/Generated.g.cs
   note     1      excluded: bin/                                       bin/Release/Ghost.cs
