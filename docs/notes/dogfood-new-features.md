@@ -22,7 +22,7 @@ items have landed since the audit:
 | `wiz lint` | not on `master` (no `Wiz/Lint.lean`, no `lint` command). |
 | `--split N` (top 10 #6) | **landed** in `wiz build` (`666b4437`); `scripts/fixpoint.sh` does not pass it yet. |
 | `ResultQ`/`ResultH` (W4) | **landed** in `lib/Region.wiz` (`60cd8ec9`); `lib/HeapBorrow.wiz` and `lib/Optic.wiz` do not use `ResultH` yet. |
-| `PMap`/`PSet` | **landed** (`lib/PMap.wiz`). |
+| `PMap`/`PSet` | **landed** (`lib/Data/PMap.wiz`). |
 | scry stack (`lib/Scry/*`, `scry/`) | **landed**; `Store`/`Egraph` are still the list models (top 10 #10, W6 open). |
 | Grail region cache (top 10 #8, W2) | **landed**: `tc.regionCache` in `Grail/Elab.lean`, `--region-cache` in `Grail/Cli.lean` (`d5841ca4`). |
 | Nix package with a warmed read-only cache (top 10 #7) | **landed**: `flake.nix` warms `share/wiz/cache` and both wrappers pass `--cache-ro` (`f480155a`). |
@@ -46,8 +46,8 @@ The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL
 | `wiz fmt` | **after stack** | now [11aa](../stages/11-tooling.md); at the audit, no `Wiz/Format.lean`. |
 | `wiz lint` | **after stack** | designed, not on `master` (no `Wiz/Lint.lean`). |
 | `wiz repl`, `wiz test-driver` | **now** | `Main.lean` (`replCmd`: `:type`, `:load`, `--prelude`; `testDriverCmd`); docs/stages/11-tooling.md, 11ac. The single-file `wiz test FILE` is still a proposal. |
-| `ResultQ`/`ResultH`, q-variable fields | **after stack** | now in [libraries.md](../libraries.md) (`ResultQ`, `ResultH`). `Result1`/`Result`/`Monad Result` are **now** (`lib/Region.wiz:106`, `lib/Result.wiz:34-44`). |
-| `PMap`/`PSet` | **after stack** | `lib/PMap.wiz`, now in [libraries.md](../libraries.md) ("Persistent data structures"). Not merged at the audit commit. |
+| `ResultQ`/`ResultH`, q-variable fields | **after stack** | now in [libraries.md](../libraries.md) (`ResultQ`, `ResultH`). `Result1`/`Result`/`Monad Result` are **now** (`lib/Region.wiz:106`, `lib/Data/Result.wiz:34-44`). |
+| `PMap`/`PSet` | **after stack** | `lib/Data/PMap.wiz`, now in [libraries.md](../libraries.md) ("Persistent data structures"). Not merged at the audit commit. |
 | `U64Map`, `StrMap`, `Intern`, `U32Array`/`U64Array`, `WordMap` | **now** | `lib/WordMap.wiz`, `lib/WordArray.wiz`, `lib/Intern.wiz`, `lib/Std.wiz`. |
 | `Optic`/`OpticDerive`, `Functor`, `Eff`/`Handle`, `Region`/`Result1` | **now** | `lib/Optic.wiz`, `lib/OpticDerive.wiz`, `lib/Functor.wiz`, `lib/Eff.wiz`, `lib/Handle.wiz`, `lib/Region.wiz`. |
 | `sat_decide_native` | **not a PR** | an axiom whose statement mentions the certificate costs as much as the check itself: no gain, more trust. Do not adopt. (It has since been added anyway as [28e](../stages/28-solvers.md), behind `--trust-native`.) |
@@ -172,7 +172,7 @@ Confidence: HTrie/ring high that the work is safe, medium on the size; measure f
 * `lib/Region.wiz:133-215`: several places do `match r with | .mk v => …` inside an `.ok`/`.err`
   match; `Uniq.end r (fun v => .ok (b, v))` already exists (`:126`) and removes the nesting.
   Keep the linear quantities exactly as they are.
-* After `ResultQ` merges: `lib/Region.wiz` `Result1 B H` and `lib/Result.wiz` `Result A` gain the
+* After `ResultQ` merges: `lib/Region.wiz` `Result1 B H` and `lib/Data/Result.wiz` `Result A` gain the
   quantity-polymorphic aliases; `lib/HeapBorrow.wiz:30-85` and `lib/Optic.wiz:75-138` replace
   `Result (B × V)` with `ResultH 1 B V` so specs name the handle instead of a pair. Expect the
   `.1`/`.2` plumbing in specs to disappear (~40–60 lines); no runtime change (definitional).

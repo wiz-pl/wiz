@@ -68,7 +68,7 @@ def semHelpers : String :=
   "def double : Nat → Float64 → Float64\n  | .zero, x => x\n  | .succ k, x => double k (Float64.add x x)\n"
 
 def imports : String :=
-  "import Word\nimport Int\nimport Text\nimport IO\nimport WordBytes\n"
+  "import Word\nimport Int\nimport Text\nimport IO\nimport Data.WordBytes\n"
 
 /-- `main : List Nat`, the channel the interpreters and C read back. -/
 def natProgram (cells : Array SCell) : String :=

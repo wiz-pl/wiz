@@ -3,7 +3,7 @@ import Word
 /-!
 # PMap
 
-Persistent (immutable, structurally shared) maps and sets (`import PMap`): `PMap K V`
+Persistent (immutable, structurally shared) maps and sets (`import Data.PMap`): `PMap K V`
 and `PSet K`. Every update returns a new value and leaves the old one valid; the two
 share all the nodes the update did not touch, so an update allocates only the O(log n)
 nodes on the path from the root to the changed leaf (plus a constant number for
@@ -18,7 +18,7 @@ map with a native hash-table backend; `PMap` is the pure model a future `U64Map`
 defined against, see `wiz-notes/persistent-data.md`.)
 
 ```
-import PMap
+import Data.PMap
 
 def m : PMap Nat String := PMap.fromList [(2, "two"), (1, "one")]
 def m' : PMap Nat String := PMap.insert m 3 "three"
