@@ -2230,11 +2230,13 @@ def ekLazyExpected : String :=
 
 /-- (E-K) The cost literals remove (`wiz-notes/elab-evaluator-plan.md` §3.5: the hygiene
 mark `✝` is code 10013): the equation `77 * 130 + 3 = 10013`, once with the registered
-operations on literals and once with the definitions on unary numerals. Prints both
-verdicts and the two times in nanoseconds. -/
-def ekTimingMain : String :=
+operations on literals and once with the definitions on unary numerals. -/
+def ekTimingDefs : String :=
   "def unaryWork : Tm := eqN (app2 addC (app2 mulC (unary 77) (unary 130)) (unary 3)) (unary 10013)\n" ++
-  "def litWork : Tm := eqN (op2 .nadd (op2 .nmul (lit 77) (lit 130)) (lit 3)) (lit 10013)\n" ++
+  "def litWork : Tm := eqN (op2 .nadd (op2 .nmul (lit 77) (lit 130)) (lit 3)) (lit 10013)\n"
+
+/-- The timing program: both verdicts and the two times in nanoseconds. -/
+def ekTimingMain : String := ekTimingDefs ++
   "def main : IO Unit := do\n" ++
   "  t0 ← Clock.monotonic;\n" ++
   "  IO.println (prfOk litWork);\n" ++
@@ -2242,6 +2244,24 @@ def ekTimingMain : String :=
   "  IO.println (prfOk unaryWork);\n" ++
   "  t2 ← Clock.monotonic;\n" ++
   "  IO.println (String.append (Nat.toString (Duration.sub t1 t0).ns) (String.append \" \" (Nat.toString (Duration.sub t2 t1).ns)))\n"
+
+/-- (E-K) The timing program's output: the equation holds both ways, and the literal path
+is at least ten times faster than the unary one (the ratio, not the times, is the claim,
+and the machine is shared). -/
+def checkEkTiming (out : String) : IO Unit := do
+  match out.splitOn "\n" with
+  | l :: u :: t :: _ =>
+    unless l == "True" && u == "True" do
+      throw (IO.userError s!"the equation was not decided True both ways: {l} / {u}")
+    match t.splitOn " " with
+    | [a, b] => match a.toNat?, b.toNat? with
+      | some lit, some unary =>
+        -- (a generous bound: a light probe measured about 64 µs against 1.2 s)
+        unless lit * 10 < unary do
+          throw (IO.userError s!"literals were not 10 times faster: {lit} ns against {unary} ns")
+      | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
+    | _ => throw (IO.userError s!"unexpected timing line: {t}")
+  | _ => throw (IO.userError s!"unexpected output: {out}")
 
 
 /-- The pipeline group: every case here runs the **self-hosted** compiler (`selfhostCompiler`)
@@ -3340,6 +3360,49 @@ def selfHostGroup : Group where
     { name := "(C14) native_refl: the driver has no --trust-native, so it refuses a native_refl body without the flag (D9)", run := fun _ =>
         selfhostCompileFails nativeReflDriverProgram nativeReflDriverExpected },
 
+    -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
+    -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet).
+    -- Each case runs the kernel program twice: through the Lean host, against its pinned
+    -- output, and then through the self-hosted compiler, which must print the same output.
+    { name := "(E-K) Kernel.wiz literals: the registered operations compute natively on literals (exact past 64 bits), with the zero shortcuts and the stuck applications of the Lean kernel", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let prog := kernel ++ "\n" ++ ekNatDefs ++ ekMain ekArithCalls
+        ioRun prog ekArithExpected (split := 8)
+        selfhostCompileRun prog ekArithExpected (opt := "-O0") },
+
+    { name := "(E-K) Kernel.wiz literals: a literal and its unary numeral are convertible both ways (the equation, conversion, ind looking inside a literal)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let prog := kernel ++ "\n" ++ ekNatDefs ++ ekMain ekConvCalls
+        ioRun prog ekConvExpected (split := 8)
+        selfhostCompileRun prog ekConvExpected (opt := "-O0") },
+
+    { name := "(E-K) Kernel.wiz literals: different numbers, a literal at another type and ill-typed registrations are rejected", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let prog := kernel ++ "\n" ++ ekNatDefs ++ ekMain ekRejectCalls
+        ioRun prog ekRejectExpected (split := 8)
+        selfhostCompileRun prog ekRejectExpected (opt := "-O0") },
+
+    -- (B13) parity with the host's `vNatOp` rules (`kernel-lazy-let.md` §8.1, §8.4,
+    -- §9.3): a big literal is exact; an operation on a definition's glued value stays
+    -- glued until its value is needed; `vEq` does not force an expansive `Nat.pow`; `nf`
+    -- computes. The pow case would allocate 2^(2^28) if the equation forced its sides.
+    { name := "(B13) Kernel.wiz literals: a big literal, a glued `Nat` operation, an expansive `Nat.pow` that is not forced, and `nf` that computes", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let prog := kernel ++ "\n" ++ ekNatDefs ++ ekMain ekLazyCalls
+        ioRun prog ekLazyExpected (split := 8)
+        selfhostCompileRun prog ekLazyExpected (opt := "-O0") },
+
+    { name := "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        -- the ratio is measured on the host build (the clock is not in the embedded
+        -- prelude, so the self-hosted program below prints the verdicts only); the unary
+        -- side is the slow one, so give the loaded-shard machine a longer budget
+        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) (timeout := 600) checkEkTiming
+        -- and the self-hosted pipeline must decide the literal equation (the unary
+        -- side is a 10 000-numeral reduction: at -O0 it does not fit the 60 s run
+        -- budget, and the ratio above is the host build's claim anyway)
+        selfhostCompileRun (kernel ++ "\n" ++ ekNatDefs ++ ekTimingDefs ++ ekMain ["prfOk litWork"])
+          "True\n" (opt := "-O0") },
     { name := "(B13) source numerals still elaborate as successor trees, not `nlit`/`natFn` (the kernel literal rules are covered separately)", run := fun _ =>
         selfhostCheckFile numeralSourceProgram numeralSourceExpected },
     { name := "the lexer in Wiz agrees with the Lean lexer", run := fun _ => do
@@ -3904,47 +3967,6 @@ def selfHostHostGroup : Group where
   cases := [
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
-    -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
-    -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet)
-    { name := "(E-K) Kernel.wiz literals: the registered operations compute natively on literals (exact past 64 bits), with the zero shortcuts and the stuck applications of the Lean kernel", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekArithCalls) ekArithExpected (split := 8) },
-
-    { name := "(E-K) Kernel.wiz literals: a literal and its unary numeral are convertible both ways (the equation, conversion, ind looking inside a literal)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekConvCalls) ekConvExpected (split := 8) },
-
-    { name := "(E-K) Kernel.wiz literals: different numbers, a literal at another type and ill-typed registrations are rejected", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekRejectCalls) ekRejectExpected (split := 8) },
-
-    -- (B13) parity with the host's `vNatOp` rules (`kernel-lazy-let.md` §8.1, §8.4,
-    -- §9.3): a big literal is exact; an operation on a definition's glued value stays
-    -- glued until its value is needed; `vEq` does not force an expansive `Nat.pow`; `nf`
-    -- computes. The pow case would allocate 2^(2^28) if the equation forced its sides.
-    { name := "(B13) Kernel.wiz literals: a big literal, a glued `Nat` operation, an expansive `Nat.pow` that is not forced, and `nf` that computes", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekLazyCalls) ekLazyExpected (split := 8) },
-
-    { name := "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        -- (the unary side of the comparison is the slow one; a loaded shard machine runs
-        -- it well past the usual two minutes, so give it the longer budget)
-        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) (timeout := 600) fun out => do
-          match out.splitOn "\n" with
-          | l :: u :: t :: _ =>
-            unless l == "True" && u == "True" do
-              throw (IO.userError s!"the equation was not decided True both ways: {l} / {u}")
-            match t.splitOn " " with
-            | [a, b] => match a.toNat?, b.toNat? with
-              | some lit, some unary =>
-                -- (a generous bound: a light probe measured about 64 µs against 1.2 s; the
-                -- ratio, not the times, is the claim, and the machine is shared)
-                unless lit * 10 < unary do
-                  throw (IO.userError s!"literals were not 10 times faster: {lit} ns against {unary} ns")
-              | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
-            | _ => throw (IO.userError s!"unexpected timing line: {t}")
-          | _ => throw (IO.userError s!"unexpected output: {out}") },
     -- The anti-vacuity case: the pipeline group must fail when its compiler/checker is a
     -- stub that echoes `input.wiz`. It runs each case of `selfhost` in a child process
     -- with `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` set (the override in
