@@ -9,7 +9,7 @@ set_option compiler.extract_closed false
 namespace Tests.Elab
 
 /-- `lib/FingerTree.wiz`: the level-indexed finger tree, the `Monoid`/`Measure`
-interface, the size and measure laws, and the deque laws. The first case also pins the
+interface, the size and measure laws, and the deque laws. The last case also pins the
 kernel restriction that forced the level index (the textbook non-uniform tree is
 rejected). -/
 def fingerTreeGroup : Group where
