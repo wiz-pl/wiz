@@ -1111,11 +1111,12 @@ def legacyCmd (args : List String) : IO Unit := do
 -- `didChange`, `didClose`, `textDocument/publishDiagnostics`, the `wiz/elaborated`
 -- notification when the client asks for it, and the infoview's plain queries
 -- (`wiz/plainGoal`, `wiz/plainTermGoal`): a check with the collection on records each
--- definition body's expected type (`LspEntry` in `selfhost/Frontend.wiz`), and
--- `plainTermGoal` answers from those entries in the host's shape (`Wiz/LSP.lean`):
--- `{goal, range}` of the innermost term at the cursor. `plainGoal` still answers `null`
--- (the tactic snapshots are the next step). `textDocument/hover` is `null` and the
--- interactive infoview methods are `MethodNotFound`, as in the shim.
+-- definition body's expected type and, in a `by` block, the goals after each tactic
+-- (`LspEntry` in `selfhost/Frontend.wiz`), and the queries answer from those entries in
+-- the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
+-- innermost term at the cursor, `plainGoal` the nearest snapshot at or before it
+-- (`{rendered, goals, messages}`, `null` outside every `by` block). `textDocument/hover`
+-- is `null` and the interactive infoview methods are `MethodNotFound`, as in the shim.
 -- Diagnostics are `check`'s, with `source: "wiz"`,
 -- the code `check` prints, and a range from the diagnostic's position to the end of its
 -- line. An imported module's diagnostics are not published: open that module. A
@@ -1645,6 +1646,26 @@ def lspTermAt (es : List LspEntry) (off : Nat) : Option LspTerm :=
         | .none => .some (LspTerm.mk s t g)
     | .goal _ _ _ => lspTermAt rest off
 
+-- (D8 goals) the nearest goal snapshot at or before `off`, inside the `by` block it
+-- belongs to (its stop); a later snapshot wins
+structure LspGoal where
+  start : Nat
+  stop : Nat
+  goals : List String
+
+def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
+  match es with
+  | .nil => .none
+  | .cons e rest => match e with
+    | .goal s t gs => match Bool.and (Nat.le s off) (Nat.le off t) with
+      | .false => lspGoalAt rest off
+      | .true => match lspGoalAt rest off with
+        | .some b => match Nat.le b.start s with
+          | .true => .some (LspGoal.mk s t gs)
+          | .false => .some b
+        | .none => .some (LspGoal.mk s t gs)
+    | .term _ _ _ => lspGoalAt rest off
+
 -- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
 partial def lspOffGo : List Char → Nat → Nat → Nat
   | .nil, _, i => i
@@ -1655,6 +1676,25 @@ partial def lspOffGo : List Char → Nat → Nat → Nat
 def lspOffOf (text : String) (line col : Nat) : Nat :=
   match text with
   | .mk cs => Nat.add (lspOffGo cs line 0) col
+
+def lspStrList : List String → JList
+  | .nil => .jnil
+  | .cons s rest => .jcons (.jstr s) (lspStrList rest)
+
+def lspJoin2 : List String → String
+  | .nil => ""
+  | .cons s .nil => s
+  | .cons s rest => String.append (String.append s "\n\n") (lspJoin2 rest)
+
+-- the host's `plainGoals`: the goals in a `wiz` fence (`no goals` when none), the goal
+-- strings, and the (empty) trace messages
+def lspGoalJson (gs : List String) : J :=
+  let rendered := match gs with
+    | .nil => "no goals"
+    | _ => String.append "```wiz\n" (String.append (lspJoin2 gs) "\n```");
+  .jobj (.ocons "rendered" (.jstr rendered)
+    (.ocons "goals" (.jarr (lspStrList gs))
+    (.ocons "messages" (.jarr .jnil) .onil)))
 
 -- the host's `plainTermGoal`: the expected type and the range of the term it belongs to
 def lspTermJson (text : String) (g : LspTerm) : J :=
@@ -1828,8 +1868,15 @@ def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspStat
       IO.pure st
     | .false => match strEq method "wiz/plainGoal" with
       | .true => do
-        -- (D8 goals: step 2) the tactic snapshots are not retained yet
-        lspSend (lspReply id .jnull);
+        -- (D8 goals) the nearest snapshot at or before the cursor, inside its `by` block
+        let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+        let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+        let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+        match lspFind st.docs uri with
+        | .some doc => match lspGoalAt doc.entries (lspOffOf doc.text line col) with
+          | .some g => lspSend (lspReply id (lspGoalJson g.goals))
+          | .none => lspSend (lspReply id .jnull)
+        | .none => lspSend (lspReply id .jnull);
         IO.pure st
       | .false => match strEq method "wiz/plainTermGoal" with
         | .true => do

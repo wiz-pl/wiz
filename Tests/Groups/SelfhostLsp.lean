@@ -228,12 +228,15 @@ def selfhostLspGroup : Group where
         let (c, _, err) ← cliRun exe #[] #["-I", "lib", "lsp"]
         checkEq 2 c
         cliCheck err "unknown flag: -I" "lsp option" },
-    { name := "lsp: plainTermGoal answers from the check's declaration types", run := fun _ =>
+    { name := "lsp: plainTermGoal and plainGoal answer from the check's entries", run := fun _ =>
         withSelfhostCli fun exe => do
         let doc := "import Prelude\ndef k (n : Nat) : Nat := by\n  change Nat\n  exact n\n\ndef plain : Nat := 3\n"
         let uri := "file:///tmp/selfhost-goals.wiz"
-        -- (line, character): a plain body, and inside a `by` body
-        let queries := [(5, 19, "wiz/plainTermGoal"), (2, 4, "wiz/plainTermGoal")]
+        -- (line, character): a tactic, the last tactic, after it, outside any `by`, a
+        -- plain body, and a `by` body
+        let queries := [(2, 4, "wiz/plainGoal"), (3, 4, "wiz/plainGoal"),
+          (3, 9, "wiz/plainGoal"), (5, 19, "wiz/plainGoal"),
+          (5, 19, "wiz/plainTermGoal"), (2, 4, "wiz/plainTermGoal")]
         let msgs :=
           [ lspReq 1 "initialize",
             lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]) ] ++
@@ -250,7 +253,7 @@ def selfhostLspGroup : Group where
         checkEq (2 + queries.length) got.length
         -- the host, for the same document and positions: the values below are compared
         -- field by field (host `Wiz/LSP.lean`: `plainTermGoal` is `{goal, range}` from
-        -- `Query.termGoalAt`)
+        -- `Query.termGoalAt`; `plainGoal` is `plainGoals`' `{rendered, goals, messages}`)
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let srv : LSP.Server :=
           { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude),
@@ -271,18 +274,28 @@ def selfhostLspGroup : Group where
           let self := match jpath (← lspAt got (2 + qi)) ["result"] with
             | some r => r
             | none => .null
-          checkEq (lspStr host ["goal"]) (lspStr self ["goal"])
-          for k in ["start", "end"] do
-            checkEq (lspNat host ["range", k, "line"]) (lspNat self ["range", k, "line"])
-            checkEq (lspNat host ["range", k, "character"]) (lspNat self ["range", k, "character"])
+          if method == "wiz/plainTermGoal" then
+            checkEq (lspStr host ["goal"]) (lspStr self ["goal"])
+            for k in ["start", "end"] do
+              checkEq (lspNat host ["range", k, "line"]) (lspNat self ["range", k, "line"])
+              checkEq (lspNat host ["range", k, "character"]) (lspNat self ["range", k, "character"])
+          else
+            checkEq (lspStrs host ["goals"]) (lspStrs self ["goals"])
+            checkEq (lspStr host ["rendered"]) (lspStr self ["rendered"])
+            checkEq (lspStrs host ["messages"]) (lspStrs self ["messages"])
           qi := qi + 1
         -- and the concrete expectations (so a host change is visible here too)
-        checkEq "⊢ Nat" (lspStr (← lspAt got 2) ["result", "goal"])
-        checkEq 5 (lspNat (← lspAt got 2) ["result", "range", "start", "line"])
-        checkEq 19 (lspNat (← lspAt got 2) ["result", "range", "start", "character"])
+        checkEq ["n : Nat\n⊢ Nat"] (lspStrs (← lspAt got 2) ["result", "goals"])
+        -- at the last tactic, and after it (the end of its line): no goals left
+        checkEq [] (lspStrs (← lspAt got 3) ["result", "goals"])
+        checkEq "no goals" (lspStr (← lspAt got 4) ["result", "rendered"])
+        check ((jpath (← lspAt got 5) ["result"]) == some .null) "outside a by block, plainGoal is null"
+        checkEq "⊢ Nat" (lspStr (← lspAt got 6) ["result", "goal"])
+        checkEq 5 (lspNat (← lspAt got 6) ["result", "range", "start", "line"])
+        checkEq 19 (lspNat (← lspAt got 6) ["result", "range", "start", "character"])
         -- inside the `by` body the expected type is the body's (`n : Nat ⊢ Nat`)
-        checkEq "n : Nat\n⊢ Nat" (lspStr (← lspAt got 3) ["result", "goal"])
-        checkEq 1 (lspNat (← lspAt got 3) ["result", "range", "start", "line"]) }
+        checkEq "n : Nat\n⊢ Nat" (lspStr (← lspAt got 7) ["result", "goal"])
+        checkEq 1 (lspNat (← lspAt got 7) ["result", "range", "start", "line"]) }
   ]
 
 builtin_initialize registerGroup selfhostLspGroup
