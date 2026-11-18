@@ -4127,7 +4127,8 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let boolT : Term R := .const "Bool" []
     let w : Term R := .qlit QuantitySyntax.explicitDefault
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    let isBool ← match ← typeOf? gl eT with
+    let ty? ← typeOf? gl eT
+    let isBool ← match ty? with
       | some ty => match ← force ty with
         | .const "Bool" _ => pure true
         | _ => pure false
