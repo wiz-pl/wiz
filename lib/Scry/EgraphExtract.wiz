@@ -1,0 +1,473 @@
+import Prelude
+import Scry.Egraph
+import Scry.Wil
+import Scry.EgraphWil
+/-!
+# Scry.EgraphExtract: e-graph rewrites back into Wil, checked
+
+`Scry.EgraphWil` builds an e-graph *view* of a Wil program and saturates it, but it only
+reports: the program is never changed. This module adds the missing direction, under a
+check that keeps the result sound:
+
+1. **One graph per function.** `wgBuildProgram` keys a register by its index, so a graph
+   built from a whole program merges `v0` of one function with `v0` of the next. The
+   transformation therefore saturates a fresh graph per function (`wgSaturate` on
+   `Wil.program [fn]`) and never mixes two functions' classes.
+
+2. **Extraction to a Wil term.** `Scry.EGraph.extract` returns the cheapest `ETerm` of an
+   assignment's value class. `wgeOfETerm` decodes it back to `Scry.WgeTerm`, a term over
+   Wil values and registers (constant e-nodes, register leaves, `bin`/`un` operator
+   nodes). Memory, `alloc` and `havoc` nodes decode to `none`: they are not terms this
+   layer may rebuild.
+
+3. **A single instruction.** A `Wil.Rhs` names its operands directly, so only a term
+   whose shape is one instruction is representable without inventing new temporaries:
+   a constant, a register, `op` of two registers, or `op` of one register. Anything
+   deeper is not extracted back (the e-graph report still shows the equality).
+
+4. **The checks** (`wgeRewriteStmt`). An extracted term is applied only when:
+   * the function is straight-line (exactly one block), so "defined before" is the
+     execution order and no path-sensitive merge is involved;
+   * every register the *extracted* term mentions is already a register of the original
+     right-hand side;
+   * every register the original right-hand side reads is a parameter or has exactly one
+     definition earlier in the block (so its value at this point is that definition's
+     value, and a folded constant is grounded in those definitions);
+   * the term is strictly cheaper than the original right-hand side's own term, which
+     makes every accepted rewrite a decrease of a well-founded measure;
+   * the term decodes to a `Wil.Rhs` at all.
+
+   Under the built-in fold/identity rules the class equality that justifies extraction
+   is then semantic equality: each register class contains its unique definition's
+   value, folds use `Wil.Val.bin`, identities are the arithmetic laws, and congruence
+   preserves equality. `wgeRewriteProgram` passes no extra `Scry.Rewrite` rules
+   (`wgSaturate … []`); a caller that wants different rules must add its own check.
+
+5. **Fuel and termination.** `wgeRewriteProgram fuel p` runs at most `fuel` rounds. A
+   round saturates a per-function graph (`wgSaturate k`), extracts, and applies the
+   checked rewrites. Every application lowers one statement's term cost, so the measure
+   `Σ statement costs` strictly decreases in a changing round; the fuel bound is the
+   backstop, exactly as in `wgSaturate`. The stop reason is `fixpoint` or `fuel`.
+
+## Relation to the Datalog layer
+
+The result is a *new* `Wil.Program`. The CST, the `Scry.Store` facts and every Datalog
+derivation are untouched, so Datalog stays authoritative; the transformed program is an
+optional input to a later analysis. `Scry.EgraphTaint` compares taint findings before and
+after the transformation and checks that no finding is added.
+
+## Limits
+
+* No flow sensitivity: a register with several definitions is never used to justify a
+  rewrite, and a function with branches is left alone.
+* No new temporaries and no sharing-aware extraction: a deep term is reported by the
+  e-graph but not written back.
+* The transformation is untrusted like the rest of the engine: `wgeRewriteStmt` is a
+  runtime check, not a theorem. The `scry-egraph` tests pin its expected output.
+-/
+
+-- ## Terms
+
+/-- A Wil-shaped term: a value, a register, or one unary/binary operator node. This is a
+subset of the e-graph's uninterpreted `ETerm`, restricted to what a `Wil.Rhs` can say. -/
+inductive Scry.WgeTerm where
+  | cst (v : Wil.Val)
+  | var (i : Nat)
+  | bin (op : Wil.Op) (a b : Scry.WgeTerm)
+  | un (op : Wil.Op) (a : Scry.WgeTerm)
+
+partial def Scry.wgeTermCost : Scry.WgeTerm → Nat
+  | .cst _ => 1
+  | .var _ => 1
+  | .bin _ a b => Nat.succ (Nat.add (Scry.wgeTermCost a) (Scry.wgeTermCost b))
+  | .un _ a => Nat.succ (Scry.wgeTermCost a)
+
+def Scry.wgeOpBeq (a b : Wil.Op) : Bool := Nat.beq (Scry.wgOpCode a) (Scry.wgOpCode b)
+
+partial def Scry.wgeTermBeq (a b : Scry.WgeTerm) : Bool :=
+  match a, b with
+  | .cst x, .cst y => Wil.Val.beq x y
+  | .var i, .var j => Nat.beq i j
+  | .bin op x y, .bin op' x' y' =>
+    Bool.and (Scry.wgeOpBeq op op')
+      (Bool.and (Scry.wgeTermBeq x x') (Scry.wgeTermBeq y y'))
+  | .un op x, .un op' x' => Bool.and (Scry.wgeOpBeq op op') (Scry.wgeTermBeq x x')
+  | _, _ => .false
+
+partial def Scry.wgeTermVars : Scry.WgeTerm → List Nat
+  | .cst _ => .nil
+  | .var i => .cons i .nil
+  | .bin _ a b => List.append (Scry.wgeTermVars a) (Scry.wgeTermVars b)
+  | .un _ a => Scry.wgeTermVars a
+
+-- ## Decoding an extracted e-term
+
+/-- The constant node's two children are literal leaves (bits, then `2 * width + signed`);
+-- a register is a leaf in the variable range. -/
+partial def Scry.wgeOfETerm (t : Scry.ETerm) : Option Scry.WgeTerm :=
+  match t with
+  | .tnode op args =>
+    if Nat.beq op Scry.wgConstOp then
+      match args with
+      | .tcons a (.tcons ty .tnil) => match a, ty with
+        | .tnode oa .tnil, .tnode ot .tnil =>
+          match Scry.wgLitBitsOf oa, Scry.wgLitTyOf ot with
+          | .some b, .some p => .some (.cst (.int p.1 p.2 b))
+          | _, _ => .none
+        | _, _ => .none
+      | _ => .none
+    else match Scry.wgOpFromBin op with
+      | .some bop => match args with
+        | .tcons a (.tcons b .tnil) => match Scry.wgeOfETerm a, Scry.wgeOfETerm b with
+          | .some ta, .some tb => .some (.bin bop ta tb)
+          | _, _ => .none
+        | _ => .none
+      | .none => match Scry.wgOpFromUn op with
+        | .some uop => match args with
+          | .tcons a .tnil => match Scry.wgeOfETerm a with
+            | .some ta => .some (.un uop ta)
+            | .none => .none
+          | _ => .none
+        | .none => match Scry.wgVarOf op, args with
+          | .some i, .tnil => .some (.var i)
+          | _, _ => .none
+
+/-- The term a right-hand side itself spells. Memory and effectful right-hand sides have
+no term. -/
+def Scry.wgeTermOfRhs : Wil.Rhs → Option Scry.WgeTerm
+  | .use v => .some (.var v.index)
+  | .cst v => .some (.cst v)
+  | .bin op a b => .some (.bin op (.var a.index) (.var b.index))
+  | .un op a => .some (.un op (.var a.index))
+  | .load _ => .none
+  | .gep _ _ => .none
+  | .alloc _ => .none
+  | .havoc _ => .none
+  | .slot _ => .none
+  | .globalRef _ => .none
+  | .fnptr _ => .none
+  | .gepVar _ _ _ => .none
+
+/-- A register's declaration: parameters first, then locals. -/
+def Scry.wgeFindVar (fn : Wil.Func) (i : Nat) : Option Wil.Var :=
+  match List.find (fun v => Nat.beq v.index i) fn.params with
+  | .some v => .some v
+  | .none => List.find (fun v => Nat.beq v.index i) fn.locals
+
+/-- Rebuild a `Wil.Rhs` from a term. Only one instruction is representable, and a
+register operand needs its declared type from the function. -/
+def Scry.wgeRhsOfTerm (fn : Wil.Func) : Scry.WgeTerm → Option Wil.Rhs
+  | .cst v => .some (.cst v)
+  | .var i => match Scry.wgeFindVar fn i with
+    | .some v => .some (.use v)
+    | .none => .none
+  | .bin op (.var a) (.var b) =>
+    match Scry.wgeFindVar fn a with
+    | .none => .none
+    | .some va => match Scry.wgeFindVar fn b with
+      | .none => .none
+      | .some vb => .some (.bin op va vb)
+  | .un op (.var a) =>
+    match Scry.wgeFindVar fn a with
+    | .some va => .some (.un op va)
+    | .none => .none
+  | _, _ => .none
+
+/-- The registers a right-hand side reads. -/
+def Scry.wgeRhsVars : Wil.Rhs → List Nat
+  | .use v => .cons v.index .nil
+  | .cst _ => .nil
+  | .bin _ a b => .cons a.index (.cons b.index .nil)
+  | .un _ a => .cons a.index .nil
+  | .load p => .cons p.index .nil
+  | .gep p _ => .cons p.index .nil
+  | .alloc _ => .nil
+  | .havoc _ => .nil
+  | .slot _ => .nil
+  | .globalRef _ => .nil
+  | .fnptr _ => .nil
+  | .gepVar p i _ => .cons p.index (.cons i.index .nil)
+
+def Scry.wgeShowVar (v : Wil.Var) : String := String.append "v" (Nat.repr v.index)
+
+def Scry.wgeShowRhs : Wil.Rhs → String
+  | .use v => Scry.wgeShowVar v
+  | .cst v => Wil.Val.show v
+  | .bin op a b => String.append (Scry.wgeShowVar a)
+      (String.append (String.append " " (Scry.wgOpName op))
+        (String.append " " (Scry.wgeShowVar b)))
+  | .un op a => String.append (Scry.wgOpName op)
+      (String.append " " (Scry.wgeShowVar a))
+  | .load p => String.append "*" (Scry.wgeShowVar p)
+  | .gep p off => String.append (Scry.wgeShowVar p)
+      (String.append "[" (String.append (Nat.repr off) "]"))
+  | .alloc cells => String.append "alloc(" (String.append (Nat.repr cells) ")")
+  | .havoc _ => "havoc"
+  | .slot cells => String.append "slot(" (String.append (Nat.repr cells) ")")
+  | .globalRef name => String.append "&" name
+  | .fnptr name => String.append "&" name
+  | .gepVar p i scale => String.append (Scry.wgeShowVar p)
+      (String.append "[" (String.append (Scry.wgeShowVar i)
+        (String.append " * " (String.append (Nat.repr scale) "]"))))
+
+-- ## Definitions and the checks
+
+/-- `(register, statement position)` for every assignment and call result. -/
+def Scry.wgeDefsGo : Nat → List Wil.Stmt → List (Nat × Nat)
+  | _, .nil => .nil
+  | pos, .cons s rest =>
+    let tail := Scry.wgeDefsGo (Nat.succ pos) rest;
+    match s with
+    | .assign x _ _ => .cons (x.index, pos) tail
+    | .call (.some r) _ _ _ => .cons (r.index, pos) tail
+    | _ => tail
+
+def Scry.wgeDefs (stmts : List Wil.Stmt) : List (Nat × Nat) := Scry.wgeDefsGo 0 stmts
+
+def Scry.wgeDefsBefore (defs : List (Nat × Nat)) (reg pos : Nat) : Nat :=
+  List.length (List.filter (fun p => Bool.and (Nat.beq p.1 reg) (Nat.lt p.2 pos)) defs)
+
+/-- A register is usable as a justification when it has exactly one source of value before
+this statement: a parameter that has not been assigned yet, or exactly one definition. -/
+def Scry.wgeVarOk (fn : Wil.Func) (defs : List (Nat × Nat)) (reg pos : Nat) : Bool :=
+  match List.find (fun v => Nat.beq v.index reg) fn.params with
+  | .some _ => Nat.beq (Scry.wgeDefsBefore defs reg pos) 0
+  | .none => Nat.beq (Scry.wgeDefsBefore defs reg pos) 1
+
+def Scry.wgeAllVarsOk (fn : Wil.Func) (defs : List (Nat × Nat)) (vars : List Nat)
+    (pos : Nat) : Bool :=
+  List.all (fun v => Scry.wgeVarOk fn defs v pos) vars
+
+def Scry.wgeMem (x : Nat) (xs : List Nat) : Bool := List.any (Nat.beq x) xs
+
+def Scry.wgeSubset (vars allowed : List Nat) : Bool :=
+  List.all (fun v => Scry.wgeMem v allowed) vars
+
+-- ## One statement and one function
+
+/-- Where a statement's value lives in a saturated graph. Re-adding the right-hand side
+returns the class its e-node hash-conses to; the node table already holds it because the
+graph was built from this program. -/
+def Scry.wgeClassOfRhs (g : Scry.EGraph) (e : Wil.Rhs) : Option Nat :=
+  let r := Scry.wgRhs g e;
+  .some (Scry.EGraph.find r.1 r.2)
+
+/-- The weight of a register leaf outside `allowed`: larger than any term this layer
+builds, so a cost at or above it means the cheapest term needs such a leaf.
+`Scry.EGraph` has no `inf` sentinel (costs are `Option Nat`, `none` = no finite term);
+this bound is the extraction's own. -/
+def Scry.wgeForbidden : Nat := 1000000
+
+/-- The class contains the register `x = e` itself (the assignment unions the target's
+leaf with the value). That leaf is not a justification unless the target is also an
+operand of `e`, so extraction charges every register leaf outside `allowed` the
+`wgeForbidden` weight and refuses a cheapest term that reaches it: the term is then built
+only from the right-hand side's own registers, constants, and operators. -/
+def Scry.wgeExtract (g : Scry.EGraph) (allowed : List Nat) (e : Wil.Rhs) :
+    Option Scry.WgeTerm :=
+  let w := fun op => match Scry.wgVarOf op with
+    | .some i => if Scry.wgeMem i allowed then 0 else Scry.wgeForbidden
+    | .none => 0;
+  match Scry.wgeClassOfRhs g e with
+  | .none => .none
+  | .some cls =>
+    let costs := Scry.EGraph.costs g w;
+    let root := Scry.EGraph.find g cls;
+    match Scry.egCostAt costs root with
+    | .none => .none
+    | .some c => if Nat.lt c Scry.wgeForbidden then
+        match Scry.EGraph.buildTerm g w costs (Nat.succ c) root with
+        | .none => .none
+        | .some t => Scry.wgeOfETerm t
+      else .none
+
+structure Scry.WgeStep where
+  stmt : Wil.Stmt
+  rule : String
+  changed : Bool
+  rejected : Bool
+  skipped : Bool
+  from : String
+  to : String
+
+/-- Classify an accepted term: a constant is a fold, a register a copy, anything else an
+extracted operator term. -/
+def Scry.wgeKind : Scry.WgeTerm → String
+  | .cst _ => "fold"
+  | .var _ => "copy"
+  | .bin _ _ _ => "term"
+  | .un _ _ => "term"
+
+/-- Check and (maybe) rewrite one assignment. `pos` is the statement's position in the
+function's single block. -/
+def Scry.wgeRewriteStmt (g : Scry.EGraph) (fn : Wil.Func) (defs : List (Nat × Nat))
+    (pos : Nat) (s : Wil.Stmt) : Scry.WgeStep :=
+  match s with
+  | .assign x e origin =>
+    let keep := Scry.WgeStep.mk s "" .false .false .false "" ""
+    match Scry.wgeTermOfRhs e with
+    | .none => Scry.WgeStep.mk s "" .false .false .true "" ""
+    | .some original =>
+      let allowed := Scry.wgeRhsVars e;
+      match Scry.wgeExtract g allowed e with
+      | .none => keep
+      | .some candidate =>
+        let cost := Scry.wgeTermCost candidate;
+        let cost0 := Scry.wgeTermCost original;
+        if Scry.wgeTermBeq candidate original then keep
+        else if Bool.not (Nat.lt cost cost0) then keep
+        else if Bool.not (Scry.wgeSubset (Scry.wgeTermVars candidate) allowed) then
+          Scry.WgeStep.mk s "" .false .true .false "" ""
+        else if Bool.not (Scry.wgeAllVarsOk fn defs allowed pos) then
+          Scry.WgeStep.mk s "" .false .true .false "" ""
+        else if Bool.not
+            (Scry.wgeAllVarsOk fn defs (Scry.wgeTermVars candidate) pos) then
+          Scry.WgeStep.mk s "" .false .true .false "" ""
+        else match Scry.wgeRhsOfTerm fn candidate with
+          | .none => Scry.WgeStep.mk s "" .false .true .false "" ""
+          | .some rhs =>
+            let stmt' := Wil.Stmt.assign x rhs origin;
+            Scry.WgeStep.mk stmt' (Scry.wgeKind candidate) .true .false .false
+              (Scry.wgeShowRhs e) (Scry.wgeShowRhs rhs)
+  | _ => Scry.WgeStep.mk s "" .false .false .true "" ""
+
+structure Scry.WgeRewrite where
+  func : String
+  stmt : Nat
+  rule : String
+  from : String
+  to : String
+
+structure Scry.WgeFuncResult where
+  fn : Wil.Func
+  changed : Nat
+  rejected : Nat
+  skipped : Nat
+  log : List Scry.WgeRewrite
+
+structure Scry.WgeStmts where
+  stmts : List Wil.Stmt
+  changed : Nat
+  rejected : Nat
+  skipped : Nat
+  log : List Scry.WgeRewrite
+
+def Scry.wgeRewriteStmts (g : Scry.EGraph) (fn : Wil.Func) (defs : List (Nat × Nat)) :
+    Nat → List Wil.Stmt → Scry.WgeStmts
+  | _, .nil => Scry.WgeStmts.mk .nil 0 0 0 .nil
+  | pos, .cons s rest =>
+    let step := Scry.wgeRewriteStmt g fn defs pos s;
+    let tail := Scry.wgeRewriteStmts g fn defs (Nat.succ pos) rest;
+    let log' : List Scry.WgeRewrite :=
+      if step.changed then
+        .cons (Scry.WgeRewrite.mk fn.name pos step.rule step.from step.to) tail.log
+      else tail.log;
+    Scry.WgeStmts.mk (.cons step.stmt tail.stmts)
+      (Nat.add (if step.changed then 1 else 0) tail.changed)
+      (Nat.add (if step.rejected then 1 else 0) tail.rejected)
+      (Nat.add (if step.skipped then 1 else 0) tail.skipped) log'
+
+/-- The one-block precondition: a straight-line function has no merge, so a register's
+single earlier definition is the value at every later statement. -/
+def Scry.wgeSingleBlock (fn : Wil.Func) : Option Wil.Block :=
+  match fn.blocks with
+  | .cons b .nil => .some b
+  | _ => .none
+
+/-- Rewrite a function against its saturated graph. A function with branches is left
+alone with zero counts: no claim is made about a path-sensitive merge. -/
+def Scry.wgeRewriteFunc (g : Scry.EGraph) (fn : Wil.Func) : Scry.WgeFuncResult :=
+  match Scry.wgeSingleBlock fn with
+  | .none =>
+    Scry.WgeFuncResult.mk fn 0 0 0 .nil
+  | .some blk =>
+    let defs := Scry.wgeDefs blk.stmts;
+    let r := Scry.wgeRewriteStmts g fn defs 0 blk.stmts;
+    Scry.WgeFuncResult.mk (Wil.Func.mk fn.name fn.params fn.locals fn.entry
+      (.cons (Wil.Block.mk r.stmts blk.term) .nil) fn.origin)
+      r.changed r.rejected r.skipped r.log
+
+-- ## Rounds and the fuel bound
+
+structure Scry.WgeStats where
+  program : Wil.Program
+  rounds : Nat
+  rewritten : Nat
+  rejected : Nat
+  skipped : Nat
+  stop : String
+  log : List Scry.WgeRewrite
+
+structure Scry.WgeAcc where
+  program : Wil.Program
+  rewritten : Nat
+  rejected : Nat
+  skipped : Nat
+  log : List Scry.WgeRewrite
+
+/-- Saturate a fresh graph for one function, then rewrite it. The graph is built from
+`Wil.program [fn]` so two functions' registers never share a class. -/
+def Scry.wgeRoundFunc (fuel : Nat) (fn : Wil.Func) : Scry.WgeFuncResult :=
+  let built := Scry.wgBuildProgram (Wil.program [fn]);
+  let sat := Scry.wgSaturate fuel built.g [];
+  Scry.wgeRewriteFunc sat.g fn
+
+def Scry.wgeRoundGo (fuel : Nat) :
+    List Wil.Func → Scry.WgeAcc → Scry.WgeAcc
+  | .nil, acc => acc
+  | .cons fn rest, acc =>
+    let r := Scry.wgeRoundFunc fuel fn;
+    Scry.wgeRoundGo fuel rest
+      (Scry.WgeAcc.mk (Wil.Program.mk (.cons r.fn acc.program.funcs))
+        (Nat.add acc.rewritten r.changed)
+        (Nat.add acc.rejected r.rejected)
+        (Nat.add acc.skipped r.skipped)
+        (List.append acc.log r.log))
+
+def Scry.wgeRound (fuel : Nat) (p : Wil.Program) : Scry.WgeAcc :=
+  let r := Scry.wgeRoundGo fuel p.funcs
+    (Scry.WgeAcc.mk (Wil.Program.mk .nil) 0 0 0 .nil);
+  Scry.WgeAcc.mk (Wil.Program.mk (List.reverse r.program.funcs))
+    r.rewritten r.rejected r.skipped r.log
+
+/-- The outermost loop: at most `fuel` rounds, each saturating a fresh per-function graph
+with the remaining budget and applying the checked rewrites. A round that changes nothing
+is the fixpoint (and is counted, like `wgLoop`); running out of budget reports `fuel`. -/
+partial def Scry.wgeLoop (fuel rounds rewritten rejected skipped : Nat) (p : Wil.Program)
+    (log : List Scry.WgeRewrite) : Scry.WgeStats :=
+  match fuel with
+  | .zero => Scry.WgeStats.mk p rounds rewritten rejected skipped "fuel" log
+  | .succ k =>
+    let r := Scry.wgeRound (Nat.succ k) p;
+    if Nat.beq r.rewritten 0 then
+      Scry.WgeStats.mk p (Nat.succ rounds) rewritten r.rejected r.skipped
+        "fixpoint" log
+    else
+      Scry.wgeLoop k (Nat.succ rounds) (Nat.add rewritten r.rewritten)
+        r.rejected r.skipped r.program (List.append log r.log)
+
+/-- The checked transformation. `fuel` bounds the rounds; each accepted rewrite strictly
+lowers one statement's term cost, so a changing round makes progress even before the
+bound. -/
+def Scry.wgeRewriteProgram (fuel : Nat) (p : Wil.Program) : Scry.WgeStats :=
+  Scry.wgeLoop fuel 0 0 0 0 p .nil
+
+-- ## Rendering
+
+def Scry.wgeRenderLine (r : Scry.WgeRewrite) : String :=
+  "extract: " ++ r.func ++ "#" ++ Nat.repr r.stmt ++ " " ++ r.rule
+    ++ ": " ++ r.from ++ " -> " ++ r.to
+
+/-- The deterministic `--rewrite` report. The first line names the input file, as in
+`wgRenderReport`; `rewritten` is cumulative over the rounds and `rejected`/`skipped`
+are the last round's, so `skipped` describes the final graph state. -/
+def Scry.wgeRenderReport (path : String) (s : Scry.WgeStats) : String :=
+  let head := "rewrite: " ++ path ++ "\n"
+    ++ "rewrite-rounds: " ++ Nat.repr s.rounds ++ "\n"
+    ++ "rewritten: " ++ Nat.repr s.rewritten ++ "\n"
+    ++ "rejected: " ++ Nat.repr s.rejected ++ "\n"
+    ++ "skipped: " ++ Nat.repr s.skipped ++ "\n"
+    ++ "rewrite-stop: " ++ s.stop;
+  match s.log with
+  | .nil => head
+  | .cons _ _ => head ++ "\n" ++ String.intercalate "\n" (List.map Scry.wgeRenderLine s.log)

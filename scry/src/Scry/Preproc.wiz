@@ -339,3 +339,147 @@ def Scry.mapSpan (pre : Scry.Preprocessed) (node start stop : Nat) : Wil.Span :=
   | .true => Wil.Span.mk a.file a.off b.off node a.line a.col
   | .false => Scry.lineOrigin pre a node
 
+
+-- ## Mapping many spans: the index built once
+
+/-- One original file's lookup data: its characters as words, its length in characters
+(`String.length`), and its line-start offsets. -/
+structure Scry.FileIndex where
+  words : U32Array
+  len : Nat
+  lines : U64Array
+
+/-- The tables `Scry.mapSpan` reads, as arrays built once per unit. `Scry.mapSpan` itself
+walks lists and `String.drop`s from the start of the file (a `String` is a `List Char`
+in this runtime), so it is O(file) per span; mapping every node of a large file that way
+is quadratic. `Scry.mapSpanAt` gives the same `Wil.Span` in O(log lines + span). -/
+structure Scry.SpanIndex where
+  preWords : U32Array
+  lineStart : U64Array
+  lineFile : U64Array
+  lineOrig : U64Array
+  files : List Scry.FileIndex
+
+/-- The characters of `s` as words. -/
+def Scry.wordsOf (s : String) : U32Array :=
+  List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c))) U32Array.empty (String.chars s)
+
+/-- A list of naturals as a `U64Array`. -/
+def Scry.u64sOf (l : List Nat) : U64Array :=
+  List.foldl (fun a n => U64Array.push a (U64.ofNat n)) U64Array.empty l
+
+/-- One `Scry.FileIndex` per file (texts and line tables are parallel lists). -/
+def Scry.fileIndexes : List String → List (List Nat) → List Scry.FileIndex
+  | .nil, _ => .nil
+  | .cons t ts, ls => match ls with
+    | .nil => .cons (Scry.FileIndex.mk (Scry.wordsOf t) (String.length t) U64Array.empty)
+        (Scry.fileIndexes ts .nil)
+    | .cons l rest => .cons (Scry.FileIndex.mk (Scry.wordsOf t) (String.length t)
+        (Scry.u64sOf l)) (Scry.fileIndexes ts rest)
+
+/-- Build the index of a preprocessed unit (O(text + files)). -/
+def Scry.spanIndexOf (pre : Scry.Preprocessed) : Scry.SpanIndex :=
+  Scry.SpanIndex.mk (Scry.wordsOf pre.text) (Scry.u64sOf pre.lineStart)
+    (Scry.u64sOf pre.lineFile) (Scry.u64sOf pre.lineOrig)
+    (Scry.fileIndexes pre.texts pre.fileLines)
+
+/-- The file record for index `f` (an empty file when out of range, as `List.getD … ""`). -/
+def Scry.SpanIndex.file (ix : Scry.SpanIndex) (f : Nat) : Scry.FileIndex :=
+  List.getD ix.files f (Scry.FileIndex.mk U32Array.empty 0 U64Array.empty)
+
+/-- `U64Array.getD` as a `Nat`. -/
+def Scry.u64At (a : U64Array) (i : Nat) (d : Nat) : Nat :=
+  match Nat.lt i (U64Array.size a) with
+  | .true => UIntN.toNat (U64Array.get a i)
+  | .false => d
+
+/-- Binary search: the largest `i` in `[lo, hi]` with `starts[i] <= off` (`lo` when none). -/
+partial def Scry.lineIndexAt (starts : U64Array) (off : Nat) (lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
+    match Nat.le (UIntN.toNat (U64Array.get starts mid)) off with
+    | .true => Scry.lineIndexAt starts off mid hi
+    | .false => Scry.lineIndexAt starts off lo (Nat.sub mid 1)
+
+/-- `Scry.posOf` from the index. `Scry.lineIndexFrom` returns the last line whose start
+is `<= off`, and line starts are strictly increasing, so the binary search agrees. -/
+def Scry.posAt (ix : Scry.SpanIndex) (off : Nat) : Scry.Pos :=
+  let n := U64Array.size ix.lineStart;
+  let i := match Nat.beq n 0 with
+    | .true => 0
+    | .false => Scry.lineIndexAt ix.lineStart off 0 (Nat.sub n 1);
+  let file := Scry.u64At ix.lineFile i 0;
+  let line0 := Scry.u64At ix.lineOrig i 0;
+  let line := match Nat.beq line0 0 with
+    | .true => 1
+    | .false => line0;
+  let lo := Scry.u64At ix.lineStart i 0;
+  let col := Nat.add (Nat.sub off lo) 1;
+  let fi := Scry.SpanIndex.file ix file;
+  let lineOff := Scry.u64At fi.lines (Nat.sub line 1) 0;
+  let off2 := Nat.add lineOff (Nat.sub col 1);
+  let off3 := match Nat.le off2 fi.len with
+    | .true => off2
+    | .false => fi.len;
+  Scry.Pos.mk file line col off3
+
+/-- `String.take k (String.drop s t)`'s length, for a text of `size` characters. -/
+def Scry.cutLen (size s k : Nat) : Nat :=
+  match Nat.le k (Nat.sub size s) with
+  | .true => k
+  | .false => Nat.sub size s
+
+/-- The text of words `[start, start + len)` (`len` already cut to the array). -/
+def Scry.sliceText (a : U32Array) (start len : Nat) : String :=
+  match Nat.beq len 0 with
+  | .true => ""
+  | .false => String.ofChars (List.map (fun x => Char.mk (UIntN.toNat x))
+      (U32Array.toList (U32Array.slice a start len)))
+
+/-- Are words `a[i, i+n)` and `b[j, j+n)` equal? -/
+partial def Scry.wordsEqGo (a b : U32Array) (i j n : Nat) : Bool :=
+  match n with
+  | .zero => .true
+  | .succ k => match UIntN.beq (U32Array.get a i) (U32Array.get b j) with
+    | .false => .false
+    | .true => Scry.wordsEqGo a b (Nat.succ i) (Nat.succ j) k
+
+/-- `String.eq (take n (drop i A)) (take m (drop j B))` on word arrays, in O(n). -/
+def Scry.sliceEq (a : U32Array) (i n : Nat) (b : U32Array) (j m : Nat) : Bool :=
+  let la := Scry.cutLen (U32Array.size a) i n;
+  let lb := Scry.cutLen (U32Array.size b) j m;
+  match Nat.beq la lb with
+  | .false => .false
+  | .true => Scry.wordsEqGo a b i j la
+
+/-- `Scry.lineOrigin` from the index: the line's text is sliced, not dropped to. -/
+def Scry.lineOriginAt (ix : Scry.SpanIndex) (p : Scry.Pos) (node : Nat) : Wil.Span :=
+  let fi := Scry.SpanIndex.file ix p.file;
+  let i := Nat.sub p.line 1;
+  let lo0 := Scry.u64At fi.lines i fi.len;
+  let nxt := Scry.u64At fi.lines (Nat.succ i) (Nat.succ fi.len);
+  let hi := match Nat.le nxt fi.len with
+    | .true => Nat.sub nxt 1
+    | .false => fi.len;
+  let l := Scry.sliceText fi.words lo0 (Scry.cutLen fi.len lo0 (Nat.sub hi lo0));
+  let lead := Nat.sub (String.length l) (String.length (String.trimLeft l));
+  let len := String.length (String.trim l);
+  let lo := Nat.add (Scry.u64At fi.lines i 0) lead;
+  let hi2 := Nat.add lo len;
+  Wil.Span.mk p.file lo hi2 node p.line (Nat.add lead 1)
+
+/-- `Scry.mapSpan` from the index (the same span, in O(log lines + span)). -/
+def Scry.mapSpanAt (ix : Scry.SpanIndex) (node start stop : Nat) : Wil.Span :=
+  let a := Scry.posAt ix start;
+  let b := Scry.posAt ix stop;
+  let exact : Bool := match Nat.beq a.file b.file with
+    | .false => .false
+    | .true => match Nat.le a.off b.off with
+      | .false => .false
+      | .true => Scry.sliceEq ix.preWords start (Nat.sub stop start)
+          (Scry.SpanIndex.file ix a.file).words a.off (Nat.sub b.off a.off);
+  match exact with
+  | .true => Wil.Span.mk a.file a.off b.off node a.line a.col
+  | .false => Scry.lineOriginAt ix a node

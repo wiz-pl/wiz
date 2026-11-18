@@ -264,6 +264,7 @@
                 ./web/playground.html ./web/playground.js ./web/playground-values.js
                 ./web/playground.css ./web/lsp-client.js ./web/goals.js
                 ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+                ./web/playground-engine.js
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -456,10 +457,29 @@
               platforms = systems;
             };
           };
-        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground; default = wiz; };
+          # The self-hosted toolchain chain (docs/bootstrap-chain.md): a prototype, not built
+          # by CI and not pinned by any commit until the chain's root is declared.
+          # `wizc` is the fixpoint compiler built from the Lean host's seed, `wizc-release`
+          # its self-contained release tarball; `legacyPackages.SYSTEM.bootstrapChain` has
+          # the functions (`step`, `fetchToolchain`).
+          bootstrapChain = import ./nix/bootstrap-chain.nix {
+            inherit pkgs lib;
+            hostWiz = wiz;
+            selfhostSrc = fs.toSource { root = ./.; fileset = ./selfhost; };
+            inherit (unwrapped) version;
+          };
+        in {
+          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
+                   wiz-web wiz-playground; default = wiz;
+          wizc = bootstrapChain.wizc;
+          wizc-seed = bootstrapChain.seed;
+          wizc-release = bootstrapChain.release { };
+          inherit bootstrapChain;
+        };
     in {
-      packages = forAll packagesFor;
+      # (packages without the function set, which is not a derivation)
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
 
       apps = forAll (pkgs:
         let

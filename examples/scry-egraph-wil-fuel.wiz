@@ -1,0 +1,48 @@
+import Scry.EgraphWil
+-- The fuel bound (`scry-egraph-wil-fuel`): `a = 2 + 3; b = a + 4`. One simplify pass
+-- folds `a` first (the node table is newest-first, so the outer `b` is visited before
+-- `a` exists as a constant), so fuel 1 stops with `b` unfolded, while fuel 5 reaches the
+-- fixpoint and folds `b` to 9. `main` records both outcomes.
+
+def v0 : Wil.Var := Wil.var 0 Wil.i32
+def v1 : Wil.Var := Wil.var 1 Wil.i32
+def v2 : Wil.Var := Wil.var 2 Wil.i32
+def v3 : Wil.Var := Wil.var 3 Wil.i32
+def v4 : Wil.Var := Wil.var 4 Wil.i32
+
+def fn : Wil.Func :=
+  Wil.func "nested" [] [v0, v1, v2, v3, v4]
+    [ Wil.block
+        [ Wil.num v0 2
+        , Wil.num v1 3
+        , Wil.binop v2 .add v0 v1
+        , Wil.num v3 4
+        , Wil.binop v4 .add v2 v3 ]
+        (Wil.ret (.some v4)) ]
+
+def b : Scry.WgBuild := Scry.wgBuildProgram (Wil.program [fn])
+def s1 : Scry.WgStats := Scry.wgSaturate 1 b.g []
+def s5 : Scry.WgStats := Scry.wgSaturate 5 b.g []
+
+def classOfVar (g : Scry.EGraph) (i : Nat) : Nat :=
+  match Scry.EGraph.classOf g (Scry.ENode.leaf (Scry.wgVarOp i)) with
+  | .some c => c
+  | .none => 999
+
+def classOfConst (g : Scry.EGraph) (v : Wil.Val) : Nat :=
+  let a := Scry.wgAddConst g v;
+  a.2
+
+def bit (x : Bool) : Nat := if x then 1 else 0
+
+def main : Nat :=
+  let b1 := classOfVar s1.g 4;
+  let b5 := classOfVar s5.g 4;
+  let c9a := classOfConst s1.g (.int 32 .true 9);
+  let c9b := classOfConst s5.g (.int 32 .true 9);
+  bit (String.eq s1.stop "fuel") * 100000
+  + bit (String.eq s5.stop "fixpoint") * 10000
+  + bit (Scry.EGraph.sameClass s1.g b1 c9a) * 1000
+  + bit (Scry.EGraph.sameClass s5.g b5 c9b) * 100
+  + s1.rounds * 10
+  + s5.rounds

@@ -423,7 +423,12 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
     let key ← r.testKey file kind expected
     -- (9f) a `run` test also depends on its executable's link (its `link_c` files' contents)
     let key := if kind == .run then mixHash key (d 0).key else key
-    let force := update || expected.isNone
+    let force := update || expected.isNone || r.rerunTests
+    -- (`--rerun`) the recorded pass goes first: the run records a new one, and a failure
+    -- leaves none, so the next `grail test` does not report a pass this run did not see
+    if r.rerunTests then
+      let out := r.outDir key
+      if ← out.pathExists then IO.FS.removeDirAll out
     let onOk (cached : Bool) (_ : System.FilePath) : IO String := do
       if !cached then return ""
       results.modify (·.insert file { file, ok := true, cached := true })
@@ -435,14 +440,15 @@ def Runner.prep (r : Runner) (update : Bool) (results : TestResults) (n : Node)
       let f ← r.judgeTest file update results (.error msg)
       return .fail msg f.log
     let exe := if kind == .run then ((d 0).out / testExe file).toString else ""
+    let limitMs := testLimitMs r.testTimeoutMs (← IO.FS.readFile (r.ctx.dir / file))
     pure (.job {
-      key := key, timeoutMs := r.testTimeoutMs, force := force, onOk := onOk,
+      key := key, timeoutMs := limitMs, force := force, onOk := onOk,
       how := .grail (node "test" [str file, str kind.name, str exe]),
       finish := some fun o out => do
-        if o.code == 124 then r.judgeTest file update results (.error s!"timed out after {secs r.testTimeoutMs} s")
+        if o.code == 124 then r.judgeTest file update results (.error s!"timed out after {secs limitMs} s")
         -- (exit 1: the test failed, its message on stderr; else the process died)
         else if o.code == 1 && !o.stderr.trimAscii.isEmpty then r.judgeTest file update results (.error o.stderr.trimAsciiEnd.toString)
-        else if o.code != 0 then r.judgeTest file update results (.error s!"the test's process failed: {failureMessage o r.testTimeoutMs}")
+        else if o.code != 0 then r.judgeTest file update results (.error s!"the test's process failed: {failureMessage o limitMs}")
         else r.judgeTest file update results (.ok (← IO.FS.readFile (out / "actual"))) })
   | .source role =>
     let (prog, self) ← r.selfhostSources role

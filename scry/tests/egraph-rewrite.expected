@@ -1,0 +1,24 @@
+egraph: fixtures/egraph-const.c
+functions: 1
+statements: 11
+e-classes: 13
+e-nodes: 28
+rounds: 3
+folds: 2
+rewrites: 2
+rule-rounds: 0
+stop: fixpoint
+rewrite: fold: 5 + 5 -> 10
+rewrite: add-zero: v0 + 0 -> v0
+rewrite: mul-one: v7 * 1 -> v7
+rewrite: fold: 2 + 3 -> 5
+rewrite: fixtures/egraph-const.c
+rewrite-rounds: 2
+rewritten: 4
+rejected: 0
+skipped: 0
+rewrite-stop: fixpoint
+extract: egraph_const#2 fold: v1 + v2 -> 5
+extract: egraph_const#5 copy: v0 * v5 -> v0
+extract: egraph_const#8 copy: v0 + v8 -> v0
+extract: egraph_const#10 fold: v4 + v7 -> 10

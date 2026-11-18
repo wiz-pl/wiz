@@ -1,0 +1,39 @@
+import Scry.EgraphNative
+-- Explanations (`scry-egraph-explain`): every union records why it happened. A rewrite
+-- records its rule index; a rebuild that discovers a congruence records `.congruence`.
+-- `explain` walks the log and returns the chain of steps between two class ids. This
+-- example prints one chain per reason. `main` is the digest.
+
+-- ops: 0 = x, 1 = add, 2 = zero, 3 = a, 4 = b, 5 = f
+def pX : Scry.Pat := .var 0
+def pAddX0 : Scry.Pat := .pnode 1 (.pcons (.var 0) (.pcons (.pnode 2 .pnil) .pnil))
+def rAddZero : Scry.Rewrite := Scry.Rewrite.mk pAddX0 pX
+
+def main : Nat :=
+  -- rewrite chain: x + 0 -> x is rule 0
+  let e := Scry.EGraph.empty;
+  let x := Scry.EGraph.add e (Scry.ENode.leaf 0);
+  let z := Scry.EGraph.add x.1 (Scry.ENode.leaf 2);
+  let ax := Scry.EGraph.add z.1 (Scry.ENode.mk 1 [x.2, z.2]);
+  let s := Scry.EGraph.saturate 3 ax.1 [rAddZero];
+  let ch1 := Scry.EGraph.explain s ax.2 x.2;
+  -- congruence chain: merging a and b equates f a and f b
+  let e2 := Scry.EGraph.empty;
+  let a := Scry.EGraph.add e2 (Scry.ENode.leaf 3);
+  let b := Scry.EGraph.add a.1 (Scry.ENode.leaf 4);
+  let fa := Scry.EGraph.add b.1 (Scry.ENode.mk 5 [a.2]);
+  let fb := Scry.EGraph.add fa.1 (Scry.ENode.mk 5 [b.2]);
+  let m := Scry.EGraph.merge fb.1 a.2 b.2;
+  let ch2 := Scry.EGraph.explain m.1 fa.2 fb.2;
+  let n1 := match ch1 with
+    | .none => 900
+    | .some ch => List.length ch * 100 + (match Scry.chainRules ch with
+      | .nil => 90
+      | .cons r _ => r);
+  let n2 := match ch2 with
+    | .none => 800
+    | .some ch =>
+      List.length ch * 100 +
+      (if Scry.chainHasCongruence ch then 10 else 0) +
+      (match Scry.EGraph.explain s ax.2 999 with | .none => 1 | .some _ => 0);
+  n1 * 10000 + n2
