@@ -8,7 +8,8 @@
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
 --            --cache-verify off|warn|strict, --target c|llvm (llvm: C5's first slice,
---            a closed `main : Nat`; wasm is C5), --llvm (the host's alias),
+--            a closed `main : Nat`, lowered to the host's IR; wasm is C5), --llvm
+--            (the host's alias),
 --            -v (cache hits/misses), --types (each declaration's type),
 --            --cc, --llc, --rt, --cflags, --ldflags (the toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the C backend),
@@ -48,7 +49,7 @@
 -- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5); the
 -- driver's cache has no manifests, so `strict` never trusts an entry (see `cacheRead`).
 -- `target` is `--target c|llvm`: C is the whole backend, LLVM is C5's first slice (a
--- closed `main : Nat`, `Backend.wiz` `genLLVM`). `llc` is `--llc CMD` (the host's).
+-- closed `main : Nat` lowered to the host's IR, `Backend.wiz` `genLLVM`). `llc` is the host's.
 structure Opts where
   roots : List String
   cache : Option String
@@ -892,7 +893,8 @@ def usageText : String :=
   "  ~/.cache/wiz, as the Lean-hosted `wiz`'s),\n" +++
   "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
   "  manifests yet, so strict never trusts an entry), --target c|llvm (LLVM is a\n" +++
-  "  first slice, C5: a closed `main : Nat`; `--llvm` is its alias), --llc CMD,\n" +++
+  "  first slice, C5: a closed `main : Nat` lowered to the host's IR; `--llvm` is\n" +++
+  "  its alias), --llc CMD,\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS; C backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++

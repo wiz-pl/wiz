@@ -224,6 +224,17 @@ def cliDiffIsExe (b : ByteArray) : Bool :=
 
 def cliDiffExists (r : CliDiffRun) (name : String) : IO Bool := (r.dir / name).pathExists
 
+/-- The lines of a textual LLVM module from the definition whose first line is `header`
+(a `define internal i64 @… {`) through its closing `}`. The functions the two
+toolchains print can be compared verbatim: `Wiz/Compiler/LLVM.lean` is the emitter both
+use (the self-hosted one is its port). -/
+def cliDiffLLVMBlock (text header : String) : Option String := Id.run do
+  let ls := text.splitOn "\n"
+  let some i := ls.findIdx? (· == header) | return none
+  let rest := ls.drop (i + 1)
+  let some j := rest.findIdx? (· == "}") | return none
+  return some ("\n".intercalate (header :: rest.take (j + 1)))
+
 /-- The entries of a directory (0 when it does not exist). -/
 def cliDiffEntries (p : System.FilePath) : IO Nat := do
   if ← p.isDir then pure (← p.readDir).size else pure 0
@@ -590,7 +601,7 @@ def cliDiffGroup : Group where
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
           skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
-    { name := "build --llvm: both accept it; the host links an executable, the driver writes IR text (D4/C5)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "build --llvm: both accept it; the lowered functions are the host's IR (D4/C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
         let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffNat)]
@@ -599,13 +610,30 @@ def cliDiffGroup : Group where
         let (h, s) ← cliDiffBoth host exe spec
         checkEq 0 h.code
         checkEq 0 s.code
+        -- the host leaves its module beside the executable (`compileLLVM` writes `out.ll`);
+        -- the driver's artifact *is* the module
+        let some hll ← cliDiffRead h "out.ll"
+          | throw (IO.userError "the host wrote no .ll beside its executable")
+        let some sll ← cliDiffRead s "out"
+          | throw (IO.userError "the driver's LLVM build wrote no artifact")
+        -- `cliDiffNat` is `Nat.add 40 2`, not a numeral at the ETm level: the driver
+        -- lowers it to the host's IR (`lit 40`, `lit 2`, `nat.add`), folds it, removes
+        -- the dead bindings and prints the function with `LLVM.lean`'s `decl`. The two
+        -- `main` and `wiz.entry` definitions (and their `_boxed` wrappers) are equal
+        -- text, variable numbers included.
+        for header in ["define internal i64 @w_main() {",
+                       "define internal i64 @w_main_boxed(ptr %a) {",
+                       "define internal i64 @w_wiz_2e_entry() {",
+                       "define internal i64 @w_wiz_2e_entry_boxed(ptr %a) {"] do
+          match cliDiffLLVMBlock hll header, cliDiffLLVMBlock sll header with
+          | some hb, some sb => checkEq hb sb
+          | none, _ => throw (IO.userError s!"the host's module has no {header}")
+          | _, none => throw (IO.userError s!"the driver's module has no {header}")
         match ← cliDiffReadBin h "out" with
         | some b => check (cliDiffIsExe b) "the host's LLVM build is not an executable"
         | none => throw (IO.userError "the host's LLVM build wrote no artifact")
-        match ← cliDiffRead s "out" with
-        | some text => Tests.check ((text.splitOn "define i32 @main()").length > 1) "the driver's artifact is not LLVM IR"
-        | none => throw (IO.userError "the driver's LLVM build wrote no artifact")
-        skip "artifact: both build through textual LLVM IR; the host then assembles and links an executable, the driver writes the IR (its `build` writes C for the C target: D4). The slice is a closed `main : Nat` (C5)" },
+        Tests.check ((sll.splitOn "define i32 @main()").length > 1) "the driver's artifact is not LLVM IR"
+        skip "artifact: the lowered `w_main`/`w_wiz_2e_entry` text is equal to the host's (D4: the host links an executable, the driver writes the IR); the driver's `main` prints the scalar itself, where the host calls the runtime's `wiz_run_main` (C5's result protocol)" },
     { name := "run --llvm: `main : Nat` prints the same value (C5's first slice)", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"

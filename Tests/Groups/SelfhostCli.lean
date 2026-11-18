@@ -280,7 +280,7 @@ def cliGroup : Group where
         checkEq 1 c
         checkEq "" out
         cliCheck err "error: unknown identifier nope" "one-shot error" },
-    { name := "--target llvm: a closed `main : Nat` is textual LLVM IR, built and run (C5)", run := fun _ =>
+    { name := "--target llvm: a closed `main : Nat` is lowered to the host's IR, printed, built and run (C5)", run := fun _ =>
         withSelfhostCli fun exe => do
         let files := #[("n.wiz", "import Prelude\ndef main : Nat := Nat.add 40 2\n")]
         -- the module, to OUT: text only, so no C toolchain is needed here
@@ -290,7 +290,16 @@ def cliGroup : Group where
         checkEq "" err
         let ll ← IO.FS.readFile (dir / "out.ll")
         Tests.check (cliHas ll "define i32 @main()") "the module's main"
-        Tests.check (cliHas ll "i64 42") "the numeral"
+        -- `Nat.add 40 2` is not a numeral at the ETm level: it is lowered to the IR
+        -- (`Lit 40`, `Lit 2`, `nat.add`), folded to `42` (`Simp.lean`), and the dead
+        -- argument bindings are removed (`Reuse.lean`'s `elimDead`): one `add 85`
+        -- (the scalar `2n+1`) named as in the host's module, and nothing for 40 or 2.
+        Tests.check (cliHas ll "define internal i64 @w_main()") "the lowered `main`"
+        Tests.check (cliHas ll "add i64 0, 85") "the folded literal, through the IR"
+        Tests.check (!cliHas ll "add i64 0, 81") "an argument binding survived dead-code elimination (40)"
+        Tests.check (!cliHas ll "add i64 0, 5") "an argument binding survived dead-code elimination (2)"
+        Tests.check (cliHas ll "define internal i64 @w_wiz_2e_entry()") "the entry's call of main"
+        Tests.check (cliHas ll "call i64 @w_main()") "the entry's call of main"
         Tests.check (cliHas ll "@printf") "the result's print"
         -- `--llvm` is the host's alias: the same text
         let (dir2, c, _, _) ← cliRunDir exe files #["build", "n.wiz", "-o", "out.ll", "--llvm"]
@@ -305,6 +314,12 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe files #["check", "n.wiz", "--target", "wasm"]
         checkEq 1 c
         cliCheck err "unsupported target wasm" "wasm is still C5"
+        -- the brief's own example, `Nat.add 2 3`: 5, not a numeral in the source
+        let small := #[("s.wiz", "import Prelude\ndef main : Nat := Nat.add 2 3\n")]
+        let (sdir, c, _, _) ← cliRunDir exe small #["build", "s.wiz", "-o", "s.ll", "--target", "llvm"]
+        checkEq 0 c
+        let sll ← IO.FS.readFile (sdir / "s.ll")
+        Tests.check (cliHas sll "add i64 0, 11") "`Nat.add 2 3` folded through the IR"
         -- `llc` and `cc`, then the value as `wiz run` prints a Nat
         match ← cliRunOptions with
         | none => skip "no C toolchain (--gc-cflags): the module is built, `run` is not exercised"
@@ -314,6 +329,10 @@ def cliGroup : Group where
           let (c, out, err) ← cliRun exe files (#["run", "n.wiz", "--target", "llvm"] ++ opts)
           checkEq 0 c
           checkEq "42\n" out
+          checkEq "" err
+          let (c, out, err) ← cliRun exe small (#["run", "s.wiz", "--target", "llvm"] ++ opts)
+          checkEq 0 c
+          checkEq "5\n" out
           checkEq "" err
         -- outside the slice: one explicit error, exit 1, and no artifact
         let (dir, c, out, err) ← cliRunDir exe #[("b.wiz", cliHello)] #["build", "b.wiz", "-o", "b.ll", "--target", "llvm"]
