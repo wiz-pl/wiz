@@ -489,7 +489,9 @@ jobs:
     needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # 45 min: both Wasm builds, `wiz doc --lib` and the site, with wiz substituted
+    # 45 min: both Wasm builds, `wiz doc --lib` and the site, with wiz substituted.
+    # Without an elaboration cache for this binary `wiz doc --lib` is the bulk of the
+    # job (10-19 min in recent runs); the restored cache below replays it in ~2-4 min.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -504,6 +506,33 @@ jobs:
           wiz=$(nix build .#wiz --no-link --print-out-paths)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
+      - name: Cache key (the elaboration cache's own namespace)
+        id: key
+        shell: bash
+        run: |
+          # The cache is namespaced by the running binary: entry names mix in `binaryId`
+          # (a 64-bit hash of the executable's bytes, Wiz/Cache.lean) and manifests its
+          # SHA-256 (`toolchainTag`). So an identical build of the same source has the
+          # same namespace and hits, and a changed binary misses by construction.
+          # `$wiz/bin/wiz` is a makeWrapper script (its text embeds the store path);
+          # the file it execs is the ELF below, and its sha256 is that namespace.
+          elf="${{ steps.nix.outputs.wiz }}/share/wiz/.lake/build/bin/wiz"
+          compiler=$(sha256sum "$elf" | cut -d' ' -f1)
+          # The documented sources decide which entries exist: a changed lib/ saves a new
+          # snapshot, and the restore prefix (below) still serves the unchanged modules.
+          sources=$(git rev-parse HEAD:lib)
+          echo "compiler=$compiler" >> "$GITHUB_OUTPUT"
+          echo "cache=wiz-doc-v1-${{ runner.os }}-$compiler-$sources" >> "$GITHUB_OUTPUT"
+          echo "cache: wiz-doc-v1-${{ runner.os }}-$compiler-$sources"
+      - name: Restore the elaboration cache (a read-only layer)
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          # `wiz --cache-ro` (a layer wiz only reads): the job cannot corrupt it, and a
+          # miss repopulates the write cache, which this run publishes below.
+          path: .wiz-doc-cache/ro
+          key: ${{ steps.key.outputs.cache }}
+          restore-keys: wiz-doc-v1-${{ runner.os }}-${{ steps.key.outputs.compiler }}-
       - name: The Wasm modules (web/build.sh, web/build-playground.sh)
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
@@ -511,10 +540,45 @@ jobs:
           sh web/build.sh web/out
           sh web/build-playground.sh web/out
       - name: wiz doc --lib
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
         run: |
-          "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
-            --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
+          # --cache-ro: wiz reads the restored layer and never writes it; this run's misses
+          #   go to `.wiz-doc-cache/write`, published as the next run's layer.
+          # --cache-verify off: the layer is this workflow's own, and the entries are
+          #   content-keyed (the binary hash plus each module's text); the manifest check
+          #   would additionally bind them to the toolchain tag, which embeds the store
+          #   paths of cc/llc and so needlessly invalidates a rebuild with the same ELF.
+          #   The store's own `share/wiz/cache` layer (the wrapper's default) is read too.
+          # No --jobs N: master's `wiz doc` has no such flag yet. When it lands, add
+          # `--jobs 4`: the output is byte-identical (245 files SHA-256-equal at jobs 1
+          # and 4) and the warm run drops from ~333 s to ~162 s.
+          mkdir -p .wiz-doc-cache/write .wiz-doc-cache/ro
+          "$WIZ" doc --lib -o doc-site/docs --web web/out \
+            --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/" \
+            --cache .wiz-doc-cache/write --cache-ro .wiz-doc-cache/ro \
+            --cache-verify off
           ls doc-site/docs | head -50
+      - name: Publish this run's entries as the read-only layer (a miss)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          # A hit needs nothing: the layer then serves every entry (checked: a warm run
+          # leaves no .wizc in the write cache). A miss repopulates it.
+          mkdir -p .wiz-doc-cache/ro
+          cp -a .wiz-doc-cache/write/. .wiz-doc-cache/ro/
+          # (the memo names the runner's store path; one hash of the binary per run)
+          rm -rf .wiz-doc-cache/ro/bin
+          find .wiz-doc-cache/ro -name '*.tmp*' -delete
+          ls .wiz-doc-cache/ro | wc -l
+          du -sh .wiz-doc-cache/ro
+      - name: Save the elaboration cache
+        # a cache quota or upload failure must not fail the site
+        continue-on-error: true
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .wiz-doc-cache/ro
+          key: ${{ steps.key.outputs.cache }}
       - name: The reference manual's Markdown (nix build .#reference)
         # Built here, not in the `build` job: this is the only consumer, and only a push
         # runs this job, so it is off the shards' critical path. It is generated from the
