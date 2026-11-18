@@ -1075,19 +1075,28 @@ def classProgram : String :=
 /-- (30f) A superclass is an instance-implicit parameter of the class's telescope:
 `Loud : (A : Type) → [Show A] → Type`, so `#check Loud` shows the extra binder and each
 method re-inserts it. A signature that forms `Loud A` carries `[d : Show A]` too: the
-parameter form's cost, paid. -/
+parameter form's cost, paid. (The method calls spell the class's parameters with `@`:
+a problem whose arguments are still metavariables is `stuck` here — 30a — and the
+postponed argument `x` has not fixed `A` when the problem is resolved.) -/
 def superclassParam : String :=
   "import Prelude\nclass Show (A : Type) where\n  show : A → Nat\n" ++
   "class Loud (A : Type) [super : Show A] where\n  loud : A → Nat\n" ++
   "instance instShowNat : Show Nat := Show.mk (fun n => n)\n" ++
   "instance instLoudNat : Loud Nat := Loud.mk (fun n => n + 1)\n" ++
-  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := Loud.loud x + Show.show x\n" ++
-  "#check Loud\n#check Loud.loud\n#check both\n#reduce Nat.beq (both (A := Nat) 2) 5\n"
+  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := @Loud.loud A d i x + @Show.show A d x\n" ++
+  "#check Loud\n#check Loud.loud\n#check both\n#reduce Nat.beq (@both Nat instShowNat instLoudNat 2) 5\n"
 
 def superclassParamExpected : String :=
+  "Show : (x0 : U0) → U0\n" ++
+  "Show.show : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : x0) → Nat\n" ++
   "Loud : (x0 : U0) → (x1 : (Show x0)) → U0\n" ++
-  "Loud.loud : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : (Loud x0 x1)) → (x3 : x0) → Nat\n" ++
-  "both : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : (Loud x0 x1)) → (x3 : x0) → Nat\n" ++
+  "Loud.loud : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : ((Loud x0) x1)) → (x3 : x0) → Nat\n" ++
+  "instShowNat : (Show Nat)\n" ++
+  "instLoudNat : ((Loud Nat) instShowNat)\n" ++
+  "both : (x0 :0 U0) → (x1 : (Show x0)) → (x2 : ((Loud x0) x1)) → (x3 : x0) → Nat\n" ++
+  "(x0 : U0) → (x1 : (Show x0)) → U0\n" ++
+  "(x0 :0 U0) → (x1 : (Show x0)) → (x2 : ((Loud x0) x1)) → (x3 : x0) → Nat\n" ++
+  "(x0 :0 U0) → (x1 : (Show x0)) → (x2 : ((Loud x0) x1)) → (x3 : x0) → Nat\n" ++
   "con((#1, (tt, tt)))\n"
 
 /-- (30f) The same class compiles and runs with both dictionaries; `both 2` is 5
@@ -1097,8 +1106,8 @@ def superclassProgram : String :=
   "class Loud (A : Type) [super : Show A] where\n  loud : A → Nat\n" ++
   "instance instShowNat : Show Nat := Show.mk (fun n => n)\n" ++
   "instance instLoudNat : Loud Nat := Loud.mk (fun n => n + 1)\n" ++
-  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := Loud.loud x + Show.show x\n" ++
-  "def main : IO Unit := do\n  IO.println (Nat.toString (both (A := Nat) 2))\n"
+  "def both {A : Type} [d : Show A] [i : Loud A] (x : A) : Nat := @Loud.loud A d i x + @Show.show A d x\n" ++
+  "def main : IO Unit := do\n  IO.println (Nat.toString (@both Nat instShowNat instLoudNat 2))\n"
 /-- (A9) Named arguments: explicit, implicit, reordered, with `@f` and after other
 positional arguments. -/
 def namedArgHeader : String :=

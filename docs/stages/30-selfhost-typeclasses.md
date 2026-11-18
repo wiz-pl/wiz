@@ -359,4 +359,6 @@ Tests (`=classes`): `#check Strong` showing the extra parameter and `Strong.mk` 
 it; a `Type 1` lens that supplies both `[d : Profunctor p]` and `[i : Strong p]` and
 runs through `Hom`; and the missing-`Profunctor` error. `=selfhost` checks the same
 declaration's frontend output and compiles and runs the same program with the
-self-hosted toolchain.
+self-hosted toolchain; its method calls spell the class's parameters (`@Loud.loud A d i
+x`) because a problem whose arguments are still metavariables is `stuck` there (30a),
+and a postponed argument does not fix them in time.
