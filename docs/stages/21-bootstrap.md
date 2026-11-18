@@ -1146,10 +1146,13 @@ lake test -- '=selfhost-libdiff'                               # the same, as a 
 ```
 
 The group skips (a skipped case is not a pass) when there is no C toolchain for the
-self-hosted compiler, and never fails because of a gap; it writes the full report to
-`.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
-case's output. CI runs it as its own shard (`selfhost-libdiff` in
-`.github/test-shards.json`).
+self-hosted compiler, and never fails because of a gap. It is four cases, each over a
+contiguous range of the file list by index (every file is checked exactly once), and
+each writes its own report under `.lake/libdiff/` (`records-1-of-4.jsonl`,
+`summary-1-of-4.txt`, …), because the harness hides a passing case's output. CI runs
+one case per job (`selfhost-libdiff` in `.github/test-shards.json`: `"split": 4`,
+`"split-cases": true`), so the 45-minute sweep is four jobs of about 16 minutes instead
+of the run's critical path.
 
 `--only` and `--limit` make it usable as the A13 work list: the gap list groups the
 files whose verdicts differ by the construct the self-hosted frontend names

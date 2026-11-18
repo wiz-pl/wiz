@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* CI: the test matrix is listed longest first, and `selfhost-libdiff` is four jobs. The
+  sweep over `lib/` and `scry/` was one 45-minute case and the run's critical path (run
+  44333554608: 2679 s, of which 423 s built the self-hosted compiler, with 3 files at a
+  time); it is now four cases, each a contiguous file range by index (every file is still
+  checked exactly once in both compilers), each about 16 minutes in its own job. A new
+  `"split-cases": true` shard field lets the splitter spread cases that share a program
+  over the jobs and charges each part the build it pays, and `scripts/ci.py matrix` sorts
+  the shards by the same estimated cost: GitHub's 20-job cap made the late matrix entries
+  wait (`test (prop)` started 16 minutes after the wave), so the expensive work now
+  starts first.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,

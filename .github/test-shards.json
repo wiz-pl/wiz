@@ -27,7 +27,7 @@
    "select": [
     "=grail-selfhost"
   ]},
-  {"name": "selfhost-libdiff", "heavy": true,
+  {"name": "selfhost-libdiff", "split": 4, "split-cases": true, "heavy": true,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
               "Tests/Main.lean"],
    "select": [

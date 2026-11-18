@@ -42,9 +42,12 @@ Usage (a work list, not a gate):
     tests --libdiff --baseline FILE          # write it, or diff against it
     tests --libdiff --jobs 3                 # three files at a time (capped by CPUs and memory)
 
-`lake test -- '=selfhost-libdiff'` runs the sweep with the defaults (the driver's
-`--jobs N`, capped as above) and writes the report to `.lake/libdiff/` (the harness hides
-a passing case's output).
+`lake test -- '=selfhost-libdiff'` runs the sweep in `libDiffChunks` parts, each over a
+contiguous slice of the file list (every file is checked exactly once), with the defaults
+(the driver's `--jobs N`, capped as above), and writes one report per part under
+`.lake/libdiff/` (the harness hides a passing case's output). CI runs one part per job
+(`.github/test-shards.json`: `"split": 4`, `"split-cases": true`): the file payload, not
+the group, is what takes the time.
 -/
 
 /-- The module roots both toolchains resolve `import M` under, in order. The checkout's
@@ -67,6 +70,22 @@ partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array
 def libDiffFiles : IO (Array String) := do
   let all := (← libDiffWalk "lib" #[]) ++ (← libDiffWalk "scry" #[])
   pure (all.qsort (· < ·))
+
+/-- The number of parts the group's sweep is divided into. Each part is one case (one
+`--timings` line) over a contiguous slice of `libDiffFiles`, so CI can run the parts in
+different jobs: `.github/test-shards.json` sets `"split": 4, "split-cases": true` for
+`selfhost-libdiff`, and changing one number here means changing the other too. A part
+builds the self-hosted compiler itself (the shards' caches are per job), which is why the
+parts are not made smaller: 4 parts cost 3 extra builds and cut the 45-minute sweep to
+about 16 minutes each. -/
+def libDiffChunks : Nat := 4
+
+/-- The `k`th part of `files`: the contiguous slice `k * n / N` … `(k + 1) * n / N` by
+index (as equal as the list allows), so every file is in exactly one part. -/
+def libDiffChunk (files : Array String) (k : Nat) : Array String :=
+  let lo := files.size * k / libDiffChunks
+  let hi := files.size * (k + 1) / libDiffChunks
+  files.extract lo hi
 
 /-- The module a file's path names, for `--only`: `lib/Hdl/Uart.wiz` is `Hdl.Uart`. -/
 def libDiffModule (file : String) : String :=
@@ -401,6 +420,9 @@ structure LibDiffOpts where
   capped by the free memory at `memMB` per file); an explicit `--jobs N` (or the
   driver's `--jobs N`) overrides it -/
   jobs : Nat := 0
+  /-- the files to sweep, when the group checks one part of the list (CI); `none` is every
+  `lib/` and `scry/` file (`--limit` and `--only` still narrow it) -/
+  files : Option (Array String) := none
   deriving Inhabited
 
 /-- A record as one line of the report: verdict, the two sides, and the first divergence. -/
@@ -556,7 +578,9 @@ partial def libDiffPool {α : Type} (n jobs : Nat) (canStart : IO Bool)
 and the number of workers. `none` when the self-hosted compiler could not be built for a
 toolchain reason (the caller skips). -/
 def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Array LibRec × Nat)) := do
-  let all ← libDiffFiles
+  let all ← match o.files with
+    | some fs => pure fs
+    | none => libDiffFiles
   let picked := all.filter fun f =>
     (o.only.isEmpty || o.only.any (libDiffPicks · f)) && f.endsWith ".wiz"
   let picked := if o.limit == 0 then picked else picked.take o.limit
@@ -790,33 +814,54 @@ def libDiffMain (args : List String) : IO UInt32 := do
 
 /-! ## The group -/
 
-/-- The report the group leaves behind (its own output is hidden when it passes). -/
-def libDiffWriteReport (recs : Array LibRec) (sum : LibSummary) : IO Unit := do
+/-- The report a part leaves behind (its own output is hidden when it passes):
+`.lake/libdiff/records-<label>.jsonl` and `summary-<label>.txt`. -/
+def libDiffWriteReport (label : String) (recs : Array LibRec) (sum : LibSummary) : IO Unit := do
   let dir : System.FilePath := ".lake/libdiff"
   IO.FS.createDirAll dir
-  IO.FS.writeFile (dir / "records.jsonl")
+  IO.FS.writeFile (dir / s!"records-{label}.jsonl")
     (String.intercalate "\n" (recs.toList.map fun r => Lean.Json.compress (jsonOfRec r)) ++ "\n")
-  IO.FS.writeFile (dir / "summary.txt")
+  IO.FS.writeFile (dir / s!"summary-{label}.txt")
     (s!"{recs.size} files\n" ++ libDiffSummaryText sum ++ "\n")
+
+/-- One part of the sweep, as a case: files `k * n / N` … `(k + 1) * n / N` by index. -/
+def libDiffSweepCase (k : Nat) : Case :=
+  { name := s!"the library through both compilers: files {k + 1} of {libDiffChunks} by index (the parity gap list)"
+    run := fun _ => do
+      -- `--libdiff --jobs N` / the driver's `--jobs N` when it was given (so CI's
+      -- shard may set it, and `--jobs 1` is the serial control); else auto
+      let cj ← caseJobs
+      let given ← caseJobsGiven
+      let chunk := libDiffChunk (← libDiffFiles) k
+      let o : LibDiffOpts := { jobs := if given then cj else 0, files := some chunk }
+      let say := fun (_ : String) => pure ()
+      match ← libDiffSweep o say with
+      | none => skip "no C toolchain (no self-hosted compiler)"
+      | some (recs, workers) =>
+        let sum := libDiffSummarize recs
+        let label := s!"{k + 1}-of-{libDiffChunks}"
+        libDiffWriteReport label recs sum
+        note s!"libdiff part={label} files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}" }
 
 def libDiffGroup : Group where
   name := "selfhost-libdiff"
   exercise := "replacement parity: lib/ and scry/ through both compilers"
   shard := "selfhost"
-  cases := [
-    { name := "the library through both compilers: the parity gap list", run := fun _ => do
-        -- `--libdiff --jobs N` / the driver's `--jobs N` when it was given (so CI's
-        -- shard may set it, and `--jobs 1` is the serial control); else auto
-        let cj ← caseJobs
-        let given ← caseJobsGiven
-        let o : LibDiffOpts := { jobs := if given then cj else 0 }
-        let say := fun (_ : String) => pure ()
-        match ← libDiffSweep o say with
-        | none => skip "no C toolchain (no self-hosted compiler)"
-        | some (recs, workers) =>
-          let sum := libDiffSummarize recs
-          libDiffWriteReport recs sum
-          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}" },
+  cases :=
+    (List.range libDiffChunks).map libDiffSweepCase ++ [
+    { name := "the sweep's file parts: every file exactly once, and the parts differ by at most one", run := fun _ => do
+        for size in [0, 1, 3, 7, 182, 183] do
+          let files := ((List.range size).map toString).toArray
+          let parts := (List.range libDiffChunks).map (libDiffChunk files)
+          let joined := parts.foldl (· ++ ·) (#[] : Array String)
+          checkEq files joined
+          let lo := parts.foldl (fun m p => min m p.size) size
+          let hi := parts.foldl (fun m p => max m p.size) 0
+          check (hi - lo ≤ 1) s!"size {size}: part sizes differ: {lo}..{hi}"
+        -- and on the sweep's real list: every lib/ and scry/ file in exactly one part
+        let all ← libDiffFiles
+        let parts := (List.range libDiffChunks).map (libDiffChunk all)
+        checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) },
     { name := "the sweep's worker pool: every file exactly once, results in order, any worker count", run := fun _ => do
         for jobs in [1, 2, 3, 8, 40] do
           let n := 17
