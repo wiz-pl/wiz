@@ -1,4 +1,4 @@
-// The playground's React UI (?ui=react) under Node, in two halves:
+// The playground's Loom UI (?ui=react) under Node, in two halves:
 //
 //   1. The Wiz half: web/test-playground-ui.sh rendered three models with `wiz run`
 //      (web/playground-ui-fixture.wiz) and printed their HTML and the patch list between

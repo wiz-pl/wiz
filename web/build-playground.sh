@@ -44,7 +44,7 @@ ENGINE="$OUT/playground.wiz"
 
 # 3. Wiz → C → wasm. wasm64 as in web/build.sh; the export is called from
 # web/playground.js, and returns a malloc'ed UTF-8 string the page frees.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
 -sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_free \
@@ -59,7 +59,7 @@ cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-v
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/driver.js" "$OUT/framework/"
 
-# 4. (?ui=react) The right pane as a `model -> tree` app (lib/Web/React.wiz, named in
+# 4. (?ui=react) The right pane as a `model -> tree` app (lib/Web/Loom.wiz, named in
 # web/ui-framework.wiz). A module of its own: the page loads it only under `?ui=react`,
 # and a failure to build or load it leaves the page's DOM path untouched. The exports
 # are `wiz_ui_html : String -> String` and `wiz_ui_patch : String -> String -> String`.

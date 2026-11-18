@@ -40,6 +40,7 @@ partial def leanFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
 def toolchainGroup : Group where
   name := "toolchain"
   exercise := "Stage 23a"
+  parallel := true
   cases := [
     { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]

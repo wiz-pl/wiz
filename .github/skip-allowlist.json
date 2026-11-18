@@ -1,16 +1,20 @@
 {
-  "comment": "Groups that may skip cases in CI, with the reason and an owner (and, with `case`, the one case the entry excuses) (scripts/ci.py check-skips; docs/building.md, 'Skips'). A group that is not here must run in CI: if it skips wholesale the run fails. A skip whose reason names a tool the dev shell (flake.nix, devShells.default) must provide is a failure even for a group here. Prefer fixing the shell or the test to adding an entry.",
+  "comment": "Groups that may skip cases in CI, with the reason, an owner, the one `case` the entry excuses and an `expires` date (scripts/ci.py check-skips; docs/building.md, 'Skips'). A group that is not here must run in CI: if it skips wholesale the run fails. Every entry names exactly one case (there is no whole-group entry) and expires on its date: an expired entry is an error until it is renewed with a new reason. The reason matches the start of the skip's reason (a skip usually carries detail after the entry's words); the case matches exactly. A skip whose reason names a tool the dev shell (flake.nix, devShells.default) must provide is a failure even for a group here. Prefer fixing the shell or the test to adding an entry.",
   "groups": [
     {
       "group": "hdl",
+      "case": "Verilog: Icarus Verilog accepts the emitted modules (skipped without iverilog on PATH)",
       "reason": "no iverilog",
       "owner": "HDL (Tests/Groups/Hdl.lean, lib/Hdl)",
+      "expires": "2027-05-01",
       "why": "Icarus simulation is optional in the dev shell; yosys (synthesis) is required and is in flake.nix, so a 'no yosys' skip in this group still fails."
     },
     {
       "group": "tower",
+      "case": "from source: install, channels, update, shims, +SPEC, run",
       "reason": "no source toolchain",
       "owner": "tower (Tests/Tower.lean, docs/building.md)",
+      "expires": "2027-05-01",
       "why": "the 'from source' case needs Lake's toolchain inside a checkout, which the store-built shards do not have; the rest of the group runs."
     },
     {
@@ -19,6 +23,7 @@
       "reason": "prelude: the self-hosted Prelude is one embedded module that includes the IO natives",
       "parity": "A14/C12",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (A14/C12): the self-hosted Prelude embeds the IO natives; the host's lib/Prelude.wiz has none. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -27,6 +32,7 @@
       "reason": "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5)",
       "parity": "C5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (C5): the self-hosted backend emits C only and refuses the other target names. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -35,6 +41,7 @@
       "reason": "cache: `--cache-ro DIR` adds a read-only layer",
       "parity": "D5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D5): the driver's one-file cache has no read-only layers, so it rejects --cache-ro. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -43,6 +50,7 @@
       "reason": "cache verification: the host writes output manifests",
       "parity": "D5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D5): the self-hosted cache writes no output manifests, so --cache-verify strict never hits. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -51,6 +59,7 @@
       "reason": "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C",
       "parity": "D4",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D4): the self-hosted build's artifact is the generated C, not an executable. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -59,6 +68,7 @@
       "reason": "flags: the driver also has `--include` (an -I alias), `--types` and `-v`",
       "parity": "D3",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D3): --include/--types/-v are driver-only flags the host rejects. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -67,6 +77,7 @@
       "reason": "usage text: the driver documents the subset it has",
       "parity": "D2/D8",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D2/D8): the driver's usage documents only the subset it implements (no parse/doc/fmt/lsp, no --llvm). Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -75,6 +86,7 @@
       "reason": "artifact: --lib's object/header match",
       "parity": "D4/C9",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D4/C9): --no-main does not link without a `main` on the host's Wasm path; the driver writes the C. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -83,6 +95,7 @@
       "reason": "warnings: the host warns (on stdout) about a module root shadowing its own lib",
       "parity": "A14/D6",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (A14/D6): the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -91,6 +104,7 @@
       "reason": "column: the host reports the failing term and the declared name",
       "parity": "D6",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D6): the self-hosted frontend reports the command's start column. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -99,6 +113,7 @@
       "reason": "structure: the host nests a module's errors under its import",
       "parity": "D6/A14",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D6/A14): the self-hosted loader reports each error at its own module and position. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -107,6 +122,7 @@
       "reason": "backend: the host builds through textual LLVM IR",
       "parity": "C5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (C5): the self-hosted backend is C only. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
@@ -115,6 +131,7 @@
       "reason": "message: the host lets IO.readFile throw",
       "parity": "D6/D7",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
       "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
     }
   ]

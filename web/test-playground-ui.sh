@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test the playground's React UI (?ui=react) without a browser: concatenate
+# Test the playground's Loom UI (?ui=react) without a browser: concatenate
 # web/ui-framework.wiz + web/playground-ui.wiz + the fixture, render the three models with
 # `wiz run`, and hand the JSON to web/playground_ui_test.mjs, which applies the patch list
 # to the SSR HTML in the minidom double and drives web/framework/driver.js's `startModel`

@@ -11,6 +11,7 @@ namespace Tests.Elab
 def effectsGroup : Group where
   name := "effects"
   exercise := "Stage 10a"
+  parallel := true
   cases := [
     { name := "a program reads its command-line arguments (IO.args, 21k), C and LLVM", run := fun _ => do
         let src := "import IO\ndef printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s rest => do\n    IO.println s;\n    printAll rest\n" ++

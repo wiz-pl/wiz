@@ -5,15 +5,17 @@ and kernel compiled to WebAssembly (stage 11ab). Since the playground-LSP work i
 pane is served **in the page by default** (`web/selfhost-lsp-shim.js`, the same Wasm
 engine), so the published page has a pane with no server to start; with an endpoint in
 the page's URL it can also be a **language client** of an external server, showing that
-server's tactic state, expected type and diagnostics. Either way clicking a hypothesis or
-a subterm selects its source span in the editor.
+server's tactic state, expected type and diagnostics. With an external server that
+implements the interactive methods, clicking a hypothesis or a tagged subterm selects its
+source span in the editor; the in-page server answers only the plain goal methods, so
+only the goal's span is clickable.
 
 The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
 rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
 insertion), `web/squiggles.js` and `web/completions.js` draw them, and
 `web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
-the repo's own React-style framework (`lib/Web/React.wiz`) with `?ui=react`
-(§ The React UI); the default page builds its DOM directly.
+the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=react`
+(§ The Loom UI); the default page builds its DOM directly.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
@@ -49,7 +51,7 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
   `?completions=off` the completion popup (§ The editor). `?ui=react` renders the pane
-  with the repo's React-style framework instead of the DOM path (§ The React UI).
+  with the repo's Loom framework instead of the DOM path (§ The Loom UI).
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -173,9 +175,9 @@ The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
 asking.
 
-## The React UI (`?ui=react`)
+## The Loom UI (`?ui=react`)
 
-The right-hand pane (Goals over Output) can be rendered by the repo's React-style
+The right-hand pane (Goals over Output) can be rendered by the repo's Loom
 framework instead of by `document.createElement` in `web/playground.js`:
 
 ```sh
@@ -193,14 +195,14 @@ web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playgroun
   page with arbitrary text can use the framework even though its typed dispatch carries
   only `(event, handler index)`. It is built as its own small Wasm module so a failure to
   build or load it cannot affect the checker; `web/ui-framework.wiz` is the **only** file
-  naming the framework module (`Web.React` today; the module is being renamed to
-  `Web.Loom`, with namespace and Wasm exports, so only that file changes).
+  naming the framework module (`Web.Loom`), so a rename of the framework or its Wasm
+  exports costs an edit in that file and nothing else in the page.
 * Still imperative (the same on both paths): the textarea and its squiggle overlay, the
   completion popup, the header's status line, the Run button and the footer's engine
   line. The line count moves from under the editor into the pane's Output head under the
   flag (so it is not drawn twice). The pane's own DOM path is untouched: without the
   flag, and whenever the UI module is missing, `#side-dom` renders as before and the
-  React container stays hidden.
+  Loom container stays hidden.
 * `web/test-playground-ui.sh` checks the Wiz half under Node: it runs the fixture
   (`web/playground-ui-fixture.wiz`) with `wiz run`, applies the patch list to the SSR HTML
   in `web/framework/minidom.mjs`, and requires the result to equal the next model's HTML

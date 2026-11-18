@@ -1,11 +1,9 @@
 -- The playground UI's one reference to the UI framework.
 --
--- The framework in `lib/Web/React.wiz` is being renamed: on `agent/loom-rename` it is
--- `lib/Web/Loom.wiz`, module `Web.Loom`, namespace `Loom.*`, and the Wasm exports are
--- `wiz_loom_*` (the `react` test group becomes `loom`). Everything the playground's UI
--- app needs therefore goes through a `Ui.*` alias below, and `web/playground-ui.wiz`
--- names `Ui.*` only: when the rename lands, this file's `import` and aliases change and
--- nothing else in the page does.
+-- The framework is `lib/Web/Loom.wiz`, module `Web.Loom`, namespace `Loom.*`, and its
+-- Wasm exports are `wiz_loom_*`. Everything the playground's UI app needs goes through a
+-- `Ui.*` alias below, and `web/playground-ui.wiz` names `Ui.*` only, so a framework whose
+-- names change again costs an edit here and nothing else in the page.
 --
 -- This file also carries the imports: `web/playground-ui.wiz` and the fixture are
 -- concatenated after it (web/build-playground.sh, web/test-playground-ui.sh), so an
@@ -13,30 +11,30 @@
 -- fixture's `main`; it is cheap here and keeps the module one import block.
 import IO
 import Json
-import Web.React
+import Web.Loom
 
 /-- A virtual node in the page's message type. -/
-def Ui.vnode (M : Type) : Type := React.VNode M
+def Ui.vnode (M : Type) : Type := Loom.VNode M
 /-- An attribute list. -/
-def Ui.attrs : Type := List React.Attr
+def Ui.attrs : Type := List Loom.Attr
 /-- `name="value"`. -/
-def Ui.attr (name value : String) : React.Attr := React.attr name value
+def Ui.attr (name value : String) : Loom.Attr := Loom.attr name value
 /-- The `class` attribute. -/
-def Ui.class (value : String) : React.Attr := React.class value
+def Ui.class (value : String) : Loom.Attr := Loom.class value
 /-- The `id` attribute. -/
-def Ui.id (value : String) : React.Attr := React.id value
+def Ui.id (value : String) : Loom.Attr := Loom.id value
 /-- An escaped text node. -/
-def Ui.text {M : Type} (s : String) : Ui.vnode M := React.text s
+def Ui.text {M : Type} (s : String) : Ui.vnode M := Loom.text s
 /-- Trusted HTML, inserted unescaped (the goals panel's markup). -/
-def Ui.raw {M : Type} (html : String) : Ui.vnode M := React.raw html
+def Ui.raw {M : Type} (html : String) : Ui.vnode M := Loom.raw html
 /-- An element. -/
 def Ui.el {M : Type} (tag : String) (attrs : Ui.attrs) (kids : List (Ui.vnode M)) : Ui.vnode M :=
-  React.el tag attrs kids
+  Loom.el tag attrs kids
 /-- `map` over a list of children. -/
 def Ui.map {A : Type} {M : Type} (f : A → Ui.vnode M) (xs : List A) : List (Ui.vnode M) :=
-  React.map f xs
+  Loom.map f xs
 /-- A node as deterministic HTML (server-side rendering, and the page's first paint). -/
-def Ui.html {M : Type} (v : Ui.vnode M) : String := React.toHtml v
+def Ui.html {M : Type} (v : Ui.vnode M) : String := Loom.toHtml v
 /-- The patch list between two views, as JSON for `web/framework/runtime.js`. -/
 def Ui.patches {M : Type} (a b : Ui.vnode M) : String :=
-  React.patchesJson (React.Rendered.diff (React.render a) (React.render b))
+  Loom.patchesJson (Loom.Rendered.diff (Loom.render a) (Loom.render b))

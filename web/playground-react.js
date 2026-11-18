@@ -1,5 +1,5 @@
-// (playground, ?ui=react) The right-hand pane rendered by the repo's React-style
-// framework (`lib/Web/React.wiz`, through web/ui-framework.wiz) instead of by
+// (playground, ?ui=react) The right-hand pane rendered by the repo's Loom framework
+// (`lib/Web/Loom.wiz`, through web/ui-framework.wiz) instead of by
 // `document.createElement` in web/playground.js.
 //
 // It is behind the `?ui=react` flag and additive: with no flag, `playground.js`'s

@@ -1,9 +1,9 @@
 -- (playground, ?ui=react) The right-hand pane's UI as a pure function of a JSON model,
--- so the page can render it with the repo's React-style framework and patch it instead of
+-- so the page can render it with the repo's Loom framework and patch it instead of
 -- building DOM nodes by hand.
 --
 -- No `import` here: this file is concatenated after `web/ui-framework.wiz`, which names
--- the framework (`Web.React` today, `Web.Loom` after agent/loom-rename) and imports
+-- the framework (`Web.Loom`) and imports
 -- `Json`. The two ends are:
 --
 --   * `web/playground-ui-exports.wiz` — the Wasm exports `wiz_ui_html`/`wiz_ui_patch`,
@@ -21,7 +21,7 @@
 -- count under them. A missing or unparsable model renders an empty pane: the page's UI
 -- must never be the thing that breaks evaluating Wiz.
 --
--- What the React path does **not** own (docs/playground-lsp.md, "?ui=react"): the
+-- What the Loom path does **not** own (docs/playground-lsp.md, "The Loom UI"): the
 -- textarea and its squiggles, the completion popup, the header's status line, the Run
 -- button and the footer's engine line. Those stay imperative, and the default page
 -- (`?ui=` absent) is entirely imperative.
@@ -56,7 +56,7 @@ def Ui.decode (text : String) : UiModel :=
   | .error _ => UiModel.mk "" List.nil ""
 
 /-- A message type with no constructors the app uses: the pane has no handlers of its
--- own (the Run button and the editor stay outside the React tree). -/
+-- own (the Run button and the editor stay outside the Loom tree). -/
 inductive UiMsg where
   | noop
 
