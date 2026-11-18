@@ -61,7 +61,7 @@ def wasmRun (src expected : String) : IO Unit := do
   let out ← wasmRunBytes bytes
   match Build.parseValue out with
   | none => throw (IO.userError s!"could not read the result: {out}")
-  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty
 
 /-- The interpreter's answer for `main`: append `#eval main` and take its one info
 message. This is the oracle for a golden test (the C backend's result is the same tree). -/
@@ -188,7 +188,7 @@ def wasmRunPeak (src expected : String) (maxPages : Nat) : IO Unit := do
   let (out, pages) ← wasmPeakBytes bytes
   match Build.parseValue out with
   | none => throw (IO.userError s!"could not read the result: {out}")
-  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty
   if pages > maxPages then
     throw (IO.userError s!"peak linear memory was {pages} pages, over the {maxPages} bound")
 
@@ -231,7 +231,7 @@ def wasmCafCached (src expected : String) : IO Unit := do
   let (out, b1, b2) ← wasmCafRunTwice bytes
   match Build.parseValue out with
   | none => throw (IO.userError s!"could not read the result: {out}")
-  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+  | some v => checkEq expected (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty
   if b1 == 0 then throw (IO.userError "the program built no CAF, so the test proves nothing")
   if b2 != b1 then
     throw (IO.userError s!"a CAF was rebuilt on the second run ({b1} → {b2} builds)")

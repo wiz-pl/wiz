@@ -41,14 +41,21 @@ variable {R : Type} [QRig R] [DecidableEq R] [ToString R] [QuantitySyntax R]
 
 namespace Mark
 
+/-- Does `t`, at the type whose sort is `s`, get a marker (and at which level), and is
+there anything to mark inside it? Nothing inside a proof (level `0`). The sort is passed
+in because the sorts pass computed it while it filled the type: evaluating the type again
+for it is the same computation (`Decl.withSortsAndSort`). -/
+def decideAt (ctx : Ctx R) (t : Term R) (s : Option Level) : Option Level × Bool :=
+  if ctx.sortsOnly then (none, true) else
+  if (if ctx.globals.strictProofs then (t matches .prf ..) else t.neutralShaped) then (none, true) else
+  match s with
+  | none => (none, true)
+  | some s => if s.isNeverZero then (none, true) else (some s, !s.isZero)
+
 /-- Does `t`, at the type `ty`, get a marker (and at which level), and is there anything
 to mark inside it? Nothing inside a proof (level `0`). -/
 def decide (ctx : Ctx R) (t : Term R) (ty : VTy R) : Option Level × Bool :=
-  if ctx.sortsOnly then (none, true) else
-  if (if ctx.globals.strictProofs then (t matches .prf ..) else t.neutralShaped) then (none, true) else
-  match ctx.sortOf? ty with
-  | none => (none, true)
-  | some s => if s.isNeverZero then (none, true) else (some s, !s.isZero)
+  decideAt ctx t (ctx.sortOf? ty)
 
 private def sortLevel? (ty : Option (VTy R)) : Option Level :=
   match ty.map whnf with
@@ -112,11 +119,11 @@ partial def checkRest (ctx : Ctx R) (t : Term R) (ty : VTy R) : Term R :=
   | .dret i, .desc _ I => .dret (check ctx i I)
   | .darg q S D, .desc l I =>
     let (S, _) := type ctx S
-    .darg q S (check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩))
+    .darg q S (check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk #[I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩))
   | .drec q j D, .desc l I => .drec q (check ctx j I) (check ctx D (.desc l I))
   | .dhrec q H j D, .desc l I =>
     let (H, _) := type ctx H
-    .dhrec q H (check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩))
+    .dhrec q H (check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk #[I] (.var 1)) ⟨.succ l, .succ l⟩))
       (check ctx D (.desc l I))
   | .con x, .mu l I D i s _ prop => match sizePred? s with
     | some s' => .con (check ctx x (vInterp g l I D (muFamilyAt l I D s' prop) i prop))
@@ -155,7 +162,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
   match t with
   | .var ix => (t, ctx.types[ix]?)
   | .const n us => (t, (g.find? n).bind fun d =>
-      if d.levelParams.length == us.length then some (eval g [] (d.type.instLevels d.levelParams us)) else none)
+      if d.levelParams.length == us.length then some (eval g #[] (d.type.instLevels d.levelParams us)) else none)
   | .natLit _ => (t, (g.builtins.lookup "nat").map fun N => ctx.eval (.const N []))
   | .sort l => (t, some (.sort (.succ l)))
   -- (the sorts pass: a hole gets the component's level)
@@ -265,7 +272,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let a := check ctx a vA
     let va := ctx.evalAt a vA
     let motiveTy : Val R := .pi "b" .default (.qlit 0) vA
-      (.mk [va, vA] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) ⟨lA.getD .hole, .imax 0 1⟩
+      (.mk #[vA, va] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) ⟨lA.getD .hole, .imax 0 1⟩
     let P := check ctx P motiveTy
     let vP := ctx.eval P
     let p := check { ctx with proof := true } p (vApp g (vApp g vP va) (.neutral (.refl vA va) #[]))
@@ -391,20 +398,14 @@ end
 
 end Mark
 
-/-- (Mandatory sorts) A declaration with every hole in its `Π`/`Σ`/`ULift` sorts filled
-(the sorts pass, `Ctx.sortsOnly`): in the type, the value, the implementation and the
-witness. A declaration without holes is returned as it is.
-
-The declared type is **evaluated only when the term's shape needs an expected type** (a
-`fun`, a pair, …), or when inference could not type the term: evaluating an equation
-computes its sides — the whole of a `refl` proof's computation — and the pass runs on
-every declaration (`kernel-eval`). Where the type is not needed the traversal infers the
-subterm's type instead (`Mark.infer`). -/
-def Decl.withSorts (g : Globals R) (d : Decl R) : Decl R :=
+/-- `Decl.withSorts`, also returning the sort of the declared type when the pass had to
+traverse it (the `Π`/`Σ` sorts it computed). `withTopMarks` uses it instead of evaluating
+the type again; `none` means the declaration had no holes and the type was not traversed. -/
+def Decl.withSortsAndSort (g : Globals R) (d : Decl R) : Decl R × Option (Option Level) :=
   let has := d.type.hasHole || (d.value.any (·.hasHole)) || (d.impl.any (·.hasHole)) ||
     (d.witness.any (·.hasHole))
-  if !has then d else
-  let type := (Mark.type { globals := g, sortsOnly := true } d.type).1
+  if !has then (d, none) else
+  let (type, lType) := Mark.type { globals := g, sortsOnly := true } d.type
   -- (a recursive definition mentions itself, and it is not in the globals yet — its own
   -- check is what adds it. Give the pass the declaration (with its filled type and no
   -- value: a neutral), so that a self-reference has a type and the traversal descends
@@ -428,7 +429,20 @@ def Decl.withSorts (g : Globals R) (d : Decl R) : Decl R :=
       | (t', some _) => t'
       | (_, none) => t
     if !byInfer.hasHole then byInfer else Mark.check ctx t ty.get
-  { d with type := type, value := d.value.map fill, impl := d.impl.map fill, witness := d.witness.map fill }
+  ({ d with type := type, value := d.value.map fill, impl := d.impl.map fill, witness := d.witness.map fill },
+   some lType)
+
+/-- (Mandatory sorts) A declaration with every hole in its `Π`/`Σ`/`ULift` sorts filled
+(the sorts pass, `Ctx.sortsOnly`): in the type, the value, the implementation and the
+witness. A declaration without holes is returned as it is.
+
+The declared type is **evaluated only when the term's shape needs an expected type** (a
+`fun`, a pair, …), or when inference could not type the term: evaluating an equation
+computes its sides — the whole of a `refl` proof's computation — and the pass runs on
+every declaration (`kernel-eval`). Where the type is not needed the traversal infers the
+subterm's type instead (`Mark.infer`). -/
+def Decl.withSorts (g : Globals R) (d : Decl R) : Decl R :=
+  (d.withSortsAndSort g).1
 
 /-- A declaration with its proof markers (and the `Π`/`Σ` sorts it fills on the way):
 what the kernel requires (`Check.lean`, "the proof marker"). -/
@@ -443,13 +457,18 @@ def Decl.withMarks (g : Globals R) (d : Decl R) : Decl R :=
 /-- A declaration with a marker on its body only, when the body is a proof (its type's
 sort may be `0`) and not neutral-shaped: enough for most theorems, whose proofs hold no
 relevant subterm with a proof of its own in it. The kernel answers "unmarked proof" when
-it is not enough (`withMarksOnDemand`). -/
-def Decl.withTopMarks (g : Globals R) (d : Decl R) : Decl R :=
+it is not enough (`withMarksOnDemand`).
+
+`sort?` is the sort of the declared type when the caller already has it (`Decl.withSortsAndSort`):
+`some none` means "computed, unknown", so the type is not evaluated again. -/
+def Decl.withTopMarks (g : Globals R) (d : Decl R) (sort? : Option (Option Level) := none) : Decl R :=
   let ctx : Ctx R := { globals := g }
-  let ty := ctx.eval d.type
+  let sort? : Option Level := match sort? with
+    | some s => s
+    | none => ctx.sortOf? (ctx.eval d.type)
   let top (v : Term R) : Term R := match v with
     | .prf .. => v
-    | _ => match (Mark.decide ctx v ty).1 with
+    | _ => match (Mark.decideAt ctx v sort?).1 with
       | some l => .prf l v
       | none => v
   { d with value := d.value.map top, impl := d.impl.map top, witness := d.witness.map top }

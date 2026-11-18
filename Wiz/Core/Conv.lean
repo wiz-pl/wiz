@@ -34,7 +34,7 @@ with its level parameters instantiated, or (stage 4c) the type of a stuck
 observational construct. -/
 def headType (g : Globals R) (tys : Array (VTy R)) : Head R → Option (VTy R)
   | .local x => tys[x]?
-  | .global n us => (g.find? n).map fun d => eval g [] (d.type.instLevels d.levelParams us)
+  | .global n us => (g.find? n).map fun d => eval g #[] (d.type.instLevels d.levelParams us)
   | .mvar _ => none
   | .eq .. | .eqTy .. => some (.sort 0)
   | .cast _ B _ _ => some B
@@ -62,7 +62,7 @@ private def spi (q : R) (x : Name) (a b : Term R × Level) : Term R × Level :=
 
 /-- `P : Desc I → Sort v` -/
 def delimMotiveTy (l v : Level) (I : Val R) (w : R) : VTy R :=
-  .pi "D" .default (.qlit w) (.desc l I) (.mk [] (.sort v)) ⟨.succ (.succ l), .succ v⟩
+  .pi "D" .default (.qlit w) (.desc l I) (.mk #[] (.sort v)) ⟨.succ (.succ l), .succ v⟩
 
 /-- The types of `mret`, `marg`, `mrec`, `mhrec` for `Desc.elim` with motive `P`
 (`P : Desc I → Sort v`). -/
@@ -88,7 +88,7 @@ def delimMethodTys (g : Globals R) (l v : Level) (I P : Val R) (w : R) : VTy R �
 def indMotiveTy (g : Globals R) (l v : Level) (I D : Val R) (w : R) (prop : Bool := false) : VTy R :=
   let l1 : Level := .succ l
   let lμ : Level := if prop then .zero else l1
-  eval g [D, I] (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none prop, lμ) (.sort v, .succ v))).1
+  eval g #[I, D] (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none prop, lμ) (.sort v, .succ v))).1
 
 /-- `m : (0 i : I) → (xs : ⟦D⟧ (μ D) i) → (ih : All D (μ D) P i xs) → P i (con xs)` -/
 def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) (prop : Bool := false) : VTy R :=
@@ -96,20 +96,20 @@ def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) (prop : Bo
   -- i0 P1 D2 I3 ; xs0 i1 P2 D3 I4 ; ih0 xs1 i2 P3 D4 I5
   let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none prop)
   let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none prop)
-  eval g [P, D, I] (spi 0 "i" (tv 2, l1)
+  eval g #[I, D, P] (spi 0 "i" (tv 2, l1)
     (spi w "xs" (Templates.interpApp l prop (tv 3) (tv 2) X₁ (tv 0), l1)
       (spi w "ih" (tapps (Templates.allTm l v prop) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
         (tapps (tv 3) [tv 2, .con (tv 1)], v)))).1
 
 /-- `S : I → Type l` -/
 def coitStateTy (l : Level) (I : Val R) (w : R) : VTy R :=
-  .pi "i" .default (.qlit w) I (.mk [] (.sort (.succ l))) ⟨.succ l, .succ (.succ l)⟩
+  .pi "i" .default (.qlit w) I (.mk #[] (.sort (.succ l))) ⟨.succ l, .succ (.succ l)⟩
 
 /-- `step : (i : I) → S i → ⟦D⟧ S i` -/
 def coitStepTy (g : Globals R) (l : Level) (I D S : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
-  eval g [S, D, I] (spi w "i" (tv 2, l1)
+  eval g #[I, D, S] (spi w "i" (tv 2, l1)
     (spi w "s" (.app (tv 1) (tv 0), l1) (Templates.interpApp l false (tv 4) (tv 3) (tv 2) (tv 1), l1))).1
 
 /-! ### Sizes
@@ -170,7 +170,7 @@ def sfixFunTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- s0 P1 D2 I3 ; j0 s1 P2 D3 I4 ; i0 j1 s2 P3 D4 I5 ; y0 i1 j2 s3 P4
   -- rec0 s1 P2 D3 I4 ; i0 rec1 s2 P3 D4 I5 ; x0 i1 rec2 s3 P4
-  eval g [P, D, I] (spi 0 "s" (.size, 1)
+  eval g #[I, D, P] (spi 0 "s" (.size, 1)
     (pi "rec" (spi 0 "j" (.sizeLt (tv 0), 1)
         (pi "i" (tv 4, l1) (pi "y" (.mu l (tv 5) (tv 4) (tv 0) (tv 1) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))
       (pi "i" (tv 4, l1) (pi "x" (.mu l (tv 5) (tv 4) (tv 0) (tv 2) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))).1
@@ -180,7 +180,7 @@ of `scase` at quantity `q` (K1) receives the payload at `q`. -/
 def scaseMethodTy (g : Globals R) (l v : Level) (I D P s q : Val R) : VTy R :=
   let l1 : Level := .succ l
   -- j0 s1 P2 D3 I4 q5 ; i0 j1 s2 P3 D4 I5 q6 ; xs0 i1 j2 s3 P4 D5 I6
-  eval g [s, P, D, I, q] (spi 0 "j" (.sizeLt (tv 0), 1) (spi 0 "i" (tv 4, l1)
+  eval g #[q, I, D, P, s] (spi 0 "j" (.sizeLt (tv 0), 1) (spi 0 "i" (tv 4, l1)
     ((.pi "xs" .default (tv 6)
       (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none false), tv 0])
       (tapps (tv 4) [tv 1, .con (tv 0)]) ⟨l1, v⟩), .imax l1 v))).1
@@ -190,7 +190,7 @@ def scofixFunTy (g : Globals R) (l : Level) (I D A : Val R) (w : R) : VTy R :=
   let pi := spi w
   let l1 : Level := .succ l
   -- s0 A1 D2 I3 ; i0 s1 A2 D3 I4 ; a0 i1 s2 A3 D4 I5 ; rec0 s1 A2 D3 I4 ; i0 rec1 s2 A3 D4 I5 ; a0 i1 rec2 s3 A4 D5 I6
-  eval g [A, D, I] (spi 0 "s" (.size, 1)
+  eval g #[I, D, A] (spi 0 "s" (.size, 1)
     (pi "rec" (pi "i" (tv 3, l1) (pi "a" (.app (tv 2) (tv 0), l1) (.nu l (tv 5) (tv 4) (tv 1) (tv 2) none, l1)))
       (pi "i" (tv 4, l1) (pi "a" (.app (tv 3) (tv 0), l1) (.nu l (tv 6) (tv 5) (tv 1) (.szSuc (tv 3)) none, l1))))).1
 
@@ -351,12 +351,12 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
     | .dret i, .dret j => conv g tys I i j
     | .darg q S E, .darg q' S' E' =>
       conv g tys .qty q q' && convTy g tys S S' &&
-        conv g tys (.pi "s" .default (.qlit 1) S (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) E E'
+        conv g tys (.pi "s" .default (.qlit 1) S (.mk #[I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) E E'
     | .drec q j E, .drec q' j' E' =>
       conv g tys .qty q q' && conv g tys I j j' && conv g tys (.desc l I) E E'
     | .dhrec q H j E, .dhrec q' H' j' E' =>
       conv g tys .qty q q' && convTy g tys H H' &&
-        conv g tys (.pi "h" .default (.qlit 1) H (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩) j j' && conv g tys (.desc l I) E E'
+        conv g tys (.pi "h" .default (.qlit 1) H (.mk #[I] (.var 1)) ⟨.succ l, .succ l⟩) j j' && conv g tys (.desc l I) E E'
     | _, _ => (convNe g tys a b).isSome
   | .mu l I D i _ _ pr => match a, b with
     | .con x, .con y => conv g tys (vInterp g l I D (muFamily l I D pr) i pr) x y
@@ -379,7 +379,7 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
     match g.hidden[T]? with
     | some { value := some v, levelParams, .. } =>
       let full := g.fullView
-      conv full tys (vElims full (eval full [] (v.instLevels levelParams us)) sp) a b
+      conv full tys (vElims full (eval full #[] (v.instLevels levelParams us)) sp) a b
     | _ => false
   | _ => (convNe g tys a b).isSome
   --|ex

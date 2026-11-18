@@ -90,7 +90,7 @@ where
 
 /-- Normalise: evaluate in an environment of fresh variables and quote back. -/
 def norm (g : Globals R) (b : B R) : B R := fun d =>
-  let env : Env R := (List.range d).reverse.map Val.var
+  let env : Env R := (List.range d).map Val.var |>.toArray
   quote g d (eval g env (b d))
 
 end B
@@ -150,7 +150,7 @@ def mkRecursor (g : Globals R) (T : Name) (ctors : List Name) (withIH : Bool) (s
     | none => false
     | some dv =>
       let (teleD, _) := peelPis descD.type
-      let vD := (List.range teleD.length).foldl (fun f a => vApp g f (Val.var a)) (eval g [] dv)
+      let vD := (List.range teleD.length).foldl (fun f a => vApp g f (Val.var a)) (eval g #[] dv)
       descSingleton g 0 vD)
   let vName := (["v", "v'", "v''", "w"].find? (!ps.contains ·)).getD "v_rec"
   let v : Level := if prop && !singleton then .zero else .param vName

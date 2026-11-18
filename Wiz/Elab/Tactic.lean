@@ -289,7 +289,7 @@ def RCtx.ofLocal (ctx : LocalCtx R) : RCtx R :=
   { env := ctx.env, types := ctx.types.map some, lvl := ctx.lvl }
 
 def RCtx.bind (rc : RCtx R) (ty : Option (VTy R)) : RCtx R :=
-  { env := Val.var rc.lvl :: rc.env, types := ty :: rc.types, lvl := rc.lvl + 1 }
+  { env := Env.push rc.env (Val.var rc.lvl), types := ty :: rc.types, lvl := rc.lvl + 1 }
 
 abbrev ReflM (R : Type) := StateT (Array (Term R × Nat)) (ElabM R)
 
@@ -301,11 +301,11 @@ def zonkR (l : Lvl) (t : Term R) : ReflM R (Term R) := fun s => do pure (← zon
 type depends on it. -/
 def RCtx.instArg (rc : RCtx R) (g : Globals R) (c : Closure R) (a : Term R) : VTy R :=
   match c with
-  | .mk env body => eval g ((if body.hasVar 0 then eval g rc.env a else .unit .zero) :: env) body
+  | .mk env body => eval g (Env.push env (if body.hasVar 0 then eval g rc.env a else .unit .zero)) body
 
 /-- The type of a constant or a variable (the head of an application). -/
 def RCtx.headType? (rc : RCtx R) (g : Globals R) : Term R → Option (VTy R)
-  | .const n us => (g.find? n).map fun d => eval g [] (d.type.instLevels d.levelParams us)
+  | .const n us => (g.find? n).map fun d => eval g #[] (d.type.instLevels d.levelParams us)
   | .var i => (rc.types[i]?).join
   | _ => none
 
@@ -435,7 +435,7 @@ partial def reflectCtor (rc : RCtx R) (tag rest : Term R) (ty? : Option (VTy R))
   let fields := ((parts.take sh.fields.length).zip sh.fields).map fun ((c : Term R), (pos : FieldPos)) => pos.field c
   -- the parameters come from the type; they give the fields their types
   let mut acc := mkCon 1 [encodeString cname]
-  let mut cty := eval g [] (d.type.instLevels d.levelParams us)
+  let mut cty := eval g #[] (d.type.instLevels d.levelParams us)
   for p in targs.take sh.nParams do
     let .pi _ _ _ dom cod _ ← forceR cty | return none
     acc := mkCon 5 [acc, ← reflectT rc (← zonkR rc.lvl (quote g rc.lvl p)) (some dom)]
@@ -503,7 +503,7 @@ def Goal.show (gl : Goal R) : ElabM R String := do
     -- the type of the `j`th local lives in the context below it
     let k := j + 1
     let sub : LocalCtx R :=
-      { ctx with env := ctx.env.drop k, names := ctx.names.drop k, types := ctx.types.drop k,
+      { ctx with env := ctx.env.extract 0 (ctx.lvl - k), names := ctx.names.drop k, types := ctx.types.drop k,
                  bound := ctx.bound.drop k, lvl := ctx.lvl - k }
     lines := lines.push s!"{ctx.names[j]!} : {← showTermM sub (← zonk sub.lvl (quote (← getGlobals) sub.lvl ctx.types[j]!))}"
   lines := lines.push s!"⊢ {goalTarget (← showTermM ctx (← zonk ctx.lvl (quote (← getGlobals) ctx.lvl gl.ty)))}"

@@ -76,6 +76,13 @@ partial def dropsResets : IR.Body → Nat × Nat
 /-- Unary numbers, so that the inputs need no library. -/
 def natDecl : String := "inductive N where\n  | z\n  | s (n : N)\n"
 
+/-- An inductive with `n` nullary constructors. Its six recursors are Π-towers of `n`
+methods, and each method mentions `motive` (bound `≈ n − i` levels out), so checking
+them looks a variable up at depth `≈ n` once per method: with a list environment that
+walked the list each time, 500 constructors took 14 s and 1000 took 103 s. -/
+def wideInductive (n : Nat) : String :=
+  "inductive Wide where\n" ++ String.join ((List.range n).map (s!"  | c{·} : Wide\n"))
+
 /-- A structure with `n` fields, its constructor applied, and its last field. -/
 def wideStructure (n : Nat) : String :=
   natDecl ++ "structure S where\n" ++ String.join ((List.range n).map (s!"  f{·} : N\n")) ++
@@ -384,8 +391,8 @@ def descsOf (g : Globals ZeroOneMany) : Array (Name × Level × Val ZeroOneMany 
   for n in g.order do
     let some d := g.find? n | continue
     if d.value.isNone then continue
-    let mut ty := whnf (eval g [] d.type)
-    let mut v : Val ZeroOneMany := eval g [] (.const n (d.levelParams.map Level.param))
+    let mut ty := whnf (eval g #[] d.type)
+    let mut v : Val ZeroOneMany := eval g #[] (.const n (d.levelParams.map Level.param))
     let mut k := 0
     for _ in [0:12] do
       match ty with
@@ -618,6 +625,11 @@ def group : Group where
         checksWithin 60 (wideStructure 64) },
     { name := "a class with 48 Hw-like methods and an instance (was exponential: 16 took 4 s)", run := fun _ =>
         checksWithin 60 (wideClass 48) },
+    -- the sorts and marks passes of the six recursors looked `motive` up in a list
+    -- environment (bound ≈ n − i levels out), so an n-constructor inductive cost Θ(n³):
+    -- 500 took 14 s and 1000 took 103 s
+    { name := "an inductive with 1000 constructors is checked (the environment used to be a list: 500 took 14 s, 1000 103 s)", run := fun _ =>
+        checksWithin 60 (wideInductive 1000) },
     -- a failed unification of glued definitions tried every order of unfolding, and the
     -- same comparisons again under the fresh variables of each unfolded `Ex`: a wrong
     -- `⋆` law took minutes to be rejected
@@ -730,7 +742,7 @@ def group : Group where
     { name := "erasure believes a Π's sort, and the kernel rejects a wrong one wherever erasure could read it", run := fun _ => do
         -- `Type → Type` marked as a proposition: erasure would take its values for proofs
         let w : Val ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk [] (.sort 1)) ⟨2, 0⟩
+        let ty : Val ZeroOneMany := .pi "x" .default w (.sort 1) (.mk #[] (.sort 1)) ⟨2, 0⟩
         check (erasable { globals := {} } ty) "the annotation is read"
         -- so no declaration may carry it: not in its type, its value, or its implementation
         let bad : Term ZeroOneMany := .pi "x" .default (.qlit QuantitySyntax.explicitDefault) (.sort 1) (.sort 1) ⟨2, 0⟩

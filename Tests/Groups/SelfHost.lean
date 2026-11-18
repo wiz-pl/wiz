@@ -2311,7 +2311,7 @@ def selfHostGroup : Group where
         -- the marker's level is instantiated: `prf.{u} t` is a suspended proof at `u := 0`
         let g : Globals ZeroOneMany := {}
         let m : Term ZeroOneMany := (Term.prf (.param "u") .tt).instLevels ["u"] [.zero]
-        unless (eval g [] m) matches .neutral (.prf ..) #[] do throw (IO.userError "prf.{u} at u := 0 is not suspended")
+        unless (eval g #[] m) matches .neutral (.prf ..) #[] do throw (IO.userError "prf.{u} at u := 0 is not suspended")
         -- the Wiz kernel's traversals
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
@@ -2399,10 +2399,10 @@ def selfHostGroup : Group where
         let stuck (v : Val ZeroOneMany) : Bool := (whnf v) matches .neutral (.cast ..) #[]
         -- (a) a level variable: T := True × Unit.{u}
         let T : Term ZeroOneMany := .sigma "x" ω (.unit 0) (.unit (.param "u")) ⟨0, .param "u"⟩
-        unless stuck (eval g [] (.cast T T (.reflTy T) (.pair .tt .tt))) do throw (IO.userError "(a) the cast computed")
+        unless stuck (eval g #[] (.cast T T (.reflTy T) (.pair .tt .tt))) do throw (IO.userError "(a) the cast computed")
         -- at an instance it computes: `u := 1`
         let T1 := T.instLevels ["u"] [Level.ofNat 1]
-        unless (whnf (eval g [] (.cast T1 T1 (.reflTy T1) (.pair .tt .tt)))) matches .pair .. do throw (IO.userError "(a) at u := 1 the cast is stuck")
+        unless (whnf (eval g #[] (.cast T1 T1 (.reflTy T1) (.pair .tt .tt)))) matches .pair .. do throw (IO.userError "(a) at u := 1 the cast is stuck")
         -- (b) (mandatory sorts) a Π without its sorts can't be formed: the kernel rejects it
         let F (s : BinderSorts) : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 0) s
         let e : Val ZeroOneMany := Val.var 0
@@ -2411,10 +2411,10 @@ def selfHostGroup : Group where
         | .ok _ => throw (IO.userError "(b) a Π without its sorts was accepted")
         | .error err => unless ((toString err).splitOn "without its sort").length > 1 do throw (IO.userError s!"(b) {err}")
         -- (b') `Unit → True` with its sorts is a proposition: a cast between propositions is stuck (P2)
-        unless stuck (vCast g (eval g [] (F ⟨1, 0⟩)) (eval g [] (F ⟨1, 0⟩)) e f) do throw (IO.userError "(b') the cast computed")
+        unless stuck (vCast g (eval g #[] (F ⟨1, 0⟩)) (eval g #[] (F ⟨1, 0⟩)) e f) do throw (IO.userError "(b') the cast computed")
         -- with both sorts known and not propositions it computes (a λ), as before
         let G : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 1) ⟨1, 1⟩
-        unless (vCast g (eval g [] G) (eval g [] G) e f) matches .lam .. do throw (IO.userError "an annotated Π cast is stuck")
+        unless (vCast g (eval g #[] G) (eval g #[] G) e f) matches .lam .. do throw (IO.userError "an annotated Π cast is stuck")
         let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
         let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
           "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
@@ -2492,7 +2492,7 @@ def selfHostGroup : Group where
             | .ok g => pure g
             | .error e => throw (IO.userError s!"{name}: the term is rejected: {e}")
           let vv := d0.value.getD .tt
-          let nf := quote g 0 (eval g [] vv)
+          let nf := quote g 0 (eval g #[] vv)
           match addDecl (R := ZeroOneMany) {} { d0 with value := some nf } with
           | .error e => throw (IO.userError s!"{name}: its normal form is rejected: {e}")
           | .ok _ => pure ()
@@ -2570,7 +2570,7 @@ def selfHostGroup : Group where
           | .ok g => pure g
           | .error e => throw (IO.userError s!"the marked term is rejected: {e}")
         let inst (l : Nat) (A a : Term ZeroOneMany) : Val ZeroOneMany :=
-          whnf (eval g [] (.app (.app (.const "k" [Level.ofNat l]) A) a))
+          whnf (eval g #[] (.app (.app (.const "k" [Level.ofNat l]) A) a))
         -- at `u := 1` it computes; at `u := 0` the whole of `k` is a proof (of
         -- `(A : Prop) → A → A`): suspended, and applying it only grows its spine
         unless (inst 1 (.enum ["a", "b"]) (.tag ["a", "b"] 1)) matches .tag _ 1 do throw (IO.userError "k.{1} did not compute")

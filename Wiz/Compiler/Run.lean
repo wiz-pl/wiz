@@ -572,10 +572,10 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then
       let a' := readback A v
-      .pair a' (readback (Closure.inst g B (eval g [] a')) .erased)
+      .pair a' (readback (Closure.inst g B (eval g #[] a')) .erased)
     else
     let a' := readback A (v.field 0)
-    .pair a' (readback (Closure.inst g B (eval g [] a')) (v.field 1))
+    .pair a' (readback (Closure.inst g B (eval g #[] a')) (v.field 1))
   -- Q4: a lifted value is the value itself at run time
   | .ulift _ _ A, v => .up (readback A v)
   | .enum ls, .obj t _ => .tag ls t
@@ -613,7 +613,7 @@ where
       match whnf d with
       | .darg _ S F =>
         let f := field n
-        .obj 0 #[f, rest (vApp g F (eval g [] (readback g builtins S f))) (n + 1) fuel]
+        .obj 0 #[f, rest (vApp g F (eval g #[] (readback g builtins S f))) (n + 1) fuel]
       | .drec _ _ D' | .dhrec _ _ _ D' => .obj 0 #[field n, rest D' (n + 1) fuel]
       | _ => .obj 0 #[.erased, .erased]
     match whnf D with

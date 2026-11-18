@@ -20,7 +20,7 @@ def goalView (ctx : LocalCtx R) (ty : VTy R) (userName : Option Name := none) : 
   for l in [0:ctx.lvl] do
     let i := ctx.lvl - 1 - l
     let hty ← zonk l (quote g l ctx.types[i]!)
-    let val ← if ctx.bound[i]! then pure none else some <$> zonk l (quote g l ctx.env[i]!)
+    let val ← if ctx.bound[i]! then pure none else some <$> zonk l (quote g l ctx.env[ctx.lvl - 1 - i]!)
     hyps := hyps.push (ctx.names[i]!, hty, val)
   pure { hyps, target := ← zonk ctx.lvl (quote g ctx.lvl ty), userName }
 

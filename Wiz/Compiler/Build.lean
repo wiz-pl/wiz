@@ -336,7 +336,7 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
       if io then return .ok out.stdout
       match parseValue out.stdout with
       | none => pure (.error (.readback s!"could not read the result: {out.stdout}"))
-      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty)
 
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
 (`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
@@ -360,7 +360,7 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
         return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
       match parseValue out.stdout with
       | none => pure (.error s!"could not read the result: {out.stdout}")
-      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty)
 
 /-- Preprocess the headers a file imports (`import_c "h"`), since the frontend is pure. -/
 def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String String) := do

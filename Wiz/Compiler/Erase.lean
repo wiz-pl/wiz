@@ -570,7 +570,7 @@ quadratic in the chain's length). -/
 partial def sndType (ctx : Ctx R) (B : Closure R) (p : Term R) : VTy R :=
   match B with
   | .mk env body =>
-    Wiz.eval ctx.globals ((if body.hasVar 0 then vFst (ctx.eval p) else .unit .zero) :: env) body
+    Wiz.eval ctx.globals (Env.push env (if body.hasVar 0 then vFst (ctx.eval p) else .unit .zero)) body
 
 /-- (The fallback runs the kernel's `infer` in erased mode: it wants the type only, and
 this context's quantities are approximate. **Erasure is not the checker**: in erased mode
@@ -587,7 +587,7 @@ partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
   match t with
   | .var ix => pure ctx.types[ix]!
   | .const n us => match g.find? n with
-    | some d => pure (Wiz.eval g [] (d.type.instLevels d.levelParams us))
+    | some d => pure (Wiz.eval g #[] (d.type.instLevels d.levelParams us))
     | none => throw (.unboundGlobal n)
   | .app f a => match whnf (← quickType ctx f) with
     | .pi _ _ _ _ cod _ => pure (ctx.instArg cod a)
@@ -685,13 +685,13 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
         "constructor tag would depend on how that type is instantiated. Give the first field a known type " ++
         "(for a choice of constructors, `Enum […]`)"))
     let D' ← eraseCheck ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) vS
-      (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) true
+      (.mk #[I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩) true
     -- a choice of tag is marked, for `pack`
     return .obj (if (tagField? vS).isSome then 4 else 1) #[.erased, D']
   | .drec _ j D, .desc l I =>
     return .obj 2 #[← eraseCheck ctx j I, ← eraseCheck ctx D (.desc l I) true]
   | .dhrec _ H j D, .desc l I =>
-    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩
+    let jTy : VTy R := .pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk #[I] (.var 1)) ⟨.succ l, .succ l⟩
     return .obj 3 #[.erased, ← eraseCheck ctx j jTy, ← eraseCheck ctx D (.desc l I) true]
   | .tt, _ => return .erased
   | .letE x q ty' v b, _ =>

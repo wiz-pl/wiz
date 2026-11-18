@@ -162,7 +162,9 @@ def isOwnVar (v : Val R) (l : Lvl) : Bool := match v with
 /-- Is every variable of the context its own value (none substituted away by a `match`
 on an index)? -/
 def placeholderFull (ctx : LocalCtx R) : Bool :=
-  (ctx.env.zip (List.range ctx.lvl).reverse).all fun (v, l) => isOwnVar v l
+  (List.range ctx.lvl).all fun l => match ctx.env[l]? with
+    | some v => isOwnVar v l
+    | none => false
 
 /-- A placeholder metavariable for an argument (`checkApp`): like `freshMeta`, but
 applied only to the bound variables that are their own values, so that unifying it with
@@ -170,8 +172,8 @@ the argument stays in the pattern fragment in a `match` branch whose context has
 variables replaced by others (index unification). -/
 def freshPlaceholder (ctx : LocalCtx R) : ElabM R (Term R) := do
   let m := (← get).metas.size
-  let live := (ctx.bound.zip (ctx.env.zip (List.range ctx.lvl).reverse)).reverse.map fun (b, v, l) =>
-    b && isOwnVar v l
+  let live := (List.range ctx.lvl).map fun l =>
+    (ctx.bound[ctx.lvl - 1 - l]?.getD false) && (ctx.env[l]?.any fun v => isOwnVar v l)
   modify fun s => { s with metas := s.metas.push { info := ctx.info, desc := "an argument", arity := (live.filter id).length } }
   let mut t : Term R := .mvar m
   for b in live, lvl in [0:ctx.lvl] do
@@ -195,7 +197,7 @@ def builtinApp? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Name × Arr
   if (lookupLocal ctx n).isSome || (← getGlobals).contains n then return none
   return some (n, (stx.getArg 1).args)
 
-/-- The term for a string literal, `String.mk [Char.mk n, …]` with numerals `n`. The
+/-- The term for a string literal, `String.mk #[Char.mk n, …]` with numerals `n`. The
 prelude's names are fixed here. -/
 def mkStringLit (str : String) (us : List Level := []) : ElabM R (Term R) := do
   let S := ((← get).builtins.lookup "string").getD "String"
@@ -215,7 +217,7 @@ def ofNatLit? (ctx : LocalCtx R) (n : Nat) (A : VTy R) : ElabM R (Option (Term R
   let some d := s.globals.find? "OfNat.ofNat" | return none
   let us ← d.levelParams.mapM fun _ => freshLevelMeta
   let g ← getGlobals
-  let fty := eval g [] (d.type.instLevels d.levelParams us)
+  let fty := eval g #[] (d.type.instLevels d.levelParams us)
   let .pi _ _ _ domA codA _ ← force fty | return none
   let qA := quote g ctx.lvl A
   if let .sort l ← force domA then addSortConstraint ctx qA l
@@ -385,7 +387,7 @@ partial def fieldByTypeName? (ctx : LocalCtx R) (t : Term R) (ty : VTy R) (f : N
         if let some m := g.privateTo? Df then
           throwAt ctx.info s!"'{Globals.privateBase n}.{f}' is private to module {m}" "private"
         let dus ← d.levelParams.mapM fun _ => freshLevelMeta
-        let fty : VTy R := eval g [] (d.type.instLevels d.levelParams dus)
+        let fty : VTy R := eval g #[] (d.type.instLevels d.levelParams dus)
         let (tm, fty) ← insertImplicits ctx (.const Df dus) fty
         let .pi _ _ _ dom cod _ ← force fty | return none
         unifyAt ctx (.missing) dom ty
@@ -418,7 +420,7 @@ partial def elabFields (ctx : LocalCtx R) (t : Term R) (ty : VTy R) (fields : Li
               [("name", [f]), ("type", [S])]
         if let some m := g.privateTo? (S ++ "." ++ f) then
           throwAt ctx.info s!"'{Globals.privateBase S}.{f}' is private to module {m}" "private"
-        let fty : VTy R := eval g [] (d.type.instLevels d.levelParams us)
+        let fty : VTy R := eval g #[] (d.type.instLevels d.levelParams us)
         let (tm, fty) ← insertImplicits ctx (.const (S ++ "." ++ f) us) fty
         let .pi _ _ _ dom cod _ ← force fty | throwAt ctx.info s!"{S}.{f} is not a function of {S}"
         unifyAt ctx (.missing) dom ty
@@ -577,7 +579,7 @@ def familyCtor? (g : Globals R) (n : Name) : Option Name := do
 of the type `ty`, that is, is `ty` the member `X := F F.Tag.X`? -/
 def memberTag (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (t : Name) : Bool :=
   let X := (t.dropEnd ((ctorShort t).length + 1)).toString
-  t.contains '.' && (g.find? X).isSome && convTy g tys ty (eval g [] (.const X []))
+  t.contains '.' && (g.find? X).isSome && convTy g tys ty (eval g #[] (.const X []))
 
 /-- The constructor that `.c` names at the expected type `expected`, a data type whose
 `μ` has the nominal hint `T`: `T.c`; at a member of a `mutual` block (whose family `T`
@@ -831,7 +833,7 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
             match whnf (Closure.inst g hcod (Val.var lvl)) with
             | .pi _ _ q' E cod2 _ => match q'.toPoly?, trivialProof g (tys.push H) E with
               | some [], some p =>
-                let env : Env R := (List.range lvl).reverse.map Val.var
+                let env : Env R := (List.range lvl).map Val.var |>.toArray
                 let pTm := quote g (lvl + 1) p
                 let tyTm : Term R := .pi hn hbi (quote g lvl hq) (quote g lvl H)
                   (quote g (lvl + 1) (Closure.inst g cod2 p)) .hole
@@ -911,7 +913,7 @@ def zonkedTypes (ctx : LocalCtx R) : ElabM R (Array (VTy R)) := do
   for v in ctx.types.reverse do
     let j := tys.size
     let t ← zonk j (quote g j (← forceMeta v))
-    tys := tys.push (eval g (ctx.env.drop (ctx.lvl - j)) t)
+    tys := tys.push (eval g (ctx.env.extract 0 j) t)
   pure tys
 
 /-- (13b) The two sides of an equation that `rfl` is about to prove by `refl`/`reflTy`
@@ -1217,7 +1219,7 @@ partial def elabCalc (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy 
           | some m => m
           | none => lhs
         let rM ← freshMeta ctx "the relation this calc step composes to"
-        let goalTy : VTy R := vApp g (vApp g (vApp g (eval g [] (.const "Trans" []))
+        let goalTy : VTy R := vApp g (vApp g (vApp g (eval g #[] (.const "Trans" []))
           (← evalIn ctx resType)) propTy) (← evalIn ctx rM)
         let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | do
           let resS ← showTermM ctx (← zonk ctx.lvl resType)
@@ -1350,7 +1352,7 @@ where
     | "term.str" =>
       match ← force expected with
       | .mu _ _ _ _ _ (some (T, us, _)) _ =>
-        -- a string of the `builtin string` type: `String.mk [Char.mk n, …]`
+        -- a string of the `builtin string` type: `String.mk #[Char.mk n, …]`
         let s ← get
         match s.builtins.lookup "string" with
         | some S =>
@@ -1573,7 +1575,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     let s := q (← evalIn ctx s)
     let motive := (q expected).abstract s
     let bs ← bs.toList.mapIdxM fun k b => do
-      check ctx b (eval g (.tag ls k :: ctx.env) motive)
+      check ctx b (eval g (Env.push ctx.env (.tag ls k)) motive)
     return some (.ecase "z" motive s bs)
   | _ =>
   let some (n, args) ← builtinApp? ctx stx | return none
@@ -1583,7 +1585,7 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     let qt ← check ctx qs .qty
     let S' ← check ctx S (.sort (.succ l))
     let vS ← evalIn ctx S'
-    let D' ← check ctx D (ctx.sortVal g (.pi "s" .default (.qlit w) vS (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩))
+    let D' ← check ctx D (ctx.sortVal g (.pi "s" .default (.qlit w) vS (.mk #[I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩))
     return some (.darg qt S' D')
   | "Desc.rec", #[qs, j, D], .desc l I =>
     return some (.drec (← check ctx qs .qty) (← check ctx j I) (← check ctx D (.desc l I)))
@@ -1654,7 +1656,7 @@ partial def inferData? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Term
     let vX ← evalIn ctx X'
     let v ← freshLevelMeta
     -- (i : I) → X i → Sort v
-    let Pty : VTy R := ctx.sortVal g <| eval g [vX, I] (.pi "i" .default (.qlit w) (.var 1)
+    let Pty : VTy R := ctx.sortVal g <| eval g #[I, vX] (.pi "i" .default (.qlit w) (.var 1)
       (.pi "_" .default (.qlit w) (.app (.var 1) (.var 0)) (.sort v) .hole) .hole)
     let P' ← check ctx P Pty
     let i' ← check ctx i I
@@ -1931,7 +1933,7 @@ partial def structUpdateCore (ctx : LocalCtx R) (stx : Syntax) (s : Term R) (sty
   let sTm : Term R := if isVar then s else .var 0
   let sVal ← evalIn ctx' sTm
   let mut tm : Term R := .const (S ++ ".mk") us
-  let mut fty : VTy R := eval g [] (mk.type.instLevels mk.levelParams us)
+  let mut fty : VTy R := eval g #[] (mk.type.instLevels mk.levelParams us)
   for p in params do
     let .pi _ _ _ _ cod _ ← force fty | throwAt ctx.info s!"internal error: the type of {S}.mk"
     tm := .app tm (quote g ctx'.lvl p)
@@ -2002,7 +2004,7 @@ partial def autoShare? (ctx : LocalCtx R) (A B : VTy R) : ElabM R (Option (Term 
   let At ← zonk ctx.lvl (quote g ctx.lvl A)
   let Bt ← zonk ctx.lvl (quote g ctx.lvl B)
   unless At.mvars.isEmpty && Bt.mvars.isEmpty do return none
-  let goalTy := vApp g (vApp g (eval g [] (.const "ShareLet" [])) A) B
+  let goalTy := vApp g (vApp g (eval g #[] (.const "ShareLet" [])) A) B
   let some inst ← (try synthInstance ctx goalTy catch _ => pure none) | return none
   return some (.app (.app (.app (.const "ShareLet.share" []) At) Bt) inst)
 
@@ -2891,7 +2893,7 @@ data), so its eliminator can only target Prop"
   let sizeArgs : List (Val R) := if sized then [xsz] else []
   let mut f : Term R := ((Δargs ++ sizeArgs).map q).foldl .app elimHead |>.app motive
   -- the eliminator's type, instantiated with the parameters (size) and the motive
-  let mut fty : VTy R := eval g [] (ed.type.instLevels ed.levelParams levels)
+  let mut fty : VTy R := eval g #[] (ed.type.instLevels ed.levelParams levels)
   for a in Δargs ++ sizeArgs ++ [← evalIn ctx motive] do
     let .pi _ _ _ _ cod _ ← force fty | throwAt ctx.info "internal error: eliminator type"
     fty ← instM cod a
@@ -2983,8 +2985,8 @@ data), so its eliminator can only target Prop"
           subst := [(y, tv)]
           for d in fieldLvls.toList.filter (· > y) do
             let tyTm := quote g ctx'.lvl ctx'.types[ctx'.lvl - d - 1]!
-            let env : Env R := (List.range ctx'.lvl).reverse.map fun l =>
-              ((subst.find? (·.1 == l)).map (·.2)).getD (Val.var l)
+            let env : Env R := ((List.range ctx'.lvl).map fun l =>
+              ((subst.find? (·.1 == l)).map (·.2)).getD (Val.var l)).toArray
             let ty' := eval g env tyTm
             subst := subst ++ [(d, Val.var ctx'.lvl)]
             fieldLvls' := fieldLvls'.map fun l => if l == d then ctx'.lvl else l
@@ -3167,7 +3169,7 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
   let g ← getGlobals
   let Ct ← zonk ctx.lvl (quote g ctx.lvl C)
   unless Ct.mvars.isEmpty do return none
-  let mux (A : VTy R) : VTy R := vApp g (vApp g (eval g [] (.const "Mux" [])) C) A
+  let mux (A : VTy R) : VTy R := vApp g (vApp g (eval g #[] (.const "Mux" [])) C) A
   let some _ ← (try synthInstance ctx (mux C) catch _ => pure none) | return none
   -- (H14 S4) `a && b` and `a || b` on a signal: the prelude makes them
   -- `if a then b else Bool.false` and `if a then Bool.true else b`; they are the gates
@@ -3182,7 +3184,7 @@ partial def ifMux? (ctx : LocalCtx R) (alts : Array Syntax) (c : Term R) (C expe
     unifyAt ctx other expected C
     let o ← check ctx other C
     let cls : Name := if op == "AndOp.and" then "AndOp" else "OrOp"
-    let instTy := vApp g (eval g [] (.const cls [])) C
+    let instTy := vApp g (eval g #[] (.const cls [])) C
     let inst ← freshMeta ctx "an instance" instTy
     addInstProblem ctx inst instTy
     return some (.app (.app (.app (.app (.const op []) Ct) inst) c) o)
@@ -3206,7 +3208,7 @@ partial def hdlSignal? (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Val R 
     | #[.app C] =>
       let g ← getGlobals
       let r := Val.var l
-      let some _ ← (try synthInstance ctx (vApp g (eval g [] (.const "Hw" [])) r) catch _ => pure none)
+      let some _ ← (try synthInstance ctx (vApp g (eval g #[] (.const "Hw" [])) r) catch _ => pure none)
         | return none
       return some (r, C)
     | _ => return none
@@ -3261,7 +3263,7 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
     | [b] => return some (← check ctx b.rhs expected)
     | _ => throwAt atInfo "a match on a signal needs at least one constructor pattern"
   let tys ← zonkedTypes ctx
-  let hwTyVal := eval g [] (.const "HwTy" [])
+  let hwTyVal := eval g #[] (.const "HwTy" [])
   let bitCode ← evalIn ctx (.app (.const "HwTy.bits" []) (.natLit 1))
   let isBit := conv g tys hwTyVal (← force code) (← force bitCode)
   let ctorNames' := ctorBranches.map (·.1)
@@ -3658,7 +3660,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     match ← force ety with
     | .neutral (.eq A a b) #[] =>
       let motiveTy : Val R := ctx.sortVal g (.pi "b" .default (.qlit 0) A
-        (.mk [a, A] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) .hole)
+        (.mk #[A, a] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) .hole)
       let P ← check ctx (stx.getArg 1) motiveTy
       let vP ← evalIn ctx P
       let p ← check ctx (stx.getArg 2) (vApp g (vApp g vP a) (.neutral (.refl A a) #[]))
@@ -3867,10 +3869,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     if s.smtDecl.isEmpty then throwAt info "tactic: a definition can only be added in the body of a definition"
     unless gl.ctx.bound.all id do throwAt info "tactic: a definition can't be added in a context with a `let`"
     let names := gl.ctx.names.reverse
-    let env := gl.ctx.env.reverse.toArray
+    let env := gl.ctx.env
     let types ← (List.range lvl).zip gl.ctx.types.reverse |>.mapM fun (j, A) => do
       let t ← zonk j (quote g j A)
-      pure (eval g (env.extract 0 j).toList.reverse t)
+      pure (eval g (env.extract 0 j) t)
     let ty ← zonk lvl (← reify st.handles (fld 1) lvl)
     let val ← zonk lvl (← reify st.handles (fld 2) lvl)
     unless (Term.mvars ty).isEmpty && (Term.mvars val).isEmpty do throwAt info "tactic: a definition with holes"
@@ -3917,10 +3919,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let names := gl.ctx.names.reverse
     -- (the context's types with their solved holes filled: a hypothesis
     -- `Nat.lt (UIntN.toNat x) 256 = .true` has the width as a solved hole)
-    let env := gl.ctx.env.reverse.toArray
+    let env := gl.ctx.env
     let types ← (List.range lvl).zip gl.ctx.types.reverse |>.mapM fun (j, A) => do
       let t ← zonk j (quote g j A)
-      pure (eval g (env.extract 0 j).toList.reverse t)
+      pure (eval g (env.extract 0 j) t)
     let q ← match Smt.translate g names types (gl.ctx.bound.reverse) (← evalIn gl.ctx tyT) with
       | .ok q => pure q
       | .error e => throwAt info e

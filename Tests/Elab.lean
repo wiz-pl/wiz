@@ -404,7 +404,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     unless out.exitCode == 0 do throw (IO.userError s!"the program failed ({out.exitCode}): {out.stderr.take 500}")
     match Build.parseValue out.stdout with
     | none => throw (IO.userError s!"could not read the result: {out.stdout}")
-    | some v => checkEq expected (readback s.globals s.builtins (eval s.globals [] ty) v).pretty
+    | some v => checkEq expected (readback s.globals s.builtins (eval s.globals #[] ty) v).pretty
 
 /-- (L-1) Diverging terms in 0 positions the kernel checks erased: a constructor field at
 0 (`Tagged.mk`, and the implicit one of `L.cons`), and a 0 field of a structure, with other fields

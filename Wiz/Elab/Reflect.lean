@@ -82,7 +82,7 @@ private def propBinders (g : Globals R) : Array (VTy R) → Env R → List (Name
   | _, _, [] => []
   | tys, env, (_, _, A) :: bs =>
     let v := eval g env A
-    isProp g tys v :: propBinders g (tys.push v) (Val.var tys.size :: env) bs
+    isProp g tys v :: propBinders g (tys.push v) (Env.push env (Val.var tys.size)) bs
 
 private def encodeParam (p : Name × BinderInfo × Syntax) : RVal :=
   mkCon 0 [encodeString p.1, encodeBinderKind p.2.1, encodeSyntax p.2.2]

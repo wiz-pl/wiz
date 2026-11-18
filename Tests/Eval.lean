@@ -63,11 +63,11 @@ def convG : Globals Unit :=
 
 /-- Are `x` and `y` convertible at type `t`? -/
 def isConv (t x y : Raw Unit) : Bool :=
-  let ev (r : Raw Unit) := eval convG [] r.toTerm
+  let ev (r : Raw Unit) := eval convG #[] r.toTerm
   conv convG #[] (ev t) (ev x) (ev y)
 
 def isConvTy (x y : Raw Unit) : Bool :=
-  let ev (r : Raw Unit) := eval convG [] r.toTerm
+  let ev (r : Raw Unit) := eval convG #[] r.toTerm
   convTy convG #[] (ev x) (ev y)
 
 def aa : Raw Unit := arr () "A" "A"

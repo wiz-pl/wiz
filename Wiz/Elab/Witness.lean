@@ -122,7 +122,7 @@ partial def applyConst (ix : HeadIndex) (ctx : LocalCtx R) (ty : VTy R) (c : Nam
   let some d := g.find? c | return none
   let us ← d.levelParams.mapM fun _ => freshLevelMeta
   let mut t : Term R := .const c us
-  let mut cty := eval g [] (d.type.instLevels d.levelParams us)
+  let mut cty := eval g #[] (d.type.instLevels d.levelParams us)
   let mut holes : Array (Term R × VTy R × BinderInfo) := #[]
   for _ in [0:numPis d.type] do
     match ← forceMeta cty with

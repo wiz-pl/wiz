@@ -70,7 +70,7 @@ def gluedProjections : IO Unit := do
   let pairTy : Raw Unit := .sigma "x" () "A" "A"
   let g : Globals Unit := [Raw.axiom "A" (.sort 0), Raw.axiom "a" "A",
     Raw.defn "p" pairTy (.pair "a" "a")].foldl Globals.insert {}
-  let pv := eval g [] (.const "p" [])
+  let pv := eval g #[] (.const "p" [])
   for (which, v) in [("fst", vFst pv), ("snd", vSnd pv)] do
     match v with
     | .unfold "p" _ sp _ =>

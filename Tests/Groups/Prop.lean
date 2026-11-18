@@ -1080,7 +1080,7 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
   let vars := cx.varsOfTy T
   let vT := cx.k.eval T
   let gadgets : Array Tm := (w.gadgets.filter fun (_, ty) =>
-    Wiz.convTy g cx.k.tys (eval g [] ty) vT).toArray.map (·.1)
+    Wiz.convTy g cx.k.tys (eval g #[] ty) vT).toArray.map (·.1)
   let leaves : Array (Gen Tm) := (vars ++ gadgets).map pure
   let f := fuel - 1
   -- introduction forms, by the shape of the type
@@ -2151,7 +2151,7 @@ def wizNormal (g : Gl) (t : MTm) : String :=
   | some a => a.text
   | none =>
     let t' := (markInf g t.toTerm).getD t.toTerm
-    let s := match MTm.ofTerm (quote g 0 (eval g [] t')) with
+    let s := match MTm.ofTerm (quote g 0 (eval g #[] t')) with
       | some m => m.pretty 0
       | none => "?"
     (memoPut memo k { text := s }).text

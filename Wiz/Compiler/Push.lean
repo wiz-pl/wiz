@@ -238,7 +238,7 @@ partial def reuseScrutinee (g : Globals R) (depth : Nat) (t : Term R) : Term R :
               (.const (ctorConst T' c) us)
             -- (as the value has it: constructors unfold, `con (tag, fields…)`)
             let D := depth + F
-            let env : Env R := (List.range D).reverse.map Val.var
+            let env : Env R := (List.range D).map Val.var |>.toArray
             let ctorNf := quote g D (eval g env ctorTm)
             fns.foldr .lam (replace ctorNf (y.lift F) 0 (replace ctorTm (y.lift F) 0 b))
           | none => mt

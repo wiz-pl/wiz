@@ -57,9 +57,10 @@ structure InstanceInfo where
 
 
 
-/-- The local context. As in `Ctx`, the lists are aligned and index 0 is innermost. -/
+/-- The local context. As in `Ctx`, the lists are aligned and index 0 is innermost; `env`
+is by level (`Env`), as `Ctx.env` is. -/
 structure LocalCtx (R : Type) where
-  env : Env R := []
+  env : Env R := #[]
   names : List Name := []
   types : List (VTy R) := []
   /-- `true` for λ/Π-bound variables, `false` for `let`-bound ones -/
@@ -338,12 +339,12 @@ namespace LocalCtx
 
 def bind (ctx : LocalCtx R) (x : Name) (ty : VTy R) : LocalCtx R :=
   { ctx with
-    env := Val.var ctx.lvl :: ctx.env, names := x :: ctx.names, types := ty :: ctx.types
+    env := Env.push ctx.env (Val.var ctx.lvl), names := x :: ctx.names, types := ty :: ctx.types
     bound := true :: ctx.bound, lvl := ctx.lvl + 1 }
 
 def define (ctx : LocalCtx R) (x : Name) (ty : VTy R) (val : Val R) : LocalCtx R :=
   { ctx with
-    env := val :: ctx.env, names := x :: ctx.names, types := ty :: ctx.types
+    env := Env.push ctx.env val, names := x :: ctx.names, types := ty :: ctx.types
     bound := false :: ctx.bound, lvl := ctx.lvl + 1 }
 
 /-- (21v) `bind`, remembering a variable bound at a literal quantity other than 0 and ω
@@ -500,12 +501,12 @@ first): fill in the missing sorts in it, and return its sort when it is known. -
 partial def type (tys : Array (VTy R)) (env : Env R) : Term R → Term R × Option Level
   | .pi x bi q A B σ =>
     let (A, lA) := type tys env A
-    let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
+    let (B, lB) := type (tys.push (eval g env A)) (Env.push env (Val.var tys.size)) B
     let σ := σ.fill lA lB
     (.pi x bi (term tys env q) A B σ, if σ.hasHole then none else some σ.piSort)
   | .sigma x q A B σ =>
     let (A, lA) := type tys env A
-    let (B, lB) := type (tys.push (eval g env A)) (Val.var tys.size :: env) B
+    let (B, lB) := type (tys.push (eval g env A)) (Env.push env (Val.var tys.size)) B
     let σ := σ.fill lA lB
     (.sigma x (term tys env q) A B σ, if σ.hasHole then none else some σ.sigmaSort)
   -- an equation is a proposition: no need to evaluate it (which computes its sides, the
@@ -526,7 +527,7 @@ partial def term (tys : Array (VTy R)) (env : Env R) : Term R → Term R
     -- (P2: a `let`-bound proof is bound suspended, not evaluated, as in the kernel)
     let vT := eval g env T
     let val := if g.lazyProofs && isProp g tys vT then suspend g env v else eval g env v
-    .letE x (term tys env q) T v (term (tys.push vT) (val :: env) b)
+    .letE x (term tys env q) T v (term (tys.push vT) (Env.push env val) b)
   | t => Id.run <| t.mapChildrenM pure fun k c => pure (if k == 0 then term tys env c else c)
 
 /-- `t` has type `ty`: like `term`, also under the `fun`s that `ty` gives types to. -/
@@ -534,7 +535,7 @@ partial def value (tys : Array (VTy R)) (env : Env R) (t : Term R) (ty : VTy R) 
   match t, whnf ty with
   | .lam x b, .pi _ _ _ A B _ =>
     let v := Val.var tys.size
-    .lam x (value (tys.push A) (v :: env) b (Closure.inst g B v))
+    .lam x (value (tys.push A) (Env.push env v) b (Closure.inst g B v))
   | t, _ => term tys env t
 end
 
@@ -567,7 +568,7 @@ def instArgM (ctx : LocalCtx R) (c : Closure R) (a : Term R) : ElabM R (Val R) :
   match c with
   | .mk env body =>
     let v ← if body.hasVar 0 then evalIn ctx a else pure (.unit .zero)
-    return eval (← getGlobals) (v :: env) body
+    return eval (← getGlobals) (Env.push env v) body
 
 def vAppM (f a : Val R) : ElabM R (Val R) := return vApp (← getGlobals) f a
 

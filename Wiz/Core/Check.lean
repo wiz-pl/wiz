@@ -226,11 +226,13 @@ def kernelRejectedCode : TypeError → String
 
 abbrev TCM := Except TypeError
 
-/-- The typing context. All the lists are aligned: index 0 is the innermost binder. -/
+/-- The typing context. The lists are aligned: index 0 is the innermost binder. `env` is
+by level instead (`Env`: the innermost binder is its last entry), so evaluating a `var`
+is one array index. -/
 structure Ctx (R : Type) where
   globals : Globals R
   /-- values of locals, for evaluating types that mention them -/
-  env   : Env R := []
+  env   : Env R := #[]
   names : List Name := []
   qtys  : List (QPoly R) := []
   types : List (VTy R) := []
@@ -258,7 +260,7 @@ variable [QRig R] [DecidableEq R] [QuantitySyntax R]
 /-- Go under a binder: the new variable is a fresh neutral. -/
 def bind (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) : Ctx R :=
   { ctx with
-    env := Val.var ctx.lvl :: ctx.env
+    env := Env.push ctx.env (Val.var ctx.lvl)
     names := x :: ctx.names
     qtys := q :: ctx.qtys
     types := ty :: ctx.types
@@ -267,7 +269,7 @@ def bind (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) : Ctx R :=
 /-- Go under a `let`: the new variable has a known value. -/
 def define (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (val : Val R) : Ctx R :=
   { ctx with
-    env := val :: ctx.env
+    env := Env.push ctx.env val
     names := x :: ctx.names
     qtys := q :: ctx.qtys
     types := ty :: ctx.types
@@ -283,7 +285,7 @@ def instArg (ctx : Ctx R) (c : Closure R) (a : Term R) : Val R :=
   match c with
   -- (the placeholder is the stuck unknown, not a well-formed value: if `hasVar` ever
   -- missed an occurrence, the codomain would be stuck on it, not a type that checks)
-  | .mk env body => Wiz.eval ctx.globals ((if body.hasVar 0 then ctx.eval a else default) :: env) body
+  | .mk env body => Wiz.eval ctx.globals (Env.push env (if body.hasVar 0 then ctx.eval a else default)) body
 
 /-- The types of the locals indexed by level, as `conv` wants them. -/
 def tys (ctx : Ctx R) : Array (VTy R) := ctx.types.reverse.toArray
@@ -492,7 +494,7 @@ def Ctx.evalAt (ctx : Ctx R) (t : Term R) (ty : VTy R) : Val R :=
 /-- `Ctx.instArg` for an argument of type `dom`, bound by type (`evalAt`). -/
 def Ctx.instArgAt (ctx : Ctx R) (dom : VTy R) (c : Closure R) (a : Term R) : Val R :=
   match c with
-  | .mk env body => Wiz.eval ctx.globals ((if body.hasVar 0 then ctx.evalAt a dom else .unit .zero) :: env) body
+  | .mk env body => Wiz.eval ctx.globals (Env.push env (if body.hasVar 0 then ctx.evalAt a dom else .unit .zero)) body
 
 /-- Is `t` a term that needs a marker in this mode, if its sort may be `0`? -/
 def Ctx.wantsMarker (ctx : Ctx R) (t : Term R) : Bool :=
@@ -637,7 +639,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     -- from (Q4: universes aren't cumulative; the elaborator lifts smaller fields)
     unless lS.equiv (.succ l) do
       throw (.other s!"a description's field type must be in Sort {(Level.succ l).format}, not Sort {lS.format} (lift it with ULift)")
-    check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk [I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩)
+    check ctx D (.pi "s" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval S) (.mk #[I] (.desc l (.var 1))) ⟨.succ l, .succ (.succ l)⟩)
   | .drec q j D, .desc l I => do
     let _ ← checkQty ctx q
     let uj ← check ctx j I
@@ -649,7 +651,7 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let lH ← checkType ctx H
     unless lH.equiv (.succ l) do
       throw (.other s!"a description's branching type must be in Sort {(Level.succ l).format}, not Sort {lH.format} (lift it with ULift)")
-    let uj ← check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩)
+    let uj ← check ctx j (.pi "h" .default (.qlit QuantitySyntax.explicitDefault) (ctx.eval H) (.mk #[I] (.var 1)) ⟨.succ l, .succ l⟩)
     let uD ← check ctx D (.desc l I)
     pure (uj + uD)
   | .con x, .mu l I D i s _ prop => do
@@ -739,7 +741,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     | some d => do
       unless d.levelParams.length == us.length do
         throw (TypeError.other s!"{n} expects {d.levelParams.length} universe levels, got {us.length}")
-      pure (Wiz.eval ctx.globals [] (d.type.instLevels d.levelParams us), Usage.zeros ctx.lvl)
+      pure (Wiz.eval ctx.globals #[] (d.type.instLevels d.levelParams us), Usage.zeros ctx.lvl)
     | none => throw (.unboundGlobal n)
   | .sort l => pure (.sort (.succ l), Usage.zeros ctx.lvl)
   | .pi x _ q dom cod σ => do
@@ -905,7 +907,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
     let va := ctx.evalAt a vA
     -- (b :0 A) → (_ :0 a = b) → Prop, with env [a, A]
     let motiveTy : Val R := .pi "b" .default (.qlit 0) vA
-      (.mk [va, vA] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) ⟨l, .imax 0 1⟩
+      (.mk #[vA, va] (.pi "_" .default (.qlit 0) (.eq (.var 2) (.var 1) (.var 0)) (.sort 0) ⟨0, 1⟩)) ⟨l, .imax 0 1⟩
     let _ ← check ctx P motiveTy
     let vP := ctx.eval P
     let g := ctx.globals
@@ -1393,15 +1395,15 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   -- A proposition-valued definition is a proof: the evaluator suspends its value (P2), so
   -- there is no split to compare, and conversion takes any two proofs as equal (proofs
   -- are erased and nothing runs them). A well-typed implementation agrees with it.
-  let ty0 := eval g [] d.type
+  let ty0 := eval g #[] d.type
   if ((Ctx.sortOf? ({ globals := g } : Ctx R)) ty0).any (·.isZero) then
-    if conv g #[] ty0 (eval g [] value) (eval g [] impl) then return
+    if conv g #[] ty0 (eval g #[] value) (eval g #[] impl) then return
     fail "its value is a proposition, and its implementation is not convertible to it"
   -- An implementation that does not call the definition (a hand-written one, say) agrees
   -- with the value if it is convertible to it. One that calls it is checked below; the
   -- whole-term comparison would compare the two eliminators structurally first, and fail.
   if !mentionsConst d.name impl then
-    if conv g #[] ty0 (eval g [] value) (eval g [] impl) then return
+    if conv g #[] ty0 (eval g #[] value) (eval g #[] impl) then return
     fail "it is not convertible to the value and does not call the definition"
   -- (P2: the conversion goes through the markers too: a level-generic value is
   -- `prf.{l} (fun …)`, with `l` symbolic, which evaluates to its body's value)
@@ -1422,10 +1424,10 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   let fV : Val R := Val.var fL
   tys := tys.push ty0
   let args := (List.range k).map Val.var
-  let a := whnf (args.foldl (vApp g) (eval g [] value))
+  let a := whnf (args.foldl (vApp g) (eval g #[] value))
   -- (the implementation with `F` for the definition: everything it says but the calls is
   -- compared with `F` free, which is the more general statement)
-  let b := whnf (args.foldl (vApp g) (eval g [fV] (replaceConst d.name (d.levelParams.map Level.param) impl)))
+  let b := whnf (args.foldl (vApp g) (eval g #[fV] (replaceConst d.name (d.levelParams.map Level.param) impl)))
   let (.neutral (.local x) sp, .neutral (.local x') sp') := (a, b)
     | fail "the value or the implementation is not stuck on an argument"
   let (some (Elim.ind l I D v P M i pr), some (Elim.ind l' I' D' v' P' MF i' pr')) := ((sp[0]? : Option (Elim R)), (sp'[0]? : Option (Elim R)))
@@ -1452,7 +1454,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
   let jv : Val R := Val.var jL
   let X := muFamily l I D pr
   -- y0 j1 m2 P3 D4 I5 (as in `vIndStep`)
-  let fInd : Val R := .lam "j" (.mk [M, P, D, I] (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0) pr)))
+  let fInd : Val R := .lam "j" (.mk #[I, D, P, M] (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0) pr)))
   /- **The hypotheses as calls.** The kernel's hypothesis for a field `y` at index `j` is
   `ind P M j y`; a direct call `F … y …` unfolds to an `ind` too, but only after the whole
   definition (and its recursor) is evaluated again, and comparing the two `ind`s compares
@@ -1494,7 +1496,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
     let nq := ixL.length
     let unpack (q : Nat) : Val R := vFst ((List.range q).foldl (fun t _ => vSnd t) j)
     -- environment: head, y, the index components, then the levels 0 … k-1
-    let env : List (Val R) := [head, y] ++ (List.range nq).map unpack ++ (List.range k).map Val.var
+    let env : Env R := ([head, y] ++ (List.range nq).map unpack ++ (List.range k).map Val.var).reverse.toArray
     let ref (e : Nat) : Term R := .var (m + nE + e)
     let argTm (ℓ : Nat) : Term R :=
       if ℓ == x then ref 1
@@ -1523,7 +1525,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
           | none => lvl ℓ
     let call : Term R := ((List.range k).map argTm).foldl .app (lvl fL)
     (List.range sh).foldr (fun _ t => Term.lam "r" t) call
-  let fReal : Val R := eval g [] (.const d.name (d.levelParams.map Level.param))
+  let fReal : Val R := eval g #[] (.const d.name (d.levelParams.map Level.param))
   let replace? : Option (Array (VTy R) → Val R → Bool) := do
     let rs ← rsL?
     -- (mode B needs an index equation; an index of variables that is not mode A: none)
@@ -1569,7 +1571,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
                 if ok tys' j then
                   let jT := quote g (hl + 1) j
                   let yT := quote g (hl + 1) (.neutral hd sp.pop)
-                  let env := (List.range hl).reverse.map Val.var
+                  let env := (List.range hl).map Val.var |>.toArray
                   some (eval g env (.lam hn (hypCallTm (hl + 1) jT yT rs (!modeA))))
                 else some c
               | _ => none
@@ -1596,7 +1598,7 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
     if emptyPayload tysJ 64 restTy then continue
     let tys' := tysJ.push restTy
     let xs : Val R := .pair t (Val.var tysJ.size)
-    let hyps := [I, D, X, P, fInd, jv, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v pr))
+    let hyps := [I, D, X, P, fInd, jv, xs].foldl (vApp g) (eval g #[] (Templates.hypsTm l v pr))
     -- (the implementation is compared with `F` free, always: so each of its calls must be
     -- one of the hypotheses' calls, on a field. A call on anything else, the scrutinee say,
     -- would make compiled code loop where the kernel's recursion is well founded: such an

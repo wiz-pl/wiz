@@ -246,7 +246,7 @@ def trustGroup : Group where
     { name := "groundEqDesc: one closed description at two levels is not identified", run := fun _ => do
         let s := runFrontend (R := ZeroOneMany) "inductive Box.{u} : Type (u+1) where\n  | mk (T : Type u)\n" {}
         let g := s.globals
-        let atL (u : Level) : Val ZeroOneMany := eval g [] (.const "Box.desc" [u])
+        let atL (u : Level) : Val ZeroOneMany := eval g #[] (.const "Box.desc" [u])
         let I : Val ZeroOneMany := .unit (.succ .zero)
         check (groundEqDesc g 0 I (atL .zero) (atL .zero)) "Box.desc.{0} is not itself"
         check (!groundEqDesc g 0 I (atL .zero) (atL (.succ .zero))) "Box.desc.{0} and Box.desc.{1} were identified" },

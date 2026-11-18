@@ -500,7 +500,7 @@ cast computed while a hole in its types was unsolved is stuck, and may compute n
 the kernel will compute it. `none` if nothing changed. -/
 partial def reevalStale? (l : Lvl) (v : Val R) : ElabM R (Option (Val R)) := do
   let g ← getGlobals
-  let env : Env R := ((List.range l).map fun i => Val.var i).reverse
+  let env : Env R := ((List.range l).map fun i => Val.var i).toArray
   let rec inst (k : Lvl) (t : Term R) : ElabM R (Term R) := do
     let rec spine : Term R → Array (Term R) → Term R × Array (Term R)
       | .app f a, acc => spine f (#[a] ++ acc)
@@ -510,7 +510,7 @@ partial def reevalStale? (l : Lvl) (v : Val R) : ElabM R (Option (Val R)) := do
     | .mvar m =>
       match (← lookupMeta m).solution with
       | some sol =>
-        let envk : Env R := ((List.range k).map fun i => Val.var i).reverse
+        let envk : Env R := ((List.range k).map fun i => Val.var i).toArray
         inst k (quote g k (args.foldl (fun f a => vApp g f (eval g envk a)) sol))
       | none => return (← args.mapM (inst k)).foldl .app (.mvar m)
     | _ =>
@@ -583,13 +583,13 @@ def metaAppType? (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Option (V
   -- a type at level `n` of the hole's context, at level `l` with the arguments put in
   let transport (n : Nat) (v : VTy R) : Option (VTy R) := Id.run do
     let t := quote g n v
-    let mut env : Env R := []
+    let mut env : Env R := #[]
     for j in [0:n] do
       match slot[j]?.join with
-      | some k => env := args[k]! :: env
+      | some k => env := env.push args[k]!
       | none =>
         if t.hasVar (n - j - 1) then return none
-        env := .unit .zero :: env
+        env := env.push (.unit .zero)
     return some (eval g env t)
   let some ty := transport ctx.lvl ty | return none
   let mut tys : Array (VTy R) := Array.replicate l (.unit .zero)
@@ -952,7 +952,7 @@ partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected :
     if saw then set s; markGuessed; return
     let g ← getGlobals
     if g.hidden.isEmpty then throw e
-    let env : Env R := ((List.range l).map fun i => Val.var i).reverse
+    let env : Env R := ((List.range l).map fun i => Val.var i).toArray
     let equalIn (g' : Globals R) : Bool :=
       let ev (v : VTy R) := eval g' env (quote g l v)
       convTy g' tys (ev inferred) (ev expected)
@@ -974,7 +974,7 @@ partial def unifyFirstOrder (l : Lvl) (m : Nat) (sp : Array (Elim R)) (v : Val R
         let g ← getGlobals
         pure (pre.foldl (fun acc e => match e with
           | .app b => vApp g acc b
-          | _ => acc) (eval g [] (.const n us)))), sp')
+          | _ => acc) (eval g #[] (.const n us)))), sp')
     | .neutral h sp' => pure ((fun pre => pure (.neutral h pre)), sp')
     | _ => return false
   let appArg : Elim R → Option (Val R)

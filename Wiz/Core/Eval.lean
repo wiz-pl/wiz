@@ -141,8 +141,8 @@ def vBuiltin? (g : Globals R) (n : Name) : Option (Val R) := do
   -- (its `nat.` key: other registrations on `n`, such as `inline`, don't hide it)
   let (k, _) ← g.builtins.find? fun (k, m) => m == n && k.startsWith "nat."
   if k == "nat.zero" then some (.natLit 0)
-  else if natOpArity k == 1 then some (.lam "a" (.mk [] (.natOp k #[.var 0])))
-  else some (.lam "a" (.mk [] (.lam "b" (.natOp k #[.var 1, .var 0]))))
+  else if natOpArity k == 1 then some (.lam "a" (.mk #[] (.natOp k #[.var 0])))
+  else some (.lam "a" (.mk #[] (.lam "b" (.natOp k #[.var 1, .var 0]))))
 
 /-- Is this glued operation one whose result can be far larger than its arguments
 (`Nat.pow`, `Nat.shiftLeft`)? Computing one costs as much memory as its value, so a caller
@@ -197,8 +197,8 @@ partial def vAbsurd (m : Val R) : Val R → Val R
 
 /-- `(a → b) × (b → a)`: equality of propositions (propositional extensionality) -/
 def vIff (a b : Val R) : Val R :=
-  .sigma "_" (.qlit 0) (.pi "_" .default (.qlit 0) a (.mk [b] (.var 1)) ⟨0, 0⟩)
-    (.mk [a, b] (.pi "_" .default (.qlit 0) (.var 2) (.var 2) ⟨0, 0⟩)) ⟨0, 0⟩
+  .sigma "_" (.qlit 0) (.pi "_" .default (.qlit 0) a (.mk #[b] (.var 1)) ⟨0, 0⟩)
+    (.mk #[b, a] (.pi "_" .default (.qlit 0) (.var 2) (.var 2) ⟨0, 0⟩)) ⟨0, 0⟩
 
 /-- Is the sort `s` that of propositions? `some true` if it is `0`, `some false` if it is
 never `0`, `none` if that depends on a level parameter (or the sort is a hole, which the
@@ -267,7 +267,8 @@ both.) The unifier uses this narrow form: a data Σ's sides are what a stuck equ
 has lost when its type computed (`Eq.trans h e1`, #257). -/
 def eqDataSides? : Val R → Option (Val R × Val R × Val R)
   | .sigma _ _ _ (.mk env _) _ =>
-    match env.reverse with
+    -- (the payload rides at the outermost end: levels 0–3, see `markDataEq`)
+    match env.toList with
     | .neutral (.global " eq-reduct-data" []) #[] :: A :: a :: b :: _ => some (A, a, b)
     | _ => none
   | _ => none
@@ -279,7 +280,11 @@ def eqDataSides? : Val R → Option (Val R × Val R × Val R)
 the equation survives a read-back (a `match` clause's motive), and `rfl` can prove it
 by one `refl`. -/
 def eqSigmaSides? : Val R → Option (Val R × Val R × Val R)
-  | .sigma "e" _ _ (.mk [b, a, _, _, A, .neutral (.global " eq-reduct" []) #[]] _) _ => some (A, a, b)
+  | .sigma "e" _ _ (.mk env _) _ =>
+    -- (`#[eqReductMark, A, _A, _lam, a, b]`, level order; see `vEq`)
+    match env.toList with
+    | [.neutral (.global " eq-reduct" []) #[], A, _, _, a, b] => some (A, a, b)
+    | _ => none
   -- a data type's equation (`vEq` at a `μ`): the original sides ride at the end of the
   -- outermost Σ's environment, after `eqDataMark`
   | v => eqDataSides? v
@@ -296,7 +301,8 @@ them back, and `quote` with `quoteEqs` gives the equation again, so `rfl` is one
 def markDataEq (v : Val R) (A a b : Val R) : Val R :=
   match v with
   | .sigma x q fst (.mk env body) s =>
-    .sigma x q fst (.mk (env ++ [b, a, A, eqDataMark]) body) s
+    -- (`eqDataSides?`: the four are the outermost levels, `eqDataMark` first)
+    .sigma x q fst (.mk (#[eqDataMark, A, a, b] ++ env) body) s
   | _ => v
 
 mutual
@@ -333,11 +339,11 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   --<sol
   -- (the checker rejects a variable out of scope before anything evaluates it; if one
   -- gets here it is a stuck unknown, not a panic's default value, `Sort 0`)
-  | .var ix => env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
+  | .var ix => Env.getD env ix (.neutral (.global "out of scope✝" []) #[])
   | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
-      if inline || g.eager then eval g [] (g.instValue n v levelParams us)
-      else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
+      if inline || g.eager then eval g #[] (g.instValue n v levelParams us)
+      else .unfold n us #[] (memoThunk fun _ => eval g #[] (g.instValue n v levelParams us))
     | _ => .neutral (.global n us) #[]
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
@@ -345,7 +351,7 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   | .pi x bi q dom cod s => .pi x bi (eval g env q) (eval g env dom) (.mk env cod) s
   | .lam x body => .lam x (.mk env body)
   | .app f a => vApp g (eval g env f) (eval g env a)
-  | .letE _ _ _ val body => eval g (eval g env val :: env) body
+  | .letE _ _ _ val body => eval g (Env.push env (eval g env val)) body
   | .ann tm _ => eval g env tm
   | .mvar m => .neutral (.mvar m) #[]
   | .sigma x q a b s => .sigma x (eval g env q) (eval g env a) (.mk env b) s
@@ -506,9 +512,9 @@ partial def vApp (g : Globals R) : Val R → Val R → Val R
 partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
   --<sol
   | .mk env body, a => match g.budget with
-    | none => eval g (a :: env) body
+    | none => eval g (Env.push env a) body
     -- (P2, outside the kernel) reading a proof back, within its step budget
-    | some b => if b.tick then eval g (a :: env) body else outOfSteps
+    | some b => if b.tick then eval g (Env.push env a) body else outOfSteps
   --|ex
   --| | .mk env body, a => sorry
   --sol>
@@ -516,8 +522,8 @@ partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
 /-- Instantiate a closure over two binders (`a` first, then `b`). -/
 partial def Closure.inst2 (g : Globals R) : Closure R → Val R → Val R → Val R
   | .mk env body, a, b => match g.budget with
-    | none => eval g (b :: a :: env) body
-    | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps
+    | none => eval g (Env.push (Env.push env a) b) body
+    | some bud => if bud.tick then eval g (Env.push (Env.push env a) b) body else outOfSteps
 
 /-- **Exercise 4.4a.** `let (x, y) := s; body`: β-reduces on a `pair`, gets stuck on a
 neutral. -/
@@ -543,25 +549,25 @@ neutrals. `vInd` and `vOut` use the description templates of `Wiz.Core.Templates
 
 /-- `λ j. μ^s D j` and `λ j. ν^s D j` at a given size. -/
 partial def muFamilyAt (l : Level) (I D s : Val R) (prop : Bool := false) : Val R :=
-  .lam "j" (.mk [s, D, I] (.mu l (.var 3) (.var 2) (.var 0) (.var 1) none prop))
+  .lam "j" (.mk #[I, D, s] (.mu l (.var 3) (.var 2) (.var 0) (.var 1) none prop))
 
 partial def nuFamilyAt (l : Level) (I D s : Val R) : Val R :=
-  .lam "j" (.mk [s, D, I] (.nu l (.var 3) (.var 2) (.var 0) (.var 1) none))
+  .lam "j" (.mk #[I, D, s] (.nu l (.var 3) (.var 2) (.var 0) (.var 1) none))
 
 /-- `λ j. μ D j`, the family being defined, as a value. -/
 partial def muFamily (l : Level) (I D : Val R) (prop : Bool := false) : Val R :=
-  .lam "j" (.mk [D, I] (.mu l (.var 2) (.var 1) (.var 0) .szInf none prop))
+  .lam "j" (.mk #[I, D] (.mu l (.var 2) (.var 1) (.var 0) .szInf none prop))
 
 partial def nuFamily (l : Level) (I D : Val R) : Val R :=
-  .lam "j" (.mk [D, I] (.nu l (.var 2) (.var 1) (.var 0) .szInf none))
+  .lam "j" (.mk #[I, D] (.nu l (.var 2) (.var 1) (.var 0) .szInf none))
 
 /-- `⟦D⟧ X i` -/
 partial def vInterp (g : Globals R) (l : Level) (I D X i : Val R) (prop : Bool := false) : Val R :=
-  [I, D, X, i].foldl (vApp g) (eval g [] (Templates.interpTm l prop))
+  [I, D, X, i].foldl (vApp g) (eval g #[] (Templates.interpTm l prop))
 
 /-- `All D X P i xs` -/
 partial def vAll (g : Globals R) (l v : Level) (I D X P i xs : Val R) (prop : Bool := false) : Val R :=
-  [I, D, X, P, i, xs].foldl (vApp g) (eval g [] (Templates.allTm l v prop))
+  [I, D, X, P, i, xs].foldl (vApp g) (eval g #[] (Templates.allTm l v prop))
 
 /-- **Exercise 4.19a.** `ecase` on a tag picks the branch (evaluated in `env`). -/
 partial def vEcase (g : Globals R) (z : Name) (m : Closure R) (s : Val R) (env : Env R)
@@ -595,7 +601,7 @@ partial def vDelim (g : Globals R) (v : Level) (P mret marg mrec mhrec D : Val R
   | .dret i => vApp g mret i
   | .darg q S E =>
     -- s0 E1 mhrec2 mrec3 marg4 mret5 P6
-    let ih : Val R := .lam "s" (.mk [E, mhrec, mrec, marg, mret, P]
+    let ih : Val R := .lam "s" (.mk #[P, mret, marg, mrec, mhrec, E]
       (.delim v (.var 6) (.var 5) (.var 4) (.var 3) (.var 2) (.app (.var 1) (.var 0))))
     [q, S, E, ih].foldl (vApp g) marg
   | .drec q j E => [q, j, E, vDelim g v P mret marg mrec mhrec E].foldl (vApp g) mrec
@@ -612,7 +618,7 @@ unchanged. -/
 partial def vNatView (g : Globals R) : Val R → Val R
   | .natLit n =>
     let ctor (k : Name) : Val R := match (g.builtins.lookup k).bind g.find? with
-      | some { value := some v, .. } => eval g [] v
+      | some { value := some v, .. } => eval g #[] v
       | _ => panic! s!"numerals need `builtin {k}`"
     if n == 0 then ctor "nat.zero" else vApp g (ctor "nat.succ") (.natLit (n - 1))
   | v => v
@@ -670,7 +676,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
     | .natLit n => some (acc.push n)
     | _ => none
   let d : Val R := match (g.builtins.lookup op).bind g.find? with
-    | some { value := some v, .. } => eval g [] v
+    | some { value := some v, .. } => eval g #[] v
     | _ => panic! s!"no definition for builtin {op}"
   -- not computed natively: the definition, kept glued under its name (`Nat.pred n`, not
   -- its unfolding; `succ` is a constructor). `a - n` with `a` stuck and `n` a numeral is
@@ -723,7 +729,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
 
 /-- `hyps D X P f i xs` by `Templates.hypsTm`: the definition. -/
 partial def vHypsTemplate (g : Globals R) (l v : Level) (I D X P f i xs : Val R) (prop : Bool := false) : Val R :=
-  [I, D, X, P, f, i, xs].foldl (vApp g) (eval g [] (Templates.hypsTm l v prop))
+  [I, D, X, P, f, i, xs].foldl (vApp g) (eval g #[] (Templates.hypsTm l v prop))
 
 /-- (given) `hyps D X P f i xs` computed directly on a canonical description, one step of
 `Templates.hypsTm`'s `Desc.elim` at a time, without evaluating the template (most of the
@@ -743,7 +749,7 @@ partial def vHyps (g : Globals R) (l v : Level) (I D X P f i xs : Val R) (prop :
   | .drec _ j E => .pair (vApp g (vApp g f j) (vFst xs)) (vHyps g l v I E X P f i (vSnd xs) prop)
   | .dhrec _ _ j E =>
     -- h0 x1 j2 f3
-    .pair (.lam "h" (.mk [vFst xs, j, f] (.app (.app (.var 3) (.app (.var 2) (.var 0))) (.app (.var 1) (.var 0)))))
+    .pair (.lam "h" (.mk #[f, j, vFst xs] (.app (.app (.var 3) (.app (.var 2) (.var 0))) (.app (.var 1) (.var 0)))))
       (vHyps g l v I E X P f i (vSnd xs) prop)
   | _ => vHypsTemplate g l v I D X P f i xs prop
 
@@ -808,7 +814,7 @@ partial def vIndStep (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P m 
   match x with
   | .con xs =>
     -- y0 j1 m2 P3 D4 I5
-    let f : Val R := .lam "j" (.mk [m, P, D, I]
+    let f : Val R := .lam "j" (.mk #[I, D, P, m]
       (.lam "y" (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0) prop)))
     let hyps := vHyps g l v I D (muFamily l I D prop) P f i xs prop
     [i, xs, hyps].foldl (vApp g) m
@@ -853,7 +859,7 @@ partial def vSfix (g : Globals R) (l : Level) (I D : Val R) (v : Level) (P f s i
   match x with
   | .con _ =>
     -- y0 i1 j2 f3 P4 D5 I6
-    let rec_ : Val R := .lam "j" (.mk [f, P, D, I] (.lam "i" (.lam "y"
+    let rec_ : Val R := .lam "j" (.mk #[I, D, P, f] (.lam "i" (.lam "y"
       (.sfix l (.var 6) (.var 5) v (.var 4) (.var 3) (.var 2) (.var 1) (.var 0)))))
     [.szInf, rec_, i, x].foldl (vApp g) f
   | .neutral h sp => .neutral h (sp.push (.sfix l I D v P f s i))
@@ -885,13 +891,13 @@ partial def vOut (g : Globals R) (x : Val R) : Val R :=
   match x with
   | .coit l I D S step i s =>
     -- s0 j1 step2 S3 D4 I5
-    let f : Val R := .lam "j" (.mk [step, S, D, I]
+    let f : Val R := .lam "j" (.mk #[I, D, S, step]
       (.lam "s" (.coit l (.var 5) (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))))
-    [I, D, S, nuFamily l I D, f, i, [i, s].foldl (vApp g) step].foldl (vApp g) (eval g [] (Templates.mapTm l))
+    [I, D, S, nuFamily l I D, f, i, [i, s].foldl (vApp g) step].foldl (vApp g) (eval g #[] (Templates.mapTm l))
   | .cocon xs => xs
   | .scofix l I D A f _ i a =>
     -- a0 i1 f2 A3 D4 I5
-    let rec_ : Val R := .lam "i" (.mk [f, A, D, I]
+    let rec_ : Val R := .lam "i" (.mk #[I, D, A, f]
       (.lam "a" (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) .szInf (.var 1) (.var 0))))
     vOut g ([.szInf, rec_, i, a].foldl (vApp g) f)
   -- a cast between two `ν` types of a family is observed through (`vCastData`)
@@ -962,7 +968,7 @@ partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
   match A with
   | .pi x _ _ A₁ B σ =>
     -- (x :0 A₁) → (B x ∋ a x = b x); env: b, a, B
-    .pi x .default (.qlit 0) A₁ (.mk [b, a, .lam x B] (.eq (.app (v 3) (v 0)) (.app (v 2) (v 0)) (.app (v 1) (v 0)))) ⟨σ.dom, 0⟩
+    .pi x .default (.qlit 0) A₁ (.mk #[.lam x B, a, b] (.eq (.app (v 3) (v 0)) (.app (v 2) (v 0)) (.app (v 1) (v 0)))) ⟨σ.dom, 0⟩
   | .sigma x _ A₁ B σ =>
     -- env (inside the Σ, after `e`): b, a, B, A₁
     let P : Term R := .lam "y" (.lam "_" (.eqTy (.app (v 5) (.fst (v 4))) (.app (v 5) (v 1))))
@@ -980,7 +986,7 @@ partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
     -- the equation's own type `A` and the mark ride along at the end of the environment,
     -- unused by the body: `eqSigmaSides?` reads `A`, `a`, `b` back, so that `quote` gives
     -- back the equation and the elaborator's `rfl` proves it by one `refl` (13n)
-    .sigma "e" (.qlit 0) fstEq (.mk [b, a, .lam x B, A₁, A, eqReductMark] body) ⟨0, 0⟩
+    .sigma "e" (.qlit 0) fstEq (.mk #[eqReductMark, A, A₁, .lam x B, a, b] body) ⟨0, 0⟩
   | .unit _ | .empty _ => .unit 0
   | .enum _ => match a, b with
     | .tag _ i, .tag _ j => if i == j then .unit 0 else .empty 0
@@ -1017,7 +1023,7 @@ equation with a cast along the tags' equation, which without regularity would be
 The choice between rules depends only on `D` and on whether tags are canonical (computed or
 stuck), so it is stable under substitution. -/
 partial def vEqPayload (g : Globals R) (l : Level) (I X i D x y : Val R) (prop : Bool := false) : Option (Val R) :=
-  let pairTy (A B : Val R) : Val R := .sigma "_" (.qlit 0) A (.mk [B] (.var 1)) ⟨0, 0⟩
+  let pairTy (A B : Val R) : Val R := .sigma "_" (.qlit 0) A (.mk #[B] (.var 1)) ⟨0, 0⟩
   -- a field's equation, and the rest's unless the rest is just `ret` (whose equation is
   -- `True`): decided by the description, so `succ m = succ n` is `m = n` and the
   -- nesting doesn't depend on how a number is written (`2 = 2` is `True`, and so is
@@ -1044,7 +1050,7 @@ partial def vEqPayload (g : Globals R) (l : Level) (I X i D x y : Val R) (prop :
   | .dhrec q H j E => do
     let r ← vEqPayload g l I X i E (vSnd x) (vSnd y) prop
     -- h0 j1 X2
-    let F : Val R := .pi "h" .default q H (.mk [j, X] (.app (.var 2) (.app (.var 1) (.var 0)))) ⟨.succ l, .succ l⟩
+    let F : Val R := .pi "h" .default q H (.mk #[X, j] (.app (.var 2) (.app (.var 1) (.var 0)))) ⟨.succ l, .succ l⟩
     pure (withRest (vEq g F (vFst x) (vFst y)) E r)
   | _ => none
 
@@ -1091,11 +1097,11 @@ partial def vEqType (g : Globals R) (X Y : Val R) : Val R :=
     if qtyApart q q' then .empty 0 else if sameQty q q' != some true then .neutral (.eqTy X Y) #[] else
     -- env (inside the Σ, after `e`): B', B, A', A; inside the Π add `x` (of type `A'`,
     -- in `Sort σ'.dom`)
-    .sigma "e" (.qlit 0) (vEqType g A' A) (.mk [.lam "x" B', .lam "x" B, A', A]
+    .sigma "e" (.qlit 0) (vEqType g A' A) (.mk #[A, A', .lam "x" B, .lam "x" B']
       (.pi "x" .default (.qlit 0) (v 3) (.eqTy (.app (v 3) (.cast (v 4) (v 5) (v 1) (v 0))) (.app (v 2) (v 0))) ⟨σ'.dom, 0⟩)) ⟨0, 0⟩
   | .sigma _ q A B σ, .sigma _ q' A' B' _ =>
     if qtyApart q q' then .empty 0 else if sameQty q q' != some true then .neutral (.eqTy X Y) #[] else
-    .sigma "e" (.qlit 0) (vEqType g A A') (.mk [.lam "x" B', .lam "x" B, A', A]
+    .sigma "e" (.qlit 0) (vEqType g A A') (.mk #[A, A', .lam "x" B, .lam "x" B']
       (.pi "x" .default (.qlit 0) (v 4) (.eqTy (.app (v 3) (v 0)) (.app (v 2) (.cast (v 5) (v 4) (v 1) (v 0)))) ⟨σ.dom, 0⟩)) ⟨0, 0⟩
   | .sort u, .sort w | .unit u, .unit w | .empty u, .empty w => levels u w
   | .enum ls, .enum ls' => if ls.length == ls'.length then .unit 0 else .empty 0
@@ -1158,7 +1164,7 @@ partial def vCast (g : Globals R) (A B e t : Val R) : Val R :=
     if !computes σ σ' || sameQty q q' != some true then stuck else
     -- env: t, e, B₂, B₁, A₂, A₁; index 0 is the new `x`
     let c : Term R := .cast (v 5) (v 6) (.fst (v 2)) (v 0)
-    .lam x (.mk [t, e, .lam x B₂, .lam x B₁, A₂, A₁]
+    .lam x (.mk #[A₁, A₂, .lam x B₁, .lam x B₂, e, t]
       (.cast (.app (v 4) c) (.app (v 3) (v 0)) (.app (.snd (v 2)) (v 0)) (.app (v 1) c)))
   | .sigma _ q A₁ B₁ σ, .sigma _ q' A₂ B₂ σ' =>
     if !computes σ σ' || sameQty q q' != some true then stuck else
@@ -1372,11 +1378,11 @@ partial def vEqDesc (g : Globals R) (l : Level) (I D D' : Val R) : Val R :=
   -- `(e :0 S ≡ S') × ((x :0 S) → F x = F' (cast S S' e x))` at type `T`
   -- (inside `e`: e0 S1 S'2 F3 F'4 T5; inside `x`: one more)
   let along (S S' F F' T : Val R) : Val R :=
-    .sigma "e" (.qlit 0) (vEqType g S S') (.mk [S, S', F, F', T]
+    .sigma "e" (.qlit 0) (vEqType g S S') (.mk #[T, F', F, S', S]
       (.pi "x" .default (.qlit 0) (v 1) (.eq (v 6) (.app (v 4) (v 0)) (.app (v 5) (.cast (v 2) (v 3) (v 1) (v 0)))) ⟨.succ l, 0⟩)) ⟨0, 0⟩
   -- `A × (E = E')` (inside `_`: _0 E1 E'2 I3)
   let andRest (A E E' : Val R) : Val R :=
-    .sigma "_" (.qlit 0) A (.mk [E, E', I] (.eq (.desc l (v 3)) (v 1) (v 2))) ⟨0, 0⟩
+    .sigma "_" (.qlit 0) A (.mk #[I, E', E] (.eq (.desc l (v 3)) (v 1) (v 2))) ⟨0, 0⟩
   match D, D' with
   | .dret j, .dret j' => vEq g I j j'
   | .darg q S E, .darg q' S' E' => qty q q' fun _ => along S S' E E' (.desc l I)
@@ -1395,7 +1401,7 @@ partial def famCodeTy (l : Level) : Val R :=
   let s : Level := .succ (.succ l)
   let ω : Val R := .qlit QuantitySyntax.explicitDefault
   -- J0: `Sort (l+1) : Sort (l+2)`, `Desc_l J : Sort (l+2)`, `J : Sort (l+1)`
-  .sigma "I" ω (.sort (.succ l)) (.mk [] (.sigma "D" (.qlit QuantitySyntax.explicitDefault) (.desc l (.var 0)) (.var 1) ⟨s, .succ l⟩)) ⟨s, s⟩
+  .sigma "I" ω (.sort (.succ l)) (.mk #[] (.sigma "D" (.qlit QuantitySyntax.explicitDefault) (.desc l (.var 0)) (.var 1) ⟨s, .succ l⟩)) ⟨s, s⟩
 
 /-- The payload equation of a cast between two `μ` (or two `ν`) types (4g):
 
@@ -1417,7 +1423,7 @@ partial def famPayloadEq? (g : Globals R) (A B e : Val R) : Option (Val R × Val
     -- under `t _`: _0 t1 Xi2 sp3; under `k`: k0 _1 t2 Xi3 sp4
     let famT : Term R := .lam "k" (if nu then .nu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4) none
       else .mu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4) none false)
-    let P : Val R := .lam "t" (.mk [Xi, sp] (.lam "_" (.eqTy (.var 2)
+    let P : Val R := .lam "t" (.mk #[sp, Xi] (.lam "_" (.eqTy (.var 2)
       ((Templates.interpTm l).app (.fst (.var 1)) |>.app (.fst (.snd (.var 1))) |>.app famT |>.app (.snd (.snd (.var 1)))))))
     pure (Xi, Xi', .neutral (.transp (famCodeTy l) (.pair I (.pair D i)) P (.neutral (.reflTy Xi) #[]) (.pair I' (.pair D' i')) e) #[])
   match A, B with
@@ -1448,10 +1454,10 @@ partial def vCastData (g : Globals R) (A B e t stuck : Val R) : Val R :=
     match whnf t with
     | .dret i => .dret (vCast g I I' e i)
     -- s0 E1 e2 I'3 I4
-    | .darg q S E => .darg q S (.lam "s" (.mk [E, e, I', I] (.cast (.desc l (v 4)) (.desc l (v 3)) (v 2) (.app (v 1) (v 0)))))
+    | .darg q S E => .darg q S (.lam "s" (.mk #[I, I', e, E] (.cast (.desc l (v 4)) (.desc l (v 3)) (v 2) (.app (v 1) (v 0)))))
     | .drec q j E => .drec q (vCast g I I' e j) (vCast g A B e E)
     -- h0 j1 e2 I'3 I4
-    | .dhrec q H j E => .dhrec q H (.lam "h" (.mk [j, e, I', I] (.cast (v 4) (v 3) (v 2) (.app (v 1) (v 0)))))
+    | .dhrec q H j E => .dhrec q H (.lam "h" (.mk #[I, I', e, j] (.cast (v 4) (v 3) (v 2) (.app (v 1) (v 0)))))
         (vCast g A B e E)
     | _ => stuck
   | .mu .., .mu .. =>
@@ -1633,6 +1639,6 @@ end
 /-- Normal form of a closed term (every definition unfolded). -/
 def nf (g : Globals R) (t : Term R) : Term R :=
   let g := { g with eager := true, quoteEqs := false }
-  quote g 0 (eval g [] t)
+  quote g 0 (eval g #[] t)
 
 end Wiz

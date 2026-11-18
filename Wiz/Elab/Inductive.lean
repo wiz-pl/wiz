@@ -166,7 +166,7 @@ def fieldLevels (ctx : LocalCtx R) (base : Nat) (fs : List (Term R)) : ElabM R (
   fs.zipIdx.mapM fun (A, k) => do
     let n := base + k
     let tys := allTys.extract 0 n
-    let env : Env R := (List.range n).reverse.map Val.var
+    let env : Env R := (List.range n).map Val.var |>.toArray
     let lA := typeSort? g tys (eval g env A)
     let lH := match A with
       | .pi _ _ _ H _ _ => typeSort? g tys (eval g env H)
@@ -314,12 +314,12 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   -- level from the fields and the index types, as the `Type`-inferred signature does)
   let l ← if prop then do
       let g ← getGlobals
-      let ctxT0 := ctxΔ.bind T (eval g [] (pisTm Δ.toList sig))
+      let ctxT0 := ctxΔ.bind T (eval g #[] (pisTm Δ.toList sig))
       let saved ← get
       let mut l : Level := .zero
       let tys := ctxΔ.types.reverse.toArray
       for (_, _, _, X) in Ξ do
-        match typeSort? g tys (eval g ((List.range ctxΔ.lvl).reverse.map Val.var) X) with
+        match typeSort? g tys (eval g ((List.range ctxΔ.lvl).map Val.var |>.toArray) X) with
         | some k => unless k.hasMVar do l := l.join k.predBound
         | none => pure ()
       for c in (cmd.child "ctors").args do
@@ -553,7 +553,7 @@ def elabStructure (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
       let tys := ctxF.types.reverse.toArray
       let mut l : Level := 0
       for (_, _, _, A) in fs', k in [0:fs'.size] do
-        let env := (List.range (ctxΔ.lvl + k)).reverse.map Val.var
+        let env : Env R := ((List.range (ctxΔ.lvl + k)).map Val.var).toArray
         match typeSort? g (tys.extract 0 (ctxΔ.lvl + k)) (eval g env A) with
         | some s => unless s.hasMVar do l := l.join s.predBound
         | none => pure ()

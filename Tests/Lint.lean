@@ -343,7 +343,7 @@ read back must mention the variable (index 0). The other children are a lower va
 every eliminator is stuck on it. -/
 
 def L : Nat := 8
-def semEnv : Env R := (List.range L).map fun i => Val.var (L - 1 - i)
+def semEnv : Env R := ((List.range L).map Val.var).toArray
 
 /-- Globals for the witnesses: `natOp "nat.add"` needs its registration. -/
 def semGlobals (erase : Bool) : Globals R :=
@@ -533,9 +533,9 @@ def elimCtorName : Elim R → String
 def VM : Nat := 6
 
 def plainV : Val R := .tt
-def plainK : Closure R := .mk [] (.var 0)
+def plainK : Closure R := .mk #[] (.var 0)
 /-- A closure under `b` binders whose body is the entry of its environment. -/
-def markK (b : Nat) (v : Val R) : Closure R := .mk [v] (.var b)
+def markK (b : Nat) (v : Val R) : Closure R := .mk #[v] (.var b)
 
 /-- Every child of every value constructor is read back by
 `quote` in both modes; `eraseExempt` names the rows whose children are erased proofs. -/
@@ -1008,7 +1008,7 @@ def lintGroup : Group where
           let one : Level := .succ .zero
           let mut types := 0
           for row in valTable ++ headTable do
-            let w := row.build (fun _ => .unit one) (fun _ => .mk [] (.unit one)) (fun _ => one)
+            let w := row.build (fun _ => .unit one) (fun _ => .mk #[] (.unit one)) (fun _ => one)
             if propSort? (whnf w) == some false then types := types + 1
             match whnf (vEqType g w w) with
             | .empty _ => fail s!"Val.{row.name}: `T = T` computes to False for T := {repr (quote g 0 w)}"

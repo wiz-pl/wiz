@@ -207,8 +207,9 @@ marker on their body. So the kernel is tried on, in turn:
 
 The error reported is the last attempt's, and the kernel has accepted exactly the term
 that is stored. -/
-def withMarksOnDemand (g : Globals R) (d : Decl R) (k : Decl R → TCM (Globals R)) : TCM (Globals R) :=
-  match k (d.withTopMarks g) with
+def withMarksOnDemand (g : Globals R) (d : Decl R) (k : Decl R → TCM (Globals R))
+    (sort? : Option (Option Level) := none) : TCM (Globals R) :=
+  match k (d.withTopMarks g sort?) with
   | .error (.unmarkedProof t ty l) =>
     let go := fun (_ : Unit) => k (d.withMarks g)
     if g.traceProofSteps then dbgTrace s!"marks-on-demand {d.name}: {(t.take 80).replace "\n" " "} : {(ty.take 60).replace "\n" " "} in Sort {l}" go else go ()
@@ -281,8 +282,10 @@ def addDeclSorted (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- the kernel's own check is against the full environment: never the elaborator's view,
   -- whose `hidden` definitions (13b) `conv` would consult
   unless g.hidden.isEmpty do throw (.other s!"internal error: {d.name} checked against the elaborator's view")
-  let d := d.withSorts g
-  let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g')
+  -- (the pass computed the sort of the declared type on the way; the marker pass
+  -- reuses it instead of evaluating the type a second time)
+  let (d, sort?) := d.withSortsAndSort g
+  let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g') sort?
   let g' ← kind g d
   privacyCheck g d kind
   pure g'
@@ -914,7 +917,7 @@ def elabCopatternsCoit (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) 
     else
       let some od := g.find? (T ++ "." ++ o) | throwAt info s!"unknown observation {o}"
       -- the observation's type at our parameters: {Δ} → T Δ → F
-      let mut oty : VTy R := eval g [] (od.type.instLevels od.levelParams us)
+      let mut oty : VTy R := eval g #[] (od.type.instLevels od.levelParams us)
       for a in args do
         let .pi _ _ _ _ cod _ ← force oty | throwAt info "internal error: observation type"
         oty ← instM cod a
@@ -1189,7 +1192,7 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | .const c [] => c == N
     | _ => false
   if key == "nat" || key == "string" || key == "int" then
-    match d.type, d.value.map (eval g []) with
+    match d.type, d.value.map (eval g #[]) with
     | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
@@ -1868,12 +1871,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | (.ok v, hv) =>
         addInfos hv
         let v := match g.find? name with
-          | some d => if v.hasHole then Mark.check { globals := g, sortsOnly := true } v (eval g [] d.type) else v
+          | some d => if v.hasHole then Mark.check { globals := g, sortsOnly := true } v (eval g #[] d.type) else v
           | none => v
         -- (the proof markers, if the kernel asks for them: `withMarksOnDemand`)
         let r := match addPartialImpl g name v with
           | .error (.unmarkedProof ..) => match g.find? name with
-            | some d => addPartialImpl g name (Mark.check { globals := g } v (eval g [] d.type))
+            | some d => addPartialImpl g name (Mark.check { globals := g } v (eval g #[] d.type))
             | none => addPartialImpl g name v
           | r => r
         match r with
@@ -2599,7 +2602,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           -- (linear-case stage 2) side effects live in `IO` (the world), never in an
           -- erasable or contentless result: a pure `… → Unit` call has nothing to keep, so
           -- erasure may drop it (inside an erased position, an erased closure, a dead `let`)
-          else if resultContentless s.globals (eval s.globals [] ty) then
+          else if resultContentless s.globals (eval s.globals #[] ty) then
             report .error cmd.info ("a foreign function's result must carry something at run time: this one returns " ++
               "Unit, a proposition, a type or another value with no runtime content (outside IO), so compiled code " ++
               "may drop the call. A pure extern returns data; an effect belongs in IO (`… → IO Unit`)")
@@ -2630,7 +2633,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | .error e => reportErr e
       | .ok ty =>
         if !d.levelParams.isEmpty then report .error fStx.info s!"{f} has universe parameters: only closed functions can be exported"
-        else if !convTy s.globals #[] (eval s.globals [] d.type) (eval s.globals [] ty) then
+        else if !convTy s.globals #[] (eval s.globals #[] d.type) (eval s.globals #[] ty) then
           report .error (cmd.getArg 3).info s!"{f} has type {d.type.pretty [] (some s.globals)}, not {ty.pretty [] (some s.globals)}"
         else if !C.isCIdent cname then report .error (cmd.getArg 1).info s!"{cname} is not a C identifier"
         else if s.builtins.any (fun (k, _) => (RVal.ExternSig.ofExportKey? k).any (·.cname == cname)) then
@@ -2804,7 +2807,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- type), `get` reads its one runtime field back; the kernel keeps the model.
         let get := (getStx.getId?).getD "_"
         let g := s.globals
-        let (T?, _) := target g 0 (eval g [] df.type) 1000
+        let (T?, _) := target g 0 (eval g #[] df.type) 1000
         match s.globals.find? get, ctorShape? df, T? with
         | none, _, _ => reportC getStx.info s!"unknown declaration '{get}'" ErrorCode.unknownDeclaration
         | _, none, _ | _, _, none =>
@@ -2813,10 +2816,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let us := df.levelParams.map Level.param
           if di.levelParams.length != df.levelParams.length || dg.levelParams.length != df.levelParams.length then
             report .error (cmd.getArg 3).info s!"{impl} and {get} must have {f}'s universe parameters"
-          else if !convTy g #[] (eval g [] df.type) (eval g [] (di.type.instLevels di.levelParams us)) then
+          else if !convTy g #[] (eval g #[] df.type) (eval g #[] (di.type.instLevels di.levelParams us)) then
             report .error (cmd.getArg 3).info
               s!"{impl} can't implement {f}: its type {di.type.pretty [] (some s.globals)} is not {f}'s type {df.type.pretty [] (some s.globals)}"
-          else if lastDom g 0 (eval g [] dg.type) 1000 != some T then
+          else if lastDom g 0 (eval g #[] dg.type) 1000 != some T then
             report .error getStx.info s!"{get} must take a value of {T} as its last argument"
           else if (reprOf? s.builtins T).isSome then
             report .error fStx.info s!"{T} already has a native representation"
@@ -2827,7 +2830,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           else if (s.globals.privates.get? f) != some s.module then
             report .error fStx.info s!"a native representation needs a private constructor (`| private {(f.splitOn ".").getLast!} …`): {T}'s module keeps the invariant its natives rely on"
           else
-            let (_, getArity) := target g 0 (eval g [] dg.type) 1000
+            let (_, getArity) := target g 0 (eval g #[] dg.type) 1000
             let key := ReprInfo.key T { mkImpl := impl, getImpl := get, tag, nfields, r, mkArity, p, getArity }
             modify fun s => { s with builtins := (key, f) :: s.builtins,
                                      globals := { s.globals with builtins := (key, f) :: s.globals.builtins } }
@@ -2837,7 +2840,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       -- (linear-case stage 2) as for `extern`: an implementation is where an effect could
       -- hide, and a result of type Unit (or a type) carries nothing erasure must keep
       -- (a proposition is allowed: the implementation is a proof, erased as well)
-      else if resultContentless s.globals (eval s.globals [] df.type) && !resultProp s.globals (eval s.globals [] df.type) then
+      else if resultContentless s.globals (eval s.globals #[] df.type) && !resultProp s.globals (eval s.globals #[] df.type) then
         report .error fStx.info s!"{f}'s result has no runtime content (Unit, a type, …): its implementation could only matter through an effect, which compiled code may drop; return IO or data instead"
       else if df.levelParams.length != di.levelParams.length then
         report .error (cmd.getArg 3).info
@@ -2846,7 +2849,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         let us := df.levelParams.map Level.param
         let tyI := di.type.instLevels di.levelParams us
         let g := s.globals
-        if !convTy g #[] (eval g [] df.type) (eval g [] tyI) then
+        if !convTy g #[] (eval g #[] df.type) (eval g #[] tyI) then
           report .error (cmd.getArg 3).info
             s!"{impl} can't implement {f}: its type {tyI.pretty [] (some s.globals)} is not {f}'s type {df.type.pretty [] (some s.globals)}"
         else

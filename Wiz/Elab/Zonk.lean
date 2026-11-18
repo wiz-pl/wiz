@@ -37,8 +37,7 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     match (← lookupMeta m).solution with
     | some sol =>
       let g ← getGlobals
-      let env : Env R := (List.range l).map fun i => Val.var i
-      let env := env.reverse
+      let env : Env R := ((List.range l).map fun i => Val.var i).toArray
       let v := args.foldl (fun f a => vApp g f (eval g env a)) sol
       zonk l (quote g l v)
     | none => return (← args.mapM (zonk l)).foldl .app (.mvar m)
@@ -52,7 +51,7 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
       if i.mvars.isEmpty then
         if let some N := (← getGlobals).builtins.lookup "nat" then
           let g ← getGlobals
-          let env : Env R := ((List.range l).map fun i => Val.var i).reverse
+          let env : Env R := ((List.range l).map fun i => Val.var i).toArray
           let isNat := match A with
             | .const c _ => c == N
             | _ => match whnf (eval g env A) with
@@ -97,7 +96,7 @@ partial def zonkInsts (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     match e.solution, e.isInst with
     | some sol, true =>
       let g ← getGlobals
-      let env : Env R := ((List.range l).map fun i => Val.var i).reverse
+      let env : Env R := ((List.range l).map fun i => Val.var i).toArray
       let v := args.foldl (fun f a => vApp g f (eval g env a)) sol
       zonkInsts l (quote g l v)
     | _, _ => return (← args.mapM (zonkInsts l)).foldl .app (.mvar m)

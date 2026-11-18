@@ -72,20 +72,20 @@ partial def nativeReadback (g : Globals R) (builtins : List (Name × Name)) (ty 
   | .sigma _ q A B _ =>
     if unboxedSigma g 1000000 ty then
       let a' ← rb A v fuel
-      return .pair a' (unitFun g (Closure.inst g B (eval g [] a')) 1000000)
+      return .pair a' (unitFun g (Closure.inst g B (eval g #[] a')) 1000000)
     if erasedFunTy g A 1000000 then
       let a' := unitFun g A 1000000
-      return .pair a' (← rb (Closure.inst g B (eval g [] a')) (v.field 1) fuel)
+      return .pair a' (← rb (Closure.inst g B (eval g #[] a')) (v.field 1) fuel)
     if isZeroQ q then
       -- (only the index equation of a constructor's payload, `⟦ret i⟧ X j = (0 _ : i = j) × Unit`:
       -- a data field of quantity 0 was refused by `unflat`)
       unless irrelevant A 100 do throw s!"a field of quantity 0 (erased at run time) that is not a proof, of type {(quote g 0 A).pretty}"
       let p ← proof A 100
-      return .pair p (← rb (Closure.inst g B (eval g [] p)) (v.field 1) fuel)
+      return .pair p (← rb (Closure.inst g B (eval g #[] p)) (v.field 1) fuel)
     let .obj _ fs := v | throw "a pair was expected"
     unless fs.size == 2 do throw "a pair was expected"
     let a' ← rb A fs[0]! fuel
-    return .pair a' (← rb (Closure.inst g B (eval g [] a')) fs[1]! fuel)
+    return .pair a' (← rb (Closure.inst g B (eval g #[] a')) fs[1]! fuel)
   | .enum ls =>
     let t ← match v with
       | .obj t #[] => pure t
@@ -125,7 +125,7 @@ where
       throw "an index equation that does not hold"
     | .sigma _ _ P Q _ =>
       let p ← proof P (fuel - 1)
-      return .pair p (← proof (Closure.inst g Q (eval g [] p)) (fuel - 1))
+      return .pair p (← proof (Closure.inst g Q (eval g #[] p)) (fuel - 1))
     | t => throw s!"a proof of {(quote g 0 t).pretty} (not first-order data)"
   /-- The payload of a flat value, walking the description (as a value). -/
   unflat (D : Val R) (v : RVal) : Except String RVal := do
@@ -144,10 +144,10 @@ where
           unless irrelevant S 100 do
             throw s!"a constructor field of quantity 0 (erased at run time), of type {(quote g 0 S).pretty}"
           let p ← proof S 100
-          return .obj 0 #[.erased, ← rest (vApp g F (eval g [] p)) (n + 1) fuel]
+          return .obj 0 #[.erased, ← rest (vApp g F (eval g #[] p)) (n + 1) fuel]
         let f ← field n
         let s ← nativeReadback g builtins S f
-        return .obj 0 #[f, ← rest (vApp g F (eval g [] s)) (n + 1) fuel]
+        return .obj 0 #[f, ← rest (vApp g F (eval g #[] s)) (n + 1) fuel]
       | .drec q _ D' =>
         if isZeroQ q then throw "a recursive field of quantity 0"
         return .obj 0 #[← field n, ← rest D' (n + 1) fuel]

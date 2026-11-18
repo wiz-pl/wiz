@@ -653,7 +653,7 @@ def leanNormal (t : MTm) : String :=
   -- pre-P2 kernel rejects is left as it is, as in `Elab.leanVerdict`
   let tm := if !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false } } t.toTerm).toBool then
       t.toTerm else (Mark.infer (R := ZeroOneMany) { globals := g } t.toTerm).1
-  match MTm.ofTerm (dropQty (quote g 0 (eval g [] tm))) with
+  match MTm.ofTerm (dropQty (quote g 0 (eval g #[] tm))) with
   | some m => m.pretty 0
   | none => "?"
 
@@ -1078,7 +1078,7 @@ def queryMain (ixs : List String) : IO UInt32 := do
       | .ok _ => pure ()
     else
       let g := Elab.leanGlobals ()
-      IO.println (((toString (repr (quote g 0 (eval g [] t.toTerm)))).take 1500).toString)
+      IO.println (((toString (repr (quote g 0 (eval g #[] t.toTerm)))).take 1500).toString)
   pure 0
 
 /-- `tests --audit-long`: the same cases on the large grids, in this process. -/

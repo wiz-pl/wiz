@@ -109,7 +109,7 @@ def candidates (ctx : LocalCtx R) (cls : Name) : ElabM R (Array (Term R × VTy R
   for (inst, _) in sorted do
     if let some d := s.globals.find? inst.name then
       let us ← d.levelParams.mapM fun _ => freshLevelMeta
-      out := out.push (.const inst.name us, eval s.globals [] (d.type.instLevels d.levelParams us))
+      out := out.push (.const inst.name us, eval s.globals #[] (d.type.instLevels d.levelParams us))
   pure out
 
 def mkGenerator (ctx : LocalCtx R) (key : String) (goal : Term R) (goalTy : VTy R) : ElabM R (Generator R) := do
@@ -140,7 +140,7 @@ def instArgsWellTyped (ctx : LocalCtx R) (args : Array (Term R × VTy R)) : Elab
   for v in ctx.types.reverse do
     let j := tys.size
     let t ← zonk j (quote g j (← forceMeta v))
-    tys := tys.push (eval g (ctx.env.drop (ctx.lvl - j)) t)
+    tys := tys.push (eval g (ctx.env.extract 0 j) t)
   let kctx : Ctx R := { globals := g, env := ctx.env, names := ctx.names,
                         qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
                         types := tys.toList.reverse, lvl := ctx.lvl }
@@ -192,7 +192,7 @@ partial def synthInstance (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Ter
     if out then args' := args'.push (← evalIn ctx (← freshMeta ctx "an output parameter"))
     else args' := args'.push a
   let g ← getGlobals
-  let goalTy := args'.foldl (vApp g) (eval g [] (.const info.name us))
+  let goalTy := args'.foldl (vApp g) (eval g #[] (.const info.name us))
   let goal ← freshMeta ctx "an instance" goalTy
   let key ← goalKey ctx goalTy
   let saved ← get
@@ -320,7 +320,7 @@ where
       unless d.isDefault && d.cls == info.name do continue
       let some decl := s.globals.find? d.name | continue
       let us ← decl.levelParams.mapM fun _ => freshLevelMeta
-      let ety := eval s.globals [] (decl.type.instLevels decl.levelParams us)
+      let ety := eval s.globals #[] (decl.type.instLevels decl.levelParams us)
       if let some subgoals ← (try some <$> applyInstance ctx p.hole p.ty (.const d.name us) ety catch _ => pure none) then
         for (_, hty) in subgoals do
           if (← instReady ctx hty) && (← synthInstance ctx hty).isNone then
@@ -387,7 +387,7 @@ def applyDefaultInstance («from» : Nat := 0) : ElabM R Bool := do
       unless cls == d.cls do continue
       let saved ← get
       let us ← decl.levelParams.mapM fun _ => freshLevelMeta
-      let ety := eval s.globals [] (decl.type.instLevels decl.levelParams us)
+      let ety := eval s.globals #[] (decl.type.instLevels decl.levelParams us)
       match ← (try some <$> applyInstance p.ctx p.hole p.ty (.const d.name us) ety catch _ => pure none) with
       | some subgoals =>
         modify fun s => { s with pendingInsts := s.pendingInsts.erase id }

@@ -76,7 +76,7 @@ inductive Head (R : Type) where
   evaluated to be read back (`quote`, unless `quoteErasesProofs`), within a step budget
   (`Budget`). It carries no type: conversion never compares two proofs, and what follows
   an `absurd` is typed by the motive. -/
-  | prf (env : List (Val R)) (t : Term R)
+  | prf (env : Array (Val R)) (t : Term R)
 
 inductive Val (R : Type) where
   /-- `head` followed by the eliminations in `spine`, innermost first -/
@@ -138,7 +138,7 @@ inductive Elim (R : Type) where
   | split (q : Val R) (z : Name) (motive : Closure R) (x y : Name) (body : Closure R)
   | absurd (motive : Val R)
   /-- the branches are evaluated in `env` only when the tag is known -/
-  | ecase (z : Name) (motive : Closure R) (env : List (Val R)) (branches : List (Term R))
+  | ecase (z : Name) (motive : Closure R) (env : Array (Val R)) (branches : List (Term R))
   | delim (v : Level) (P mret marg mrec mhrec : Val R)
   | ind (l : Level) (I D : Val R) (v : Level) (P m i : Val R) (prop : Bool)
   | sfix (l : Level) (I D : Val R) (v : Level) (P f s i : Val R)
@@ -148,13 +148,32 @@ inductive Elim (R : Type) where
   | down
 
 /-- A body waiting for the values of its bound variables. `env` gives the values of
-the body's free variables, with the most recent binder at the head of the list. -/
+the body's free variables, by level (`Env`): the most recent binder is the last entry. -/
 inductive Closure (R : Type) where
-  | mk (env : List (Val R)) (body : Term R)
+  | mk (env : Array (Val R)) (body : Term R)
 end
 
-abbrev Env (R : Type) := List (Val R)
+/-- An environment: the values of the local variables, **by level**. `env[0]` is the
+outermost binder and `env[env.size - 1]` the innermost, so binding a variable appends
+(`Env.push`) and a de Bruijn index is one array index (`Env.get?`), both O(1). (It was a
+list, innermost first, and every `var` lookup walked `ix` cells: the sorts and marks
+passes over a Π-tower of `n` methods paid Θ(n) per variable, which made an inductive
+with `n` constructors cost Θ(n³) to check — 1000 constructors took 103 s.)
+
+The order is the opposite of a de Bruijn *index*; `Env.get?` converts. -/
+abbrev Env (R : Type) := Array (Val R)
 abbrev VTy (R : Type) := Val R
+
+namespace Env
+
+/-- Bind a variable at the innermost level. -/
+def push {R : Type} (env : Env R) (v : Val R) : Env R := Array.push env v
+
+/-- The value of the variable at de Bruijn index `ix` (`0` is the innermost binder). -/
+def getD {R : Type} (env : Env R) (ix : Lvl) (default : Val R) : Val R :=
+  if ix < env.size then (env[env.size - 1 - ix]?).getD default else default
+
+end Env
 
 /-- The head of the value that a kernel-internal failure leaves behind. Lean's `panic!`
 (an eliminator applied to a value of the wrong shape, `xs[i]!` out of range) prints a
