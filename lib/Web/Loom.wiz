@@ -1,6 +1,7 @@
 import Json
 import Optic
 import Tagged
+import Text
 /-!
 # Web.Loom
 
@@ -583,6 +584,66 @@ def Loom.App.patch {S M : Type} (a : Loom.App S M) (s s' : S) : List Loom.Patch 
 /-- `Loom.App.patch` as JSON, for `js_patch`. -/
 def Loom.App.patches {S M : Type} (a : Loom.App S M) (s s' : S) : String :=
   Loom.patchesJson (Loom.App.patch a s s')
+
+-- ## Events with a payload (form controls, keys)
+
+/-- One browser event: the DOM type, the handler index that answered it, and the payload
+`web/framework/driver.js` attached (a form control's value for `input`/`change`, the key
+for `keydown`/`keyup`; empty for the rest). -/
+structure Loom.Event where
+  name : String
+  index : Nat
+  payload : String
+
+/-- A decimal string as a number (`0` when it is not one). -/
+def Loom.natOr0 (s : String) : Nat := match String.parseNat s with
+  | .some n => n
+  | .none => 0
+
+/-- Split the driver's event string. The driver sends `event "\n" index "\n" payload`, and
+the payload is the rest of the string, so a textarea's newlines arrive intact:
+`"input\n3\na\nb"` is `input`, handler 3, `"a\nb"`. -/
+def Loom.splitEvent (s : String) : Loom.Event :=
+  match String.splitOn s "\n" with
+  | .nil => Loom.Event.mk "" 0 ""
+  | .cons name rest => match rest with
+    | .nil => Loom.Event.mk name 0 ""
+    | .cons index tail => Loom.Event.mk name (Loom.natOr0 index) (String.intercalate "\n" tail)
+
+/-- An app whose messages carry the event's payload: `update msg payload state`. Use it
+when a view binds a form control (`input`/`change`) or a key (`keydown`/`keyup`); a
+`Loom.App` whose messages need no payload stays as it is. -/
+structure Loom.LiveApp (S M : Type) where
+  init : S
+  update : M → String → S → S
+  view : S → Loom.VNode M
+
+/-- The app's view at `s`, rendered. -/
+def Loom.LiveApp.render {S M : Type} (a : Loom.LiveApp S M) (s : S) : Loom.Rendered M :=
+  Loom.render (a.view s)
+
+/-- SSR: the app at `s` as HTML. -/
+def Loom.LiveApp.html {S M : Type} (a : Loom.LiveApp S M) (s : S) : String :=
+  (Loom.LiveApp.render a s).html
+
+/-- The patches from the app's state `s` to `s'`. -/
+def Loom.LiveApp.patch {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : List Loom.Patch :=
+  Loom.Rendered.diff (Loom.LiveApp.render a s) (Loom.LiveApp.render a s')
+
+/-- `Loom.LiveApp.patch` as JSON, for `js_patch`. -/
+def Loom.LiveApp.patches {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : String :=
+  Loom.patchesJson (Loom.LiveApp.patch a s s')
+
+/-- Dispatch one browser event string (`Loom.splitEvent`), giving the message its
+payload. A stale index from a previous render cannot fire the wrong message: the event
+name has to match the handler's too. -/
+def Loom.LiveApp.step {S M : Type} (a : Loom.LiveApp S M) (s : S) (ev : String) : S :=
+  let e := Loom.splitEvent ev;
+  match Loom.at e.index (Loom.LiveApp.render a s).handlers with
+  | .some h => match String.eq h.1 e.name with
+    | .true => a.update h.2 e.payload s
+    | .false => s
+  | .none => s
 
 -- ## Owned (linear) state
 

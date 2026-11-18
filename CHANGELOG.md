@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* loom: a form control's live value now reaches a pure `step`. `web/framework/driver.js`
+  sends the event string `event "\n" index "\n" payload` — a control's `value` for
+  `input`/`change`, the key for `keydown`/`keyup`, nothing otherwise — and
+  `lib/Web/Loom.wiz` parses it with `Loom.splitEvent`; an app that reads it is a
+  `Loom.LiveApp` (`update msg payload state`, `Loom.LiveApp.step`/`patches`). The driver
+  also grew `onStep` (the page's effect hook), `setState` (handing back a state the page
+  changed through its own entry point) and a `parse` argument (the DOM double in tests).
+  `web/framework/driver_test.mjs` pins the strings, and `web/framework/test.sh` runs it.
+* playground: the editor is a Loom component (`lib/Web/Editor.wiz`): the page's
+  `section.pane`, `#editor` textarea, its label and hint, `#run` and `#count`, with the
+  text arriving as the input event's payload and Run counting requests. It is tested the
+  way the output pane is: `web/playground_editor_gen.wiz` renders and steps it and
+  `web/playground_editor_test.mjs` applies the patches to the SSR in the DOM double
+  (both run in `web/playground-loom-test.sh`).
 * web: the standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`)
   now mounts the playground's goals pane (`web/playground-lsp.js` on `web/lsp-client.js`
   and `web/goals.js`) instead of the Wiz program `web/Web.wiz` stepped through

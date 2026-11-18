@@ -1549,6 +1549,9 @@ rendering and a keyed diff to DOM patches. Nodes are `Loom.VNode M` (`text`, `ra
 `Loom.Rendered.diff` a `List Loom.Patch` (`replace`, `text`, `setAttr`,
 `removeAttr`, `insert`, `remove`, `move`) that `Loom.patchesJson` hands to
 `web/framework/runtime.js`. An app is `Loom.App S M` (`init`, `update`, `view`); a
+`Loom.LiveApp S M` takes the browser event's payload too (`update msg payload state`:
+a form control's live value for `input`/`change`, the key for `keydown`/`keyup`, parsed
+from the driver's `event\nindex\npayload` string by `Loom.splitEvent`); a
 component is `Loom.Component P S M`. Local state is a lens into the app state
 (`Loom.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
 commute), and a one-shot resource is `Loom.Owned S`, a quantity-1 token the kernel
@@ -1556,8 +1559,8 @@ makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw
 the only trust boundary (and must be one element); all other text and attribute values
 are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
 no effects, and `value`/`checked` would need property patches. Tests: group `loom`
-and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
-`wiz-notes/react-framework.md`.
+and `web/framework/test.sh` (Node DOM; `driver_test.mjs` pins the event strings).
+Design, survey and migration analysis: `wiz-notes/react-framework.md`.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
@@ -1579,7 +1582,9 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
 widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
 held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
-the raw `Loom.on`/`Loom.App.event` path passes only a handler index.
+the raw `Loom.on`/`Loom.App.event` path passes only a handler index, and an app that
+wants a control's live value uses `Loom.LiveApp` (the driver puts it in the event
+string).
 
 ## Numbers: classes, integers, words
 

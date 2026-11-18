@@ -1,0 +1,60 @@
+-- A fixture for web/playground_editor_test.mjs: the playground's editor
+-- (lib/Web/Editor.wiz) rendered and stepped as a Loom.LiveApp, printed as JSON. The Node
+-- test parses `initial` with web/framework/minidom.mjs, dispatches the same event strings
+-- the browser's driver sends (through the fixture's steps) and applies the patches with
+-- runtime.js, requiring the result to be the next state's SSR exactly. No Wasm, no
+-- browser.
+--
+--   wiz run -I <repo>/lib web/playground_editor_gen.wiz
+import IO
+import Json
+import Web.Editor
+import Web.Loom
+
+def jstr (s : String) : Json := Json.mkStr s
+
+-- The page's program (web/playground.html).
+def program : String :=
+  "import Prelude\n\n-- Everything here runs in the page: the self-hosted Wiz frontend and kernel\n-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.\ndef twice (n : Nat) : Nat := n + n\n\n#check twice\n#eval twice 21"
+
+def app : Loom.LiveApp Editor Editor.Msg := Editor.app program
+
+def s0 : Editor := app.init
+
+-- The driver's event strings: `event\nindex\npayload` (the textarea's handler is 0, the
+-- Run button's is 1; `input` carries the whole new text, newlines included).
+def typed : Editor := Loom.LiveApp.step app s0 "input\n0\nimport Prelude\n\ndef twice (n : Nat) : Nat := n + n"
+def escaped : Editor := Loom.LiveApp.step app s0 "input\n0\n</textarea><script>alert('x')</script>"
+def multiline : Editor := Loom.LiveApp.step app s0 "input\n0\na\nb\nc"
+def disabledClick : Editor := Loom.LiveApp.step app s0 "click\n1"
+def enabled : Editor := Editor.withDisabled s0 .false
+def clicked : Editor := Loom.LiveApp.step app enabled "click\n1"
+def twiceClicked : Editor := Loom.LiveApp.step app clicked "click\n1"
+-- A stale index (handler 0 is the textarea, not the button) and a stale event name: both
+-- must leave the state alone.
+def staleIndex : Editor := Loom.LiveApp.step app enabled "click\n0"
+def staleEvent : Editor := Loom.LiveApp.step app s0 "input\n1\nbogus"
+-- The page's other entry points: the count text and the text replaced.
+def counted : Editor := Editor.withCount (Editor.withText s0 "x") "2 lines · 1 error"
+
+def fields : List (String × Json) :=
+  [ Json.field "initial" (jstr (Loom.LiveApp.html app s0))
+  , Json.field "typed" (jstr (Loom.LiveApp.html app typed))
+  , Json.field "initialToTyped" (jstr (Loom.LiveApp.patches app s0 typed))
+  , Json.field "escaped" (jstr (Loom.LiveApp.html app escaped))
+  , Json.field "multiline" (jstr (Loom.LiveApp.html app multiline))
+  , Json.field "enabled" (jstr (Loom.LiveApp.html app enabled))
+  , Json.field "initialToEnabled" (jstr (Loom.LiveApp.patches app s0 enabled))
+  , Json.field "counted" (jstr (Loom.LiveApp.html app counted))
+  , Json.field "typedText" (jstr typed.text)
+  , Json.field "multilineText" (jstr multiline.text)
+  , Json.field "disabledRuns" (jstr (Nat.toString disabledClick.runs))
+  , Json.field "clickRuns" (jstr (Nat.toString clicked.runs))
+  , Json.field "twiceRuns" (jstr (Nat.toString twiceClicked.runs))
+  , Json.field "staleIndexText" (jstr staleIndex.text)
+  , Json.field "staleIndexRuns" (jstr (Nat.toString staleIndex.runs))
+  , Json.field "staleEventText" (jstr staleEvent.text)
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))
