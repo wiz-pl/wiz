@@ -38,7 +38,8 @@ scry egraph FILE.c [--fuel N] [--rewrite]
                                 Wil and prints the transformation report
 ```
 
-Exit status is 0 on success, 1 on an error (a message on stderr), 2 on a usage error.
+Exit status is 0 on success and 1 on an error, including a usage error (a `scry: …`
+message on stderr). `scry help`, `scry --help` and `scry COMMAND --help` exit 0.
 The grail command targets in `grail.wiz` run `facts`, `query`, `explain` and `parse` over
 `fixtures/demo.facts.json`, so `grail build` exercises the loaders end to end.
 -/
@@ -236,13 +237,17 @@ def Scry.egraphCmd (file : String) (fuel : Nat) (rewrite : Bool) : EIO Nat := do
     Scry.say (Scry.wgeRenderReport file t);
     EIO.pure 0
 
+/-- `scry egraph`'s usage line. -/
+def Scry.egraphUsage : String :=
+  "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+
 /-- `scry egraph`'s arguments: one file, optional `--fuel N` and `--rewrite`, in any
 order. A second file is a usage error. -/
 partial def Scry.egraphArgsGo (file : Option String) (fuel : Nat) (rewrite : Bool) :
     List String → EIO Nat
   | .nil => match file with
     | .some f => Scry.egraphCmd f fuel rewrite
-    | .none => EIO.fail "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+    | .none => EIO.fail Scry.egraphUsage
   | .cons a rest =>
     if String.eq a "--rewrite" then
       Scry.egraphArgsGo file fuel .true rest
@@ -250,17 +255,40 @@ partial def Scry.egraphArgsGo (file : Option String) (fuel : Nat) (rewrite : Boo
       | .cons n rest' => match String.parseNat n with
         | .some k => Scry.egraphArgsGo file k rewrite rest'
         | .none => EIO.fail ("\"" ++ n ++ "\" is not a fuel bound")
-      | .nil => EIO.fail "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+      | .nil => EIO.fail Scry.egraphUsage
     else match file with
       | .none => Scry.egraphArgsGo (.some a) fuel rewrite rest
       | .some _ => EIO.fail ("unexpected argument \"" ++ a ++ "\" (one FILE.c)")
 
-/-- `scry egraph FILE.c [--fuel N] [--rewrite]`. -/
+/-- `scry egraph FILE.c [--fuel N] [--rewrite]`. `--help` is help before it is a file. -/
 def Scry.egraphArgs (args : List String) : EIO Nat :=
-  Scry.egraphArgsGo .none 8 .false args
+  match List.any (fun a => String.eq a "--help") args with
+  | .true => do
+    Scry.say Scry.egraphUsage;
+    EIO.pure 0
+  | .false => Scry.egraphArgsGo .none 8 .false args
+
+/-- The help text a command's `--help` prints: the command's own usage when it has
+subcommands, and the shared command list otherwise. -/
+def Scry.helpText (cmd : String) : Option String :=
+  match cmd with
+  | "facts" => .some Scry.usage
+  | "query" => .some Scry.usage
+  | "explain" => .some Scry.usage
+  | "parse" => .some Scry.usage
+  | "cst" => .some Scry.usage
+  | "taint" => .some Scry.usage
+  | "dynamic" => .some Scry.usage
+  | "bench" => .some Scry.usage
+  | "repl" => .some Scry.usage
+  | "report" => .some Scry.usage
+  | "fuzz-span" => .some Scry.usage
+  | "findings" => .some Scry.findingsUsage
+  | "egraph" => .some Scry.egraphUsage
+  | _ => .none
 
 /-- Run one command; the result is the exit status or an error message. -/
-def Scry.dispatch (args : List String) : EIO Nat := match args with
+def Scry.dispatchGo (args : List String) : EIO Nat := match args with
   | .nil => do
     Scry.say Scry.usage;
     EIO.pure 0
@@ -298,6 +326,19 @@ def Scry.dispatch (args : List String) : EIO Nat := match args with
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons "egraph" rest => Scry.egraphArgs rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
+
+/-- `--help` before positional parsing: a command's arguments that ask for help print it
+and succeed, whether the help comes before or after the command's file or id. -/
+def Scry.dispatch (args : List String) : EIO Nat :=
+  match args with
+  | .cons cmd rest => match Scry.helpText cmd with
+    | .some text => match List.any (fun a => String.eq a "--help") rest with
+      | .true => do
+        Scry.say text;
+        EIO.pure 0
+      | .false => Scry.dispatchGo args
+    | .none => Scry.dispatchGo args
+  | .nil => Scry.dispatchGo args
 
 /-- `main`: run a command and exit with its status (1 with a `scry: …` message on an
 error). -/
