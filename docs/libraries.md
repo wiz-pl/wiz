@@ -495,6 +495,16 @@ unchanged, for every state (no evaluation needed). `Bundle.lens b` (with
 `Bundle.Lawful b`, `rfl` for derived bundles) and `HwTy.fstL`/`sndL` are the packed
 views at values. Example: `examples/hdl-optic.wiz` (group `hdl`).
 
+A profunctor-style optic quantifies over a type constructor (`p : Type → Type → Type`) and
+its class dictionaries, so by the kernel's predicative Π rule — `(x : A) → B` has sort
+`Sort (imax i j)` (`docs/CoreSpec.md:365`, `Wiz/Core/Check.lean:745-755`) — it lives in
+`Type 1`, not `Type 0`; cumulativity would not help, since subsumption raises a type's
+universe rather than lowering it. A `Type 0` container of such optics is therefore
+impossible, while the store lens `Lens S A = S → Store A S` is `Type` and stays that way.
+If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
+(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
+universe change.
+
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
 Compiled, the value simulation (`Circuit.run`, `Design.runLeaves`) runs the step function
