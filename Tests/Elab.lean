@@ -604,6 +604,20 @@ void tick(uint64_t n) { for (uint64_t i = 0; i < n; i++) if (s_ctx) s_fn(s_ctx, 
 void forget(void) { if (s_ctx) wiz_release(s_ctx); s_ctx = 0; }
 "
 
+/-- (9g) Callbacks with a `Unit` parameter: C sees no parameter for it, the Wiz closure
+still takes it. `call_unit` calls `Unit → UInt64` at once, `call_unit_arg` calls
+`Unit → UInt64 → UInt64` with 41, and a `Callback (Unit → UInt64)` is kept until
+`forget_unit`. -/
+def unitCbHelper : String := "#include <stdint.h>
+void wiz_release(void *v);
+uint64_t call_unit(uint64_t (*f)(void *), void *ctx) { return f(ctx); }
+uint64_t call_unit_arg(uint64_t (*f)(void *, uint64_t), void *ctx, uint64_t n) { return f(ctx, n); }
+static uint64_t (*g_unit)(void *); static void *g_unit_ctx;
+void keep_unit(uint64_t (*f)(void *), void *ctx) { g_unit = f; g_unit_ctx = ctx; }
+uint64_t call_kept_unit(void) { return g_unit(g_unit_ctx); }
+void forget_unit(void) { if (g_unit_ctx) wiz_release(g_unit_ctx); g_unit_ctx = 0; }
+"
+
 -- the generators of Wiz source moved to `Wiz/Selfhost.lean` (grail builds the
 -- self-hosted toolchain too); the names stay here for the scripts that use them
 export Wiz.Selfhost (wizLit wizPD wizList wizTables)
@@ -2190,6 +2204,14 @@ def nativeCases (llvm : Bool) : List Case :=
         cRunSmallStack (llvm := llvm) ("import Prelude\npartial def count (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++
           "  | .succ m => match Nat.beq (Nat.mod m 3) 0 with\n    | .true => count m (acc + 2)\n    | .false => count m acc\n" ++
           "def main : Nat := count 10000000 0") "6666668" },
+    { name := "dropping a long list is iterative: 1M cells on a 1 MB stack (15f)", run := fun _ =>
+        -- (a unique list dropped by an unused parameter: one `wiz_dec` of a million cells;
+        -- recursive `wiz_free` was one C frame per cell, a SIGSEGV at this stack size)
+        cRunSmallStack (llvm := llvm) ("import Prelude\n" ++
+          "partial def build (n : Nat) (acc : List Nat) : List Nat := match n with\n  | .zero => acc\n" ++
+          "  | .succ k => build k (List.cons k acc)\n" ++
+          "def ignore (xs : List Nat) (n : Nat) : Nat := n\n" ++
+          "def main : Nat := ignore (build 1000000 .nil) 7") "7" },
     { name := "constant folding and known constructors behave as before (15c)", run := fun _ =>
         cRun (llvm := llvm) foldSrc foldExpected },
     { name := "numerals at 2^31 … 2^64+1 and 10^30 are constants (15g)", run := fun _ =>

@@ -28,7 +28,12 @@ def main : IO Unit := do
   drop or duplicate such a call. Its result must have runtime content: `Unit`, a
   proposition, a type or an erased function into those (after unfolding) is refused;
   an effect belongs in `IO` (`… → IO Unit`). (4h; CoreSpec §10.2a.)
-  Without a header, a prototype is generated from the Wiz type.
+  A `char *` coming from C may be NULL (an unset `getenv`, `strchr` on a missing byte, a
+  failed `strdup`): it is the empty string, in a result, a parameter and a struct field
+  alike (`wiz_out_string` guards it; `strlen(NULL)` is a SIGSEGV in a legal program).
+  Without a header, a prototype is generated from the Wiz type — for every extern,
+  including a `link_c` function whose name starts with `wiz_` (an implicit declaration
+  would assume an `int` result and truncate it).
 * `UInt64` and `Float64` are axioms whose operations are runtime functions, bound
   with `extern` (boxed raw words at runtime). The kernel doesn't compute with them.
 * `wiz run` on `main : IO A` runs it. Foreign functions only run in compiled code
@@ -187,10 +192,13 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   from `double`, `String` from a `const char *` that Wiz copies, `Bool` from `int`, a
   foreign pointer lent without a finalizer, a Wiz data type as a `wiz_val`), the
   closure is applied, and the result goes out (a `String` as a `malloc`ed `char *` the
-  caller `free`s; `Unit` as `void`). A result in `IO` is run: the wrapper passes the
-  world (a scalar) and drops it after. The optional type must be the definition's.
-  Universe-polymorphic definitions and erased parameters can't be exported, nor
-  functions taking functions.
+  caller `free`s; `Unit` as `void`). A `Unit` **parameter** is not in the C prototype
+  (there is nothing to pass) but is a runtime parameter of the Wiz function, so the
+  wrapper supplies it; `export "c" f` for `f : Unit → Nat` is `uint64_t c(void)` and
+  calls `f ()`, and `Unit → A → B` is `B c(A)`. A result in `IO` is run: the wrapper
+  passes the world (a scalar) and drops it after. The optional type must be the
+  definition's. Universe-polymorphic definitions and erased (`0`-quantity) parameters
+  can't be exported, nor functions taking functions.
 * **Handles.** A Wiz value of a data type crosses as `wiz_val` (a word), and the C
   side **owns** the reference it gets: passing it back to an export hands that
   reference over (so `s = step(s, ev)` threads a state), `wiz_retain(v)` makes another
@@ -198,7 +206,9 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   runtime's `wiz_live_objects()` counts live objects, for leak checks in C tests.
 * **Callbacks.** A foreign function's parameter of function type becomes two C
   arguments: a function pointer whose first parameter is the context, then the
-  context (`void *`, the closure). The function is a *trampoline* generated per
+  context (`void *`, the closure). A `Unit` parameter is not in the function-pointer
+  type; the trampoline supplies it to the Wiz closure, as an export's wrapper does.
+  The function is a *trampoline* generated per
   signature (`wiz_cb_nn_b` for `Nat → Nat → Bool`), which marshals like an export and
   applies the closure. Ownership: a plain `A → B` parameter is **borrowed** for the
   call (the wrapper drops the closure when the C function returns, so C must not keep
@@ -219,7 +229,8 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   a handle is used from the thread that got it (only 25a's shared objects cross
   threads), and `wiz_live_objects()` counts the calling thread's objects.
 * The keys: an export is `export:cname:kinds:result:io` in the builtins (cached with
-  them); a callback parameter is `k[<params>/<result>]` (`K` for `Callback`, `!` before
+  them; a `Unit` parameter's kind is `v`); a callback parameter is `k[<params>/<result>]`
+  (`K` for `Callback`, `!` before
   a result in `IO`) in an `extern:` key (`RVal.ExternSig`). An export's code is an IR
   function `wiz.export.<cname>` giving `f`'s closure (so borrowed parameters and owned
   wrappers stay the compiler's business), which the C wrapper applies with `wiz_apply`;
@@ -427,7 +438,9 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
   `File.readBytes f n : EIO (Option Bytes)` (up to `n`, fewer only at the end; `none`
   at the end), `File.writeBytes`, `File.seek f to : EIO Nat` with
   `SeekFrom = start n | forward n | back n | fromEnd n` (the result is the new offset;
-  `.forward 0` asks where it is). `File.flush` was there already.
+  `.forward 0` asks where it is; an offset above `INT64_MAX` is `EINVAL` — a `Nat` goes
+  to 2⁶⁴−1 but `off_t` is signed, and negating 2⁶³ would be signed-overflow UB).
+  `File.flush` was there already.
 * **Descriptors.** `foreign_type Fd`: an unbuffered POSIX descriptor, for terminals,
   pipes and devices, where a buffer would hide from `poll` what is waiting.
   `Fd.open path access flags` (`Access = read | write | readWrite`; `OpenFlags` with

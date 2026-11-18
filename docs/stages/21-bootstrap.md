@@ -220,7 +220,8 @@ extern "strlen" (header := "string.h") strlen : String → Nat
   for arity 0) that converts its arguments, calls the C function and converts the
   result back, in both modes (`rt_drop` releases an argument under reference counting).
   The headers are `#include`d once each; without one, a prototype is written from the
-  Wiz type, except for the runtime's own `wiz_…` functions (as `C.glue` does).
+  Wiz type, for every extern (the runtime's own `wiz_…` functions included, as
+  `C.glue` does).
 * **Runtime** (`rt.c`). The conversions (`rt_in_*`, `rt_out_*`), two new object kinds:
   `T_EXT`, a foreign pointer and its finalizer, and `T_RAW`, a 64-bit word (a `UInt64`
   or `Float64` whose top bit is set; smaller ones are scalars). Under reference counting
@@ -372,13 +373,15 @@ Parity with [9f](09-ffi.md) and the first half of 9g.
 * **`export "c_name" f (: T)?`** (`exportCmd`; `Foreign.exported`): the same checks and
   messages as `command.export` (the declaration exists, the optional type converts with
   its type, a C identifier, not exported twice, arguments `Nat`, `UInt64`, `Float64`,
-  `String`, `Bool`, a foreign pointer or a Wiz value, a result among those but not a
-  foreign pointer, or `Unit`, maybe in `IO`). The backend (`exportDocs`) writes a C
+  `String`, `Bool`, `Unit`, a foreign pointer or a Wiz value, a result among those but not
+  a foreign pointer, or `Unit`, maybe in `IO`). The backend (`exportDocs`) writes a C
   function `c_name` after the program's definitions, in both modes: C values become Wiz
   values (a `String` copied, a foreign pointer lent without a finalizer, a `Bool` from
   `int`), the definition's closure is applied (`get_f`, with the world for `IO`, whose
   result is the pair's first field), and the result is converted back (a `String` as a
-  `malloc`ed `char *` the caller frees, `rt_export_str`; `Unit` as `void`).
+  `malloc`ed `char *` the caller frees, `rt_export_str`; `Unit` as `void`). A `Unit`
+  parameter is not in the C prototype but is still a parameter of the Wiz closure, so
+  the wrapper passes `BOX(0)` at its place (`exportArgs`).
 
 Callbacks, `c_struct`, libraries and the handle functions came later (21q–21s).
 
@@ -419,8 +422,10 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   kinds of the callback's parameters, `/`, `!` if its result is in `IO`, and the result's
   kind. `Callback T` (a transparent definition in the self-hosted Prelude too) is `K[…]`.
   The signature has the same rules as an export's (`callSig` is now shared with
-  `exportCmd`, as `ffiCallSig` is in `Elab/Command.lean`): no erased or `Unit`
-  parameters, no functions, a result that isn't a foreign pointer. The same errors: the
+  `exportCmd`, as `ffiCallSig` is in `Elab/Command.lean`): no erased parameters, no
+  functions, a result that isn't a foreign pointer. A `Unit` parameter is kept as `v`
+  and is not in the function-pointer type; the trampoline supplies it (`BOX(0)`). The
+  same errors: the
   extern message now names c_structs and callbacks, and "a foreign function that takes a
   callback in IO must be in IO itself". A runtime native (`wiz_…`) takes closures, and any
   other value, as they are.

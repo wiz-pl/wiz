@@ -63,6 +63,21 @@ def sysBytesCases : List Case := [
           "y ← Fd.readExactly g 4", "say (gotShow x y)", "FS.removeAll d"]
           "250\n[250, 251, 252, 253, 254, 255]\nend\n253\n[252, 253]\nyes\neof after 2\n"
           sysBytesShow },
+    { name := "seek rejects an offset that does not fit in off_t (no signed-overflow UB, no narrowing)", run := fun _ =>
+        sysRun ["d ← FS.createTempDir", "f ← File.open (Path.join d \"bin\") \"w+\"",
+          "File.writeBytes f (Bytes.range 16)",
+          r#"e ← EIO.lift (File.seek f (.back (Nat.pow 2 63)))"#,
+          r#"say (match e with | .ok n => "seeked " ++ Nat.toString n | .error m => m)"#,
+          r#"e2 ← EIO.lift (File.seek f (.back (Nat.add (Nat.pow 2 63) 5)))"#,
+          r#"say (match e2 with | .ok n => "seeked " ++ Nat.toString n | .error m => m)"#,
+          "e3 ← EIO.lift (File.seek f (.start 18446744073709551615))",
+          r#"say (match e3 with | .ok n => "seeked " ++ Nat.toString n | .error m => m)"#,
+          "g ← Fd.open (Path.join d \"bin\") .read OpenFlags.none",
+          r#"e4 ← EIO.lift (Fd.seek g (.back (Nat.pow 2 63)))"#,
+          r#"say (match e4 with | .ok n => "seeked " ++ Nat.toString n | .error m => m)"#,
+          "File.close f", "Fd.close g", "FS.removeAll d"]
+          ("seek: Invalid argument\nseek: Invalid argument\nseek: Invalid argument\nseek: Invalid argument\n")
+          sysBytesShow },
     { name := "spawn options: directory, environment, process groups, try-wait", run := fun _ =>
         sysRun [r#"Env.set "WIZ_T_HOME" "set""#, r#"o ← Process.outputWith "sh" (.cons "-c" (.cons "pwd; echo $A $B; echo ${WIZ_T_HOME:-unset}" .nil)) "" (SpawnOptions.default |> SpawnOptions.inDir "/" |> SpawnOptions.setEnv "A" "x" |> SpawnOptions.setEnv "B" "y" |> SpawnOptions.setEnv "A" "z" |> SpawnOptions.unsetEnv "WIZ_T_HOME")"#,
           "EIO.lift (IO.print o.stdout)",

@@ -71,7 +71,7 @@ def optsDefault : Opts :=
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
 -- `cAccessFails`)
 
-extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
+extern "wiz_sys_write_file" cWriteFile : String → String → Bool → IO Nat
 -- the Lean-hosted `wiz`'s default cache is `~/.cache/wiz` (`Main.lean`); the driver has
 -- the same default. `wiz_sys_getenv` is the Lean runtime's (`runtime/rt_sys.inc`) and
 -- the selfhost runtime's (`rt.c`), so the driver builds with either.
@@ -102,7 +102,7 @@ def readIf (p : String) : IO (Option String) :=
     | .true => IO.bind (IO.readFile p) (fun t => someIO t))
 
 def writeFile (p text : String) : IO Bool :=
-  IO.bind (cWriteFile p text 0) (fun st => IO.pure (Nat.beq st 0))
+  IO.bind (cWriteFile p text .false) (fun st => IO.pure (Nat.beq st 0))
 
 -- ------------------------------------------------------------------------------------
 -- Strings and lists (the Prelude has few)

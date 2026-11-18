@@ -132,7 +132,9 @@ where
     | _ => acc
 
 /-- (9g) The signature of a function C calls (a callback, an exported function): the
-kinds of its parameters and result (letters), and whether the result is in `IO`. -/
+kinds of its parameters and result (letters), and whether the result is in `IO`. A
+`Unit` parameter is `'v'`: it is not in the C signature, but it is a runtime parameter of
+the Wiz closure, which the wrapper supplies (`WIZ_BOX(0)`). -/
 structure CallbackSig where
   params : List Char
   result : Char

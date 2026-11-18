@@ -34,6 +34,11 @@ WIZ_API char *wiz_in_string(wiz_val s) {
   return buf;
 }
 WIZ_API wiz_val wiz_out_string(const char *s) {
+  /* A foreign function's `char *` may be NULL (`C.strchr` on a missing byte, an unset
+     `C.getenv`, a failed `strdup`): it is the empty string, as in the struct marshaller
+     (`wiz_sout_N`). Nothing in docs/stages/09-ffi.md requires a result to be non-NULL,
+     and `strlen(NULL)` is a SIGSEGV in a legal program. */
+  if (!s) s = "";
   /* decode UTF-8 into code points, then build the list from the end */
   size_t n = strlen(s), k = 0;
   uint32_t *cps = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));

@@ -35,6 +35,25 @@ def callbacksGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (sumSquares 10))")
           "#include <stdint.h>\nuint64_t wiz_square(uint64_t);\nuint64_t sum_squares(uint64_t n) { uint64_t s = 0; for (uint64_t i = 1; i <= n; i++) s += wiz_square(i); return s; }\n"
           "385\n" },
+    { name := "a callback with a Unit parameter (borrowed, and Callback), and one after it", run := fun _ =>
+        ioRunC ("import IO\n" ++
+          "extern \"call_unit\" callUnit : (Unit → UInt64) → UInt64\n" ++
+          "extern \"call_unit_arg\" callUnitArg : (Unit → UInt64 → UInt64) → UInt64 → UInt64\n" ++
+          "extern \"keep_unit\" keepUnit : Callback (Unit → UInt64) → IO Unit\n" ++
+          "extern \"call_kept_unit\" callKeptUnit : IO UInt64\n" ++
+          "extern \"forget_unit\" forgetUnit : IO Unit\n" ++
+          "def show (n : UInt64) : IO Unit := IO.println (Nat.toString (UInt64.toNat n))\n" ++
+          "def main : IO Unit := do\n  show (callUnit (fun _ => 7));\n" ++
+          "  show (callUnitArg (fun _ n => UInt64.add n 1) 41);\n  keepUnit (fun _ => 9);\n" ++
+          "  r ← callKeptUnit;\n  show r;\n  forgetUnit")
+          unitCbHelper "7\n42\n9\n" },
+    { name := "an exported function with a Unit parameter (C calls Wiz)", run := fun _ =>
+        libRunC ("import IO\ndef g (_ : Unit) : UInt64 := 7\nexport \"wiz_g\" g\n" ++
+          "def g2 (_ : Unit) (n : UInt64) : UInt64 := UInt64.add n 1\nexport \"wiz_g2\" g2\n")
+          ("#include <stdio.h>\n#include \"lib.h\"\nint main(void) {\n" ++
+           "  printf(\"%llu\\n\", (unsigned long long)wiz_g());\n" ++
+           "  printf(\"%llu\\n\", (unsigned long long)wiz_g2(41));\n  return 0;\n}\n")
+          "7\n42\n" },
     { name := "a C program uses a Wiz library (wiz build --lib)", run := fun _ =>
         libRunC ("import IO\ndef fact : Nat → Nat\n  | .zero => 1\n  | .succ n => (n + 1) * fact n\n" ++
           "export \"wiz_fact\" fact\n" ++

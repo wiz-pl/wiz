@@ -9,7 +9,10 @@
 * **Case analysis.** `T.casesOn`'s method no longer threads the hypotheses through, and
   erasure applies such a method directly instead of computing them.
 * **Stack.** Compiled programs run on a thread with a 1 GB stack (`$WIZ_STACK_MB`), so
-  deep non-tail recursion (`sumTo 100000`) works.
+  deep non-tail recursion (`sumTo 100000`) works. Dropping or printing a value is
+  iterative (a work list), not one C frame per constructor cell: a list a million long
+  is dropped and printed without touching the stack (worth knowing at a smaller
+  `$WIZ_STACK_MB`: the old recursion was a SIGSEGV, exit 139, past `wiz_panic`).
 
 ## 12a (part 2): a standard library for systems code
 

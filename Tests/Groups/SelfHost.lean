@@ -646,8 +646,9 @@ def exportHeader : String :=
 
 def exportDecls : List (String × Bool) := [
   ("export \"ok_f\" f\nexport \"ok_f2\" f : Nat → Nat\n", true),
+  ("export \"ok_k\" k\n", true),
   ("export \"1x\" f\n", false), ("export \"ok_f\" nope\n", false), ("export \"ok_f\" f : Nat → Bool\n", false),
-  ("export \"ok_g\" g\n", false), ("export \"ok_h\" h\n", false), ("export \"ok_k\" k\n", false),
+  ("export \"ok_g\" g\n", false), ("export \"ok_h\" h\n", false),
   ("export \"ok_f\" f\nexport \"ok_f\" f\n", false), ("link_lib \"-lm\"\n", false)]
 
 /-- (stages 21q–t) `selfhostAgrees` for declarations that need `import IO` in the Lean
@@ -698,9 +699,44 @@ def callbackDecls : List (String × Bool) := [
      "extern \"f3\" f3 : Callback (Nat → IO Bool) → IO Unit\nextern \"f4\" f4 : (FILE → Float64) → Nat → Nat\n", true),
   ("extern \"g1\" g1 : (Nat → IO Unit) → Nat\n", false),
   ("extern \"g2\" g2 : ((Nat → Nat) → Nat) → Nat\n", false),
-  ("extern \"g3\" g3 : (Unit → Nat) → Nat\n", false),
-  ("extern \"g4\" g4 : (Nat → FILE) → Nat\n", false),
-  ("extern \"g5\" g5 : Callback ((Nat → Nat) → Nat) → IO Unit\n", false)]
+  ("extern \"g3\" g3 : (Unit → Nat) → Nat\nextern \"g4\" g4 : (Nat → Unit) → Nat\n", true),
+  ("extern \"g5\" g5 : (Nat → FILE) → Nat\n", false),
+  ("extern \"g6\" g6 : Callback ((Nat → Nat) → Nat) → IO Unit\n", false)]
+
+/-- (9g) `Unit` parameters across the FFI, for both compilers: C calls exported
+`Unit → UInt64` and `Unit → UInt64 → UInt64`, Wiz passes a borrowed callback of each
+shape and a `Callback (Unit → UInt64)` kept by C. Prints `7 42 47 9`. -/
+def unitFiles : List (String × String) :=
+  [("main.wiz", "import IO\nlink_c \"c/u.c\"\n" ++
+      "def g (_ : Unit) : UInt64 := UInt64.ofNat 7\n" ++
+      "def g2 (_ : Unit) (n : UInt64) : UInt64 := UInt64.add n (UInt64.ofNat 1)\n" ++
+      "export \"ex_g\" g\nexport \"ex_g2\" g2\n" ++
+      "extern \"call_g\" callG : Unit → UInt64\nextern \"call_g2\" callG2 : Unit → UInt64 → UInt64\n" ++
+      "extern \"each\" each : (Unit → UInt64) → (Unit → UInt64 → UInt64) → UInt64\n" ++
+      "extern \"keep_g\" keepG : Callback (Unit → UInt64) → IO Unit\n" ++
+      "extern \"call_kept\" callKept : IO UInt64\nextern \"forget_g\" forgetG : IO Unit\n" ++
+      "def show (n : UInt64) : IO Unit := IO.println (Nat.toString (UInt64.toNat n))\n" ++
+      "def main : IO Unit := do\n  show (callG ());\n  show (callG2 () (UInt64.ofNat 41));\n" ++
+      "  show (each (fun _ => UInt64.ofNat 5) (fun _ n => UInt64.add n (UInt64.ofNat 2)));\n" ++
+      "  keepG (fun _ => UInt64.ofNat 9);\n  r ← callKept;\n  show r;\n  forgetG\n"),
+   ("c/u.c", "#include <stdint.h>\nvoid wiz_release(void *v);\n" ++
+      "uint64_t ex_g(void);\nuint64_t ex_g2(uint64_t);\n" ++
+      "uint64_t call_g(void) { return ex_g(); }\n" ++
+      "uint64_t call_g2(uint64_t n) { return ex_g2(n); }\n" ++
+      "uint64_t each(uint64_t (*f)(void *), void *fc, uint64_t (*g)(void *, uint64_t), void *gc) { return f(fc) + g(gc, 40); }\n" ++
+      "static uint64_t (*saved)(void *); static void *saved_ctx;\n" ++
+      "void keep_g(uint64_t (*f)(void *), void *ctx) { saved = f; saved_ctx = ctx; }\n" ++
+      "uint64_t call_kept(void) { return saved(saved_ctx); }\n" ++
+      "void forget_g(void) { if (saved_ctx) wiz_release(saved_ctx); saved_ctx = 0; }\n")]
+
+def unitExpected : String := "7\n42\n47\n9\n"
+
+/-- (9g) A user C function named `wiz_*` (no header): every extern gets a prototype, so
+the call is not implicitly declared as returning `int`. -/
+def wizNameFiles : List (String × String) :=
+  [("main.wiz", "import IO\nlink_c \"c/tri.c\"\nextern \"wiz_triple\" tri : Nat → Nat\n" ++
+      "def main : IO Unit := IO.println (Nat.toString (tri 4000000000))\n"),
+   ("c/tri.c", "#include <stdint.h>\nuint64_t wiz_triple(uint64_t x) { return 3 * x; }\n")]
 
 /-- (stage 21r) Structs by value: `div_t` from a header, a struct defined from its fields
 (numbers, a `Float64`, a `Bool`, a string) passed and returned, and one nesting it. -/
@@ -1823,6 +1859,12 @@ def selfHostGroup : Group where
         selfhostCompileRun selfhostProgram1 "6765\n5050\n1989\n2\nyes, ünïcode\n2\n5\n" (flags := #["--rc"]) },
     { name := "reference counting: deep lists, unused parameters and hypotheses, shared arrays, closures", run := fun _ =>
         selfhostCompileRun selfhostProgram2 "1000000\n0\n6\n15\n5\n3\n" (flags := #["--rc"]) },
+    { name := "dropping a long list is not one C frame per cell: 1M cells on a 1 MB stack, with the GC and with RC (21b)", run := fun _ => do
+        let prog := "import Prelude\npartial def build (n : Nat) (acc : List Nat) : List Nat := match n with\n  | .zero => acc\n" ++
+          "  | .succ k => build k (List.cons k acc)\ndef ignore (xs : List Nat) (n : Nat) : Nat := n\n" ++
+          "def main : IO Unit := IO.println (Nat.toString (ignore (build 1000000 .nil) 7))\n"
+        selfhostCompileRun prog "7\n" (smallStack := true)
+        selfhostCompileRun prog "7\n" (flags := #["--rc"]) (smallStack := true) },
     { name := "the first-line pragma `-- wiz: rc` still selects reference counting (a fallback, 21k)", run := fun _ =>
         selfhostCompileRun ("-- wiz: rc\n" ++ selfhostProgram2) "1000000\n0\n6\n15\n5\n3\n" },
     { name := "self tail calls are loops: 10M iterations on a 1 MB stack, at -O0, with the GC and with RC (15f)", run := fun _ => do
@@ -1974,6 +2016,15 @@ def selfHostGroup : Group where
         linkRun (callbackFiles true) callbackExpected
         selfhostLinkRun (callbackFiles true) callbackExpected
         selfhostLinkRun (callbackFiles true) callbackExpected (flags := #["--rc"]) },
+    { name := "Unit parameters across the FFI (export, extern and Callback), the Lean and the self-hosted compilers agree (9g)", run := fun _ => do
+        linkRun unitFiles unitExpected
+        linkRun unitFiles unitExpected (llvm := true)
+        selfhostLinkRun unitFiles unitExpected
+        selfhostLinkRun unitFiles unitExpected (flags := #["--rc"]) },
+    { name := "a user's wiz_-prefixed extern gets a prototype, in both compilers (9g)", run := fun _ => do
+        linkRun wizNameFiles "12000000000\n"
+        selfhostLinkRun wizNameFiles "12000000000\n"
+        selfhostLinkRun wizNameFiles "12000000000\n" (flags := #["--rc"]) },
     { name := "a kept callback that C never releases is a leak, in both compilers (21q)", run := fun _ => do
         let files := callbackFiles false
         ioRunC ((files.lookup "main.wiz").get!.replace "link_c \"c/cb.c\"\n" "") (files.lookup "c/cb.c").get! "" (fails := some "leaked")

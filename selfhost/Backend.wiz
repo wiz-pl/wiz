@@ -1882,7 +1882,9 @@ def genCode : CG → List Doc → List Doc → List Erased → Code
 -- (under reference counting: its last reference; under the collector: when it is
 -- collected, or at exit). Like any function it owns its arguments; a foreign pointer is
 -- lent to C for the call and released after it. Without a header, a prototype is
--- written from the Wiz type (except for the runtime's own `wiz_…` functions).
+-- written from the Wiz type (for every extern, the runtime's own `wiz_…` functions
+-- included: a duplicate identical declaration next to `rt.c`'s definition is legal,
+-- and a user `link_c` function named `wiz_…` no longer goes without one).
 def ffiArity (ps : List String) (io : Bool) : Nat := lenL ps + (match io with
   | .true => 1
   | .false => 0)
@@ -1954,9 +1956,12 @@ def cbName (c : CbSig) : String := match c with
   | .mk _ ps r io => "wiz_cb_" +++ joinStrs ps +++ "_" +++ (match io with
     | .true => "io_"
     | .false => "") +++ r
+-- the C types of the parameters C sees (no `v`/`e`: a `Unit` is not passed)
 def ffiCTypes : List String → List String
   | .nil => .nil
-  | .cons k rest => .cons (ffiCType k) (ffiCTypes rest)
+  | .cons k rest => match Bool.or (strEq k "v") (strEq k "e") with
+    | .true => ffiCTypes rest
+    | .false => .cons (ffiCType k) (ffiCTypes rest)
 -- the C type of its function pointer
 def cbPtrType (c : CbSig) : String := match c with
   | .mk _ ps r _ => ffiCTypeOut r +++ " (*)(" +++ commaSep (.cons "void *" (ffiCTypes ps)) +++ ")"
@@ -2140,9 +2145,11 @@ partial def ffiDecls (ffi : List Foreign) (seen : List String) : List Foreign �
       | .false => match elemS header seen with
         | .true => ffiDecls ffi seen rest
         | .false => .cons (.t ("#include <" +++ header +++ ">")) (ffiDecls ffi (.cons header seen) rest)
-      | .true => match Bool.or (strStarts "wiz_" cname) (elemS cname seen) with
+      | .true => match elemS cname seen with
         | .true => ffiDecls ffi seen rest
         | .false =>
+          -- (a runtime native is defined above in `rt.c`; a user's `wiz_…` function from
+          -- `link_c` is not — an implicit declaration would assume `int` and truncate)
           let pts := ffiProtoParams ffi ps;
           .cons (.t ("extern " +++ extCType ffi r +++ " " +++ cname +++ "(" +++ (match pts with
             | .nil => "void"
@@ -2168,7 +2175,10 @@ def exportArgs : Nat → List String → List String
   | _, .nil => .nil
   | i, .cons k rest =>
     let c := "c" +++ Nat.toString i;
-    .cons (match strEq k "s" with
+    .cons (match strEq k "v" with
+      -- a `Unit` parameter is not in the C signature; the Wiz closure still takes it
+      | .true => "BOX(0)"
+      | .false => match strEq k "s" with
       | .true => "rt_out_str(" +++ c +++ ")"
       | .false => match strEq k "p" with
       | .true => "rt_out_ptr(" +++ c +++ ", NULL)"
@@ -2183,7 +2193,12 @@ def exportArgs : Nat → List String → List String
       | .false => "rt_out_nat(" +++ c +++ ")") (exportArgs (i + 1) rest)
 def exportParams : Nat → List String → List String
   | _, .nil => .nil
-  | i, .cons k rest => .cons (ffiCType k +++ " c" +++ Nat.toString i) (exportParams (i + 1) rest)
+  | i, .cons k rest =>
+    -- (`v`/`e`: not in C, so they keep their index but declare nothing)
+    let here : List String := match Bool.or (strEq k "v") (strEq k "e") with
+      | .true => .nil
+      | .false => .cons (ffiCType k +++ " c" +++ Nat.toString i) .nil;
+    List.append here (exportParams (i + 1) rest)
 def exportResult (k : String) : String := match strEq k "v" with
   | .true => "rt_drop(r); "
   | .false => match strEq k "s" with
@@ -2277,9 +2292,14 @@ def exportDocs (rc : Bool) : List Foreign → List Doc
 -- `C.lean`: the handle functions and a prototype per export.
 def headerParams : Nat → List String → List String
   | _, .nil => .nil
-  | i, .cons k rest => .cons ((match strEq k "w" with
-    | .true => "wiz_val"
-    | .false => ffiCType k) +++ " a" +++ Nat.toString i) (headerParams (i + 1) rest)
+  | i, .cons k rest =>
+    -- (a `Unit` parameter is not in the C prototype; see `exportParams`)
+    let here : List String := match Bool.or (strEq k "v") (strEq k "e") with
+      | .true => .nil
+      | .false => .cons ((match strEq k "w" with
+        | .true => "wiz_val"
+        | .false => ffiCType k) +++ " a" +++ Nat.toString i) .nil;
+    List.append here (headerParams (i + 1) rest)
 def headerProtos : List Foreign → List Doc
   | .nil => .nil
   | .cons f rest => match f with

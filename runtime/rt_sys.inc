@@ -777,10 +777,20 @@ WIZ_API uint64_t wiz_sys_file_write_bytes(void *p, wiz_val v) {
 /* whence 0 from the start, 1 from here, 2 from the end; `back`: the offset is negative.
    The new offset from the start. */
 static int wiz_sys_whence(uint64_t w) { return w == 0 ? SEEK_SET : w == 1 ? SEEK_CUR : SEEK_END; }
+/* A Wiz `Nat` offset as an `off_t`: a magnitude above `INT64_MAX` is EINVAL, not a
+   narrowing conversion (implementation-defined, negative) and, for 2^63, not
+   `-INT64_MIN` (signed-overflow UB, which -O2 may exploit). `Nat` reaches 2^64-1. */
+static int wiz_sys_offset(uint64_t off, int back, off_t *o) {
+  if (off > (uint64_t)INT64_MAX) return EINVAL;
+  *o = back ? -(off_t)off : (off_t)off;
+  return 0;
+}
 WIZ_API uint64_t wiz_sys_file_seek(void *p, uint64_t whence, uint64_t off, int back) {
   wiz_sys_file *h = (wiz_sys_file *)p;
   if (!h->f) { wiz_sys_err = EBADF; return 0; }
-  off_t o = back ? -(off_t)off : (off_t)off;
+  off_t o;
+  int e = wiz_sys_offset(off, back, &o);
+  if (e) { wiz_sys_err = e; return 0; }
   if (fseeko(h->f, o, wiz_sys_whence(whence)) < 0) { wiz_sys_err = errno; return 0; }
   off_t at = ftello(h->f);
   wiz_sys_err = at < 0 ? errno : 0;
@@ -952,7 +962,10 @@ WIZ_API uint64_t wiz_sys_fd_wait(void *p, uint64_t events, int timed, uint64_t n
 WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int back) {
   wiz_sys_fdh *h = (wiz_sys_fdh *)p;
   if (h->fd < 0) { wiz_sys_err = EBADF; return 0; }
-  off_t at = lseek(h->fd, back ? -(off_t)off : (off_t)off, wiz_sys_whence(whence));
+  off_t o;
+  int e = wiz_sys_offset(off, back, &o);
+  if (e) { wiz_sys_err = e; return 0; }
+  off_t at = lseek(h->fd, o, wiz_sys_whence(whence));
   wiz_sys_err = at < 0 ? errno : 0;
   return at < 0 ? 0 : (uint64_t)at;
 }
@@ -1002,15 +1015,44 @@ WIZ_API wiz_val wiz_sys_fd_poll(wiz_val fds, wiz_val events, int timed, uint64_t
 
 /* ---- output: a generic tree, read back by the compiler using the type ---- */
 
+/* Print a value: iteratively, with a work list, so a long list is one entry per cell
+   rather than one C frame per cell (printing it and then dropping it must not overflow
+   the stack; see `wiz_free`). */
+typedef struct { wiz_val v; unsigned char what; } wiz_print_item;
+
 static void wiz_print(wiz_val v) {
-  if (WIZ_IS_SCALAR(v)) { printf("%lu", (unsigned long)WIZ_UNBOX(v)); return; }
-  wiz_hdr *h = (wiz_hdr *)v;
-  if (h->tag == WIZ_TAG_BIG) { mpz_out_str(stdout, 10, ((wiz_big *)v)->z); return; }
-  if (h->tag == WIZ_TAG_CLO || h->tag == WIZ_TAG_THUNK) { printf("<fn>"); return; }
-  if (h->tag == WIZ_TAG_RAW) { printf("#%llu", (unsigned long long)wiz_raw_bits(v)); return; }
-  printf("(%u", h->tag);
-  for (uint32_t i = 0; i < h->size; i++) { putchar(' '); wiz_print(((wiz_ctor *)v)->fields[i]); }
-  putchar(')');
+  wiz_print_item small[32];
+  wiz_print_item *st = small;
+  size_t cap = 32, n = 0;
+  int heap = 0;
+#define WIZ_PRINT_PUSH(x, w) do { \
+    if (n == cap) { \
+      size_t ncap_ = 2 * cap; \
+      wiz_print_item *ns_ = (wiz_print_item *)malloc(ncap_ * sizeof *ns_); \
+      if (!ns_) wiz_panic("out of memory"); \
+      memcpy(ns_, st, n * sizeof *st); \
+      if (heap) free(st); \
+      st = ns_; cap = ncap_; heap = 1; \
+    } \
+    st[n].v = (x); st[n].what = (w); n++; } while (0)
+  WIZ_PRINT_PUSH(v, 0);
+  while (n) {
+    wiz_print_item it = st[--n];
+    if (it.what == 2) { putchar(')'); continue; }
+    if (it.what == 1) putchar(' ');
+    wiz_val x = it.v;
+    if (WIZ_IS_SCALAR(x)) { printf("%lu", (unsigned long)WIZ_UNBOX(x)); continue; }
+    wiz_hdr *h = (wiz_hdr *)x;
+    if (h->tag == WIZ_TAG_BIG) { mpz_out_str(stdout, 10, ((wiz_big *)x)->z); continue; }
+    if (h->tag == WIZ_TAG_CLO || h->tag == WIZ_TAG_THUNK) { printf("<fn>"); continue; }
+    if (h->tag == WIZ_TAG_RAW) { printf("#%llu", (unsigned long long)wiz_raw_bits(x)); continue; }
+    printf("(%u", h->tag);
+    /* the closing paren after the fields, each field preceded by a space */
+    WIZ_PRINT_PUSH(0, 2);
+    for (uint32_t i = h->size; i > 0; i--) WIZ_PRINT_PUSH(((wiz_ctor *)x)->fields[i - 1], 1);
+  }
+#undef WIZ_PRINT_PUSH
+  if (heap) free(st);
 }
 
 /* WIZ_SET as a function, for the LLVM backend */

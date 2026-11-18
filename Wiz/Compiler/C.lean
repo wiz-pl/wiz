@@ -216,10 +216,13 @@ def cOfWiz (k : Char) (x : String) : String := match k with
   | _ => x
 
 /-- The body of a C function that applies the closure `f` (an owned `wiz_val`
-expression) to its parameters `a0 …` of the signature `c`. -/
+expression) to its parameters `a0 …` of the signature `c`. A `'v'` (`Unit`) parameter is
+not in the C signature, but the Wiz function still takes it (erasure keeps the binder),
+so the call supplies `WIZ_BOX(0)` at its position. -/
 def callIntoWiz (c : RVal.CallbackSig) (f : String) : String :=
   let n := c.params.length + (if c.io then 1 else 0)
-  let args := (c.params.zipIdx.map fun (k, i) => wizOfC k s!"a{i}") ++ (if c.io then ["WIZ_BOX(0)"] else [])
+  let args := (c.params.zipIdx.map fun (k, i) =>
+    if k == 'v' || k == 'e' then "WIZ_BOX(0)" else wizOfC k s!"a{i}") ++ (if c.io then ["WIZ_BOX(0)"] else [])
   let call := if n == 0 then s!"  wiz_val r = {f};\n"
     else s!"  wiz_val f = {f};\n  wiz_val args[{n}] = {lb}{", ".intercalate args}{rb};\n  wiz_val r = wiz_apply(f, {n}, args);\n"
   let io := if c.io then "  r = wiz_io_value(r);\n" else ""
@@ -229,8 +232,15 @@ where
   lb := "{"
   rb := "}"
 
+/-- The C parameters of a signature: positions of `'v'`/`'e'` kinds are not in C (a
+`Unit` argument is `void`, which cannot be named); the rest keep their index. -/
 def cParams (c : RVal.CallbackSig) : List String :=
-  c.params.zipIdx.map fun (k, i) => s!"{ctypeIn k} a{i}"
+  c.params.zipIdx.filterMap fun (k, i) =>
+    if k == 'v' || k == 'e' then (none : Option String) else some s!"{ctypeIn k} a{i}"
+
+/-- The C types of the parameters C sees (no `'v'`/`'e'`). -/
+def cParamTypes (c : RVal.CallbackSig) : List String :=
+  c.params.filter (fun k => k != 'v' && k != 'e') |>.map ctypeIn
 
 /-- The trampoline of a callback signature: C calls it with the context first. -/
 def trampoline (c : RVal.CallbackSig) : String :=
@@ -245,11 +255,12 @@ where
 
 /-- The C type of a callback's function pointer. -/
 def callbackType (c : RVal.CallbackSig) : String :=
-  s!"{ctypeOut c.result} (*)({", ".intercalate ("void *" :: c.params.map ctypeIn)})"
+  s!"{ctypeOut c.result} (*)({", ".intercalate ("void *" :: cParamTypes c)})"
 
-/-- An exported function's C prototype. -/
+/-- An exported function's C prototype: a `Unit` parameter is not in C. -/
 def exportProto (sig : RVal.ExternSig) : String :=
-  let ps := (sig.params.zipIdx.map fun (k, i) => s!"{ctypeIn k.letter} a{i}")
+  let ps := sig.params.zipIdx.filterMap fun (k, i) =>
+    if k.letter == 'v' || k.letter == 'e' then (none : Option String) else some s!"{ctypeIn k.letter} a{i}"
   s!"{ctypeOut sig.result.letter} {sig.cname}({if ps.isEmpty then "void" else ", ".intercalate ps})"
 
 /-- The IR function that gives an exported function's closure. -/
@@ -301,7 +312,10 @@ def glue (keys : Array Name) (before : String := "") (unbox : Bool := false) : S
         unless cbs.contains t do cbs := cbs.push t
   out := out ++ String.join cbs.toList
   for (key, sig) in sigs do
-    if sig.header == "" && !sig.cname.startsWith "wiz_" then
+    -- (a runtime native is defined above, in this translation unit; a user's `wiz_…`
+    -- function from `link_c` is not, and gets a prototype like any other extern: an
+    -- implicit declaration would assume `int`, which truncates a 64-bit result)
+    if sig.header == "" then
       let ps := sig.params.filter (fun k => k != .k 'v' && k != .k 'e') |>.flatMap fun k =>
         if k == .k 'y' then ["const void *", "size_t"]
         else if let .callback _ c := k then [callbackType c, "void *"] else [ftype k]

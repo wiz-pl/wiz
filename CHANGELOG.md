@@ -10,6 +10,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* ffi (9g): a `Unit` parameter of an exported function or a callback is no longer
+  rejected, and is marshalled correctly: it is not in the C prototype (`export "g" g`
+  for `g : Unit → UInt64` is `uint64_t g(void)`) but it is a runtime parameter of the
+  Wiz closure, so the wrapper supplies it instead of applying the closure one argument
+  short (which returned the closure's `fn` word, or a partial application). Fixed in
+  both frontends (`Command.lean`, `Frontend.wiz`) and both backends (`C.lean`,
+  `Backend.wiz`), with `export`, `extern` and `Callback` tests that check the returned
+  values.
+* ffi (9a): a NULL `char *` from C is the empty string everywhere (`wiz_out_string`
+  guards it, as the struct marshaller already did): `C.strchr "abc" 122` and a
+  `C.getenv` of an unset variable no longer reach `strlen(NULL)` (a SIGSEGV); a
+  `const char *` result of a `link_c` function is covered too.
+* runtime (9k): `File.seek`/`Fd.seek` reject an offset above `INT64_MAX` with `EINVAL`
+  instead of narrowing it (implementation-defined) or negating 2^63 (`-INT64_MIN` is
+  signed-overflow UB); `Nat` offsets reach 2^64-1.
+* runtime: dropping a value (`wiz_free`) and printing one (`wiz_print`) use a work list
+  instead of one C frame per constructor cell, like `wiz_immortal`/`wiz_mark_mt`
+  already did: a long list dropped or printed at a small `$WIZ_STACK_MB` is no longer a
+  stack overflow (exit 139, past `wiz_panic`). `scripts/test-runtime.sh` drops and
+  prints a million-cell list on a 1 MB stack in both ABI settings.
+* ffi (9a): every extern without a header gets a prototype, including a user `link_c`
+  function named `wiz_*` (previously suppressed as if it were a runtime native: an
+  implicit declaration assumed an `int` result and truncated it).
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal

@@ -81,6 +81,25 @@ def ffiGroup : Group where
     { name := "import_c binds a header's functions", run := fun _ =>
         ioRun ("import IO\nimport_c \"string.h\"\nimport_c \"stdlib.h\" (pure)\ndef main : IO Unit := do\n" ++
           "  n ← C.strlen \"hello, world\";\n  IO.println (Nat.toString n);\n  IO.println (Nat.toString (C.atoi \"42\"))") "12\n42\n" },
+    { name := "a NULL char* result from C is the empty string (C.strchr on a missing byte, C.getenv on an unset variable)", run := fun _ => do
+        let src := "import IO\nimport Text\nimport_c \"string.h\"\nimport_c \"stdlib.h\" (pure)\n" ++
+          "def main : IO Unit := do\n" ++
+          "  s ← C.strchr \"abc\" 122;\n" ++
+          "  IO.println (Nat.toString (String.length s));\n" ++
+          "  IO.println (Nat.toString (String.length (C.getenv \"WIZ_NO_SUCH_VARIABLE_5e1\")))"
+        ioRun src "0\n0\n"
+        ioRun src "0\n0\n" (llvm := true) },
+    { name := "a NULL char* from a foreign function is the empty string (a Unit parameter is not passed to C)", run := fun _ =>
+        ioRunC ("import IO\nextern \"nil_str\" nil : Unit → String\n" ++
+          "def main : IO Unit := do\n  IO.print \"seventeen\";\n  IO.print (nil ());\n  IO.println \"thousand\"")
+          "#include <stdint.h>\nconst char *nil_str(void) { return 0; }\n" "seventeenthousand\n" },
+    { name := "link_c: an extern named wiz_* gets a prototype (no implicit declaration)", run := fun _ => do
+        let files : List (String × String) :=
+          [("main.wiz", "import IO\nlink_c \"c/tri.c\"\nextern \"wiz_triple\" tri : Nat → Nat\n" ++
+             "def main : IO Unit := IO.println (Nat.toString (tri 4000000000))\n"),
+           ("c/tri.c", "#include <stdint.h>\nuint64_t wiz_triple(uint64_t x) { return 3 * x; }\n")]
+        linkRun files "12000000000\n"
+        linkRun files "12000000000\n" (llvm := true) },
     { name := "the C subset parser (Exercise 9.1)", run := fun _ => do
         let fs := FFI.parseHeader "typedef unsigned long size_t;\nextern size_t strlen (const char *__s) __attribute__ ((__pure__));\nstruct S { int x; };\ntypedef int (*cmp_t)(const void *, const void *);\nvoid qsort(void *b, size_t n, size_t s, cmp_t c);\nstatic inline int twice(int x) { return 2 * x; }\nint printf(const char *f, ...);"
         checkEq "[strlen, qsort, twice, printf]" (toString (fs.toList.map (·.name)))

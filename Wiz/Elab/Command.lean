@@ -1544,14 +1544,13 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | (.const "IO" _, [A]) => (true, A)
     | _ => (false, res)
   -- (9g) a function that C calls: Wiz values come in (`n u f s b p w`) and go out
-  -- (`n u f s b v w`); none erased, none a callback
+  -- (`n u f s b v w`); none erased, none a callback. A `Unit` parameter stays here as
+  -- `v`: it is not in the C signature (`void` cannot be named), but the Wiz closure takes
+  -- it, so the wrapper supplies it (`callIntoWiz`)
   let ffiCallSig (ty : Term R) : Option RVal.CallbackSig := do
     let (ps, res) := ffiParams ty
     let (io, res) := ffiIO res
-    let ks ← ps.mapM fun (q, A) => if q == .qlit 0 then none else
-      match ffiKind A with
-      | some 'v' => none
-      | k => k
+    let ks ← ps.mapM fun (q, A) => if q == .qlit 0 then none else ffiKind A
     let rk ← match ffiKind res with
       | some 'p' => none
       | k => k
@@ -2637,7 +2636,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           report .error (cmd.getArg 1).info s!"{cname} is exported already"
         else match ffiCallSig ty with
           | none =>
-            report .error cmd.info "an exported function's arguments must be Nat, UInt64, Float64, String, Bool, a foreign pointer or a Wiz data type, and its result one of those (not a foreign pointer) or Unit, maybe in IO"
+            report .error cmd.info "an exported function's arguments must be Nat, UInt64, Float64, String, Bool, Unit, a foreign pointer or a Wiz data type, and its result one of those (not a foreign pointer) or Unit, maybe in IO"
           | some c =>
             let key : Name := s!"export:{cname}:{String.ofList c.params}:{c.result}:{if c.io then "io" else "pure"}"
             modify fun s => { s with builtins := (key, f) :: s.builtins }

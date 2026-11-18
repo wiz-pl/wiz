@@ -6455,8 +6455,9 @@ def extKind (ffi : List Foreign) (native : Bool) (t : Tm) : Option String := mat
       | .true => .some "w"
       | .false => .none
 -- (stage 21q) The signature of a function C calls, a callback or an export, as
--- `ffiCallSig` in `Elab/Command.lean`: the kinds of its parameters (none erased, none
--- `Unit`), of its result (not a foreign pointer), and whether the result is in `IO`.
+-- `ffiCallSig` in `Elab/Command.lean`: the kinds of its parameters (none erased; `Unit`
+-- stays as `v`, a runtime parameter of the Wiz closure that C does not pass), of its
+-- result (not a foreign pointer), and whether the result is in `IO`.
 inductive CallSig where
   | mk (params : List String) (res : String) (io : Bool)
   | bad
@@ -6489,11 +6490,9 @@ def callSigPi (ffi : List Foreign) (q : Q) (a b : Tm) : CallSig := match qEq q .
   | .true => .bad
   | .false => match ffiKind ffi a with
     | .none => .bad
-    | .some k => match strEq k "v" with
-      | .true => .bad
-      | .false => match callSig ffi b with
-        | .mk ks r io => .mk (.cons k ks) r io
-        | .bad => .bad
+    | .some k => match callSig ffi b with
+      | .mk ks r io => .mk (.cons k ks) r io
+      | .bad => .bad
 end
 def joinStrs : List String → String
   | .nil => ""
@@ -6683,7 +6682,7 @@ def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
         -- (the kinds of a function C calls: as a callback's, `callSig`)
         | .false => match callSig (Globals.ffi gs) ty with
           | .mk ks r io => LinkR.mk .none (Globals.addFFI gs (.exported (globalKeyOf gs f) cname ks r io))
-          | .bad => err "an exported function's arguments must be Nat, UInt64, Float64, String, Bool, a foreign pointer or a Wiz data type, and its result one of those (not a foreign pointer) or Unit, maybe in IO"
+          | .bad => err "an exported function's arguments must be Nat, UInt64, Float64, String, Bool, Unit, a foreign pointer or a Wiz data type, and its result one of those (not a foreign pointer) or Unit, maybe in IO"
 -- (stage 21t) `attribute [implemented_by g] f` (`command.attrImplementedBy`): compiled
 -- code runs `g` wherever it would run `f`; the kernel keeps `f`'s definition. The Lean
 -- frontend's checks and messages; a native representation (`implemented_by mk get` on

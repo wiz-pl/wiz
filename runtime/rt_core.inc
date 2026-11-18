@@ -105,50 +105,83 @@ WIZ_API void wiz_dec(wiz_val v) {
   else if (rc < 0 && __atomic_add_fetch(&h->rc, 1, __ATOMIC_ACQ_REL) == 0) wiz_free(v);
 }
 
+/* Free `v`, and everything it owns, with a work list: a long list is one entry per cell,
+   not one C frame per cell, so dropping it cannot overflow the stack (a SIGSEGV, exit
+   139, bypassing `wiz_panic`). `wiz_immortal` and `wiz_mark_mt` traverse iteratively for
+   the same reason. `WIZ_FREE_PUSH` is `wiz_dec`'s ownership rule, leaving the object to
+   the loop instead of calling `wiz_free` recursively. */
 static void wiz_free(wiz_val v) {
-  wiz_hdr *h = (wiz_hdr *)v;
-  if (h->tag == WIZ_TAG_CLO) {
-    wiz_clo *c = (wiz_clo *)v;
-    for (uint32_t i = 0; i < h->size; i++) wiz_dec(c->args[i]);
-  } else if (h->tag == WIZ_TAG_BIG) {
-    mpz_clear(((wiz_big *)v)->z);
-  } else if (h->tag == WIZ_TAG_RAW) {
-    /* raw machine words: nothing inside to drop */
-  } else if (h->tag == WIZ_TAG_EXT) {
-    wiz_ext *e = (wiz_ext *)v;
-    if (e->fin && e->ptr) e->fin(e->ptr);
-  } else if (h->tag == WIZ_TAG_BYTES) {
-    free(((wiz_bytes *)v)->data);
-  } else if (h->tag == WIZ_TAG_ARRAY) {
-    wiz_array *a = (wiz_array *)v;
-    for (size_t i = 0; i < a->len; i++) wiz_dec(a->data[i]);
-    free(a->data);
-  } else if (h->tag == WIZ_TAG_STR) {
-    /* the text is inline */
-  } else if (h->tag == WIZ_TAG_THUNK) {
-    wiz_thunk *t = (wiz_thunk *)v;
-    if (t->fn) wiz_dec(t->fn); else wiz_dec(t->val);
-  } else if (h->tag == WIZ_TAG_MAP) {
-    wiz_map *m = (wiz_map *)v;
-    for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { wiz_dec(m->keys[i]); wiz_dec(m->vals[i]); }
-    free(m->keys); free(m->vals);
-  } else if (h->tag == WIZ_TAG_WARRAY) {
-    free(((wiz_warray *)v)->data);
-  } else if (h->tag == WIZ_TAG_WMAP) {
-    wiz_wmap *m = (wiz_wmap *)v;
-    for (size_t i = 0; i < m->cap; i++) if (m->vals[i]) wiz_dec(m->vals[i]);
-    free(m->keys); free(m->vals);
-  } else if (h->tag == WIZ_TAG_ITAB) {
-    wiz_itab *t = (wiz_itab *)v;
-    for (size_t i = 0; i < t->count; i++) wiz_dec(t->strs[i]);
-    free(t->strs); free(t->hashes); free(t->slots);
-  } else {
-    wiz_ctor *o = (wiz_ctor *)v;
-    for (uint32_t i = 0; i < h->size; i++) wiz_dec(o->fields[i]);
+  wiz_val small[32];
+  wiz_val *st = small;
+  size_t cap = 32, n = 0;
+  int heap = 0;
+  st[n++] = v;
+#define WIZ_FREE_PUSH(x) do { wiz_val y_ = (x); \
+    if (wiz_watch) wiz_watch_log("dec", y_, __builtin_return_address(0)); \
+    if (!WIZ_IS_SCALAR(y_)) { \
+      wiz_hdr *h_ = (wiz_hdr *)y_; \
+      int64_t rc_ = WIZ_RC(h_); \
+      if (rc_ > 1) h_->rc = rc_ - 1; \
+      else if (rc_ == 1 || (rc_ < 0 && __atomic_add_fetch(&h_->rc, 1, __ATOMIC_ACQ_REL) == 0)) { \
+        if (n == cap) { \
+          size_t ncap_ = 2 * cap; \
+          wiz_val *ns_ = (wiz_val *)malloc(ncap_ * sizeof(wiz_val)); \
+          if (!ns_) wiz_panic("out of memory"); \
+          memcpy(ns_, st, n * sizeof(wiz_val)); \
+          if (heap) free(st); \
+          st = ns_; cap = ncap_; heap = 1; \
+        } \
+        st[n++] = y_; \
+      } \
+    } } while (0)
+  while (n) {
+    wiz_val x = st[--n];
+    wiz_hdr *h = (wiz_hdr *)x;
+    if (h->tag == WIZ_TAG_CLO) {
+      wiz_clo *c = (wiz_clo *)x;
+      for (uint32_t i = 0; i < h->size; i++) WIZ_FREE_PUSH(c->args[i]);
+    } else if (h->tag == WIZ_TAG_BIG) {
+      mpz_clear(((wiz_big *)x)->z);
+    } else if (h->tag == WIZ_TAG_RAW) {
+      /* raw machine words: nothing inside to drop */
+    } else if (h->tag == WIZ_TAG_EXT) {
+      wiz_ext *e = (wiz_ext *)x;
+      if (e->fin && e->ptr) e->fin(e->ptr);
+    } else if (h->tag == WIZ_TAG_BYTES) {
+      free(((wiz_bytes *)x)->data);
+    } else if (h->tag == WIZ_TAG_ARRAY) {
+      wiz_array *a = (wiz_array *)x;
+      for (size_t i = 0; i < a->len; i++) WIZ_FREE_PUSH(a->data[i]);
+      free(a->data);
+    } else if (h->tag == WIZ_TAG_STR) {
+      /* the text is inline */
+    } else if (h->tag == WIZ_TAG_THUNK) {
+      wiz_thunk *t = (wiz_thunk *)x;
+      if (t->fn) WIZ_FREE_PUSH(t->fn); else WIZ_FREE_PUSH(t->val);
+    } else if (h->tag == WIZ_TAG_MAP) {
+      wiz_map *m = (wiz_map *)x;
+      for (size_t i = 0; i < m->cap; i++) if (m->keys[i]) { WIZ_FREE_PUSH(m->keys[i]); WIZ_FREE_PUSH(m->vals[i]); }
+      free(m->keys); free(m->vals);
+    } else if (h->tag == WIZ_TAG_WARRAY) {
+      free(((wiz_warray *)x)->data);
+    } else if (h->tag == WIZ_TAG_WMAP) {
+      wiz_wmap *m = (wiz_wmap *)x;
+      for (size_t i = 0; i < m->cap; i++) if (m->vals[i]) WIZ_FREE_PUSH(m->vals[i]);
+      free(m->keys); free(m->vals);
+    } else if (h->tag == WIZ_TAG_ITAB) {
+      wiz_itab *t = (wiz_itab *)x;
+      for (size_t i = 0; i < t->count; i++) WIZ_FREE_PUSH(t->strs[i]);
+      free(t->strs); free(t->hashes); free(t->slots);
+    } else {
+      wiz_ctor *o = (wiz_ctor *)x;
+      for (uint32_t i = 0; i < h->size; i++) WIZ_FREE_PUSH(o->fields[i]);
+    }
+    wiz_live--;
+    wiz_untrack(h);
+    free(h);
   }
-  wiz_live--;
-  wiz_untrack(h);
-  free(h);
+#undef WIZ_FREE_PUSH
+  if (heap) free(st);
 }
 
 /* A shared constant (a hoisted constant, or the value of a closed top-level definition):
