@@ -3389,7 +3389,7 @@ def selfHostGroup : Group where
         -- prelude, so the self-hosted program below prints the verdicts only)
         ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) checkEkTiming
         -- and the self-hosted pipeline must decide the same equation both ways
-        selfhostCompileRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ["prfOk litWork", "prfOk unaryWork"])
+        selfhostCompileRun (kernel ++ "\n" ++ ekNatDefs ++ ekTimingDefs ++ ekMain ["prfOk litWork", "prfOk unaryWork"])
           "True\nTrue\n" (opt := "-O0") },
     { name := "(B13) source numerals still elaborate as successor trees, not `nlit`/`natFn` (the kernel literal rules are covered separately)", run := fun _ =>
         selfhostCheckFile numeralSourceProgram numeralSourceExpected },
