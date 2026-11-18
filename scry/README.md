@@ -662,10 +662,11 @@ cd scry
 ./.grail/bin/scry bench --no-timing --json build/bench.json
 python3 fuzz/run.py --build --runs 5000 --time 15 --seed 20261115 \
   --static build/bench.json --out build/fuzz
-python3 scripts/fuzz-lower.py --iterations 400 --seed 20261117 \
-  --timeout 5 --memory-mb 256
 python3 scripts/fuzz-lower.py --regressions-only
 ```
+
+The discovery command and its bounds are in `bench/fuzz.md`; `--ci` is the bounded
+profile for a nightly or CI run.
 
 `fuzz/run.py` seeds from `bench/corpus/**/*.c` plus the taint fixtures, sweeps the static
 corpus once under the same sanitizers, and writes `build/fuzz/dynamic.json` and
