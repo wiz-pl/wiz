@@ -72,6 +72,24 @@ def cliRunOptions : IO (Option (Array String)) := do
   return some (#["--rt", (← IO.currentDir) / "selfhost" |>.toString] ++
     #["--cflags", " ".intercalate tc.gcCflags] ++ #["--ldflags", " ".intercalate tc.gcLdflags])
 
+/-- Every `*.wiz` under `dir`, recursively (`lib/Scry/rules` is two levels down). -/
+partial def cliWizFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
+  let mut out := #[]
+  for e in ← dir.readDir do
+    if e.path.extension == some "wiz" then
+      out := out.push e.path
+    else if ← e.path.isDir then
+      out := out ++ (← cliWizFiles e.path)
+  pure out
+
+/-- An unformatted source: trailing spaces, runs of blank lines, adjacent declarations
+and a doc comment attached to its declaration. -/
+def cliUnformatted : String := "import Prelude\ndef one : Nat := 1   \ndef two : Nat := 2\n\n\n/-- three -/\ndef three : Nat := Nat.add one two\n"
+
+/-- What `wiz fmt` makes of `cliUnformatted`. -/
+def cliFormatted : String := "import Prelude\n\ndef one : Nat := 1\n\ndef two : Nat := 2\n\n/-- three -/\ndef three : Nat := Nat.add one two\n"
+
+
 def cliGroup : Group where
   name := "selfhost-cli"
   exercise := "stage 21 (D2-D7): the self-hosted driver"
@@ -84,6 +102,7 @@ def cliGroup : Group where
         let (c, out, _) ← cliRun exe #[] #["help"]
         checkEq 0 c
         cliCheck out "wiz-selfhost run FILE" "help"
+        cliCheck out "wiz-selfhost fmt FILE" "help"
         let want := s!"wiz-selfhost {Wiz.version}\n"
         let (c, out, _) ← cliRun exe #[] #["--version"]
         checkEq 0 c
@@ -279,7 +298,59 @@ def cliGroup : Group where
         let (c, out, err) ← cliRun exe #[("input.wiz", "import Prelude\ndef bad : Nat := nope\n")] #[]
         checkEq 1 c
         checkEq "" out
-        cliCheck err "error: unknown identifier nope" "one-shot error" }
+        cliCheck err "error: unknown identifier nope" "one-shot error" },
+    { name := "fmt: a fixed point, and the result still elaborates (B1)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let (c1, out1, err1) ← cliRun exe #[("a.wiz", cliUnformatted)] #["fmt", "a.wiz"]
+        checkEq 0 c1
+        checkEq "" err1
+        checkEq cliFormatted out1
+        -- the second run's input is the first run's output: byte-identical
+        let (c2, out2, err2) ← cliRun exe #[("b.wiz", out1)] #["fmt", "b.wiz"]
+        checkEq 0 c2
+        checkEq "" err2
+        checkEq out1 out2
+        -- the formatted source still checks, by the self-hosted frontend ...
+        let (c, out, err) ← cliRun exe #[("f.wiz", out1)] #["check", "f.wiz"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        -- ... and by the host's Lean frontend on the same text
+        let loader ← preludeLoader
+        let s := runFrontend (R := ZeroOneMany) out1 { loader, trustedModule := Tests.libModule }
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render out1
+        unless errs.isEmpty do
+          throw (IO.userError s!"the host rejects the formatted file:\n{"\n".intercalate errs.toList}") },
+    { name := "fmt --check: unformatted exits 1, formatted exits 0 (B1)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let (c, out, err) ← cliRun exe #[("bad.wiz", cliUnformatted)] #["fmt", "--check", "bad.wiz"]
+        checkEq 1 c
+        checkEq "" out
+        checkEq "wiz fmt: bad.wiz: not formatted\n" err
+        let (c, out, err) ← cliRun exe #[("good.wiz", cliFormatted)] #["fmt", "good.wiz", "--check"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err },
+    { name := "fmt is idempotent on every lib/ file (B1)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let files ← cliWizFiles "lib"
+        let mut n := 0
+        let mut changed := 0
+        for f in files do
+          let text ← IO.FS.readFile f
+          let (c1, out1, err1) ← cliRun exe #[("a.wiz", text)] #["fmt", "a.wiz"]
+          unless c1 == 0 do
+            throw (IO.userError s!"fmt failed on {f} ({c1}): {err1}")
+          let (c2, out2, err2) ← cliRun exe #[("b.wiz", out1)] #["fmt", "b.wiz"]
+          unless c2 == 0 do
+            throw (IO.userError s!"fmt failed on the output of {f} ({c2}): {err2}")
+          unless out2 == out1 do
+            throw (IO.userError s!"fmt is not idempotent on {f}")
+          if out1 != text then changed := changed + 1
+          n := n + 1
+        -- (a formatter that returns its input is idempotent too: the gate must see it work)
+        unless 0 < changed do throw (IO.userError "fmt changed no lib/ file: the property is vacuous")
+        note s!"fmt: {n} lib files, {changed} changed, each a fixed point after one run" }
   ]
 
 builtin_initialize registerGroup cliGroup

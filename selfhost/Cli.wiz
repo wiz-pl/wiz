@@ -857,6 +857,8 @@ def usageText : String :=
   "                                  standard error; exit 1 if it has errors)\n" +++
   "  wiz-selfhost build FILE -o OUT  write the generated C to OUT\n" +++
   "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" +++
+  "  wiz-selfhost fmt FILE [--check]  format FILE to standard output (`--check` writes\n" +++
+  "                                  nothing and exits 1 when FILE would change)\n" +++
   "  wiz-selfhost version            print the version (also --version)\n" +++
   "  wiz-selfhost help               this text (also -h, --help)\n" +++
   "\n" +++
@@ -933,6 +935,43 @@ def checkCmd (o : Opts) (file : String) : IO Unit := do
   match gopt with
   | .none => missingFile file
   | .some g => checkGraph o g
+
+-- ------------------------------------------------------------------------------------
+-- fmt (B1): the formatter in `selfhost/Fmt.wiz`, on standard output like the host's
+-- `wiz fmt`; `--check` writes nothing and exits 1 when the file is not a fixed point.
+
+inductive FmtArg where
+  | ok (file : String) (check : Bool)
+  | err (msg : String)
+
+def fmtArgsGo : List String → Option String → Bool → FmtArg
+  | .nil, .none, _ => .err "wiz fmt: no FILE"
+  | .nil, .some f, c => .ok f c
+  | .cons a rest, f, c => match strEq a "--check" with
+    | .true => fmtArgsGo rest f .true
+    | .false => match strStarts "-" a with
+      | .true => .err (String.append "wiz fmt: unknown option " a)
+      | .false => match f with
+        | .some _ => .err "wiz fmt: one file at a time"
+        | .none => fmtArgsGo rest (.some a) c
+
+def fmtCmd (args : List String) : IO Unit :=
+  match fmtArgsGo args .none .false with
+  | .err msg => usageError msg
+  | .ok file check => do
+    ok ← pathExists file;
+    match ok with
+    | .false => missingFile file
+    | .true => do
+      text ← IO.readFile file;
+      let out := fmtText text;
+      match check with
+      | .true => match strEq out text with
+        | .true => IO.pure ()
+        | .false => do
+          IO.ePrintln (String.append "wiz fmt: " (String.append file ": not formatted"));
+          Process.exit 1
+      | .false => IO.print out
 
 -- ------------------------------------------------------------------------------------
 -- build: the C, to OUT
@@ -1236,10 +1275,14 @@ def dispatch : List String → IO Unit
                         | .true => match rest3 with
                           | .nil => IO.println usageText
                           | .cons _ _ => usageError "unknown flag: -h"
-                        | .false => match unknownTopFlag lead with
-                          | .some f => usageError (String.append "unknown flag: " f)
-                          | .none => match strStarts "-" b with
-                            | .true => usageError (String.append "unknown flag: " b)
-                            | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
+                        -- (B1) `wiz fmt [--check] FILE`: a tail branch, so the other
+                        -- subcommands' chain is untouched (the merge point with D8).
+                        | .false => match strEq b "fmt" with
+                          | .true => fmtCmd rest3
+                          | .false => match unknownTopFlag lead with
+                            | .some f => usageError (String.append "unknown flag: " f)
+                            | .none => match strStarts "-" b with
+                              | .true => usageError (String.append "unknown flag: " b)
+                              | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
 -- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)

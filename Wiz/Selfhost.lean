@@ -134,6 +134,12 @@ def checkEntryFiles : List String := ["selfhost/Check.wiz"]
 /-- The self-hosted checker's sources: the language, the tables and the entry point. -/
 def checkerFiles : List String := frontendFiles ++ tableFiles ++ checkEntryFiles
 
+/-- The formatter (`wiz fmt`, stage 21 B1): a trivia-level formatter for the sources the
+self-hosted frontend parses. `Fmt.wiz` uses the parser's `strEq`, so it comes after the
+language; it is a tool of the driver, not part of the frontend, so the checker
+(`checkerFiles`) does not carry it. -/
+def fmtFiles : List String := ["selfhost/Fmt.wiz"]
+
 /-- The driver (stage 21 D2-D7): the command line, as real Wiz source rather than
 generated strings. It comes last but one in `compilerFiles` (before `Main.wiz`), so
 `compilerSource` can put it after the parser tables (`cats`, `tokens`). -/
@@ -144,7 +150,7 @@ the driver's `dispatch`. Last, so everything it uses is before it. -/
 def mainFiles : List String := ["selfhost/Main.wiz"]
 
 def compilerFiles : List String :=
-  frontendFiles ++ ["selfhost/Backend.wiz"] ++ tableFiles ++ driverFiles ++ mainFiles
+  frontendFiles ++ ["selfhost/Backend.wiz"] ++ fmtFiles ++ tableFiles ++ driverFiles ++ mainFiles
 
 /-- The toolchain's identity, for the driver's cache key (source + toolchain): the
 version (`Wiz.Version.version`, one source for every tool) and the sources themselves.

@@ -1,0 +1,273 @@
+-- The formatter (`wiz fmt`, stage 21 B1): a line/token formatter for the sources the
+-- self-hosted frontend already parses.
+--
+-- The scope is deliberately narrow. The host's formatter (`Wiz/Format.lean`, stage
+-- 11aa) reprints each command from its syntax tree; the self-hosted frontend prints no
+-- notation and has no command printer, so a tree reprint is a separate, much larger job
+-- (and `wiz-notes/wiz-fmt.md` §A says why a token rewriter cannot reindent a block: the
+-- parser remembers columns, so moving a line can change how it parses). This formatter
+-- therefore never moves code: it normalises the *trivia* between tokens, and keeps every
+-- non-blank line's bytes (leading indentation included).
+--
+-- What it does:
+--
+--   * trailing whitespace is removed (except on lines that end inside a string literal,
+--     where the spaces are string content);
+--   * a run of blank lines becomes one, and a file loses its leading and trailing blank
+--     lines (blank lines inside a string or a block comment are kept: they are content);
+--   * top-level declarations are separated by exactly one blank line, a comment or an
+--     attribute stays attached to the declaration it precedes, and a run of `import`
+--     lines stays together;
+--   * the file ends with exactly one newline.
+--
+-- Every change is whitespace the lexer skips, so the token stream is unchanged; the
+-- formatter is idempotent by construction (the second pass sees no run of blanks and no
+-- top-level line without its blank). `fmt(fmt(x)) == fmt(x)` over every `lib/` file is
+-- the gate (`Tests/Groups/SelfhostCli.lean`).
+--
+-- Not done (the next step, and why): indentation by block structure. That needs the
+-- tree, not the token stream: `term.let`, `term.match`, `term.by` and `instance` fields
+-- remember the column they start at (`withPosition`/`colGt`/`colGe` in `selfhost/Parse.wiz`),
+-- so a reindent must be checked against the parse tree (`Fmt.run`'s "same tree" check in
+-- `Wiz/Format.lean`). This formatter is the safe half, not the whole job.
+
+-- ------------------------------------------------------------------------------------
+-- Characters and strings (the Prelude's list helpers; no `List.map` in this source)
+
+def fmtTrailSpace (c : Char) : Bool :=
+  Bool.or (Nat.beq (Char.code c) 32) (Bool.or (Nat.beq (Char.code c) 9)
+    (Nat.beq (Char.code c) 13))
+
+def fmtIsSpace (c : Char) : Bool := fmtTrailSpace c
+
+-- drop trailing spaces, tabs and carriage returns (a CRLF file keeps its `\r`s out of
+-- the output's line ends; the final `\n` is added by `fmtText`)
+def fmtRtrim : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match fmtRtrim cs with
+    | .nil => match fmtTrailSpace c with
+      | .true => .nil
+      | .false => .cons c .nil
+    | rest => .cons c rest
+
+def fmtIndentGo : List Char → Nat
+  | .nil => 0
+  | .cons c cs => match fmtIsSpace c with
+    | .true => Nat.succ (fmtIndentGo cs)
+    | .false => 0
+
+def fmtIndentOf (cs : List Char) : Nat := fmtIndentGo cs
+
+def fmtAfterSpace : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match fmtIsSpace c with
+    | .true => fmtAfterSpace cs
+    | .false => .cons c cs
+
+def fmtPrefixGo : List Char → List Char → Bool
+  | .nil, _ => .true
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => match Nat.beq (Char.code a) (Char.code b) with
+    | .true => fmtPrefixGo as bs
+    | .false => .false
+
+def fmtStartsWith (p : String) (cs : List Char) : Bool := match p with
+  | .mk ps => fmtPrefixGo ps cs
+
+def fmtDropN : Nat → List Char → List Char
+  | .zero, cs => cs
+  | .succ k, .nil => .nil
+  | .succ k, .cons _ cs => fmtDropN k cs
+
+-- `import` followed by a space or the end of the line
+def fmtImportAt (cs : List Char) : Bool :=
+  match fmtStartsWith "import" cs with
+  | .false => .false
+  | .true => match fmtDropN 6 cs with
+    | .nil => .true
+    | .cons c _ => fmtIsSpace c
+
+-- ------------------------------------------------------------------------------------
+-- The scanner: where a line starts and ends in a nested block comment or a string
+
+structure FmtSt where
+  block : Nat
+  str : Bool
+  -- the outermost open block comment began at column 0 (so its lines are top-level
+  -- comment lines for the blank-line rule)
+  top : Bool
+
+-- one line of input, classified. `kind` is a small tag, not seven `Bool`s: a wide
+-- structure constructor is what the host elaborator is slowest on (roadmap D2), and the
+-- compiler that builds this file goes through it.
+--   0 body (non-blank, not top-level)   1 blank line
+--   2 top-level declaration             3 top-level comment line
+--   4 top-level attribute line          5 top-level `import`
+--   6 protected (inside a block comment: a top-level comment line)
+--   7 protected (inside a string, or a comment that opened mid-line)
+structure FmtLine where
+  text : String
+  kind : Nat
+
+def fmtLine (text : String) (kind : Nat) : FmtLine := FmtLine.mk text kind
+
+partial def fmtScanGo : List Char → FmtSt → Bool → FmtSt
+  | .nil, st, _ => st
+  | .cons c cs, st, atStart => match st with
+    | .mk blk ins top => match ins with
+      | .true => match Nat.beq (Char.code c) 92 with
+        -- a backslash escapes one character: `\"` does not close the literal
+        | .true => match cs with
+          | .nil => st
+          | .cons _ rest => fmtScanGo rest (FmtSt.mk blk .true top) .false
+        | .false => match Nat.beq (Char.code c) 34 with
+          | .true => fmtScanGo cs (FmtSt.mk blk .false top) .false
+          | .false => fmtScanGo cs st .false
+      | .false => match Nat.lt 0 blk with
+        | .true => match cs with
+          | .cons d ds => match Bool.and (Nat.beq (Char.code c) 47) (Nat.beq (Char.code d) 45) with
+            | .true => fmtScanGo ds (FmtSt.mk (Nat.succ blk) .false top) .false
+            | .false => match Bool.and (Nat.beq (Char.code c) 45) (Nat.beq (Char.code d) 47) with
+              | .true => match Nat.beq blk 1 with
+                | .true => fmtScanGo ds (FmtSt.mk 0 .false .false) .false
+                | .false => fmtScanGo ds (FmtSt.mk (Nat.sub blk 1) .false top) .false
+              | .false => fmtScanGo cs (FmtSt.mk blk .false top) .false
+          | .nil => st
+        | .false => match cs with
+          | .cons d ds => match Bool.and (Nat.beq (Char.code c) 45) (Nat.beq (Char.code d) 45) with
+            -- a `--` comment runs to the end of the line
+            | .true => st
+            | .false => match Bool.and (Nat.beq (Char.code c) 47) (Nat.beq (Char.code d) 45) with
+              | .true => fmtScanGo ds (FmtSt.mk 1 .false atStart) .false
+              | .false => match Nat.beq (Char.code c) 34 with
+                | .true => fmtScanGo cs (FmtSt.mk blk .true top) .false
+                | .false => match fmtIsSpace c with
+                  | .true => fmtScanGo cs st atStart
+                  | .false => fmtScanGo cs st .false
+          | .nil => match Nat.beq (Char.code c) 34 with
+            | .true => FmtSt.mk blk .true top
+            | .false => st
+
+-- ------------------------------------------------------------------------------------
+-- One line's classification
+
+def fmtCodeLine (cs : List Char) (endsInString : Bool) : FmtLine :=
+  let rest := fmtAfterSpace cs;
+  match rest with
+  | .nil => fmtLine "" 1
+  | .cons c more =>
+    let ind := fmtIndentOf cs;
+    let text := match endsInString with
+      | .true => String.mk cs
+      | .false => String.mk (fmtRtrim cs);
+    match Nat.beq ind 0 with
+    | .false => fmtLine text 0
+    | .true => match Nat.beq (Char.code c) 45 with
+      | .true => match more with
+        -- `--`
+        | .cons d _ => match Nat.beq (Char.code d) 45 with
+          | .true => fmtLine text 3
+          | .false => fmtLine text 2
+        | .nil => fmtLine text 2
+      | .false => match Nat.beq (Char.code c) 47 with
+        -- `/-` (a doc comment starts its own top-level group)
+        | .true => match more with
+          | .cons d _ => match Nat.beq (Char.code d) 45 with
+            | .true => fmtLine text 3
+            | .false => fmtLine text 2
+          | .nil => fmtLine text 2
+        | .false => match Nat.beq (Char.code c) 64 with
+          -- `@[...]`
+          | .true => match more with
+            | .cons d _ => match Nat.beq (Char.code d) 91 with
+              | .true => fmtLine text 4
+              | .false => fmtLine text 2
+            | .nil => fmtLine text 2
+          | .false => match fmtImportAt (.cons c more) with
+            | .true => fmtLine text 5
+            | .false => fmtLine text 2
+
+def fmtClassify (st : FmtSt) (cs : List Char) : FmtLine :=
+  let st2 := fmtScanGo cs st .true;
+  match st with
+  | .mk blk ins top => match ins with
+    | .true => fmtLine (String.mk cs) 7
+    | .false => match Nat.lt 0 blk with
+      | .true => match top with
+        | .true => fmtLine (String.mk cs) 6
+        | .false => fmtLine (String.mk cs) 7
+      | .false => match st2 with
+        | .mk _ endsInString _ => fmtCodeLine cs endsInString
+
+def fmtClassifyAll : List (List Char) → FmtSt → List FmtLine → List FmtLine
+  | .nil, _, acc => List.reverseOf acc .nil
+  | .cons l rest, st, acc =>
+      fmtClassifyAll rest (fmtScanGo l st .true) (List.cons (fmtClassify st l) acc)
+
+-- ------------------------------------------------------------------------------------
+-- Laying the classified lines out
+
+-- (kinds 2, 3 and 4 start a top-level group; 3 and 4 belong to the declaration after)
+def fmtEmit (ls : List FmtLine) (out : List String) (prevBlank prevTop prevImport : Bool) :
+    List String :=
+  match ls with
+  | .nil => out
+  | .cons l rest => match l with
+    | .mk text kind =>
+      match Nat.le 6 kind with
+      -- inside a block comment or a string: content, not layout
+      | .true => fmtEmit rest (List.cons text out) .false
+          (Nat.beq kind 6) .false
+      | .false => match Nat.beq kind 1 with
+        | .true => match out with
+          | .nil => fmtEmit rest out prevBlank prevTop prevImport
+          | .cons _ _ => match prevBlank with
+            | .true => fmtEmit rest out .true prevTop prevImport
+            | .false => fmtEmit rest (List.cons "" out) .true prevTop prevImport
+        | .false =>
+          let group := Bool.or (Nat.beq kind 2) (Bool.or (Nat.beq kind 3) (Nat.beq kind 4));
+          -- a comment or an attribute belongs to the declaration after it
+          let attach := Bool.or prevTop (Bool.and prevImport (Nat.beq kind 5));
+          let needBlank := Bool.and group (Bool.and (Bool.not prevBlank) (Bool.not attach));
+          let top := Bool.or (Nat.beq kind 3) (Nat.beq kind 4);
+          let imp := Nat.beq kind 5;
+          match out with
+          | .nil => fmtEmit rest (List.cons text out) .false top imp
+          | .cons _ _ => match needBlank with
+            | .true => fmtEmit rest (List.cons text (List.cons "" out)) .false top imp
+            | .false => fmtEmit rest (List.cons text out) .false top imp
+
+def fmtDropEmptyHead : List String → List String
+  | .nil => .nil
+  | .cons s rest => match strEq s "" with
+    | .true => fmtDropEmptyHead rest
+    | .false => List.cons s rest
+
+def fmtJoin : List String → String
+  | .nil => ""
+  | .cons s rest => match rest with
+    | .nil => s
+    | .cons _ _ => String.append s (String.append "\n" (fmtJoin rest))
+
+def fmtSplitGo : List Char → List Char → List (List Char)
+  | .nil, acc => .cons (List.reverseOf acc .nil) .nil
+  | .cons c cs, acc => match Nat.beq (Char.code c) 10 with
+    | .true => .cons (List.reverseOf acc .nil) (fmtSplitGo cs .nil)
+    | .false => fmtSplitGo cs (List.cons c acc)
+
+-- the lines of a text, each without its newline
+def fmtSplit (s : String) : List (List Char) := match s with
+  | .mk cs => match cs with
+    | .nil => .nil
+    | .cons _ _ => fmtSplitGo cs .nil
+
+-- ------------------------------------------------------------------------------------
+-- The formatter
+
+def fmtText (text : String) : String :=
+  let lines := fmtClassifyAll (fmtSplit text) (FmtSt.mk 0 .false .false) .nil;
+  -- (`fmtEmit` builds the output backwards, so a trailing blank line is at its head)
+  let out := fmtDropEmptyHead (fmtEmit lines .nil .false .false .false);
+  match out with
+  | .nil => ""
+  | .cons _ _ => String.append (fmtJoin (List.reverseOf out .nil)) "\n"
