@@ -335,7 +335,7 @@ def cliDiffDriverHelp : String :=
   "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" ++
   "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" ++
   "\n" ++
-  "without a command: input.wiz in the working directory to standard output\n"
+  "without a command: input.wiz in the working directory to standard output\n\n"
 def cliDiffGroup : Group where
   name := "selfhost-cli-diff"
   exercise := "stage 21 (D2-D7): the self-hosted driver against the Lean-hosted wiz"
