@@ -28,6 +28,11 @@ grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
 if grep -qF 'playground lsp: all checks passed' "$OUT/lsp.txt"; then echo "ok (playground, lsp)"; else
   echo "FAIL (playground, lsp)"; cat "$OUT/lsp.txt"; exit 1; fi
+# (infoview-page) the standalone infoview page's URL rule and status line (the pane is
+# the playground's, above)
+node "$ROOT/web/infoview_page_test.mjs" > "$OUT/infoview-page.txt"
+if grep -qF 'infoview page: all checks passed' "$OUT/infoview-page.txt"; then echo "ok (infoview page)"; else
+  echo "FAIL (infoview page)"; cat "$OUT/infoview-page.txt"; exit 1; fi
 # (playground-selfhost-lsp) ?lsp=selfhost: the in-page server shim, with a stub engine
 node "$ROOT/web/selfhost_lsp_test.mjs" > "$OUT/selfhost-lsp.txt"
 if grep -qF 'selfhost lsp: all checks passed' "$OUT/selfhost-lsp.txt"; then echo "ok (playground, selfhost lsp)"; else
@@ -71,7 +76,12 @@ BRIDGE=$!
 sleep 3
 node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT" > "$OUT/chrome.txt"
 ok=1
-for want in 'status: connected' 'class="names">A</span>' 'data-ref="' 'tt k-const sel' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
+# The page's markup is web/goals.js's (the playground's renderer) since the two infoviews
+# were unified: a goal's hypothesis is a `.names` span (with its own title/span
+# attributes), a tagged subterm is `.tt k-KIND` with `data-ref`, a clicked one carries
+# `sel`, and the selected subterm is in `#info` as `.selection`.
+for want in 'status: connected' 'class="names"' 'title="A">A</span>' 'data-ref="' 'tt k-const sel' \
+            'info: <div class="selection">' 'class="kind">const</span>'; do
   if grep -qF "$want" "$OUT/chrome.txt"; then echo "ok (chromium): $want"; else echo "FAIL (chromium): missing $want"; ok=0; fi
 done
 [ $ok = 1 ] || { cat "$OUT/chrome.txt" "$OUT/bridge.log"; exit 1; }

@@ -745,16 +745,22 @@ setup action keeps the elan cache for those
   Pages outage does not fail the suite. See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
   changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. It
-  builds both Wasm modules with the same scripts as `docs`, then runs its browser-free
-  half: `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
-  and the site check's rules for it); `web/playground_lsp_test.mjs` and
-  `web/selfhost_lsp_test.mjs` (the language client and the in-page server shim, against
-  stubs); `web/node_test.mjs` and `web/playground_test.mjs` (the two modules);
-  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the React
-  framework's browser half, in a Node DOM double) runs beside it. `CI result` requires
-  the job when `changes` selects it. The Chromium half (`web/chrome_test.mjs` and
-  `web/doc_chrome_test.mjs`: a served page over the DevTools protocol) needs a browser
-  and stays local.
+  builds the three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the
+  playground's Loom UI, `web/build-playground-ui.sh`) with the same scripts as `docs`,
+  then runs its browser-free half: `web/scroll-search_test.mjs`; `web/test-bench.sh` (the
+  benchmark page's fixtures and the site check's rules for it);
+  `web/playground_lsp_test.mjs` and
+  `web/infoview_page_test.mjs` (the language client and goals pane shared by the
+  playground and the infoview page, and the page's URL rule); `web/selfhost_lsp_test.mjs`
+  (the in-page server shim, against stubs); `web/node_test.mjs` and
+  `web/playground_test.mjs` (the two modules); `web/playground_ui_test.mjs` (the whole
+  page as a Loom app, mounted from the built module with the driver and the DOM double);
+  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the Loom
+  framework's browser half, in a Node DOM double, plus the driver's event strings) and
+  `web/playground-loom-test.sh` (the output pane and editor components) run beside it.
+  `CI result` requires the job when `changes` selects it. The Chromium half
+  (`web/chrome_test.mjs` and `web/doc_chrome_test.mjs`: a served page over the DevTools
+  protocol) needs a browser and stays local.
 * **Trust ledger** (a step in the `build` job, before any shard):
   `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
@@ -1158,16 +1164,18 @@ tests and the site-check rules for it are in `web/test-bench.sh`.
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
 | `docs/reference.md` | the reference manual as Markdown (`nix build .#reference`'s `index.md`; generated, not committed) |
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
-| `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the infoview's Wasm module, when `web/build.sh` built it |
+| `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the web module (the documentation's signatures and the Wiz-language infoview), when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
 | `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
 | `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
+| `playground/wiz-playground-ui.mjs` | the playground's Loom UI (`?ui=loom`), when `web/build-playground-ui.sh` built it (optional: the page falls back to its static markup) |
 
 To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
 
 ```sh
-sh web/build.sh web/out                         # the infoview module, scroll assets
+sh web/build.sh web/out                         # the web module, the infoview page, scroll assets
 sh web/build-playground.sh web/out              # the playground module
+sh web/build-playground-ui.sh web/out           # the playground's Loom UI (?ui=loom)
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
 cp "$(nix build .#reference --no-link --print-out-paths)/index.md" doc-site/docs/reference.md
 sh web/build-site.sh doc-site web/out           # landing page, /bench/ and /playground/
