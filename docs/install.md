@@ -20,7 +20,7 @@ Once you have one: [your first project](#a-first-project-with-grail),
 ### Install it
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/badly-drawn-wizards/wiz/master/scripts/tower-init.sh | sh
+curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh | sh
 export PATH="$HOME/.tower/bin:$PATH"      # put this in your shell's profile
 ```
 
@@ -32,7 +32,7 @@ For a release instead, `| sh -s -- v0.1.0`.
 You can do the same by hand:
 
 ```sh
-curl -sSfLO https://github.com/badly-drawn-wizards/wiz/releases/download/nightly/wiz-x86_64-linux.tar.gz
+curl -sSfLO https://github.com/wiz-pl/wiz/releases/download/nightly/wiz-x86_64-linux.tar.gz
 tar -xzf wiz-x86_64-linux.tar.gz
 wiz-x86_64-linux/bin/tower self install   # tower and the shims in ~/.tower/bin
 tower default nightly
@@ -43,7 +43,7 @@ The unpacked `wiz-x86_64-linux/bin/` works by itself too, without tower.
 **With Nix**, tower and the shims come as one package:
 
 ```sh
-nix profile install github:badly-drawn-wizards/wiz#tower
+nix profile install github:wiz-pl/wiz#tower
 tower set source release                  # see "Where toolchains come from" below
 tower default nightly
 ```
@@ -117,12 +117,12 @@ compiler, pass the flags (`wiz build --cc gcc …`) or set them for every toolch
 ## Nix
 
 ```sh
-nix run github:badly-drawn-wizards/wiz -- check hello.wiz      # wiz
-nix run github:badly-drawn-wizards/wiz#grail -- build          # grail
-nix run github:badly-drawn-wizards/wiz#nvim-wiz -- hello.wiz   # Neovim with wiz.nvim
+nix run github:wiz-pl/wiz -- check hello.wiz      # wiz
+nix run github:wiz-pl/wiz#grail -- build          # grail
+nix run github:wiz-pl/wiz#nvim-wiz -- hello.wiz   # Neovim with wiz.nvim
 ```
 
-Pin a revision the usual way (`github:badly-drawn-wizards/wiz/v0.1.0`, or a commit). The
+Pin a revision the usual way (`github:wiz-pl/wiz/v0.1.0`, or a commit). The
 packages are `wiz` (the default, with `grail`), `tower`, `wiz-nvim` (the plugin as a
 Neovim plugin derivation) and `nvim-wiz` (a Neovim with only the plugin, to try it).
 Nix's packages pass the C compiler, GMP and the collector from nixpkgs as flags, so
@@ -234,7 +234,7 @@ With a plugin manager, point it at the repository's `editors/nvim` (lazy.nvim:
 `vim.opt.rtp:append(plugin.dir .. '/editors/nvim')` in `config`; packer:
 `rtp = 'editors/nvim'`); with Nix, add `packages.<system>.wiz-nvim` to your Neovim's
 plugins. To try it without touching your configuration:
-`nix run github:badly-drawn-wizards/wiz#nvim-wiz -- hello.wiz`.
+`nix run github:wiz-pl/wiz#nvim-wiz -- hello.wiz`.
 
 **Which server runs.** The plugin finds the project root (the nearest `grail.wiz`,
 `wiz-toolchain`, `lakefile.toml` or `.git`) and starts the server there, through the
@@ -314,5 +314,5 @@ the Nix package (whose wrapper passes them) or pass `--cflags`/`--ldflags` where
 lives.
 
 **Something else.** Bugs and questions: the repository's issues,
-<https://github.com/badly-drawn-wizards/wiz/issues>. For a soundness bug (a proof of
+<https://github.com/wiz-pl/wiz/issues>. For a soundness bug (a proof of
 `False`), see [Status.md](Status.md), "How to report a soundness bug".

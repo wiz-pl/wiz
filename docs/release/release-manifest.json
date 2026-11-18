@@ -3,22 +3,12 @@
   "status": "draft",
   "version": "0.1.0",
   "tag": null,
-  "commit": "672d3bfb8d202aed7e99f7dd0685efff30b8aadc",
-  "sourceDateEpoch": 1794950162,
+  "commit": "4ad297923dc74afbc7fd1e37ee2ae6f554c40783",
+  "sourceDateEpoch": 1795021741,
   "generatedAt": null,
   "releaseNotes": "docs/release/v0.1.md",
   "knownLimitations": "docs/release/v0.1.md#known-limitations",
   "filledBy": null,
-  "source": {
-    "tarball": {
-      "name": "wiz-0.1.0-src.tar.gz",
-      "sha256": null,
-      "size": null,
-      "manifestSha256": null,
-      "treeSha256": null,
-      "schema": "wiz-source-tarball/v1"
-    }
-  },
   "artifacts": [
     {
       "name": "wiz-x86_64-linux.tar.gz",
@@ -32,30 +22,6 @@
       "name": "wiz-x86_64-linux.tar.gz.sha256",
       "kind": "checksum",
       "system": "x86_64-linux",
-      "sha256": null,
-      "size": null,
-      "url": null
-    },
-    {
-      "name": "wiz-0.1.0-src.tar.gz",
-      "kind": "source",
-      "system": "any",
-      "sha256": null,
-      "size": null,
-      "url": null
-    },
-    {
-      "name": "wiz-0.1.0-src.tar.gz.manifest.json",
-      "kind": "source-manifest",
-      "system": "any",
-      "sha256": null,
-      "size": null,
-      "url": null
-    },
-    {
-      "name": "wiz-0.1.0-src.tar.gz.sha256",
-      "kind": "checksum",
-      "system": "any",
       "sha256": null,
       "size": null,
       "url": null
@@ -141,5 +107,5 @@
     "extraData": null,
     "verifier": null
   },
-  "notes": null
+  "notes": "No source tarball at this candidate. The deterministic source-tarball work (scripts/source-tarball.py, scripts/test-source-tarball.sh, the release-tarball Nix target and the wiz-source-tarball/v1 manifest) is unmerged; see docs/release/v0.1-checklist.md section 4. No source object and no source rows in artifacts, because none can be built. Add both only if the work lands before the tag."
 }

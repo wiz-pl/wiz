@@ -1511,6 +1511,57 @@ Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model
 `Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
 uses the same nine runtime natives (`selfhost/rt.c`).
 
+## SHA-256 (`lib/Sha.wiz`)
+
+`import Sha` (over `Word`, `Text`, `Encoding` and `WordBytes`): SHA-256 (FIPS 180-4),
+pure and total (`#eval` runs it; no `partial`, `extern`, `axiom` or `implemented_by`), so
+a tag release's `.sha256` and an archive's digest are computed by code a proof can see.
+The message is padded here (`Sha.pad`: a `1` bit, zeros, then the length in bits as a
+64-bit big-endian integer), and the digest is 32 bytes, big-endian.
+
+* `Sha.sha256 : List U8 → List U8`, `Sha.sha256Hex : List U8 → String` (lower-case hex).
+* `Sha.sha256Bytes : Bytes → Bytes`, `Sha.sha256BytesHex : Bytes → String`.
+
+```wiz
+import Sha
+
+#eval Sha.sha256Hex (.cons 97 (.cons 98 (.cons 99 .nil)))
+-- "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+#eval Sha.sha256Hex .nil
+-- "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+```
+
+The standard's vectors (the empty message, `"abc"` and the 448-bit message), a 64-byte
+message and the digest length are cases in the `library` group
+(`Tests/Groups/Library.lean`).
+
+## Encodings: hex and base64 (`lib/Encoding.wiz`)
+
+`import Encoding` (over `Word`, `Text` and `WordBytes`): base64 (RFC 4648) and
+hexadecimal over `List U8`, with `Bytes` wrappers. Both directions are pure and total.
+Encoding returns a `String`; decoding returns an `Except String` holding the bytes or the
+reason the text is invalid, so a malformed digest is an error and never a silently short
+result.
+
+* `Encoding.hexEncode`, `Encoding.hexDecode`: lower-case out, either case in; an odd
+  number of digits or a character outside `0-9a-fA-F` is an error.
+* `Encoding.base64Encode`, `Encoding.base64Decode`: the standard alphabet with `=`
+  padding; the length must be a multiple of four, only the last group may be padded, and
+  whitespace is rejected. The unused low bits of the last character are ignored, as RFC
+  4648 permits.
+* `Encoding.hexEncodeBytes`, `Encoding.hexDecodeBytes`, `Encoding.base64EncodeBytes`,
+  `Encoding.base64DecodeBytes` are the same over a `Bytes` buffer.
+
+```wiz
+import Encoding
+
+#eval Encoding.hexEncode (.cons 0xDE (.cons 0xAD (.cons 0xBE (.cons 0xEF .nil))))
+-- "deadbeef"
+#eval Encoding.base64Encode (.cons 0x66 (.cons 0x6F (.cons 0x6F .nil)))
+-- "Zm9v"
+#eval Encoding.base64Decode "QQ"    -- .error "base64: length is not a multiple of 4"
+```
+
 ## 9j: list lemmas (`lib/ListLemmas.wiz`)
 
 `import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,

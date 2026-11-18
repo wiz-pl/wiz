@@ -279,8 +279,9 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   (`mkdtemp`), and whole files: `readFile`, `writeFile`, `appendFile`, and `readBytes`,
   `writeBytes` for binary data (text stops at a NUL byte). `Path.join` puts a `/`
   between two paths. A `readdir` failure part-way through a listing is that listing's
-  error (`EIO`, the same message shape as the rest), not the end of the directory: a
-  short `listDir` result is never reported as success.
+  error, not the end of the directory: the runtime keeps the `errno` that `readdir` set
+  and `FS.listDir` reports it (with the system's `strerror` text) as the `EIO` error,
+  so a short `listDir` result is never reported as success.
 * **File handles.** `foreign_type File` (closed by its finalizer, or `File.close`):
   `File.open path mode` (`fopen` modes; the descriptor is close-on-exec, like `Fd.open`
   and the pipes, so a child this program starts does not inherit it — only the std

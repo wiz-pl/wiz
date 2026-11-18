@@ -752,7 +752,7 @@ setup action keeps the elan cache for those
   and the site check's rules for it); `web/playground_lsp_test.mjs` and
   `web/selfhost_lsp_test.mjs` (the language client and the in-page server shim, against
   stubs); `web/node_test.mjs` and `web/playground_test.mjs` (the two modules);
-  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the React
+  `web/doc_node_test.mjs` (a `wiz doc` page's JSON). `web/framework/test.sh` (the Loom
   framework's browser half, in a Node DOM double) runs beside it. `CI result` requires
   the job when `changes` selects it. The Chromium half (`web/chrome_test.mjs` and
   `web/doc_chrome_test.mjs`: a served page over the DevTools protocol) needs a browser
@@ -1162,7 +1162,7 @@ the same source hits and a changed compiler misses; the second half only decides
 new snapshot is saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still
 serves the modules a `lib/` change did not touch. A restored run replays the cache in a
 few minutes instead of elaborating (roughly a tenth of the cold time; ~2 min with
-`--jobs 4`, once `wiz doc` has that flag). `--cache-verify off` is deliberate: the layer
+`--jobs 4`). `--cache-verify off` is deliberate: the layer
 is this job's own and its entries are content-keyed; the manifest check would bind them
 to the toolchain's store paths (cc, llc) and throw a same-binary rebuild away. The
 toolchain's own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
