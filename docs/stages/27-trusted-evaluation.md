@@ -78,14 +78,27 @@ into the keys too (the command chain, every module key, grail's `check` jobs), s
 acceptance is never replayed without the flag, nor the error without it replayed with it.
 The first run with the flag elaborates the imports again.
 
-**The self-hosted toolchain** has no native evaluation and no flag. The grammar entry
-reaches its parser only through the tables generated from the Lean parser's
-(`selfhost/Tables.wiz`, `Selfhost.wizTables`; they are not in `selfhost/Parse.wiz`), so it
-rejects `native_refl`
-either as "unsupported syntax term.nativeRefl" or as an unknown identifier (not run here;
-either way it fails closed). It checks sources itself and never receives the Lean
-toolchain's declarations, so it never sees a `.native✝` axiom; if it did, it would be an
-ordinary axiom.
+**The self-hosted toolchain (C14).** The self-hosted frontend implements the form too,
+behind the same `--trust-native` flag (a flag of the run, in `Globals.trustNative`; the
+checker's `moduleMain` reads it, and `selfhost/Cli.wiz`'s driver does not yet). Without the
+flag it is refused with the host's message; with it, the whole body of a closed definition
+whose type is an equation at a first-order data type is decided by running both sides
+(`nativeNorm`: `inlineTm`, the frontend's `eval`/`quote` — compiled code here, so the
+"interpreter" is the kernel's evaluator run natively), the two values are read back and
+`check`ed at the equation's operand type (never at the equation: F5), and the declaration
+is added as `X.native✝ : a = b` plus `X := X.native✝`. The decision is recorded as that
+**axiom**, never as a kernel reduction: `X` has no checked proof, and `#print axioms X`
+(implemented for this) lists the `.native✝` axiom with a note. It checks sources itself, so
+it never sees the Lean toolchain's declarations.
+
+The self-hosted toolchain has **no checked-in trust ledger and no `--native-fuel`**: the
+boundary is the declaration's shape (a definition whose value is an axiom, an inaccessible
+`.native✝` name, and `#print axioms`), and the evaluator has no step counter
+(`--native-fuel N` is not accepted). A `partial` definition is not refused explicitly (it
+is an axiom to this frontend, so a run that reaches one stays stuck and never equals a
+value), and the erasure/read-back strictness of the host (foreign constants, quantity-0
+fields) is simplified: both are refused as "not first-order data" only when the *type* is a
+function, codata or a sort.
 
 **Why the interpreter, not the C backend.** The interpreter runs in the (pure) frontend,
 needs no C compiler and no process, and keeps the IR, reference counting, the C runtime

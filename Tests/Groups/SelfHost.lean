@@ -119,9 +119,9 @@ def selfhostProgram5 : String :=
 
 /-- Compile a program with the self-hosted compiler, then the C it prints with the
 self-hosted runtime (`selfhost/rt.c`, with the garbage collector given by the
-toolchain's `gcCflags`/`gcLdflags`), run it, and compare its output. -/
-def selfhostCompileRun (file expected : String) (flags : Array String := #[]) (progArgs : Array String := #[])
-    (opt : String := "-O2") (smallStack : Bool := false) : IO Unit := do
+toolchain's `gcCflags`/`gcLdflags`), run it, and hand its output to `k`. -/
+def selfhostRunWith (file : String) (k : String → IO Unit) (flags : Array String := #[])
+    (progArgs : Array String := #[]) (opt : String := "-O2") (smallStack : Bool := false) : IO Unit := do
   let tc ← toolchain
   if tc.gcCflags.isEmpty then skip "no garbage collector, --gc-cflags"; return
   match ← selfhostCompiler with
@@ -143,7 +143,23 @@ def selfhostCompileRun (file expected : String) (flags : Array String := #[]) (p
         IO.Process.output { cmd := "sh", args := #["-c", "ulimit -s 1024; exec timeout 60 ./prog \"$@\"", "sh"] ++ progArgs, cwd := dir, env }
       else IO.Process.output { cmd := "timeout", args := #["60", (dir / "prog").toString] ++ progArgs, cwd := dir }
     unless run.exitCode == 0 do throw (IO.userError s!"the program failed ({run.exitCode}): {run.stderr}")
-    checkEq expected run.stdout
+    k run.stdout
+
+/-- Compile a program with the self-hosted compiler, then the C it prints with the
+self-hosted runtime, run it, and compare its output. -/
+def selfhostCompileRun (file expected : String) (flags : Array String := #[]) (progArgs : Array String := #[])
+    (opt : String := "-O2") (smallStack : Bool := false) : IO Unit :=
+  selfhostRunWith file (checkEq expected) flags progArgs opt smallStack
+
+/-- (A17/A18) A program compiled and run by the Lean host and by the self-hosted compiler:
+their outputs must agree (the expected output is the host's, not a literal). The C is
+built at `-O0`: these are output differentials, and the program (with the prelude) is
+large enough that `-O2` only slows them down. -/
+def selfhostAgreesHost (file : String) : IO Unit := do
+  let cell ← IO.mkRef (none : Option String)
+  ioRunWith file fun out => cell.set (some out)
+  let some expected ← cell.get | return
+  selfhostCompileRun file expected (opt := "-O0")
 
 /-- (15j) Reads of a wide structure's fields for the self-hosted backend: every field
 (`sumW`), the root consumed before the last read through a prefix (`early`), the root's
@@ -228,6 +244,16 @@ def selfhostCheckFails (file expected : String) : IO Unit := do
     checkEq expected out.stderr
     checkEq "" out.stdout
 
+/-- The checker's output for a file of declarations must be the declarations it printed,
+not the program it read: an echoing stub (the case that checks this group is not vacuous)
+would otherwise pass every "is accepted" case. -/
+def checkChecked (src out : String) : IO Unit := do
+  if out.splitOn "\n" == src.splitOn "\n" then
+    throw (IO.userError s!"the checker's output is its input, not declarations:\n{out.take 500}")
+  for l in out.splitOn "\n" do
+    if l.startsWith "import " then
+      throw (IO.userError s!"the checker's output is its input, not declarations:\n{out.take 500}")
+
 /-- (A11) `lib/Deriving.wiz` and the modules it imports, for the `deriving` differential:
 the tests' prelude loader does not include it. -/
 def derivingLoader : IO (Name → Option String) := do
@@ -251,8 +277,10 @@ def derivingAgrees (selfHeader : String) (decls : List (String × Bool)) : IO Un
     unless leanOk == ok do
       let es := (hs.messages.filter (·.severity == .error)).map (·.text)
       throw (IO.userError s!"the Lean frontend {if leanOk then "accepts" else "rejects"}:\n{d}\n{es}")
-    let some out ← selfhostOutput ("import Prelude\n" ++ selfHeader ++ d) | return
+    let selfSrc := "import Prelude\n" ++ selfHeader ++ d
+    let some out ← selfhostOutput selfSrc | return
     let errs := (out.splitOn "\n").filter (·.startsWith "error")
+    if errs.isEmpty then checkChecked selfSrc out
     unless errs.isEmpty == ok do
       throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
@@ -262,6 +290,73 @@ reference counting, which also checks that every object was freed). -/
 def ffiAgrees (src expected : String) (gc : Bool := true) : IO Unit := do
   ioRun src expected
   if gc then selfhostCompileRun src expected
+  selfhostCompileRun src expected (flags := #["--rc"])
+
+/-- (25a, D1) The concurrency natives (`runtime/rt_con.inc`) on the self-hosted runtime:
+the same program forks a thread per element, sends its number over the channel (the
+parent closes its end once every child has finished), bumps a counter under a lock, and
+rendezvouses on an MVar; the Lean and the self-hosted runtimes print the same sum and
+count. The program declares the natives with `lib/MVar.wiz`'s and `lib/Session.wiz`'s
+types, minus the phantom indices and linear holes the self-hosted frontend cannot express
+yet (a type family `{A : Type} → MVar A → Type`); `MVar.take acc` passes no type argument
+(its implicit `A` is written in the extern's type, which the frontend now inserts at the
+use). It does not `recv` from the channel: a `do` bind whose value is a pair needs the
+self-hosted frontend to solve a metavariable applied to the local context, which it
+cannot yet (a P1 frontend gap). -/
+def concNatives : String :=
+  "import IO\n" ++
+  "axiom MVar : Type → Type\naxiom Lock : Type\naxiom Guard : Type\naxiom Chan : Type\n" ++
+  "extern \"wiz_mvar_new\" MVar.new : {0 A : Type} → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_new_full\" MVar.newFull : {0 A : Type} → (a : A) → IO (MVar A)\n" ++
+  "extern \"wiz_mvar_take\" MVar.take : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_mvar_put\" MVar.put : {0 A : Type} → (m : MVar A) → (a : A) → IO Unit\n" ++
+  "extern \"wiz_mvar_read\" MVar.read : {0 A : Type} → (m : MVar A) → IO A\n" ++
+  "extern \"wiz_lock_new\" Lock.new : IO Lock\n" ++
+  "extern \"wiz_lock_acquire\" Lock.acquire : (l : Lock) → IO Guard\n" ++
+  "extern \"wiz_lock_release\" Lock.release : (l : Lock) → (g : Guard) → IO Unit\n" ++
+  "extern \"wiz_chan_fork\" Chan.fork : (child : (c : Chan) → IO Unit) → IO Chan\n" ++
+  "extern \"wiz_chan_send\" Chan.send : {0 A : Type} → (c : Chan) → (a : A) → IO Chan\n" ++
+  "extern \"wiz_chan_close\" Chan.close : (c : Chan) → IO Unit\n" ++
+  "def child (n : Nat) (acc : MVar Nat) (l : Lock) (done : MVar Nat) : (c : Chan) → IO Unit :=\n" ++
+  "  fun c => do\n" ++
+  "    g ← Lock.acquire l;\n" ++
+  "    x ← MVar.take acc;\n" ++
+  "    MVar.put (A := Nat) acc (x + 1);\n" ++
+  "    Lock.release l g;\n" ++
+  "    c' ← Chan.send (A := Nat) c n;\n" ++
+  "    Chan.close c';\n" ++
+  "    MVar.put (A := Nat) done n\n" ++
+  "def main : IO Unit := do\n" ++
+  "  acc ← MVar.newFull (A := Nat) 0;\n" ++
+  "  l ← Lock.new;\n" ++
+  "  done ← MVar.new (A := Nat);\n" ++
+  "  c1 ← Chan.fork (child 1 acc l done);\n" ++
+  "  c2 ← Chan.fork (child 2 acc l done);\n" ++
+  "  c3 ← Chan.fork (child 3 acc l done);\n" ++
+  "  c4 ← Chan.fork (child 4 acc l done);\n" ++
+  "  c5 ← Chan.fork (child 5 acc l done);\n" ++
+  "  c6 ← Chan.fork (child 6 acc l done);\n" ++
+  "  c7 ← Chan.fork (child 7 acc l done);\n" ++
+  "  c8 ← Chan.fork (child 8 acc l done);\n" ++
+  "  v1 ← MVar.take (A := Nat) done;\n" ++
+  "  v2 ← MVar.take (A := Nat) done;\n" ++
+  "  v3 ← MVar.take (A := Nat) done;\n" ++
+  "  v4 ← MVar.take (A := Nat) done;\n" ++
+  "  v5 ← MVar.take (A := Nat) done;\n" ++
+  "  v6 ← MVar.take (A := Nat) done;\n" ++
+  "  v7 ← MVar.take (A := Nat) done;\n" ++
+  "  v8 ← MVar.take (A := Nat) done;\n" ++
+  "  Chan.close c1;\n  Chan.close c2;\n  Chan.close c3;\n  Chan.close c4;\n" ++
+  "  Chan.close c5;\n  Chan.close c6;\n  Chan.close c7;\n  Chan.close c8;\n" ++
+  "  n ← MVar.take (A := Nat) acc;\n" ++
+  "  IO.println (Nat.toString (v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8));\n" ++
+  "  IO.println (Nat.toString n)\n"
+
+/-- The same program gives the same output in the Lean compiler and in the self-hosted
+one, in both memory modes (the `--rc` run also checks that every object was freed). -/
+def bothRuntimes (src expected : String) : IO Unit := do
+  ioRun src expected
+  selfhostCompileRun src expected
   selfhostCompileRun src expected (flags := #["--rc"])
 
 /-- (21l) Foreign functions: headers, prototypes, numbers, strings, `Bool`, `Unit`, `IO`. -/
@@ -310,6 +405,7 @@ def selfhostAgrees (header : String) (decls : List (String × Bool)) : IO Unit :
     unless leanOk == ok do throw (IO.userError s!"the Lean frontend {if leanOk then "accepts" else "rejects"}:\n{d}")
     let some out ← selfhostOutput src | return
     let errs := (out.splitOn "\n").filter (·.startsWith "error")
+    if errs.isEmpty then checkChecked src out
     unless errs.isEmpty == ok do
       throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
@@ -325,6 +421,7 @@ def selfhostVerdicts (header : String) (decls : List (String × Bool × Bool)) :
     unless leanOk == ok do throw (IO.userError s!"the Lean frontend {if leanOk then "accepts" else "rejects"}:\n{d}")
     let some out ← selfhostOutput src | return
     let errs := (out.splitOn "\n").filter (·.startsWith "error")
+    if errs.isEmpty then checkChecked src out
     unless errs.isEmpty == selfOk do
       throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
@@ -346,6 +443,23 @@ def selfhostSameNats (header : String) (cases : List (String × Nat)) : IO Unit 
   let results := lines.filter (·.startsWith "con(")
   unless results == cases.map (fun _ => "con((#1, (tt, tt)))") do
     throw (IO.userError s!"the self-hosted frontend computes otherwise:\n{out}")
+
+/-- (A23) The same lines: each `#print axioms` message and each error or warning the Lean
+frontend reports (its text, with an error's `error: ` prefix) is a line the self-hosted
+checker prints, in the same order. (A definition's own `f : T` line is a message in the
+checker's output, not in the host's, so it is left out on both sides; the axioms note's
+second line, `(native: …)`, is kept.) -/
+def selfhostSameLines (src : String) : IO Unit := do
+  let loader ← preludeLoader
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  let lines := s.messages.toList.filterMap fun m =>
+    let l := (if m.severity == .error then "error: " else if m.severity == .warning then "warning: " else "")
+      ++ m.text
+    if m.text.startsWith "'" || m.severity != .info then some l else none
+  let some out ← selfhostOutput src | return
+  let got := (out.splitOn "\n").filter fun l =>
+    l.startsWith "'" || l.startsWith "(" || l.startsWith "error" || l.startsWith "warning"
+  checkEq (String.join (lines.map (· ++ "\n"))) (String.join (got.map (· ++ "\n")))
 
 /-- (13q) Literal patterns: a `String.beq` both frontends have (`lib/Text.wiz` isn't the
 self-hosted frontend's). -/
@@ -586,7 +700,9 @@ runtime error; 4, a leak) and a fragment of its message. -/
 def selfhostLinkRun (files : List (String × String)) (expected : String) (flags : Array String := #[])
     (fails : Option String := none) (failCode : UInt32 := 3) : IO Unit := do
   let tc ← toolchain
-  if tc.gcCflags.isEmpty then IO.println "    (skipped: no garbage collector, --gc-cflags)"; return
+  if tc.gcCflags.isEmpty then
+    skip "no garbage collector (--gc-cflags)"
+    return
   match ← selfhostCompiler with
   | .error e =>
     if (e.splitOn "gmp.h").length > 1 then IO.println "    (skipped: no toolchain)" else throw (IO.userError e)
@@ -665,6 +781,7 @@ def selfhostAgreesIO (header : String) (decls : List (String × Bool)) : IO Unit
     unless leanOk == ok do throw (IO.userError s!"the Lean frontend {if leanOk then "accepts" else "rejects"}:\n{d}")
     let some out ← selfhostOutput src | return
     let errs := (out.splitOn "\n").filter (·.startsWith "error")
+    if errs.isEmpty then checkChecked src out
     unless errs.isEmpty == ok do
       throw (IO.userError s!"the self-hosted frontend {if errs.isEmpty then "accepts" else "rejects"}:\n{d}\n{out}")
 
@@ -817,6 +934,37 @@ def privateDecls : List (String × Bool) := [
      "  | .zero => .false\n  | .succ n => ev n\nend\n", false),
   ("private def dup : Nat := 1\ndef dup : Nat := 2\n", false)]
 
+/-- (B7, A18) `let () := u; b` (the unit eliminator) and `split` (`let q (x, y)`, and a
+tuple `let (x, y, z)` as nested pairs): the Lean frontend's verdicts, which the
+self-hosted one must match. A pair at quantity 1 can only be taken apart by `split`:
+projections need an unrestricted pair, and the components are bound at `q·p` and `q`, so
+at `let 1` a component of an unrestricted Σ can be reused but the second cannot be
+dropped or used twice. -/
+def splitDecls : List (String × Bool) := [
+  ("def f (1 u : Unit) : Nat := let () := u; 42\n", true),
+  ("def f (u : Unit) : Nat := let () := u; 42\n", true),
+  ("def f (0 u : Unit) : Nat := let () := u; 42\n", false),
+  ("def f (1 u : Unit) : Unit × Unit := let () := u; (u, ())\n", false),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; 42\n", true),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; 42\n", false),
+  ("def f (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; let () := y; 42\n", false),
+  ("def f (p : Nat × Nat) : Nat := let (x, y) := p; x + x + y\n", true),
+  ("def f (p : Nat × Nat × Nat) : Nat := let (x, y, z) := p; x + y + z\n", true),
+  ("def f (1 p : Nat × Nat) : Nat := p.1\n", false),
+  ("def f : Nat := let (x, y) := 5; x\n", false)]
+
+/-- (B7) The same forms as `splitDecls`, as a program the Lean and the self-hosted
+compilers both compile and run. -/
+def splitProgram : String :=
+  "import IO\n" ++
+  "def usePair (1 p : Unit × Unit) : Nat := let 1 (x, y) := p; let () := x; let () := y; 40\n" ++
+  "def unitElim (1 u : Unit) : Nat := let () := u; 1\n" ++
+  "def triple (p : Nat × Nat × Nat) : Nat := let (x, y, z) := p; x + y + z\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (usePair ((), ())));\n" ++
+  "  IO.println (Nat.toString (unitElim ()));\n" ++
+  "  IO.println (Nat.toString (triple (1, 2, 39)))\n"
+
 /-- (stage 21i) Phantom parameters, for both frontends. -/
 def phantomHeader : String :=
   "inductive UIntN (w : Nat) where\n  | mk (toNat : Nat)\ninductive Proxy (A : Type) where\n  | mk\n" ++
@@ -845,12 +993,14 @@ def dupNamesExpected : String :=
   "error: 'loop' has already been declared\nerror: 'P.mk' has already been declared\nQ : U0\nQ.fst : (x0 : Q) → Nat\n" ++
   "error: 'Q.fst' has already been declared\nerror: 'ev' has already been declared\nfine : Nat\n"
 
-/-- The self-hosted checker accepts `file`: no `error` or `parse error` line. -/
+/-- The self-hosted checker accepts `file`: no `error` or `parse error` line, and it
+printed declarations (not the input). -/
 def selfhostChecks (file : String) : IO Unit := do
   let some out ← selfhostOutput file | return
   let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
   unless bad.isEmpty do
     throw (IO.userError s!"the self-hosted checker rejected the file:\n{"\n".intercalate bad}")
+  checkChecked file out
 
 def cofProbes : String :=
   "def showBool : Bool → String" ++ "\n" ++
@@ -1576,145 +1726,350 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
       let t1 ← IO.monoMsNow
       unless out.exitCode == 0 do
         throw (IO.userError s!"{label}: exit {out.exitCode} after {t1 - t0} ms (124 is over {secs} s: the closed scrutinees were evaluated while compiling, #422): {out.stderr.take 2000}")
+      -- (a stub that echoed its input would pass the exit code: demand the real output)
+      if label == "check" then checkChecked (closedScrutProgram 40) out.stdout
+      else unless (out.stdout.splitOn "int main").length > 1 do
+        throw (IO.userError s!"{label}: the compiler printed no C:\n{out.stdout.take 500}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+/-- (A23) `#print axioms` on the forms the host distinguishes: a definition with no
+axioms, a chain to an axiom, an axiom, an inductive type and its constructor, an
+`implemented_by` target (walked as code and marked `native`), a `sealed` type's native
+representation (`native T := mk/get`), and a foreign function. -/
+def axiomsPrintProgram : String :=
+  "import Prelude\n" ++
+  "def base : Nat := 1\n" ++
+  "axiom a : Nat\naxiom b : Nat\n" ++
+  "def g : Nat := Nat.add a b\ndef h : Nat := g\n" ++
+  "inductive T where\n  | mk (x : Nat)\n" ++
+  "def mkT : T := T.mk 1\n" ++
+  "def model (n : Nat) : Nat := n\ndef fast (n : Nat) : Nat := n + 1\n" ++
+  "attribute [implemented_by fast] model\n" ++
+  "def slow (n : Nat) : Nat := n\ndef fastA (n : Nat) : Nat := n + a\n" ++
+  "attribute [implemented_by fastA] slow\n" ++
+  "sealed inductive U where\n  | private mk (n : Nat)\n" ++
+  "def umk (n : Nat) : U := U.mk n\n" ++
+  "def uget (u : U) : Nat := match u with | .mk n => n\n" ++
+  "attribute [implemented_by umk uget] U.mk\n" ++
+  "def useU : Nat := uget (umk 3)\n" ++
+  "extern \"strlen\" (header := \"string.h\") strlen : String → Nat\n" ++
+  "def myLen : Nat := strlen \"abc\"\n" ++
+  "#print axioms base\n#print axioms g\n#print axioms h\n#print axioms a\n" ++
+  "#print axioms mkT\n#print axioms model\n#print axioms slow\n" ++
+  "#print axioms useU\n#print axioms myLen\n#print axioms strlen\n"
+
+/-- (A23) `#print axioms` on partial definitions: the body is walked only where the host
+walks the implementation (an `implemented_by` target), never from a type or a value, so
+`loopA` and its users depend on nothing while `modelA` (implemented by `loopA`) lists
+`pa`. -/
+def partialAxiomsProgram : String :=
+  "import Prelude\n" ++
+  "axiom pa : Nat\n" ++
+  "partial (default := 0) def loop : Nat := loop\n" ++
+  "partial (default := 0) def loopA : Nat := pa\n" ++
+  "def usesLoopA : Nat := loopA\n" ++
+  "def modelA : Nat := 0\n" ++
+  "attribute [implemented_by loopA] modelA\n" ++
+  "#print axioms loop\n#print axioms loopA\n#print axioms usesLoopA\n#print axioms modelA\n"
+
+/-- (A23) `set_option`: the two printing options take `true`/`false`, a bad value and an
+unknown option are the same errors as the host's, and the accepted ones change nothing
+(the self-hosted printer has no notation to switch). -/
+def setOptionProgram : String :=
+  "import Prelude\n" ++
+  "set_option pp.notation false\nset_option pp.all true\n" ++
+  "def f : Nat := 1\n#print axioms f\n" ++
+  "set_option pp.notation maybe\n" ++
+  "set_option pp.all 1\n" ++
+  "set_option pp.other true\n" ++
+  "set_option pp.notation false\n#print axioms f\n"
+-- ------------------------------------------------------------------------------------
+-- (A17/A18) Surface syntax: list literals, `&&`/`||`, as-patterns, tuple patterns,
+-- `let (x, y)`, `let ()`. The host and the self-hosted frontend compile each program,
+-- and their outputs must agree.
+
+/-- (A17) List literals, including nested and empty lists and a literal pattern. -/
+def surfaceListProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def sum : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + sum xs\n" ++
+  "def sum3 : List (List Nat) → Nat\n  | .nil => 0\n  | .cons l ls => sum l + sum3 ls\n" ++
+  "def two : List Nat → Nat\n  | [x, y] => x * 10 + y\n  | _ => 0\n" ++
+  "def mapS (f : Nat → Nat) : List Nat → List Nat\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapS f xs)\n" ++
+  "def empty : List Nat := []\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (sum [1, 2, 3, 4]));\n" ++
+  "  IO.println (Nat.toString (List.length empty));\n" ++
+  "  IO.println (Nat.toString (sum3 [[1, 2], [], [3, 4, 5]]));\n" ++
+  "  IO.println (Nat.toString (two [6, 7]));\n" ++
+  "  IO.println (Nat.toString (two [8]));\n" ++
+  "  IO.println (Nat.toString (sum (mapS (fun x => x + 1) [1, 2, 3])))\n"
+
+/-- (A17) `&&`/`||` short-circuit and bind as on the host (`!` too). -/
+def surfaceBoolProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "partial def boom : Bool := boom\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (if Bool.true && Bool.false then \"t\" else \"f\");\n" ++
+  "  IO.println (if Bool.false && boom then \"boom\" else \"short\");\n" ++
+  "  IO.println (if Bool.true || boom then \"short\" else \"boom\");\n" ++
+  "  IO.println (if !Bool.false then \"not\" else \"no\");\n" ++
+  "  IO.println (if Bool.true || Bool.false && Bool.false then \"prec\" else \"bad\");\n" ++
+  "  IO.println (if (Bool.false && boom) || Bool.true then \"mixed\" else \"no\");\n" ++
+  "  IO.println (Nat.toString (if Bool.true && Bool.true then 1 else 0))\n"
+
+/-- (A18) As-patterns: over a constructor in equations and in a `match`, in a tuple, and
+`x@y` over a variable. -/
+def surfaceAsProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "inductive T where\n  | leaf (n : Nat)\n  | node (l : T) (r : T)\n" ++
+  "def size : T → Nat\n  | .leaf _ => 1\n" ++
+  "  | t@(.node l r) => size l + size r + (match t with\n" ++
+  "      | .node _ _ => 0\n      | .leaf _ => 0)\n" ++
+  "def headOr (d : Nat) : List Nat → Nat\n" ++
+  "  | xs@(.cons x _) => x + (match xs with\n      | .cons y _ => y\n      | .nil => 0)\n" ++
+  "  | .nil => d\n" ++
+  "def sumP (p : Nat × Nat) : Nat := match p with\n  | (x@a, y@b) => x + y + a + b\n" ++
+  "def dup (n : Nat) : Nat := match n with\n  | k@_ => k + k\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (size (.node (.leaf 1) (.node (.leaf 2) (.leaf 3)))));\n" ++
+  "  IO.println (Nat.toString (headOr 0 (.cons 5 .nil)));\n" ++
+  "  IO.println (Nat.toString (headOr 9 .nil));\n" ++
+  "  IO.println (Nat.toString (sumP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (dup 6))\n"
+
+/-- (A18) Tuple patterns: a pair, a right-nested triple, a tuple rebuilt, and a tuple in
+a list. -/
+def surfaceTupleProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\n" ++
+  "def three : Nat × (Nat × Nat) → Nat\n  | (a, (b, c)) => a * 100 + b * 10 + c\n" ++
+  "def swap : Nat × Nat → Nat × Nat\n  | (a, b) => (b, a)\n" ++
+  "def head : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, _) _ => a\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (fstP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (match swap (5, 6) with\n    | (a, b) => a + b));\n" ++
+  "  IO.println (Nat.toString (head (.cons (7, 8) .nil)))\n"
+
+/-- (A18) `let (x, y) := e; b`, including three components and a nested pair. -/
+def surfaceLetPairProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def addP (p : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  x + y\n" ++
+  "def three (p : Nat × (Nat × Nat)) : Nat :=\n  let (a, b, c) := p;\n  a * 100 + b * 10 + c\n" ++
+  "def nested (p q : Nat × Nat) : Nat :=\n  let (x, y) := p;\n  let (u, v) := q;\n  (x + y) * 10 + (u + v)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (addP (3, 4)));\n" ++
+  "  IO.println (Nat.toString (three (1, (2, 3))));\n" ++
+  "  IO.println (Nat.toString (nested (10, 20) (1, 2)))\n"
+
+/-- (A18) `let () := u; b` (the kernel's unit eliminator). -/
+def surfaceLetUnitProgram : String :=
+  "import Prelude\nimport IO\n" ++
+  "def use (u : Unit) : Nat :=\n  let () := u;\n  7\n" ++
+  "def twice (n : Nat) : Nat :=\n  let () := ();\n  n + n\n" ++
+  "def through (u : Unit) (n : Nat) : Nat :=\n  let () := u;\n  n * 3\n" ++
+  "def main : IO Unit := do\n" ++
+  "  IO.println (Nat.toString (use ()));\n" ++
+  "  IO.println (Nat.toString (twice 21));\n" ++
+  "  IO.println (Nat.toString (through () 5))\n"
+/-- (E-K) A natural-number type for `Kernel.wiz`'s number literals, written as kernel terms:
+`N` (the description `arg Enum2 [ret, rec ret]`), its constructors, and definitions by
+`ind` (`N.pred`, `N.add`, `N.sub`, `N.mul`, `N.isZero`, `N.beq`, `N.blt`; `N.div` and
+`N.mod` are axioms, which an operation may be). `lit n` is a literal of the registration
+`nb`, `unary n` is `N.succ` applied `n` times, `op o` is the registered operation `o`. -/
+def ekNatDefs : String :=
+  "def uT : Tm := .unit (ln 1)\n" ++
+  "def eT : Tm := .lam (.ecase (.descr (ln 0) uT) (.var 0) (.tcons (.dret .star) (.tcons (.drec (.qlit .qw) .star (.dret .star)) .tnil)))\n" ++
+  "def dT : Tm := .darg (.qlit .qw) (.enum 2) eT\n" ++
+  "def mkC (n : String) (v ty : Tm) : Tm := .const n .nil .nil (markClosed v (sortsTy ty)) (sortsTy ty)\n" ++
+  "def nC : Tm := mkC \"N\" (.mu (ln 0) uT dT .star) (.univ 0)\n" ++
+  "def zC : Tm := mkC \"N.zero\" (.ann (.con (.pair (.tag 2 0) (.pair .star .star))) nC) nC\n" ++
+  "def sC : Tm := mkC \"N.succ\" (.lam (.con (.pair (.tag 2 1) (.pair (.var 0) (.pair .star .star))))) (piH nC nC)\n" ++
+  "def nb : NatB := .mk nC zC sC\n" ++
+  "def lit (n : Nat) : Tm := .nlit (knOfNat n) nb\n" ++
+  "def litS (s : String) : Tm := .nlit (knOfDigits s) nb\n" ++
+  "def unary : Nat → Tm\n" ++
+  "  | .zero => zC\n" ++
+  "  | .succ k => .app sC (unary k)\n" ++
+  "def famX : Tm := .lam (.mu (ln 0) uT dT (.var 0))\n" ++
+  "def motN : Tm := .lam (.lam nC)\n" ++
+  "def recMot : Tm := .pi .qw .lhole .lhole (interpApp (ln 0) uT (.app eT (.var 0)) famX .star)\n" ++
+  "  (.pi .qw .lhole .lhole (tApps (allTm (ln 0) (ln 1)) (args6 uT dT famX motN .star (.pair (.var 1) (.var 0)))) nC)\n" ++
+  "def iter (z : Tm) (s : Tm → Tm → Tm) (x : Tm) : Tm :=\n" ++
+  "  .ind (ln 0) uT dT (ln 1) motN (.lam (.lam (.lam (.app (.app (.ecase recMot (.fst (.var 1))\n" ++
+  "    (.tcons (.lam (.lam z)) (.tcons (.lam (.lam (s (.fst (.var 1)) (.fst (.var 0))))) .tnil))) (.snd (.var 1))) (.var 0))))) .star x\n" ++
+  "def n2n : Tm := piH nC nC\n" ++
+  "def n3n : Tm := piH nC (piH nC nC)\n" ++
+  "def app2 (f a b : Tm) : Tm := .app (.app f a) b\n" ++
+  "def predC : Tm := mkC \"N.pred\" (.lam (iter zC (fun f _ => f) (.var 0))) n2n\n" ++
+  "def addC : Tm := mkC \"N.add\" (.lam (.lam (iter (.var 5) (fun _ ih => .app sC ih) (.var 1)))) n3n\n" ++
+  "def subC : Tm := mkC \"N.sub\" (.lam (.lam (iter (.var 6) (fun _ ih => .app predC ih) (.var 0)))) n3n\n" ++
+  "def mulC : Tm := mkC \"N.mul\" (.lam (.lam (iter zC (fun _ ih => app2 addC (.var 5) ih) (.var 1)))) n3n\n" ++
+  "def isZeroC : Tm := mkC \"N.isZero\" (.lam (.ind (ln 0) uT dT (ln 1) (.lam (.lam (.enum 2))) (.lam (.lam (.lam (.fst (.var 1))))) .star (.var 0))) (piH nC (.enum 2))\n" ++
+  "def beqC : Tm := mkC \"N.beq\" (.lam (.lam (.app isZeroC (app2 addC (app2 subC (.var 1) (.var 0)) (app2 subC (.var 0) (.var 1)))))) (piH nC (piH nC (.enum 2)))\n" ++
+  "def bltC : Tm := mkC \"N.blt\" (.lam (.lam (.app isZeroC (app2 subC (.app sC (.var 1)) (.var 0))))) (piH nC (piH nC (.enum 2)))\n" ++
+  "def divC : Tm := .axiomC \"N.div\" (sortsTy n3n)\n" ++
+  "def modC : Tm := .axiomC \"N.mod\" (sortsTy n3n)\n" ++
+  "def op (o : NatOp) : Tm := match o with\n" ++
+  "  | .nsucc => .natFn o nb sC\n" ++
+  "  | .npred => .natFn o nb predC\n" ++
+  "  | .nadd => .natFn o nb addC\n" ++
+  "  | .nsub => .natFn o nb subC\n" ++
+  "  | .nmul => .natFn o nb mulC\n" ++
+  "  | .ndiv => .natFn o nb divC\n" ++
+  "  | .nmod => .natFn o nb modC\n" ++
+  "  | .nbeq => .natFn o nb beqC\n" ++
+  "  | .nblt => .natFn o nb bltC\n" ++
+  "def op2 (o : NatOp) (a b : Tm) : Tm := app2 (op o) a b\n" ++
+  "def verdict (r : TyRes) : String := match r with\n" ++
+  "  | .ok ty _ => show .nil 0 (quote 0 ty)\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def okErr (r : TyRes) : String := match r with\n" ++
+  "  | .ok _ _ => \"ok\"\n" ++
+  "  | .err _ => \"error\"\n" ++
+  "def tyOf (t : Tm) : String := verdict (infer empty (sortsInfer t))\n" ++
+  "def prfOk (t : Tm) : String := verdict (infer (TCtx.inProof empty) (sortsInfer t))\n" ++
+  "def chkPrf (t ty : Tm) : String := match check (TCtx.inProof empty) (sortsInfer t) (eval .nil (sortsInfer ty)) with\n" ++
+  "  | .ok _ _ => \"ok\"\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def nf (t : Tm) : String := match infer empty (sortsInfer t) with\n" ++
+  "  | .ok _ _ => normalize t\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def hnf (t : Tm) : String := match infer empty (sortsInfer t) with\n" ++
+  "  | .ok _ _ => show .nil 0 (quote 0 (whnf (eval .nil (sortsInfer t))))\n" ++
+  "  | .err m => String.append \"error: \" m\n" ++
+  "def eqN (a b : Tm) : Tm := .ann (.eqRefl nC a) (.eq nC a b)\n" ++
+  "def vecC : Tm := .axiomC \"Vec\" (sortsTy (piH nC (.univ 0)))\n" ++
+  "def vecId (a b : Tm) : Tm := .ann (.lam (.var 0)) (piH (.app vecC a) (.app vecC b))\n" ++
+  -- (B13) the value of a term as it is read back, without `whnf` (`quote`, not `nf`)
+  "def readBack (t : Tm) : String := show .nil 0 (quote 0 (eval .nil (sortsInfer t)))\n" ++
+  -- (B13) a definition's glued value: a constant whose value is the literal 2
+  "def twoC : Tm := mkC \"N.two\" (lit 2) nC\n" ++
+  -- (B13) `Nat.pow 2 (Nat.pow 2 28)`, a plain definition (`nat.pow` is not one of the
+  -- native operations here): computing it is the huge numeral, so a comparison that only
+  -- asks whether two applications are the same must not force it
+  "def powC : Tm := mkC \"Nat.pow\" (.lam (.lam (iter (lit 1) (fun _ ih => app2 mulC (.var 6) ih) (.var 0)))) n3n\n" ++
+  "def printAll : List String → IO Unit\n" ++
+  "  | .nil => IO.pure ()\n" ++
+  "  | .cons s ss => do\n" ++
+  "    IO.println s;\n" ++
+  "    printAll ss\n"
+
+/-- (E-K) A `main` printing each Wiz expression (a `String`) of `calls`. -/
+def ekMain (calls : List String) : String :=
+  "def main : IO Unit := printAll " ++ calls.foldr (fun c acc => s!"(.cons ({c}) {acc})") ".nil" ++ "\n"
+
+/-- (E-K) Literal arithmetic by reduction: the registered operations on literals, natively
+(exact past 64 bits), the zero shortcuts, the stuck applications. -/
+def ekArithCalls : List String :=
+    ["tyOf (lit 5)",
+     "nf (op2 .nadd (lit 2) (lit 3))",
+     "nf (op2 .nmul (lit 6) (lit 7))",
+     "nf (op2 .nsub (lit 3) (lit 5))",
+     "nf (op2 .nsub (lit 10) (lit 4))",
+     "nf (op2 .ndiv (lit 17) (lit 5))",
+     "nf (op2 .nmod (lit 17) (lit 5))",
+     "nf (op2 .ndiv (lit 7) (lit 0))",
+     "nf (op2 .nmod (lit 7) (lit 0))",
+     "nf (op2 .nbeq (lit 4) (lit 4))",
+     "nf (op2 .nbeq (lit 4) (lit 5))",
+     "nf (op2 .nblt (lit 3) (lit 4))",
+     "nf (op2 .nblt (lit 4) (lit 3))",
+     "nf (.app (op .nsucc) (lit 9))",
+     "nf (.app (op .npred) (lit 0))",
+     "nf (op2 .nmul (lit 4294967296) (lit 4294967296))",
+     "nf (op2 .nsub (litS \"18446744073709551616\") (lit 1))",
+     "nf (op2 .nmul (litS \"123456789012345678901234567890\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .ndiv (litS \"121932631137021795226185032733622923332237463801111263526900\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .nmod (litS \"121932631137021795226185032733622923332237463801111263526901\") (litS \"987654321098765432109876543210\"))",
+     "nf (op2 .nmul (lit 0) (unary 2))",
+     "nf (op2 .nadd (lit 0) (unary 2))",
+     "nf (op2 .nsub (unary 2) (lit 0))",
+     "nf (op2 .nadd (unary 2) (lit 3))",
+     "nf (.app (op .nsucc) (unary 1))",
+     "nf (.app (op .nadd) (lit 2))",
+     "nf (.ann (.lam (op2 .nsub (.var 0) (lit 3))) n2n)"]
+def ekArithExpected : String := "N\n5\n42\n0\n6\n3\n2\n0\n7\n#0\n#1\n#0\n#1\n10\n0\n18446744073709551616\n18446744073709551615\n121932631137021795226185032733622923332237463801111263526900\n123456789012345678901234567890\n1\n0\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ncon((#1, (con((#1, (3, (tt, tt)))), (tt, tt))))\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\n(N.add 2)\nλx0. ((N.sub x0) 3)\n"
+
+/-- (E-K) Literals and unary numerals are convertible both ways: the equation, conversion
+(a neutral `Vec n`), and the eliminators looking inside a literal. -/
+def ekConvCalls : List String :=
+    ["prfOk (eqN (lit 3) (unary 3))",
+     "prfOk (eqN (unary 3) (lit 3))",
+     "prfOk (eqN (op2 .nadd (lit 2) (lit 3)) (unary 5))",
+     "prfOk (eqN (app2 addC (unary 2) (lit 3)) (lit 5))",
+     "prfOk (eqN (app2 mulC (lit 3) (lit 4)) (lit 12))",
+     "prfOk (eqN (lit 0) zC)",
+     "tyOf (vecId (lit 3) (unary 3))",
+     "tyOf (vecId (unary 3) (lit 3))",
+     "tyOf (vecId (op2 .nadd (lit 1) (lit 2)) (.app sC (lit 2)))",
+     "tyOf (vecId (app2 subC (lit 5) (lit 2)) (lit 3))",
+     "hnf (.app isZeroC (lit 0))",
+     "hnf (.app isZeroC (lit 7))",
+     "hnf (.app predC (lit 10))"]
+def ekConvExpected : String := "True\nTrue\nTrue\nTrue\nTrue\nTrue\n(x0 : (Vec 3)) → (Vec (N.succ (N.succ (N.succ N.zero))))\n(x0 : (Vec (N.succ (N.succ (N.succ N.zero))))) → (Vec 3)\n(x0 : (Vec 3)) → (Vec (N.succ 2))\n(x0 : (Vec ((N.sub 5) 2))) → (Vec 3)\n#0\n#1\n9\n"
+
+/-- (E-K) Rejections: different numbers, a literal at another type, an ill-typed
+registration, an operation registered at the wrong type or with a non-constant. -/
+def ekRejectCalls : List String :=
+    ["okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (lit 3) (unary 4))))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (unary 4) (lit 3))))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (op2 .nadd (lit 2) (lit 2)) (lit 5))))",
+     "okErr (infer empty (sortsInfer (vecId (lit 3) (unary 4))))",
+     "okErr (infer empty (sortsInfer (vecId (lit 2) (lit 3))))",
+     "tyOf (.ann (lit 3) (.enum 2))",
+     "tyOf (.nlit (knOfNat 1) (.mk nC sC sC))",
+     "tyOf (.nlit (knOfNat 1) (.mk nC zC zC))",
+     "tyOf (.nlit (knOfNat 1) (.mk (.univ 0) zC sC))",
+     "tyOf (.natFn .nadd nb predC)",
+     "tyOf (.natFn .nadd nb (lit 3))"]
+def ekRejectExpected : String := "error\nerror\nerror\nerror\nerror\nerror: type mismatch: expected Enum2, got N\nerror: the registered nat.zero is not a N\nerror: the registered nat.succ is not a function from and to N\nerror: numerals need `builtin nat`, `builtin nat.zero` and `builtin nat.succ` registered as definitions\nerror: nat.add is registered with a constant of the wrong type: N.pred\nerror: nat.add is registered with a term that is not a constant\n"
+
+/-- (B13) A big literal, a `Nat` operation on a definition's glued value, the expansive
+`Nat.pow 2 (Nat.pow 2 28)`, and a normal form that must compute: the host's rules
+(`wiz-notes/kernel-lazy-let.md` §8.1, §8.4, §9.3) on the self-hosted kernel. -/
+def ekLazyCalls : List String :=
+    ["tyOf (litS \"123456789012345678901234567890\")",
+     "nf (op2 .nadd (litS \"123456789012345678901234567890\") (lit 1))",
+     "readBack (op2 .nadd twoC (lit 3))",
+     "hnf (op2 .nadd twoC (lit 3))",
+     "prfOk (eqN (op2 .nadd twoC (lit 3)) (lit 5))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (op2 .nadd twoC (lit 3)) (lit 6))))",
+     "readBack (app2 powC (lit 2) (app2 powC (lit 2) (lit 28)))",
+     "okErr (infer (TCtx.inProof empty) (sortsInfer (eqN (app2 powC (lit 2) (app2 powC (lit 2) (lit 28))) (app2 powC (lit 2) (app2 powC (lit 2) (lit 28))))))",
+     "chkPrf (.eqRefl nC (app2 powC (lit 2) (app2 powC (lit 2) (lit 28)))) (.eq nC (app2 powC (lit 2) (app2 powC (lit 2) (lit 28))) (app2 powC (lit 2) (app2 powC (lit 2) (lit 28))))",
+     "nf (op2 .nadd twoC (lit 3))"]
+def ekLazyExpected : String :=
+  "N\n123456789012345678901234567891\n((N.add N.two) 3)\n5\nTrue\nerror\n" ++
+  "((Nat.pow 2) ((Nat.pow 2) 28))\nok\nok\n5\n"
+
+/-- (E-K) The cost literals remove (`wiz-notes/elab-evaluator-plan.md` §3.5: the hygiene
+mark `✝` is code 10013): the equation `77 * 130 + 3 = 10013`, once with the registered
+operations on literals and once with the definitions on unary numerals. Prints both
+verdicts and the two times in nanoseconds. -/
+def ekTimingMain : String :=
+  "def unaryWork : Tm := eqN (app2 addC (app2 mulC (unary 77) (unary 130)) (unary 3)) (unary 10013)\n" ++
+  "def litWork : Tm := eqN (op2 .nadd (op2 .nmul (lit 77) (lit 130)) (lit 3)) (lit 10013)\n" ++
+  "def main : IO Unit := do\n" ++
+  "  t0 ← Clock.monotonic;\n" ++
+  "  IO.println (prfOk litWork);\n" ++
+  "  t1 ← Clock.monotonic;\n" ++
+  "  IO.println (prfOk unaryWork);\n" ++
+  "  t2 ← Clock.monotonic;\n" ++
+  "  IO.println (String.append (Nat.toString (Duration.sub t1 t0).ns) (String.append \" \" (Nat.toString (Duration.sub t2 t1).ns)))\n"
+
+
+/-- The pipeline group: every case here runs the **self-hosted** compiler (`selfhostCompiler`)
+or checker (`selfhostChecker`), and compares what it says. A case that only runs the Lean
+host belongs in `selfhost-host`; the case that sets an echoing stub proves this group
+cannot regress into cases that do not reach the pipeline. -/
 def selfHostGroup : Group where
   name := "selfhost"
-  exercise := "Stages 12b–14q"
+  exercise := "Stages 12b–14q (the self-hosted pipeline)"
   cases := [
-    { name := "the lexer in Wiz agrees with the Lean lexer", run := fun _ => do
-        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
-        let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
-          "inductive T where | a | b (t : T)\ndef s : String := \"hi\\n\" -- strings\ndef α₁ : List.cons → Nat.add := λ x => x.1\n" ++
-          "0x3F 0b1010 0XfF 0B1 0x 0b2 0xg 007 0x7FFFFFFFFFFFFFFF 0x8000000000000000 " ++
-          -- every escape, then a bad one (both lexers stop there with the same message)
-          "def e := \"a\\r\\t\\\\\\\"\\'\\x41\\u{3bb}\\u{1F600}z\" \"bad \\q\""
-        let toks := Builtin.tables.tokens
-        let expected := leanTokens toks input
-        let table := toks.toList.foldr (fun t acc => s!"(.cons {wizLit t} {acc})") ".nil"
-        let prog := lexSrc ++ s!"\ndef main : IO Unit := printAll (List.reverseL (tokenize {table} {wizLit input}) .nil)\n"
-        let prog := prog.replace "def printAll" "def List.reverseL : List String → List String → List String\n  | .nil, acc => acc\n  | .cons x xs, acc => List.reverseL xs (.cons x acc)\ndef printAll"
-        ioRun prog ("\n".intercalate expected ++ "\n") },
-    { name := "the parser in Wiz agrees with the Lean parser", run := fun _ => do
-        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
-        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
-        let t := Builtin.tables
-        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
-        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
-        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ wizTables t ++
-          s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
-          s!"def main : IO Unit := printAll {wizList calls}\n"
-        ioRun prog ("\n".intercalate expected ++ "\n") },
-    { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
-        -- the checked-in file is what the selfhost builds read; a grammar change that
-        -- does not regenerate it is a stale compiler, so fail here (CI runs this shard
-        -- when `Wiz/Parser/*` changes)
-        let file ← IO.FS.readFile "selfhost/Tables.wiz"
-        unless file == Selfhost.tablesFile do
-          throw (IO.userError s!"selfhost/Tables.wiz is stale: run `lake build genSelfhostTables` and commit it (file {file.length} bytes, the tables now {Selfhost.tablesFile.length})") },
-    { name := "the checked-in tables accept the corpus the Lean parser accepts", run := fun _ => do
-        -- the semantic check of the file: not "the text is the same" but "the tables in
-        -- selfhost/Tables.wiz parse, on the differential's corpus, exactly what the Lean
-        -- parser produces" (the case above does the same with freshly generated tables)
-        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
-        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
-        let tablesSrc ← IO.FS.readFile "selfhost/Tables.wiz"
-        let t := Builtin.tables
-        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
-        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
-        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ tablesSrc ++
-          s!"def main : IO Unit := printAll {wizList calls}\n"
-        ioRun prog ("\n".intercalate expected ++ "\n") },
-    { name := "the type checker in Wiz", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let defs := "def idTy : Tm := piH (.univ 0) (piH (.var 0) (.var 1))\n" ++
-          "def idTm : Tm := .ann (.lam (.lam (.var 0))) idTy\n" ++
-          "def cnat : Tm := piH (.univ 0) (piH (piH (.var 0) (.var 1)) (piH (.var 1) (.var 2)))\n" ++
-          "def two : Tm := .ann (.lam (.lam (.lam (.app (.var 1) (.app (.var 1) (.var 0)))))) cnat\n" ++
-          "def add : Tm := .ann (.lam (.lam (.lam (.lam (.lam (.app (.app (.app (.var 4) (.var 2)) (.var 1)) " ++
-          "(.app (.app (.app (.var 3) (.var 2)) (.var 1)) (.var 0)))))))) (piH cnat (piH cnat cnat))\n" ++
-          "def viaId : Tm := .ann (.lam (.lam (.app (.app idTm (.var 1)) (.var 0)))) idTy\n"
-        let main := "def main : IO Unit := do\n  IO.println (typeOf idTm);\n  IO.println (typeOf viaId);\n" ++
-          "  IO.println (typeOf (.app idTm cnat));\n  IO.println (typeOf (.app (.app add two) two));\n" ++
-          "  IO.println (normalize (.app (.app add two) two));\n  IO.println (typeOf (.app (.univ 0) (.univ 0)));\n" ++
-          -- a variable out of scope is an error (it was `Sort 0`, as a type and as a value: `Prop : Prop`)
-          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit (ln 1)) .prop)))\n"
-        ioRun (kernel ++ "\n" ++ defs ++ main) ("(x0 : U0) → (x1 : x0) → x0\n(x0 : U0) → (x1 : x0) → x0\n" ++
-          "error: type mismatch: expected U0, got U1\n(x0 : U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\n" ++
-          "λx0. λx1. λx2. (x1 (x1 (x1 (x1 x2))))\nerror: not a function: its type is U1\n" ++
-          "error: internal error: a variable out of scope\nerror: internal error: a variable out of scope\n") },
-    -- W1 (`wiz-notes/kernel-lint.md`): the structural fast path (`valSame`) compared two
-    -- constants by name, without their universe levels, so two stuck cases whose
-    -- environments held `d.{0}` and `d.{1}` were convertible: a closed term of type `False`
-    { name := "W1: a constant at two universe levels is not the same value (the fast path for stuck cases)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let probe :=
-          "def dVal : Tm := sortsTy (piH (.sortL (.lparam \"u\")) (piH (.var 0) (piH (.var 1) (piH (piH (.var 2) .prop)\n" ++
-          "  (piH (.app (.var 0) (.var 2)) (.app (.var 1) (.var 2)))))))\n" ++
-          "def dAt (l : Lvl) : Tm := .const \"d\" (.cons \"u\" .nil) (.cons l .nil) dVal .prop\n" ++
-          "def d0 : Tm := dAt (.lnum 0)\n" ++
-          "def d1 : Tm := dAt (.lnum 1)\n" ++
-          "def d0Proof : Tm := .ann (.lam (.lam (.lam (.lam (.lam (.var 0)))))) d0\n" ++
-          "def fTy : Tm := sortsTy (piH .prop (piH (.enum 1) .prop))\n" ++
-          "def fVal : Tm := .lam (.lam (.ecase .prop (.var 0) (.tcons (.var 1) .tnil)))\n" ++
-          "def fC : Tm := .const \"F\" .nil .nil fVal fTy\n" ++
-          "def fAt (a x : Tm) : Tm := .app (.app fC a) x\n" ++
-          "def h (a b : Tm) : Tm := .ann (.lam (.lam (.var 0))) (piH (.enum 1) (piH (fAt a (.var 0)) (fAt b (.var 1))))\n" ++
-          "def isFirst : Tm := .ann (.lam (.ecase .prop (.var 0) (.tcons .ptrue (.tcons .pfalse .tnil)))) (piH (.enum 2) .prop)\n" ++
-          "def refute (p : Tm) : Tm := .app (.app (.app (.app (.app p (.enum 2)) (.tag 2 0)) (.tag 2 1)) isFirst) .star\n" ++
-          "def bad (a b : Tm) : Tm := .ann (refute (.app (.app (h a b) (.tag 1 0)) d0Proof)) .pfalse\n" ++
-          "def verdict (r : TyRes) : String := match r with\n" ++
-          "  | .ok _ _ => \"ok\"\n" ++
-          "  | .err _ => \"error\"\n" ++
-          -- (P2) the probes are proofs (their types are propositions): checked inside a proof,
-          -- where they need no marker
-          "def typeOk (t : Tm) : String := verdict (infer (TCtx.inProof empty) (sortsInfer t))\n" ++
-          "def typeOfP (t : Tm) : String := match infer (TCtx.inProof empty) (sortsInfer t) with\n  | .ok ty _ => show .nil 0 (quote 0 ty)\n  | .err m => String.append \"error: \" m\n" ++
-          "def main : IO Unit := do\n" ++
-          "  IO.println (String.append \"d's declaration, at every level: \" (verdict (checkDecl .prop (.some dVal))));\n" ++
-          "  IO.println (String.append \"F's declaration: \" (verdict (checkDecl fTy (.some fVal))));\n" ++
-          "  IO.println (String.append \"the proof of d.{0}: \" (typeOk d0Proof));\n" ++
-          "  IO.println (String.append \"control, d.{0} used as d.{1} directly (want error): \" (typeOk (.ann d0Proof d1)));\n" ++
-          "  IO.println (String.append \"control, F d.{0} x → F d.{0} x (want ok): \" (typeOk (h d0 d0)));\n" ++
-          "  IO.println (String.append \"F d.{0} x → F d.{1} x (want error): \" (typeOk (h d0 d1)));\n" ++
-          "  IO.println (String.append \"a closed term of type False (want error): \" (typeOfP (bad d0 d1)))\n"
-        ioRun (kernel ++ "\n" ++ probe) ("d's declaration, at every level: ok\nF's declaration: ok\nthe proof of d.{0}: ok\n" ++
-          "control, d.{0} used as d.{1} directly (want error): error\ncontrol, F d.{0} x → F d.{0} x (want ok): ok\n" ++
-          "F d.{0} x → F d.{1} x (want error): error\n" ++
-          "a closed term of type False (want error): error: type mismatch: expected case(Prop, x0, d.{1}), got ((F d.{0}) x0)\n") },
-    { name := "the frontend gives the types it builds their sorts (sortTy, and the sorts pass)", run := fun _ => do
-        -- `(True → Unit) = ((True → True) → Unit)` computes to the domains' equivalence: with
-        -- the sorts `sortTy` fills in, and (mandatory sorts) with those the sorts pass fills
-        -- in where none were written (`normalize` runs it), so both are the same
-        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
-        let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
-        let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
-          "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
-          "def eqn (s : Bool) : Tm := match s with\n" ++
-          "  | .true => .eqTy (sortTy (gTy .ptrue)) (sortTy (gTy (piH .ptrue .ptrue)))\n" ++
-          "  | .false => .eqTy (gTy .ptrue) (gTy (piH .ptrue .ptrue))\n" ++
-          "def main : IO Unit := do\n  IO.println (normalize (eqn .false));\n  IO.println (normalize (eqn .true));\n" ++
-          "  IO.println (typeOf (sortTy (gTy (piH .ptrue .ptrue))))\n"
-        let computed := "(x0 :0 (x0 :0 (x0 :0 (x0 : True) → True) → True) × (x1 :0 True) → (x2 : True) → True) × " ++
-          "(x1 :0 (x1 : True) → True) → True\n"
-        ioRun prog (computed ++ computed ++ "U0\n") },
     -- Y4: `Kernel.wiz` compares two constants by name, so a name has one declaration
     { name := "a name is declared once: a second declaration is an error (it proved an empty type inhabited)", run := fun _ =>
         selfhostCheckFile dupNames dupNamesExpected },
-    { name := "text to checked term, all in Wiz", run := fun _ => do
-        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
-        let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
-        let t := Builtin.tables
-        let bad := "(fun (x : Type) => x"
-        let cases := ["(fun A x => x : (A : Type) → A → A)", "Type 2", "let T : Type 1 := Type; (fun x => x : T → T)",
-          "fun x => x", "y", "(fun f x => f x : (Type → Type) → Type → Type)", bad]
-        let calls := cases.map fun c => s!"(checkText cats tokens {wizLit c})"
-        let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++ wizTables t ++
-          s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
-          s!"def main : IO Unit := printAll {wizList calls}\n"
-        ioRun prog ("(x0 : U0) → (x1 : x0) → x0\nU3\n(x0 : U0) → U0\n" ++
-          "error: cannot infer the type of a λ; add a type ascription\nscope error: unknown identifier y\n" ++
-          "(x0 : (x0 : U0) → U0) → (x1 : U0) → U0\nparse " ++ leanParse t "term" bad ++ "\n") },
     { name := "a file of definitions, checked in Wiz", run := fun _ =>
         selfhostCheckFile ("def N : Type 1 := (A : Type) → (A → A) → A → A\ndef two : N := fun A s z => s (s z)\n" ++
           "def add (m n : N) : N := fun A s z => m A s (n A s z)\n#reduce add two two\n#check add two\n" ++
@@ -1876,6 +2231,8 @@ def selfHostGroup : Group where
           "14\n2\n0\n5\n3486784401\n8\n14\n6\n3145728\n125\n10\nset\n" },
     { name := "foreign functions: the Lean and the self-hosted compilers agree (21l)", run := fun _ =>
         ffiAgrees ffiProgram1 ffiExpected1 },
+    { name := "threads: the channel, MVar and lock natives agree in both runtimes (25a, D1)", run := fun _ =>
+        bothRuntimes concNatives "36\n8\n" },
     { name := "foreign pointers: the finalizer runs with the last reference, in both compilers (21l)", run := fun _ =>
         ffiAgrees (ffiProgramFin false) "line\nline\nline\n" (gc := false) },
     { name := "foreign pointers passed around and flushed, with either collector (21l)", run := fun _ =>
@@ -1921,19 +2278,6 @@ def selfHostGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (get b + sum p))\n") "6\n" },
     { name := "the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10)", run := fun _ =>
         selfhostAgrees quantityHeader quantityDecls },
-    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
-        -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
-        -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
-        let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
-          "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
-        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
-        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
-          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
-        ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
-          "ok\nerror\n" },
     { name := "the self-hosted frontend: constructor field quantities (0, 1, ω) and implicit fields, as in the Lean frontend (21x)", run := fun _ =>
         selfhostAgrees fieldQtyHeader fieldQtyDecls },
     { name := "constructor field quantities and implicit fields: the Lean and the self-hosted compilers agree (21x)", run := fun _ => do
@@ -1944,8 +2288,12 @@ def selfHostGroup : Group where
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
-    { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
-        ioRun linearMatchProgram "3\n5\n6\n" },
+    { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
+        selfhostAgrees "" splitDecls },
+    { name := "`let () := u; b` and split: the Lean and the self-hosted compilers agree (B7)", run := fun _ => do
+        ioRun splitProgram "40\n1\n42\n"
+        selfhostCompileRun splitProgram "40\n1\n42\n"
+        selfhostCompileRun splitProgram "40\n1\n42\n" (flags := #["--rc"]) },
     { name := "the self-hosted frontend: Σ types, pairs, projections and ∀, as in the Lean frontend (21u)", run := fun _ =>
         selfhostAgrees "" sigmaDecls },
     { name := "the self-hosted backend: quantities erase and run, with either collector (21m)", run := fun _ => do
@@ -1956,8 +2304,14 @@ def selfHostGroup : Group where
     -- (`attribute [macro …]`/`[tactic …]` are commands A12 now accepts; these are still
     -- unknown to the frontend)
     { name := "the self-hosted frontend: an unknown command is an error naming it (21n)", run := fun _ =>
-        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#print axioms f\n#erase f\ndef g : Nat := f\n"
-          "f : Nat\nerror: unsupported command command.printAxioms\nerror: unsupported command command.erase\ng : Nat\n" },
+        selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#erase f\ndef g : Nat := f\n"
+          "f : Nat\nerror: unsupported command command.erase\ng : Nat\n" },
+    { name := "the self-hosted frontend: #print axioms lists the same axioms as the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines axiomsPrintProgram },
+    { name := "the self-hosted frontend: #print axioms walks a partial definition's body only as code, as the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines partialAxiomsProgram },
+    { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
+        selfhostSameLines setOptionProgram },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -2124,62 +2478,6 @@ def selfHostGroup : Group where
         selfhostSameNats (updHeader ++ updProgram) updCases },
     { name := "the self-hosted frontend: structure update verdicts, as in the Lean frontend (13i, 13p)", run := fun _ =>
         selfhostAgrees updHeader updDecls },
-    { name := "both kernels compare propositions by equivalence (and agree on it below)", run := fun _ => do
-        -- the domains' equation is an equivalence, not `False`
-        match MTm.propShapes.map leanVerdict with
-        | ["error", ok] => unless ok != "error" do throw (IO.userError "the equivalence was rejected")
-        | vs => throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "Size = Size is stuck, not False (and both kernels agree on it below)", run := fun _ => do
-        match MTm.sizeEq.map leanVerdict with
-        | ["error", "error", "error", a, b] =>
-          unless a == "EqTy(Size, Size)" && b == "EqTy(Size<(∞), Size<(∞))" do
-            throw (IO.userError s!"unexpected types {a}, {b}")
-        | vs => throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "projections need an unrestricted pair; positions at 0 are erased; eliminators use their scrutinee ω times (R1; and both kernels agree on it below)", run := fun _ => do
-        for (t, ok) in MTm.projRule ++ MTm.elimRule ++ MTm.usageRule ++ MTm.linearCaseRule do
-          let v := leanVerdict t
-          unless (v != "error") == ok do
-            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
-    { name := "the size of μ and ν is checked (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.sizeArgs.map leanVerdict
-        unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") do
-          throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)", run := fun _ => do
-        for (t, ok) in MTm.muSize do
-          let v := leanVerdict t
-          unless (v != "error") == ok do
-            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
-    { name := "∞ is not below itself (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.sizeInf.map leanVerdict
-        unless vs.take 5 == List.replicate 5 "error" && (vs.drop 5).all (· != "error") do
-          throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "F6: literal quantities that differ make types unequal (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.qtyApart.map leanVerdict
-        unless vs.take 2 |>.all (· != "error") do throw (IO.userError s!"unexpected verdicts {vs}")
-        unless vs[2]? == some "error" && vs[3]? != some "error" do throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "F3 (audit): the eliminators check the index type's level (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.elimLevels.map leanVerdict
-        let names := ["ind", "sfix", "scase", "coit", "scofix"]
-        for n in names, k in [0:5] do
-          unless vs[k]? == some "error" do
-            throw (IO.userError s!"{n} with an index type one level too high was accepted: {vs[k]?}")
-          unless vs[5 + k]? == some "error" do
-            throw (IO.userError s!"{n} with an index type one level too low was accepted: {vs[5 + k]?}")
-          unless vs[10 + k]? != some "error" && vs[15 + k]? != some "error" do
-            throw (IO.userError s!"{n} with a well-levelled index type was rejected: {vs[10 + k]?}, {vs[15 + k]?}")
-        unless vs.drop 20 == ["error", "error"] do throw (IO.userError s!"unexpected verdicts {vs.drop 20}") },
-    { name := "transp is rejected at a proposition, as eq and refl are (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.transpProp.map leanVerdict
-        unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") && vs.length == 4 do
-          throw (IO.userError s!"unexpected verdicts {vs}") },
-    { name := "Q4: a small description field is rejected, a lifted one works (and both kernels agree on it below)", run := fun _ => do
-        let vs := MTm.smallField.map leanVerdict
-        let body := (vs.drop 4).dropLast
-        unless vs.take 4 == List.replicate 4 "error" && body.all (· != "error") && vs.getLast? == some "error" do
-          throw (IO.userError s!"unexpected verdicts {vs}")
-        -- `getS D'` is a type (it computes to `ULift True`), and a boxed proof unboxes to `True`
-        unless vs[5]? == some "U0" && vs[9]? == some "True" do
-          throw (IO.userError s!"unexpected types {vs}") },
     { name := "the self-hosted frontend checks itself (Lex, Parse, Kernel, CParse, CGlue and Frontend.wiz)", run := fun _ => do
         let srcs ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
         let src := "\n".intercalate srcs
@@ -2211,10 +2509,12 @@ def selfHostGroup : Group where
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
-        let some out ← selfhostOutputPeak ("import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead) 512
+        let src := "import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead
+        let some out ← selfhostOutputPeak src 512
           | pure ()
         for l in out.splitOn "\n" do
-          if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l) },
+          if l.startsWith "error" || l.startsWith "parse error" then throw (IO.userError l)
+        checkChecked src out },
     -- (agent/checker-mem) The grammar has no `if`: it is a flat application spine, so a
     -- nested unparenthesised `if` in a then branch must take the first `else` (the
     -- dangling else). Before the split fix the outer else was applied as a function
@@ -2227,420 +2527,6 @@ def selfHostGroup : Group where
           ("f : (x0 : Nat) → Nat\n" ++
            "g : (x0 : Bool) → (x1 : Bool) → Nat\n" ++
            "h : (x0 : Bool) → (x1 : Bool) → Nat\n") },
-    { name := "the Wiz kernel agrees with the Lean kernel (400 random terms)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let mut terms : Array MTm := MTm.samples.toArray
-        let mut seed := 42
-        for i in [0:400] do
-          let (t, s) := MTm.gen seed (2 + i % 3) 0
-          terms := terms.push t
-          seed := s
-        let expected := terms.toList.map leanVerdict
-        let verdict := wizVerdict
-        let calls := terms.toList.map fun t => s!"(verdict {t.toWiz})"
-        let main := s!"def main : IO Unit := printAll {wizList calls}\n"
-        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
-        unless (expected.filter (· != "error")).length ≥ 30 do throw (IO.userError "too few well-typed terms")
-        ioRun (kernel ++ "\n" ++ verdict ++ printAll ++ main) ("\n".intercalate expected ++ "\n") },
-    -- P2 (soundness review of PR #61). A suspended proof never reaches these positions from
-    -- a checked term (it only sits in the proof positions of `cast` and `transp`), so the
-    -- values are built by hand, in both kernels.
-    { name := "P2: comparing types erases suspended proofs, but not what follows an absurd (both kernels)", run := fun _ => do
-        let g : Globals ZeroOneMany := {}
-        let ls : List Name := ["a", "b"]
-        let E : Val ZeroOneMany := .enum ls
-        let pf (sp : Array (Elim ZeroOneMany)) : Val ZeroOneMany :=
-          .neutral (.prf [] .tt) sp
-        -- (the kernel's read-back, as its comparisons and its messages use it)
-        let sameVal (g : Globals ZeroOneMany) (a b : Val ZeroOneMany) : Bool :=
-          quote { g with quoteErasesProofs := true } 0 a == quote { g with quoteErasesProofs := true } 0 b
-        -- two proofs are equal, whatever was projected
-        checkEq "true" (toString (sameVal g (pf #[.fst]) (pf #[.snd])))
-        -- `absurd E p` is a value of `E`, not a proof: what is done with it is compared
-        checkEq "false" (toString (sameVal g (pf #[.absurd E, .app (.tag ls 0)]) (pf #[.absurd E, .app (.tag ls 1)])))
-        -- and what was done before the `absurd` is not
-        checkEq "true" (toString (sameVal g (pf #[.fst, .absurd E, .app (.tag ls 0)]) (pf #[.snd, .absurd E, .app (.tag ls 0)])))
-        -- the same proof as a stuck `refl` head and as a suspension reads back alike (the
-        -- two forms of one proof must not make two types differ: `prf-marker.md` §4.3)
-        checkEq "true" (toString (sameVal g (.neutral (.refl E (.tag ls 0)) #[.fst]) (pf #[.snd])))
-        checkEq "true" (toString (sameVal g (.neutral (.refl E (.tag ls 0)) #[.absurd E]) (pf #[.fst, .absurd E])))
-        -- conversion, a suspended proof against a `refl`, both under `absurd`: a proof under
-        -- `absurd` is not compared, in either kernel (they differed before the marker)
-        let refl : Val ZeroOneMany := .neutral (.refl E (.tag ls 0)) #[.absurd E]
-        checkEq "true" (toString (conv g #[] E (pf #[.absurd E]) refl))
-        -- (I-2) and with no `absurd`, where the type was not seen to be a proposition: a
-        -- suspended proof and a `refl` head are two proofs, equal in both kernels
-        checkEq "true" (toString (conv g #[] E (pf #[.fst]) (.neutral (.refl E (.tag ls 0)) #[.fst])))
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
-          "def pf : Head := .hprf .nil .star\n" ++
-          "def rf : Head := .hrefl (.venum 2) (.vtag 2 0)\n" ++
-          "def sameVal (a b : Val) : Bool := tmEq (quoteM .false 0 a) (quoteM .false 0 b)\n" ++
-          "def ab (sp : Spine) : Spine := .sabsurd sp (.venum 2)\n" ++
-          "def main : IO Unit := do\n" ++
-          "  IO.println (b2s (sameVal (.vne pf (.sfst .snil)) (.vne pf (.ssnd .snil))));\n" ++
-          "  IO.println (b2s (sameVal (.vne pf (.sapp (ab .snil) (.vtag 2 0))) (.vne pf (.sapp (ab .snil) (.vtag 2 1)))));\n" ++
-          "  IO.println (b2s (sameVal (.vne pf (.sapp (ab (.sfst .snil)) (.vtag 2 0))) (.vne pf (.sapp (ab (.ssnd .snil)) (.vtag 2 0)))));\n" ++
-          "  IO.println (b2s (sameVal (.vne rf (.sfst .snil)) (.vne pf (.ssnd .snil))));\n" ++
-          "  IO.println (b2s (sameVal (.vne rf (ab .snil)) (.vne pf (ab (.sfst .snil)))));\n" ++
-          "  IO.println (b2s (conv empty (.venum 2) (.vne pf (ab .snil)) (.vne (.hrefl (.venum 2) (.vtag 2 0)) (ab .snil))));\n" ++
-          "  IO.println (b2s (conv empty (.venum 2) (.vne pf (.sfst .snil)) (.vne (.hrefl (.venum 2) (.vtag 2 0)) (.sfst .snil))))\n"
-        ioRun (kernel ++ "\n" ++ main) "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\n" },
-    { name := "every constructor of Term is covered by the traversals (S1: a missed one proved False)", run := fun _ => do
-        let samples := termSamples (.var 5) (.param "pw")
-        -- a sample for every constructor
-        let names := (samples.map (termCtor ·.1)).eraseDups
-        unless names.length == termCtorCount && samples.length == termCtorCount do
-          throw (IO.userError s!"{names.length} constructors have a sample, of {termCtorCount}")
-        for (t, nTerms, nLevels) in samples do
-          let c := termCtor t
-          -- `mapChildrenM` visits every term child and every level
-          let (_, (ts, ls)) := (t.forChildren (m := StateM (Nat × Nat))
-            (fun _ => modify fun (a, b) => (a, b + 1)) (fun _ _ => modify fun (a, b) => (a + 1, b))).run (0, 0)
-          unless (ts, ls) == (nTerms, nLevels) do
-            throw (IO.userError s!"{c}: mapChildrenM visits {ts} terms and {ls} levels, expected {nTerms} and {nLevels}")
-          -- so do the traversals built on it: shifting, substitution, occurrence, the levels
-          if nTerms > 0 then
-            unless t.lift 1 != t do throw (IO.userError s!"{c}: lift misses the children")
-            unless (List.range 3).any (fun d => t.instantiateAt (5 - d) .tt != t) do throw (IO.userError s!"{c}: instantiateAt misses the children")
-            unless (List.range 3).any (fun d => t.hasVar (5 - d)) do throw (IO.userError s!"{c}: hasVar misses the children")
-          if nLevels > 0 then
-            unless t.instLevels ["pw"] [.zero] != t do throw (IO.userError s!"{c}: instLevels misses a level")
-            unless (t.levelParamsUsed.filter (· == "pw")).length == nLevels do
-              throw (IO.userError s!"{c}: levelParamsUsed misses a level")
-        -- the marker's level is instantiated: `prf.{u} t` is a suspended proof at `u := 0`
-        let g : Globals ZeroOneMany := {}
-        let m : Term ZeroOneMany := (Term.prf (.param "u") .tt).instLevels ["u"] [.zero]
-        unless (eval g [] m) matches .neutral (.prf ..) #[] do throw (IO.userError "prf.{u} at u := 0 is not suspended")
-        -- the Wiz kernel's traversals
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
-          "def z : Lvl := .lnum 0\n" ++
-          "def main : IO Unit := do\n" ++
-          "  IO.println (b2s (usesVar 0 (.prf z (.var 0))));\n" ++
-          "  IO.println (b2s (usesVar 0 (.prf z .star)));\n" ++
-          "  IO.println (b2s (tmEq (.prf z (.var 0)) (.prf z (.var 1))));\n" ++
-          "  IO.println (b2s (tmEq (.prf z .star) (.prf (.lnum 1) .star)));\n" ++
-          "  IO.println (b2s (tmEq (tmSubst (.cons \"u\" .nil) (.cons z .nil) (.prf (.lparam \"u\") .star)) (.prf z .star)));\n" ++
-          "  IO.println (b2s (tmEq (quote 1 (eval (.cons (fresh 0) .nil) (.prf z (.var 0)))) (.prf z (.var 0))))\n"
-        ioRun (kernel ++ "\n" ++ main) "true\nfalse\nfalse\nfalse\ntrue\ntrue\n" },
-    { name := "P2: the proof marker is required and verified, by both kernels (terms without the marking pass)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let samples := MTm.markerSamples
-        let show' (b : Bool) : String := if b then "ok" else "error"
-        for (t, ok) in samples, i in [0:samples.length] do
-          let v := leanVerdict t (mark := false)
-          unless (v != "error") == ok do
-            throw (IO.userError s!"sample {i}: the Lean kernel says {v}, expected {show' ok}")
-        let okV := "def okVerdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let calls := samples.map fun (t, _) => s!"(okVerdict {t.toWiz})"
-        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
-        ioRun (kernel ++ "\n" ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
-          ("\n".intercalate (samples.map fun (_, ok) => show' ok) ++ "\n")
-        -- Marking on demand (`withMarksOnDemand`): a declaration the kernel finds unmarked is
-        -- marked and checked again, and what is stored (and cached) is the marked term
-        let g0 : Globals ZeroOneMany := {}
-        let T2 : Term ZeroOneMany := (MTm.pi .ptrue .ptrue).toTerm
-        let pairTy : Term ZeroOneMany := (MTm.sorted 1 0 (.sigma (.enum 2) (.sorted 0 0 (.pi .ptrue .ptrue)))).toTerm
-        let d : Decl ZeroOneMany := { name := "d", type := pairTy, value := some (.pair (.tag ["a", "b"] 0) (.lam "x" (.var 0))) }
-        match addDeclSorted g0 d with
-        | .error e => throw (IO.userError s!"marking on demand failed: {e}")
-        | .ok g => match (g.find? "d").bind (·.value) with
-          | some (.pair _ (.prf ..)) => pure ()
-          | v => throw (IO.userError s!"the stored value is not the marked one: {repr v}")
-        -- a theorem is marked at once
-        match addDeclSorted g0 { name := "t", type := T2, value := some (.lam "x" (.var 0)) } with
-        | .ok g => unless ((g.find? "t").bind (·.value)) matches some (.prf ..) do throw (IO.userError "the theorem is stored unmarked")
-        | .error e => throw (IO.userError s!"{e}")
-        -- and when the marked term fails, the error is the second check's (not "unmarked proof")
-        match addDeclSorted g0 { name := "e", type := pairTy, value := some (.pair (.tag ["a", "b"] 0) (.lam "x" (.tag ["a", "b"] 0))) } with
-        | .ok _ => throw (IO.userError "an ill-typed declaration was accepted")
-        | .error (.unmarkedProof ..) => throw (IO.userError "the error of the first check was reported")
-        | .error _ => pure () },
-    { name := "P1/PF-C: regularity is decided by conversion in both kernels (the probes as core terms; the type-position control)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let samples := MTm.convSamples
-        let show' (b : Bool) : String := if b then "ok" else "error"
-        -- the Lean kernel, by default (`conv`)
-        for (n, t, ok) in samples do
-          let v := leanVerdict t
-          unless (v != "error") == ok do throw (IO.userError s!"{n}: the Lean kernel says {v}, expected {show' ok}")
-        -- with the fast path alone (`--inert ground`): the *value* comparisons inside an
-        -- equation are still accepted (PF-C's prop gate sets conversion-level full
-        -- regularity, which does not consult `inertReg`); the *type* controls (`ty`, `tv`)
-        -- need the inert-only rule and are rejected
-        let ground (t : MTm) : Bool :=
-          let g : Globals ZeroOneMany := { leanGlobals () with inertReg := .ground }
-          -- (mandatory sorts and proof markers: the same pre-check, sorts pass and marking
-          -- pass as `leanVerdict`, at the ground globals)
-          if !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false, sortHolesOk := true } } t.toTerm).toBool then false else
-          let t0 := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t.toTerm).1
-          (infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t0).1).toBool
-        for (n, t, _) in samples do
-          unless ground t == (n != "ty" && n != "tv") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
-        -- the Wiz kernel
-        let okV := "def okVerdict (t0 : Tm) : String :=\n  let t := sortsInfer t0;\n  match infer (TCtx.inProof empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => match infer empty (MR.tm (markInfer empty t)) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
-        let calls := samples.map fun (_, t, _) => s!"(okVerdict {t.toWiz})"
-        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
-          ("\n".intercalate (samples.map fun (_, _, ok) => show' ok) ++ "\n")
-        -- and with `kernelInertConv := .false` the value comparisons are still accepted by
-        -- the prop gate; only the type controls (`ty`, `tv`) are rejected
-        let on := "def kernelInertConv : Bool := .true"
-        unless (kernel.splitOn on).length == 2 do throw (IO.userError "kernelInertConv not found")
-        let groundK := kernel.replace on "def kernelInertConv : Bool := .false"
-        ioRun (groundK ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
-          ("\n".intercalate (samples.map fun (n, _, _) => show' (n != "ty" && n != "tv")) ++ "\n") },
-    { name := "U5b: a cast at a Π/Σ whose sort depends on a level variable is stuck, as the equation it goes along is; a Π without its sorts is rejected (both kernels)", run := fun _ => do
-        -- (prop-harness, `wiz-notes/soundness-probes/ph-u5b-cast-at-unknown-sort.txt`) the cast
-        -- used to compute, projecting a proof whose type is a stuck equation and no pair
-        let g : Globals ZeroOneMany := {}
-        let ω : Term ZeroOneMany := .qlit .many
-        let stuck (v : Val ZeroOneMany) : Bool := (whnf v) matches .neutral (.cast ..) #[]
-        -- (a) a level variable: T := True × Unit.{u}
-        let T : Term ZeroOneMany := .sigma "x" ω (.unit 0) (.unit (.param "u")) ⟨0, .param "u"⟩
-        unless stuck (eval g [] (.cast T T (.reflTy T) (.pair .tt .tt))) do throw (IO.userError "(a) the cast computed")
-        -- at an instance it computes: `u := 1`
-        let T1 := T.instLevels ["u"] [Level.ofNat 1]
-        unless (whnf (eval g [] (.cast T1 T1 (.reflTy T1) (.pair .tt .tt)))) matches .pair .. do throw (IO.userError "(a) at u := 1 the cast is stuck")
-        -- (b) (mandatory sorts) a Π without its sorts can't be formed: the kernel rejects it
-        let F (s : BinderSorts) : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 0) s
-        let e : Val ZeroOneMany := Val.var 0
-        let f : Val ZeroOneMany := Val.var 1
-        match infer (R := ZeroOneMany) { globals := g } (F .hole) with
-        | .ok _ => throw (IO.userError "(b) a Π without its sorts was accepted")
-        | .error err => unless ((toString err).splitOn "without its sort").length > 1 do throw (IO.userError s!"(b) {err}")
-        -- (b') `Unit → True` with its sorts is a proposition: a cast between propositions is stuck (P2)
-        unless stuck (vCast g (eval g [] (F ⟨1, 0⟩)) (eval g [] (F ⟨1, 0⟩)) e f) do throw (IO.userError "(b') the cast computed")
-        -- with both sorts known and not propositions it computes (a λ), as before
-        let G : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 1) ⟨1, 1⟩
-        unless (vCast g (eval g [] G) (eval g [] G) e f) matches .lam .. do throw (IO.userError "an annotated Π cast is stuck")
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
-          "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
-          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
-          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
-          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
-          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
-          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
-          "def main : IO Unit := do\n" ++
-          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
-          "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
-          "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
-          "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
-          "  IO.println (shape (vCast S1 S1 (fresh 0) (.vpair .vtt .vtt)));\n" ++
-          "  IO.println (shape (vCast G G (fresh 0) (fresh 1)))\n"
-        ioRun (kernel ++ "\n" ++ main) "internal error: a Π's domain without its sort (the sorts pass did not fill it)\nstuck\nstuck\nstuck\npair\nlam\n" },
-    { name := "P2 (I-1): a proof inside a marked proof is not evaluated: a tower of exponentials in Prop checks at once (both kernels)", run := fun _ => do
-        -- k = 3 is 65 536 β-steps and k = 4 is 2^65536 if the checker runs the proof (it
-        -- did: a `let` evaluated its value to bind it). The kernel has no step budget, so
-        -- nothing but not evaluating can make these answer.
-        for k in [3, 4, 6] do
-          let t0 ← IO.monoMsNow
-          checkEq "True" (leanVerdict (MTm.proofTower k) (mark := false))
-          let ms := (← IO.monoMsNow) - t0
-          unless ms < 5000 do throw (IO.userError s!"k = {k}: the Lean kernel took {ms} ms")
-        -- the same term as a relevant `let` is rejected unmarked, as before
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let calls := [3, 4, 6].map fun k => s!"(rawVerdict {(MTm.proofTower k).toWiz})"
-        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n") "True\nTrue\nTrue\n" },
-    { name := "F7: reading a proof back stops at its step budget in the self-hosted kernel too (a tower under absurd, read back in a type)", run := fun _ => do
-        -- (review F7) `quote` evaluates a suspended proof, to read it back as a normal form;
-        -- Kernel.wiz's had no budget, and reading this type back did not finish (30 s). The
-        -- Lean read-back stops at its budget and writes the proof as the message; the Wiz one
-        -- must too, with the same message (and the kernels accept the term at once).
-        let t := MTm.proofTowerAbsurd 4
-        let g := leanGlobals ()
-        let msg := Budget.message Budget.defaultSteps
-        match infer (R := ZeroOneMany) { globals := g } t.toTerm with
-        | .error e => throw (IO.userError s!"the Lean kernel rejects the term: {e}")
-        | .ok (ty, _) =>
-          unless ((reprStr (quote g 0 ty)).splitOn "a proof was not read back: it needs more than 1000000 evaluation steps").length > 1 do
-            throw (IO.userError s!"the Lean read-back of the type did not stop at the budget: {(reprStr (quote g 0 ty)).take 400}")
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        -- (and the stub is no constant: the kernel rejects a term that holds it, with the message)
-        let stub := "(.prf (.lnum 0) (.axiomC proofStub .star))"
-        let main := s!"def main : IO Unit := do\n  IO.println (rawVerdict {t.toWiz});\n  IO.println (match infer empty {stub} with\n    | .ok _ _ => \"ok\"\n    | .err m => m)\n"
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ main)
-          s!"(x0 : False) → Eq(Enum2, absurd(Enum2, x0), absurd(Enum2, {msg}))\n{msg}\n" },
-    { name := "D2 (closed by mandatory sorts): a Π/Σ/ULift cast across components of different sorts is stuck, and its normal form is accepted (both kernels)", run := fun _ => do
-        -- (meta-review D2, `wiz-notes/soundness-probes/mr-cast-component-sorts.lean`) the casts
-        -- used to compute with no check on the components' sorts, and the kernel rejected the
-        -- normal form of a term it had accepted ("cast between different universes"):
-        -- subject reduction failed. With mandatory sorts every Π/Σ carries its components'
-        -- sorts and `ULift` its content's, and the structural casts compute only when the
-        -- two domains (contents) are in one sort and the two codomains are
-        -- (`wiz-notes/mandatory-sorts.md` §5.3): the four probes are stuck casts, accepted
-        -- with their normal forms; the control still computes.
-        let castCase (X Y : MTm) : MTm × MTm := (.pi (.eqTy X Y) (.pi X Y), .lam (.lam (.cast X Y (.var 1) (.var 0))))
-        let fn (i j : Nat) (a b : MTm) : MTm := .sorted i j (.pi a b)
-        -- `X : Sort 1`, `Y : Sort 2`, `e : (X → Type) ≡ (Y → Type)`
-        let nTy : MTm := .pi (.univ 0) (.pi (.univ 1) (.pi (.eqTy (fn 1 2 (.var 1) (.univ 0)) (fn 2 2 (.var 0) (.univ 0)))
-          (.pi (fn 1 2 (.var 2) (.univ 0)) (fn 2 2 (.var 2) (.univ 0)))))
-        let nV : MTm := .lam (.lam (.lam (.lam (.cast (fn 1 2 (.var 3) (.univ 0)) (fn 2 2 (.var 2) (.univ 0)) (.var 1) (.var 0)))))
-        -- (name, term, type, does it compute?)
-        let cases : List (String × (MTm × MTm) × Bool) :=
-          [("Π, domains Unit₁ / Unit₂", castCase (fn 1 2 (.unit 0) (.univ 0)) (fn 2 2 (.unit 1) (.univ 0)), false),
-           ("Σ, first components Unit₁ / Unit₂", castCase (.sorted 1 2 (.sigma (.unit 0) (.unit 1))) (.sorted 2 2 (.sigma (.unit 1) (.unit 1))), false),
-           ("ULift.{1}, contents True / Unit₁", castCase (.ulift 0 1 .ptrue) (.ulift 1 1 (.unit 0)), false),
-           ("Π, domains X : Sort 1 / Y : Sort 2", (nTy, nV), false),
-           ("control: Π, domains and codomains pairwise in one sort", castCase (fn 2 1 (.unit 1) (.unit 0)) (fn 2 1 (.unit 1) (.enum 2)), true)]
-        for (name, (ty, v), computes) in cases do
-          let d0 : Decl ZeroOneMany := Decl.withSorts {} { name := "d", levelParams := [], type := ty.toTerm, value := some v.toTerm }
-          let g ← match addDecl (R := ZeroOneMany) {} d0 with
-            | .ok g => pure g
-            | .error e => throw (IO.userError s!"{name}: the term is rejected: {e}")
-          let vv := d0.value.getD .tt
-          let nf := quote g 0 (eval g [] vv)
-          match addDecl (R := ZeroOneMany) {} { d0 with value := some nf } with
-          | .error e => throw (IO.userError s!"{name}: its normal form is rejected: {e}")
-          | .ok _ => pure ()
-          -- the normal form: under `e` and `t`, a stuck cast (or the control's λ)
-          let isStuck : Bool := match nf with
-            | .lam _ (.lam _ (.cast ..)) | .lam _ (.lam _ (.lam _ (.lam _ (.cast ..)))) => true
-            | _ => false
-          unless isStuck == !computes do throw (IO.userError s!"{name}: expected {if computes then "a reduct" else "a stuck cast"}, got {repr nf}")
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let calls := cases.map fun (_, (ty, v), _) => s!"  both {v.toWiz} {ty.toWiz};\n"
-        let (_, cV) := castCase (fn 2 1 (.unit 1) (.unit 0)) (fn 2 1 (.unit 1) (.enum 2))
-        let main := "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
-          "def both (v ty : Tm) : IO Unit := do\n  let t := sortsInfer (.ann v ty);\n  IO.println (okT t);\n" ++
-          "  match t with\n  | .ann v' ty' => IO.println (okT (.ann (quote 0 (eval .nil v')) ty'))\n  | _ => IO.println \"?\"\n" ++
-          "def lamShape : Tm → String\n  | .lam (.lam (.lam _)) => \"lam\"\n  | _ => \"other\"\n" ++
-          "def main : IO Unit := do\n" ++ String.join calls ++
-          s!"  IO.println (lamShape (quote 0 (eval .nil (sortsInfer {cV.toWiz}))))\n"
-        ioRun (kernel ++ "\n" ++ main) (String.join (cases.map fun _ => "ok\nok\n") ++ "lam\n") },
-    { name := "F1 (prf-review): the marking passes go inside a marker already in the term (both kernels)", run := fun _ => do
-        -- a marker written by read-back (`prf.{0} (refl B2 ((), fun x => x))`, a solved hole)
-        -- holds a relevant subterm whose proof needs a marker of its own (I-1)
-        let surf := "def B2 : Type := (x : Unit) × (True → True)\n" ++
-          "def P (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : Prop := True\n" ++
-          "def t3 (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : P h := ()\n" ++
-          -- (the pair ascribed: since #123 an equation at a type whose second part is a
-          -- proposition computes to `True` only once that is known, and the elaborator
-          -- does not solve the pair's type through it; the same on master without P2)
-          "def t5 : P (refl (((), fun x => x) : B2)) := t3 (refl (((), fun x => x) : B2))\n" ++
-          "def t4 : P (refl (((), fun x => x) : B2)) := t3 _\n"
-        ok surf
-        -- the pair's type left to inference (#130: `refl` retries against the expected
-        -- equation's type), as in prf-review's probe
-        ok (surf.replace "(((), fun x => x) : B2)" "((), fun x => x)")
-        -- raw: prf.{0} ((fun _ => () : a = a → True) (refl B2 a)) : True, a := ((), fun x => x)
-        let B2 : MTm := .sigma (.unit 0) (.pi .ptrue .ptrue)
-        let a : MTm := .ann (.pair .star (.lam (.var 0))) B2
-        let v : MTm := .prf (.num 0) (.app (.ann (.lam .star) (.pi (.eq B2 a a) .ptrue)) (.refl B2 a))
-        let ty : MTm := .ptrue
-        let g : Globals ZeroOneMany := {}
-        let d : Decl ZeroOneMany := { name := "f1", levelParams := [], type := ty.toTerm, value := some v.toTerm }
-        -- as it is, the kernel rejects it (the λ inside `refl`'s relevant `a` is unmarked) ...
-        unless (addDecl g (Decl.withSorts g d)) matches .error (.unmarkedProof ..) do throw (IO.userError "the unmarked term was not rejected for its inner proof")
-        -- ... and the pass marks it
-        if let .error e := addDecl g (Decl.withMarks g d) then throw (IO.userError s!"the marked term is rejected: {e}")
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let main := "def okD (v : Tm) : String := match checkDecl .ptrue (.some (sortsClosed v .ptrue)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
-          s!"def main : IO Unit := do\n  IO.println (okD {v.toWiz});\n  IO.println (okD (markClosed {v.toWiz} .ptrue))\n"
-        ioRun (kernel ++ "\n" ++ main) "error\nok\n" },
-    { name := "P2 with #126: a level-generic structurally recursive definition's derived equations agree with its value (checkImplAgrees), at levels 0 and 1", run := fun _ => do
-        -- its marker is `prf.{u}` at a symbolic level: evaluated, not suspended, so the
-        -- agreement check goes through the recursion as for data; at `u := 0` it is a proof
-        ok ("inductive N where\n  | z\n  | s (n : N)\n" ++
-          "def natRec.{u} (P : N → Sort u) (z : P .z) (s : (n : N) → P n → P (.s n)) : (n : N) → P n\n" ++
-          "  | .z => z\n  | .s n => s n (natRec P z s n)\n" ++
-          "def allT (n : N) : True := natRec.{0} (fun _ => True) () (fun _ h => h) n\n" ++
-          "def two : N := natRec.{1} (fun _ => N) .z (fun _ m => .s m) (.s (.s .z))\n" ++
-          "#reduce two") [".s (.s .z)"]
-        -- the derived equations are what the kernel checked against the value
-        let s := runFrontend (R := ZeroOneMany) ("inductive N where\n  | z\n  | s (n : N)\n" ++
-          "def natRec.{u} (P : N → Sort u) (z : P .z) (s : (n : N) → P n → P (.s n)) : (n : N) → P n\n" ++
-          "  | .z => z\n  | .s n => s n (natRec P z s n)\n")
-        match s.globals.find? "natRec" with
-        | some d => unless d.derivedEquations do throw (IO.userError "natRec has no derived equations: the test does not reach checkImplAgrees")
-        | none => throw (IO.userError "natRec was not declared") },
-    { name := "P2 (R1): a level-generic term is marked at its level, and is a suspended proof at the instance 0 (both kernels)", run := fun _ => do
-        -- k.{u} (A : Sort u) (a : A) : A := (fun x => x : A → A) a
-        let ty : MTm := .pi (.sortParam "u") (.pi (.var 0) (.var 1))
-        let v : MTm := .lam (.lam (.app (.ann (.lam (.var 0)) (.pi (.var 1) (.var 2))) (.var 0)))
-        let g0 : Globals ZeroOneMany := {}
-        let d := Decl.withMarks g0 { name := "k", levelParams := ["u"], type := ty.toTerm, value := some v.toTerm }
-        -- unmarked it is rejected: the inner λ is at a type in `Sort (imax u u)`, which may be 0
-        if let .ok _ := addDecl g0 { name := "k", levelParams := ["u"], type := ty.toTerm, value := some v.toTerm } then
-          throw (IO.userError "the unmarked level-generic term was accepted")
-        let g ← match addDecl g0 d with
-          | .ok g => pure g
-          | .error e => throw (IO.userError s!"the marked term is rejected: {e}")
-        let inst (l : Nat) (A a : Term ZeroOneMany) : Val ZeroOneMany :=
-          whnf (eval g [] (.app (.app (.const "k" [Level.ofNat l]) A) a))
-        -- at `u := 1` it computes; at `u := 0` the whole of `k` is a proof (of
-        -- `(A : Prop) → A → A`): suspended, and applying it only grows its spine
-        unless (inst 1 (.enum ["a", "b"]) (.tag ["a", "b"] 1)) matches .tag _ 1 do throw (IO.userError "k.{1} did not compute")
-        unless (inst 0 (.unit 0) .tt) matches .neutral (.prf ..) #[.app _, .app _] do throw (IO.userError "k.{0} was evaluated")
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let main := "def kTy : Tm := sortsTy " ++ ty.toWiz ++ "\ndef kV : Tm := markClosed " ++ v.toWiz ++ " kTy\n" ++
-          "def kAt (l : Nat) (A a : Tm) : Val := whnf (eval .nil (.app (.app (.const \"k\" (.cons \"u\" .nil) (.cons (.lnum l) .nil) kV kTy) A) a))\n" ++
-          "def shape : Val → String\n  | .vtag _ _ => \"tag\"\n  | .vne (.hprf _ _) (.sapp (.sapp .snil _) _) => \"suspended\"\n  | _ => \"other\"\n" ++
-          "def okD (v : Tm) : String := match checkDecl kTy (.some (sortsClosed v kTy)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
-          "def main : IO Unit := do\n  IO.println (okD " ++ v.toWiz ++ ");\n  IO.println (okD kV);\n" ++
-          "  IO.println (shape (kAt 1 (.enum 2) (.tag 2 1)));\n  IO.println (shape (kAt 0 .ptrue .star))\n"
-        ioRun (kernel ++ "\n" ++ main) "error\nok\ntag\nsuspended\n" },
-    { name := "the Wiz kernel checks declarations at symbolic levels like the Lean kernel", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let decls := MTm.declSamples ++ MTm.levelPuzzles 200
-        let expected := decls.map leanDeclVerdict
-        unless (expected.filter (· == "ok")).length ≥ 60 do throw (IO.userError "too few valid declarations")
-        unless (expected.filter (· == "error")).length ≥ 30 do throw (IO.userError "too few invalid declarations")
-        let decl := "def wellTyped (ty0 : Tm) (v0 : Option Tm) : Bool :=\n  let ty := sortsTy ty0;\n  match inferUniv (TCtx.noMarkers empty) ty with\n  | .err _ => .false\n  | .ok _ _ => match v0 with\n    | .none => .true\n    | .some v => match check (TCtx.noMarkers empty) (sortsClosed v ty) (eval .nil ty) with\n      | .ok _ _ => .true\n      | .err _ => .false\n" ++
-          "def declVerdict (ty0 : Tm) (v0 : Option Tm) : String := match wellTyped ty0 v0 with\n  | .false => \"error\"\n  | .true =>\n    let ty := markTy empty ty0;\n    match checkDecl ty (match v0 with\n      | .some v => .some (markClosed v ty)\n      | .none => .none) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
-        let calls := decls.map fun (_, v, ty) =>
-          s!"(declVerdict {ty.toWiz} {match v with | some v => s!"(.some {v.toWiz})" | none => ".none"})"
-        let main := s!"def main : IO Unit := printAll {wizList calls}\n"
-        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
-        ioRun (kernel ++ "\n" ++ decl ++ printAll ++ main) ("\n".intercalate expected ++ "\n") },
-    -- D1: regularity is off in both kernels; with it on, the Wiz kernel loops too
-    -- (L-2) the kernel checks the value of a `let` at 0 as an erased position, so the
-    -- backend must not compile it (the frontend doesn't produce `letq` today)
-    { name := "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω", run := fun _ => do
-        -- the backend test does not need the CLI driver (which expects the generated
-        -- parser tables and toolchain constants): checker + Backend only
-        let src ← (Selfhost.frontendFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
-        let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
-        let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
-          s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"
-        let kept := "(let " ++ "#0" ++ "; "
-        ioRunWith prog fun out => do
-          match out.splitOn "\n" with
-          | z :: o :: w :: _ =>
-            unless z.startsWith "(let ◾; " do throw (IO.userError s!"a let at 0 keeps its value: {z}")
-            unless !o.startsWith "(let ◾; " && o.startsWith "(let " && o == w do
-              throw (IO.userError s!"unexpected erasure at 1 / ω: {o} / {w} (expected like {kept}…)")
-          | _ => throw (IO.userError s!"unexpected output: {out}") },
-    { name := "D1 (Abel–Coquand): both kernels check the let-encoded program, with regularity on too (P2: its let-bound proofs are marked, and never evaluated)", run := fun _ => do
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        let control := MTm.abelCoquand false
-        unless leanVerdict control != "error" do throw (IO.userError "the Lean kernel rejects the control")
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {control.toWiz})\n")
-          (leanVerdict control ++ "\n")
-        let loop := MTm.abelCoquand true
-        -- without regularity (the default) both kernels check it
-        let expected := leanVerdict loop
-        unless expected != "error" do throw (IO.userError "the Lean kernel without regularity rejects it")
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {loop.toWiz})\n") (expected ++ "\n")
-        -- unmarked, both kernels reject it: its `let`-bound proofs are λs (the marker is
-        -- required, not a convention of the elaborator)
-        checkEq "error" (leanVerdict loop (mark := false))
-        ioRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (rawVerdict {loop.toWiz})\n") "error\n"
-        -- with regularity (`kernelRegularity`; `--regularity full` in the Lean kernel) the
-        -- program used to loop in the Wiz kernel: `Omega := delta omega` was evaluated by
-        -- the `let`. Marked, `delta` is a suspended proof, and `delta omega` only grows its
-        -- spine: both kernels answer.
-        let off := "def kernelRegularity : Bool := .false"
-        unless (kernel.splitOn off).length == 2 do throw (IO.userError "kernelRegularity not found")
-        let withReg := kernel.replace off "def kernelRegularity : Bool := .true"
-        ioRun (withReg ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {loop.toWiz})\n") (expected ++ "\n")
-        let g : Globals ZeroOneMany := { leanGlobals () with regularity := .full }
-        match infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } loop.toTerm).1 with
-        | .ok _ => pure ()
-        | .error e => throw (IO.userError s!"the Lean kernel with full regularity rejects it: {e}") },
     -- (A14) modules: `import M` loads `M.wiz` (a `-I` root, then the working directory)
     { name := "the self-hosted frontend: universe levels, Sort and Prop, as in the Lean frontend (A15/U1)", run := fun _ =>
         let header := "def id.{u} {A : Type u} (x : A) : A := x\n" ++
@@ -2787,6 +2673,19 @@ def selfHostGroup : Group where
     { name := "the boolean operators parse, short-circuit and bind as on the host; a tuple pattern binds", run := fun _ =>
         selfhostCompileRun ("import Prelude\npartial def boom : Bool := boom\ndef fstP (p : Nat × Nat) : Nat := match p with\n  | (a, b) => a\ndef pairHead : List (Nat × Nat) → Nat\n  | .nil => 0\n  | .cons (a, b) _ => a\ndef main : IO Unit := do\n  IO.println (if Bool.true && Bool.false then \"and-t\" else \"and-f\");\n  IO.println (if Bool.false && boom then \"and-boom\" else \"and-short\");\n  IO.println (if Bool.true || boom then \"or-short\" else \"or-boom\");\n  IO.println (if !Bool.false then \"not-t\" else \"not-f\");\n  IO.println (if Bool.true || Bool.false && Bool.false then \"prec-ok\" else \"prec-bad\");\n  IO.println (Nat.toString (fstP (3, 4)));\n  IO.println (Nat.toString (pairHead (.cons (5, 6) .nil)))\n")
           "and-f\nand-short\nor-short\nnot-t\nprec-ok\n3\n5\n" },
+    -- (A17/A18) The host and the self-hosted compiler agree on the same program
+    { name := "A17: list literals (nested, empty, in a pattern) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceListProgram },
+    { name := "A17: `&&`/`||` short-circuit, bind as on the host and agree with it", run := fun _ =>
+        selfhostAgreesHost surfaceBoolProgram },
+    { name := "A18: as-patterns (in equations, nested, over a variable, in a tuple) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceAsProgram },
+    { name := "A18: tuple patterns (a pair, a nested triple, a tuple in a list) agree with the host", run := fun _ =>
+        selfhostAgreesHost surfaceTupleProgram },
+    { name := "A18: `let (x, y)` (and three components, nested) agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetPairProgram },
+    { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
+        selfhostAgreesHost surfaceLetUnitProgram },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -2821,6 +2720,18 @@ def selfHostGroup : Group where
            ("B.wiz", "import Prelude\ndef x : Nat := 2\n"),
            ("input.wiz", "import Prelude\nimport A\nimport B\n#check x\n#check a\n")]
           "x : Bool\na : Bool\nx : Nat\nNat\nBool\n" },
+    { name := "modules: a private name is rejected in an importer with the host's message shape, by the compiler too (A8, 21n)", run := fun _ => do
+        let files :=
+          [("A.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef visible : Nat := secret\n"),
+           ("B.wiz", "import Prelude\nimport A\ndef fromA : Nat := visible\ndef bad : Nat := secret\n"),
+           ("input.wiz", "import Prelude\nimport B\ndef total : Nat := fromA\n#check secret\n")]
+        let phrase := "'secret' is private to module A"
+        let errs ← hostModuleErrors files
+        unless errs.any (· == phrase) do
+          throw (IO.userError s!"the Lean frontend's message is not {repr phrase}:\n{errs}")
+        -- (the checker's pinned output is the test above; the compiler reports the same
+        -- error, and writes no C)
+        selfhostModuleCompileFails files [phrase] },
     { name := "the one-shot path (checkFile) is one module, input (21n)", run := fun _ =>
         selfhostCheckModules
           [("input.wiz", "import Prelude\nprivate def secret : Nat := 42\ndef use : Nat := secret\n#check use\n")]
@@ -3026,10 +2937,8 @@ def selfHostGroup : Group where
         ioRun u2bProgram "3\nxy\n42\n42\n7\n"
         selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n"
         selfhostCompileRun u2bProgram "3\nxy\n42\n42\n7\n" (flags := #["--rc"]) },
-
     { name := "(A11) deriving BEq: 0/1/2/3 fields, a recursive polymorphic inductive, and an after-the-fact instance", run := fun _ =>
         selfhostCheckFile selfhostDeriving selfhostDerivingExpected },
-
     { name := "(A11) deriving rejects a field with no BEq instance and a class with no deriver", run := fun _ =>
         selfhostCheckFile selfhostDerivingBad selfhostDerivingBadExpected },
     -- (A13) `by`: the core tactic engine. A real block is intro/apply/assumption, an
@@ -3064,7 +2973,8 @@ def selfHostGroup : Group where
           "#check ap\n#check tr\n#check ob\n"
         let some out ← selfhostOutput src | return
         let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
-        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the core tactics:\n{out}") },
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the core tactics:\n{out}")
+        checkChecked src out },
     { name := "(A13) per-tactic cases: intros, change, unfold, constructor, try/first/repeat", run := fun _ => do
         let src := "import Prelude\n" ++
           "def idn : Nat → Nat := by intro n; exact n\n" ++
@@ -3081,7 +2991,8 @@ def selfHostGroup : Group where
           "#check idn\n#check box\n"
         let some out ← selfhostOutput src | return
         let errs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
-        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects a core tactic:\n{out}") },
+        unless errs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects a core tactic:\n{out}")
+        checkChecked src out },
     { name := "the self-hosted frontend: unsolved goals are reported with their context (A13)", run := fun _ =>
         selfhostCheckFile "import Prelude\ndef bad : Nat → Bool := by intro n\n"
           "error: unsolved goals:\nn : Nat\n⊢ Bool\n" },
@@ -3102,6 +3013,7 @@ def selfHostGroup : Group where
         let some out ← selfhostOutput src | return
         let selfErrs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
         unless selfErrs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the differential script:\n{out}")
+        checkChecked src out
         -- and a failing rewrite: the same verdict and the same message
         let bad := "import Prelude\ndef r (a b c : Nat) (h : a = b) (P : Nat → Prop) (pc : P c) : P c := by\n" ++
           "  rw h\n  exact pc\n"
@@ -3114,13 +3026,10 @@ def selfHostGroup : Group where
         let expected := "error: " ++ (leanBad.toList.head!).text
         unless selfBad.head! == expected do
           throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
-
     { name := "(A11) the deriver table: the five built-ins on every form (inductive, structure, after the fact, several classes, several types, re-registered)", run := fun _ =>
         selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },
-
     { name := "(A11) the deriver table's errors: no deriver, an indexed family, a recursive field, a wrong arity, an unrunnable deriver, a mutual block", run := fun _ =>
         selfhostCheckFile selfhostDerivingNeg selfhostDerivingNegExpected },
-
     { name := "(A11) deriving: the Lean host and the self-hosted frontend agree on every form", run := fun _ =>
         derivingAgrees derivingSelfHeader [
           ("inductive D1 where\n  | a\n  | b\n  | c\n  deriving BEq\n", true),
@@ -3134,16 +3043,749 @@ def selfHostGroup : Group where
           ("class Sz (A : Type) where\n  size : A → Nat\nderiving instance Sz for Nat\n", false),
           ("def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n", false),
           ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
-
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
+    -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
+    -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
+    -- is how a run makes what it trusted visible
+    { name := "(C14) native_refl: decided with --trust-native and recorded as the axiom X.native✝; refused without the flag", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def s : sumTo 3 = 6 := native_refl\n#print axioms s\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some trusted ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has trusted "'s' depends on axioms: [s.native✝]") s!"no .native✝ axiom in the trusted run:\n{trusted}"
+        check (has trusted ".native✝: a closed proposition decided by running it") s!"no trust note in the trusted run:\n{trusted}"
+        check (!has trusted "error:") s!"unexpected error in the trusted run:\n{trusted}"
+        let some plain ← selfhostModuleOutput [("input.wiz", src)] #[] | return
+        check (has plain "error: native evaluation is not enabled") s!"accepted without the flag:\n{plain}"
+        check (!has plain "s.native✝") s!"the axiom was added without the flag:\n{plain}" },
+    { name := "(C14) native_refl: a false equation is refuted, and a function type and a bare native_refl are refused", run := fun _ => do
+        let src := "import Prelude\ndef sumTo : Nat → Nat\n  | .zero => 0\n  | .succ n => Nat.add (Nat.succ n) (sumTo n)\n" ++
+          "def bad : sumTo 10 = 54 := native_refl\n" ++
+          "def fn : ((fun (x : Nat) => x) = (fun (x : Nat) => x)) := native_refl\n" ++
+          "def r : Nat := native_refl\n" ++
+          "def q : sumTo 3 = 6 := (native_refl : sumTo 3 = 6)\n"
+        let has (out frag : String) : Bool := (out.splitOn frag).length > 1
+        let some out ← selfhostModuleOutput [("input.wiz", src)] #["--trust-native"] | return
+        check (has out "native evaluation refutes it") s!"the false equation was accepted:\n{out}"
+        check (has out "native_refl compares first-order data") s!"a function type was accepted:\n{out}"
+        check (has out "native_refl proves an equation `a = b`; this type is not one") s!"native_refl at Nat was accepted:\n{out}"
+        check (has out "native_refl can only be the whole body of a definition") s!"an ascription was accepted:\n{out}"
+        check (!has out "bad.native✝") s!"the false equation added an axiom:\n{out}" },
+
+    -- (E-K) number literals in `Kernel.wiz` (`Tm.nlit`, `Tm.natFn`): the Lean kernel's
+    -- `natLit`/`natOp` rules, on hand-written terms (the frontend does not emit literals yet)
+    { name := "(E-K) Kernel.wiz literals: the registered operations compute natively on literals (exact past 64 bits), with the zero shortcuts and the stuck applications of the Lean kernel", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekArithCalls) ekArithExpected (split := 8) },
+
+    { name := "(E-K) Kernel.wiz literals: a literal and its unary numeral are convertible both ways (the equation, conversion, ind looking inside a literal)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekConvCalls) ekConvExpected (split := 8) },
+
+    { name := "(E-K) Kernel.wiz literals: different numbers, a literal at another type and ill-typed registrations are rejected", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekRejectCalls) ekRejectExpected (split := 8) },
+
+    -- (B13) parity with the host's `vNatOp` rules (`kernel-lazy-let.md` §8.1, §8.4,
+    -- §9.3): a big literal is exact; an operation on a definition's glued value stays
+    -- glued until its value is needed; `vEq` does not force an expansive `Nat.pow`; `nf`
+    -- computes. The pow case would allocate 2^(2^28) if the equation forced its sides.
+    { name := "(B13) Kernel.wiz literals: a big literal, a glued `Nat` operation, an expansive `Nat.pow` that is not forced, and `nf` that computes", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRun (kernel ++ "\n" ++ ekNatDefs ++ ekMain ekLazyCalls) ekLazyExpected (split := 8) },
+
+    { name := "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        ioRunWith ("import Sys\n" ++ kernel ++ "\n" ++ ekNatDefs ++ ekTimingMain) (split := 8) fun out => do
+          match out.splitOn "\n" with
+          | l :: u :: t :: _ =>
+            unless l == "True" && u == "True" do
+              throw (IO.userError s!"the equation was not decided True both ways: {l} / {u}")
+            match t.splitOn " " with
+            | [a, b] => match a.toNat?, b.toNat? with
+              | some lit, some unary =>
+                -- (a generous bound: a light probe measured about 64 µs against 1.2 s; the
+                -- ratio, not the times, is the claim, and the machine is shared)
+                unless lit * 10 < unary do
+                  throw (IO.userError s!"literals were not 10 times faster: {lit} ns against {unary} ns")
+              | _, _ => throw (IO.userError s!"unexpected timing line: {t}")
+            | _ => throw (IO.userError s!"unexpected timing line: {t}")
+          | _ => throw (IO.userError s!"unexpected output: {out}") },
+    { name := "the lexer in Wiz agrees with the Lean lexer", run := fun _ => do
+        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
+        let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
+          "inductive T where | a | b (t : T)\ndef s : String := \"hi\\n\" -- strings\ndef α₁ : List.cons → Nat.add := λ x => x.1\n" ++
+          "0x3F 0b1010 0XfF 0B1 0x 0b2 0xg 007 0x7FFFFFFFFFFFFFFF 0x8000000000000000 " ++
+          -- every escape, then a bad one (both lexers stop there with the same message)
+          "def e := \"a\\r\\t\\\\\\\"\\'\\x41\\u{3bb}\\u{1F600}z\" \"bad \\q\""
+        let toks := Builtin.tables.tokens
+        let expected := leanTokens toks input
+        let table := toks.toList.foldr (fun t acc => s!"(.cons {wizLit t} {acc})") ".nil"
+        let prog := lexSrc ++ s!"\ndef main : IO Unit := printAll (List.reverseL (tokenize {table} {wizLit input}) .nil)\n"
+        let prog := prog.replace "def printAll" "def List.reverseL : List String → List String → List String\n  | .nil, acc => acc\n  | .cons x xs, acc => List.reverseL xs (.cons x acc)\ndef printAll"
+        selfhostCompileRun prog ("\n".intercalate expected ++ "\n") },
+    { name := "the parser in Wiz agrees with the Lean parser", run := fun _ => do
+        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
+        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
+        let t := Builtin.tables
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ wizTables t ++
+          s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
+          s!"def main : IO Unit := printAll {wizList calls}\n"
+        selfhostCompileRun prog ("\n".intercalate expected ++ "\n") },
+    { name := "the checked-in tables accept the corpus the Lean parser accepts", run := fun _ => do
+        -- the semantic check of the file: not "the text is the same" but "the tables in
+        -- selfhost/Tables.wiz parse, on the differential's corpus, exactly what the Lean
+        -- parser produces" (the case above does the same with freshly generated tables)
+        let lexSrc ← IO.FS.readFile "selfhost/Lex.wiz"
+        let parseSrc ← IO.FS.readFile "selfhost/Parse.wiz"
+        let tablesSrc ← IO.FS.readFile "selfhost/Tables.wiz"
+        let t := Builtin.tables
+        let expected := parseDiffCorpus.map fun (c, i) => leanParse t c i
+        let calls := parseDiffCorpus.map fun (c, i) => s!"(parse cats tokens {wizLit c} {wizLit i})"
+        let prog := lexSrc ++ "\n" ++ parseSrc ++ "\n" ++ tablesSrc ++
+          s!"def main : IO Unit := printAll {wizList calls}\n"
+        selfhostCompileRun prog ("\n".intercalate expected ++ "\n") },
+    { name := "the type checker in Wiz", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let defs := "def idTy : Tm := piH (.univ 0) (piH (.var 0) (.var 1))\n" ++
+          "def idTm : Tm := .ann (.lam (.lam (.var 0))) idTy\n" ++
+          "def cnat : Tm := piH (.univ 0) (piH (piH (.var 0) (.var 1)) (piH (.var 1) (.var 2)))\n" ++
+          "def two : Tm := .ann (.lam (.lam (.lam (.app (.var 1) (.app (.var 1) (.var 0)))))) cnat\n" ++
+          "def add : Tm := .ann (.lam (.lam (.lam (.lam (.lam (.app (.app (.app (.var 4) (.var 2)) (.var 1)) " ++
+          "(.app (.app (.app (.var 3) (.var 2)) (.var 1)) (.var 0)))))))) (piH cnat (piH cnat cnat))\n" ++
+          "def viaId : Tm := .ann (.lam (.lam (.app (.app idTm (.var 1)) (.var 0)))) idTy\n"
+        let main := "def main : IO Unit := do\n  IO.println (typeOf idTm);\n  IO.println (typeOf viaId);\n" ++
+          "  IO.println (typeOf (.app idTm cnat));\n  IO.println (typeOf (.app (.app add two) two));\n" ++
+          "  IO.println (normalize (.app (.app add two) two));\n  IO.println (typeOf (.app (.univ 0) (.univ 0)));\n" ++
+          -- a variable out of scope is an error (it was `Sort 0`, as a type and as a value: `Prop : Prop`)
+          "  IO.println (typeOf (.var 0));\n  IO.println (typeOf (.ann (.lam (.var 3)) (piH (.unit (ln 1)) .prop)))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ defs ++ main) ("(x0 : U0) → (x1 : x0) → x0\n(x0 : U0) → (x1 : x0) → x0\n" ++
+          "error: type mismatch: expected U0, got U1\n(x0 : U0) → (x1 : (x1 : x0) → x0) → (x2 : x0) → x0\n" ++
+          "λx0. λx1. λx2. (x1 (x1 (x1 (x1 x2))))\nerror: not a function: its type is U1\n" ++
+          "error: internal error: a variable out of scope\nerror: internal error: a variable out of scope\n") },
+    -- W1 (`wiz-notes/kernel-lint.md`): the structural fast path (`valSame`) compared two
+    -- constants by name, without their universe levels, so two stuck cases whose
+    -- environments held `d.{0}` and `d.{1}` were convertible: a closed term of type `False`
+    { name := "W1: a constant at two universe levels is not the same value (the fast path for stuck cases)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let probe :=
+          "def dVal : Tm := sortsTy (piH (.sortL (.lparam \"u\")) (piH (.var 0) (piH (.var 1) (piH (piH (.var 2) .prop)\n" ++
+          "  (piH (.app (.var 0) (.var 2)) (.app (.var 1) (.var 2)))))))\n" ++
+          "def dAt (l : Lvl) : Tm := .const \"d\" (.cons \"u\" .nil) (.cons l .nil) dVal .prop\n" ++
+          "def d0 : Tm := dAt (.lnum 0)\n" ++
+          "def d1 : Tm := dAt (.lnum 1)\n" ++
+          "def d0Proof : Tm := .ann (.lam (.lam (.lam (.lam (.lam (.var 0)))))) d0\n" ++
+          "def fTy : Tm := sortsTy (piH .prop (piH (.enum 1) .prop))\n" ++
+          "def fVal : Tm := .lam (.lam (.ecase .prop (.var 0) (.tcons (.var 1) .tnil)))\n" ++
+          "def fC : Tm := .const \"F\" .nil .nil fVal fTy\n" ++
+          "def fAt (a x : Tm) : Tm := .app (.app fC a) x\n" ++
+          "def h (a b : Tm) : Tm := .ann (.lam (.lam (.var 0))) (piH (.enum 1) (piH (fAt a (.var 0)) (fAt b (.var 1))))\n" ++
+          "def isFirst : Tm := .ann (.lam (.ecase .prop (.var 0) (.tcons .ptrue (.tcons .pfalse .tnil)))) (piH (.enum 2) .prop)\n" ++
+          "def refute (p : Tm) : Tm := .app (.app (.app (.app (.app p (.enum 2)) (.tag 2 0)) (.tag 2 1)) isFirst) .star\n" ++
+          "def bad (a b : Tm) : Tm := .ann (refute (.app (.app (h a b) (.tag 1 0)) d0Proof)) .pfalse\n" ++
+          "def verdict (r : TyRes) : String := match r with\n" ++
+          "  | .ok _ _ => \"ok\"\n" ++
+          "  | .err _ => \"error\"\n" ++
+          -- (P2) the probes are proofs (their types are propositions): checked inside a proof,
+          -- where they need no marker
+          "def typeOk (t : Tm) : String := verdict (infer (TCtx.inProof empty) (sortsInfer t))\n" ++
+          "def typeOfP (t : Tm) : String := match infer (TCtx.inProof empty) (sortsInfer t) with\n  | .ok ty _ => show .nil 0 (quote 0 ty)\n  | .err m => String.append \"error: \" m\n" ++
+          "def main : IO Unit := do\n" ++
+          "  IO.println (String.append \"d's declaration, at every level: \" (verdict (checkDecl .prop (.some dVal))));\n" ++
+          "  IO.println (String.append \"F's declaration: \" (verdict (checkDecl fTy (.some fVal))));\n" ++
+          "  IO.println (String.append \"the proof of d.{0}: \" (typeOk d0Proof));\n" ++
+          "  IO.println (String.append \"control, d.{0} used as d.{1} directly (want error): \" (typeOk (.ann d0Proof d1)));\n" ++
+          "  IO.println (String.append \"control, F d.{0} x → F d.{0} x (want ok): \" (typeOk (h d0 d0)));\n" ++
+          "  IO.println (String.append \"F d.{0} x → F d.{1} x (want error): \" (typeOk (h d0 d1)));\n" ++
+          "  IO.println (String.append \"a closed term of type False (want error): \" (typeOfP (bad d0 d1)))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ probe) ("d's declaration, at every level: ok\nF's declaration: ok\nthe proof of d.{0}: ok\n" ++
+          "control, d.{0} used as d.{1} directly (want error): error\ncontrol, F d.{0} x → F d.{0} x (want ok): ok\n" ++
+          "F d.{0} x → F d.{1} x (want error): error\n" ++
+          "a closed term of type False (want error): error: type mismatch: expected case(Prop, x0, d.{1}), got ((F d.{0}) x0)\n") },
+    { name := "the frontend gives the types it builds their sorts (sortTy, and the sorts pass)", run := fun _ => do
+        -- `(True → Unit) = ((True → True) → Unit)` computes to the domains' equivalence: with
+        -- the sorts `sortTy` fills in, and (mandatory sorts) with those the sorts pass fills
+        -- in where none were written (`normalize` runs it), so both are the same
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
+        let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++
+          "def gTy (X : Tm) : Tm := piH X (.unit (ln 1))\n" ++
+          "def eqn (s : Bool) : Tm := match s with\n" ++
+          "  | .true => .eqTy (sortTy (gTy .ptrue)) (sortTy (gTy (piH .ptrue .ptrue)))\n" ++
+          "  | .false => .eqTy (gTy .ptrue) (gTy (piH .ptrue .ptrue))\n" ++
+          "def main : IO Unit := do\n  IO.println (normalize (eqn .false));\n  IO.println (normalize (eqn .true));\n" ++
+          "  IO.println (typeOf (sortTy (gTy (piH .ptrue .ptrue))))\n"
+        let computed := "(x0 :0 (x0 :0 (x0 :0 (x0 : True) → True) → True) × (x1 :0 True) → (x2 : True) → True) × " ++
+          "(x1 :0 (x1 : True) → True) → True\n"
+        selfhostCompileRun prog (computed ++ computed ++ "U0\n") },
+    { name := "text to checked term, all in Wiz", run := fun _ => do
+        let src ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
+        let body := "\n".intercalate (src.map fun f => "\n".intercalate ((f.splitOn "\n").filter (!·.startsWith "import")))
+        let t := Builtin.tables
+        let bad := "(fun (x : Type) => x"
+        let cases := ["(fun A x => x : (A : Type) → A → A)", "Type 2", "let T : Type 1 := Type; (fun x => x : T → T)",
+          "fun x => x", "y", "(fun f x => f x : (Type → Type) → Type → Type)", bad]
+        let calls := cases.map fun c => s!"(checkText cats tokens {wizLit c})"
+        let prog := "import IO\nimport Std\n" ++ body ++ "\n" ++ wizTables t ++
+          s!"def tokens : List String := {wizList (t.tokens.toList.map wizLit)}\n" ++
+          s!"def main : IO Unit := printAll {wizList calls}\n"
+        selfhostCompileRun prog ("(x0 : U0) → (x1 : x0) → x0\nU3\n(x0 : U0) → U0\n" ++
+          "error: cannot infer the type of a λ; add a type ascription\nscope error: unknown identifier y\n" ++
+          "(x0 : (x0 : U0) → U0) → (x1 : U0) → U0\nparse " ++ leanParse t "term" bad ++ "\n") },
+    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
+        -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
+        -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
+        let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
+          "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
+        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
+        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
+        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
+          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
+        selfhostCompileRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
+          "ok\nerror\n" },
+    { name := "the Wiz kernel agrees with the Lean kernel (400 random terms)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let mut terms : Array MTm := MTm.samples.toArray
+        let mut seed := 42
+        for i in [0:400] do
+          let (t, s) := MTm.gen seed (2 + i % 3) 0
+          terms := terms.push t
+          seed := s
+        let expected := terms.toList.map leanVerdict
+        let verdict := wizVerdict
+        let calls := terms.toList.map fun t => s!"(verdict {t.toWiz})"
+        let main := s!"def main : IO Unit := printAll {wizList calls}\n"
+        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
+        unless (expected.filter (· != "error")).length ≥ 30 do throw (IO.userError "too few well-typed terms")
+        selfhostCompileRun (kernel ++ "\n" ++ verdict ++ printAll ++ main) ("\n".intercalate expected ++ "\n") },
+    -- P2 (soundness review of PR #61). A suspended proof never reaches these positions from
+    -- a checked term (it only sits in the proof positions of `cast` and `transp`), so the
+    -- values are built by hand, in both kernels.
+    { name := "P2: comparing types erases suspended proofs, but not what follows an absurd (both kernels)", run := fun _ => do
+        let g : Globals ZeroOneMany := {}
+        let ls : List Name := ["a", "b"]
+        let E : Val ZeroOneMany := .enum ls
+        let pf (sp : Array (Elim ZeroOneMany)) : Val ZeroOneMany :=
+          .neutral (.prf [] .tt) sp
+        -- (the kernel's read-back, as its comparisons and its messages use it)
+        let sameVal (g : Globals ZeroOneMany) (a b : Val ZeroOneMany) : Bool :=
+          quote { g with quoteErasesProofs := true } 0 a == quote { g with quoteErasesProofs := true } 0 b
+        -- two proofs are equal, whatever was projected
+        checkEq "true" (toString (sameVal g (pf #[.fst]) (pf #[.snd])))
+        -- `absurd E p` is a value of `E`, not a proof: what is done with it is compared
+        checkEq "false" (toString (sameVal g (pf #[.absurd E, .app (.tag ls 0)]) (pf #[.absurd E, .app (.tag ls 1)])))
+        -- and what was done before the `absurd` is not
+        checkEq "true" (toString (sameVal g (pf #[.fst, .absurd E, .app (.tag ls 0)]) (pf #[.snd, .absurd E, .app (.tag ls 0)])))
+        -- the same proof as a stuck `refl` head and as a suspension reads back alike (the
+        -- two forms of one proof must not make two types differ: `prf-marker.md` §4.3)
+        checkEq "true" (toString (sameVal g (.neutral (.refl E (.tag ls 0)) #[.fst]) (pf #[.snd])))
+        checkEq "true" (toString (sameVal g (.neutral (.refl E (.tag ls 0)) #[.absurd E]) (pf #[.fst, .absurd E])))
+        -- conversion, a suspended proof against a `refl`, both under `absurd`: a proof under
+        -- `absurd` is not compared, in either kernel (they differed before the marker)
+        let refl : Val ZeroOneMany := .neutral (.refl E (.tag ls 0)) #[.absurd E]
+        checkEq "true" (toString (conv g #[] E (pf #[.absurd E]) refl))
+        -- (I-2) and with no `absurd`, where the type was not seen to be a proposition: a
+        -- suspended proof and a `refl` head are two proofs, equal in both kernels
+        checkEq "true" (toString (conv g #[] E (pf #[.fst]) (.neutral (.refl E (.tag ls 0)) #[.fst])))
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
+          "def pf : Head := .hprf .nil .star\n" ++
+          "def rf : Head := .hrefl (.venum 2) (.vtag 2 0)\n" ++
+          "def sameVal (a b : Val) : Bool := tmEq (quoteM .false 0 a) (quoteM .false 0 b)\n" ++
+          "def ab (sp : Spine) : Spine := .sabsurd sp (.venum 2)\n" ++
+          "def main : IO Unit := do\n" ++
+          "  IO.println (b2s (sameVal (.vne pf (.sfst .snil)) (.vne pf (.ssnd .snil))));\n" ++
+          "  IO.println (b2s (sameVal (.vne pf (.sapp (ab .snil) (.vtag 2 0))) (.vne pf (.sapp (ab .snil) (.vtag 2 1)))));\n" ++
+          "  IO.println (b2s (sameVal (.vne pf (.sapp (ab (.sfst .snil)) (.vtag 2 0))) (.vne pf (.sapp (ab (.ssnd .snil)) (.vtag 2 0)))));\n" ++
+          "  IO.println (b2s (sameVal (.vne rf (.sfst .snil)) (.vne pf (.ssnd .snil))));\n" ++
+          "  IO.println (b2s (sameVal (.vne rf (ab .snil)) (.vne pf (ab (.sfst .snil)))));\n" ++
+          "  IO.println (b2s (conv empty (.venum 2) (.vne pf (ab .snil)) (.vne (.hrefl (.venum 2) (.vtag 2 0)) (ab .snil))));\n" ++
+          "  IO.println (b2s (conv empty (.venum 2) (.vne pf (.sfst .snil)) (.vne (.hrefl (.venum 2) (.vtag 2 0)) (.sfst .snil))))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\n" },
+    { name := "every constructor of Term is covered by the traversals (S1: a missed one proved False)", run := fun _ => do
+        let samples := termSamples (.var 5) (.param "pw")
+        -- a sample for every constructor
+        let names := (samples.map (termCtor ·.1)).eraseDups
+        unless names.length == termCtorCount && samples.length == termCtorCount do
+          throw (IO.userError s!"{names.length} constructors have a sample, of {termCtorCount}")
+        for (t, nTerms, nLevels) in samples do
+          let c := termCtor t
+          -- `mapChildrenM` visits every term child and every level
+          let (_, (ts, ls)) := (t.forChildren (m := StateM (Nat × Nat))
+            (fun _ => modify fun (a, b) => (a, b + 1)) (fun _ _ => modify fun (a, b) => (a + 1, b))).run (0, 0)
+          unless (ts, ls) == (nTerms, nLevels) do
+            throw (IO.userError s!"{c}: mapChildrenM visits {ts} terms and {ls} levels, expected {nTerms} and {nLevels}")
+          -- so do the traversals built on it: shifting, substitution, occurrence, the levels
+          if nTerms > 0 then
+            unless t.lift 1 != t do throw (IO.userError s!"{c}: lift misses the children")
+            unless (List.range 3).any (fun d => t.instantiateAt (5 - d) .tt != t) do throw (IO.userError s!"{c}: instantiateAt misses the children")
+            unless (List.range 3).any (fun d => t.hasVar (5 - d)) do throw (IO.userError s!"{c}: hasVar misses the children")
+          if nLevels > 0 then
+            unless t.instLevels ["pw"] [.zero] != t do throw (IO.userError s!"{c}: instLevels misses a level")
+            unless (t.levelParamsUsed.filter (· == "pw")).length == nLevels do
+              throw (IO.userError s!"{c}: levelParamsUsed misses a level")
+        -- the marker's level is instantiated: `prf.{u} t` is a suspended proof at `u := 0`
+        let g : Globals ZeroOneMany := {}
+        let m : Term ZeroOneMany := (Term.prf (.param "u") .tt).instLevels ["u"] [.zero]
+        unless (eval g [] m) matches .neutral (.prf ..) #[] do throw (IO.userError "prf.{u} at u := 0 is not suspended")
+        -- the Wiz kernel's traversals
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let main := "def b2s : Bool → String\n  | .true => \"true\"\n  | .false => \"false\"\n" ++
+          "def z : Lvl := .lnum 0\n" ++
+          "def main : IO Unit := do\n" ++
+          "  IO.println (b2s (usesVar 0 (.prf z (.var 0))));\n" ++
+          "  IO.println (b2s (usesVar 0 (.prf z .star)));\n" ++
+          "  IO.println (b2s (tmEq (.prf z (.var 0)) (.prf z (.var 1))));\n" ++
+          "  IO.println (b2s (tmEq (.prf z .star) (.prf (.lnum 1) .star)));\n" ++
+          "  IO.println (b2s (tmEq (tmSubst (.cons \"u\" .nil) (.cons z .nil) (.prf (.lparam \"u\") .star)) (.prf z .star)));\n" ++
+          "  IO.println (b2s (tmEq (quote 1 (eval (.cons (fresh 0) .nil) (.prf z (.var 0)))) (.prf z (.var 0))))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) "true\nfalse\nfalse\nfalse\ntrue\ntrue\n" },
+    { name := "P2: the proof marker is required and verified, by both kernels (terms without the marking pass)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let samples := MTm.markerSamples
+        let show' (b : Bool) : String := if b then "ok" else "error"
+        for (t, ok) in samples, i in [0:samples.length] do
+          let v := leanVerdict t (mark := false)
+          unless (v != "error") == ok do
+            throw (IO.userError s!"sample {i}: the Lean kernel says {v}, expected {show' ok}")
+        let okV := "def okVerdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
+        let calls := samples.map fun (t, _) => s!"(okVerdict {t.toWiz})"
+        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
+        selfhostCompileRun (kernel ++ "\n" ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
+          ("\n".intercalate (samples.map fun (_, ok) => show' ok) ++ "\n")
+        -- Marking on demand (`withMarksOnDemand`): a declaration the kernel finds unmarked is
+        -- marked and checked again, and what is stored (and cached) is the marked term
+        let g0 : Globals ZeroOneMany := {}
+        let T2 : Term ZeroOneMany := (MTm.pi .ptrue .ptrue).toTerm
+        let pairTy : Term ZeroOneMany := (MTm.sorted 1 0 (.sigma (.enum 2) (.sorted 0 0 (.pi .ptrue .ptrue)))).toTerm
+        let d : Decl ZeroOneMany := { name := "d", type := pairTy, value := some (.pair (.tag ["a", "b"] 0) (.lam "x" (.var 0))) }
+        match addDeclSorted g0 d with
+        | .error e => throw (IO.userError s!"marking on demand failed: {e}")
+        | .ok g => match (g.find? "d").bind (·.value) with
+          | some (.pair _ (.prf ..)) => pure ()
+          | v => throw (IO.userError s!"the stored value is not the marked one: {repr v}")
+        -- a theorem is marked at once
+        match addDeclSorted g0 { name := "t", type := T2, value := some (.lam "x" (.var 0)) } with
+        | .ok g => unless ((g.find? "t").bind (·.value)) matches some (.prf ..) do throw (IO.userError "the theorem is stored unmarked")
+        | .error e => throw (IO.userError s!"{e}")
+        -- and when the marked term fails, the error is the second check's (not "unmarked proof")
+        match addDeclSorted g0 { name := "e", type := pairTy, value := some (.pair (.tag ["a", "b"] 0) (.lam "x" (.tag ["a", "b"] 0))) } with
+        | .ok _ => throw (IO.userError "an ill-typed declaration was accepted")
+        | .error (.unmarkedProof ..) => throw (IO.userError "the error of the first check was reported")
+        | .error _ => pure () },
+    { name := "P1/PF-C: regularity is decided by conversion in both kernels (the probes as core terms; the type-position control)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let samples := MTm.convSamples
+        let show' (b : Bool) : String := if b then "ok" else "error"
+        -- the Lean kernel, by default (`conv`)
+        for (n, t, ok) in samples do
+          let v := leanVerdict t
+          unless (v != "error") == ok do throw (IO.userError s!"{n}: the Lean kernel says {v}, expected {show' ok}")
+        -- with the fast path alone (`--inert ground`): the *value* comparisons inside an
+        -- equation are still accepted (PF-C's prop gate sets conversion-level full
+        -- regularity, which does not consult `inertReg`); the *type* controls (`ty`, `tv`)
+        -- need the inert-only rule and are rejected
+        let ground (t : MTm) : Bool :=
+          let g : Globals ZeroOneMany := { leanGlobals () with inertReg := .ground }
+          -- (mandatory sorts and proof markers: the same pre-check, sorts pass and marking
+          -- pass as `leanVerdict`, at the ground globals)
+          if !(infer (R := ZeroOneMany) { globals := { g with lazyProofs := false, sortHolesOk := true } } t.toTerm).toBool then false else
+          let t0 := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t.toTerm).1
+          (infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t0).1).toBool
+        for (n, t, _) in samples do
+          unless ground t == (n != "ty" && n != "tv") do throw (IO.userError s!"{n}: unexpected verdict with the fast path alone")
+        -- the Wiz kernel
+        let okV := "def okVerdict (t0 : Tm) : String :=\n  let t := sortsInfer t0;\n  match infer (TCtx.inProof empty) t with\n  | .err _ => \"error\"\n  | .ok _ _ => match infer empty (MR.tm (markInfer empty t)) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
+        let calls := samples.map fun (_, t, _) => s!"(okVerdict {t.toWiz})"
+        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
+          ("\n".intercalate (samples.map fun (_, _, ok) => show' ok) ++ "\n")
+        -- and with `kernelInertConv := .false` the value comparisons are still accepted by
+        -- the prop gate; only the type controls (`ty`, `tv`) are rejected
+        let on := "def kernelInertConv : Bool := .true"
+        unless (kernel.splitOn on).length == 2 do throw (IO.userError "kernelInertConv not found")
+        let groundK := kernel.replace on "def kernelInertConv : Bool := .false"
+        selfhostCompileRun (groundK ++ "\n" ++ wizVerdict ++ okV ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n")
+          ("\n".intercalate (samples.map fun (n, _, _) => show' (n != "ty" && n != "tv")) ++ "\n") },
+    { name := "U5b: a cast at a Π/Σ whose sort depends on a level variable is stuck, as the equation it goes along is; a Π without its sorts is rejected (both kernels)", run := fun _ => do
+        -- (prop-harness, `wiz-notes/soundness-probes/ph-u5b-cast-at-unknown-sort.txt`) the cast
+        -- used to compute, projecting a proof whose type is a stuck equation and no pair
+        let g : Globals ZeroOneMany := {}
+        let ω : Term ZeroOneMany := .qlit .many
+        let stuck (v : Val ZeroOneMany) : Bool := (whnf v) matches .neutral (.cast ..) #[]
+        -- (a) a level variable: T := True × Unit.{u}
+        let T : Term ZeroOneMany := .sigma "x" ω (.unit 0) (.unit (.param "u")) ⟨0, .param "u"⟩
+        unless stuck (eval g [] (.cast T T (.reflTy T) (.pair .tt .tt))) do throw (IO.userError "(a) the cast computed")
+        -- at an instance it computes: `u := 1`
+        let T1 := T.instLevels ["u"] [Level.ofNat 1]
+        unless (whnf (eval g [] (.cast T1 T1 (.reflTy T1) (.pair .tt .tt)))) matches .pair .. do throw (IO.userError "(a) at u := 1 the cast is stuck")
+        -- (b) (mandatory sorts) a Π without its sorts can't be formed: the kernel rejects it
+        let F (s : BinderSorts) : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 0) s
+        let e : Val ZeroOneMany := Val.var 0
+        let f : Val ZeroOneMany := Val.var 1
+        match infer (R := ZeroOneMany) { globals := g } (F .hole) with
+        | .ok _ => throw (IO.userError "(b) a Π without its sorts was accepted")
+        | .error err => unless ((toString err).splitOn "without its sort").length > 1 do throw (IO.userError s!"(b) {err}")
+        -- (b') `Unit → True` with its sorts is a proposition: a cast between propositions is stuck (P2)
+        unless stuck (vCast g (eval g [] (F ⟨1, 0⟩)) (eval g [] (F ⟨1, 0⟩)) e f) do throw (IO.userError "(b') the cast computed")
+        -- with both sorts known and not propositions it computes (a λ), as before
+        let G : Term ZeroOneMany := .pi "x" .default ω (.unit 1) (.unit 1) ⟨1, 1⟩
+        unless (vCast g (eval g [] G) (eval g [] G) e f) matches .lam .. do throw (IO.userError "an annotated Π cast is stuck")
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let main := "def shape (v : Val) : String := match whnf v with\n  | .vne (.hcast _ _ _ _) .snil => \"stuck\"\n  | .vlam _ _ => \"lam\"\n  | .vpair _ _ => \"pair\"\n  | _ => \"other\"\n" ++
+          "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err m => m\n" ++
+          "def FP : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 0) (.unit (ln 1)) .ptrue)\n" ++
+          "def U : Val := eval .nil (.pi .qw (.lnum 1) (.lparam \"u\") (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def G : Val := eval .nil (.pi .qw (.lnum 1) (.lnum 1) (.unit (ln 1)) (.unit (ln 1)))\n" ++
+          "def S : Val := eval .nil (.sigma .qw (.lnum 0) (.lparam \"u\") .ptrue (.unit (ln 1)))\n" ++
+          "def S1 : Val := eval .nil (.sigma .qw (.lnum 0) (.lnum 1) .ptrue (.unit (ln 1)))\n" ++
+          "def main : IO Unit := do\n" ++
+          "  IO.println (okT (.pi .qw .lhole .lhole (.unit (ln 1)) .ptrue));\n" ++
+          "  IO.println (shape (vCast FP FP (fresh 0) (fresh 1)));\n" ++
+          "  IO.println (shape (vCast U U (fresh 0) (fresh 1)));\n" ++
+          "  IO.println (shape (vCast S S (fresh 0) (.vpair .vtt .vtt)));\n" ++
+          "  IO.println (shape (vCast S1 S1 (fresh 0) (.vpair .vtt .vtt)));\n" ++
+          "  IO.println (shape (vCast G G (fresh 0) (fresh 1)))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) "internal error: a Π's domain without its sort (the sorts pass did not fill it)\nstuck\nstuck\nstuck\npair\nlam\n" },
+    { name := "P2 (I-1): a proof inside a marked proof is not evaluated: a tower of exponentials in Prop checks at once (both kernels)", run := fun _ => do
+        -- k = 3 is 65 536 β-steps and k = 4 is 2^65536 if the checker runs the proof (it
+        -- did: a `let` evaluated its value to bind it). The kernel has no step budget, so
+        -- nothing but not evaluating can make these answer.
+        for k in [3, 4, 6] do
+          let t0 ← IO.monoMsNow
+          checkEq "True" (leanVerdict (MTm.proofTower k) (mark := false))
+          let ms := (← IO.monoMsNow) - t0
+          unless ms < 5000 do throw (IO.userError s!"k = {k}: the Lean kernel took {ms} ms")
+        -- the same term as a relevant `let` is rejected unmarked, as before
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let calls := [3, 4, 6].map fun k => s!"(rawVerdict {(MTm.proofTower k).toWiz})"
+        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ printAll ++ s!"def main : IO Unit := printAll {wizList calls}\n") "True\nTrue\nTrue\n" },
+    { name := "F7: reading a proof back stops at its step budget in the self-hosted kernel too (a tower under absurd, read back in a type)", run := fun _ => do
+        -- (review F7) `quote` evaluates a suspended proof, to read it back as a normal form;
+        -- Kernel.wiz's had no budget, and reading this type back did not finish (30 s). The
+        -- Lean read-back stops at its budget and writes the proof as the message; the Wiz one
+        -- must too, with the same message (and the kernels accept the term at once).
+        let t := MTm.proofTowerAbsurd 4
+        let g := leanGlobals ()
+        let msg := Budget.message Budget.defaultSteps
+        match infer (R := ZeroOneMany) { globals := g } t.toTerm with
+        | .error e => throw (IO.userError s!"the Lean kernel rejects the term: {e}")
+        | .ok (ty, _) =>
+          unless ((reprStr (quote g 0 ty)).splitOn "a proof was not read back: it needs more than 1000000 evaluation steps").length > 1 do
+            throw (IO.userError s!"the Lean read-back of the type did not stop at the budget: {(reprStr (quote g 0 ty)).take 400}")
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        -- (and the stub is no constant: the kernel rejects a term that holds it, with the message)
+        let stub := "(.prf (.lnum 0) (.axiomC proofStub .star))"
+        let main := s!"def main : IO Unit := do\n  IO.println (rawVerdict {t.toWiz});\n  IO.println (match infer empty {stub} with\n    | .ok _ _ => \"ok\"\n    | .err m => m)\n"
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ main)
+          s!"(x0 : False) → Eq(Enum2, absurd(Enum2, x0), absurd(Enum2, {msg}))\n{msg}\n" },
+    { name := "D2 (closed by mandatory sorts): a Π/Σ/ULift cast across components of different sorts is stuck, and its normal form is accepted (both kernels)", run := fun _ => do
+        -- (meta-review D2, `wiz-notes/soundness-probes/mr-cast-component-sorts.lean`) the casts
+        -- used to compute with no check on the components' sorts, and the kernel rejected the
+        -- normal form of a term it had accepted ("cast between different universes"):
+        -- subject reduction failed. With mandatory sorts every Π/Σ carries its components'
+        -- sorts and `ULift` its content's, and the structural casts compute only when the
+        -- two domains (contents) are in one sort and the two codomains are
+        -- (`wiz-notes/mandatory-sorts.md` §5.3): the four probes are stuck casts, accepted
+        -- with their normal forms; the control still computes.
+        let castCase (X Y : MTm) : MTm × MTm := (.pi (.eqTy X Y) (.pi X Y), .lam (.lam (.cast X Y (.var 1) (.var 0))))
+        let fn (i j : Nat) (a b : MTm) : MTm := .sorted i j (.pi a b)
+        -- `X : Sort 1`, `Y : Sort 2`, `e : (X → Type) ≡ (Y → Type)`
+        let nTy : MTm := .pi (.univ 0) (.pi (.univ 1) (.pi (.eqTy (fn 1 2 (.var 1) (.univ 0)) (fn 2 2 (.var 0) (.univ 0)))
+          (.pi (fn 1 2 (.var 2) (.univ 0)) (fn 2 2 (.var 2) (.univ 0)))))
+        let nV : MTm := .lam (.lam (.lam (.lam (.cast (fn 1 2 (.var 3) (.univ 0)) (fn 2 2 (.var 2) (.univ 0)) (.var 1) (.var 0)))))
+        -- (name, term, type, does it compute?)
+        let cases : List (String × (MTm × MTm) × Bool) :=
+          [("Π, domains Unit₁ / Unit₂", castCase (fn 1 2 (.unit 0) (.univ 0)) (fn 2 2 (.unit 1) (.univ 0)), false),
+           ("Σ, first components Unit₁ / Unit₂", castCase (.sorted 1 2 (.sigma (.unit 0) (.unit 1))) (.sorted 2 2 (.sigma (.unit 1) (.unit 1))), false),
+           ("ULift.{1}, contents True / Unit₁", castCase (.ulift 0 1 .ptrue) (.ulift 1 1 (.unit 0)), false),
+           ("Π, domains X : Sort 1 / Y : Sort 2", (nTy, nV), false),
+           ("control: Π, domains and codomains pairwise in one sort", castCase (fn 2 1 (.unit 1) (.unit 0)) (fn 2 1 (.unit 1) (.enum 2)), true)]
+        for (name, (ty, v), computes) in cases do
+          let d0 : Decl ZeroOneMany := Decl.withSorts {} { name := "d", levelParams := [], type := ty.toTerm, value := some v.toTerm }
+          let g ← match addDecl (R := ZeroOneMany) {} d0 with
+            | .ok g => pure g
+            | .error e => throw (IO.userError s!"{name}: the term is rejected: {e}")
+          let vv := d0.value.getD .tt
+          let nf := quote g 0 (eval g [] vv)
+          match addDecl (R := ZeroOneMany) {} { d0 with value := some nf } with
+          | .error e => throw (IO.userError s!"{name}: its normal form is rejected: {e}")
+          | .ok _ => pure ()
+          -- the normal form: under `e` and `t`, a stuck cast (or the control's λ)
+          let isStuck : Bool := match nf with
+            | .lam _ (.lam _ (.cast ..)) | .lam _ (.lam _ (.lam _ (.lam _ (.cast ..)))) => true
+            | _ => false
+          unless isStuck == !computes do throw (IO.userError s!"{name}: expected {if computes then "a reduct" else "a stuck cast"}, got {repr nf}")
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let calls := cases.map fun (_, (ty, v), _) => s!"  both {v.toWiz} {ty.toWiz};\n"
+        let (_, cV) := castCase (fn 2 1 (.unit 1) (.unit 0)) (fn 2 1 (.unit 1) (.enum 2))
+        let main := "def okT (t : Tm) : String := match infer empty t with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
+          "def both (v ty : Tm) : IO Unit := do\n  let t := sortsInfer (.ann v ty);\n  IO.println (okT t);\n" ++
+          "  match t with\n  | .ann v' ty' => IO.println (okT (.ann (quote 0 (eval .nil v')) ty'))\n  | _ => IO.println \"?\"\n" ++
+          "def lamShape : Tm → String\n  | .lam (.lam (.lam _)) => \"lam\"\n  | _ => \"other\"\n" ++
+          "def main : IO Unit := do\n" ++ String.join calls ++
+          s!"  IO.println (lamShape (quote 0 (eval .nil (sortsInfer {cV.toWiz}))))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) (String.join (cases.map fun _ => "ok\nok\n") ++ "lam\n") },
+    { name := "F1 (prf-review): the marking passes go inside a marker already in the term (both kernels)", run := fun _ => do
+        -- a marker written by read-back (`prf.{0} (refl B2 ((), fun x => x))`, a solved hole)
+        -- holds a relevant subterm whose proof needs a marker of its own (I-1)
+        let surf := "def B2 : Type := (x : Unit) × (True → True)\n" ++
+          "def P (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : Prop := True\n" ++
+          "def t3 (h : ((), fun (x : True) => x) = (((), fun x => x) : B2)) : P h := ()\n" ++
+          -- (the pair ascribed: since #123 an equation at a type whose second part is a
+          -- proposition computes to `True` only once that is known, and the elaborator
+          -- does not solve the pair's type through it; the same on master without P2)
+          "def t5 : P (refl (((), fun x => x) : B2)) := t3 (refl (((), fun x => x) : B2))\n" ++
+          "def t4 : P (refl (((), fun x => x) : B2)) := t3 _\n"
+        ok surf
+        -- the pair's type left to inference (#130: `refl` retries against the expected
+        -- equation's type), as in prf-review's probe
+        ok (surf.replace "(((), fun x => x) : B2)" "((), fun x => x)")
+        -- raw: prf.{0} ((fun _ => () : a = a → True) (refl B2 a)) : True, a := ((), fun x => x)
+        let B2 : MTm := .sigma (.unit 0) (.pi .ptrue .ptrue)
+        let a : MTm := .ann (.pair .star (.lam (.var 0))) B2
+        let v : MTm := .prf (.num 0) (.app (.ann (.lam .star) (.pi (.eq B2 a a) .ptrue)) (.refl B2 a))
+        let ty : MTm := .ptrue
+        let g : Globals ZeroOneMany := {}
+        let d : Decl ZeroOneMany := { name := "f1", levelParams := [], type := ty.toTerm, value := some v.toTerm }
+        -- as it is, the kernel rejects it (the λ inside `refl`'s relevant `a` is unmarked) ...
+        unless (addDecl g (Decl.withSorts g d)) matches .error (.unmarkedProof ..) do throw (IO.userError "the unmarked term was not rejected for its inner proof")
+        -- ... and the pass marks it
+        if let .error e := addDecl g (Decl.withMarks g d) then throw (IO.userError s!"the marked term is rejected: {e}")
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let main := "def okD (v : Tm) : String := match checkDecl .ptrue (.some (sortsClosed v .ptrue)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
+          s!"def main : IO Unit := do\n  IO.println (okD {v.toWiz});\n  IO.println (okD (markClosed {v.toWiz} .ptrue))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) "error\nok\n" },
+    { name := "P2 (R1): a level-generic term is marked at its level, and is a suspended proof at the instance 0 (both kernels)", run := fun _ => do
+        -- k.{u} (A : Sort u) (a : A) : A := (fun x => x : A → A) a
+        let ty : MTm := .pi (.sortParam "u") (.pi (.var 0) (.var 1))
+        let v : MTm := .lam (.lam (.app (.ann (.lam (.var 0)) (.pi (.var 1) (.var 2))) (.var 0)))
+        let g0 : Globals ZeroOneMany := {}
+        let d := Decl.withMarks g0 { name := "k", levelParams := ["u"], type := ty.toTerm, value := some v.toTerm }
+        -- unmarked it is rejected: the inner λ is at a type in `Sort (imax u u)`, which may be 0
+        if let .ok _ := addDecl g0 { name := "k", levelParams := ["u"], type := ty.toTerm, value := some v.toTerm } then
+          throw (IO.userError "the unmarked level-generic term was accepted")
+        let g ← match addDecl g0 d with
+          | .ok g => pure g
+          | .error e => throw (IO.userError s!"the marked term is rejected: {e}")
+        let inst (l : Nat) (A a : Term ZeroOneMany) : Val ZeroOneMany :=
+          whnf (eval g [] (.app (.app (.const "k" [Level.ofNat l]) A) a))
+        -- at `u := 1` it computes; at `u := 0` the whole of `k` is a proof (of
+        -- `(A : Prop) → A → A`): suspended, and applying it only grows its spine
+        unless (inst 1 (.enum ["a", "b"]) (.tag ["a", "b"] 1)) matches .tag _ 1 do throw (IO.userError "k.{1} did not compute")
+        unless (inst 0 (.unit 0) .tt) matches .neutral (.prf ..) #[.app _, .app _] do throw (IO.userError "k.{0} was evaluated")
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let main := "def kTy : Tm := sortsTy " ++ ty.toWiz ++ "\ndef kV : Tm := markClosed " ++ v.toWiz ++ " kTy\n" ++
+          "def kAt (l : Nat) (A a : Tm) : Val := whnf (eval .nil (.app (.app (.const \"k\" (.cons \"u\" .nil) (.cons (.lnum l) .nil) kV kTy) A) a))\n" ++
+          "def shape : Val → String\n  | .vtag _ _ => \"tag\"\n  | .vne (.hprf _ _) (.sapp (.sapp .snil _) _) => \"suspended\"\n  | _ => \"other\"\n" ++
+          "def okD (v : Tm) : String := match checkDecl kTy (.some (sortsClosed v kTy)) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n" ++
+          "def main : IO Unit := do\n  IO.println (okD " ++ v.toWiz ++ ");\n  IO.println (okD kV);\n" ++
+          "  IO.println (shape (kAt 1 (.enum 2) (.tag 2 1)));\n  IO.println (shape (kAt 0 .ptrue .star))\n"
+        selfhostCompileRun (kernel ++ "\n" ++ main) "error\nok\ntag\nsuspended\n" },
+    { name := "the Wiz kernel checks declarations at symbolic levels like the Lean kernel", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let decls := MTm.declSamples ++ MTm.levelPuzzles 200
+        let expected := decls.map leanDeclVerdict
+        unless (expected.filter (· == "ok")).length ≥ 60 do throw (IO.userError "too few valid declarations")
+        unless (expected.filter (· == "error")).length ≥ 30 do throw (IO.userError "too few invalid declarations")
+        let decl := "def wellTyped (ty0 : Tm) (v0 : Option Tm) : Bool :=\n  let ty := sortsTy ty0;\n  match inferUniv (TCtx.noMarkers empty) ty with\n  | .err _ => .false\n  | .ok _ _ => match v0 with\n    | .none => .true\n    | .some v => match check (TCtx.noMarkers empty) (sortsClosed v ty) (eval .nil ty) with\n      | .ok _ _ => .true\n      | .err _ => .false\n" ++
+          "def declVerdict (ty0 : Tm) (v0 : Option Tm) : String := match wellTyped ty0 v0 with\n  | .false => \"error\"\n  | .true =>\n    let ty := markTy empty ty0;\n    match checkDecl ty (match v0 with\n      | .some v => .some (markClosed v ty)\n      | .none => .none) with\n    | .ok _ _ => \"ok\"\n    | .err _ => \"error\"\n"
+        let calls := decls.map fun (_, v, ty) =>
+          s!"(declVerdict {ty.toWiz} {match v with | some v => s!"(.some {v.toWiz})" | none => ".none"})"
+        let main := s!"def main : IO Unit := printAll {wizList calls}\n"
+        let printAll := "def printAll : List String → IO Unit\n  | .nil => IO.pure ()\n  | .cons s ss => do\n    IO.println s;\n    printAll ss\n"
+        selfhostCompileRun (kernel ++ "\n" ++ decl ++ printAll ++ main) ("\n".intercalate expected ++ "\n") },
+    -- D1: regularity is off in both kernels; with it on, the Wiz kernel loops too
+    -- (L-2) the kernel checks the value of a `let` at 0 as an erased position, so the
+    -- backend must not compile it (the frontend doesn't produce `letq` today)
+    { name := "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω", run := fun _ => do
+        -- the backend test does not need the CLI driver (which expects the generated
+        -- parser tables and toolchain constants): checker + Backend only
+        let src ← (Selfhost.frontendFiles ++ ["selfhost/Backend.wiz"]).mapM (fun (f : String) => IO.FS.readFile f)
+        let show1 (q : String) := s!"(match eraseCheck empty (.letq {q} (.enum 2) (.tag 2 0) (.tag 2 1)) (.venum 2) with\n    | .ok e => showE e\n    | .err m => String.append \"error: \" m)"
+        let prog := "import IO\nimport Std\n" ++ "\n".intercalate (src.map Selfhost.strip) ++ "\n" ++
+          s!"def main : IO Unit := do\n  IO.println {show1 ".qz"};\n  IO.println {show1 ".qo"};\n  IO.println {show1 ".qw"}\n"
+        let kept := "(let " ++ "#0" ++ "; "
+        selfhostRunWith prog fun out => do
+          match out.splitOn "\n" with
+          | z :: o :: w :: _ =>
+            unless z.startsWith "(let ◾; " do throw (IO.userError s!"a let at 0 keeps its value: {z}")
+            unless !o.startsWith "(let ◾; " && o.startsWith "(let " && o == w do
+              throw (IO.userError s!"unexpected erasure at 1 / ω: {o} / {w} (expected like {kept}…)")
+          | _ => throw (IO.userError s!"unexpected output: {out}") },
+    { name := "D1 (Abel–Coquand): both kernels check the let-encoded program, with regularity on too (P2: its let-bound proofs are marked, and never evaluated)", run := fun _ => do
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        let control := MTm.abelCoquand false
+        unless leanVerdict control != "error" do throw (IO.userError "the Lean kernel rejects the control")
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {control.toWiz})\n")
+          (leanVerdict control ++ "\n")
+        let loop := MTm.abelCoquand true
+        -- without regularity (the default) both kernels check it
+        let expected := leanVerdict loop
+        unless expected != "error" do throw (IO.userError "the Lean kernel without regularity rejects it")
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {loop.toWiz})\n") (expected ++ "\n")
+        -- unmarked, both kernels reject it: its `let`-bound proofs are λs (the marker is
+        -- required, not a convention of the elaborator)
+        checkEq "error" (leanVerdict loop (mark := false))
+        selfhostCompileRun (kernel ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (rawVerdict {loop.toWiz})\n") "error\n"
+        -- with regularity (`kernelRegularity`; `--regularity full` in the Lean kernel) the
+        -- program used to loop in the Wiz kernel: `Omega := delta omega` was evaluated by
+        -- the `let`. Marked, `delta` is a suspended proof, and `delta omega` only grows its
+        -- spine: both kernels answer.
+        let off := "def kernelRegularity : Bool := .false"
+        unless (kernel.splitOn off).length == 2 do throw (IO.userError "kernelRegularity not found")
+        let withReg := kernel.replace off "def kernelRegularity : Bool := .true"
+        selfhostCompileRun (withReg ++ "\n" ++ wizVerdict ++ s!"def main : IO Unit := IO.println (markedVerdict {loop.toWiz})\n") (expected ++ "\n")
+        let g : Globals ZeroOneMany := { leanGlobals () with regularity := .full }
+        match infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } loop.toTerm).1 with
+        | .ok _ => pure ()
+        | .error e => throw (IO.userError s!"the Lean kernel with full regularity rejects it: {e}") }
+
+  ]
+
+/-- The audit's stub: a file that pretends to be the self-hosted compiler (or checker) and
+writes its input to standard output. A case in `selfhost` that passes with this in place
+does not run the pipeline. -/
+def echoStub (dir : System.FilePath) : IO System.FilePath := do
+  let p := dir / "echo-stub"
+  IO.FS.writeFile p ("#!/bin/sh\n" ++
+    "for f in input.wiz \"$1\"; do\n" ++
+    "  if [ -f \"$f\" ]; then cat \"$f\"; exit 0; fi\n" ++
+    "done\n" ++
+    "exit 0\n")
+  let c ← IO.Process.output { cmd := "chmod", args := #["+x", p.toString] }
+  unless c.exitCode == 0 do throw (IO.userError s!"chmod failed: {c.stderr}")
+  pure p
+
+/-- The cases that run the **Lean host** toolchain only: they compile Wiz sources with the
+Lean compiler, or they are in-process probes of the Lean kernel (their "and both kernels
+agree below" counterpart is the `selfhost` case that runs the Wiz program). They are not
+evidence about the self-hosted pipeline, so they live in their own group; a case that
+reaches `selfhostCompiler`/`selfhostChecker` belongs to `selfhost` instead. -/
+def selfHostHostGroup : Group where
+  name := "selfhost-host"
+  exercise := "Stages 12b–14q (Lean host only)"
+  cases := [
+    { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
+        ioRun linearMatchProgram "3\n5\n6\n" },
+    -- The anti-vacuity case: the pipeline group must fail when its compiler/checker is a
+    -- stub that echoes `input.wiz`. It runs each case of `selfhost` in a child process
+    -- with `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` set (the override in
+    -- `Tests/Elab.lean`), so a new case that forgets to invoke the pipeline fails here.
+    { name := "an echoing stub compiler and checker fail every =selfhost case (the pipeline group is not vacuous)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let stub ← echoStub dir
+        let self ← IO.appPath
+        let env : Array (String × Option String) :=
+          #[("WIZ_SELFHOST_COMPILER", some stub.toString), ("WIZ_SELFHOST_CHECKER", some stub.toString)]
+        let flags := (← flagsRef.get).toArray
+        let mut passed := #[]
+        for c in selfHostGroup.cases, i in [0:selfHostGroup.cases.length] do
+          let out ← IO.Process.output
+            { cmd := "timeout", args := #["900", self.toString, "--run-case", "selfhost", toString i] ++ flags, env }
+          -- (a case that skipped did not demonstrate the pipeline, but it did not pass
+          -- either: only an exit 0 without a `skipped` note is a vacuous case; both the
+          -- note and the older printed `(skipped: …)` form count)
+          let skipped := (out.stdout.splitOn "\n").any fun l =>
+            l.startsWith (noteMarker ++ "skipped ") || l.trimAscii.toString.startsWith "(skipped: "
+          if out.exitCode == 0 && !skipped then passed := passed.push s!"{i}: {c.name}"
+        unless passed.isEmpty do
+          throw (IO.userError s!"{passed.size} of {selfHostGroup.cases.length} =selfhost cases pass with a stub compiler/checker that echoes its input; they do not test the pipeline:\n{"\n".intercalate passed.toList}")
+        note s!"all {selfHostGroup.cases.length} =selfhost cases failed with the echo stub" },
+    { name := "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)", run := fun _ => do
+        -- the checked-in file is what the selfhost builds read; a grammar change that
+        -- does not regenerate it is a stale compiler, so fail here (CI runs this shard
+        -- when `Wiz/Parser/*` changes)
+        let file ← IO.FS.readFile "selfhost/Tables.wiz"
+        unless file == Selfhost.tablesFile do
+          throw (IO.userError s!"selfhost/Tables.wiz is stale: run `lake build genSelfhostTables` and commit it (file {file.length} bytes, the tables now {Selfhost.tablesFile.length})") },
+    { name := "both kernels compare propositions by equivalence (and agree on it below)", run := fun _ => do
+        -- the domains' equation is an equivalence, not `False`
+        match MTm.propShapes.map leanVerdict with
+        | ["error", ok] => unless ok != "error" do throw (IO.userError "the equivalence was rejected")
+        | vs => throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "Size = Size is stuck, not False (and both kernels agree on it below)", run := fun _ => do
+        match MTm.sizeEq.map leanVerdict with
+        | ["error", "error", "error", a, b] =>
+          unless a == "EqTy(Size, Size)" && b == "EqTy(Size<(∞), Size<(∞))" do
+            throw (IO.userError s!"unexpected types {a}, {b}")
+        | vs => throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "projections need an unrestricted pair; positions at 0 are erased; eliminators use their scrutinee ω times (R1; and both kernels agree on it below)", run := fun _ => do
+        for (t, ok) in MTm.projRule ++ MTm.elimRule ++ MTm.usageRule ++ MTm.linearCaseRule do
+          let v := leanVerdict t
+          unless (v != "error") == ok do
+            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
+    { name := "the size of μ and ν is checked (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.sizeArgs.map leanVerdict
+        unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") do
+          throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)", run := fun _ => do
+        for (t, ok) in MTm.muSize do
+          let v := leanVerdict t
+          unless (v != "error") == ok do
+            throw (IO.userError s!"expected {if ok then "accepted" else "rejected"}, got {v}: {MTm.pretty 0 t}") },
+    { name := "∞ is not below itself (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.sizeInf.map leanVerdict
+        unless vs.take 5 == List.replicate 5 "error" && (vs.drop 5).all (· != "error") do
+          throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "F6: literal quantities that differ make types unequal (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.qtyApart.map leanVerdict
+        unless vs.take 2 |>.all (· != "error") do throw (IO.userError s!"unexpected verdicts {vs}")
+        unless vs[2]? == some "error" && vs[3]? != some "error" do throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "F3 (audit): the eliminators check the index type's level (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.elimLevels.map leanVerdict
+        let names := ["ind", "sfix", "scase", "coit", "scofix"]
+        for n in names, k in [0:5] do
+          unless vs[k]? == some "error" do
+            throw (IO.userError s!"{n} with an index type one level too high was accepted: {vs[k]?}")
+          unless vs[5 + k]? == some "error" do
+            throw (IO.userError s!"{n} with an index type one level too low was accepted: {vs[5 + k]?}")
+          unless vs[10 + k]? != some "error" && vs[15 + k]? != some "error" do
+            throw (IO.userError s!"{n} with a well-levelled index type was rejected: {vs[10 + k]?}, {vs[15 + k]?}")
+        unless vs.drop 20 == ["error", "error"] do throw (IO.userError s!"unexpected verdicts {vs.drop 20}") },
+    { name := "transp is rejected at a proposition, as eq and refl are (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.transpProp.map leanVerdict
+        unless vs.take 2 == ["error", "error"] && (vs.drop 2).all (· != "error") && vs.length == 4 do
+          throw (IO.userError s!"unexpected verdicts {vs}") },
+    { name := "Q4: a small description field is rejected, a lifted one works (and both kernels agree on it below)", run := fun _ => do
+        let vs := MTm.smallField.map leanVerdict
+        let body := (vs.drop 4).dropLast
+        unless vs.take 4 == List.replicate 4 "error" && body.all (· != "error") && vs.getLast? == some "error" do
+          throw (IO.userError s!"unexpected verdicts {vs}")
+        -- `getS D'` is a type (it computes to `ULift True`), and a boxed proof unboxes to `True`
+        unless vs[5]? == some "U0" && vs[9]? == some "True" do
+          throw (IO.userError s!"unexpected types {vs}") },
+    { name := "P2 with #126: a level-generic structurally recursive definition's derived equations agree with its value (checkImplAgrees), at levels 0 and 1", run := fun _ => do
+        -- its marker is `prf.{u}` at a symbolic level: evaluated, not suspended, so the
+        -- agreement check goes through the recursion as for data; at `u := 0` it is a proof
+        ok ("inductive N where\n  | z\n  | s (n : N)\n" ++
+          "def natRec.{u} (P : N → Sort u) (z : P .z) (s : (n : N) → P n → P (.s n)) : (n : N) → P n\n" ++
+          "  | .z => z\n  | .s n => s n (natRec P z s n)\n" ++
+          "def allT (n : N) : True := natRec.{0} (fun _ => True) () (fun _ h => h) n\n" ++
+          "def two : N := natRec.{1} (fun _ => N) .z (fun _ m => .s m) (.s (.s .z))\n" ++
+          "#reduce two") [".s (.s .z)"]
+        -- the derived equations are what the kernel checked against the value
+        let s := runFrontend (R := ZeroOneMany) ("inductive N where\n  | z\n  | s (n : N)\n" ++
+          "def natRec.{u} (P : N → Sort u) (z : P .z) (s : (n : N) → P n → P (.s n)) : (n : N) → P n\n" ++
+          "  | .z => z\n  | .s n => s n (natRec P z s n)\n")
+        match s.globals.find? "natRec" with
+        | some d => unless d.derivedEquations do throw (IO.userError "natRec has no derived equations: the test does not reach checkImplAgrees")
+        | none => throw (IO.userError "natRec was not declared") }
 
   ]
 
 builtin_initialize registerGroup selfHostGroup
+builtin_initialize registerGroup selfHostHostGroup
 
 end Tests.Elab

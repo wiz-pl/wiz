@@ -858,6 +858,8 @@ def dropQSrc : String :=
   "  | .up a => .up (dropQTm a)\n" ++
   "  | .down t => .down (dropQTm t)\n" ++
   "  | .prf l t => .prf l (dropQTm t)\n" ++
+  "  | .nlit n nb => .nlit n nb\n" ++
+  "  | .natFn op nb d => .natFn op nb d\n" ++
   "partial def dropQTms : Tms → Tms\n" ++
   "  | .tnil => .tnil\n" ++
   "  | .tcons t r => .tcons (dropQTm t) (dropQTms r)\n" ++
