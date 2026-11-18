@@ -50,6 +50,10 @@ def group : Group where
       run := fun _ => formats
         "def f (b : Bool) : Nat := match b with\n| .true => match b with | .true => 1 | .false => 2\n| .false => 3\n"
         "def f (b : Bool) : Nat := match b with\n  | .true => match b with\n    | .true => 1\n    | .false => 2\n  | .false => 3\n" },
+    { name := "match with an equation keeps `h :`",
+      run := fun _ => formats
+        "def f (b : Bool) : Nat :=  match  h  :  b  with\n| .true => 1\n| .false => 2\n"
+        "def f (b : Bool) : Nat := match h : b with\n  | .true => 1\n  | .false => 2\n" },
     { name := "inductive: constructors and `deriving` at 2",
       run := fun _ => formats
         "inductive Foo where\n| a\n| b (n : Nat)\nderiving BEq\n"

@@ -800,9 +800,12 @@ def defMatchAsEqns? (name : Name) (cmd : Syntax) : Option Syntax := do
     else items := items.push ("inst✝", some b, false)
   let (funNames, body) ← peelFunBinders val
   guard (body.isOfKind "term.match")
+  -- (13t) a named equation is kept: this rewrite would move the alternatives into a
+  -- definition by equations, where the hypothesis has no binding site
+  guard ((body.getArg 1).args.isEmpty)
   let nDef := items.size
   for n in funNames do items := items.push (n, none, true)
-  let scruts := (body.getArg 1).args.filter (!· matches .atom ..)
+  let scruts := (body.getArg 2).args.filter (!· matches .atom ..)
   let scrutNames ← scruts.toList.mapM fun t =>
     if t.isOfKind "term.ident" then (t.getArg 0).getId? else none
   guard (scrutNames.eraseDups.length == scrutNames.length)

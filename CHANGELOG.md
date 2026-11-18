@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* language: `match h : e with` names the equation between the scrutinee and each pattern
+  (#254, 13t). In `| .true => …` the branch has `h : e = .true`, and in `| .succ m => …`
+  it has `h : e = .succ m`, with the branch's own `m`; the left side is the scrutinee as
+  written (`p n`). It is the ordinary match with the motive `fun x => (h : e = x) → C`,
+  each right-hand side read as `fun h => body`, and the result applied to
+  `refl : e = e` — no new kernel term former and no axiom. One scrutinee only; the
+  branch hypothesis may go unused.
 * web: the UI framework is renamed **React → Loom**. `lib/Web/React.wiz` is
   `lib/Web/Loom.wiz`, the module is `Web.Loom` (so `React.VNode`/`React.App`/… are
   `Loom.*`), the test group and file are `loom`/`Tests/Groups/Loom.lean`, and the

@@ -1792,8 +1792,8 @@ partial def elabLetPat (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy
   let some qStx := (stx.getArg 1).args[0]? | do
     let i := stx.info
     let alt : Syntax := .node i "match.alt" #[.atom i "|", .node i "null" #[pat], .atom i "=>", body]
-    let m : Syntax := .node i "term.match" #[.atom i "match", .node i "null" #[stx.getArg 4], .atom i "with",
-      .node i "null" #[alt]]
+    let m : Syntax := .node i "term.match" #[.atom i "match", .node i "null" #[],
+      .node i "null" #[stx.getArg 4], .atom i "with", .node i "null" #[alt]]
     match expected with
     | some e => return (← check ctx m e, e)
     | none => return ← infer ctx m
@@ -3141,7 +3141,7 @@ partial def numeralish (stx : Syntax) : Bool :=
   numLike stx ||
   (stx.isOfKind "term.paren" && numeralish (stx.getArg 1)) ||
   (stx.isOfKind "term.ite" && numeralish (stx.getArg 3) && numeralish (stx.getArg 5)) ||
-  (stx.isOfKind "term.match" && (stx.getArg 3).args.all fun a => a matches .atom .. || numeralish (a.getArg 3))
+  (stx.isOfKind "term.match" && (stx.getArg 4).args.all fun a => a matches .atom .. || numeralish (a.getArg 3))
 
 /-- (H14 S2) `if c then t else e` (the match `match c with | .true => t | .false => e` that the
 prelude's `if` makes) when `c` is a signal: its type is not a data type and selects between
@@ -3355,10 +3355,22 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
-  let scruts := (stx.getArg 1).args.filter (!· matches .atom ..)
-  let alts := (stx.getArg 3).args
+  -- (13t) `match h : e with`: the branch gets `h : e = <pattern>`.
+  let eqName? : Option (Name × SourceInfo) := do
+    let b ← (stx.getArg 1).args[0]?
+    return ((b.getArg 0).getId?.getD "_", b.info)
+  let scruts := (stx.getArg 2).args.filter (!· matches .atom ..)
+  let alts := (stx.getArg 4).args
+  if let some (_, info) := eqName? then
+    unless scruts.size == 1 do
+      throwAt info "`match h : e with` names the equation of one scrutinee: write one scrutinee, or a plain `match e₁, …, eₙ with`"
+  -- the equation is a binder in every branch (`fun h => rhs`), so that the branch sees
+  -- `h : e = <the constructor value>`; the match is then applied to `rfl : e = e`
   let clauses : List (MClause R) ← alts.toList.mapM fun a => do
-    pure { pats := ← ((a.getArg 1).args.filter (!· matches .atom ..)).toList.mapM expandPattern, rhs := a.getArg 3 }
+    let rhs := match eqName? with
+      | some (h, i) => hdlFun i h (a.getArg 3)
+      | none => a.getArg 3
+    pure { pats := ← ((a.getArg 1).args.filter (!· matches .atom ..)).toList.mapM expandPattern, rhs }
   -- bind every scrutinee to a fresh variable, generalising it in the goal
   let mut ctx' := ctx
   let mut ts : Array (Term R) := #[]
@@ -3370,9 +3382,18 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   let mut linearScruts : Array Bool := #[]
   for s in scruts do
     let (t, ty) ← infer ctx s
+    -- (13t) a structure or pair is taken apart by projections, so the equation would be
+    -- about the matched value, not the constructor of the fields
+    if let some (_, info) := eqName? then
+      match ← force ty with
+      | .sigma .. =>
+        throwAt info "`match h : e with` on a pair: the equation would be about the matched value, not `(a, b)`; write a plain `match e with` (or take the pair apart with a `let`)"
+      | ty => if (structHead? g ty).isSome then
+        throwAt info "`match h : e with` on a structure: the fields are projections, so the equation would be about the matched value, not the constructor of the fields; write a plain `match e with`"
     ts := ts.push t
-    -- (H14 S2) a signal as the condition of `if`: a multiplexer
-    if scruts.size == 1 then
+    -- (H14 S2) a signal as the condition of `if`: a multiplexer (a named equation
+    -- needs the real match: a mux has no branch hypothesis)
+    if scruts.size == 1 && eqName?.isNone then
       if let some m ← ifMux? ctx alts t ty expected then return m
       -- (H14 S4) `match` on a signal: a case tree over `Hw.eq` and `Hw.mux`
       if let some m ← matchMux? ctx stx alts s ty expected then return m
@@ -3402,15 +3423,29 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     ctx' := ctx'.bindQ n vTy (if linearScruts[i]! then some 1 else none)
   binders := absBinders
   goalTm := absGoal
+  -- (13t) `h : e = x✝` in the goal: the eliminator's branch is then
+  -- `(h : e = <constructor value>) → C`, and `rfl : e = e` closes the match.
+  if let some (h, _) := eqName? then
+    if linearScruts[0]! then
+      throwAt stx.info "`match h : e with` on a scrutinee that uses a linear variable: the equation would use it twice"
+    let A := binders[0]!.2
+    let n := binders.size
+    goalTm := .pi h .default (.qlit QuantitySyntax.explicitDefault)
+      (.eq (A.lift n) (ts[0]!.lift n) (.var 0)) (goalTm.lift 1) ⟨0, .hole⟩
   let goal ← evalIn ctx' goalTm
   if let some x := lvls.head? then recordMatch stx.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
-  let body ← compileMatch ctx' lvls clauses goal none true
+  -- (a named equation keeps every branch a function: no shared catch-all `let`, whose
+  -- call would have to produce the equation proof)
+  let body ← compileMatch ctx' lvls clauses goal none eqName?.isNone
   let lam := (binders.toList.map (·.1)).foldr .lam body
   -- (the `i`-th scrutinee's type is under the `i` binders before it)
   let piTy := (binders.toList.zip linearScruts.toList).foldr (fun ((n, A), lin) acc =>
     Term.pi n .default (.qlit (if lin then 1 else QuantitySyntax.explicitDefault)) A acc .hole) goalTm
   let piTy := ctx.sortType g piTy
-  pure (ts.foldl .app (.ann lam piTy))
+  let m := ts.foldl .app (.ann lam piTy)
+  match eqName? with
+  | some _ => pure (.app m (.refl binders[0]!.2 ts[0]!))
+  | none => pure m
 
 /-- **Exercise 6.2.** Elaborate the body of a quotation to a term that builds it as a
 Wiz `Syntax` value: `SyntaxF.missing`, `SyntaxF.atom "v"`, `SyntaxF.node "k" args` with
@@ -3680,12 +3715,17 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     -- stage 13: the type is found from the alternatives (a metavariable, in `Type`)
     -- (not depending on the scrutinised variables: the motive abstracts them, which
     -- would leave the metavariable outside the pattern fragment)
-    let scrut := (stx.getArg 1).args.toList.filterMap fun a =>
+    let scrut := (stx.getArg 2).args.toList.filterMap fun a =>
       if a.isOfKind "term.ident" then (a.getArg 0).getId? else none
     let firstIx (n : Name) : Option Nat := ctx.names.findIdx? (· == n)
     let hidden := scrut.filterMap firstIx
     let ctx' := { ctx with bound := ctx.bound.zipIdx.map fun (b, i) => b && !hidden.contains i }
-    let ty ← evalIn ctx (← freshMeta ctx' "the type of this match")
+    -- (13t) a named equation puts the goal under a `Π`, whose sort is needed: an
+    -- inferred named-equation match is taken to be in `Type` (a plain one keeps the
+    -- `Sort ?` it may be)
+    let named := !(stx.getArg 1).args.isEmpty
+    let ty ← evalIn ctx (← freshMeta ctx' "the type of this match"
+      (if named then some (.sort (.succ .zero)) else none))
     return (← check ctx stx ty, ty)
   | "term.calc" => elabCalc ctx stx
   | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>

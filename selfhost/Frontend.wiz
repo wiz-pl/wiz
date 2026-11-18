@@ -2732,8 +2732,8 @@ def appOf : List Syntax → Syntax
 def iteMatch (c a b : Syntax) : Syntax :=
   let alt := fun (ctor : String) (rhs : Syntax) => mkNode "match.alt" (.cons (.atom "|")
     (.cons (mkNull (one (mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident ctor)))))) (.cons (.atom "=>") (one rhs))));
-  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one c)) (.cons (.atom "with")
-    (one (mkNull (.cons (alt "true" a) (one (alt "false" b))))))))
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull .nil) (.cons (mkNull (one c)) (.cons (.atom "with")
+    (one (mkNull (.cons (alt "true" a) (one (alt "false" b)))))))))
 -- The grammar's `if` (`term.ite`: `"if" term "then" term "else" term`), and the older
 -- application form (when the surface rule is not in the tables), are both accepted.
 def ifMatch (s : Syntax) : Option Syntax := match strEq (kindOf s) "term.ite" with
@@ -4976,7 +4976,7 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
 -- a `match` as a term (stage 18g): its scrutinees are `let`-bound, then the clauses are
 -- compiled against the expected type (no recursion: that is a definition's)
 def termMatch (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
-  match scrutLets gs es cx (nonAtoms (kids (kid s 1))) with
+  match scrutLets gs es cx (nonAtoms (kids (kid s 2))) with
   | .err m => .err m
   | .ok cx' cols wrap es1 =>
     let d := Cx.lvl cx';
@@ -4985,7 +4985,7 @@ def termMatch (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
     | .some v =>
         let R := quote d ty;
         let mc := MatchCtx.mk "" .nil 0 d v R R .tnil .tnil .nil;
-        match compileM gs mc es1 cx' ty cols .false .nil (clausesOf (kids (kid s 3))) with
+        match compileM gs mc es1 cx' ty cols .false .nil (clausesOf (kids (kid s 4))) with
         | .ok t es2 => .ok (wrap t) ty es2
         | .err m => .err m
 def scrutLets (gs : Globals) (es : ES) (cx : Cx) : List Syntax → SL
@@ -5592,7 +5592,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
       let us := univParamsOf stx;
       match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil) ps with
       | .err m => errStep gs m
-      | .ok pts cxP0 => match scrutCols params pts pts (nonAtoms (kids (kid body 1))) with
+      | .ok pts cxP0 => match scrutCols params pts pts (nonAtoms (kids (kid body 2))) with
         | .err m => errStep gs m
         | .ok cols => match inferType gs (ES.withParams ES.empty us) cxP0 rStx with
           | .err m => errStep gs m
@@ -5607,7 +5607,7 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
               | .mk c Rv => match sortOf c Rv with
                 | .none => errStep gs "the result is not a type"
                 | .some v =>
-                    let cls := clausesOf (kids (kid body 3));
+                    let cls := clausesOf (kids (kid body 4));
                     -- the structural parameter: the leftmost one a clause splits
                     let p := match structuralCol cls (lenL cols) 0 with
                       | .some k => colLvl (nthCol cols k)
@@ -5898,8 +5898,8 @@ def eqnsToMatch (stx : Syntax) : Option Syntax := match kids (kid stx 4) with
     match peelArrows m 0 ty with
     | .fail => .none
     | .mk bs xs res =>
-      let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull xs)
-        (.cons (.atom "with") (one (kid stx 5)))));
+      let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull .nil) (.cons (mkNull xs)
+        (.cons (.atom "with") (one (kid stx 5))))));
       .some (mkNode "command.def" (.cons (.atom "def") (.cons (kid stx 1) (.cons (kid stx 2)
         (.cons (mkNull (List.append (kids (kid stx 3)) bs))
           (.cons (mkNull (.cons colon (one res))) (.cons (.atom ":=") (one body))))))))
@@ -5967,8 +5967,8 @@ def identsOf : List String → List Syntax
 def withDefault' (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
   | .ident f =>
     let body := kid stx 6;
-    let alts := kids (kid body 3);
-    let scruts := nonAtoms (kids (kid body 1));
+    let alts := kids (kid body 4);
+    let scruts := nonAtoms (kids (kid body 2));
     let params := fieldNames (fieldsOf (kids (kid stx 3)));
     let useInd := match Scope.lookup (Globals.scope gs) f with
       | .some _ => Bool.false
@@ -6054,8 +6054,8 @@ def reorderStructural (gs : Globals) (stx0 : Syntax) : Reorder := match kid stx0
     let params := fieldNames (fieldsOf bs);
     let n := lenL params;
     let body := kid stx 6;
-    let alts := kids (kid body 3);
-    let scruts := nonAtoms (kids (kid body 1));
+    let alts := kids (kid body 4);
+    let scruts := nonAtoms (kids (kid body 2));
     let useInd := match Scope.lookup (Globals.scope gs) f with
       | .some _ => Bool.false
       | .none => clausesMention f (clausesOf alts);
@@ -6115,7 +6115,7 @@ def defStep (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "co
   | .false => match strEq (kindOf stx) "command.inductive" with
   | .true => inductiveCmd gs stx
   | .false => match Bool.and (strEq (kindOf stx) "command.def") (Bool.and (strEq (kindOf (kid stx 6)) "term.match")
-      (scrutsAreParams (fieldNames (fieldsOf (kids (kid stx 3)))) (nonAtoms (kids (kid (kid stx 6) 1))))) with
+      (scrutsAreParams (fieldNames (fieldsOf (kids (kid stx 3)))) (nonAtoms (kids (kid (kid stx 6) 2))))) with
     | .true => withDefault gs stx
     | .false => match strEq (kindOf stx) "command.defEqns" with
       | .true => match eqnsToMatch stx with
@@ -6808,8 +6808,8 @@ def projections (T : String) (us : Syntax) (bs : List Syntax) (sTy pat : Syntax)
   | .true => projections T us bs sTy pat rest
   | .false =>
     let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat)) (.cons (.atom "=>") (one (identStx (fieldName f))))));
-    let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (identStx "s✝")))
-      (.cons (.atom "with") (one (mkNull (one alt))))));
+    let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull .nil) (.cons (mkNull (one (identStx "s✝")))
+      (.cons (.atom "with") (one (mkNull (one alt)))))));
     let d := mkNode "command.def" (.cons (.atom "def") (.cons (.ident (String.append (String.append T ".") (fieldName f)))
       (.cons us (.cons (mkNull (List.append (implicitBinders bs) (one (binderStx "(" ")" "s✝" sTy))))
         (.cons (mkNull (.cons (.atom ":") (one (kid f 4)))) (.cons (.atom ":=") (one body)))))));
@@ -6862,8 +6862,8 @@ def instProjections (T : String) (us : Syntax) (bs : List Syntax) (sTy pat : Syn
   | .true => instProjections T us bs sTy pat rest
   | .false =>
     let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat)) (.cons (.atom "=>") (one (identStx (fieldName f))))));
-    let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one (identStx "self✝")))
-      (.cons (.atom "with") (one (mkNull (one alt))))));
+    let body := mkNode "term.match" (.cons (.atom "match") (.cons (mkNull .nil) (.cons (mkNull (one (identStx "self✝")))
+      (.cons (.atom "with") (one (mkNull (one alt)))))));
     let d := mkNode "command.def" (.cons (.atom "def") (.cons (.ident (String.append (String.append T ".") (fieldName f)))
       (.cons us (.cons (mkNull (List.append (classMethBinders bs) (one (binderStx "[" "]" "self✝" sTy))))
         (.cons (mkNull (.cons (.atom ":") (one (kid f 4)))) (.cons (.atom ":=") (one body)))))));
@@ -8282,7 +8282,7 @@ def ctorPatStx (c : String) (subs : List Syntax) : Syntax := match subs with
   | _ => mkNode "term.app" (.cons (dotStx c) (one (mkNull subs)))
 -- `match s₁, …, sₙ with alts`
 def matchStx (scruts alts : List Syntax) : Syntax :=
-  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull scruts) (.cons (.atom "with") (one (mkNull alts)))))
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull .nil) (.cons (mkNull scruts) (.cons (.atom "with") (one (mkNull alts))))))
 def alt1 (p : Syntax) (rhs : Syntax) : Syntax :=
   mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one p)) (.cons (.atom "=>") (one rhs))))
 def alt2 (p q : Syntax) (rhs : Syntax) : Syntax :=

@@ -143,7 +143,7 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 | `term.tag`           | max  | "'" ident |
 | `term.ecase`         | lead | "ecase" term "[" [terms] "]" |
 | `term.dotIdent`      | max  | "." ident (a constructor of the expected type) |
-| `term.match`         | lead | "match" [terms] "with" [alts] |
+| `term.match`         | lead | "match" [("h" ":")] [terms] "with" [alts] (13t: the equation `h : e = <pattern>`) |
 | `term.calc`          | lead | "calc" [`calc.step`: term ":=" term, aligned] |
 | `term.szInf`, `term.szSuc`, `term.sizeLt` | | "∞", "↑" s, "Size<" s |
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
@@ -230,7 +230,10 @@ def termLeading : List LeadingParser := [
   { kind := "term.match", prec := leadPrec,
     -- alternatives line up at or right of the first `|`, so an outer match's next
     -- alternative ends a nested match (as in Lean)
-    p := seqs ["match", sepBy1 term ",", "with", withPosition (many (seqs [colGe, matchAlt]))] },
+    -- (13t) `match h : e with`: the named equation is an optional child, so a plain
+    -- `match` has the same shape with an empty `null` there
+    p := seqs ["match", optional (node "match.eqName" (seqs [ident, ":"])),
+      sepBy1 term ",", "with", withPosition (many (seqs [colGe, matchAlt]))] },
   -- tactics line up (or are separated by `;`); the tactics themselves come from the prelude
   { kind := "term.by", prec := leadPrec,
     p := seqs ["by", withPosition (many1 (seqs [colGe, cat "tactic" 0, optional ";"]))] },

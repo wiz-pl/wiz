@@ -789,3 +789,64 @@ unrelated `calc_e` syntax category in the `language` group is untouched.
 
 The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
 request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).
+
+## 13t: `match h : e with`, a case split that keeps the equation
+
+A `match` may name the equation between the value it scrutinises and each pattern:
+
+```wiz
+import Logic
+
+def keep (p : Nat → Bool) (n : Nat) : Nat :=
+  match h : p n with
+  | .true => n
+  | .false => 0
+```
+
+In the `.true` branch `h : p n = .true`; in the `.false` branch `h : p n = .false`.
+The left side is the scrutinee **as written** — here `p n`, not a fresh variable — so it
+can be passed to a lemma stated about that expression, and the right side is the
+branch's constructor *value*, with that branch's variables: in `| .succ m => …` the
+hypothesis is `n = .succ m` (not `n = .succ ?`).
+
+Nothing new is needed in the kernel. The match is compiled as usual, but:
+
+* the goal generalised over the scrutinee `x` is extended with the equation, giving the
+  motive `fun x => (h : e = x) → C` (inside the branch this is `h : e = ctor`);
+* every alternative's right-hand side is a function of `h` (`fun h => body`), so the
+  branch has the hypothesis in scope (a tactic body in `by …` sees it too);
+* the whole match then has the type `e = e → C[e]` and is applied to `refl : e = e`.
+
+The extra function takes an ordinary explicit argument, so the hypothesis is a normal
+local: it is unused in branches that do not need it, and `#print axioms` shows no axiom
+for a definition that uses it. The equation's left side is duplicated in the motive's
+type, which is erased at run time; the scrutinee itself is still evaluated once, as the
+match's argument.
+
+Limits: a named equation is for exactly one scrutinee (`match h : e₁, e₂ with` is
+rejected — name the relation you need with a `let`, or use a plain `match`). A scrutinee
+that uses a variable at quantity 1 is rejected: the equation would mention it a second
+time, and linearity is about uses. The hypothesis is ordinary (not `subst`): it is a
+proof of the equation, and rewriting with it is the library's `rw`/`Tac.rewriteAt`. A
+`match h :` on an indexed type whose index is not a variable (`v : Vec A (.succ n)`)
+takes the general index-unification path, which cannot carry the scrutinee equation yet:
+the plain `match v with` works there, the named one reports "this match needs index
+unification whose goal depends on the scrutinee". A structure or pair is taken apart by
+projections rather than a constructor split, so it rejects the named form (the
+hypothesis would be about the matched value, not `S.mk a b`); a one-constructor
+`inductive` declares its fields in its constructor and works.
+
+A recursive definition whose body is `match h : e with` is not rewritten to the
+equations form (that rewrite moves the alternatives into a definition by equations,
+where the hypothesis has no binding site), so a self-call in it is not structural: write
+such a function by equations and keep the equation out of its body, or use a plain
+`match` there.
+
+The Lean frontend implements the equation. `selfhost/Frontend.wiz` reads the new shape
+for plain matches but does not bind the hypothesis yet, so a self-hosted build of a
+program that *uses* `h` reports it as an unknown identifier.
+
+Tests: the `match` group (the equation at the scrutinee expression and at a constructor
+with a field, an unused equation, the several-scrutinee and wrong-constructor errors) and
+the `format` group (the named form prints and parses back). The parser's `term.match`
+gained an optional `match.eqName` child; a plain `match` has an empty `null` there.
