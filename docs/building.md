@@ -697,7 +697,8 @@ setup action keeps the elan cache for those
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
-  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
+  a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
   checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
@@ -1082,6 +1083,23 @@ web/out`, checks the result with `web/check-site.sh doc-site` (the four entry po
 exist and the landing page's and benchmark page's local links resolve; no server), and
 uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
 then publishes that artifact.
+
+`wiz doc --lib` elaborates the whole library once when its cache is cold, and that is
+the bulk of the job (10-19 min in recent runs; 43 min on a loaded machine). So the job
+restores `wiz`'s elaboration cache from the Actions cache and passes it as a read-only
+layer (`.wiz-doc-cache/ro`, `--cache-ro`); this run's misses go to
+`.wiz-doc-cache/write`, which a miss publishes as the next run's layer. The key is
+`wiz-doc-v1-<os>-<SHA-256 of the wiz binary>-<git tree of lib/>`. The first half is the
+cache's own namespace (`Wiz/Cache.lean`: an entry is named by `binaryId`, a hash of the
+running binary; manifests carry its SHA-256, `toolchainTag`), so an identical build of
+the same source hits and a changed compiler misses; the second half only decides when a
+new snapshot is saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still
+serves the modules a `lib/` change did not touch. A restored run replays the cache in a
+few minutes instead of elaborating (roughly a tenth of the cold time; ~2 min with
+`--jobs 4`, once `wiz doc` has that flag). `--cache-verify off` is deliberate: the layer
+is this job's own and its entries are content-keyed; the manifest check would bind them
+to the toolchain's store paths (cc, llc) and throw a same-binary rebuild away. The
+toolchain's own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
 
 The benchmark page is **generated, not written**: `web/build-bench.py` renders
 `web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
