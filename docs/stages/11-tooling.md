@@ -310,6 +310,24 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
 
+**The token (#430).** The `Origin` check stops other web sites, but a local program
+simply sends no `Origin`, and a WebSocket client may open documents and have them
+elaborated (imports, `import_c` headers, an SMT solver) with the user's privileges. So
+the upgrade must also present the server's token, as `?token=T` in the request target
+(all a browser can add) or as `Authorization: Bearer T`; anything else gets `401` before
+any `101`, and the comparison takes the same time wherever the first difference is
+(`WebSocket.constantTimeEq`). The token is 128 random bits, fresh for every launch and
+printed on stderr with the web infoview's URL; `--token-file FILE` reads it from FILE
+(creating FILE, mode 0600, with a fresh one when it does not exist), and `--ws-insecure`
+turns the check off, for the loopback address only and with a warning.
+`wiz/browserInfoview` returns the token and puts it in the page's URL; the pages
+(`web/infoview.js`, the playground and `wiz doc --serve`'s panel through
+`web/lsp-client.js`) pass their own `?token=` on to the socket and never display it. The
+infoview's files are served without a token (they are the toolchain's own). Tests: the
+`lsp-server` group (no token, a wrong, empty or longer token, a wrong bearer: `401`; the
+query and the bearer: `101`; a token in an asset's URL changes nothing), the `nvim` group
+(the browser infoview's URL and handshake), and `web/playground_lsp_test.mjs`.
+
 ## 11p: a Neovim plugin
 
 `editors/nvim/` is **wiz.nvim**, a Lua plugin for Neovim ≥ 0.10 modelled on lean.nvim
@@ -414,6 +432,22 @@ def four : Nat := twice two
   sections under the goals, and `gd` on an item jumps to it. `#check`, `#eval`,
   `#reduce`, `#run`, `inductive` and `structure` now keep their info trees, so hovers
   work inside them too.
+* **One-shot requests** (#435), for clients without an interactive table (no session, no
+  ref): `wiz/typeAt {textDocument, position}` answers the innermost elaborated term there
+  (an application, a `match`, a literal, a hole, or an identifier) as `{term, type,
+  range, kind, name?}`: the source text, the type it was checked against (an
+  identifier's own type), the range, and `const`/`local`/`term`/`hole`; it is the place
+  `wiz/plainTermGoal` picks, without the hypotheses. The info tree records no core term
+  per range, so `term` is what the source says there. `wiz/coreTerm {textDocument, name}`
+  (or `position`: the global under the cursor, else the declaration of the command
+  there) answers `{name, type, value, kind, levelParams, location, native?, axioms,
+  raw?}`: the declaration as the kernel has it, printed as core terms (macros and
+  notation expanded; `notation: true` prints with notation, as hovers do), `kind`
+  `definition`, `opaque` (no value to unfold: an axiom, a constructor, an `extern`; the
+  value is `null` rather than unfolded) or `partial`, the native implementation if
+  there is one, `#print axioms`'s list (`axioms: false` skips it), and with `raw: true`
+  the core syntax trees. Both are in `infoviewMethods`, so infoviews on the Unix socket
+  may ask them. Tests: `lsp-server`, "#435: wiz/typeAt and wiz/coreTerm".
 
 Not covered: hovers inside tactic arguments (a tactic gets its syntax without ranges),
 a procedural macro's output (it has no ranges of the user's), the arguments of
@@ -784,6 +818,19 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+* **From a declaration's own name** (#434). The name in a `def`, `inductive`,
+  `structure` or `class` header, a constructor (`| red`) and a structure field (`px :
+  Nat`) are not identifiers of the info tree, so the cursor there used to find nothing.
+  Now `targetAt` falls back to the command's syntax (parsed again, `declIdents`): the
+  first identifier of each declaring node is the name it declares, and the cursor on it
+  is the same target as a use, so references, highlights and rename give the same answer
+  from either place. The declaration site in the results is that identifier (before, the
+  name's first occurrence in the command's text, which missed constructors and fields).
+  A constructor or field is written by its last component (`red` for `Col.red`): rename
+  edits it there with the new name's last component when the new name keeps the prefix
+  (`Col.crimson`), and leaves it when it doesn't (the declaration can't say `Other.x`).
+  Tests: `lsp-server`, "#434: references, highlights and rename from a declaration's own
+  name".
 
 ## 11aa: `wiz fmt`, a formatter
 

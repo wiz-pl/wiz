@@ -278,7 +278,19 @@ partial def rename (m : Nat) (p : PRen) (v : Val R) : ElabM R (Term R) := do
         let e' ← lookupMeta m'
         -- (its arity: the kept arguments among the ones for the context's variables)
         let arity := (keep.filter (· < e'.arity)).size
-        modify fun s => { s with metas := s.metas.push { info := e'.info, desc := "a pruned hole", arity } }
+        -- (13b) its type: the old hole's, in its context with the pruned variables no
+        -- longer bound (`metaAppType` gives up on a type that mentions one). When an
+        -- argument past the context's is pruned, the hole's own Π loses a binder: that
+        -- type is not at hand, and the hole is left untyped (a guess about it falls back
+        -- to `checkGuessedDecl`)
+        let type? := e'.type?.bind fun (ctx0, ty) =>
+          if (List.range sp.size).any (fun i => i ≥ e'.arity && !keep.contains i) then none
+          else
+            -- the context's bound flags, outermost first: the i-th bound one is argument i
+            let (flags, _) := ctx0.bound.reverse.foldl (init := ([], 0)) fun (acc, i) b =>
+              if b then (acc ++ [keep.contains i], i + 1) else (acc ++ [false], i)
+            some ({ ctx0 with bound := flags.reverse }, ty)
+        modify fun s => { s with metas := s.metas.push { info := e'.info, desc := "a pruned hole", arity, type? } }
         let n := sp.size
         let body : Term R := keep.foldl (fun t i => .app t (.var (n - i - 1))) (.mvar m'')
         let sol := (List.range n).foldl (fun t i => Term.lam s!"x{n - i - 1}" t) body
@@ -560,7 +572,10 @@ def etaProjected (m : Nat) (sp : Array (Elim R)) : ElabM R Bool := do
 
 /-- (13b) A guess that couldn't be typed where it was made (`checkGuess`): the
 declaration is checked once more (`ElabState.unifyGuessed`). -/
-def markGuessed : ElabM R Unit := modify fun st => { st with unifyGuessed := true }
+def markGuessed (why : String) : ElabM R Unit :=
+  modify fun st =>
+    let rs := if st.guessReasons.contains why then st.guessReasons else st.guessReasons.push why
+    { st with unifyGuessed := true, guessReasons := rs }
 
 /-- (13b) The type of the hole `?m` applied to `args` (values in a context of `l`
 variables), read off its entry (`MetaEntry.type?`), and the types of those arguments that
@@ -568,11 +583,12 @@ are variables, by level (for `inferNe`; the other entries are never read, since 
 mentions only its own arguments). `none` when the hole has no recorded type, when it is
 applied to fewer arguments than its context has bound variables, or when its type
 mentions a variable of that context the hole is not applied to (a `let`, or a variable a
-`match` hid from it). -/
-def metaAppType? (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Option (VTy R × Array (VTy R))) := do
+`match` hid from it). The error says which (`markGuessed`). -/
+def metaAppType (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Except String (VTy R × Array (VTy R))) := do
   let e ← lookupMeta m
-  let some (ctx, ty) := e.type? | return none
-  if args.size < e.arity then return none
+  let some (ctx, ty) := e.type? | return .error s!"untyped hole ({e.desc})"
+  if args.size < e.arity then return .error s!"hole applied to fewer arguments than its context ({e.desc})"
+  let hidden := s!"hole type mentions a variable it is not applied to ({e.desc})"
   let g ← getGlobals
   -- the index among the hole's arguments of each level of its context (`none`: not bound)
   let mut slot : Array (Option Nat) := #[]
@@ -591,14 +607,14 @@ def metaAppType? (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Option (V
         if t.hasVar (n - j - 1) then return none
         env := .unit .zero :: env
     return some (eval g env t)
-  let some ty := transport ctx.lvl ty | return none
+  let some ty := transport ctx.lvl ty | return .error hidden
   let mut tys : Array (VTy R) := Array.replicate l (.unit .zero)
   let types := ctx.types.toArray.reverse
   for j in [0:ctx.lvl] do
     if let some k := slot[j]?.join then
       if let .neutral (.local x) #[] ← forceMeta args[k]! then
         if x < l then
-          let some A := transport j types[j]! | return none
+          let some A := transport j types[j]! | return .error hidden
           tys := tys.set! x A
   -- the arguments past the context's: through the hole's own function type
   let mut ty := ty
@@ -608,8 +624,85 @@ def metaAppType? (m : Nat) (args : Array (Val R)) (l : Lvl) : ElabM R (Option (V
       if let .neutral (.local x) #[] ← forceMeta a then
         if x < l then tys := tys.set! x dom
       ty ← instM cod a
+    | _ => return .error s!"hole type is not a function type where it is applied ({e.desc})"
+  return .ok (ty, tys)
+
+/-- (13b) The type of the next argument of the constant `n` (at levels `us`) applied to
+`args`: the Π domain of its declared type after them, for a hole made to stand for that
+argument (`MetaEntry.type?`). `none` when there is no such constant or the type is not a Π
+there. -/
+def constArgType? (n : Name) (us : List Level) (args : List (Val R)) : ElabM R (Option (VTy R)) := do
+  let g ← getGlobals
+  let some d := g.find? n | return none
+  let mut ty : VTy R := eval g [] (d.type.instLevels d.levelParams us)
+  for a in args do
+    match ← force ty with
+    | .pi _ _ _ _ cod _ => ty ← instM cod a
     | _ => return none
-  return some (ty, tys)
+  match ← force ty with
+  | .pi _ _ _ dom _ _ => return some dom
+  | _ => return none
+
+/-- The last line of a forging guess's error (`checkGuessTypes`). `unifyAt0` knows the
+error by it and passes it on as it is, instead of nesting it under a type mismatch. -/
+def forgingGuessTail : String :=
+  "(a hole solved by shape would take a look-alike of a private type)"
+
+/-- The names of the variables of a context of `l` levels, innermost first, for a message
+unification writes itself: a binder unification went under (`ElabState.binderNames`), else
+the caller's context (`ElabState.unifyCtxNames`, for the levels it has), else `#i`, as
+`Term.pretty` shows a variable it has no name for. -/
+def unifyNames (l : Lvl) : ElabM R (List Name) := do
+  let st ← get
+  let base := st.unifyCtxNames
+  let nameAt (i : Nat) : Name :=
+    match st.binderNames.find? (·.1 == i) with
+    | some (_, x) => x
+    | none => if i < base.length then base[base.length - 1 - i]! else s!"#{l - 1 - i}"
+  pure ((List.range l).reverse.map nameAt)
+
+/-- A hole, by what it was made for (`MetaEntry.desc`), at the head of a message: "the
+implicit argument F", "the hole ?x", "the hole `_`". -/
+def holePhrase (desc : String) : String :=
+  if desc == "_" then "the hole `_`"
+  else if desc.startsWith "?" then s!"the hole {desc}"
+  else if desc.startsWith "a " || desc.startsWith "an " || desc.startsWith "the " then desc
+  else if desc == "by" then "the goal of a `by` block"
+  else if desc.contains ' ' || desc == "goal" || desc == "type" then s!"the {desc}"
+  else s!"the hole made for `{desc}`"
+
+/-- (13b) A guess's type comparison failed without meeting a hole (`checkGuessTypes`, or
+at the end of the declaration, `recheckDeferredGuesses`): the failure `e` is final, and the
+guess is not taken. When the two types are equal once another module's private types have
+their definitions back, this is the forgery the check is for: it throws with code `private`
+(and the guess is not retried another way, `unifyFirstOrder`), naming the types whose
+definition alone makes them equal; otherwise it throws `e`. The message shows the hole
+`?m sp`, the `guess` and both types, with the free variables named by `names` (innermost
+first). -/
+def guessFailed (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R)
+    (m : Nat) (sp : Array (Elim R)) (guess : Val R) (e : ElabError R) (names : List Name) :
+    ElabM R Unit := do
+  let g ← getGlobals
+  if g.hidden.isEmpty then throw e
+  let env : Env R := ((List.range l).map fun i => Val.var i).reverse
+  let equalIn (g' : Globals R) : Bool :=
+    let ev (v : VTy R) := eval g' env (quote g l v)
+    convTy g' tys (ev inferred) (ev expected)
+  unless equalIn g.fullView do throw e
+  let alone := g.hidden.fold (init := []) fun acc n d =>
+    if equalIn { g with decls := g.decls.insert n d, hidden := g.hidden.erase n } then n :: acc else acc
+  let used := if alone.isEmpty then g.hidden.toList.map (·.1) else alone
+  let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
+  let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty names (some g))
+  let desc := (← lookupMeta m).desc
+  let hole := pretty (.neutral (.mvar m) sp) ++ (if desc == "_" then "" else s!" ({desc})")
+  -- (#412) the reason first, with the hole named by what it was made for; then the hole,
+  -- the guess and both types, as a type mismatch shows them
+  throwAt {} (s!"{holePhrase desc} can't be {pretty guess}: the two types agree only through " ++
+    s!"the definition of {", ".intercalate (used.map show1)}, " ++
+    "hidden outside its module (it has private parts)\n" ++
+    s!"  hole: {hole}\n  expected: {pretty expected}\n  guess: {pretty guess}\n  its type: {pretty inferred}\n" ++
+    forgingGuessTail) ErrorCode.private_
 
 mutual
 
@@ -920,51 +1013,44 @@ read off it, or the comparison is not final (it met a hole), the declaration is
 checked once more instead (`ElabState.unifyGuessed`, `checkGuessedDecl`). -/
 partial def checkGuess (l : Lvl) (m : Nat) (args : Array (Val R)) (head : Val R) : ElabM R Unit := do
   let g ← getGlobals
-  match ← metaAppType? m args l with
-  | some (expected, tys) =>
+  match ← metaAppType m args l with
+  | .ok (expected, tys) =>
     match inferNe g tys head with
-    | some inferred => checkGuessTypes l tys inferred expected
-    | none => markGuessed
-  | none => markGuessed
+    | some inferred => checkGuessTypes l tys inferred expected m (args.map .app) head
+    | none => markGuessed "the guessed head's type can't be read off"
+  | .error why => markGuessed why
 
 /-- (13b) Unification made two holes equal by shape (the flex-flex last resort): their
 types must agree, as in `checkGuess`. -/
 partial def checkGuessFlex (l : Lvl) (m : Nat) (sp : Array (Elim R)) (m' : Nat) (sp' : Array (Elim R)) :
     ElabM R Unit := do
   let appArgs (sp : Array (Elim R)) : Array (Val R) := sp.filterMap fun | .app a => some a | _ => none
-  match ← metaAppType? m (appArgs sp) l, ← metaAppType? m' (appArgs sp') l with
-  | some (A, tys), some (B, _) => checkGuessTypes l tys A B
-  | _, _ => markGuessed
+  match ← metaAppType m (appArgs sp) l, ← metaAppType m' (appArgs sp') l with
+  -- (shown as `?m'` guessed to be `?m`: the hole `?m'`, of type `B`, and the guess, of type `A`)
+  | .ok (A, tys), .ok (B, _) => checkGuessTypes l tys A B m' sp' (.neutral (.mvar m) sp)
+  | .error why, _ | _, .error why => markGuessed s!"flex-flex: {why}"
 
 /-- The two types of a guess (`checkGuess`) are equal: a failure that met no hole is
-final and throws; one that met a hole may not be, and leaves the guess to
-`checkGuessedDecl`. A final failure where the two types are equal once another module's
-private types have their definitions back is the forgery this check is for: it throws
-with code `private` (and the guess is not retried another way, `unifyFirstOrder`); the
-types named are those whose definition alone makes them equal. `tys` are the variables'
-types, as `metaAppType?` gives them (only for that comparison). -/
-partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R) : ElabM R Unit := do
+final (`guessFailed`). One that met a hole may not be: the comparison is made again at the
+end of the declaration, once its holes are solved (`ElabState.deferredGuesses`,
+`recheckDeferredGuesses`). `tys` are the variables' types, as `metaAppType` gives them
+(only for that comparison). The hole `?m sp` and the `guess` are for the message. -/
+partial def checkGuessTypes (l : Lvl) (tys : Array (VTy R)) (inferred expected : VTy R)
+    (m : Nat) (sp : Array (Elim R)) (guess : Val R) : ElabM R Unit := do
   let s ← get
   let (r, saw) ← trackMeta (unify l inferred expected)
   match r with
   | .ok _ => pure ()
   | .error e =>
-    if saw then set s; markGuessed; return
-    let g ← getGlobals
-    if g.hidden.isEmpty then throw e
-    let env : Env R := ((List.range l).map fun i => Val.var i).reverse
-    let equalIn (g' : Globals R) : Bool :=
-      let ev (v : VTy R) := eval g' env (quote g l v)
-      convTy g' tys (ev inferred) (ev expected)
-    unless equalIn g.fullView do throw e
-    let alone := g.hidden.fold (init := []) fun acc n d =>
-      if equalIn { g with decls := g.decls.insert n d, hidden := g.hidden.erase n } then n :: acc else acc
-    let used := if alone.isEmpty then g.hidden.toList.map (·.1) else alone
-    let show1 (n : Name) : String := s!"{n} (module {(g.opaques[n]?).getD "?"})"
-    let pretty (v : VTy R) : String := elideLong ((quote g l v).pretty [] (some g))
-    throwAt {} (s!"a hole solved by shape would take {pretty inferred} for {pretty expected}, which " ++
-      s!"agree only through the definition of {", ".intercalate (used.map show1)}, hidden outside its module " ++
-      "(it has private parts)") ErrorCode.private_
+    if saw then
+      set s
+      -- (#411) not final yet: kept, with the names for its message, for the end of the
+      -- declaration (it used to leave the declaration to `checkGuessedDecl`)
+      let names ← unifyNames l
+      let d : DeferredGuess R := { l, tys, inferred, expected, m, sp, guess, names }
+      modify fun st => { st with deferredGuesses := st.deferredGuesses.push d }
+      return
+    guessFailed l tys inferred expected m sp guess e (← unifyNames l)
 
 /-- The first-order approximation (see `unifyGlued`). -/
 partial def unifyFirstOrder (l : Lvl) (m : Nat) (sp : Array (Elim R)) (v : Val R) : ElabM R Bool := do
@@ -1077,5 +1163,44 @@ partial def unifySpine (l : Lvl) (sp sp' : Array (Elim R)) : ElabM R Unit := do
     | _, _ => throwAt {} "spine mismatch"
 
 end
+
+/-- (13b, #411) The guesses whose type comparison met a hole (`checkGuessTypes`), compared
+again at the end of the declaration, with the holes solved since. A comparison is settled
+when the two types now unify without meeting a hole, or when they are convertible in the
+elaborator's view with any hole still unsolved taken as rigid (`convTy`: equal whatever it
+is solved to). One that fails without meeting a hole, where the types agree only through
+another module's private definitions, is the forgery `guessFailed` reports, as it would on
+the spot, at the hole (or at `info`, when the hole has no position). Anything else (a
+comparison that still meets an unsolved hole, or two types that differ in every view, which
+the kernel's check rejects) leaves the declaration to the whole-declaration recheck as
+before (`markGuessed`, `checkGuessedDecl`). It solves nothing: each comparison runs on a
+copy of the state. -/
+def recheckDeferredGuesses (info : SourceInfo) : ElabM R Unit := do
+  let pending := (← get).deferredGuesses
+  modify fun st => { st with deferredGuesses := #[] }
+  let stillHole := "the type comparison met a hole, still unsolved at the end of the declaration"
+  for p in pending do
+    let now (v : Val R) : ElabM R (Val R) := do pure ((← reevalStale? p.l v).getD v)
+    let inferred ← now p.inferred
+    let expected ← now p.expected
+    let tys ← p.tys.mapM now
+    let s ← get
+    let (r, saw) ← trackMeta (unify p.l inferred expected)
+    set s
+    let g ← getGlobals
+    match r with
+    | .ok _ =>
+      -- (a success that solved a hole is not settled: the hole might be solved otherwise)
+      if saw && !convTy g tys inferred expected then markGuessed stillHole
+    | .error e =>
+      if convTy g tys inferred expected then pure ()
+      else if saw then markGuessed stillHole
+      else
+        let hi := (← lookupMeta p.m).info
+        let at_ := if hi == ({} : SourceInfo) then info else hi
+        tryCatch (guessFailed p.l tys inferred expected p.m p.sp p.guess e p.names) fun e' =>
+          if e'.code == ErrorCode.private_ then
+            throw { e' with info := if e'.info == ({} : SourceInfo) then at_ else e'.info }
+          else markGuessed "the guess's type differs from its hole's at the end of the declaration"
 
 end Wiz

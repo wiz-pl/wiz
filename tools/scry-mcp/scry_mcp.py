@@ -20,8 +20,19 @@ with respect to the workspace:
 * `scry_findings` lists or shows the findings database (`scry findings
   list|show`); it never scans, triages, reproduces or verifies.
 
-`scry dynamic`, `findings repro` (both compile and run code), `findings
-scan`/`triage` (they write the database) and the REPL are not offered.
+Opt-in runners (phase 3), each listed only with its flag:
+
+* `--allow-scry-dynamic`: `scry_dynamic` (`scry dynamic FILE.c`: compile and run
+  under ASAN/UBSAN), `scry_repro` and `scry_verify` (`scry findings repro|verify ID`).
+  They run through `heavy` (a declared `mem`, a time limit inside heavy, refused when
+  heavy is busy unless `queue`) in a `bwrap` sandbox: no network, the root file system
+  read-only, the home directory hidden, and only the run directory (and, for
+  repro/verify, the findings database's directory) writable. `--cc`, `--harness` and
+  `--env` are never passed: no caller-chosen command or shell.
+* `--allow-scry-triage`: `scry_triage` (`scry findings triage ID --state S --reason R`)
+  writes the findings database, under `light` in the same sandbox.
+
+`findings scan` and the REPL are not offered.
 
 Every run happens in a fresh directory inside the server's private (0700)
 temporary directory, which is also the child's HOME and XDG cache: anything Scry
@@ -53,6 +64,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "wiz-mcp"))
 
 import wiz_mcp as base  # noqa: E402  (the shared transport and policy helpers)
+import wiz_runners  # noqa: E402  (phase 3: heavy/light, the sandbox, jobs)
 from wiz_mcp import (  # noqa: E402
     ToolError,
     child_env,
@@ -97,8 +109,8 @@ INSTRUCTIONS = (
     "message, location, path) and keep the SARIF as a resource (scry://runs/{id}/sarif). "
     "Use diff=BASE to report only findings on lines changed since BASE. scry_query, "
     "scry_explain and scry_facts read JSON fact stores; scry_findings lists or shows the "
-    "findings database. Nothing is written to the workspace; dynamic analysis and triage "
-    "are not available here."
+    "findings database. Nothing is written to the workspace by these; the dynamic and triage "
+    "runners exist only when the server was started with their flags."
 )
 
 
@@ -110,6 +122,11 @@ class Config:
     timeout: float = DEFAULT_TIMEOUT
     extra_roots: tuple[str, ...] = ()
     pass_env: tuple[str, ...] = ()
+    #: scry_dynamic, scry_repro, scry_verify: compile and run C (heavy, sandboxed).
+    allow_dynamic: bool = False
+    #: scry_triage: write the findings database (light, sandboxed).
+    allow_triage: bool = False
+    runner: wiz_runners.RunnerConfig = wiz_runners.RunnerConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +774,69 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+RUNNER_ANNOTATIONS = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+FINDING_PROPS = {
+    "id": {"type": "string", "description": "a finding id such as f_db2e1eccee6d902d"},
+    "db": {"type": "string", "description": "the findings database (default scry-workflow/findings.json)"},
+}
+
+
+def _runner(name: str, title: str, description: str, properties: dict[str, Any], required: list[str],
+            job: bool = True) -> dict[str, Any]:
+    props = dict(properties, **(base.JOB_PROPS if job else {}))
+    return {"name": name, "annotations": dict(RUNNER_ANNOTATIONS, title=title), "description": description,
+            "inputSchema": {"type": "object", "properties": props, "required": required, "additionalProperties": False}}
+
+
+RUN_SECONDS = {"type": "integer", "minimum": 1, "maximum": 120,
+               "description": "the analysed program's own time limit in seconds (default 10)"}
+RUNNER_TOOLS: list[dict[str, Any]] = [
+    _runner("scry_dynamic", "Dynamic evidence (heavy, sandboxed; needs --allow-scry-dynamic)",
+            "Compile and run one C file under AddressSanitizer/UndefinedBehaviorSanitizer (`scry dynamic`) "
+            "through heavy, in a sandbox with no network and the home directory hidden; returns the events, "
+            "their links to static findings and (coverage=true) line coverage. Observed, not verified: a "
+            "clean run is not a proof of absence. The SARIF is kept as a resource.",
+            {"path": {"type": "string"}, "run_timeout": RUN_SECONDS,
+             "coverage": {"type": "boolean", "description": "llvm-cov line coverage (default false)"}},
+            ["path"]),
+    _runner("scry_repro", "Reproduce a finding (heavy, sandboxed; needs --allow-scry-dynamic)",
+            "`scry findings repro ID`: build a harness with sanitizers and run it, recording the evidence "
+            "in the finding's artifacts. Only the database's directory is writable; no compiler, harness "
+            "script or environment can be chosen.",
+            dict(FINDING_PROPS, sanitize={"type": "string", "enum": ["address", "undefined", "both", "none"]},
+                 input={"type": "string", "description": "an input file in the workspace"},
+                 witness={"type": "string", "description": "a scry-workflow-witness/1 file in the workspace"},
+                 run_timeout=RUN_SECONDS),
+            ["id"]),
+    _runner("scry_verify", "Verify a finding (heavy, sandboxed; needs --allow-scry-dynamic)",
+            "`scry findings verify ID`: re-run the analysis and the stored repro; the verdict says whether the "
+            "finding is still reported. Not reported is never 'absent from the program'.",
+            dict(FINDING_PROPS), ["id"]),
+    _runner("scry_triage", "Triage a finding (writes the database; needs --allow-scry-triage)",
+            "`scry findings triage ID --state S --reason R`: record a triage decision (new, triaged, confirmed, "
+            "false-positive, fixed; illegal transitions are refused by scry). Runs under light in a sandbox.",
+            dict(FINDING_PROPS, state={"type": "string", "enum": list(FINDING_STATES)},
+                 reason={"type": "string", "description": "why (required)"}),
+            ["id", "state", "reason"], job=False),
+    _runner("job_status", "A runner job's state",
+            "A dynamic/repro/verify job's state (queued with its heavy queue position, running, done, failed, "
+            "timeout, killed, cancelled), its output tail and, once it ended, its parsed result. Without `job`: every job.",
+            {"job": {"type": "string"}, "wait": {"type": "integer", "minimum": 0}}, [], job=False),
+    _runner("job_cancel", "Stop a runner job", "Stop a job this server started (its whole session).",
+            {"job": {"type": "string"}}, ["job"], job=False),
+]
+TOOLS += RUNNER_TOOLS
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
+GATED_TOOLS = {
+    "scry_dynamic": "--allow-scry-dynamic", "scry_repro": "--allow-scry-dynamic", "scry_verify": "--allow-scry-dynamic",
+    "job_status": "--allow-scry-dynamic", "job_cancel": "--allow-scry-dynamic",
+    "scry_triage": "--allow-scry-triage",
+}
+
+
+def visible_tools(config: Config) -> list[dict[str, Any]]:
+    enabled = {"--allow-scry-dynamic": config.allow_dynamic, "--allow-scry-triage": config.allow_triage}
+    return [tool for tool in TOOLS if enabled.get(GATED_TOOLS.get(tool["name"], ""), True)]
 
 
 class Server:
@@ -771,7 +850,17 @@ class Server:
         self.shutting_down = False
 
     def close(self) -> None:
+        if self._runner is not None:
+            self._runner.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    _runner: Optional["wiz_runners.Runner"] = None
+
+    @property
+    def runner(self) -> "wiz_runners.Runner":
+        if self._runner is None:
+            self._runner = wiz_runners.Runner(self.config.runner, os.path.join(self.tmp, "jobs"))
+        return self._runner
 
     # -- policy --------------------------------------------------------------
 
@@ -915,6 +1004,11 @@ class Server:
         path = args.get("path") if isinstance(args.get("path"), str) else None
         try:
             return self._call_tool(name, args)
+        except wiz_runners.RunnerError as exc:
+            envelope = error_envelope(name, exc.kind, exc.message, path=path)
+            if exc.detail is not None:
+                envelope["result"] = {"heavy": exc.detail}
+            return envelope
         except ToolError as exc:
             return error_envelope(name, exc.kind, exc.message, path=path,
                                   stdout=getattr(exc, "stdout", "") or "", stderr=getattr(exc, "stderr", "") or "")
@@ -943,7 +1037,152 @@ class Server:
             return self._store(name, args)
         if name == "scry_findings":
             return self._findings(args)
+        if name in GATED_TOOLS:
+            if not any(tool["name"] == name for tool in visible_tools(self.config)):
+                raise ToolError("not_enabled", f"`{name}` executes or writes; it is off unless the server is "
+                                f"started with {GATED_TOOLS[name]}")
+            return self._runner_tool(name, args)
         raise ToolError("invalid_args", f"unknown tool {name}")
+
+    # -- phase 3 runners ---------------------------------------------------------
+
+    def _env(self, run_dir: str) -> dict[str, str]:
+        env = child_env(extra=self.config.pass_env)
+        env["HOME"] = os.path.join(run_dir, "home")
+        env["XDG_CACHE_HOME"] = os.path.join(run_dir, "home", ".cache")
+        return env
+
+    def _sandbox(self, writable: list[str]) -> "wiz_runners.Sandbox":
+        readable = list(self.read_roots()[1:])
+        scry = self._scry()
+        readable.append(os.path.dirname(os.path.realpath(scry)))
+        return wiz_runners.Sandbox(workspace=os.path.realpath(self.config.workspace), workspace_rw=False,
+                                   hide_home=True, readable=tuple(readable), writable=tuple(writable))
+
+    def _db(self, args: dict[str, Any]) -> str:
+        """The findings database: inside the workspace (it is written), not a symlink, existing."""
+        value = args.get("db", os.path.join("scry-workflow", "findings.json"))
+        if not isinstance(value, str) or not value.strip():
+            raise ToolError("invalid_args", "`db` must be a non-empty string")
+        db = confine(resolve_path(self.config.workspace, value), [os.path.realpath(self.config.workspace)],
+                     "findings database")
+        if os.path.islink(db) or os.path.islink(os.path.dirname(db)):
+            raise ToolError("path_denied", f"findings database {db} is behind a symlink; it will not be written through it")
+        if not os.path.isfile(db):
+            raise ToolError("not_found", f"no findings database at {db} (create it with `scry findings scan`)")
+        return db
+
+    def _finding_id(self, args: dict[str, Any]) -> str:
+        finding = args.get("id")
+        if not isinstance(finding, str) or not FINDING_ID.match(finding) or finding.startswith("-"):
+            raise ToolError("invalid_args", "`id` must be a finding id such as f_db2e1eccee6d902d")
+        return finding
+
+    def _withhold_outside(self, report: Any) -> Any:
+        if isinstance(report, dict):
+            source = report.get("source")
+            if isinstance(source, str) and os.path.isabs(source) and not base._allowed(source, self.read_roots()):
+                return {"withheld": 1, "reason": "the finding's source is outside the readable roots"}
+        return report
+
+    def _runner_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "job_status":
+            if args.get("job") is None:
+                return make_envelope(name, result={"jobs": self.runner.list_jobs()})
+            wait = args.get("wait", 0)
+            if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
+                raise ToolError("invalid_args", "`wait` must be a non-negative integer")
+            described = self.runner.status_of(args["job"], child_env(extra=self.config.pass_env),
+                                              float(min(wait, self.config.timeout)))
+            return base.job_envelope(name, described)
+        if name == "job_cancel":
+            return base.job_envelope(name, self.runner.cancel(args.get("job")))
+        if name == "scry_triage":
+            finding = self._finding_id(args)
+            state = args.get("state")
+            if state not in FINDING_STATES:
+                raise ToolError("invalid_args", f"`state` must be one of {', '.join(FINDING_STATES)}")
+            reason = args.get("reason")
+            if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000 or "\0" in reason:
+                raise ToolError("invalid_args", "`reason` must be non-empty text of at most 2000 characters")
+            db = self._db(args)
+            run_id, run_dir = self._new_run_dir()
+            try:
+                command = [self._scry(), "findings", "triage", finding, "--state", state, "--reason", reason,
+                           "--by", "scry-mcp", "--db", db]
+                box = self._sandbox([run_dir, os.path.dirname(db)])
+                run = self.runner.run_light(command, box, self._env(run_dir), min(self.config.timeout, 200))
+            finally:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            ok = run["exit"] == 0
+            return make_envelope(name, ok=ok, path=db, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"],
+                                 error=None if ok else {"kind": "scry_error", "message": _first_line(run["stderr"])})
+        limits = self.config.runner
+        run_seconds = wiz_runners.check_seconds(args.get("run_timeout"), 10, 120, "run_timeout") \
+            if name != "scry_verify" else None
+        if name == "scry_dynamic":
+            path = self._path(args)
+            if not os.path.isfile(path):
+                raise ToolError("invalid_args", f"{path} is not a file")
+            coverage = wiz_runners.check_bool(args, "coverage")
+            mem, timeout, queue, wait = wiz_runners.job_args(args, limits, self.config.timeout, "4G", 600)
+            run_id, run_dir = self._new_run_dir()
+            work = os.path.join(run_dir, "work")
+            os.makedirs(work, mode=0o700)
+            sarif = os.path.join(run_dir, "report.sarif")
+            command = [self._scry(), "dynamic", path, "--json", "--sarif", sarif, "--work-dir", work,
+                       "--timeout", str(run_seconds)] + ([] if coverage else ["--no-coverage"])
+
+            def post(_job: Any, stdout: str, stderr: str, code: int) -> Any:
+                try:
+                    report = json.loads(stdout)
+                except ValueError as exc:
+                    raise wiz_runners.RunnerError("scry_error", f"scry dynamic did not produce JSON (exit {code})") from exc
+                shutil.rmtree(work, ignore_errors=True)
+                kept = self._keep(run_id, run_dir, "dynamic", path, report, sarif)
+                return dict(report, **{"_run": kept}) if isinstance(report, dict) else {"report": report, "_run": kept}
+
+            job = self.runner.start_heavy("scry_dynamic", f"scry dynamic {os.path.relpath(path, self.config.workspace)}",
+                                          command, self._sandbox([run_dir]), self._env(run_dir), mem=mem,
+                                          timeout=timeout, queue=queue, post=post)
+            return self._job_envelope(name, job, wait, path)
+        # scry_repro / scry_verify
+        finding = self._finding_id(args)
+        db = self._db(args)
+        mem, timeout, queue, wait = wiz_runners.job_args(args, limits, self.config.timeout, "4G", 600)
+        if name == "scry_repro":
+            sanitize = args.get("sanitize", "both")
+            if sanitize not in ("address", "undefined", "both", "none"):
+                raise ToolError("invalid_args", "`sanitize` must be address, undefined, both or none")
+            command = [self._scry(), "findings", "repro", finding, "--db", db, "--sanitize", sanitize,
+                       "--timeout", str(run_seconds), "--json"]
+            for key in ("input", "witness"):
+                if args.get(key) is not None:
+                    file = self._path(args, key, key)
+                    if not os.path.isfile(file):
+                        raise ToolError("invalid_args", f"{file} is not a file")
+                    command += ["--" + key, file]
+        else:
+            command = [self._scry(), "findings", "verify", finding, "--db", db, "--json"]
+
+        run_id, run_dir = self._new_run_dir()
+
+        def post_finding(_job: Any, stdout: str, _stderr: str, code: int) -> Any:
+            try:
+                return self._withhold_outside(json.loads(stdout))
+            except ValueError:
+                return None
+
+        job = self.runner.start_heavy(name, f"scry findings {name[5:]} {finding}", command,
+                                      self._sandbox([run_dir, os.path.dirname(db)]), self._env(run_dir),
+                                      mem=mem, timeout=timeout, queue=queue, post=post_finding)
+        return self._job_envelope(name, job, wait, db)
+
+    def _job_envelope(self, name: str, job: Any, wait: float, path: Optional[str]) -> dict[str, Any]:
+        if wait > 0:
+            self.runner.jobs.wait(job, wait)
+        described = self.runner.status_of(job.id, child_env(extra=self.config.pass_env))
+        return base.job_envelope(name, described, path)
 
     def _limits(self, args: dict[str, Any]) -> list[str]:
         out = []
@@ -1178,14 +1417,20 @@ class Server:
                 "capabilities": {"tools": {"listChanged": False},
                                  "resources": {"listChanged": False, "subscribe": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": INSTRUCTIONS,
+                "instructions": INSTRUCTIONS + (
+                    " Enabled runners: " + ", ".join(sorted(t["name"] for t in visible_tools(self.config)
+                                                           if t["name"] in GATED_TOOLS)) +
+                    ". scry_dynamic/scry_repro/scry_verify compile and run C through heavy in a sandbox without "
+                    "network (refused with heavy_busy unless queue=true; follow the job with job_status); "
+                    "scry_triage writes the findings database."
+                    if self.config.allow_dynamic or self.config.allow_triage else ""),
             })], False
         if method in ("notifications/initialized", "notifications/cancelled"):
             return [], False
         if method == "ping":
             return [reply(msg_id, {})], False
         if method == "tools/list":
-            return [reply(msg_id, {"tools": TOOLS})], False
+            return [reply(msg_id, {"tools": visible_tools(self.config)})], False
         if method == "resources/list":
             return [reply(msg_id, {"resources": self.list_resources()})], False
         if method == "resources/templates/list":
@@ -1253,7 +1498,14 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--allow-root", action="append", default=[], metavar="DIR")
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
+    parser.add_argument("--allow-scry-dynamic", action="store_true",
+                        help="list and allow scry_dynamic, scry_repro and scry_verify (compile and run C through "
+                        "heavy, in a sandbox without network)")
+    parser.add_argument("--allow-scry-triage", action="store_true",
+                        help="list and allow scry_triage (writes the findings database; light, sandboxed)")
+    base.add_runner_args(parser)
     args = parser.parse_args(argv)
+    runner = base.runner_config(parser, args)
     workspace = os.path.abspath(os.path.expanduser(args.workspace))
     if not os.path.isdir(workspace):
         parser.error(f"--workspace is not a directory: {workspace}")
@@ -1263,7 +1515,8 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         if not os.path.isdir(root):
             parser.error(f"--allow-root is not a directory: {root}")
     return Config(workspace=workspace, scry=args.scry, rules=args.rules, timeout=args.timeout,
-                  extra_roots=tuple(os.path.abspath(r) for r in args.allow_root), pass_env=tuple(args.pass_env))
+                  extra_roots=tuple(os.path.abspath(r) for r in args.allow_root), pass_env=tuple(args.pass_env),
+                  allow_dynamic=args.allow_scry_dynamic, allow_triage=args.allow_scry_triage, runner=runner)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

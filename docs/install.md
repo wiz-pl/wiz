@@ -262,8 +262,9 @@ repository and are not in the release tarball:
 * **in a browser**: `web/build.sh` (needs Emscripten, which the dev shell does not
   include; without `emcc` on `PATH` the script runs itself again under
   `nix shell nixpkgs#emscripten`), then `web/bridge.sh`, which starts `wiz lsp --ws`
-  and serves the page; open the address it prints. The page edits its own documents,
-  and when your editor's server runs with `--ws` it also follows that editor's cursor.
+  and serves the page; open the address it prints (it carries the server's token:
+  `wiz lsp --ws` refuses a client without it). The page edits its own documents, and
+  when your editor's server runs with `--ws` it also follows that editor's cursor.
 
 Details: [stages/11-tooling.md](stages/11-tooling.md), 11l–11o.
 

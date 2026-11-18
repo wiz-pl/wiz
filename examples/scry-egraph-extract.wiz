@@ -34,8 +34,12 @@ def main : Nat :=
   let w := fun op => if Nat.beq op 5 then 100 else 0;
   let unit := Scry.EGraph.extract ga xcls;
   let weighted := Scry.EGraph.extractWith ga w kcls;
-  let unitCost := Scry.EGraph.cost ga (fun _ => 0) xcls;
-  let weightedCost := Scry.EGraph.cost ga w kcls;
+  let unitCost := match Scry.EGraph.cost ga (fun _ => 0) xcls with
+    | .none => 1000000
+    | .some c => c;
+  let weightedCost := match Scry.EGraph.cost ga w kcls with
+    | .none => 1000000
+    | .some c => c;
   match unit with
   | .none => 902
   | .some t1 =>

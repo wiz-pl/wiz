@@ -189,7 +189,10 @@ partial def synthInstance (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Ter
   -- output parameters become fresh holes
   let mut args' := #[]
   for a in args, out in info.outParams ++ List.replicate args.size false do
-    if out then args' := args'.push (← evalIn ctx (← freshMeta ctx "an output parameter"))
+    if out then
+      -- (13b) typed by the class's parameter (`MetaEntry.type?`)
+      let ty? ← constArgType? info.name us args'.toList
+      args' := args'.push (← evalIn ctx (← freshMeta ctx "an output parameter" ty?))
     else args' := args'.push a
   let g ← getGlobals
   let goalTy := args'.foldl (vApp g) (eval g [] (.const info.name us))
