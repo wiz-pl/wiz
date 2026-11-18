@@ -404,12 +404,19 @@ def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
     | .true => acc
     | .false => List.append acc (.cons w .nil)) .nil ws
 
-/-- One unmodelled-external diagnostic for a call: an external the unit does not define,
-with no model entry, and with a pointer result or argument, so its memory effect is
-genuinely unknown. The warning is attached to the call point. A call to a function the
-unit defines is not external (`Wil.findFunc` is the discriminator), and a modelled call
-has a known effect, so neither warns here. -/
-def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+/-- The `(callee name, call point)` pairs of the unmodelled external calls in a function:
+an external the unit does not define, with no model entry, and with a pointer result or
+argument, so its memory effect is genuinely unknown. A call to a function the unit
+defines is not external (`Wil.findFunc` is the discriminator), and a modelled call has a
+known effect, so neither is listed here. The callee name is kept apart from the
+diagnostic text so a coverage report can group by external (the `scry cs` external
+frequency table).
+
+`isModelled` is a parameter so a measurement can ask the same question of an older
+table (`Scry.Models.isModelledCore`): the `before` column of an external-coverage run is
+this function with the table the change added entries to. -/
+def Scry.unmodelledCallsWith (isModelled : String → Bool) (p : Wil.Program)
+    (r : Scry.FuncResult) : List (String × Nat) :=
   let g := r.plan.info.g;
   Scry.rulePackConcat (fun n =>
     match Scry.nodeStmt g n with
@@ -417,7 +424,7 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
       match Wil.findFunc p name with
       | .some _ => .nil
       | .none =>
-        if Scry.Models.isModelled name then .nil
+        if isModelled name then .nil
         else
           let pointerArg := List.any (fun v => Scry.ptrLike v.ty) args;
           let pointerRet := match res with
@@ -425,10 +432,19 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
             | .none => (.false : Bool);
           match Bool.or pointerArg pointerRet with
           | .false => .nil
-          | .true => List.cons (Scry.memWarning Scry.MemWarnKind.unmodelledExternal
-              r.fn.name n ("call to unmodelled external " ++ name
-                ++ ": result and memory effects are unknown")) .nil
+          | .true => List.cons (name, n) .nil
     | _ => .nil) (Scry.range g.count)
+
+/-- `unmodelledCallsWith` for the analysis's own table (`Scry.Models.isModelled`). -/
+def Scry.unmodelledCallsOf (p : Wil.Program) (r : Scry.FuncResult) : List (String × Nat) :=
+  Scry.unmodelledCallsWith Scry.Models.isModelled p r
+
+/-- One unmodelled-external diagnostic for a call: the call point carries the callee and
+why the call is not modelled. See `Scry.unmodelledCallsOf` for the selection. -/
+def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+  List.map (fun nc => Scry.memWarning Scry.MemWarnKind.unmodelledExternal
+    r.fn.name nc.2 ("call to unmodelled external " ++ nc.1
+      ++ ": result and memory effects are unknown")) (Scry.unmodelledCallsOf p r)
 
 /-- The lifetime rule supersedes the old points-to `use-after-free` warning: once a
 `kind memory` rule is enabled its finding is the diagnostic, so do not print both. -/

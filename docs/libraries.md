@@ -1836,11 +1836,17 @@ The S4 rule pack and interprocedural slice are separate modules:
   (`getenv`, `read`/`recv`, the `exec*` family, `system`/`popen`, the
   `printf`/`sprintf`/`snprintf` family, the `strcpy`/`memcpy` family,
   `malloc`/`calloc`/`realloc`/`free`), the policy sanitisers, and the pure read-only
-  calls. Model source/sink/sanitiser facts are a deduplicated fallback after the pack;
-  model copy pairs become memory stores, model allocation/free drives the lowering, and
-  an unmodelled external with a pointer result/argument is an explicit
-  `unmodelled-external` warning (its result stays `Loc.unknown`). `RulePack.withModels`
-  supplies the model rule descriptors.
+  calls. For the C# frontend the same table carries the **CLR reads** it lowers to
+  (`T[].get_Item`/`get_Length`, `String.Length`/`Substring`/`Concat`/`Format`, property
+  getters, `System.Linq.Enumerable` projections, `Console.ReadLine` as a source); a
+  model read claims no write through an argument, no free and no new source, and taint
+  still flows through `gen`, so a model never launders. Writes through a receiver or an
+  argument (`set_*`, `Add`, `Append`, `CopyTo`, `Read`) and `Dispose` are not modelled
+  (they stay explicit `unmodelled-external`). Model source/sink/sanitiser facts are a
+  deduplicated fallback after the pack; model copy pairs become memory stores, model
+  allocation/free drives the lowering, and an unmodelled external with a pointer
+  result/argument is an explicit `unmodelled-external` warning (its result stays
+  `Loc.unknown`). `RulePack.withModels` supplies the model rule descriptors.
 * `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
   the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
   per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
