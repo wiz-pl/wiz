@@ -11,6 +11,7 @@ def testPkg : List (String × String) :=
 def testRunnerGroup : Group where
   name := "testrunner"
   exercise := "Stage 23f"
+  parallel := true
   cases := [
     { name := "tests are files with expected output; --update writes it", run := fun _ => do
         let dir ← mkTree testPkg

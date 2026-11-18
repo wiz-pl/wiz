@@ -79,6 +79,7 @@ def rqRun : String := rqPrelude ++ "import IO\n" ++
 def rqGroup : Group where
   name := "result-q"
   exercise := "lib/Result.wiz, lib/Region.wiz (quantity-polymorphic results)"
+  parallel := true
   cases := [
     { name := "ResultQ ω is Result and ResultH 1 is Result1, definitionally both ways", run := fun _ =>
         okLibs rqAliases [".ok 5", ".ok 5", ".ok 5", ".err .overflow"] },

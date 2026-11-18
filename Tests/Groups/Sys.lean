@@ -167,6 +167,7 @@ def readdirShim : String :=
 def sysGroup : Group where
   name := "sys"
   exercise := "Stage 9h"
+  parallel := true
   cases := [
     { name := "spawn echo and collect its output", run := fun _ =>
         sysRun ["o ← Process.output \"echo\" (.cons \"hello\" (.cons \"world\" .nil)) \"\"",
