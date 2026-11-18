@@ -254,8 +254,8 @@ read (the fixed CVE-2017-7659 control: the helper always returns `APR_ENOMEM`, s
 **Decision: opt-in.** `scry taint --null-deref` runs it (`Scry.analyzeWithNull` in the
 library); the default `scry taint` does not. Unchecked allocations are common in real C,
 so the pass adds a warning on every `p = malloc(...); p->x`; keeping it off preserves the
-default pack's pinned results and lets a user choose the diagnostic. The CVE-476
-measurement below runs with the flag. Functions longer than `Scry.maxNullPoints` (300
+default pack's pinned results and lets a user choose the diagnostic. The null fixtures
+in `tests/taint.wiz` run with the flag. Functions longer than `Scry.maxNullPoints` (300
 program points) are skipped: the list-based worklist is a prototype and the pass must not
 turn a one-minute CVE analysis into a ten-minute one.
 
