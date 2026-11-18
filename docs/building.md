@@ -27,6 +27,17 @@ as `⊘ name` with `skipped (REASON)`; the total counts it apart (`…, 2 skippe
 not a pass. A selector that picks no group, a case index the group lacks, and an unknown
 flag are errors (exit code 2), not an empty run.
 
+**A missing toolchain is a skip; a failing program is a failure.** `Build.runGlobal`
+returns a `Build.RunError` that says which happened: `.build`, or `.toolchain` when the
+compiler, `llc` or GMP's `gmp.h` could not be found (no program ran), and `.run` with the
+program's exit code and standard error, `.timeout`, or `.readback` when the program itself
+failed. The helpers in `Tests/Elab.lean` (`failRun`, and `cRun`/`ioRun`/`cRunLibs`/…) skip
+only a `.toolchain` failure and otherwise fail the case, reporting the exit code and the
+program's stderr. Never look for `No such file` in a program's stderr to decide "no
+toolchain": a program may print that itself (a missing fixture, a `File.open`, a
+`Process.output` of a command not on `PATH`), and the case then failed. The `conc` group
+has a case for each half.
+
 `tests --run GROUP INDEX` runs one case as `lake test -- '=GROUP#INDEX'` does: in a child
 process, with the toolchain of `grail.local.wiz` (toolchain flags after it override it),
 printing the case's name and result, a failure's output, and a last line
@@ -226,7 +237,14 @@ rebuild all of it); `scripts/test-embed.sh` checks the setup (a local
 `nix develop -c scripts/test-embed.sh` check, since it needs an incremental Lake build;
 CI runs only `scripts/test-runtime.sh`), and `scripts/test-runtime.sh` compiles the
 runtime alone with `cc -fsyntax-only -Wall -Wextra`, with `WIZ_API=` and `WIZ_API=static`
-(the header's prototypes are checked against the parts).
+(the header's prototypes are checked against the parts), each also with
+`-DWIZ_NO_THREADS`, and runs a small C program against the threaded and the one-thread
+runtime. The one-thread binary links with stub pthreads (every pthread name it uses is
+redirected with `-Wl,--wrap=` to a no-op) and must have no pthread symbols; the program
+sends on a channel before receiving, and checks that the waits a second thread would end
+stop with their message. It also compiles the header's Emscripten auto-enable with
+`-D__EMSCRIPTEN__` (there is no `emcc` in the toolchain, so this is not an Emscripten
+build).
 
 ## Test layout
 
@@ -697,7 +715,8 @@ setup action keeps the elan cache for those
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
   modules (the infoview's and the playground's), the standard library's pages with
-  `wiz doc --lib` (source links to the commit) into `doc-site/docs`, and the landing page
+  `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
+  a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
   checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
@@ -1083,6 +1102,23 @@ exist and the landing page's and benchmark page's local links resolve; no server
 uploads `doc-site` as the artifact `wiz-docs` (3 days, for debugging). `deploy-docs`
 then publishes that artifact.
 
+`wiz doc --lib` elaborates the whole library once when its cache is cold, and that is
+the bulk of the job (10-19 min in recent runs; 43 min on a loaded machine). So the job
+restores `wiz`'s elaboration cache from the Actions cache and passes it as a read-only
+layer (`.wiz-doc-cache/ro`, `--cache-ro`); this run's misses go to
+`.wiz-doc-cache/write`, which a miss publishes as the next run's layer. The key is
+`wiz-doc-v1-<os>-<SHA-256 of the wiz binary>-<git tree of lib/>`. The first half is the
+cache's own namespace (`Wiz/Cache.lean`: an entry is named by `binaryId`, a hash of the
+running binary; manifests carry its SHA-256, `toolchainTag`), so an identical build of
+the same source hits and a changed compiler misses; the second half only decides when a
+new snapshot is saved, and the restore prefix (`wiz-doc-v1-<os>-<binary hash>-`) still
+serves the modules a `lib/` change did not touch. A restored run replays the cache in a
+few minutes instead of elaborating (roughly a tenth of the cold time; ~2 min with
+`--jobs 4`, once `wiz doc` has that flag). `--cache-verify off` is deliberate: the layer
+is this job's own and its entries are content-keyed; the manifest check would bind them
+to the toolchain's store paths (cc, llc) and throw a same-binary rebuild away. The
+toolchain's own `share/wiz/cache` is read as well (the wrapper's default `--cache-ro`).
+
 The benchmark page is **generated, not written**: `web/build-bench.py` renders
 `web/bench/index.html` from the JSON, and `web/build-site.sh` runs its `--check` mode
 first, so a JSON change that was not regenerated fails the job (and is visible as a diff
@@ -1119,6 +1155,11 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
+`wiz doc --jobs N` elaborates and renders N modules at once (`0`: auto); the tree is the
+same as with `--jobs 1`. `-v` (`-vv`, `-q`) turns on the progress log on stderr, which
+names each phase, each module's elaboration/rendering time and cache hits, and ends with
+the wall time and peak RSS.
+
 **Live documentation (`wiz doc --serve`).** The generated documentation is static by
 default; `--serve` additionally serves one output tree over HTTP on `127.0.0.1` (port
 8000, `--port N`; `0` takes a free one), and `--lsp PORT` makes the module pages ask a
@@ -1149,7 +1190,18 @@ TLS or authentication. Live search results and code actions are not part of it �
 need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
-slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Both web
+builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
+are compiled without `-pthread` (the header also turns it on by itself for Emscripten
+without `-pthread`): the runtime then has one thread, nothing is ever
+marked shared (so every count operation is plain), `main` runs on the calling thread,
+and `Chan.fork`, or a wait that no other thread could end (taking from an empty `MVar`,
+putting into a full one, acquiring a held `Lock`, receiving on an empty channel), stops
+the program with `wiz: …: threads are not available in this build (WIZ_NO_THREADS)` and
+exit code 3 instead of hanging. `-DWIZ_RC_ATOMIC` is the opposite debugging build:
+thread-owned counts change atomically too. `scripts/test-runtime.sh` checks all three;
+`scripts/rc-cost-bench.sh` times them against each other (the single-thread cost of
+thread-safe counts). Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
 `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
 stays for 3 days for debugging; the site keeps the newest deployed tree until the next
