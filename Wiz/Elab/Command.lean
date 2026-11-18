@@ -1114,6 +1114,26 @@ def superField (x : Name) (t : Syntax) : Syntax :=
   Syntax.node t.info "structure.field"
     #[Syntax.mkNull #[], Syntax.mkNull #[], .ident t.info x, .atom t.info ":", t]
 
+/-- The projection `t.2…2.1` of a right-nested Σ, with `i` projections: field `i` of a
+value of a structure whose value is `x₀, (x₁, …)`. -/
+def projField (i : Nat) (t : Term R) : Term R :=
+  let rec snds : Nat → Term R → Term R
+    | 0, t => t
+    | n + 1, t => snds n (.snd t)
+  .fst (snds i t)
+
+/-- The type `A` of field `k` lives in `[f_{k-1} … f_0, Δ]`; in a method's context
+`[self, Δ]` field `f_i` is `projField i self`. Substituting them one at a time rebuilds
+`A` once per field, and copies each earlier projection into it (`k` rebuilds of a term
+that grows to `k²`); here they are replaced in one pass, each by a term of its own size. -/
+partial def substProjFields (k : Nat) (t : Term R) (d : Nat := 0) : Term R :=
+  match t with
+  | .var i =>
+    if i < d then t
+    else if i - d < k then projField (k - 1 - (i - d)) (.var d)
+    else .var (i + 1 - k)
+  | t => Id.run <| t.mapChildrenM pure fun dd c => pure (substProjFields k c (d + dd))
+
 /-- The method functions of a class `C` (from its structure declaration):
 `C.f : {Δ} → [self : C Δ] → F`, the field `f` of `self`, where earlier fields in `F`
 become projections of `self`. With `selfBi := .default`, the projection functions of a
@@ -1133,22 +1153,20 @@ def classMethods (sDecl : Decl R) (levelParams : List Name)
     | .sigma x q A rest _ => (x, q, A) :: fieldsOf rest
     | _ => []
   let fields := fieldsOf (stripLams nΔ (sDecl.value.getD .tt))
-  let proj (i : Nat) (t : Term R) : Term R := .fst ((List.range i).foldl (fun t _ => .snd t) t)
+  -- `t.2…2.1`: the `i`-th field of a right-nested Σ (`projField 0` is `.1`)
+  let proj := projField (R := R)
   let implicitΔ := Δ.map fun (x, _, _, A) => (x, BinderInfo.implicit, (.qlit 0 : Term R), A)
   let Capp : Term R := ((List.range nΔ).map fun j => Term.var (nΔ - 1 - j)).foldl .app (.const C us)
   let w : Term R := .qlit QuantitySyntax.explicitDefault
-  let mut out := []
+  let mut out : Array (Decl R) := #[]
   for (x, q, A) in fields, k in [0:fields.length] do
     if q == .qlit 0 then continue
-    -- `A` lives under the earlier fields: insert `self` below them, then replace them
-    let mut A' := A.lift 1 k
-    for i in (List.range k).reverse do
-      A' := A'.instantiateAt 0 (proj i (.var i))
+    let A' := substProjFields (R := R) k A
     let type := implicitΔ.foldr (fun (y, bi, q, B) acc => .pi y bi q B acc .hole) (.pi "self" selfBi w Capp A' .hole)
     let value := Δ.foldr (fun (y, _, _, _) acc => .lam y acc) (.lam "self" (proj k (.var 0)))
     let d : Decl R := { name := C ++ "." ++ x, levelParams, type, value := some value }
-    out := out ++ [d]
-  pure out
+    out := out.push d
+  pure out.toList
 
 /-- `notation` and `infixl`/`infixr`/`infix`: register a syntax rule and a macro rule.
 Returns the new tables and the macro rule. -/
