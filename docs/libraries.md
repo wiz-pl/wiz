@@ -94,6 +94,50 @@ imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof modu
 what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
 `drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
 
+## H0d: finger trees, measures and deques
+
+`lib/FingerTree.wiz` (`import FingerTree`): a finger tree and the monoidal measure
+interface. `Monoid M` has `one` and `mul`; `Monoid.Lawful` states associativity and the
+two unit laws (kept out of the class so instances stay data). `Measure A M` gives each
+element its contribution in `M`.
+
+A sequence is `Seq A` (`Deque A` is another name for it): `Seq.empty`, `Seq.single`,
+`Seq.ofList`, `Seq.toList`, `Seq.size`, `Seq.measure`, `Seq.push`, `Seq.pushFront`,
+`Seq.pop`, `Seq.popFront`, `Seq.get` and `Seq.append`. The tree itself is `FT A l`: a
+digit of 1–4 `Elem A l`s, a middle at level `l+1`, and another digit, where
+`Elem A 0 = A` and `Elem A (n+1)` is a node of 2–3 `Elem A n`s.
+
+The level index is not decoration. The textbook tree is non-uniform:
+
+```wiz no-check
+inductive FT (A : Type) where
+  | deep (prefix : Digit A) (middle : FT (Node A)) (suffix : Digit A)
+```
+
+Wiz rejects it: "constructor deep: the recursive field middle must use the same
+parameters" — a recursive field may change the type's *indices* but not its
+*parameters*. The type-level `Elem` moves the nesting into an index, which is allowed,
+and every operation is structural on its first argument: no `partial` and no `mutual`
+block, so the trust ledger is unchanged.
+
+The laws (structural recursion, no axiom):
+* `FT.size_eq`: `FT.size t = List.length (FT.toList t)`;
+* `FT.measure_eq`: for a `Monoid.Lawful m`, `FT.measure t = listMeasure (FT.toList t)`
+  (a non-commutative monoid gives the elements' order, `listMeasure` being their fold);
+* `FT.toList_push` and `FT.toList_pushFront`: the readings of the two pushes;
+* `Seq.toList_ofList`, `Seq.toList_append` and `Seq.size_append`: the list and
+  catenation laws.
+
+The readings go through accumulator helpers (`FT.toListGo`, `listMeasureGo`,
+`listElemSizeGo`), so the laws are right-nested and the measure proof needs the monoid
+laws only where a node combines its parts, not a reassociation at every step.
+
+Not here: for the same kernel restriction, `Seq.append` rebuilds from the two readings
+(O(n)) instead of the textbook O(log n) catenation, which needs one function to match
+two trees at the same level. The measure is recomputed by a fold — a node does not cache
+it — so `size`/`measure` are O(n); a cached measure would be a node carrying its value
+and its equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational

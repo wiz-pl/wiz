@@ -37,6 +37,8 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `text-suffix` | 40000 | `endsWith`, `stripSuffix` and `dropEnd`, 3 passes |
 | `sort` | 100000 | insert N keys into `U64Map`, read them back sorted 8 times |
 | `hash` | 300000 | `NatList.hash` of an 8-number list, 300000 times (a different seed each time) |
+| `list-index` | 4000 | 10 passes of N reads of a `List Nat` at a pseudo-random index: the `List` `at`-in-a-loop pattern |
+| `egraph` | 3000 | build N e-nodes, union N pseudo-random pairs, then 10·N `find`s (`Scry.EGraph`, whose union-find tables are `Array Nat`) |
 
 ## Comparing two builds
 

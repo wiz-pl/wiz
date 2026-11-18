@@ -46,6 +46,7 @@ MODES = [
     "bytes-append", "bytes-slice", "bytes-compare",
     "text-split", "text-replace", "text-trim", "text-eq", "text-suffix",
     "sort", "hash",
+    "list-index", "egraph",
 ]
 
 
