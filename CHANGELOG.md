@@ -16,9 +16,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   able to kill the program (`EPIPE` again). `File.open` sets `FD_CLOEXEC` (children no
   longer inherit every `File`). `Fd.adopt` rejects a number above `INT_MAX` with
   `EINVAL` (an already-closed handle, never fd 1: `4294967297` used to become stdout).
-  The sys/IO
-  allocations fail like the runtime's (`wiz: out of memory`, exit 3) or take the
-  `ENOMEM` error path, never a NULL dereference; `FS.listDir` reports a `readdir`
+  The sys/IO allocations fail like the runtime's (`wiz: out of memory`, exit 3) or take
+  the `ENOMEM` error path, never a NULL dereference; `FS.listDir` reports a `readdir`
   error instead of a truncated listing; `Child.communicate` with input but no stdin
   pipe is `EBADF`; `IO.writeFile` writes the text up to its first NUL and prints
   `wiz: <path>: <message>` and exits 1 when the write fails (it used to ignore every
