@@ -1,0 +1,837 @@
+#!/bin/sh
+""":"
+exec python3 "$0" "$@"
+":"""
+
+__doc__ = """Flag shapes that are quadratic by construction, on changed lines only.
+
+A grep cannot see types, so this check is deliberately narrow: it reports the five
+shapes behind the measured blow-ups in `reviews/2026-11-18-complexity-patterns.md`
+(cx-01/02/03, cx-08/09/10, cx-06) and nothing else.  A hit is a question, not a
+verdict: the suggestion is the structural fix, and a hit may be silenced with a
+reason on the line (or the line above):
+
+    out := out ++ [d]   -- complexity: ok (the list has at most 4 entries here)
+
+Rules (all in files ending `.lean` or `.wiz`):
+
+  append-in-loop   `x := x ++ …`, `x := String.append x …` or `x := List.append x …`
+                   inside an enclosing `for`/`while`/`foldl`/`foldr` (by indentation,
+                   or on the loop's own line).  `++ [x]` copies the left spine each
+                   step, so a loop that grows `x` this way is O(n²).
+  array-builder    a `foldl`/`foldr` whose accumulator starts at `#[]` (an `Array`)
+                   or `[]` (a `List`) and is grown with `++`/`String.append` in the
+                   fold's span.  Lean's `Array.append` copies both operands.
+  search-in-loop   `.contains`/`.elem`/`find?` on a collection that the same loop
+                   also grows with `++` (or `Array.push`): the membership test scans
+                   the whole collection per element.  A map/set built once is the
+                   fix.  Only collections grown in the loop are flagged, so
+                   `HashMap.contains` and lookups of precomputed data are not.
+  eraseDups        `List.eraseDups` (O(n²) by its own documentation) or `List.nub`.
+  render-in-sort   `toString`/`render` inside a `qsort`/`mergeSort`/`sortBy`
+                   comparator: the key is recomputed at every comparison.
+
+Changed lines only
+  By default the check is diff-scoped (`--diff origin/master`): it scans the whole
+  file for context but reports a hit only when its line is added or changed since
+  BASE.  `--all` scans every tracked `.lean`/`.wiz` file.  The existing sites are in
+  `scripts/complexity-allow.tsv`, so a pull request fails only on a *new* shape.
+
+The allowlist
+  `scripts/complexity-allow.tsv` has one entry per line,
+
+      path<TAB>line-hash<TAB>reason
+
+  where `line-hash` is the first 12 hex digits of SHA-256 over the line with runs of
+  whitespace collapsed and its ends trimmed (`" ".join(line.split())`).  The hash is
+  of the *text*, not the line number, so reindenting a file, inserting lines above a
+  site, or moving the site to another line does not invalidate its entry; changing
+  the line itself does, which is the review it should get.  One entry covers every
+  line in that file with that exact text.  In `--all` mode an entry that matches no
+  current hit is an error, so fixed sites lose their row.
+
+  Removing a row for a site that is now clean is the intended way to shrink the
+  baseline; the reason column is free text (owner, date, why it is bounded).
+
+Usage
+  scripts/check-complexity                    # diff against origin/master
+  scripts/check-complexity --diff BASE         # diff against BASE
+  scripts/check-complexity --all               # every tracked .lean/.wiz file
+  scripts/check-complexity --self-test         # fixtures; exact expected output
+  scripts/check-complexity --allow FILE        # another allowlist
+  scripts/check-complexity --list-baseline     # print rows for unreviewed hits
+
+Exit status: 0 clean, 1 violations (or a failing self-test), 2 usage or a malformed
+allowlist, 3 the check could not run (not a git checkout, unknown BASE, no files in
+`--all`).  A diff with no changed source lines is a pass (0): there was nothing to
+report, which is not the same as an unusable checkout.
+"""
+
+import argparse
+import contextlib
+import hashlib
+import io
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+SUFFIXES = (".lean", ".wiz")
+DEFAULT_BASE = "origin/master"
+DEFAULT_ALLOW = "scripts/complexity-allow.tsv"
+
+# --- patterns ---------------------------------------------------------------------
+
+# A declaration opening: climbing past one leaves the enclosing function, so a loop in
+# the previous declaration is not an ancestor of the current line.
+DECL_START = re.compile(
+    r"^(?:@\[[^\]]*\]\s*)?"
+    r"(?:(?:private|protected|public|partial|noncomputable|unsafe|nonrec|local|"
+    r"scoped|open|export|builtin)\s+)*"
+    r"(?:def|theorem|lemma|abbrev|instance|structure|inductive|class|namespace|"
+    r"section|end|example|axiom|opaque|mutual|import|syntax|macro|elab|extern|"
+    r"type)\b")
+
+LOOP = re.compile(r"\b(?:for|while)\b.*\bdo\b|\bfold[lr]\b|\bList\.fold[lr]\b|"
+                  r"\.fold[lr]\b|\bArray\.fold[lr]\b|\b\.fold\b")
+
+# `x := x ++ …`, `x := x.append …`, `x := String.append x …`, `x := List.append x …`
+SELF_APPEND = re.compile(
+    r"\b(\w+)\s*:=\s*(?:\1\s*(?:\+\+|\.append\b)|"
+    r"(?:String|List|Array)\.append\s+\1\b)")
+
+STRINGISH = re.compile(r'(?:s!"|"|String\.|toString\b|render\b|repr\b)')
+LISTISH = re.compile(r"(?:\[|#\[|List\.|Array\.|\.toList\b)")
+
+FOLD = re.compile(r"\bfold[lr]\b|\bList\.fold[lr]\b|\.fold[lr]\b|\bArray\.fold[lr]\b")
+APPEND_OP = re.compile(r"\+\+|\b(?:String|List|Array)\.append\b")
+EMPTY_BUILDER = re.compile(r"#\[\]|\[\s*\]|\bList\.nil\b")
+
+MEMBERSHIP = re.compile(r"\b(\w+)\.(?:contains|elem|find\?)\b")
+GROW = re.compile(r"\b(\w+)\s*:=\s*(?:\1\s*(?:\+\+|\.append\b)|"
+                  r"(?:String|List|Array)\.append\s+\1\b)")
+GROW_EXPR = re.compile(r"\b(\w+)\s*\+\+\s*\[")
+PUSH = re.compile(r"\b(\w+)\s*:=\s*\1\.push\b")
+
+# The left operand of an append: `acc ++ …` or `List.append acc …`.
+APPEND_LEFT = re.compile(r"\b([A-Za-z_][\w.']*)\s*\+\+|"
+                         r"\b(?:String|List|Array)\.append\s+([A-Za-z_][\w.']*)")
+
+DEDUP = re.compile(r"\.eraseDups\b|\bList\.(?:eraseDups|nub)\b|\bnub\b")
+SORT = re.compile(r"\b(?:qsort|mergeSort|sortBy|sortWith|sortOn)\b|"
+                  r"\.(?:qsort|mergeSort)\b|\bList\.sort\b")
+RENDER = re.compile(r"\.render\b|\btoString\b")
+
+MARKER = "complexity: ok"
+
+SUGGESTIONS = {
+    "append-in-loop": "accumulate reversed (`x :: acc`) and reverse once, or use "
+                      "`Array.push`; `++ [x]` copies the left spine every step",
+    "array-builder": "emit into an `Array`/`ByteArray` with `push` (or a list of "
+                     "chunks) and flatten once; folding with `++` copies the "
+                     "accumulator",
+    "search-in-loop": "build a `Std.HashSet`/`U64Map`/`StrMap` once (or insert as you "
+                      "go) instead of scanning the collection the loop grows",
+    "eraseDups": "`eraseDups` is O(n²); use a `Std.HashSet` (or sort and dedup) and "
+                 "keep insertion order",
+    "render-in-sort": "precompute the key once per element (decorate, sort, undecorate) "
+                      "instead of calling `toString`/`render` in the comparator",
+}
+
+
+@dataclass(frozen=True)
+class Hit:
+    path: str
+    line: int  # 1-based
+    rule: str
+
+    def render(self) -> str:
+        return f"{self.path}:{self.line}: {self.rule} — {SUGGESTIONS[self.rule]}"
+
+
+# --- lexical helpers --------------------------------------------------------------
+
+def code_lines(lines: list[str]) -> list[str]:
+    """The code part of each line: `--` comments and `/- … -/` blocks removed.
+
+    Double-quoted strings are tracked (they may span lines), so a `--` inside a string
+    is not a comment.  Single quotes are not treated as literals: an identifier such as
+    `x'` is far more common than a char literal, and a false "in string" state would
+    only hide candidate lines.
+    """
+    out, in_block, quote, escaped = [], False, False, False
+    for l in lines:
+        code, i = [], 0
+        while i < len(l):
+            c = l[i]
+            if in_block:
+                j = l.find("-/", i)
+                i = len(l) if j < 0 else j + 2
+                if j >= 0:
+                    in_block = False
+            elif quote:
+                if escaped:
+                    escaped = False
+                elif c == "\\":
+                    escaped = True
+                elif c == '"':
+                    quote = False
+                code.append(c)
+                i += 1
+            elif c == '"':
+                quote, code = True, code + [c]
+                i += 1
+            elif l.startswith("/-", i):
+                in_block, i = True, i + 2
+            elif l.startswith("--", i):
+                break
+            else:
+                code.append(c)
+                i += 1
+        out.append("".join(code))
+    return out
+
+
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def is_blank_or_comment(line: str) -> bool:
+    s = line.strip()
+    return not s or s.startswith("--")
+
+
+def strip_literals(code: str) -> str:
+    """`code` with the contents of double-quoted strings blanked (quoting kept)."""
+    out, quote, escaped = [], False, False
+    for c in code:
+        if quote:
+            if escaped:
+                out.append(" ")
+                escaped = False
+            elif c == "\\":
+                out.append(" ")
+                escaped = True
+            elif c == '"':
+                quote = False
+                out.append(c)
+            else:
+                out.append(" ")
+        elif c == '"':
+            quote = True
+            out.append(c)
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def line_hash(line: str) -> str:
+    """Stable hash of a line: whitespace collapsed, ends trimmed, SHA-256, 12 hex."""
+    return hashlib.sha256(" ".join(line.split()).encode("utf-8")).hexdigest()[:12]
+
+
+# --- scanning ---------------------------------------------------------------------
+
+def _block_end(code: list[str], header: int) -> int:
+    """Index of the last line of `header`'s indented block (exclusive end)."""
+    ind = indent_of(code[header])
+    for j in range(header + 1, len(code)):
+        if is_blank_or_comment(code[j]):
+            continue
+        if indent_of(code[j]) <= ind:
+            return j
+    return len(code)
+
+
+def _enclosing_loop(code: list[str], i: int) -> int | None:
+    """The index of the innermost enclosing loop header line, or None.
+
+    Walks up the indentation chain (a banner `def`/`namespace`/… ends it), so an
+    assignment under an `if` inside a `for` finds the `for`, while an assignment after
+    the loop (same indentation as its header) does not.
+    """
+    ind = indent_of(code[i])
+    j = i - 1
+    while j >= 0:
+        if is_blank_or_comment(code[j]):
+            j -= 1
+            continue
+        jind = indent_of(code[j])
+        if jind >= ind:
+            j -= 1
+            continue
+        if DECL_START.match(code[j].strip()):
+            return None
+        if LOOP.search(code[j]):
+            return j
+        ind = jind
+        j -= 1
+    return None
+
+
+def _fold_span(code: list[str], start: int) -> range:
+    """The lines of the fold call beginning at `start` (by parenthesis balance)."""
+    depth, seen = 0, False
+    end = min(len(code), start + 40)
+    for j in range(start, min(len(code), start + 40)):
+        for c in code[j]:
+            if c == "(":
+                depth, seen = depth + 1, True
+            elif c == ")":
+                depth -= 1
+        if seen and depth <= 0:
+            end = j + 1
+            break
+    return range(start, end)
+
+
+def append_shape(code: str, var: str) -> str:
+    """What `var := var ++ …` appends: `list`, `string` or `unknown`.
+
+    In Lean `String.append` updates an unshared string in place (linear; see
+    `String.append`'s doc comment), so a String accumulator is only quadratic in Wiz,
+    where a `String` is a `List Char`.  Without types, a literal or `toString`/`render`
+    on the right means a String; `[…`/`List.`/`Array.` means a collection.
+    """
+    m = re.search(rf"\b{re.escape(var)}\s*:=\s*(.*)", code)
+    if not m:
+        return "unknown"
+    rhs = m.group(1).strip()
+    if rhs.startswith("String.append"):
+        return "string"
+    if rhs.startswith(("List.append", "Array.append")):
+        return "list"
+    m = re.match(rf"{re.escape(var)}\s*(?:\+\+|\.append\b)\s*(.*)", rhs)
+    if not m:
+        return "unknown"
+    tail = m.group(1).strip().lstrip("(")
+    if LISTISH.match(tail):
+        return "list"
+    if STRINGISH.match(tail):
+        return "string"
+    return "unknown"
+
+
+def allows(value: str, path: str) -> bool:
+    """Whether an append of `value` kind is quadratic in this language.
+
+    In Lean only a definitely-list append is flagged: `String.append` is linear there
+    (destructive update), and without types an unknown right-hand side is more often a
+    String than a list.  A Wiz `String` is a `List Char`, so every shape is quadratic.
+    """
+    return value == "list" or path.endswith(".wiz")
+
+
+def _arg_span(code: list[str], start: int, col: int) -> range:
+    """The argument of a call whose head ends at `col` on line `start`.
+
+    Ends where the parenthesis opened after the head closes, or (for a bare `fun`
+    argument) where the indentation returns.  This keeps `toString (xs.qsort f)` and a
+    `.render` later in the same expression out of the comparator's span.
+    """
+    base = 0
+    for c in strip_literals(code[start][:col]):
+        base += 1 if c == "(" else -1 if c == ")" else 0
+    depth, left = base, False
+    for j in range(start, min(len(code), start + 40)):
+        if j > start and depth == base and code[j].strip() and \
+                indent_of(code[j]) <= indent_of(code[start]):
+            return range(start, j)
+        for c in code[j][(col if j == start else 0):]:
+            if c == "(":
+                depth, left = depth + 1, True
+            elif c == ")":
+                depth -= 1
+                if depth < base or (left and depth == base):
+                    return range(start, j + 1)
+        if depth < base:
+            return range(start, j + 1)
+    return range(start, min(len(code), start + 40))
+
+
+def _fold_acc_names(code: list[str], span: range, start: int, fm: re.Match,
+                    foldr: bool) -> set[str] | None:
+    """The accumulator parameter(s) of a fold's lambda, or None if unparseable.
+
+    `foldl (fun acc x => …)` accumulates `acc` (the first parameter); `foldr (fun x acc
+    => …)` accumulates the last.  A parameter may be a tuple pattern.  None (a section
+    such as `(· ++ ·)`, or an unusual shape) means "cannot tell": the caller stays
+    conservative and reports the append.
+    """
+    text = " ".join(code[j] for j in span)
+    after = text[fm.start() + len(fm.group(0)):]
+    m = re.search(r"\bfun\b(.*?)=>", after, re.S)
+    if not m:
+        return None
+    params, depth, cur = [], 0, ""
+    for ch in m.group(1):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch.isspace() and depth == 0:
+            if cur:
+                params.append(cur)
+                cur = ""
+        else:
+            cur += ch
+    if cur:
+        params.append(cur)
+    if not params:
+        return None
+    chosen = params[-1] if foldr else params[0]
+    return set(re.findall(r"[A-Za-z_][\w']*", chosen))
+
+
+def scan_file(path: str, lines: list[str]) -> list[Hit]:
+    """Every candidate hit in one file, unfiltered by diff or allowlist."""
+    code = code_lines(lines)
+    hits: list[Hit] = []
+
+    def add(i: int, rule: str) -> None:
+        hits.append(Hit(path, i + 1, rule))
+
+    for i, c in enumerate(code):
+        if is_blank_or_comment(lines[i]) or not c.strip():
+            continue
+
+        # append-in-loop: `x := x ++ …` inside a loop (or on the loop's own line)
+        m = SELF_APPEND.search(c)
+        if m and allows(append_shape(c, m.group(1)), path):
+            if LOOP.search(c) or _enclosing_loop(code, i) is not None:
+                add(i, "append-in-loop")
+
+        # array-builder: a fold that grows `#[]`/`[]` with `++`
+        fm = FOLD.search(c)
+        if fm and EMPTY_BUILDER.search(c):
+            span = _fold_span(code, i)
+            accs = _fold_acc_names(code, span, i, fm, foldr="foldr" in fm.group(0))
+            if accs is None:
+                # a section such as `(· ++ ·)`: the append is the fold's own body
+                for j in span:
+                    if APPEND_OP.search(code[j], fm.end() if j == i else 0):
+                        add(j, "array-builder")
+                        break
+            else:
+                for j in span:
+                    if any((am.group(1) or am.group(2) or "").split(".")[0] in accs
+                           for am in APPEND_LEFT.finditer(
+                               code[j], fm.end() if j == i else 0)):
+                        add(j, "array-builder")
+                        break
+
+        c2 = strip_literals(c)
+
+        if DEDUP.search(c2):
+            add(i, "eraseDups")
+
+        # render-in-sort: `render`/`toString` inside the comparator argument
+        sm = SORT.search(c2)
+        if sm:
+            rest = c2[sm.end():].lstrip(" ")
+            if rest.startswith("(") or re.match(r"fun\b", rest):
+                for j in _arg_span(code, i, sm.end()):
+                    cj = strip_literals(code[j])
+                    if RENDER.search(cj, sm.end() if j == i else 0):
+                        add(j, "render-in-sort")
+                        break
+
+        # search-in-loop: membership on a collection the same loop grows
+        m = MEMBERSHIP.search(c2)
+        if m:
+            header = _enclosing_loop(code, i)
+            if header is not None:
+                lo, hi = header, _block_end(code, header)
+                grown: set[str] = set()
+                for j in range(lo, hi):
+                    for rx in (GROW, GROW_EXPR, PUSH):
+                        grown.update(rx.findall(code[j]))
+                if m.group(1) in grown:
+                    add(i, "search-in-loop")
+
+    return hits
+
+
+# --- git --------------------------------------------------------------------------
+
+def _git(args: list[str], root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+
+
+def tracked_files(root: Path) -> list[str] | None:
+    """Tracked `.lean`/`.wiz` files, or None when `root` is not a git checkout."""
+    p = _git(["ls-files", "-z"], root)
+    if p.returncode != 0:
+        return None
+    return sorted(f for f in p.stdout.split("\0") if f.endswith(SUFFIXES))
+
+
+def changed_lines(root: Path, base: str) -> dict[str, set[int]] | None:
+    """Added/changed lines per file in `git diff BASE`, or None if BASE is unknown."""
+    if _git(["rev-parse", "--verify", "--quiet", base], root).returncode != 0:
+        return None
+    p = _git(["diff", "--unified=0", "--no-color", "--no-ext-diff", base], root)
+    if p.returncode != 0:
+        return None
+    out: dict[str, set[int]] = {}
+    path, new = None, 0
+    for line in p.stdout.splitlines():
+        if line.startswith("+++ "):
+            name = line[4:]
+            path = name[2:] if name.startswith("b/") else name
+            if path == "/dev/null":
+                path = None
+            elif not path.endswith(SUFFIXES):
+                path = None
+        elif line.startswith("@@ "):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            new = int(m.group(1)) if m else 0
+        elif path is not None and line.startswith("+"):
+            out.setdefault(path, set()).add(new)
+            new += 1
+        elif path is not None and line.startswith(" "):
+            new += 1
+    return out
+
+
+# --- allowlist --------------------------------------------------------------------
+
+def read_allowlist(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
+    """(entries, errors) from a `path<TAB>hash<TAB>reason` file."""
+    entries: dict[tuple[str, str], str] = {}
+    errors: list[str] = []
+    if not path.exists():
+        return entries, errors
+    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        parts = raw.split("\t")
+        if len(parts) != 3 or not parts[2].strip():
+            errors.append(f"{path}:{n}: expected `path<TAB>line-hash<TAB>reason`, "
+                          f"got {raw!r}")
+            continue
+        p, h, why = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if not re.fullmatch(r"[0-9a-f]{12}", h):
+            errors.append(f"{path}:{n}: {h!r} is not 12 lowercase hex digits")
+            continue
+        entries[(p, h)] = why
+    return entries, errors
+
+
+def allowed_by_comment(lines: list[str], line: int) -> bool:
+    """Whether the hit is silenced by `complexity: ok` on its line or the one above."""
+    for i in (line - 1, line - 2):
+        if 0 <= i < len(lines) and MARKER in lines[i]:
+            return True
+    return False
+
+
+def filter_hits(hits: list[Hit], texts: dict[str, list[str]],
+                allow: dict[tuple[str, str], str]) -> list[Hit]:
+    kept = []
+    for h in hits:
+        lines = texts[h.path]
+        if allowed_by_comment(lines, h.line):
+            continue
+        if (h.path, line_hash(lines[h.line - 1])) in allow:
+            continue
+        kept.append(h)
+    return kept
+
+
+# --- the check --------------------------------------------------------------------
+
+def run(root: Path, base: str | None, allow_path: Path, all_files: bool) -> int:
+    files = tracked_files(root)
+    if files is None:
+        print("check-complexity: not a git checkout; nothing could be checked",
+              file=sys.stderr)
+        return 3
+
+    if all_files:
+        if not files:
+            print("check-complexity: no .lean/.wiz files; nothing could be checked",
+                  file=sys.stderr)
+            return 3
+        changed = {f: None for f in files}
+    else:
+        diff = changed_lines(root, base or DEFAULT_BASE)
+        if diff is None:
+            print(f"check-complexity: cannot diff against {base or DEFAULT_BASE!r}; "
+                  f"nothing could be checked", file=sys.stderr)
+            return 3
+        tracked = set(files)
+        changed = {f: lines for f, lines in diff.items() if f in tracked}
+        if not changed:
+            print(f"check-complexity: no changed .lean/.wiz lines since "
+                  f"{base or DEFAULT_BASE}; nothing to report")
+            return 0
+
+    allow, errors = read_allowlist(allow_path)
+    if errors:
+        for e in errors:
+            print(f"check-complexity: {e}", file=sys.stderr)
+        return 2
+
+    texts: dict[str, list[str]] = {}
+    hits: list[Hit] = []
+    for path in sorted(changed):
+        try:
+            text = (root / path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"check-complexity: cannot read {path}: {e}", file=sys.stderr)
+            return 3
+        lines = text.splitlines()
+        texts[path] = lines
+        for h in scan_file(path, lines):
+            if changed[path] is None or h.line in changed[path]:
+                hits.append(h)
+
+    hits.sort(key=lambda h: (h.path, h.line, h.rule))
+    lookup = {(h.path, line_hash(texts[h.path][h.line - 1])) for h in hits}
+    stale: list[str] = []
+    if all_files:
+        for (path, h), why in sorted(allow.items()):
+            if (path, h) not in lookup:
+                stale.append(f"stale allowlist entry {path} {h} ({why}): no hit has "
+                             f"that line; remove the row")
+
+    kept = filter_hits(hits, texts, allow)
+    for s in stale:
+        print(f"check-complexity: {s}", file=sys.stderr)
+    for h in kept:
+        print(h.render())
+    if kept:
+        print(f"check-complexity: {len(kept)} violation(s)", file=sys.stderr)
+    if kept or stale:
+        return 1
+    print(f"check-complexity: ok ({len(hits)} allowlisted/silenced hit(s), "
+          f"{len(changed)} file(s) checked)")
+    return 0
+
+
+# --- self-test --------------------------------------------------------------------
+
+FIXTURE = '''\
+/-- A wide structure's methods: the accumulator is copied per field. -/
+def collect (xs : List Nat) : List Nat :=
+  let mut out := []
+  for x in xs do
+    out := out ++ [x]
+  pure out
+
+/-- The bytecode builder: `Array.append` copies both operands. -/
+def encode (xs : List Nat) : Array Nat :=
+  xs.foldl (fun code x => code ++ [x, x]) #[]
+
+/-- A set maintained with a membership scan per element. -/
+def unique (xs : List String) : Array String :=
+  let mut seen := #[]
+  for x in xs do
+    if seen.contains x then continue
+    seen := seen.push x
+  pure seen
+
+/-- O(n²) by its own documentation. -/
+def dedup (xs : List Nat) : List Nat := xs.eraseDups
+
+/-- The key is re-rendered at every comparison. -/
+def ordered (xs : List Entry) : List Entry :=
+  xs.qsort fun a b => a.render < b.render
+
+/-- Allowed: the list is a fixed four-entry table. -/
+def four (xs : List Nat) : List Nat :=
+  let mut out := []
+  for x in xs.take 4 do
+    out := out ++ [x]   -- complexity: ok (at most four entries)
+  pure out
+
+def clean (xs : List Nat) : Array Nat :=
+  xs.foldl (fun acc x => acc.push x) #[]
+'''
+
+EXPECTED = '''\
+tests/fixtures/Bad.lean:5: append-in-loop — accumulate reversed (`x :: acc`) and reverse once, or use `Array.push`; `++ [x]` copies the left spine every step
+tests/fixtures/Bad.lean:10: array-builder — emit into an `Array`/`ByteArray` with `push` (or a list of chunks) and flatten once; folding with `++` copies the accumulator
+tests/fixtures/Bad.lean:16: search-in-loop — build a `Std.HashSet`/`U64Map`/`StrMap` once (or insert as you go) instead of scanning the collection the loop grows
+tests/fixtures/Bad.lean:21: eraseDups — `eraseDups` is O(n²); use a `Std.HashSet` (or sort and dedup) and keep insertion order
+tests/fixtures/Bad.lean:25: render-in-sort — precompute the key once per element (decorate, sort, undecorate) instead of calling `toString`/`render` in the comparator
+tests/fixtures/Bad.lean:31: append-in-loop — accumulate reversed (`x :: acc`) and reverse once, or use `Array.push`; `++ [x]` copies the left spine every step'''
+
+# The last hit above is the allowed site (line 31 has the marker): the check reports
+# the five patterns and drops it.
+EXPECTED_FILTERED = "\n".join(EXPECTED.splitlines()[:-1])
+
+# The allowlisted fixture line: same shape as the fifth hit, grandfathered.
+ALLOW_FIXTURE = "tests/fixtures/Grandfathered.lean\t{hash}\tappend-in-loop: fixed table (fixture)"
+
+
+def self_test() -> int:
+    """Exact-output fixtures for every rule, the allowlist and exit 3."""
+    bad_path = "tests/fixtures/Bad.lean"
+    bad = scan_file(bad_path, FIXTURE.splitlines())
+    got = "\n".join(h.render() for h in bad)
+    if got != EXPECTED:
+        print("FAIL complexity self-test: the fixture's hits are not the expected ones")
+        print("--- expected ---")
+        print(EXPECTED)
+        print("--- got ---")
+        print(got)
+        return 1
+    kept = filter_hits(bad, {bad_path: FIXTURE.splitlines()}, {})
+    if "\n".join(h.render() for h in kept) != EXPECTED_FILTERED:
+        print("FAIL complexity self-test: the allowed site (line 31, `complexity: ok`) "
+              "was not suppressed")
+        return 1
+    print(f"ok   five rules, one hit each, and one allowed site ({len(bad)} raw hits, "
+          f"{len(kept)} reported, exact output)")
+
+    # an allowlisted site is suppressed
+    grant = ("tests/fixtures/Grandfathered.lean",
+             "def grown (xs : List Nat) : List Nat :=\n"
+             "  let mut out := []\n"
+             "  for x in xs do\n"
+             "    out := out ++ [x]   -- reviewed: at most 4 entries\n"
+             "  pure out\n")
+    gpath, gtext = grant
+    glines = gtext.splitlines()
+    ghits = scan_file(gpath, glines)
+    if len(ghits) != 1:
+        print(f"FAIL complexity self-test: the allowlist fixture has {len(ghits)} hits, "
+              f"expected 1")
+        return 1
+    h = line_hash(glines[ghits[0].line - 1])
+    if filter_hits(ghits, {gpath: glines}, {(gpath, h): "fixture"}):
+        print("FAIL complexity self-test: an allowlisted line was not suppressed")
+        return 1
+    print("ok   an allowlisted line is suppressed")
+
+    # a line marker on the line above the hit
+    marked = ["def f (xs : List Nat) : List Nat :=",
+              "  let mut out := []",
+              "  for x in xs do",
+              "    -- complexity: ok (bounded by the caller)",
+              "    out := out ++ [x]",
+              "  pure out"]
+    mhits = scan_file("tests/fixtures/Marked.lean", marked)
+    if not mhits or filter_hits(mhits, {"tests/fixtures/Marked.lean": marked}, {}):
+        print("FAIL complexity self-test: `complexity: ok` on the line above did not "
+              "silence the hit")
+        return 1
+    print("ok   `complexity: ok` on the line above silences a hit")
+
+    # end-to-end in a real (temporary) checkout: --all reports the hit, the allowlist
+    # suppresses it, a stale row fails, and an unknown diff base exits 3
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            src = ("def f (xs : List Nat) : List Nat :=\n"
+                   "  let mut out := []\n"
+                   "  for x in xs do\n"
+                   "    out := out ++ [x]\n"
+                   "  pure out\n")
+            (root / "a.lean").write_text(src)
+            _git(["init", "-q"], root)
+            _git(["add", "a.lean"], root)
+            _git(["-c", "user.email=t@example.com", "-c", "user.name=t",
+                  "commit", "-qm", "x"], root)
+            allowp = root / "allow.tsv"
+
+            def attempt(base: str | None, all_files: bool) -> tuple[int, str, str]:
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = run(root, base, allowp, all_files=all_files)
+                return rc, out.getvalue(), err.getvalue()
+
+            rc, out, _ = attempt(None, True)
+            if rc != 1 or "a.lean:4: append-in-loop" not in out:
+                print(f"FAIL complexity self-test: --all on a new hit exited {rc}:\n{out}")
+                return 1
+            allowp.write_text(f"a.lean\t{line_hash(src.splitlines()[3])}\tfixture\n")
+            rc, out, _ = attempt(None, True)
+            if rc != 0 or "append-in-loop" in out:
+                print(f"FAIL complexity self-test: the allowlist did not suppress the "
+                      f"hit (exit {rc}):\n{out}")
+                return 1
+            allowp.write_text("a.lean\t000000000000\tstale fixture\n")
+            rc, _, err = attempt(None, True)
+            if rc != 1 or "stale allowlist entry" not in err:
+                print(f"FAIL complexity self-test: a stale row exited {rc}:\n{err}")
+                return 1
+            rc, _, _ = attempt("no-such-ref", False)
+            if rc != 3:
+                print(f"FAIL complexity self-test: an unknown base exited {rc}, "
+                      f"expected 3")
+                return 1
+    except OSError as e:
+        print(f"FAIL complexity self-test: cannot create the fixture repo: {e}")
+        return 3
+    print("ok   --all reports a hit, the allowlist suppresses it, a stale row fails, "
+          "an unknown base exits 3")
+
+    print("check-complexity self-test: 5 checks, 5 ok")
+    return 0
+
+
+def list_baseline(root: Path, allow_path: Path) -> int:
+    """Print TSV rows for every current hit that has no allowlist entry."""
+    files = tracked_files(root)
+    if files is None:
+        print("check-complexity: not a git checkout", file=sys.stderr)
+        return 3
+    allow, errors = read_allowlist(allow_path)
+    if errors:
+        for e in errors:
+            print(e, file=sys.stderr)
+        return 2
+    rows = []
+    for path in files:
+        try:
+            lines = (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for h in scan_file(path, lines):
+            key = (h.path, line_hash(lines[h.line - 1]))
+            if key in allow or allowed_by_comment(lines, h.line):
+                continue
+            rows.append(f"{path}\t{key[1]}\t{h.rule}: grandfathered 2026-11-18 "
+                        f"(pre-existing; reviews/2026-11-18-complexity-patterns.md)")
+    for r in rows:
+        print(r)
+    print(f"# {len(rows)} unreviewed hit(s)", file=sys.stderr)
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--diff", nargs="?", const=DEFAULT_BASE, default=None, metavar="BASE",
+                    help=f"report only lines changed since BASE (default {DEFAULT_BASE})")
+    ap.add_argument("--all", action="store_true", help="scan every tracked .lean/.wiz file")
+    ap.add_argument("--allow", default=DEFAULT_ALLOW, metavar="FILE",
+                    help=f"allowlist TSV (default {DEFAULT_ALLOW})")
+    ap.add_argument("--list-baseline", action="store_true",
+                    help="print TSV rows for current hits without an entry")
+    ap.add_argument("--self-test", action="store_true", help="run the fixtures")
+    ap.add_argument("--root", default=".", help="the checkout to check (default .)")
+    args = ap.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
+    root = Path(args.root).resolve()
+    allow = Path(args.allow)
+    if not allow.is_absolute():
+        allow = root / args.allow
+    if args.list_baseline:
+        return list_baseline(root, allow)
+    if args.all and args.diff is not None:
+        print("check-complexity: --all and --diff are exclusive", file=sys.stderr)
+        return 2
+    base = args.diff if args.diff is not None else DEFAULT_BASE
+    return run(root, base, allow, all_files=args.all)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

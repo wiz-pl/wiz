@@ -175,19 +175,25 @@ def toolingGroup : Group where
         check (h5 > 0) "the default is not this binary's hash" },
     { name := "a long list literal caches in linear time (its expansion is not reprinted exponentially)", run := fun _ => do
         let wiz := ((← IO.appPath).parent.getD ".") / "wiz"
-        let dir ← IO.FS.createTempDir
-        let names := (List.range 40).map fun i => s!"name{i}"
-        let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
-          "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
-          "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
-        let file := dir / "long-list.wiz"
-        IO.FS.writeFile file src
-        let start ← IO.monoMsNow
-        let out ← IO.Process.output { cmd := "timeout", args :=
-          #["20", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
-        let ms := (← IO.monoMsNow) - start
-        check (out.exitCode == 0) s!"checking a 40-element list literal through the cache failed after {ms} ms: {out.stdout}{out.stderr}"
-        check (ms < 15000) s!"checking a 40-element list literal through the cache took {ms} ms" },
+        -- one cold check of a `k`-element list literal through a fresh cache
+        let checkLiteral (k : Nat) : IO Unit := do
+          let dir ← IO.FS.createTempDir
+          let names := (List.range k).map fun i => s!"name{i}"
+          let src := "import Prelude\nstructure M where\n  name : String\ndef mk (n : String) : M := M.mk n\n" ++
+            "def mapM {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapM f xs)\n" ++
+            "def xs : List M :=\n  mapM mk [ " ++ ", ".intercalate (names.map fun n => s!"\"{n}\"") ++ " ]\n"
+          let file := dir / "long-list.wiz"
+          IO.FS.writeFile file src
+          try
+            let out ← IO.Process.output { cmd := "timeout", args :=
+              #["60", wiz.toString, "check", "--cache", (dir / "cache").toString, file.toString] }
+            unless out.exitCode == 0 do
+              throw (IO.userError s!"checking a {k}-element list literal through the cache failed (exit {out.exitCode}): {out.stdout}{out.stderr}")
+          finally
+            IO.FS.removeDirAll dir
+        -- (finding in reviews/2026-11-17-test-audit.md:35: one size and `ms < 15000`
+        -- passes a quadratic implementation; the ratio at 40 and 80 is the claim)
+        let _ ← checkScaling "long list literal" checkLiteral 40 3 },
     { name := "terms survive the cache's format", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let st := runFrontend (R := ZeroOneMany) "import Prelude" { trustedModule := Tests.libModule, loader := fun _ => some prelude }
