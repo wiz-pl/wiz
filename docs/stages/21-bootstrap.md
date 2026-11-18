@@ -979,8 +979,8 @@ command is parsed with the rules declared by the previous ones.
 **Not done.** The macro and tactic registrations name a *function* the host executes at
 elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
 DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
-`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
-an "unsupported syntax" error. That is A12's other half, and it depends on the
+`Logic`'s `∃` and the ring macros would elaborate to an "unsupported syntax" error (list
+literals are the exception: `Parse.wiz` carries their surface rule itself). That is A12's other half, and it depends on the
 elaborator-time evaluation that A11 and A13 also need. Printing notation
 (`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
 host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
@@ -1383,9 +1383,9 @@ module now elaborate and check, in the self-hosted frontend as on the Lean one.
 **Tests** (group `selfhost`): `sigmaFieldDecls` — a `×` as an inductive field, a
 structure field, a field of a parameterised type, two nested pairs in a structure, and a
 use of the pair's `.1`/`.2` in a `match`, with the same verdicts in both frontends; a
-pair argument of the wrong type is still rejected by both. A second case pins a
-difference that is *not* fixed here: `[a, b]` (a list literal, A17) is a term on the
-Lean side and a parse error on the self-hosted one.
+pair argument of the wrong type is still rejected by both. The A17 case of
+`surfaceListProgram` checks the list literal itself (nested, empty, and in a pattern)
+against the host.
 
 **Measured** (`tests --libdiff` over the two library modules and three neighbours, the
 same harness before and after the one-line change):
@@ -1421,12 +1421,10 @@ self-hosted frontend, and the `=selfhost-libdiff` rows for them cannot flip to `
 yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in these files:
 
 * `lib/Web/Widget.wiz` writes its attribute and child lists as `[a, b]`. List literals
-  are a **library** syntax in `lib/Prelude.wiz` (a `syntax` rule plus a `Macro`
-  function, `ListLit.expand`), and the self-hosted frontend's prelude is
-  `preludeText`, which declares no such rule; the self-hosted frontend has no
-  elaborator-time macro evaluator to run `ListLit.expand` either (A12). List literals
-  are a known gap (A17): expanding `term.listLit` in `expandNotes`, with a surface rule
-  in `Parse.wiz`, is not on master.
+  parse (A17: `term.listLit` in `selfhost/Parse.wiz`, rewritten by the frontend), but
+  the other macros these files use do not: their rule names a function the host runs
+  at elaboration time (`ListLit.expand`, `Json.mkObj`'s), and the self-hosted frontend
+  has no elaborator-time macro evaluator (A12).
 * Both files import `Json`, `Text`, `Web.React` and their closures (`Optic`, `Tagged`,
   `Logic`, `Result`). The Lean toolchain's prelude is `lib/Prelude.wiz` (266
   declarations: `builtin`, `attribute`, macros, tactics, classes), while the
