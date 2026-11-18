@@ -38,6 +38,31 @@ def matchGroup : Group where
           [".cons .zero (.zero, .succ .zero) .nil"] },
     { name := "tuples of variables infer their type", run := fun _ =>
         ok (matchPrelude ++ "def t1 (A B : Type) (n : Nat) (a : A) (b : B) (r : Vec (A × B) n) : Vec (A × B) (.succ n) := Vec.cons (a, b) r") },
+    { name := "#267 a parameter before the colon that a recursive call changes", run := fun _ =>
+        -- the varying parameter moves after the colon, as Lean does (it used to be
+        -- "recursive call of run must pass the parameter s unchanged")
+        okLib ("import Prelude\ndef run (s : Nat) : List Nat → Nat\n  | .nil => s\n" ++
+          "  | .cons x xs => run (Nat.add s x) xs\n#eval run 1 (.cons 2 (.cons 3 .nil))") ["6"] },
+    { name := "#267 a varying parameter before the colon, with another parameter after it", run := fun _ =>
+        okLib ("import Prelude\ndef run (s k : Nat) : List Nat → Nat\n  | .nil => Nat.add s k\n" ++
+          "  | .cons x xs => run (Nat.add s x) k xs\n#eval run 1 10 (.cons 2 (.cons 3 .nil))") ["16"] },
+    { name := "#267 a varying parameter after an implicit binder", run := fun _ =>
+        okLib ("import Prelude\ndef run {A : Type} (s : Nat) : List A → Nat\n  | .nil => s\n" ++
+          "  | .cons x xs => run (Nat.add s 1) xs\n#eval run 1 (.cons 2 (.cons 3 .nil))") ["3"] },
+    { name := "#267 moving a parameter does not accept recursion on a non-field", run := fun _ =>
+        failsLib ("import Prelude\ndef bad (s : Nat) : List Nat → Nat\n  | .nil => s\n" ++
+          "  | .cons x xs => bad (Nat.add s x) (List.cons 0 xs)") "not a recursive field" },
+    { name := "#259 a hypothesis before the colon is refined by the match", run := fun _ =>
+        -- `h : b = .true` depends on the scrutinee, so it is generalised into the match
+        -- (otherwise the `.false` branch sees `h : b = .true`, and `h.1` has no `False`)
+        okLib ("import Logic\ndef f (b : Bool) (h : b = .true) : Nat := match b with\n" ++
+          "  | .true => 0\n  | .false => absurd h.1\n#eval f .true rfl") ["0"] },
+    { name := "#259 a hypothesis about a scrutinee expression is refined", run := fun _ =>
+        okLib ("import Logic\ndef f (n : Nat) (h : Nat.pred n = 0) : Nat := match Nat.pred n with\n" ++
+          "  | .zero => 0\n  | .succ m => absurd h.1") },
+    { name := "#259 two hypotheses about the scrutinee are both refined", run := fun _ =>
+        okLib ("import Logic\ndef f (b : Bool) (h : b = .true) (k : b = .false) : Nat := match b with\n" ++
+          "  | .true => absurd k.1\n  | .false => absurd h.1") },
     { name := "missing cases are reported", run := fun _ =>
         fails (matchPrelude ++ "def missing : Nat → Nat\n  | .zero => .zero") "missing case" },
     { name := "non-structural recursion is rejected", run := fun _ =>

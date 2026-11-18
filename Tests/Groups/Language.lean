@@ -220,9 +220,11 @@ def languageGroup : Group where
           "  | k, .nil, ys => ys\n  | k, .cons x xs, ys => .cons (Nat.add x k) (app2 k xs ys)\n" ++
           "#eval addE 9 (.cons 1 .nil)\n#eval app2 10 (.cons 1 .nil) (.cons 7 .nil)")
           [".cons 1 (.cons 9 .nil)", ".cons 11 (.cons 7 .nil)"] },
-    { name := "a parameter must be passed unchanged", run := fun _ =>
-        failsLib "import Prelude\ndef bad (w : Nat) : List Nat → Nat\n  | .nil => w\n  | .cons x xs => bad x xs"
-          "must pass the parameter w unchanged" },
+    { name := "a varying parameter before the colon moves after it (#267)", run := fun _ =>
+        -- the induction hypothesis is only at the parameters unchanged; a call that
+        -- changes one (`bad x xs`) generalises it into the match, as Lean does
+        okLib ("import Prelude\ndef bad (w : Nat) : List Nat → Nat\n  | .nil => w\n" ++
+          "  | .cons x xs => bad x xs\n#eval bad 9 (.cons 1 (.cons 2 .nil))") ["2"] },
     { name := "mutual (partial) definitions", run := fun _ =>
         okLib ("import Prelude\nmutual\ndef isEven : Nat → Bool\n  | .zero => .true\n  | .succ n => isOdd n\n" ++
           "def isOdd : Nat → Bool\n  | .zero => .false\n  | .succ n => isEven n\nend\n#eval isOdd 7\n" ++

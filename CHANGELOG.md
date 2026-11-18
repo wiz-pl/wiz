@@ -119,6 +119,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   compiler's entry point is `selfhost/Main.wiz` (the checker's is
   `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
   text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
+* Elaboration generalises what a `match` needs: dependent hypotheses that are not
+  written in the match are refined in each branch (#259); an unannotated motive for an
+  implicit-typed argument is postponed until the argument is known instead of failing
+  with "a variable escapes" (#260); and a parameter before the colon that a recursive
+  equation call changes is moved after the colon, as Lean does (#267; stage 4e).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual

@@ -333,11 +333,17 @@ def head {A : Type} {n : Nat} : Vec A (.succ n) → A
 
 `match` and equation-style definitions compile to case trees over `T.casesOn`
 (`compileMatch` in `Elab/Term.lean`). Later match variables are reverted into the
-motive. Index *variables* are generalised by the motive, which is Cockx's solution
-rule without an equation. Other indices get an equation `idx_c = ξ`, which
-observational equality computes. When it contains `False`, the case is closed
-automatically with `absurd`. Recursive calls on a recursive field of the first
-argument compile through `T.rec`, and the other arguments may change between calls.
+motive, and so are local hypotheses whose type mentions the scrutinee even when they
+are not written in the match (as Lean generalises them): `def f (b : Bool) (h : b = .true)
+: Nat := match b with | .true => 0 | .false => absurd h.1` refines `h` in each branch.
+A parameter *before* the colon that a recursive call changes is moved after the colon
+(the trailing explicit binders become match columns), so `def run (s : Nat) : List Nat →
+Nat | .nil => s | .cons x xs => run (Nat.add s x) xs` is accepted. Index *variables*
+are generalised by the motive, which is Cockx's solution rule without an equation. Other
+indices get an equation `idx_c = ξ`, which observational equality computes. When it
+contains `False`, the case is closed automatically with `absurd`. Recursive calls on a
+recursive field of the first argument compile through `T.rec`, and the other arguments
+may change between calls.
 
 The solution rule *with* an equation is supported too (`tail`, `zip`). When the
 computed equation contains `y = t` for a constructor field `y`, the later fields are
