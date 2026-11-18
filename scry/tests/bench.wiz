@@ -113,4 +113,102 @@ def main : IO Unit := EIO.toIO (do
     baseline := .some "bench/baseline.json", noTiming := .true };
   check "baseline: corpus run is ok" (String.eq run.status "ok");
   check "baseline: checked-in baseline matches"
-    (Bool.and (String.eq run.baseline.status "compared") run.baseline.matches))
+    (Bool.and (String.eq run.baseline.status "compared") run.baseline.matches);
+  check "baseline: safe corpus is TP 32, FP 1, TN 17, FN 0"
+    (Bool.and (Nat.beq run.summary.overall.metrics.counts.tp 32)
+      (Bool.and (Nat.beq run.summary.overall.metrics.counts.fp 1)
+        (Bool.and (Nat.beq run.summary.overall.metrics.counts.tn 17)
+          (Nat.beq run.summary.overall.metrics.counts.fn 0))));
+
+  -- the gate fails closed: a deleted/invalid baseline, a non-ok run, and a baseline
+  -- case removed from the run all fail with --fail-on-regression, and pass without it.
+  dir ← FS.createTempDir;
+  let gateBase := { Scry.benchDefaultOpts with baseline := .some "", noTiming := .true,
+    failOnRegression := .true };
+
+  let deletedPath := Path.join dir "deleted-baseline.json";
+  let deletedOpts := { gateBase with baseline := .some deletedPath };
+  let deletedNoFlag := { deletedOpts with failOnRegression := .false };
+  baseText ← FS.readFile "bench/baseline.json";
+  FS.writeFile deletedPath baseText;
+  FS.removeFile deletedPath;
+  deletedBaseline ← Scry.benchLoadBaseline deletedPath run;
+  let deletedRun := { run with baseline := deletedBaseline };
+  check "gate: a deleted baseline fails with the flag"
+    (Nat.beq (Scry.benchExitCode deletedOpts deletedRun) 1);
+  check "gate: a deleted baseline names the path"
+    (match Scry.benchGateFailure deletedOpts deletedRun with
+      | .some m => String.contains m deletedPath
+      | .none => .false);
+  check "gate: a deleted baseline passes without the flag"
+    (Nat.beq (Scry.benchExitCode deletedNoFlag deletedRun) 0);
+  check "gate: bootstrap permits an explicit first run"
+    (Nat.beq (Scry.benchExitCode { deletedOpts with bootstrap := .true } deletedRun) 0);
+
+  let corruptPath := Path.join dir "corrupt-baseline.json";
+  let corruptOpts := { gateBase with baseline := .some corruptPath };
+  let corruptNoFlag := { corruptOpts with failOnRegression := .false };
+  FS.writeFile corruptPath "{ this is not json\n";
+  corruptBaseline ← Scry.benchLoadBaseline corruptPath run;
+  let corruptRun := { run with baseline := corruptBaseline };
+  check "gate: a corrupted baseline is invalid"
+    (String.eq corruptRun.baseline.status "invalid");
+  check "gate: a corrupted baseline fails with the flag"
+    (Nat.beq (Scry.benchExitCode corruptOpts corruptRun) 1);
+  check "gate: a corrupted baseline passes without the flag"
+    (Nat.beq (Scry.benchExitCode corruptNoFlag corruptRun) 0);
+
+  let missingCorpusOpts := { Scry.benchDefaultOpts with
+    corpus := "bench/corpus-does-not-exist", baseline := .some "bench/baseline.json",
+    noTiming := .true, failOnRegression := .true };
+  let missingCorpusNoFlag := { missingCorpusOpts with failOnRegression := .false };
+  missingCorpusRun ← Scry.benchRun missingCorpusOpts;
+  check "gate: a missing corpus is a skip" (String.eq missingCorpusRun.status "skipped");
+  check "gate: a missing corpus fails with the flag"
+    (Nat.beq (Scry.benchExitCode missingCorpusOpts missingCorpusRun) 1);
+  check "gate: a missing corpus names the status"
+    (match Scry.benchGateFailure missingCorpusOpts missingCorpusRun with
+      | .some m => String.contains m "skipped"
+      | .none => .false);
+  check "gate: a missing corpus passes without the flag"
+    (Nat.beq (Scry.benchExitCode missingCorpusNoFlag missingCorpusRun) 0);
+
+  -- remove the first run case: it is present in the baseline and absent from the run
+  let fullOpts := { Scry.benchDefaultOpts with baseline := .some "bench/baseline.json",
+    noTiming := .true, failOnRegression := .true };
+  let fullNoFlag := { fullOpts with failOnRegression := .false };
+  let droppedIds := List.map (fun c => c.caseId) (List.take 1 run.cases);
+  let droppedId := match droppedIds with
+    | .cons x _ => x
+    | .nil => "";
+  trimmedBaseline ← Scry.benchLoadBaseline "bench/baseline.json"
+    { run with cases := List.drop 1 run.cases };
+  let trimmedRun := { run with cases := List.drop 1 run.cases, baseline := trimmedBaseline };
+  check "gate: a removed case is present→absent"
+    (Bool.and (List.any (String.eq droppedId) trimmedRun.baseline.missingFromRun)
+      (List.any (fun c => Bool.and (String.eq c.field "presence")
+        (Bool.and (String.eq c.before "present") (String.eq c.after "absent")))
+        trimmedRun.baseline.changes));
+  check "gate: a removed case fails with the flag"
+    (Nat.beq (Scry.benchExitCode fullOpts trimmedRun) 1);
+  check "gate: a removed case is named"
+    (match Scry.benchGateFailure fullOpts trimmedRun with
+      | .some m => String.contains m droppedId
+      | .none => .false);
+  check "gate: a removed case passes without the flag"
+    (Nat.beq (Scry.benchExitCode fullNoFlag trimmedRun) 0);
+
+  -- the other direction: a run case absent from the baseline is absent→present
+  let extraCases := List.map (fun c => { c with caseId := "s2/gate/new-case" })
+    (List.take 1 run.cases);
+  addedBaseline ← Scry.benchLoadBaseline "bench/baseline.json"
+    { run with cases := List.append run.cases extraCases };
+  let addedRun := { run with cases := List.append run.cases extraCases, baseline := addedBaseline };
+  check "gate: a new case is absent→present"
+    (Bool.and (List.any (String.eq "s2/gate/new-case") addedRun.baseline.addedInRun)
+      (List.any (fun c => Bool.and (String.eq c.field "presence")
+        (Bool.and (String.eq c.before "absent") (String.eq c.after "present")))
+        addedRun.baseline.changes));
+  check "gate: a new case fails with the flag"
+    (Nat.beq (Scry.benchExitCode fullOpts addedRun) 1);
+  FS.removeAll dir)

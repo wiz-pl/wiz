@@ -110,6 +110,7 @@ The layout is one manifest per module (the note's P2) plus a per-layer generatio
 ```
 <cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
 <cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/roots/<hash path>.rootp                             -- a root file's last manifest
 <cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
 ```
 
@@ -132,13 +133,22 @@ A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `
 `module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
 `target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
 `valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
-entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+entries, so editing `prev`/`valid-until` breaks the root too. A **root file's** manifest
+is keyed by its text as well as its headers (`wiz-cache/root-manifest-v1`), so two files
+that differ only in their text do not share one: sharing it made that manifest grow with
+every root file checked (12.7 MB in one cache here), rewrote it per root miss and lost a
+concurrent writer's entries, which made a fresh file miss on every run.
+`manifest.sexpr` records the
 generation number, the previous root, the optional expiry and one record per module (fast
 key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
-**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
-because the number of writing processes (and `-j`) is not an input; a manifest that is
-extended keeps the base it started from rather than chaining to an intermediate partial
-write. Only the write cache is ever written; a
+**snapshot** of the layer's manifests, written by `wiz cache manifest` (and, for a
+read-only layer, sealed by the package) — not by an ordinary run: rebuilding it means
+reading and re-validating every manifest in the layer, which is O(cache) (about a minute
+on a shared cache of thousands of manifests), and nothing a run does reads its module
+list (only its expiry, which a run never changes). Its generation is the module count and
+its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
+manifest that is extended keeps the base it started from rather than chaining to an
+intermediate partial write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.
@@ -300,6 +310,24 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
 
+**The token (#430).** The `Origin` check stops other web sites, but a local program
+simply sends no `Origin`, and a WebSocket client may open documents and have them
+elaborated (imports, `import_c` headers, an SMT solver) with the user's privileges. So
+the upgrade must also present the server's token, as `?token=T` in the request target
+(all a browser can add) or as `Authorization: Bearer T`; anything else gets `401` before
+any `101`, and the comparison takes the same time wherever the first difference is
+(`WebSocket.constantTimeEq`). The token is 128 random bits, fresh for every launch and
+printed on stderr with the web infoview's URL; `--token-file FILE` reads it from FILE
+(creating FILE, mode 0600, with a fresh one when it does not exist), and `--ws-insecure`
+turns the check off, for the loopback address only and with a warning.
+`wiz/browserInfoview` returns the token and puts it in the page's URL; the pages
+(`web/infoview.js`, the playground and `wiz doc --serve`'s panel through
+`web/lsp-client.js`) pass their own `?token=` on to the socket and never display it. The
+infoview's files are served without a token (they are the toolchain's own). Tests: the
+`lsp-server` group (no token, a wrong, empty or longer token, a wrong bearer: `401`; the
+query and the bearer: `101`; a token in an asset's URL changes nothing), the `nvim` group
+(the browser infoview's URL and handshake), and `web/playground_lsp_test.mjs`.
+
 ## 11p: a Neovim plugin
 
 `editors/nvim/` is **wiz.nvim**, a Lua plugin for Neovim ≥ 0.10 modelled on lean.nvim
@@ -404,6 +432,22 @@ def four : Nat := twice two
   sections under the goals, and `gd` on an item jumps to it. `#check`, `#eval`,
   `#reduce`, `#run`, `inductive` and `structure` now keep their info trees, so hovers
   work inside them too.
+* **One-shot requests** (#435), for clients without an interactive table (no session, no
+  ref): `wiz/typeAt {textDocument, position}` answers the innermost elaborated term there
+  (an application, a `match`, a literal, a hole, or an identifier) as `{term, type,
+  range, kind, name?}`: the source text, the type it was checked against (an
+  identifier's own type), the range, and `const`/`local`/`term`/`hole`; it is the place
+  `wiz/plainTermGoal` picks, without the hypotheses. The info tree records no core term
+  per range, so `term` is what the source says there. `wiz/coreTerm {textDocument, name}`
+  (or `position`: the global under the cursor, else the declaration of the command
+  there) answers `{name, type, value, kind, levelParams, location, native?, axioms,
+  raw?}`: the declaration as the kernel has it, printed as core terms (macros and
+  notation expanded; `notation: true` prints with notation, as hovers do), `kind`
+  `definition`, `opaque` (no value to unfold: an axiom, a constructor, an `extern`; the
+  value is `null` rather than unfolded) or `partial`, the native implementation if
+  there is one, `#print axioms`'s list (`axioms: false` skips it), and with `raw: true`
+  the core syntax trees. Both are in `infoviewMethods`, so infoviews on the Unix socket
+  may ask them. Tests: `lsp-server`, "#435: wiz/typeAt and wiz/coreTerm".
 
 Not covered: hovers inside tactic arguments (a tactic gets its syntax without ranges),
 a procedural macro's output (it has no ranges of the user's), the arguments of
@@ -519,6 +563,25 @@ package's `lib` targets with its module roots (dependencies included), into
   (`/` focuses the box): names first, then doc comments, then signatures, and a hit
   says which matched. The pages are complete HTML: they read without JS, and the
   search works from `file://`.
+* **What is documented.** Every command that declares a name, in source order: `def`
+  (with equations), `partial def`, `axiom`, `extern`, `foreign_type`, `glue`, `c_struct`,
+  `structure`, `class`, `inductive`, `coinductive`, `sealed inductive` and `instance`
+  (named or anonymous: the entry is the instance's name, and its signature is the class
+  applied to its arguments). A *user* command — `syntax … : command` with
+  `attribute [macro command.k] f`, as `lib/Feral.wiz` does — is documented with its own
+  kind, so a project can add `theorem`, `lemma` or `abbrev` as command macros and they
+  appear as such (`lemma` is shown as `theorem`). An entry's signature is the
+  declaration's elaborated type — the statement, for a theorem-like command — never its
+  body. Left out: private declarations and private constructors or fields, the
+  elaborator's auxiliary names (`T.rec`, `T.desc`, `T.casesOn`, …), instances a
+  `deriving` clause makes (they are still listed under their class and type) and commands
+  that declare nothing (`#check`, `#eval`, `syntax`, `notation`, `attribute`, `export`,
+  `link_c`, …); Wiz has no `example` command. Wiz also has no `namespace` command, so a
+  name written `T.f` is a top-level entry whose name, anchor and API row are the fully
+  qualified name (`#T.f`); grouping such names under `T` would need a grouping concept
+  the pages and the manual do not have, and source order is easier to follow. The shown
+  kind is the command's own, with `defEqns` as `def`, `foreignType` as `foreign type`,
+  `cStruct` as `c struct` and `lemma` as `theorem`.
 * **The reference manual** (`Wiz/Doc/Reference.lean`, `--reference DIR`). The pages are
   for browsing; the manual is for looking a name up. `DIR/index.md` has a contents list,
   the **notation table**, then one section per module and one subsection per declaration
@@ -584,9 +647,28 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
+* **Cost: one elaboration per module, and `--jobs`.** The site needs each module's
+  declarations as that module's own file sees them, so `run` elaborates `import M` once
+  per module (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from
+  `~/.cache/wiz` (median closure: 8 modules), so the work is one elaboration per module,
+  not one for the library; the pages, the API index and the reference then pretty-print
+  every declaration and run `Wiz.infer` on every subterm of every signature
+  (`LSP.subtermType:532`, `Site.lean:130`), once per declaration. `--jobs N` elaborates
+  and renders N modules at once (`0`: auto, the CPUs available, at most 8); the output is
+  assembled in the modules' own order, so `OUT` is byte-for-byte the same as `--jobs 1`
+  (only the `-v` log follows completion order, and every line names its module). `-v`
+  writes a progress log to stderr — per module its elaboration and rendering time and
+  cache hits, every 25th declaration, the phase boundaries, and a summary with the wall
+  time and peak RSS; `-vv` lists every declaration, `-q` is the quiet default. Stdout and
+  the pages are unchanged in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
-  links, instances, the index); every cross-link resolves; every declaration is in the
+  links, instances, the index); a fixture with one declaration of every command kind
+  (`Kinds/All.wiz`, including a user-defined `theorem`/`lemma`/`abbrev` and a private
+  definition), checking the kind and the signature (the type or statement, not the body)
+  on the page, in `api.html`/`api.json`, in the search index and in the reference manual,
+  that no non-declaring command makes an entry, and that two runs make the same bytes;
+  every cross-link resolves; every declaration is in the
   search index, with its doc summary and signature; the API index and `api.json` list
   every module and declaration; the reference manual and its `--check`; the pages without
   JS; `grail doc`; and the page model of the Wasm module
@@ -736,6 +818,19 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+* **From a declaration's own name** (#434). The name in a `def`, `inductive`,
+  `structure` or `class` header, a constructor (`| red`) and a structure field (`px :
+  Nat`) are not identifiers of the info tree, so the cursor there used to find nothing.
+  Now `targetAt` falls back to the command's syntax (parsed again, `declIdents`): the
+  first identifier of each declaring node is the name it declares, and the cursor on it
+  is the same target as a use, so references, highlights and rename give the same answer
+  from either place. The declaration site in the results is that identifier (before, the
+  name's first occurrence in the command's text, which missed constructors and fields).
+  A constructor or field is written by its last component (`red` for `Col.red`): rename
+  edits it there with the new name's last component when the new name keeps the prefix
+  (`Col.crimson`), and leaves it when it doesn't (the declaration can't say `Other.x`).
+  Tests: `lsp-server`, "#434: references, highlights and rename from a declaration's own
+  name".
 
 ## 11aa: `wiz fmt`, a formatter
 
