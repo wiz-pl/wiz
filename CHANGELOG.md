@@ -18,7 +18,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   converged round's `FuncResult`s for the results stage (it evaluated every function a
   second time), prepares each function's plan once instead of per round, and indexes a
   point's CFG predecessors (`Scry.Fn.preds`) instead of rebuilding them by scanning
-  every point: the 525-byte 128-statement case drops from 12.85 s to under 10 ms. Long
+  every point: the 525-byte 128-statement case drops from 12.85 s to 0.32 s (256 statements 2.2 s). Long
   integer literals are parsed by halving the digit list (`Scry.parseDigitsAt`) instead
   of one quadratic-size multiply per digit. New `scry/scripts/dos-check.py` (grail target
   `dos-check`, run by the nightly bench workflow) pins RSS < 20× input and statement
