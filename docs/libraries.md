@@ -1421,6 +1421,20 @@ has no value, so a handle cannot be threaded through it, and `ResultH`'s only us
 instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
 Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
 
+The library uses the family where a handle is threaded. `ResultH.elim` cases a `Result1`
+once, with no nested handle match inside each `ok`/`err` arm, and
+`ResultH.mapHandle`/`ResultH.ofResult` transform the handle, or attach one to a plain
+`Result`, on both branches. The borrow scopes in lib/Region.wiz use them: `Uniq.borrow`
+and `borrowIn` case once, and `reborrow`, `reborrowIn`, `share`, `shareIn`, `zoom`,
+`zoomIn` and `both` end the inner handle and rebuild the outer one once instead of in
+each arm. The value-level results of lib/Optic.wiz and lib/HeapBorrow.wiz use
+`Result.map`, `Result.bind` and `Result.elim`, which are the `ResultQ` functions at
+`q = ω` (the same functions, since `Result = ResultQ ω`): a Feral borrow's functional
+model threads ω data and its panic path carries no lender, so `ResultH`'s error branch (a
+handle on both branches) is not the right type there. lib/Handle.wiz, lib/Eff.wiz and
+lib/IO.wiz report failures as `Except String`/`EIO` and carry results in `IO1`, not
+`Result`, so the family does not apply to them.
+
 ## Functors and Booleans
 
 `lib/Functor.wiz` (`import Functor`): `Functor`, `Applicative`, `<$>`, `<*>`; every `Monad`
