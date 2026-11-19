@@ -21,30 +21,42 @@ The small, engine-wide values shared by `Storage.wiz` (the write half) and `Curs
 -- ## The read-path counter
 
 /-- What a plan spent: `nodes` primary-node reads (the store's `Snapshot.fetch`),
-`keys` index/table entries consumed. Both are counts, never wall-clock time. -/
+`keys` index/table entries consumed, and `pages` mapped 4 KiB pages touched. The first
+two are the pure slice's counts; `pages` is the page-backed slice's count (a `U64Map`
+scan touches no page, so the pure plan leaves it 0). All are counts, never wall-clock
+time. -/
 structure Cost where
   nodes : Nat
   keys : Nat
+  pages : Nat
 
 /-- An empty spend. -/
-def Cost.zero : Cost := Cost.mk 0 0
+def Cost.zero : Cost := Cost.mk 0 0 0
 
 /-- One primary-node read. -/
-def Cost.node : Cost := Cost.mk 1 0
+def Cost.node : Cost := Cost.mk 1 0 0
 
 /-- One consumed index/table entry (no primary read). -/
-def Cost.key : Cost := Cost.mk 0 1
+def Cost.key : Cost := Cost.mk 0 1 0
+
+/-- One mapped page touched. -/
+def Cost.page : Cost := Cost.mk 0 0 1
+
+/-- `n` mapped pages touched. -/
+def Cost.pageN (n : Nat) : Cost := Cost.mk 0 0 n
 
 /-- Add two spends. -/
-def Cost.add (a b : Cost) : Cost := Cost.mk (a.nodes + b.nodes) (a.keys + b.keys)
+def Cost.add (a b : Cost) : Cost :=
+  Cost.mk (a.nodes + b.nodes) (a.keys + b.keys) (a.pages + b.pages)
 
 /-- The spend as one number (convenience for assertions). -/
-def Cost.total (c : Cost) : Nat := c.nodes + c.keys
+def Cost.total (c : Cost) : Nat := c.nodes + c.keys + c.pages
 
-/-- `nodes=… keys=…`, for `#eval` of a plan or a run. -/
+/-- `nodes=… keys=… pages=…`, for `#eval` of a plan or a run. -/
 def Cost.show (c : Cost) : String :=
   String.append "nodes=" (String.append (Nat.repr c.nodes)
-    (String.append " keys=" (Nat.repr c.keys)))
+    (String.append " keys=" (String.append (Nat.repr c.keys)
+      (String.append " pages=" (Nat.repr c.pages)))))
 
 -- ## Index entries and key ranges
 

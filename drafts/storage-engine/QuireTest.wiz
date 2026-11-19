@@ -1,0 +1,157 @@
+import Sys
+import Word
+import Text
+import Functor
+import Storage
+import Quire
+import QuireCursor
+/-!
+# The page-backed store, end to end
+
+`wiz run -I drafts/storage-engine drafts/storage-engine/QuireTest.wiz` (compiled: the file
+and `mmap` natives are `wiz run` code). It exercises the format the benchmark uses:
+
+* seed 500 nodes in one commit, then read them back through the snapshot and through a
+  fresh open (the meta pick, no map materialisation);
+* an update through the recording lens (`qsetField`), a delete, and the index facts
+  those write;
+* stale and unique rejection;
+* the page cursor: an equality index-only query reads one slot's pages, a full scan reads
+  every slot's, a range reads the slots of its values, and an index→primary query follows
+  the candidates. `Cost.pages` is asserted, not just the counts.
+-/
+
+def expect (r : Nat) (what : String) (b : Bool) : EIO Nat :=
+  match b with
+  | .true => EIO.pure (Nat.succ r)
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def u64 (n : Nat) : U64 := U64.ofNat n
+def u32 (n : Nat) : U32 := U32.ofNat n
+
+def stateIndex : IndexDef := IndexDef.mk (U32.ofNat 3) (U32.ofNat 2) .false
+def schema : List IndexDef := [kindIndex, stateIndex]
+
+/-- Node `i`: kind `i % 10` (rule), count `i` (line), label `i % 5` (state). -/
+def seedNode (i : Nat) : Node :=
+  Node.mk (U32.ofNat (Nat.mod i 10)) (u64 i) (U32.ofNat (Nat.mod i 5))
+
+partial def seedGo (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => seedGo (QSnapshot.record s (u64 i) (.some (.set (seedNode i)))) n (Nat.succ i)
+  | .false => s
+
+def seedAll (s : QSnapshot) (n : Nat) : QSnapshot := seedGo s n 1
+
+def countOf (s : QSnapshot) (i : Nat) : Nat :=
+  match QSnapshot.getNode s (u64 i) with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def labelOf (s : QSnapshot) (i : Nat) : Nat :=
+  match QSnapshot.getNode s (u64 i) with
+  | .none => 999
+  | .some n => n.label.toNat
+
+def has (s : QSnapshot) (i : Nat) : Bool :=
+  match QSnapshot.getNode s (u64 i) with
+  | .some _ => .true
+  | .none => .false
+
+/-- The equality query the benchmark runs: `indexCursor` + `filterKey`. -/
+def eqCost (s : QSnapshot) (d : IndexDef) (v : U64) : Nat × Cost :=
+  QCursor.foldWith (QCursor.filterKey (KeyPred.eq v) (QSnapshot.indexOnlyRange d KeyRange.all s))
+    (fun n _ => Nat.succ n) 0
+
+def allCost (s : QSnapshot) (d : IndexDef) : Nat × Cost :=
+  QCursor.foldWith (QSnapshot.indexOnlyRange d KeyRange.all s) (fun n _ => Nat.succ n) 0
+
+def rangeCost (s : QSnapshot) (d : IndexDef) (lo hi : U64) : Nat × Cost :=
+  QCursor.foldWith
+    (QCursor.filterKey (KeyPred.between lo hi) (QSnapshot.indexOnlyRange d KeyRange.all s))
+    (fun n _ => Nat.succ n) 0
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  let path := Path.join dir "quire.db";
+  h ← openQ path schema;
+  s0 ← getQ h;
+  oSeed ← putQ h (seedAll s0 500);
+  r0 ← expect 0 "the seed commits" (succeeded oSeed);
+  s1 ← getQ h;
+  r1 ← expect r0 "generation 1" (Nat.beq s1.gen.toNat 1);
+  r2 ← expect r1 "node 1 count" (Nat.beq (countOf s1 1) 1);
+  r3 ← expect r2 "node 500 count" (Nat.beq (countOf s1 500) 500);
+  r4 ← expect r3 "node 501 absent" (Bool.not (has s1 501));
+  -- 100 nodes have state 2 (500 / 5).
+  let eq := eqCost s1 stateIndex (u64 2);
+  r5 ← expect r4 "state 2 has 100 nodes" (Nat.beq eq.1 100);
+  r6 ← expect r5 "index-only equality reads no primary node" (Nat.beq eq.2.nodes 0);
+  r7 ← expect r6 "index-only equality reads 1 root page + 1 fact page"
+    (Nat.beq eq.2.pages 2);
+  let all := allCost s1 stateIndex;
+  r8 ← expect r7 "all states have 500 nodes" (Nat.beq all.1 500);
+  r9 ← expect r8 "a full index scan reads more pages than equality"
+    (Nat.lt eq.2.pages all.2.pages);
+  let rng := rangeCost s1 kindIndex (u64 0) (u64 2);
+  r10 ← expect r9 "rules 0..2 have 150 nodes" (Nat.beq rng.1 150);
+  r11 ← expect r10 "a range reads fewer pages than a full scan and no node"
+    (Bool.and (Nat.lt rng.2.pages all.2.pages) (Nat.beq rng.2.nodes 0));
+  -- The index→primary composite: one leaf read per result.
+  let followed := QCursor.foldWith
+    (QSnapshot.indexNodesWhere stateIndex (KeyPred.eq (u64 2)) s1) (fun n _ => Nat.succ n) 0;
+  r12 ← expect r11 "follow returns 100 nodes" (Nat.beq followed.1 100);
+  r13 ← expect r12 "follow reads one primary page per node"
+    (Nat.beq followed.2.nodes 100);
+
+  -- Update node 7: state 2 -> 3 through the lens.
+  s2 ← getQ h;
+  oUp ← putQ h (qsetField (u64 7) Node.labelL (U32.ofNat 3) s2);
+  r14 ← expect r13 "the update commits" (succeeded oUp);
+  s3 ← getQ h;
+  r15 ← expect r14 "the update is visible" (Nat.beq (labelOf s3 7) 3);
+  r16 ← expect r15 "state 2 lost node 7" (Nat.beq (eqCost s3 stateIndex (u64 2)).1 99);
+  r17 ← expect r16 "state 3 gained node 7" (Nat.beq (eqCost s3 stateIndex (u64 3)).1 101);
+
+  -- Delete node 8: every index writes a remove fact.
+  oDel ← putQ h ({ s3 with ws := WriteSet.combine s3.ws (u64 8) .del });
+  r18 ← expect r17 "the delete commits" (succeeded oDel);
+  s4 ← getQ h;
+  r19 ← expect r18 "node 8 is gone" (Bool.not (has s4 8));
+  r20 ← expect r19 "state 3 excludes the deleted node" (Nat.beq (eqCost s4 stateIndex (u64 3)).1 100);
+
+  -- A snapshot taken before the update is stale for a `set`.
+  oStale ← putQ h (qsetField (u64 7) Node.labelL (U32.ofNat 4) s2);
+  r21 ← expect r20 "a stale set is rejected" (Bool.not (succeeded oStale));
+
+  -- Reopen: a meta pick, then the same reads.
+  closeQ h;
+  h2 ← openQ path schema;
+  s5 ← getQ h2;
+  r22 ← expect r21 "reopen keeps the generation" (Nat.beq s5.gen.toNat 3);
+  r23 ← expect r22 "reopen keeps node 500" (Nat.beq (countOf s5 500) 500);
+  r24 ← expect r23 "reopen keeps the update" (Nat.beq (labelOf s5 7) 3);
+  r25 ← expect r24 "reopen keeps the delete" (Bool.not (has s5 8));
+  closeQ h2;
+
+  -- A unique index (a small store of its own).
+  h3 ← openQ (Path.join dir "unique.db") [uniqueLabel];
+  u0 ← getQ h3;
+  o1 ← putQ h3 (QSnapshot.record u0 (u64 1) (.some (.set (Node.mk (u32 0) (u64 0) (u32 7)))));
+  r26 ← expect r25 "unique: node 1 commits" (succeeded o1);
+  u1 ← getQ h3;
+  o2 ← putQ h3 (QSnapshot.record u1 (u64 2) (.some (.set (Node.mk (u32 0) (u64 0) (u32 8)))));
+  r27 ← expect r26 "unique: node 2 commits" (succeeded o2);
+  u2 ← getQ h3;
+  o3 ← putQ h3 (QSnapshot.record u2 (u64 2) (.some (.set (Node.mk (u32 0) (u64 0) (u32 7)))));
+  r28 ← expect r27 "unique: a duplicate is rejected" (Bool.not (succeeded o3));
+  closeQ h3;
+
+  FS.removeAll dir;
+  EIO.lift (IO.println (String.append "quire: all checks passed: "
+    (Nat.toString r28))))
