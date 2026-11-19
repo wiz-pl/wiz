@@ -902,8 +902,9 @@ output line per command, and a status line (`loading` / `running` / `done in N m
 with error lines in red). No server, no editor, no install: `web/build-playground.sh`
 compiles the program the page runs.
 
-* **The page around the engine.** The Examples menu holds six checked programs (basics,
-  arithmetic, inductive data, pattern matching, structures, lists). **Save .wiz**
+* **The page around the engine.** The Examples menu holds seven checked programs (basics,
+  arithmetic, inductive data, pattern matching, structures, lists, and a "Wiz in Y
+  minutes" tour). **Save .wiz**
   downloads the program as `playground.wiz`, adding `import Prelude` when the editor has
   none so the file checks on its own; **Share link** puts the program in the URL
   fragment and copies the URL; **Reset** restores the default program; **Clear** empties

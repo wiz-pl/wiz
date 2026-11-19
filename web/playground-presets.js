@@ -98,6 +98,83 @@ def mapList {A B : Type} (f : A → B) : List A → List B
 #eval mapList double numbers
 `,
   },
+  {
+    id: "tour",
+    title: "Wiz in Y minutes",
+    // The tour from the sample-page branch (`web/playground-tour.wiz` there), kept as an
+    // example now that the page's first program is this menu's default.
+    code: `import Prelude
+
+-- Wiz in Y minutes: \`--\` starts a comment; commands begin at column 0, and
+-- layout (indentation) only matters inside \`where\` and \`match\`. The page runs
+-- this with the self-hosted frontend (selfhost/*.wiz) in WebAssembly; docs/tour.md is longer.
+
+-- Literals; \`#check\` gives a type, \`#eval\` the kernel's normal form.
+#check 42
+#eval 6 * 7
+
+-- Functions curry: \`add3 1 2\` waits for one more argument.
+def add3 (a b c : Nat) : Nat := a + b + c
+
+#eval add3 1 2 3
+
+-- \`let\` binds an intermediate value; \`if\` is a two-branch match on Bool.
+def parity (n : Nat) : Nat :=
+  let r := Nat.mod n 2; if Nat.beq r 0 then 0 else 1
+
+#eval parity 7
+
+-- An inductive type, and a function by pattern-matching equations.
+inductive Shape where
+  | circle (r : Nat)
+  | square (s : Nat)
+
+def area : Shape → Nat
+  | .circle r => 3 * r * r
+  | .square s => s * s
+
+-- Lists, recursion, and a function passed to \`List.map\`.
+def total : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x + total xs
+
+#eval total (.cons 1 (.cons 2 (.cons 3 .nil)))
+#eval List.map (fun n => n + 1) (.cons 1 (.cons 2 .nil))
+
+-- A structure's fields are projections: \`p.x\`.
+structure Point where
+  x : Nat
+  y : Nat
+
+#eval (Point.mk 2 3).x
+
+-- A class and its instance; the dictionary comes from instance search.
+class Describe (A : Type) where
+  describe : A → Nat
+instance instDescribeNat : Describe Nat where
+  describe := fun n => n + 1
+
+#eval Describe.describe 41
+
+-- A dependent type: \`Vec A n\` has \`n\` elements, so \`head\` needs a default.
+inductive Vec (A : Type) : Nat → Type where
+  | nil : Vec A Nat.zero
+  | cons (n : Nat) (x : A) (xs : Vec A n) : Vec A (Nat.succ n)
+
+def head {A : Type} {n : Nat} (d : A) (v : Vec A n) : A := match v with
+  | .cons _ x _ => x
+  | .nil => d
+
+#eval head 0 (Vec.cons 0 7 Vec.nil)
+
+def twoPlusTwo : 2 + 2 = 4 := rfl   -- \`rfl\` closes a definitional equality
+
+-- Answers from a built-in, a recursion and a pattern match.
+#eval String.length "Wiz"
+#eval total (List.map (fun n => n + 1) (.cons 2 (.cons 3 .nil)))
+#eval area (.square 5)
+`,
+  },
 ]);
 
 export const defaultPresetId = "basics";
