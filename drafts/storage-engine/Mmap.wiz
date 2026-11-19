@@ -19,31 +19,32 @@ skipped on the hot path.
   mapping) — a bad page number or offset is an error, never a `SIGSEGV`. `Map.getU64`
   is the same load without the check, for offsets a caller has already checked (the
   decoder only uses it after `Store.pageBase` or a meta-slot bound).
-* Pages are read in place: a `Snapshot` holds the `Map` handle and a root page number,
+* Pages are read in place: a `MappedSnapshot` holds the `Map` handle and a root page number,
   and a lookup copies one 32-byte record, never a page. The mapping is reference
   counted like every other `foreign_type`, so a snapshot kept across a commit keeps its
   mapping alive.
 * Writes do not go through the map. The commit path is `pwrite` + `fsync` (slice 2), so
   the mapping is read-only and no `msync` is needed.
-* `Store.checkPage`/`Snapshot.getNodeWith`/`Snapshot.indexBucketWith` take a
+* `Store.checkPage`/`MappedSnapshot.getNodeWith`/`MappedSnapshot.indexBucketWith` take a
   `verify : Bool`: `.true` recomputes the page's FNV-1a-64 checksum, `.false` only
-  bounds-checks the page. The wrappers `Snapshot.open`, `Snapshot.getNode` and
-  `Snapshot.indexBucket` verify by default (the first slice's choice). The meta slots
+  bounds-checks the page. The wrappers `MappedSnapshot.open`, `MappedSnapshot.getNode` and
+  `MappedSnapshot.indexBucket` verify by default (the first slice's choice). The meta slots
   are always checksummed (two 64-byte reads per open), so a torn meta write is never
   read.
 
 ## The format this decoder assumes (version 1)
 
-`wiz-notes/storage-engine.md` fixes the shape but not every byte value; slice 2 owns the
-on-disk format and had not published a writer when this was written (branch
-`store-durable` had no commits). These are the assumed values; each is a single
-constant below, so a different choice in slice 2 is a small change, not a rewrite:
+`wiz-notes/storage-engine.md` fixes the shape but not every byte value. This decoder was
+written before `store-durable` published its writer; the constants below were then pinned
+to that writer (the magic, the chained kind-1 leaf, the 96-byte meta record), so the two
+halves read and write one format:
 
 * page size 4096 B; page `p` is at `p * 4096`; the file is little-endian;
 * page header 32 B: `u16 kind` (0), `u16 n` (2), `u16 free` (4), `u16 flags` (6),
   `u64 txid` (8), `u64 checksum` (16), `u32 right` (24), `u32 reserved` (28);
 * page kinds: 1 leaf, 2 internal, 3 index-leaf, 4 index-internal, 5 free, 6 log,
-  7 meta (the note lists the kinds but not their numbers);
+  7 meta (the note lists the kinds but not their numbers). The writer uses kind 1 only:
+  the primary records are one chained run of leaves, followed through `right`;
 * primary leaf record 32 B: `u64 node id` (0), `u32 kind` (8), `u32 label` (12),
   `u64 count` (16), `u64 version` (24), slots at `32 + i*32` (the note's "the node id
   is the key, so it is not repeated" contradicts its own arithmetic — 32 B a record,
@@ -109,9 +110,9 @@ def Store.indexRecordSize : Nat := 16
 def Store.internalRecordSize : Nat := 16
 /-- The assumed on-disk format version (`meta.format`). -/
 def Store.formatVersion : Nat := 1
-/-- The magic our fixture writes (`WIZSTOR1`, little-endian). The decoder accepts any
-nonzero magic with a valid checksum: the note does not fix a value. -/
-def Store.metaMagic : U64 := U64.ofNat 0x31524F54535A4957
+/-- The on-disk magic (`store-durable`'s `metaMagic`; the reader accepts any nonzero value
+with a valid checksum, so an older fixture still reads). -/
+def Store.metaMagic : U64 := U64.ofNat 0x57495a53544f5245
 /-- The offsets a meta slot may start at (page 0, its second 64-byte slot, page 1). -/
 def Store.metaOffsets : List Nat := [0, 64, 4096]
 /-- The deepest tree walk accepted before the file is called cyclic/corrupt. -/
@@ -366,6 +367,24 @@ def Store.findInLeaf (m : Map) (page : U64) (key : U64) : Except StoreError (Opt
       | .ok base => .ok (Store.findInLeafFrom m base 0 hdr.n key)
     | _ => .error (.badKind page hdr.kindCode)
 
+/-- Scan a leaf, then its `right` siblings: `store-durable` writes the primary records as
+one chained run of leaf pages (no internal pages yet), so a lookup that is not in the
+first page follows the chain. `fuel` bounds a corrupt cycle. -/
+def Store.findInChain : Map → U64 → U64 → Bool → Nat → Except StoreError (Option NodeRecord)
+  | _, _, _, _, .zero => .error (.tooDeep 0)
+  | m, page, key, verify, .succ f => match Store.checkPage m page verify with
+    | .error e => .error e
+    | .ok _ => match Store.header m page with
+      | .error e => .error e
+      | .ok hdr => match hdr.kind with
+        | .leaf => match Store.findInLeaf m page key with
+          | .error e => .error e
+          | .ok (.some r) => .ok (.some r)
+          | .ok .none => match UIntN.beq hdr.right (U64.ofNat 0) with
+            | .true => .ok .none
+            | .false => Store.findInChain m hdr.right key verify f
+        | _ => .error (.badKind page hdr.kindCode)
+
 -- ## The B+tree walk
 
 /-- The child for `key`: the last internal entry whose key is `<= key`, or the first
@@ -414,7 +433,7 @@ def Store.walkFrom : Map → U64 → U64 → Bool → Nat → Except StoreError 
     | .ok _ => match Store.header m page with
       | .error e => .error e
       | .ok hdr => match hdr.kind with
-        | .leaf => Store.findInLeaf m page key
+        | .leaf => Store.findInChain m page key verify f
         | .internal => match Store.findChild m page key with
           | .error e => .error e
           | .ok child => Store.walkFrom m child key verify f
@@ -571,58 +590,60 @@ def Store.pickMeta (m : Map) : Except StoreError MetaSlot :=
 
 -- ## A snapshot is a root pointer
 
-/-- A mapping and a root page: the production `Root` (the prototype's is a `U64Map`).
+/-- A mapping and a root page: the mapped root (the prototype's is a `U64Map`).
 The map is a reference-counted handle; copying the root does not copy a page. -/
-structure Root where
+structure MapRoot where
   map : Map
   page : U64
 
 /-- An immutable snapshot: a generation and a root page into the mapping. `getDb`
-returns one; reads go through `Snapshot.getNode`/`Snapshot.indexBucket`. -/
-structure Snapshot where
+returns one; reads go through `MappedSnapshot.getNode`/`MappedSnapshot.indexBucket`. -/
+structure MappedSnapshot where
   gen : U64
-  root : Root
+  root : MapRoot
   indexRoot : U64
 
 /-- Open a snapshot: pick the valid meta slot, require format 1, and (with `verify`)
 checksum the root page. The meta checksums are always checked. -/
-def Snapshot.openWith (m : Map) (verify : Bool) : Except StoreError Snapshot :=
+def MappedSnapshot.openWith (m : Map) (verify : Bool) : Except StoreError MappedSnapshot :=
   match Store.pickMeta m with
   | .error e => .error e
   | .ok meta => match Nat.beq meta.format Store.formatVersion with
     | .false => .error (.badFormat meta.format)
     | .true => match verify with
-      | .false => .ok (Snapshot.mk meta.txid (Root.mk m meta.root) meta.indexRoot)
-      | .true => match Store.verifyPage m meta.root with
-        | .error e => .error e
-        | .ok _ => .ok (Snapshot.mk meta.txid (Root.mk m meta.root) meta.indexRoot)
+      | .false => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
+      | .true => match Nat.beq meta.root.toNat 0 with
+        | .true => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
+        | .false => match Store.verifyPage m meta.root with
+          | .error e => .error e
+          | .ok _ => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
 
 /-- Open a snapshot, verifying the root page's checksum (the default). -/
-def Snapshot.open (m : Map) : Except StoreError Snapshot := Snapshot.openWith m .true
+def MappedSnapshot.open (m : Map) : Except StoreError MappedSnapshot := MappedSnapshot.openWith m .true
 
 /-- The node with `id` in the snapshot, verifying every page on the way (the first
 slice's default). -/
-def Snapshot.getNode (s : Snapshot) (id : U64) : Except StoreError (Option NodeRecord) :=
+def MappedSnapshot.getNode (s : MappedSnapshot) (id : U64) : Except StoreError (Option NodeRecord) :=
   Store.getNode s.root.map s.root.page id .true
 
 /-- The node with `id`, skipping page checksums on the hot path (`verify := false` only
 for pages the caller trusts). -/
-def Snapshot.getNodeWith (s : Snapshot) (id : U64) (verify : Bool) :
+def MappedSnapshot.getNodeWith (s : MappedSnapshot) (id : U64) (verify : Bool) :
     Except StoreError (Option NodeRecord) :=
   Store.getNode s.root.map s.root.page id verify
 
 /-- The nodes in the index bucket for `value`, verifying every page (the default). -/
-def Snapshot.indexBucket (s : Snapshot) (value : U64) : Except StoreError (List U64) :=
+def MappedSnapshot.indexBucket (s : MappedSnapshot) (value : U64) : Except StoreError (List U64) :=
   Store.indexWalk s.root.map s.indexRoot value .true Store.maxDepth
 
 /-- The index bucket, skipping page checksums on the hot path. -/
-def Snapshot.indexBucketWith (s : Snapshot) (value : U64) (verify : Bool) :
+def MappedSnapshot.indexBucketWith (s : MappedSnapshot) (value : U64) (verify : Bool) :
     Except StoreError (List U64) :=
   Store.indexWalk s.root.map s.indexRoot value verify Store.maxDepth
 
 /-- Map a file and open a snapshot from it: the IO shell the engine's `getDb` uses
-(`mapFile` then `Snapshot.openWith`). -/
+(`mapFile` then `MappedSnapshot.openWith`). -/
 def Store.openSnapshot (fd : Fd) (length : Nat) (verify : Bool) :
-    EIO (Except StoreError Snapshot) := do
+    EIO (Except StoreError MappedSnapshot) := do
   m ← Store.mapFile fd length;
-  EIO.pure (Snapshot.openWith m verify)
+  EIO.pure (MappedSnapshot.openWith m verify)

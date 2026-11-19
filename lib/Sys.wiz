@@ -674,6 +674,8 @@ extern "wiz_sys_fd_seek" Fd.seekRaw : Fd → Nat → Nat → Bool → IO Nat
 extern "wiz_sys_fd_fsync" Fd.syncRaw : Fd → IO Nat
 /-- Raw `fdatasync`; use `Fd.dataSync`. -/
 extern "wiz_sys_fd_fdatasync" Fd.dataSyncRaw : Fd → IO Nat
+/-- Raw `ftruncate`; use `Fd.truncate`. -/
+extern "wiz_sys_fd_ftruncate" Fd.truncateRaw : Fd → Nat → IO Nat
 /-- Raw `poll`; use `Fd.poll`. -/
 extern "wiz_sys_fd_poll" Fd.pollRaw : List Fd → List Nat → Bool → Nat → IO (List Nat)
 /-- Raw pipe hand-over; use `Child.takePipe`. -/
@@ -814,6 +816,9 @@ def Fd.sync (f : Fd) : EIO Unit := Sys.lift "fsync" (Fd.syncRaw f)
 /-- Flush this descriptor's data to stable storage (`fdatasync`), leaving metadata that is
 not needed to read the data back to the filesystem. -/
 def Fd.dataSync (f : Fd) : EIO Unit := Sys.lift "fdatasync" (Fd.dataSyncRaw f)
+/-- Set the file's length in bytes: growing zero-fills, shrinking discards the tail. Only
+for a descriptor whose pages nothing holds mapped past the new end. -/
+def Fd.truncate (f : Fd) (n : Nat) : EIO Unit := Sys.lift "ftruncate" (Fd.truncateRaw f n)
 
 -- Waiting on several descriptors.
 /-- What `Fd.poll` waits for on a descriptor. -/

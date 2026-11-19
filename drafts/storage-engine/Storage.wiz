@@ -241,6 +241,9 @@ inductive CommitError where
   | conflict (id : U64) (expected : U64) (actual : U64)
   | missing (id : U64)
   | duplicate (ix : U32) (value : U64)
+  /-- The retention policy no longer keeps the transaction's base generation
+  (its root's pages may since have been compacted away). -/
+  | expired (base : U64) (floor : U64)
 
 /-- A commit's outcome. -/
 inductive Outcome where

@@ -5,6 +5,7 @@ import WordMap
 import Functor
 import MVar
 import Storage
+import Registry
 /-!
 # A durable single-file store (storage engine, slice 2)
 
@@ -277,14 +278,14 @@ def writeAt (fd : Fd) (page : U64) (b : Bytes) : EIO Unit := do
   at ← Fd.seek fd (.start (Nat.mul page.toNat pageSize));
   Fd.write fd b
 
-/-- Follow a commit's page chain from its root. `fuel` is the slot's `page_count`, so a
-cycle or an out-of-range `right` is corrupt rather than a loop. -/
-def loadChainGo (fd : Fd) (txid pageCount : U64) : Nat → U64 → List Rec →
-    EIO (Option (List Rec))
-  | .zero, _, _ => EIO.pure .none
-  | .succ k, page, acc =>
+/-- Follow a commit's page chain from its root, also counting its pages. `fuel` is the
+slot's `page_count`, so a cycle or an out-of-range `right` is corrupt rather than a loop. -/
+def loadChainCountGo (fd : Fd) (txid pageCount : U64) : Nat → U64 → List Rec → Nat →
+    EIO (Option (List Rec × Nat))
+  | .zero, _, _, _ => EIO.pure .none
+  | .succ k, page, acc, n =>
     match Nat.beq page.toNat 0 with
-    | .true => EIO.pure (.some acc)
+    | .true => EIO.pure (.some (acc, n))
     | .false =>
       match UIntN.lt page pageCount with
       | .false => EIO.pure .none
@@ -293,23 +294,33 @@ def loadChainGo (fd : Fd) (txid pageCount : U64) : Nat → U64 → List Rec →
         match r with
         | .none => EIO.pure .none
         | .some p =>
-          loadChainGo fd txid pageCount k p.right (List.append acc p.recs)
+          loadChainCountGo fd txid pageCount k p.right (List.append acc p.recs) (Nat.succ n)
+
+/-- The records of a slot's root and the chain's length, if the whole chain verifies. -/
+def loadChainCount (fd : Fd) (m : Meta) : EIO (Option (List Rec × Nat)) :=
+  match Nat.beq m.root.toNat 0 with
+  | .true => EIO.pure (.some ([], 0))
+  | .false => loadChainCountGo fd m.txid m.pageCount m.pageCount.toNat m.root [] 0
 
 /-- The records of a slot's root, if the whole chain verifies. -/
-def loadChain (fd : Fd) (m : Meta) : EIO (Option (List Rec)) :=
-  match Nat.beq m.root.toNat 0 with
-  | .true => EIO.pure (.some [])
-  | .false => loadChainGo fd m.txid m.pageCount m.pageCount.toNat m.root []
+def loadChain (fd : Fd) (m : Meta) : EIO (Option (List Rec)) := do
+  r ← loadChainCount fd m;
+  match r with
+  | .none => EIO.pure .none
+  | .some p => EIO.pure (.some p.1)
 
 -- ## A committed database on disk
 
-/-- The published state: the last committed `Db`, the next free page, and the highest
-`txid` any checksum-valid slot has carried (it may be above `db.gen` after a fallback,
-so a new commit never reuses it). -/
+/-- The published state: the last committed `Db`, the next free page, the highest `txid`
+any checksum-valid slot has carried (it may be above `db.gen` after a fallback, so a new
+commit never reuses it), the descriptor compaction replaces, and the retention registry
+(the roots this process still serves). -/
 structure StoreState where
   db : Db
   pageCount : U64
   genFloor : U64
+  fd : Fd
+  registry : Registry
 
 /-- An empty database with the schema's indices built (they are empty too). -/
 def emptyDb (indices : List IndexDef) : Db :=
@@ -350,18 +361,43 @@ def maxPages (ms : List Meta) : U64 :=
     | .true => m.pageCount
     | .false => p) (U64.ofNat 2) ms
 
-/-- Try the slots newest first; the first whose chain verifies is the state. -/
-def chooseState (fd : Fd) (indices : List IndexDef) (floor pages : U64) :
+/-- The root a slot names, once its chain verifies. -/
+def refOf (m : Meta) (recs : List Rec) (n : Nat) : RootRef :=
+  RootRef.mk m.txid m.root n m.delEpoch 0
+
+/-- Try the slots newest first; the first whose chain verifies is the state. The registry
+starts with that root; `addOlder` appends the other slot's root when it verifies too, so
+the two on-disk meta slots give a restart a two-root retention (K is clamped to at least
+one, and a larger K is in-process history that the format does not name). -/
+def chooseState (fd : Fd) (indices : List IndexDef) (floor pages : U64) (keep : Nat) :
     List Meta → EIO (Option StoreState)
   | .nil => EIO.pure .none
   | .cons m rest => do
-    r ← loadChain fd m;
+    r ← loadChainCount fd m;
     match r with
-    | .some recs => EIO.pure (.some (StoreState.mk (dbOf m recs indices) pages floor))
-    | .none => chooseState fd indices floor pages rest
+    | .some p =>
+      EIO.pure (.some (StoreState.mk (dbOf m p.1 indices) pages floor fd
+        (Registry.mk [refOf m p.1 p.2] keep)))
+    | .none => chooseState fd indices floor pages keep rest
 
-/-- Read both slots and recover the last committed state (or an empty store). -/
-def recover (fd : Fd) (indices : List IndexDef) : EIO StoreState := do
+/-- Add any other checksum-valid slot's root the chosen state does not already hold. The
+meta list is the decreasing argument; the state is threaded after it. -/
+def addOlder (fd : Fd) : List Meta → StoreState → EIO StoreState
+  | .nil, st => EIO.pure st
+  | .cons m rest, st =>
+    match Registry.find st.registry m.txid with
+    | .some _ => addOlder fd rest st
+    | .none => do
+      r ← loadChainCount fd m;
+      match r with
+      | .none => addOlder fd rest st
+      | .some p =>
+        addOlder fd rest { st with registry := Registry.add st.registry (refOf m p.1 p.2) }
+
+/-- Read both slots and recover the last committed state (or an empty store), returning
+the state and the first free page any valid slot names. -/
+def recoverWith (fd : Fd) (indices : List IndexDef) (keep : Nat) :
+    EIO (StoreState × U64) := do
   a ← readAt fd 0 metaSize;
   b ← readAt fd pageSize metaSize;
   let ma : Option Meta := match a with
@@ -373,10 +409,18 @@ def recover (fd : Fd) (indices : List IndexDef) : EIO StoreState := do
   let ms := validMetas ma mb;
   let floor := maxTxid ms;
   let pages := maxPages ms;
-  r ← chooseState fd indices floor pages ms;
-  match r with
-  | .some st => EIO.pure st
-  | .none => EIO.pure (StoreState.mk (emptyDb indices) pages floor)
+  r ← chooseState fd indices floor pages keep ms;
+  st ← match r with
+    | .some s => addOlder fd ms s
+    | .none =>
+      EIO.pure (StoreState.mk (emptyDb indices) pages floor fd
+        (Registry.mk [RootRef.mk (U64.ofNat 0) (U64.ofNat 0) 0 (U64.ofNat 0) 0] keep));
+  EIO.pure (st, pages)
+
+/-- Read both slots and recover the last committed state (or an empty store). -/
+def recover (fd : Fd) (indices : List IndexDef) : EIO StoreState := do
+  p ← recoverWith fd indices 8;
+  EIO.pure p.1
 
 -- ## Commit
 
@@ -438,7 +482,7 @@ def commit (fd : Fd) (st : StoreState) (tx : Snapshot) :
       db'.root.delEpoch (U64.ofNat 0) (U64.ofNat 0) last;
     -- On an I/O error the pages are abandoned (never reused) and the generation floor
     -- moves past `g`, so this attempt can never be mistaken for the next one.
-    let failed := StoreState.mk st.db last g;
+    let failed := StoreState.mk st.db last g fd st.registry;
     r ← writePages fd g chunks start;
     match r with
     | .error e => IO.pure (failed, .error e)
@@ -452,24 +496,47 @@ def commit (fd : Fd) (st : StoreState) (tx : Snapshot) :
         rm ← writeMeta fd g meta;
         match rm with
         | .error e => IO.pure (failed, .error e)
-        | .ok _ => IO.pure (StoreState.mk db' last g, .ok (.committed g))
+        | .ok _ =>
+          let ref := RootRef.mk g root n db'.root.delEpoch 0;
+          IO.pure (StoreState.mk db' last g fd
+            (Registry.trim (Registry.add st.registry ref)), .ok (.committed g))
 
 -- ## The handle
 
-/-- A store: its descriptor, its published state (behind the single-writer cell), and
-the schema's indices (rebuilt on open; there is no index page in this slice). -/
+/-- A store: its path (compaction replaces the file), its published state behind the
+single-writer cell, and the schema's indices (rebuilt on open; there is no index page in
+this slice). -/
 structure Handle where
-  fd : Fd
+  path : String
   state : MVar StoreState
   indices : List IndexDef
 
-/-- Open (creating if needed) and recover a store. -/
-def openDb (path : String) (indices : List IndexDef) : EIO Handle := do
+/-- Drop bytes past `pages` pages: they were appended by a commit that crashed before the
+meta switch, so no valid slot names them. Only call it when no reader has the file
+mapped (open does). -/
+def trimTail (fd : Fd) (pages : U64) : EIO Unit := do
+  size ← Fd.seek fd (.fromEnd 0);
+  let target := Nat.mul pages.toNat pageSize;
+  match Nat.le size target with
+  | .true => EIO.pure ()
+  | .false => Fd.truncate fd target
+
+/-- Open (creating if needed) and recover a store, retaining the newest `keep` roots
+(plus leased ones; at least one). -/
+def openDbWith (path : String) (indices : List IndexDef) (keep : Nat) : EIO Handle := do
   fd ← Fd.open path .readWrite
     (OpenFlags.mk .true .false .false .false .false .false);
-  st ← recover fd indices;
-  cell ← EIO.lift (MVar.newFull st);
-  EIO.pure (Handle.mk fd cell indices)
+  let k := match Nat.lt 0 keep with
+    | .true => keep
+    | .false => 1;
+  p ← recoverWith fd indices k;
+  trimTail fd p.2;
+  cell ← EIO.lift (MVar.newFull p.1);
+  EIO.pure (Handle.mk path cell indices)
+
+/-- Open with the default retention (K = 8). -/
+def openDb (path : String) (indices : List IndexDef) : EIO Handle :=
+  openDbWith path indices 8
 
 /-- The latest committed snapshot. -/
 def getDb (h : Handle) : EIO Snapshot :=
@@ -478,14 +545,23 @@ def getDb (h : Handle) : EIO Snapshot :=
     IO.pure (Db.snapshot st.db))
 
 /-- Commit a transaction, or reject it. The cell is held for the whole commit: one
-writer, and `getDb` never observes a half-written `Db`. -/
+writer, and `getDb` never observes a half-written `Db`. A snapshot whose generation the
+retention policy no longer keeps is `expired` (its pages are gone or about to be). -/
 def putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
   MVar.borrow h.state (fun st hole =>
-    IO.bind (commit h.fd st tx)
-      (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
+    match Registry.retained st.registry tx.gen with
+    | .false =>
+      MVar.fill h.state hole st
+        (IO.pure (.ok (.rejected (.expired tx.gen (Registry.minGen st.registry))))
+          : IO (Except String Outcome))
+    | .true =>
+      IO.bind (commit st.fd st tx)
+        (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
 
 /-- Close the descriptor. The in-memory state is dropped with the handle. -/
-def closeDb (h : Handle) : EIO Unit := Fd.close h.fd
+def closeDb (h : Handle) : EIO Unit := do
+  st ← EIO.lift (MVar.read h.state);
+  Fd.close st.fd
 
 -- ## A test shape (compiled only: the natives are `wiz run` code)
 
