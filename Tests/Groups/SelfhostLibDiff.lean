@@ -920,7 +920,7 @@ def libDiffGroup : Group where
         for size in [0, 1, 3, 7, 182, 183] do
           let files := ((List.range size).map toString).toArray
           let parts := (List.range libDiffChunks).map (libDiffChunk files)
-          let joined := parts.foldl (· ++ ·) (#[] : Array String)
+          let joined := parts.foldl (· ++ ·) (#[] : Array String) -- complexity: ok (libDiffChunks is 4)
           checkEq files joined
           let lo := parts.foldl (fun m p => min m p.size) size
           let hi := parts.foldl (fun m p => max m p.size) 0
@@ -928,7 +928,7 @@ def libDiffGroup : Group where
         -- and on the sweep's real list: every lib/ and scry/ file in exactly one part
         let all ← libDiffFiles
         let parts := (List.range libDiffChunks).map (libDiffChunk all)
-        checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) },
+        checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) -- complexity: ok (libDiffChunks is 4)
     { name := "the sweep's worker pool: every file exactly once, results in order, any worker count", run := fun _ => do
         for jobs in [1, 2, 3, 8, 40] do
           let n := 17
