@@ -16,7 +16,9 @@ neighbours that must stay accepted, so the corpus cannot be gamed by over-reject
 `xfail:` cases are programs that should be rejected but are not (a `Tests.note` records
 why, and the case fails once the elaborator rejects them).
 
-`lake test -- '=reject'` runs the group.
+`lake test -- '=reject'` runs the group. The last cases run the experimental kernel flags
+(`--predicative-prop`, `--strict-privacy`) through the command line: they assert the
+verdict *and* the message, because the flag (not a `Globals` field) is what is under test.
 -/
 
 namespace Tests.RejectGroup
@@ -374,7 +376,48 @@ def group : Group where
           let errs := s.messages.filter (·.severity == .error)
           throw (IO.userError s!"no module-name clash:\n{"\n".intercalate (errs.toList.map (describe src))}")
         let s2 := (← Cache.elaborateCached (some cache) [] src init 0).1
-        unless clash s2 do throw (IO.userError "the module-name clash disappeared on a warm cache") }
+        unless clash s2 do throw (IO.userError "the module-name clash disappeared on a warm cache") },
+    -- experimental kernel modes: the flags (not just the `Globals` fields the in-process
+    -- tests set), the verdict each changes, and the rendered message
+    { name := "kernel mode --predicative-prop: an impredicative Prop is rejected, the same program is accepted without the flag", run := fun _ => do
+        let src := "import Prelude\ndef Impr : Prop := (P : Prop) → P → P\n"
+        -- impredicative (the default): `(P : Prop) → P → P` is a small proposition
+        let some _ ← cliCheckWith [] src [] false | return
+        let some out ← cliCheckWith ["--predicative-prop"] src [] true | return
+        check (out.contains "Impr: impredicative Π (into Prop over Prop) under predicative Prop")
+          s!"the --predicative-prop message changed:\n{out}"
+        -- under the flag, a Π whose domain is a variable is still a proposition, and a
+        -- declaration's own Π-spine is exempt (`declTypeSpine`: the theorem is never used
+        -- as a proof at level 0)
+        let okSrc := "import Prelude\ndef f (P : Prop) : Prop := P → P\ndef thm (A : Type) (a : A) : A := a\n"
+        discard <| cliCheckWith ["--predicative-prop"] okSrc [] false },
+    { name := "kernel mode --strict-privacy: the documented over-rejection class (a proof that quotes an evaluated UIntN)", run := fun _ => do
+        -- `lib/Hdl/Mem.wiz` checks normally. With the flag the second check rejects
+        -- `Mem.ram1_write_read`: its `rfl` quotes the evaluated `BitVec 1` as
+        -- `μ (UIntN.desc 1) …`, which has no name once `UIntN` (a sealed type of another
+        -- module) has no definition. This is the "legitimate proof that computes through
+        -- a library operation" the documentation says the flag is off for (13b; the file
+        -- it names, `drafts/feral/lowered/03_get_mut.wiz`, no longer triggers).
+        let mem : System.FilePath := System.FilePath.mk "lib/Hdl/Mem.wiz"
+        let some _ ← cliRun ["--cache", cacheDir.toString] mem false | return
+        let some out ← cliRun ["--strict-privacy"] mem true | return
+        check (out.contains "Mem.ram1_write_read depends on the definition of UIntN (module Word), which is hidden outside its module")
+          s!"the --strict-privacy message changed:\n{out}" },
+    { name := "kernel mode --strict-privacy: the first-order forgery it was added for is now rejected without the flag", run := fun _ => do
+        -- (13b, `docs/stages/13-language.md`: "this also rejects a forgery that some other
+        -- rule left to the kernel"). The only such forgery was the untyped-unification
+        -- one; since a guessed solution is type-checked where it is made, the default
+        -- elaborator rejects it, so the flag never gets a declaration to check. Pinned
+        -- both ways: the verdict and message are the same with and without it.
+        let src := "import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+          "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+          "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n"
+        let want := "hidden outside its module"
+        let some out ← cliCheckWith [] src [("Priv", privMod)] true | return
+        check (out.contains want) s!"the default verdict's message changed:\n{out}"
+        let some out ← cliCheckWith ["--strict-privacy"] src [("Priv", privMod)] true | return
+        check (out.contains want) s!"the --strict-privacy verdict's message changed:\n{out}" }
   ]
 
 builtin_initialize registerGroup group
