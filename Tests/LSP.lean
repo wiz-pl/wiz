@@ -462,6 +462,10 @@ def wsCase : IO Unit := do
         let (r, w) ← tcp
         w.putStr "GET / HTTP/1.1\r\nHost: x\r\n\r\n"; w.flush
         check (((← r.getLine).splitOn "426").length > 1) "a plain GET was not refused"
+        -- a head that never ends (more than 100 header lines) is a `400`, not silence
+        let (r, w) ← tcp
+        w.putStr ("GET / HTTP/1.1\r\nHost: x\r\n" ++ String.join (List.replicate 101 "X: y\r\n")); w.flush
+        check (((← r.getLine).splitOn "400").length > 1) "a malformed head was not refused"
         -- the editor opens a document
         let src := "import Prelude\ndef k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n"
         LSP.writeMessage edW (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
