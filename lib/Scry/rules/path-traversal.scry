@@ -1,0 +1,93 @@
+# scry's opt-in path-traversal pack (CWE-22)
+#
+# This file is the default pack (`default.scry`) plus the `path-traversal` rule,
+# so `--rules lib/Scry/rules/path-traversal.scry` keeps command injection, format
+# strings and the forbidden calls and adds file-path sinks. It is opt-in: the
+# default pack does not ship it (see scry/README.md, "Rules").
+#
+# Taint reaches a path API through `getenv`, `read`/`recv`/`fgets`/`getline`/
+# `fread`, or C's `argv`. The `source argv result` line is a pack directive, not a
+# call pattern: it seeds the second parameter of `main` as a source.
+#
+# `realpath` is modelled in `Scry.Models` as a sanitiser of its result and of the
+# destination it writes (argument 1), never of its input. So
+#
+#   realpath(user, buf); open(buf);    -- clean: buf is the canonical path
+#   realpath(user, buf); open(user);   -- still reported: the input is unchanged
+#   p = realpath(user, 0); open(p);    -- clean: the result is canonical
+#
+# `sanitize_path`/`confine_path` are the policy-model sanitisers already in the
+# model table. A program that normalises with its own function (as the Apache
+# reduction for CVE-2021-41773 does) is not laundered: there is no model for it.
+
+rule command-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a command interpreter
+  source getenv result
+  source recv result
+  source read arg 1
+  sanitise escape_shell result
+  sanitise shellescape result
+  sanitise sanitize arg 0
+  sink system arg 0
+  sink popen arg 0
+end
+
+rule format-string
+  kind taint
+  severity warning
+  message Attacker-controlled data is used as a format string
+  source getenv result
+  source recv result
+  sanitise escape_shell result
+  sink printf arg 0
+  sink fprintf arg 1
+end
+
+rule gets-overflow
+  kind forbidden
+  severity error
+  message gets cannot bound its write; use fgets with a size
+  call gets
+end
+
+rule strcpy-overflow
+  kind forbidden
+  severity warning
+  message strcpy does not bound the copy; use strlcpy or a checked length
+  call strcpy
+  call strcat
+end
+
+rule path-traversal
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a filesystem path
+  source getenv result
+  source recv result
+  source read arg 1
+  source fgets arg 0
+  source getline arg 0
+  source fread arg 0
+  source argv result
+  sanitise realpath result
+  sanitise sanitize_path result
+  sanitise confine_path result
+  sink open arg 0
+  sink openat arg 1
+  sink creat arg 0
+  sink fopen arg 0
+  sink freopen arg 0
+  sink stat arg 0
+  sink lstat arg 0
+  sink unlink arg 0
+  sink remove arg 0
+  sink rename arg 0
+  sink rename arg 1
+  sink chdir arg 0
+  sink opendir arg 0
+  sink access arg 0
+  sink mkdir arg 0
+  sink rmdir arg 0
+end

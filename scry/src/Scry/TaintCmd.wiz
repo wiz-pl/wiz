@@ -45,7 +45,8 @@ fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnost
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
   `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
-  `Scry.RuleTaint`, and direct-call summaries stitch the paths.
+  `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
+  S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
   function's EDB. A finding is `checked` when its certificate verifies and `unchecked`
   otherwise (e.g. no provenance), and the status is printed and put in SARIF.
@@ -84,6 +85,9 @@ structure Scry.TaintOpts where
   failOnFinding : Bool
   /-- `--origin-map`: print the point -> span table. -/
   showOriginMap : Bool
+  /-- `--null-deref`: run the S5 nullness pass and add
+  `scry/memory/null-dereference` diagnostics. Off by default. -/
+  nullDeref : Bool
   /-- `--diff BASE`: filter to the changed lines of `git diff -U0 BASE`, or `all`. -/
   diff : Option String
   /-- `--changed-lines FILE`: filter to the changed lines of a saved unified diff. -/
@@ -104,7 +108,7 @@ structure Scry.TaintOpts where
 clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` disable
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
-  Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
+  Scry.TaintOpts.mk file .none .none .false .false .false .false .false .none .none .none
     (.some 300) (.some 2000000) .none .false
 
 /-- The budget view of the options (`--progress` is included there too). -/
@@ -160,6 +164,7 @@ def Scry.checkDiffBase (o : Scry.TaintOpts) : Except String Scry.TaintOpts :=
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
+  ++ "                      [--null-deref]\n"
   ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "                      [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                      [--progress]\n"
@@ -199,6 +204,7 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
     | "--origin-map" => Scry.taintArgsGo file { o with showOriginMap := .true } rest
+    | "--null-deref" => Scry.taintArgsGo file { o with nullDeref := .true } rest
     | "--diff" => match rest with
       | .cons p more => Scry.taintArgsGo file { o with diff := .some p } more
       | .nil => .error "--diff needs a base revision or 'all'"
@@ -999,7 +1005,7 @@ partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
     let allMems := Scry.allMemSeeds sums;
     results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries plans allMems
       sums p.funcs 0 (List.length p.funcs);
-    let next := Scry.growSummaries p graph sums results;
+    let next := Scry.growSummaries p pack graph sums results;
     match Scry.summariesEq next sums with
     | .true => do
       Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
@@ -1096,12 +1102,15 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
       | .some _ => .true
       | .none => .false;
     let bounds := Scry.boundsCheck prog pt pack results;
+    let nulls : List Scry.MemWarning := match o.nullDeref with
+      | .true => Scry.nullDerefWarnings prog
+      | .false => .nil;
     let warnings := Scry.dedupWarnings (List.append
       (List.filter (Scry.keepMemWarning hasLifetime)
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
-      bounds.warnings);
+      (List.append bounds.warnings nulls));
     let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
     let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
