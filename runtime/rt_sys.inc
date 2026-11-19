@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,6 +36,7 @@ WIZ_API uint64_t wiz_sys_errno(void) { return (uint64_t)wiz_sys_err; }
 WIZ_API const char *wiz_sys_strerror(uint64_t e) {
   if (e == WIZ_SYS_EOF) return "end of file";
   if (e == 100001) return "timed out"; /* WIZ_SYS_TIMEOUT */
+  if (e == 100002) return "busy";      /* WIZ_SYS_BUSY: a non-blocking lock is held */
   return strerror((int)e);
 }
 
@@ -1152,6 +1154,31 @@ WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p) {
 #else
   if (fdatasync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
 #endif
+  wiz_sys_err = 0;
+  return 0;
+}
+/* file locks (flock(2)): one exclusive writer or any number of shared readers, across
+   processes. `mode` 0 shared, 1 exclusive, 2 unlock; `nonblock` makes a held lock the
+   typed `busy` (WIZ_SYS_BUSY) instead of a wait. 0 is success, otherwise errno (also
+   left in `wiz_sys_err`, so a caller that ignores the return still sees it).
+
+   The lock belongs to the open file description: it is dropped by `close` of the last
+   descriptor that shares it, and by the kernel when the process exits or is killed. That
+   is the crash story for the store: an abandoned writer cannot leave the file locked. */
+#define WIZ_SYS_BUSY 100002 /* not an errno: a non-blocking lock that is held */
+WIZ_API uint64_t wiz_sys_fd_flock(void *p, uint64_t mode, int nonblock) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (!h || h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  int op = mode == 0 ? LOCK_SH : mode == 1 ? LOCK_EX : LOCK_UN;
+  if (nonblock) op |= LOCK_NB;
+  if (flock(h->fd, op) != 0) {
+    if (nonblock && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+      wiz_sys_err = 0; /* busy is an answer, not an error */
+      return WIZ_SYS_BUSY;
+    }
+    wiz_sys_err = errno;
+    return (uint64_t)errno;
+  }
   wiz_sys_err = 0;
   return 0;
 }
