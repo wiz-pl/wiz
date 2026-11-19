@@ -315,6 +315,11 @@ where
     let before := s.globals.order.size
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
+    -- Macro scopes must depend on the command, not on which earlier commands were cache
+    -- hits: a hit applies an effect without expanding the macros it recorded, so a running
+    -- counter would make a command's names depend on the schedule. Start each command's
+    -- scopes at its source position instead (the position is part of what the key hashes).
+    let s := { s with nextScope := 1000000 + cmd.info.start }
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)

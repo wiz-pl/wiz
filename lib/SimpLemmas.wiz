@@ -2,7 +2,7 @@ import Nat
 import Int
 import Text
 import Functor
-import ListLemmas
+import Data.ListLemmas
 /-!
 # Simp lemmas
 
@@ -22,7 +22,7 @@ importing that module alone also gives `simp` the rule:
   laws and De Morgan. The three `&&`/`||` identities are stated with the notation
   (the stuck form the macro makes differs from `Bool.and`/`Bool.or` applied); the rest
   are `Bool.and`/`Bool.or` laws. `!` is `Bool.not`, so `Bool.not_not` fires on `!(!b)`.
-* **`List`** (`lib/ListLemmas.wiz`): `xs ++ [] → xs`, `l ++ m` pushed through `map`,
+* **`List`** (`lib/Data/ListLemmas.wiz`): `xs ++ [] → xs`, `l ++ m` pushed through `map`,
   `length`, `filter`, `any` and `all`, and `reverse` in normal form
   (`reverse (reverse l) → l`, `reverse (l ++ m) → reverse m ++ reverse l`, …).
 
@@ -30,7 +30,7 @@ Every rule is a theorem (no axioms, no `sorry`). Rules that would loop are delib
 not registered: commutativity (`Nat.add_comm`, `Bool.and_comm`), associativity
 (`Nat.add_assoc`, `List.append_assoc`), distributivity, and the reverse of the
 identities above. The exclusions and their reasons are in the module that states the
-lemmas (`lib/Nat.wiz`, `lib/Logic.wiz`, `lib/ListLemmas.wiz`).
+lemmas (`lib/Nat.wiz`, `lib/Logic.wiz`, `lib/Data/ListLemmas.wiz`).
 
 ```
 import SimpLemmas

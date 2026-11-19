@@ -99,9 +99,9 @@ def termGroup : Group where
     { name := "forall (13e)", run := fun _ =>
         parses "forall (A : Type) x, A"
           "(term.forall [(binder.explicit [] [A] [(term.type [])]) x] (term.ident A))" },
-    { name := "let with a tuple of three or more names (13f)", run := fun _ =>
+    { name := "let with a tuple pattern of three or more (13f)", run := fun _ =>
         parses "let 1 (a, b, c, d) := p; a"
-          "(term.letTuple [(quantity 1)] a b [c d] (term.ident p) [] (term.ident a))" },
+          "(term.letPat [(quantity 1)] (term.tuplePat (term.ident a) (term.ident b) [(term.ident c) (term.ident d)]) (term.ident p) [] (term.ident a))" },
     { name := "let with semicolon", run := fun _ =>
         parses "let 1 x : A := f a; x"
           "(term.let [(quantity 1)] x [(term.ident A)] (term.app (term.ident f) [(term.ident a)]) [] (term.ident x))" },
@@ -138,7 +138,46 @@ def termGroup : Group where
     { name := "deep nesting is fast (packrat memo)", run := fun _ => do
         let n := 40
         let s := String.join (List.replicate n "(") ++ "x" ++ String.join (List.replicate n ")")
-        let _ ← parseTerm s }
+        let _ ← parseTerm s },
+    { name := "a 1001-digit numeral is exact (10^1000 + 1)", run := fun _ => do
+        -- The digit -> Nat conversion used `String.toNat?`, which folds `n * 10 + d`
+        -- per digit and copies the whole bignum each time (quadratic). The expected
+        -- value is computed here by exponentiation, not from the digit string, so
+        -- this checks the conversion instead of repeating it.
+        let s := "1" ++ String.ofList (List.replicate 999 '0') ++ "1"
+        match parseCategory Builtin.tables "term" s with
+        | .ok stx =>
+          checkEq (some (Nat.pow 10 1000 + 1)) (stx.getArg 0 |>.getNat?)
+          -- and the printer (the cache serialises `natLit` with it) gives the text back
+          checkEq s (NatString.decimalString (Nat.pow 10 1000 + 1))
+        | .error e => throw (IO.userError s!"parse error: {e}") },
+    { name := "a 128 KiB numeral converts and prints in linear time (was quadratic)", run := fun _ => do
+        -- A timing check, not an absolute millisecond budget: `checkScaling` measures
+        -- n and 2n digit numerals (best of three) and requires t(2n) ≤ 3·t(n) + 100 ms.
+        -- The old per-digit fold took ~1.5 s and ~6 s for these sizes (four times
+        -- longer per doubling) and failed the bound; the product tree takes ~10 ms and
+        -- ~25 ms. The 100 ms slack absorbs scheduler noise in the net times.
+        let convert (n : Nat) : IO Unit := do
+          let s := String.ofList (List.replicate (n + 1) '9')
+          match parseCategory Builtin.tables "term" s with
+          | .ok stx => match stx.getArg 0 |>.getNat? with
+            | some _ => pure ()
+            | none => throw (IO.userError "the numeral did not convert")
+          | .error e => throw (IO.userError s!"parse error: {e}")
+        let _ ← checkScaling "numeral conversion" convert 131072 3 100
+        -- `wiz check` serialises the literal for its cache with the printer, and the
+        -- core `Nat.toString` is quadratic too (one division and one append per digit);
+        -- the same n/2n measurement over `NatString.decimalString`.
+        let print (n : Nat) : IO Unit := do
+          let _ := NatString.decimalString (Nat.pow 10 (n + 1) + 1)
+          pure ()
+        let _ ← checkScaling "numeral printing" print 131072 3 100
+        -- The same size against an independently computed value: the token is not
+        -- truncated and the limbs combine in the right order.
+        let s := String.ofList (List.replicate 131072 '9')
+        match parseCategory Builtin.tables "term" s with
+        | .ok stx => checkEq (some (Nat.pow 10 131072 - 1)) (stx.getArg 0 |>.getNat?)
+        | .error e => throw (IO.userError s!"parse error: {e}") }
   ]
 
 def parseFileOk (input : String) : IO ParsedFile := do

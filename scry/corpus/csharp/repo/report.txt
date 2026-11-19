@@ -1,17 +1,18 @@
 scry cs scry/corpus/csharp/repo
 target: scry/corpus/csharp/repo (directory)
-walk: 9 .cs file(s) before exclusions; 4 kept, 5 excluded by rule
-files: 4 found, 3 parsed, 3 lowered, 1 failed
-functions: 4 lowered
-rules: scry/corpus/csharp/csharp.scry (4 rule(s))
+walk: 11 .cs file(s) before exclusions; 6 kept, 5 excluded by rule
+files: 6 found, 5 parsed, 5 lowered, 1 failed
+functions: 6 lowered
+rules: scry/corpus/csharp/csharp.scry (5 rule(s))
 findings: 1 (error 1, warning 0, note 0)
   SEVERITY COUNT  RULE  EXAMPLE
   error    1      command-injection  src/Helper.cs:11:13
-coverage: 8 row(s) — what was skipped or warned about
+coverage: 9 row(s) — what was skipped or warned about
   SEVERITY COUNT  CONSTRUCT                                            EXAMPLE
   error    1      parse failure                                        src/Broken.cs
-  warning  3      unmodelled-external                                  src/Unsupported.cs:11:28
   warning  1      lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown src/Unsupported.cs:10:36
+  warning  1      unknown name not modelled: havoc                     src/SlicePattern.cs:10:45
+  warning  1      unmodelled-external                                  src/Helper.cs:11:13
   note     1      excluded: *.Designer.cs                              src/Form1.Designer.cs
   note     1      excluded: *.g.cs                                     src/Generated.g.cs
   note     1      excluded: bin/                                       bin/Release/Ghost.cs

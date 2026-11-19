@@ -1,0 +1,106 @@
+import Scry.Wil
+/-!
+# Scry.NullExamples: small hand-built Wil programs for the nullness pass
+
+These are the `Scry.Nullness` corpus: the translation from Wil points to `ACfg`, the
+allocation/`call`/literal null sources, the guard kill, and the constant-return status
+guard. They are hand-built so the `scry-taint` group can exercise the pass without a C
+parser; the same shapes end-to-end are `scry/tests/fixtures/null-*.c`.
+
+Programs:
+
+* `nullAlloc` — `p = malloc(4); *p = 1` (an unchecked allocation);
+* `nullChecked` — the same with `if (p == NULL) return` before the store;
+* `nullCall` — `p = lookup(); *p = 1` (an unchecked call result);
+* `nullParam` — `void f(int *p) { *p = 1 }` (a pointer parameter is assumed valid);
+* `nullLiteral` — `p = NULL; *p = 1` (the definitely-null case);
+* `nullStatus` — `req = NULL; st = create(); req->method` (the status is ignored);
+* `nullStatusChecked` — the same under `if (st == SUCCESS)`; `create` always returns
+  `ENOMEM`, so the guard is constant-false and the dereference is unreachable.
+-/
+
+def Scry.np (n : Nat) : Wil.Var := Wil.var n (Wil.Ty.ptr Wil.Ty.unknown)
+def Scry.nint (n : Nat) : Wil.Var := Wil.var n Wil.i32
+
+/-- `p = malloc(4); *p = 1`. Points: 0 alloc, 1 the value, 2 store, 3 return. -/
+def Scry.nullAlloc : Wil.Program :=
+  let p := Scry.np 0;
+  let one := Scry.nint 1;
+  Wil.program
+    [ Wil.func "main" [] [p, one]
+        [ Wil.block [Wil.alloc p 4, Wil.num one 1, Wil.store p one] (Wil.ret .none) ] ]
+
+/-- `p = malloc(4); if (p == NULL) return; *p = 1`. -/
+def Scry.nullChecked : Wil.Program :=
+  let p := Scry.np 0;
+  let one := Scry.nint 1;
+  let zero := Scry.nint 2;
+  Wil.program
+    [ Wil.func "main" [] [p, one, zero]
+        [ Wil.block [Wil.alloc p 4, Wil.num one 1, Wil.num zero 0]
+            (Wil.branch (Wil.condEq p zero) (Wil.mkBlockId 2) (Wil.mkBlockId 1))
+        , Wil.block [Wil.store p one] (Wil.jump (Wil.mkBlockId 2))
+        , Wil.block [] (Wil.ret .none) ] ]
+
+/-- `p = lookup(); *p = 1`. -/
+def Scry.nullCall : Wil.Program :=
+  let p := Scry.np 0;
+  let one := Scry.nint 1;
+  Wil.program
+    [ Wil.func "main" [] [p, one]
+        [ Wil.block [Wil.call (.some p) "lookup" [], Wil.num one 1, Wil.store p one]
+            (Wil.ret .none) ] ]
+
+/-- `void f(int *p) { *p = 1 }` (no caller; the parameter is assumed valid). -/
+def Scry.nullParam : Wil.Program :=
+  let p := Scry.np 0;
+  let one := Scry.nint 1;
+  Wil.program
+    [ Wil.func "f" [p] [one]
+        [ Wil.block [Wil.num one 1, Wil.store p one] (Wil.ret .none) ] ]
+
+/-- `p = NULL; *p = 1`. -/
+def Scry.nullLiteral : Wil.Program :=
+  let p := Scry.np 0;
+  let one := Scry.nint 1;
+  Wil.program
+    [ Wil.func "main" [] [p, one]
+        [ Wil.block [Wil.cst p .nul, Wil.num one 1, Wil.store p one] (Wil.ret .none) ] ]
+
+/-- `create() { return 1 }` (ENOMEM). -/
+def Scry.nullStatusHelper : Wil.Func :=
+  let r := Scry.nint 0;
+  Wil.func "create" [] [r]
+    [ Wil.block [Wil.num r 1] (Wil.retV r) ]
+
+/-- `req = NULL; st = create(); req->method`. -/
+def Scry.nullStatus : Wil.Program :=
+  let req := Scry.np 0;
+  let st := Scry.nint 1;
+  let fld := Scry.nint 2;
+  Wil.program
+    [ Wil.func "main" [] [req, st, fld]
+        [ Wil.block
+            [ Wil.cst req .nul
+            , Wil.call (.some st) "create" []
+            , Wil.gep fld req 0
+            , Wil.load fld fld ]
+            (Wil.ret .none) ]
+    , Scry.nullStatusHelper ]
+
+/-- `req = NULL; st = create(); if (st == SUCCESS) req->method`. -/
+def Scry.nullStatusChecked : Wil.Program :=
+  let req := Scry.np 0;
+  let st := Scry.nint 1;
+  let fld := Scry.nint 2;
+  let zero := Scry.nint 3;
+  Wil.program
+    [ Wil.func "main" [] [req, st, fld, zero]
+        [ Wil.block
+            [ Wil.cst req .nul
+            , Wil.call (.some st) "create" []
+            , Wil.num zero 0 ]
+            (Wil.branch (Wil.condEq st zero) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+        , Wil.block [Wil.gep fld req 0, Wil.load fld fld] (Wil.jump (Wil.mkBlockId 2))
+        , Wil.block [] (Wil.ret .none) ]
+    , Scry.nullStatusHelper ]

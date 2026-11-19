@@ -8,7 +8,7 @@ import FeralCore
 -- fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit
 -- `*x` reads the value and gives the handle back (`Uniq.peek`); a function returns its
 -- value and its handles in a `Result1`, whose error alternative hands them back too (D8).
-def swap {ρ₁ ρ₂ : Region} (1 x : Uniq ρ₁ U64) (1 y : Uniq ρ₂ U64) : Result1 Unit ((1 _ : Uniq ρ₁ U64) × Uniq ρ₂ U64) :=
+def swap {0 ρ₁ ρ₂ : Region} (1 x : Uniq ρ₁ U64) (1 y : Uniq ρ₂ U64) : Result1 Unit ((1 _ : Uniq ρ₁ U64) × Uniq ρ₂ U64) :=
   let 1 (t, x) := Uniq.peek x;       -- let t := *x        (U64 is Copy)
   let 1 (u, y) := Uniq.peek y;
   let 1 x := Uniq.write x u;         -- *x := *y
@@ -18,7 +18,7 @@ def swap {ρ₁ ρ₂ : Region} (1 x : Uniq ρ₁ U64) (1 y : Uniq ρ₂ U64) : 
 -- fn mem_swap {'a 'b} {T : Type} (x : &'a mut T) (y : &'b mut T) : Unit := mem.swap x y
 -- (a move out of a borrow is only allowed through `mem.swap`/`mem.replace`; lowered,
 -- it is just exchanging the two values)
-def mem_swap {ρ₁ ρ₂ : Region} {T : Type} (1 x : Uniq ρ₁ T) (1 y : Uniq ρ₂ T) : Result1 Unit ((1 _ : Uniq ρ₁ T) × Uniq ρ₂ T) :=
+def mem_swap {0 ρ₁ ρ₂ : Region} {T : Type} (1 x : Uniq ρ₁ T) (1 y : Uniq ρ₂ T) : Result1 Unit ((1 _ : Uniq ρ₁ T) × Uniq ρ₂ T) :=
   let 1 (t, x) := Uniq.peek x;
   let 1 (u, y) := Uniq.peek y;
   .ok () (Uniq.write x u, Uniq.write y t)

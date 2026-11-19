@@ -1,7 +1,7 @@
 import FeralCore
 -- REJECTED (Rust: "lifetime may not live long enough" at the call: `pick` needs `'a : 'b`,
 -- but `b`'s borrow is the outer one, so only `'b : 'a` holds). check.sh expects a type error.
-def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
+def pick {0 ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
     Borrowed (Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)) ((1 _ : Uniq ρa U64) × Uniq ρb U64) :=
   match c with
   | .true => .ok (Mut.alongside (Mut.weaken h (Mut.ofUniq x)) y (fun (x : Uniq ρa U64) (y : Uniq ρb U64) => (x, y)))

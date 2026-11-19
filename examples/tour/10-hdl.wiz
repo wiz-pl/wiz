@@ -18,6 +18,6 @@ def pipeline : Circuit B4 B4 := Circuit.seq (Circuit.comb addThree) acc
 -- simulate on a list of inputs (one per clock cycle), as numbers
 #eval Circuit.runPacked pipeline [1, 2, 3, 4]
 -- the same circuit as a netlist, simulated cycle by cycle: the same outputs
-#eval Circuit.simNet Bool.true pipeline [1, 2, 3, 4]
+#eval Circuit.simNet .true pipeline [1, 2, 3, 4]
 -- and as Verilog
 def verilog : String := Verilog.emit (Circuit.netlist "pipeline" pipeline)

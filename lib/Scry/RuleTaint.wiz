@@ -146,12 +146,16 @@ inductive Scry.MemWarnKind where
   /-- A call to an external function with no model and a pointer result or argument:
   its result and memory effect are unknown, not silently assumed pure. -/
   | unmodelledExternal
+  /-- A load or store through a pointer that may be null on some path (S5's nullness
+  alarm, wired through `Scry.Nullness`). -/
+  | nullDereference
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
   | .useAfterFree => "use-after-free"
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
+  | .nullDereference => "null-dereference"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/
@@ -224,7 +228,7 @@ def Scry.retPoints (g : Scry.Fn) : List (Nat × Nat) :=
     match Scry.nodeTerm g n with
     | .none => .nil
     | .some t => match t with
-      | .ret (.some v) _ => List.cons (n, v.index) .nil
+      | .ret (.some v) _ => [(n, v.index)]
       | _ => .nil) (Scry.range g.count)
 
 /-- Match one taint rule's sources and sanitisers against a call, collecting the
@@ -237,7 +241,7 @@ def Scry.matchRuleParts (n : Nat) (name : String) (args : List Wil.Var) (r : Scr
       | .result => .nil
       | .arg k => match Wil.listNth args k with
         | .none => .nil
-        | .some v => List.cons (n, v.index) .nil
+        | .some v => [(n, v.index)]
     else .nil) r.sources;
   let sans := Scry.rulePackConcat (fun p =>
     if Scry.nameMatches p.1 name then
@@ -245,7 +249,7 @@ def Scry.matchRuleParts (n : Nat) (name : String) (args : List Wil.Var) (r : Scr
       | .result => .nil
       | .arg k => match Wil.listNth args k with
         | .none => .nil
-        | .some v => List.cons (n, v.index) .nil
+        | .some v => [(n, v.index)]
     else .nil) r.sanitisers;
   (sources, sans)
 
@@ -257,7 +261,7 @@ def Scry.ruleSourcesAt (n : Nat) (callResult : Option Nat) (name : String)
       if Scry.nameMatches p.1 name then
         match p.2 with
         | .result => match callResult with
-          | .some rv => List.cons (n, rv) .nil
+          | .some rv => [(n, rv)]
           | .none => .nil
         | .arg _ => .nil
       else .nil) r.sources;
@@ -272,7 +276,7 @@ def Scry.ruleSansAt (n : Nat) (callResult : Option Nat) (name : String)
       if Scry.nameMatches p.1 name then
         match p.2 with
         | .result => match callResult with
-          | .some rv => List.cons (n, rv) .nil
+          | .some rv => [(n, rv)]
           | .none => .nil
         | .arg _ => .nil
       else .nil) r.sanitisers;
@@ -300,7 +304,7 @@ def Scry.sinkArgPositions (sel : Scry.SinkArg) (args : List Wil.Var) :
   match sel with
   | .one k => match Wil.listNth args k with
     | .none => .nil
-    | .some v => List.cons (k, v.index) .nil
+    | .some v => [(k, v.index)]
   | .any => Scry.indexedArgVars args 0
 
 def Scry.ruleSinksAt (n : Nat) (name : String) (args : List Wil.Var)
@@ -317,7 +321,7 @@ def Scry.ruleBadCallsAt (n : Nat) (name : String) (rules : List Scry.ForbiddenRu
     List Scry.BadCall :=
   Scry.rulePackConcat (fun r =>
     if List.any (fun pat => Scry.nameMatches pat name) r.calls then
-      List.cons (Scry.BadCall.mk n name r.id r.severity r.message) .nil
+      [(Scry.BadCall.mk n name r.id r.severity r.message)]
     else .nil) rules
 
 /-- One call's rule facts, collected while preparing a function. -/
@@ -415,7 +419,7 @@ def Scry.dedupPairs (xs : List (Nat × Nat)) : List (Nat × Nat) :=
   List.foldl (fun acc p =>
     match List.any (fun q => String.eq (Scry.pairKey q) (Scry.pairKey p)) acc with
     | .true => acc
-    | .false => List.append acc (List.cons p .nil)) .nil xs
+    | .false => List.append acc [p]) .nil xs
 
 /-- Deduplicate sink facts by `(node, argument)`, keeping the first. A pack sink wins
 over a model fallback for the same call argument, so one alert cannot become two
@@ -427,62 +431,68 @@ def Scry.dedupSinks (xs : List Scry.RuleSinkFact) : List Scry.RuleSinkFact :=
   List.foldl (fun acc s =>
     match List.any (fun q => String.eq (Scry.sinkKey q) (Scry.sinkKey s)) acc with
     | .true => acc
-    | .false => List.append acc (List.cons s .nil)) .nil xs
+    | .false => List.append acc [s]) .nil xs
 
 /-- Source facts from the external model table, resolved against the call's result and
 arguments. A model is a fallback: the pack's own source lines are added first and the
 pair is deduplicated, so `getenv` is one `src` fact, not two. -/
-def Scry.modelSourcesAt (n : Nat) (callResult : Option Nat) (name : String)
-    (args : List Wil.Var) : List (Nat × Nat) :=
+def Scry.modelSourcesAt (models : Scry.ModelPack) (n : Nat) (callResult : Option Nat)
+    (name : String) (args : List Wil.Var) : List (Nat × Nat) :=
   Scry.modelFlat (fun ref => match ref with
     | .result => match callResult with
-      | .some rv => List.cons (n, rv) .nil
+      | .some rv => [(n, rv)]
       | .none => .nil
     | .arg k => match Wil.listNth args k with
-      | .some v => List.cons (n, v.index) .nil
-      | .none => .nil) (Scry.Models.sourcesOf name)
+      | .some v => [(n, v.index)]
+      | .none => .nil) (Scry.ModelPack.sourcesOfAt models name (List.length args))
 
 /-- Sanitiser facts from the external model table, including an in-place sanitiser. -/
-def Scry.modelSansAt (n : Nat) (callResult : Option Nat) (name : String)
-    (args : List Wil.Var) : List (Nat × Nat) :=
+def Scry.modelSansAt (models : Scry.ModelPack) (n : Nat) (callResult : Option Nat)
+    (name : String) (args : List Wil.Var) : List (Nat × Nat) :=
   Scry.modelFlat (fun ref => match ref with
     | .result => match callResult with
-      | .some rv => List.cons (n, rv) .nil
+      | .some rv => [(n, rv)]
       | .none => .nil
     | .arg k => match Wil.listNth args k with
-      | .some v => List.cons (n, v.index) .nil
-      | .none => .nil) (Scry.Models.sansOf name)
+      | .some v => [(n, v.index)]
+      | .none => .nil) (Scry.ModelPack.sansOfAt models name (List.length args))
 
 /-- Extra definitions a model call writes: a source argument and an in-place
 sanitiser argument are definitions at the call point, exactly like the rule pack's
 `source read arg 1`. A result source is an ordinary definition and is not included. -/
-def Scry.modelExtraDefsAt (pack : Scry.RulePack) (n : Nat) (name : String)
-    (args : List Wil.Var) : List (Nat × Nat) :=
+def Scry.modelExtraDefsAt (models : Scry.ModelPack) (pack : Scry.RulePack) (n : Nat)
+    (name : String) (args : List Wil.Var) : List (Nat × Nat) :=
   let sans : List (Nat × Nat) := match pack.trustsSanitiser name with
-    | .true => Scry.modelSansAt n .none name args
+    | .true => Scry.modelSansAt models n .none name args
     | .false => .nil;
-  Scry.dedupPairs (List.append (Scry.modelSourcesAt n .none name args) sans)
+  Scry.dedupPairs (List.append (Scry.modelSourcesAt models n .none name args) sans)
 
 /-- Sink facts from the external model table. The model sink class selects the rule id
 (`command-injection`, `format-string`, `buffer-overflow`, `integer-overflow`); the pack's
 metadata is used when it declares that rule, otherwise the model's defaults are used. -/
-def Scry.modelSinkFactsAt (n : Nat) (name : String) (args : List Wil.Var)
-    (pack : Scry.RulePack) : List Scry.RuleSinkFact :=
+def Scry.modelSinkFactsAt (models : Scry.ModelPack) (n : Nat) (name : String)
+    (args : List Wil.Var) (pack : Scry.RulePack) : List Scry.RuleSinkFact :=
   Scry.modelFlat (fun ac =>
     let arg := ac.1;
     let cls := ac.2;
     match Wil.listNth args arg with
     | .none => .nil
     | .some v =>
-      let id := Scry.SinkClass.ruleId cls;
-      let sev := match pack.taintRuleById id with
-        | .some r => r.severity
-        | .none => Scry.SinkClass.severity cls;
-      let msg := match pack.taintRuleById id with
-        | .some r => r.message
-        | .none => Scry.SinkClass.message cls;
-      List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg) .nil)
-    (Scry.Models.sinksOf name)
+      -- A log line is forged by a **string** argument; an integer (a length, a count)
+      -- cannot carry a newline and is not a CWE-117 sink. The other model classes are
+      -- argument-position sinks regardless of the value's type.
+      match Bool.and (Scry.SinkClass.isLog cls) (Bool.not (Scry.ptrLike v.ty)) with
+      | .true => .nil
+      | .false =>
+        let id := Scry.SinkClass.ruleId cls;
+        let sev := match pack.taintRuleById id with
+          | .some r => r.severity
+          | .none => Scry.SinkClass.severity cls;
+        let msg := match pack.taintRuleById id with
+          | .some r => r.message
+          | .none => Scry.SinkClass.message cls;
+        List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg) .nil)
+    (Scry.ModelPack.sinksOfAt models name (List.length args))
 
 /-- One access's freed-location diagnostic: a free that reaches the access and may free
 one of its locations. -/
@@ -497,22 +507,24 @@ def Scry.freedWarning (g : Scry.Fn) (byLoc : U64Map (List Nat)) (func : String)
 `copyArgs` effect (a format call) against the actual arity, so every formatted argument
 is a source of the destination object. An unmodelled external has no copy rows; its
 result stays unknown via the points-to external rule and it is warned about explicitly. -/
-def Scry.copyScan (pt : Scry.PtResult) (g : Scry.Fn) (byLoc : U64Map (List Nat))
-    (func : String) (n : Nat) (name : String) (args : List Wil.Var) : Scry.MemScan :=
+def Scry.copyScan (models : Scry.ModelPack) (pt : Scry.PtResult) (g : Scry.Fn)
+    (byLoc : U64Map (List Nat)) (func : String) (n : Nat) (name : String)
+    (args : List Wil.Var) : Scry.MemScan :=
   List.foldr (fun dstsrc acc =>
     match Wil.listNth args dstsrc.1, Wil.listNth args dstsrc.2 with
     | .some dst, .some src =>
       let r := Scry.ptrAccess pt func n dst.index ("external " ++ name)
       let op : List Scry.MemOp := match r.1 with
         | .nil => .nil
-        | locs => List.cons (Scry.MemOp.mk n src.index locs) .nil;
+        | locs => [(Scry.MemOp.mk n src.index locs)];
       Scry.MemScan.mk (List.append op acc.stores) acc.loads
         (List.append (List.append r.2
           (Scry.freedWarning g byLoc func n r.1 ("external " ++ name))) acc.warnings)
     | _, _ => acc) (Scry.MemScan.mk .nil .nil .nil)
-    (Scry.Models.copyPairsOf name (List.length args))
+    (Scry.ModelPack.copyPairsOf models name (List.length args))
 
-def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemScan :=
+def Scry.memScan (models : Scry.ModelPack) (pt : Scry.PtResult) (fn : Wil.Func)
+    (g : Scry.Fn) : Scry.MemScan :=
   let frees := Scry.fnFrees pt fn g;
   let byLoc := Scry.freeByLocOf frees;
   List.foldr (fun n acc =>
@@ -536,7 +548,7 @@ def Scry.memScan (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) : Scry.MemSc
           (List.append (List.append r.2
             (Scry.freedWarning g byLoc fn.name n r.1 "load")) acc.warnings)
       | .call _ (.direct name) args _ =>
-        let cs := Scry.copyScan pt g byLoc fn.name n name args;
+        let cs := Scry.copyScan models pt g byLoc fn.name n name args;
         Scry.MemScan.mk (List.append cs.stores acc.stores)
           (List.append cs.loads acc.loads) (List.append cs.warnings acc.warnings)
       | .call _ (.indirect fv) _ _ =>
@@ -567,13 +579,23 @@ parameters are tainted only through a caller. The points-to result supplies the 
 rows of the plan. Model rules are metadata only; adding them here means a direct
 `evaluateFunc` caller gets the same rule ids as `Scry.analyze`, without mutating the
 caller's pack. -/
-def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtResult)
+def Scry.prepareFuncWithModels (models : Scry.ModelPack) (fn : Wil.Func)
+    (pack0 : Scry.RulePack) (pt : Scry.PtResult)
     (entrySources : List Nat) : Scry.FuncPlan :=
   let pack := Scry.RulePack.withModels pack0;
   let g := Scry.flatten fn;
   let taintRules := Scry.RulePack.taintRules pack;
   let forbidden := Scry.RulePack.forbiddenRules pack;
   let paramDefs := List.map (fun p => (Scry.entryNode g, p.2)) (Scry.paramMap 0 fn.params);
+  /-- `source argv result`: `main`'s second parameter (the C `argv` array) is
+  attacker-controlled. The pack opts in; the default pack does not. -/
+  let argvDefs : List (Nat × Nat) :=
+    match Scry.RulePack.sourcesArgv pack, String.eq fn.name "main" with
+    | .true, .true => match Wil.listNth fn.params 1 with
+      | .some v => List.cons (Scry.entryNode g, v.index) .nil
+      | .none => .nil
+    | _, _ => .nil;
+  let paramDefs := List.append paramDefs argvDefs;
   let scan := Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
@@ -585,15 +607,15 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
             | .none => (.none : Option Nat);
           List.cons (Scry.CallScan.mk n name rv args
             (Scry.dedupPairs (List.append (Scry.ruleExtraDefsAt n name args taintRules)
-              (Scry.modelExtraDefsAt pack n name args)))
+              (Scry.modelExtraDefsAt models pack n name args)))
             (Scry.dedupPairs (List.append (Scry.ruleSourcesAt n rv name args taintRules)
-              (Scry.modelSourcesAt n rv name args)))
+              (Scry.modelSourcesAt models n rv name args)))
             (Scry.dedupPairs (List.append (Scry.ruleSansAt n rv name args taintRules)
               (match pack.trustsSanitiser name with
-                | .true => Scry.modelSansAt n rv name args
+                | .true => Scry.modelSansAt models n rv name args
                 | .false => (.nil : List (Nat × Nat)))))
             (Scry.dedupSinks (List.append (Scry.ruleSinksAt n name args taintRules)
-              (Scry.modelSinkFactsAt n name args pack)))
+              (Scry.modelSinkFactsAt models n name args pack)))
             (Scry.ruleBadCallsAt n name forbidden)) .nil
         | .indirect _ => .nil
       | _ => .nil) (Scry.range g.count);
@@ -614,10 +636,15 @@ def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtRe
   let sans := Scry.rulePackConcat (fun p => p.sans) scan;
   let sinks := Scry.rulePackConcat (fun p => p.sinks) scan;
   let bads := Scry.rulePackConcat (fun p => p.bads) scan;
-  let mem := Scry.memScan pt fn g;
+  let mem := Scry.memScan models pt fn g;
   Scry.FuncPlan.mk info (Scry.entryNode g) (Scry.paramMap 0 fn.params)
     (Scry.retPoints g) sources sans sinks bads
     mem.stores mem.loads mem.warnings .nil
+
+/-- The default-pack spelling of `prepareFuncWithModels` (kept for the old callers). -/
+def Scry.prepareFuncWith (fn : Wil.Func) (pack0 : Scry.RulePack) (pt : Scry.PtResult)
+    (entrySources : List Nat) : Scry.FuncPlan :=
+  Scry.prepareFuncWithModels Scry.defaultModels fn pack0 pt entrySources
 
 /-- A plan with no exported-entry parameter sources (the library/test API). -/
 def Scry.prepareFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult) :
@@ -719,10 +746,10 @@ def Scry.rtAddTuples (rel : Nat) (rows : List (List Nat)) (st : Scry.State Nat) 
   List.foldr (fun row acc => Scry.State.addTuple acc rel (List.map Scry.rtU row)) st rows
 
 def Scry.rtPairs (xs : List (Nat × Nat)) : List (List Nat) :=
-  List.map (fun p => List.cons p.1 (List.cons p.2 .nil)) xs
+  List.map (fun p => [p.1, p.2]) xs
 
 def Scry.rtTriples (xs : List Scry.DataDep) : List (List Nat) :=
-  List.map (fun d => List.cons d.from (List.cons d.to (List.cons d.var .nil))) xs
+  List.map (fun d => [d.from, d.to, d.var]) xs
 
 /-- `(loc, point, var)` rows for a list of memory accesses. -/
 def Scry.memRows (ops : List Scry.MemOp) : List (List Nat) :=
@@ -737,17 +764,17 @@ def Scry.planInput (plan : Scry.FuncPlan) (paramTaint : List Nat)
   let st1 := Scry.rtAddTuples Scry.rtFlow (Scry.rtTriples plan.info.deps) st0;
   let st1b := Scry.rtAddTuples Scry.rtGen (Scry.rtPairs (Scry.defsOf plan.info.g)) st1;
   let st2 := Scry.rtAddTuples Scry.rtSrc (Scry.rtPairs plan.sources) st1b;
-  let sinkRows := List.map (fun s => List.cons s.node (List.cons s.arg (List.cons s.var .nil)))
+  let sinkRows := List.map (fun s => [s.node, s.arg, s.var])
     plan.sinks;
   let st3 := Scry.rtAddTuples Scry.rtSink sinkRows st2;
   let st4 := Scry.rtAddTuples Scry.rtSan (Scry.rtPairs plan.sans) st3;
   let paramRows := Scry.rulePackConcat (fun i =>
     match Scry.paramVarAt plan.params i with
-    | .some v => List.cons (List.cons plan.entry (List.cons v .nil)) .nil
+    | .some v => [(List.cons plan.entry (List.cons v .nil))]
     | .none => .nil) paramTaint;
   let st5 := Scry.rtAddTuples Scry.rtParam paramRows st4;
   let st6 := Scry.rtAddTuples Scry.rtRetSrc (Scry.rtPairs retSeeds) st5;
-  let badRows := List.map (fun b => List.cons b.node .nil) plan.badCalls;
+  let badRows := List.map (fun b => [b.node]) plan.badCalls;
   let st7 := Scry.rtAddTuples Scry.rtBadCall badRows st6;
   let st8 := Scry.rtAddTuples Scry.rtMStore (Scry.memRows plan.mstores) st7;
   let st9 := Scry.rtAddTuples Scry.rtMLoad (Scry.memRows plan.mloads) st8;
@@ -851,16 +878,16 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
         match storeNode with
         | .none => fromTaint
         | .some sn => List.append fromTaint
-            (List.cons (Scry.mkK sn Scry.PathKind.store) .nil)
+            [(Scry.mkK sn Scry.PathKind.store)]
     | .false =>
       let here := (Scry.rtRowNat step.fact.args 0, Scry.rtRowNat step.fact.args 1);
       match Scry.rtPremiseOfRel st step Scry.rtTainted with
       | .some pid => List.append (Scry.rtChainKinds st seeds pid)
-          (List.cons (Scry.mkK here Scry.PathKind.flow) .nil)
+          [(Scry.mkK here Scry.PathKind.flow)]
       | .none => match Scry.rtPremiseOfRel st step Scry.rtMTainted with
         | .some mid => List.append (Scry.rtChainKinds st seeds mid)
-            (List.cons (Scry.mkK here Scry.PathKind.load) .nil)
-        | .none => List.cons (Scry.mkK here Scry.PathKind.assumed) .nil
+            [(Scry.mkK here Scry.PathKind.load)]
+        | .none => [(Scry.mkK here Scry.PathKind.assumed)]
 
 /-- The seed kind of a tainted fact, read from the rule that introduced it. -/
 def Scry.rtSeedKind (st : Scry.State Nat) (n v : Nat) : Scry.PathKind :=
@@ -925,13 +952,21 @@ def Scry.evaluateFuncWithPlan (fn : Wil.Func) (plan0 : Scry.FuncPlan)
   let edb := Scry.planInput plan paramTaint retSeeds;
   Scry.FuncResult.mk fn plan edb (Scry.eval (Scry.ruleTaintProgramFor plan) edb)
 
+/-- Evaluate one function with an explicit model pack, preparing its plan here. -/
+def Scry.evaluateFuncWithModels (models : Scry.ModelPack) (fn : Wil.Func)
+    (pack : Scry.RulePack) (pt : Scry.PtResult)
+    (memSeeds : List Scry.MemSeed) (paramTaint : List Nat) (retSeeds : List (Nat × Nat))
+    (entrySources : List Nat) : Scry.FuncResult :=
+  Scry.evaluateFuncWithPlan fn (Scry.prepareFuncWithModels models fn pack pt entrySources)
+    memSeeds paramTaint retSeeds
+
 /-- Evaluate one function, preparing its plan here (callers that evaluate the same
 function several times prepare the plan once and use `Scry.evaluateFuncWithPlan`). -/
 def Scry.evaluateFuncWith (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
     (memSeeds : List Scry.MemSeed) (paramTaint : List Nat) (retSeeds : List (Nat × Nat))
     (entrySources : List Nat) : Scry.FuncResult :=
-  Scry.evaluateFuncWithPlan fn (Scry.prepareFuncWith fn pack pt entrySources) memSeeds
-    paramTaint retSeeds
+  Scry.evaluateFuncWithModels Scry.defaultModels fn pack pt memSeeds paramTaint retSeeds
+    entrySources
 
 /-- Evaluate one function with no exported-entry parameter sources. -/
 def Scry.evaluateFunc (fn : Wil.Func) (pack : Scry.RulePack) (pt : Scry.PtResult)
@@ -1000,8 +1035,8 @@ def Scry.resultTaintFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
       r.plan.sinks;
     let path := match Scry.alertDef st sink arg with
       | .some d => List.append (Scry.chainToDef r.fn.name r.plan.seeds st d.1 d.2)
-          (List.cons (Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink) .nil)
-      | .none => List.cons (Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink) .nil;
+          [(Scry.PathNode.mk r.fn.name sink d.2 Scry.PathKind.sink)]
+      | .none => [(Scry.PathNode.mk r.fn.name sink 0 Scry.PathKind.sink)];
     List.map (fun f => Scry.RuleFinding.mk f.rule f.severity f.message Scry.FindingKind.taint
       r.fn.name sink f.name f.arg path) facts) alerts
 
@@ -1011,9 +1046,9 @@ def Scry.resultForbiddenFindings (r : Scry.FuncResult) : List Scry.RuleFinding :
     match List.find (fun b => Nat.beq b.node node) r.plan.badCalls with
     | .some b => Scry.RuleFinding.mk b.rule b.severity b.message Scry.FindingKind.forbidden
         r.fn.name node b.name 0
-        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)
+        [(Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink)]
     | .none => Scry.RuleFinding.mk "" .note "" Scry.FindingKind.forbidden r.fn.name node "" 0
-        (List.cons (Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink) .nil)) bad
+        [(Scry.PathNode.mk r.fn.name node 0 Scry.PathKind.sink)]) bad
 
 def Scry.resultFindings (r : Scry.FuncResult) : List Scry.RuleFinding :=
   List.append (Scry.resultTaintFindings r) (Scry.resultForbiddenFindings r)

@@ -633,6 +633,12 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     if x.isOfKind "term.ident" then pure (.as ((x.getArg 0).getId?.getD "_") (stx.getArg 2))
     else .error "an as-pattern is `x@p` with a variable `x`"
   | "term.anon" => pure (.anon ((stx.getArg 1).args.filter (!· matches .atom ..)).toList)
+  | "term.tuplePat" =>
+    -- (13f) a tuple pattern of three or more in a `let`: the same view as `(a, (b, c))`
+    let inner := (stx.getArg 5).args
+    let rest := .node stx.info "null" (#[stx.getArg 3, .atom stx.info ","] ++ inner)
+    patView g (.node stx.info "term.tuple" #[.atom stx.info "(", stx.getArg 1, .atom stx.info ",", rest,
+      .atom stx.info ")"])
   | "term.num" | "term.str" => pure (.lit stx)
   | "term.dotIdent" => pure (.ctor none ((stx.getArg 1).getId?.getD "_") [])
   | "term.ident" =>
@@ -672,6 +678,13 @@ def patIsCtor (g : Globals R) (stx : Syntax) : Bool :=
   match patViewAs g stx with
   | .ok (_, .ctor ..) | .ok (_, .lit _) | .ok (_, .plusK ..) => true
   | _ => false
+
+/-- (13f) The components of a tuple pattern of three or more, `(p₁, …, pₙ)` as the
+right-nested `(p₁, (… pₙ))`: `[p₁, …, pₙ]`, from the `PatView.tuple` chain. -/
+partial def tuplePatComponents (g : Globals R) (a b : Syntax) : List Syntax :=
+  match patView g b with
+  | .ok (.tuple b1 b2) => a :: tuplePatComponents g b1 b2
+  | _ => [a, b]
 
 /-- The pattern `x₁@…@xₙ@p`. -/
 def asPatStx (ns : List Name) (p : Syntax) : Syntax :=
@@ -1088,6 +1101,36 @@ def calcEndpoints? (t : Term R) : Option (Term R × Term R) :=
     | b :: a :: _ => some (a, b)
     | _ => none
 
+/-- **Rule (b)** (the language decision of 2026-11-16): the default quantity of a binder
+with none written, once its type is elaborated. `tyl` is the binder's elaborated type and
+its sort level (`checkType`), or `none` when no type was written.
+
+* An explicit or instance binder: `explicitDefault` (ω).
+* An implicit binder: `implicitDefault` (0) when its type is a **sort** or a
+  **proposition**, `implicitDataDefault` (ω) otherwise. "A sort": the type, with solved
+  metavariables and definitions unfolded at its head (`force`), is `Sort u` (`Prop`,
+  `Type`, `Type u`, `Sort u`). "A proposition": the type's own sort, with solved level
+  metavariables replaced, is equivalent to level 0 (`Prop`).
+
+The type is the one known **when the binder is elaborated**, before anything after it:
+an implicit with no written type (`{A}`), or one whose type is still an unsolved
+metavariable (`{A : _}`), counts as data and defaults to ω, even when later uses solve it
+to `Type`; write the type (`{A : Type}`) or the quantity (`{0 A}`) to erase it. A type
+family (`{F : Type → Type}`) is not a sort: it is data (ω), as erasure has it (a function
+into a sort has run-time content, `Erase.erasable`). The self-hosted frontend decides
+the same way (`implicitQ` in `selfhost/Frontend.wiz`). -/
+def binderDefaultQty (ctx : LocalCtx R) (bi : BinderInfo) (tyl : Option (Term R × Level)) :
+    ElabM R (Term R) := do
+  unless bi == .implicit do return defaultQty bi
+  let dflt := QuantitySyntax.implicitDefault (R := R)
+  let data := QuantitySyntax.implicitDataDefault (R := R)
+  if dflt == data then return .qlit dflt
+  let some (ty, l) := tyl | return .qlit data
+  let erased ← match ← force (← evalIn ctx ty) with
+    | .sort _ => pure true
+    | _ => pure ((← instLevel l).equiv 0)
+  return .qlit (if erased then dflt else data)
+
 /-- One branch of a `match` on a signal, as `matchMux?` reads it: the constructor tag of
 the pattern (`none` for the default `_`), the type the pattern named (`Phase.idle` names
 `Phase`; a bare `.idle` names none), the branch body, and the pattern's position. -/
@@ -1134,6 +1177,14 @@ def hdlEnumCandidates (g : Globals R) (c : Name) : List Name := Id.run do
   return out
 
 mutual
+
+/-- A binder's quantity once its type is elaborated: the written one (`elabQuantity`), or
+the default by rule (b) (`binderDefaultQty`). -/
+partial def elabBinderQty (ctx : LocalCtx R) (bi : BinderInfo) (qty : Option Syntax)
+    (tyl : Option (Term R × Level)) : ElabM R (Term R) :=
+  match qty with
+  | none => binderDefaultQty ctx bi tyl
+  | some _ => elabQuantity ctx bi qty
 
 /-- A binder's quantity: the default, a literal (`0`, `1`, `ω`), or (stage 4d)
 `%t` for a term `t : Qty`, such as a quantity variable. -/
@@ -1314,7 +1365,6 @@ where
         | none => do let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
       | _ => do let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
     | "term.letPair" => elabLetPair ctx stx expected
-    | "term.letTuple" => elabLetPair ctx (letTupleToPairs stx) expected
     -- (linear-case stage 2) `let () := u; b`: consumes `u : Unit`
     | "term.letUnit" => do
       let u ← check ctx (stx.getArg 4) (.unit (.succ .zero))
@@ -1712,25 +1762,14 @@ partial def inferTuple (ctx : LocalCtx R) (items : List Syntax) : ElabM R (Term 
     let g ← getGlobals
     -- the second component's type, weakened under the Σ binder
     let bTerm := quote g (ctx.lvl + 1) bty
-    return (.pair a b, ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole))
-
-/-- `let q (x₁, x₂, …, xₙ) := e; body` (n ≥ 3) as right-nested pairs:
-`let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …; let q (xₙ₋₁, xₙ) := rₙ₋₂; body`, with
-names `rᵢ` that no user name can capture. -/
-partial def letTupleToPairs (stx : Syntax) : Syntax :=
-  let i := stx.info
-  let names : List Syntax := [stx.getArg 3, stx.getArg 5] ++
-    ((stx.getArg 7).args.toList.filter (· matches .ident ..))
-  let pair (x y e body : Syntax) : Syntax :=
-    .node i "term.letPair" #[stx.getArg 0, stx.getArg 1, .atom i "(", x, .atom i ",", y, .atom i ")",
-      .atom i ":=", e, .node i Syntax.nullKind #[], body]
-  let rec go : Nat → List Syntax → Syntax → Syntax
-    | _, [x, y], e => pair x y e (stx.getArg 12)
-    | k, x :: rest, e =>
-      let r : Name := s!"tuple✝{k}"
-      pair x (.ident i r) e (go (k + 1) rest (.node i "term.ident" #[.ident i r]))
-    | _, _, e => e
-  go 0 names (stx.getArg 10)
+    let S := ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole)
+    -- (annotated: the kernel cannot infer the type of a pair — only check one against a
+    -- `Σ` — and a tuple literal in inference position has no expected type to go on. The
+    -- projection of one (`(a, b).2`, `term.proj`) is exactly that: it infers its
+    -- scrutinee, so without this the term it builds is one the kernel rejects with
+    -- "cannot infer a type for (a, b)". `selfhost/Frontend.wiz`'s `inferTuple` writes the
+    -- annotation for the same reason.)
+    return (.ann (.pair a b) (quote g ctx.lvl S), S)
 
 /-- (linear-case stage 2) The literal quantities a `split` at `q` binds its components
 at, `q·p` and `q`, for a Σ whose first component is at `p` (when both are literals): a
@@ -1855,6 +1894,10 @@ partial def elabLetPat (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy
         unless ps.length ≥ 2 do
           throwAt pat.info "an anonymous constructor pattern on a pair has at least two components"
         ps.mapM nameOf
+      -- (13f) `let q (p₁, …, pₙ) := e` with n ≥ 3: the components of the right-nested
+      -- pair, each a name (as for `⟨…⟩`)
+      | .tuple a b, .sigma .. =>
+        (tuplePatComponents g a b).mapM nameOf
       | _, sty => throwAt (ctx.withInfo (stx.getArg 4)).info s!"`let` with a quantity and a pattern expects a structure or a tuple, got {← showVal ctx sty}"
   pure (← splitChain ctx q s sty names body expected, expected)
 
@@ -1992,10 +2035,10 @@ partial def inferFun (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   match bs with
   | [] => infer ctx body
   | b :: rest =>
-    let ty ← match b.type with
-      | some s => pure (← checkType ctx s).1
-      | none => freshTypeMeta ctx s!"the type of {b.name}"
-    let q ← elabQuantity ctx b.bi b.qty
+    let (ty, tyl) ← match b.type with
+      | some s => do let (ty, l) ← checkType ctx s; pure (ty, some (ty, l))
+      | none => pure (← freshTypeMeta ctx s!"the type of {b.name}", none)
+    let q ← elabBinderQty ctx b.bi b.qty tyl
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let ctx' := ctx.bind b.name vty
@@ -2064,7 +2107,7 @@ partial def elabPis (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
       | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
-    let q ← elabQuantity ctx b.bi b.qty
+    let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let (cod, l₂) ← elabPis (ctx.bind b.name vty) rest body
@@ -2081,7 +2124,7 @@ partial def elabSigmas (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax)
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
       | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
-    let q ← elabQuantity ctx b.bi b.qty
+    let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let (cod, s) ← elabSigmas (ctx.bind b.name vty) rest body
@@ -3697,7 +3740,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let ty ← evalIn ctx (← freshTypeMeta ctx' "the type of this match")
     return (← check ctx stx ty, ty)
   | "term.calc" => elabCalc ctx stx
-  | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>
+  | "term.letPair" | "term.absurd" | "term.rfl" =>
     throwAt ctx.info "cannot infer the type of this expression; add a type ascription" ErrorCode.cannotInfer
   | "term.letUnit" => do
     let u ← check ctx (stx.getArg 4) (.unit (.succ .zero))

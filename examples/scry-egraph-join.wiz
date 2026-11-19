@@ -1,0 +1,141 @@
+import Scry.EqPlan
+-- The Datalog/e-graph join (`scry-egraph-join`): one plan has an `eqsort` sort (the
+-- e-class ids of terms), a lattice relation `itv` hanging off e-classes (an interval
+-- per class, keyed by an `eqsort` column), Datalog rules that derive the intervals
+-- from a term table, and a rewrite `f x -> g x` guarded by the interval fact. The
+-- rewrite adds an equality, canonicalisation joins the intervals of the merged class,
+-- and the next round's guard sees the joined value. Extraction is the separate
+-- bottom-up pass on the resulting graph.
+--
+-- The term graph and the interval are the ones of `scry-egraph-analysis` (an interval
+-- analysis with a guarded rewrite), so `main` is that example's digest `1131341`; an
+-- extraction that does not return `g 3` adds a large penalty, and the absent `g 9`
+-- check is a real check (0 when absent, a penalty when it exists).
+--
+-- relations: 0 = leaf (class, value), 1 = un (term, op, child), 2 = itv (class -> L);
+-- class columns are eqsort 0, `itv`'s key is eqsort 0, and no relation asserts
+-- equalities (the rewrite is the only source of unions)
+def u (n : Nat) : U64 := U64.ofNat n
+
+def iops : Scry.LatOps Interval :=
+  Scry.LatOps.mk Interval.ebot Interval.join (fun a b => BEq.beq a b)
+
+-- itv(c) = [3,3] for leaf(c, 3) and [9,9] for leaf(c, 9)
+def rLeaf3 : Scry.Rule Interval :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (.lit (Interval.range 3 3)))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.lit (u 3)]]
+
+def rLeaf9 : Scry.Rule Interval :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (.lit (Interval.range 9 9)))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.lit (u 9)]]
+
+-- itv(t) = id(itv(c)) for un(t, 10, c) and add10(itv(c)) for un(t, 11, c)
+def rF : Scry.Rule Interval :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (.map 0 (.var 1)))
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.lit (u 10), Scry.Term.var 1],
+     Scry.Atom.lat 2 [Scry.Term.var 1] 1]
+
+def rG : Scry.Rule Interval :=
+  Scry.Rule.mk (Scry.Head.lat 2 [Scry.Term.var 0] (.map 1 (.var 1)))
+    [Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.lit (u 11), Scry.Term.var 1],
+     Scry.Atom.lat 2 [Scry.Term.var 1] 1]
+
+def idI (v : Interval) : Interval := v
+
+def add10 : Interval → Interval
+  | .range lo hi => .range (Nat.add lo 10) (Nat.add hi 10)
+  | .top => .top
+  | .bot => .bot
+
+-- arities: leaf 2, un 3, itv 1; itv is the lattice relation
+def prog : Scry.Program Interval :=
+  Scry.Program.mk iops [2, 3, 1] [2] [idI, add10] [rLeaf3, rLeaf9, rF, rG]
+
+def plan : Scry.Plan Interval :=
+  Scry.Plan.mk prog
+    [Scry.EqCol.mk 0 0 0, Scry.EqCol.mk 1 0 0, Scry.EqCol.mk 1 2 0,
+     Scry.EqCol.mk 2 0 0]
+    []
+
+-- e-class ids: 0 = leaf 3, 1 = f 3, 2 = leaf 9, 3 = f 9, 4 = g 3
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let c3 := Scry.EGraph.add e (Scry.ENode.leaf 3);
+  let f3 := Scry.EGraph.add c3.1 (Scry.ENode.mk 10 [c3.2]);
+  let c9 := Scry.EGraph.add f3.1 (Scry.ENode.leaf 9);
+  let f9 := Scry.EGraph.add c9.1 (Scry.ENode.mk 10 [c9.2]);
+  let g3 := Scry.EGraph.add f9.1 (Scry.ENode.mk 11 [c3.2]);
+  g3.1
+
+def sorts0 : Scry.EqSorts := Scry.EqSorts.setGraph (Scry.Plan.sorts plan) 0 ga
+
+def ed (st : Scry.State Interval) (rel : Nat) (row : List U64) : Scry.State Interval :=
+  Scry.State.addTuple st rel row
+
+def db : Scry.State Interval :=
+  let s0 := ed Scry.State.empty 0 [u 0, u 3];
+  let s1 := ed s0 0 [u 2, u 9];
+  let s2 := ed s1 1 [u 1, u 10, u 0];
+  let s3 := ed s2 1 [u 3, u 10, u 2];
+  ed s3 1 [u 4, u 11, u 0]
+
+-- the analysis fact the rewrite is guarded by: itv(x) <= [0,5]
+def guardSmall (st : Scry.State Interval) (sorts : Scry.EqSorts)
+    (b : Scry.Bindings) : Bool :=
+  let g := Scry.EqSorts.graph sorts 0;
+  let cls := Scry.EGraph.find g (Scry.EGraph.classOfVar b 0);
+  match Scry.Db.findLat st.db 2 [u cls] with
+  | .none => .false
+  | .some v => Interval.le v (Interval.range 0 5)
+
+def pFx : Scry.Pat := .pnode 10 (.pcons (.var 0) .pnil)
+def pGx : Scry.Pat := .pnode 11 (.pcons (.var 0) .pnil)
+
+def rw : Scry.PlanRewrite Interval :=
+  Scry.PlanRewrite.mk 0 (Scry.Rewrite.mk pFx pGx)
+    (fun b st sorts => guardSmall st sorts b)
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => d
+  | .some c => c
+
+def headD : List Nat → Nat
+  | .nil => 99
+  | .cons x _ => x
+
+def intervalNat (i : Interval) : Nat :=
+  match Interval.loOpt i with
+  | .none => 900
+  | .some lo =>
+    match Interval.hiOpt i with
+    | .none => 901
+    | .some hi => Nat.add (Nat.mul lo 100) hi
+
+def main : Nat :=
+  match Scry.Plan.evalAn plan sorts0 db 20 [rw] with
+  | .none => 900
+  | .some r =>
+    let st := r.1;
+    let g := Scry.EqSorts.graph r.2 0;
+    let f3 := classOfD g (Scry.ENode.mk 10 [0]) 900;
+    let g3 := classOfD g (Scry.ENode.mk 11 [0]) 901;
+    let f9 := classOfD g (Scry.ENode.mk 10 [2]) 902;
+    let g9 := classOfD g (Scry.ENode.mk 11 [2]) 999;
+    let iv := match Scry.Db.findLat st.db 2 [u (Scry.EGraph.find g f3)] with
+      | .none => Interval.ebot
+      | .some v => v;
+    let extracted := Scry.EGraph.extract g f3;
+    let extractionOk := match extracted with
+      | .none => (.false : Bool)
+      | .some t =>
+        if Nat.beq (headD (Scry.ETerm.toList t)) 11 then
+          Nat.beq (List.length (Scry.ETerm.toList t)) 2
+        else (.false : Bool);
+    (if Scry.EGraph.sameClass g f3 g3 then 1000000 else 0) +
+    (if Scry.EGraph.sameClass g f9 g9 then 10000 else 0) +
+    intervalNat iv * 100 +
+    Scry.EGraph.numClasses g * 10 +
+    (if Scry.EGraph.canonical g then 1 else 0) +
+    (if Nat.beq g9 999 then 100000 else 100000000) +
+    (if extractionOk then 0 else 1000000000)

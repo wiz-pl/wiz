@@ -6,13 +6,13 @@ import FeralCore
 
 -- fn first_mut {'a} (v : &'a mut Vec U64) : Option (&'a mut U64) := v.get_mut 0
 -- (it cannot fail, but a function returning a borrow returns a `Borrowed`, D8)
-def first_mut {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Borrowed (MutOpt ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
+def first_mut {0 ρ : Region} (1 v : Uniq ρ (Vec U64)) : Borrowed (MutOpt ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
   .ok (Vec.getMut (U64.lit 0) v)
 
 -- fn zero_first (v : &mut Vec U64) : Bool :=
 --   if let .some x := first_mut v then { *x := 0; true } else false
 -- (`first_mut` returns a borrow of `*v`: a reborrow scope, L17)
-def zero_first {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Bool (Uniq ρ (Vec U64)) :=
+def zero_first {0 ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Bool (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>
     match first_mut r with
     | .ok o => (match o with
@@ -23,7 +23,7 @@ def zero_first {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Bool (Uniq ρ (
     | .err e r => .err e r)
 
 -- (the same, through the library: `MutOpt.over`)
-def zero_first' {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
+def zero_first' {0 ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>
     match first_mut r with
     | .ok o => .ok () (MutOpt.over (fun (_ : U64) => U64.lit 0) o)

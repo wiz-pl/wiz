@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "main.c",
+    "arguments": ["cc", "-Bbin", "-I.", "-c", "main.c", "-o", "main.o"]
+  }
+]

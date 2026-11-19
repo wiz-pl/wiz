@@ -133,6 +133,30 @@
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
       "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "scry-csharp",
+      "case": "known gap: a lambda passed to an unknown callee keeps its body out of the program",
+      "reason": "known gap: a lambda passed to an unknown callee",
+      "owner": "scry C# frontend (scry/CSHARP.md, scry/corpus/csharp/lower/lambda.cs)",
+      "expires": "2027-05-01",
+      "why": "Joern's LambdaTests fixture. A lambda assigned to a local and invoked in the same method is lowered inline; a lambda passed to a callee whose call site is unknown (`Select`) is still an opaque `fnptr` plus a warning, so its body is absent from the program. The case checks the lowering golden and the skip is the honest report; the golden changes when that gap is fixed."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "run: program arguments are the driver's (the host's `run` takes flags only)",
+      "reason": "run: the driver passes the words after FILE to the program",
+      "owner": "selfhost CLI parity (Tests/Groups/SelfhostCliDiff.lean, selfhost/Cli.wiz)",
+      "expires": "2027-05-19",
+      "why": "The host's `run` takes flags only and rejects trailing arguments (exit 2); the self-hosted driver passes them to the program. That is a documented host caveat, not a regression, and it needs a host-side `run FILE ARG...` before the entry can go."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "smt: without --trust-smt the refusal is the host's, at the command's start (C15)",
+      "reason": "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6)",
+      "owner": "selfhost diagnostics (Tests/Groups/SelfhostCliDiff.lean, selfhost/Frontend.wiz)",
+      "expires": "2027-05-19",
+      "why": "The message and exit code agree; only the column differs because the host points at the `smt` token while the driver points at the command's start. Fixing it is D6 positioned diagnostics in the self-hosted frontend."
     }
   ]
 }

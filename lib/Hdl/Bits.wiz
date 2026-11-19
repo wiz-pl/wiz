@@ -137,14 +137,14 @@ def Hdl.boolSame {A : Type} : (c : Bool) → (x : A) → (match c with | .true =
   | .true, x => rfl
   | .false, x => rfl
 /-- `mux c x x = x`. -/
-def HwTy.El.mux_same {t : HwTy} (c : BitVec 1) (x : HwTy.El t) : @HwTy.El.mux t c x x = x :=
+def HwTy.El.mux_same {0 t : HwTy} (c : BitVec 1) (x : HwTy.El t) : @HwTy.El.mux t c x x = x :=
   Hdl.boolSame (BitVec.isTrue c) x
 /-- `mux 1 x y = x`. -/
-def HwTy.El.mux_one {t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.one x y = x := rfl
+def HwTy.El.mux_one {0 t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.one x y = x := rfl
 /-- `mux 0 x y = y`. -/
-def HwTy.El.mux_zero {t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.zero x y = y := rfl
+def HwTy.El.mux_zero {0 t : HwTy} (x y : HwTy.El t) : @HwTy.El.mux t Bit.zero x y = y := rfl
 /-- `mux (~~~c) x y = mux c y x`. -/
-def HwTy.El.mux_not {t : HwTy} (c : BitVec 1) (x y : HwTy.El t) : @HwTy.El.mux t ~~~c x y = @HwTy.El.mux t c y x :=
+def HwTy.El.mux_not {0 t : HwTy} (c : BitVec 1) (x y : HwTy.El t) : @HwTy.El.mux t ~~~c x y = @HwTy.El.mux t c y x :=
   Bit.ind (fun (a : BitVec 1) => @HwTy.El.mux t ~~~a x y = @HwTy.El.mux t a y x) rfl rfl c
 
 /-- gates as multiplexers -/

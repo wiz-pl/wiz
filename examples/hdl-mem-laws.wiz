@@ -147,7 +147,7 @@ def randomIns (n : Nat) : List (HwTy.El (Mem.ReqW.code 6 32)) :=
 
 def agreeW (c : Circuit (Mem.ReqW.code 6 32) (Mem.Resp.code 32)) (n : Nat) : Bool :=
   let ins := randomIns n;
-  Hdl.natsEq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
+  BEq.beq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
     (Circuit.simNet .true c (Hdl.map (HwTy.pack (Mem.ReqW.code 6 32)) ins))
 
 def agree1 : Bool := agreeW (Mem.ramWC1 2 6 4 32) 96
@@ -166,7 +166,7 @@ def randomReq (n : Nat) : List (HwTy.El (Mem.Req.code 6 32)) :=
 
 def agreeP (c : Circuit (Mem.Req.code 6 32) (Mem.Resp.code 32)) (n : Nat) : Bool :=
   let ins := randomReq n;
-  Hdl.natsEq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
+  BEq.beq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
     (Circuit.simNet .true c (Hdl.map (HwTy.pack (Mem.Req.code 6 32)) ins))
 
 def agreeP1 : Bool := agreeP (Mem.ramC1 2 6 4 32) 96

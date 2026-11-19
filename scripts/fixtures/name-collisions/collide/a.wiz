@@ -1,0 +1,2 @@
+/-- Fixture: two modules declare the same top-level name. -/
+def shared : Nat := 1

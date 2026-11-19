@@ -56,6 +56,13 @@ public class Control
             Console.WriteLine(box);
         }
 
+        // A name declared inside a subpattern is on a path the lowering does not build:
+        // it must stay a named warning.
+        if (value is OutOfScope { Id: var inner })
+        {
+            Console.WriteLine(value);
+        }
+
         try
         {
             throw new Exception();

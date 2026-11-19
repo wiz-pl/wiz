@@ -31,8 +31,8 @@ def stdGroup : Group where
           "def f (xs : List U8) : List U8 := List.cons 1 xs\n#eval (a 255).toNat\n#eval (b 1).toNat\n#eval c 5\n#eval (d 7).toNat\n#eval (e 1).toNat\n" ++
           "def g (x : I16) := 2 * x - 1\n#eval (g 3).toNat")
           ["0", "2", "-9", "8", "10", "5"] },
-    { name := "order notation: ≤, < and ≈ are classes (lib/Order.wiz)", run := fun _ =>
-        okLibs ("import Order\ndef Bool.Le (a b : Bool) : Prop := Bool.or (Bool.not a) b = .true\n" ++
+    { name := "order notation: ≤, < and ≈ are classes (lib/Data/Order.wiz)", run := fun _ =>
+        okLibs ("import Data.Order\ndef Bool.Le (a b : Bool) : Prop := Bool.or (Bool.not a) b = .true\n" ++
           "instance : LE Bool := LE.mk Bool.Le\ninstance : Equiv Bool := Equiv.mk (fun a b => a = b)\n" ++
           "def t : Bool.false ≤ Bool.true := rfl\ndef u : Bool.true ≈ Bool.true := rfl\n#check Bool.false ≤ Bool.true")
           ["Bool.false ≤ Bool.true : Prop"] },

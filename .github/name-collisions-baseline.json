@@ -1,0 +1,1073 @@
+{
+  "comment": "Global name-collision groups that exist today but cannot break a run (scripts/check-name-collisions.py --quiet). Every entry must name the exact module set, the reason the declarations cannot be loaded in one program, an owner and an expires date. An expired entry is an error; so is a stale entry whose group has disappeared. Prefer renaming the declaration or removing the entry over renewing it. A module here is a repository-relative .wiz path; module and modules identify the same set (module is the primary path).",
+  "entries": [
+    {
+      "module": "lib/Infoview.wiz",
+      "name": "Goal",
+      "modules": [
+        "lib/Infoview.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Infoview.wiz (the infoview protocol) and selfhost/Frontend.wiz (the self-hosted frontend) are independent programs. Neither imports the other, transitively, and no scanned module imports both, so Goal cannot be loaded twice in one run.",
+      "owner": "Infoview (lib/Infoview.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Rat.wiz",
+      "name": "Q",
+      "modules": [
+        "lib/Rat.wiz",
+        "selfhost/Kernel.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Rat.wiz (the rationals' structure Q) and selfhost/Kernel.wiz (the self-hosted kernel's inductive Q) are independent. There is no import path either way and no scanned module imports both.",
+      "owner": "Rat (lib/Rat.wiz) and the self-hosted kernel (selfhost/Kernel.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "scry/src/Scry/Codegen.wiz",
+      "name": "Scry.boolD",
+      "modules": [
+        "scry/src/Scry/Codegen.wiz",
+        "scry/src/Scry/Facts.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: scry/src/Scry/Codegen.wiz (the schema generator) and scry/src/Scry/Facts.wiz (the fact-store loader) are separate tools. Neither imports the other, transitively, and no scanned module imports both.",
+      "owner": "Scry schema tooling (scry/src/Scry/Codegen.wiz, scry/src/Scry/Facts.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "scry/src/Scry/Codegen.wiz",
+      "name": "Scry.dedup",
+      "modules": [
+        "scry/src/Scry/Codegen.wiz",
+        "scry/src/Scry/Lower.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: scry/src/Scry/Codegen.wiz (the schema generator) and scry/src/Scry/Lower.wiz (C to Wil) have no import path between them and no common scanned importer, so the two dedup functions cannot meet in one run.",
+      "owner": "Scry schema tooling (scry/src/Scry/Codegen.wiz) and the C frontend (scry/src/Scry/Lower.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Grail.wiz",
+      "name": "Step",
+      "modules": [
+        "lib/Grail.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Grail.wiz (the tactic framework) and selfhost/Frontend.wiz (the self-hosted frontend) are independent: neither imports the other and no scanned module imports both.",
+      "owner": "Grail (lib/Grail.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "selfhost/Cof.wiz",
+      "name": "branches",
+      "modules": [
+        "selfhost/Cof.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: selfhost/Cof.wiz is not in the self-hosted compiler's module graph with selfhost/Frontend.wiz. There is no import path between them and no common scanned importer, so neither branches function is loaded by the other's program.",
+      "owner": "Self-hosted Cof (selfhost/Cof.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveBEq",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveBEq and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveDecidableEq",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveDecidableEq and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveInhabited",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveInhabited and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveRepr",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveRepr and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "selfhost/Check.wiz",
+      "name": "main",
+      "modules": [
+        "selfhost/Check.wiz",
+        "selfhost/Main.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: selfhost/Check.wiz and selfhost/Main.wiz are alternative entry points (the checker and the compiler). Nothing imports both, so the two main definitions are never linked into one program.",
+      "owner": "Self-hosted entry points (selfhost/Check.wiz, selfhost/Main.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scope.wiz",
+      "name": "Scope",
+      "modules": [
+        "lib/Scope.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scope.wiz and selfhost/Frontend.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Scope.wiz and selfhost/Frontend.wiz",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Bindings",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.add",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.addTerm",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.addTerms",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.applyAt",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.applyMatches",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.applyRule",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.applyRules",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.bestIn",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.buildArgs",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.buildTerm",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.canonical",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.classOf",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.classOfVar",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.compress",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.compressFrom",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.cost",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.costIter",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.costPass",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.costs",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.empty",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.ensure",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.ensureFrom",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.expand",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.extract",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.extractWith",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.find",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.findGo",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.instList",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.instantiate",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.matchBranches",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.matchPat",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.matches",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.merge",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.mergeFacts",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.mergeRows",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.nodesOf",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.numClasses",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.numNodes",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.rebuild",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.rebuildLoop",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.roots",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.sameClass",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.saturate",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.EGraph.union",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode.beq",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode.canon",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode.canonical",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode.cost",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ENode.leaf",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm.leaf",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm.node1",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm.node2",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm.size",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerm.toList",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerms",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerms.length",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerms.size",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.ETerms.toList",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Pat",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Pat.size",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Pats",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Pats.length",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Pats.size",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.Rewrite",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.bindLookup",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/PointsTo.wiz",
+      "name": "Scry.directTargets",
+      "modules": [
+        "lib/Scry/PointsTo.wiz",
+        "lib/Scry/Race.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/PointsTo.wiz and lib/Scry/Race.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Scry/PointsTo.wiz and lib/Scry/Race.wiz",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.egArgsBeq",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.egCountUp",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.egRep",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.etableFindL",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Prover.wiz",
+      "name": "Scry.rowNat",
+      "modules": [
+        "lib/Scry/Prover.wiz",
+        "lib/Scry/Taint.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/Prover.wiz and lib/Scry/Taint.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Scry/Prover.wiz and lib/Scry/Taint.wiz",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/Egraph.wiz",
+      "name": "Scry.zipPats",
+      "modules": [
+        "lib/Scry/Egraph.wiz",
+        "lib/Scry/EgraphNative.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
+      "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Web/Playground.wiz",
+      "name": "linesOf",
+      "modules": [
+        "lib/Web/Playground.wiz",
+        "selfhost/Cli.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Web/Playground.wiz and selfhost/Cli.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Web/Playground.wiz and selfhost/Cli.wiz",
+      "expires": "2027-05-01"
+    }
+  ]
+}

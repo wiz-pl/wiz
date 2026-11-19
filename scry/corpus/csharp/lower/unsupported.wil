@@ -24,23 +24,33 @@ func Demo.Unsupported.Control.Flow(%0, %1)
     %15 = call Demo.Unsupported.Control.Apply(%14)
     %16 = call System.String.Concat(%13, %15)
     %1 = %16
-    %17 = call System.Exception..ctor()
-    goto b1
+    %17 = havoc u1
+    %18 = 0
+    br ne %17, %18 ? b1 : b2
   b1:
-    %18 = havoc u1
-    %19 = 0
-    br ne %18, %19 ? b3 : b5
+    %19 = call System.Console.WriteLine(%1)
+    goto b3
   b2:
-    ret
+    goto b3
   b3:
-    %20 = havoc dyn*
-    %21 = havoc u1
-    %22 = call System.Console.WriteLine(%20)
-    goto b2
-  b4:
-    ret
-  b5:
+    %20 = call System.Exception..ctor()
     goto b4
+  b4:
+    %21 = havoc u1
+    %22 = 0
+    br ne %21, %22 ? b6 : b8
+  b5:
+    ret
+  b6:
+    %23 = havoc dyn*
+    %24 = null
+    %25 = ne %23, %24
+    %26 = call System.Console.WriteLine(%23)
+    goto b5
+  b7:
+    ret
+  b8:
+    goto b7
 warning: Demo.Unsupported.OutOfScope.GetEnumerator:30: yield_statement not modelled
 warning: Demo.Unsupported.Control.Apply:36: call to f: not a method of Demo.Unsupported.Control (delegate or unknown)
 warning: Demo.Unsupported.Control.Flow:40: local function Local not modelled: its body is not lowered and calls to it are unknown
@@ -49,9 +59,9 @@ warning: Demo.Unsupported.Control.Flow:44: lambda body not lowered: passed to De
 warning: Demo.Unsupported.Control.Flow:46: lock_statement not modelled
 warning: Demo.Unsupported.Control.Flow:51: goto_statement not modelled
 warning: Demo.Unsupported.Control.Flow:53: labeled_statement not modelled
-warning: Demo.Unsupported.Control.Flow:63: is test not modelled: havoc
+warning: Demo.Unsupported.Control.Flow:61: nested pattern binding inner not modelled
 warning: Demo.Unsupported.Control.Flow:42: lambda body not lowered: assigned to local unused but never invoked in this method, so its call site is unknown
-warning: <global>:70: preproc_if not modelled: no code is lowered for it
+warning: <global>:77: preproc_if not modelled: no code is lowered for it
 warning: <global>:10: delegate_declaration not modelled: no code is lowered for it
 warning: Demo.Unsupported.IBox:14: indexer_declaration member not modelled: no code is lowered for it
 warning: Demo.Unsupported.OutOfScope:20: indexer_declaration member not modelled: no code is lowered for it

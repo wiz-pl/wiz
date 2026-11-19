@@ -22,6 +22,13 @@ The model table has three kinds of entry:
 * **pure/none** — calls such as `strlen` or `strcmp` that neither copy taint nor write
   memory. A model with an empty effect list is a claim that the call is **modelled as
   pure**, not a claim that the function is safe in general.
+* **CLR (C#)** — the C# frontend emits CLR spellings (`Namespace.Type.Method`,
+  `T[].get_Item`), so the same table carries the BCL reads it lowers to: any property
+  getter, array/string lengths and element reads, `String` operations, LINQ projections,
+  ASP.NET Core minimal-API registration calls, `TypedResults`/`Results` factories,
+  `Console.ReadLine` and the HTTP request accessors as sources, and `ILogger.Log*` as a
+  log-line sink (CWE-117). Writes through a receiver or an argument, constructors and
+  `Dispose` are deliberately not modelled. See "CLR (C#) models" below.
 
 ## Effects
 
@@ -39,6 +46,30 @@ The model table has three kinds of entry:
 `copyArgs` exists because a format call has no single source: the destination receives a
 mixture of the format and its variadic arguments. It expands to `arity - first` copy
 pairs, so the taint layer can treat each argument as a source of the written object.
+
+## The pack and its keys
+
+The entries are a value, `Scry.ModelPack`: a name, the pack's default language, and
+`Scry.ModelEntry` values keyed by `(name, arity, language, module)`. `none` in a key is a
+wildcard; a lookup picks the matching entry with the most concrete key fields and, on a
+tie, the first in the pack. `Scry.defaultModels` is today's table with every field
+wildcarded, so its lookups are the old `List.find (String.eq m.name name)` exactly;
+`Scry.csModels` is the same table looked up in `c_sharp`. The lowering and the analyses
+take the pack as an argument (`Scry.lowerTUWithModels`, `Scry.analyzeModels`,
+`Scry.boundsCheckModels`, `Scry.lifetimeFindingsWithModels`), and the default spellings
+pass `Scry.defaultModels`.
+
+`Bounds` reads a call's copy/read shape from the pack's `copyBounds` effect instead of
+keeping the old `boundsCopyShape` name table. The five entries the old table named
+(`read`, `recv`, `memcpy`, `memmove`, `strncpy`) are the five with `copyBounds`; the
+bounded format copies (`sprintf`, `snprintf`, `vsnprintf`, `strncat`, `strlcpy`,
+`strlcat`) are modelled for taint but do not have a `copyBounds` effect, because adding
+one would add findings the old analysis never reported. That is a known table gap, not a
+silent fix.
+
+`Scry.ModelPack.conflictReports` reports overlapping entries of equal specificity that
+disagree about the effects, and `Scry.ModelPack.deadReport` (used by
+`Scry.deadModelReportOn`) reports entries a corpus never calls.
 
 ## Unknown is explicit
 
@@ -70,30 +101,42 @@ inductive Scry.SinkClass where
   | length
   /-- An allocation size (`malloc`, `calloc`, `realloc`). -/
   | size
+  /-- A log line written to a file (a log-injection sink, CWE-117). -/
+  | log
 
 def Scry.SinkClass.show : Scry.SinkClass → String
   | .command => "command"
   | .format => "format"
   | .length => "length"
   | .size => "size"
+  | .log => "log"
 
 def Scry.SinkClass.ruleId : Scry.SinkClass → String
   | .command => "command-injection"
   | .format => "format-string"
   | .length => "buffer-overflow"
   | .size => "integer-overflow"
+  | .log => "log-injection"
+
+/-- Is this sink a log-line write? An integer written into a log line cannot forge a
+record, so the model adds log sinks only for pointer-like (string/object) arguments. -/
+def Scry.SinkClass.isLog : Scry.SinkClass → Bool
+  | .log => .true
+  | _ => .false
 
 def Scry.SinkClass.severity : Scry.SinkClass → Scry.Severity
   | .command => .error
   | .format => .warning
   | .length => .warning
   | .size => .warning
+  | .log => .warning
 
 def Scry.SinkClass.message : Scry.SinkClass → String
   | .command => "Attacker-controlled data reaches a command interpreter"
   | .format => "Attacker-controlled data is used as a format string"
   | .length => "Attacker-controlled length reaches a copy or read; the destination can overflow"
   | .size => "Attacker-controlled value reaches an allocation size; the size may overflow or exhaust memory"
+  | .log => "Attacker-controlled data reaches a log line written to a file"
 
 /-- One effect of an external call. `ArgRef` is the rule pack's `result`/`arg K`
 selector, so a model and a pack line mean the same thing. -/
@@ -108,6 +151,11 @@ inductive Scry.Effect where
   | sanitise (ref : Scry.ArgRef)
   | copy (dst : Nat) (src : Nat)
   | copyArgs (dst : Nat) (first : Nat)
+  /-- A copy/read whose length is the value at argument `count`. `dst` is the buffer that
+  is written (`read`/`recv`) or the destination of a copy; `src` is the copied-from
+  argument for a copy and `none` for a read. `Bounds` reads this effect instead of
+  keeping its own name table (`boundsCopyShape`). -/
+  | copyBounds (dst : Nat) (src : Option Nat) (count : Nat)
   | alloc (sizeArg : Option Nat) (countArg : Option Nat)
   | free (arg : Nat)
   | unknown
@@ -125,6 +173,55 @@ structure Scry.FnModel where
   effects : List Scry.Effect
   note : String
 
+/-- What a model entry is keyed by. `none` is a wildcard: the entry applies to every
+arity/language/module. A lookup prefers the most specific matching entry and, among
+equally specific ones, the first in the pack (the order `List.find` gave before the
+parameterisation). -/
+structure Scry.ModelKey where
+  /-- The external function name (`malloc`, `System.String.Concat`, …). -/
+  name : String
+  /-- The exact argument count, or `none` for "any arity" (variadic families). -/
+  arity : Option Nat
+  /-- The source language (`c`, `c_sharp`, …), or `none` for a language-independent model. -/
+  language : Option String
+  /-- The module/type a language-scoped name belongs to (`System.String`), or `none`. -/
+  module : Option String
+
+/-- One entry of a model pack: a key and the model it selects. -/
+structure Scry.ModelEntry where
+  key : Scry.ModelKey
+  model : Scry.FnModel
+
+/-- A request to a pack. `language` is the language of the unit being analysed;
+`arity` and `module` are `none` when the caller does not know them. A `none` in the
+request matches any entry value, while a `none` in the entry is a wildcard that matches
+any request. -/
+structure Scry.ModelQuery where
+  name : String
+  arity : Option Nat
+  language : String
+  module : Option String
+
+/-- A pack: named entries, the language it is the default for, and an optional shape
+fallback for names that are not static entries (train6's CLR getter/fluent/result
+rules). `Scry.defaultModels` keys the core table wildcarded, so its core lookups are
+exactly the old `List.find (String.eq m.name name)`. -/
+structure Scry.ModelPack where
+  name : String
+  language : String
+  entries : List Scry.ModelEntry
+  fallback : String → Option Scry.FnModel
+
+/-- The copy/read shape `Bounds` consumes, derived from a model's `copyBounds` effect. -/
+structure Scry.CopyShape where
+  dst : Nat
+  src : Option Nat
+  count : Nat
+
+/-- Wrap a model as an any-arity, any-language, any-module entry. -/
+def Scry.ModelEntry.anyModel (m : Scry.FnModel) : Scry.ModelEntry :=
+  Scry.ModelEntry.mk (Scry.ModelKey.mk m.name .none .none .none) m
+
 -- ## Queries
 
 def Scry.modelFlat {A B : Type} (f : A → List B) : List A → List B
@@ -133,32 +230,44 @@ def Scry.modelFlat {A B : Type} (f : A → List B) : List A → List B
 
 def Scry.modelSources (m : Scry.FnModel) : List Scry.ArgRef :=
   Scry.modelFlat (fun e => match e with
-    | .source r => List.cons r .nil
+    | .source r => [r]
     | _ => .nil) m.effects
 
 def Scry.modelSans (m : Scry.FnModel) : List Scry.ArgRef :=
   Scry.modelFlat (fun e => match e with
-    | .sanitise r => List.cons r .nil
+    | .sanitise r => [r]
     | _ => .nil) m.effects
 
 def Scry.modelSinkArgs (m : Scry.FnModel) : List (Nat × Scry.SinkClass) :=
   Scry.modelFlat (fun e => match e with
-    | .sink arg c => List.cons (arg, c) .nil
+    | .sink arg c => [(arg, c)]
     | _ => .nil) m.effects
 
 def Scry.modelRangeFrom : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, first => List.append (Scry.modelRangeFrom k first)
-      (List.cons (Nat.add first k) .nil)
+      [(Nat.add first k)]
 
 /-- The `(destination, source)` pairs a model copies into. `arity` is the call's argument
 count, which is what expands a `copyArgs` effect (a format call has no fixed arity). -/
 def Scry.modelCopyPairs (m : Scry.FnModel) (arity : Nat) : List (Nat × Nat) :=
   Scry.modelFlat (fun e => match e with
-    | .copy dst src => List.cons (dst, src) .nil
+    | .copy dst src => [(dst, src)]
     | .copyArgs dst first => List.map (fun src => (dst, src))
         (Scry.modelRangeFrom (Nat.sub arity first) first)
     | _ => .nil) m.effects
+
+/-- The first `copyBounds` effect whose length argument exists at this call arity. The
+arity test is `count + 1 <= arity`, the same `arity >= 3` test the old
+`boundsCopyShape` applied to every shape. -/
+def Scry.modelCopyBounds (m : Scry.FnModel) (arity : Nat) : Option Scry.CopyShape :=
+  match List.find (fun e => match e with
+    | .copyBounds _ _ count => Nat.le (Nat.succ count) arity
+    | _ => .false) m.effects with
+  | .none => .none
+  | .some e => match e with
+    | .copyBounds dst src count => .some (Scry.CopyShape.mk dst src count)
+    | _ => .none
 
 def Scry.modelAlloc (m : Scry.FnModel) : Option Scry.AllocShape :=
   match List.find (fun e => match e with
@@ -186,39 +295,41 @@ def Scry.modelHasUnknown (m : Scry.FnModel) : Bool :=
 -- ## The table
 
 def Scry.sourceGetenv : Scry.FnModel :=
-  Scry.FnModel.mk "getenv" "libc" (List.cons (.source .result) .nil)
+  Scry.FnModel.mk "getenv" "libc" [(.source .result)]
     "the environment value is attacker-controlled"
 
 def Scry.sourceRead : Scry.FnModel :=
   Scry.FnModel.mk "read" "syscall"
     (List.cons (.source (.arg 1))
-      (List.cons (.sink 2 .length) .nil))
+      (List.cons (.sink 2 .length)
+        (List.cons (.copyBounds 1 .none 2) .nil)))
     "fills buffer argument 1; the length argument 2 is a bound"
 
 def Scry.sourceRecv : Scry.FnModel :=
   Scry.FnModel.mk "recv" "syscall"
     (List.cons (.source (.arg 1))
-      (List.cons (.sink 2 .length) .nil))
+      (List.cons (.sink 2 .length)
+        (List.cons (.copyBounds 1 .none 2) .nil)))
     "fills buffer argument 1; the length argument 2 is a bound"
 
 def Scry.sourceFgets : Scry.FnModel :=
-  Scry.FnModel.mk "fgets" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "fgets" "libc" [(.source (.arg 0))]
     "fills buffer argument 0"
 
 def Scry.sourceGetline : Scry.FnModel :=
-  Scry.FnModel.mk "getline" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "getline" "libc" [(.source (.arg 0))]
     "fills the line buffer argument 0"
 
 def Scry.sourceFread : Scry.FnModel :=
-  Scry.FnModel.mk "fread" "libc" (List.cons (.source (.arg 0)) .nil)
+  Scry.FnModel.mk "fread" "libc" [(.source (.arg 0))]
     "fills buffer argument 0"
 
 def Scry.sinkSystem : Scry.FnModel :=
-  Scry.FnModel.mk "system" "libc" (List.cons (.sink 0 .command) .nil)
+  Scry.FnModel.mk "system" "libc" [(.sink 0 .command)]
     "argument 0 is passed to the shell"
 
 def Scry.sinkPopen : Scry.FnModel :=
-  Scry.FnModel.mk "popen" "libc" (List.cons (.sink 0 .command) .nil)
+  Scry.FnModel.mk "popen" "libc" [(.sink 0 .command)]
     "argument 0 is passed to the shell"
 
 /-- `execl`/`execle`/`execlp` are variadic: the path is argument 0 and every argv entry
@@ -227,30 +338,30 @@ is still handled by the lower-ranked positions, and the limit is stated here rat
 silently assuming one position. -/
 def Scry.sinkExec : Scry.FnModel :=
   Scry.FnModel.mk "execl" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path and every variadic argv entry are command sinks (positions 0–7)"
 
 def Scry.sinkExeclp : Scry.FnModel :=
   Scry.FnModel.mk "execlp" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path and every variadic argv entry are command sinks (positions 0–7)"
 
 def Scry.sinkExecle : Scry.FnModel :=
   Scry.FnModel.mk "execle" "libc"
-    (Scry.modelFlat (fun k => List.cons (.sink k .command) .nil)
+    (Scry.modelFlat (fun k => [(.sink k .command)])
       (Scry.modelRangeFrom 8 0))
     "path, argv and the environment are command sinks (positions 0–7)"
 
 def Scry.sinkExecv : Scry.FnModel :=
   Scry.FnModel.mk "execv" "libc"
-    (List.cons (.sink 0 .command) (List.cons (.sink 1 .command) .nil))
+    [(.sink 0 .command), (.sink 1 .command)]
     "the path and the argv pointer"
 
 def Scry.sinkExecvp : Scry.FnModel :=
   Scry.FnModel.mk "execvp" "libc"
-    (List.cons (.sink 0 .command) (List.cons (.sink 1 .command) .nil))
+    [(.sink 0 .command), (.sink 1 .command)]
     "the path and the argv pointer"
 
 def Scry.sinkExecvpe : Scry.FnModel :=
@@ -278,16 +389,16 @@ def Scry.sinkPosixSpawnp : Scry.FnModel :=
     "the path (1), argv (4) and environment (5); argument 0 is the pid output"
 
 def Scry.sinkPrintf : Scry.FnModel :=
-  Scry.FnModel.mk "printf" "libc" (List.cons (.sink 0 .format) .nil)
+  Scry.FnModel.mk "printf" "libc" [(.sink 0 .format)]
     "argument 0 is the format string"
 
 def Scry.sinkFprintf : Scry.FnModel :=
-  Scry.FnModel.mk "fprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "fprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkSprintf : Scry.FnModel :=
   Scry.FnModel.mk "sprintf" "libc"
-    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    [(.sink 1 .format), (.copyArgs 0 1)]
     "argument 1 is the format; the formatted arguments are copied into the destination"
 
 def Scry.sinkSnprintf : Scry.FnModel :=
@@ -298,16 +409,16 @@ def Scry.sinkSnprintf : Scry.FnModel :=
     "argument 1 is the bound, argument 2 the format; the formatted arguments are copied"
 
 def Scry.sinkVprintf : Scry.FnModel :=
-  Scry.FnModel.mk "vprintf" "libc" (List.cons (.sink 0 .format) .nil)
+  Scry.FnModel.mk "vprintf" "libc" [(.sink 0 .format)]
     "argument 0 is the format string"
 
 def Scry.sinkVfprintf : Scry.FnModel :=
-  Scry.FnModel.mk "vfprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "vfprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkVsprintf : Scry.FnModel :=
   Scry.FnModel.mk "vsprintf" "libc"
-    (List.cons (.sink 1 .format) (List.cons (.copyArgs 0 1) .nil))
+    [(.sink 1 .format), (.copyArgs 0 1)]
     "argument 1 is the format; the formatted arguments are copied into the destination"
 
 def Scry.sinkVsnprintf : Scry.FnModel :=
@@ -318,52 +429,52 @@ def Scry.sinkVsnprintf : Scry.FnModel :=
     "argument 1 is the bound, argument 2 the format; the formatted arguments are copied"
 
 def Scry.sinkSyslog : Scry.FnModel :=
-  Scry.FnModel.mk "syslog" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "syslog" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.sinkDprintf : Scry.FnModel :=
-  Scry.FnModel.mk "dprintf" "libc" (List.cons (.sink 1 .format) .nil)
+  Scry.FnModel.mk "dprintf" "libc" [(.sink 1 .format)]
     "argument 1 is the format string"
 
 def Scry.copyStrcpy : Scry.FnModel :=
-  Scry.FnModel.mk "strcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strcpy" "libc" [(.copy 0 1)]
     "argument 1 is copied into the object argument 0 points at"
 
 def Scry.copyStrncpy : Scry.FnModel :=
-  Scry.FnModel.mk "strncpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strncpy" "libc" [(.copy 0 1), (.copyBounds 0 (.some 1) 2)]
     "a bounded copy, still a copy from argument 1 to argument 0"
 
 def Scry.copyStrcat : Scry.FnModel :=
-  Scry.FnModel.mk "strcat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strcat" "libc" [(.copy 0 1)]
     "argument 1 is appended to the object argument 0 points at"
 
 def Scry.copyStrncat : Scry.FnModel :=
-  Scry.FnModel.mk "strncat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strncat" "libc" [(.copy 0 1)]
     "a bounded append, still a copy from argument 1 to argument 0"
 
 def Scry.copyStpcpy : Scry.FnModel :=
-  Scry.FnModel.mk "stpcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "stpcpy" "libc" [(.copy 0 1)]
     "argument 1 is copied into argument 0"
 
 def Scry.copyStrlcpy : Scry.FnModel :=
-  Scry.FnModel.mk "strlcpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strlcpy" "libc" [(.copy 0 1)]
     "a size-bounded copy from argument 1 to argument 0"
 
 def Scry.copyStrlcat : Scry.FnModel :=
-  Scry.FnModel.mk "strlcat" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strlcat" "libc" [(.copy 0 1)]
     "a size-bounded append from argument 1 to argument 0"
 
 def Scry.copyMemcpy : Scry.FnModel :=
-  Scry.FnModel.mk "memcpy" "libc" (List.cons (.copy 0 1) .nil)
-    "argument 1 is copied into argument 0"
+  Scry.FnModel.mk "memcpy" "libc" [(.copy 0 1), (.copyBounds 0 (.some 1) 2)]
+    "argument 1 is copied into argument 0; argument 2 is the length"
 
 def Scry.copyMemmove : Scry.FnModel :=
-  Scry.FnModel.mk "memmove" "libc" (List.cons (.copy 0 1) .nil)
-    "argument 1 is moved into argument 0"
+  Scry.FnModel.mk "memmove" "libc" [(.copy 0 1), (.copyBounds 0 (.some 1) 2)]
+    "argument 1 is moved into argument 0; argument 2 is the length"
 
 def Scry.allocMalloc : Scry.FnModel :=
   Scry.FnModel.mk "malloc" "libc"
-    (List.cons (.alloc (.some 0) .none) (List.cons (.sink 0 .size) .nil))
+    [(.alloc (.some 0) .none), (.sink 0 .size)]
     "a fresh object; argument 0 is the byte count"
 
 def Scry.allocCalloc : Scry.FnModel :=
@@ -374,11 +485,11 @@ def Scry.allocCalloc : Scry.FnModel :=
 
 def Scry.allocRealloc : Scry.FnModel :=
   Scry.FnModel.mk "realloc" "libc"
-    (List.cons (.alloc (.some 1) .none) (List.cons (.sink 1 .size) .nil))
-    "a fresh object; the old object may also be freed (not modelled as a free here, to keep the may-alias result)"
+    [(.alloc (.some 1) .none), (.sink 1 .size), (.free 0)]
+    "a fresh object; the old object (argument 0) may also be freed, which the lifetime analysis reads from `.free`"
 
 def Scry.freeFree : Scry.FnModel :=
-  Scry.FnModel.mk "free" "libc" (List.cons (.free 0) .nil)
+  Scry.FnModel.mk "free" "libc" [(.free 0)]
     "argument 0 is freed"
 
 -- Policy models: the sanitiser names the default pack trusts. A model supplies the
@@ -386,43 +497,51 @@ def Scry.freeFree : Scry.FnModel :=
 -- function is safe for every use.
 
 def Scry.sanEscapeShell : Scry.FnModel :=
-  Scry.FnModel.mk "escape_shell" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "escape_shell" "policy" [(.sanitise .result)]
     "shell-escapes its argument and returns a new string"
 
 def Scry.sanShellescape : Scry.FnModel :=
-  Scry.FnModel.mk "shellescape" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "shellescape" "policy" [(.sanitise .result)]
     "shell-escapes its argument and returns a new string"
 
 def Scry.sanQuoteArg : Scry.FnModel :=
-  Scry.FnModel.mk "quote_arg" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "quote_arg" "policy" [(.sanitise .result)]
     "quotes one shell argument"
 
 def Scry.sanSanitize : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize" "policy" (List.cons (.sanitise (.arg 0)) .nil)
+  Scry.FnModel.mk "sanitize" "policy" [(.sanitise (.arg 0))]
     "cleans argument 0 in place"
 
 def Scry.sanSanitizeFormat : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize_format" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "sanitize_format" "policy" [(.sanitise .result)]
     "returns a format string with no conversions"
 
 def Scry.sanSanitizePath : Scry.FnModel :=
-  Scry.FnModel.mk "sanitize_path" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "sanitize_path" "policy" [(.sanitise .result)]
     "returns a path with traversal components removed"
 
+/-- `realpath(path, resolved)` canonicalises the path. Only the **result** and the
+written destination (argument 1) are clean; the input argument is not, so
+`realpath(user, buf); open(user)` still reports. -/
+def Scry.sanRealpath : Scry.FnModel :=
+  Scry.FnModel.mk "realpath" "libc"
+    (List.cons (.sanitise .result) (List.cons (.sanitise (.arg 1)) .nil))
+    "canonicalises a path into its result and argument 1; the input is not cleaned"
+
 def Scry.sanConfinePath : Scry.FnModel :=
-  Scry.FnModel.mk "confine_path" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "confine_path" "policy" [(.sanitise .result)]
     "confines a path to a base directory"
 
 def Scry.sanCheckedSize : Scry.FnModel :=
-  Scry.FnModel.mk "checked_size" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "checked_size" "policy" [(.sanitise .result)]
     "returns a size after an overflow check"
 
 def Scry.sanClampLen : Scry.FnModel :=
-  Scry.FnModel.mk "clamp_len" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "clamp_len" "policy" [(.sanitise .result)]
     "returns a length clamped to a bound"
 
 def Scry.sanClampSize : Scry.FnModel :=
-  Scry.FnModel.mk "clamp_size" "policy" (List.cons (.sanitise .result) .nil)
+  Scry.FnModel.mk "clamp_size" "policy" [(.sanitise .result)]
     "returns a size clamped to a bound"
 
 -- Pure/read-only calls: an empty effect list is a positive model, not `unknown`.
@@ -439,14 +558,12 @@ def Scry.pureModels : List Scry.FnModel :=
     , "isdigit", "isspace", "isalpha", "toupper", "tolower", "puts", "fputs"
     , "fwrite", "fflush", "close", "perror" ]
 
-/-- A C#/CLR external call whose effect on the **value** is known: `result` is the
-call's result type (`?` when unknown), `awaited` is what `await` yields for an async
-call (`""` when the call is not async), and `note` states what the entry claims. A
-listed call is `Scry.isModelled`, so the memory model does not report it as
-`unmodelled-external`: the claim is only that the call affects its result and its
-arguments by value (the C# rule pack still owns sources, sanitisers and sinks). A name
-not in the table is unknown: its result type is `?` and its memory effect is warned
-about with the name. -/
+/-- A C#/CLR external call whose **value** is known: `result` is the call's result type
+(`?` when unknown), `awaited` is what `await` yields for an async call (`""` when the
+call is not async), and `note` states what the entry claims. This is a *type* table for
+the lowering: it says nothing about memory effects, which stay in `clrModels` above (a
+write or a sink that table leaves out keeps its `unmodelled-external` warning). A name
+not in the table has result type `?`. -/
 structure Scry.CsExternal where
   name : String
   result : String
@@ -454,9 +571,9 @@ structure Scry.CsExternal where
   note : String
 
 /-- The C# value summary. These are the calls the lowerer emits for CLR/BCL code and
-the ones a rule can propagate through; the table is deliberately small and every entry
-names its effect. `""` in `awaited` means "not an async call"; `?` as a result means
-"the value flows, its static type is not known". -/
+whose result type (or awaited type) it can name; the table is deliberately small and
+every entry says what it claims. `""` in `awaited` means "not an async call"; `?` as a
+result means "the value flows, its static type is not known". -/
 def Scry.csExternals : List Scry.CsExternal :=
   [ Scry.CsExternal.mk "System.String.Concat" "System.String" ""
       "concatenates its arguments: taint flows to the result"
@@ -686,12 +803,6 @@ def Scry.csAwaitedType (name : String) : Option String :=
   | .some e => if String.eq e.awaited "" then .none else .some e.awaited
   | .none => .none
 
-/-- The table as `FnModel` entries: an empty effect list means "value-only, the pack
-still owns sources/sinks/sanitisers", so the memory model does not warn
-`unmodelled-external` for a call it has a value summary for. -/
-def Scry.csExternalModels : List Scry.FnModel :=
-  List.map (fun e => Scry.FnModel.mk e.name "csharp" .nil e.note) Scry.csExternals
-
 def Scry.libcModels : List Scry.FnModel :=
   [ Scry.sourceGetenv
   , Scry.sourceRead
@@ -733,6 +844,7 @@ def Scry.libcModels : List Scry.FnModel :=
   , Scry.allocCalloc
   , Scry.allocRealloc
   , Scry.freeFree
+  , Scry.sanRealpath
   ]
 
 def Scry.policyModels : List Scry.FnModel :=
@@ -748,15 +860,385 @@ def Scry.policyModels : List Scry.FnModel :=
   , Scry.sanClampSize
   ]
 
-def Scry.models : List Scry.FnModel :=
-  List.append Scry.libcModels
-    (List.append Scry.policyModels (List.append Scry.pureModels Scry.csExternalModels))
+-- ## CLR (C#) models
 
-def Scry.modelOf (name : String) : Option Scry.FnModel :=
-  List.find (fun m => String.eq m.name name) Scry.models
+-- The C# frontend emits **CLR spellings**, not C ones (`scry/CSHARP.md` §3): a function
+-- is `Namespace.Type.Method`, an instance call's receiver is argument 0, a property is
+-- `Type.get_P` / `Type.set_P`, an indexer is `Type.get_Item` / `Type.set_Item`, a
+-- constructor is `Type..ctor`, and an array's type is part of the name
+-- (`System.Int32[].get_Length`). The classes modelled here:
+--
+-- * **reads and projections** — a length, an element, a property getter, a string
+--   operation, a LINQ operator, an ASP.NET Core minimal-API registration call. A read
+--   *writes nothing through an argument, frees nothing and is not a taint source*: it is
+--   a claim about effects, not about safety.
+--   It does not launder either: the taint layer's ordinary `gen` rule still carries
+--   taint from the receiver and the arguments to the result, so `s.Substring(1)` of a
+--   tainted `s` is tainted, and `xs.Select(f)` of a tainted `xs` is tainted. A model is
+--   never *narrower* than `unknown` for taint: an unmodelled call also has no source
+--   fact, so the two differ only in the warning and in the effects a model names.
+-- * **one source** — `System.Console.ReadLine` returns attacker-controlled text. The
+--   C# rule pack already declares it a source; the model makes the effect independent
+--   of a pack (model sources and pack sources are deduplicated, so a pack that also
+--   names it is unchanged).
+-- * **one allocation shape** — `System.Array.$new`, the collection-expression array: a
+--   fresh object whose elements are its arguments.
+--
+-- What is deliberately **not** modelled:
+--
+-- * anything that writes through its receiver or an argument (`set_*`, `set_Item`,
+--   `Add`, `Append`, `Insert`, `Remove`, `Clear`, `CopyTo`, `Array.Copy`, `Read` into a
+--   buffer): its memory effect is unknown, so the explicit `unmodelled-external`
+--   warning stays. A `copy` model into an unknown `Loc` would taint every later load
+--   through an unknown pointer — more false positives, not more soundness.
+-- * a **log write** is the exception among writes: `ILogger.Log*` has no memory effect
+--   the points-to model can name, but its data arguments reach a file, so they are a
+--   `sink` (`SinkClass.log`, CWE-117). Only pointer-like arguments are sinks; an integer
+--   length cannot forge a log line.
+-- * a constructor (`Type..ctor`): it writes the object it returns; `gen` already taints
+--   that object from the arguments, and a `copy` effect would land in `Loc.unknown`.
+-- * `Dispose`: `free` would claim the managed object dies; a `using` block's `Dispose`
+--   does not (and the lifetime rule would then report a false use-after-free).
+-- * `Process.Start` and the rest of the C# rule pack's sinks: a sink needs a *rule
+--   class*, and the pack owns those. The pack is what makes them findings; adding the
+--   same sink to the table would only duplicate the fact.
 
-def Scry.isModelled (name : String) : Bool :=
-  match Scry.modelOf name with
+/-- A CLR read/projection: no write through an argument, no free, no new source. The
+result is an ordinary external value (points-to keeps it `Loc.unknown`, as for every
+external call), and taint still reaches it through `gen`. -/
+def Scry.clrRead (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-read" .nil
+    "a CLR read or projection: no write through an argument, no free, no new source; its result derives from the receiver and arguments (taint still flows through gen)"
+
+/-- The last `.`-separated segment of a CLR name (`System.Int32[].get_Item` → `get_Item`). -/
+def Scry.clrLast : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons _ rest => Scry.clrLast rest
+
+def Scry.clrLastSegment (name : String) : String := Scry.clrLast (String.splitOn name ".")
+
+/-- Is this a CLR property getter? Every CLR member name the C# frontend emits contains a
+`.` (`T.get_P`, `?.get_P`), while a C identifier never does, so the shape rule cannot
+capture a C function named `get_Foo`. A getter's only input is the receiver: it returns a
+value derived from it (taint reaches the result through `gen`), has no data argument to
+write through, and is not a source. `set_*` is *not* matched: a setter writes. -/
+def Scry.clrIsGetter (name : String) : Bool :=
+  Bool.and (String.contains name ".") (String.startsWith (Scry.clrLastSegment name) "get_")
+
+/-- The shape rule `Scry.clrModelOf` adds after the exact names: any CLR property getter
+(read), and the object-protocol member shapes (also reads on any receiver). A name that
+ends this way and is not defined by the unit is a read: it writes nothing through an
+argument, frees nothing, and is not a source. It is not a sanitiser either. -/
+def Scry.clrReadSuffixes : List String :=
+  [ ".ToString", ".Equals", ".GetHashCode", ".GetType", ".CompareTo"
+  , ".MoveNext", ".GetEnumerator" ]
+
+/-- ASP.NET Core minimal-API registration/fluent member names (`Microsoft.AspNetCore.
+Builder.EndpointRouteBuilderExtensions`, `…RouteHandlerBuilderExtensions`): they return
+the builder or endpoint derived from the receiver, so taint in the receiver reaches the
+result through `gen`, and they take no buffer the analysis could write a tainted value
+into. Any registration state they keep *inside* the builder is outside the points-to
+model either way. Matched by the member segment on any CLR receiver, because the
+frontend often does not know the builder's type (`?.Produces`, `?.MapPost`). -/
+def Scry.clrFluentNames : List String :=
+  [ "Produces", "ProducesProblem", "ProducesValidationProblem"
+  , "WithName", "WithSummary", "WithDescription", "WithTags", "WithOpenApi"
+  , "WithMetadata", "WithDisplayName", "AddEndpointFilter"
+  , "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapMethods"
+  , "MapGroup", "MapControllers", "MapHub", "MapFallback"
+  , "AllowAnonymous", "RequireAuthorization", "RequireCors", "RequireRateLimiting"
+  , "RequireHost", "DisableAntiforgery", "ExcludeFromDescription" ]
+
+/-- `Microsoft.AspNetCore.Http.TypedResults` / `Results` factory members: they return an
+`IResult` carrying the argument values, so taint reaches the result through `gen`; no
+argument is written through. -/
+def Scry.clrResultNames : List String :=
+  [ "Problem", "Ok", "Created", "CreatedAtRoute", "NoContent", "BadRequest"
+  , "NotFound", "Unauthorized", "Forbid", "Conflict", "UnprocessableEntity"
+  , "Json", "Text", "Bytes", "File", "Stream", "PhysicalFile", "VirtualFile"
+  , "Content", "Accepted", "AcceptedAtRoute", "Redirect", "RedirectToRoute"
+  , "StatusCode", "Empty" ]
+
+def Scry.clrMemberIn (names : List String) (name : String) : Bool :=
+  List.any (fun x => String.eq x (Scry.clrLastSegment name)) names
+
+/-- A fluent registration call (see `Scry.clrFluentNames`); gated on a CLR name so a C
+function called `Produces` is untouched. -/
+def Scry.clrIsFluent (name : String) : Bool :=
+  Bool.and (String.contains name ".") (Scry.clrMemberIn Scry.clrFluentNames name)
+
+/-- A `TypedResults`/`Results` factory (see `Scry.clrResultNames`). -/
+def Scry.clrIsResult (name : String) : Bool :=
+  Bool.and (Scry.clrMemberIn Scry.clrResultNames name)
+    (Bool.or (String.contains name "TypedResults.") (String.contains name "Results."))
+
+/-- Exact CLR read/projection names: the ones a receiver's shape does not reveal (a
+`String` member or a LINQ operator whose receiver type the lowering knows, and the
+`?`-receiver spellings it emits when it does not). `String.Concat`/`String.Format` are
+what the lowering emits for `+`, interpolation and `string.Format`, so a tainted part
+reaches the result through `gen`. -/
+def Scry.clrReadNames : List String :=
+  [ "System.String.Concat", "System.String.Format", "System.String.Join"
+  , "System.String.Substring", "System.String.Split", "System.String.Replace"
+  , "System.String.Trim", "System.String.TrimStart", "System.String.TrimEnd"
+  , "System.String.ToLower", "System.String.ToUpper"
+  , "System.String.ToLowerInvariant", "System.String.ToUpperInvariant"
+  , "System.String.Contains", "System.String.StartsWith", "System.String.EndsWith"
+  , "System.String.IndexOf", "System.String.LastIndexOf"
+  , "System.String.PadLeft", "System.String.PadRight"
+  , "System.String.IsNullOrEmpty", "System.String.IsNullOrWhiteSpace"
+  , "System.String.op_Equality", "System.String.op_Inequality"
+  , "System.Convert.FromBase64String", "System.Convert.ToBase64String"
+  , "?.Substring", "?.Split", "?.Replace", "?.Trim", "?.TrimStart", "?.TrimEnd"
+  , "?.ToLower", "?.ToUpper", "?.ToLowerInvariant", "?.ToUpperInvariant"
+  , "?.Contains", "?.StartsWith", "?.EndsWith", "?.IndexOf", "?.LastIndexOf"
+  , "?.PadLeft", "?.PadRight", "?.Select", "?.Where", "?.SelectMany"
+  , "?.OrderBy", "?.OrderByDescending", "?.ThenBy", "?.ThenByDescending"
+  , "?.Distinct", "?.Take", "?.Skip", "?.ToList", "?.ToArray", "?.AsEnumerable"
+  , "?.Concat", "?.Union", "?.Intersect", "?.Except", "?.GroupBy"
+  , "?.First", "?.FirstOrDefault", "?.Single", "?.SingleOrDefault"
+  , "?.Last", "?.LastOrDefault", "?.Any", "?.All", "?.Count", "?.LongCount"
+  , "?.Sum", "?.Min", "?.Max", "?.Average", "?.ElementAt", "?.ElementAtOrDefault"
+  , "?.Cast", "?.OfType", "?.Reverse", "?.Zip", "?.DefaultIfEmpty"
+  , "System.Linq.Enumerable.Select", "System.Linq.Enumerable.SelectMany"
+  , "System.Linq.Enumerable.Where", "System.Linq.Enumerable.OrderBy"
+  , "System.Linq.Enumerable.OrderByDescending", "System.Linq.Enumerable.ThenBy"
+  , "System.Linq.Enumerable.ThenByDescending", "System.Linq.Enumerable.Distinct"
+  , "System.Linq.Enumerable.Take", "System.Linq.Enumerable.Skip"
+  , "System.Linq.Enumerable.TakeWhile", "System.Linq.Enumerable.SkipWhile"
+  , "System.Linq.Enumerable.ToList", "System.Linq.Enumerable.ToArray"
+  , "System.Linq.Enumerable.AsEnumerable", "System.Linq.Enumerable.Concat"
+  , "System.Linq.Enumerable.Union", "System.Linq.Enumerable.Intersect"
+  , "System.Linq.Enumerable.Except", "System.Linq.Enumerable.GroupBy"
+  , "System.Linq.Enumerable.First", "System.Linq.Enumerable.FirstOrDefault"
+  , "System.Linq.Enumerable.Single", "System.Linq.Enumerable.SingleOrDefault"
+  , "System.Linq.Enumerable.Last", "System.Linq.Enumerable.LastOrDefault"
+  , "System.Linq.Enumerable.Any", "System.Linq.Enumerable.All"
+  , "System.Linq.Enumerable.Count", "System.Linq.Enumerable.LongCount"
+  , "System.Linq.Enumerable.Sum", "System.Linq.Enumerable.Min"
+  , "System.Linq.Enumerable.Max", "System.Linq.Enumerable.Average"
+  , "System.Linq.Enumerable.Contains", "System.Linq.Enumerable.ElementAt"
+  , "System.Linq.Enumerable.ElementAtOrDefault", "System.Linq.Enumerable.Cast"
+  , "System.Linq.Enumerable.OfType", "System.Linq.Enumerable.Reverse"
+  , "System.Linq.Enumerable.Zip", "System.Linq.Enumerable.DefaultIfEmpty"
+  , "System.Linq.Enumerable.Empty", "System.Linq.Enumerable.Range"
+  -- Console: output is terminal (nothing flows back into the program), and the
+  -- `Out`/`Error`/`In` getters are reads. `ReadLine` is the source below.
+  , "System.Console.Write", "System.Console.WriteLine"
+  , "System.Console.WriteAsync", "System.Console.WriteLineAsync"
+  , "System.Console.get_Out", "System.Console.get_Error", "System.Console.get_In"
+  , "System.Console.Read", "System.Console.ReadKey"
+  , "?.Write", "?.WriteLine", "?.WriteAsync", "?.WriteLineAsync", "?.Flush" ]
+
+/-- An ASP.NET Core minimal-API registration/fluent call (see `Scry.clrFluentNames`): the
+result is the builder or endpoint derived from the receiver, so taint in the receiver
+reaches it through `gen`; no argument is written through. -/
+def Scry.clrFluent (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-fluent" .nil
+    "an ASP.NET Core minimal-API registration/fluent call: its result derives from the receiver (taint flows through gen), it writes no memory the points-to model can name, and it is not a source"
+
+/-- `System.Array.$new(a…)` is the collection-expression constructor the C# lowering
+emits (`new[] { … }`, `[…]`). It returns a fresh array whose elements are its arguments,
+so taint reaches the array through `gen`; the model names the allocation and nothing
+else. -/
+def Scry.clrAllocArrayNew : Scry.FnModel :=
+  Scry.FnModel.mk "System.Array.$new" "clr-alloc"
+    (List.cons (.alloc .none .none) .nil)
+    "the collection-expression array: a fresh object whose elements are the arguments (taint reaches the array through gen)"
+
+/-- `System.Console.ReadLine`: stdin is attacker-controlled text (the C# rule pack names
+it as a source too; model and pack sources are deduplicated). -/
+def Scry.clrSourceReadLine : Scry.FnModel :=
+  Scry.FnModel.mk "System.Console.ReadLine" "clr-source"
+    (List.cons (.source .result) .nil)
+    "stdin text is attacker-controlled"
+
+/-- A CLR request read: the result is supplied by the caller (an HTTP request), so it is
+attacker-controlled. The property getters would otherwise be modelled as ordinary reads;
+an exact source entry wins over the shape rule. `?.` is the spelling the lowering emits
+when it cannot resolve the receiver's type (`ctx.Request.Headers`). -/
+def Scry.clrSource (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-source" (List.cons (.source .result) .nil)
+    "the HTTP request value is attacker-controlled"
+
+def Scry.clrHttpSourceNames : List String :=
+  [ "Microsoft.AspNetCore.Http.HttpRequest.get_Body", "HttpRequest.get_Body", "?.get_Body"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_ContentType", "HttpRequest.get_ContentType", "?.get_ContentType"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Query", "HttpRequest.get_Query", "?.get_Query"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Form", "HttpRequest.get_Form", "?.get_Form"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Headers", "HttpRequest.get_Headers", "?.get_Headers"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Cookies", "HttpRequest.get_Cookies", "?.get_Cookies"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_RouteValues", "HttpRequest.get_RouteValues", "?.get_RouteValues"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Path", "HttpRequest.get_Path", "?.get_Path"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_QueryString", "HttpRequest.get_QueryString", "?.get_QueryString"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFormAsync", "HttpRequest.ReadFormAsync", "?.ReadFormAsync"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFromJsonAsync", "HttpRequest.ReadFromJsonAsync", "?.ReadFromJsonAsync"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFromJson", "HttpRequest.ReadFromJson", "?.ReadFromJson"
+  ]
+
+def Scry.clrHttpSources : List Scry.FnModel :=
+  List.map Scry.clrSource Scry.clrHttpSourceNames
+
+/-- A log write: the formatted line is written to the configured sink. The receiver
+(argument 0) and the variadic data arguments (1–8) are covered; a data argument from a
+request is a CWE-117 sink. The receiver is deliberately not a sink, so a tainted logger
+object does not fire on its own. -/
+def Scry.clrLog (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-log"
+    (Scry.modelFlat (fun k => List.cons (.sink k .log) .nil) (Scry.modelRangeFrom 8 1))
+    "writes its message and variadic data arguments (1–8) to the configured log sink (a file)"
+
+def Scry.clrLogNames : List String :=
+  [ "ILogger.LogTrace", "ILogger.LogDebug", "ILogger.LogInformation"
+  , "ILogger.LogWarning", "ILogger.LogError", "ILogger.LogCritical"
+  , "?.LogTrace", "?.LogDebug", "?.LogInformation"
+  , "?.LogWarning", "?.LogError", "?.LogCritical"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogTrace"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogDebug"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogInformation"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogWarning"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogError"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogCritical"
+  ]
+
+def Scry.clrLogModels : List Scry.FnModel :=
+  List.map Scry.clrLog Scry.clrLogNames
+
+def Scry.clrModels : List Scry.FnModel :=
+  List.append Scry.clrHttpSources (List.append Scry.clrLogModels
+    (List.cons Scry.clrSourceReadLine (List.cons Scry.clrAllocArrayNew
+      (List.map Scry.clrRead Scry.clrReadNames))))
+
+/-- A CLR model by exact name, then by the shape rules (property getter, object-protocol
+member, ASP.NET fluent registration, `TypedResults`/`Results` factory). The shape rules
+only fire for a name that is not in the exact table and contains a `.`, so they cannot
+capture a C identifier; a unit-defined function is filtered by `Wil.findFunc` before the
+table is read at all. -/
+def Scry.clrModelOf (name : String) : Option Scry.FnModel :=
+  match List.find (fun m => String.eq m.name name) Scry.clrModels with
+  | .some m => .some m
+  | .none =>
+    if Scry.clrIsGetter name then .some (Scry.clrRead name)
+    else if Scry.clrIsFluent name then .some (Scry.clrFluent name)
+    else if Scry.clrIsResult name then .some (Scry.clrRead name)
+    else match List.find (fun s => String.endsWith name s) Scry.clrReadSuffixes with
+      | .some _ => .some (Scry.clrRead name)
+      | .none => .none
+
+/-- The model table without the CLR (C#) layer: libc/syscall semantics, the policy
+sanitisers and the C pure calls — what the analysis knew before the BCL reads were
+modelled. The external-coverage measurement reads it for the `before` column, so one
+tool and one input give both numbers. -/
+def Scry.coreModels : List Scry.FnModel :=
+  List.append Scry.libcModels (List.append Scry.policyModels Scry.pureModels)
+
+/-- All model entries: the core C table and the CLR layer. `coreModels` stays a list
+for the external-coverage measurement; `defaultModels` is the keyed value the analyses
+take. -/
+def Scry.modelList : List Scry.FnModel :=
+  List.append Scry.coreModels Scry.clrModels
+
+/-- The CLR entries are keyed to `c_sharp`; the core entries are language-independent, so
+the default C pack still sees exactly the old libc/policy/pure table. The fallback keeps
+train6's shape rules (property getters, fluent/result members, `.ToString`-style reads)
+for the C# pack without making them static entries. -/
+def Scry.clrEntry (m : Scry.FnModel) : Scry.ModelEntry :=
+  Scry.ModelEntry.mk
+    (Scry.ModelKey.mk m.name .none (.some "c_sharp") .none) m
+
+def Scry.modelEntries : List Scry.ModelEntry :=
+  List.append (List.map Scry.ModelEntry.anyModel Scry.coreModels)
+    (List.map Scry.clrEntry Scry.clrModels)
+
+/-- The default pack: train6's table, core entries wildcard-keyed and CLR entries keyed
+to `c_sharp`. Its fallback is the CLR shape rules, so a name-only C# lookup such as
+`System.Int32[].get_Length` is still modelled. `Scry.models` is this value (the name is
+kept for compatibility). -/
+def Scry.defaultModels : Scry.ModelPack :=
+  Scry.ModelPack.mk "default" "c" Scry.modelEntries Scry.clrModelOf
+
+def Scry.models : Scry.ModelPack := Scry.defaultModels
+
+/-- The C# default: the same entries looked up with language `c_sharp`. -/
+def Scry.csModels : Scry.ModelPack :=
+  Scry.ModelPack.mk "csharp-default" "c_sharp" Scry.modelEntries Scry.clrModelOf
+
+/-- `isModelled` against the pre-CLR table (the `before` side of the coverage
+measurement). -/
+def Scry.isModelledCore (name : String) : Bool :=
+  match List.find (fun m => String.eq m.name name) Scry.coreModels with
+  | .some _ => .true
+  | .none => .false
+
+-- ## Keyed lookup
+
+/-- How many key fields are concrete. The lookup prefers the largest number of concrete
+fields that match, which is what lets a `(name, arity, language, module)` entry override a
+wildcard entry of the same name. -/
+def Scry.ModelKey.specificity (k : Scry.ModelKey) : Nat :=
+  Nat.add (match k.arity with | .some _ => 1 | .none => 0)
+    (Nat.add (match k.language with | .some _ => 1 | .none => 0)
+      (match k.module with | .some _ => 1 | .none => 0))
+
+/-- Does this entry key answer this request? A `none` in the request means "not known
+here", so it matches every entry value; a `none` in the entry is a wildcard. -/
+def Scry.ModelKey.matches (k : Scry.ModelKey) (q : Scry.ModelQuery) : Bool :=
+  Bool.and (String.eq k.name q.name)
+    (Bool.and
+      (match q.arity with
+        | .none => .true
+        | .some a => match k.arity with
+          | .none => .true
+          | .some b => Nat.beq a b)
+      (Bool.and
+        (match k.language with
+          | .none => .true
+          | .some l => String.eq l q.language)
+        (match q.module with
+          | .none => .true
+          | .some m => match k.module with
+            | .none => .true
+            | .some n => String.eq m n)))
+
+def Scry.ModelPack.query (p : Scry.ModelPack) (name : String) (arity : Option Nat)
+    (module : Option String) : Scry.ModelQuery :=
+  Scry.ModelQuery.mk name arity p.language module
+
+/-- The most specific matching entry; on a tie the first one in the pack wins. -/
+def Scry.ModelPack.find (p : Scry.ModelPack) (q : Scry.ModelQuery) :
+    Option Scry.ModelEntry :=
+  List.foldl (fun best e =>
+    match Scry.ModelKey.matches e.key q with
+    | .false => best
+    | .true => match best with
+      | .none => .some e
+      | .some b => match Nat.lt (Scry.ModelKey.specificity b.key)
+            (Scry.ModelKey.specificity e.key) with
+        | .true => .some e
+        | .false => best) (.none : Option Scry.ModelEntry) p.entries
+
+def Scry.ModelPack.modelOf (p : Scry.ModelPack) (name : String) :
+    Option Scry.FnModel :=
+  match Scry.ModelPack.find p (Scry.ModelPack.query p name .none .none) with
+  | .some e => .some e.model
+  | .none => p.fallback name
+
+def Scry.ModelPack.modelOfArity (p : Scry.ModelPack) (name : String) (arity : Nat)
+    (module : Option String) : Option Scry.FnModel :=
+  match Scry.ModelPack.find p
+      (Scry.ModelPack.query p name (.some arity) module) with
+  | .some e => .some e.model
+  | .none => p.fallback name
+
+def Scry.ModelPack.isModelled (p : Scry.ModelPack) (name : String) : Bool :=
+  match Scry.ModelPack.modelOf p name with
+  | .some _ => .true
+  | .none => .false
+
+def Scry.ModelPack.isModelledAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Bool :=
+  match Scry.ModelPack.modelOfArity p name arity .none with
   | .some _ => .true
   | .none => .false
 
@@ -766,31 +1248,97 @@ def Scry.isUnknownModel (m : Scry.FnModel) : Bool :=
 /-- The explicit fallback: an unmodelled external has an `unknown` effect, never an empty
 effect list. -/
 def Scry.unknownModel (name : String) : Scry.FnModel :=
-  Scry.FnModel.mk name "unknown" (List.cons .unknown .nil)
+  Scry.FnModel.mk name "unknown" [.unknown]
     "unmodelled external: its result and memory effect are unknown"
 
-def Scry.modelFor (name : String) : Scry.FnModel :=
-  match Scry.modelOf name with
+def Scry.ModelPack.modelFor (p : Scry.ModelPack) (name : String) : Scry.FnModel :=
+  match Scry.ModelPack.modelOf p name with
   | .some m => m
   | .none => Scry.unknownModel name
 
+def Scry.ModelPack.modelAt (p : Scry.ModelPack) (name : String) (arity : Nat)
+    (module : Option String) : Scry.FnModel :=
+  match Scry.ModelPack.modelOfArity p name arity module with
+  | .some m => m
+  | .none => Scry.unknownModel name
+
+def Scry.ModelPack.sourcesOf (p : Scry.ModelPack) (name : String) : List Scry.ArgRef :=
+  Scry.modelSources (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sourcesOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List Scry.ArgRef :=
+  Scry.modelSources (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.sansOf (p : Scry.ModelPack) (name : String) : List Scry.ArgRef :=
+  Scry.modelSans (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sansOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List Scry.ArgRef :=
+  Scry.modelSans (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.sinksOf (p : Scry.ModelPack) (name : String) :
+    List (Nat × Scry.SinkClass) :=
+  Scry.modelSinkArgs (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sinksOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List (Nat × Scry.SinkClass) :=
+  Scry.modelSinkArgs (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.copyPairsOf (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List (Nat × Nat) :=
+  Scry.modelCopyPairs (Scry.ModelPack.modelAt p name arity .none) arity
+
+def Scry.ModelPack.allocOf (p : Scry.ModelPack) (name : String) :
+    Option Scry.AllocShape :=
+  Scry.modelAlloc (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.allocOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.AllocShape :=
+  Scry.modelAlloc (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.freeArgOf (p : Scry.ModelPack) (name : String) : Option Nat :=
+  Scry.modelFreeArg (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.freeArgOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Nat :=
+  Scry.modelFreeArg (Scry.ModelPack.modelAt p name arity .none)
+
+/-- The copy/read shape for this call, from the pack's `copyBounds` effect. This is the
+one table `Bounds` reads; it no longer keeps a second name list. -/
+def Scry.ModelPack.copyShapeOf (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.CopyShape :=
+  match Scry.ModelPack.modelOfArity p name arity .none with
+  | .some m => Scry.modelCopyBounds m arity
+  | .none => .none
+
+-- The name-only defaults, now explicitly the default pack.
+
+def Scry.modelOf (name : String) : Option Scry.FnModel :=
+  Scry.ModelPack.modelOf Scry.defaultModels name
+
+def Scry.isModelled (name : String) : Bool :=
+  Scry.ModelPack.isModelled Scry.defaultModels name
+
+def Scry.modelFor (name : String) : Scry.FnModel :=
+  Scry.ModelPack.modelFor Scry.defaultModels name
+
 def Scry.sourcesOf (name : String) : List Scry.ArgRef :=
-  Scry.modelSources (Scry.modelFor name)
+  Scry.ModelPack.sourcesOf Scry.defaultModels name
 
 def Scry.sansOf (name : String) : List Scry.ArgRef :=
-  Scry.modelSans (Scry.modelFor name)
+  Scry.ModelPack.sansOf Scry.defaultModels name
 
 def Scry.sinksOf (name : String) : List (Nat × Scry.SinkClass) :=
-  Scry.modelSinkArgs (Scry.modelFor name)
+  Scry.ModelPack.sinksOf Scry.defaultModels name
 
 def Scry.copyPairsOf (name : String) (arity : Nat) : List (Nat × Nat) :=
-  Scry.modelCopyPairs (Scry.modelFor name) arity
+  Scry.ModelPack.copyPairsOf Scry.defaultModels name arity
 
 def Scry.allocOf (name : String) : Option Scry.AllocShape :=
-  Scry.modelAlloc (Scry.modelFor name)
+  Scry.ModelPack.allocOf Scry.defaultModels name
 
 def Scry.freeArgOf (name : String) : Option Nat :=
-  Scry.modelFreeArg (Scry.modelFor name)
+  Scry.ModelPack.freeArgOf Scry.defaultModels name
 
 -- Namespaced aliases for callers that read the table by name. The definitions above
 -- live in the `Scry` namespace (following the module style); these give the public
@@ -830,7 +1378,7 @@ def Scry.RulePack.trustsSanitiser (p : Scry.RulePack) (name : String) : Bool :=
 -- ## Model rules
 
 def Scry.modelSinkClasses : List Scry.SinkClass :=
-  [ .command, .format, .length, .size ]
+  [ .command, .format, .length, .size, .log ]
 
 def Scry.modelRule (c : Scry.SinkClass) : Scry.PackRule :=
   .taint (Scry.TaintRule.mk (Scry.SinkClass.ruleId c) (Scry.SinkClass.severity c)
@@ -848,7 +1396,7 @@ def Scry.RulePack.withModels (p : Scry.RulePack) : Scry.RulePack :=
   let step : Scry.RulePack → Scry.SinkClass → Scry.RulePack :=
     fun acc c => match acc.hasRule (Scry.SinkClass.ruleId c) with
       | .true => acc
-      | .false => Scry.RulePack.mk (List.append acc.rules (List.cons (Scry.modelRule c) .nil));
+      | .false => Scry.RulePack.mk (List.append acc.rules [(Scry.modelRule c)]);
   List.foldl step p Scry.modelSinkClasses
 
 -- ## Rendering (for diagnostics and docs)
@@ -859,6 +1407,10 @@ def Scry.Effect.render : Scry.Effect → String
   | .sanitise r => "sanitise " ++ Scry.ArgRef.show r
   | .copy dst src => "copy " ++ Nat.repr dst ++ " <- " ++ Nat.repr src
   | .copyArgs dst first => "copyArgs " ++ Nat.repr dst ++ " from " ++ Nat.repr first
+  | .copyBounds dst src count =>
+    "copyBounds " ++ Nat.repr dst
+      ++ (match src with | .none => "" | .some s => " <- " ++ Nat.repr s)
+      ++ " count " ++ Nat.repr count
   | .alloc size count =>
     "alloc" ++ (match size with | .some k => " size " ++ Nat.repr k | .none => "")
       ++ (match count with | .some k => " count " ++ Nat.repr k | .none => "")
@@ -868,3 +1420,75 @@ def Scry.Effect.render : Scry.Effect → String
 def Scry.FnModel.render (m : Scry.FnModel) : String :=
   m.name ++ " [" ++ m.family ++ "]: "
     ++ String.intercalate "; " (List.map Scry.Effect.render m.effects)
+
+-- ## Pack lint
+
+/-- A canonical key for the effects, used only to compare two entries. -/
+def Scry.modelEffectsKey (m : Scry.FnModel) : String :=
+  String.intercalate ";" (List.map Scry.Effect.render m.effects)
+
+/-- A stable spelling of an entry key (for diagnostics). -/
+def Scry.ModelKey.render (k : Scry.ModelKey) : String :=
+  k.name
+    ++ (match k.arity with | .none => "(any)" | .some n => "/" ++ Nat.repr n)
+    ++ (match k.language with | .none => "" | .some l => " [" ++ l ++ "]")
+    ++ (match k.module with | .none => "" | .some m => " {" ++ m ++ "}")
+
+/-- Two keys with the same name overlap when no concrete field contradicts the other.
+This ignores specificity: a specific entry and its wildcard are not a conflict, they are
+the override the keying exists for. -/
+def Scry.optNatOverlap (a b : Option Nat) : Bool :=
+  match a, b with
+  | .none, _ => .true
+  | _, .none => .true
+  | .some x, .some y => Nat.beq x y
+
+def Scry.optStrOverlap (a b : Option String) : Bool :=
+  match a, b with
+  | .none, _ => .true
+  | _, .none => .true
+  | .some x, .some y => String.eq x y
+
+def Scry.ModelKey.overlaps (a b : Scry.ModelKey) : Bool :=
+  Bool.and (String.eq a.name b.name)
+    (Bool.and (Scry.optNatOverlap a.arity b.arity)
+      (Bool.and (Scry.optStrOverlap a.language b.language)
+        (Scry.optStrOverlap a.module b.module)))
+
+/-- Entries that overlap at the same specificity but disagree about the effects. This is
+the bug the keying is meant to expose: two tables (say `boundsCopyShape` and the model
+table) describing the same call differently. `none` for the default pack, which has one
+entry per name. -/
+def Scry.ModelPack.conflictReports (p : Scry.ModelPack) : List String :=
+  let step := fun (acc : List Scry.ModelEntry × List String) (e : Scry.ModelEntry) =>
+    let older := List.filter (fun b => Bool.and
+        (Scry.ModelKey.overlaps b.key e.key)
+        (Bool.and
+          (Nat.beq (Scry.ModelKey.specificity b.key) (Scry.ModelKey.specificity e.key))
+          (Bool.not (String.eq (Scry.modelEffectsKey b.model)
+            (Scry.modelEffectsKey e.model))))) acc.1;
+    let reports := List.map (fun b =>
+        "model conflict: " ++ Scry.ModelKey.render e.key ++ " and "
+          ++ Scry.ModelKey.render b.key ++ " have different effects ("
+          ++ Scry.modelEffectsKey e.model ++ " vs " ++ Scry.modelEffectsKey b.model
+          ++ ")") older;
+    (List.append acc.1 (List.cons e .nil), List.append acc.2 reports);
+  (List.foldl step ((.nil : List Scry.ModelEntry), (.nil : List String)) p.entries).2
+
+/-- The entries whose name never appears in `used`, the external names a corpus actually
+calls. The caller builds `used` (for the CLI, from the analysed program); this is the
+dead-model report P4 asks for. A language/module-specific entry is dead when its own name
+is never used; a broader "did any language call it" check is intentionally not guessed. -/
+def Scry.ModelPack.deadEntryList (p : Scry.ModelPack) (used : List String) :
+    List Scry.ModelEntry :=
+  List.filter (fun e => Bool.not
+    (List.any (fun n => String.eq n e.key.name) used)) p.entries
+
+def Scry.ModelPack.deadEntries (p : Scry.ModelPack) (used : List String) :
+    List Scry.FnModel :=
+  List.map (fun e => e.model) (Scry.ModelPack.deadEntryList p used)
+
+def Scry.ModelPack.deadReport (p : Scry.ModelPack) (used : List String) : List String :=
+  List.map (fun e => "dead model: " ++ Scry.ModelKey.render e.key
+      ++ " (" ++ e.model.family ++ ") is never used on this corpus")
+    (Scry.ModelPack.deadEntryList p used)

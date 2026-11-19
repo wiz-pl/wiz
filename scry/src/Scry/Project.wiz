@@ -18,10 +18,12 @@ the project-level front end:
   `-isystem`, `-iquote`, `-idirafter`, `-D`, `-U`, `-include`, `-std=`) and drops the
   compiler, the source and the compile driver's own `-c`/`-o`/`-M…` structure. Every
   other word is **refused** with a diagnostic naming it: a compile database is
-  repository-supplied, and `-B<dir>` (with a committed `cc1`), `-fplugin=`, `-specs=`,
-  `-wrapper`, `@file`, `-Xclang` or `-cc1` would choose which program runs.
-  `Scry.ProjectIO` resolves a relative `directory` against the database file and keeps
-  `file` relative to it, which is how `cc -E` sees the entry.
+  repository-supplied, so `-B<dir>` (with a committed `cc1`), `-fplugin=`, `-specs=`,
+  `-wrapper`, `@file`, `-Xclang` or `-cc1` would choose which program runs. Those
+  execution vectors also have their own explicit refusal list
+  (`Scry.forbiddenCompdbFlag`), checked before the allowlist. `Scry.ProjectIO`
+  resolves a relative `directory` against the database file and keeps `file` relative to
+  it, which is how `cc -E` sees the entry.
 * `Scry.ProjectUnit` pairs a TU's `Scry.Preprocessed` line map, `Scry.Cst` and lowered
   `Scry.TU`. The IO driver in `Scry.ProjectIO` builds one per source file with that
   file's own flags. Origins stay in the **original** file/line/column (`Scry.mapSpan`).
@@ -154,6 +156,31 @@ partial def Scry.splitWordsGo : List Char → List Char → Bool → Bool → Bo
 def Scry.splitWords (s : String) : List String :=
   Scry.splitWordsGo (String.chars s) .nil .false .false .false .nil
 
+/-- Whether `a` starts with `p` and continues past it (`-Bbin` starts with `-B`). -/
+def Scry.startsWithMore (a p : String) : Bool :=
+  Bool.and (String.startsWith a p) (Nat.lt (String.length p) (String.length a))
+
+/-- Flags that must never reach `cc -E` and that make the whole compile database
+untrustworthy: `-B<dir>` (selects the compiler's own executables, e.g. a committed
+`bin/cc1`), `-specs=`/`-wrapper` (rewrite the driver), `-fplugin*` (loads a shared
+object into the compiler), `@file` (a response file, which can carry any of these),
+`-Xclang`/`-Xpreprocessor`/`-Xlinker`/`-Wp,` (splice arbitrary words past the driver),
+and a bare `-B`/`-specs`/`-wrapper` whose value is the next word. The allowlist below
+already refuses them (they are not preprocessing flags); this predicate is the explicit
+deny list, checked first, so a refusal names the execution vector even if the allowlist
+later grows. A *dropped* flag cannot hurt, but these are evidence of a hostile database,
+so the entry is refused with the flag's name instead of silently ignored. -/
+def Scry.forbiddenCompdbFlag (a : String) : Bool :=
+  let starts : String → Bool := Scry.startsWithMore a;
+  Bool.or (Bool.or (String.eq a "-B") (starts "-B"))
+    (Bool.or (String.startsWith a "@")
+      (Bool.or (Bool.or (String.eq a "-specs") (starts "-specs="))
+        (Bool.or (Bool.or (String.eq a "-wrapper") (starts "-wrapper,"))
+          (Bool.or (Bool.or (String.eq a "-fplugin") (starts "-fplugin="))
+            (Bool.or (starts "-fplugin-arg-")
+              (Bool.or (String.eq a "-Xclang") (Bool.or (String.eq a "-Xpreprocessor")
+                (Bool.or (String.eq a "-Xlinker") (starts "-Wp,")))))))))
+
 /-- What `Scry.parseCompdbFlags` does with one word of a compile command. -/
 inductive Scry.FlagAction where
   /-- Pass the word to `cc -E` (it carries its value: `-Iinc`, `-std=c11`). -/
@@ -234,13 +261,15 @@ def Scry.refuseFlag (file a : String) : String :=
 it, drop it and its value, or refuse the database. A source argument is dropped; a word
 that is neither a flag nor the source is refused (a bare `@file` is refused too). -/
 def Scry.flagAction (file a : String) : Scry.FlagAction :=
-  match Scry.keepFlag a with
-  | .some k => k
-  | .none => match Scry.dropFlag a with
-    | .some d => d
-    | .none => match Bool.and (Bool.not (String.isEmpty file)) (Scry.isSourceArg file a) with
-      | .true => .drop
-      | .false => .refuse
+  match Scry.forbiddenCompdbFlag a with
+  | .true => .refuse
+  | .false => match Scry.keepFlag a with
+    | .some k => k
+    | .none => match Scry.dropFlag a with
+      | .some d => d
+      | .none => match Bool.and (Bool.not (String.isEmpty file)) (Scry.isSourceArg file a) with
+        | .true => .drop
+        | .false => .refuse
 
 /-- Keep the preprocessing-relevant arguments of a compile command: drop the compiler
 (`argv[0]` is dropped by the caller), the source file and the driver's `-c`/`-o`/`-M…`
@@ -285,8 +314,8 @@ def Scry.entryArguments (j : Json) (file : String) : List String :=
     | _ => .nil
   | _ => args
 
-/-- One JSON object of a compile database, or `none` for an entry without a file; an
-entry whose command contains a refused flag is an error naming that flag. -/
+/-- One JSON object of a compile database, `none` for an entry without a file, or the
+refusal of one of its flags (naming the flag). -/
 def Scry.cmdOfJson (j : Json) : Except String (Option Scry.CompileCommand) :=
   let file := Json.getStr j "file";
   match String.isEmpty file with
@@ -347,8 +376,8 @@ def Scry.addFile (ft : Scry.FileTable) (p text : String) : Scry.FileTable × Nat
   match Scry.pathIndex p ft.paths with
   | .some i => (ft, i)
   | .none =>
-    (Scry.FileTable.mk (List.append ft.paths (List.cons p .nil))
-      (List.append ft.texts (List.cons text .nil)), List.length ft.paths)
+    (Scry.FileTable.mk (List.append ft.paths [p])
+      (List.append ft.texts [text]), List.length ft.paths)
 
 /-- Add the local file table of one unit in order; the second result is the unit's
 `local file → project file` map. -/

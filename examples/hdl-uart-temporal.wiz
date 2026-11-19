@@ -779,11 +779,9 @@ def Tx.case : (s : TxS) → (x : Bool × Bits8) → Tx.inv s → Tx.Case s x
   | .mk l c d, x, h => Bool.indP (fun (st : Bool) => Tx.Case (TxS.mk l c d) (st, x.2))
       (Nat.all_spec Tx.CaseL 11 Tx.cases l h.1 c h.2 d x.2).1 (Nat.all_spec Tx.CaseL 11 Tx.cases l h.1 c h.2 d x.2).2 x.1
 def Tx.ok (s : TxS) (x : Bool × Bits8) (h : Tx.inv s) : txM (Tx.emb s) (Tx.embIn x) = (Tx.emb (Tx.spec s x).1, Tx.embOut (Tx.spec s x).2) :=
-  @Eq.trans TxP (txM (Tx.emb s) (Tx.embIn x))
-    (Tx.pk (Tx.G (BitVec.beq (Tx.embT s).2.1 (BitVec.ofNat 4 0)) (BitVec.beq (Tx.embT s).2.2.1 (BitVec.ofNat 7 3)) (Tx.embT s) (Bool.toBits x.1) (byte x.2)), Tx.wire (Tx.embT s).1)
-    (Tx.emb (Tx.spec s x).1, Tx.embOut (Tx.spec s x).2)
+  Eq.trans.{0} (A := TxP)
     (Tx.stepG (Tx.embT s) x.1 (byte x.2))
-    (Eq.congrArg (fun (q : TxT) => (Tx.pk q, Tx.wire (Tx.embT s).1)) (Tx.case s x h).1)
+    (Eq.congrArg.{0, 0} (fun (q : TxT) => (Tx.pk q, Tx.wire (Tx.embT s).1)) (Tx.case s x h).1)
 def Tx.pres (s : TxS) (x : Bool × Bits8) (h : Tx.inv s) : Tx.inv (Tx.spec s x).1 := (Tx.case s x h).2
 def Tx.inv0 : Tx.inv Tx.s0 := And.intro rfl rfl
 
@@ -859,8 +857,8 @@ def Tx.fsteps (d : Bits8) : Nat.All (Tx.FStep d) 40 :=
 
 def Tx.frameStart (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hidle : (Tx.run xs t).l = 0) (hgo : (xs t) = (.true, e)) :
     Mealy.stateAt Tx.spec Tx.s0 xs (Nat.succ t) = Tx.frameSt e 0 :=
-  @Eq.trans TxS (Tx.spec (Tx.run xs t) (xs t)).1 (Tx.spec (Tx.run xs t) (.true, e)).1 (TxS.mk 10 0 e)
-    (Eq.congrArg (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs t) x).1) hgo) (Tx.go_step (Tx.run xs t) e hidle)
+  Eq.trans.{0} (A := TxS)
+    (Eq.congrArg.{0, 0} (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs t) x).1) hgo) (Tx.go_step (Tx.run xs t) e hidle)
 def Tx.frameSteps (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (k : Nat) (hk : Nat.lt k 40 = .true) :
     (Tx.spec (Tx.frameSt e k) (xs (Nat.add k (Nat.succ t)))).1 = Tx.frameSt e (Nat.succ k) :=
   Nat.all_spec (Tx.FStep e) 40 (Tx.fsteps e) k hk (xs (Nat.add k (Nat.succ t)))
@@ -879,8 +877,10 @@ def Tx.lineBits (e : Bits8) : Nat.All (Tx.lineBit e) 40 :=
 def Tx.frame (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hidle : (Tx.run xs t).l = 0) (hgo : (xs t) = (.true, e))
     (m : Nat) (hm : Nat.lt m 40 = .true) :
     Tx.lineAt xs (Nat.add m (Nat.succ t)) = Tx.embOut (Uart.frameBit e (Nat.div m 4)) :=
-  Eq.trans (Tx.lineAt_spec xs (Nat.add m (Nat.succ t)))
-    (Eq.trans (Eq.congrArg (fun (s : TxS) => Tx.embOut (Tx.lineOf s.d s.l)) (Tx.frameRun xs t e hidle hgo m (Nat.lt_to_succ m 40 hm)))
+  Eq.via.{0} (Tx.embOut (Tx.lineOf (Tx.run xs (Nat.add m (Nat.succ t))).d (Tx.run xs (Nat.add m (Nat.succ t))).l))
+    (Tx.lineAt_spec xs (Nat.add m (Nat.succ t)))
+    (Eq.via.{0} (Tx.embOut (Tx.lineOf (Tx.frameSt e m).d (Tx.frameSt e m).l))
+      (Eq.congrArg.{0, 0} (fun (s : TxS) => Tx.embOut (Tx.lineOf s.d s.l)) (Tx.frameRun xs t e hidle hgo m (Nat.lt_to_succ m 40 hm)))
       (Eq.congrArg Tx.embOut (Nat.all_spec (Tx.lineBit e) 40 (Tx.lineBits e) m hm)))
 
 -- the same as a temporal formula: for a rigid byte `e`, goA e |=> the 40 cycles of the
@@ -898,9 +898,9 @@ def Tx.returns (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hidle : (Tx.r
 def Tx.accepts (xs : Trace (Bool × Bits8)) (t : Nat) (e e' : Bits8) (hidle : (Tx.run xs t).l = 0) (hgo : (xs t) = (.true, e))
     (hnext : xs (Nat.add 40 (Nat.succ t)) = (.true, e')) :
     Tx.run xs (Nat.succ (Nat.add 40 (Nat.succ t))) = TxS.mk 10 0 e' :=
-  Eq.trans (Tx.run_succ xs (Nat.add 40 (Nat.succ t)))
-    (Eq.trans (Eq.congrArg (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs (Nat.add 40 (Nat.succ t))) x).1) hnext)
-      (Tx.go_step (Tx.run xs (Nat.add 40 (Nat.succ t))) e' (Eq.congrArg (fun (s : TxS) => s.l) (Tx.returns xs t e hidle hgo))))
+  Eq.trans.{0} (A := TxS) (Tx.run_succ xs (Nat.add 40 (Nat.succ t)))
+    (Eq.trans.{0} (A := TxS) (Eq.congrArg.{0, 0} (fun (x : Bool × Bits8) => (Tx.spec (Tx.run xs (Nat.add 40 (Nat.succ t))) x).1) hnext)
+      (Tx.go_step (Tx.run xs (Nat.add 40 (Nat.succ t))) e' (Eq.congrArg.{0, 0} (fun (s : TxS) => s.l) (Tx.returns xs t e hidle hgo))))
 -- and while a frame is on the line, start is ignored: `Tx.frameRun` holds for every
 -- input from cycle t+1 on.
 
@@ -1127,16 +1127,14 @@ def Rx.idle_tg (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.GOK (RxS.
     (fun (z : BitVec 7) => Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true)
       = ((BitVec.ofNat 4 0, (z, byte cs)), (Bool.toBits .false, byte cs)))
     (Nat.all_spec Rx.Inc 128 Rx.incs c hc)
-    (@Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .true)) (Rx.idleQ c cs .true)
-      ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))
+    (Eq.trans.{0} (A := RxTO)
       (Rx.idle_g c cs .true) (refl ((BitVec.ofNat 4 0, (@inc HwTy.El _ 7 (BitVec.ofNat 7 c), byte cs)), (Bool.toBits .false, byte cs))))
 def Rx.idle_ti (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 0 c cs) .true) :=
   And.intro rfl (Nat.all_spec Rx.CntLt 128 Rx.cntLts c hc)
 def Rx.idle_t (c : Nat) (hc : Nat.lt c 128 = .true) (cs : Bits8) : Rx.Case (RxS.mk 0 c cs) .true :=
   And.intro (Rx.idle_tg c hc cs) (Rx.idle_ti c hc cs)
 def Rx.idle_fg (c : Nat) (cs : Bits8) : Rx.GOK (RxS.mk 0 c cs) .false :=
-    (@Eq.trans RxTO (Rx.Gd (Rx.embT (RxS.mk 0 c cs)) (Bool.toBits .false)) (Rx.idleQ c cs .false)
-      ((BitVec.ofNat 4 10, (BitVec.ofNat 7 0, byte cs)), (Bool.toBits .false, byte cs))
+    (Eq.trans.{0} (A := RxTO)
       (Rx.idle_g c cs .false) (refl ((BitVec.ofNat 4 10, (BitVec.ofNat 7 0, byte cs)), (Bool.toBits .false, byte cs))))
 def Rx.idle_fi (c : Nat) (cs : Bits8) : Rx.inv (Rx.next (RxS.mk 0 c cs) .false) := And.intro rfl rfl
 def Rx.idle_f (c : Nat) (cs : Bits8) : Rx.Case (RxS.mk 0 c cs) .false := And.intro (Rx.idle_fg c cs) (Rx.idle_fi c cs)
@@ -1513,11 +1511,9 @@ def Rx.case : (s : RxS) → (r : Bool) → Rx.inv s → Rx.Case s r
   | .mk ph c cs, r, h => Bool.indP (fun (b : Bool) => Rx.Case (RxS.mk ph c cs) b)
       (Nat.all_spec Rx.CaseL 11 Rx.cases ph h.1 c h.2 cs).1 (Nat.all_spec Rx.CaseL 11 Rx.cases ph h.1 c h.2 cs).2 r
 def Rx.ok (s : RxS) (r : Bool) (h : Rx.inv s) : rxM (Rx.emb s) (Rx.embIn r) = (Rx.emb (Rx.spec s r).1, Rx.embOut (Rx.spec s r).2) :=
-  @Eq.trans RxP (rxM (Rx.emb s) (Rx.embIn r))
-    (Rx.pk (Rx.Gd (Rx.embT s) (Bool.toBits r)).1, Rx.pkO (Rx.Gd (Rx.embT s) (Bool.toBits r)).2)
-    (Rx.emb (Rx.spec s r).1, Rx.embOut (Rx.spec s r).2)
+  Eq.trans.{0} (A := RxP)
     (Rx.stepG (Rx.embT s) (Bool.toBits r))
-    (Eq.congrArg (fun (p : RxTO) => (Rx.pk p.1, Rx.pkO p.2)) (Rx.case s r h).1)
+    (Eq.congrArg.{0, 0} (fun (p : RxTO) => (Rx.pk p.1, Rx.pkO p.2)) (Rx.case s r h).1)
 def Rx.pres (s : RxS) (r : Bool) (h : Rx.inv s) : Rx.inv (Rx.spec s r).1 := (Rx.case s r h).2
 def Rx.inv0 : Rx.inv Rx.s0 := And.intro rfl rfl
 
@@ -1532,7 +1528,7 @@ def Rx.outs (rs : Trace Bool) : Trace (Bool × Bits8) := Mealy.outAt Rx.spec Rx.
 def Rx.outs_spec (rs : Trace Bool) (u : Nat) :
     Rx.outs rs u = Rx.out (Rx.run rs u) (rs u) := rfl
 -- The same one step at the first component (an equation at `Bool`, so no pair is
--- inspected); the statements about `valid` use this rather than `congrArg` on the pair.
+-- inspected); the statements about `valid` use this rather than `Eq.congrArg` on the pair.
 def Rx.outs_fst (rs : Trace Bool) (u : Nat) :
     (Rx.outs rs u).1 = (Rx.out (Rx.run rs u) (rs u)).1 := rfl
 def Rx.refines (rs : Trace Bool) (t : Nat) :
@@ -1604,7 +1600,7 @@ def Rx.quietAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (k u : Nat)
   @Eq.trans Bool (Rx.outs rs u).1 (Rx.out (Rx.run rs u) (rs u)).1 .false
     (Rx.outs_fst rs u)
     (@Eq.trans Bool (Rx.out (Rx.run rs u) (rs u)).1 (Rx.out (Rx.path c0 cs e k) (rs u)).1 .false
-      (@Eq.congrArg RxS Bool (fun (s : RxS) => (Rx.out s (rs u)).1) (Rx.run rs u) (Rx.path c0 cs e k) hrun)
+      (Eq.congrArg.{0, 0} (fun (s : RxS) => (Rx.out s (rs u)).1) hrun)
       hquiet)
 def Rx.quiet (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (k : Nat) (hk : Nat.lt k 38 = .true) : (Rx.outs rs (Nat.add k v)).1 = .false :=
@@ -1614,11 +1610,13 @@ def Rx.quiet (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v 
 def Rx.receivesAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (u : Nat)
     (hrun : Rx.run rs u = Rx.path c0 cs e 38) (hstop : rs u = .true) :
     Rx.outs rs u = (.true, e) :=
-  @Eq.trans (Bool × Bits8) (Rx.outs rs u) (Rx.out (Rx.run rs u) (rs u)) (.true, e)
+  Eq.trans.{0} (A := Bool × Bits8)
+    (a := Rx.outs rs u) (b := Rx.out (Rx.run rs u) (rs u)) (c := (.true, e))
     (Rx.outs_spec rs u)
-    (@Eq.trans (Bool × Bits8) (Rx.out (Rx.run rs u) (rs u)) (Rx.out (Rx.path c0 cs e 38) (rs u)) (.true, e)
-      (@Eq.congrArg RxS (Bool × Bits8) (fun (s : RxS) => Rx.out s (rs u)) (Rx.run rs u) (Rx.path c0 cs e 38) hrun)
-      (@Eq.congrArg Bool (Bool × Bits8) (fun (r : Bool) => Rx.out (Rx.path c0 cs e 38) r) (rs u) .true hstop))
+    (Eq.trans.{0} (A := Bool × Bits8)
+      (a := Rx.out (Rx.run rs u) (rs u)) (b := Rx.out (Rx.path c0 cs e 38) (rs u)) (c := (.true, e))
+      (Eq.congrArg.{0, 0} (fun (s : RxS) => Rx.out s (rs u)) hrun)
+      (Eq.congrArg.{0, 0} (fun (r : Bool) => Rx.out (Rx.path c0 cs e 38) r) hstop))
 def Rx.receives (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (hstop : rs (Nat.add 38 v) = .true) : Rx.outs rs (Nat.add 38 v) = (.true, e) :=
   Rx.receivesAt rs c0 cs e (Nat.add 38 v)
@@ -1635,8 +1633,8 @@ def Rx.badStopAt (rs : Trace Bool) (c0 : Nat) (cs e : Bits8) (u : Nat)
   @Eq.trans Bool (Rx.outs rs u).1 (Rx.out (Rx.run rs u) (rs u)).1 .false
     (Rx.outs_fst rs u)
     (@Eq.trans Bool (Rx.out (Rx.run rs u) (rs u)).1 (Rx.out (Rx.path c0 cs e 38) (rs u)).1 .false
-      (@Eq.congrArg RxS Bool (fun (s : RxS) => (Rx.out s (rs u)).1) (Rx.run rs u) (Rx.path c0 cs e 38) hrun)
-      (@Eq.congrArg Bool Bool (fun (r : Bool) => (Rx.out (Rx.path c0 cs e 38) r).1) (rs u) .false hstop))
+      (Eq.congrArg.{0, 0} (fun (s : RxS) => (Rx.out s (rs u)).1) hrun)
+      (Eq.congrArg.{0, 0} (fun (r : Bool) => (Rx.out (Rx.path c0 cs e 38) r).1) hstop))
 def Rx.badStop (rs : Trace Bool) (v c0 : Nat) (cs e : Bits8) (hidle : Rx.run rs v = RxS.mk 0 c0 cs) (hf : Rx.WellFormed rs v e)
     (hstop : rs (Nat.add 38 v) = .false) : (Rx.outs rs (Nat.add 38 v)).1 = .false ∧ Rx.run rs (Nat.add 39 v) = RxS.mk 0 0 e :=
   And.intro
@@ -1715,11 +1713,11 @@ def loopM : Mealy (HwTy.El loopC.st) (HwTy.El Send.code) (HwTy.El Byte.code) := 
 def Loop.stepEq : loopM = Mealy.seq (Mealy.seq txM syncM) rxM := rfl
 def Loop.outImpl (xs : Trace (Bool × Bits8)) (u : Nat) : HwTy.El Byte.code := Mealy.outAt loopM loopC.init (Trace.map Tx.embIn xs) u
 def Loop.refinesOut (xs : Trace (Bool × Bits8)) (u : Nat) : Loop.outImpl xs u = Rx.embOut (Rx.outs (Loop.rs xs) u) :=
-  Eq.trans (Eq.congrArg (fun (m : Mealy (HwTy.El loopC.st) (HwTy.El Send.code) (HwTy.El Byte.code)) => Mealy.outAt m loopC.init (Trace.map Tx.embIn xs) u) Loop.stepEq)
+  Eq.trans (Eq.congrArg.{0, 0} (fun (m : Mealy (HwTy.El loopC.st) (HwTy.El Send.code) (HwTy.El Byte.code)) => Mealy.outAt m loopC.init (Trace.map Tx.embIn xs) u) Loop.stepEq)
    (Eq.trans (Mealy.seq_outAt (Mealy.seq txM syncM) rxM ((txC 4).init, syncC.init) (rxC 4).init (Trace.map Tx.embIn xs) u)
-    (Eq.trans (Eq.congrArg (fun (ys : Trace (HwTy.El Line.code)) => Mealy.outAt rxM (rxC 4).init ys u)
+    (Eq.trans (Eq.congrArg.{0, 0} (fun (ys : Trace (HwTy.El Line.code)) => Mealy.outAt rxM (rxC 4).init ys u)
        (funext (fun (w : Nat) => Eq.trans (Mealy.seq_outAt txM syncM (txC 4).init syncC.init (Trace.map Tx.embIn xs) w)
-         (Eq.trans (Eq.congrArg (fun (zs : Trace (HwTy.El Line.code)) => Mealy.outAt syncM syncC.init zs w)
+         (Eq.trans (Eq.congrArg.{0, 0} (fun (zs : Trace (HwTy.El Line.code)) => Mealy.outAt syncM syncC.init zs w)
             (funext (fun (j : Nat) => Tx.refinesOut xs j)))
            (Sy.refinesOut (Loop.line xs) w)))))
       (Rx.refinesOut (Loop.rs xs) u)))
@@ -1738,7 +1736,7 @@ def Tx.line_idle (xs : Trace (Bool × Bits8)) (u : Nat) (h : (Tx.run xs u).l = 0
   Eq.congrArg (fun (l : Nat) => Tx.lineOf (Tx.run xs u).d l) h
 def Tx.frameSpec (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hidle : (Tx.run xs t).l = 0) (hgo : (xs t) = (.true, e))
     (m : Nat) (hm : Nat.lt m 40 = .true) : Loop.line xs (Nat.add m (Nat.succ t)) = Uart.frameBit e (Nat.div m 4) :=
-  Eq.trans (Eq.congrArg (fun (s : TxS) => Tx.lineOf s.d s.l) (Tx.frameRun xs t e hidle hgo m (Nat.lt_to_succ m 40 hm)))
+  Eq.trans (Eq.congrArg.{0, 0} (fun (s : TxS) => Tx.lineOf s.d s.l) (Tx.frameRun xs t e hidle hgo m (Nat.lt_to_succ m 40 hm)))
     (Nat.all_spec (Tx.lineBit e) 40 (Tx.lineBits e) m hm)
 
 -- (L1) A byte taken by the transmitter at cycle t, while the synchroniser holds the high
@@ -1751,7 +1749,7 @@ def Loop.Quiet (xs : Trace (Bool × Bits8)) (t : Nat) : Prop :=
 def Loop.rxLine (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hq : Loop.Quiet xs t) (hgo : xs t = (.true, e))
     (k : Nat) (hk : Nat.lt k 40 = .true) :
     Loop.rs xs (Nat.add k (Nat.succ (Nat.succ (Nat.succ t)))) = Uart.frameBit e (Nat.div k 4) :=
-  Eq.trans (Eq.congrArg (Loop.rs xs) (Eq.trans (Nat.add_succ k (Nat.succ (Nat.succ t)))
+  Eq.trans (Eq.congrArg.{0, 0} (Loop.rs xs) (Eq.trans (Nat.add_succ k (Nat.succ (Nat.succ t)))
       (Eq.congrArg Nat.succ (Nat.add_succ k (Nat.succ t)))))
     (Tx.frameSpec xs t e hq.1 hgo k hk)
 
@@ -1761,10 +1759,10 @@ def Loop.rxIdle (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hq : Loop.Qu
     (Eq.symm (Tx.line_idle xs t hq.1))
     (Rx.ph_next_true (Rx.run (Loop.rs xs) (Nat.succ (Nat.succ t))) (Or.inl
       (Eq.substProp (fun (r : Bool) => (Rx.next (Rx.run (Loop.rs xs) (Nat.succ t)) r).ph = 0)
-        (Eq.symm (Eq.congrArg SyS.f1 hq.2.1))
+        (Eq.symm (Eq.congrArg.{0, 0} SyS.f1 hq.2.1))
         (Rx.ph_next_true (Rx.run (Loop.rs xs) (Nat.succ t)) (Or.inl
           (Eq.substProp (fun (r : Bool) => (Rx.next (Rx.run (Loop.rs xs) t) r).ph = 0)
-            (Eq.symm (Eq.congrArg SyS.f2 hq.2.1))
+            (Eq.symm (Eq.congrArg.{0, 0} SyS.f2 hq.2.1))
             (Rx.ph_next_true (Rx.run (Loop.rs xs) t) hq.2.2)))))))
 
 def Loop.delivers (xs : Trace (Bool × Bits8)) (t : Nat) (e : Bits8) (hq : Loop.Quiet xs t) (hgo : xs t = (.true, e)) :
@@ -1792,11 +1790,11 @@ def Tx.stay_idle : (s : TxS) → (x : Bool × Bits8) → s.l = 0 → x.1 = .fals
 def Loop.quietStep (xs : Trace (Bool × Bits8)) (u : Nat) (hs : (xs u).1 = .false) (hq : Loop.Quiet xs u) : Loop.Quiet xs (Nat.succ u) :=
   And.intro (Tx.stay_idle (Tx.run xs u) (xs u) hq.1 hs)
     (And.intro
-      (@Eq.trans SyS (SyS.mk (Loop.line xs u) (Mealy.stateAt Sy.spec Sy.s0 (Loop.line xs) u).f1) (SyS.mk .true (Mealy.stateAt Sy.spec Sy.s0 (Loop.line xs) u).f1) (SyS.mk .true .true)
+      (Eq.trans.{0} (A := SyS)
         (Eq.congrArg (fun (p : Bool) => SyS.mk p (Mealy.stateAt Sy.spec Sy.s0 (Loop.line xs) u).f1) (Tx.line_idle xs u hq.1))
-        (Eq.congrArg (fun (q : Bool) => SyS.mk .true q) (Eq.congrArg SyS.f1 hq.2.1)))
+        (Eq.congrArg (fun (q : Bool) => SyS.mk .true q) (Eq.congrArg.{0, 0} SyS.f1 hq.2.1)))
       (Or.inl (Eq.substProp (fun (r : Bool) => (Rx.next (Rx.run (Loop.rs xs) u) r).ph = 0)
-        (Eq.symm (Eq.congrArg SyS.f2 hq.2.1))
+        (Eq.symm (Eq.congrArg.{0, 0} SyS.f2 hq.2.1))
         (Rx.ph_next_true (Rx.run (Loop.rs xs) u) hq.2.2))))
 def Loop.quietUntil (xs : Trace (Bool × Bits8)) (t : Nat) (hnone : (u : Nat) → Nat.lt u t = .true → (xs u).1 = .false) :
     (u : Nat) → Nat.lt u (Nat.succ t) = .true → Loop.Quiet xs u

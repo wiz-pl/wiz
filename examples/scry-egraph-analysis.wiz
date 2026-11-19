@@ -1,3 +1,4 @@
+-- test: run
 import Scry.EgraphNative
 -- E-class analyses and guarded rewrites (`scry-egraph-analysis`): the interval lattice
 -- is joined per e-class after each rebuild. The rewrite `f x -> g x` fires only when

@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,6 +36,7 @@ WIZ_API uint64_t wiz_sys_errno(void) { return (uint64_t)wiz_sys_err; }
 WIZ_API const char *wiz_sys_strerror(uint64_t e) {
   if (e == WIZ_SYS_EOF) return "end of file";
   if (e == 100001) return "timed out"; /* WIZ_SYS_TIMEOUT */
+  if (e == 100002) return "busy";      /* WIZ_SYS_BUSY: a non-blocking lock is held */
   return strerror((int)e);
 }
 
@@ -256,12 +258,22 @@ WIZ_API uint64_t wiz_sys_write_bytes(const char *p, wiz_val v, int append) {
   return r;
 }
 
-/* ---- file handles: `foreign_type File (finalizer := "wiz_sys_file_free")` ---- */
+/* ---- file handles: `foreign_type File (finalizer := "wiz_sys_file_free")`
 
-typedef struct { FILE *f; int owned; } wiz_sys_file;
+   A `File` is an ordinary (ω) Wiz value, so a well-typed program can keep one and also
+   capture it in a `Chan.fork` child: two threads may then use one handle. Every
+   operation holds `h->mu` while it touches `h->f`, and `File.close` takes the stream
+   out under it, so a close can't `fclose` a `FILE *` that a `getline` is still using
+   (the use-after-free of conc-02), and a second close is EBADF rather than a second
+   `fclose`. Operations on one handle are serialised, not run in parallel: a close
+   waits for a read already in progress. (The standard streams are never `fclose`d;
+   sharing one `File.stdout` value is also serialised by stdio's own per-`FILE` lock.) */
+
+typedef struct { FILE *f; int owned; pthread_mutex_t mu; } wiz_sys_file;
 WIZ_API void wiz_sys_file_free(void *p) {
   wiz_sys_file *h = (wiz_sys_file *)p;
   if (h->f && h->owned) fclose(h->f);
+  pthread_mutex_destroy(&h->mu);
   free(h);
 }
 /* fopen modes ("r", "w", "a", "r+", …); NULL with the error. The descriptor is
@@ -280,6 +292,7 @@ WIZ_API void *wiz_sys_file_open(const char *p, const char *mode) {
   wiz_sys_err = 0;
   wiz_sys_file *h = (wiz_sys_file *)wiz_xmalloc(sizeof *h);
   h->f = f; h->owned = 1;
+  pthread_mutex_init(&h->mu, NULL);
   return h;
 }
 /* 0 stdin, 1 stdout, 2 stderr (never closed) */
@@ -287,60 +300,86 @@ WIZ_API void *wiz_sys_file_std(uint64_t i) {
   wiz_sys_file *h = (wiz_sys_file *)wiz_xmalloc(sizeof *h);
   h->f = i == 0 ? stdin : i == 1 ? stdout : stderr;
   h->owned = 0;
+  pthread_mutex_init(&h->mu, NULL);
   return h;
 }
 /* a line without its newline; error WIZ_SYS_EOF at the end */
 WIZ_API const char *wiz_sys_file_read_line(void *p) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) { wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
+  pthread_mutex_lock(&h->mu);
+  if (!h->f) { pthread_mutex_unlock(&h->mu); wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
   char *line = NULL;
   size_t cap = 0;
   errno = 0;
   ssize_t n = getline(&line, &cap, h->f);
-  if (n < 0) { wiz_sys_err = errno ? errno : WIZ_SYS_EOF; free(line); return wiz_sys_keep(NULL); }
+  if (n < 0) {
+    int e = errno ? errno : WIZ_SYS_EOF;
+    pthread_mutex_unlock(&h->mu);
+    wiz_sys_err = e; free(line); return wiz_sys_keep(NULL);
+  }
   if (n > 0 && line[n - 1] == '\n') line[n - 1] = 0;
+  pthread_mutex_unlock(&h->mu);
   wiz_sys_err = 0;
   return wiz_sys_keep(line);
 }
 WIZ_API const char *wiz_sys_file_read_all(void *p) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) { wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
+  pthread_mutex_lock(&h->mu);
+  if (!h->f) { pthread_mutex_unlock(&h->mu); wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
   size_t cap = 4096, n = 0, k;
   char *b = (char *)malloc(cap);
-  if (!b) { wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
+  if (!b) { pthread_mutex_unlock(&h->mu); wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
   while ((k = fread(b + n, 1, cap - n - 1, h->f)) > 0) {
     n += k;
     if (n + 1 >= cap) {
       char *nb = (char *)realloc(b, cap * 2);
-      if (!nb) { free(b); wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
+      if (!nb) { free(b); pthread_mutex_unlock(&h->mu); wiz_sys_err = ENOMEM; return wiz_sys_keep(NULL); }
       cap *= 2; b = nb;
     }
   }
   b[n] = 0;
   wiz_sys_err = ferror(h->f) ? (errno ? errno : EIO) : 0;
+  pthread_mutex_unlock(&h->mu);
   return wiz_sys_keep(b);
 }
 WIZ_API uint64_t wiz_sys_file_write(void *p, const char *s) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) return EBADF;
   size_t n = strlen(s);
-  return fwrite(s, 1, n, h->f) == n ? 0 : (errno ? (uint64_t)errno : EIO);
+  pthread_mutex_lock(&h->mu);
+  uint64_t r = !h->f ? EBADF : (fwrite(s, 1, n, h->f) == n ? 0 : (errno ? (uint64_t)errno : EIO));
+  pthread_mutex_unlock(&h->mu);
+  return r;
 }
 WIZ_API uint64_t wiz_sys_file_flush(void *p) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) return EBADF;
-  return wiz_sys_status(fflush(h->f) == 0 ? 0 : -1);
+  pthread_mutex_lock(&h->mu);
+  uint64_t r = !h->f ? EBADF : wiz_sys_status(fflush(h->f) == 0 ? 0 : -1);
+  pthread_mutex_unlock(&h->mu);
+  return r;
 }
 WIZ_API uint64_t wiz_sys_file_close(void *p) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  /* take the stream atomically: two threads closing one handle close it once */
-  FILE *f = __atomic_exchange_n(&h->f, (FILE *)NULL, __ATOMIC_ACQ_REL);
+  /* take the stream under the lock: two threads closing one handle close it once, and
+     no operation can be holding the `FILE *` when it is taken away */
+  pthread_mutex_lock(&h->mu);
+  FILE *f = h->f;
+  h->f = NULL;
+  pthread_mutex_unlock(&h->mu);
   if (!f) return EBADF;
   int r = h->owned ? fclose(f) : fflush(f);
   return wiz_sys_status(r == 0 ? 0 : -1);
 }
 
-/* ---- processes: `foreign_type Child (finalizer := "wiz_sys_child_free")` ---- */
+/* ---- processes: `foreign_type Child (finalizer := "wiz_sys_child_free")`
+
+   A `Child` is an ω value too, so one can be captured by a fork and used from two
+   threads. Unlike one stdio stream, its state is several descriptors plus the wait
+   status, so `fdmu[i]` guards the pipe behind `fd[i]` (read, write, close, take) and
+   `mu` guards `waited`/`status`/`buf`; `waitmu` lets one thread block in `waitpid`
+   while the others use `kill` or the pipes. Lock order: an `fdmu[i]` first, then `mu`
+   (and `waitmu` first, then `mu`). A second `closeStdin` is EBADF, not a second
+   `close(2)` of a number another thread may have reused, and two `wait`s return the
+   same status. */
 
 typedef struct {
   pid_t pid;
@@ -348,14 +387,18 @@ typedef struct {
   int waited;     /* the status is known */
   int status;     /* exit code, or 256 + signal */
   char *buf[2];   /* stdout and stderr, once collected by `communicate` */
+  pthread_mutex_t fdmu[3]; /* fd[0], fd[1], fd[2] */
+  pthread_mutex_t mu;      /* waited, status, buf */
+  pthread_mutex_t waitmu;  /* one blocking `wait` (or `tryWait`) at a time */
 } wiz_sys_child;
 
 WIZ_API void wiz_sys_child_free(void *p) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  for (int i = 0; i < 3; i++) if (c->fd[i] >= 0) close(c->fd[i]);
+  for (int i = 0; i < 3; i++) { if (c->fd[i] >= 0) close(c->fd[i]); pthread_mutex_destroy(&c->fdmu[i]); }
   /* reap it if it has finished (otherwise it is left to init when we exit) */
   if (!c->waited) waitpid(c->pid, NULL, WNOHANG);
   free(c->buf[0]); free(c->buf[1]);
+  pthread_mutex_destroy(&c->mu); pthread_mutex_destroy(&c->waitmu);
   free(c);
 }
 static void wiz_sys_close_fd(int *fd) { if (*fd >= 0) { close(*fd); *fd = -1; } }
@@ -547,6 +590,9 @@ static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64
   if (r == 0) {
     c = (wiz_sys_child *)wiz_xcalloc(1, sizeof *c);
     c->pid = pid;
+    for (int i = 0; i < 3; i++) pthread_mutex_init(&c->fdmu[i], NULL);
+    pthread_mutex_init(&c->mu, NULL);
+    pthread_mutex_init(&c->waitmu, NULL);
   }
   for (int i = 0; i < 3; i++) {
     if (pipes[i][0] < 0) { if (c) c->fd[i] = -1; continue; }
@@ -560,25 +606,42 @@ static void *wiz_sys_spawn_in(const char *cmd, wiz_val args, uint64_t in, uint64
 WIZ_API uint64_t wiz_sys_child_pid(void *p) { return (uint64_t)((wiz_sys_child *)p)->pid; }
 WIZ_API uint64_t wiz_sys_child_write(void *p, const char *s) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (c->fd[0] < 0) return EBADF;
-  return wiz_sys_status(wiz_sys_write_all(c->fd[0], s, strlen(s)));
+  pthread_mutex_lock(&c->fdmu[0]);
+  uint64_t r = c->fd[0] < 0 ? EBADF : wiz_sys_status(wiz_sys_write_all(c->fd[0], s, strlen(s)));
+  pthread_mutex_unlock(&c->fdmu[0]);
+  return r;
 }
 WIZ_API uint64_t wiz_sys_child_close_stdin(void *p) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (c->fd[0] < 0) return EBADF;
+  pthread_mutex_lock(&c->fdmu[0]);
+  if (c->fd[0] < 0) { pthread_mutex_unlock(&c->fdmu[0]); return EBADF; }
   int r = close(c->fd[0]);
   c->fd[0] = -1;
+  pthread_mutex_unlock(&c->fdmu[0]);
   return wiz_sys_status(r);
 }
 /* the rest of stdout (1) or stderr (2): what `communicate` collected, or read to the end */
 WIZ_API const char *wiz_sys_child_read(void *p, uint64_t i) {
   wiz_sys_child *c = (wiz_sys_child *)p;
   if (i != 1 && i != 2) { wiz_sys_err = EINVAL; return wiz_sys_keep(NULL); }
-  if (c->buf[i - 1]) { char *b = c->buf[i - 1]; c->buf[i - 1] = NULL; wiz_sys_err = 0; return wiz_sys_keep(b); }
-  if (c->fd[i] < 0) { wiz_sys_err = EBADF; return wiz_sys_keep(NULL); }
+  pthread_mutex_lock(&c->fdmu[i]);
+  pthread_mutex_lock(&c->mu);
+  if (c->buf[i - 1]) {
+    char *b = c->buf[i - 1];
+    c->buf[i - 1] = NULL;
+    pthread_mutex_unlock(&c->mu);
+    pthread_mutex_unlock(&c->fdmu[i]);
+    wiz_sys_err = 0; return wiz_sys_keep(b);
+  }
+  pthread_mutex_unlock(&c->mu);
+  if (c->fd[i] < 0) {
+    pthread_mutex_unlock(&c->fdmu[i]);
+    wiz_sys_err = EBADF; return wiz_sys_keep(NULL);
+  }
   char *b = wiz_sys_read_fd(c->fd[i], NULL);
   wiz_sys_err = b ? 0 : errno;
   wiz_sys_close_fd(&c->fd[i]);
+  pthread_mutex_unlock(&c->fdmu[i]);
   return wiz_sys_keep(b);
 }
 /* write `input` to stdin and close it, while collecting stdout and stderr (whichever are
@@ -586,8 +649,13 @@ WIZ_API const char *wiz_sys_child_read(void *p, uint64_t i) {
    an error (`EBADF`), not silently dropped: the child never saw it. */
 WIZ_API uint64_t wiz_sys_child_communicate(void *p, const char *input) {
   wiz_sys_child *c = (wiz_sys_child *)p;
+  /* all three pipes, in order (the lock order is fdmu[0] before fdmu[1] before fdmu[2]) */
+  for (int i = 0; i < 3; i++) pthread_mutex_lock(&c->fdmu[i]);
   size_t inlen = strlen(input), inpos = 0;
-  if (inlen > 0 && c->fd[0] < 0) return EBADF;
+  if (inlen > 0 && c->fd[0] < 0) {
+    for (int i = 2; i >= 0; i--) pthread_mutex_unlock(&c->fdmu[i]);
+    return EBADF;
+  }
   size_t cap[2] = {0, 0}, len[2] = {0, 0};
   char *buf[2] = {NULL, NULL};
   int r = 0;
@@ -599,6 +667,7 @@ WIZ_API uint64_t wiz_sys_child_communicate(void *p, const char *input) {
   }
   if (r) {
     free(buf[0]); free(buf[1]);
+    for (int i = 2; i >= 0; i--) pthread_mutex_unlock(&c->fdmu[i]);
     return (uint64_t)r;
   }
   if (c->fd[0] >= 0 && inlen == 0) wiz_sys_close_fd(&c->fd[0]);
@@ -624,6 +693,7 @@ WIZ_API uint64_t wiz_sys_child_communicate(void *p, const char *input) {
     }
     if (r) break;
   }
+  pthread_mutex_lock(&c->mu);
   for (int i = 0; i < 2; i++) {
     if (!buf[i]) continue;
     if (r) { free(buf[i]); continue; }
@@ -631,57 +701,98 @@ WIZ_API uint64_t wiz_sys_child_communicate(void *p, const char *input) {
     free(c->buf[i]);
     c->buf[i] = buf[i];
   }
+  pthread_mutex_unlock(&c->mu);
+  for (int i = 2; i >= 0; i--) pthread_mutex_unlock(&c->fdmu[i]);
   return (uint64_t)r;
 }
 /* wait for it to finish: its exit code, or 256 + the signal that stopped it */
 WIZ_API uint64_t wiz_sys_child_wait(void *p) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (!c->waited) {
+  pthread_mutex_lock(&c->waitmu);
+  pthread_mutex_lock(&c->mu);
+  int waited = c->waited, status = c->status;
+  pthread_mutex_unlock(&c->mu);
+  if (!waited) {
     int st;
     pid_t r;
     while ((r = waitpid(c->pid, &st, 0)) < 0 && errno == EINTR) {}
-    if (r < 0) { wiz_sys_err = errno; return 0; }
-    c->waited = 1;
-    c->status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 256 + WTERMSIG(st) : 512;
+    if (r < 0) {
+      int e = errno;
+      pthread_mutex_unlock(&c->waitmu);
+      wiz_sys_err = e; return 0;
+    }
+    status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 256 + WTERMSIG(st) : 512;
+    pthread_mutex_lock(&c->mu);
+    c->waited = 1; c->status = status;
+    pthread_mutex_unlock(&c->mu);
   }
+  pthread_mutex_unlock(&c->waitmu);
   wiz_sys_err = 0;
-  return (uint64_t)c->status;
+  return (uint64_t)status;
 }
 WIZ_API uint64_t wiz_sys_child_kill(void *p, uint64_t sig) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (c->waited) return ESRCH;
+  pthread_mutex_lock(&c->mu);
+  int waited = c->waited;
+  pthread_mutex_unlock(&c->mu);
+  if (waited) return ESRCH;
   return wiz_sys_status(kill(c->pid, (int)sig));
 }
 /* (sys-bytes) without blocking: as `wiz_sys_child_wait`, or 2^32 while it runs */
 WIZ_API uint64_t wiz_sys_child_try_wait(void *p) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (!c->waited) {
+  /* a thread is already in a blocking `wait`: the child still runs from here */
+  if (pthread_mutex_trylock(&c->waitmu) != 0) return (uint64_t)1 << 32;
+  pthread_mutex_lock(&c->mu);
+  int waited = c->waited;
+  uint64_t status = (uint64_t)c->status;
+  pthread_mutex_unlock(&c->mu);
+  if (!waited) {
     int st;
     pid_t r;
     while ((r = waitpid(c->pid, &st, WNOHANG)) < 0 && errno == EINTR) {}
-    if (r < 0) { wiz_sys_err = errno; return 0; }
+    if (r < 0) {
+      int e = errno;
+      pthread_mutex_unlock(&c->waitmu);
+      wiz_sys_err = e; return 0;
+    }
     wiz_sys_err = 0;
-    if (r == 0) return (uint64_t)1 << 32;
-    c->waited = 1;
-    c->status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 256 + WTERMSIG(st) : 512;
+    if (r == 0) { pthread_mutex_unlock(&c->waitmu); return (uint64_t)1 << 32; }
+    status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 256 + WTERMSIG(st) : 512;
+    pthread_mutex_lock(&c->mu);
+    c->waited = 1; c->status = (int)status;
+    pthread_mutex_unlock(&c->mu);
   }
+  pthread_mutex_unlock(&c->waitmu);
   wiz_sys_err = 0;
-  return (uint64_t)c->status;
+  return status;
 }
 /* a signal to the process group the child leads (spawned with a new group or session) */
 WIZ_API uint64_t wiz_sys_child_kill_group(void *p, uint64_t sig) {
   wiz_sys_child *c = (wiz_sys_child *)p;
   /* the pid (and so the group id) may be reused after wait: as wiz_sys_child_kill */
-  if (c->waited) return ESRCH;
+  pthread_mutex_lock(&c->mu);
+  int waited = c->waited;
+  pthread_mutex_unlock(&c->mu);
+  if (waited) return ESRCH;
   return wiz_sys_status(kill(-c->pid, (int)sig));
 }
 /* take our end of pipe i (0 stdin, 1 stdout, 2 stderr) out of the child, as a
    descriptor number for `wiz_sys_fd_adopt` (the child no longer closes it) */
 WIZ_API uint64_t wiz_sys_child_take(void *p, uint64_t i) {
   wiz_sys_child *c = (wiz_sys_child *)p;
-  if (i > 2 || c->fd[i] < 0 || (i > 0 && c->buf[i - 1])) { wiz_sys_err = EBADF; return 0; }
+  if (i > 2) { wiz_sys_err = EBADF; return 0; }
+  pthread_mutex_lock(&c->fdmu[i]);
+  pthread_mutex_lock(&c->mu);
+  int has_buf = i > 0 && c->buf[i - 1] != NULL;
+  pthread_mutex_unlock(&c->mu);
+  if (c->fd[i] < 0 || has_buf) {
+    pthread_mutex_unlock(&c->fdmu[i]);
+    wiz_sys_err = EBADF; return 0;
+  }
   int fd = c->fd[i];
   c->fd[i] = -1;
+  pthread_mutex_unlock(&c->fdmu[i]);
   wiz_sys_err = 0;
   return (uint64_t)fd;
 }
@@ -801,24 +912,29 @@ WIZ_API int wiz_bytes_eq(wiz_val a, wiz_val b) {
 /* up to n bytes; fewer only at the end of the file (error WIZ_SYS_EOF with nothing) */
 WIZ_API wiz_val wiz_sys_file_read_bytes(void *p, uint64_t n) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) { wiz_sys_err = EBADF; return wiz_bytes_empty(); }
   if (n == 0) { wiz_sys_err = 0; return wiz_bytes_empty(); }
+  pthread_mutex_lock(&h->mu);
+  if (!h->f) { pthread_mutex_unlock(&h->mu); wiz_sys_err = EBADF; return wiz_bytes_empty(); }
   unsigned char *d = (unsigned char *)malloc(n);
-  if (!d) { wiz_sys_err = ENOMEM; return wiz_bytes_empty(); }
+  if (!d) { pthread_mutex_unlock(&h->mu); wiz_sys_err = ENOMEM; return wiz_bytes_empty(); }
   size_t k = fread(d, 1, n, h->f);
   if (k == 0) {
     free(d);
     wiz_sys_err = ferror(h->f) ? (errno ? errno : EIO) : WIZ_SYS_EOF;
     clearerr(h->f);
+    pthread_mutex_unlock(&h->mu);
     return wiz_bytes_empty();
   }
+  pthread_mutex_unlock(&h->mu);
   wiz_sys_err = 0;
   return wiz_bytes_adopt(d, k, n);
 }
 WIZ_API uint64_t wiz_sys_file_write_bytes(void *p, wiz_val v) {
   wiz_sys_file *h = (wiz_sys_file *)p;
   wiz_bytes *b = (wiz_bytes *)v;
+  pthread_mutex_lock(&h->mu);
   uint64_t r = !h->f ? EBADF : (b->len == 0 || fwrite(b->data, 1, b->len, h->f) == b->len) ? 0 : (errno ? (uint64_t)errno : EIO);
+  pthread_mutex_unlock(&h->mu);
   wiz_dec(v);
   return r;
 }
@@ -827,11 +943,16 @@ WIZ_API uint64_t wiz_sys_file_write_bytes(void *p, wiz_val v) {
 static int wiz_sys_whence(uint64_t w) { return w == 0 ? SEEK_SET : w == 1 ? SEEK_CUR : SEEK_END; }
 WIZ_API uint64_t wiz_sys_file_seek(void *p, uint64_t whence, uint64_t off, int back) {
   wiz_sys_file *h = (wiz_sys_file *)p;
-  if (!h->f) { wiz_sys_err = EBADF; return 0; }
+  pthread_mutex_lock(&h->mu);
+  if (!h->f) { pthread_mutex_unlock(&h->mu); wiz_sys_err = EBADF; return 0; }
   off_t o = back ? -(off_t)off : (off_t)off;
-  if (fseeko(h->f, o, wiz_sys_whence(whence)) < 0) { wiz_sys_err = errno; return 0; }
+  if (fseeko(h->f, o, wiz_sys_whence(whence)) < 0) {
+    pthread_mutex_unlock(&h->mu);
+    wiz_sys_err = errno; return 0;
+  }
   off_t at = ftello(h->f);
   wiz_sys_err = at < 0 ? errno : 0;
+  pthread_mutex_unlock(&h->mu);
   return at < 0 ? 0 : (uint64_t)at;
 }
 
@@ -1014,6 +1135,63 @@ WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int bac
   off_t at = lseek(h->fd, back ? -(off_t)off : (off_t)off, wiz_sys_whence(whence));
   wiz_sys_err = at < 0 ? errno : 0;
   return at < 0 ? 0 : (uint64_t)at;
+}
+/* durability: fsync flushes the descriptor's data and metadata, fdatasync only what is
+   needed to read the data back. Both return 0 or errno, like close. */
+WIZ_API uint64_t wiz_sys_fd_fsync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
+}
+WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+#ifdef __EMSCRIPTEN__
+  /* Emscripten's libc does not promise fdatasync; fsync is the portable spelling. */
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#else
+  if (fdatasync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#endif
+  wiz_sys_err = 0;
+  return 0;
+}
+/* file locks (flock(2)): one exclusive writer or any number of shared readers, across
+   processes. `mode` 0 shared, 1 exclusive, 2 unlock; `nonblock` makes a held lock the
+   typed `busy` (WIZ_SYS_BUSY) instead of a wait. 0 is success, otherwise errno (also
+   left in `wiz_sys_err`, so a caller that ignores the return still sees it).
+
+   The lock belongs to the open file description: it is dropped by `close` of the last
+   descriptor that shares it, and by the kernel when the process exits or is killed. That
+   is the crash story for the store: an abandoned writer cannot leave the file locked. */
+#define WIZ_SYS_BUSY 100002 /* not an errno: a non-blocking lock that is held */
+WIZ_API uint64_t wiz_sys_fd_flock(void *p, uint64_t mode, int nonblock) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (!h || h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  int op = mode == 0 ? LOCK_SH : mode == 1 ? LOCK_EX : LOCK_UN;
+  if (nonblock) op |= LOCK_NB;
+  if (flock(h->fd, op) != 0) {
+    if (nonblock && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+      wiz_sys_err = 0; /* busy is an answer, not an error */
+      return WIZ_SYS_BUSY;
+    }
+    wiz_sys_err = errno;
+    return (uint64_t)errno;
+  }
+  wiz_sys_err = 0;
+  return 0;
+}
+/* set the file's length: 0 or errno, like fsync. Growing zero-fills; shrinking discards
+   the tail. Only for a descriptor nothing has mapped past the new end: a live mapping of
+   those pages faults on the next read (the store compacts into a new inode instead). */
+WIZ_API uint64_t wiz_sys_fd_ftruncate(void *p, uint64_t n) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (n > (uint64_t)INT64_MAX) { wiz_sys_err = EINVAL; return EINVAL; }
+  if (ftruncate(h->fd, (off_t)n) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
 }
 /* poll several: `fds` a `List Fd`, `events` a `List Nat` (1 read, 2 write, 3 both) of
    the same length; within `ns` if timed. The list of ready positions (each with what
