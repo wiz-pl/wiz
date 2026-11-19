@@ -647,6 +647,67 @@ that pin each one):
   found no accepted closed `Empty` in either kernel and no verdict difference beyond the
   known quantity-only `Σ` observations (`Tests/FalseFuzz.lean:1-26`).
 * Not yet in Wiz: termination by measure, machine-integer and vector literals.
+* scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
+  reports a summary with a coverage section: `.cs` files before and after exclusions
+  (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
+  symbolic links), found/parsed/lowered/failed, findings by rule and severity, and every
+  construct or file that was skipped or warned about with a count and one example
+  location. `--json` is the same report, `--fail-on error|warning|note` gates findings
+  and coverage rows, and the exit status separates `0` clean, `1` gated, `2` usage/IO
+  from `3` nothing analysed (no `.cs`, or every file failed). Lowering warnings are
+  normalised to constructs, so a first run answers "what didn't you look at?" in one
+  screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
+  counts, coverage rows, JSON and every exit status.
+* scry C#: the frontend survives real code. Re-checked against a real solution's
+  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  files under `src/`), the lowering no longer drops constructs silently. The headline
+  find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
+  function and no warning** — `typeDecls` recursed into the namespace node, but
+  tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type
+  in the project was dropped. Fixed, and `lower/{modern,unsupported}` pin it. Top-level
+  statements (the whole of a minimal-API `Program.cs`) become `<stem>.Main`
+  (`Program.Main` for `Program.cs`); a record's or primary constructor's positional
+  parameters become fields and `new R(a)` lowers and stores its arguments instead of
+  discarding them; `partial` parts in one file are merged; `: base(…)` / `: this(…)`
+  evaluates its arguments and calls the target constructor; an inherited call resolves
+  through `base_list`; collection expressions unwrap all three element wrappers;
+  `with` initialisers lower their values; `var (a, b) = …` evaluates its right-hand side
+  and binds each name to a havoc with a warning; an indexer, an operator, a destructor,
+  an event with accessors, a nested delegate and a `#if`-guarded member are each
+  reported by name. `switch` expressions, collection expressions, `with` expressions, LINQ query
+  syntax and target-typed `new()` in a declaration are lowered with their value flow
+  (taint included) instead of havoc'd. New fixtures
+  `lower/{modern,toplevel,unsupported}` and `taint/cwe78-modern-{unsafe,safe}`; the
+  `silent skip` case fails when any of the out-of-scope warnings disappears
+  (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
+  (frequencies, and per-file parse/lower/taint given a native build).
+* scry C#: `is` tests and pattern bindings are modelled instead of havoc'd as a whole.
+  `o is T x` is a nondeterministic type test (the lowering cannot know an object's
+  runtime type, so both edges are explored) **and** a local `x` of the pattern type `T`,
+  assigned `o` on the test's true edge only — the copy is emitted into the true block, so
+  a use of `x` carries `o`'s taint exactly where the test held, and a call `x.M()` names
+  `T.M` as the rule pack expects. `is null` / `is not null`, integer constant patterns,
+  `is T`, `is var x` and `or`/`and` patterns are tests too. Property, positional,
+  relational and list patterns, and `is not T y` (which binds on the false edge), still
+  warn by name. On `src/Crux.Api` this removes the `is test not modelled` row (88
+  warnings); fixtures `lower/patterns` and `taint/cwe78-pattern-unsafe` pin the binding
+  and the true-branch flow.
+* scry C#: `switch` statement sections and `switch` expression arms are compared and
+  their bindings installed. A constant label (`case 0:`, `case "a":`, `case Mode.Idle:`)
+  is a value comparison against the scrutinee, materialised once; an enum member the
+  analysed tree declares uses its ordinal, and one from outside it (or a `const` of
+  unknown value) is compared against a distinct symbolic value, so two labels never
+  alias. A typed label (`case string s:`) keeps the nondeterministic runtime type test
+  and copies the scrutinee into `s` in the section's edge block; `when` guards are
+  lowered **after** that copy, as the section's own condition, and a failing guard tests
+  the next label. Stacked labels (`case 1: case 2:`) are one section. Property,
+  relational and list labels (and an external constant against an integer scrutinee)
+  are unknown tests, reported by name rather than guessed. On the §7.4 real-code
+  corpus the 6 `switch … not compared` warnings go to 0 (warnings 409 → 403; no
+  warning is added — the two `when` guards are now lowered, so their calls appear in
+  the driver's coverage rows instead); fixtures `lower/switch` and
+  `taint/cwe78-switch-unsafe`.
+
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
