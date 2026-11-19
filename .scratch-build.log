@@ -1,54 +1,19 @@
 heavy: template [lake build .*wiz.*tests] -> mem=8G cpus=4 time=14400s
-srun: job 2410 queued and waiting for resources
-srun: job 2410 has been allocated resources
-✔ [188/555] Built Wiz.Compiler.Run (1.1s)
-✖ [189/555] Building Wiz.Compiler.IRRun (626ms)
-trace: .> LEAN_PATH=/workspace/wt/train6/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/train6/Wiz/Compiler/IRRun.lean -o /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.olean -i /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.ilean -c /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.c --setup /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.setup.json --json
-error: Wiz/Compiler/IRRun.lean:105:4: Redundant alternative: Any expression matching
-  x✝
-will match one of the preceding alternatives
-error: Wiz/Compiler/IRRun.lean:247:13: unexpected token 'at'; expected '(', ':=', 'rec', '|', identifier or term
-⚠ [190/555] Built Wiz.Compiler.C (995ms)
-warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
-
-Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
-warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
-
-Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
-  [apply] _cb
-
-Note: This linter can be disabled with `set_option linter.unusedVariables false`
-✔ [191/555] Built Wiz.Compiler.Simp (528ms)
-✔ [192/555] Built Wiz.Compiler.NativeRun (702ms)
-✔ [197/555] Built Wiz.Elab.Basic (1.0s)
-✔ [198/555] Built Wiz.Compiler.LLVM (492ms)
-✔ [199/555] Built Wiz.Compiler.Wasm (2.2s)
-✔ [203/555] Built Wiz.Infoview (249ms)
-✔ [204/555] Built Wiz.Elab.Macro (315ms)
-✔ [205/555] Built Wiz.Compiler.Native (580ms)
-✔ [206/555] Built Wiz.Compiler.Lower (631ms)
-⚠ [211/555] Built Wiz.Elab.ProcMacro (352ms)
+srun: job 2424 queued and waiting for resources
+srun: job 2424 has been allocated resources
+⚠ [41/555] Replayed Wiz.Elab.ProcMacro
 warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
 
 Hint: Replace the deprecated name:
   String.m̵k̵o̲f̲L̲i̲s̲t̲
-✔ [213/555] Built Wiz.Elab.Unify (1.9s)
-✔ [215/555] Built Wiz.Elab.Zonk (396ms)
-✔ [217/555] Built Wiz.Elab.Info (263ms)
-✔ [218/555] Built Wiz.Compiler.Run:c.o (5.4s)
-✔ [220/555] Built Wiz.Elab.Class (763ms)
-✔ [222/555] Built Wiz.Elab.Tactic (1.2s)
-✔ [223/555] Built Wiz.Elab.Witness (398ms)
-✔ [226/555] Built Wiz.Elab.Reflect (292ms)
-⚠ [228/555] Built Wiz.Elab.Term (8.9s)
+⚠ [46/555] Replayed Wiz.Elab.Term
 warning: Wiz/Elab/Term.lean:441:24: Variable name `args` is not explicitly referenced.
 
 Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
   [apply] _args
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
-✔ [230/555] Built Wiz.Elab.Inductive (884ms)
-⚠ [232/555] Built Wiz.Elab.Recursor (964ms)
+⚠ [49/555] Replayed Wiz.Elab.Recursor
 warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
 
 Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
@@ -61,6 +26,20 @@ Hint: The binding can be removed (if unused) or named `_` (if used implicitly). 
   [apply] _tele0
 
 Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [71/555] Replayed Wiz.Compiler.C
+warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
+
+Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
+warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
+
+Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
+  [apply] _cb
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+✖ [232/555] Building Wiz.Compiler.IRRun (558ms)
+trace: .> LEAN_PATH=/workspace/wt/train6/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/train6/Wiz/Compiler/IRRun.lean -o /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.olean -i /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.ilean -c /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.c --setup /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.setup.json --json
+error: Wiz/Compiler/IRRun.lean:272:12: typeclass instance problem is stuck, it is often due to metavariables
+  Decidable (i < a.size)
 Some required targets logged failures:
 - Wiz.Compiler.IRRun
 error: build failed

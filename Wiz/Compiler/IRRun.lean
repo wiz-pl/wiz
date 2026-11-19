@@ -269,10 +269,11 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
             let i := idx 1
             let x := argAt 2
             for v in a do dupV v
-            if i < a.size then do
-              dupV x
-              pure (some (.arr (a.set! i x)))
-            else pure (some (.arr a))
+            -- (an `if` on `i < a.size` leaves the `Decidable` instance stuck here, so
+            -- the in-range test is the element lookup, which is the same condition)
+            match a[i]? with
+            | some _ => do dupV x; pure (some (.arr (a.set! i x)))
+            | none => pure (some (.arr a))
           | _, _ => pure none
       match r with
       | some v => do args.forM dropV; pure v
