@@ -1,0 +1,2 @@
+/-- Fixture: `same`, beside the `__root__.same` in a.wiz. -/
+def same : Nat := 2
