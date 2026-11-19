@@ -27,6 +27,8 @@ What it checks:
 * two writers read the same base: both `+1`s commit and sum, a `set` from the same base is
   rejected as a conflict, a pure `add` still merges, and a transaction that began before a
   delete is rejected as stale;
+* retention: a base nine commits old has fallen out of the K = 8 window and is rejected as
+  `expired`, not quietly rebased;
 * a file truncated by one page (the stand-in for a writer that died between its page
   writes and its slot switch) reopens at the previous generation, is not left locked, and
   commits again above the torn generation.
@@ -62,6 +64,13 @@ def isConflict (o : Outcome) : Bool :=
   match o with
   | .rejected e => match e with
     | .conflict _ _ _ => .true
+    | _ => .false
+  | .committed _ => .false
+
+def isExpired (o : Outcome) : Bool :=
+  match o with
+  | .rejected e => match e with
+    | .expired _ _ => .true
     | _ => .false
   | .committed _ => .false
 
@@ -173,7 +182,7 @@ def lockTest (dir : String) : EIO Unit := do
   s2 ← Handle.getDb h;
   expect "lock test: and the count is 1" (Nat.beq (snapCount s2 1) 1);
   Fd.close p;
-  Handle.closeDb h;
+  closeDb h;
   EIO.lift (IO.println
     "lock: shares coexist, exclusive excludes both ways, commit section waits for the lock")
 
@@ -220,7 +229,7 @@ def snapshotTest (dir : String) : EIO Unit := do
         expect "scan test: a new reader sees 1"
           (Nat.beq (snapCount (Reader.snapshot r2) 1) 1);
         Reader.close r2;
-        Handle.closeDb h;
+        closeDb h;
         EIO.lift (IO.println
           "scan: pages 127 3, old values 0 0, new value 1, generation 1 -> 2")
 
@@ -261,12 +270,39 @@ def writersTest (dir : String) : EIO Unit := do
   s5 ← Handle.getDb w2;
   expect "writers test: the delete is visible" (Bool.not (snapHas s5 2));
   expect "writers test: the counter survives" (Nat.beq (snapCount s5 1) 3);
-  Handle.closeDb w1;
-  Handle.closeDb w2;
+  closeDb w1;
+  closeDb w2;
   EIO.lift (IO.println
     "writers: two +1s committed and summed to 3, stale set conflict, stale add merged, post-delete tx stale")
 
--- ## 4. A torn last commit, and no lock left behind
+-- ## 4. Retention: a base the policy dropped is `expired`
+
+/-- `n` read-bump-commit rounds from the current snapshot. -/
+def bumpN (h : Handle) : Nat → EIO Unit
+  | .zero => EIO.pure ()
+  | .succ k => do
+    s ← Handle.getDb h;
+    o ← Handle.putDb h (bumpCount (U64.ofNat 1) s);
+    expect "retention test: a bump in the run commits" (succeeded o);
+    bumpN h k
+
+def retentionTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "retention.db";
+  h ← openDb path indices;
+  s0 ← Handle.getDb h;
+  o ← Handle.putDb h (seedNodes s0);
+  expect "retention test: the seed commits" (succeeded o);
+  s1 ← Handle.getDb h;                      -- generation 1
+  bumpN h 9;                                -- generations 2..10; K = 8 keeps 3..10
+  oOld ← Handle.putDb h (bumpCount (U64.ofNat 1) s1);
+  expect "retention test: a base outside the K window is rejected" (rejected oOld);
+  expect "retention test: and it is expired" (isExpired oOld);
+  sNow ← Handle.getDb h;
+  expect "retention test: the counter is 9" (Nat.beq (snapCount sNow 1) 9);
+  closeDb h;
+  EIO.lift (IO.println "retention: a 9-commit-old base is expired, not rebased")
+
+-- ## 5. A torn last commit, and no lock left behind
 
 def reopenTest (dir : String) : EIO Unit := do
   let path := Path.join dir "reopen.db";
@@ -281,7 +317,7 @@ def reopenTest (dir : String) : EIO Unit := do
   expect "reopen test: three commits"
     (Bool.and (succeeded oA) (Bool.and (succeeded oB) (succeeded oC)));
   expect "reopen test: at generation 3" (Nat.beq s3.gen.toNat 3);
-  Handle.closeDb h;
+  closeDb h;
   -- The crash substitute: drop the file's last page, so the newest slot's root is short
   -- while the slot still checksums. This is what a writer killed between the page writes
   -- and the slot switch leaves behind (the pages of the slot are not reachable).
@@ -306,11 +342,11 @@ def reopenTest (dir : String) : EIO Unit := do
   expect "reopen test: the recovery commit is generation 4"
     (Nat.beq s4.gen.toNat 4);
   expect "reopen test: and the count is 2" (Nat.beq (snapCount s4 1) 2);
-  Handle.closeDb ht;
+  closeDb ht;
   EIO.lift (IO.println
     "reopen: torn last commit ignored at generation 2, no lock held, next commit is 4")
 
--- ## 5. An abandoned writer (opt-in: needs the `flock` utility)
+-- ## 6. An abandoned writer (opt-in: needs the `flock` utility)
 
 def waitForFile (path : String) : Nat → EIO Bool
   | .zero => EIO.pure .false
@@ -350,7 +386,7 @@ def killTest (dir : String) : EIO Unit := do
   expect "kill test: the killed child's lock is released" (gotLock l2);
   Fd.unlock p;
   Fd.close p;
-  Handle.closeDb h;
+  closeDb h;
   EIO.lift (IO.println
     (String.append "kill: released after SIGKILL ("
       (String.append (ExitStatus.toString st) ")")))
@@ -367,6 +403,7 @@ def main : IO Unit := EIO.toIO (do
   lockTest dir;
   snapshotTest dir;
   writersTest dir;
+  retentionTest dir;
   reopenTest dir;
   match killOn with
   | .true => killTest dir

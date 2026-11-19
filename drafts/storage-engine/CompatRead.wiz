@@ -15,8 +15,8 @@ the writer's bytes.
 
 def word (w : U64) : String := Nat.toString (UIntN.toNat w)
 
-def showNode (s : Snapshot) (id : U64) : String :=
-  match Snapshot.getNode s id with
+def showNode (s : MappedSnapshot) (id : U64) : String :=
+  match MappedSnapshot.getNode s id with
   | .none => String.append "node " (String.append (word id) " absent")
   | .some n =>
     String.append (word n.id) (String.append " kind " (String.append (word n.kind)
@@ -30,7 +30,7 @@ def main : IO Unit := EIO.toIO (do
   | .some path => do
     fd ← Fd.open path .read OpenFlags.none;
     m ← Store.mapFile fd 1048576;
-    s ← match Snapshot.open m with
+    s ← match MappedSnapshot.open m with
       | .ok s => EIO.pure s
       | .error e => EIO.fail (StoreError.message e)
     EIO.lift (IO.println (String.append "gen " (word s.gen)));
