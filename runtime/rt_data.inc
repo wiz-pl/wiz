@@ -36,6 +36,12 @@ WIZ_API char *wiz_in_string(wiz_val s) {
   return buf;
 }
 WIZ_API wiz_val wiz_out_string(const char *s) {
+  /* a C function may return NULL: `strchr`/`strstr`/`memchr` on a miss, `getenv` for an
+     unset variable, `realpath` on failure. `import_c` types `char *` as `String` (a C
+     header says nothing about nullability), so read NULL as "", like the struct-field
+     marshalling does (`C.lean`, `c.f ? c.f : ""`), `wiz_sys_getenv` below, and the
+     self-hosted runtime's `rt_out_str`. */
+  if (!s) s = "";
   /* decode UTF-8 into code points, then build the list from the end */
   size_t n = strlen(s), k = 0;
   uint32_t *cps = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
