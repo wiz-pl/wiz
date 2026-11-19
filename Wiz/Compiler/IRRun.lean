@@ -126,7 +126,6 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
       | some (.tag t) => pure t
       | some (.num k) => pure (if k == 0 then 0 else 1)
       | _ => pure 0
-    args.forM dropV
     pure (.tag t)
   | "fieldAt" =>
     match (args[0]? : Option IVal), (args[1]? : Option IVal) with

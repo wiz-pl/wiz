@@ -2190,6 +2190,12 @@ def nativeCases (llvm : Bool) : List Case :=
         cRunSmallStack (llvm := llvm) ("import Prelude\npartial def count (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++
           "  | .succ m => match Nat.beq (Nat.mod m 3) 0 with\n    | .true => count m (acc + 2)\n    | .false => count m acc\n" ++
           "def main : Nat := count 10000000 0") "6666668" },
+    { name := "tag inspections borrow their scrutinee: a match's number is used again in a branch, no leaks, interpreted and compiled (8e)", run := fun _ => do
+        let src := "import Prelude\ndef count : Nat → Nat\n  | .zero => 0\n" ++
+          "  | .succ n => count n + 1\ndef sum : List Nat → Nat\n  | .nil => 0\n" ++
+          "  | .cons x xs => x + sum xs\ndef main : Nat := count 100000 + sum (List.range 1000)\n"
+        unless llvm do okLib (src ++ "#run main\n") ["599500"]
+        cRun (llvm := llvm) src "599500" },
     { name := "constant folding and known constructors behave as before (15c)", run := fun _ =>
         cRun (llvm := llvm) foldSrc foldExpected },
     { name := "numerals at 2^31 … 2^64+1 and 10^30 are constants (15g)", run := fun _ =>
