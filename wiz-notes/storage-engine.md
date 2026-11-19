@@ -1473,11 +1473,18 @@ Not run: the trust-ledger gate (same pre-existing `lib/Scope.wiz` /
 ## 16. Slice 3b implemented: one writer, many readers
 
 Status: branch `store-multiproc` off `integration/train6` (`7138f924`), with
-`store-durable` (`244caf7a`) and `store-mmap` (`79fb531b`) merged; train6 is
-untouched and there is no PR. Neither format branch's writer or decoder is
-changed: this slice adds `flock` to the ordinary `Sys`/`Fd` family, a
-`Multiproc.wiz` layer over `Durable.wiz`, and its tests. The `mmap` read path is
-merged unchanged, and §16.6 checks its assumptions against the shipped writer.
+`store-compact` (`da05a948`, which folds `store-durable` and `store-mmap`) merged;
+train6 is untouched and there is no PR. The format of record is store-compact's:
+this slice adds only `flock` to the ordinary `Sys`/`Fd` family, a `Multiproc.wiz`
+layer over `Durable.wiz`/`Registry.wiz`, and its tests. It does not change the
+writer, the decoder or the compaction plan; §16.6 crosses the durable writer and
+the `mmap` decoder on one file to check they share the format.
+
+The layer follows store-compact's shapes rather than re-deriving them: the
+descriptor lives in `StoreState.fd` (compaction replaces it), validation also
+runs `Registry.retained` (an old base is `expired`, not silently rebased), and a
+reader's `Db` snapshot is separate from the mapped `MappedSnapshot` the slice-3
+decoder returns.
 
 ### 16.1 The lock native
 
@@ -1525,6 +1532,16 @@ reader:   open ── LOCK_SH ─ read two meta slots ── LOCK_UN ── (sna
   mid-scan-commit test impossible. When a later policy reuses pages (§2.5
   policies 2/3), the lease becomes a held share or a counted lease and a commit
   then waits for old readers.
+* **The lease survives compaction.** `Compact.compactStore` writes a fresh file,
+  `fsync`s it and `rename`s it over the path. A reader's own descriptor keeps the
+  old inode alive even after the last name is replaced, so its `Scan` still reads
+  the old pages under the old `txid`; a mapped snapshot likewise keeps the old
+  mapping. This is why a multi-process reader does not need the in-memory
+  `Registry` lease (which is per process and cannot see another process's
+  readers): the descriptor *is* the lease. A **writer** handle is different — it
+  holds a descriptor to the old inode and would keep committing to a file no name
+  points at. Compaction is therefore kept out of the concurrent contract:
+  quiesce writers and reopen their handles after a swap (§16.4).
 * **What a reader sees when a commit lands mid-scan.** Its root was frozen at
   `Reader.open`; the commit appends fresh pages at the old `page_count` and
   switches the inactive meta slot. Pages reachable from the old root are never
@@ -1546,20 +1563,34 @@ reader:   open ── LOCK_SH ─ read two meta slots ── LOCK_UN ── (sna
 
 `Handle.putDb` runs, under `LOCK_EX`:
 
-1. `recover`: read both slots, pick the max checksum-valid `txid`, load its chain;
-2. `Db.commit` on that state: the delete-epoch test and every per-key version test
+1. `refresh`: read both slots, pick the max checksum-valid `txid`, load its chain
+   (`recoverWith`), and merge the roots this process still remembers
+   (`Registry.roots`) whose chains verify in the current file;
+2. `Registry.retained fresh.registry tx.gen`: a base the retention policy has
+   dropped is `expired` — its pages may have been compacted away, so it is
+   rejected, not rebased;
+3. `Db.commit` on that state: the delete-epoch test and every per-key version test
    see a state that no cooperating writer can change before the slot switch;
-3. only on a commit: the page writes, the two syncs, the slot switch.
+4. only on a commit: the page writes, the two syncs, the slot switch.
+
+Step 1's merge is the multi-process reading of retention. The format names only
+the two roots in the meta slots, so another process's older in-process roots are
+invisible; a root this process knows is kept only while its chain still verifies,
+which drops it exactly when compaction (or a different file) has removed its
+pages. That keeps a process's own K = 8 history working across commits by other
+processes, while an unknown or compacted generation is `expired`.
 
 A transaction that loses the race is returned as `Outcome.rejected`
-(`stale`/`conflict`/...) with the fresh state published to the handle, so a
-caller can re-read with `getDb` and re-run its pure function if it wants to. The
-engine never retries. A pure delta (`addCount`) still merges: two `+1`s from one
+(`stale`/`conflict`/`expired`/...) with the fresh state published to the handle,
+so a caller can re-read with `getDb` and re-run its pure function if it wants to.
+The engine never retries. A pure delta (`addCount`) still merges: two `+1`s from one
 base both commit and sum, while a `set`/`del` computed from that base is a
 conflict, and any transaction that began before a delete is `stale` through the
 global epoch. Two-handle test, exact outcomes: `+1` commits, `+1` commits
 (count 2), `set` rejected `conflict`, `+1` commits (count 3), `delete` commits,
-the next transaction from the old base rejected `stale`.
+the next transaction from the old base rejected `stale`. The retention test does
+nine commits from one base and then commits from generation 1: rejected
+`expired`, and the counter stays 9 (no silent rebase).
 
 ### 16.4 Crash and abandonment
 
@@ -1573,15 +1604,25 @@ the next transaction from the old base rejected `stale`.
   back to the previous slot. The generation floor is above every checksum-valid
   slot seen, so the next commit cannot reuse the abandoned attempt's generation,
   and `page_count` starts after every page a valid slot names, so it cannot
-  overwrite a page a stale slot still reaches. Pages of the abandoned attempt
-  are unreachable and leaked, as §2.5's never-reuse policy accepts.
+  overwrite a page a stale slot still reaches. `openDb` then trims bytes past
+  the largest `page_count` of a valid slot (store-compact's `trimTail`), so a
+  crashed append does not survive as a tail; this is safe for readers because
+  the cut is past every page a valid root names.
+* **Compaction is not in the concurrent contract.** The compactor's `rename`
+  does not take the store lock, and a writer handle in another process still
+  holds the old inode; making that safe needs an inode check after taking the
+  lock on the inode the path currently names (and locking that file, not the one
+  opened earlier). The slice-3 format does not expose an inode, so the contract
+  is: compaction is an offline, single-writer operation; readers survive it (the
+  descriptor is the lease), writers must be reopened around it.
 
 Tested: the truncated-tail substitute (drop the last 4 KiB page of a
 three-commit file, reopen: generation 2 / count 1, no lock held, next commit
 generation 4 / count 2) and, opt-in, a real killed process (§16.5).
 Not tested: a torn slot in the *middle* of the 96 bytes (covered by the checksum
-by construction, but not exercised by a test), and power loss between the two
-syncs (the protocol's ordering argument covers it; no fault injector here).
+by construction, but not exercised by a test); power loss between the two syncs
+(the protocol's ordering argument covers it; no fault injector here); and a
+commit racing a compaction by another process (excluded by the contract above).
 
 ### 16.5 What ran
 
