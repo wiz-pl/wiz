@@ -70,7 +70,11 @@ def Scry.Cs.bclTypes : List (String × String) :=
    ("SqlCommand", "Microsoft.Data.SqlClient"), ("SqlConnection", "Microsoft.Data.SqlClient"),
    ("HttpRequest", "Microsoft.AspNetCore.Http"), ("HttpResponse", "Microsoft.AspNetCore.Http"),
    ("StringBuilder", "System.Text"), ("Regex", "System.Text.RegularExpressions"),
-   ("List", "System.Collections.Generic"), ("Dictionary", "System.Collections.Generic")]
+   ("List", "System.Collections.Generic"), ("Dictionary", "System.Collections.Generic"),
+   ("Task", "System.Threading.Tasks"), ("ValueTask", "System.Threading.Tasks"),
+   ("HttpClient", "System.Net.Http"), ("HttpResponseMessage", "System.Net.Http"),
+   ("HttpContent", "System.Net.Http"), ("DbDataReader", "System.Data.Common"),
+   ("Stream", "System.IO"), ("MemoryStream", "System.IO"), ("Encoding", "System.Text")]
 
 /-- C#'s keyword types as CLR names. -/
 def Scry.Cs.predefName (t : String) : Option String :=
@@ -138,6 +142,9 @@ structure Scry.Cs.Meth where
   isStatic : Bool
   /-- The declared return type (canonical spelling, `System.Void` for none). -/
   ret : String
+  /-- The declared return type as written (`Task<string>` keeps its argument). `await`
+  reads the argument from here; the canonical `ret` has generics erased. -/
+  retRaw : String
   arity : Nat
 
 /-- A class (or struct/record/interface) of the unit. -/
@@ -179,6 +186,9 @@ structure Scry.Cs.Local where
   name : String
   var : Wil.Var
   ty : String
+  /-- The type `await` yields when the declared type is a `Task<T>`/`ValueTask<T>`
+  (`""` when it is not an async wrapper). -/
+  awaitTy : String
 
 /-- A pattern binding waiting for the edge where it holds: `is T x`'s `x` is the operand
 where the test held, `is not T x`'s where it failed. -/
@@ -344,6 +354,11 @@ def Scry.Cs.knownRet (name : String) : String :=
   if String.elem name ["System.Console.ReadLine", "System.String.Concat", "System.String.Format",
       "System.Environment.GetEnvironmentVariable", "System.IO.File.ReadAllText",
       "System.IO.Path.Combine", "System.IO.Path.GetFileName"] then "System.String"
+  -- the async chain a lowered `await` walks: response -> content -> text
+  else if String.eq name "System.Net.Http.HttpResponseMessage.get_Content" then "System.Net.Http.HttpContent"
+  else if String.eq name "System.Net.Http.HttpResponseMessage.EnsureSuccessStatusCode" then "System.Net.Http.HttpResponseMessage"
+  else if String.eq name "System.Net.Http.HttpClient.GetStringAsync" then "System.Threading.Tasks.Task"
+  else if String.eq name "System.Net.Http.HttpContent.ReadAsStringAsync" then "System.Threading.Tasks.Task"
   else if String.endsWith name ".ToString" then "System.String"
   else if Bool.or (String.eq name "System.Int32.Parse") (String.endsWith name ".get_Length") then "System.Int32"
   else if String.endsWith name "..ctor" then String.dropEnd 6 name
@@ -360,19 +375,22 @@ def Scry.Cs.call (c : Scry.Cst) (n : Nat) (name : String) (args : List Wil.Var) 
 def Scry.Cs.lookupLocal (s : Scry.Cs.LS) (name : String) : Option Scry.Cs.Local :=
   List.find (fun l => String.eq l.name name) s.env
 
+def Scry.Cs.bindLocalA (name : String) (v : Wil.Var) (ty awaitTy : String) : Scry.Cs.M Unit :=
+  Scry.Cs.modify (fun s => { s with env := .cons (Scry.Cs.Local.mk name v ty awaitTy) s.env })
+
 def Scry.Cs.bindLocal (name : String) (v : Wil.Var) (ty : String) : Scry.Cs.M Unit :=
-  Scry.Cs.modify (fun s => { s with env := .cons (Scry.Cs.Local.mk name v ty) s.env })
+  Scry.Cs.bindLocalA name v ty ""
 
 /-- Declare a local: a fresh register initialised from `e` (a copy, so later writes do
 not alias the initialiser's register). -/
-def Scry.Cs.declare (c : Scry.Cst) (n : Nat) (name : String) (ty : String) (e : Option Scry.Cs.EV) :
-    Scry.Cs.M Wil.Var := do
+def Scry.Cs.declareA (c : Scry.Cst) (n : Nat) (name : String) (ty awaitTy : String)
+    (e : Option Scry.Cs.EV) : Scry.Cs.M Wil.Var := do
   wt ← Scry.Cs.wilOf ty;
   v ← Scry.Cs.fresh wt;
   (match e with
     | .some x => Scry.Cs.emit c n (Wil.copy v x.v)
     | .none => Scry.Cs.emit c n (Wil.cst v (Wil.Val.default wt)));
-  Scry.Cs.bindLocal name v ty;
+  Scry.Cs.bindLocalA name v ty awaitTy;
   Scry.Cs.pure v
 
 /-- Declare a pattern's local and schedule its assignment on the edge where the binding
@@ -385,6 +403,10 @@ def Scry.Cs.patternBinding (c : Scry.Cst) (p : Nat) (positive : Bool) (name : St
   Scry.Cs.bindLocal name v ty;
   Scry.Cs.modify (fun s =>
     { s with pending := .cons (Scry.Cs.PatBind.mk positive v src) s.pending })
+
+def Scry.Cs.declare (c : Scry.Cst) (n : Nat) (name : String) (ty : String) (e : Option Scry.Cs.EV) :
+    Scry.Cs.M Wil.Var :=
+  Scry.Cs.declareA c n name ty "" e
 
 /-- The method `m` of the current class, if any. -/
 def Scry.Cs.ownMethod (s : Scry.Cs.LS) (m : String) : Option Scry.Cs.Meth :=
@@ -453,6 +475,121 @@ partial def Scry.Cs.typePath (c : Scry.Cst) (n : Nat) : Scry.Cs.M (Option String
       | .none => Scry.Cs.pure (.none : Option String)
     | _, _ => Scry.Cs.pure (.none : Option String)
   else Scry.Cs.pure (.none : Option String)
+
+-- ## `await`
+
+/-- The `T` of a declared `Task<T>`/`ValueTask<T>` type, as written; `""` when the type
+is not an async wrapper (`Task`/`ValueTask` without an argument have no result). -/
+def Scry.Cs.taskResultRaw (raw : String) : String :=
+  match String.splitOn raw "Task<" with
+  | .cons _ (.cons rest .nil) =>
+    match String.stripSuffix (String.trim rest) ">" with
+    | .some inner => String.trim inner
+    | .none => ""
+  | _ => ""
+
+/-- The awaited result type of the async BCL methods whose receiver type the lowering
+does not resolve, keyed by method name. This is a **value** table for the lowering (what
+`await` yields), not a model: it registers no memory effect and suppresses no
+`unmodelled-external` warning, so an await of an unknown external still reports one
+warning at its call site and leaves the pre-existing locals alone. -/
+def Scry.Cs.asyncResult (name : String) : Option String :=
+  let m := match List.reverse (String.splitOn name ".") with
+    | .cons x _ => x
+    | .nil => name;
+  if String.elem m ["GetAsync", "PostAsync", "PutAsync", "PatchAsync", "DeleteAsync", "SendAsync"]
+    then .some "System.Net.Http.HttpResponseMessage"
+  else if String.elem m ["GetStringAsync", "ReadAsStringAsync", "ReadLineAsync", "ReadToEndAsync"]
+    then .some "System.String"
+  else if String.elem m ["GetByteArrayAsync", "ReadAsByteArrayAsync"] then .some "System.Byte[]"
+  else if String.elem m ["GetStreamAsync", "ReadAsStreamAsync"] then .some "System.IO.Stream"
+  else if String.elem m ["ExecuteReaderAsync"] then .some "System.Data.Common.DbDataReader"
+  else if String.elem m ["ExecuteScalarAsync"] then .some "System.Object"
+  else if String.elem m ["ExecuteNonQueryAsync", "CountAsync"] then .some "System.Int32"
+  else if String.elem m ["AnyAsync"] then .some "System.Boolean"
+  else .none
+
+/-- The simple method name of a call's function node (`""` when the callee is not a
+plain name or a member access). -/
+def Scry.Cs.calleeSimple (c : Scry.Cst) (n : Nat) : String :=
+  match Scry.childF c n "function" with
+  | .some f =>
+    let fk := c.kindOf f;
+    if Bool.or (String.eq fk "identifier") (String.eq fk "generic_name") then
+      Scry.Cs.nameText c f
+    else if Bool.or (String.eq fk "member_access_expression") (String.eq fk "conditional_access_expression") then
+      match Scry.childF c f "name" with
+      | .some mn => Scry.Cs.nameText c mn
+      | .none => ""
+    else ""
+  | .none => ""
+
+/-- The declared return type, as written, of the method a call names when the lowering
+can resolve it to a method of the unit (directly, on a type path, or on a local whose
+declared type is a class of the unit). Only pure lookups are used: the receiver is never
+lowered here, because the call itself has already been lowered. -/
+partial def Scry.Cs.callRetRaw (c : Scry.Cst) (n : Nat) : Scry.Cs.M (Option String) := do
+  s ← Scry.Cs.st;
+  match Scry.childF c n "function" with
+  | .none => Scry.Cs.pure (.none : Option String)
+  | .some f =>
+    let fk := c.kindOf f;
+    if Bool.or (String.eq fk "identifier") (String.eq fk "generic_name") then
+      match Scry.Cs.methodOwner s.unit s.cls (Scry.Cs.nameText c f) with
+      | .some om => Scry.Cs.pure (.some om.2.retRaw)
+      | .none => Scry.Cs.pure (.none : Option String)
+    else if Bool.or (String.eq fk "member_access_expression") (String.eq fk "conditional_access_expression") then
+      match Scry.childF c f "expression", Scry.childF c f "name" with
+      | .some e, .some mn => do
+        let m := Scry.Cs.nameText c mn;
+        if String.eq (c.kindOf e) "this_expression" then
+          match Scry.Cs.methodOwner s.unit s.cls m with
+          | .some om => Scry.Cs.pure (.some om.2.retRaw)
+          | .none => Scry.Cs.pure (.none : Option String)
+        else do
+          ty0 ← (match Scry.Cs.lookupLocal s (c.textOf e) with
+            | .some l => Scry.Cs.pure (.some l.ty)
+            | .none => Scry.Cs.typePath c e);
+          match ty0 with
+          | .some t => match Scry.Cs.findCls s.unit t with
+            | .some k => match List.find (fun x => String.eq x.name m) k.methods with
+              | .some meth => Scry.Cs.pure (.some meth.retRaw)
+              | .none => Scry.Cs.pure (.none : Option String)
+            | .none => Scry.Cs.pure (.none : Option String)
+          | .none => Scry.Cs.pure (.none : Option String)
+      | _, _ => Scry.Cs.pure (.none : Option String)
+    else Scry.Cs.pure (.none : Option String)
+
+/-- The result type of `await e`. `await` is sequencing: the value is the operand's value
+(so a tainted call result is still tainted after the await), and only its static type
+changes to the awaited `T`. The type comes from a unit method's raw
+`Task<T>`/`ValueTask<T>`, a local declared as `Task<T>`, or the async BCL name table;
+otherwise it is `?` and the value still flows. -/
+partial def Scry.Cs.awaitedType (c : Scry.Cst) (e : Nat) (fallback : String) : Scry.Cs.M String := do
+  s ← Scry.Cs.st;
+  let k := c.kindOf e;
+  if String.eq k "identifier" then
+    match Scry.Cs.lookupLocal s (c.textOf e) with
+    | .some l => Scry.Cs.pure (match String.eq l.awaitTy "" with
+      | .true => fallback
+      | .false => l.awaitTy)
+    | .none => Scry.Cs.pure fallback
+  else if String.eq k "invocation_expression" then do
+    rawOpt ← Scry.Cs.callRetRaw c e;
+    match rawOpt with
+    | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
+      | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
+      | .true => Scry.Cs.pure (match Scry.Cs.asyncResult (Scry.Cs.calleeSimple c e) with
+        | .some t => t
+        | .none => "?")
+    | .none => Scry.Cs.pure (match Scry.Cs.asyncResult (Scry.Cs.calleeSimple c e) with
+      | .some t => t
+      | .none => "?")
+  else
+    match String.endsWith fallback "Task", String.endsWith fallback "ValueTask" with
+    | .true, _ => Scry.Cs.pure "?"
+    | _, .true => Scry.Cs.pure "?"
+    | _, _ => Scry.Cs.pure fallback
 
 /-- The argument expressions of an `argument_list`, lowered left to right; `out`
 declarations are collected to be bound (havoc'd) after the call. -/
@@ -1126,9 +1263,18 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
     Scry.Cs.call c n "System.Array.$new" (List.append sizes elems) t0
   else if String.eq k "implicit_object_creation_expression" then
     Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "target-typed new() without a declared type"
-  else if String.eq k "await_expression" then match Scry.kids c n with
-    | .cons e _ => Scry.Cs.lowerExpr c e
-    | .nil => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "await without an operand"
+  else if String.eq k "await_expression" then
+    match Scry.childF c n "expression" with
+    | .some e => do
+      x ← Scry.Cs.lowerExpr c e;
+      t ← Scry.Cs.awaitedType c e x.ty;
+      Scry.Cs.pure (Scry.Cs.ev x.v t)
+    | .none => match List.find (fun j => Bool.not (String.eq (c.kindOf j) "await")) (Scry.kids c n) with
+      | .some e => do
+        x ← Scry.Cs.lowerExpr c e;
+        t ← Scry.Cs.awaitedType c e x.ty;
+        Scry.Cs.pure (Scry.Cs.ev x.v t)
+      | .none => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "await without an operand"
   else if String.eq k "typeof_expression" then do
     r ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
     Scry.Cs.emit c n (Wil.globalRef r ("$type:" ++ c.textOf n));
@@ -1860,7 +2006,10 @@ partial def Scry.Cs.lowerVarDecl (c : Scry.Cst) (d : Nat) : Scry.Cs.M (List Scry
   let declTy : String := match Scry.childF c d "type" with
     | .some t => Scry.Cs.typeText c t
     | .none => "var";
-  Scry.Cs.declGo c declTy (Scry.childrenK c d "variable_declarator")
+  let declTyRaw : String := match Scry.childF c d "type" with
+    | .some t => c.textOf t
+    | .none => "var";
+  Scry.Cs.declGo c declTy declTyRaw (Scry.childrenK c d "variable_declarator")
 
 /-- The names bound by a `tuple_pattern` / `parenthesized_variable_designation`
 (`var (a, (b, _)) = …`): identifiers, nested patterns, discards dropped. -/
@@ -1884,9 +2033,9 @@ partial def Scry.Cs.bindDecon (c : Scry.Cst) (n : Nat) : List String → Scry.Cs
     Scry.Cs.emit c n (Wil.havoc v);
     Scry.Cs.bindLocal nm v "?";
     more ← Scry.Cs.bindDecon c n rest;
-    Scry.Cs.pure (List.cons (Scry.Cs.Local.mk nm v "?") more)
+    Scry.Cs.pure (List.cons (Scry.Cs.Local.mk nm v "?" "") more)
 
-partial def Scry.Cs.declGo (c : Scry.Cst) (declTy : String) : List Nat → Scry.Cs.M (List Scry.Cs.Local)
+partial def Scry.Cs.declGo (c : Scry.Cst) (declTy declTyRaw : String) : List Nat → Scry.Cs.M (List Scry.Cs.Local)
   | .nil => Scry.Cs.pure .nil
   | .cons v rest => match Scry.childK c v "tuple_pattern" with
     | .some tp => do
@@ -1898,7 +2047,7 @@ partial def Scry.Cs.declGo (c : Scry.Cst) (declTy : String) : List Nat → Scry.
           Scry.Cs.pure ()
         | .none => Scry.Cs.pure ());
       xs ← Scry.Cs.bindDecon c v (Scry.Cs.designationNames c tp);
-      more ← Scry.Cs.declGo c declTy rest;
+      more ← Scry.Cs.declGo c declTy declTyRaw rest;
       Scry.Cs.pure (List.append xs more)
     | .none => do
       let name : String := match Scry.childF c v "name" with
@@ -1914,14 +2063,29 @@ partial def Scry.Cs.declGo (c : Scry.Cst) (declTy : String) : List Nat → Scry.
           Scry.Cs.pure (Option.some ev)
         | .none => Scry.Cs.pure (.none : Option Scry.Cs.EV));
       t0 ← Scry.Cs.canonM declTy;
+      -- a declared `Task<T>` local carries the type `await` yields; `var t = FooAsync()`
+      -- takes it from the callee's raw return type
+      aw ← (match String.eq declTyRaw "var" with
+        | .true => match Scry.childF c v "value" with
+          | .some x => do
+            rawOpt ← Scry.Cs.callRetRaw c x;
+            match rawOpt with
+            | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
+              | .true => Scry.Cs.pure ""
+              | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
+            | .none => Scry.Cs.pure ""
+          | .none => Scry.Cs.pure ""
+        | .false => match String.eq (Scry.Cs.taskResultRaw declTyRaw) "" with
+          | .true => Scry.Cs.pure ""
+          | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw declTyRaw));
       let ty : String := match e with
         | .some ev => match String.eq declTy "var" with
           | .true => ev.ty
           | .false => t0
         | .none => t0;
-      var ← Scry.Cs.declare c v name ty e;
-      more ← Scry.Cs.declGo c declTy rest;
-      Scry.Cs.pure (List.cons (Scry.Cs.Local.mk name var ty) more)
+      var ← Scry.Cs.declareA c v name ty aw e;
+      more ← Scry.Cs.declGo c declTy declTyRaw rest;
+      Scry.Cs.pure (List.cons (Scry.Cs.Local.mk name var ty aw) more)
 
 /-- A loop body with `break`/`continue` targets. -/
 partial def Scry.Cs.loopBody (c : Scry.Cst) (body : Nat) (brk cont : Nat) : Scry.Cs.M Unit := do
@@ -2345,6 +2509,12 @@ def Scry.Cs.memberType (c : Scry.Cst) (n : Nat) : String := match Scry.childF c 
   | .some t => Scry.Cs.typeText c t
   | .none => "void"
 
+/-- The declared type exactly as written, before generics are erased (`Task<string>`,
+`Task<ProcessStartInfo>`): `await` needs the type argument, which `typeText` drops. -/
+def Scry.Cs.memberTypeRaw (c : Scry.Cst) (n : Nat) : String := match Scry.childF c n "type" with
+  | .some t => c.textOf t
+  | .none => "void"
+
 /-- Fields of a `field_declaration`: (name, type spelling). -/
 def Scry.Cs.fieldNames (c : Scry.Cst) (n : Nat) : List (String × String) :=
   match Scry.childK c n "variable_declaration" with
@@ -2404,10 +2574,10 @@ def Scry.Cs.scanClass (c : Scry.Cst) (ns : String) (n : Nat) : Scry.Cs.Cls :=
       | .true, .true => { k with statics := List.append k.statics [(Scry.Cs.memberName c m, Scry.Cs.memberType c m)] }
       | .true, .false => { k with fields := List.append k.fields [(Scry.Cs.memberName c m, Scry.Cs.memberType c m)] }
       | .false, _ => { k with props := List.append k.props [Scry.Cs.memberName c m],
-          methods := List.append k.methods [Scry.Cs.Meth.mk ("get_" ++ Scry.Cs.memberName c m) st (Scry.Cs.memberType c m) 0,
-            Scry.Cs.Meth.mk ("set_" ++ Scry.Cs.memberName c m) st "void" 1] }
+          methods := List.append k.methods [Scry.Cs.Meth.mk ("get_" ++ Scry.Cs.memberName c m) st (Scry.Cs.memberType c m) (Scry.Cs.memberTypeRaw c m) 0,
+            Scry.Cs.Meth.mk ("set_" ++ Scry.Cs.memberName c m) st "void" "void" 1] }
     else if String.eq mk "method_declaration" then
-      { k with methods := List.append k.methods [Scry.Cs.Meth.mk (Scry.Cs.memberName c m) st (Scry.Cs.memberType c m) (Scry.Cs.arityOf c m)] }
+      { k with methods := List.append k.methods [Scry.Cs.Meth.mk (Scry.Cs.memberName c m) st (Scry.Cs.memberType c m) (Scry.Cs.memberTypeRaw c m) (Scry.Cs.arityOf c m)] }
     else if String.eq mk "constructor_declaration" then
       { k with hasCtor := .true }
     else k) (Scry.Cs.Cls.mk qname simple pos .nil .nil .nil .false (List.length pos)

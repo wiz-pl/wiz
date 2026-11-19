@@ -348,7 +348,7 @@ diagnostic.
 | `partial` parts in one file | yes | parts merged by qualified name | flows | **yes: the second part was shadowed** → fixed |
 | top-level statements | yes | `<stem>.Main` (`Program.Main` for `Program.cs`) | flows | **yes: not a type, so ignored; a minimal API `Program.cs` produced no functions** → fixed |
 | `async` method | yes | body lowered synchronously | flows | no (by design) |
-| `await e` | yes | the value of `e` | flows | no (by design) |
+| `await e` | yes | the value of `e`, typed as the awaited `T` of `Task<T>`/`ValueTask<T>` | flows (`cwe78-await`) | no: every await warned `await not modelled: havoc` until the operand lookup stopped naming a field the grammar does not give it; the awaited type is recovered in this pass |
 | nullable `T?` | yes | erased to `T` | n/a | no (no nullness domain yet, documented) |
 | generic parameters/constraints | yes | erased to `dyn` | n/a | no (as C# erases them) |
 | `is T x` (and every other pattern) | yes | `x` bound to the left value; the boolean is havoc'd (both branches reachable) + warning | flows through `x` | no (warning) |
@@ -380,6 +380,16 @@ diagnostic.
   `tuple_expression` 30, target-typed `new()` 30, `out`/`ref` 19, property initialiser
   10, deconstruction 8, switch labels/arms 6, `with` 3, throw expression 4,
   `range_expression` 3, `initializer_expression` 3, `lock_statement` 2.
+
+`await` is the class this tree used to lose: on `origin/master` (`4ad29792`) the same run
+reports **205** `await not modelled: havoc` warnings (653 lowering warnings in total),
+because the operand was read through a field name tree-sitter-c-sharp does not give the
+node. On this branch the class is **0** and the 513 warnings above are the whole lowering
+list; the awaited type is now recovered (a `Task<T>` method's `T`), which is what makes
+`taint/cwe78-await-unsafe` fire. An await whose callee has no summary is still **one**
+`unmodelled-external` warning at its call site (4,028 on this tree, one per call node) and
+does not havoc the locals around it — the summary machinery in `Scry.Interproc` owns
+that, not the lowering.
 
 ### 7.5 Fixes in this pass
 
@@ -415,6 +425,16 @@ diagnostic.
 * **Constructor initialisers** (`: base(…)`, `: this(…)`) evaluate their arguments and
   call the target constructor; unsupported members (indexer, operator, destructor,
   event with accessors, `#if`-guarded member) are each named.
+* **`await e` is sequencing, not havoc.** The value is `e`'s value (a tainted call
+  result is still tainted after the await, and the locals before it are unchanged), and
+  its static type is the awaited `T` read from a unit method's raw `Task<T>`/
+  `ValueTask<T>`, a local declared as `Task<T>`, or the async BCL method-name table
+  (`GetAsync` → `HttpResponseMessage`, `ReadAsStringAsync` → `string`, …). That type is
+  what makes a property setter after the await the modelled sink: in `cwe78-await`,
+  `psi = await ShellAsync()` must be a `ProcessStartInfo`, not a `Task`, for
+  `psi.Arguments = command` to be `set_Arguments`. An await of an unknown external is
+  one `unmodelled-external` warning at its call site (the summary machinery in
+  `Scry.Interproc`), not a havoc of the state, so the surrounding locals stay known.
 
 ### 7.6 Still out of scope, with the warning each produces
 

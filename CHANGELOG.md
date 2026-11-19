@@ -104,6 +104,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `silent skip` case fails when any of the out-of-scope warnings disappears
   (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
   (frequencies, and per-file parse/lower/taint given a native build).
+* scry C#: **`await` is sequencing, not havoc**. `await e` yields the value of `e` (a
+  tainted call result is still tainted after it, and the locals defined before it are
+  unchanged), and its static type is now the awaited `T` read from a unit method's raw
+  `Task<T>`/`ValueTask<T>`, a local declared as `Task<T>`, or the async BCL method-name
+  table. That type is what lets a member written after the await be the modelled
+  property: in `taint/cwe78-await-unsafe`, `psi = await ShellAsync()` is a
+  `ProcessStartInfo`, so `psi.Arguments = command` is the `set_Arguments` sink; with the
+  value typed as `Task` no sink matches. The havoc itself (every await used to be havoc
+  because its operand was read through a field name the grammar does not give it) is
+  fixed in the same feature: on `src/Crux.Api` the `await not modelled: havoc` class is
+  0, against 205 warnings on `origin/master`, with no other warning class changed and no
+  finding lost. An await of an unknown external stays one `unmodelled-external` warning
+  at its call site, not a havoc of the whole state (`scry/CSHARP.md` §7.4).
 * scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
   reports a summary with a coverage section: `.cs` files before and after exclusions
   (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
