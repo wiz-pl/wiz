@@ -118,10 +118,10 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"), ("parse", "contextual"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
-   ("lower", "unicode"), ("lower", "primary-ctor"),
+   ("lower", "unicode"), ("lower", "primary-ctor"), ("lower", "expansions"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-stringop-unsafe"),
+   ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
    ("taint", "cwe78-await-unsafe")]
 
@@ -413,6 +413,18 @@ def group : Group where
       run := fun _ => lowerLocGolden "unicode" },
     { name := "lower: a record's and a primary constructor's implicit constructor (field stores, base call)",
       run := fun _ => lowerGolden "primary-ctor" },
+    { name := "lower: known expansions (method groups, Format, FromResult, ConfigureAwait, ThrowIfNull)",
+      run := fun _ => lowerGolden "expansions" },
+    { name := "macro guard: an unknown name is still a havoc with a warning, not a value",
+      run := fun _ => do
+        let text ← loweredText "expansions"
+        let has (sub : String) : Bool := (text.splitOn sub).length > 1
+        checkEq [true, false, true, true, false]
+          [has "unknown name Mystery not modelled: havoc",
+           has "unknown name Handlers.Sink",
+           has "fnptr $method:Demo.Expansions.Handlers.Sink",
+           has "$str:Sink",
+           has "$str:nameof"] },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []
@@ -454,6 +466,12 @@ def group : Group where
         let fs ← taintFindings "cwe78-stringop-unsafe"
         checkEq ["command-injection Fixtures.Slicer.Main System.Diagnostics.Process.Start arg 1"] fs
         let us ← taintUnmodelled "cwe78-stringop-unsafe"
+        checkEq ["System.Diagnostics.Process.Start"] us },
+    { name := "taint: a method group carries the flow to the method it names (and a re-assignment clears it)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-macro-unsafe"
+        checkEq ["command-injection Fixtures.Macro.Dispatcher.Sink System.Diagnostics.Process.Start arg 0"] fs
+        let us ← taintUnmodelled "cwe78-macro-unsafe"
         checkEq ["System.Diagnostics.Process.Start"] us },
     { name := "models: CLR reads and ASP.NET fluent calls are covered; writes and bare C names are not",
       run := fun _ => do

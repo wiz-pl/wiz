@@ -41,6 +41,14 @@ section nondeterministically (sound for taint; constants are not compared yet).
 What is not modelled is **havoc plus a warning** (`Scry.Warning`, with the node's
 origin): lambdas, `out`/`ref` targets (havoc'd after the call), `is` tests (a havoc'd
 bit), floating point arithmetic, field initialisers, and calls through delegates.
+
+The **known expansions** (`Scry.Cs.expansions`, `CSHARP.md` §10) are the exceptions that
+are not calls at all: a method group that names a unit method is a `fnptr` (and a local
+initialised from a static one remembers its target, so a call through it reaches the
+method), `nameof(x)` is the constant naming `x`, and a few CLR helpers (`String.Format`,
+`ConfigureAwait`, `Task.FromResult`, `ThrowIfNull`) are emitted as their term templates.
+An exact name only; anything else keeps its ordinary call, and an unknown method group
+is still havoc plus `unknown name`.
 -/
 
 -- ## Types
@@ -161,7 +169,8 @@ structure Scry.Cs.Unit where
   enums : List String
   usings : List String
 
-/-- A local variable: its register and canonical C# type. -/
+/-- A local variable: its register, canonical C# type, and the unit method it was
+initialised from when it holds a method-group value (a known delegate target). -/
 structure Scry.Cs.Local where
   name : String
   var : Wil.Var
@@ -169,6 +178,8 @@ structure Scry.Cs.Local where
   /-- The type `await` yields when the declared type is a `Task<T>`/`ValueTask<T>`
   (`""` when it is not an async wrapper). -/
   awaitTy : String
+  /-- The known delegate target of a local (a method-group value), if any. -/
+  fn : Option String
 
 /-- The lowering state: the C lowering's block builder plus C#'s scope. -/
 structure Scry.Cs.LS where
@@ -244,6 +255,23 @@ partial def Scry.Cs.methodOwner (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (m : String
       | .false => Scry.Cs.methodOwner u b m
     | .none => .none
 
+/-- Split `Ns.Type.Method` at the last `.` (the class name may itself contain dots). -/
+def Scry.Cs.splitLast (s : String) : Option (String × String) :=
+  match List.reverse (String.splitOn s ".") with
+  | .cons last rest => .some (String.intercalate "." (List.reverse rest), last)
+  | .nil => .none
+
+/-- The declared return type of the unit method `qname` (`?` when it is not a unit
+method). Used to give a devirtualised delegate call its result type. -/
+def Scry.Cs.retOf (u : Scry.Cs.Unit) (qname : String) : String :=
+  match Scry.Cs.splitLast qname with
+  | .some p => match Scry.Cs.findCls u p.1 with
+    | .some k => match List.find (fun m => String.eq m.name p.2) k.methods with
+      | .some m => m.ret
+      | .none => "?"
+    | .none => "?"
+  | .none => "?"
+
 /-- The index of `name` in a field list. -/
 def Scry.Cs.fieldIndex : Nat → String → List (String × String) → Option (Nat × String)
   | _, _, .nil => .none
@@ -273,12 +301,17 @@ def Scry.Cs.live : Scry.Cs.M Bool := do
   s ← Scry.Cs.st;
   Scry.Cs.pure s.ls.live
 
-/-- A value with its canonical C# type (`?` when unknown). -/
+/-- A value with its canonical C# type (`?` when unknown). `fn` is set when the value is
+a method group whose target is a static unit method: a *known* delegate value. -/
 structure Scry.Cs.EV where
   v : Wil.Var
   ty : String
+  fn : Option String
 
-def Scry.Cs.ev (v : Wil.Var) (ty : String) : Scry.Cs.EV := Scry.Cs.EV.mk v ty
+def Scry.Cs.ev (v : Wil.Var) (ty : String) : Scry.Cs.EV := Scry.Cs.EV.mk v ty .none
+
+def Scry.Cs.evFn (v : Wil.Var) (ty : String) (f : Option String) : Scry.Cs.EV :=
+  Scry.Cs.EV.mk v ty f
 
 def Scry.Cs.havoc (c : Scry.Cst) (n : Nat) (ty : Wil.Ty) (what : String) : Scry.Cs.M Scry.Cs.EV := do
   Scry.Cs.warn c n (what ++ " not modelled: havoc");
@@ -317,14 +350,95 @@ def Scry.Cs.call (c : Scry.Cst) (n : Nat) (name : String) (args : List Wil.Var) 
   Scry.Cs.emit c n (Wil.Stmt.call (.some r) (.direct name) args Wil.noSpan);
   Scry.Cs.pure (Scry.Cs.ev r retTy)
 
+-- ## Known expansions
+
+/-- What a known expansion emits in place of a call, given the call's already lowered
+arguments (receiver first, the lowering's convention). Every entry is a *term* over
+those values: no entry reads a declaration, a type or a symbol that the file does not
+already give the frontend. That is the whole point of the table — it is not a C#
+preprocessor, and it cannot invent resolution. -/
+inductive Scry.Cs.Expand where
+  /-- The value is argument `i` (a pass-through: `ConfigureAwait`, `FromResult`). -/
+  | arg (i : Nat)
+  /-- `System.String.Concat` of the arguments from `i` (`String.Format`). -/
+  | concat (i : Nat)
+  /-- After the call argument `i` is non-null (a `ThrowIfNull`-shaped guard): the call
+  either returns or throws, so the continuation may assume the value is non-null. -/
+  | notNull (i : Nat)
+
+/-- The fixed table. A name here is *known*: the lowering emits the template instead of
+a call, so the call no longer depends on an external model. Names outside the table are
+not expanded: they keep their ordinary call (and, when nothing models them, the
+analysis's `unmodelled-external` warning). -/
+def Scry.Cs.expansions : List (String × Scry.Cs.Expand) :=
+  [ ("System.String.Format", .concat 0)
+  , ("String.Format", .concat 0)
+  , ("System.Threading.Tasks.Task.ConfigureAwait", .arg 0)
+  , ("Task.ConfigureAwait", .arg 0)
+  , ("?.ConfigureAwait", .arg 0)
+  , ("System.Threading.Tasks.Task.FromResult", .arg 0)
+  , ("Task.FromResult", .arg 0)
+  , ("System.ArgumentNullException.ThrowIfNull", .notNull 0)
+  , ("ArgumentNullException.ThrowIfNull", .notNull 0)
+  , ("System.ArgumentException.ThrowIfNullOrEmpty", .notNull 0)
+  , ("ArgumentException.ThrowIfNullOrEmpty", .notNull 0)
+  ]
+
+def Scry.Cs.expandOf (name : String) : Option Scry.Cs.Expand :=
+  match List.find (fun p => String.eq p.1 name) Scry.Cs.expansions with
+  | .some p => .some p.2
+  | .none => .none
+
+/-- An expansion is for an *external* spelling: a class of the unit with the same name
+wins (it is analysed as the unit's own code, and a template must not replace it). -/
+def Scry.Cs.expandable (u : Scry.Cs.Unit) (name : String) : Bool :=
+  match Scry.Cs.splitLast name with
+  | .some p => match Scry.Cs.findClsLoose u p.1 with
+    | .some _ => .false
+    | .none => .true
+  | .none => .true
+
+def Scry.Cs.nthArg : List Wil.Var → Nat → Option Wil.Var
+  | .nil, _ => .none
+  | .cons x _, .zero => .some x
+  | .cons _ xs, .succ k => Scry.Cs.nthArg xs k
+
+/-- Emit the template of a known expansion, or `.none` when its argument is absent (a
+malformed call falls back to the ordinary path rather than becoming havoc-free). -/
+partial def Scry.Cs.expandCall (c : Scry.Cst) (n : Nat) (e : Scry.Cs.Expand)
+    (args : List Wil.Var) : Scry.Cs.M (Option Scry.Cs.EV) :=
+  match e with
+  | .arg i => match Scry.Cs.nthArg args i with
+    | .some a => Scry.Cs.pure (.some (Scry.Cs.ev a "?"))
+    | .none => Scry.Cs.pure (.none : Option Scry.Cs.EV)
+  | .concat i => match List.drop i args with
+    | .nil => Scry.Cs.pure (.none : Option Scry.Cs.EV)
+    | parts => do
+      x ← Scry.Cs.call c n "System.String.Concat" parts "System.String";
+      Scry.Cs.pure (.some x)
+  | .notNull i => match Scry.Cs.nthArg args i with
+    | .some a => do
+      z ← Scry.Cs.fresh a.ty;
+      Scry.Cs.emit c n (Wil.cst z (Wil.Val.default a.ty));
+      Scry.Cs.emit c n (Wil.assume (Wil.Cond.cmp .ne a z));
+      Scry.Cs.pure (.some (Scry.Cs.ev a "?"))
+    | .none => Scry.Cs.pure (.none : Option Scry.Cs.EV)
+
 def Scry.Cs.lookupLocal (s : Scry.Cs.LS) (name : String) : Option Scry.Cs.Local :=
   List.find (fun l => String.eq l.name name) s.env
 
 def Scry.Cs.bindLocalA (name : String) (v : Wil.Var) (ty awaitTy : String) : Scry.Cs.M Unit :=
-  Scry.Cs.modify (fun s => { s with env := .cons (Scry.Cs.Local.mk name v ty awaitTy) s.env })
+  Scry.Cs.modify (fun s => { s with env := .cons (Scry.Cs.Local.mk name v ty awaitTy .none) s.env })
 
 def Scry.Cs.bindLocal (name : String) (v : Wil.Var) (ty : String) : Scry.Cs.M Unit :=
   Scry.Cs.bindLocalA name v ty ""
+
+/-- Record (or clear) the known delegate target of an existing local. -/
+def Scry.Cs.setLocalFn (name : String) (f : Option String) : Scry.Cs.M Unit :=
+  Scry.Cs.modify (fun s => { s with env := List.map (fun l =>
+    match String.eq l.name name with
+    | .true => { l with fn := f }
+    | .false => l) s.env })
 
 /-- Declare a local: a fresh register initialised from `e` (a copy, so later writes do
 not alias the initialiser's register). -/
@@ -353,6 +467,20 @@ def Scry.Cs.nameText (c : Scry.Cst) (n : Nat) : String :=
     | .cons i _ => c.textOf i
     | .nil => c.textOf n
   | .false => c.textOf n
+
+/-- The name a `nameof(…)` argument denotes: its trimmed source text after the last `.`
+and before any generic argument list (`nameof(Foo.Bar)` is `Bar`, as in C#). A complex
+argument is approximated by its text; nothing here resolves a symbol. -/
+def Scry.Cs.nameofText (s : String) : String :=
+  let s := String.trim s;
+  let s := match String.splitOn s "<" with
+    | .cons h _ => h
+    | .nil => s;
+  match List.reverse (String.splitOn s ".") with
+  | .cons last _ => match String.isEmpty last with
+    | .true => "nameof"
+    | .false => last
+  | .nil => "nameof"
 
 /-- The binary operator token of a node. -/
 def Scry.Cs.opOf (c : Scry.Cst) (n : Nat) : String := Scry.tokenF c n "operator"
@@ -569,16 +697,53 @@ partial def Scry.Cs.bindOuts (c : Scry.Cst) : List Nat → Scry.Cs.M Unit
         Scry.Cs.assignTo c o o h);
     Scry.Cs.bindOuts c rest
 
-/-- Lower a call whose callee name and leading arguments (receiver) are known. -/
+/-- Lower a call whose callee name and leading arguments (receiver) are known. A name in
+`Scry.Cs.expansions` is emitted as its template (a copy, a concat, a guard) instead of a
+call; every other name keeps the ordinary call. -/
 partial def Scry.Cs.finishCall (c : Scry.Cst) (n : Nat) (name : String) (pre : List Wil.Var)
     (retTy : String) : Scry.Cs.M Scry.Cs.EV := do
+  s ← Scry.Cs.st;
   let argsN : List Nat := match Scry.childF c n "arguments" with
     | .some a => Scry.kids c a
     | .none => .nil;
   r ← Scry.Cs.lowerArgs c argsN;
-  ev ← Scry.Cs.call c n name (List.append pre r.1) retTy;
-  Scry.Cs.bindOuts c r.2;
-  Scry.Cs.pure ev
+  let callNow : Scry.Cs.M Scry.Cs.EV := (do
+    ev ← Scry.Cs.call c n name (List.append pre r.1) retTy;
+    Scry.Cs.bindOuts c r.2;
+    Scry.Cs.pure ev);
+  match Scry.Cs.expandOf name with
+  | .some e => match Scry.Cs.expandable s.unit name with
+    | .true => do
+      x ← Scry.Cs.expandCall c n e (List.append pre r.1);
+      match x with
+      | .some ev => do
+        Scry.Cs.bindOuts c r.2;
+        Scry.Cs.pure ev
+      | .none => callNow
+    | .false => callNow
+  | .none => callNow
+
+/-- The ordinary resolution for a bare call name. -/
+partial def Scry.Cs.ownCall (c : Scry.Cst) (n : Nat) (s : Scry.Cs.LS) (m : String) :
+    Scry.Cs.M Scry.Cs.EV :=
+  match Scry.Cs.methodOwner s.unit s.cls m with
+  | .some om => match om.2.isStatic, s.this with
+    | .false, .some th => Scry.Cs.finishCall c n (om.1.qname ++ "." ++ m) (List.cons th .nil) om.2.ret
+    | _, _ => Scry.Cs.finishCall c n (om.1.qname ++ "." ++ m) .nil om.2.ret
+  | .none => do
+    Scry.Cs.warn c n ("call to " ++ m ++ ": not a method of " ++ s.cls.qname ++ " (delegate or unknown)");
+    Scry.Cs.finishCall c n m .nil "?"
+
+/-- `f(args)` for a bare name: a local holding a known method group calls its target
+directly (so the taint engine sees the callee); otherwise the unit's method table decides,
+and an unknown name warns (a delegate call with no known target). -/
+partial def Scry.Cs.callByName (c : Scry.Cst) (n : Nat) (s : Scry.Cs.LS) (m : String) :
+    Scry.Cs.M Scry.Cs.EV :=
+  match Scry.Cs.lookupLocal s m with
+  | .some l => match l.fn with
+    | .some target => Scry.Cs.finishCall c n target .nil (Scry.Cs.retOf s.unit target)
+    | .none => Scry.Cs.ownCall c n s m
+  | .none => Scry.Cs.ownCall c n s m
 
 /-- An instance call `T.m(recv, args)`: a unit method when `T` is a class of the unit. -/
 partial def Scry.Cs.instanceCall (c : Scry.Cst) (n : Nat) (recv : Scry.Cs.EV) (m : String) :
@@ -591,6 +756,19 @@ partial def Scry.Cs.instanceCall (c : Scry.Cst) (n : Nat) (recv : Scry.Cs.EV) (m
     | .none => Scry.Cs.knownRet (recv.ty ++ "." ++ m);
   Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) [recv.v] ret
 
+/-- A method group: the function value of a unit method. The name is the whole
+expansion (`$method:Ns.Class.Method`), so this needs no resolution beyond the unit's own
+method table. A static target also records `fn`, which lets a call through a local that
+holds this value reach the method; an instance target keeps `fn = none` because the
+receiver would have to be captured first (its value still names the target). -/
+def Scry.Cs.methodGroup (c : Scry.Cst) (n : Nat) (q : String) (m : Scry.Cs.Meth) :
+    Scry.Cs.M Scry.Cs.EV := do
+  v ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
+  Scry.Cs.emit c n (Wil.fnptr v ("$method:" ++ q ++ "." ++ m.name));
+  Scry.Cs.pure (Scry.Cs.evFn v "?" (match m.isStatic with
+    | .true => .some (q ++ "." ++ m.name)
+    | .false => .none))
+
 /-- `f(args)`, `x.M(args)`, `T.M(args)`, `this.M(args)`. -/
 partial def Scry.Cs.lowerCall (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV := do
   s ← Scry.Cs.st;
@@ -601,16 +779,17 @@ partial def Scry.Cs.lowerCall (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
     if Bool.or (String.eq fk "identifier") (String.eq fk "generic_name") then
       let m := Scry.Cs.nameText c f;
       if String.eq m "nameof" then do
+        -- `nameof(x)` is a compile-time constant naming `x`; the argument's spelling is
+        -- the whole expansion, so no symbol resolution is involved (see `nameofText`).
+        let nm : String := (match Scry.childF c n "arguments" with
+          | .some a => match Scry.kids c a with
+            | .cons x _ => Scry.Cs.nameofText (c.textOf x)
+            | .nil => "nameof"
+          | .none => "nameof");
         v ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
-        Scry.Cs.emit c n (Wil.globalRef v ("$str:nameof"));
+        Scry.Cs.emit c n (Wil.globalRef v ("$str:" ++ nm));
         Scry.Cs.pure (Scry.Cs.ev v "System.String")
-      else match Scry.Cs.methodOwner s.unit s.cls m with
-      | .some om => match om.2.isStatic, s.this with
-        | .false, .some th => Scry.Cs.finishCall c n (om.1.qname ++ "." ++ m) (List.cons th .nil) om.2.ret
-        | _, _ => Scry.Cs.finishCall c n (om.1.qname ++ "." ++ m) .nil om.2.ret
-      | .none => do
-        Scry.Cs.warn c f ("call to " ++ m ++ ": not a method of " ++ s.cls.qname ++ " (delegate or unknown)");
-        Scry.Cs.finishCall c n m .nil "?"
+      else Scry.Cs.callByName c n s m
     else if Bool.or (String.eq fk "member_access_expression") (String.eq fk "conditional_access_expression") then
       match Scry.childF c f "expression", Scry.childF c f "name" with
       | .some e, .some mn => do
@@ -686,7 +865,9 @@ partial def Scry.Cs.lowerMember (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV 
         r ← Scry.Cs.readField c n (Wil.var 0 Wil.Ty.dyn) k m;
         match r with
         | .some x => Scry.Cs.pure x
-        | .none => Scry.Cs.call c n (t ++ ".get_" ++ m) .nil "?"
+        | .none => match Scry.Cs.methodOwner s.unit k m with
+          | .some om => Scry.Cs.methodGroup c n om.1.qname om.2
+          | .none => Scry.Cs.call c n (t ++ ".get_" ++ m) .nil "?"
       | .none => Scry.Cs.call c n (t ++ ".get_" ++ m) .nil (Scry.Cs.knownRet (t ++ ".get_" ++ m))
     | .none => do
       recv ← Scry.Cs.lowerExpr c e;
@@ -697,8 +878,10 @@ partial def Scry.Cs.lowerMember (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV 
           r ← Scry.Cs.readField c n recv.v k m;
           match r with
           | .some x => Scry.Cs.pure x
-          | .none => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) [recv.v] "?"
-      | .none => Scry.Cs.call c n (recv.ty ++ ".get_" ++ m) [recv.v]
+          | .none => match Scry.Cs.methodOwner s.unit k m with
+            | .some om => Scry.Cs.methodGroup c n om.1.qname om.2
+            | .none => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) (List.cons recv.v .nil) "?"
+      | .none => Scry.Cs.call c n (recv.ty ++ ".get_" ++ m) (List.cons recv.v .nil)
           (Scry.Cs.knownRet (recv.ty ++ ".get_" ++ m))
   | _, _ => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "member access"
 
@@ -710,7 +893,11 @@ partial def Scry.Cs.assignTo (c : Scry.Cst) (n : Nat) (lhs : Nat) (v : Scry.Cs.E
   if String.eq k "identifier" then
     let nm := c.textOf lhs;
     match Scry.Cs.lookupLocal s nm with
-    | .some l => Scry.Cs.emit c n (Wil.copy l.var v.v)
+    | .some l => do
+      Scry.Cs.emit c n (Wil.copy l.var v.v);
+      -- a re-assignment updates the known delegate target too, or a later call would
+      -- still reach the old method (unsound)
+      Scry.Cs.setLocalFn nm v.fn
     | .none => do
       a ← Scry.Cs.fieldAddr c n s.this s.cls nm;
       match a with
@@ -859,14 +1046,16 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
   else if String.eq k "identifier" then
     let nm := c.textOf n;
     match Scry.Cs.lookupLocal s nm with
-    | .some l => Scry.Cs.pure (Scry.Cs.ev l.var l.ty)
+    | .some l => Scry.Cs.pure (Scry.Cs.evFn l.var l.ty l.fn)
     | .none => do
       r ← Scry.Cs.readField c n (match s.this with
         | .some th => th
         | .none => Wil.var 0 Wil.Ty.dyn) s.cls nm;
       match r with
       | .some x => Scry.Cs.pure x
-      | .none => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) ("unknown name " ++ nm)
+      | .none => match Scry.Cs.methodOwner s.unit s.cls nm with
+        | .some om => Scry.Cs.methodGroup c n om.1.qname om.2
+        | .none => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) ("unknown name " ++ nm)
   else if String.eq k "this_expression" then match s.this with
     | .some th => Scry.Cs.pure (Scry.Cs.ev th s.cls.qname)
     | .none => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "this in a static method"
@@ -1443,7 +1632,7 @@ partial def Scry.Cs.bindDecon (c : Scry.Cst) (n : Nat) : List String → Scry.Cs
     Scry.Cs.emit c n (Wil.havoc v);
     Scry.Cs.bindLocal nm v "?";
     more ← Scry.Cs.bindDecon c n rest;
-    Scry.Cs.pure (List.cons (Scry.Cs.Local.mk nm v "?" "") more)
+    Scry.Cs.pure (List.cons (Scry.Cs.Local.mk nm v "?" "" .none) more)
 
 partial def Scry.Cs.declGo (c : Scry.Cst) (declTy declTyRaw : String) : List Nat → Scry.Cs.M (List Scry.Cs.Local)
   | .nil => Scry.Cs.pure .nil
@@ -1494,8 +1683,12 @@ partial def Scry.Cs.declGo (c : Scry.Cst) (declTy declTyRaw : String) : List Nat
           | .false => t0
         | .none => t0;
       var ← Scry.Cs.declareA c v name ty aw e;
+      let fn : Option String := match e with
+        | .some ev => ev.fn
+        | .none => .none;
+      Scry.Cs.setLocalFn name fn;
       more ← Scry.Cs.declGo c declTy declTyRaw rest;
-      Scry.Cs.pure (List.cons (Scry.Cs.Local.mk name var ty aw) more)
+      Scry.Cs.pure (List.cons (Scry.Cs.Local.mk name var ty aw fn) more)
 
 /-- A loop body with `break`/`continue` targets. -/
 partial def Scry.Cs.loopBody (c : Scry.Cst) (body : Nat) (brk cont : Nat) : Scry.Cs.M Unit := do

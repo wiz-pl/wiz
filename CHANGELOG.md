@@ -34,6 +34,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   the shards by the same estimated cost: GitHub's 20-job cap made the late matrix entries
   wait (`test (prop)` started 16 minutes after the wave), so the expensive work now
   starts first.
+* scry C#: known expansions for method groups, `nameof` and a few CLR helpers. A C#
+  method group is now a function value (`fnptr "$method:Ns.Class.Method"`) rather than an
+  `unknown name … havoc`, and a local initialised from a static method group calls that
+  method (an assignment updates or clears the target). `nameof(x)` names `x` instead of
+  sharing one `$str:nameof` constant, and `String.Format`, `ConfigureAwait`,
+  `Task.FromResult`, `ThrowIfNull`/`ThrowIfNullOrEmpty` are emitted as templates over
+  their arguments (`CSHARP.md` §11). The table is exact-name only, the method-group
+  lookup is the unit's own method table, and an unknown name still warns — measured on
+  `src/Crux.Api`, lowering warnings drop 513 → 420 (`unknown name` 173 → 80, every one
+  of the 93 removed a unit method) while the new `cwe78-macro-unsafe` fixture gains the
+  finding the havoc used to hide.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,
