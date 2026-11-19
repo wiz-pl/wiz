@@ -597,7 +597,7 @@ def metaApp (ctx : LocalCtx R) (m : Nat) : Term R := Id.run do
 /-- A fresh metavariable applied to all the bound variables of `ctx`; `ty`, when the
 caller knows it, is the hole's type in `ctx` (`MetaEntry.type?`). -/
 def freshMeta (ctx : LocalCtx R) (desc : String := "_") (ty : Option (VTy R) := none) : ElabM R (Term R) := do
-  Stats.bump Stats.cells.metaNew
+  let _ := Stats.bump Stats.cells.metaNew
   let m := (← get).metas.size
   let arity := (ctx.bound.filter id).length
   modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity, type? := ty.map (ctx, ·) } }

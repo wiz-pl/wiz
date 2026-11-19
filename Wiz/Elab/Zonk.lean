@@ -30,7 +30,7 @@ solutions can mention metas solved later. Otherwise rebuild the term, zonking ev
 subterm (under binders at `l + 1`) and instantiating level metas in `sort` and
 `const` (`instLevel`). Unsolved metas stay. -/
 partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
-  Stats.bump Stats.cells.zonk
+  let _ := Stats.bump Stats.cells.zonk
   --<sol
   let (h, args) := spine t #[]
   match h with

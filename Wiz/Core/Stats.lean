@@ -26,10 +26,10 @@ initialize enabledRef : IO.Ref Bool ← IO.mkRef false
 initialize timeRef : IO.Ref Bool ← IO.mkRef false
 
 unsafe def onImpl : Bool := unsafeBaseIO enabledRef.get
-@[implemented_by onImpl] def on : Bool := false
+@[implemented_by onImpl] opaque on : Bool
 
 unsafe def timingImpl : Bool := unsafeBaseIO timeRef.get
-@[implemented_by timingImpl] def timing : Bool := false
+@[implemented_by timingImpl] opaque timing : Bool
 
 def newCell : IO Cell := IO.mkRef 0
 
@@ -40,17 +40,19 @@ initialize dQuote : IO.Ref UInt64 ← IO.mkRef 0
 initialize dWhnf : IO.Ref UInt64 ← IO.mkRef 0
 initialize dUnify : IO.Ref UInt64 ← IO.mkRef 0
 initialize dParse : IO.Ref UInt64 ← IO.mkRef 0
+initialize dElab : IO.Ref UInt64 ← IO.mkRef 0
+initialize dAddDecl : IO.Ref UInt64 ← IO.mkRef 0
 
 /-- A `UInt64` ref, used only to give `Cell` a default (a `Cells` constant needs one). -/
 instance : Inhabited Cell := ⟨dConv⟩
 
 unsafe def bumpImpl (c : Cell) : Unit := unsafeBaseIO do
   if ← enabledRef.get then c.modify (· + 1)
-@[implemented_by bumpImpl] def bump (c : Cell) : Unit := ()
+@[implemented_by bumpImpl] opaque bump (c : Cell) : Unit
 
 unsafe def bumpNImpl (c : Cell) (n : Nat) : Unit := unsafeBaseIO do
   if ← enabledRef.get then c.modify (· + UInt64.ofNat n)
-@[implemented_by bumpNImpl] def bumpN (c : Cell) (n : Nat) : Unit := ()
+@[implemented_by bumpNImpl] opaque bumpN (c : Cell) (n : Nat) : Unit
 
 /-- One sample in a histogram with `n` buckets, last bucket `n-1` and up. -/
 unsafe def bumpIdxImpl (c : Array Cell) (i : Nat) : Unit := unsafeBaseIO do
@@ -58,7 +60,7 @@ unsafe def bumpIdxImpl (c : Array Cell) (i : Nat) : Unit := unsafeBaseIO do
     match c[if i < c.size then i else c.size - 1]? with
     | some r => r.modify (· + 1)
     | none => pure ()
-@[implemented_by bumpIdxImpl] def bumpIdx (c : Array Cell) (i : Nat) : Unit := ()
+@[implemented_by bumpIdxImpl] opaque bumpIdx (c : Array Cell) (i : Nat) : Unit
 
 /-- One sample in a size histogram: buckets `0,1,2,3,4,5-8,9-16,17-32,33-64,65+`. -/
 unsafe def bumpSizeImpl (c : Array Cell) (n : Nat) : Unit := unsafeBaseIO do
@@ -68,24 +70,55 @@ unsafe def bumpSizeImpl (c : Array Cell) (n : Nat) : Unit := unsafeBaseIO do
     match c[i]? with
     | some r => r.modify (· + 1)
     | none => pure ()
-@[implemented_by bumpSizeImpl] def bumpSize (c : Array Cell) (n : Nat) : Unit := ()
+@[implemented_by bumpSizeImpl] opaque bumpSize (c : Array Cell) (n : Nat) : Unit
+
+/-- Force a call whose result is used: count `c` and return `x`. `x` is dynamic at every
+call site, so the call cannot be hoisted, and its result is the function's result, so the
+dead-code pass cannot remove it. -/
+unsafe def countedImpl {α : Type} [Inhabited α] (c : Cell) (x : α) : α := unsafeBaseIO do
+  if ← enabledRef.get then c.modify (· + 1)
+  pure x
+@[implemented_by countedImpl] opaque counted {α : Type} [Inhabited α] (c : Cell) (x : α) : α
+
+/-- `counted`, and one sample in the histogram `h` at `i`. -/
+unsafe def countedHImpl {α : Type} [Inhabited α] (h : Array Cell) (i : Nat) (x : α) : α := unsafeBaseIO do
+  if ← enabledRef.get then
+    match h[if i < h.size then i else h.size - 1]? with
+    | some r => r.modify (· + 1)
+    | none => pure ()
+  pure x
+@[implemented_by countedHImpl] opaque countedH {α : Type} [Inhabited α] (h : Array Cell) (i : Nat) (x : α) : α
+
+/-- `counted`, and one sample in each of three histograms (`conv`). -/
+unsafe def sampledImpl {α : Type} [Inhabited α] (c : Cell)
+    (h1 : Array Cell) (i1 : Nat) (h2 : Array Cell) (i2 : Nat) (h3 : Array Cell) (i3 : Nat) (x : α) : α :=
+  unsafeBaseIO do
+    if ← enabledRef.get then
+      c.modify (· + 1)
+      for (h, i) in [(h1, i1), (h2, i2), (h3, i3)] do
+        match h[if i < h.size then i else h.size - 1]? with
+        | some r => r.modify (· + 1)
+        | none => pure ()
+    pure x
+@[implemented_by sampledImpl] opaque sampled {α : Type} [Inhabited α] (c : Cell)
+    (h1 : Array Cell) (i1 : Nat) (h2 : Array Cell) (i2 : Nat) (h3 : Array Cell) (i3 : Nat) (x : α) : α
 
 /-- Physical identity of two values (the same heap object). -/
 unsafe def ptrSameImpl {α : Type} (a : α) (b : α) : Bool := ptrEq a b
-@[implemented_by ptrSameImpl] def ptrSame {α : Type} (a : α) (b : α) : Bool := false
+@[implemented_by ptrSameImpl] opaque ptrSame {α : Type} (a : α) (b : α) : Bool
 
 initialize probeMap : IO.Ref (Std.HashMap (UInt64 × UInt64 × UInt64) Unit) ← IO.mkRef {}
 
 initialize kernelRef : IO.Ref Bool ← IO.mkRef false
 
 unsafe def inKernelImpl : Bool := unsafeBaseIO kernelRef.get
-@[implemented_by inKernelImpl] def inKernel : Bool := false
+@[implemented_by inKernelImpl] opaque inKernel : Bool
 
 /-- Mark that the kernel's `addDecl` is on the stack (for splitting conversion counts). -/
 unsafe def kernelOnImpl : Unit := unsafeBaseIO (kernelRef.set true)
-@[implemented_by kernelOnImpl] def kernelOn : Unit := ()
+@[implemented_by kernelOnImpl] opaque kernelOn : Unit
 unsafe def kernelOffImpl : Unit := unsafeBaseIO (kernelRef.set false)
-@[implemented_by kernelOffImpl] def kernelOff : Unit := ()
+@[implemented_by kernelOffImpl] opaque kernelOff : Unit
 
 /-- Has this `(a, b, ty)` triple by pointer been seen before in this process? (A probe for
 a conversion cache: it says whether the same *objects* are compared again. The map is
@@ -99,7 +132,7 @@ unsafe def probeRepeatImpl {α β γ : Type} (a : α) (b : β) (c : γ) : Bool :
     if m.size ≥ 200000 then probeMap.set ((∅ : Std.HashMap (UInt64 × UInt64 × UInt64) Unit).insert k ())
     else probeMap.modify (·.insert k ())
     pure false
-@[implemented_by probeRepeatImpl] def probeRepeat {α β γ : Type} (a : α) (b : β) (c : γ) : Bool := false
+@[implemented_by probeRepeatImpl] opaque probeRepeat {α β γ : Type} (a : α) (b : β) (c : γ) : Bool
 
 /-- `n` cells. -/
 def hist (n : Nat) : IO (Array Cell) := do
@@ -122,7 +155,8 @@ structure Stamp where
   t0 : Nat := 0
   deriving Inhabited
 
-unsafe def enterImpl (d : IO.Ref UInt64) : Stamp := unsafeBaseIO do
+unsafe def enterImpl {α : Type} (d : IO.Ref UInt64) (c1 c2 : Cell) (b : Bool) (salt : α) : Stamp := unsafeBaseIO do
+  if ← enabledRef.get then (if b then c1.modify (· + 1) else c2.modify (· + 1))
   if !(← timeRef.get) then pure {} else
   let n ← d.get
   if n == 0 then
@@ -132,9 +166,9 @@ unsafe def enterImpl (d : IO.Ref UInt64) : Stamp := unsafeBaseIO do
   else
     d.set (n + 1)
     pure {}
-@[implemented_by enterImpl] def enter (d : IO.Ref UInt64) : Stamp := {}
+@[implemented_by enterImpl] opaque enter {α : Type} (d : IO.Ref UInt64) (c1 c2 : Cell) (b : Bool) (salt : α) : Stamp
 
-unsafe def leaveImpl {α : Type} (d : IO.Ref UInt64) (acc : Cell) (s : Stamp) (r : α) : α := unsafeBaseIO do
+unsafe def leaveImpl {α : Type} [Inhabited α] (d : IO.Ref UInt64) (acc : Cell) (s : Stamp) (r : α) : α := unsafeBaseIO do
   if !s.top then
     if ← timeRef.get then d.modify (· - 1)
     pure r
@@ -143,7 +177,7 @@ unsafe def leaveImpl {α : Type} (d : IO.Ref UInt64) (acc : Cell) (s : Stamp) (r
     acc.modify (· + UInt64.ofNat (t1 - s.t0))
     d.set 0
     pure r
-@[implemented_by leaveImpl] def leave {α : Type} (d : IO.Ref UInt64) (acc : Cell) (s : Stamp) (r : α) : α := r
+@[implemented_by leaveImpl] opaque leave {α : Type} [Inhabited α] (d : IO.Ref UInt64) (acc : Cell) (s : Stamp) (r : α) : α
 
 /-- The cells, named after what they count; `n*` are nanoseconds. -/
 structure Cells where

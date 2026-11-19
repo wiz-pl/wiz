@@ -1614,10 +1614,9 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
 for the compiler, if it has one, is checked too (`checkImpl`): no term reaches erasure
 unchecked. -/
 def addDecl (g : Globals R) (d : Decl R) : TCM (Globals R) :=
-  let _ := Stats.bump Stats.cells.addDecl
-  let _ := Stats.kernelOn
-  let st := Stats.enter Stats.dAddDecl
-  let r := do
+  haveI : Inhabited (Except TypeError (Globals R)) := ⟨.error (.other "")⟩
+  let st := Stats.enter Stats.dAddDecl Stats.cells.addDecl Stats.cells.addDecl d.value.isSome d
+  let r := (do
     -- constants are identified by name: a second declaration of one would change what
     -- everything checked against the first means
     if g.contains d.name then throw (.duplicateDecl d.name)
@@ -1633,8 +1632,7 @@ def addDecl (g : Globals R) (d : Decl R) : TCM (Globals R) :=
       -- compiled equations derived from the value compute what it computes
       if let some v := d.value then
         if d.derivedEquations then checkImplAgrees g' d v impl
-    pure g'
-  let _ := Stats.kernelOff
+    pure g')
   Stats.leave Stats.dAddDecl Stats.cells.nAddDecl st r
 
 /-- Give the declaration `name` another implementation for the compiler

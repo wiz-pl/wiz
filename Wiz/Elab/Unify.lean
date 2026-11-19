@@ -91,7 +91,6 @@ def elimsChecked (m : Nat) (sol : Val R) (sp : Array (Elim R)) : ElabM R (Val R)
 A neutral `?m sp` whose meta has a solution `v` becomes `v` with the eliminations of
 `sp` applied (`vElims`). Anything else is returned unchanged. -/
 partial def forceMeta (v : Val R) : ElabM R (Val R) := do
-  Stats.bump Stats.cells.forceMeta
   --<sol
   match v with
   | .neutral (.mvar m) sp =>
@@ -447,7 +446,7 @@ def lookupFail (key : UInt64 × Term R × Term R) : ElabM R (Option String) := d
   pure ((es.find? (fun (t', u', _) => t' == qt && u' == qu)).map (·.2.2))
 
 def recordFail (key : UInt64 × Term R × Term R) (msg : String) : ElabM R Unit :=
-  Stats.bump Stats.cells.unifyFail
+  let _ := Stats.bump Stats.cells.unifyFail
   modify fun s =>
     let (h, qt, qu) := key
     -- (bounded: start afresh now and then)
@@ -632,10 +631,10 @@ failure. Force both sides first, then:
 `t.1` and `b` with `t.2`), `unit`, `tt`, `empty`; and the other eliminations in
 `unifySpine`. -/
 partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit :=
-  let _ := Stats.bump Stats.cells.unify
-  show ElabM R Unit from fun s =>
-    let st := Stats.enter Stats.dUnify
-    let r := (do
+  unifyCore l t u
+
+/-- The body of `unify` (counted by the wrapper above). -/
+partial def unifyCore (l : Lvl) (t u : Val R) : ElabM R Unit := do
       -- (kernel-eval: `ind` on a constructor is lazy for speed alone; the elaborator sees what
       -- it computes, which may be glued: `K.beq (.cons x xs) (.cons y ys)` against
       -- `Bool.and ?a ?b` compares the two `Bool.and`s, as before `ind` was lazy there)
@@ -801,8 +800,6 @@ partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit :=
       --|ex
       --| sorry
       --sol>
-    ) s
-    Stats.leave Stats.dUnify Stats.cells.nUnify st r
 
 /-- Glued values (given). Returns `true` if it solved the problem:
 

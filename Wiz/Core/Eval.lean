@@ -50,14 +50,13 @@ def qtyApart (a b : Val R) : Bool :=
 /-- Unfold glued values (`Val.unfold`) until the head is not a definition: do this before
 matching on a value's shape. -/
 partial def whnf (v : Val R) : Val R :=
-  let _ := Stats.bump Stats.cells.whnf
-  let st := Stats.enter Stats.dWhnf
-  let r :=
-    match v with
-    | .unfold _ _ _ v => let _ := Stats.bump Stats.cells.whnfUnfold; whnf v.get
-    | .lazyInd _ _ _ _ _ _ _ _ _ _ v => let _ := Stats.bump Stats.cells.whnfLazyInd; whnf v.get
-    | v => v
-  Stats.leave Stats.dWhnf Stats.cells.nWhnf st r
+  let st := Stats.enter Stats.dEval Stats.cells.whnf Stats.cells.whnf
+    (v matches .neutral ..) v
+  Stats.leave Stats.dEval Stats.cells.nEval st
+    (match v with
+    | .unfold _ _ _ v => Stats.counted Stats.cells.whnfUnfold (whnf v.get)
+    | .lazyInd _ _ _ _ _ _ _ _ _ _ v => Stats.counted Stats.cells.whnfLazyInd (whnf v.get)
+    | v => v)
 
 /-- A value with its suspended inductions on constructors computed (`vInd`): they are
 lazy for speed alone, so wherever a value's shape or read-back is looked at without `whnf`
@@ -353,11 +352,10 @@ compute).
 `sigma` captures its second component in a closure, and eliminators use `vFst`,
 `vSnd`, `vSplit` and `vAbsurd`. -/
 partial def eval (g : Globals R) (env : Env R) (t : Term R) : Val R :=
-  let _ := Stats.bump Stats.cells.eval
-  let _ := Stats.bumpIdx Stats.cells.evalByTerm (termClass t)
-  let st := Stats.enter Stats.dEval
-  let r :=
-  match t with
+  let st := Stats.enter Stats.dEval Stats.cells.eval Stats.cells.eval
+    (t matches .app ..) t
+  Stats.leave Stats.dEval Stats.cells.nEval st
+    (Stats.countedH Stats.cells.evalByTerm (termClass t) (match t with
   -- (given) Q4: lifting
   | .ulift k l A => .ulift k l (eval g env A)
   | .up a => .up (eval g env a)
@@ -368,18 +366,18 @@ partial def eval (g : Globals R) (env : Env R) (t : Term R) : Val R :=
   --<sol
   -- (the checker rejects a variable out of scope before anything evaluates it; if one
   -- gets here it is a stuck unknown, not a panic's default value, `Sort 0`)
-  | .var ix => let _ := Stats.bump Stats.cells.evalVar; env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
-  | .const n us => let _ := Stats.bump Stats.cells.evalConst; if let some v := vBuiltin? g n then v else match g.find? n with
+  | .var ix => Stats.counted Stats.cells.evalVar (env[ix]?.getD (.neutral (.global "out of scope✝" []) #[]))
+  | .const n us => Stats.counted Stats.cells.evalConst (if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
       else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
-    | _ => .neutral (.global n us) #[]
+    | _ => .neutral (.global n us) #[])
   | .natLit n => .natLit n
   | .natOp op args => vNatOp g op (args.map (eval g env))
   | .sort l => .sort l
   | .pi x bi q dom cod s => .pi x bi (eval g env q) (eval g env dom) (.mk env cod) s
-  | .lam x body => let _ := Stats.bump Stats.cells.evalLam; .lam x (.mk env body)
-  | .app f a => let _ := Stats.bump Stats.cells.evalApp; vApp g (eval g env f) (eval g env a)
+  | .lam x body => Stats.counted Stats.cells.evalLam (.lam x (.mk env body))
+  | .app f a => Stats.counted Stats.cells.evalApp (vApp g (eval g env f) (eval g env a))
   | .letE _ _ _ val body => eval g (eval g env val :: env) body
   | .ann tm _ => eval g env tm
   | .mvar m => .neutral (.mvar m) #[]
@@ -443,8 +441,7 @@ partial def eval (g : Globals R) (env : Env R) (t : Term R) : Val R :=
     .scofix l (eval g env I) (eval g env D) (eval g env A) (eval g env f) (eval g env s)
       (eval g env i) (eval g env a)
   | .coit l I D S st i s =>
-    .coit l (eval g env I) (eval g env D) (eval g env S) (eval g env st) (eval g env i) (eval g env s)
-  Stats.leave Stats.dEval Stats.cells.nEval st r
+    .coit l (eval g env I) (eval g env D) (eval g env S) (eval g env st) (eval g env i) (eval g env s)))
   --|ex
   --| | .var ix => sorry
   --| -- (given) numerals; `vBuiltin?` registered operations
@@ -528,11 +525,11 @@ A `lam` β-reduces; a neutral grows its spine (with `Elim.app`). Anything else i
 type error that the checker should have ruled out (use `panic!`). -/
 partial def vApp (g : Globals R) : Val R → Val R → Val R
   -- (given) a glued application grows its spine, and its unfolding lazily
-  | .unfold n us sp v, a => let _ := Stats.bump Stats.cells.vAppGlued; .unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
-  | .lazyInd l I D w P m i x pr sp v, a => let _ := Stats.bump Stats.cells.vAppGlued; .lazyInd l I D w P m i x pr (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
+  | .unfold n us sp v, a => Stats.counted Stats.cells.vApp (Stats.counted Stats.cells.vAppGlued (.unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)))
+  | .lazyInd l I D w P m i x pr sp v, a => Stats.counted Stats.cells.vApp (Stats.counted Stats.cells.vAppGlued (.lazyInd l I D w P m i x pr (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)))
   --<sol
-  | .lam _ c, a => let _ := Stats.bump Stats.cells.vAppLam; Closure.inst g c a
-  | .neutral h sp, a => let _ := Stats.bump Stats.cells.vAppNeutral; .neutral h (sp.push (.app a))
+  | .lam _ c, a => Stats.counted Stats.cells.vApp (Stats.counted Stats.cells.vAppLam (Closure.inst g c a))
+  | .neutral h sp, a => Stats.counted Stats.cells.vApp (Stats.counted Stats.cells.vAppNeutral (.neutral h (sp.push (.app a))))
   | _, _ => panic! "vApp: ill-typed application"
   --|ex
   --| | f, a => sorry
@@ -541,19 +538,19 @@ partial def vApp (g : Globals R) : Val R → Val R → Val R
 /-- **Exercise 1.2b.** Instantiate a closure with a value for its bound variable. -/
 partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
   --<sol
-  | .mk env body, a => let _ := Stats.bump Stats.cells.inst; match g.budget with
+  | .mk env body, a => Stats.counted Stats.cells.inst (match g.budget with
     | none => eval g (a :: env) body
     -- (P2, outside the kernel) reading a proof back, within its step budget
-    | some b => if b.tick then eval g (a :: env) body else outOfSteps
+    | some b => if b.tick then eval g (a :: env) body else outOfSteps)
   --|ex
   --| | .mk env body, a => sorry
   --sol>
 
 /-- Instantiate a closure over two binders (`a` first, then `b`). -/
 partial def Closure.inst2 (g : Globals R) : Closure R → Val R → Val R → Val R
-  | .mk env body, a, b => let _ := Stats.bump Stats.cells.inst2; match g.budget with
+  | .mk env body, a, b => Stats.counted Stats.cells.inst2 (match g.budget with
     | none => eval g (b :: a :: env) body
-    | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps
+    | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps)
 
 /-- **Exercise 4.4a.** `let (x, y) := s; body`: β-reduces on a `pair`, gets stuck on a
 neutral. -/
@@ -1520,11 +1517,10 @@ and `transp` (just quote their components).
 and `absurd` eliminations. A `split`'s motive is under one binder and its body under
 two. -/
 partial def quote (g : Globals R) (l : Lvl) (v : Val R) : Term R :=
-  let _ := Stats.bump Stats.cells.quote
-  let _ := Stats.bumpIdx Stats.cells.quoteByVal (valClass v)
-  let st := Stats.enter Stats.dQuote
-  let r :=
-  match v with
+  let st := Stats.enter Stats.dQuote Stats.cells.quote Stats.cells.quote
+    (v matches .neutral ..) v
+  Stats.leave Stats.dQuote Stats.cells.nQuote st
+    (Stats.countedH Stats.cells.quoteByVal (valClass v) (match v with
   -- (given) a glued value keeps its name
   | .unfold n us sp _ => quote g l (.neutral (.global n us) sp)
   -- (folded only on a numeral, as before kernel-eval: `ind` on a constructor is lazy for
@@ -1649,8 +1645,7 @@ partial def quote (g : Globals R) (l : Lvl) (v : Val R) : Term R :=
   | .scofix k I D A f s i a =>
     .scofix k (quote g l I) (quote g l D) (quote g l A) (quote g l f) (quote g l s) (quote g l i) (quote g l a)
   | .coit k I D S st i s =>
-    .coit k (quote g l I) (quote g l D) (quote g l S) (quote g l st) (quote g l i) (quote g l s)
-  Stats.leave Stats.dQuote Stats.cells.nQuote st r
+    .coit k (quote g l I) (quote g l D) (quote g l S) (quote g l st) (quote g l i) (quote g l s)))
   --|ex
   --| | .natLit n => .natLit n  -- (given)
   --| | v => sorry

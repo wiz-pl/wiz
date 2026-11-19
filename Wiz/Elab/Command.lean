@@ -1044,10 +1044,7 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     (classes : List ClassInfo := []) (instances : Array InstanceInfo := #[]) (termInfo : Bool := false)
     (smt : Smt.Config := {}) (smtDecl : Name := "") :
     Except (ElabError R) (α × Array (Decl R)) × Array (Info R) :=
-  let _ := Stats.bump Stats.cells.elabCmd
-  let st := Stats.enter Stats.dElab
-  let r :=
-    -- macros and tactics run against the globals as they are when this command starts
+  -- macros and tactics run against the globals as they are when this command starts
     let compileCode (roots : List Name) := match metaCode.get with
       | .ok c => if roots.all c.contains then .ok c
         else (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the environment: {·}")
@@ -1063,7 +1060,6 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
                   kernelInfer, classes, instances, termInfo, smt, smtDecl } with
     | .ok (a, st') => (.ok (a, st'.sideDecls), finishInfos st')
     | .error e => (.error e, (e.state?.map finishInfos).getD #[])
-  Stats.leave Stats.dElab Stats.cells.nElab st r
 
 /-- Run the elaborator; also returns the info tree it recorded (even after an error). -/
 def runElabH (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
