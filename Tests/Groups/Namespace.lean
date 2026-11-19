@@ -111,10 +111,10 @@ def mutualNs : String :=
 
 /-- A module with a namespace that another file opens. -/
 def mathMod : String :=
-  "namespace M\ndef double (n : Nat) : Nat := n\nend M\n"
+  "namespace M\ndef double (n : Unit) : Unit := n\nend M\n"
 
 def openAcrossModules : String :=
-  "import Math\nopen M\ndef use : Nat := double 1\n#check use\n"
+  "import Math\nopen M\ndef use : Unit := double ()\n#check use\n"
 
 /-- `open` is not transitive: `Outer` opens `I`, but opening `Outer` does not open `I`. -/
 def innerMod : String := "namespace I\ndef x : Unit := ()\nend I\n"
@@ -125,7 +125,7 @@ def outerMod : String :=
 def openNotTransitive : String := "import Outer\nopen Outer\ndef z : Unit := x\n"
 
 /-- A module's name is not a namespace: its declarations are named as written in it. -/
-def plainMod : String := "def double (n : Nat) : Nat := n\n"
+def plainMod : String := "def double (n : Unit) : Unit := n\n"
 
 def moduleNameNotNamespace : String := "import Plain\nopen Plain\n"
 
@@ -134,19 +134,19 @@ def aliasShadows : String :=
   "namespace A\ndef x : Unit := ()\nend A\nnamespace B\ndef x : Unit := ()\nend B\n" ++
   "open B as A\ndef use : Unit := A.x\n#check A.x\n"
 
-/-- A local binder shadows the opened `A.x`, and the bound name is the binder's (a `Nat`
+/-- A local binder shadows the opened `A.x`, and the bound name is the binder's (a `Type`
 global would not typecheck as a `Unit`); outside the binder the open still applies. -/
 def localShadows : String :=
-  "namespace A\ndef x : Nat := 0\nend A\nopen A\n" ++
-  "def f (x : Unit) : Unit := x\ndef g : Nat := x\n#check g\n"
+  "namespace A\ndef x : Type := Unit\nend A\nopen A\n" ++
+  "def f (x : Unit) : Unit := x\ndef g : Type := x\n#check g\n"
 
 /-- A module whose namespace holds only a private name: opening it there makes the
 private name unqualified, and `shown` proves it. -/
 def privOnlyMod : String :=
-  "namespace Secret\nprivate def hidden : Nat := 1\nend Secret\nopen Secret\n" ++
-  "def shown : Nat := hidden\n"
+  "namespace Secret\nprivate def hidden : Unit := ()\nend Secret\nopen Secret\n" ++
+  "def shown : Unit := hidden\n"
 
-def privOnlyOpen : String := "import PrivOnly\ndef a : Nat := shown\n#check a\n"
+def privOnlyOpen : String := "import PrivOnly\ndef a : Unit := shown\n#check a\n"
 
 def namespaceGroup : Group where
   name := "namespace"
@@ -175,9 +175,9 @@ def namespaceGroup : Group where
     { name := "a qualified public name works without an open", run := fun _ =>
         nsOk [("Priv", privMod)] privQualified [] },
     { name := "a namespace with only this module's private names opens in that module", run := fun _ =>
-        nsOk [("PrivOnly", privOnlyMod)] privOnlyOpen ["a : Nat"] },
+        nsOk [("PrivOnly", privOnlyMod)] privOnlyOpen ["a : Unit"] },
     { name := "`open` a namespace declared in another module", run := fun _ =>
-        nsOk [("Math", mathMod)] openAcrossModules ["use : Nat"] },
+        nsOk [("Math", mathMod)] openAcrossModules ["use : Unit"] },
     { name := "`open` is not transitive: an importer's `open` does not open what it opened", run := fun _ =>
         nsFails [("Inner", innerMod), ("Outer", outerMod)] openNotTransitive "unknown identifier 'x'" },
     { name := "an `open` names a namespace, not a module: a module's name opens nothing", run := fun _ =>
@@ -185,7 +185,7 @@ def namespaceGroup : Group where
     { name := "an `open … as` alias shadows a real namespace of the same prefix", run := fun _ =>
         nsOk [] aliasShadows ["B.x : Unit"] },
     { name := "a local binder shadows a name the `open` provides", run := fun _ =>
-        nsOk [] localShadows ["g : Nat"] },
+        nsOk [] localShadows ["g : Type"] },
     { name := "wiz check: an `open` across two modules", run := fun _ =>
         Tests.Reject.cliCheck openAcrossModules [("Math", mathMod)] false },
     { name := "wiz check: an ambiguous name is a command-line error", run := fun _ =>
