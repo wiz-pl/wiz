@@ -379,7 +379,7 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
     bounds.warnings);
-  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
+  let memoryFindings := List.append (Scry.useAfterFreeCheck p pt pack) bounds.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/

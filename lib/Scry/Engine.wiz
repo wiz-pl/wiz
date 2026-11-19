@@ -52,11 +52,18 @@ inductive Scry.RunResult (Obs : Type) where
 
 -- ## The event vocabulary
 
-/-- The memory/control events analyses consume. It is deliberately small: an analysis
-that needs a construct the vocabulary does not have gets a new constructor here, and
-every `Sem` decides how its IR produces it. The default (`Scry.Wil.concrete`) is a
-one-to-one projection of Wil's statement constructors, so `Scry.Bounds` sees exactly
-the statements it used to match on. -/
+/-- The memory/control events the memory analyses consume. It is one *vocabulary*, not
+the only one: `Scry.Sem` and `Scry.ObservedEvent` are parameterised by the event type,
+so a second analysis can own a vocabulary of its own (a typestate event, an e-graph
+equality event) without editing this inductive. `Scry.Bounds` and `Scry.Lifetime` fix
+it to this type because they match its constructors; that is what "the analysis owns a
+vocabulary" means in a language without type classes.
+
+The vocabulary is deliberately small: an analysis that needs a construct it does not
+have gets a new constructor here (or its own vocabulary), and every `Sem` decides how
+its IR produces the event. The default (`Scry.Wil.concrete`) is a one-to-one projection
+of Wil's statement constructors, so `Scry.Bounds` sees exactly the statements it used
+to match on. -/
 inductive Scry.Event where
   /-- `x = alloc cells` -/
   | alloc (dst : Nat) (cells : Nat)
@@ -68,39 +75,52 @@ inductive Scry.Event where
   | store (ptr : Nat) (val : Nat)
   /-- `x = p + i * scale` (a variable-index subscript) -/
   | sub (dst : Nat) (base : Nat) (index : Nat) (scale : Nat)
-  /-- a direct or indirect call -/
+  /-- a direct call -/
   | call (dst : Option Nat) (callee : String) (args : List Nat)
+  /-- a call through a computed function value. A `call` names its callee, so an
+  indirect call needs its own constructor: `Scry.Lifetime` reports a use of a freed
+  function pointer as an "indirect call" and cannot recover the register from a name. -/
+  | callIndirect (dst : Option Nat) (callee : Nat) (args : List Nat)
   /-- `free p` -/
   | free (ptr : Nat)
   /-- a statement or terminator with no event the current analyses use -/
   | other
 
-/-- One event at a program point of a named function. -/
-structure Scry.ObservedEvent where
+/-- One event at a program point of a named function. The event type is the semantics'
+choice (`Scry.Sem (Ev : Type)`); `Scry.Wil.concrete` uses `Scry.Event`. -/
+structure Scry.ObservedEvent (Ev : Type) where
   func : String
   point : Nat
-  event : Scry.Event
+  event : Ev
 
 -- ## Semantics
 
-/-- An IR with a semantics. `Ir` is the unit a frontend produces (a program, a
-translation unit, a graph); `Conf` its configurations; `Obs` its observations.
-`obsEq` is the semantics' own notion of "the same observation"; a lowering that crosses
-two semantics uses `Scry.Obligation.refines`'s explicit `rel`, because the two `Obs`
-types may differ. `events` is the analysis-facing projection; it is a
-field of `Sem` because whether two statements are the same memory event is a semantic
-question (an e-graph semantics may expose one event for a whole rewrite class). -/
-structure Scry.Sem where
+/-- An IR with a semantics, parameterised by the *event type* its `events` projection
+emits. `Ir` is the unit a frontend produces (a program, a translation unit, a graph);
+`Conf` its configurations; `Obs` its observations. `obsEq` is the semantics' own notion
+of "the same observation"; a lowering that crosses two semantics uses
+`Scry.Obligation.refines`'s explicit `rel`, because the two `Obs` types may differ.
+`events` is the analysis-facing projection; it is a field of `Sem` because whether two
+statements are the same memory event is a semantic question (an e-graph semantics may
+expose one event for a whole rewrite class).
+
+`Ev` is the semantics' own vocabulary. Keeping it a parameter (rather than fixing
+`Scry.Event`) lets a symbolic/e-graph semantics expose exactly the events it has, and
+lets an analysis choose its own event type; an analysis that matches constructors of a
+particular vocabulary fixes `Ev` to that inductive. `Scry.Wil.concrete` fixes it to
+`Scry.Event`, which is the memory analyses' shared vocabulary and a one-to-one
+projection of Wil's statements. -/
+structure Scry.Sem (Ev : Type) where
   Ir : Type
   Conf : Type
   Obs : Type
   init : Ir → Conf
   step : Conf → Scry.StepResult Conf Obs
   obsEq : Obs → Obs → Bool
-  events : Ir → List Scry.ObservedEvent
+  events : Ir → List (Scry.ObservedEvent Ev)
 
 /-- The derived fuel-bounded run of a semantics. -/
-def Scry.Sem.run (s : Scry.Sem) : Nat → s.Conf → Scry.RunResult s.Obs
+def Scry.Sem.run {Ev : Type} (s : Scry.Sem Ev) : Nat → s.Conf → Scry.RunResult s.Obs
   | .zero, _ => .outOfFuel
   | .succ k, c => match s.step c with
     | .next c' => Scry.Sem.run s k c'
@@ -119,8 +139,8 @@ inductive Scry.Obligation where
 /-- Whole-run refinement: every terminating source run and its lowered target run are
 related by `rel`. `sourceIr` says how a source unit is read by the source semantics (a
 CST store and a preprocessed text are the same `Src`). -/
-def Scry.Obligation.refines (Src : Type) (source target : Scry.Sem)
-    (sourceIr : Src → source.Ir) (lower : Src → target.Ir)
+def Scry.Obligation.refines {EvS EvT : Type} (Src : Type) (source : Scry.Sem EvS)
+    (target : Scry.Sem EvT) (sourceIr : Src → source.Ir) (lower : Src → target.Ir)
     (rel : source.Obs → target.Obs → Prop) : Prop :=
   (i : Src) → (n : Nat) → (o : source.Obs) → (o' : target.Obs) →
     source.run n (source.init (sourceIr i)) = Scry.RunResult.done o →
@@ -133,12 +153,12 @@ not inspect `preserves`; a proof would be `proved` in a `LoweringCertificate`, e
 as `Scry.Cert` does for findings. Today every frontend sets `obligation := .refinesDefault`
 and `preserves := True` (trusted), which is the honest state: the lowering is tested, not
 verified (design §4.3). -/
-structure Scry.Lowering where
+structure Scry.Lowering (EvS EvT : Type) where
   Src : Type
-  source : Scry.Sem
+  source : Scry.Sem EvS
   /-- how a `Src` value is read as a unit of the source semantics -/
   sourceIr : Src → source.Ir
-  target : Scry.Sem
+  target : Scry.Sem EvT
   lower : Src → target.Ir
   obligation : Scry.Obligation
   preserves : Prop
@@ -146,7 +166,8 @@ structure Scry.Lowering where
 -- ## Analysis
 
 /-- The classical soundness obligation: γ before, one concrete step, γ after. -/
-def Scry.Analysis.Sound (s : Scry.Sem) (D : Type) (gamma : D → s.Conf → Prop)
+def Scry.Analysis.Sound {Ev : Type} (s : Scry.Sem Ev) (D : Type)
+    (gamma : D → s.Conf → Prop)
     (transfer : s.Ir → D → D) : Prop :=
   (i : s.Ir) → (d : D) → (c c' : s.Conf) → gamma d c →
     s.step c = Scry.StepResult.next c' → gamma (transfer i d) c'
@@ -163,7 +184,8 @@ def Scry.listMem {A : Type} (eq : A → A → Bool) (x : A) : List A → Bool
 true of some terminating run's observation. Bounds and taint are *may* analyses, so this
 (not the classical γ obligation) is the shape their `sound` field names; today neither
 carries a proof. -/
-def Scry.Analysis.SoundFindings (s : Scry.Sem) (D F : Type) (eqF : F → F → Bool)
+def Scry.Analysis.SoundFindings {Ev : Type} (s : Scry.Sem Ev) (D F : Type)
+    (eqF : F → F → Bool)
     (report : D → List F) (claim : s.Obs → F → Prop) : Prop :=
   (i : s.Ir) → (d : D) → (f : F) → Scry.listMem eqF f (report d) = .true →
     ∃ (o : s.Obs), ∃ (n : Nat),
@@ -181,7 +203,7 @@ environment, a points-to table, a finding list); `gamma` relates it to concrete
 configurations; `transfer` is the interface the engine runs. `sound` is the *statement*
 of the analysis's obligation (one of the two shapes above); `proved` carries a proof
 when one exists, and is `no` for a trusted or result-checked analysis. -/
-structure Scry.Analysis (s : Scry.Sem) where
+structure Scry.Analysis (Ev : Type) (s : Scry.Sem Ev) where
   Domain : Type
   gamma : Domain → s.Conf → Prop
   transfer : s.Ir → Domain → Domain
@@ -242,10 +264,13 @@ def Scry.Event.ofStmt : Wil.Stmt → Scry.Event
   | .call r (.direct name) args _ =>
     .call (match r with | .some v => .some v.index | .none => .none) name
       (List.map (fun v => v.index) args)
+  | .call r (.indirect v) args _ =>
+    .callIndirect (match r with | .some x => .some x.index | .none => .none) v.index
+      (List.map (fun a => a.index) args)
   | _ => .other
 
 /-- Every statement of a function as an observed event, at its program point. -/
-def Scry.WilEventsOfFunc (fn : Wil.Func) : List Scry.ObservedEvent :=
+def Scry.WilEventsOfFunc (fn : Wil.Func) : List (Scry.ObservedEvent Scry.Event) :=
   let g := Scry.flatten fn;
   List.concat (List.map (fun n =>
     match Scry.nodeStmt g n with
@@ -254,13 +279,15 @@ def Scry.WilEventsOfFunc (fn : Wil.Func) : List Scry.ObservedEvent :=
     (Scry.range g.count))
 
 /-- Every function's events, in function and point order. -/
-def Scry.WilEvents (t : Scry.WilTarget) : List Scry.ObservedEvent :=
+def Scry.WilEvents (t : Scry.WilTarget) : List (Scry.ObservedEvent Scry.Event) :=
   List.concat (List.map Scry.WilEventsOfFunc t.prog.funcs)
 
-/-- **The default instantiation**: Wil with its concrete `Wil.step`/`Wil.run` semantics
-and its concrete observations. Nothing else in scry has to change to keep using it;
-`Scry.boundsCheck` is `Scry.boundsCheckWith Scry.Wil.concrete`. -/
-def Scry.Wil.concrete : Scry.Sem :=
+/-- **The default instantiation**: Wil with its concrete `Wil.step`/`Wil.run` semantics,
+its concrete observations, and the memory analyses' (`Scry.Event`) projection. Nothing
+else in scry has to change to keep using it; `Scry.boundsCheck` is
+`Scry.boundsCheckWith Scry.Wil.concrete` and `Scry.useAfterFreeCheck` is
+`Scry.useAfterFreeCheckWith Scry.Wil.concrete`. -/
+def Scry.Wil.concrete : Scry.Sem Scry.Event :=
   Scry.Sem.mk Scry.WilTarget (Option Wil.Config) Scry.WilObservation
     Scry.WilInit Scry.WilStep Scry.WilObsEq Scry.WilEvents
 

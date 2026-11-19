@@ -1010,7 +1010,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
       bounds.warnings);
-    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
+    let memoryFindings := List.append (Scry.useAfterFreeCheck prog pt pack) bounds.findings;
     let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
       ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
