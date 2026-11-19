@@ -528,7 +528,8 @@ reserved (so a local keyword `shout` is an identifier again in the importer). Ki
 names stay taken, so an importer that declares the same notation gets a new kind and
 none of the dropped rules. Definitions written with the notation are unaffected (they
 are terms by then). Lean also has `scoped` notation, active where a namespace is open;
-Wiz has no `open`, so the module is the only scope. The design notes are in the notes
+Wiz's `open` (13t) scopes names, not notation, so the module is still the only notation
+scope. The design notes are in the notes
 (`notation.md`). `command.local` is built-in grammar (`Wiz/Parser/Builtin.lean`), so the
 self-hosted parser's generated tables have it too; the self-hosted frontend has no
 `syntax` command yet and doesn't elaborate it. Tests: groups `language`,
@@ -851,6 +852,17 @@ end Foo
   `open` normally follows the namespace it opens (and a qualified name needs no `open` at
   all). `open` makes *names* visible, not notation: `notation` is not scoped by a
   namespace (13m has `local` for module-scoped grammar).
+* **`open` is not transitive.** `open Foo` brings in exactly the declarations named
+  `Foo.…`: a name `Foo` itself opened from `Bar` is `Bar.x`, so it needs its own
+  `open Bar`; and a module's opens are dropped when the module ends, so an importer never
+  inherits them. The command takes a *namespace*, not a module: a file's declarations are
+  global names as written in it, so `open Math` finds nothing unless `Math.wiz` wraps
+  them in `namespace Math`.
+* **Local names shadow; declarations do not.** A binder, `let`, or pattern variable
+  named `x` shadows an opened `A.x` (locals are looked up first and no ambiguity is
+  reported). A *declaration* does not shadow: the enclosing namespace's `x`, the module's
+  own `x` and an opened `A.x` are all candidates, and two distinct ones are the ambiguity
+  error below.
 * **Ambiguity is an error, not last-wins.** An unqualified name that two `open`s provide
   (or an `open` and a declaration), with two *different* declared names, is rejected at
   the use, naming both candidates (`ambiguous-name`):
@@ -866,12 +878,16 @@ end Foo
 * **`open M as Alias` is a prefix alias, not an open.** It makes `Alias.x` a spelling of
   `M.x` and opens *nothing* unqualified: after `open A as Al`, `x` is not `A.x`. The
   distinction is deliberate — an alias is for a long or clashing prefix, an `open` for
-  unqualified use. A qualified name uses the longest matching alias.
+  unqualified use. A qualified name uses the longest matching alias, and the alias is
+  applied before the name is looked up: after `open B as A`, `A.x` is `B.x` even if a
+  namespace `A` exists (the real `A.…` names stay reachable unqualified through
+  `open A`).
 * **`private` stays module-private.** A private declaration is reachable neither through
   an `open` (an unqualified `x` skips another module's private `M.x`, so the use is
   unknown) nor through an alias (`Al.x` resolves to `M.x`, and the private check reports
-  `'M.x' is private to module M`). In its own module it works as before, and a qualified
-  name needs no `open`.
+  `'M.x' is private to module M`). In its own module it works as before — an `open` there
+  does bring the namespace's private names in, since they are usable in that module — and
+  a qualified name needs no `open`.
 * **Errors.** A namespace with no `end` is reported at the `namespace` line
   (`namespace Foo is not closed: add end (or end Foo)`); `end` with no open namespace,
   and `end Bar` that does not name the innermost namespace, are errors at the `end`.
@@ -882,6 +898,9 @@ end Foo
 
 Tests: `namespace` (nested namespaces; qualified use with no `open`; `open` then
 unqualified use; the exact ambiguity error; `open … as` for qualification; `open … as`
-not opening unqualified; a private name through an open and through an alias; missing and
-stray `end`; `#check` showing the qualified name; `mutual` under a namespace). The
-self-hosted frontend does not compile these tests.
+not opening unqualified; an alias shadowing a real prefix; a local binder shadowing an
+opened name; a private name through an open and through an alias; an `open` across two
+modules and its non-transitivity; missing and stray `end`; `#check` showing the
+qualified name; `mutual` under a namespace), plus two `wiz check` cases (an `open`
+across two modules, and the ambiguity as a command-line error). The self-hosted frontend
+does not compile these tests.

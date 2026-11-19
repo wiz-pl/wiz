@@ -1,4 +1,5 @@
 import Tests.Elab
+import Tests.Reject
 
 open Wiz
 
@@ -32,6 +33,18 @@ def nsFails (mods : List (Name × String)) (src : String) (fragment : String) : 
   unless errs.size == 1 do throw (IO.userError s!"expected one error, got {errs.size}: {errs}")
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
+
+/-- Exactly one error, with `code` and mentioning `fragment`, from a program with the
+given modules importable. -/
+def nsFailsCode (mods : List (Name × String)) (src : String) (code fragment : String) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { loader := fun n => mods.lookup n }
+  let errs := s.messages.filter (·.severity == .error)
+  unless errs.size == 1 do throw (IO.userError s!"expected one error, got {errs.size}: {errs.map (·.render src)}")
+  let m := errs[0]!
+  unless m.code == code do
+    throw (IO.userError s!"expected code '{code}', got '{m.code}':\n{m.render src}")
+  unless (m.text.splitOn fragment).length > 1 do
+    throw (IO.userError s!"error does not mention '{fragment}':\n{m.render src}")
 
 /-- The nested-namespace program: `A.B.x`, `A.y` (which uses `B.x` through `A`), and
 `#check`s of the qualified names. -/
@@ -96,6 +109,45 @@ def mutualNs : String :=
   "namespace N\nmutual\ninductive A where\n  | mk (b : B)\ninductive B where\n  | mk (a : A)\nend\n" ++
   "def a (b : B) : A := A.mk b\nend N\n#check N.A\n#check N.B\n"
 
+/-- A module with a namespace that another file opens. -/
+def mathMod : String :=
+  "namespace M\ndef double (n : Nat) : Nat := n\nend M\n"
+
+def openAcrossModules : String :=
+  "import Math\nopen M\ndef use : Nat := double 1\n#check use\n"
+
+/-- `open` is not transitive: `Outer` opens `I`, but opening `Outer` does not open `I`. -/
+def innerMod : String := "namespace I\ndef x : Unit := ()\nend I\n"
+
+def outerMod : String :=
+  "import Inner\nnamespace Outer\nopen I\ndef y : Unit := x\nend Outer\n"
+
+def openNotTransitive : String := "import Outer\nopen Outer\ndef z : Unit := x\n"
+
+/-- A module's name is not a namespace: its declarations are named as written in it. -/
+def plainMod : String := "def double (n : Nat) : Nat := n\n"
+
+def moduleNameNotNamespace : String := "import Plain\nopen Plain\n"
+
+/-- `open B as A` shadows a real namespace `A` for qualified names. -/
+def aliasShadows : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nnamespace B\ndef x : Unit := ()\nend B\n" ++
+  "open B as A\ndef use : Unit := A.x\n#check A.x\n"
+
+/-- A local binder shadows the opened `A.x`, and the bound name is the binder's (a `Nat`
+global would not typecheck as a `Unit`); outside the binder the open still applies. -/
+def localShadows : String :=
+  "namespace A\ndef x : Nat := 0\nend A\nopen A\n" ++
+  "def f (x : Unit) : Unit := x\ndef g : Nat := x\n#check g\n"
+
+/-- A module whose namespace holds only a private name: opening it there makes the
+private name unqualified, and `shown` proves it. -/
+def privOnlyMod : String :=
+  "namespace Secret\nprivate def hidden : Nat := 1\nend Secret\nopen Secret\n" ++
+  "def shown : Nat := hidden\n"
+
+def privOnlyOpen : String := "import PrivOnly\ndef a : Nat := shown\n#check a\n"
+
 def namespaceGroup : Group where
   name := "namespace"
   exercise := "Stage 13t"
@@ -107,9 +159,9 @@ def namespaceGroup : Group where
     { name := "`open A` then an unqualified use; #check shows A.x", run := fun _ =>
         nsOk [] openUse ["A.x : Unit", "use : Unit"] },
     { name := "two opens with the same name: the use is ambiguous, naming both", run := fun _ =>
-        nsFails [] twoOpens "'x' is ambiguous: it refers to 'A.x', 'B.x'; qualify it with a namespace" },
+        nsFailsCode [] twoOpens "ambiguous-name" "'x' is ambiguous: it refers to 'A.x', 'B.x'; qualify it with a namespace" },
     { name := "an open and a declaration with the same name: the use is ambiguous", run := fun _ =>
-        nsFails [] openAndDecl "'x' is ambiguous: it refers to 'A.x', 'x'; qualify it with a namespace" },
+        nsFailsCode [] openAndDecl "ambiguous-name" "'x' is ambiguous: it refers to 'A.x', 'x'; qualify it with a namespace" },
     { name := "opening the same namespace twice is one candidate, not an ambiguity", run := fun _ =>
         nsOk [] openedTwice ["use : Unit"] },
     { name := "`open A as Al` makes Al.x a spelling of A.x", run := fun _ =>
@@ -122,12 +174,28 @@ def namespaceGroup : Group where
         nsFails [("Priv", privMod)] privThroughAlias "'Secret.hidden' is private to module Priv" },
     { name := "a qualified public name works without an open", run := fun _ =>
         nsOk [("Priv", privMod)] privQualified [] },
+    { name := "a namespace with only this module's private names opens in that module", run := fun _ =>
+        nsOk [("PrivOnly", privOnlyMod)] privOnlyOpen ["a : Nat"] },
+    { name := "`open` a namespace declared in another module", run := fun _ =>
+        nsOk [("Math", mathMod)] openAcrossModules ["use : Nat"] },
+    { name := "`open` is not transitive: an importer's `open` does not open what it opened", run := fun _ =>
+        nsFails [("Inner", innerMod), ("Outer", outerMod)] openNotTransitive "unknown identifier 'x'" },
+    { name := "an `open` names a namespace, not a module: a module's name opens nothing", run := fun _ =>
+        nsFails [("Plain", plainMod)] moduleNameNotNamespace "unknown namespace 'Plain'" },
+    { name := "an `open … as` alias shadows a real namespace of the same prefix", run := fun _ =>
+        nsOk [] aliasShadows ["B.x : Unit"] },
+    { name := "a local binder shadows a name the `open` provides", run := fun _ =>
+        nsOk [] localShadows ["g : Nat"] },
+    { name := "wiz check: an `open` across two modules", run := fun _ =>
+        Tests.Reject.cliCheck openAcrossModules [("Math", mathMod)] false },
+    { name := "wiz check: an ambiguous name is a command-line error", run := fun _ =>
+        Tests.Reject.cliCheck twoOpens [] true },
     { name := "an `open` is file-scoped: it outlives its namespace's `end`", run := fun _ =>
         nsOk [] openOutlivesNamespace ["use : Unit"] },
     { name := "an `open` in a module does not reach the files that import it", run := fun _ =>
         nsFails [("Op", openerMod)] importedOpenDoesNotLeak "unknown identifier 'x'" },
     { name := "a namespace with no `end` is reported at its own line", run := fun _ =>
-        nsFails [] missingEnd "namespace A is not closed: add `end` (or `end A`)" },
+        nsFailsCode [] missingEnd "unclosed-namespace" "namespace A is not closed: add `end` (or `end A`)" },
     { name := "a stray `end` is an error at its own line", run := fun _ =>
         nsFails [] strayEnd "`end` without an open `namespace`" },
     { name := "`end B` that does not close `A` is an error", run := fun _ =>

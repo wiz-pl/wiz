@@ -1762,7 +1762,13 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
     let n := ((cmd.getArg 1).getId?).getD "_"
     let asAlias? := (cmd.getArg 2).args.filterMap Syntax.getId? |>.toList.head?
-    if !s.globals.order.any fun d => d.startsWith (n ++ ".") then
+    -- (13t) the namespace must have a declaration visible here: a public one (named
+    -- `N.x`), or this module's own private one (`_private.m._0.N.x`, which only this
+    -- module can name). Another module's private names open nothing.
+    let privPrefix := if s.module.isEmpty then "" else "_private." ++ s.module ++ "._0."
+    let declares := s.globals.order.any fun d =>
+      d.startsWith (n ++ ".") || (privPrefix != "" && d.startsWith (privPrefix ++ n ++ "."))
+    if !declares then
       report .error (cmd.getArg 1).info s!"unknown namespace '{n}': there is no declaration `{n}.…`"
     else match asAlias? with
     | some a =>

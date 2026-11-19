@@ -675,8 +675,9 @@ is refused, so `new` never overwrites work, and the name must start with a lette
 ([stages/23-grail.md](stages/23-grail.md), 23o.)
 
 Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
-library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
-one name can be declared only once among everything a file imports. Mark helpers
+library `lib/`, a package's `lib` directories, `-I DIR`). There is no selective import,
+so one name can be declared only once among everything a file imports (`namespace`,
+13t, prefixes a declaration's name but does not let two modules reuse one). Mark helpers
 `private` to keep them out of other modules.
 
 ## 12: taint analysis with scry
