@@ -26,6 +26,10 @@ def unless (label : String) (ok : Bool) : EIO Unit :=
   | .false => EIO.fail (label ++ ": FAILED")
 
 def opts (args : List String) : EIO Scry.TaintOpts :=
+  -- Every analysis in this file gets the budget its docstring claims (900 s). The
+  -- library default is 300, which the 3.9 MB grammar exceeds on a cold runner; setting
+  -- it per call is how one of the three was missed and timed out at 300.
+  let args := List.append args (List.cons "--timeout" (List.cons "900" .nil));
   match Scry.taintArgs args with
   | .ok o => EIO.pure o
   | .error e => EIO.fail e
@@ -62,6 +66,8 @@ def scale : EIO Unit := do
   match present with
   | .false => say "scale: skip (native/tree-sitter-c/src/parser.c absent)"
   | .true => do
+    -- The docstring above says 900 s, but the library default is 300: on a cold CI
+    -- runner parsing the 3.9 MB grammar exceeds it, and the test then fails itself.
     o ← opts (List.cons path (List.cons "--allow-errors" .nil));
     rep ← Scry.analyzeFile o;
     say ("scale: nodes=" ++ Nat.repr rep.nodes

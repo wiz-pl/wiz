@@ -324,7 +324,76 @@ checkThat("wiring: a failed connection is no server",
 checkThat("wiring: the failure is explained", deadPanel.innerHTML.includes("cannot connect"));
 checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-action="reconnect"'));
 
-// ## 10b. The token (#430): the mock refuses like `wiz lsp --ws`; a client with the
+// ## 10b. Follow mode (`web/infoview.html?follow=1`): no document of its own
+//
+// The standalone infoview page shows another editor's document. The server owns it, so
+// the pane must not open, change or close one; it moves with `wiz/infoview/cursor` and
+// asks about that URI.
+
+const followMock = await startMockServer();
+const followPanel = fakePanel();
+const followed = startInfoview({
+  editor: fakeEditor(""), panel: followPanel, config: { url: followMock.url }, follow: true,
+});
+checkThat("follow: the pane connects", await waitUntil(() => followPanel.innerHTML.includes("connected")));
+check("follow: no document of its own is opened", followMock.stats.didOpen, 0);
+checkThat("follow: the client is there to subscribe", !!followed.client());
+followed.client().on("wiz/infoview/cursor", (p) => followed.goTo(p.textDocument.uri, p.position));
+followMock.notify("wiz/infoview/cursor", {
+  textDocument: { uri: "file:///editor.wiz" },
+  position: { line: 4, character: 8 },
+  session: 1,
+});
+checkThat("follow: the state at the editor's cursor",
+  await waitUntil(() => followPanel.innerHTML.includes('class="names"')), followPanel.innerHTML.slice(0, 300));
+check("follow: still no document opened", followMock.stats.didOpen, 0);
+check("follow: still no document changed", followMock.stats.didChange, 0);
+check("follow: the followed position's line", followed.view.position && followed.view.position.line, 4);
+check("follow: the followed position's character", followed.view.position && followed.view.position.character, 8);
+check("follow: the target is the editor's document", followed.target(), "file:///editor.wiz");
+followed.stop();
+check("follow: it does not close the editor's document", followMock.stats.didClose, 0);
+await followMock.close();
+
+// ## 10c. The selected subterm in its own element (`#info` on the infoview page)
+//
+// With `info`, the panel leaves the selection out and the box renders it, so the
+// standalone page keeps its separate `#info` (and its CSS).
+
+const infoMock = await startMockServer();
+const infoPanel = fakePanel();
+const infoBox = { innerHTML: "" };
+const infoApp = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: infoPanel, info: infoBox,
+  config: { url: infoMock.url }, uri: "file:///info.wiz",
+});
+checkThat("info: the goals arrive", await waitUntil(() => infoPanel.innerHTML.includes('class="names"')));
+const infoTag = {
+  dataset: { ref: "5", span: "2:8-2:9" }, parentElement: null,
+  closest: () => infoTag,
+};
+infoPanel.listeners.click[0]({ target: infoTag, preventDefault() {} });
+checkThat("info: the subterm is described", await waitUntil(() => infoBox.innerHTML.includes('class="kind"')),
+  infoBox.innerHTML);
+checkThat("info: its kind", infoBox.innerHTML.includes('class="kind">const</span>'), infoBox.innerHTML);
+checkThat("info: its type", infoBox.innerHTML.includes("Type"), infoBox.innerHTML);
+checkThat("info: the panel does not repeat it", !infoPanel.innerHTML.includes('class="selection"'));
+infoApp.stop();
+await infoMock.close();
+
+// ## 10d. The page hook (`onRender`) sees every state
+
+const renders = [];
+const hookMock = await startMockServer();
+const hooked = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: fakePanel(), config: { url: hookMock.url },
+  onRender: (view) => renders.push(view.state),
+});
+check("hook: the first render", renders[0], "connecting");
+checkThat("hook: it reaches open", await waitUntil(() => renders.includes("open")));
+hooked.stop();
+await hookMock.close();
+// ## 10e. The token (#430): the mock refuses like `wiz lsp --ws`; a client with the
 // page's `?token=` gets in, one without it does not
 
 const tokenMock = await startMockServer({ token: "s3cr3t" });

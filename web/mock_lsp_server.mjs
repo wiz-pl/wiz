@@ -112,7 +112,7 @@ export async function startMockServer(options = {}) {
   const mode = options.mode || "full";
   const stats = {
     connections: 0, initialize: 0, initialized: 0,
-    didOpen: 0, didChange: 0, requests: 0, diagnostics: 0,
+    didOpen: 0, didChange: 0, didClose: 0, requests: 0, diagnostics: 0,
   };
   const docs = new Map();
   const clients = new Set();
@@ -178,6 +178,7 @@ export async function startMockServer(options = {}) {
         return;
       }
       case "textDocument/didClose":
+        stats.didClose += 1;
         docs.delete((params.textDocument || {}).uri);
         return;
       case "wiz/interactiveGoals":
@@ -284,6 +285,11 @@ export async function startMockServer(options = {}) {
     stats,
     mode,
     documents: docs,
+    // Send a notification to every client, as `wiz lsp --ws` does for
+    // `wiz/infoview/cursor` (a server with a followed editor).
+    notify(method, params) {
+      for (const client of clients) send(client, { jsonrpc: "2.0", method, params });
+    },
     // Close every client connection (the client sees an abnormal close), keep listening.
     dropClients() {
       for (const client of clients) {
