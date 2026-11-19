@@ -1,5 +1,5 @@
--- Regression fixture for #256: the ledger state machine from the crux-spec project's
--- `Crux.Machine` (definitions unchanged, imports inlined), run behind one definition.
+-- Regression fixture for #256: a ledger state machine (definitions unchanged, imports
+-- inlined), run behind one definition.
 -- Before the fix, the last equation did not check in two minutes and exceeded 5 GB.
 import Prelude
 import Int
@@ -54,16 +54,16 @@ def Movement.mirror (m : Movement) : Movement := Movement.mk m.tx m.account m.un
 def mirror (l : List Movement) : List Movement := List.map Movement.mirror l
 def forTx (l : List Movement) (t : Nat) : List Movement := List.filter (fun m => Nat.beq m.tx t) l
 
--- The ledger kernel as a state machine, cut down from CruxSpec/Machine.lean to what
--- ACCOUNT-001's floor is about: each `Op` is one save, and `apply` returns `.none` when
--- the save is refused. Kept: the chart (Held or Mirrored accounts), movements, draw holds,
--- transactions with a status and a movement set, and the operations create, the two
--- status-only begins, authorize (with the funds gate), complete (with the re-check and
--- the per-unit balance check), settle, fail, expire and reverse (with its availability
--- check). Left out, as in the Lean model: received and incoming holds, refunds, capture
--- for less, account opening and closing, pricing, the other gates, the outbox.
+-- The ledger kernel as a state machine, cut down to what the account-balance floor is
+-- about: each `Op` is one save, and `apply` returns `.none` when the save is refused.
+-- Kept: the chart (Held or Mirrored accounts), movements, draw holds, transactions with a
+-- status and a movement set, and the operations create, the two status-only begins,
+-- authorize (with the funds gate), complete (with the re-check and the per-unit balance
+-- check), settle, fail, expire and reverse (with its availability check). Left out of
+-- this slice: received and incoming holds, refunds, capture for less, account opening and
+-- closing, pricing, the other gates, the outbox.
 
--- ## The chart of accounts (UVM §Account `Backing`)
+-- ## The chart of accounts
 
 inductive Backing where
   | held
@@ -77,7 +77,7 @@ structure AccountInfo where
   unit : Nat
   backing : Backing
 
--- fixed in this slice: opening and closing (ACCOUNT-003) are not modelled
+-- fixed in this slice: opening and closing an account are not modelled
 def Chart : Type := Nat → AccountInfo
 
 def isHeld (c : Chart) (a : Nat) : Bool := Backing.isHeld (AccountInfo.backing (c a))
@@ -99,7 +99,7 @@ def HoldStatus.isActive : HoldStatus → Bool
   | .captured => .false
   | .released => .false
 
--- UVM §AccountHold, `Kind = Draw` only
+-- the hold model, draw holds only
 structure Hold where
   tx : Nat
   account : Nat
@@ -110,7 +110,7 @@ structure Tx where
   status : Status
   plan : List Posting
 
--- `Movement` is Crux.Ledger's (tx, account, unit, amount)
+-- a movement is (tx, account, unit, amount)
 structure State where
   txs : Nat → Option Tx
   next : Nat
@@ -130,7 +130,7 @@ def holdCounts (a : Nat) (h : Hold) : Bool :=
   Bool.and (HoldStatus.isActive (Hold.status h)) (Nat.beq (Hold.account h) a)
 def heldOn (s : State) (a : Nat) : Int := sumBy (holdCounts a) Hold.amount (State.holds s)
 
--- UVM §Account: "posted less held"
+-- the available balance is "posted less held"
 def available (s : State) (a : Nat) : Int := posted s a - heldOn s a
 
 -- the active hold transaction `t` has on account `a`
@@ -146,7 +146,7 @@ def txNet (s : State) (t a : Nat) : Int :=
 def net (plan : List Posting) (a : Nat) : Int :=
   sumBy (fun p => Nat.beq (Posting.account p) a) Posting.amount plan
 
--- the net draw of a movement set on one account, `max 0 (-net)` (UVM §Holds)
+-- the net draw of a movement set on one account, `max 0 (-net)` (the hold rule)
 def draw (plan : List Posting) (a : Nat) : Int := Int.pos (-(net plan a))
 
 def accounts (plan : List Posting) : List Nat := uniq (List.map Posting.account plan)
@@ -155,7 +155,7 @@ def unitOf (c : Chart) (p : Posting) : Nat := AccountInfo.unit (c (Posting.accou
 def planUnitSum (c : Chart) (plan : List Posting) (u : Nat) : Int :=
   sumBy (fun p => Nat.beq (unitOf c p) u) Posting.amount plan
 
--- every unit the set moves sums to zero (the check `DoubleEntryInterceptor` makes)
+-- every unit the set moves sums to zero (the check the double-entry rule makes)
 def balancedB (c : Chart) (plan : List Posting) : Bool :=
   List.all (fun u => Int.beq (planUnitSum c plan u) 0) (List.map (unitOf c) plan)
 
@@ -179,18 +179,18 @@ def closeHolds (t : Nat) (st : HoldStatus) (hs : List Hold) : List Hold := List.
 
 -- ## Guards
 
--- ACCOUNT-001 at authorize, the funds gate: on every Held account the set touches,
+-- the funds gate at authorize: on every Held account the set touches,
 -- `draw ≤ available`
 def fundsOk (c : Chart) (s : State) (plan : List Posting) : Bool :=
   List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a - draw plan a))) (accounts plan)
 
--- UVM §Debits and credits: "Complete checks a debit again … with the transaction's own
+-- the debit/credit rule: "Complete checks a debit again … with the transaction's own
 -- draw hold added back"
 def recheckOk (c : Chart) (s : State) (t : Nat) (plan : List Posting) : Bool :=
   List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a + ownHold s t a - draw plan a)))
     (accounts plan)
 
--- UVM §Holds: "A reversal takes back only value the account still has available"
+-- the hold rule: "A reversal takes back only value the account still has available"
 def reverseOk (c : Chart) (s : State) (t : Nat) : Bool :=
   List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a - txNet s t a)))
     (uniq (List.map Movement.account (forTx (State.ledger s) t)))
@@ -290,7 +290,7 @@ def completeTx (c : Chart) (s : State) (t : Nat) (tx : Tx) (plan : List Posting)
 def closeTx (s : State) (t : Nat) (tx : Tx) (ok : Bool) (to : Status) : Option State :=
   guard ok (State.save s t tx to (State.ledger s) (closeHolds t .released (State.holds s)))
 
--- the mirror of the transaction's movements (UVM §Refund, reversal and return)
+-- the mirror of the transaction's movements (the refund/reversal rule)
 def reverseTx (c : Chart) (s : State) (t : Nat) (tx : Tx) : Option State :=
   guard (Bool.and (Status.canReverse (Tx.status tx)) (reverseOk c s t))
     (State.save s t tx .reversed (List.append (State.ledger s) (mirror (forTx (State.ledger s) t))) (State.holds s))
