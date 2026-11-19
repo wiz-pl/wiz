@@ -71,17 +71,10 @@ Limits, stated rather than hidden:
 rejection, and an I/O error. A process that dies inside the section leaves the release to
 the kernel. -/
 def EIO.withLock {A : Type} (fd : Fd) (mode : LockMode) (body : EIO A) : EIO A := do
-  l ← Fd.lock fd mode;
-  match l with
-  | .error e => EIO.fail e
-  | .ok _ => do
-    r ← body;
-    u ← Fd.unlock fd;
-    match u with
-    | .error e => EIO.fail e
-    | .ok _ => match r with
-      | .ok a => EIO.pure a
-      | .error e => EIO.fail e
+  Fd.lock fd mode;
+  r ← body;
+  Fd.unlock fd;
+  EIO.pure r
 
 -- ## Reading the meta
 
@@ -179,10 +172,8 @@ def Scan.step (s : Scan) : EIO (Option (List Rec × Scan)) :=
 /-- Close the reader's descriptor (releasing anything it still holds, though the share is
 only taken for the handshake). -/
 def Reader.close (r : Reader) : EIO Unit := do
-  u ← Fd.unlock r.fd;
-  match u with
-  | .error e => EIO.fail e
-  | .ok _ => Fd.close r.fd
+  Fd.unlock r.fd;
+  Fd.close r.fd
 
 -- ## The public engine: the same API, now safe across processes
 
@@ -241,13 +232,14 @@ def refreshAndRead (h : Handle) (st : StoreState) (ms : List Meta) :
     | .ok st' => IO.pure (st', .ok (Db.snapshot st'.db)))
 
 def Handle.getDb (h : Handle) : EIO Snapshot :=
-  EIO.lift (MVar.borrow h.state (fun st hole =>
+  MVar.borrow h.state (fun st hole =>
     IO.bind (readSlotsLocked st.fd) (fun r =>
       match r with
-      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
+      | .error e => MVar.fill h.state hole st
+        (IO.pure (.error e) : IO (Except String Snapshot))
       | .ok ms =>
         IO.bind (refreshAndRead h st ms) (fun r2 =>
-          MVar.fill h.state hole r2.1 (IO.pure r2.2)))))
+          MVar.fill h.state hole r2.1 (IO.pure r2.2))))
 
 /-- Re-read the meta *inside* the exclusive lock and commit against it, with the
 retention test first (exactly `Durable.putDb`, moved under the lock). This is the whole
@@ -276,30 +268,36 @@ def commitAndUnlock (h : Handle) (st : StoreState) (tx : Snapshot) :
   IO.bind (commitUnlocked h st tx) (fun r =>
     IO.bind (Fd.unlock st.fd) (fun u =>
       match u with
-      | .error e => IO.pure (r.1, .error e)
+      | .error e => IO.pure (r.1, (.error e : Except String Outcome))
       | .ok _ => IO.pure r))
 
 /-- Commit a transaction, waiting for the writer lock. The transaction's pure part is
 already done; the exclusive section is validation plus the page/fsync/meta/fsync
 sequence. A transaction that lost a race is `Outcome.rejected` — it is not retried. -/
 def Handle.putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
-  EIO.lift (MVar.borrow h.state (fun st hole =>
+  MVar.borrow h.state (fun st hole =>
     IO.bind (Fd.lock st.fd .exclusive) (fun l =>
       match l with
-      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
+      | .error e => MVar.fill h.state hole st
+        (IO.pure (.error e) : IO (Except String Outcome))
       | .ok _ =>
         IO.bind (commitAndUnlock h st tx) (fun r =>
-          MVar.fill h.state hole r.1 (IO.pure (.ok r.2))))))
+          MVar.fill h.state hole r.1 (IO.pure r.2))))
 
 /-- A non-blocking commit: `none` when another open file description holds the exclusive
 lock (the caller decides whether to wait or to report `busy`), `some out` when the
 section ran. The typed `busy` of `Fd.tryLock` is surfaced here as `none`. -/
 def Handle.tryPutDb (h : Handle) (tx : Snapshot) : EIO (Option Outcome) :=
-  EIO.lift (MVar.borrow h.state (fun st hole =>
+  MVar.borrow h.state (fun st hole =>
     IO.bind (Fd.tryLock st.fd .exclusive) (fun l =>
       match l with
-      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
-      | .ok .busy => MVar.fill h.state hole st (IO.pure (.ok .none))
+      | .error e => MVar.fill h.state hole st
+        (IO.pure (.error e) : IO (Except String (Option Outcome)))
+      | .ok .busy => MVar.fill h.state hole st
+        (IO.pure (.ok .none) : IO (Except String (Option Outcome)))
       | .ok .acquired =>
         IO.bind (commitAndUnlock h st tx) (fun r =>
-          MVar.fill h.state hole r.1 (IO.pure (.ok (.some r.2)))))))
+          MVar.fill h.state hole r.1
+            (IO.pure (match r.2 with
+              | .error e => (.error e : Except String (Option Outcome))
+              | .ok o => .ok (.some o))))))

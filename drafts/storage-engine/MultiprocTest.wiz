@@ -90,22 +90,24 @@ def snapHas (s : Snapshot) (id : U64) : Bool :=
 
 def indices : List IndexDef := [kindIndex, uniqueLabel]
 
-def seedNodes (s : Snapshot) : Snapshot :=
+def seedTwo (s : Snapshot) : Snapshot :=
   Snapshot.record
     (Snapshot.record s (U64.ofNat 1)
       (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)))))
     (U64.ofNat 2)
     (.some (.set (Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8))))
 
-/-- `n` nodes with ids and labels `i, i+1, …`, all of kind 1, count 0. Two leaves: 127
-records and the rest. -/
-def seedMany (s : Snapshot) : Nat → Nat → Snapshot
-  | .zero, _ => s
-  | .succ k, i =>
-    seedMany
+/-- `n` nodes with ids and labels `i, i+1, …`, all of kind 1, count 0, threaded through
+`seedManyGo` so the recursion decreases on `n` (a parameter before a modified one would be
+rejected). Two leaves: 127 records and the rest. -/
+def seedManyGo : Nat → Nat → Snapshot → Snapshot
+  | .zero, _, s => s
+  | .succ k, i, s =>
+    seedManyGo k (Nat.succ i)
       (Snapshot.record s (U64.ofNat i)
         (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat i)))))
-      k (Nat.succ i)
+
+def seedMany (s : Snapshot) (n i : Nat) : Snapshot := seedManyGo n i s
 
 /-- The record for `id` in a page's record list. -/
 def recFind : List Rec → U64 → Option Rec
@@ -131,7 +133,7 @@ def lockTest (dir : String) : EIO Unit := do
   let path := Path.join dir "lock.db";
   h ← openDb path indices;
   s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  o ← Handle.putDb h (seedTwo s0);
   expect "lock test: the seed commits" (succeeded o);
   -- Three open file descriptions in the same process: flock treats each as an
   -- independent locker, exactly as it would another process.
@@ -198,7 +200,7 @@ def snapshotTest (dir : String) : EIO Unit := do
   p1 ← Scan.step (Reader.scan r);
   match p1 with
   | .none => EIO.fail "scan test: the scan ended before its first page"
-  | .some (recs1, scan1) =>
+  | .some (recs1, scan1) => do
     expect "scan test: the first leaf holds 127 records" (Nat.beq (List.length recs1) 127);
     -- The commit lands in the middle of the scan.
     sNow ← Handle.getDb h;
@@ -208,7 +210,7 @@ def snapshotTest (dir : String) : EIO Unit := do
     p2 ← Scan.step scan1;
     match p2 with
     | .none => EIO.fail "scan test: the scan lost its second page"
-    | .some (recs2, scan2) =>
+    | .some (recs2, scan2) => do
       expect "scan test: the second leaf holds the remaining 3 records"
         (Nat.beq (List.length recs2) 3);
       expect "scan test: node 1 is still 0 in the old chain"
@@ -218,7 +220,7 @@ def snapshotTest (dir : String) : EIO Unit := do
       p3 ← Scan.step scan2;
       match p3 with
       | .some _ => EIO.fail "scan test: the scan has a page too many"
-      | .none =>
+      | .none => do
         expect "scan test: the old snapshot still says 0"
           (Nat.beq (snapCount (Reader.snapshot r) 1) 0);
         sAfter ← Handle.getDb h;
@@ -240,7 +242,7 @@ def writersTest (dir : String) : EIO Unit := do
   w1 ← openDb path indices;
   w2 ← openDb path indices;
   s0 ← Handle.getDb w1;
-  oSeed ← Handle.putDb w1 (seedNodes s0);
+  oSeed ← Handle.putDb w1 (seedTwo s0);
   expect "writers test: the seed commits" (succeeded oSeed);
   -- Both read the same generation.
   a ← Handle.getDb w1;
@@ -290,7 +292,7 @@ def retentionTest (dir : String) : EIO Unit := do
   let path := Path.join dir "retention.db";
   h ← openDb path indices;
   s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  o ← Handle.putDb h (seedTwo s0);
   expect "retention test: the seed commits" (succeeded o);
   s1 ← Handle.getDb h;                      -- generation 1
   bumpN h 9;                                -- generations 2..10; K = 8 keeps 3..10
@@ -308,7 +310,7 @@ def reopenTest (dir : String) : EIO Unit := do
   let path := Path.join dir "reopen.db";
   h ← openDb path indices;
   s0 ← Handle.getDb h;
-  oA ← Handle.putDb h (seedNodes s0);
+  oA ← Handle.putDb h (seedTwo s0);
   s1 ← Handle.getDb h;
   oB ← Handle.putDb h (bumpCount (U64.ofNat 1) s1);
   s2 ← Handle.getDb h;
@@ -351,10 +353,10 @@ def reopenTest (dir : String) : EIO Unit := do
 def waitForFile (path : String) : Nat → EIO Bool
   | .zero => EIO.pure .false
   | .succ k => do
-    r ← FS.readFile path;
-    match r with
-    | .ok _ => EIO.pure .true
-    | .error _ => do
+    here ← EIO.lift (FS.exists path);
+    match here with
+    | .true => EIO.pure .true
+    | .false => do
       EIO.lift (Clock.sleep (Duration.millis 25));
       waitForFile path k
 
@@ -364,7 +366,7 @@ def killTest (dir : String) : EIO Unit := do
   let path := Path.join dir "kill.db";
   h ← openDb path indices;
   s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  o ← Handle.putDb h (seedTwo s0);
   expect "kill test: the seed commits" (succeeded o);
   let marker := Path.join dir "kill.marker";
   -- A separate process takes the exclusive lock the same way the writer would, then
@@ -391,6 +393,13 @@ def killTest (dir : String) : EIO Unit := do
     (String.append "kill: released after SIGKILL ("
       (String.append (ExitStatus.toString st) ")")))
 
+/-- Run the kill case, or print its fixed skipping line (the test group's expected
+output is the skipping line; `test-multiproc.sh` sets the flag). -/
+def killOrSkip (on : Bool) (dir : String) : EIO Unit :=
+  match on with
+  | .true => killTest dir
+  | .false => EIO.lift (IO.println "kill: skipped (WIZ_MULTIPROC_KILL is not set)")
+
 def envFlag (k : String) : IO Bool := do
   v ← Env.get k;
   IO.pure (match v with
@@ -405,9 +414,6 @@ def main : IO Unit := EIO.toIO (do
   writersTest dir;
   retentionTest dir;
   reopenTest dir;
-  match killOn with
-  | .true => killTest dir
-  | .false =>
-    EIO.lift (IO.println "kill: skipped (WIZ_MULTIPROC_KILL is not set)")
+  killOrSkip killOn dir;
   FS.removeAll dir;
   EIO.lift (IO.println "multiproc: all checks passed"))
