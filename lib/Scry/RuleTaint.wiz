@@ -104,6 +104,26 @@ def Scry.rtMStore : Nat := 11
 def Scry.rtMLoad : Nat := 12
 def Scry.rtMTainted : Nat := 13
 
+-- Prover EDB relations (the guards/bounds slice). The taint rules above never read
+-- them: `Scry.Bounds.boundsFactsOfFunc` fills them from the CFG, the points-to
+-- capacities and the copy shapes, and `Scry.Prover.checkCut` reads them. They are in
+-- this table because it is the one place that fixes a relation's number and columns.
+--
+-- `guard (point, var, hi, target)` — on the edge from `point` to `target`, `var <= hi`.
+-- `use (point, var, loc, cap, kind, const)` — a memory access at `point` uses `var` as
+--   an index/length into location `loc`, which holds `cap` cells; `kind` is one of the
+--   `Scry.use*` numbers; `const` is `0` for "not a known constant" and `k+1` for the
+--   constant `k`.
+-- `before (node, usePoint)` — `node` dominates `usePoint` in the CFG.
+def Scry.rtGuard : Nat := 14
+def Scry.rtUse : Nat := 15
+def Scry.rtBefore : Nat := 16
+
+def Scry.useIndexWrite : Nat := 0
+def Scry.useIndexRead : Nat := 1
+def Scry.useCopyWrite : Nat := 2
+def Scry.useCopyRead : Nat := 3
+
 -- ## The plan for one function
 
 /-- A sink occurrence with the rule that owns it: `node` is the call point, `arg` the

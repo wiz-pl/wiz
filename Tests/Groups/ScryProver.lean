@@ -70,7 +70,7 @@ def runProbe (imports body : String) : IO (List String) := do
 
 def proverImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\n" ++
-  "import Scry.Interproc\nimport Scry.Prover\nimport Scry.ProverExamples\nimport Text\n"
+  "import Scry.Bounds\nimport Scry.Interproc\nimport Scry.Prover\nimport Scry.ProverExamples\nimport Text\n"
 
 /-- A fixture's C# text and its checked-in spill. -/
 def fixture (name : String) : IO (String × String) := do
@@ -218,7 +218,27 @@ def group : Group where
       run := fun _ => evalTexts
         ("#eval String.contains (Scry.Verdict.show Scry.proverScriptFailVerdict) \"script-failed\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverScriptFailVerdict\n")
-        [".true", ".false"] }
+        [".true", ".false"] },
+    { name := "the cut: a guarded write proves; an unordered, weak, unknown-capacity or unguarded write is refuted",
+      run := fun _ => evalTexts
+        ("#eval Scry.Verdict.isOk Scry.proverCutSafeVerdict\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutSafeVerdict) \"proved (every write is preceded by a check)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"does not dominate\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"guard(0,3,32,1)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"use(1,3,7,32,2,0)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutWeakVerdict) \"allows register 3 up to 64\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverCutConstOkVerdict\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutConstBadVerdict) \"constant 64\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnknownCapVerdict) \"no statically known capacity\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutPhantomVerdict) \"no guard fact\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutVacuousVerdict) \"write set is empty\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverCutUnorderedVerdict\n" ++
+         "#eval String.eq (Scry.Property.show Scry.Property.cut) \"cut (every write is preceded by a check)\"\n" ++
+         "#eval Nat.eq (List.length Scry.guardFnRows) 1\n" ++
+         "#eval match Scry.guardFnRows with\n" ++
+         "  | .cons r _ => Bool.and (Nat.eq (List.getD r 1 99) 0) (Nat.eq (List.getD r 2 99) 16)\n" ++
+         "  | .nil => .false\n")
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
   ]
 
 builtin_initialize registerGroup group
