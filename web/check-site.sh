@@ -32,6 +32,7 @@ need playground/playground-values.js
 need playground/lsp-client.js
 need playground/goals.js
 need playground/playground-lsp.js
+need playground/hover.js
 need playground/tagged.js
 need playground/selfhost-lsp-shim.js
 need playground/playground-engine.js

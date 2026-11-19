@@ -113,6 +113,7 @@ export async function startMockServer(options = {}) {
   const stats = {
     connections: 0, initialize: 0, initialized: 0,
     didOpen: 0, didChange: 0, didClose: 0, requests: 0, diagnostics: 0,
+    hover: 0, definition: 0,
   };
   const docs = new Map();
   const clients = new Set();
@@ -181,6 +182,34 @@ export async function startMockServer(options = {}) {
         stats.didClose += 1;
         docs.delete((params.textDocument || {}).uri);
         return;
+      case "textDocument/hover":
+        // The editor's hover card (web/hover.js): Markdown with a fenced signature and,
+        // after a rule, the doc comment, as the Wiz server's hover does.
+        stats.hover += 1;
+        if (options.noHover) return replyError(client, id, -32601, "MethodNotFound");
+        return reply(client, id, {
+          contents: {
+            kind: "markdown",
+            value: "```wiz\nNat.add : Nat → Nat → Nat\n```\n\n---\n\nAdds two Nats.",
+          },
+        });
+      case "textDocument/definition": {
+        stats.definition += 1;
+        if (options.noHover) return replyError(client, id, -32601, "MethodNotFound");
+        const uri = (params.textDocument || {}).uri;
+        const line = (params.position || {}).line || 0;
+        // The last line of the fixture is in this file; anything earlier is a global from
+        // the library, which this page cannot open.
+        if (line >= 4) {
+          return reply(client, id, {
+            uri, range: { start: { line: 1, character: 4 }, end: { line: 1, character: 9 } },
+          });
+        }
+        return reply(client, id, {
+          uri: "file:///lib/Prelude.wiz",
+          range: { start: { line: 6, character: 0 }, end: { line: 6, character: 9 } },
+        });
+      }
       case "wiz/interactiveGoals":
         if (mode === "plain") return replyError(client, id, -32601, "MethodNotFound");
         return reply(client, id, goalResult(client.session));
