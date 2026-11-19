@@ -119,7 +119,11 @@ Such a function is used from inside the unit as a callback, so its parameters ar
 external entry merely because no direct call resolves to it. -/
 def Scry.fnptrNamesOfStmt (s : Wil.Stmt) : List String :=
   match s with
-  | .assign _ (.fnptr name) _ => [name]
+  | .assign _ (.fnptr name) _ =>
+    let n := match String.stripPrefix name "$method:" with
+      | .some x => x
+      | .none => name;
+    List.cons n .nil
   | _ => .nil
 
 def Scry.fnptrNamesOfFunc (fn : Wil.Func) : List String :=

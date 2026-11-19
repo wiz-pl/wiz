@@ -123,7 +123,8 @@ def fixtures : List (String × String) :=
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
-   ("taint", "cwe78-await-unsafe")]
+   ("taint", "cwe78-await-unsafe"),
+   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -230,6 +231,27 @@ def taintFindings (name : String) : IO (List String) := do
     pure (if fs.isEmpty then [] else fs.splitOn "|")
   | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
 
+
+/-- The findings of the C# rule pack on a taint fixture under the **entry policy** the
+`scry cs` driver uses (`Scry.analyzeC`): a public method with no caller in the unit is
+reachable from outside, so its parameters are sources. -/
+def taintFindingsEntry (name : String) : IO (List String) := do
+  let (src, spill) ← fixture "taint" name
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  let body :=
+    fixtureDefs src spill ++
+    s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
+    s!"def prog : Wil.Program := Scry.Cs.programOf {wizStr (name ++ ".cs")} src spill\n" ++
+    "def line (f : Scry.RuleFinding) : String := f.rule ++ \" \" ++ f.func ++ \" \" ++ f.name ++ \" arg \" ++ Nat.repr f.arg\n" ++
+    "#eval List.length prog.funcs\n" ++
+    "#eval String.intercalate \"|\" (List.map line (Scry.programFindings (Scry.analyzeC prog pack)))\n"
+  match ← runProbe taintImports body with
+  | [nf, fs] =>
+    if nf == "0" then throw (IO.userError s!"{name}: the frontend produced no functions")
+    let fs := unquote fs
+    pure (if fs.isEmpty then [] else fs.splitOn "|")
+  | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
+
 /-- The unmodelled external callees of a taint fixture, in program order (deduplicated).
 A modelled call is absent, and the fixture's finding still has to fire: that is the pair
 a model must satisfy. -/
@@ -307,7 +329,7 @@ def repoBody (files : List (String × String)) : IO String := do
     "def repoKept : List Scry.Cs.FileResult := List.filter (fun r => List.any (fun p => String.eq p.1 r.path) repoWalk.files) repoResults\n" ++
     "def repoFuncs : List Wil.Func := List.concat (List.map (fun r => r.funcs) repoKept)\n" ++
     "def repoOrigins : Scry.OriginMap := Scry.Cs.originMapOf repoKept\n" ++
-    "def repoProgram : Scry.ProgramResult := Scry.analyze (Wil.program repoFuncs) repoPack\n" ++
+    "def repoProgram : Scry.ProgramResult := Scry.analyzeC (Scry.Cs.resolveCalls (Wil.program repoFuncs)) repoPack\n" ++
     "def repoFindings : List Scry.Cs.FindingRow := Scry.Cs.findingRows repoOrigins (Scry.programFindings repoProgram)\n" ++
     "def repoDiags : List Scry.Cs.CoverRow := Scry.Cs.coverageOfDiags (List.map (Scry.Cs.diagOfMem repoOrigins) repoProgram.warnings)\n" ++
     "def repoReport : Scry.Cs.Report := Scry.Cs.reportOf \"scry/corpus/csharp/repo\" \"directory\" repoWalk repoKept (.some \"scry/corpus/csharp/csharp.scry\") (List.length repoPack.rules) repoFindings repoDiags\n")
@@ -502,6 +524,14 @@ def group : Group where
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-unsafe"
         checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-117, an entry parameter reaches a log sink (log-injection)",
+      run := fun _ => do
+        let fs ← taintFindingsEntry "cwe117-log-unsafe"
+        checkEq ["log-injection Fixtures.Logger.Record ILogger.LogWarning arg 2"] fs },
+    { name := "taint: CWE-117 safe twin logs a constant, so there is no finding",
+      run := fun _ => do
+        let fs ← taintFindingsEntry "cwe117-log-safe"
+        checkEq ([] : List String) fs },
     { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-safe"

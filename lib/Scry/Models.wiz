@@ -25,9 +25,10 @@ The model table has three kinds of entry:
 * **CLR (C#)** — the C# frontend emits CLR spellings (`Namespace.Type.Method`,
   `T[].get_Item`), so the same table carries the BCL reads it lowers to: any property
   getter, array/string lengths and element reads, `String` operations, LINQ projections,
-  ASP.NET Core minimal-API registration calls, `TypedResults`/`Results` factories, and
-  `Console.ReadLine` as a source. Writes through a receiver or an argument, constructors
-  and `Dispose` are deliberately not modelled. See "CLR (C#) models" below.
+  ASP.NET Core minimal-API registration calls, `TypedResults`/`Results` factories,
+  `Console.ReadLine` and the HTTP request accessors as sources, and `ILogger.Log*` as a
+  log-line sink (CWE-117). Writes through a receiver or an argument, constructors and
+  `Dispose` are deliberately not modelled. See "CLR (C#) models" below.
 
 ## Effects
 
@@ -76,30 +77,42 @@ inductive Scry.SinkClass where
   | length
   /-- An allocation size (`malloc`, `calloc`, `realloc`). -/
   | size
+  /-- A log line written to a file (a log-injection sink, CWE-117). -/
+  | log
 
 def Scry.SinkClass.show : Scry.SinkClass → String
   | .command => "command"
   | .format => "format"
   | .length => "length"
   | .size => "size"
+  | .log => "log"
 
 def Scry.SinkClass.ruleId : Scry.SinkClass → String
   | .command => "command-injection"
   | .format => "format-string"
   | .length => "buffer-overflow"
   | .size => "integer-overflow"
+  | .log => "log-injection"
+
+/-- Is this sink a log-line write? An integer written into a log line cannot forge a
+record, so the model adds log sinks only for pointer-like (string/object) arguments. -/
+def Scry.SinkClass.isLog : Scry.SinkClass → Bool
+  | .log => .true
+  | _ => .false
 
 def Scry.SinkClass.severity : Scry.SinkClass → Scry.Severity
   | .command => .error
   | .format => .warning
   | .length => .warning
   | .size => .warning
+  | .log => .warning
 
 def Scry.SinkClass.message : Scry.SinkClass → String
   | .command => "Attacker-controlled data reaches a command interpreter"
   | .format => "Attacker-controlled data is used as a format string"
   | .length => "Attacker-controlled length reaches a copy or read; the destination can overflow"
   | .size => "Attacker-controlled value reaches an allocation size; the size may overflow or exhaust memory"
+  | .log => "Attacker-controlled data reaches a log line written to a file"
 
 /-- One effect of an external call. `ArgRef` is the rule pack's `result`/`arg K`
 selector, so a model and a pack line mean the same thing. -/
@@ -541,6 +554,10 @@ def Scry.policyModels : List Scry.FnModel :=
 --   buffer): its memory effect is unknown, so the explicit `unmodelled-external`
 --   warning stays. A `copy` model into an unknown `Loc` would taint every later load
 --   through an unknown pointer — more false positives, not more soundness.
+-- * a **log write** is the exception among writes: `ILogger.Log*` has no memory effect
+--   the points-to model can name, but its data arguments reach a file, so they are a
+--   `sink` (`SinkClass.log`, CWE-117). Only pointer-like arguments are sinks; an integer
+--   length cannot forge a log line.
 -- * a constructor (`Type..ctor`): it writes the object it returns; `gen` already taints
 --   that object from the arguments, and a `copy` effect would land in `Loc.unknown`.
 -- * `Dispose`: `free` would claim the managed object dies; a `using` block's `Dispose`
@@ -700,9 +717,61 @@ def Scry.clrSourceReadLine : Scry.FnModel :=
     (List.cons (.source .result) .nil)
     "stdin text is attacker-controlled"
 
+/-- A CLR request read: the result is supplied by the caller (an HTTP request), so it is
+attacker-controlled. The property getters would otherwise be modelled as ordinary reads;
+an exact source entry wins over the shape rule. `?.` is the spelling the lowering emits
+when it cannot resolve the receiver's type (`ctx.Request.Headers`). -/
+def Scry.clrSource (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-source" (List.cons (.source .result) .nil)
+    "the HTTP request value is attacker-controlled"
+
+def Scry.clrHttpSourceNames : List String :=
+  [ "Microsoft.AspNetCore.Http.HttpRequest.get_Body", "HttpRequest.get_Body", "?.get_Body"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_ContentType", "HttpRequest.get_ContentType", "?.get_ContentType"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Query", "HttpRequest.get_Query", "?.get_Query"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Form", "HttpRequest.get_Form", "?.get_Form"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Headers", "HttpRequest.get_Headers", "?.get_Headers"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Cookies", "HttpRequest.get_Cookies", "?.get_Cookies"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_RouteValues", "HttpRequest.get_RouteValues", "?.get_RouteValues"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_Path", "HttpRequest.get_Path", "?.get_Path"
+  , "Microsoft.AspNetCore.Http.HttpRequest.get_QueryString", "HttpRequest.get_QueryString", "?.get_QueryString"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFormAsync", "HttpRequest.ReadFormAsync", "?.ReadFormAsync"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFromJsonAsync", "HttpRequest.ReadFromJsonAsync", "?.ReadFromJsonAsync"
+  , "Microsoft.AspNetCore.Http.HttpRequest.ReadFromJson", "HttpRequest.ReadFromJson", "?.ReadFromJson"
+  ]
+
+def Scry.clrHttpSources : List Scry.FnModel :=
+  List.map Scry.clrSource Scry.clrHttpSourceNames
+
+/-- A log write: the formatted line is written to the configured sink. The receiver
+(argument 0) and the variadic data arguments (1–8) are covered; a data argument from a
+request is a CWE-117 sink. The receiver is deliberately not a sink, so a tainted logger
+object does not fire on its own. -/
+def Scry.clrLog (name : String) : Scry.FnModel :=
+  Scry.FnModel.mk name "clr-log"
+    (Scry.modelFlat (fun k => List.cons (.sink k .log) .nil) (Scry.modelRangeFrom 8 1))
+    "writes its message and variadic data arguments (1–8) to the configured log sink (a file)"
+
+def Scry.clrLogNames : List String :=
+  [ "ILogger.LogTrace", "ILogger.LogDebug", "ILogger.LogInformation"
+  , "ILogger.LogWarning", "ILogger.LogError", "ILogger.LogCritical"
+  , "?.LogTrace", "?.LogDebug", "?.LogInformation"
+  , "?.LogWarning", "?.LogError", "?.LogCritical"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogTrace"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogDebug"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogInformation"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogWarning"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogError"
+  , "Microsoft.Extensions.Logging.LoggerExtensions.LogCritical"
+  ]
+
+def Scry.clrLogModels : List Scry.FnModel :=
+  List.map Scry.clrLog Scry.clrLogNames
+
 def Scry.clrModels : List Scry.FnModel :=
-  List.cons Scry.clrSourceReadLine (List.cons Scry.clrAllocArrayNew
-    (List.map Scry.clrRead Scry.clrReadNames))
+  List.append Scry.clrHttpSources (List.append Scry.clrLogModels
+    (List.cons Scry.clrSourceReadLine (List.cons Scry.clrAllocArrayNew
+      (List.map Scry.clrRead Scry.clrReadNames))))
 
 /-- A CLR model by exact name, then by the shape rules (property getter, object-protocol
 member, ASP.NET fluent registration, `TypedResults`/`Results` factory). The shape rules
@@ -813,7 +882,7 @@ def Scry.RulePack.trustsSanitiser (p : Scry.RulePack) (name : String) : Bool :=
 -- ## Model rules
 
 def Scry.modelSinkClasses : List Scry.SinkClass :=
-  [ .command, .format, .length, .size ]
+  [ .command, .format, .length, .size, .log ]
 
 def Scry.modelRule (c : Scry.SinkClass) : Scry.PackRule :=
   .taint (Scry.TaintRule.mk (Scry.SinkClass.ruleId c) (Scry.SinkClass.severity c)
