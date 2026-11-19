@@ -152,3 +152,44 @@ delete, stale and unique rejection, reopen, the page-read counts, and the group 
 `lib/Json` (see `bench/README.md`). `Quire.wiz` also has `compactQ`: the live records and
 recomputed indices are written to a fresh image and renamed over the path, which is what
 reclaims a never-reuse file.
+
+(no map materialisation, no index rebuild). `QuireCursor.wiz` is the page-backed query
+plan: `indexOnlyRange`/`indexCursorRange`/`indexNodesRange`, `filterKey`/`filterOnNode`
+pushdown, `fold`/`foldUntil`, and `Cost.pages` (the mapped pages touched).
+`QuireTest.wiz` covers a batched seed, an update through the lens, a delete, stale and
+unique rejection, reopen, and the page-read counts. `test-quire.sh` checks and runs it;
+`bench/` is the findings-store benchmark against `lib/Json` (see `bench/README.md`).
+`Quire.wiz` also has `compactQ`: the live records and recomputed indices are written to
+a fresh image and renamed over the path, which is what reclaims a never-reuse file.
+
+## The crash matrix (real `SIGKILL`, not a truncated copy)
+
+`crash-matrix.sh` is one heavy job. It builds `CrashHarness.wiz` with the train7
+compiler, loads `crash_shim.so` into the writer, and has the shim `kill(getpid(),
+SIGKILL)` at the checkpoint named by `QUIRE_CRASH`; the checker then runs as a
+fresh process. The engine is unchanged: the same `Durable.wiz`/`Compact.wiz`
+code writes the file.
+
+The commit points are `before-pages`, `during-page` (half a data page then
+death), `after-pages` (at `fdatasync` entry), `after-fdatasync`, `torn-meta`
+(half a 96-byte slot then death), `after-meta-write` (slot written, before
+`fsync`), `after-fsync`, and `torn-page-published` (a page with one stale byte
+under a complete, fsynced meta). The compaction points are
+`compact-during-temp`, `compact-torn-temp`, `compact-before-temp-fsync`,
+`compact-after-temp-fsync`, `compact-before-rename`, `compact-after-rename`
+(the documented hole: the rename is visible, the directory `fsync` has not run),
+and `compact-after-dir-fsync`.
+
+Every row asserts the same contract: the old committed generation is readable;
+`count = gen - 1`, so a mixed state cannot pass; every retained root loads
+through the durable loader; the next commit succeeds, is at the expected
+generation, and survives a reopen; a leftover `.compact` file is ignored and
+removed. `torn-page-published` is the `genFloor`/`page_count` row: recovery
+falls back to generation 2, and the next commit is generation 4, never the torn
+generation 3.
+
+A `kill -9` leaves page-cache bytes visible, so `after-meta-write` already opens
+as the new state: that row distinguishes process death from power loss, which
+this matrix does **not** simulate. Nor does it simulate filesystem reordering
+between the two `fsync`s (the protocol's ordering argument is the design note's
+§4.1); the first `fdatasync` is the only barrier the shim can observe.
