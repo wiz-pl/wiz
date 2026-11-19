@@ -13,6 +13,7 @@ report is `wiz-notes/scry-prover-dogfood.md`.
 | `p2-sqlcommand.sh` | `real/SqlReportProvider.cs` (`ReportService.Provider…FetchRrnsAsync`) | no caller-supplied value reaches a `SqlCommand`'s text | **refused**: `mload` (2 loads at the `SqlCommand` point) |
 | `p3-header-processor.sh` | `real/CommunicationsWebhookEndpoints.cs` (`Crux.Api.Endpoints…SendGridMarketingWebhook`) | an unvalidated header value does not reach the webhook processor | `ok`, invariant 10 rows |
 | `p3b-logpath.sh` | `real/LogFileReader.cs` (`Crux.Dashboard.Api…Resolve`) | no request-supplied name reaches a filesystem handle | **refused**: `mtainted` (a tainted location seed) |
+| `p6-modern-store.sh` | `cwe78-modern-unsafe.cs` (`Crux.Api.Endpoints…ReportEndpoints.Run`) | the P1 claim on the modern C# twin | **refused**: `mstore`, although the analysis finds it (`FINDINGS=1`) |
 | `p4-process-unsafe.sh` | `cwe78-process-unsafe.cs` | the P1 claim on the unsafe twin | **rejected**, `tainted(9,9) -> flow(9,10,9) -> sink(10,1,9)` |
 | `p5-helper-safe.sh` | `helper/Files.cs` (`SafeWrite`) | no header value reaches the file write | `ok`, invariant 3 rows |
 | `p5b-helper-unsafe.sh` | `helper/Files.cs` (`UnsafeWrite`) | the same claim on the unsafe twin | **rejected**, `tainted(6,7) -> flow(6,8,7) -> sink(8,0,7)` |

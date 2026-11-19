@@ -36,6 +36,7 @@ run p2-sqlcommand && expect p2-sqlcommand '^REASON[[:space:]]+rejected: .*mload.
 run p3-header-processor && expect p3-header-processor '^VERDICT[[:space:]]+ok$' \
   && expect p3-header-processor '^ROWS[[:space:]]+10$'
 run p3b-logpath && expect p3b-logpath '^REASON[[:space:]]+rejected: .*mtainted.*memory rules are not covered'
+run p6-modern-store && expect p6-modern-store '^REASON[[:space:]]+rejected: .*mstore.*memory rules are not covered'
 run p4-process-unsafe && expect p4-process-unsafe '^VERDICT[[:space:]]+rejected:' \
   && expect p4-process-unsafe 'path tainted\([0-9]+,[0-9]+\) -> flow\([0-9]+,[0-9]+,[0-9]+\) -> sink\([0-9]+,[0-9]+,[0-9]+\)'
 run p5-helper-safe && expect p5-helper-safe '^VERDICT[[:space:]]+ok$' \
