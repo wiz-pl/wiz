@@ -1,0 +1,407 @@
+import Sys
+import Word
+import Text
+import Json
+import Scry.Workflow
+import Storage
+import Durable
+import FindingsQuire
+/-!
+# The `scry findings` store on Quire: a runnable prototype
+
+`wiz run drafts/scry-quire/FindingsQuireTest.wiz` (compiled: the file natives do not run
+under `#eval`). It exercises the workflow store through `Durable.wiz` and measures the
+same operations on the JSON path, printing deterministic **counts** (bytes, pages,
+records, cursor costs) rather than wall-clock time:
+
+* **batch** — a scan that creates `N` findings in one commit, as `scry findings scan`
+  does (it accumulates every file and saves once);
+* **incremental** — `N` creates, one commit each (the worst case, not what a scan does);
+* **reopen** — close, open again, count the table;
+* **query** — by rule and by state through the index cursor, plus rule-and-state; both
+  the match count and the cursor `Cost` (index entries / primary reads);
+* **stale writer** — a triage `set` from a snapshot another triage has superseded is
+  rejected (`conflict`), and a transaction that began before a `forget` (a Quire delete)
+  is rejected by the delete epoch (`stale`);
+* **JSON** — the same `N` findings written by `Scry.wfStoreText` (the real
+  `findings.json`) and as an index-only JSON array, with the bytes written, the final
+  size, the bytes read on reopen, and the records a state query examines.
+
+The counts are the evidence; timings are left to a perf window.
+-/
+
+-- ## Helpers
+
+def expect (what : String) (b : Bool) : EIO Unit :=
+  match b with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+partial def rangeGo (fuel : Nat) (n : Nat) : List Nat :=
+  match fuel with
+  | .zero => []
+  | .succ k => List.cons n (rangeGo k (Nat.succ n))
+
+def range (n : Nat) : List Nat := rangeGo n 0
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def rejectKind (o : Outcome) : String :=
+  match o with
+  | .committed _ => "committed"
+  | .rejected e => match e with
+    | .conflict _ _ _ => "conflict"
+    | .stale _ _ => "stale"
+    | .missing _ => "missing"
+    | .duplicate _ _ => "duplicate"
+    | .expired _ _ => "expired"
+
+def fileBytes (p : String) : EIO Nat := do
+  st ← FS.stat p;
+  EIO.pure st.size
+
+def ceilDiv (a b : Nat) : Nat := Nat.div (Nat.add a (Nat.sub b 1)) b
+
+/-- `ceilDiv j 127` summed over `j = lo … hi` (the chain lengths of the last `K` roots). -/
+partial def chainSumGo (j hi acc : Nat) : Nat :=
+  match Nat.lt hi j with
+  | .true => acc
+  | .false => chainSumGo (Nat.succ j) hi (Nat.add acc (ceilDiv j 127))
+
+def chainSum (lo hi : Nat) : Nat := chainSumGo lo hi 0
+
+-- ## The fixture: `N` findings with 4 rules, 5 states, 8 files
+
+def stateOf (i : Nat) : Scry.WfState :=
+  match Nat.mod i 5 with
+  | 0 => .new
+  | 1 => .triaged
+  | 2 => .confirmed
+  | 3 => .falsePositive
+  | _ => .fixed
+
+def ruleOf (i : Nat) : String :=
+  match Nat.mod i 4 with
+  | 0 => "command-injection"
+  | 1 => "format-string"
+  | 2 => "buffer-overflow"
+  | _ => "path-traversal"
+
+def fileOf (i : Nat) : String :=
+  String.append "src/mod" (String.append (Nat.repr (Nat.mod i 8)) ".c")
+
+def fidOf (i : Nat) : String :=
+  String.append "f_" (Scry.wfHex (Scry.wfFnv (String.append "finding " (Nat.repr i))))
+
+def findingOf (i : Nat) : Findings.Finding :=
+  Findings.Finding.mk (fidOf i) (U32.ofNat (Nat.mod i 4))
+    (Findings.stateId (Scry.WfState.show (stateOf i))) (U64.ofNat (Nat.mod i 8)) (U64.ofNat i)
+
+def findings (n : Nat) : List Findings.Finding := List.map findingOf (range n)
+
+/-- A representative finding blob: the shape `static.json`/`finding.json` carry, so the
+JSON baseline's size is realistic rather than a list of ids. -/
+def findingJson (i : Nat) : Json :=
+  let fn := String.append "handler_" (Nat.repr i);
+  let loc := fun (line : Nat) => Json.mkObj
+    [ ("file", Json.mkStr (fileOf i))
+    , ("line", Json.ofNat line)
+    , ("column", Json.ofNat (Nat.mod i 40)) ];
+  let step := fun (kind : String) (line : Nat) => Json.mkObj
+    [ ("kind", Json.mkStr kind)
+    , ("function", Json.mkStr fn)
+    , ("point", Json.ofNat line)
+    , ("var", Json.ofNat i)
+    , ("location", loc line) ];
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-taint-finding/1")
+    , ("rule", Json.mkStr (ruleOf i))
+    , ("severity", Json.mkStr "error")
+    , ("message", Json.mkStr "attacker-controlled value reaches a sink")
+    , ("function", Json.mkStr fn)
+    , ("sink", Json.ofNat (Nat.add 100 i))
+    , ("callee", Json.mkStr "system")
+    , ("argument", Json.ofNat 0)
+    , ("checked", Json.mkBool .true)
+    , ("path", Json.mkArr
+        [ step "source" (Nat.add 10 i)
+        , step "flow" (Nat.add 11 i)
+        , step "flow" (Nat.add 12 i)
+        , step "sink" (Nat.add 13 i) ]) ]
+
+def recordOf (i : Nat) : Scry.WfRecord :=
+  let st := stateOf i;
+  let id := fidOf i;
+  Scry.WfRecord.mk id
+    (String.append "key " id) (Scry.wfHex (Scry.wfFnv (String.append "line " id)))
+    st [Scry.WfHistory.mk st 0 "scry" "first seen by scry findings scan"]
+    (fileOf i) Option.none .false (findingJson i)
+    (String.append "scry-workflow/" id)
+    (Option.some "static.json") Option.none Option.none
+    (Option.some Scry.wfScanCandidate) (Option.some "candidate.json")
+    0 (Nat.succ i)
+
+-- ## The JSON baselines
+
+/-- Append the records to a `findings.json` the way `wfSaveStore` does: render the whole
+store and truncate/rewrite the file. -/
+partial def jsonFullAppendGo (path : String) (st : Scry.WfStore) (total : Nat)
+    : List Nat → EIO Nat
+  | .nil => EIO.pure total
+  | .cons i rest => do
+    let st' := Scry.wfUpsert st (recordOf i);
+    let text := Scry.wfStoreText st';
+    FS.writeFile path text;
+    jsonFullAppendGo path st' (Nat.add total (String.length text)) rest
+
+def jsonFullAppend (path : String) (n : Nat) : EIO Nat :=
+  jsonFullAppendGo path Scry.wfEmptyStore 0 (range n)
+
+/-- The index-only JSON that a Quire table replaces: `{id, rule, state, file, line}` per
+finding (no blob; the blob is in the artifact directory). Rewritten whole each time,
+because that is what the current store does. -/
+def jsonIndexRecord (i : Nat) : Json := Json.mkObj
+  [ ("id", Json.mkStr (fidOf i))
+  , ("rule", Json.mkStr (ruleOf i))
+  , ("state", Json.mkStr (Scry.WfState.show (stateOf i)))
+  , ("file", Json.mkStr (fileOf i))
+  , ("line", Json.ofNat i) ]
+
+partial def jsonIndexAppendGo (path : String) (total : Nat) : List Nat → EIO Nat
+  | .nil => EIO.pure total
+  | .cons i rest => do
+    let text := String.append
+      (Json.render (Json.mkObj
+        [ ("schema", Json.mkStr "scry-findings-index/1")
+        , ("findings", Json.mkArr (List.map jsonIndexRecord (range (Nat.succ i)))) ]))
+      "\n";
+    FS.writeFile path text;
+    jsonIndexAppendGo path (Nat.add total (String.length text)) rest
+
+def jsonIndexAppend (path : String) (n : Nat) : EIO Nat :=
+  jsonIndexAppendGo path 0 (range n)
+
+/-- What a reopen measured: records, bytes read, and a state query's matches/examined. -/
+structure Reopen where
+  records : Nat
+  bytes : Nat
+  matches : Nat
+  examined : Nat
+
+/-- Reopen the real `findings.json`: read it all, parse it all, filter N records. -/
+def jsonFullReopen (path : String) (stateName : String) : EIO Reopen := do
+  text ← FS.readFile path;
+  let bytes := String.length text;
+  match Scry.wfStoreOfText text with
+  | .error e => EIO.fail e
+  | .ok st =>
+    EIO.pure (Reopen.mk (List.length st.findings) bytes
+      (List.length (List.filter
+        (fun r => String.eq (Scry.WfState.show r.state) stateName) st.findings))
+      (List.length st.findings))
+
+/-- Reopen the index-only JSON the same way. -/
+def jsonIndexReopen (path : String) (stateName : String) : EIO Reopen := do
+  text ← FS.readFile path;
+  let bytes := String.length text;
+  match Json.parse text with
+  | .error e => EIO.fail e
+  | .ok j =>
+    let rs := Json.getList j "findings";
+    EIO.pure (Reopen.mk (List.length rs) bytes
+      (List.length (List.filter (fun r => String.eq (Json.getStr r "state") stateName) rs))
+      (List.length rs))
+
+-- ## The Quire store
+
+/-- The batch scan: `N` creates in one commit. Returns the committed generation. -/
+def quireBatch (path : String) (n : Nat) : EIO Nat := do
+  h ← openDbWith path Findings.indices 8;
+  s0 ← getDb h;
+  o ← putDb h (Findings.createAll (findings n) s0);
+  expect "batch commit" (succeeded o);
+  s1 ← getDb h;
+  expect "batch table size" (Nat.beq (Findings.tableCount s1).1 n);
+  closeDb h;
+  EIO.pure s1.gen.toNat
+
+/-- `N` creates, one commit each; pages written (data + registry) and the file size
+before and after the offline compaction. -/
+partial def quireIncrementalGo (h : Handle) (pages : Nat) : List Nat → EIO Nat
+  | .nil => EIO.pure pages
+  | .cons i rest => do
+    s ← getDb h;
+    o ← putDb h (Findings.create (findingOf i) s);
+    expect "incremental commit" (succeeded o);
+    -- The commit writes the whole map's chain (ceil(records/127) pages) and one
+    -- registry page; the 96-byte meta slot is written in place and not counted.
+    quireIncrementalGo h (Nat.add pages (Nat.add (ceilDiv (Nat.succ i) 127) 1)) rest
+
+def quireIncremental (path : String) (n : Nat) : EIO (Nat × Nat) := do
+  h ← openDbWith path Findings.indices 8;
+  pages ← quireIncrementalGo h 0 (range n);
+  before ← fileBytes path;
+  closeDb h;
+  EIO.pure (pages, before)
+
+/-- What one reopened store's queries returned. -/
+structure QueryResult where
+  ruleN : Nat
+  ruleCost : Cost
+  stateN : Nat
+  stateCost : Cost
+  ruleStateN : Nat
+  ruleStateCost : Cost
+  tableCost : Cost
+
+/-- Query the reopened store by rule, by state, and by rule-and-state. -/
+def quireQuery (path : String) (rule state : Nat) : EIO QueryResult := do
+  h ← openDb path Findings.indices;
+  s ← getDb h;
+  let r := Findings.count (Findings.ruleCursor (U32.ofNat rule) s);
+  let st := Findings.count (Findings.stateCursor (U32.ofNat state) s);
+  let rs := Findings.count (Findings.ruleStateCursor (U32.ofNat rule) (U32.ofNat state) s);
+  let tbl := Findings.tableCount s;
+  closeDb h;
+  EIO.pure (QueryResult.mk r.1 r.2 st.1 st.2 rs.1 rs.2 tbl.2)
+
+/-- What the stale-writer scenario observed. -/
+structure StaleResult where
+  staleSet : String
+  staleEpoch : String
+  deleted : Bool
+  state0 : U32
+
+/-- Triage from a snapshot another triage has superseded, then from a snapshot that began
+before a `forget` (a Quire delete). -/
+def quireStale (path : String) : EIO StaleResult := do
+  h ← openDbWith path Findings.indices 8;
+  s0 ← getDb h;
+  oSeed ← putDb h (Findings.createAll (findings 4) s0);
+  expect "stale seed" (succeeded oSeed);
+  base ← getDb h;
+  let id0 := (findingOf 0).key;
+  let id1 := (findingOf 1).key;
+  let txA := match Findings.setState id0 Findings.stateConfirmed base with
+    | .some t => t
+    | .none => base;
+  oA ← putDb h txA;
+  expect "first triage commits" (succeeded oA);
+  -- The second triage uses the same base; the key's version moved.
+  let txB := match Findings.setState id0 Findings.stateFalsePositive base with
+    | .some t => t
+    | .none => base;
+  oB ← putDb h txB;
+  -- A transaction that began before a delete (forget finding 1).
+  sD ← getDb h;
+  oDel ← putDb h (Findings.forget id1 sD);
+  expect "forget commits" (succeeded oDel);
+  let txOld := match Findings.setState id0 Findings.stateFixed sD with
+    | .some t => t
+    | .none => sD;
+  oOld ← putDb h txOld;
+  closeDb h;
+  -- The committed triage and the delete are durable.
+  h2 ← openDb path Findings.indices;
+  s2 ← getDb h2;
+  let del := match Snapshot.getNode s2 id1 with
+    | .some _ => .false
+    | .none => .true;
+  let st0 := match Snapshot.getNode s2 id0 with
+    | .some n => n.label
+    | .none => U32.ofNat 99;
+  closeDb h2;
+  EIO.pure (StaleResult.mk (rejectKind oB) (rejectKind oOld) del st0)
+
+-- ## The run
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  say (String.append "scry-quire: in " dir);
+  let n := 500;
+  let qBatch := Path.join dir "findings.quire";
+  let qInc := Path.join dir "findings-inc.quire";
+  let qStale := Path.join dir "findings-stale.quire";
+  let jFull := Path.join dir "findings.json";
+  let jIndex := Path.join dir "findings-index.json";
+  let rule := 1;
+  let state := 2;
+
+  -- 1. the Quire batch commit (a scan)
+  g ← quireBatch qBatch n;
+  szBatch ← fileBytes qBatch;
+  say (String.append "quire.batch.records " (Nat.repr n));
+  say (String.append "quire.batch.gen " (Nat.repr g));
+  say (String.append "quire.batch.pagesWritten " (Nat.repr (Nat.add (ceilDiv n 127) 1)));
+  say (String.append "quire.batch.bytesWritten "
+    (Nat.repr (Nat.mul (Nat.add (ceilDiv n 127) 1) 4096)));
+  say (String.append "quire.batch.fileBytes " (Nat.repr szBatch));
+  say (String.append "quire.batch.pages " (Nat.repr (Nat.div (Nat.add szBatch 4095) 4096)));
+
+  -- 2. the Quire incremental path
+  inc ← quireIncremental qInc n;
+  szInc ← fileBytes qInc;
+  -- After compaction the file is the newest K roots' chains + 2 meta slots + 1
+  -- registry page. K = 8 (the default); the arithmetic is exact for this fixture.
+  let compactPages := Nat.add (Nat.add 2 (chainSum (Nat.sub n 7) n)) 1;
+  say (String.append "quire.inc.commits " (Nat.repr n));
+  say (String.append "quire.inc.pagesWritten " (Nat.repr inc.1));
+  say (String.append "quire.inc.bytesWritten " (Nat.repr (Nat.mul inc.1 4096)));
+  say (String.append "quire.inc.fileBytesBeforeCompact " (Nat.repr inc.2));
+  say (String.append "quire.inc.fileBytesAfterCompactEstimate "
+    (Nat.repr (Nat.mul compactPages 4096)));
+  say (String.append "quire.inc.fileBytesReopened " (Nat.repr szInc));
+
+  -- 3. reopen and query (the batch store)
+  qr ← quireQuery qBatch rule state;
+  expect "rule query count" (Nat.beq qr.ruleN (Nat.div n 4));
+  expect "state query count" (Nat.beq qr.stateN (Nat.div n 5));
+  expect "rule-and-state count" (Nat.beq qr.ruleStateN 25);
+  say (String.append "quire.query.rule.matches " (Nat.repr qr.ruleN));
+  say (String.append "quire.query.rule.cost " (Cost.show qr.ruleCost));
+  say (String.append "quire.query.state.matches " (Nat.repr qr.stateN));
+  say (String.append "quire.query.state.cost " (Cost.show qr.stateCost));
+  say (String.append "quire.query.ruleState.matches " (Nat.repr qr.ruleStateN));
+  say (String.append "quire.query.ruleState.cost " (Cost.show qr.ruleStateCost));
+  say (String.append "quire.query.table.cost " (Cost.show qr.tableCost));
+  let chainPages := ceilDiv n 127;
+  let reopenBytes := Nat.add (Nat.mul 2 96) (Nat.mul (Nat.add chainPages 1) 4096);
+  say (String.append "quire.reopen.records " (Nat.repr n));
+  say (String.append "quire.reopen.bytesRead " (Nat.repr reopenBytes));
+
+  -- 4. the stale writer and the delete epoch
+  sr ← quireStale qStale;
+  expect "a superseded triage is a conflict" (String.eq sr.staleSet "conflict");
+  expect "a transaction begun before a delete is stale" (String.eq sr.staleEpoch "stale");
+  expect "the forget is durable" sr.deleted;
+  expect "the committed triage survives" (Nat.beq sr.state0.toNat 2);
+  say (String.append "quire.stale.set " sr.staleSet);
+  say (String.append "quire.stale.epoch " sr.staleEpoch);
+  say (String.append "quire.stale.deletedAfterReopen " (Bool.show sr.deleted));
+  say (String.append "quire.stale.stateAfterReopen " (Findings.stateShow sr.state0));
+
+  -- 5. the JSON baselines
+  jfTotal ← jsonFullAppend jFull n;
+  jfSize ← fileBytes jFull;
+  jfr ← jsonFullReopen jFull "confirmed";
+  say (String.append "json.full.bytesWritten " (Nat.repr jfTotal));
+  say (String.append "json.full.fileBytes " (Nat.repr jfSize));
+  say (String.append "json.full.reopenBytes " (Nat.repr jfr.bytes));
+  say (String.append "json.full.queryExamined " (Nat.repr jfr.examined));
+  say (String.append "json.full.queryMatches " (Nat.repr jfr.matches));
+  jiTotal ← jsonIndexAppend jIndex n;
+  jiSize ← fileBytes jIndex;
+  jir ← jsonIndexReopen jIndex "confirmed";
+  say (String.append "json.index.bytesWritten " (Nat.repr jiTotal));
+  say (String.append "json.index.fileBytes " (Nat.repr jiSize));
+  say (String.append "json.index.reopenBytes " (Nat.repr jir.bytes));
+  say (String.append "json.index.queryExamined " (Nat.repr jir.examined));
+  say (String.append "json.index.queryMatches " (Nat.repr jir.matches));
+
+  FS.removeAll dir;
+  say "scry-quire: all checks passed")
