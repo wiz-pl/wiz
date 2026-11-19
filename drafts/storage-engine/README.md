@@ -7,14 +7,14 @@ staged plan, extended with the pieces slice 4 needs: a plan-backed cursor (fusin
 `follow`, and read-count shape checks (`indexTraversal`/`indexNodes`, `Cursor.follow`,
 `fold`/`foldUntil`, the rejection cases).
 
-Checked with a shipped `wiz` (no build needed; the pure half imports only `lib/`):
+Checked with a shipped `wiz` (no build needed; the pure half imports `lib/` and the shared `drafts/optics/Traversal.wiz`):
 
 ```text
-wiz check -I drafts/storage-engine drafts/storage-engine/Core.wiz
-wiz check -I drafts/storage-engine drafts/storage-engine/Cursor.wiz
-wiz check -I drafts/storage-engine drafts/storage-engine/Storage.wiz
-wiz check -I drafts/storage-engine drafts/storage-engine/StorageCursor.wiz
-wiz check -I drafts/storage-engine drafts/storage-engine/Tests.wiz
+wiz check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/Core.wiz
+wiz check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/Cursor.wiz
+wiz check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/Storage.wiz
+wiz check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/StorageCursor.wiz
+wiz check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/Tests.wiz
 ```
 
 `CursorReject.wiz` and `CursorRecursive.wiz` are expected to **fail**: they are the
@@ -27,7 +27,7 @@ files and in the note.
 |---|---|
 | `Core.wiz` | `Node` (+ `field`/`beq`), `Cost` (the read-path counter), `Entry`, `KeyRange`/`KeyPred`, `Source`, `Projection`, `Rerange` (the pushdown hook) |
 | `Cursor.wiz` | the linear `Cursor`/`Step`/`Control` over a `Plan`; `next`/`close`, `fold`/`foldUntil` (and `…With` cost variants), `map`/`filter`/`filterMap`, `first`/`firstWith`, `filterKey`/`filterOnNode` pushdown, `followKeys`, `info`/`Info.show` |
-| `Storage.wiz` | `Patch`/`WriteSet`, `Root`/`Snapshot`, `Snapshot.fetch` (the counted read), `nodeAt`/`nodeOr`, `PLens.over`, `IndexDef`, `IndexFact`/`IndexDelta` (facts and tombstones), `Root.rebuildIndex`, `Traversal`/`indexTraversal`, `Db.commit` and validation |
+| `Storage.wiz` | `Patch`/`WriteSet`, `Root`/`Snapshot`, `Snapshot.fetch` (the counted read), `nodeAt`/`nodeOr`, `IndexDef`, `IndexFact`/`IndexDelta` (facts and tombstones), `Root.rebuildIndex`, `indexTraversal`, `Db.commit` and validation; `PLens.over` and `Traversal` come from `drafts/optics/Traversal.wiz` |
 | `StorageCursor.wiz` | `tableCursor`, `indexCursor` (primary keys), `indexOnlyRange`/`indexOnlyWhere` (the indexed field, no node), `Cursor.follow`, `indexNodes`, `filterOnNode` |
 | `Tests.wiz` | the `#eval` cases (recording, commits/validation, index deltas, scans, early exit, and the plan: fusion, index-only, pushdown equivalence, read counts) |
 | `CursorReject.wiz` | the four rejected cursor programs (expected errors) |
@@ -40,8 +40,10 @@ backward function records one `Patch` into the snapshot's write-set, so `Lens.ov
 and `PLens.over` produce the diff *as they run*. `Lens.comp` composes the backward
 functions, so a deep path records one record-level patch at the outer lens. There is
 no second pass and no diff of the maps. This is the store encoding in
-`lib/Optic.wiz`, **not** profunctor optics: there is no `Strong`/`Wandering`, and the
-note's new `Traversal` is engine-local.
+`lib/Optic.wiz`, **not** profunctor optics. The pure `Traversal` and `PLens.over` are
+shared with `drafts/optics/Traversal.wiz`; the profunctor reading of the same index
+bucket (with a `Writer` interpretation that records the write-set in one pass) is in
+`drafts/optics/EngineIndex.wiz`.
 
 ## Indices
 
