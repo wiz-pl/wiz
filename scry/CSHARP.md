@@ -431,8 +431,8 @@ and ignored.
 
 ### 7.7 What runs today
 
-There is **no command on this branch that analyses a directory of `.cs` files**. C# is
-not wired into `scry taint`; `scry parse --stats` reads a spill. Two things exist:
+Two commands exist for a tree of C# (the driver landed in §8; this section's numbers were
+taken with the first):
 
 ```
 # 1. the measurement harness (this section's numbers; needs the native grammar)
@@ -446,10 +446,9 @@ cd .. && CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh DIR
 ./.lake/build/bin/tests '=scry-csharp'
 ```
 
-A `scry cs PATH` driver (`scry/src/Scry/CsCmd.wiz`, which walks a directory,
-`.csproj` or `.sln`, prints per-file coverage rows and exits 3 when nothing could be
-analysed) is being added on the sibling branch `agent/cs-driver`; it is not part of
-this branch.
+`scry cs PATH` (§8) is the directory/project/solution driver: it walks the tree, prints
+per-file coverage rows and exits 3 when nothing could be analysed. `cs-externals`
+(§9.1) is the measurement tool for the `unmodelled-external` frequency table.
 
 ### 7.8 Non-ASCII text: byte spans, character columns
 
@@ -574,10 +573,10 @@ grammar-gap reproducers `KeywordIdentifier.cs` and `SlicePattern.cs` now parse �
 and five excluded paths (`bin/`, `obj/`, `node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda
 and a `from … where … select` query: the lambda is still an opaque `fnptr` (its own
 warning), while the query lowers to `System.Int32[].get_Item` and
-`System.Linq.Enumerable.Select` calls, so those two calls are part of the five
-`unmodelled-external` rows (with `Console.ReadLine`, `Process.Start` and
-`System.Int32[].get_Length`) instead of a `query_expression not modelled` row: a query
-the lowering handles is analysed, not skipped. The `scry-csharp` group enumerates it,
+`System.Linq.Enumerable.Select` calls, which the CLR model table (§10) covers, so the
+tree's remaining `unmodelled-external` rows are the calls the model does not know
+(`Console.ReadLine`, `Process.Start`; §10.3), and the query is analysed rather than
+skipped as a `query_expression not modelled` row. The `scry-csharp` group enumerates it,
 applies `Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the
 driver's aggregation) to checked-in spills, and asserts the before/after counts, the
 coverage rows (one `parse failure` row per failed file, each named), both report
@@ -739,3 +738,144 @@ regression test: it has `record`, `record struct`, a record with a base call, an
 primary constructor with a base call. Before this change it lowered to zero functions;
 `lower/*.wil` now pins the five `..ctor` functions, their field stores, and the two base
 calls.
+
+## 10. External models (`Scry.Models` §CLR)
+
+`Scry.Models` was a C table: libc names, policy sanitisers and the C pure calls. The C#
+frontend emits CLR spellings (`Namespace.Type.Method`, `T[].get_Item`), so on real code
+*none* of the BCL reads it lowers to matched an entry. Every one became an
+`unmodelled-external` warning — the coverage marker `Scry.Interproc.unmodelledWarningsOf`
+prints for a call with a pointer result or argument and no model. That was 4,028 call
+sites over 75 `Crux.Api` files: noise on the coverage report, not a taint fact (an
+unmodelled call has no source fact either; only its result's points-to location is
+`unknown`, which is what every external call's result is anyway).
+
+### 10.1 The frequency table
+
+`scry/tools/CsExternalsMain.wiz` (`grail build cs-externals`) prints it from the same walk,
+lowering and merged-program analysis `scry cs` uses, so the numbers are comparable:
+
+```
+cd scry && grail build cs-externals
+.grail/bin/cs-externals /workspace/Nexus/src/Crux.Api corpus/csharp/csharp.scry
+```
+
+`count-before` is the same selection against `Scry.Models.coreModels` (libc/policy/pure,
+without the CLR layer), so one run gives both sides of a model change. The model is keyed
+by the exact callee spelling (or by the shape rules in §10.2), so a call disappears from
+`count` exactly when a model covers it.
+
+Top of `src/Crux.Api` (75 files, 240 functions, merged program), before → after:
+
+| # | callee | before | after | model |
+|---|---|---|---|---|
+| 1 | `StatusCodes.get_Status422UnprocessableEntity` | 180 | — | getter |
+| 2 | `TypedResults.Problem` | 160 | — | `Results` factory |
+| 3 | `?.Produces` | 155 | — | ASP.NET fluent |
+| 4 | `?.ProducesProblem` | 126 | — | ASP.NET fluent |
+| 5 | `StatusCodes.get_Status404NotFound` | 99 | — | getter |
+| 6 | `?.WithName` | 96 | — | ASP.NET fluent |
+| 7 | `StatusCodes.get_Status200OK` | 92 | — | getter |
+| 8 | `?.WithSummary` | 90 | — | ASP.NET fluent |
+| 9 | `System.String.Concat` | 75 | — | exact |
+| 10 | `TypedResults.Ok` | 71 | — | `Results` factory |
+| 11 | `HttpContext.RequireAuthenticatedPartner` | 63 | 63 | not modelled: another Nexus project's method |
+| 12 | `?.MapPost` | 59 | — | ASP.NET fluent |
+| 13 | `?.get_TenantId` | 49 | — | getter |
+| 14 | `?.Refuses` | 46 | 46 | not modelled: another Nexus project's method |
+| 15 | `?.get_PartyId` | 44 | — | getter |
+| 16 | `CruxValidationException.get_Message` | 42 | — | getter |
+| 17 | `?.get_Status` | 42 | — | getter |
+| 18 | `HttpContext.PartnerTenantId` | 41 | 41 | not modelled: another Nexus project's method |
+| 19 | `?.get_IsReplay` | 35 | — | getter |
+| 20 | `?.get_TransactionId` | 35 | — | getter |
+| 21 | `BoundaryRejectionRecorder.RecordAsync` | 34 | 34 | not modelled: another Nexus project's method |
+| 22 | `StatusCodes.get_Status201Created` | 31 | — | getter |
+| 23 | `System.Array.$new` | 30 | — | collection-expression allocation |
+| 24 | `?.WithTags` | 29 | — | ASP.NET fluent |
+| 25 | `BoundaryRejectionRecorder..ctor` | 28 | 28 | not modelled: a constructor writes its object |
+| 26 | `CruxNotFoundException.get_Message` | 28 | — | getter |
+| 27 | `System.String.get_Empty` | 26 | — | getter |
+| 28 | `AuthorizeRefusals.get_PartyClosed` | 24 | — | getter |
+| 29 | `?.get_Services` | 22 | — | getter |
+| 30 | `IEndpointRouteBuilder.MapGroup` | 22 | — | ASP.NET fluent |
+
+Totals: **4,028 → 917** call sites (`unmodelled-external`), 1,179 → 485 distinct
+callees, on the same input and the same rule pack. The remaining 917, by shape:
+
+| shape | calls | why it stays |
+|---|---|---|
+| named type, other method | 487 | almost all another `Nexus` project's code (`HttpContext.RequireAuthenticatedPartner`, `BoundaryRejectionRecorder.RecordAsync`, `IOrchestrator.ExecuteAsync`), which the model table has no honest entry for |
+| `?.method` (unknown receiver) | 215 | user mapping/DI/logging extensions (`?.ToWire`, `?.GetRequiredService`, `?.LogError`); a name alone does not say what they do |
+| `T..ctor` | 170 | a constructor writes the object it returns; modelling it `copy` would taint `Loc.unknown` |
+| `T.set_*` / `set_Item` | 39 | a setter writes through its receiver |
+| `System.*` | 5 | `Encoding.UTF8.GetBytes` (has a write-into-buffer overload), `String.Any`/`String[].Any` (a lowering approximation, not `Enumerable.Any`) |
+
+### 10.2 What is modelled, and why each is conservative
+
+The table gains `System.Console.ReadLine` (a source: stdin text is attacker-controlled;
+the rule pack already names it, and pack and model sources are deduplicated) and the
+rest as **reads**. A read model is an empty effect list under the new family `clr-read`
+(`clr-fluent` for the ASP.NET registration calls, `clr-alloc` for `System.Array.$new`):
+
+* **any property getter** (`T.get_P`): the member segment starts with `get_`, and the
+  name contains a `.` — every CLR member name does, and no C identifier can, so the shape
+  rule cannot capture a C function called `get_Foo`. This is the single biggest class
+  (1,943 call sites). A getter's only input is the receiver, so its result derives from it
+  and `gen` carries the receiver's taint to the result. It has no data argument to write
+  through, and it does not free. `set_*` is deliberately not matched.
+* **array/string/collection element and length reads** are getters under that rule
+  (`System.Int32[].get_Item`, `?.get_Length`, `System.String.get_Empty`).
+* **`String` operations** (`Concat`, `Format`, `Join`, `Substring`, `Split`, `Replace`,
+  `Trim*`, `ToLower`/`ToUpper`, `Contains`/`StartsWith`/`EndsWith`, `IndexOf`, `Pad*`,
+  `IsNullOrEmpty`, …) and the `?`-receiver spellings of the same: a string operation
+  returns a value derived from its parts, and `Concat`/`Format` are what the lowering
+  emits for `+`, interpolation and `String.Format`.
+* **LINQ operators** (`System.Linq.Enumerable.*` and the `?`-receiver spellings):
+  projections/aggregations over their source; `gen` carries the source's taint to the
+  result.
+* **ASP.NET Core minimal-API registration/fluent calls** (`?.Produces`, `?.WithName`,
+  `?.MapPost`, `?.RequireAuthorization`, …): the result derives from the receiver and the
+  builder's internal registration state is outside the points-to model either way.
+* **`TypedResults.*` / `Results.*` factories**: they return an `IResult` carrying the
+  argument values; `gen` taints the result when an argument is tainted.
+* **`System.Array.$new`**: the collection-expression array — a fresh object whose
+  elements are its arguments (`alloc`, nothing else).
+* **`System.Convert.FromBase64String`/`ToBase64String`**: conversions of their input.
+
+A model never launders and never narrows taint: the taint layer's ordinary `gen` rule
+still carries taint from the receiver and every argument to the result, so
+`s.Substring(1)` of a tainted `s` is tainted and `xs.Select(f)` of a tainted `xs` is
+tainted. It also does not *widen* it: an unmodelled call has no source fact either, so
+the two differ in the warning and in the effects a model names, not in the flow. No model
+is a sanitiser; the policy sanitisers are still the only names that clean a value, and a
+pack has to trust them.
+
+### 10.3 What is deliberately not modelled
+
+* **Writes through the receiver or an argument**: `set_*`, `set_Item`, `Add`, `Append`,
+  `Insert`, `Remove`, `Clear`, `CopyTo`, `Array.Copy`, `Read`/`ReadOnlySpan` fills,
+  `Encoding.GetBytes(dest, …)`. Modelling a store into an unknown `Loc` would taint every
+  later load through an unknown pointer: more false positives, not more soundness.
+* **Constructors** (`T..ctor`): they write the object they return; the result is tainted
+  by the arguments through `gen` already, and a `copy` effect would land in
+  `Loc.unknown`.
+* **`Dispose`**: `free` would claim the managed object dies; a `using` block's `Dispose`
+  does not, and the lifetime rule would report a false use-after-free.
+* **The rule pack's sinks** (`Process.Start`, `ProcessStartInfo.set_Arguments`, …): a
+  sink needs a rule class and the pack owns those; duplicating them in the table would
+  add nothing (the facts would be deduplicated).
+* **Cross-project code**: a call into another assembly's own methods is not a BCL call,
+  and the name alone (especially on an unknown `?.` receiver) does not say whether it
+  writes or allocates. It keeps its explicit warning.
+
+### 10.4 Findings
+
+`src/Crux.Api` has **0 findings before and after** (the pack's only rule is CWE-78 and
+these endpoints do not build a command line from a request value). This is the expected
+direction: a read model adds no sanitiser and no filter, and the one source model
+(`Console.ReadLine`) duplicates a pack source, so the finding set can only stay or grow.
+The repo fixture's finding (`src/Helper.cs`, `Console.ReadLine` → `Process.Start`) still
+fires, and its `unmodelled-external` row drops from 5 to 1 (only `Process.Start` is
+left). The `taint/cwe78-stringop-unsafe` case pins the pair: `Substring` between the
+source and the sink is no longer a warning, and the finding still fires.

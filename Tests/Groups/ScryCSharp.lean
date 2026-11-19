@@ -101,6 +101,8 @@ def taintImports : String :=
 def csCmdImports : String :=
   "import Scry.CsCmd\nimport Scry.Wil\nimport Scry.Rules\nimport Scry.Interproc\nimport Json\n"
 
+def modelImports : String := "import Scry.Models\n"
+
 /-- A fixture's C# text and its checked-in spill (`dir/name.cs`, `dir/name.cst`). -/
 def fixture (dir name : String) : IO (String × String) := do
   let src ← IO.FS.readFile s!"scry/corpus/csharp/{dir}/{name}.cs"
@@ -119,6 +121,7 @@ def fixtures : List (String × String) :=
    ("lower", "unicode"), ("lower", "primary-ctor"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
+   ("taint", "cwe78-stringop-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
    ("taint", "cwe78-await-unsafe")]
 
@@ -227,6 +230,24 @@ def taintFindings (name : String) : IO (List String) := do
     pure (if fs.isEmpty then [] else fs.splitOn "|")
   | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
 
+/-- The unmodelled external callees of a taint fixture, in program order (deduplicated).
+A modelled call is absent, and the fixture's finding still has to fire: that is the pair
+a model must satisfy. -/
+def taintUnmodelled (name : String) : IO (List String) := do
+  let (src, spill) ← fixture "taint" name
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  let body :=
+    fixtureDefs src spill ++
+    s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
+    s!"def prog : Wil.Program := Scry.Cs.programOf {wizStr (name ++ ".cs")} src spill\n" ++
+    "def names (r : Scry.FuncResult) : List String := List.map (fun nc => nc.1) (Scry.unmodelledCallsOf prog r)\n" ++
+    "#eval String.intercalate \"|\" (List.concat (List.map names (Scry.analyze prog pack).results))\n"
+  match ← runProbe taintImports body with
+  | [ns] =>
+    let ns := unquote ns
+    pure (if ns.isEmpty then [] else ns.splitOn "|")
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms}")
+
 /-! ## The `scry cs` fixture tree
 
 `scry/corpus/csharp/repo/` is a small tree with two excluded directories and three
@@ -322,9 +343,9 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|warning 6 unmodelled-external"
-     ++ "|warning 1 is test not modelled: havoc"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
+     ++ "|warning 1 is test not modelled: havoc"
+     ++ "|warning 1 unmodelled-external"
      ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
@@ -428,6 +449,25 @@ def group : Group where
       run := fun _ => do
         let fs ← taintFindings "cwe78-helper-unsafe"
         checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: a modelled String operation between source and sink neither warns nor launders",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-stringop-unsafe"
+        checkEq ["command-injection Fixtures.Slicer.Main System.Diagnostics.Process.Start arg 1"] fs
+        let us ← taintUnmodelled "cwe78-stringop-unsafe"
+        checkEq ["System.Diagnostics.Process.Start"] us },
+    { name := "models: CLR reads and ASP.NET fluent calls are covered; writes and bare C names are not",
+      run := fun _ => do
+        let ms ← runProbe modelImports (
+          "#eval if Scry.Models.isModelled \"System.Int32[].get_Length\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"System.Int32[].get_Item\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"?.get_TenantId\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"System.String.Concat\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"?.Produces\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"System.Array.$new\" then 1 else 0\n" ++
+          "#eval if Scry.Models.isModelled \"System.Collections.Generic.Dictionary.set_Item\" then 0 else 1\n" ++
+          "#eval if Scry.Models.isModelled \"get_Length\" then 0 else 1\n" ++
+          "#eval List.length (Scry.Models.sourcesOf \"System.Console.ReadLine\")\n")
+        checkEq ["1", "1", "1", "1", "1", "1", "1", "1", "1"] (ms.map unquote) },
     { name := "cs: the fixture tree's walk counts (before/after exclusions, parsed/lowered/failed)",
       run := fun _ => repoCounts },
     { name := "cs: the summary lists every skipped or warned construct with a count and an example",
