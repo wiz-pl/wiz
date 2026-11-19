@@ -3140,7 +3140,16 @@ def selfHostGroup : Group where
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
-        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" }
+        selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- the import header (13u): the self-hosted loader skips imports, so it must agree
+    { name := "13u: comments and imports form the header (accepted)", run := fun _ =>
+        selfhostChecks "import Prelude\n-- a comment\n/- a block -/\ndef two : Nat := 1 + 1\n#check two\n" },
+    { name := "13u: an import after a declaration is an error", run := fun _ =>
+        selfhostCheckFails "import Prelude\ndef two : Nat := 1 + 1\nimport Prelude\n"
+          "input.wiz:3:1: error: imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)\n" },
+    { name := "13u: an import inside `mutual` is an error naming the block", run := fun _ =>
+        selfhostCheckFails "import Prelude\nmutual\nimport Prelude\ndef two : Nat := 1 + 1\nend\n"
+          "input.wiz:2:1: error: `import` is not allowed inside a `mutual`/`partial` block: imports go at the top level of a file, before every other command\n" }
 
   ]
 

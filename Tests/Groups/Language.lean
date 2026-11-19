@@ -579,7 +579,28 @@ def languageGroup : Group where
         okLoc locMod "import Loc\n#check fun (x : Nat) (xs : List Nat) => List.cons x xs\n#check fun (a b : String) => a &&& b"
           ["fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
-        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" }
+        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" },
+    -- the import header (13u): imports first, top level only, not producible by an extension
+    { name := "13u: the header is comments and imports, then declarations (accepted)", run := fun _ =>
+        okLib ("-- a leading comment\n/- a block comment /- nested -/ -/\nimport Prelude\n-- between imports\nimport Logic\n" ++
+          "def two : Nat := 1 + 1\n#eval two") ["2"] },
+    { name := "13u: an import after a declaration is an error", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          "import Prelude\ndef two : Nat := 1 + 1\nimport Loc\n#eval two" "imports must precede declarations" },
+    { name := "13u: an import inside `mutual` is an error naming the block", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          "import Prelude\nmutual\nimport Loc\ndef two : Nat := 1 + 1\nend"
+          "not allowed inside a `mutual` block" },
+    { name := "13u: a command macro that builds an `import` node is rejected", run := fun _ =>
+        failsLoc "def locVal : Nat := 1\n"
+          ("import Prelude\nsyntax (name := evil) \"evil_import\" : command\n" ++
+           "def evilM : CommandMacro := fun _ =>\n" ++
+           "  MacroM.pure (.cons (Syntax.mkNode \"command.import\" (.cons (.atom \"import\") (.cons (.ident \"Loc\") .nil))) .nil)\n" ++
+           "attribute [macro command.evil] evilM\nevil_import") "only allowed at the top level" },
+    { name := "13u: `(command| import M)` does not parse (a quotation cannot write one)", run := fun _ =>
+        failsLib ("import Prelude\nsyntax (name := steal) \"steal\" : command\n" ++
+          "macro_rules\n  | `(command| steal) => `(command| import Prelude)\n")
+          "expected" }
   ]
 
 builtin_initialize registerGroup languageGroup

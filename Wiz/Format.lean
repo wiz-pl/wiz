@@ -272,13 +272,15 @@ partial def joinChunks (cs : List Chunk) : Doc :=
 
 /-- How a syntax kind formats: its rule (see `PPFormat`), from the parser tables. -/
 def formatsOf (s : CommandState ZeroOneMany) : Std.HashMap Name PPFormat :=
-  s.tables.cats.fold (init := ({} : Std.HashMap Name PPFormat)) fun m c cat =>
+  let m := s.tables.cats.fold (init := ({} : Std.HashMap Name PPFormat)) fun m c cat =>
     let m := cat.leading.foldl (init := m) fun m lp =>
       let raw := s.rawAtoms.getD lp.kind #[]
       m.insert lp.kind { cat := c, leading := true, prec := lp.prec, p := lp.p, raw := raw }
     cat.trailing.foldl (init := m) fun m tp =>
       let raw := s.rawAtoms.getD tp.kind #[]
       m.insert tp.kind { cat := c, leading := false, prec := tp.prec, lhsPrec := tp.lhsPrec, p := tp.p, raw := raw }
+  -- the import header is not a category rule (13u), so it has no table entry of its own
+  m.insert "command.import" { cat := "command", leading := true, prec := maxPrec, p := Builtin.seqs ["import", ParserDescr.ident] }
 
 /-! ### Layout: where the breaks go
 

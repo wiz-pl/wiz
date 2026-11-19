@@ -789,3 +789,67 @@ unrelated `calc_e` syntax category in the `language` group is untouched.
 
 The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
 request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).
+
+## 13u: imports are a fixed header
+
+A file's dependencies are a **syntactic fact**: `import` is not a command, but a
+header declaration.
+
+```wiz
+-- comments are not commands, so they may sit anywhere in the header
+/- … -/
+import Prelude
+import Logic
+
+def two : Nat := 1 + 1
+```
+
+Three rules, checked by both frontends:
+
+1. **Top level only.** An `import` inside a command (`private`, `sealed`, `local`,
+   `partial`, `mutual`) is an error that names the container, at the `import`'s
+   position. Wiz has no `namespace`/`section`, so those containers are the ones there
+   are; a term cannot contain an `import` at all (it is a reserved keyword, and the
+   parser says so where it was written).
+2. **Before every other command.** Once a non-import command has been elaborated, a
+   later `import` is the error `imports must precede declarations` (code
+   `import-order`), at the `import`'s position; it is not loaded.
+   **What the header admits:** only comments (`--`, `/- … -/`, including doc
+   comments) and `import`s. Every command ends it, including directives that are not
+   declarations: `set_option`, `syntax`/`notation`/`macro_rules`, `#check`/`#eval`.
+   The header is therefore *contiguous*, which is what makes the dependency scan a
+   scan of the top of the file; and a `set_option` is about printing, so nothing an
+   import means depends on one before it. (A doc comment before an import is trivia,
+   not documentation of it: imports declare no names.)
+3. **No extension can produce one.** `import` was removed from the extensible
+   `command` category: it is `Wiz.Parser.Builtin.importDescr`, a descriptor that
+   `parseCommand` tries before the category. A `syntax` rule cannot mention the token
+   in a `command` quotation — `` `(command| import M) `` is a parse error — and
+   `macro_rules` templates that try it do not parse. A command macro can still
+   *construct* a node of kind `command.import` by hand (`Syntax.mkNode`); that node
+   reaches `Wiz.Elab.Command.elabCommand`, which rejects it with the top-level-import
+   error. Two layers: the grammar cannot make one, and the elaborator refuses one
+   made anyway.
+
+The self-hosted frontend (`selfhost/Parse.wiz`, `selfhost/Frontend.wiz`) agrees: its
+`parseCommandAt` tries the same descriptor (`importDescr`) before the category, its
+`runCommands` carries a header flag (an import after a declaration is the same error),
+its `mutual`/`partial` handler rejects a nested import, and its module loader's
+`modImportsAt` stops at the first command that is not an import instead of scanning the
+whole file for import lines (the loader skips imports in the body, so this is where the
+two frontends would otherwise drift). `selfhost/Tables.wiz` is regenerated.
+
+**Payoff.** `wiz parse --imports FILE` prints the module names, one per line, in source
+order — parse only, no elaboration, no module lookup, and it stops at the first
+declaration. (Before the header rule, dependencies were found by scanning every line of
+the file, `Module.importsOf`; that line scan remains as the loader's superset, but the
+parser's answer is the authority, and `wiz parse --imports` reads only the header.) That
+fact is what the module graph needs: `loadClosure`/`moduleKeys` can compute the reachable
+set and the cache's input keys from the header, build ordering is the same graph, and the
+namespace/aliasing work of stage 13b/13m can treat "imported by another module" as a
+syntactic predicate rather than a result of elaboration.
+
+Migration: no `.wiz` file in the tree violates the order (0 files; checked with a
+comment-aware scan of every `.wiz`, and the accepted-header tests above). Tests:
+`language` (the header, the three rejections) and `selfhost` (the same header and
+rejections, through the self-hosted module loader).

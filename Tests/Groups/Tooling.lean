@@ -186,6 +186,19 @@ def toolingGroup : Group where
         check ((err.splitOn "unknown module NoSuchPrelude").length > 1)
           s!"no clear missing-module error:\n{out}\n{err}"
         check ((out.splitOn "1").length == 1) s!"the session ran anyway:\n{out}\n{err}" },
+    { name := "wiz parse --imports lists the header, and parse reports an import after a declaration", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let file := dir / "deps.wiz"
+        IO.FS.writeFile file "-- a comment\nimport Prelude\n/- block -/\nimport Logic\ndef x : Nat := 1\nimport Text\n"
+        -- the dependency fact: header only, one module per line
+        let (code, out, err) := ← runWiz ["parse", "--imports", file.toString]
+        checkEq 0 code
+        checkEq "Prelude\nLogic\n" out
+        checkEq "" err
+        -- `wiz parse` reports the order violation (and still prints the trees)
+        let (code, _, err) := ← runWiz ["parse", file.toString]
+        checkEq 1 code
+        check ((err.splitOn "imports must precede declarations").length > 1) s!"no order error:\n{err}" },
     { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath
         let (code, out, err) := ← runWiz ["test-driver", "--driver", self.toString, "--list"] #[]

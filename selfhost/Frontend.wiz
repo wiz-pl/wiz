@@ -6768,9 +6768,18 @@ def defsSteps : Globals → List Syntax → Step
       | .mk lines gs'' => .mk (match rest with
           | .nil => line
           | .cons _ _ => String.append (String.append line "\n") lines) gs''
-def partialCmd (gs : Globals) (defs : List Syntax) : Step := match addPartials gs defs with
-  | .err m => errStep gs m
-  | .ok gs1 => defsSteps gs1 (unwrapDefs defs)
+-- an `import` among `defs` (`partial import M`, `mutual … import M … end`): the fixed
+-- header does not allow one inside a command
+def hasImportCmd : List Syntax → Bool
+  | .nil => .false
+  | .cons s rest => match strEq (kindOf s) "command.import" with
+    | .true => .true
+    | .false => hasImportCmd rest
+def partialCmd (gs : Globals) (defs : List Syntax) : Step := match hasImportCmd defs with
+  | .true => errStep gs "`import` is not allowed inside a `mutual`/`partial` block: imports go at the top level of a file, before every other command"
+  | .false => match addPartials gs defs with
+    | .err m => errStep gs m
+    | .ok gs1 => defsSteps gs1 (unwrapDefs defs)
 
 -- Structures (stage 18e): `structure T (ps) where f₁ : A₁ …` is the inductive type
 -- `T (ps) where | mk (f₁ : A₁) …` and a projection `T.fᵢ {ps} (s : T ps) : Aᵢ` for each
@@ -8721,8 +8730,15 @@ inductive StepR where
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
   | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+-- is the command at `pos` an `import`? (`import_c` is not: the next character is an id
+-- character). `runCommands` uses this to keep the header open across imports and close it
+-- at the first declaration.
+def startsImport (input : Array Nat) (pos : Nat) : Bool :=
+  let i := skipWs input pos;
+  Bool.and (cStarts (toChars "import") (slice 6 input i))
+    (Bool.not (isIdRest (at input (Nat.add i 6))))
 mutual
-def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
+def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
   let start := skipWs input pos;
   match Nat.lt start (Array.size input) with
@@ -8731,11 +8747,14 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
     | .err m => .next (atLine start (.some (String.append "parse " m))) (Array.size input) gs cats tokens notes
     | .ok stx0 stop => match strEq (kindOf stx0) "command.import" with
     -- (A14) with the module loader (`inlineImports = false`) the import was loaded
-    -- before the file: skip it (only the Prelude, when checking one file, is inline)
-    | .true => match inlineImports with
-      | .false => .next .none stop gs cats tokens notes
-      | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes (String.codes preludeText) 0 gs .nil with
-        | .mk _ gs' cats' tokens' notes' => .next .none stop gs' cats' tokens' notes'
+    -- before the file: skip it (only the Prelude, when checking one file, is inline).
+    -- The header is fixed: an `import` after a declaration is an error (code import-order).
+    | .true => match header with
+      | .false => .next (atLine start (.some "error: imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)")) stop gs cats tokens notes
+      | .true => match inlineImports with
+        | .false => .next .none stop gs cats tokens notes
+        | .true => match runCommands .true .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes (String.codes preludeText) 0 gs .nil with
+          | .mk _ gs' cats' tokens' notes' => .next .none stop gs' cats' tokens' notes'
     | .false =>
       -- (A12) the grammar-changing commands: `syntax`, `notation`, `infixl`/`infixr`/
       -- `infix`, `macro_rules`, `declare_syntax_cat`, and the macro/tactic registrations
@@ -8795,8 +8814,11 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                         | .true => withDeriving gs0 stx (defStep gs0 stx)
                         | .false => defStep gs0 stx
                       -- (an unknown command, or a modifier this frontend doesn't know, is
-                      -- an error naming it, never ignored)
-                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
+                      -- an error naming it, never ignored). An import nested in a
+                      -- wrapper is the fixed header's error, not an unknown command.
+                      | .false => match strEq (kindOf stx) "command.import" with
+                        | .true => errStep gs0 "`import` is not allowed inside a command: imports go at the top level of a file, before every other command"
+                        | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
         | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
@@ -8804,11 +8826,11 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
         | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
             | .true => .none
             | .false => .some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
-def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
+def runCommands (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
-  match stepCommand inlineImports cats tokens notes input pos gs with
+  match stepCommand inlineImports header cats tokens notes input pos gs with
   | .done => .mk out gs cats tokens notes
-  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports cats' tokens' notes' input stop gs' (match line with
+  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports (Bool.and header (startsImport input pos)) cats' tokens' notes' input stop gs' (match line with
     | .some l => .cons l out
     | .none => out)
 end
@@ -8878,7 +8900,7 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+  match runCommands .true .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
 
@@ -8887,9 +8909,11 @@ def checkFile (cats : List Cat) (tokens : List String) (text : String) : List St
 -- elaborated once, before the modules that import it, into the same globals (`Globals`)
 -- and parser tables, so an importer sees the declarations of the modules it imports.
 -- `Prelude` is always the embedded prelude (`preludeText`): the self-hosted prelude is
--- what this frontend can check, not `lib/Prelude.wiz` (A9-A23). A module's imports are
--- hoisted: they are loaded (and the modules checked) before any other command of the
--- module, in source order; the module's own declarations keep their source order.
+-- what this frontend can check, not `lib/Prelude.wiz` (A9-A23). A module's **header**
+-- imports (before its first declaration) are loaded (and the modules checked) before any
+-- other command of the module, in source order; the module's own declarations keep their
+-- source order. An `import` after a declaration is an error (`imports must precede
+-- declarations`, 13u), never a dependency the loader silently drops.
 --
 -- The loader is pure: the driver reads the files (moduleRootSources) and `moduleCheck`
 -- builds the dependency graph from the sources. A cycle is an error naming the cycle, and
@@ -8973,7 +8997,9 @@ partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array
     | .err _ => .nil
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
       | .true => .cons (modCanonical (identOf'' (kid stx 1))) (modImportsAt cats tokens input stop)
-      | .false => modImportsAt cats tokens input stop
+      -- the header is fixed: the first command that is not an import ends it, so the
+      -- graph never depends on an import written after a declaration
+      | .false => .nil
 
 def moduleImports (cats : List Cat) (tokens : List String) (text : String) : List String :=
   modImportsAt cats tokens (String.codes text) 0
@@ -9067,10 +9093,10 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- declarations are private to it, and every name it declares is marked in its name
   let gs0 := Globals.setModule (Run.gs r) name;
   let r' := match strEq name "Prelude" with
-    | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
+    | .true => match runCommands .false .true (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
         (Run.notesOf r) (String.codes text) 0 gs0 .nil with
       | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
-    | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
+    | .false => runCommands .false .true (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
         (String.codes text) 0 gs0 (Run.out r);
   match r' with
   | .mk out gs' cats' tokens' notes' =>
