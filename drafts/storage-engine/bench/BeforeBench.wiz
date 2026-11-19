@@ -35,14 +35,25 @@ def pack (i : Nat) : Nat :=
 def mkNode (i : Nat) : Node :=
   Node.mk (u32 (Nat.mod i 100)) (u64 (pack i)) (u32 (Nat.mod i 5))
 
-partial def appendLoop (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
+def chunkEnd (n i : Nat) : Nat :=
+  match Nat.le (Nat.add i 500) n with
+  | .true => Nat.add i 500
+  | .false => n
+
+partial def appendChunk (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
   match Nat.le i n with
   | .true => do
     s ← getDb h;
     o ← putDb h (Snapshot.record s (u64 i) (.some (.set (mkNode i))));
     match o with
-    | .committed _ => appendLoop h n (Nat.succ i)
+    | .committed _ => appendChunk h n (Nat.succ i)
     | .rejected _ => EIO.fail "before append: rejected"
+  | .false => EIO.pure ()
+
+partial def appendLoop (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => EIO.bind (appendChunk h (chunkEnd n i) i)
+      (fun _ => appendLoop h n (Nat.succ (chunkEnd n i)))
   | .false => EIO.pure ()
 
 def firstWord (s : String) : String :=
@@ -70,11 +81,16 @@ def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
   IO.println (String.append "rss_kb " (Nat.toString rss));
   IO.println extra
 
+def parseN (n : String) : EIO Nat :=
+  match String.parseNat n with
+  | .some k => EIO.pure k
+  | .none => EIO.fail "bad N"
+
 def parseArg (args : List String) : EIO (String × Nat × String) :=
   match args with
-  | op :: n :: path :: _ => match String.parseNat n with
-    | .some k => EIO.pure (op, k, path)
-    | .none => EIO.fail "bad N"
+  | op :: n :: path :: _ => do
+    k ← parseN n;
+    EIO.pure (op, k, path)
   | _ => EIO.fail "usage: before-bench OP N PATH"
 
 def runAppend (n : Nat) (path : String) : EIO Unit := do
@@ -85,10 +101,11 @@ def runAppend (n : Nat) (path : String) : EIO Unit := do
 def runReopen (n : Nat) (path : String) : EIO Unit := do
   h ← openDbWith path schema 1;
   s ← getDb h;
-  match Snapshot.getNode s (u64 n) with
+  let got := Snapshot.getNode s (u64 n);
+  closeDb h;
+  match got with
   | .some _ => EIO.lift (IO.println (String.append "found " (Nat.toString n)))
   | .none => EIO.fail "before reopen: last node absent"
-  closeDb h
 
 def runQuery (n : Nat) (path : String) : EIO Unit := do
   h ← openDbWith path schema 1;

@@ -42,13 +42,15 @@ def storageQuireBody : IO String := do
   let mut body := storageQuireImports
   for f in files do
     body := body ++ dropImports (← IO.FS.readFile f) ++ "\n"
-  pure body
+  -- the case has no source file, so `link_c` resolves against the repo root
+  pure (body.replace "link_c \"quire_seal.c\"" "link_c \"drafts/storage-engine/quire_seal.c\"")
 
 def storageQuireExpected : String :=
   "quire: all checks passed: 28\n"
 
 def storageQuire : IO Unit := do
-  cRunLibs (← storageQuireBody) storageQuireExpected
+  -- the C companion's header (`quire_seal.h`) is on the draft include path
+  cRunLibs (← storageQuireBody) storageQuireExpected (cflags := ["-Idrafts/storage-engine"])
 
 def storageQuireGroup : Group where
   name := "storage-quire"

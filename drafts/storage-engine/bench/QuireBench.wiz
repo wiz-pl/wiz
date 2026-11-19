@@ -42,21 +42,41 @@ def mkNode (i : Nat) : Node :=
 def setNode (s : QSnapshot) (i : Nat) : QSnapshot :=
   QSnapshot.record s (u64 i) (.some (.set (mkNode i)))
 
-/-- `n` records in one write-set (the batched load). -/
-partial def setMany (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+/-- The end of the chunk starting at `i` (at most 500 records). -/
+def chunkEnd (n i : Nat) : Nat :=
+  match Nat.le (Nat.add i 500) n with
+  | .true => Nat.add i 500
+  | .false => n
+
+/-- A chunk of at most 500 records into one write-set. -/
+partial def setChunk (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
   match Nat.le i n with
-  | .true => setMany (setNode s i) n (Nat.succ i)
+  | .true => setChunk (setNode s i) n (Nat.succ i)
   | .false => s
 
-/-- `n` single-record commits (the append path). -/
-partial def buildLoop (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+/-- `n` records in one write-set (the batched load), in chunks of 500 so the recursion
+does not depend on N. -/
+partial def setMany (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => setMany (setChunk s (chunkEnd n i) i) n (Nat.succ (chunkEnd n i))
+  | .false => s
+
+/-- A chunk of at most 500 single-record commits. -/
+partial def buildChunk (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
   match Nat.le i n with
   | .true => do
     s ← getQ h;
     o ← putQ h (setNode s i);
     match o with
-    | .committed _ => buildLoop h n (Nat.succ i)
+    | .committed _ => buildChunk h n (Nat.succ i)
     | .rejected _ => EIO.fail "append: rejected"
+  | .false => EIO.pure ()
+
+/-- `n` single-record commits (the append path), in chunks of 500. -/
+partial def buildLoop (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => EIO.bind (buildChunk h (chunkEnd n i) i)
+      (fun _ => buildLoop h n (Nat.succ (chunkEnd n i)))
   | .false => EIO.pure ()
 
 /-- The peak RSS of this process, from `/proc/self/status`. -/
@@ -85,11 +105,16 @@ def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
   IO.println (String.append "rss_kb " (Nat.toString rss));
   IO.println extra
 
+def parseN (n : String) : EIO Nat :=
+  match String.parseNat n with
+  | .some k => EIO.pure k
+  | .none => EIO.fail "bad N"
+
 def parseArg (args : List String) : EIO (String × Nat × String) :=
   match args with
-  | op :: n :: path :: _ => match String.parseNat n with
-    | .some k => EIO.pure (op, k, path)
-    | .none => EIO.fail "bad N"
+  | op :: n :: path :: _ => do
+    k ← parseN n;
+    EIO.pure (op, k, path)
   | _ => EIO.fail "usage: quire-bench OP N PATH"
 
 def runBuild (n : Nat) (path : String) : EIO Unit := do
@@ -150,6 +175,7 @@ def runUpdate (n : Nat) (path : String) : EIO Unit := do
 def run (op : String) (n : Nat) (path : String) : EIO Unit :=
   match op with
   | "build" => runBuild n path
+  | "append" => runBuild n path
   | "batch" => runBatch n path
   | "reopen" => runReopen n path
   | "reopen-fast" => runReopenFast n path

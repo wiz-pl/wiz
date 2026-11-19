@@ -55,9 +55,13 @@ live record once and writes a fresh image. Neither is on the commit, open or que
 
 -- ## Checksums in C
 
+link_c "quire_seal.c"
+
 /-- Seal a page: FNV-1a-64 over its bytes with the 8-byte checksum field at `off` read
-as zero, then write the hash there. Takes and returns the page (no copy). -/
-extern "wiz_store_seal" QFnv.seal : Bytes → Nat → Bytes
+as zero, then write the hash there. Takes and returns the page (no copy). A 4 KiB page
+hashed in Wiz would be 4096 interpreter/compiler steps, which dominates a small commit;
+this is the draft's C companion (built with `-Idrafts/storage-engine`). -/
+extern "wiz_store_seal" (header := "quire_seal.h") QFnv.seal : Bytes → Nat → Bytes
 
 -- ## Format constants
 
@@ -141,10 +145,15 @@ def QPage.level (m : Map) (base : Nat) : Nat := (Store.headerAt m base).flags
 /-- The header's `right` page. -/
 def QPage.right (m : Map) (base : Nat) : Nat := (Store.headerAt m base).right.toNat
 
-/-- The directory entry at slot `i`. -/
+/-- The directory entry at slot `i`. The array is packed `u32`s; read the 8-byte word
+that contains entry `i` (the last entry's own 8-byte load would cross the page end and
+fault on the final page of the mapping). -/
 def QPage.entry (m : Map) (base : Nat) (i : Nat) : Nat :=
-  Nat.land (UIntN.toNat (Map.getU64 m (Nat.add base (Nat.add 32 (Nat.mul i 4)))))
-    0xffffffff
+  let off := Nat.add base (Nat.add 32 (Nat.mul (Nat.div i 2) 8));
+  let w := UIntN.toNat (Map.getU64 m off);
+  match Nat.mod i 2 with
+  | 0 => Nat.land w 0xffffffff
+  | _ => Nat.land (Nat.shiftRight w 32) 0xffffffff
 
 /-- `n` zeros. -/
 def QZeros : Nat → List Nat
@@ -430,21 +439,22 @@ def QFactsOfChange (ord : Nat) (d : IndexDef) (id : U64) (old new : Option Node)
     | .false => [QFact.mk ord (IndexDef.key d a) id .false,
                  QFact.mk ord (IndexDef.key d b) id .true]
 
-/-- Every fact a transaction's entries contribute, with each index's position. -/
-def QFactsOfEntriesFrom (defs : List IndexDef) : Nat → List (U64 × Patch) →
-    (U64 → Option Node) → List QFact
-  | _, .nil, _ => []
-  | ord, .cons (id, p) es, oldOf =>
-    let old := oldOf id;
-    let new := Patch.apply p old;
-    List.append
-      (List.flatMap defs (fun d => QFactsOfChange ord d id old new))
-      (QFactsOfEntriesFrom defs (Nat.succ ord) es oldOf)
+/-- One changed record's facts for every index, at each index's schema position. -/
+partial def QFactsOfDefs (defs : List IndexDef) (ord : Nat) (id : U64)
+    (old new : Option Node) : List QFact :=
+  match defs with
+  | [] => []
+  | List.cons d ds =>
+    List.append (QFactsOfChange ord d id old new)
+      (QFactsOfDefs ds (Nat.succ ord) id old new)
 
 /-- Every fact a transaction's entries contribute. -/
 def QFactsOfEntries (defs : List IndexDef) (entries : List (U64 × Patch))
     (oldOf : U64 → Option Node) : List QFact :=
-  QFactsOfEntriesFrom defs 0 entries oldOf
+  List.flatMap entries (fun (e : U64 × Patch) =>
+    let old := oldOf e.1;
+    let new := Patch.apply e.2 old;
+    QFactsOfDefs defs 0 e.1 old new)
 
 /-- Group facts by global slot; within a slot the newest fact is first. -/
 def QGroupFacts (slots : Nat) (fs : List QFact) : List (U64 × List QFact) :=
@@ -712,14 +722,17 @@ partial def QDupInBucket (d : IndexDef) (changed : U64Map (Option Node)) (stMap 
 def QSlotOfAll (slots : Nat) (ord : Nat) (v : U64) : Nat :=
   Nat.add (Nat.mul ord slots) (Nat.mod v.toNat slots)
 
+/-- One record's add facts for every index, at each index's schema position. -/
+partial def QFactsOfRecordDefs (defs : List IndexDef) (ord : Nat) (r : Rec) : List QFact :=
+  match defs with
+  | [] => []
+  | List.cons d ds =>
+    List.append [QFact.mk ord (IndexDef.key d r.node) r.id .true]
+      (QFactsOfRecordDefs ds (Nat.succ ord) r)
+
 /-- Every record's add facts (the compacted index is recomputed, not copied). -/
-def QFactsOfRecordsFrom (defs : List IndexDef) : Nat → List Rec → List QFact
-  | _, [] => []
-  | ord, List.cons r rs =>
-    List.append
-      (List.flatMap defs (fun d =>
-        [QFact.mk ord (IndexDef.key d r.node) r.id .true]))
-      (QFactsOfRecordsFrom defs (Nat.succ ord) rs)
+def QFactsOfRecords (defs : List IndexDef) (recs : List Rec) : List QFact :=
+  List.flatMap recs (fun (r : Rec) => QFactsOfRecordDefs defs 0 r)
 
 /-- Write a fresh image (pages from 2) holding `recs` and the indices recomputed from
 them. Returns `(pageCount, root, indexRoot)`. -/
@@ -740,7 +753,7 @@ def QWriteImage (fd : Fd) (src : Map) (recs : List Rec) (indices : List IndexDef
     | [] => (w1, 0)
     | _ => QWriteDir w1 src gen 0 QRootDepth pairs;
   let (w3, indexRoot) := QNewIndexRoot w2 src gen 0
-    (QGroupFacts slots (QFactsOfRecordsFrom indices 0 recs));
+    (QGroupFacts slots (QFactsOfRecords indices recs));
   let last := Nat.add 2 (List.length w3.pages);
   QWriteAt fd 2 (QWriterBytes w3);
   Fd.dataSync fd;

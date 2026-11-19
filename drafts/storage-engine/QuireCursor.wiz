@@ -73,6 +73,7 @@ structure QPlan (a : Type) where
   ord : Nat
   slots : Nat
   range : KeyRange
+  heads : List Nat
   pending : List Nat
   cur : List (U64 × U64)
   project : U64 → U64 → Option Node → Option a
@@ -106,8 +107,12 @@ def QCursor.ofIndex {a : Type} (s : QSnapshot) (d : IndexDef) (kr : KeyRange)
     (project : U64 → U64 → Option Node → Option a) (needNode : Bool) : QCursor a :=
   let slots := QSlotsPer (List.length s.indices);
   let ord := QOrdOf d s.indices;
-  QCursor.mk (QPlan.mk s ord slots kr (QGlobalSlots ord slots kr) []
-    project needNode [] Cost.zero)
+  let heads := QDirRead s.map s.indexRoot.toNat;
+  let cost := match Nat.beq s.indexRoot.toNat 0 with
+    | .true => Cost.zero
+    | .false => Cost.page;
+  QCursor.mk (QPlan.mk s ord slots kr heads (QGlobalSlots ord slots kr) []
+    project needNode [] cost)
 
 /-- Index-only scan: the indexed value, no primary read. -/
 def QSnapshot.indexOnlyRange (d : IndexDef) (kr : KeyRange) (s : QSnapshot) : QCursor U64 :=
@@ -144,13 +149,13 @@ partial def QAdvance {a : Type} (p : QPlan a) : QAdvanced a :=
   | [] => match p.pending with
     | [] => .done p
     | List.cons slot rest =>
-      let head := QNth (QDirRead p.snap.map p.snap.indexRoot.toNat) slot 0;
+      let head := QNth p.heads slot 0;
       let (fs, pages) := QReadFacts p.snap.map head p.fuel p.ord;
       let live := QFactsLive fs p.range;
       let cost := Cost.add p.cost (Cost.add (Cost.pageN pages)
         (Cost.mk 0 (List.length fs) 0));
-      QAdvance (QPlan.mk p.snap p.ord p.slots p.range rest live p.project p.needNode
-        p.post cost)
+      QAdvance (QPlan.mk p.snap p.ord p.slots p.range p.heads rest live p.project
+        p.needNode p.post cost)
   | List.cons (v, id) rest =>
     let cost := match p.needNode with
       | .true => Cost.add p.cost (Cost.mk 1 0 1)
@@ -159,13 +164,13 @@ partial def QAdvance {a : Type} (p : QPlan a) : QAdvanced a :=
       | .true => QReadNode p.snap.map p.snap.root id
       | .false => Option.none;
     match p.project v id got with
-    | .none => QAdvance (QPlan.mk p.snap p.ord p.slots p.range p.pending rest
+    | .none => QAdvance (QPlan.mk p.snap p.ord p.slots p.range p.heads p.pending rest
         p.project p.needNode p.post cost)
     | .some x =>
       match List.all (fun q => q x) p.post with
-      | .true => .more x (QPlan.mk p.snap p.ord p.slots p.range p.pending rest
+      | .true => .more x (QPlan.mk p.snap p.ord p.slots p.range p.heads p.pending rest
           p.project p.needNode p.post cost)
-      | .false => QAdvance (QPlan.mk p.snap p.ord p.slots p.range p.pending rest
+      | .false => QAdvance (QPlan.mk p.snap p.ord p.slots p.range p.heads p.pending rest
           p.project p.needNode p.post cost)
 
 -- ## Consuming
@@ -228,12 +233,10 @@ def QCursor.pushKey {a : Type} (pred : KeyPred) (test : a → Bool)
     (1 c : QCursor a) : QCursor a :=
   match c with
   | .mk p => match Nat.beq p.cost.keys 0 with
-    | .true => match Nat.beq p.cost.pages 0 with
-      | .true =>
-        let r' := KeyRange.tighten p.range pred;
-        QCursor.mk (QPlan.mk p.snap p.ord p.slots r' (QGlobalSlots p.ord p.slots r') []
-          p.project p.needNode p.post p.cost)
-      | .false => QCursor.mk { p with post := List.append p.post [test] }
+    | .true =>
+      let r' := KeyRange.tighten p.range pred;
+      QCursor.mk (QPlan.mk p.snap p.ord p.slots r' p.heads
+        (QGlobalSlots p.ord p.slots r') [] p.project p.needNode p.post p.cost)
     | .false => QCursor.mk { p with post := List.append p.post [test] }
 
 /-- Push an equality/range predicate into an index-only plan (the key *is* the indexed

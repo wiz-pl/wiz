@@ -18,15 +18,21 @@ ns=${BENCH_NS:-"1000 10000 100000"}
 mkdir -p "$out"
 
 . /workspace/wiz-env.sh 2>/dev/null || true
-CF=${WIZ_CFLAGS:-}
+CF="${WIZ_CFLAGS:-} -Idrafts/storage-engine"
 LF=${WIZ_LDFLAGS:-}
 cd "$root"
 
-echo "bench: building the two programs" >&2
-"$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
-  drafts/storage-engine/bench/QuireBench.wiz -o "$out/quire-bench"
-"$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
-  drafts/storage-engine/bench/JsonBench.wiz -o "$out/json-bench"
+bin=${BENCH_BIN_DIR:-$out}
+if [ -z "${BENCH_SKIP_BUILD:-}" ]; then
+  bin=$out
+  echo "bench: building the three programs" >&2
+  "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
+    drafts/storage-engine/bench/QuireBench.wiz -o "$bin/quire-bench"
+  "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
+    drafts/storage-engine/bench/JsonBench.wiz -o "$bin/json-bench"
+  "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
+    drafts/storage-engine/bench/BeforeBench.wiz -o "$bin/before-bench"
+fi
 
 tsv="$out/results.tsv"
 : > "$tsv"
@@ -66,26 +72,41 @@ for n in $ns; do
   QU="$out/quire-$n-update.db"
 
   # build / append
-  run_one json  build  "$n" "$out/json-bench"  "$J"
-  run_one quire batch  "$n" "$out/quire-bench" "$QB"
-  run_one quire append "$n" "$out/quire-bench" "$QA"
+  run_one json  build  "$n" "$bin/json-bench"  "$J"
+  run_one quire batch  "$n" "$bin/quire-bench" "$QB"
+  run_one quire append "$n" "$bin/quire-bench" "$QA"
 
   # reopen (parse the whole file vs open the snapshot)
-  run_one json  reopen "$n" "$out/json-bench"  "$J"
-  run_one quire reopen "$n" "$out/quire-bench" "$QB"
-  run_one quire reopen-fast "$n" "$out/quire-bench" "$QB"
+  run_one json  reopen "$n" "$bin/json-bench"  "$J"
+  run_one quire reopen "$n" "$bin/quire-bench" "$QB"
+  run_one quire reopen-fast "$n" "$bin/quire-bench" "$QB"
 
   # query by state (parse+filter vs indexCursor + filterKey)
-  run_one json  query  "$n" "$out/json-bench"  "$J"
-  run_one quire query  "$n" "$out/quire-bench" "$QB"
+  run_one json  query  "$n" "$bin/json-bench"  "$J"
+  run_one quire query  "$n" "$bin/quire-bench" "$QB"
 
   # update one record's state (parse/mutate/rewrite vs lens over + commit)
-  run_one json  update "$n" "$out/json-bench"  "$JU" "$J"
-  run_one quire update "$n" "$out/quire-bench" "$QU" "$QB"
+  run_one json  update "$n" "$bin/json-bench"  "$JU" "$J"
+  run_one quire update "$n" "$bin/quire-bench" "$QU" "$QB"
 
   # compact the never-reuse append file: the reclamation the design note promises
-  run_one quire compact "$n" "$out/quire-bench" "$QA" keep
+  run_one quire compact "$n" "$bin/quire-bench" "$QA" keep
   rm -f "$QA"
+done
+
+# The engine Quire replaces: train7's Durable (whole-chain rewrite on every commit).
+# Its append is O(n^2) pages, so only the small Ns are feasible.
+for n in ${BENCH_BEFORE_NS:-"1000 10000"}; do
+  B="$out/before-$n.db"
+  BU="$out/before-$n-update.db"
+  run_one before append "$n" "$bin/before-bench" "$B"
+  run_one before reopen "$n" "$bin/before-bench" "$B" keep
+  run_one before query  "$n" "$bin/before-bench" "$B" keep
+  if [ "$n" = "1000" ]; then
+    run_one before update "$n" "$bin/before-bench" "$BU" "$B"
+    rm -f "$BU"
+  fi
+  rm -f "$B"
 done
 
 echo
@@ -97,6 +118,7 @@ BEGIN {
   printf "%s\n", "-----------------------------------------------------------------------------------------------"
 }
 {
+  if ($1 == "before") { key = $3 SUBSEP $2; bt[key]=$4; br[key]=$6; bs[key]=$7; border[++bm]=key; next }
   key = $3 SUBSEP $2
   if ($1 == "json") { jt[key]=$4; jr[key]=$6; js[key]=$7 }
   else { qt[key]=$4; qr[key]=$6; qs[key]=$7; order[++m]=key }
@@ -112,6 +134,16 @@ END {
 }' "$tsv"
 
 echo
+echo "=== before (train7 Durable: whole-chain commits; small N only) ==="
+awk -F '\t' '
+BEGIN {
+  printf "%-6s %-7s | %10s %9s %10s\n", "N", "op", "before_us", "before_kB", "before_B"
+}
+$1 == "before" {
+  printf "%-6s %-7s | %10d %9d %10d\n", $3, $2, $4, $6, $7
+}' "$tsv"
+
+echo
 echo "=== markdown ==="
 awk -F '\t' '
 BEGIN {
@@ -119,6 +151,7 @@ BEGIN {
   print "|---:|---|---:|---:|---:|---:|---:|---:|---:|"
 }
 {
+  if ($1 == "before") next
   key = $3 SUBSEP $2
   if ($1 == "json") { jt[key]=$4; jr[key]=$6; js[key]=$7 }
   else { qt[key]=$4; qr[key]=$6; qs[key]=$7; order[++m]=key }
