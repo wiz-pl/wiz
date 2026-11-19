@@ -2,6 +2,7 @@ import Prelude
 import Scry.Egraph
 import Scry.Wil
 import Scry.EgraphWil
+import Scry.EgraphNative
 /-!
 # Scry.EgraphExtract: e-graph rewrites back into Wil, checked
 
