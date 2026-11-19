@@ -524,6 +524,12 @@ Sys	Fd.readRaw	axiom Fd.readRaw	runtime/rt_sys.inc wiz_sys_fd_read: one read aft
 Sys	Fd.readRaw	builtin extern:wiz_sys_fd_read:pnbn:w:io:: := Fd.readRaw	runtime/rt_sys.inc wiz_sys_fd_read: one read after an optional poll; fresh Bytes; WIZ_SYS_EOF/WIZ_SYS_TIMEOUT/errno on the short cases	Reuben Steenekamp	2027-05-01
 Sys	Fd.seekRaw	axiom Fd.seekRaw	runtime/rt_sys.inc wiz_sys_fd_seek: lseek with whence 0/1/2 and back negating off; returns the new offset, errno on failure	Reuben Steenekamp	2027-05-01
 Sys	Fd.seekRaw	builtin extern:wiz_sys_fd_seek:pnnb:n:io:: := Fd.seekRaw	runtime/rt_sys.inc wiz_sys_fd_seek: lseek with whence 0/1/2 and back negating off; returns the new offset, errno on failure	Reuben Steenekamp	2027-05-01
+Sys	Fd.syncRaw	axiom Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.syncRaw	builtin extern:wiz_sys_fd_fsync:p:n:io:: := Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.dataSyncRaw	axiom Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.dataSyncRaw	builtin extern:wiz_sys_fd_fdatasync:p:n:io:: := Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.truncateRaw	axiom Fd.truncateRaw	runtime/rt_sys.inc wiz_sys_fd_ftruncate: ftruncate(2) on the descriptor; 0 or errno, EBADF when closed, EINVAL above INT64_MAX	Reuben Steenekamp	2027-05-01
+Sys	Fd.truncateRaw	builtin extern:wiz_sys_fd_ftruncate:pn:n:io:: := Fd.truncateRaw	runtime/rt_sys.inc wiz_sys_fd_ftruncate: ftruncate(2) on the descriptor; 0 or errno, EBADF when closed, EINVAL above INT64_MAX	Reuben Steenekamp	2027-05-01
 Sys	Fd.std	axiom Fd.std	runtime/rt_sys.inc wiz_sys_fd_std: wraps descriptors 0/1/2 as unowned handles; other indices map to 2	Reuben Steenekamp	2027-05-01
 Sys	Fd.std	builtin extern:wiz_sys_fd_std:n:p:io::wiz_sys_fd_free := Fd.std	runtime/rt_sys.inc wiz_sys_fd_std: wraps descriptors 0/1/2 as unowned handles; other indices map to 2	Reuben Steenekamp	2027-05-01
 Sys	Fd.waitRaw	axiom Fd.waitRaw	runtime/rt_sys.inc wiz_sys_fd_wait: poll for POLLIN (events 1) or POLLOUT (events 2) with a deadline; 1 ready, 0 timeout, errno	Reuben Steenekamp	2027-05-01

@@ -1,0 +1,37 @@
+import Storage
+import Cursor
+
+/-!
+# Storage cursors (prototype)
+
+The same `Cursor` type for a table scan and an index scan; `follow` turns an index
+cursor (primary keys) into a node cursor. The snapshot is ω (copyable); only the
+cursor is linear, so a query does not make the transaction linear.
+-/
+
+/-- The primary keys in the snapshot's base pages. -/
+def Snapshot.nodeIds (s : Snapshot) : List U64 := U64Map.keys s.root.pages
+
+/-- A table scan: every node, through the pending write-set. -/
+def Snapshot.tableCursor (s : Snapshot) : Cursor Node :=
+  Cursor.fromList (List.flatMap (Snapshot.nodeIds s)
+    (fun id => Option.toList (Snapshot.getNode s id)))
+
+/-- An index scan: the primary keys in one bucket. The production plan streams the
+index leaf pages; this one materialises the bucket. -/
+def Snapshot.indexCursor (d : IndexDef) (v : U64) (s : Snapshot) : Cursor U64 :=
+  Cursor.fromList (Root.lookupIndex s.root (IndexDef.uid d) v)
+
+/-- The composite: follow each primary key to its node (the index→table optic). -/
+def Cursor.follow (s : Snapshot) (1 c : Cursor U64) : Cursor Node :=
+  Cursor.filterMap (fun id => Snapshot.getNode s id) c
+
+/-- An index scan whose elements are nodes: the same type as `tableCursor`. -/
+def Snapshot.indexNodes (d : IndexDef) (v : U64) (s : Snapshot) : Cursor Node :=
+  Cursor.follow s (Snapshot.indexCursor d v s)
+
+#eval List.length (Cursor.toList (Snapshot.tableCursor s0))          -- 2
+#eval List.length (Cursor.toList (Snapshot.indexNodes kindIndex (U64.ofNat 1) s0))  -- 1
+#eval List.length (Cursor.toList (Snapshot.indexNodes kindIndex (U64.ofNat 2) s0))  -- 1
+#eval Cursor.foldUntil (Snapshot.tableCursor s0) (fun n _ => Control.go (n + 1)) 0  -- 2
+#eval Cursor.foldUntil (Snapshot.tableCursor s0) (fun n _ => Control.stop n) 0     -- 0 (early exit)

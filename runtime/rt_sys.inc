@@ -1134,6 +1134,38 @@ WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int bac
   wiz_sys_err = at < 0 ? errno : 0;
   return at < 0 ? 0 : (uint64_t)at;
 }
+/* durability: fsync flushes the descriptor's data and metadata, fdatasync only what is
+   needed to read the data back. Both return 0 or errno, like close. */
+WIZ_API uint64_t wiz_sys_fd_fsync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
+}
+WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+#ifdef __EMSCRIPTEN__
+  /* Emscripten's libc does not promise fdatasync; fsync is the portable spelling. */
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#else
+  if (fdatasync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#endif
+  wiz_sys_err = 0;
+  return 0;
+}
+/* set the file's length: 0 or errno, like fsync. Growing zero-fills; shrinking discards
+   the tail. Only for a descriptor nothing has mapped past the new end: a live mapping of
+   those pages faults on the next read (the store compacts into a new inode instead). */
+WIZ_API uint64_t wiz_sys_fd_ftruncate(void *p, uint64_t n) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (n > (uint64_t)INT64_MAX) { wiz_sys_err = EINVAL; return EINVAL; }
+  if (ftruncate(h->fd, (off_t)n) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
+}
 /* poll several: `fds` a `List Fd`, `events` a `List Nat` (1 read, 2 write, 3 both) of
    the same length; within `ns` if timed. The list of ready positions (each with what
    it is ready for: 8 * position + (1 readable | 2 writable | 4 hung up or error)),

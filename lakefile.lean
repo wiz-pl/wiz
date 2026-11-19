@@ -47,11 +47,12 @@ lean_lib Grail
 -- The C runtime as text (`include_str`, runtime/WizRuntime.lean), a library of its own so
 -- that only it depends on the runtime's files: `needs` mixes their hashes into its
 -- modules' traces, so editing one rebuilds it and its importers (Lake doesn't track
--- include_str). The runtime is the header's inline part plus six area files.
+-- include_str). The runtime is the header's inline part plus seven area files.
 lean_lib WizRuntime where
   srcDir := "runtime"
   needs := #[`@/wizRuntimeHeader, `@/wizRuntimeCore, `@/wizRuntimeNum,
-    `@/wizRuntimeWords, `@/wizRuntimeData, `@/wizRuntimeSys, `@/wizRuntimeCon]
+    `@/wizRuntimeWords, `@/wizRuntimeData, `@/wizRuntimeSys, `@/wizRuntimeStorage,
+    `@/wizRuntimeCon]
 
 @[default_target] lean_exe wiz where
   root := `Main
@@ -104,6 +105,10 @@ input_file wizRuntimeData where
 
 input_file wizRuntimeSys where
   path := "runtime/rt_sys.inc"
+  text := true
+
+input_file wizRuntimeStorage where
+  path := "runtime/rt_storage.inc"
   text := true
 
 input_file wizRuntimeCon where
