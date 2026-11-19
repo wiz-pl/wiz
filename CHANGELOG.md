@@ -11,8 +11,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 ## [Unreleased]
 
 * scry C#: the frontend survives real code. Re-checked against a real solution's
-  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
-  files under `src/`), the lowering no longer drops constructs silently. The headline
+  75-file API project (every file parses without an `ERROR` or `MISSING` node; 2,483
+  files in the solution), the lowering no longer drops constructs silently. The headline
   find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
   function and no warning** — `typeDecls` recursed into the namespace node, but
   tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type

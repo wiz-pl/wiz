@@ -280,7 +280,7 @@ def group : Group where
     { name := "taint: CWE-78 through a LINQ query, a switch expression, a record field and a with copy",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-unsafe"
-        checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+        checkEq ["command-injection Fixtures.Modern.CommandEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
     { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-safe"

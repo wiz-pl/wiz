@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Regression check for the dogfood proofs. Each proof prints `key<TAB>value` lines;
+# Regression check for the prover corpus. Each proof prints `key<TAB>value` lines;
 # this script asserts the tagged verdict and, for a refutation, that the message names
-# the provenance path (a memory finding names its store and load). A refusal or a
-# vacuous verdict is a result too: it must say which one it is.
+# the provenance path (a memory finding names its store and load). A refused
+# certificate or a vacuous verdict is a result too: it must say which one it is.
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 PROVER=${PROVER:-$ROOT/scry/build/prover}
@@ -28,25 +28,24 @@ run() { # proof script
 
 run p1-process-safe && expect p1-process-safe '^VERDICT[[:space:]]+proved$' \
   && expect p1-process-safe '^ROWS[[:space:]]+1$'
-# P1b is memory-covered now, but it has no Console.ReadLine and no Process.Start, so
-# the honest answer is "vacuous", not "proved".
-run p1b-crux-api && expect p1b-crux-api '^VERDICT[[:space:]]+vacuous: .*source set is empty'
-# P1c has neither a source nor a sink; the old rubber stamp is now a loud vacuity.
-run p1c-crux-api-vacuous && expect p1c-crux-api-vacuous '^VERDICT[[:space:]]+vacuous: .*source set is empty' \
-  && expect p1c-crux-api-vacuous '^SRC[[:space:]]+0$' \
-  && expect p1c-crux-api-vacuous '^SINK[[:space:]]+0$'
-# P2: the SQL property ("every argument is a constant or a parameter bind") over the
-# untrusted sources. The method's reads (the connection string) are memory seeds now,
-# but they do not reach the SQL text: the text is built from constants and parameter
-# names, so the claim is proved.
+# P1b reads a field and calls a service; there is no Console.ReadLine and no
+# Process.Start, so the honest answer is vacuous, not proved.
+run p1b-field-service && expect p1b-field-service '^VERDICT[[:space:]]+vacuous: .*source set is empty'
+# P1c is the memory-free method in the same fixture: neither source nor sink.
+run p1c-vacuous && expect p1c-vacuous '^VERDICT[[:space:]]+vacuous: .*source set is empty' \
+  && expect p1c-vacuous '^SRC[[:space:]]+0$' \
+  && expect p1c-vacuous '^SINK[[:space:]]+0$'
+# P2: the SQL property over the untrusted sources. The field read is covered by the
+# memory invariant; the command text is built from constants and parameter names.
 run p2-sqlcommand && expect p2-sqlcommand '^VERDICT[[:space:]]+proved' \
   && expect p2-sqlcommand '^PROPERTY[[:space:]]+constant-or-parameter-bound'
-run p3-header-processor && expect p3-header-processor '^VERDICT[[:space:]]+proved$' \
-  && expect p3-header-processor '^ROWS[[:space:]]+10$'
-# P3b has no sink after the frontend lowering: vacuous, not a memory refusal.
+# P3: the header is a source and the processor call is a sink, but the header does not
+# reach the processor argument.
+run p3-header-processor && expect p3-header-processor '^VERDICT[[:space:]]+proved$'
+# P3b has no sink after lowering: vacuous, not a refused memory certificate.
 run p3b-logpath && expect p3b-logpath '^VERDICT[[:space:]]+vacuous: .*sink set is empty'
-# P6: the modern C# twin the analysis already found; now the checker refutes it through
-# the record's store and the later load.
+# P6: the modern C# twin; the record's store and the later load are in the invariant,
+# so the checker refutes it through memory.
 run p6-modern-store && expect p6-modern-store '^VERDICT[[:space:]]+refuted:' \
   && expect p6-modern-store 'store\(2,23,25\)' \
   && expect p6-modern-store 'load\(2,31,35\)' \

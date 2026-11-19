@@ -2,7 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 
-namespace Crux.Api.Endpoints;
+namespace Fixtures.Modern;
 
 #nullable enable
 
@@ -11,7 +11,7 @@ public record CommandRequest(string Command, int Retries = 0);
 
 // CWE-78 through the constructs a real endpoint file uses: LINQ query syntax, a switch
 // expression, an interpolated string, a record's positional field and a `with` copy.
-public sealed class ReportEndpoints
+public sealed class CommandEndpoints
 {
     public void Run(string mode)
     {

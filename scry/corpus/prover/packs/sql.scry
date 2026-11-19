@@ -1,10 +1,8 @@
-# Dogfood pack: the SQL-injection sinks of the real ReportService provider.
+# Prover pack: the SQL command sinks used by the synthetic report provider.
 #
-# The claim proved over `ReportService.Provider.SqlReportProvider.FetchRrnsAsync` is
-# "no caller-supplied or ambient value reaches a SqlCommand's text". The safety
-# consequence of "every SqlCommand argument is a constant or a parameter bind" is the
-# same no-flow claim; the positive "is a constant or a bind" predicate is not in the
-# proposition language (see wiz-notes/scry-prover-dogfood.md).
+# The claim is "every SqlCommand argument is a constant or a parameter bind", encoded
+# as a no-flow obligation over the untrusted sources: no caller-supplied or ambient
+# value reaches the command text.
 rule sql-injection
   kind taint
   severity error

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# P3b (attempt): a request-supplied name must not reach a filesystem handle.
-# Real Nexus file, LogFileReader.Resolve. REFUSED: a tainted location seed is present
-# (the checker's memory fragment); see the note.
+# P3b: a path helper with no sink. The helper validates and normalises a name but
+# returns a string; the lowered unit has no filesystem constructor, so the claim is
+# vacuous at the sink set (this used to be a refused memory certificate).
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../../.." && pwd)
 PROVER=${PROVER:-$ROOT/scry/build/prover}
-exec "$PROVER" "$ROOT/scry/corpus/prover/real/LogFileReader.cs" \
-  Crux.Dashboard.Api.LogViewer.LogFileReader.Resolve \
-  --pack "$ROOT/scry/corpus/prover/packs/logpath.scry" --entry
+exec "$PROVER" "$ROOT/scry/corpus/prover/synthetic/PathHelper.cs" \
+  Fixtures.Files.PathHelper.Resolve \
+  --pack "$ROOT/scry/corpus/prover/packs/path.scry" --entry

@@ -207,13 +207,13 @@ def toolchainGroup : Group where
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := loaderOf ms }
         checkEq "[2:1: info: 3]" (toString (s.messages.toList.map (·.render src))) },
     { name := "#262: `wiz check -I src FILE` and `wiz check FILE -I src` both find the package's modules", run := fun _ => do
-        let dir ← mkTree [("src/Crux/B.wiz", "import Prelude\ndef b : Nat := 1\n"),
-                          ("src/Crux/A.wiz", "import Crux.B\n#eval b\n")]
+        let dir ← mkTree [("src/Neutral/B.wiz", "import Prelude\ndef b : Nat := 1\n"),
+                          ("src/Neutral/A.wiz", "import Neutral.B\n#eval b\n")]
         let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
-        for args in [["check", "-I", "src", "src/Crux/A.wiz"], ["check", "src/Crux/A.wiz", "-I", "src"],
-                     ["-I", "src", "check", "src/Crux/A.wiz"]] do
+        for args in [["check", "-I", "src", "src/Neutral/A.wiz"], ["check", "src/Neutral/A.wiz", "-I", "src"],
+                     ["-I", "src", "check", "src/Neutral/A.wiz"]] do
           let out ← IO.Process.output { cmd := wiz, args := (args ++ ["--no-cache"]).toArray, cwd := some dir }
-          checkEq s!"{args}: 0 src/Crux/A.wiz:2:1: info: 1\n" s!"{args}: {out.exitCode} {out.stdout}{out.stderr}"
+          checkEq s!"{args}: 0 src/Neutral/A.wiz:2:1: info: 1\n" s!"{args}: {out.exitCode} {out.stdout}{out.stderr}"
         -- the usage text names -I for check
         let out ← IO.Process.output { cmd := wiz, args := #["help"] }
         check ((out.stdout.splitOn "wiz check [-I DIR] FILE").length > 1) out.stdout },
