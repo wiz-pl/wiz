@@ -72,8 +72,10 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to start one), and the playground keeps working as a local checker. Nothing is logged
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
-  `?completions=off` the completion popup (§ The editor). `?ui=loom` mounts the whole
-  page as the repo's Loom app instead of the static markup (§ The Loom UI).
+  `?completions=off` the completion popup (§ The editor). Both are on in every mode,
+  including `?ui=loom` and the standalone infoview page, and their layout is
+  `web/overlays.css` (loaded by both pages). `?ui=loom` mounts the whole page as the
+  repo's Loom app instead of the static markup (§ The Loom UI).
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -152,17 +154,25 @@ Assuming a text field is enough is what makes the playground feel unlike an edit
 pieces fix that without replacing the textarea, and none of them adds a dependency:
 
 * **Squiggles.** `web/squiggles.js` draws every diagnostic range as a wavy underline
-  under the offending source. It puts the editor in a positioned wrapper and places a
-  **mirror** over it: an absolutely positioned `div` with the textarea's font, padding and
-  wrapping, holding the same text with a `<span class="squiggle sev-ERROR">` around each
-  range, transparent text and a coloured `text-decoration`. The layer never takes a
-  pointer event (`pointer-events: none`), so typing, selection and scrolling stay the
-  textarea's, and its colour and caret are untouched. This is the fragile part of
-  decorating a plain textarea — the mirror only lines up if the font metrics and the wrap
-  points match — which is why `web/squiggles.js` copies `getComputedStyle(editor)` on
-  every layout and why `web/playground.css` repeats the same declarations on both sides.
-  If they ever drift, only the underline's position is wrong. `?squiggles=off` (also
+  under the offending source. It places a **mirror** over the editor: an absolutely
+  positioned `div` with the textarea's font, padding and wrapping, holding the same text
+  with a `<span class="squiggle sev-ERROR">` around each range, transparent text and a
+  coloured `text-decoration`. The layer never takes a pointer event
+  (`pointer-events: none`), so typing, selection and scrolling stay the textarea's, and
+  its colour and caret are untouched. This is the fragile part of decorating a plain
+  textarea — the mirror only lines up if the font metrics and the wrap points match —
+  which is why `web/squiggles.js` copies `getComputedStyle(editor)` on every layout and
+  why `web/overlays.css` repeats the same declarations on both sides. If they ever
+  drift, only the underline's position is wrong. `?squiggles=off` (also
   0/none/false) turns the layer off; the Goals pane's list still selects the spans.
+
+  The editor is **not wrapped**: the layer is appended to the editor's existing parent,
+  after everything that parent renders, and the parent is made a containing block. A
+  wrapper would move the textarea one child level deeper, and the Loom page
+  (`?ui=loom`) addresses nodes by child index — its text patch would resolve to the
+  wrapper and set the textarea's default value instead of its live one.
+  `web/loom_overlay_test.mjs` mounts the Loom page's tree, enables both overlays and
+  applies the app's patches to pin this.
 
   The ranges are computed by `squiggleSegments` (`web/editor-model.js`), which repairs
   what real servers send: a range with **no end** underlines the token at its start (one
@@ -216,8 +226,10 @@ The UI is its own Wasm instance, so a trap or restart in the engine does not tou
 The page keeps the effects (the engine, the goals client, the editor overlays) and
 reports their results through the module's `wiz_loom_*` entry points; the static markup
 is the default and the fallback when the module is missing or its ABI is not what the
-driver expects. `web/playground_ui_test.mjs` mounts the real module under Node with the
-driver and the DOM double and checks the panes, the status pair, the count, the value
+driver expects. The overlays are the same in both modes: the squiggle layer is a
+sibling of the editor (never a wrapper), so the driver's child-index paths keep pointing
+at the same nodes. `web/playground_ui_test.mjs` mounts the real module under Node with
+the driver and the DOM double and checks the panes, the status pair, the count, the value
 classes and the entry points.
 
 ## Documents
@@ -549,6 +561,9 @@ server does.
 * `node web/editor_dom_test.mjs` — the same two overlays against
   `web/framework/minidom.mjs`: what the squiggle layer draws, the popup's keys, the
   insertion and its `input` event, closing on blur/Escape, and the URL flags.
+* `node web/loom_overlay_test.mjs` — the overlays under the Loom page: mount its
+  child-index tree, enable squiggles and completions, apply the app's editor-text patch,
+  and require the textarea's live value, its path and the underline to stay in step.
 * `node web/playground_test.mjs` — the Wasm module itself: the engine's output, the
   check's `index` (a definition's expected type and declaration span, a `by` block's
   state before its step and at its end).

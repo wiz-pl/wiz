@@ -30,6 +30,7 @@ need docs/scroll.css
 need playground/index.html
 need playground/playground.js
 need playground/playground.css
+need playground/overlays.css
 need playground/playground-values.js
 need playground/playground-presets.js
 need playground/playground-state.js

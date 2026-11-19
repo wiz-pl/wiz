@@ -61,6 +61,11 @@ if grep -qF 'editor model: all checks passed' "$OUT/editor.txt"; then echo "ok (
 node "$ROOT/web/editor_dom_test.mjs" > "$OUT/editor-dom.txt"
 if grep -qF 'editor dom: all checks passed' "$OUT/editor-dom.txt"; then echo "ok (editor dom)"; else
   echo "FAIL (editor dom)"; cat "$OUT/editor-dom.txt"; exit 1; fi
+# (loom overlays) the overlays under the Loom page's child-index patch paths: enabling
+# squiggles must not move the textarea (web/loom_overlay_test.mjs)
+node "$ROOT/web/loom_overlay_test.mjs" > "$OUT/loom-overlay.txt"
+if grep -qF 'loom overlay: all checks passed' "$OUT/loom-overlay.txt"; then echo "ok (loom overlay)"; else
+  echo "FAIL (loom overlay)"; cat "$OUT/loom-overlay.txt"; exit 1; fi
 # (playground-exit) the engine guard: exit(3), abort/OOM and traps from a stub module
 node "$ROOT/web/playground_engine_test.mjs" > "$OUT/engine.txt"
 if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo "ok (playground, engine guard)"; else

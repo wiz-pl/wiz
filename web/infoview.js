@@ -72,10 +72,8 @@ export function startPage(doc = globalThis.document, loc = globalThis.location) 
     follow,
     // Following: the document is the editor's, not ours; the server announces it.
     uri: follow ? null : undefined,
-    // The underlines and the completion popup are the playground's (their layout lives
-    // in web/playground.css); this page keeps its own textarea and grid.
-    squiggles: false,
-    completions: false,
+    // The underlines and the completion popup are shared with the playground; their
+    // layout is web/overlays.css, which this page loads too (web/infoview.html).
     onRender(view) {
       if (status) status.textContent = statusText(view, follow, hasToken);
       if (pos && view.position) {
