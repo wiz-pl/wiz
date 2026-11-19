@@ -1041,6 +1041,10 @@ def writeMessage (stdout : IO.FS.Stream) (j : Json) : IO Unit := do
 structure Conn where
   /-- its socket (to shut it down) -/
   fd : UInt32
+  /-- the read handle `fd` belongs to. It stays here until the connection is erased, so
+  `fd` is still this connection's when `Socket.shutdown` runs (a closed descriptor's
+  number can be reused by a new connection, which the shutdown would then kill) -/
+  handle : IO.FS.Handle
   send : Json → IO Unit
   /-- a WebSocket client, which may also open and edit documents and ask anything an
   editor may (the web infoview is its own editor); the Unix socket's infoviews only pull -/
@@ -1115,23 +1119,35 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
   let unixConn (fd : UInt32) (r w : IO.FS.Handle) : IO Unit := do
     let k ← fresh
     let out := IO.FS.Stream.ofHandle w
-    ch.send (.connected k { fd, send := writeMessage out })
+    ch.send (.connected k { fd, handle := r, send := writeMessage out })
     readLoop k (readMessage (IO.FS.Stream.ofHandle r))
   -- a WebSocket: the handshake (on this connection's own thread), then a message per frame
   let wsConn (fd : UInt32) (r w : IO.FS.Handle) : IO Unit := do
-    let (r, w) := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
-    unless ← (try WebSocket.accept r w token listen.web catch _ => pure false) do Socket.shutdown fd; return
+    let (rs, ws) := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
+    unless ← (try WebSocket.accept rs ws token listen.web catch _ => pure false) do Socket.shutdown fd; return
     let k ← fresh
-    ch.send (.connected k { fd, send := fun j => WebSocket.sendText w j.compress, editing := true })
+    ch.send (.connected k { fd, handle := r, send := fun j => WebSocket.sendText ws j.compress, editing := true })
     readLoop k do
-      let some text ← WebSocket.recvText r w | return none
+      let some text ← WebSocket.recvText rs ws | return none
       pure (some ((Json.parse text).toOption.getD Json.null))
+  -- A closed listener is how the server stops: `Socket.close`/`closeFd` shuts it down and
+  -- closes it (EBADF, or EINVAL for an accept already under way). Any other error (EMFILE,
+  -- ECONNABORTED, …) is transient: retry instead of ending the acceptor for good.
+  let listenerClosed (e : IO.Error) : Bool :=
+    match e with
+    | .invalidArgument _ code _ => code == 9 || code == 22 -- EBADF | EINVAL
+    | _ => false
   let rec acceptLoop (lfd : UInt32) (serveConn : UInt32 → IO.FS.Handle → IO.FS.Handle → IO Unit) : IO Unit := do
-    match ← (try some <$> Socket.accept lfd catch _ => pure none) with
-    | none => pure ()
-    | some (fd, r, w) =>
+    let accepted : Except IO.Error (UInt32 × IO.FS.Handle × IO.FS.Handle) ←
+      try pure (.ok (← Socket.accept lfd)) catch e => pure (.error e)
+    match accepted with
+    | .ok (fd, r, w) =>
       let _ ← IO.asTask (prio := .dedicated) (serveConn fd r w)
       acceptLoop lfd serveConn
+    | .error e =>
+      unless listenerClosed e do
+        IO.sleep 20
+        acceptLoop lfd serveConn
   let unixFd ← listen.infoview.mapM Socket.listen
   if let (some fd, some _) := (unixFd, listen.infoview) then
     let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd unixConn)
