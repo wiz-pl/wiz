@@ -350,7 +350,7 @@ inductive RStar (sg : Sig) (Γ : Ctx) (A : Tm) : Tm → Tm → Prop where
 
 theorem rstar_snoc {sg : Sig} {Γ : Ctx} {A : Tm} :
     ∀ {t u v : Tm}, RStar sg Γ A t u → RedStep sg Γ A u v → RStar sg Γ A t v
-  | _, _, _, .refl _, hs => .step hs .refl
+  | _, _, _, .refl _, hs => .step hs (RStar.refl _)
   | _, _, _, .step h1 h2, hs => .step h1 (rstar_snoc h2 hs)
 
 theorem rstar_trans {sg : Sig} {Γ : Ctx} {A : Tm} :
@@ -363,7 +363,7 @@ theorem redStar_head {sg : Sig} {Γ : Ctx} {A : Tm} {t u v : Tm}
   rcases h with hEq | h
   · rw [← hEq]
     exact redStar_of_step hs
-  · exact Or.inr (Relation.TransGen.tail (Relation.TransGen.single hs) h)
+  · exact Or.inr (Relation.TransGen.trans (Relation.TransGen.single hs) h)
 
 theorem rstar_of_redStar {sg : Sig} {Γ : Ctx} {A : Tm} {t u : Tm}
     (h : RedStar sg Γ A t u) : RStar sg Γ A t u := by
@@ -401,10 +401,10 @@ theorem confluence_aux {sg : Sig} {Γ : Ctx} {A : Tm} (hLC : LocalConfluence sg)
         obtain ⟨c, hac, hbc⟩ := hLC Γ A t _ _ hta htb
         have hac' : RStar sg Γ A _ c := rstar_of_redStar hac
         have hbc' : RStar sg Γ A _ c := rstar_of_redStar hbc
-        obtain ⟨d, hud, hcd⟩ := ih _ hta u hau c hac'
-        obtain ⟨e, hve, hce⟩ := ih _ htb v hbv c hbc'
+        obtain ⟨d, hud, hcd⟩ := ih _ hta u c hau hac'
+        obtain ⟨e, hve, hce⟩ := ih _ htb v c hbv hbc'
         obtain ⟨z, hdz, hez⟩ :=
-          ih _ hta d (rstar_trans hac' hcd) e (rstar_trans hac' hce)
+          ih _ hta d e (rstar_trans hac' hcd) (rstar_trans hac' hce)
         exact ⟨z, rstar_trans hud hdz, rstar_trans hve hez⟩
 
 /-- **Local confluence plus strong normalisation gives confluence** (Newman's lemma). -/
