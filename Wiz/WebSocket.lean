@@ -164,10 +164,15 @@ def presentedToken (target : String) (headers : List (String × String)) : Optio
     if a.toLower.startsWith "bearer " then some (a.drop 7).trimAscii.toString else none
 
 /-- (11w) The files of the web infoview a server may hand out over HTTP (`web/build.sh`'s
-output), with their media types: only these, by exact name, so no other file is reachable. -/
+output), with their media types: only these, by exact name, so no other file is reachable.
+The page's language client is the playground's (`web/playground-lsp.js`), so its modules are
+served too. -/
 def webAssets : List (String × String) :=
   [("infoview.html", "text/html; charset=utf-8"), ("infoview.js", "text/javascript; charset=utf-8"),
-   -- (11s) the part infoview.js shares with the documentation's pages
+   -- (11s) the parts infoview.js shares with the playground and the documentation's pages
+   ("playground-lsp.js", "text/javascript; charset=utf-8"),
+   ("lsp-client.js", "text/javascript; charset=utf-8"),
+   ("goals.js", "text/javascript; charset=utf-8"),
    ("tagged.js", "text/javascript; charset=utf-8"),
    ("wiz-infoview.mjs", "text/javascript; charset=utf-8"), ("wiz-infoview.wasm", "application/wasm")]
 
@@ -180,12 +185,12 @@ the web infoview), a plain `GET` of one of `webAssets` (`/infoview.html?…`) ge
 and `false`, with or without a token (the files are the toolchain's own, the same for
 everyone); any other path gets `404`. -/
 def accept (r w : IO.FS.Stream) (token : Option String) (web : Option String := none) : IO Bool := do
-  let some (line, headers) ← readHead r | return false
-  let get (k : String) := (headers.lookup k).getD ""
   let refuse (status : String) : IO Bool := do
     w.putStr s!"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     w.flush
     pure false
+  let some (line, headers) ← readHead r | return ← refuse "400 Bad Request"
+  let get (k : String) := (headers.lookup k).getD ""
   unless line.startsWith "GET " do return ← refuse "405 Method Not Allowed"
   if let some o := headers.lookup "origin" then
     unless localOrigin o do return ← refuse "403 Forbidden"
