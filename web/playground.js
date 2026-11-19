@@ -399,7 +399,14 @@ const selfhost = typeof location !== "undefined" && wantsSelfhost(location.searc
   : undefined;
 
 function wireGoals() {
-  startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });
+  // The squiggle mirror wraps the textarea in a positioned element, which moves the
+  // textarea's text node off the Loom app's patch paths (the driver addresses nodes by
+  // index), so the Loom page keeps it off. The completion popup is appended to the body
+  // and stays on.
+  startInfoview({
+    editor, panel: document.getElementById("goals"), config: selfhost,
+    squiggles: ui === null,
+  });
 }
 
 // ## Mounting the page

@@ -1,0 +1,3 @@
+/-- Fixture: the same dotted name in another module. Dotted is not an escape hatch:
+it is still one global name today (`Thing.name`), and it migrates twice. -/
+def Thing.name : Nat := 2

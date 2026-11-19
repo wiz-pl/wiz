@@ -1,2 +1,0 @@
-heavy: template [lake build .*wiz.*tests] -> mem=8G cpus=4 time=14400s
-srun: job 2452 queued and waiting for resources

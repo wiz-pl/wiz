@@ -971,7 +971,12 @@ compiles the program the page runs.
   server must serve — methods, UTF-16 positions, fallbacks and the optional fields that
   make highlighting precise — is [playground-lsp.md](../playground-lsp.md). The mock
   server (`web/mock_lsp_server.mjs`) and `node web/playground_lsp_test.mjs` test it with
-  no Wiz build.
+  no Wiz build. The editor itself is a plain textarea plus overlays with no dependency:
+  diagnostics are underlined by `web/squiggles.js`, the caret is re-asked on selection
+  changes, and `web/completions.js` shows `textDocument/completion` at Ctrl-Space or while
+  typing. `?ui=loom` mounts the whole page from `lib/Web/Loom.wiz`
+  (`web/playground-ui.wiz`, built as its own small Wasm module) instead of the static
+  markup, which stays the default and the fallback.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
   call into Wasm is synchronous), and a very large normal form (a `Nat` in the thousands)
   can exhaust the Wasm stack, so the examples stay small. Only the embedded Prelude

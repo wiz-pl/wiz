@@ -42,10 +42,9 @@ cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css playground-values.js \
          playground-presets.js playground-state.js \
          lsp-client.js goals.js playground-lsp.js hover.js tagged.js selfhost-lsp-shim.js \
-         playground-engine.js; do
+         playground-engine.js editor-model.js squiggles.js completions.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
-
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
 for f in wiz-playground.mjs wiz-playground.wasm; do
