@@ -517,6 +517,18 @@ def languageGroup : Group where
           "def b {A : Type} (xs : List A) : List A := xs ++ xs\ndef c (s : String) : String := \"<\" ++ s ++ \">\"\n" ++
           "#eval a [2]\n#eval b [1]\n#eval c \"x\"")
           [".cons 1 (.cons 2 .nil)", ".cons 1 (.cons 1 .nil)", "\"<x>\""] },
+    -- (13k) `x :: xs` is `List.cons x xs`
+    { name := "13k: x :: xs is List.cons: right-associative, in patterns, printed back", run := fun _ =>
+        okLib ("import Prelude\n#eval 1 :: [2]\ndef ys : List Nat := 1 :: 2 :: [3]\n#eval ys\n" ++
+          "def len : List Nat → Nat\n  | [] => 0\n  | x :: xs => Nat.succ (len xs)\n#eval len ys\n" ++
+          "def prepend (x : Nat) (xs ys : List Nat) : List Nat := x :: xs ++ ys\n" ++
+          "#eval prepend 0 [1] [2, 3]\n" ++
+          "#check fun (x : Nat) (xs ys : List Nat) => x :: xs ++ ys\n" ++
+          "#check fun (x : Nat) (xs : List Nat) => List.cons x xs")
+          [".cons 1 (.cons 2 .nil)", ".cons 1 (.cons 2 (.cons 3 .nil))", "3",
+           ".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           "fun x xs ys => x :: xs ++ ys : Nat → List Nat → List Nat → List Nat",
+           "fun x xs => x :: xs : Nat → List Nat → List Nat"] },
     -- (13m) `local` notation
     { name := "local notation is used in its module and not seen by importers", run := fun _ => do
         okLoc locMod "import Loc\n#eval greet \"a\" &&& \"b\"\n#eval three" ["\"hi a!b\"", ".cons 1 (.cons 2 (.cons 3 .nil))"]
@@ -563,7 +575,7 @@ def languageGroup : Group where
           "#check fun (P Q : Prop) => P ∧ Q → Q ∨ ¬ P\n#check ∃ (n : Nat), n = n\n#check fun (f : Nat → Nat) => (fun x => x) (f 1) + 2")
           ["fun n => n + 1 : Nat → Nat", "fun a b => a * (b + 1) - a : Nat → Nat → Nat",
            "fun xs ys => xs ++ ys : List Nat → List Nat → List Nat", "[1, 2, 3] : List Nat", "[] : List Nat",
-           "fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat",
+           "fun x xs => x :: xs : Nat → List Nat → List Nat",
            "fun b c => if b then c else !c : Bool → Bool → Bool", "fun b c => b && c || !b : Bool → Bool → Bool",
            "fun P Q => P ∧ Q → Q ∨ ¬P : Prop → Prop → Prop", "∃ n, n = n : Prop",
            "fun f => (fun x => x : Nat → Nat) (f 1) + 2 : (Nat → Nat) → Nat"] },
@@ -583,7 +595,7 @@ def languageGroup : Group where
            "fun n => dbl (dbl n) : Nat → Nat"] },
     { name := "... local notation's unexpanders end with the module", run := fun _ =>
         okLoc locMod "import Loc\n#check fun (x : Nat) (xs : List Nat) => List.cons x xs\n#check fun (a b : String) => a &&& b"
-          ["fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
+          ["fun x xs => x :: xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
         failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" }
   ]

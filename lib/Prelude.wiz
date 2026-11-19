@@ -1482,6 +1482,10 @@ instance instHAppend {A : Type} [Append A] : HAppend A A A := HAppend.mk Append.
 attribute [default_instance] instHAppend
 attribute [binop] HAppend.hAppend
 infixr:67 " ++ " => HAppend.hAppend
+-- `x :: xs` is `List.cons x xs`, at the precedence of `++` (67, right-associative, as
+-- in Lean): `1 :: 2 :: xs` is `1 :: (2 :: xs)` and `x :: xs ++ ys` is
+-- `x :: (xs ++ ys)`. Tighter than the arrows (25), so `x :: xs → P` is `(x :: xs) → P`.
+infixr:67 " :: " => List.cons
 -- `[a, b, c]` is `List.cons a (List.cons b (List.cons c List.nil))` and `[]` is
 -- `List.nil`, in terms and in patterns. Instance binders (`[Monad m] → …`) still parse:
 -- a dependent arrow is longer than a list literal followed by an arrow.
