@@ -11,6 +11,7 @@ import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
 import Scry.Interproc
+import Scry.Registry
 import Scry.Sarif
 import Scry.Certify
 import Scry.Diff
@@ -963,6 +964,19 @@ def Scry.certVerified : Option Scry.Certificate → Bool
   | .some c => c.verified
   | .none => .false
 
+/-- Refuse to analyse when the rule pack and the analysis registry disagree: a `check`
+name no row implements (the old behaviour was a silent skip: zero findings and exit 0), or
+a row the pipeline can never select. `Scry.registryProblems` is the two-direction check;
+this only turns it into the CLI's loud failure. -/
+def Scry.refuseRegistryProblems (o : Scry.TaintOpts) (pack : Scry.RulePack) : EIO Unit :=
+  match Scry.registryProblems Scry.analyses pack with
+  | .nil => EIO.pure ()
+  | .cons first rest =>
+    EIO.fail (o.file ++ ": " ++ first
+      ++ (match List.length rest with
+        | .zero => ""
+        | n => " (and " ++ Nat.repr n ++ " more registry problem(s))"))
+
 /-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
 locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
 so a session does not parse the C again. -/
@@ -975,6 +989,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
   | .false => do
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
+    Scry.refuseRegistryProblems o pack;
     let c := Scry.Cst.ofStore text cst;
     let tu := Scry.lowerTU o.file c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
@@ -1003,14 +1018,16 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    let bounds := Scry.boundsCheck prog pt pack results;
+    -- The memory analyses are the registry's rows: every row the pack enables runs, in
+    -- registry order (lifetime before bounds, as the old fixed sequence did).
+    let analyses := Scry.runAnalyses Scry.analyses pack prog pt results;
     let warnings := Scry.dedupWarnings (List.append
       (List.filter (Scry.keepMemWarning hasLifetime)
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
           (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
-      bounds.warnings);
-    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
+      analyses.warnings);
+    let memoryFindings := analyses.findings;
     let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
       ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"

@@ -145,12 +145,16 @@ inductive Scry.MemWarnKind where
   /-- A call to an external function with no model and a pointer result or argument:
   its result and memory effect are unknown, not silently assumed pure. -/
   | unmodelledExternal
+  /-- The rule pack or the analysis registry asks for something this build cannot run
+  (an unknown `check`, or a registered analysis no check can select). -/
+  | registry
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
   | .useAfterFree => "use-after-free"
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
+  | .registry => "registry"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/

@@ -219,7 +219,7 @@ structure Scry.CompileResult where
   sanArgs : List String
   baseArgs : List String
 
-structure Scry.RunResult where
+structure Scry.ReproRunResult where
   runOut : Output
   runCmd : List String
   timeoutUsed : String
@@ -259,18 +259,18 @@ def Scry.wfCompile (cfg : Scry.ReproConfig) (source bin : String) : EIO Scry.Com
     compileCmd opt1 opt2 sanArgs baseArgs)
 
 def Scry.wfExecute (cfg : Scry.ReproConfig) (compileOk : Bool) (harnessPath bin inputText : String)
-    : EIO Scry.RunResult := do
+    : EIO Scry.ReproRunResult := do
   let envOpts := List.foldl (fun o kv => SpawnOptions.setEnv kv.1 kv.2 o)
     SpawnOptions.default cfg.env;
   let timeoutCmd := String.append (Nat.repr cfg.timeoutSecs) "s";
   let timedArgs := [timeoutCmd, "sh", harnessPath, bin];
   let runArgsDirect := ["sh", harnessPath, bin];
   runResult ← Scry.wfRunRepro compileOk timedArgs harnessPath bin inputText envOpts runArgsDirect;
-  EIO.pure (Scry.RunResult.mk runResult.1 runResult.2.1 runResult.2.2)
+  EIO.pure (Scry.ReproRunResult.mk runResult.1 runResult.2.1 runResult.2.2)
 
 structure Scry.CompileRunResult where
   compile : Scry.CompileResult
-  run : Scry.RunResult
+  run : Scry.ReproRunResult
 
 def Scry.wfCompileRun (cfg : Scry.ReproConfig) (source bin harnessPath inputText : String) :
     EIO Scry.CompileRunResult := do

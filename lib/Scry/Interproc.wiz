@@ -5,6 +5,7 @@ import Scry.Rules
 import Scry.Models
 import Scry.Lifetime
 import Scry.Bounds
+import Scry.Registry
 import Text
 /-!
 # Scry.Interproc
@@ -372,14 +373,18 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let bounds := Scry.boundsCheck p pt pack results;
+  -- The memory analyses are the registry's rows, not a fixed sequence. `runAnalyses`
+  -- selects the rows this pack enables, in registry order (lifetime before bounds, the
+  -- order this function used to call them in). A `check` name with no row is reported as
+  -- a registry diagnostic below rather than silently skipped.
+  let analyses := Scry.runAnalyses Scry.analyses pack p pt results;
   let warnings := Scry.dedupWarnings (List.append
     (List.filter (Scry.keepMemWarning hasLifetime)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
-    bounds.warnings);
-  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
+    (List.append analyses.warnings (Scry.registryWarnings pack)));
+  let memoryFindings := analyses.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/
