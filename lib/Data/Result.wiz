@@ -33,21 +33,6 @@ inductive Result (A : Type) where
   | ok (a : A)
   | err (e : Error)
 
-/-- Sequence two results, stopping at the first error. Lowered code matches on results
-directly (no closures around owners); `bind` and the monad instance are for
-hand-written specs and Wiz code calling lowered code (RD16). -/
-def Result.bind {A B : Type} (x : Result A) (f : A → Result B) : Result B := match x with
-  | .ok a => f a
-  | .err e => .err e
-/-- Apply `f` to the value, if there is one. -/
-def Result.map {A B : Type} (f : A → B) (x : Result A) : Result B := match x with
-  | .ok a => .ok (f a)
-  | .err e => .err e
-/-- `Result` is a monad, so it has `do` notation. -/
-instance : Monad Result where
-  pure := fun a => Result.ok a
-  bind := Result.bind
-
 -- ## Quantity-polymorphic results (`ResultQ`)
 
 /-- A result whose success value is used at quantity `q`: `ok` carries the value at `%q`,
@@ -89,6 +74,37 @@ def ResultQ.elim {0 q : Qty} {A B : Type} (onOk : (%q a : A) → B) (onErr : (e 
     (1 x : ResultQ q A) : B := match x with
   | .ok a => onOk a
   | .err e => onErr e
+
+attribute [inline] ResultQ.bind
+attribute [inline] ResultQ.map
+attribute [inline] ResultQ.elim
+
+-- ## `Result` is the `q = ω` instance of `ResultQ`
+--
+-- The value-level API below is the family at `q = ω` (`ResultQ ω A` and `Result A` are
+-- the same type), so there is one implementation of each ok/err path. Existing code
+-- keeps using `Result.bind`/`Result.map`; nothing about their meaning changes.
+
+/-- Sequence two results, stopping at the first error. Lowered code matches on results
+directly (no closures around owners); `bind` and the monad instance are for
+hand-written specs and Wiz code calling lowered code (RD16). This is `ResultQ.bind` at
+`q = ω`. -/
+def Result.bind {A B : Type} (x : Result A) (f : A → Result B) : Result B :=
+  ResultQ.bind x f
+/-- Apply `f` to the value, if there is one. This is `ResultQ.map` at `q = ω`. -/
+def Result.map {A B : Type} (f : A → B) (x : Result A) : Result B := ResultQ.map f x
+/-- Case analysis: the value (at ω) to `onOk`, the `Error` to `onErr`. This is
+`ResultQ.elim` at `q = ω`. -/
+def Result.elim {A B : Type} (onOk : A → B) (onErr : (e : Error) → B) (x : Result A) : B :=
+  ResultQ.elim onOk onErr x
+/-- `Result` is a monad, so it has `do` notation. -/
+instance : Monad Result where
+  pure := fun a => Result.ok a
+  bind := Result.bind
+
+attribute [inline] Result.bind
+attribute [inline] Result.map
+attribute [inline] Result.elim
 
 /-- `P` holds of the value, if there is one (a failure satisfies everything): "if it
 succeeds, then `P`". -/

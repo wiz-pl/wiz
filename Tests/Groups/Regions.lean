@@ -81,6 +81,32 @@ def regionsTwo (name outer body : String) : String :=
   | .err e => .err e
 "
 
+/-- Shared reborrows, zooms and pair borrows: the `ResultH.mapHandle`/`ofResult` paths of
+`Uniq.share(In)`, `Uniq.zoom(In)` and `Uniq.both`. -/
+def regionsOptics : String := r#"def share1 {ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
+  Uniq.share r (fun ρ' h x => .ok (List.length x.val))
+def shareIn1 {ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
+    Result1 Nat ((1 _ : Uniq ρa Nat) × Uniq ρb (List Nat)) :=
+  Uniq.shareIn r o (fun ρ' h o x => .ok (List.length x.val) o)
+def zoom1 {ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
+  Uniq.zoom Pair2.fstL p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))
+def both1 {ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
+  Uniq.both p (fun ρ' h a b =>
+    let 1 (x, a) := Uniq.peek a;
+    let 1 (y, b) := Uniq.peek b;
+    .ok (Nat.add x y) (a, b))
+def tShare : Result (Nat × List Nat) :=
+  Uniq.borrow Region.static (List.cons 1 (List.cons 2 List.nil)) (fun ρ h l r => share1 r)
+def tShareIn : Result ((Nat × List Nat) × Nat) :=
+  Uniq.borrow Region.static 5 (fun ρa ha la ra =>
+    Uniq.borrowIn Region.static (List.cons 3 List.nil) ra (fun ρb hb lb ra rb =>
+      shareIn1 rb ra))
+def tZoom : Result (Nat × Pair2 Nat Nat) :=
+  Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => zoom1 r)
+def tBoth : Result (Nat × (Nat × Nat)) :=
+  Uniq.borrow Region.static (1, 2) (fun ρ h l r => both1 r)
+"#
+
 /-- The front end's state for `src`, with every library importable. -/
 def libsState (src : String) (unbox : Bool := false) : IO (CommandState ZeroOneMany) := do
   let s := runFrontend (R := ZeroOneMany) src
@@ -210,7 +236,10 @@ def regionsGroup : Group where
         -- nor through an equation with a look-alike (the kernel compares by shape; `rfl`
         -- compares in the elaborator's view)
         failsLibs ("import Region\nstructure MyShr (ρ : Region) (A : Type) where\n  val : A\n" ++
-          "def forge {0 ρ : Region} (x : Nat) : Shr ρ Nat := cast rfl (MyShr.mk x : MyShr ρ Nat)") "not definitionally equal" },
+          "def forge {ρ : Region} (x : Nat) : Shr ρ Nat := cast rfl (MyShr.mk x : MyShr ρ Nat)") "not definitionally equal" },
+    { name := "shared reborrows, zooms and pair borrows keep the lender and hand it back", run := fun _ =>
+        okLibs ("import Region\n" ++ regionsOptics ++ "#eval tShare\n#eval tShareIn\n#eval tZoom\n#eval tBoth")
+          [".ok (2, .cons 1 (.cons 2 .nil))", ".ok ((1, .cons 3 .nil), 5)", ".ok (1, 9, 2, ())", ".ok (3, 1, 2)"] },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
           "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++

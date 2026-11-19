@@ -55,9 +55,8 @@ def Store.comp {A B S : Type} (st : Store A S) (m : A → Store B A) : Store B S
   (inner.1, fun b => st.2 (inner.2 b))
 /-- A borrow out of `A` (which may fail), seen as a borrow out of `S`, given how to put
 `A` back into `S`. -/
-def Store.underR {A B S : Type} (k : A → S) : Result (Store B A) → Result (Store B S)
-  | .ok inner => .ok (inner.1, fun b => k (inner.2 b))
-  | .err e => .err e
+def Store.underR {A B S : Type} (k : A → S) (r : Result (Store B A)) : Result (Store B S) :=
+  Result.map (fun (inner : Store B A) => (inner.1, fun b => k (inner.2 b))) r
 /-- `Store.comp` when the inner borrow may fail (`&mut (*r)[i]`). -/
 def Store.compP {A B S : Type} (st : Store A S) (m : A → Result (Store B A)) : Result (Store B S) :=
   Store.underR st.2 (m st.1)
@@ -92,9 +91,7 @@ def Lens.toP {S A : Type} (l : Lens S A) : PLens S A := fun s => .ok (l s)
 
 /-- A partial place inside a partial place (`v[i][j]`): fails if either does. -/
 def PLens.comp {S A B : Type} (l : PLens S A) (m : PLens A B) : PLens S B := fun s =>
-  match l s with
-  | .ok st => Store.compP st m
-  | .err e => .err e
+  Result.bind (l s) (fun st => Store.compP st m)
 
 -- ## zoom: run a state transformer through a place
 --
@@ -108,17 +105,11 @@ a sub-place of `s` is `zoom`. This is also the lowering of a `FnMut` closure tha
 captures `&mut x` (state passing, RD5). -/
 def zoom {S X B : Type} (l : Lens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
   let st := l s;
-  match m st.1 with
-  | .ok r => .ok (r.1, st.2 r.2)
-  | .err e => .err e
+  Result.map (fun (r : B × X) => (r.1, st.2 r.2)) (m st.1)
 
 /-- `zoom` through a partial place: fails if the place does. -/
 def zoomP {S X B : Type} (l : PLens S X) (m : X → Result (B × X)) (s : S) : Result (B × S) :=
-  match l s with
-  | .ok st => (match m st.1 with
-    | .ok r => .ok (r.1, st.2 r.2)
-    | .err e => .err e)
-  | .err e => .err e
+  Result.bind (l s) (fun st => Result.map (fun (r : B × X) => (r.1, st.2 r.2)) (m st.1))
 
 -- ## Affine: `Option<&mut A>`
 --
@@ -164,12 +155,9 @@ class TraverseMut (S : Type) (A : outParam Type) where
 
 /-- `iter_mut` over a list (`TraverseMut`'s instance for `List`). -/
 def List.traverseM {A σ : Type} (f : A → σ → Result (A × σ)) : List A → σ → Result (List A × σ)
-  | .nil, st => .ok (([] : List A), st)
-  | .cons x xs, st => match f x st with
-    | .ok r => (match List.traverseM f xs r.2 with
-      | .ok r' => .ok (List.cons r.1 r'.1, r'.2)
-      | .err e => .err e)
-    | .err e => .err e
+  | .nil, st => .ok ((List.nil : List A), st)
+  | .cons x xs, st => Result.bind (f x st) (fun r =>
+      Result.map (fun (r' : List A × σ) => (List.cons r.1 r'.1, r'.2)) (List.traverseM f xs r.2))
 
 /-- Lists are traversed front to back, by `List.traverseM`. -/
 instance {A : Type} : TraverseMut (List A) A where
@@ -233,9 +221,7 @@ def Store.final {A S : Type} (st : Store A S) (fin : A) : Store.put st fin = st.
 is unchanged). -/
 def zoom.frameAt {S X Y B : Type} (n : Lens S Y) (k : X → S) (y : Y) (hk : (x : X) → (n (k x)).1 = y) :
     (r : Result (B × X)) →
-    Result.All (fun (p : B × S) => (n p.2).1 = y) (match r with
-      | .ok p => Result.ok (p.1, k p.2)
-      | .err e => Result.err e)
+    Result.All (fun (p : B × S) => (n p.2).1 = y) (Result.map (fun (p : B × X) => (p.1, k p.2)) r)
   | .ok p => hk p.2
   | .err e => ()
 /-- The frame rule for `zoom`: a place `n` independent of `l` is unchanged. -/
