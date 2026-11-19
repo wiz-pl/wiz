@@ -37,6 +37,14 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
 A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
 text over the expected file **and still fails the case**, so a regenerated golden is
 always reviewed in the diff and never passes silently.
+
+`lower/lambda.cs` is a port of Joern's `csharpsrc2cpg` `LambdaTests` fixture. It is a
+**characterization case for a known gap**, not a claim of support: the golden records
+what scry does today, and the case is then reported as skipped with the gap as its
+reason. When the gap is fixed the golden changes, the case fails, and both the golden
+and the skip must be updated (see `.github/skip-allowlist.json`). Joern's
+`TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed on this
+branch, so it is an ordinary lowering case (lowered as `<stem>.Main`).
 -/
 
 open Wiz
@@ -119,7 +127,7 @@ def fixtures : List (String × String) :=
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
    ("lower", "patterns"), ("lower", "switch"),
-   ("lower", "primary-ctor"),
+   ("lower", "primary-ctor"), ("lower", "lambda"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
@@ -389,6 +397,10 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
+    { name := "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+      run := fun _ => do
+        lowerGolden "lambda"
+        skip "known gap: lambda bodies are an opaque fnptr and its body is not in the program; Joern's LambdaTests lowers each lambda as a method" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"
