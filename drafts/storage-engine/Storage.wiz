@@ -1,0 +1,450 @@
+import Optic
+import OpticDerive
+import Word
+import Text
+import WordMap
+import Functor
+import Cursor
+/-!
+# Storage engine prototype (design note companion)
+
+A toy in-memory engine with the shape the note argues for:
+
+* `Snapshot` is an immutable value: a base root, a generation, and a write-set
+  (`U64Map Patch`) that the store's optics extend;
+* the store's `Lens`/`PLens` put functions *record* a patch instead of
+  materialising a new map (`nodeAt`, `nodeOr`);
+* `Db.commit` is the pure commit/validation core: deletes bump a global epoch,
+  `set`/`del` are first-committer-wins per key, `addCount` is a commutative delta
+  and is rebased unconditionally;
+* `IndexDef`/`Root.reindex` maintain a secondary index incrementally from the
+  primary write-set, and `indexTraversal` is a hand-rolled `Traversal` over a
+  bucket (new for this module; lib/Optic.wiz has no `Traversal`).
+
+Only the pure core is here. `getDb`/`putDb` are the two IO operations of the
+design; their signatures are in the note, and the in-memory `Handle` would be a
+`Ref`/`foreign_type` in a real slice.
+-/
+
+-- ## Records
+
+/-- A fixed-size flatgraph node. Production stores this in 32 bytes (see the note). -/
+structure Node where
+  kind : U32
+  count : U64
+  label : U32
+  deriving Lens
+
+/-- Field equality (no `BEq` instance for `Node` in the prototype). -/
+def Node.beq (a b : Node) : Bool :=
+  Bool.and (UIntN.beq a.kind b.kind)
+    (Bool.and (UIntN.beq a.count b.count) (UIntN.beq a.label b.label))
+
+/-- The value of a field, by the schema's field number: 0 kind, 1 count, 2 label. -/
+def Node.field (n : Node) : Nat → U64
+  | 0 => UIntN.resize 64 n.kind
+  | 1 => n.count
+  | _ => UIntN.resize 64 n.label
+
+-- ## The write-set: the transaction is a diff
+
+/-- One record's change. `addCount` is the commutative delta (two `+1`s compose
+to `+2` and rebase over anything); `set` and `del` are not commutative. -/
+inductive Patch where
+  | set (node : Node)
+  | addCount (d : U64)
+  | del
+
+/-- Apply a patch to a record (absent is `none`). -/
+def Patch.apply (p : Patch) (old : Option Node) : Option Node :=
+  match p, old with
+  | .set n, _ => .some n
+  | .del, _ => .none
+  | .addCount d, .some n => .some { n with count := n.count + d }
+  | .addCount _, .none => .none
+
+/-- `q` followed by `p`, as one patch (the transaction monoid on one key). -/
+def Patch.seq (q p : Patch) : Patch :=
+  match q, p with
+  | .del, .set n => .set n
+  | .del, _ => .del
+  | .addCount d1, .addCount d2 => .addCount (d1 + d2)
+  | .addCount _, .set n => .set n
+  | .addCount _, .del => .del
+  | .set n, .addCount d => .set { n with count := n.count + d }
+  | .set _, .set m => .set m
+  | .set _, .del => .del
+
+/-- The patch taking `old` to `new`: an `addCount` when only the counter grew,
+otherwise a `set`; `none` when they are equal (so GetPut holds). -/
+def Patch.ofChange (old new : Node) : Option Patch :=
+  match Node.beq old new with
+  | .true => .none
+  | .false =>
+    match Bool.and (UIntN.beq old.kind new.kind) (UIntN.beq old.label new.label) with
+    | .true =>
+      match UIntN.lt new.count old.count with
+      | .false => .some (.addCount (new.count - old.count))
+      | .true => .some (.set new)
+    | .false => .some (.set new)
+
+/-- A write-set: at most one patch per key, composed by `Patch.seq`. -/
+def WriteSet : Type := U64Map Patch
+
+/-- Record a patch for `id`, composing with what the transaction already has. -/
+def WriteSet.combine (m : WriteSet) (id : U64) (p : Patch) : WriteSet :=
+  match U64Map.find m id with
+  | .none => U64Map.insert m id p
+  | .some q => U64Map.insert m id (Patch.seq q p)
+
+-- ## Roots and snapshots
+
+/-- A materialised root (the production store's is a page number). -/
+structure Root where
+  pages : U64Map Node
+  versions : U64Map U64
+  index : U64Map (U64Map (List U64))
+  delEpoch : U64
+
+/-- An immutable snapshot: a base root, its generation, and the pending write-set.
+`getDb` returns one with an empty `ws`; each `over` extends `ws`; `putDb` commits it. -/
+structure Snapshot where
+  gen : U64
+  root : Root
+  ws : WriteSet
+
+/-- Read a node through the pending write-set: the overlay wins over the base. -/
+def Snapshot.getNode (s : Snapshot) (id : U64) : Option Node :=
+  match U64Map.find s.ws id with
+  | .some p => Patch.apply p (U64Map.find s.root.pages id)
+  | .none => U64Map.find s.root.pages id
+
+/-- Extend the write-set (a no-op patch leaves the snapshot alone, keeping GetPut). -/
+def Snapshot.record (s : Snapshot) (id : U64) (p : Option Patch) : Snapshot :=
+  match p with
+  | .none => s
+  | .some q => { s with ws := WriteSet.combine s.ws id q }
+
+-- ## The optics: puts record; the existing `Lens`/`PLens` are enough
+
+/-- The place of an existing node: a partial lens that records the change. -/
+def nodeAt (id : U64) : PLens Snapshot Node := fun s =>
+  match Snapshot.getNode s id with
+  | .none => .err .outOfBounds
+  | .some n => .ok (n, fun n' => Snapshot.record s id (Patch.ofChange n n'))
+
+/-- The place of a node, with a default for an absent one (create-on-first-write).
+Lawful on the nodes that exist; the note uses `nodeAt` for the honest version. -/
+def nodeOr (id : U64) (d : Node) : Lens Snapshot Node := fun s =>
+  let cur := match Snapshot.getNode s id with
+    | .some n => n
+    | .none => d;
+  (cur, fun n' => match Snapshot.getNode s id with
+    | .some old => Snapshot.record s id (Patch.ofChange old n')
+    | .none => match Node.beq d n' with
+      | .true => s
+      | .false => Snapshot.record s id (.some (.set n')))
+
+/-- `PLens.over`: the partial-lens counterpart of `Lens.over` (a small addition the
+note proposes for lib/Optic.wiz). -/
+def PLens.over {S A : Type} (l : PLens S A) (f : A → A) (s : S) : Result S :=
+  match l s with
+  | .ok st => .ok (st.2 (f st.1))
+  | .err e => .err e
+
+/-- The owner's shape, pure: `over (nodeOr id d ∘ Node.countL) (+1) db`. -/
+def bumpCount (id : U64) (s : Snapshot) : Snapshot :=
+  Lens.over (Lens.comp (nodeOr id (Node.mk 0 0 0)) Node.countL) (fun c => c + 1) s
+
+/-- The same through the partial place, with the absent case explicit. -/
+def bumpCountAt (id : U64) (s : Snapshot) : Result Snapshot :=
+  PLens.over (PLens.comp (nodeAt id) (Lens.toP Node.countL)) (fun c => c + 1) s
+
+-- ## Secondary indices
+
+/-- An index: a numbered field, non-unique or unique. -/
+structure IndexDef where
+  id : U32
+  field : U32
+  unique : Bool
+
+/-- The index key of a node for `d`. -/
+def IndexDef.key (d : IndexDef) (n : Node) : U64 := Node.field n d.field.toNat
+
+/-- `d`'s number as a map key. -/
+def IndexDef.uid (d : IndexDef) : U64 := U64.ofNat d.id.toNat
+
+/-- The bucket map of one index. -/
+def Root.indexOf (r : Root) (ix : U64) : U64Map (List U64) :=
+  U64Map.findD r.index ix U64Map.empty
+
+/-- The node ids in a bucket. -/
+def Root.lookupIndex (r : Root) (ix : U64) (v : U64) : List U64 :=
+  U64Map.findD (Root.indexOf r ix) v []
+
+/-- Add `id` to a bucket (set insertion: absent entries only). -/
+def Root.addIndex (r : Root) (ix : U64) (v : U64) (id : U64) : Root :=
+  let b := Root.indexOf r ix;
+  let ids := U64Map.findD b v [];
+  let ids' := match List.any (fun x => UIntN.beq x id) ids with
+    | .true => ids
+    | .false => List.append ids [id];
+  { r with index := U64Map.insert r.index ix (U64Map.insert b v ids') }
+
+/-- Remove `id` from a bucket. -/
+def Root.removeIndex (r : Root) (ix : U64) (v : U64) (id : U64) : Root :=
+  let b := Root.indexOf r ix;
+  let ids := U64Map.findD b v [];
+  let ids' := List.filter (fun x => Bool.not (UIntN.beq x id)) ids;
+  { r with index := U64Map.insert r.index ix (U64Map.insert b v ids') }
+
+/-- Recompute one index from the primary map (the repair path, and how a new index is
+built; the production store does this in compaction, not on every commit). -/
+def Root.rebuildIndex (r : Root) (defs : List IndexDef) : Root :=
+  List.foldl (fun r d =>
+    let empty : U64Map (List U64) := U64Map.empty;
+    let r0 := { r with index := U64Map.insert r.index (IndexDef.uid d) empty };
+    U64Map.foldl (fun r id n => Root.addIndex r (IndexDef.uid d) (IndexDef.key d n) id) r0 r.pages) r defs
+
+/-- The index delta of one record's change, as a monoid: added and removed facts.
+In the production store this is the value the index B+tree is COW-updated with. -/
+structure IndexDelta where
+  added : List (U64 × U64 × U64)
+  removed : List (U64 × U64 × U64)
+
+/-- The identity delta. -/
+def IndexDelta.empty : IndexDelta := IndexDelta.mk [] []
+
+/-- The sum of two deltas (facts; set union is commutative, and so is this). -/
+def IndexDelta.combine (a b : IndexDelta) : IndexDelta :=
+  IndexDelta.mk (List.append a.added b.added) (List.append a.removed b.removed)
+
+/-- The delta one changed record contributes to every index. -/
+def Root.reindexOp (r : Root) (defs : List IndexDef) (id : U64) (old new : Option Node) : Root :=
+  List.foldl (fun r d =>
+    let ov : Option U64 := match old with | .none => .none | .some n => .some (IndexDef.key d n);
+    let nv : Option U64 := match new with | .none => .none | .some n => .some (IndexDef.key d n);
+    match ov, nv with
+    | .none, .none => r
+    | .some a, .none => Root.removeIndex r (IndexDef.uid d) a id
+    | .none, .some b => Root.addIndex r (IndexDef.uid d) b id
+    | .some a, .some b =>
+      match UIntN.beq a b with
+      | .true => r
+      | .false => Root.addIndex (Root.removeIndex r (IndexDef.uid d) a id) (IndexDef.uid d) b id) r defs
+
+-- ## Commit and validation
+
+/-- Why a commit was rejected. -/
+inductive CommitError where
+  | stale (base : U64) (current : U64)
+  | conflict (id : U64) (expected : U64) (actual : U64)
+  | missing (id : U64)
+  | duplicate (ix : U32) (value : U64)
+
+/-- A commit's outcome. -/
+inductive Outcome where
+  | committed (gen : U64)
+  | rejected (e : CommitError)
+
+/-- The committed database (the in-memory stand-in for the handle's root). -/
+structure Db where
+  gen : U64
+  root : Root
+  indices : List IndexDef
+
+/-- A snapshot of a committed database, with no pending writes. -/
+def Db.snapshot (db : Db) : Snapshot := Snapshot.mk db.gen db.root U64Map.empty
+
+
+/-- The version a root records for a key (0: never written). -/
+def Root.versionOf (r : Root) (id : U64) : U64 := U64Map.findD r.versions id (U64.ofNat 0)
+
+/-- The delete barrier: a transaction that began before a delete is stale, whatever
+keys it touches (the conservative global rule; the note refines it per key). -/
+def Db.checkStale (db : Db) (tx : Snapshot) : Option CommitError :=
+  match UIntN.lt tx.gen db.root.delEpoch with
+  | .true => .some (.stale tx.gen db.gen)
+  | .false => .none
+
+/-- The per-key rule: `addCount` rebases; `set`/`del` need the version the tx read. -/
+def Db.checkOp (db : Db) (tx : Snapshot) (id : U64) (p : Patch) : Option CommitError :=
+  let seen := Root.versionOf tx.root id;
+  let now := Root.versionOf db.root id;
+  match p with
+  | .addCount _ => match U64Map.find db.root.pages id with
+    | .none => .some (.missing id)
+    | .some _ => .none
+  | .set _ => match UIntN.beq seen now with
+    | .true => .none
+    | .false => .some (.conflict id seen now)
+  | .del => match UIntN.beq seen now with
+    | .true => .none
+    | .false => .some (.conflict id seen now)
+
+/-- A unique index's insert may not land on another node's key. -/
+def Db.checkUnique (db : Db) (id : U64) (p : Patch) : Option CommitError :=
+  let old := U64Map.find db.root.pages id;
+  let new := Patch.apply p old;
+  match old, new with
+  | .some o, .some n =>
+    List.foldl (fun acc d =>
+      match acc with
+      | .some e => .some e
+      | .none =>
+        match d.unique with
+        | .false => .none
+        | .true =>
+          let a := IndexDef.key d o;
+          let b := IndexDef.key d n;
+          match UIntN.beq a b with
+          | .true => .none
+          | .false =>
+            let ids := Root.lookupIndex db.root (IndexDef.uid d) b;
+            match List.any (fun x => Bool.not (UIntN.beq x id)) ids with
+            | .true => .some (.duplicate d.id b)
+            | .false => .none) .none db.indices
+  | _, _ => .none
+
+/-- The first failing op of a write-set, if any. -/
+def Db.firstError (db : Db) (tx : Snapshot) : List (U64 × Patch) → Option CommitError
+  | .nil => .none
+  | .cons e es =>
+    match Db.checkOp db tx e.1 e.2 with
+    | .some c => .some c
+    | .none => match Db.checkUnique db e.1 e.2 with
+      | .some c => .some c
+      | .none => Db.firstError db tx es
+
+/-- The new primary map: apply every patch in the write-set. -/
+def Db.applyPages (db : Db) (entries : List (U64 × Patch)) : U64Map Node :=
+  List.foldl (fun m e => match Patch.apply e.2 (U64Map.find m e.1) with
+    | .none => U64Map.erase m e.1
+    | .some n => U64Map.insert m e.1 n) db.root.pages entries
+
+/-- The new index roots, derived incrementally from the primary change. -/
+def Db.applyIndex (db : Db) (entries : List (U64 × Patch)) : Root :=
+  List.foldl (fun r e =>
+    Root.reindexOp r db.indices e.1 (U64Map.find db.root.pages e.1)
+      (Patch.apply e.2 (U64Map.find db.root.pages e.1))) db.root entries
+
+/-- The new version table: every touched key gets the new generation. -/
+def Db.applyVersions (db : Db) (entries : List (U64 × Patch)) (g : U64) : U64Map U64 :=
+  List.foldl (fun m e => U64Map.insert m e.1 g) db.root.versions entries
+
+/-- Whether the write-set contains a delete. -/
+def Db.hasDelete (entries : List (U64 × Patch)) : Bool :=
+  List.any (fun e => match e.2 with | .del => .true | _ => .false) entries
+
+/-- The pure commit: validate, then materialise. The single-writer critical section of
+the real `putDb` is exactly this function plus the log append and `fsync`. -/
+def Db.commit (db : Db) (tx : Snapshot) : Db × Outcome :=
+  match Db.checkStale db tx with
+  | .some e => (db, .rejected e)
+  | .none =>
+    let entries := U64Map.toList tx.ws;
+    match Db.firstError db tx entries with
+    | .some e => (db, .rejected e)
+    | .none =>
+      let g := db.gen + 1;
+      let root' := Root.mk (Db.applyPages db entries) (Db.applyVersions db entries g)
+        (Db.applyIndex db entries).index
+        (match Db.hasDelete entries with
+          | .true => g
+          | .false => db.root.delEpoch);
+      (Db.mk g root' db.indices, .committed g)
+
+-- ## A traversal over an index bucket (new for this module)
+
+/-- A read-and-update traversal: every focus matching a predicate. lib/Optic.wiz has
+`TraverseMut` (an effectful `iter_mut`) but no pure `Traversal`; this is the small
+piece the index API needs. The update half records patches, like the lenses. -/
+structure Traversal (S A : Type) where
+  view : S → List A
+  overAll : (A → A) → S → S
+
+/-- The nodes in `d`'s bucket for `v`, as a traversal. -/
+def indexTraversal (d : IndexDef) (v : U64) : Traversal Snapshot Node :=
+  Traversal.mk
+    (fun s => List.flatMap (Root.lookupIndex s.root (IndexDef.uid d) v)
+      (fun id => Option.toList (Snapshot.getNode s id)))
+    (fun f s => List.foldl (fun s id =>
+        match Snapshot.getNode s id with
+        | .none => s
+        | .some n => Snapshot.record s id (Patch.ofChange n (f n)))
+      s (Root.lookupIndex s.root (IndexDef.uid d) v))
+
+-- ## A toy scenario (the probe)
+
+def nodeA : Node := Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)
+def nodeB : Node := Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8)
+def kindIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def uniqueLabel : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .true
+
+/-- Bump every node whose indexed field is `v`. -/
+def bumpOfKind (v : U64) (s : Snapshot) : Snapshot :=
+  Traversal.overAll (indexTraversal kindIndex v) (fun n => { n with count := n.count + 1 }) s
+
+
+def db0Root : Root :=
+  Root.mk (U64Map.ofList [(U64.ofNat 1, nodeA), (U64.ofNat 2, nodeB)])
+    (U64Map.empty : U64Map U64)
+    (U64Map.empty : U64Map (U64Map (List U64)))
+    (U64.ofNat 0)
+def db0 : Db := Db.mk (U64.ofNat 0) (Root.rebuildIndex db0Root [kindIndex, uniqueLabel]) [kindIndex, uniqueLabel]
+
+def countOf (db : Db) (id : U64) : Nat :=
+  match U64Map.find db.root.pages id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def bucketOf (db : Db) (ix : U64) (v : U64) : Nat :=
+  List.length (Root.lookupIndex db.root ix v)
+
+def isRejected (o : Outcome) : Nat :=
+  match o with
+  | .committed _ => 0
+  | .rejected _ => 1
+
+def isCommitted (o : Outcome) : Nat :=
+  match o with
+  | .committed _ => 1
+  | .rejected _ => 0
+
+-- one `+1`
+def s0 := Db.snapshot db0
+def db1 := (Db.commit db0 (bumpCount 1 s0)).1
+#eval countOf db1 1                 -- 1
+#eval isCommitted (Db.commit db0 (bumpCount 1 s0)).2   -- 1
+
+-- two `+1`s from the same base: both commit, and the counter is 2
+def dbA := (Db.commit db0 (bumpCount 1 s0)).1
+def dbB := (Db.commit dbA (bumpCount 1 s0))
+#eval isCommitted dbB.2            -- 1
+#eval countOf dbB.1 1              -- 2
+
+-- a `set` from the same stale base conflicts with the committed `+1` (a change to a
+-- non-counter field is a `set`, not a commutative delta)
+def setLabel (id : U64) (v : U32) (s : Snapshot) : Snapshot :=
+  Lens.over (Lens.comp (nodeOr id (Node.mk 0 0 0)) Node.labelL) (fun _ => v) s
+#eval isRejected (Db.commit dbA (setLabel 1 (U32.ofNat 9) s0)).2   -- 1
+
+-- a unique index rejects a duplicate (node 2's label 7 is node 1's)
+#eval isRejected (Db.commit db0 (setLabel 2 (U32.ofNat 7) s0)).2   -- 1
+
+-- a transaction that started before a delete is stale
+def delNode (id : U64) (s : Snapshot) : Snapshot :=
+  { s with ws := WriteSet.combine s.ws id .del }
+def dbDel := (Db.commit db0 (delNode 2 s0)).1
+#eval isRejected (Db.commit dbDel (bumpCount 1 s0)).2   -- 1
+
+-- the index is maintained and the bucket is readable
+#eval bucketOf dbA (IndexDef.uid kindIndex) (U64.ofNat 1)   -- 1
+#eval bucketOf dbA (IndexDef.uid kindIndex) (U64.ofNat 9)   -- 0
+
+-- an index traversal: both nodes are in the kind buckets; bumping kind 1 bumps one
+#eval List.length (Traversal.view (indexTraversal kindIndex (U64.ofNat 1)) s0)   -- 1
+def dbT := (Db.commit db0 (bumpOfKind (U64.ofNat 1) s0)).1
+#eval countOf dbT 1                 -- 1
+#eval countOf dbT 2                 -- 0
+#eval bucketOf dbT (IndexDef.uid kindIndex) (U64.ofNat 1)   -- 1
