@@ -20,37 +20,87 @@
 set -u
 
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-wiz=${WIZ:-/workspace/wt/train7/.lake/build/bin/wiz}
+# The runtime under test is the train7 binary, not whatever `WIZ` the job
+# environment happens to export.  The binary reads its standard library from
+# the worktree it lives in, so use a copy inside this worktree: the train7
+# worktree itself may have moved on, and its lib is not the base this branch
+# was cut from.  A copy is byte-for-byte the same compiler/runtime.  Override
+# deliberately with QUIRE_WIZ.
+train7_wiz=/workspace/wt/train7/.lake/build/bin/wiz
+wiz=${QUIRE_WIZ:-$root/.lake/build/bin/wiz}
+if [ -z "${QUIRE_WIZ:-}" ] && [ ! -x "$wiz" ]; then
+  if [ ! -x "$train7_wiz" ]; then
+    echo "crash-matrix: $train7_wiz is missing" >&2; exit 2
+  fi
+  mkdir -p "$root/.lake/build/bin"
+  cp "$train7_wiz" "$wiz" || {
+    echo "crash-matrix: could not copy the train7 wiz to $wiz" >&2; exit 2; }
+fi
 
-# The wiz build needs a C compiler and GMP; the stock PATH has neither.  These
-# are the train7 host's store paths (override with GMP_DEV/GMP_LIB).
-gmp_dev=${GMP_DEV:-/nix/store/58cds16cp7zyiywadnfih6x99vd7f9fq-gmp-with-cxx-6.3.0-dev}
-gmp_lib=${GMP_LIB:-/nix/store/3z4n8rmy4cfp0km5jaczz7f404j9sa64-gmp-with-cxx-6.3.0}
-# Prefer the host x86-64 wrapper the train7 binary was built with, even when a
-# `cc` is already on PATH: the /nix/store also contains cross wrappers whose
-# `cc` hangs on this host.  Override with CC_DIR.
-good_cc=${CC_DIR:-/nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin}
-if [ -x "$good_cc/cc" ]; then
-  PATH=$good_cc:$PATH
-else
-  for d in \
-    /nix/store/kbw2j1vag664b3sj3rjwz9v53cqx87sb-gcc-wrapper-15.2.0/bin \
-    /nix/store/*-gcc-wrapper-16.2.0/bin \
-    /nix/store/*-gcc-wrapper-15.2.0/bin; do
-    if [ -x "$d/cc" ]; then PATH=$d:$PATH; break; fi
+# The wiz build needs a C compiler and GMP.  The batch nodes do not share the
+# controller's /nix/store paths, so discover both on the node this job got.
+# Override with CC_DIR, GMP_DEV, GMP_LIB if needed.
+probe_cc() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 15 "$1" --version >/dev/null 2>&1
+  else
+    "$1" --version >/dev/null 2>&1
+  fi
+}
+
+if [ -n "${CC_DIR:-}" ] && [ -x "$CC_DIR/cc" ]; then
+  PATH=$CC_DIR:$PATH
+elif ! command -v cc >/dev/null 2>&1 || ! probe_cc "$(command -v cc)"; then
+  # The /nix/store also holds cross wrappers whose cc hangs on some nodes, so
+  # probe each candidate instead of taking the first.
+  for d in /nix/store/*-gcc-wrapper-*/bin; do
+    if [ -x "$d/cc" ] && probe_cc "$d/cc"; then PATH=$d:$PATH; break; fi
   done
 fi
 if ! command -v cc >/dev/null 2>&1; then
-  echo "crash-matrix: no C compiler on PATH" >&2; exit 2
+  echo "crash-matrix: no working C compiler (set CC_DIR)" >&2; exit 2
 fi
-if [ ! -f "$gmp_dev/include/gmp.h" ] || [ ! -f "$gmp_lib/lib/libgmp.so.10" ]; then
-  echo "crash-matrix: GMP dev/lib not found (set GMP_DEV and GMP_LIB)" >&2
+
+gmp_dev=${GMP_DEV:-}
+gmp_lib=${GMP_LIB:-}
+if [ -z "$gmp_dev" ]; then
+  for d in /nix/store/*gmp*/include; do
+    if [ -f "$d/gmp.h" ]; then gmp_dev=${d%/include}; break; fi
+  done
+fi
+libdirs=""
+if [ -n "$gmp_lib" ] && [ -f "$gmp_lib/lib/libgmp.so.10" ]; then
+  libdirs="$gmp_lib/lib"
+else
+  for f in /nix/store/*gmp*/lib/libgmp.so.10; do
+    if [ -f "$f" ]; then libdirs="$libdirs ${f%/libgmp.so.10}"; fi
+  done
+fi
+if [ -z "$gmp_dev" ] || [ ! -f "$gmp_dev/include/gmp.h" ] || [ -z "$libdirs" ]; then
+  echo "crash-matrix: GMP dev/lib not found on $(hostname) (set GMP_DEV and GMP_LIB)" >&2
   exit 2
 fi
 export CPATH="$gmp_dev/include${CPATH:+:$CPATH}"
-export LIBRARY_PATH="$gmp_lib/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$gmp_lib/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+for d in $libdirs; do
+  LIBRARY_PATH="$d${LIBRARY_PATH:+:$LIBRARY_PATH}"
+  LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+export LIBRARY_PATH LD_LIBRARY_PATH
 
+# The train7 binary is the runtime under test.  If this node's store cannot run
+# it, say so and fall back to the node's wiz rather than failing at the first
+# check with a less obvious error.
+if ! "$wiz" --version >/dev/null 2>&1; then
+  if command -v wiz >/dev/null 2>&1; then
+    echo "crash-matrix: $(hostname) cannot run $wiz; using $(command -v wiz)" >&2
+    wiz=$(command -v wiz)
+  else
+    echo "crash-matrix: the train7 wiz does not run on $(hostname) and no wiz is on PATH" >&2
+    exit 2
+  fi
+fi
+
+echo "crash-matrix: wiz=$wiz"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/quire-crash.XXXXXX")
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT HUP INT TERM
