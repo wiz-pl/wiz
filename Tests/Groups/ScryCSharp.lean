@@ -377,7 +377,7 @@ def repoCoverage : IO Unit := do
   checkEq
     ("error 1 parse failure"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
-     ++ "|warning 1 is test not modelled: havoc"
+     
      ++ "|warning 1 unmodelled-external"
      ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|note 1 excluded: *.Designer.cs"
