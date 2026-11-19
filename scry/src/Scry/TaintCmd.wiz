@@ -312,16 +312,6 @@ structure Scry.TextIndex where
 def Scry.TextIndex.ofString (text : String) : Scry.TextIndex :=
   Scry.TextIndex.mk (Scry.ByteMap.ofString text) (Scry.lineStartsOf text)
 
-/-- Binary search for the largest line-start index whose offset is `<= off`. -/
-partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
-  match Nat.lt lo hi with
-  | .false => lo
-  | .true =>
-    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
-    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
-    | .true => Scry.lineIndexGo starts off mid hi
-    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
-
 /-- A 1-based line and **character** column for a byte offset. The line table holds byte
 offsets; the column goes through the text's byte map, so a multibyte character before
 the span does not inflate it. -/
