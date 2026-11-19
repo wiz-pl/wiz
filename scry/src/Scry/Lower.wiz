@@ -191,7 +191,7 @@ def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
       (fun i => Scry.CstStore.kindName s i)
       (fun i => Scry.CstStore.fieldName s i)
       (fun i => let sp := Scry.CstStore.spanOf s i;
-        let lc := Scry.lineColFrom starts sp.start;
+        let lc := Scry.lineColFromBytes starts sp.start;
         Wil.Span.mk 0 sp.start sp.stop i lc.1 lc.2)
       (fun i => match Scry.CstStore.parentOf s i with
         | .none => .none
