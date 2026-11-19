@@ -3172,6 +3172,12 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
+    -- (A19) the coinductive surface is the one frontend feature with no case at all:
+    -- pin the missing half rather than assuming parity (`command.coinductive` is in
+    -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
+    { name := "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it", run := fun _ =>
+        selfhostVerdicts "" [
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n", true, false)] },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
