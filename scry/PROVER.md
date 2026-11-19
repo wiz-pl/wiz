@@ -241,7 +241,17 @@ What makes the prototype more than decoration, concretely:
 Test cases (all in the interpreter, reading the checked-in spills, so no tree-sitter and
 no .NET):
 
-<!-- TESTS: filled from the prototype run -->
+| case | expected |
+|---|---|
+| tiny safe/unsafe pair | `proved` / `refuted` with `src(0,0) -> flow(0,1,0) -> flow(1,2,1) -> sink(2,0,1)` |
+| empty and cross invariants | `refused` (rule 0 / the extra taint admits an alert), never `proved` |
+| memory pair | safe: `proved`, `I={(0,0)}`, `M={7}`; unsafe: `refuted` with `store(7,1,0) -> load(7,2,0)` |
+| memory certificate gaps | no `M` is `refused` at rule 6 (`mtainted 7`); no load taint is `refused` at rule 7 (`tainted (2,0)`) |
+| vacuity | a sink with no source is `vacuous` (source set empty); a source with no sink is `vacuous` (sink set empty) |
+| source selection | the all-source claim is `refuted` by the parameter flow; the `src`-only claim is `proved` |
+| `constantOrBound` | `proved` on the parameter-only flow, `refuted` when the untrusted source reaches the sink |
+| tagged verdict | `apply 99` is `script-failed`, not `none` |
+| the C# pair | safe twin proved with a 1-row invariant; unsafe twin refuted at the alert |
 
 ## 8. Alternatives considered
 
