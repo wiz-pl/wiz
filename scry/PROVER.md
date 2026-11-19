@@ -251,7 +251,11 @@ no .NET):
 | source selection | the all-source claim is `refuted` by the parameter flow; the `src`-only claim is `proved` |
 | `constantOrBound` | `proved` on the parameter-only flow, `refuted` when the untrusted source reaches the sink |
 | tagged verdict | `apply 99` is `script-failed`, not `none` |
-| the C# pair | safe twin proved with a 1-row invariant; unsafe twin refuted at the alert |
+| the C# process pair | safe twin proved with a 1-row invariant; unsafe twin refuted at the alert |
+
+The dogfood corpus in `scry/corpus/prover/` is a separate, synthetic corpus:
+`RecordSeeder`, `ReportProvider`, `EventEndpoint` and `PathHelper`, plus the modern C#
+memory twin. `check.sh` asserts the tagged verdicts and the memory path.
 
 ## 8. Alternatives considered
 
