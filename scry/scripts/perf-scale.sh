@@ -26,8 +26,8 @@
 # one. The script writes only under a temporary directory.
 #
 # Timing policy: the numbers are informational unless the run is inside a `perf-run`
-# window (AGENTS.md). Run it under `heavy --mem 7G` for a rough number on a shared
-# machine; never quote that as a perf claim.
+# window (AGENTS.md). Run it under `heavy` (which sizes the job from the templates) for
+# a rough number on a shared machine; never quote that as a perf claim.
 set -eu
 
 runs=1
