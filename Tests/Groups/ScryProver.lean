@@ -157,7 +157,7 @@ def group : Group where
            "#eval match full with\n" ++
            "  | .proved c => (match Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c) with\n" ++
            "    | .refused r => String.contains r \"rule 0 derives tainted\"\n" ++
-           "    | _ => .false)\n" ++
+           "    | _ => (.false : Bool))\n" ++
            "  | _ => .false\n")
           [".false", ".true"] },
     { name := "wrong proof 2: the unsafe program's invariant is rejected on the safe program",
