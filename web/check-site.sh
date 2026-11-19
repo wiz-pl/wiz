@@ -37,6 +37,11 @@ need playground/selfhost-lsp-shim.js
 need playground/playground-engine.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
+# The Loom page (`?ui=loom`) is optional, but when it was built its scripts must be there.
+if [ -f "$SITE/playground/wiz-playground-ui.mjs" ]; then
+  need playground/framework/driver.js
+  need playground/framework/runtime.js
+fi
 need notebooks/index.html
 need licenses/index.html
 need licenses/LGPL-3.0.txt
@@ -45,10 +50,11 @@ need licenses/GPL-3.0.txt
 # Every local ES import of the playground's scripts resolves: a page whose module graph
 # is broken would load and then do nothing, which an HTTP check would not see.
 check_imports() {
-  for file in "$SITE"/playground/*.js; do
+  for file in "$SITE"/playground/*.js "$SITE"/playground/framework/*.js; do
     [ -f "$file" ] || continue
+    dir=$(dirname "$file")
     for spec in $(grep -o 'from *"[.]/[^"]*"' "$file" | sed 's/^from *"//; s/"$//'); do
-      if [ ! -f "$SITE/playground/$spec" ]; then
+      if [ ! -f "$dir/$spec" ]; then
         echo "check-site: $(basename "$file"): import '$spec' does not resolve" >&2
         fail=1
       fi

@@ -273,6 +273,9 @@ def cliDiffGroup : Group where
                                     args := #["check", "good.wiz"] }
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
+        -- (both tools must exit 0 on a good file: equal non-zero codes are not a pass)
+        checkEq 0 h.code
+        checkEq 0 s.code
         checkEq "" s.out
         checkEq "" s.err },
     { name := "check: `#check` prints an info line without --types in both", run := fun _ => withSelfhostCli fun exe => do
@@ -593,7 +596,7 @@ def cliDiffGroup : Group where
         else do
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
-          skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
+          skip "artifact: --lib's object/header match; --no-main writes an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -609,7 +612,7 @@ def cliDiffGroup : Group where
           skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
         else do
           let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
-          skip s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
+          skip s!"backend: the host builds through textual LLVM IR; --llvm here selects the host's LLVM path (exit {h.code}: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]

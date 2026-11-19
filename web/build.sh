@@ -1,6 +1,10 @@
 #!/bin/sh
-# Build the web infoview: web/Web.wiz → C (the Wiz compiler) → WebAssembly (Emscripten),
+# Build the web module: web/Web.wiz → C (the Wiz compiler) → WebAssembly (Emscripten),
 # with the reference-counting runtime and mini-gmp (GMP's portable subset) for bignums.
+# The documentation's pages (`wiz doc --web`) render their signatures with it
+# (`wiz_doc_*`, web/scroll.js); the standalone infoview page is JavaScript now
+# (web/playground-lsp.js) and does not load it. The build also populates OUT with the pages'
+# scripts, which is the directory `wiz lsp --ws` serves.
 #   usage: web/build.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR] [--opt LEVEL]
 #   (OUT default web/out; needs .lake/build/bin/wiz. --gmp-src: mini-gmp from that GMP
 #   source tarball instead of nixpkgs', for builds without nix, such as the release job.
@@ -10,8 +14,8 @@
 #   compiler's -O2. emcc runs binaryen's `wasm-opt` at -O2 and up, which is the build's
 #   memory peak; -O1 is kept to a smaller module for a machine that cannot fit it.)
 # wasm64 (-sMEMORY64) keeps the runtime's 64-bit words and 62-bit small numbers as they
-# are. Web.wiz is a library (stage 9g): the page calls its exports `wiz_web_init` and
-# `wiz_web_step` on every event, so nothing waits inside Wasm (no Asyncify).
+# are. Web.wiz is a library (stage 9g): the page calls its exports `wiz_doc_init` and
+# `wiz_doc_step` on every event, so nothing waits inside Wasm (no Asyncify).
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GMPSRC=
@@ -57,10 +61,12 @@ if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
   printf '#include "mini-gmp.h"\n' > "$OUT/gmp/gmp.h"
 fi
 
-# 2. Wiz → C → wasm, as an ES module that web/infoview.js imports: `wiz build` with emcc
-# as the C compiler, mini-gmp in place of -lgmp (--gmp), and web/js.c by Web.wiz's
-# `link_c "js.c"` (stage 9f). `--no-main` (9g): the module is Web.wiz's exports, linked
-# without a `main` (emcc's --no-entry). It writes OUT/wiz-infoview.c beside the module.
+# 2. Wiz → C → wasm, as an ES module the documentation's pages load (web/scroll.js):
+# `wiz build` with emcc as the C compiler, mini-gmp in place of -lgmp (--gmp), and
+# web/js.c by Web.wiz's `link_c "js.c"` (stage 9f). `--no-main` (9g): the module is
+# Web.wiz's exports, linked without a `main` (emcc's --no-entry). It writes
+# OUT/wiz-infoview.c beside the module (the name is historical: the infoview used to be
+# this module; `wiz doc` and the toolchain look for wiz-infoview.mjs).
 (cd "$ROOT" && "$WIZ" --cc emcc --cflags "$CFLAGS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=33554432 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
@@ -68,6 +74,7 @@ fi
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8 \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/Web.wiz -o "$OUT/wiz-infoview.mjs" --no-main)
-cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/tagged.js" "$ROOT/web/scroll.js" \
+cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.js" \
+  "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" "$ROOT/web/tagged.js" "$ROOT/web/scroll.js" \
   "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" "$OUT/"
 echo "built $OUT/wiz-infoview.mjs"
