@@ -69,12 +69,13 @@ structure Decl where
 
 namespace Expr
 
-/-- Native operations that only look at their arguments (comparisons): they **borrow**
-them, like a borrowed parameter, so the caller keeps its references (a key compared
-during a lookup is neither incremented nor decremented). Every other native operation
-consumes its arguments. -/
+/-- Native operations that only look at their arguments: the **comparisons** and the
+**tag inspections** (`tag`, `natTag`). They borrow their arguments, like a borrowed
+parameter, so the caller keeps its references (a key compared during a lookup, or the
+scrutinee of a `match`, is neither incremented nor decremented). Every other native
+operation consumes its arguments. -/
 def primBorrows (op : Name) : Bool :=
-  op == "nat.beq" || op == "nat.blt"
+  op == "nat.beq" || op == "nat.blt" || op == "tag" || op == "natTag"
 
 def args : Expr → Array Var
   | ctor _ as | fap _ as | pap _ as | prim _ as => as

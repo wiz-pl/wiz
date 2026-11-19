@@ -1,0 +1,36 @@
+import FeralCore
+-- Lowering of drafts/feral/surface/13_contracts.wiz (rules: drafts/feral/LOWERING.md).
+-- A function's inline clauses are the `def f.Spec` next to its lowering (L18), stated on
+-- the arguments' values (`old(x)` is the value in, `final(x)` the lender's value out).
+
+-- fn idf (a : U64) requires (True) ensures (result = a) : U64 := a
+def idf (a : U64) : Result U64 := Result.ok a
+def idf.Spec (a : U64) : Prop :=
+  (True) → Result.Holds (fun (r : U64) => (r = a)) (idf a)
+
+-- fn bump {'a} (x : &'a mut U64) (step : U64)
+--   requires (Nat.lt x.val 100 = .true)
+--   ensures (final x.val = Nat.add old x.val step.val) ensures (result = final x)
+--   : U64 := { *x := *x + step; *x }
+def bump {0 ρ : Region} (1 x : Uniq ρ U64) (step : U64) : Result1 U64 (Uniq ρ U64) :=
+  let 1 (d, x) := Uniq.peek x;
+  (match U64.add d step with
+  | .ok s => let 1 x := Uniq.write x s; Result1.ok s x
+  | .err e => .err e x)
+def bump.Spec (x : U64) (step : U64) : Prop :=
+  (Nat.lt x.val 100 = .true) →
+    Result.Holds (fun (r : (U64 × U64)) => (r.2.val = Nat.add x.val step.val) × (r.1 = r.2))
+      (Uniq.borrow Region.static x (fun ρ1 h1 l1 x => bump x step))
+
+def idf_ok (a : U64) : idf.Spec a := fun _ => rfl
+#check @bump.Spec
+
+#eval Result.map (fun (u : U64) => u.val) (idf (U64.lit 7))
+-- .ok 7
+
+def run (n : Nat) : Result (Nat × Nat) :=
+  match Uniq.borrow Region.static (U64.mk n) (fun ρ h l r => bump r (U64.mk 2)) with
+  | .ok p => .ok (U64.toNat p.1, U64.toNat p.2)
+  | .err e => .err e
+#eval run 5
+-- .ok (7, 7)

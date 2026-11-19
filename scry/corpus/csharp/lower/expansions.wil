@@ -1,0 +1,34 @@
+func Demo.Expansions.Handlers.Sink(%0)
+  b0:
+    %1 = call System.Diagnostics.Process.Start(%0)
+    ret
+func Demo.Expansions.Handlers.Silent(%0)
+  b0:
+    ret
+func Demo.Expansions.Handlers.Run(%0)
+  b0:
+    %1 = fnptr $method:Demo.Expansions.Handlers.Sink
+    %2 = %1
+    %3 = call Demo.Expansions.Handlers.Sink(%0)
+    %4 = fnptr $method:Demo.Expansions.Handlers.Silent
+    %2 = %4
+    %5 = call Demo.Expansions.Handlers.Silent(%0)
+    %6 = global $str:"{0}"
+    %7 = call System.String.Concat(%6, %0)
+    %8 = %7
+    %9 = %0
+    %10 = 0
+    %11 = %9
+    %12 = null
+    assume ne %0, %12
+    %13 = call System.String.Concat(%8, %11)
+    %14 = call System.Console.WriteLine(%13)
+    %15 = global $str:input
+    %16 = global $str:Sink
+    %17 = call System.String.Concat(%15, %16)
+    %18 = %17
+    %19 = call System.Console.WriteLine(%18)
+    %20 = havoc dyn*
+    %21 = %20
+    ret
+warning: Demo.Expansions.Handlers.Run:38: unknown name Mystery not modelled: havoc

@@ -53,8 +53,10 @@ private def Handle.own {H B : Type} (h : H) (1 k : (1 o : Owned h) → IO B) : I
 -- release `h` with `close`, using up the token; `k` gets the close's result (private: the
 -- public releases fix `close`)
 private def Handle.releaseWith {H B : Type} (close : H → EIO Unit) (h : H) (1 o : Owned h)
-    (1 k : (r : Except String Unit) → IO B) : IO B :=
-  fun w => let 1 (u, w') := Owned.burn o w; IO.bind (close h) k w'
+    (1 k : (r : Except String Unit) → IO B) : IO B := do1
+  Owned.burn o;
+  r ← close h;
+  k r
 /-- An operation on an owned handle: the token goes in and comes back. -/
 def Handle.use {H A B : Type} (h : H) (1 o : Owned h) (act : H → IO A) (1 k : (a : A) → (1 o : Owned h) → IO B) : IO B := do1
   a ← act h;

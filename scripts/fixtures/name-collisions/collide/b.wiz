@@ -1,0 +1,2 @@
+/-- Fixture: the second `shared`, in another module. -/
+def shared : Nat := 2

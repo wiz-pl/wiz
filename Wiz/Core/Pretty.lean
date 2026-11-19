@@ -1,4 +1,5 @@
 import Wiz.Core.Term
+import Wiz.Core.NatString
 import Wiz.Core.StructLayout
 import Wiz.Rig
 
@@ -104,6 +105,16 @@ abbrev M (R : Type) := StateM (Array (Subterm R))
 def txt (s : String) : TT := .text s
 def cat (xs : List TT) : TT := .append xs.toArray
 def paren (b : Bool) (t : TT) : TT := if b then cat [txt "(", t, txt ")"] else t
+
+/-- A binder's default quantity as the printer sees it (rule (b), `Elab.binderDefaultQty`):
+an implicit binder whose domain is a sort, or whose domain's sort is `Prop`, defaults to
+`implicitDefault` (0), any other implicit to `implicitDataDefault` (ω). The printer does
+not unfold definitions, so `{0 A : Ty}` with `def Ty := Type` keeps its `0`, which reads
+back the same. -/
+def binderDefault (bi : BinderInfo) (dom : Term R) (σ : BinderSorts) : R :=
+  if bi != .implicit then QuantitySyntax.explicitDefault
+  else if (dom matches .sort _) || (!σ.dom.hasHole && σ.dom.equiv 0) then QuantitySyntax.implicitDefault
+  else QuantitySyntax.implicitDataDefault
 
 def isDefaultQ (bi : BinderInfo) : Term R → Bool
   | .qlit r => r == if bi == .implicit then QuantitySyntax.implicitDefault else QuantitySyntax.explicitDefault
@@ -402,6 +413,9 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   let app (f : TT) (args : List (Term R)) : M R TT := do
     let as ← args.mapM (sub 1023)
     pure (paren (prec > 1022) (cat (f :: as.flatMap fun a => [txt " ", a])))
+  let qtyPrefixD (dflt : R) (q : Term R) : M R TT := match q with
+    | .qlit r => pure (txt (if r == dflt then "" else QuantitySyntax.display r ++ " "))
+    | q => do pure (cat [txt "%", ← sub 1024 q, txt " "])
   let qtyPrefix (bi : BinderInfo) (q : Term R) : M R TT := match q with
     | .qlit r =>
       let dflt := if bi == .implicit then QuantitySyntax.implicitDefault else QuantitySyntax.explicitDefault
@@ -437,7 +451,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .scofix _ _ _ A f s i a => app (txt "scofix") [A, f, s, i, a]
   | .qlit r => pure (txt (QuantitySyntax.display r))
   | .sort l => pure (paren (prec > 1022 && !atomicSort l) (txt (showSort l)))
-  | .pi x bi q dom cod _ =>
+  | .pi x bi q dom cod σ =>
     if bi == .default && isDefaultQ .default q && !cod.hasVar 0 then
       pure (paren (prec > 25) (cat [← sub 26 dom, txt " → ", ← go env ("_" :: names) (some dom :: tys) 25 cod]))
     else
@@ -446,7 +460,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
         | .implicit => ("{", "}")
         | .instImplicit => ("[", "]")
         | .default => ("(", ")")
-      pure (paren (prec > 25) (cat [txt o, ← qtyPrefix bi q, txt s!"{x'} : ", ← sub 0 dom, txt s!"{c} → ",
+      pure (paren (prec > 25) (cat [txt o, ← qtyPrefixD (binderDefault bi dom σ) q, txt s!"{x'} : ", ← sub 0 dom, txt s!"{c} → ",
         ← go env (x' :: names) (some dom :: tys) 25 cod]))
   | .lam .. =>
     let (xs, names', tys', body) := lams names tys t #[]
@@ -521,7 +535,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
     app (← if s matches .szInf then pure (txt "ν") else pure (cat [txt "ν^", ← sub 1024 s])) [D, i]
   | .out x => app (txt "out") [x]
   | .coit _ _ _ S st i s => app (txt "coit") [S, st, i, s]
-  | .natLit n => pure (txt (toString n))
+  | .natLit n => pure (txt (NatString.decimalString n))
   -- Q4: the elaborator lifts small fields; `up`/`down` are invisible
   | .ulift _ _ A => app (txt "ULift") [A]
   | .up a | .down a => printNode env names tys prec a noUnexp
@@ -553,7 +567,7 @@ partial def delab (g : Globals R) (names : List Name) (tys : List (Option (Term 
   match u with
   | .up a | .down a => delab g names tys a
   | .var ix => ref (identStx (names[ix]?.getD s!"#{ix}"))
-  | .natLit n => ref (.node {} "term.num" #[.node {} "num" #[.atom {} (toString n)]])
+  | .natLit n => ref (.node {} "term.num" #[.node {} "num" #[.atom {} (NatString.decimalString n)]])
   | .lam x b =>
     let x' := freshenName names (if x == "_" && b.hasVar 0 then "x" else x)
     let body ← delab g (x' :: names) (none :: tys) b
@@ -577,7 +591,7 @@ partial def unexpand (g : Globals R) (names : List Name) (tys : List (Option (Te
   -- prints as the numeral `n` (its type and instance are implicit; H14 S2)
   if c == "OfNat.ofNat" && args.size == 3 then
     if let .natLit n := args[1]! then
-      return some (.node {} "term.num" #[.node {} "num" #[.atom {} (toString n)]])
+      return some (.node {} "term.num" #[.node {} "num" #[.atom {} (NatString.decimalString n)]])
   let some entries := g.pp.unexpanders[c]? | return none
   if entries.isEmpty then return none
   let argStx ← (explicitArgs g c args).mapM (delab g names tys)

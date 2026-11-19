@@ -145,12 +145,12 @@ def Chan.fork {B : Type} (p : Proto) (1 child : (1 c : Chan (Proto.dual p)) → 
 
 /-- Send `a`, then continue with the endpoint at `k a`. Sending never blocks (a channel
 buffers its messages). -/
-def Chan.send {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.send A k)) (a : A)
+def Chan.send {A : Type} {0 k : A → Proto} {B : Type} (1 c : Chan (Proto.send A k)) (a : A)
     (1 next : (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
   let 1 (c', w') := Chan.sendRaw c a w; next c' w'
 
 /-- Wait for a value, then continue with it and the endpoint at `k a`. -/
-def Chan.recv {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.recv A k))
+def Chan.recv {A : Type} {0 k : A → Proto} {B : Type} (1 c : Chan (Proto.recv A k))
     (1 next : (a : A) → (1 c' : Chan (k a)) → IO B) : IO B := fun w =>
   let 1 (r, w') := Chan.recvRaw c w; next r.1 r.2 w'
 
@@ -159,7 +159,7 @@ def Chan.close {B : Type} (1 c : Chan Proto.done) (1 next : IO B) : IO B := fun 
   let 1 (u, w') := Chan.closeRaw c w; next w'
 
 /-- Cancel at a send point of a cancellable protocol (`Proto.sendC`): tell the peer, and close. -/
-def Chan.cancel {A : Type} {k : A → Proto} {B : Type} (1 c : Chan (Proto.sendC A k))
+def Chan.cancel {A : Type} {0 k : A → Proto} {B : Type} (1 c : Chan (Proto.sendC A k))
     (1 next : IO B) : IO B :=
   Chan.send c Msg.cancel (fun c' => Chan.close c' next)
 

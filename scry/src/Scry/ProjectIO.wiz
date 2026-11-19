@@ -137,13 +137,14 @@ partial def Scry.ProjectIO.stripLinesGo (paths : List String) :
 def Scry.ProjectIO.stripSystem (pre : Scry.Preprocessed) : Scry.Preprocessed :=
   let lines := Scry.ProjectIO.stripLinesGo pre.paths (String.splitOn pre.text "\n")
     pre.lineFile;
-  { pre with text := String.intercalate "\n" lines }
+  let text := String.intercalate "\n" lines;
+  { pre with text := text, textMap := Scry.ByteMap.ofString text }
 
 /-- Run the preprocessor on one source file: `cc -E -ffreestanding FLAGS FILE` in
 `cwd` (the compile command's directory, when it has one). -/
 def Scry.ProjectIO.preprocess (cc : String) (cwd : Option String) (flags : List String)
     (file : String) : EIO String := do
-  let args := List.append ["-E", "-ffreestanding"] (List.append flags (List.cons file .nil));
+  let args := List.append ["-E", "-ffreestanding"] (List.append flags [file]);
   let opts : SpawnOptions := match cwd with
     | .some d => SpawnOptions.inDir d SpawnOptions.piped
     | .none => SpawnOptions.piped;
@@ -252,32 +253,74 @@ partial def Scry.ProjectIO.buildUnits (cc : String) (allowErrors : Bool) (keepSy
 
 -- ## Discovery
 
-/-- Walk `dir` for `*.c`, recursively (hidden directories are skipped). -/
+/-- The files a walk found and the paths it refused to follow (a symbolic link is
+reported, never descended: a repo link to an outside tree would otherwise embed those
+sources in a report, and `ln -s .. src/up` would recurse without bound). -/
+structure Scry.ProjectIO.Walk where
+  files : List String
+  links : List String
+
+/-- Whether `p` is `root` or below it (both are real paths). -/
+def Scry.ProjectIO.underRoot (root p : String) : Bool :=
+  match String.eq root "/" with
+  | .true => String.startsWith p "/"
+  | .false => Bool.or (String.eq p root) (String.startsWith p (String.append root "/"))
+
+/-- Walk `dir` for `*.c`, recursively. `root` is the real path of the directory the
+user named and `visited` the real directories already entered: a directory reached by
+another name cannot be walked twice. Symbolic links and escaping directories are
+returned in `links` and not followed. -/
 mutual
-partial def Scry.ProjectIO.walkNames (dir : String) : List String → EIO (List String)
-  | .nil => EIO.pure .nil
+partial def Scry.ProjectIO.walkNames (root : String) (visited : List String) (dir : String) :
+    List String → EIO Scry.ProjectIO.Walk
+  | .nil => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
   | .cons name rest => do
     let full := Path.join dir name;
-    st ← FS.stat full;
+    st ← FS.linkStat full;
     here ← match st.kind with
+      | .symlink => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
       | .dir => match String.startsWith name "." with
-        | .true => EIO.pure (.nil : List String)
-        | .false => Scry.ProjectIO.walkGo full
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+        | .false => do
+          real ← FS.realPath full;
+          match Bool.and (Scry.ProjectIO.underRoot root real)
+              (Bool.not (List.any (String.eq real) visited)) with
+          | .true => Scry.ProjectIO.walkDir root (List.cons real visited) full
+          | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil (List.cons full .nil))
       | .file => match String.endsWith name ".c" with
-        | .true => EIO.pure (List.cons full .nil)
-        | .false => EIO.pure (.nil : List String)
-      | _ => EIO.pure (.nil : List String);
-    tail ← Scry.ProjectIO.walkNames dir rest;
-    EIO.pure (List.append here tail)
+        | .true => EIO.pure (Scry.ProjectIO.Walk.mk (List.cons full .nil) .nil)
+        | .false => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil)
+      | _ => EIO.pure (Scry.ProjectIO.Walk.mk .nil .nil);
+    tail ← Scry.ProjectIO.walkNames root visited dir rest;
+    EIO.pure (Scry.ProjectIO.Walk.mk (List.append here.files tail.files)
+      (List.append here.links tail.links))
 
-partial def Scry.ProjectIO.walkGo (dir : String) : EIO (List String) := do
+partial def Scry.ProjectIO.walkDir (root : String) (visited : List String)
+    (dir : String) : EIO Scry.ProjectIO.Walk := do
   names ← FS.listDir dir;
-  Scry.ProjectIO.walkNames dir names
+  Scry.ProjectIO.walkNames root visited dir names
 end
+
+/-- Walk the directory the user named. The root's own real path is the confinement
+base (a symlink the user named explicitly is theirs to follow once). -/
+def Scry.ProjectIO.walkGo (dir : String) : EIO Scry.ProjectIO.Walk := do
+  real ← FS.realPath dir;
+  Scry.ProjectIO.walkDir real (List.cons real .nil) dir
+
+/-- Say which links a walk skipped (on stderr, so a pipe's stdout stays a file list).
+`partial`: the recursive call sits under the effect bind, which master's equation
+compiler no longer accepts as a structural call; the list is finite, so this is only a
+termination-check escape, not a different semantics. -/
+partial def Scry.ProjectIO.reportSkippedLinks : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons l rest => do
+    EIO.lift (IO.ePrintln ("note: skipped symbolic link " ++ l ++ " (not followed)"));
+    u ← Scry.ProjectIO.reportSkippedLinks rest;
+    EIO.pure u
 
 /-- Sort strings (insertion sort; a project's source list is small). -/
 def Scry.insertString (x : String) : List String → List String
-  | .nil => List.cons x .nil
+  | .nil => [x]
   | .cons y rest => match String.lt x y with
     | .true => List.cons x (List.cons y rest)
     | .false => List.cons y (Scry.insertString x rest)
@@ -322,8 +365,9 @@ partial def Scry.ProjectIO.discover (dir : String) (compdb : Option String)
       extra ← match Scry.parseCompdbFlags "" flags with
         | .error e => EIO.fail e
         | .ok ok => EIO.pure ok;
-      files ← Scry.ProjectIO.walkGo dir;
-      let files := Scry.sortStrings files;
+      w ← Scry.ProjectIO.walkGo dir;
+      Scry.ProjectIO.reportSkippedLinks w.links;
+      let files := Scry.sortStrings w.files;
       EIO.pure (List.map (fun file =>
         Scry.CompileCommand.mk "" file extra) files)
 
@@ -399,6 +443,13 @@ def Scry.ProjectOpts.default (target : String) : Scry.ProjectOpts :=
 def Scry.ProjectIO.addFlag (opts : Scry.ProjectOpts) (flag value : String) : Scry.ProjectOpts :=
   { opts with flags := List.append opts.flags [flag, value] }
 
+/-- `scry project`'s usage line (or `project query`'s). -/
+def Scry.ProjectIO.usage (query : Bool) : String :=
+  match query with
+  | .true => "usage: scry project query DIR --rel NAME | --func NAME"
+  | .false =>
+    "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
+
 /-- Parse the arguments after `project` (or `project query`): one positional directory
 and the flags above. `-I dir`, `-Idir`, `-D X=1`, `-DX=1` are all accepted and kept for
 `cc -E`. -/
@@ -406,7 +457,7 @@ partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectO
     List String → Except String (String × Scry.ProjectOpts)
   | .nil => match target with
     | .some t => .ok (t, opts)
-    | .none => .error "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
+    | .none => .error (Scry.ProjectIO.usage .false)
   | .cons a rest => match a with
     | "--compdb" => match rest with
       | .cons v r => Scry.parseProjectArgs target { opts with compdb := .some v } r
@@ -516,10 +567,9 @@ def Scry.ProjectIO.report (opts : Scry.ProjectOpts) (r : Scry.ProjectReport) : E
   | .true => EIO.pure 1
   | .false => EIO.pure 0
 
-/-- Run `scry project` (or `query` when `query` is true): parse the options, build the
-project, print the summary, the requested relation or the whole-project taint report, and
-write `--facts`/`--sarif`. -/
-def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
+/-- The command proper: parse the options, build the project, print the summary, the
+requested relation or the whole-project taint report, and write `--facts`/`--sarif`. -/
+def Scry.ProjectIO.runArgs (query : Bool) (args : List String) : EIO Nat := do
   match Scry.parseProjectArgs .none (Scry.ProjectOpts.default "") args with
   | .error e => EIO.fail e
   | .ok pair => do
@@ -550,4 +600,13 @@ def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
           | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
       | .none => match opts.func with
         | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
-        | .none => EIO.fail "usage: scry project query DIR --rel NAME | --func NAME"
+        | .none => EIO.fail (Scry.ProjectIO.usage .true)
+
+/-- Run `scry project` (or `query` when `query` is true). `--help` prints that command's
+usage and exits 0, before the positional directory is parsed. -/
+def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat :=
+  match List.any (fun a => String.eq a "--help") args with
+  | .true => do
+    Scry.ProjectIO.say (Scry.ProjectIO.usage query);
+    EIO.pure 0
+  | .false => Scry.ProjectIO.runArgs query args

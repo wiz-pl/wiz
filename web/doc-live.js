@@ -217,7 +217,8 @@ function start() {
       if (token !== generation) return;
       view.hover = hover;
       view.goals = goals;
-      view.diagnostics = (client.diagnostics && client.diagnostics.get(uri)) || [];
+      const stored = client.diagnostics && client.diagnostics.get(uri);
+      view.diagnostics = (stored && stored.diagnostics) || [];
       view.message = errors.concat(goals.errors).join("; ") || null;
       renderNow();
     } catch (e) {

@@ -3,6 +3,12 @@
 // `wiz_playground_eval : String → String`, and show the lines it returns. There is no
 // server and nothing to install: the module is the checker.
 //
+// The page's own state is deliberately small: the editor text, the example it came
+// from, an optional draft in localStorage, and a URL fragment for sharing. The pure
+// encoding lives in web/playground-state.js and is tested by playground-state_test.mjs.
+// Those controls belong to the static markup; `?ui=loom` replaces the page with the
+// Loom app (`web/playground-ui.wiz`), which is the `web/` side's own UI.
+//
 // `?ui=loom` mounts the page itself from a second Wasm module
 // (`web/build-playground-ui.wiz` → `wiz-playground-ui.mjs`): the whole page is one Loom
 // app (`web/playground-ui.wiz`), and this file only loads the engine and turns its
@@ -11,6 +17,16 @@
 // can move the page's text into a Loom component.
 "use strict";
 import { isValue, renderValue } from "./playground-values.js";
+import { findPreset, presets } from "./playground-presets.js";
+import {
+  defaultState,
+  decodeFragment,
+  encodeShareUrl,
+  matchedPresetId,
+  parseDraft,
+  serializeDraft,
+  stateFor,
+} from "./playground-state.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
@@ -19,19 +35,34 @@ const params = new URLSearchParams(typeof location !== "undefined" ? location.se
 const useLoom = params.get("ui") === "loom";
 
 // The page's elements: the static markup's at load, or the Loom app's after it mounts.
+// The UX controls (preset/share/save/reset/clear/note) exist only in the static
+// markup, so they stay null under `?ui=loom`.
 let editor = null;
 let runButton = null;
 let output = null;
 let status = null;
 let count = null;
 let engineEl = null;
+let note = null;
+let presetSelect = null;
+let shareButton = null;
+let saveButton = null;
+let resetButton = null;
+let clearButton = null;
 
 // The Loom UI instance (`?ui=loom`), driver's handle and its state marshalling.
 let ui = null;
 let app = null;
+// Whether the Loom app actually mounted; a module that fails to load leaves the static
+// page in place, which then needs its own state (examples, fragment, draft).
+let loomMounted = false;
 
+const DRAFT_KEY = "wiz-playground-draft-v1";
 let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
 let busy = false;
+let engineFailed = false;
+let syncTimer = 0;
+let noteTimer = 0;
 
 const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
@@ -78,6 +109,14 @@ function setEngine(text) {
   engineEl.textContent = text;
 }
 
+// A short-lived message beside the status line (the static page's `#note`).
+function notify(text) {
+  if (!note) return;
+  note.textContent = text;
+  window.clearTimeout(noteTimer);
+  noteTimer = window.setTimeout(() => { note.textContent = ""; }, 2600);
+}
+
 // The engine has the self-hosted frontend's embedded Prelude; a source without an
 // import gets it, so `Nat`, `Bool`, lists, … are in scope as in `wiz check`. (The rule
 // lives in the shim, which moves diagnostics back across the added lines.)
@@ -118,6 +157,7 @@ function show(text) {
     uiCall("wiz_loom_show", text);
   } else {
     output.replaceChildren();
+    output.scrollTop = 0;
     const lines = text.split("\n").filter((l) => l !== "");
     for (const t of lines) output.appendChild(line(t));
     const bad = lines.filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
@@ -134,7 +174,101 @@ function showFailure(e) {
   const countText = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
   if (ui) { uiCall("wiz_loom_fail", lines.join("\n"), countText); return; }
   output.replaceChildren(...lines.map(line));
+  output.scrollTop = 0;
   count.textContent = countText;
+}
+
+// ## The static page's program state (examples, the URL fragment, the draft)
+
+function currentState() {
+  return stateFor(editor ? editor.value : "");
+}
+
+function setEditor(code, preset) {
+  if (ui) uiCall("wiz_loom_text", code);
+  if (editor) editor.value = code;
+  if (presetSelect) presetSelect.value = preset || "";
+}
+
+function buildPresetOptions() {
+  if (!presetSelect) return;
+  presetSelect.replaceChildren();
+  const custom = document.createElement("option");
+  custom.value = "";
+  custom.textContent = "Custom program";
+  custom.disabled = true;
+  presetSelect.appendChild(custom);
+  for (const p of presets) {
+    const option = document.createElement("option");
+    option.value = p.id;
+    option.textContent = p.title;
+    presetSelect.appendChild(option);
+  }
+}
+
+function syncPreset() {
+  if (!presetSelect) return;
+  presetSelect.value = matchedPresetId(editor.value);
+}
+
+function readDraft() {
+  try {
+    return parseDraft(localStorage.getItem(DRAFT_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function writeDraft() {
+  if (!editor) return;
+  try {
+    localStorage.setItem(DRAFT_KEY, serializeDraft(currentState()));
+  } catch {
+    // a private window or a full quota: the page still works, it just won't remember.
+  }
+}
+
+function replaceUrl() {
+  if (!editor) return;
+  try {
+    const href = encodeShareUrl(location.href, currentState());
+    if (href !== location.href) history.replaceState(null, "", href);
+  } catch {
+    // `file://`, a blocked History API, or an over-long URL: sharing still copies the
+    // fragment below even if the address bar cannot be updated.
+  }
+}
+
+function scheduleSync() {
+  if (!editor) return;
+  window.clearTimeout(syncTimer);
+  syncTimer = window.setTimeout(() => {
+    writeDraft();
+    replaceUrl();
+  }, 250);
+}
+
+function syncNow() {
+  if (!editor) return;
+  window.clearTimeout(syncTimer);
+  writeDraft();
+  replaceUrl();
+}
+
+function clearOutput(quiet) {
+  if (ui) {
+    uiCall("wiz_loom_show", "");
+  } else {
+    output.replaceChildren();
+    output.scrollTop = 0;
+    count.textContent = "0 lines";
+  }
+  if (!busy) {
+    if (wasm) setStatus("ready", "ready");
+    else if (engineFailed) setStatus("the engine did not load", "error");
+    else setStatus("loading the engine…", "running");
+  }
+  if (!quiet) notify("output cleared");
 }
 
 function run() {
@@ -161,6 +295,92 @@ function run() {
   }, 0);
 }
 
+function save() {
+  if (!editor) return;
+  const blob = new Blob([withPrelude(editor.value)], { type: "text/plain;charset=utf-8" });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = "playground.wiz";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+  writeDraft();
+  notify("saved playground.wiz");
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through: plain HTTP pages often have no clipboard permission
+  }
+  let area = null;
+  try {
+    area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    if (area) area.remove();
+  }
+}
+
+async function share() {
+  if (!editor) return;
+  syncNow();
+  const url = encodeShareUrl(location.href, currentState());
+  replaceUrl();
+  if (await copyText(url)) {
+    notify("link copied to the clipboard");
+  } else {
+    notify("link is in the address bar");
+    window.prompt("Copy this playground link:", url);
+  }
+}
+
+function reset() {
+  const state = defaultState();
+  setEditor(state.code, state.preset);
+  clearOutput(true);
+  syncNow();
+  if (wasm) setStatus("ready", "ready");
+  notify("reset to the default program");
+}
+
+function applyUrl(hash) {
+  const state = decodeFragment(hash);
+  if (!state) return false;
+  setEditor(state.code, state.preset);
+  clearOutput(true);
+  if (!wasm) setStatus(engineFailed ? "the engine did not load" : "loading the engine…", engineFailed ? "error" : "running");
+  else if (!busy && state.preset) run();
+  else if (!busy) setStatus("ready — press Run", "ready");
+  return true;
+}
+
+// The page's state from the URL fragment, the draft, or the default example.
+function initPageState() {
+  buildPresetOptions();
+  const fromUrl = decodeFragment(location.hash);
+  const initial = fromUrl || readDraft() || defaultState();
+  setEditor(initial.code, initial.preset);
+  if (location.hash && !fromUrl) notify("ignored an invalid playground link");
+  syncPreset();
+  writeDraft();
+  if (fromUrl) notify("loaded the program from the link");
+}
+
 // ## The goals pane (independent of the Wasm engine)
 
 // By default it is the in-page server (web/selfhost-lsp-shim.js): the same Wasm engine
@@ -179,7 +399,14 @@ const selfhost = typeof location !== "undefined" && wantsSelfhost(location.searc
   : undefined;
 
 function wireGoals() {
-  startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });
+  // The squiggle mirror wraps the textarea in a positioned element, which moves the
+  // textarea's text node off the Loom app's patch paths (the driver addresses nodes by
+  // index), so the Loom page keeps it off. The completion popup is appended to the body
+  // and stays on.
+  startInfoview({
+    editor, panel: document.getElementById("goals"), config: selfhost,
+    squiggles: ui === null,
+  });
 }
 
 // ## Mounting the page
@@ -196,6 +423,7 @@ async function mountLoom() {
     ui._free(ui._wiz_loom_html(probe));
     const { start: startLoom } = await import("./framework/driver.js");
     app = startLoom(ui, document.body, { events: ["click", "input"] });
+    loomMounted = true;
     return true;
   } catch (e) {
     console.warn("wiz playground: using the static page: " +
@@ -213,20 +441,71 @@ function wireEditor() {
   output = document.getElementById("output");
   count = document.getElementById("count");
   engineEl = document.getElementById("engine");
+  note = document.getElementById("note");
+  presetSelect = document.getElementById("preset");
+  shareButton = document.getElementById("share");
+  saveButton = document.getElementById("save");
+  resetButton = document.getElementById("reset");
+  clearButton = document.getElementById("clear");
 
-  runButton.addEventListener("click", run);
-  editor.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+  if (runButton) runButton.addEventListener("click", run);
+  if (clearButton) clearButton.addEventListener("click", () => clearOutput(false));
+  if (shareButton) shareButton.addEventListener("click", share);
+  if (saveButton) saveButton.addEventListener("click", save);
+  if (resetButton) resetButton.addEventListener("click", reset);
+  if (presetSelect) {
+    presetSelect.addEventListener("change", () => {
+      const p = findPreset(presetSelect.value);
+      if (!p) return;
+      setEditor(p.code, p.id);
+      clearOutput(true);
+      syncNow();
+      notify("loaded example: " + p.title);
+      if (wasm && !busy) run();
+      else if (!wasm) setStatus(engineFailed ? "the engine did not load" : "loading the engine…", engineFailed ? "error" : "running");
+    });
+  }
+
+  if (editor) {
+    editor.addEventListener("input", () => {
+      syncPreset();
+      scheduleSync();
+    });
+    editor.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        run();
+        return;
+      }
+      if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
       e.preventDefault();
-      run();
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      editor.setRangeText("  ", start, end, "end");
+      syncPreset();
+      scheduleSync();
+    });
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key.toLowerCase() === "s" && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      save();
     }
   });
+
+  window.addEventListener("hashchange", () => { applyUrl(location.hash); });
+  window.addEventListener("pagehide", syncNow);
 }
 
 async function start() {
   // `?ui=loom`: the page is the Loom app; otherwise the static markup stays.
   if (useLoom) await mountLoom();
   wireEditor();
+  // The examples, the URL fragment and the draft are the static page's state; the Loom
+  // app owns its own, so do not overwrite it with a feature it does not render.
+  if (!loomMounted) initPageState();
   wireGoals();
 
   setStatus("loading the engine…", "running");
@@ -242,9 +521,18 @@ async function start() {
     setEngine("engine: ready");
     engineReady.resolve();
     setEnabled(true);
-    if (!output.childElementCount) run();
-    else setStatus("ready", "ready");
+    if (!loomMounted) {
+      const current = currentState();
+      if (!output.childElementCount && current.preset) run();
+      else if (!output.childElementCount) setStatus("ready — press Run", "ready");
+      else setStatus("ready", "ready");
+    } else if (!output || !output.childElementCount) {
+      run();
+    } else {
+      setStatus("ready", "ready");
+    }
   } catch (e) {
+    engineFailed = true;
     setEngine("engine: failed");
     engineReady.reject(e);
     setStatus("the engine did not load: " + (e && e.message ? e.message : String(e)), "error");

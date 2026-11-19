@@ -6,9 +6,9 @@ class Inhabited (A : Type) where
 
 instance : Inhabited Nat := Inhabited.mk 0
 instance : Inhabited Bool where
-  default := Bool.true
+  default := .true
 instance {A : Type} [Inhabited A] : Inhabited (List A) where
-  default := List.cons Inhabited.default List.nil
+  default := [Inhabited.default]
 
 #check Inhabited.default
 #eval (Inhabited.default : List (List Bool))
@@ -29,7 +29,7 @@ instance : HAdd Nat Bool Nat where
 
 -- `do` works for any monad
 instance : Monad Option where
-  pure := fun a => Option.some a
+  pure := fun a => .some a
   bind := fun x f => match x with
     | .none => Option.none
     | .some a => f a

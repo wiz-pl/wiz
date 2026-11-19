@@ -501,15 +501,32 @@ def descSweepApart : IO Unit := do
     unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
     check (n > 0) s!"{m}: no descriptions were compared"
 
-/-- The Desc sweep on chunk `k` of the examples (an example with errors is skipped, as
-an example of an error). -/
+/-- The examples that deliberately show an error (their `.expected` golden holds it):
+`procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
+sweep below treats an error in any other example as a failure, and an allow-listed file
+that stops erroring as one too. -/
+def errorExamples : List String := ["examples/procmacro.wiz", "examples/syntax.wiz"]
+
+/-- The Desc sweep on chunk `k` of the examples: an example other than `errorExamples`
+that reports an error is a failure, and an allow-listed one that stops erroring is one
+too. -/
 def descSweepExamples (k : Nat) : IO Unit := do
   let loader ← Tests.Elab.libLoader
   let fs := exampleChunk (← exampleFiles) k
   check (!fs.isEmpty) s!"chunk {k} of the examples is empty"
   for p in fs do
-    let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile p) { trustedModule := Tests.libModule, loader }
-    if st.messages.any (·.severity == .error) then continue
+    let src ← IO.FS.readFile p
+    let st := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
+    let errored := st.messages.any (·.severity == .error)
+    if errorExamples.contains p.toString then
+      -- the two files that demonstrate a diagnostic must keep doing so
+      unless errored do throw (IO.userError s!"{p}: expected an error, got none")
+      continue
+    if errored then
+      let first := match (st.messages.filter (·.severity == .error))[0]? with
+        | some m => m.render src
+        | none => ""
+      throw (IO.userError s!"examples with errors (only {errorExamples} may fail):\n{p}: {first}")
     let (_, bad) := hypsMismatches st.globals
     unless bad.isEmpty do throw (IO.userError s!"{p}: {bad.take 3}")
 
@@ -561,7 +578,7 @@ def big : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 1) (fun s x => let y :=
 def Rng.trace : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, s => .cons (Nat.mod s 256) (Rng.trace k (Nat.mod (s * 1103515245 + 12345) 2147483648))
-def ok : Bool × Nat := let xs := Rng.trace 100 7; (Hdl.natsEq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
+def ok : Bool × Nat := let xs := Rng.trace 100 7; (BEq.beq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
 #eval ok
 def ctr : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 0) (fun s x => Hw.pair (Hw.add s x) s)
 def Rep.go : Nat → List (HwTy.El u8) → List (HwTy.El u8)

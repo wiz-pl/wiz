@@ -1,0 +1,2 @@
+/-- Fixture: a dotted name. The module prefix would make this `Thing.Thing.name`. -/
+def Thing.name : Nat := 1

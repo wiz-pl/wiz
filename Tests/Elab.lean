@@ -130,7 +130,12 @@ def checkDiverges (input mode : String) (secs : Nat := 3) : IO Unit := do
   unless out.exitCode == 124 do
     throw (IO.userError s!"expected a timeout, got exit code {out.exitCode}: {out.stderr.take 1000}")
 
-def matchPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n\ndef pred (n : Nat) : Nat := match n with\n  | .zero => .zero\n  | .succ m => m\n\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n\ndef head {A : Type} {n : Nat} : Vec A (.succ n) → A\n  | .cons x _ => x\n\ndef map {A B : Type} (f : A → B) {n : Nat} : Vec A n → Vec B n\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (map xs)\n\n"
+/-- The `match` prelude. `head` and `map` write `{0 n}`: rule (b) (the language decision
+of 2026-11-16) makes a bare `{n : Nat}` index ω, and a recursive call that passes the
+`{0 n}` cons field to it is a quantity error at the binder. This is the migration user
+code needs (#397); `Tests.Groups.Match` pins the bare form's error, so the workaround here
+is not silent. -/
+def matchPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n\ndef pred (n : Nat) : Nat := match n with\n  | .zero => .zero\n  | .succ m => m\n\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n\ndef head {A : Type} {0 n : Nat} : Vec A (.succ n) → A\n  | .cons x _ => x\n\ndef map {A B : Type} (f : A → B) {0 n : Nat} : Vec A n → Vec B n\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (map xs)\n\n"
 
 def streamPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ncoinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n\ndef nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (.succ n)\n\n\ndef repeat {A : Type} (a : A) : Stream A\n  | .head => a\n  | .tail => repeat a\n\n"
 
@@ -422,7 +427,7 @@ def zeroFieldDecls : String :=
 /-- Build `main : IO _` with the C backend (and the `IO` library), run it, and hand its
 output to `k`. -/
 def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit := do
+    (cflags : List String := []) (split : Nat := 0) (timeout : Nat := 120) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
   let effLib ← IO.FS.readFile "lib/Eff.wiz"
@@ -443,14 +448,14 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   let tc ← toolchain
-  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some timeout) (args := args) (split := split) with
   | .ok v => k v
   | .error e => failRun e
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
 def ioRun (src : String) (expected : String) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit :=
-  ioRunWith src (checkEq expected ·) args llvm cflags
+    (cflags : List String := []) (split : Nat := 0) : IO Unit :=
+  ioRunWith src (checkEq expected ·) args llvm cflags (split := split)
 
 def ioFails (src : String) (fragment : String) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
@@ -1873,10 +1878,21 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .ok _ => "ok"
   | .error _ => "error"
 
+/-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
+from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
+"an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
+them to a stub, so the pipeline group cannot quietly stop testing the pipeline. -/
+def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
+  let var := "WIZ_SELFHOST_" ++ name.toUpper
+  return (← IO.getEnv var).map System.FilePath.mk
+
 /-- The whole self-hosted pipeline as a compiled program that checks the file `input.wiz`
 in its working directory. It is built once and kept (under `/tmp`, keyed by its source
 and this test binary), since every test that uses it would otherwise compile it again. -/
 def selfhostChecker : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "checker" then
+    note "uses checker"
+    return .ok exe
   let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.checkerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
@@ -1909,6 +1925,9 @@ def selfhostChecker : IO (Except String System.FilePath) := do
 /-- The self-hosted compiler (stage 21): the frontend and `Backend.wiz`, printing the C
 program for `input.wiz` (the frontend's own output as comments). -/
 def selfhostCompiler : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "compiler" then
+    note "uses compiler"
+    return .ok exe
   let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.compilerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
@@ -2030,11 +2049,52 @@ def selfhostModuleOutput (files : List (String × String)) (args : Array String 
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
 
+/-- (A8, A14) The self-hosted compiler rejects a module set: `build input.wiz` exits 1,
+the errors are on standard error, and no C is written. `input.wiz` is the root; the other
+files are written beside it, so its `import`s find them. -/
+def selfhostModuleCompileFails (files : List (String × String)) (phrases : List String) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let out ← IO.Process.output
+      { cmd := "timeout", args := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"],
+        cwd := dir }
+    checkEq (1 : UInt32) out.exitCode
+    checkEq "" out.stdout
+    if ← (dir / "out.c").pathExists then
+      throw (IO.userError "the compiler wrote C for a rejected program")
+    for phrase in phrases do
+      unless (out.stderr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the compiler's error does not say {repr phrase}:\n{out.stderr}")
+
 /-- (A14) Check a set of module files with the self-hosted checker and compare its output. -/
 def selfhostCheckModules (files : List (String × String)) (expected : String)
     (args : Array String := #[]) : IO Unit := do
   let some out ← selfhostModuleOutput files args | return
   checkEq expected out
+
+/-- (A8, A14) The Lean frontend's error messages for a set of module files: `input.wiz`
+is the root, the others are modules named by their file name without `.wiz` (`A.wiz` is
+module `A`). The messages are their texts, without positions: the module tests compare
+them with the self-hosted checker's `error: …` lines. -/
+def hostModuleErrors (files : List (String × String)) : IO (List String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let mods : List (Name × String) := files.filterMap fun (n, text) =>
+    if n == "input.wiz" then none
+    else some (((n.dropSuffix? ".wiz").map (·.toString)).getD n, text)
+  let loader : Name → Option String := fun m =>
+    if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Std" then some stdLib else mods.lookup m
+  let src := (files.lookup "input.wiz").getD ""
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  pure ((s.messages.filter (·.severity == .error)).map (·.text)).toList
 
 /-- (D1) The compiled program `main` of `src` doesn't finish within `secs` seconds
 (memory capped: a loop in the kernel allocates). -/
@@ -2249,6 +2309,13 @@ def nativeCases (llvm : Bool) : List Case :=
         cRunSmallStack (llvm := llvm) ("import Prelude\npartial def count (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++
           "  | .succ m => match Nat.beq (Nat.mod m 3) 0 with\n    | .true => count m (acc + 2)\n    | .false => count m acc\n" ++
           "def main : Nat := count 10000000 0") "6666668" },
+    { name := "tag inspections borrow their scrutinee: a match's number is used again in a branch, no leaks, interpreted and compiled (8e)", run := fun _ => do
+        let src := "import Prelude\ndef count : Nat → Nat\n  | .zero => 0\n" ++
+          "  | .succ n => count n + 1\ndef mk : Nat → List Nat\n  | .zero => .nil\n" ++
+          "  | .succ n => .cons n (mk n)\ndef sum : List Nat → Nat\n  | .nil => 0\n" ++
+          "  | .cons x xs => x + sum xs\ndef main : Nat := count 100000 + sum (mk 1000)\n"
+        unless llvm do okLib (src ++ "#run main\n") ["599500"]
+        cRun (llvm := llvm) src "599500" },
     { name := "constant folding and known constructors behave as before (15c)", run := fun _ =>
         cRun (llvm := llvm) foldSrc foldExpected },
     { name := "numerals at 2^31 … 2^64+1 and 10^30 are constants (15g)", run := fun _ =>

@@ -761,13 +761,11 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i32WrapI64 ++ lg 1 ++ i64Store 3 16 ++
       lg 0 ++ i32WrapI64 ++ lg 2 ++ i32c 1 ++ i32Sub ++ i32Store 2 0 ++
       lg 1 ++ ret }
-  -- `wiz_tag_of(v)`: the tag as a scalar (it consumes `v`).
+  -- `wiz_tag_of(v)`: the tag as a scalar (it borrows `v`, stage 8e).
   out := out.push {
-    name := "wiz_tag_of", params := #[.i64], results := #[.i64], locals := #[.i32]
+    name := "wiz_tag_of", params := #[.i64], results := #[.i64], locals := #[]
     code :=
-      lg 0 ++ call (rt "wiz_tag") ++ ls 1 ++
-      lg 0 ++ call (rt "wiz_dec") ++
-      lg 1 ++ boxI32 ++ ret }
+      lg 0 ++ call (rt "wiz_tag") ++ boxI32 ++ ret }
   out := out.push {
     name := "wiz_nat_tag", params := #[.i64], results := #[.i64], locals := #[.i32]
     code :=
@@ -776,7 +774,6 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
         ++ lg 0 ++ i64c 1 ++ i64ShrU ++ i64Eqz ++ if_ ++ i32c 0 ++ ls 1 ++ end_
         ++ end_ ++
-      lg 0 ++ call (rt "wiz_dec") ++
       lg 1 ++ boxI32 ++ ret }
   out := out.push {
     name := "wiz_field_at", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]

@@ -226,7 +226,8 @@ def wp.bind_r {V A B : Type} : (c : Prog V A) → (f : A → Prog V B) → (0 Q 
 /-- `wp` preserves `bind`, as an equation of predicate transformers. -/
 def wp.bind {V A B : Type} (c : Prog V A) (f : A → Prog V B) :
     wp (Prog.bind c f) = W.bind (wp c) (fun a => wp (f a)) :=
-  @funext (B → HProp V) (HProp V) (wp (Prog.bind c f)) (W.bind (wp c) (fun a => wp (f a)))
+  funext.{0, 0} (A := B → HProp V) (B := HProp V)
+    (f := wp (Prog.bind c f)) (g := W.bind (wp c) (fun a => wp (f a)))
     (fun Q => Entails.antisym (wp.bind_l c f Q) (wp.bind_r c f Q))
 
 -- ## Triples and their rules
@@ -265,10 +266,10 @@ def Triple.bind {V A B : Type} {0 P : HProp V} {ω c : Prog V A} {ω f : A → P
     {0 R : B → HProp V} (t : Triple P c Q) (k : (a : A) → Triple (Q a) (f a) R) : Triple P (Prog.bind c f) R :=
   Entails.trans t (Entails.trans (wp.mono c Q (fun a => wp (f a) R) k) (wp.bind_r c f R))
 /-- Extract an existential from the precondition. -/
-def Triple.exists {V A X : Type} {0 J : X → HProp V} {c : Prog V A} {0 Q : A → HProp V}
+def Triple.exists {V A X : Type} {0 J : X → HProp V} {0 c : Prog V A} {0 Q : A → HProp V}
     (k : (x : X) → Triple (J x) c Q) : Triple (hexists J) c Q := hexists.elim k
 /-- Extract a pure fact from the precondition. -/
-def Triple.pure {V A : Type} {P : Prop} {0 H : HProp V} {c : Prog V A} {0 Q : A → HProp V}
+def Triple.pure {V A : Type} {P : Prop} {0 H : HProp V} {0 c : Prog V A} {0 Q : A → HProp V}
     (k : P → Triple H c Q) : Triple (hpure P ⋆ H) c Q := hpure.elim_l k
 
 /-- The small-footprint specification of `Prog.read` (SLF, WPsem: `triple_get`): the result
@@ -376,11 +377,11 @@ def Prog.PostCase {V A B : Type} (Q : A → HProp V) (r : B → Option (A × Hea
 
 
 /-- Transport at `Nat` (so that the motive's type is known when it is elaborated). -/
-def Nat.substP (0 P : Nat → Prop) {a b : Nat} (e : a = b) (p : P a) : P b := @Eq.substProp Nat P a b e p
+def Nat.substP (0 P : Nat → Prop) {0 a b : Nat} (e : a = b) (p : P a) : P b := @Eq.substProp Nat P a b e p
 /-- Transport at `Bool`. -/
-def Bool.substP (0 P : Bool → Prop) {a b : Bool} (e : a = b) (p : P a) : P b := @Eq.substProp Bool P a b e p
+def Bool.substP (0 P : Bool → Prop) {0 a b : Bool} (e : a = b) (p : P a) : P b := @Eq.substProp Bool P a b e p
 /-- Transport at `Option V`. -/
-def Option.substP {V : Type} (0 P : Option V → Prop) {a b : Option V} (e : a = b) (p : P a) : P b :=
+def Option.substP {V : Type} (0 P : Option V → Prop) {0 a b : Option V} (e : a = b) (p : P a) : P b :=
   @Eq.substProp (Option V) P a b e p
 
 
@@ -423,13 +424,13 @@ def Option.unless_when {A : Type} : (b : Bool) → (w : A) → (o : Option A) �
   | .false, w, o, d => rfl
 /-- The cell `l` of `single l v ⊎ h₂` holds `v`. -/
 def Heap.union_single_at {V : Type} (h h₁ h₂ : Heap V) (l : Nat) (v : V)
-    (e : h = Heap.union h₁ h₂) (e₁ : h₁ = Heap.single l v) : h l = Option.some v :=
+    (e : h = Heap.union h₁ h₂) (e₁ : h₁ = Heap.single l v) : h l = .some v :=
   Eq.trans (e l) (@Eq.congrArg (Option V) (Option V) (fun (o : Option V) => Option.orElse o (h₂ l))
-    (h₁ l) (Option.some v) (Eq.trans (e₁ l) (Heap.single_at l v)))
+    (h₁ l) (.some v) (Eq.trans (e₁ l) (Heap.single_at l v)))
 /-- An allocated cell is below the bound. -/
-def Heap.bounded_ne {V : Type} (h : Heap V) (n l : Nat) (v : V) (b : Heap.Bounded h n) (hl : h l = Option.some v)
+def Heap.bounded_ne {V : Type} (h : Heap V) (n l : Nat) (v : V) (b : Heap.Bounded h n) (hl : h l = .some v)
     (k : Nat) : Not (Nat.beq l (k + n) = .true) := fun eb =>
-  absurd (@Option.substP V (@Option.Free V) (h l) (Option.some v) hl
+  absurd (@Option.substP V (@Option.Free V) (h l) (.some v) hl
     (@Nat.substP (Heap.FreeAt h) (k + n) l (Eq.symm (Nat.beq_eq l (k + n) eb)) (b k))).1
 
 -- ### The cases
@@ -485,11 +486,11 @@ def adequacy.alloc {V A : Type} (v : V) (k : Nat → Prog V A) (0 Q : A → HPro
     Prog.Post Q (Prog.run (Prog.alloc v k) h n) :=
   let d : Heap.Disj h (Heap.single n v) := fun l' => Or.elim (Bool.cases (Nat.beq n l'))
     (fun eb => Or.inl (@Nat.substP (Heap.FreeAt h) n l' (Nat.beq_eq n l' eb) (b 0)))
-    (fun eb => Or.inr (@Bool.substP (Option.FreeWhen v) Bool.false (Nat.beq n l') (Eq.symm eb) rfl));
+    (fun eb => Or.inr (@Bool.substP (Option.FreeWhen v) .false (Nat.beq n l') (Eq.symm eb) rfl));
   let bu : Heap.Bounded (Heap.union h (Heap.single n v)) (Nat.succ n) := fun j =>
     (Option.free_orElse (h (j + Nat.succ n)) (Heap.single n v (j + Nat.succ n))).2
       (@Nat.substP (Heap.FreeAt h) (Nat.succ (j + n)) (j + Nat.succ n) (Eq.symm (Nat.add_succ_r j n)) (b (Nat.succ j)),
-       @Bool.substP (Option.FreeWhen v) Bool.false (Nat.beq n (j + Nat.succ n))
+       @Bool.substP (Option.FreeWhen v) .false (Nat.beq n (j + Nat.succ n))
          (Eq.symm (@Nat.substP (Nat.BeqFalse n) (Nat.succ (j + n)) (j + Nat.succ n) (Eq.symm (Nat.add_succ_r j n)) (Nat.beq_succ_add n j)))
          rfl);
   ih bu (w n (Heap.single n v) d rfl)

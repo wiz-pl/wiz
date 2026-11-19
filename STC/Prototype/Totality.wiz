@@ -1,0 +1,63 @@
+import Prelude
+/-!
+# Prototype: a fuel-indexed, non-`mutual` kernel dispatcher (Wiz side)
+
+This is `STC/Prototype/Totality.lean`'s shape in the host language. `Kernel.wiz` writes
+its passes as `mutual` blocks (lines 1047, 2581, 2972), which the self-hosted kernel
+records as axioms (`docs/stages/17-selfhost-elaboration.md` §17d). Here the three passes
+are constructors of `Cmd` and the recursion is on `Nat` fuel: one `def`, no `mutual`,
+no `partial`.
+
+Checked with:
+
+    .lake/build/bin/wiz check --no-cache --cache-verify off STC/Prototype/Totality.wiz
+
+There is no output: the file typechecks. The definition is not *proved* terminating by a
+measure — fuel makes it total by construction, which is the point.
+-/
+
+inductive Tm where
+  | var (i : Nat)
+  | lam (b : Tm)
+  | app (f a : Tm)
+
+-- Types may be mutual (a closure holds an environment); the *functions* are not.
+mutual
+inductive Val where
+  | clos (env : Env) (b : Tm)
+  | neu (i : Nat)
+inductive Env where
+  | nil
+  | cons (v : Val) (e : Env)
+end
+
+inductive Cmd where
+  | eval (env : Env) (t : Tm)
+  | quote (l : Nat) (v : Val)
+
+inductive Res where
+  | val (v : Val)
+  | tm (t : Tm)
+  | fuel
+
+def lookup : Env → Nat → Option Val
+  | .nil, _ => .none
+  | .cons v _, 0 => .some v
+  | .cons _ e, Nat.succ i => lookup e i
+
+-- One total dispatcher. Every recursive call is `run n …` for the predecessor of the
+-- current fuel, so the recursion is structural on the first argument.
+def run : Nat → Cmd → Res
+  | 0, _ => .fuel
+  | Nat.succ n, .eval env (.var i) => match lookup env i with
+    | .some v => .val v
+    | .none => .val (.neu i)
+  | Nat.succ n, .eval env (.lam b) => .val (.clos env b)
+  | Nat.succ n, .eval env (.app f a) => match run n (.eval env f), run n (.eval env a) with
+    | .val (.clos cenv b), .val av => run n (.eval (.cons av cenv) b)
+    | .val v, .val av => .val (.neu 0)   -- stuck application, simplified
+    | _, _ => .fuel
+  | Nat.succ n, .quote l (.clos env b) => match run n (.eval (.cons (.neu l) env) b) with
+    | .val v => run n (.quote (Nat.succ l) v)
+    | r => r
+  | Nat.succ n, .quote l (.neu i) => .tm (.var i)

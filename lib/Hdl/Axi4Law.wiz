@@ -99,7 +99,7 @@ def Axi4.Law.AddressProgression (burst base size len : Nat) (addrs : List Nat) :
 
 /-- The Boolean form of `AddressProgression`. -/
 def Axi4.Law.addrsOk (burst base size len : Nat) (addrs : List Nat) : Bool :=
-  Hdl.natsEq addrs (Axi4.beatSeq burst base size len)
+  BEq.beq addrs (Axi4.beatSeq burst base size len)
 
 /-- A burst has `LEN + 1` beats. -/
 def Axi4.Law.BeatCount (len n : Nat) : Prop := n = Axi4.beats len

@@ -3,6 +3,6 @@ import FeralCore
 -- fn bad {'a} (x : &'a U64) : &'a U64 := { let y := 5; &y }
 -- `&y` is a scope at a fresh region ρy; the function must return a `Shr ρ U64`, and a
 -- `Shr ρy U64` is a different type (ρy isn't in scope outside the scope's lambda).
-def bad {ρ : Region} (x : Shr ρ U64) : Result (Shr ρ U64) :=
+def bad {0 ρ : Region} (x : Shr ρ U64) : Result (Shr ρ U64) :=
   let y := U64.lit 5;
   Shr.borrow ρ y (fun ρy hy y => .ok y)

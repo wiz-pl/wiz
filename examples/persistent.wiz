@@ -75,7 +75,7 @@ def treeOkFrom : Tree Nat Nat → Option Nat → Option Nat → Bool
     Bool.and (Nat.beq n (Nat.succ (Nat.add (Tree.size l) (Tree.size r))))
       (Bool.and (balanceOk l r)
         (Bool.and (above lo k) (Bool.and (below hi k)
-          (Bool.and (treeOkFrom l lo (Option.some k)) (treeOkFrom r (Option.some k) hi)))))
+          (Bool.and (treeOkFrom l lo (.some k)) (treeOkFrom r (.some k) hi)))))
 def treeOk (t : Tree Nat Nat) : Bool := treeOkFrom t .none .none
 
 def log2Fuel : Nat → Nat → Nat

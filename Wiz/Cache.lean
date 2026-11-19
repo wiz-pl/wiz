@@ -83,7 +83,7 @@ where
       if w.isEmpty then none else return (.a (String.ofList w), cs.drop w.length)
 
 def node (tag : String) (xs : List Sx) : Sx := .l (#[.a tag] ++ xs.toArray)
-def nat (n : Nat) : Sx := .a (toString n)
+def nat (n : Nat) : Sx := .a (NatString.decimalString n)
 def str (s : String) : Sx := .a s
 def list (xs : List Sx) : Sx := .l xs.toArray
 
@@ -193,7 +193,7 @@ partial def dterm : Sx → Option (Term R)
     let x (i : Nat) : Sx := xs[i]?.getD (.a "")
     let t (i : Nat) : Option (Term R) := dterm (x i)
     let s (i : Nat) : Option String := atom? (x i)
-    let n (i : Nat) : Option Nat := (s i).bind String.toNat?
+    let n (i : Nat) : Option Nat := (s i).bind NatString.ofDecimalDigits?
     let lv (i : Nat) : Option Level := dlevel (x i)
     let ts (i : Nat) : Option (List (Term R)) := do (← items? (x i)).toList.mapM dterm
     let ss (i : Nat) : Option (List String) := do (← items? (x i)).toList.mapM atom?
@@ -520,7 +520,7 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-30-sorts-prf-mutual-ctor-names-error-codes-scase-qty-letUnit"  -- 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-31-deterministic-macro-scopes"  -- 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 

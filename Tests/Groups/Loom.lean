@@ -103,7 +103,26 @@ def loomGroup : Group where
           "  a + b\n") "declared with quantity 1 but used ω" },
     { name := "owned state: dropping the cell is a type error", run := fun _ =>
         failsLoom ("import Web.Loom\n" ++
-          "def worse (1 o : Loom.Owned Nat) : Nat := 0\n") "declared with quantity 1 but used 0" }
+          "def worse (1 o : Loom.Owned Nat) : Nat := 0\n") "declared with quantity 1 but used 0" },
+    { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
+        -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
+        -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters
+        -- the session with the callback and diffs old against new.
+        okLoom ("import Web.Widget\n" ++
+          "def ws : List Widget.Widget :=\n" ++
+          "  .cons (Widget.slider \"gain\" \"input\" \"0.50\" \"onGain\")\n" ++
+          "    (.cons (Widget.plot \"trace\" \"click\" \"{}\" \"onGain\") .nil)\n" ++
+          "def cb (e : Widget.Event) (wss : List Widget.Widget) : List Widget.Widget :=\n" ++
+          "  List.map (fun w => match String.eq w.id e.widget with\n" ++
+          "    | .true => Widget.setValue w e.value\n" ++
+          "    | .false => w) wss\n" ++
+          "#eval String.startsWith (Widget.display ws) Widget.prefix\n" ++
+          "#eval String.contains (Widget.display ws) \"wiz-plot-canvas\"\n" ++
+          "#eval String.contains (Widget.display ws) \"data-wiz-widget-kind\"\n" ++
+          "#eval List.length (Widget.widgetsOf (Widget.display ws))\n" ++
+          "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"patches\"\n" ++
+          "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"\\\"op\\\"\"")
+          [".true", ".true", ".true", "2", ".true", ".true"] }
   ]
 
 builtin_initialize registerGroup loomGroup

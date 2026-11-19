@@ -113,8 +113,11 @@ partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat
     | .true => Scry.lineIndexGo starts off mid hi
     | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
 
-/-- A 1-based line and column for a byte offset, from a precomputed line-start table. -/
-def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+/-- A 1-based line and **byte-as-character** column for a byte offset, from a line-start
+table. This is the bytes-backed path's lookup (`Scry.Cst.ofStoreBytes`): it has no byte
+map, and its fixtures are ASCII (the shim's offsets are bytes; a UTF-8 identifier would
+need a byte slice). The text-backed paths use `Scry.TextIndex` and `Scry.lineColFrom`. -/
+def Scry.lineColFromBytes (starts : U32Array) (off : Nat) : Nat × Nat :=
   let n := U32Array.size starts;
   match Nat.beq n 0 with
   | .true => (1, Nat.succ off)
@@ -356,9 +359,15 @@ def Scry.CstStore.edgesOf (s : Scry.CstStore) : List Scry.Edge :=
     (InternTable.lookup s.fields (U32Array.get s.edgeLabel i)))
     (Scry.schemaRange (Scry.CstStore.edgeCount s))
 
+/-- The `arity` relation-tuple values at offsets `lo … lo+arity-1`, read from
+`relTuples` by index. Reading the array directly keeps one row O(arity); the older
+`U32Array.toList` + `List.drop` per row was O(tuples) per row, O(tuples²) for the store. -/
+def Scry.CstStore.tupleRow (s : Scry.CstStore) (lo arity : Nat) : List Nat :=
+  List.map (fun k => UIntN.toNat (U32Array.get s.relTuples (Nat.add lo k)))
+    (Scry.schemaRange arity)
+
 /-- The relations of `s`, in id order. -/
 def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
-  let flat := List.map UIntN.toNat (U32Array.toList s.relTuples);
   List.map (fun i =>
     let lo := UIntN.toNat (U32Array.get s.relOff i);
     let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ i));
@@ -367,7 +376,7 @@ def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
       | .zero => 0
       | .succ _ => Nat.div (Nat.sub hi lo) arity;
     let row := fun (j : Nat) =>
-      List.take arity (List.drop (Nat.add lo (Nat.mul j arity)) flat);
+      Scry.CstStore.tupleRow s (Nat.add lo (Nat.mul j arity)) arity;
     Scry.Relation.mk (Scry.Id.mk i) (InternTable.lookup s.relNames (U32.ofNat i)) arity
       (List.map row (Scry.schemaRange count)))
     (Scry.schemaRange (Scry.CstStore.relationCount s))
@@ -497,12 +506,12 @@ def Scry.relRows (s : Scry.CstStore) (i : Nat) : List String :=
   let arity := UIntN.toNat (U32Array.get s.relArity i);
   let lo := UIntN.toNat (U32Array.get s.relOff i);
   let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ i));
-  let flat := List.map UIntN.toNat (U32Array.toList s.relTuples);
   let count := match arity with
     | .zero => 0
     | .succ _ => Nat.div (Nat.sub hi lo) arity;
-  let rows := List.map (fun j => List.take arity
-    (List.drop (Nat.add lo (Nat.mul j arity)) flat)) (Scry.schemaRange count);
+  let rows := List.map (fun j =>
+    Scry.CstStore.tupleRow s (Nat.add lo (Nat.mul j arity)) arity)
+    (Scry.schemaRange count);
   List.append
     [Scry.cstEnc (InternTable.lookup s.relNames (U32.ofNat i)) ++ "\t"
       ++ Nat.repr arity ++ "\t" ++ Nat.repr (List.length rows)]

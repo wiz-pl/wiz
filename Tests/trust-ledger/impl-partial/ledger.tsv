@@ -1,0 +1,3 @@
+# fixture ledger (Tests/trust-ledger/impl-partial): the partial row, but not the native
+# step it hides
+A	pBase	partial	fixture: an implemented_by on a partial	gate-fixture	2027-06-30

@@ -1,0 +1,436 @@
+import Storage
+import StorageCursor
+/-!
+# The pure half: the `#eval` cases
+
+Everything here is checked by `wiz check` (no IO, no build):
+
+```text
+wiz check -I drafts/storage-engine drafts/storage-engine/Tests.wiz
+```
+
+The cases, in the order the note's plan asks for them:
+
+1. recording optics: `over (Lens.comp l m) (+1)` writes exactly one `addCount` patch,
+   and two `+1`s from one base compose to one `addCount 2` (recorded as the optics run,
+   with no second pass);
+2. `PLens.over` on an existing node succeeds and on an absent node fails;
+3. two `+1`s from the same base both commit and sum;
+4. a stale `set` is rejected (and a fresh one commits);
+5. a unique-index duplicate is rejected, including two in one transaction;
+6. a delete is a tombstone in the index delta, and the index is maintained
+   incrementally at commit; the committed index equals `rebuildIndex`;
+7. an index delta's fold: `combine` is commutative, `fold` sums, and applying the
+   commit's delta to the base root reproduces the committed index;
+8. an index scan via `Cursor.follow`, and a table scan and an index scan accepted by
+   the same `Cursor Node` function;
+9. `foldUntil` early exit (the step runs twice over a three-node scan), and `fold`;
+10. a transaction that began before a delete is stale.
+-/
+
+-- ## Fixtures
+
+def u64 (n : Nat) : U64 := U64.ofNat n
+
+def node1 : Node := Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)
+def node2 : Node := Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8)
+def node3 : Node := Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 9)
+
+-- `kindIndex` (id 0) and `uniqueLabel` (id 1) come from `Storage.wiz` (the union
+-- module); `countIndex` is this file's own index, so it takes the next id.
+def countIndex : IndexDef := IndexDef.mk (U32.ofNat 2) (U32.ofNat 1) .false
+def indexDefs : List IndexDef := [kindIndex, countIndex, uniqueLabel]
+
+def root0 : Root :=
+  Root.mk (U64Map.ofList [(u64 1, node1), (u64 2, node2), (u64 3, node3)])
+    (U64Map.empty : U64Map U64)
+    (U64Map.empty : U64Map (U64Map (List U64)))
+    (u64 0)
+
+def db0 : Db := Db.mk (u64 0) (Root.rebuildIndex root0 indexDefs) indexDefs
+def s0 : Snapshot := Db.snapshot db0
+
+-- ## Small observations
+
+def boolToNat (b : Bool) : Nat := match b with
+  | .true => 1
+  | .false => 0
+
+def isCommitted : Outcome → Nat
+  | .committed _ => 1
+  | .rejected _ => 0
+
+def isRejected : Outcome → Nat
+  | .committed _ => 0
+  | .rejected _ => 1
+
+def isOk : Result Snapshot → Nat
+  | .ok _ => 1
+  | .err _ => 0
+
+def countOf (db : Db) (id : U64) : Nat :=
+  match U64Map.find db.root.pages id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def countOfSnapshot (s : Snapshot) (id : U64) : Nat :=
+  match Snapshot.getNode s id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+/-- 0: no patch; 1: `set`; 2: `addCount`; 3: `del`. -/
+def patchTag : Option Patch → Nat
+  | .none => 0
+  | .some .del => 3
+  | .some (.set _) => 1
+  | .some (.addCount _) => 2
+
+def patchDelta : Option Patch → Nat
+  | .none => 0
+  | .some p => p.deltaOf.toNat
+
+def bucketLen (r : Root) (ix : U64) (v : U64) : Nat :=
+  List.length (Root.lookupIndex r ix v)
+
+def sameIds (a b : List U64) : Bool :=
+  Bool.and (List.all (fun x => List.hasU64 x b) a) (List.all (fun x => List.hasU64 x a) b)
+
+/-- Two roots agree on one bucket (set equality; insertion order is not observable). -/
+def bucketEq (a b : Root) (ix : U64) (v : U64) : Bool :=
+  sameIds (Root.lookupIndex a ix v) (Root.lookupIndex b ix v)
+
+def sameIndex (a b : Root) (d : IndexDef) (keys : List U64) : Bool :=
+  List.all (fun v => bucketEq a b (IndexDef.uid d) v) keys
+
+def entriesOf (s : Snapshot) : List (U64 × Patch) := U64Map.toList s.ws
+
+/-- The index delta the commit of `s` would apply (against the current `db0`). -/
+def deltaOf (s : Snapshot) : IndexDelta := Db.indexDeltaOf db0 (entriesOf s)
+
+-- `setLabel` and `delNode` come from `Storage.wiz` (the union module).
+
+-- ## 1. Recording optics: one patch, and no second pass
+
+def sBump1 : Snapshot :=
+  Lens.over (Lens.comp (nodeOr (u64 1) (Node.mk 0 0 0)) Node.countL)
+    (fun c => c + 1) s0
+
+#eval WriteSet.size sBump1.ws                 -- 1: one key touched
+#eval boolToNat (match WriteSet.patchOf sBump1.ws (u64 1) with
+  | .some p => Patch.beq p (.addCount (u64 1))
+  | .none => .false)                           -- 1: exactly `addCount 1`
+#eval patchTag (WriteSet.patchOf sBump1.ws (u64 1))   -- 2 (addCount)
+#eval patchDelta (WriteSet.patchOf sBump1.ws (u64 1)) -- 1
+#eval countOfSnapshot sBump1 (u64 1)          -- 1 (the overlay applies the patch)
+#eval U64Map.size sBump1.root.pages           -- 3 (the base root is untouched)
+
+-- Two updates through the same composite: the second is composed into the same
+-- write-set entry (`addCount 1 ∘ addCount 1 = addCount 2`), not diffed afterwards.
+def sBump2 : Snapshot :=
+  Lens.over (Lens.comp (nodeOr (u64 1) (Node.mk 0 0 0)) Node.countL)
+    (fun c => c + 1) sBump1
+
+#eval WriteSet.size sBump2.ws                 -- 1 (still one key)
+#eval patchDelta (WriteSet.patchOf sBump2.ws (u64 1)) -- 2
+#eval countOfSnapshot sBump2 (u64 1)          -- 2
+
+-- Two different nodes: two entries (a diff of the whole map would not be smaller).
+def sBumpTwo : Snapshot :=
+  Lens.over (Lens.comp (nodeOr (u64 2) (Node.mk 0 0 0)) Node.countL)
+    (fun c => c + 1) sBump1
+
+#eval WriteSet.size sBumpTwo.ws               -- 2
+
+-- ## 2. PLens.over
+
+#eval isOk (PLens.over (PLens.comp (nodeAt (u64 1)) (Lens.toP Node.countL))
+  (fun c => c + 1) s0)                        -- 1 (node 1 exists)
+#eval isOk (PLens.over (PLens.comp (nodeAt (u64 9)) (Lens.toP Node.countL))
+  (fun c => c + 1) s0)                        -- 0 (absent: no place)
+#eval isOk (PLens.over (nodeAt (u64 9)) (fun n => n) s0) -- 0
+
+def sPBump : Result Snapshot :=
+  PLens.over (PLens.comp (nodeAt (u64 1)) (Lens.toP Node.countL)) (fun c => c + 1) s0
+
+#eval match sPBump with
+  | .ok s => WriteSet.size s.ws
+  | .err _ => 0                               -- 1
+
+-- ## 3. Two `+1`s from one base: both commit, and sum
+
+def dbA : Db := (Db.commit db0 (Lens.over
+  (Lens.comp (nodeOr (u64 1) (Node.mk 0 0 0)) Node.countL) (fun c => c + 1) s0)).1
+
+def dbB : Db × Outcome := Db.commit dbA (Lens.over
+  (Lens.comp (nodeOr (u64 1) (Node.mk 0 0 0)) Node.countL) (fun c => c + 1) s0)
+
+#eval isCommitted dbB.2                       -- 1
+#eval countOf dbB.1 (u64 1)                   -- 2
+#eval bucketLen dbB.1.root (IndexDef.uid countIndex) (u64 2) -- 1 (index follows)
+#eval bucketLen dbB.1.root (IndexDef.uid countIndex) (u64 1) -- 0
+
+-- ## 4. A stale `set` is rejected; a fresh one commits
+
+#eval isRejected (Db.commit dbA (setLabel (u64 1) (U32.ofNat 9) s0)).2 -- 1
+#eval isCommitted (Db.commit db0 (setLabel (u64 1) (U32.ofNat 9) s0)).2 -- 1
+
+-- ## 5. Unique indices
+
+-- node 2's new label 7 is node 1's
+#eval isRejected (Db.commit db0 (setLabel (u64 2) (U32.ofNat 7) s0)).2 -- 1
+
+-- both nodes moved to label 5 in one transaction: the transaction's own writes collide
+#eval isRejected (Db.commit db0 (setLabel (u64 2) (U32.ofNat 5)
+  (setLabel (u64 1) (U32.ofNat 5) s0))).2                              -- 1
+
+-- a non-unique index allows the same key for two nodes (kind 1: nodes 1 and 3)
+#eval bucketLen db0.root (IndexDef.uid kindIndex) (u64 1)               -- 2
+
+-- ## 6. Tombstones and incremental maintenance
+
+def sDel3 : Snapshot := delNode (u64 3) s0
+def dDel3 : IndexDelta := deltaOf sDel3
+
+#eval List.length dDel3.removed               -- 3 (one remove fact per index)
+#eval List.length dDel3.added                 -- 0
+
+def dbDel : Db := (Db.commit db0 sDel3).1
+#eval bucketLen dbDel.root (IndexDef.uid kindIndex) (u64 1)   -- 1 (node 1)
+#eval bucketLen dbDel.root (IndexDef.uid countIndex) (u64 0)  -- 2 (nodes 1, 2)
+#eval boolToNat (sameIndex dbDel.root (Root.rebuildIndex dbDel.root indexDefs) kindIndex
+  [u64 1, u64 2, u64 9])                       -- 1 (incremental = recompute)
+
+-- a transaction that began before the delete is stale
+#eval isRejected (Db.commit dbDel (Lens.over
+  (Lens.comp (nodeOr (u64 1) (Node.mk 0 0 0)) Node.countL) (fun c => c + 1) s0)).2 -- 1
+
+-- ## 7. An index delta's fold
+
+def sMove2 : Snapshot := setLabel (u64 2) (U32.ofNat 9) s0
+
+#eval IndexDelta.size (deltaOf sBump1)        -- 2 (countIndex: one remove, one add)
+#eval IndexDelta.size (deltaOf sMove2)        -- 2 (uniqueLabel: one remove, one add)
+#eval boolToNat (IndexDelta.beq
+  (IndexDelta.combine (deltaOf sBump1) (deltaOf sMove2))
+  (IndexDelta.combine (deltaOf sMove2) (deltaOf sBump1))) -- 1 (commutative)
+#eval IndexDelta.size (IndexDelta.fold [deltaOf sBump1, deltaOf sMove2]) -- 4
+
+def appliedBump : Root := Root.applyDelta db0.root (deltaOf sBump1)
+
+#eval bucketLen appliedBump (IndexDef.uid countIndex) (u64 0) -- 2 (nodes 2, 3)
+#eval bucketLen appliedBump (IndexDef.uid countIndex) (u64 1) -- 1 (node 1)
+
+def db1 : Db := (Db.commit db0 sBump1).1
+
+#eval boolToNat (sameIndex db1.root appliedBump countIndex [u64 0, u64 1, u64 2]) -- 1
+#eval boolToNat (sameIndex db1.root (Root.rebuildIndex db1.root indexDefs) countIndex
+  [u64 0, u64 1, u64 2])                       -- 1
+
+-- ## 7b. The index traversal (ω update) and its view (the query)
+
+#eval List.length (Traversal.view (indexTraversal kindIndex (u64 1)) s0) -- 2
+#eval List.length (Traversal.view (indexTraversal kindIndex (u64 9)) s0) -- 0
+
+def sBumpKind : Snapshot :=
+  Traversal.overAll (indexTraversal kindIndex (u64 1))
+    (fun n => { n with count := n.count + 1 }) s0
+
+#eval WriteSet.size sBumpKind.ws               -- 2 (nodes 1 and 3, one patch each)
+#eval countOfSnapshot sBumpKind (u64 1)        -- 1
+#eval countOfSnapshot sBumpKind (u64 3)        -- 1
+#eval countOfSnapshot sBumpKind (u64 2)        -- 0 (not in the bucket)
+
+def dbBumpKind : Db := (Db.commit db0 sBumpKind).1
+#eval boolToNat (sameIndex dbBumpKind.root (Root.rebuildIndex dbBumpKind.root indexDefs)
+  countIndex [u64 0, u64 1, u64 2])            -- 1 (the traversal's patches reach the commit)
+
+-- ## 8. Index scans and the same `Cursor` type
+
+def scanLength (1 c : Cursor Node) : Nat := Cursor.length c
+
+#eval Cursor.length (Cursor.follow s0 (Snapshot.indexCursor kindIndex (u64 1) s0)) -- 2
+#eval Cursor.length (Snapshot.indexNodes kindIndex (u64 1) s0) -- 2
+#eval Cursor.length (Snapshot.indexNodes kindIndex (u64 2) s0) -- 1
+#eval Cursor.length (Snapshot.indexNodes kindIndex (u64 9) s0) -- 0
+#eval scanLength (Snapshot.tableCursor s0)                     -- 3
+#eval scanLength (Snapshot.indexNodes kindIndex (u64 1) s0)    -- 2
+
+-- The snapshot is ω: two cursors made from it, each consumed exactly once.
+#eval Nat.add (Cursor.length (Snapshot.tableCursor s0))
+  (Cursor.length (Snapshot.tableCursor s0))                    -- 6
+
+-- The index cursor's keys are followed to nodes; check one field through the composite.
+#eval Cursor.fold (Snapshot.indexNodes kindIndex (u64 1) s0)
+  (fun acc n => acc + n.kind.toNat) 0          -- 2 (nodes 1 and 3, kind 1 each)
+
+-- Index-only projection in the plan (no `follow`): the same `Cursor U64`.
+#eval Cursor.fold (Snapshot.indexCursor kindIndex (u64 1) s0)
+  (fun acc k => acc + k.toNat) 0               -- 4 (keys 1 and 3)
+
+-- ## 9. Early exit
+
+#eval Cursor.foldUntil (Snapshot.tableCursor s0) (fun n _ => Control.stop n) 0 -- 0
+#eval Cursor.foldUntil (Snapshot.tableCursor s0) (fun acc _ => Control.go (acc + 1)) 0 -- 3
+#eval Cursor.foldUntil (Snapshot.tableCursor s0)
+  (fun (acc : Nat) _ => match acc with
+    | .zero => Control.go (acc + 1)
+    | _ => Control.stop (acc + 1)) 0           -- 2 (stopped after two of three)
+#eval Cursor.foldUntil (Snapshot.indexNodes kindIndex (u64 1) s0)
+  (fun (acc : Nat) _ => match acc with
+    | .zero => Control.stop (acc + 1)
+    | _ => Control.go (acc + 1)) 0             -- 1 (stopped after one of two)
+
+#eval match Cursor.first (Snapshot.tableCursor s0) with
+  | .some n => n.kind.toNat
+  | .none => 0                                 -- 1
+#eval Cursor.length (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Snapshot.tableCursor s0))                   -- 2
+
+-- ## 10. The plan: fusion, index-only scans, pushdown, early exit
+
+/-- Node-list equality by value (the node ids are not in the record). -/
+def sameNodes (a b : List Node) : Bool :=
+  Bool.and (List.all (fun x => List.any (fun y => Node.beq x y) b) a)
+    (List.all (fun y => List.any (fun x => Node.beq x y) a) b)
+
+def nodesOf (c : Cost) : Nat := c.nodes
+def keysOf (c : Cost) : Nat := c.keys
+
+/-- Run a constructed cursor and keep its read-path cost. The helpers take the store
+values, not a cursor, so no linear handle is duplicated. -/
+def tableCost (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.tableCursor s) (fun n _ => n + 1) 0).2
+
+def indexAllCost (d : IndexDef) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexNodesAll d s) (fun n _ => n + 1) 0).2
+
+def indexOnlyEqCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexOnlyWhere d (KeyPred.eq v) s)
+    (fun n _ => n + 1) 0).2
+
+def pushedEqCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.filterOnNode d (KeyPred.eq v) (Snapshot.indexNodesAll d s))
+    (fun n _ => n + 1) 0).2
+
+def pushedRangeCost (d : IndexDef) (lo hi : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.filterOnNode d (KeyPred.between lo hi)
+    (Snapshot.indexNodesAll d s)) (fun n _ => n + 1) 0).2
+
+/-- One index bucket, followed to nodes. -/
+def indexBucketCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexNodes d v s) (fun n _ => n + 1) 0).2
+
+/-- A key predicate pushed before `follow`: only matching entries are fetched. -/
+def keyFilteredFollowCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.follow s
+    (Cursor.filterKey (KeyPred.eq v) (Snapshot.indexOnlyRange d KeyRange.all s)))
+    (fun n _ => n + 1) 0).2
+
+/-- The unfiltered-then-filter reference for a node predicate. -/
+def labelInRange (n : Node) : Bool :=
+  KeyPred.test (KeyPred.between (u64 7) (u64 8)) (Node.field n 2)
+
+-- ### Plan before and after pushdown
+
+#eval Info.show (Cursor.info (Snapshot.indexNodesAll kindIndex s0))
+-- source=index(field=0,nonunique) range=all ... needNode=true indexOnly=false
+#eval Info.show (Cursor.info (Cursor.filterOnNode kindIndex (KeyPred.eq (u64 1))
+  (Snapshot.indexNodesAll kindIndex s0)))
+-- ... range=eq(1) ... (the same plan, tightened)
+#eval Info.show (Cursor.info (Snapshot.indexCursor kindIndex (u64 1) s0))
+-- ... projection=id ... needNode=false indexOnly=true (primary keys from the index)
+#eval Info.show (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0))
+-- ... range=eq(1) ... needNode=false indexOnly=true projection=key
+
+-- ### Filter/filterMap fuse: recorded in the plan, nothing consumed
+
+#eval (Cursor.info (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Cursor.filter (fun n => Nat.beq n.count.toNat 0)
+    (Snapshot.indexNodesAll kindIndex s0)))).filters          -- 2
+#eval (Cursor.info (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Snapshot.indexNodesAll kindIndex s0))).cost.nodes          -- 0 (no read yet)
+#eval Cursor.length (Cursor.map (fun n => n.count)
+  (Snapshot.indexNodesAll kindIndex s0))                      -- 3
+#eval (Cursor.info (Cursor.filter (fun c => Nat.beq c.toNat 0)
+  (Cursor.map (fun n => n.count) (Snapshot.indexNodesAll kindIndex s0)))).filters -- 1
+
+-- ### Index-only scan: keys read, no primary node
+
+#eval (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).indexOnly -- true
+#eval (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).needNode  -- false
+#eval Projection.show (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).projection -- key
+#eval Cursor.length (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0) -- 2
+#eval Cursor.fold (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)
+  (fun acc k => acc + k.toNat) 0                              -- 2 (the key is 1 for both)
+#eval nodesOf (indexOnlyEqCost kindIndex (u64 1) s0)          -- 0 primary reads
+#eval keysOf (indexOnlyEqCost kindIndex (u64 1) s0)           -- 2 index entries
+
+-- The prototype's index scan still yields primary keys (ids 1 and 3), from the same
+-- index entries; only the projection differs from the index-only scan above.
+#eval Cursor.fold (Snapshot.indexCursor kindIndex (u64 1) s0)
+  (fun acc k => acc + k.toNat) 0                              -- 4 (ids 1 and 3)
+
+-- ### Pushdown equivalence: pushed == unfiltered-then-filtered
+
+#eval boolToNat (sameIds
+  (Cursor.toList (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0))
+  (Cursor.toList (Cursor.filter (fun k => UIntN.beq k (u64 1))
+    (Snapshot.indexOnlyRange kindIndex KeyRange.all s0))))     -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.filterOnNode kindIndex (KeyPred.eq (u64 1))
+    (Snapshot.indexNodesAll kindIndex s0)))
+  (Cursor.toList (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+    (Snapshot.indexNodesAll kindIndex s0))))                   -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.filterOnNode uniqueLabel (KeyPred.between (u64 7) (u64 8))
+    (Snapshot.indexNodesAll uniqueLabel s0)))
+  (Cursor.toList (Cursor.filter labelInRange
+    (Snapshot.indexNodesAll uniqueLabel s0))))                 -- 1
+
+-- Pushed equality against the same-key index bucket, and `follow` on the key
+-- projection (it follows the entry's primary id, not the projected value).
+#eval boolToNat (sameNodes
+  (Cursor.toList (Snapshot.indexNodesWhere kindIndex (KeyPred.eq (u64 1)) s0))
+  (Cursor.toList (Snapshot.indexNodes kindIndex (u64 1) s0)))  -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.follow s0
+    (Cursor.filterKey (KeyPred.eq (u64 1))
+      (Snapshot.indexOnlyRange kindIndex KeyRange.all s0))))
+  (Cursor.toList (Snapshot.indexNodes kindIndex (u64 1) s0)))  -- 1
+
+-- A predicate on a *non-indexed* field is not pushed: the range stays `all` and the
+-- predicate is a post-filter (the results are still right).
+#eval (Cursor.info (Cursor.filterOnNode countIndex (KeyPred.eq (u64 0))
+  (Snapshot.indexNodesAll kindIndex s0))).filters              -- 1
+#eval match (Cursor.info (Cursor.filterOnNode countIndex (KeyPred.eq (u64 0))
+  (Snapshot.indexNodesAll kindIndex s0))).range with
+  | .all => 1
+  | _ => 0                                                     -- 1 (not pushed)
+
+-- ### Read counts per query shape (counts, not timings)
+
+#eval nodesOf (tableCost s0)                                   -- 3 (full table scan)
+#eval keysOf (tableCost s0)                                    -- 3
+#eval nodesOf (indexAllCost kindIndex s0)                      -- 3 (index scan, follow)
+#eval keysOf (indexAllCost kindIndex s0)                       -- 3
+#eval nodesOf (indexOnlyEqCost kindIndex (u64 1) s0)           -- 0 (index-only)
+#eval keysOf (indexOnlyEqCost kindIndex (u64 1) s0)            -- 2
+#eval nodesOf (pushedEqCost kindIndex (u64 1) s0)              -- 2 (pushed equality)
+#eval keysOf (pushedEqCost kindIndex (u64 1) s0)               -- 2
+#eval nodesOf (pushedRangeCost uniqueLabel (u64 7) (u64 8) s0) -- 2 (pushed range)
+#eval keysOf (pushedRangeCost uniqueLabel (u64 7) (u64 8) s0)  -- 2
+#eval nodesOf (indexBucketCost kindIndex (u64 1) s0)           -- 2 (one bucket)
+#eval keysOf (indexBucketCost kindIndex (u64 1) s0)            -- 2
+#eval nodesOf (keyFilteredFollowCost kindIndex (u64 1) s0)     -- 2 (key filter before follow)
+#eval keysOf (keyFilteredFollowCost kindIndex (u64 1) s0)      -- 2
+
+-- ### Early exit: one value, then stop
+
+#eval (Cursor.firstWith (Snapshot.indexNodesAll kindIndex s0)).2.nodes -- 1
+#eval (Cursor.firstWith (Snapshot.indexNodesAll kindIndex s0)).2.keys  -- 1
+#eval (Cursor.firstWith (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Snapshot.indexNodesAll kindIndex s0))).2.keys               -- 1 (first entry passes)
+#eval (Cursor.foldUntilWith (Snapshot.indexNodesAll kindIndex s0)
+  (fun (acc : Nat) _ => Control.stop (acc + 1)) 0).2.nodes    -- 1 (stopped after one)
+#eval (Cursor.foldWith (Snapshot.indexNodesAll kindIndex s0)
+  (fun n _ => n + 1) 0).2.nodes                                -- 3 (the full walk)

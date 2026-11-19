@@ -41,15 +41,15 @@ func toplevel.Main()
     %16 = %14
     %17 = global $str:"started"
     %18 = call ReportScope.Mark(%16, %17)
-    %19 = havoc u1
-    %20 = 0
-    br ne %19, %20 ? b3 : b4
+    %19 = null
+    %20 = eq %7, %19
+    %21 = 0
+    br ne %20, %21 ? b3 : b4
   b3:
     ret
   b4:
     goto b5
   b5:
-    %21 = call System.String.Concat(%11)
-    %22 = call System.Console.WriteLine(%21)
+    %22 = call System.String.Concat(%11)
+    %23 = call System.Console.WriteLine(%22)
     ret
-warning: toplevel.Main:15: is test not modelled: havoc

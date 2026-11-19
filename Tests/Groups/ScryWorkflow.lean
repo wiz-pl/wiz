@@ -66,7 +66,7 @@ def group : Group where
       run := fun _ => evalNats (prelude ++
         "#eval Nat.add (if Scry.wfAllowed .new .confirmed then 100 else 0) (Nat.add (if Scry.wfAllowed .new .fixed then 0 else 10) (if Scry.wfAllowed .confirmed .fixed then 1 else 0))\n" ++
         "#eval Nat.add (if Scry.wfAllowed .falsePositive .triaged then 10 else 0) (if Scry.wfAllowed .fixed .triaged then 1 else 0)\n" ++
-        "def r0 : Scry.WfRecord := Scry.WfRecord.mk \"f_x\" \"k\" \"h\" .new [] \"src/a.c\" .none .false Json.mkNull \"art\" .none .none .none 1 1\n" ++
+        "def r0 : Scry.WfRecord := Scry.WfRecord.mk \"f_x\" \"k\" \"h\" .new [] \"src/a.c\" .none .false Json.mkNull \"art\" .none .none .none .none .none 1 1\n" ++
         "#eval match Scry.wfTriage r0 .confirmed \"tester\" \"seen\" 2 with\n" ++
         "  | .ok r => match Scry.wfTriage r .fixed \"tester\" \"patched\" 3 with\n" ++
         "    | .ok r2 => Nat.add (Nat.mul (List.length r2.history) 10) (if String.eq (Scry.WfState.show r2.state) \"fixed\" then 1 else 0)\n" ++
@@ -76,7 +76,7 @@ def group : Group where
         [111, 11, 21, 1] },
     { name := "store: JSON round-trip and the schema check",
       run := fun _ => evalNats (prelude ++
-        "def r0 : Scry.WfRecord := Scry.WfRecord.mk \"f_x\" \"k\" \"h\" .confirmed [] \"src/a.c\" .none .false Json.mkNull \"art\" (.some \"static.json\") .none .none 1 2\n" ++
+        "def r0 : Scry.WfRecord := Scry.WfRecord.mk \"f_x\" \"k\" \"h\" .confirmed [] \"src/a.c\" .none .false Json.mkNull \"art\" (.some \"static.json\") .none .none .none .none 1 2\n" ++
         "def st : Scry.WfStore := Scry.wfUpsert Scry.wfEmptyStore r0\n" ++
         "#eval match Scry.wfStoreOfText (Scry.wfStoreText st) with\n" ++
         "  | .ok s => match Scry.wfFind s \"f_x\" with\n" ++
@@ -85,7 +85,31 @@ def group : Group where
         "  | .error _ => 0\n" ++
         "#eval match Scry.wfStoreOfText \"{\\\"schema\\\":\\\"other\\\",\\\"findings\\\":[]}\" with | .error _ => 1 | .ok _ => 0\n" ++
         "#eval Nat.add (Nat.mul (if String.eq (Scry.wfCweTier \"command-injection\") \"T1\" then 1 else 0) 100) (Nat.add (Nat.mul (if String.eq (Scry.wfCweTier \"use-after-free\") \"T2\" then 1 else 0) 10) (if String.eq (Scry.wfCweTier \"gets-overflow\") \"N/A\" then 1 else 0))")
-        [11, 1, 111] }
+        [11, 1, 111] },
+    { name := "candidate: source/plan derivation, rank, verdict and JSON round-trip",
+      run := fun _ => evalNats (
+        "def src : Scry.WfSource := Scry.WfSource.mk \"getenv\" \"env\" \"SCRY_CMD\" \"main\" 7 3 0\n" ++
+        "def plan := Scry.wfPlanFor \"f_abc\" \"command-injection\" \"main\" \"system\" 0 (.some src)\n" ++
+        "#eval if String.eq plan.channel \"env\" then 1 else 0\n" ++
+        "#eval if String.eq plan.envName \"SCRY_CMD\" then 1 else 0\n" ++
+        "#eval if String.contains plan.inputText plan.marker then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfCalleeOfLine \"  char *cmd = getenv(\\\"SCRY_CMD\\\");\") \"getenv\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfChannelOfCallee \"System.Console.ReadLine\") \"stdin\" then 1 else 0\n" ++
+        "def ok := Scry.wfRankInputOf .true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" .false\n" ++
+        "def dup := Scry.wfRankInputOf .true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" .true\n" ++
+        "#eval (Scry.wfRank ok).1\n" ++
+        "#eval if String.eq (Scry.wfVerdict (Scry.wfRank ok).1) \"pursue\" then 1 else 0\n" ++
+        "#eval if String.eq (Scry.wfVerdict (Scry.wfRank dup).1) \"reject\" then 1 else 0\n" ++
+        "def cand : Scry.WfCandidate := Scry.WfCandidate.mk \"refined\" 95 \"pursue\" [\"why\"] (.some src) plan\n" ++
+        "def rec0 : Scry.WfRecord := Scry.WfRecord.mk \"f_abc\" \"k\" \"h\" .new [] \"src/a.c\" .none .false Json.mkNull \"art\" .none .none .none (.some cand) (.some \"candidate.json\") 1 2\n" ++
+        "#eval match Scry.wfStoreOfText (Scry.wfStoreText (Scry.wfUpsert Scry.wfEmptyStore rec0)) with\n" ++
+        "  | .ok s => match Scry.wfFind s \"f_abc\" with\n" ++
+        "    | .some r => match r.candidate with\n" ++
+        "      | .some c => Nat.add (if String.eq c.verdict \"pursue\" then 10 else 0) (Nat.add (if Nat.beq c.rank 95 then 1 else 0) (if String.eq c.plan.envName \"SCRY_CMD\" then 100 else 0))\n" ++
+        "      | .none => 0\n" ++
+        "    | .none => 0\n" ++
+        "  | .error _ => 0")
+        [1, 1, 1, 1, 1, 95, 1, 1, 111] }
   ]
 
 builtin_initialize registerGroup group

@@ -363,7 +363,7 @@ def Netlist.simFastGo (n : Netlist) (inputs : List (List Nat)) : List (List Nat)
   let ω p := FastProg.ofNetlist n;
   FastSim.go p (FastSim.ofList (Hdl.map (fun (r : NetReg) => r.init) n.regs) Array.empty)
     (FastSim.memInit n.mems (FastMem.layout 0 n.mems) Array.empty) HTrie.tip
-    (FastSim.ofList p.init Array.empty) inputs List.nil
+    (FastSim.ofList p.init Array.empty) inputs []
 
 /-- = `Netlist.simulate n inputs` -/
 def Netlist.simFast (n : Netlist) (inputs : List (List Nat)) : List (List Nat) :=

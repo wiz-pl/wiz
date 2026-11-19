@@ -1,0 +1,37 @@
+import Sys
+import Storage
+import Durable
+/-!
+# Write a store with the durable writer (the format-merge check)
+
+`WIZ_COMPAT_STORE=/path wiz run drafts/storage-engine/CompatSeed.wiz` commits two
+nodes with `Durable.wiz`; then `CompatRead.wiz` maps the same file with `Mmap.wiz`
+(the slice-3 read path) and reads them. The two programs are separate because both
+the writer and the decoder define `Snapshot`/`Root`: crossing them on one *file*
+keeps the two modules apart while still checking that the merged branches share
+one format. `test-multiproc.sh` runs both.
+-/
+
+def indices : List IndexDef := [kindIndex, uniqueLabel]
+
+def seedNodes (s : Snapshot) : Snapshot :=
+  Snapshot.record
+    (Snapshot.record s (U64.ofNat 1)
+      (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)))))
+    (U64.ofNat 2)
+    (.some (.set (Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8))))
+
+def main : IO Unit := EIO.toIO (do
+  p ← EIO.lift (Env.get "WIZ_COMPAT_STORE");
+  match p with
+  | .none => EIO.fail "WIZ_COMPAT_STORE is not set"
+  | .some path => do
+    h ← openDb path indices;
+    s ← getDb h;
+    o ← putDb h (seedNodes s);
+    match o with
+    | .committed g =>
+      EIO.lift (IO.println
+        (String.append "seed: committed " (Nat.toString g.toNat)))
+    | .rejected _ => EIO.fail "seed: rejected"
+    closeDb h)
