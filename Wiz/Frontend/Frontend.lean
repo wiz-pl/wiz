@@ -239,7 +239,10 @@ where
   @[nospecialize] go' (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R)
       (memo : Std.HashMap Name (CommandState R)) : CommandState R × Std.HashMap Name (CommandState R) :=
     if skipWs chars pos ≥ chars.size then (s, memo) else
-    match parseCommand chars s.tables pos with
+    let stp := Stats.enter Stats.dParse
+    let parsed := parseCommand chars s.tables pos
+    let _ := Stats.leave Stats.dParse Stats.cells.nParse stp parsed
+    match parsed with
     | .ok (cmd, stop) =>
       if cmd.isOfKind "command.import" then
         let m := ((cmd.getArg 1).getId?).getD "_"

@@ -1,5 +1,6 @@
 import Wiz.Core.Value
 import Wiz.Core.Templates
+import Wiz.Core.Stats
 
 /-!
 # Evaluation, quotation, normalisation
@@ -48,10 +49,15 @@ def qtyApart (a b : Val R) : Bool :=
 
 /-- Unfold glued values (`Val.unfold`) until the head is not a definition: do this before
 matching on a value's shape. -/
-partial def whnf : Val R → Val R
-  | .unfold _ _ _ v => whnf v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => whnf v.get
-  | v => v
+partial def whnf (v : Val R) : Val R :=
+  let _ := Stats.bump Stats.cells.whnf
+  let st := Stats.enter Stats.dWhnf
+  let r :=
+    match v with
+    | .unfold _ _ _ v => let _ := Stats.bump Stats.cells.whnfUnfold; whnf v.get
+    | .lazyInd _ _ _ _ _ _ _ _ _ _ v => let _ := Stats.bump Stats.cells.whnfLazyInd; whnf v.get
+    | v => v
+  Stats.leave Stats.dWhnf Stats.cells.nWhnf st r
 
 /-- A value with its suspended inductions on constructors computed (`vInd`): they are
 lazy for speed alone, so wherever a value's shape or read-back is looked at without `whnf`
@@ -299,6 +305,30 @@ def markDataEq (v : Val R) (A a b : Val R) : Val R :=
     .sigma x q fst (.mk (env ++ [b, a, A, eqDataMark]) body) s
   | _ => v
 
+/-- The constructor of a term, for the `evalByTerm` histogram. -/
+private def termClass {R : Type} : Term R → Nat
+  | .var _ => 0 | .const .. => 1 | .sort _ => 2 | .pi .. => 3 | .lam .. => 4 | .app .. => 5
+  | .letE .. => 6 | .ann .. => 7 | .mvar _ => 8 | .sigma .. => 9 | .pair .. => 10
+  | .fst _ => 11 | .snd _ => 12 | .split .. => 13 | .unit _ => 14 | .tt => 15
+  | .empty _ => 16 | .absurd .. => 17 | .letUnit .. => 18 | .eq .. => 19 | .eqTy .. => 20
+  | .refl .. => 21 | .reflTy _ => 22 | .cast .. => 23 | .transp .. => 24 | .qty => 25
+  | .qlit _ => 26 | .enum _ => 27 | .tag .. => 28 | .ecase .. => 29 | .desc .. => 30
+  | .dret _ => 31 | .darg .. => 32 | .drec .. => 33 | .dhrec .. => 34 | .delim .. => 35
+  | .mu .. => 36 | .con _ => 37 | .ind .. => 38 | .nu .. => 39 | .out _ => 40 | .size => 41
+  | .szInf => 42 | .szSuc _ => 43 | .sizeLt _ => 44 | .sfix .. => 45 | .cocon _ => 46
+  | .scase .. => 47 | .scofix .. => 48 | .coit .. => 49 | .natLit _ => 50 | .natOp .. => 51
+  | .ulift .. => 52 | .up _ => 53 | .down _ => 54 | .prf .. => 55
+
+/-- The constructor of a value, for the `quoteByVal` histogram. -/
+private def valClass {R : Type} : Val R → Nat
+  | .neutral .. => 0 | .sort _ => 1 | .pi .. => 2 | .lam .. => 3 | .sigma .. => 4
+  | .pair .. => 5 | .unit _ => 6 | .tt => 7 | .empty _ => 8 | .qty => 9 | .qlit _ => 10
+  | .enum _ => 11 | .tag .. => 12 | .desc .. => 13 | .dret _ => 14 | .darg .. => 15
+  | .drec .. => 16 | .dhrec .. => 17 | .mu .. => 18 | .con _ => 19 | .nu .. => 20
+  | .size => 21 | .szInf => 22 | .szSuc _ => 23 | .sizeLt _ => 24 | .cocon _ => 25
+  | .scofix .. => 26 | .coit .. => 27 | .natLit _ => 28 | .ulift .. => 29 | .up _ => 30
+  | .unfold .. => 31 | .lazyInd .. => 32
+
 mutual
 
 /-- **Exercise 1.1.** Evaluate a term in an environment.
@@ -322,7 +352,12 @@ compute).
 **Exercise 4.3** (stage 4b): the structural types. Constructors evaluate their parts,
 `sigma` captures its second component in a closure, and eliminators use `vFst`,
 `vSnd`, `vSplit` and `vAbsurd`. -/
-partial def eval (g : Globals R) (env : Env R) : Term R → Val R
+partial def eval (g : Globals R) (env : Env R) (t : Term R) : Val R :=
+  let _ := Stats.bump Stats.cells.eval
+  let _ := Stats.bumpIdx Stats.cells.evalByTerm (termClass t)
+  let st := Stats.enter Stats.dEval
+  let r :=
+  match t with
   -- (given) Q4: lifting
   | .ulift k l A => .ulift k l (eval g env A)
   | .up a => .up (eval g env a)
@@ -333,8 +368,8 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   --<sol
   -- (the checker rejects a variable out of scope before anything evaluates it; if one
   -- gets here it is a stuck unknown, not a panic's default value, `Sort 0`)
-  | .var ix => env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
-  | .const n us => if let some v := vBuiltin? g n then v else match g.find? n with
+  | .var ix => let _ := Stats.bump Stats.cells.evalVar; env[ix]?.getD (.neutral (.global "out of scope✝" []) #[])
+  | .const n us => let _ := Stats.bump Stats.cells.evalConst; if let some v := vBuiltin? g n then v else match g.find? n with
     | some { value := some v, levelParams, inline, .. } =>
       if inline || g.eager then eval g [] (g.instValue n v levelParams us)
       else .unfold n us #[] (memoThunk fun _ => eval g [] (g.instValue n v levelParams us))
@@ -343,8 +378,8 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
   | .natOp op args => vNatOp g op (args.map (eval g env))
   | .sort l => .sort l
   | .pi x bi q dom cod s => .pi x bi (eval g env q) (eval g env dom) (.mk env cod) s
-  | .lam x body => .lam x (.mk env body)
-  | .app f a => vApp g (eval g env f) (eval g env a)
+  | .lam x body => let _ := Stats.bump Stats.cells.evalLam; .lam x (.mk env body)
+  | .app f a => let _ := Stats.bump Stats.cells.evalApp; vApp g (eval g env f) (eval g env a)
   | .letE _ _ _ val body => eval g (eval g env val :: env) body
   | .ann tm _ => eval g env tm
   | .mvar m => .neutral (.mvar m) #[]
@@ -409,6 +444,7 @@ partial def eval (g : Globals R) (env : Env R) : Term R → Val R
       (eval g env i) (eval g env a)
   | .coit l I D S st i s =>
     .coit l (eval g env I) (eval g env D) (eval g env S) (eval g env st) (eval g env i) (eval g env s)
+  Stats.leave Stats.dEval Stats.cells.nEval st r
   --|ex
   --| | .var ix => sorry
   --| -- (given) numerals; `vBuiltin?` registered operations
@@ -492,11 +528,11 @@ A `lam` β-reduces; a neutral grows its spine (with `Elim.app`). Anything else i
 type error that the checker should have ruled out (use `panic!`). -/
 partial def vApp (g : Globals R) : Val R → Val R → Val R
   -- (given) a glued application grows its spine, and its unfolding lazily
-  | .unfold n us sp v, a => .unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
-  | .lazyInd l I D w P m i x pr sp v, a => .lazyInd l I D w P m i x pr (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
+  | .unfold n us sp v, a => let _ := Stats.bump Stats.cells.vAppGlued; .unfold n us (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
+  | .lazyInd l I D w P m i x pr sp v, a => let _ := Stats.bump Stats.cells.vAppGlued; .lazyInd l I D w P m i x pr (sp.push (.app a)) (memoThunk fun _ => vApp g v.get a)
   --<sol
-  | .lam _ c, a => Closure.inst g c a
-  | .neutral h sp, a => .neutral h (sp.push (.app a))
+  | .lam _ c, a => let _ := Stats.bump Stats.cells.vAppLam; Closure.inst g c a
+  | .neutral h sp, a => let _ := Stats.bump Stats.cells.vAppNeutral; .neutral h (sp.push (.app a))
   | _, _ => panic! "vApp: ill-typed application"
   --|ex
   --| | f, a => sorry
@@ -505,7 +541,7 @@ partial def vApp (g : Globals R) : Val R → Val R → Val R
 /-- **Exercise 1.2b.** Instantiate a closure with a value for its bound variable. -/
 partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
   --<sol
-  | .mk env body, a => match g.budget with
+  | .mk env body, a => let _ := Stats.bump Stats.cells.inst; match g.budget with
     | none => eval g (a :: env) body
     -- (P2, outside the kernel) reading a proof back, within its step budget
     | some b => if b.tick then eval g (a :: env) body else outOfSteps
@@ -515,7 +551,7 @@ partial def Closure.inst (g : Globals R) : Closure R → Val R → Val R
 
 /-- Instantiate a closure over two binders (`a` first, then `b`). -/
 partial def Closure.inst2 (g : Globals R) : Closure R → Val R → Val R → Val R
-  | .mk env body, a, b => match g.budget with
+  | .mk env body, a, b => let _ := Stats.bump Stats.cells.inst2; match g.budget with
     | none => eval g (b :: a :: env) body
     | some bud => if bud.tick then eval g (b :: a :: env) body else outOfSteps
 
@@ -931,6 +967,7 @@ Reference: Pujet & Tabareau, *Observational Equality: Now for Good* (POPL 2022).
 it's stuck. At a proposition (`propSort?`), the equation is `True` (proof irrelevance);
 in the Σ rule, if `A₁` is a proposition, the proof is just `reflTy (B p.1)`. -/
 partial def vEq (g : Globals R) (A a b : Val R) : Val R :=
+  let _ := Stats.bump Stats.cells.vEq
   -- (the original sides, for a computed equation's marker: `rfl` recovers them)
   let A0 := A
   let a0 := a
@@ -1125,6 +1162,7 @@ partial def vEqType (g : Globals R) (X Y : Val R) : Val R :=
 The Π case needs a template (it builds a lambda); the Σ case can be computed
 directly. Quantities must match, or it's stuck. -/
 partial def vCast (g : Globals R) (A B e t : Val R) : Val R :=
+  let _ := Stats.bump Stats.cells.vCast
   let A := whnf A
   let B := whnf B
   -- (given) Q4: through `down`, at a level that is never `0`, when the contents are in
@@ -1481,7 +1519,12 @@ and `transp` (just quote their components).
 **Exercise 4.5** (stage 4b): quote the structural types and the `fst`, `snd`, `split`
 and `absurd` eliminations. A `split`'s motive is under one binder and its body under
 two. -/
-partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
+partial def quote (g : Globals R) (l : Lvl) (v : Val R) : Term R :=
+  let _ := Stats.bump Stats.cells.quote
+  let _ := Stats.bumpIdx Stats.cells.quoteByVal (valClass v)
+  let st := Stats.enter Stats.dQuote
+  let r :=
+  match v with
   -- (given) a glued value keeps its name
   | .unfold n us sp _ => quote g l (.neutral (.global n us) sp)
   -- (folded only on a numeral, as before kernel-eval: `ind` on a constructor is lazy for
@@ -1607,6 +1650,7 @@ partial def quote (g : Globals R) (l : Lvl) : Val R → Term R
     .scofix k (quote g l I) (quote g l D) (quote g l A) (quote g l f) (quote g l s) (quote g l i) (quote g l a)
   | .coit k I D S st i s =>
     .coit k (quote g l I) (quote g l D) (quote g l S) (quote g l st) (quote g l i) (quote g l s)
+  Stats.leave Stats.dQuote Stats.cells.nQuote st r
   --|ex
   --| | .natLit n => .natLit n  -- (given)
   --| | v => sorry

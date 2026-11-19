@@ -1613,23 +1613,29 @@ partial def checkImplAgrees (g : Globals R) (d : Decl R) (value impl : Term R) :
 /-- Type check a declaration and add it to the global environment. Its implementation
 for the compiler, if it has one, is checked too (`checkImpl`): no term reaches erasure
 unchecked. -/
-def addDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
-  -- constants are identified by name: a second declaration of one would change what
-  -- everything checked against the first means
-  if g.contains d.name then throw (.duplicateDecl d.name)
-  if d.witness.isSome then throw (.other s!"{d.name}: only a partial definition has a witness")
-  checkHeader g d
-  let ctx : Ctx R := { globals := g }
-  if let some v := d.value then
-    -- usage is the empty vector: a closed term has no locals to misuse
-    let _ ← check ctx v (ctx.eval d.type)
-  let g' := g.insert d
-  if let some impl := d.impl then
-    checkImpl g' d impl
-    -- compiled equations derived from the value compute what it computes
+def addDecl (g : Globals R) (d : Decl R) : TCM (Globals R) :=
+  let _ := Stats.bump Stats.cells.addDecl
+  let _ := Stats.kernelOn
+  let st := Stats.enter Stats.dAddDecl
+  let r := do
+    -- constants are identified by name: a second declaration of one would change what
+    -- everything checked against the first means
+    if g.contains d.name then throw (.duplicateDecl d.name)
+    if d.witness.isSome then throw (.other s!"{d.name}: only a partial definition has a witness")
+    checkHeader g d
+    let ctx : Ctx R := { globals := g }
     if let some v := d.value then
-      if d.derivedEquations then checkImplAgrees g' d v impl
-  pure g'
+      -- usage is the empty vector: a closed term has no locals to misuse
+      let _ ← check ctx v (ctx.eval d.type)
+    let g' := g.insert d
+    if let some impl := d.impl then
+      checkImpl g' d impl
+      -- compiled equations derived from the value compute what it computes
+      if let some v := d.value then
+        if d.derivedEquations then checkImplAgrees g' d v impl
+    pure g'
+  let _ := Stats.kernelOff
+  Stats.leave Stats.dAddDecl Stats.cells.nAddDecl st r
 
 /-- Give the declaration `name` another implementation for the compiler
 (`attribute [implemented_by g] f` sets the constant `g`), checked like a definition's own

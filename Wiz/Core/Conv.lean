@@ -1,4 +1,5 @@
 import Wiz.Core.Eval
+import Wiz.Core.Stats
 
 /-!
 # Conversion (definitional equality), type-directed
@@ -203,7 +204,9 @@ def sameSort (k k' : Level) : Bool := k.hasHole || k'.hasHole || k.equiv k'
 def sameSorts (σ σ' : BinderSorts) : Bool := sameSort σ.dom σ'.dom && sameSort σ.cod σ'.cod
 
 /-- The type of a neutral, computed by walking its spine from the head's type. -/
-partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VTy R)
+partial def inferNe (g : Globals R) (tys : Array (VTy R)) (v : Val R) : Option (VTy R) :=
+  Stats.bump Stats.cells.inferNe
+  match v with
   | .unfold n us sp _ => inferNe g tys (.neutral (.global n us) sp)
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => inferNe g tys v.get
   | .neutral h sp => do
@@ -238,7 +241,9 @@ partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VT
   | _ => none
 
 /-- The universe level of a type, if it can be computed. -/
-partial def typeSort? (g : Globals R) (tys : Array (VTy R)) : VTy R → Option Level
+partial def typeSort? (g : Globals R) (tys : Array (VTy R)) (v : VTy R) : Option Level :=
+  Stats.bump Stats.cells.typeSortCall
+  match v with
   | .unfold _ _ _ v => typeSort? g tys v.get
   | .lazyInd _ _ _ _ _ _ _ _ _ _ v => typeSort? g tys v.get
   | .sort l => some (.succ l)
@@ -267,8 +272,9 @@ def componentSorts? (g : Globals R) (tys : Array (VTy R)) (A : VTy R) (B : Closu
 
 /-- Is this type a proposition? Then all its inhabitants are equal. -/
 def isProp (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) : Bool :=
+  Stats.bump Stats.cells.isPropCall
   match typeSort? g tys ty with
-  | some l => l.equiv 0
+  | some l => if l.equiv 0 then let _ := Stats.bump Stats.cells.isPropTrue; true else false
   | none => false
 
 /-- (P2) Is the neutral `h · sp[0..k)` a proof of `False`? Either it starts at a proof
@@ -282,6 +288,19 @@ def falsePrefix (g : Globals R) (tys : Array (VTy R)) (h : Head R) (sp : Array (
     | .empty l => l.isZero
     | _ => false
   | none => false
+
+/-- `n` eliminations at the head of a value (1 for a non-neutral), for the size histogram. -/
+private def elimDepth {R : Type} : Val R → Nat
+  | .neutral _ sp => sp.size
+  | .unfold _ _ sp _ => sp.size
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ _ sp _ => sp.size
+  | _ => 1
+
+/-- The type's constructor, for `convByType`. -/
+private def tyClass {R : Type} : Val R → Nat
+  | .sort _ => 0 | .pi .. => 1 | .sigma .. => 2 | .unit _ => 3 | .qty => 4 | .enum _ => 5
+  | .size | .sizeLt _ => 6 | .desc .. => 7 | .mu .. => 8 | .nu .. => 9 | .neutral .. => 10
+  | _ => 11
 
 mutual
 
@@ -299,8 +318,18 @@ mutual
 `true`. Then **regularity**: a stuck `cast A B e t` with an empty spine and
 `convTy A B` is replaced by `t` (on either side) before comparing. -/
 partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R) : Bool :=
+  let _ := Stats.bump Stats.cells.conv
+  let _ := if Stats.inKernel then Stats.bump Stats.cells.convKernel else Stats.bump Stats.cells.convElab
+  let _ := Stats.bumpIdx Stats.cells.convByType (tyClass ty)
+  let _ := Stats.bumpIdx Stats.cells.convByShape ((if a matches .neutral .. then 1 else 0) +
+    (if b matches .neutral .. then 2 else 0))
+  let _ := Stats.bumpSize Stats.cells.convPairSize (elimDepth a + elimDepth b)
+  let _ := if Stats.ptrSame a b then Stats.bump Stats.cells.convPtrSame else ()
+  let _ := if Stats.probeRepeat a b ty then Stats.bump Stats.cells.convRepeat else ()
+  let st := Stats.enter Stats.dConv
+  let r :=
   -- (P2, `lazyProofs`) proof irrelevance first, so that a glued proof is never unfolded
-  if g.lazyProofs && isProp g tys ty then true else
+  if g.lazyProofs && isProp g tys ty then let _ := Stats.bump Stats.cells.convProofIrr; true else
   -- a `Nat` operation with a zero argument that makes the other one irrelevant
   -- (`Nat.mul 0 x`, `Nat.add 0 x`, …): reduce it *before* `convGlued` descends into `x`
   -- (a stuck application, perhaps the comparison being decided).
@@ -382,6 +411,7 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
       conv full tys (vElims full (eval full [] (v.instLevels levelParams us)) sp) a b
     | _ => false
   | _ => (convNe g tys a b).isSome
+  Stats.leave Stats.dConv Stats.cells.nConv st r
   --|ex
   --| sorry
   --sol>
@@ -398,6 +428,12 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
 **Exercise 4.6b** (stage 4b): `sigma`/`sigma` like `pi`; `unit`/`unit` and
 `empty`/`empty` by `Level.equiv`. -/
 partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
+  let _ := Stats.bump Stats.cells.convTy
+  let _ := if Stats.inKernel then Stats.bump Stats.cells.convTyKernel else Stats.bump Stats.cells.convTyElab
+  let _ := if Stats.ptrSame a b then Stats.bump Stats.cells.convTyPtrSame else ()
+  let _ := if Stats.probeRepeat a b a then Stats.bump Stats.cells.convTyRepeat else ()
+  let st := Stats.enter Stats.dConvTy
+  let r :=
   if let some r := convGlued g tys a b then r || convTy g tys (whnf a) (whnf b) else
   let a := whnf a
   let b := whnf b
@@ -444,6 +480,7 @@ partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
   | .empty u, .empty u' => u.equiv u'
   | .neutral .., .neutral .. => (convNe g tys a b).isSome
   | _, _ => false
+  Stats.leave Stats.dConvTy Stats.cells.nConvTy st r
 where
   convQty (q q' : Val R) : Bool := conv g tys .qty q q'
   --|ex
@@ -471,6 +508,7 @@ without conversion.
 
 The value comes back in weak head normal form. -/
 partial def unCast (g : Globals R) (tys : Array (VTy R)) (v : Val R) : Val R :=
+  let _ := Stats.bump Stats.cells.unCast
   match v with
   | .neutral (.cast A B _ t) sp =>
     let applies := g.regularity == .full ||
@@ -481,17 +519,21 @@ partial def unCast (g : Globals R) (tys : Array (VTy R)) (v : Val R) : Val R :=
 /-- Two glued values (`Val.unfold`) with the same global head: are their spines
 convertible? `none` unless both are glued with the same head. -/
 partial def convGlued (g : Globals R) (tys : Array (VTy R)) (a b : Val R) : Option Bool :=
+  let _ := Stats.bump Stats.cells.convGluedTry
   match a, b with
   | .unfold n us sp _, .unfold n' us' sp' _ =>
     if n == n' && us.length == us'.length && (us.zip us').all (fun (u, u') => u.equiv u') then
+      let _ := Stats.bump Stats.cells.convGluedSome
       some (convNe g tys (.neutral (.global n us) sp) (.neutral (.global n' us') sp')).isSome
     else none
   -- the same induction on a numeral: compare the folded forms
   | a@(.lazyInd _ _ _ _ _ _ _ x _ _ _), b@(.lazyInd _ _ _ _ _ _ _ y _ _ _) =>
+    let _ := Stats.bump Stats.cells.convGluedInd
     -- (on a constructor, `ind` is lazy for speed alone: compared by what it computes)
     if (whnf x matches .con _) || (whnf y matches .con _) then none else
     -- (P2: the kernel's comparisons don't evaluate proofs)
     let g := { g with quoteErasesProofs := true }
+    let _ := Stats.bump Stats.cells.convGluedSome
     some (quote g tys.size a == quote g tys.size b)
   | _, _ => none
 
@@ -516,6 +558,10 @@ casted terms; two proof heads (`refl`, `reflTy`, `transp`) are always equal.
   motive instantiated with `(x, y)`. The result type is the motive at the neutral.
 * `absurd m`: motives `convTy`; the result type is `m`. -/
 partial def convNe (g : Globals R) (tys : Array (VTy R)) (a b : Val R) : Option (VTy R) := do
+  Stats.bump Stats.cells.convNe
+  (match a, b with
+   | .neutral _ sp, .neutral _ sp' => Stats.bumpSize Stats.cells.convNeSpine (sp.size + sp'.size)
+   | _, _ => ())
   --<sol
   let .neutral h sp := a | none
   let .neutral h' sp' := b | none

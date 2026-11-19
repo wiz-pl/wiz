@@ -543,6 +543,13 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   pure 0
 
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
+  let stats ← match ← IO.getEnv "WIZ_STATS" with
+    | some v => pure (v != "0" && v != "") | none => pure false
+  if stats then
+    let timed ← match ← IO.getEnv "WIZ_STATS_TIME" with
+      | some v => pure (v != "0" && v != "") | none => pure false
+    Wiz.Stats.start timed
+  let t0 ← IO.monoNanosNow
   let input ← IO.FS.readFile path
   let s ← elaborate tc path input
   for m in s.messages do
@@ -555,6 +562,10 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
     let c ← verifyStats.get
     IO.eprintln (s!"cache verify: {c.manifests} manifests, {c.hits} entries, {c.regions} regions, " ++
       s!"{c.mismatches} mismatches, {c.unverified} unverified")
+  if stats then
+    let t1 ← IO.monoNanosNow
+    Wiz.Stats.cells.nTotal.modify (· + UInt64.ofNat (t1 - t0))
+    Wiz.Stats.report
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do

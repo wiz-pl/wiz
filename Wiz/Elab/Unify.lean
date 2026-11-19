@@ -91,6 +91,7 @@ def elimsChecked (m : Nat) (sol : Val R) (sp : Array (Elim R)) : ElabM R (Val R)
 A neutral `?m sp` whose meta has a solution `v` becomes `v` with the eliminations of
 `sp` applied (`vElims`). Anything else is returned unchanged. -/
 partial def forceMeta (v : Val R) : ElabM R (Val R) := do
+  Stats.bump Stats.cells.forceMeta
   --<sol
   match v with
   | .neutral (.mvar m) sp =>
@@ -440,11 +441,13 @@ def failKey? (l : Lvl) (n : Name) (t u : Val R) : ElabM R (Option (UInt64 × Ter
   pure (some (hash n, kt, ku))
 
 def lookupFail (key : UInt64 × Term R × Term R) : ElabM R (Option String) := do
+  let _ := Stats.bump Stats.cells.unifyFailHit
   let (h, qt, qu) := key
   let some es := (← get).unifyFails[h]? | return none
   pure ((es.find? (fun (t', u', _) => t' == qt && u' == qu)).map (·.2.2))
 
 def recordFail (key : UInt64 × Term R × Term R) (msg : String) : ElabM R Unit :=
+  Stats.bump Stats.cells.unifyFail
   modify fun s =>
     let (h, qt, qu) := key
     -- (bounded: start afresh now and then)
@@ -628,172 +631,178 @@ failure. Force both sides first, then:
 **Exercise 4.8** (stage 4b): `sigma`, `pair` (with η: `(a, b) =?= t` unifies `a` with
 `t.1` and `b` with `t.2`), `unit`, `tt`, `empty`; and the other eliminations in
 `unifySpine`. -/
-partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit := do
-  -- (kernel-eval: `ind` on a constructor is lazy for speed alone; the elaborator sees what
-  -- it computes, which may be glued: `K.beq (.cons x xs) (.cons y ys)` against
-  -- `Bool.and ?a ?b` compares the two `Bool.and`s, as before `ind` was lazy there)
-  if ← unifyGlued l (unlazyCon (← forceMeta t)) (unlazyCon (← forceMeta u)) then return ()
-  -- numerals: compare two directly, or else look one step inside (`vNatView`)
-  let g ← getGlobals
-  let (t, u) ← match ← force t, ← force u with
-    | .natLit n, .natLit m => if n == m then return () else throwAt {} s!"{n} ≠ {m}"
-    -- only against a constructor: a metavariable is solved with the numeral itself (as
-    -- a constructor view it isn't a literal, and native arithmetic on it falls back to
-    -- the unary definitions)
-    | t@(.natLit _), u@(.con _) => pure (vNatView g t, u)
-    | t@(.con _), u@(.natLit _) => pure (t, vNatView g u)
-    | t, u => pure (t, u)
-  -- an equation against something that isn't one: it may compute further
-  let isEq (v : Val R) : Bool := v matches .neutral (.eq ..) _
-  -- a data type's computed equation carries its original sides on its payload Σ
-  -- (`markDataEq`, #256): against a stuck equation, unify those sides, so a hole in the
-  -- stuck equation learns the side the computation hid (`Eq.trans h e1`: the expected
-  -- `L = ?c` against `e1`'s computed `L = L2`, #257). Equal sides make the stuck equation
-  -- compute to the same Σ (`vEq` is a function of them), so this is the equation's
-  -- congruence; a failure undoes and falls through to the general comparison.
-  let eqSides (eq : Val R) (v : Val R) : ElabM R Bool := do
-    let .neutral (.eq A a b) #[] := eq | return false
-    let some (A', a', b') := eqDataSides? v | return false
-    let s ← get
-    try
-      unify l A A'
-      unify l a a'
-      unify l b b'
-      pure true
-    catch _ =>
-      set s
-      pure false
-  if isEq t != isEq u then
-    if let some t' ← recomputeEq? t then return ← unify l t' u
-    if let some u' ← recomputeEq? u then return ← unify l t u'
-    if isEq t then
-      if ← eqSides t u then return ()
-    else if ← eqSides u t then return ()
-  -- a stuck `cast A B e x` (computed while a hole in `A` or `B` was unsolved) against
-  -- something else: if `A` and `B` are now the same (equal without solving anything),
-  -- it is `x` (regularity; evaluated again, it would compute to `x`)
-  let isCast (v : Val R) : Bool := v matches .neutral (.cast ..) #[]
-  if isCast (← force t) != isCast (← force u) then
-    if isCast (← force t) then
-      if let some t' ← reevalStale? l (← force t) then return ← unify l t' u
-    else
-      if let some u' ← reevalStale? l (← force u) then return ← unify l t u'
-  -- a failure that met a metavariable may not be final (see `unifyGlued`)
-  if (← force t) matches .neutral (.mvar _) _ || (← force u) matches .neutral (.mvar _) _ then noteMeta
-  --<sol
-  match ← force t, ← force u with
-  | .sort a, .sort b => unifyLevel a b
-  | .pi x bi q a b _, .pi x' bi' q' a' b' _ =>
-    unless bi == bi' do throwAt {} "implicit vs explicit binder mismatch"
-    unify l q q'
-    unify l a a'
-    withBinderName l (if x == "_" then x' else x) do
-      unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
-  | .sigma _ q a b _, .sigma _ q' a' b' _ =>
-    unify l q q'
-    unify l a a'
-    unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
-  | .pair a b, .pair a' b' => unify l a a'; unify l b b'
-  | .pair a b, t'@(.neutral ..) => unify l a (vFst t'); unify l b (vSnd t')
-  | t'@(.neutral ..), .pair a b => unify l (vFst t') a; unify l (vSnd t') b
-  | .unit u, .unit u' | .empty u, .empty u' => unifyLevel u u'
-  | .tt, .tt | .qty, .qty | .size, .size | .szInf, .szInf => pure ()
-  | .szSuc a, .szSuc b | .cocon a, .cocon b | .sizeLt a, .sizeLt b => unify l a b
-  | .scofix u I D A f s i a, .scofix u' I' D' A' f' s' i' a' =>
-    unifyLevel u u'
-    for (x, y) in [(I, I'), (D, D'), (A, A'), (f, f'), (s, s'), (i, i'), (a, a')] do unify l x y
-  | .qlit a, .qlit b => unless a == b do throwAt {} "quantity mismatch"
-  | .enum ls, .enum ls' => unless ls.length == ls'.length do throwAt {} "enumeration size mismatch"
-  | .tag _ i, .tag _ j => unless i == j do throwAt {} "tag mismatch"
-  | .desc u I, .desc u' I' => unifyLevel u u'; unify l I I'
-  | .dret i, .dret j => unify l i j
-  | .darg q S D, .darg q' S' D' | .drec q S D, .drec q' S' D' => unify l q q'; unify l S S'; unify l D D'
-  | .dhrec q H j D, .dhrec q' H' j' D' => unify l q q'; unify l H H'; unify l j j'; unify l D D'
-  | .mu u I D i s _ pr, .mu u' I' D' i' s' _ pr' =>
-    unless pr == pr' do throwAt {} "inductive proposition mismatch"
-    unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
-  | .nu u I D i s _, .nu u' I' D' i' s' _ =>
-    unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
-  | .con x, .con y => unify l x y
-  | .ulift _ u A, .ulift _ u' A' => unifyLevel u u'; unify l A A'
-  | .up a, .up b => unify l a b
-  | .up a, t'@(.neutral ..) => unify l a (vDown t')
-  | t'@(.neutral ..), .up a => unify l (vDown t') a
-  | .coit u I D S st i s, .coit u' I' D' S' st' i' s' =>
-    unifyLevel u u'
-    for (a, b) in [(I, I'), (D, D'), (S, S'), (st, st'), (i, i'), (s, s')] do unify l a b
-  | .lam x b, .lam x' b' =>
-    withBinderName l (if x == "_" then x' else x) do unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
-  | .lam x b, t' => withBinderName l x do unify (l + 1) (← instM b (Val.var l)) (← vAppM t' (Val.var l))
-  | t', .lam x b => withBinderName l x do unify (l + 1) (← vAppM t' (Val.var l)) (← instM b (Val.var l))
-  | .neutral (.mvar m) sp, .neutral (.mvar m') sp' =>
-    if m == m' then unifySpine l sp sp' else
-    if ← etaProjected m sp then return ← unify l t u
-    if ← etaProjected m' sp' then return ← unify l t u
-    -- (if the left spine isn't a pattern, the right one may be)
-    tryCatch (solve l m sp (.neutral (.mvar m') sp')) fun e => do
-      if e.code != "non-pattern" then throw e
-      tryCatch (solve l m' sp' (.neutral (.mvar m) sp)) fun e' => do
-        if e'.code != "non-pattern" then throw e'
-        -- neither is a pattern: two holes over variables, applied to the same number of
-        -- other arguments (`?r Γ (.bits 1) =?= ?r' Γ' x (.bits 1)`, a family of types at an
-        -- index): those pairwise, and the holes over the variables (a guess, as Lean's
-        -- first-order approximation; not in the speculative pass)
-        if (← get).approx == .none then throw e'
-        let varPrefix (sp : Array (Elim R)) : ElabM R Nat := do
-          let mut k := 0
-          for el in sp do
-            match el with
-            | .app a => match ← forceMeta a with
-              | .neutral (.local _) #[] => k := k + 1
-              | _ => break
-            | _ => break
-          pure k
-        let k ← varPrefix sp
-        let k' ← varPrefix sp'
-        let rest := sp.extract k sp.size
-        let rest' := sp'.extract k' sp'.size
-        unless !rest.isEmpty && rest.size == rest'.size && rest.all (· matches .app _) && rest'.all (· matches .app _) do
-          throw e'
-        -- (before the last resort, only at indices without holes: `?r (.bits ?m) =?= ?r' (.bits 1)`
-        -- waits for the other arguments, which may fix `?r`; see "When unification approximates")
-        let g ← getGlobals
-        let closed (sp : Array (Elim R)) : ElabM R Bool := sp.allM fun el => match el with
-          | .app a => return (← (quote g l a).instSolved).isSome
-          | _ => pure false
-        unless (← get).approx == .last || ((← closed rest) && (← closed rest')) do throw e'
+partial def unify (l : Lvl) (t u : Val R) : ElabM R Unit :=
+  let _ := Stats.bump Stats.cells.unify
+  show ElabM R Unit from fun s =>
+    let st := Stats.enter Stats.dUnify
+    let r := (do
+      -- (kernel-eval: `ind` on a constructor is lazy for speed alone; the elaborator sees what
+      -- it computes, which may be glued: `K.beq (.cons x xs) (.cons y ys)` against
+      -- `Bool.and ?a ?b` compares the two `Bool.and`s, as before `ind` was lazy there)
+      if ← unifyGlued l (unlazyCon (← forceMeta t)) (unlazyCon (← forceMeta u)) then return ()
+      -- numerals: compare two directly, or else look one step inside (`vNatView`)
+      let g ← getGlobals
+      let (t, u) ← match ← force t, ← force u with
+        | .natLit n, .natLit m => if n == m then return () else throwAt {} s!"{n} ≠ {m}"
+        -- only against a constructor: a metavariable is solved with the numeral itself (as
+        -- a constructor view it isn't a literal, and native arithmetic on it falls back to
+        -- the unary definitions)
+        | t@(.natLit _), u@(.con _) => pure (vNatView g t, u)
+        | t@(.con _), u@(.natLit _) => pure (t, vNatView g u)
+        | t, u => pure (t, u)
+      -- an equation against something that isn't one: it may compute further
+      let isEq (v : Val R) : Bool := v matches .neutral (.eq ..) _
+      -- a data type's computed equation carries its original sides on its payload Σ
+      -- (`markDataEq`, #256): against a stuck equation, unify those sides, so a hole in the
+      -- stuck equation learns the side the computation hid (`Eq.trans h e1`: the expected
+      -- `L = ?c` against `e1`'s computed `L = L2`, #257). Equal sides make the stuck equation
+      -- compute to the same Σ (`vEq` is a function of them), so this is the equation's
+      -- congruence; a failure undoes and falls through to the general comparison.
+      let eqSides (eq : Val R) (v : Val R) : ElabM R Bool := do
+        let .neutral (.eq A a b) #[] := eq | return false
+        let some (A', a', b') := eqDataSides? v | return false
         let s ← get
         try
-          unifySpine l rest rest'
-          let pre := sp.extract 0 k
-          let pre' := sp'.extract 0 k'
-          unify l (.neutral (.mvar m) pre) (.neutral (.mvar m') pre')
-          -- (the holes were made equal by shape, not by a type: their types must agree)
-          checkGuessFlex l m pre m' pre'
-        catch e'' => set s; throw (if e''.code == ErrorCode.private_ then e'' else e')
-  | .neutral (.mvar m) sp, t' =>
-    if ← etaProjected m sp then unify l t u else solve l m sp t'
-  | t', .neutral (.mvar m) sp =>
-    if ← etaProjected m sp then unify l t u else solve l m sp t'
-  | .neutral h sp, .neutral h' sp' =>
-    -- (P2) two proofs with only applications and projections after them are equal, with
-    -- nothing to compare (as in `convNe`): their spines need not agree (a suspended
-    -- proof on one side, a `transp` applied to a phantom tail's argument on the other).
-    -- This is what makes two values that differ only in an erased proof field equal
-    -- where the type isn't seen (an opaque type, 13b), e.g. two closed words.
-    let lazy := (← getGlobals).lazyProofs
-    let isProof : Head R → Bool
-      | .refl .. | .reflTy _ | .transp .. | .prf .. => true
-      | h => lazy && proofHead h
-    let onProofs (sp : Array (Elim R)) : Bool := sp.all fun
-      | .app _ | .fst | .snd | .down => true
-      | _ => false
-    if isProof h && isProof h' && onProofs sp && onProofs sp' then pure () else
-    unifyHead l h h'; unifySpine l sp sp'
-  | _, _ => throwAt {} "rigid mismatch"
-  --|ex
-  --| sorry
-  --sol>
+          unify l A A'
+          unify l a a'
+          unify l b b'
+          pure true
+        catch _ =>
+          set s
+          pure false
+      if isEq t != isEq u then
+        if let some t' ← recomputeEq? t then return ← unify l t' u
+        if let some u' ← recomputeEq? u then return ← unify l t u'
+        if isEq t then
+          if ← eqSides t u then return ()
+        else if ← eqSides u t then return ()
+      -- a stuck `cast A B e x` (computed while a hole in `A` or `B` was unsolved) against
+      -- something else: if `A` and `B` are now the same (equal without solving anything),
+      -- it is `x` (regularity; evaluated again, it would compute to `x`)
+      let isCast (v : Val R) : Bool := v matches .neutral (.cast ..) #[]
+      if isCast (← force t) != isCast (← force u) then
+        if isCast (← force t) then
+          if let some t' ← reevalStale? l (← force t) then return ← unify l t' u
+        else
+          if let some u' ← reevalStale? l (← force u) then return ← unify l t u'
+      -- a failure that met a metavariable may not be final (see `unifyGlued`)
+      if (← force t) matches .neutral (.mvar _) _ || (← force u) matches .neutral (.mvar _) _ then noteMeta
+      --<sol
+      match ← force t, ← force u with
+      | .sort a, .sort b => unifyLevel a b
+      | .pi x bi q a b _, .pi x' bi' q' a' b' _ =>
+        unless bi == bi' do throwAt {} "implicit vs explicit binder mismatch"
+        unify l q q'
+        unify l a a'
+        withBinderName l (if x == "_" then x' else x) do
+          unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
+      | .sigma _ q a b _, .sigma _ q' a' b' _ =>
+        unify l q q'
+        unify l a a'
+        unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
+      | .pair a b, .pair a' b' => unify l a a'; unify l b b'
+      | .pair a b, t'@(.neutral ..) => unify l a (vFst t'); unify l b (vSnd t')
+      | t'@(.neutral ..), .pair a b => unify l (vFst t') a; unify l (vSnd t') b
+      | .unit u, .unit u' | .empty u, .empty u' => unifyLevel u u'
+      | .tt, .tt | .qty, .qty | .size, .size | .szInf, .szInf => pure ()
+      | .szSuc a, .szSuc b | .cocon a, .cocon b | .sizeLt a, .sizeLt b => unify l a b
+      | .scofix u I D A f s i a, .scofix u' I' D' A' f' s' i' a' =>
+        unifyLevel u u'
+        for (x, y) in [(I, I'), (D, D'), (A, A'), (f, f'), (s, s'), (i, i'), (a, a')] do unify l x y
+      | .qlit a, .qlit b => unless a == b do throwAt {} "quantity mismatch"
+      | .enum ls, .enum ls' => unless ls.length == ls'.length do throwAt {} "enumeration size mismatch"
+      | .tag _ i, .tag _ j => unless i == j do throwAt {} "tag mismatch"
+      | .desc u I, .desc u' I' => unifyLevel u u'; unify l I I'
+      | .dret i, .dret j => unify l i j
+      | .darg q S D, .darg q' S' D' | .drec q S D, .drec q' S' D' => unify l q q'; unify l S S'; unify l D D'
+      | .dhrec q H j D, .dhrec q' H' j' D' => unify l q q'; unify l H H'; unify l j j'; unify l D D'
+      | .mu u I D i s _ pr, .mu u' I' D' i' s' _ pr' =>
+        unless pr == pr' do throwAt {} "inductive proposition mismatch"
+        unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
+      | .nu u I D i s _, .nu u' I' D' i' s' _ =>
+        unifyLevel u u'; unify l I I'; unify l D D'; unify l i i'; unify l s s'
+      | .con x, .con y => unify l x y
+      | .ulift _ u A, .ulift _ u' A' => unifyLevel u u'; unify l A A'
+      | .up a, .up b => unify l a b
+      | .up a, t'@(.neutral ..) => unify l a (vDown t')
+      | t'@(.neutral ..), .up a => unify l (vDown t') a
+      | .coit u I D S st i s, .coit u' I' D' S' st' i' s' =>
+        unifyLevel u u'
+        for (a, b) in [(I, I'), (D, D'), (S, S'), (st, st'), (i, i'), (s, s')] do unify l a b
+      | .lam x b, .lam x' b' =>
+        withBinderName l (if x == "_" then x' else x) do unify (l + 1) (← instM b (Val.var l)) (← instM b' (Val.var l))
+      | .lam x b, t' => withBinderName l x do unify (l + 1) (← instM b (Val.var l)) (← vAppM t' (Val.var l))
+      | t', .lam x b => withBinderName l x do unify (l + 1) (← vAppM t' (Val.var l)) (← instM b (Val.var l))
+      | .neutral (.mvar m) sp, .neutral (.mvar m') sp' =>
+        if m == m' then unifySpine l sp sp' else
+        if ← etaProjected m sp then return ← unify l t u
+        if ← etaProjected m' sp' then return ← unify l t u
+        -- (if the left spine isn't a pattern, the right one may be)
+        tryCatch (solve l m sp (.neutral (.mvar m') sp')) fun e => do
+          if e.code != "non-pattern" then throw e
+          tryCatch (solve l m' sp' (.neutral (.mvar m) sp)) fun e' => do
+            if e'.code != "non-pattern" then throw e'
+            -- neither is a pattern: two holes over variables, applied to the same number of
+            -- other arguments (`?r Γ (.bits 1) =?= ?r' Γ' x (.bits 1)`, a family of types at an
+            -- index): those pairwise, and the holes over the variables (a guess, as Lean's
+            -- first-order approximation; not in the speculative pass)
+            if (← get).approx == .none then throw e'
+            let varPrefix (sp : Array (Elim R)) : ElabM R Nat := do
+              let mut k := 0
+              for el in sp do
+                match el with
+                | .app a => match ← forceMeta a with
+                  | .neutral (.local _) #[] => k := k + 1
+                  | _ => break
+                | _ => break
+              pure k
+            let k ← varPrefix sp
+            let k' ← varPrefix sp'
+            let rest := sp.extract k sp.size
+            let rest' := sp'.extract k' sp'.size
+            unless !rest.isEmpty && rest.size == rest'.size && rest.all (· matches .app _) && rest'.all (· matches .app _) do
+              throw e'
+            -- (before the last resort, only at indices without holes: `?r (.bits ?m) =?= ?r' (.bits 1)`
+            -- waits for the other arguments, which may fix `?r`; see "When unification approximates")
+            let g ← getGlobals
+            let closed (sp : Array (Elim R)) : ElabM R Bool := sp.allM fun el => match el with
+              | .app a => return (← (quote g l a).instSolved).isSome
+              | _ => pure false
+            unless (← get).approx == .last || ((← closed rest) && (← closed rest')) do throw e'
+            let s ← get
+            try
+              unifySpine l rest rest'
+              let pre := sp.extract 0 k
+              let pre' := sp'.extract 0 k'
+              unify l (.neutral (.mvar m) pre) (.neutral (.mvar m') pre')
+              -- (the holes were made equal by shape, not by a type: their types must agree)
+              checkGuessFlex l m pre m' pre'
+            catch e'' => set s; throw (if e''.code == ErrorCode.private_ then e'' else e')
+      | .neutral (.mvar m) sp, t' =>
+        if ← etaProjected m sp then unify l t u else solve l m sp t'
+      | t', .neutral (.mvar m) sp =>
+        if ← etaProjected m sp then unify l t u else solve l m sp t'
+      | .neutral h sp, .neutral h' sp' =>
+        -- (P2) two proofs with only applications and projections after them are equal, with
+        -- nothing to compare (as in `convNe`): their spines need not agree (a suspended
+        -- proof on one side, a `transp` applied to a phantom tail's argument on the other).
+        -- This is what makes two values that differ only in an erased proof field equal
+        -- where the type isn't seen (an opaque type, 13b), e.g. two closed words.
+        let lazy := (← getGlobals).lazyProofs
+        let isProof : Head R → Bool
+          | .refl .. | .reflTy _ | .transp .. | .prf .. => true
+          | h => lazy && proofHead h
+        let onProofs (sp : Array (Elim R)) : Bool := sp.all fun
+          | .app _ | .fst | .snd | .down => true
+          | _ => false
+        if isProof h && isProof h' && onProofs sp && onProofs sp' then pure () else
+        unifyHead l h h'; unifySpine l sp sp'
+      | _, _ => throwAt {} "rigid mismatch"
+      --|ex
+      --| sorry
+      --sol>
+    ) s
+    Stats.leave Stats.dUnify Stats.cells.nUnify st r
 
 /-- Glued values (given). Returns `true` if it solved the problem:
 

@@ -577,6 +577,7 @@ def lookupMeta (m : Nat) : ElabM R (MetaEntry R) := do
   | none => throwAt {} s!"internal error: unknown metavariable ?m{m}"
 
 def solveMeta (m : Nat) (v : Val R) : ElabM R Unit :=
+  let _ := Stats.bump Stats.cells.metaSolve
   modify fun s =>
     let s := { s with metas := s.metas.modify m ({ · with solution := some v }) }
     -- (7f) the instance problems waiting for this hole can be tried again
@@ -596,6 +597,7 @@ def metaApp (ctx : LocalCtx R) (m : Nat) : Term R := Id.run do
 /-- A fresh metavariable applied to all the bound variables of `ctx`; `ty`, when the
 caller knows it, is the hole's type in `ctx` (`MetaEntry.type?`). -/
 def freshMeta (ctx : LocalCtx R) (desc : String := "_") (ty : Option (VTy R) := none) : ElabM R (Term R) := do
+  Stats.bump Stats.cells.metaNew
   let m := (← get).metas.size
   let arity := (ctx.bound.filter id).length
   modify fun s => { s with metas := s.metas.push { info := ctx.info, desc, arity, type? := ty.map (ctx, ·) } }

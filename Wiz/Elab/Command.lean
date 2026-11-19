@@ -1044,22 +1044,26 @@ def runElabS (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
     (classes : List ClassInfo := []) (instances : Array InstanceInfo := #[]) (termInfo : Bool := false)
     (smt : Smt.Config := {}) (smtDecl : Name := "") :
     Except (ElabError R) (α × Array (Decl R)) × Array (Info R) :=
-  -- macros and tactics run against the globals as they are when this command starts
-  let compileCode (roots : List Name) := match metaCode.get with
-    | .ok c => if roots.all c.contains then .ok c
-      else (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the environment: {·}")
-    | .error e => .error e
-  let runProcMacro f stx scope := match compileCode [f, "Macro.run"] with
-    | .ok code => Elab.runProcMacro code f stx scope (macroEnv g)
-    | .error e => (#[], .error e)
-  -- (the elaborator's terms carry no proof markers yet: `proof`)
-  -- (mandatory sorts: an elaboration-time type, where a sort may still be a hole)
-  let kernelInfer (ctx : Ctx R) (t : Term R) := (Wiz.infer { ctx with proof := true, globals := { ctx.globals with sortHolesOk := true } } t).map (·.1) |>.mapError toString
-  -- (13b) structures with a constructor private to another module don't unfold here
-  match x.run { globals := g.elabView, levelParams, macros, builtins, procMacros, runProcMacro, tactics, simpLemmas, compileCode,
-                kernelInfer, classes, instances, termInfo, smt, smtDecl } with
-  | .ok (a, st) => (.ok (a, st.sideDecls), finishInfos st)
-  | .error e => (.error e, (e.state?.map finishInfos).getD #[])
+  let _ := Stats.bump Stats.cells.elabCmd
+  let st := Stats.enter Stats.dElab
+  let r :=
+    -- macros and tactics run against the globals as they are when this command starts
+    let compileCode (roots : List Name) := match metaCode.get with
+      | .ok c => if roots.all c.contains then .ok c
+        else (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the environment: {·}")
+      | .error e => .error e
+    let runProcMacro f stx scope := match compileCode [f, "Macro.run"] with
+      | .ok code => Elab.runProcMacro code f stx scope (macroEnv g)
+      | .error e => (#[], .error e)
+    -- (the elaborator's terms carry no proof markers yet: `proof`)
+    -- (mandatory sorts: an elaboration-time type, where a sort may still be a hole)
+    let kernelInfer (ctx : Ctx R) (t : Term R) := (Wiz.infer { ctx with proof := true, globals := { ctx.globals with sortHolesOk := true } } t).map (·.1) |>.mapError toString
+    -- (13b) structures with a constructor private to another module don't unfold here
+    match x.run { globals := g.elabView, levelParams, macros, builtins, procMacros, runProcMacro, tactics, simpLemmas, compileCode,
+                  kernelInfer, classes, instances, termInfo, smt, smtDecl } with
+    | .ok (a, st') => (.ok (a, st'.sideDecls), finishInfos st')
+    | .error e => (.error e, (e.state?.map finishInfos).getD #[])
+  Stats.leave Stats.dElab Stats.cells.nElab st r
 
 /-- Run the elaborator; also returns the info tree it recorded (even after an error). -/
 def runElabH (g : Globals R) (x : ElabM R α) (levelParams : List Name := [])
