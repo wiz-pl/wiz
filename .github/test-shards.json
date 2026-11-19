@@ -21,7 +21,8 @@
       "=selfhost-host",
       "=audit-kernels",
       "=selfhost-macro"
-    ]
+    ],
+    "split-cases": true
   },
   {
     "name": "hdl",

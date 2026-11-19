@@ -83,14 +83,14 @@ def regionsTwo (name outer body : String) : String :=
 
 /-- Shared reborrows, zooms and pair borrows: the `ResultH.mapHandle`/`ofResult` paths of
 `Uniq.share(In)`, `Uniq.zoom(In)` and `Uniq.both`. -/
-def regionsOptics : String := r#"def share1 {ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
+def regionsOptics : String := r#"def share1 {0 ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
   Uniq.share r (fun ρ' h x => .ok (List.length x.val))
-def shareIn1 {ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
+def shareIn1 {0 ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
     Result1 Nat ((1 _ : Uniq ρa Nat) × Uniq ρb (List Nat)) :=
   Uniq.shareIn r o (fun ρ' h o x => .ok (List.length x.val) o)
-def zoom1 {ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
+def zoom1 {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
   Uniq.zoom Pair2.fstL p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))
-def both1 {ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
+def both1 {0 ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
   Uniq.both p (fun ρ' h a b =>
     let 1 (x, a) := Uniq.peek a;
     let 1 (y, b) := Uniq.peek b;

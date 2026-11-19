@@ -574,17 +574,17 @@ Tagged	TT.htmlAll	partial	compiled-only general recursion in the `TT.html/htmlAl
 Tagged	TT.ofJson	partial	compiled-only general recursion in the `TT.ofJson/ofJsons` mutual block (Tagged JSON decoder); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by de-mutualising into structural recursion on `Json`/`Jsons`	Reuben Steenekamp	2027-05-14
 Tagged	TT.ofJsons	partial	compiled-only general recursion in the `TT.ofJson/ofJsons` mutual block (Tagged JSON decoder); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by de-mutualising into structural recursion on `Json`/`Jsons`	Reuben Steenekamp	2027-05-14
 Task	Task.both	native Task.both := Task.bothNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.bothNative	axiom Task.bothNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.bothNative	builtin extern:wiz_task_both:eeww:w:pure:: := Task.bothNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.bothNative	axiom Task.bothNative	runtime/rt_con.inc wiz_task_both: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.bothNative	builtin extern:wiz_task_both:eeww:w:pure:: := Task.bothNative	runtime/rt_con.inc wiz_task_both: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
 Task	Task.get	native Task.get := Task.getNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.getNative	axiom Task.getNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.getNative	builtin extern:wiz_task_get:ew:w:pure:: := Task.getNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.getNative	axiom Task.getNative	runtime/rt_con.inc wiz_task_get: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.getNative	builtin extern:wiz_task_get:ew:w:pure:: := Task.getNative	runtime/rt_con.inc wiz_task_get: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
 Task	Task.race	native Task.race := Task.raceNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.raceNative	axiom Task.raceNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.raceNative	builtin extern:wiz_task_race:ewwe:w:pure:: := Task.raceNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.raceNative	axiom Task.raceNative	runtime/rt_con.inc wiz_task_race: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.raceNative	builtin extern:wiz_task_race:ewwe:w:pure:: := Task.raceNative	runtime/rt_con.inc wiz_task_race: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
 Task	Task.spawn	native Task.spawn := Task.spawnNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.spawnNative	axiom Task.spawnNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
-Task	Task.spawnNative	builtin extern:wiz_task_spawn:ew:w:pure:: := Task.spawnNative	concurrency T1: native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.spawnNative	axiom Task.spawnNative	runtime/rt_con.inc wiz_task_spawn: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
+Task	Task.spawnNative	builtin extern:wiz_task_spawn:ew:w:pure:: := Task.spawnNative	runtime/rt_con.inc wiz_task_spawn: concurrency T1 native tasks (plan CP1-CP8, accepted 2026-11-17)	Reuben Steenekamp	2027-05-16
 Text	Chars.replaceGo	partial	compiled-only general recursion (`Chars.replaceGo`, which recurses on the suffix `stripPrefix` returns); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by a checked measure on the remaining character list	Reuben Steenekamp	2027-05-14
 Text	Chars.splitGo	partial	compiled-only general recursion (`Chars.splitGo`, which recurses on the suffix `stripPrefix` returns); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by a checked measure on the remaining character list	Reuben Steenekamp	2027-05-14
 Text	Nat.reprGo	partial	compiled-only general recursion (`Nat.reprGo`, a decimal loop dividing by 10); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by a checked measure on `n`, since `n` is not a constructor field	Reuben Steenekamp	2027-05-14
