@@ -67,6 +67,17 @@ def isZero : Nat → Bool
 /-- (R1) A linear token, for the projection tests. -/
 def r1Header : String := "import Prelude\naxiom Tok : Type\n"
 
+/-- The storage engine prototype's linear cursor (`drafts/storage-engine/Cursor.wiz`),
+for the recursive-consumer tests: `next` consumes the handle and returns the end or a
+value and the linear continuation. -/
+def cursorHeader : String :=
+  "import Prelude\ninductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
+  "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
+  "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
+  "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n" ++
+  "def Cursor.closeThen {a b : Type} (1 c : Cursor a) (x : b) : b := match c with\n" ++
+  "  | .mk _ => x\n"
+
 def languageGroup : Group where
   name := "language"
   exercise := "Stage 13"
@@ -234,6 +245,70 @@ def languageGroup : Group where
           "def isOdd : Nat → Bool\n  | .zero => .false\n  | .succ n => isEven n\nend\n#eval isOdd 7\n" ++
           "partial def down (n : Nat) : Nat := match n with\n  | .zero => 0\n  | .succ m => down m\n#eval down 5")
           [".true", "0"] },
+    -- the linear fixpoint: a recursive consumer threads a `1`-quantity value through its
+    -- recursive call. The *body* already follows the application and `casesOn1` rules; the
+    -- blocker was the `partial` witness (it ignored the linear parameter, so the kernel
+    -- rejected the witness before checking the body).
+    { name := "a linear value is threaded through a recursive call, once per path (the linear fixpoint)", run := fun _ =>
+        okLib (cursorHeader ++
+          "partial def Cursor.count {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => n\n  | .more _ c' => Cursor.count c' (Nat.succ n)\n" ++
+          "partial def Cursor.consume {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Cursor.consume c'\n" ++
+          "partial def Cursor.every {a : Type} (1 c : Cursor a) (p : a → Bool) (b : Bool) : Bool :=\n" ++
+          "  match Cursor.next c with\n  | .done => b\n" ++
+          "  | .more x c' => if p x then Cursor.every c' p b else Cursor.closeThen c' Bool.false\n" ++
+          "mutual\ndef Cursor.altA {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Cursor.altB c'\n" ++
+          "def Cursor.altB {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 1\n  | .more _ c' => Cursor.altA c'\nend\n" ++
+          "#eval Cursor.count (Cursor.mk (List.cons 1 (List.cons 2 (List.cons 3 List.nil)))) 0\n" ++
+          "#eval Cursor.every (Cursor.mk (List.cons 1 List.nil)) (fun _ => Bool.true) Bool.true\n" ++
+          "#eval Cursor.altA (Cursor.mk (List.cons 1 (List.cons 2 List.nil)))")
+          ["3", ".true", "0"] },
+    { name := "... and the four bad recursive consumers are still rejected", run := fun _ => do
+        -- drop the continuation
+        failsLib (cursorHeader ++
+          "partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1")
+          "variable next declared with quantity 1 but used 0"
+        -- duplicate: two recursive calls on the same handle
+        failsLib (cursorHeader ++
+          "partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n" ++
+          "  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')")
+          "quantity 1 but used ω"
+        -- use after next consumed the handle
+        failsLib (cursorHeader ++
+          "partial def Cursor.after {a : Type} (1 c : Cursor a) : Step a :=\n" ++
+          "  let s := Cursor.next c;\n  Cursor.next c")
+          "variable c declared with quantity 1 but used ω"
+        -- pass it twice: close the continuation and also recurse on it
+        failsLib (cursorHeader ++
+          "partial def Cursor.twice {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => n\n" ++
+          "  | .more _ c' => Cursor.closeThen c' (Cursor.twice c' 0)")
+          "quantity 1 but used ω" },
+    { name := "... the witness may ignore a linear parameter, but the body that runs may not", run := fun _ => do
+        -- the explicit witness consumes the handle; the body (which runs) drops it
+        failsLib (cursorHeader ++
+          "partial (default := fun c => Cursor.closeThen c 0) def Cursor.leak {a : Type} (1 c : Cursor a) : Nat := 0")
+          "variable c declared with quantity 1 but used 0"
+        -- the ordinary ω rule, not a fixpoint gap: the call's result is consumed by `Nat.succ`
+        failsLib (cursorHeader ++
+          "partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n" ++
+          "  | .more _ c' => Nat.succ (Cursor.length c')")
+          "variable next declared with quantity 1 but used ω"
+        -- the equation form threads the handle on an ω fuel, with the same branch rule
+        okLib (cursorHeader ++
+          "def Cursor.countFuel {a : Type} : (1 c : Cursor a) → List Unit → Nat → Nat\n" ++
+          "  | c, .nil, acc => Cursor.closeThen c acc\n" ++
+          "  | c, .cons _ rest, acc => match Cursor.next c with\n" ++
+          "    | .done => acc\n    | .more _ c' => Cursor.countFuel c' rest (Nat.succ acc)\n" ++
+          "#eval Cursor.countFuel (Cursor.mk (List.cons 1 (List.cons 2 List.nil)))\n" ++
+          "  (List.cons () (List.cons () (List.cons () List.nil))) 0")
+          ["2"] },
     { name := "a partial definition needs an inhabited type", run := fun _ =>
         failsLib "import Prelude\ninductive Void where\npartial def loop (n : Nat) : Void := loop n"
           "no witness found" },

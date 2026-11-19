@@ -1,0 +1,63 @@
+import Cursor
+
+/-!
+# Recursive consumers of a linear cursor (the linear fixpoint)
+
+A recursive definition may thread a linear value through its recursive call: the call
+consumes it at quantity 1, and every path consumes it exactly once. This file is the
+repro for the rule (`drafts/storage-engine/`): before the witness fix it failed with
+
+```text
+CursorLoop.wiz:26:13: error: variable c declared with quantity 1 but used 0
+  (a linear variable, of quantity 1, must be used exactly once, and c is not used)
+```
+
+one such error per `partial def` with a linear parameter. The *body* was already
+accepted; the `partial` definition's automatically found witness (`fun c => 0`) ignored
+the linear parameter and the kernel rejected it before the body was checked. The witness
+is evidence that the type is inhabited and is never run, so it is now checked without
+usages; the body that runs is still checked strictly.
+
+The result of the recursive call may not be consumed by an ω position:
+`Nat.succ (loop c')` scales the call's use of `c'` by ω (`variable next … used ω`),
+because an ω binder may duplicate it. Write the counter as an accumulator
+(`Cursor.count`) or a tail recursion (`Cursor.consume`).
+-/
+
+/-- Consume the cursor, tail-recursively: one `next` per step. -/
+partial def Cursor.consume {a : Type} (1 c : Cursor a) : Nat :=
+  match Cursor.next c with
+  | .done => 0
+  | .more _ c' => Cursor.consume c'
+
+/-- Count the elements: the accumulator is ω, the cursor is threaded at 1. -/
+partial def Cursor.count {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=
+  match Cursor.next c with
+  | .done => n
+  | .more _ c' => Cursor.count c' (Nat.succ n)
+
+/-- A loop with an early exit: the `then` branch recurses; the `else` branch closes the
+continuation. Both branches consume `c'` once (a branch that dropped it would join to ω
+and be rejected). -/
+partial def Cursor.every {a : Type} (1 c : Cursor a) (p : a → Bool) (b : Bool) : Bool :=
+  match Cursor.next c with
+  | .done => b
+  | .more x c' => if p x then Cursor.every c' p b else Cursor.closeThen c' Bool.false
+
+/-- Two mutually recursive loops over the same cursor: each passes it on once. -/
+mutual
+def Cursor.altA {a : Type} (1 c : Cursor a) : Nat :=
+  match Cursor.next c with
+  | .done => 0
+  | .more _ c' => Cursor.altB c'
+def Cursor.altB {a : Type} (1 c : Cursor a) : Nat :=
+  match Cursor.next c with
+  | .done => 1
+  | .more _ c' => Cursor.altA c'
+end
+
+-- the loops run: 3 elements, and `every` sees the true predicate
+#eval Cursor.count (Cursor.fromList (List.cons 1 (List.cons 2 (List.cons 3 List.nil)))) 0
+#eval Cursor.consume (Cursor.fromList (List.cons 1 (List.cons 2 List.nil)))
+#eval Cursor.every (Cursor.fromList (List.cons 1 (List.cons 2 List.nil))) (fun _ => Bool.true) Bool.true
+#eval Cursor.altA (Cursor.fromList (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
