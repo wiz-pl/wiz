@@ -1428,9 +1428,11 @@ def sortTy (t : Tm) : Tm := sortsTy (STm.tm (sortSpine empty t))
 -- `p : P` the index type `Unit` becomes `(0 _ : D) → … → Unit`, with `D := p` for a
 -- type and `D := (0 x : P) × (x = p)` otherwise; the indices are its one value
 -- `fun _ => tt`. Proofs and sizes get none, nor does a parameter whose `D` would raise
--- the index type's universe. Erasure drops the tail (a function into `Unit` is a
--- proposition here: `erasable`). An indexed family with such a parameter is rejected
--- (the Lean frontend pairs the index with the tail; not mirrored yet).
+-- the index type's universe. Erasure drops the tail (`erasedFunTy`: a function whose
+-- binders are all at 0 and that ends in `Unit` has one inhabitant up to η, so its value
+-- `fun _ => tt` has no runtime content; `erasable` in `Backend.wiz`). An indexed family
+-- with such a parameter is rejected (the Lean frontend pairs the index with the tail;
+-- not mirrored yet).
 mutual
 -- does `t` mention the variable `i`? (exact on the forms of field types and
 -- descriptions; any other form counts as a mention)

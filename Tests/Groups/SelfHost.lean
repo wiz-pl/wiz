@@ -2558,6 +2558,23 @@ def selfHostGroup : Group where
     { name := "the self-hosted backend compiles and runs a program", run := fun _ =>
         selfhostCompileRun selfhostProgram1
           "6765\n5050\n1989\n2\nyes, ünïcode\n2\n5\n" },
+    -- (erasure audit) a function into `Unit` (`(0 x : D) → … → Unit`) has one inhabitant
+    -- up to η, so its value has no runtime content (`erasedFunTy`). The self-hosted
+    -- backend's `erasable` lacked that case, so `ghost` survived as a closure and
+    -- applying it ran `spin`: this program looped when the self-hosted compiler ran it
+    -- (Lean's erasure drops the field and the application).
+    { name := "erasure: a contentless function field is not run (a function into Unit)", run := fun _ => do
+        let src := "import IO\n" ++
+          "partial def spin (n : Nat) : Unit := match n with\n  | 0 => spin 0\n  | .succ k => spin k\n" ++
+          "def ghostLoop : (0 x : Nat) → Unit := fun x => spin 0\n" ++
+          "structure S where\n  n : Nat\n  ghost : (0 x : Nat) → Unit\n" ++
+          "def mkS : S := S.mk 1 ghostLoop\n" ++
+          "def force (s : S) : Nat := match s with\n  | .mk n g => ((g 5, n + 1) : Unit × Nat).2\n" ++
+          "def main : IO Unit := IO.println (Nat.toString (force mkS))\n"
+        -- the intended semantics (erasure drops both the field and `g 5`)
+        ioRun src "2\n"
+        selfhostCompileRun src "2\n"
+        selfhostCompileRun src "2\n" (flags := #["--rc"]) },
     { name := "the self-hosted backend compiles and runs a program with reference counting (no leaks)", run := fun _ =>
         selfhostCompileRun selfhostProgram1 "6765\n5050\n1989\n2\nyes, ünïcode\n2\n5\n" (flags := #["--rc"]) },
     { name := "reference counting: deep lists, unused parameters and hypotheses, shared arrays, closures", run := fun _ =>
