@@ -125,9 +125,10 @@ group, so Ctrl-C reaches them as it did sequentially.
 
 A case of a group that did not opt in is told the driver's `--jobs` when it was given
 (`Tests.caseJobs`), and may use N workers of its own inside its one process.
-`=selfhost-libdiff` is the one that does: it builds the self-hosted compiler once, then
-checks N files at a time (each file still runs its host and self-hosted sides in child
-processes, so the verdicts are the same). With no `--jobs`, N is **auto**: the CPUs
+`=selfhost-libdiff` is the one that does: each of its four file-range cases builds the
+self-hosted compiler once (unless the job already did), then checks N files at a time
+(each file still runs its host and self-hosted sides in child processes, so the verdicts
+are the same). With no `--jobs`, N is **auto**: the CPUs
 minus one, capped by the free memory at its `--mem` MB per file (4096 by default,
 `/proc/meminfo` and any cgroup limit). So a 4 vCPU / 16 GiB CI runner gets 3 workers.
 `--jobs N` overrides it (`--jobs 1` is the serial control), and a worker starts its next
@@ -816,12 +817,13 @@ setup action keeps the elan cache for those
   times in `.github/test-timings.json`: the cases that use the same shared program (the
   self-hosted checker or compiler, which the first case that needs it builds) stay in
   one part, so each program is built once, and the other cases fill the parts up. A new
-  case counts as its group's median, with the programs most of its group uses. The
-  baseline holds only the split shards' cases, one per line (`selfhost`, `library`,
-  `scaling` and `examples`; `scaling` is a sweep over `lib/` and `examples/`, split into
-  cases for `lib/`, `libApart` and six chunks of `examples/`, so its parts can run in
-  different shards, and `examples` has the three name ranges of the root examples).
-  `scripts/ci.py plan` shows the parts and their
+  case counts as its group's median, with the programs most of its group uses.
+  `"split-cases": true` gives up that first rule for a shard whose cases are siblings
+  over disjoint inputs (the four parts of `selfhost-libdiff`, one file range each), where
+  spreading them over the jobs is worth a build per part; `part_cost` charges each part
+  that build. The baseline holds only the split shards' cases, one per line
+  (`selfhost`, `library`, `scaling`, `selfhost-libdiff`; the last is split into four cases
+  over `lib/` and `scry/` by file index). `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
   `core`.
@@ -867,18 +869,29 @@ setup action keeps the elan cache for those
   opted-in groups run N cases at a time, and a lone case may use N workers itself.
   Only set it on a shard whose groups were verified (and opted in) to be safe in
   parallel; `core`, `library` and `backends` use 4 on the 4-core hosted runner.
-  `selfhost-libdiff` says `"jobs": 3` deliberately: six parts landing on one 24-core
-  heavy runner would otherwise each pick `nproc - 1` workers, and an oversubscribed
-  part turns slow files into `bounded` records, which the union check rejects. Three
-  keeps six parts to at most 18 worker processes, and `--mem` (4096 MB) still caps each
-  by the free memory. A shard of one long case
-  (`grail-selfhost`, `hdl-verified`) and the shards that build a shared program
-  (`selfhost`) keep 1. A case's `seconds` stays its own process's time, so shard
-  balance is unaffected.
+  `selfhost-libdiff` needs no `"jobs"`: each of its four cases picks auto (the CPUs minus
+  one, capped by the free memory), so a 4 vCPU / 16 GB runner runs 3 files at `--mem`
+  (4096 MB) and a 20 GB one could run more; a matrix of heavy shards on 16 GB runners
+  cannot OOM it. (`"jobs"` would not help it either: the memory cap stops it below the
+  CPU count, and the sweep's cost is per file, so the lever is fewer files per job — the
+  split.) A shard of one long case (`grail-selfhost`, `hdl-verified`) and the shards that
+  build a shared program (`selfhost`) keep 1. A case's `seconds` stays its own
+  process's time, so shard balance is unaffected.
+* **Shard order.** `scripts/ci.py matrix` lists the shards longest first, by the same
+  estimated case times the split uses (a shard that selects no case goes last, by name).
+  GitHub starts a matrix in the listed order and its 20-concurrent-job cap
+  leaves the tail waiting: in run 44333554608 `test (prop)` started 16 minutes after the
+  wave did, so the long shards must be at the front. Only the split shards' cases are in
+  the baseline, so a non-split shard is estimated from the cases it selects (a new case
+  counts its group's median, 1 s when the group is unknown); the shards that are one
+  long case without an entry (`grail-selfhost`, `semantics`, `hdl-verified`) therefore
+  estimate low and sort late, and giving them entries in `.github/test-timings.json`
+  would refine the order.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
   test shard's test time is over 1.5× the median shard's**. Every split shard's cases
   have an entry in `.github/test-timings.json`, and no shared program is built by two
-  parts of one split shard. It is tracked in two places:
+  parts of one split shard (a `"split-cases": true` shard excepted: its parts each build
+  it by design, and the estimates charge for it). It is tracked in two places:
   * `scripts/ci.py check-shards` (the build job) warns when a split shard has cases
     that are not in the baseline.
   * `scripts/ci.py balance` (the `CI result` job) checks the run's measured case times.
@@ -900,10 +913,12 @@ setup action keeps the elan cache for those
   If a shard stays over the limit after the refresh, raise its `"split"` or make it a
   split shard. `scripts/ci.py plan` shows the predicted parts. One case longer than the
   limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
-  minutes, and `selfhost-libdiff` is one case of about 25 minutes even with its
-  3-worker auto pool (splitting it into cases would make each part build the
-  self-hosted compiler again). Split such a case in its test instead, into cases over
-  parts of its input that together check the same things: `scaling`'s sweep of the
+  minutes, and `selfhost-libdiff` was one of 45 minutes. Split such a case in its test
+  instead, into cases over parts of its input that together check the same things:
+  `selfhost-libdiff` is now four cases, each a contiguous range of `lib/` and `scry/` by
+  index (`"split-cases": true`, so the splitter may put them in different jobs), about 16
+  minutes each including the self-hosted compiler build it must do again, plus one case
+  that checks the four ranges cover the file list exactly once. `scaling`'s sweep of the
   induction hypotheses over `lib/` and `examples/` (up to 31 min as one case) was one
   case; it is now nine cases (one for `lib/`, one for the modules checked apart, six
   over the examples, and one that checks that the six cover every example once), measured

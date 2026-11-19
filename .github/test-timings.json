@@ -1174,6 +1174,15 @@
    "usage: a missing FILE, extra arguments and an unknown command agree (exit 2)": {"seconds": 0.304, "uses": ["compiler"]},
    "warnings: the host warns about a shadowed Prelude (the driver has none yet)": {"seconds": 5.67, "uses": ["compiler"]}
   },
+  "selfhost-libdiff": {
+   "a self-hosted run that exits 3 (the runtime gave up) is bounded, with its reason; not accepted": {"seconds": 0.064},
+   "the library through both compilers: files 1 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
+   "the library through both compilers: files 2 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
+   "the library through both compilers: files 3 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
+   "the library through both compilers: files 4 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
+   "the sweep's worker pool: every file exactly once, results in order, any worker count": {"seconds": 0.208},
+   "the sweep's workers: as asked (or auto), but no more than the CPUs and the free memory hold": {"seconds": 0.067}
+  },
   "selfhost-macro": {
    "A12's remaining half, pinned: a macro/tactic function's type is not checked (the self-hosted frontend cannot run it) (A12)": {"seconds": 1.723, "uses": ["checker"]},
    "A12's remaining half, pinned: an unexpander's pattern is unchecked (printing is not ported) (A12)": {"seconds": 1.487, "uses": ["checker"]},
