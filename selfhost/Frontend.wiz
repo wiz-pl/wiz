@@ -903,20 +903,24 @@ def errStep (gs : Globals) (m : String) : Step := .mk (String.append "error: " m
 -- and each constructor `T.c` the constant `fun fields => con (tag, fields…, tt, tt)`.
 
 -- a binder of a telescope (a constructor's field, a parameter): its name, its quantity
--- (the default filled in: ω explicit, 0 implicit; 21x) and whether it is implicit, and
--- its type
+-- (the default filled in: ω explicit, 0 implicit; 21x), its binder kind (explicit,
+-- implicit `{…}` or instance `[…]`; 22a), and its type
 inductive Field where
-  | mk (name : String) (q : Q) (impl : Bool) (ty : Syntax)
--- the kinds of a constructor's parameters (all implicit), and a field's stated
--- implicitness as a kind
+  | mk (name : String) (q : Q) (kind : BKind) (ty : Syntax)
+-- the kinds of a constructor's parameters (all implicit)
 def impls : Nat → List BKind
   | .zero => .nil
   | .succ k => .cons .impl (impls k)
-def fieldKinds : List Bool → List BKind
+-- a field's binder kind, as the constructor's implicit-argument mask (an instance field
+-- is resolved, an implicit one inserted, an explicit one written)
+def fieldKind (b : Syntax) : BKind := match isImplicitB b with
+  | .true => .impl
+  | .false => match isInstB b with
+    | .true => .inst
+    | .false => .dflt
+def fieldKinds : List Field → List BKind
   | .nil => .nil
-  | .cons b rest => .cons (match b with
-      | .true => .impl
-      | .false => .dflt) (fieldKinds rest)
+  | .cons (.mk _ _ k _) rest => .cons k (fieldKinds rest)
 -- which parameters are implicit (`{x : A}`) or instance (`[i : C A]`), one per name
 def paramMask : List Syntax → List BKind
   | .nil => .nil
@@ -969,9 +973,9 @@ def declParamNames (d : Syntax) : List String := match binderParamNames (kids (k
     | _ => .nil
   | ns => ns
 
-def fieldsNamed (q : Q) (impl : Bool) (ty : Syntax) : List String → List Field
+def fieldsNamed (q : Q) (kind : BKind) (ty : Syntax) : List String → List Field
   | .nil => .nil
-  | .cons x xs => .cons (.mk x q impl ty) (fieldsNamed q impl ty xs)
+  | .cons x xs => .cons (.mk x q kind ty) (fieldsNamed q kind ty xs)
 def fieldsOf : List Syntax → List Field
   | .nil => .nil
   | .cons b bs => match binderType b with
@@ -979,7 +983,7 @@ def fieldsOf : List Syntax → List Field
     -- (a bad quantity is an error before: `ctorQtyErr`)
     | .some ty => List.append (fieldsNamed (match binderQ b with
         | .some q => q
-        | .none => .qw) (isImplicitB b) ty (binderNames b)) (fieldsOf bs)
+        | .none => .qw) (fieldKind b) ty (binderNames b)) (fieldsOf bs)
 -- map every term position of a term: `f k c` is the child under `k` more binders
 def tmsMapWith (f : Nat → Tm → Tm) : Tms → Tms
   | .tnil => .tnil
@@ -1331,13 +1335,15 @@ def ctorFieldTys (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (Tc
 def ctorType (Tc : Tm) : List Q → List CField → Tm
   | _, .nil => Tc
   | qs, .cons (.mk _ _ A _) rest => piTm (headQ qs) A (ctorType Tc (tailQ qs) rest)
--- (21x) the fields' quantities, and which are implicit
+-- (21x) the fields' quantities, and which are not explicit (skipped by a pattern, 22a)
 def fieldQs : List Field → List Q
   | .nil => .nil
   | .cons (.mk _ q _ _) rest => .cons q (fieldQs rest)
 def fieldImpl : List Field → List Bool
   | .nil => .nil
-  | .cons (.mk _ _ b _) rest => .cons b (fieldImpl rest)
+  | .cons (.mk _ _ k _) rest => .cons (match k with
+      | .dflt => .false
+      | _ => .true) (fieldImpl rest)
 -- the payload `(field₁, …, (tt, tt))`, the first field being `var (n - 1)`
 def payloadTm : Nat → Nat → Tm
   | .zero, _ => .pair .star .star
@@ -1574,7 +1580,7 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
-          (List.append (impls np) (fieldKinds (fieldImpl cfs)))
+          (List.append (impls np) (fieldKinds (ctorFields c)))
           (List.append ps (fieldNames cfs)))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
@@ -6855,7 +6861,7 @@ def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → N
         match check empty v (eval .nil ty) with
         | .err e => .err e
         | .ok _ _ => match addMCtors members ps pts m k (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) .nil ty v v
-            (List.append (impls np) (fieldKinds (fieldImpl fs0))) .nil)) (ci + 1) rest with
+            (List.append (impls np) (fieldKinds fs0)) .nil)) (ci + 1) rest with
           | .ok gs' cs => .ok gs' (.cons (.mk (ctorName c) fs (.tag m j) (fieldQs fs0) (fieldImpl fs0) .nil) cs)
           | e => e
 def addMemberInds (np : Nat) (I D DI : Tm) (cs : List Ctor) (fam : Tm) (params : List Syntax) (m : Nat) : Globals → Nat → List String → Globals

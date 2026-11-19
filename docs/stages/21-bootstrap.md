@@ -742,17 +742,30 @@ A `match` on a structure that has a field at 0 was a difference until #217 (the 
 elaborator projected the erased field at ω); both now bind it at 0, so no difference is
 pinned any more and the 21m test of pinned differences is gone.
 
+**Instance fields (22a).** A field written `[i : C A]` is an *instance* argument of the
+constructor, not an explicit one. `Field` keeps the binder's `BKind` (explicit, implicit
+or instance), so the constructor's mask is `.inst` there: a call leaves the field to
+instance resolution (and the description's quantity is the default ω, as `elabQuantity`
+gives an instance binder), and a pattern skips it exactly as it skips `{…}`
+(`explicitPats`). Before, `Field.mk` kept only an implicit flag, so `[i : C A]` became an
+explicit ω field: `T.mk 3` was rejected ("expected C A, got Nat") where the Lean
+frontend accepts it. The linear-field-at-elimination difference (`wrapTwice`, a `match`
+whose scrutinee is built from a linear variable) stays pinned: the self-hosted match is
+the case at ω (A21), which needs the linear case `casesOn1`/`split`, and `Kernel.wiz` has
+no `split` (B7).
+
 **Shapes changed** (selfhost/*.wiz): `Tm.darg/drec/dhrec` and `Val.vdarg/vdrec/vdhrec` take
 the quantity first; new `Tm.qty`, `Tm.qlit`, `Tm.sigmaQ`, `Val.vqty`, `Val.vqlit`,
-`Spine.ssigq`. Frontend: `Field.mk` has 4 fields, `Ctor.mk` 5, `Col.mk` 4;
+`Spine.ssigq`. Frontend: `Field.mk` has 4 fields (22a: the third is its `BKind`, not a
+bool), `Ctor.mk` 5, `Col.mk` 4;
 `ctorType`, `fieldCols`, `specialize`, `addCtors` take one more argument.
 
-**Tests** (group `selfhost`): field quantities 0/1/ω and implicit fields, the same verdicts
-in both frontends (`fieldQtyDecls`); a program with them, compiled by the Lean compiler and
-by the self-hosted one (both collectors); the differential test's `MTm` descriptions carry
-a quantity (ω in the existing terms); two core terms from the review of this stage
-(`wiz-notes/fieldq-review.md, probes 7a and 15b) checked by Kernel.wiz with the
-Lean kernel's verdicts.
+**Tests** (group `selfhost`): field quantities 0/1/ω, implicit fields and (22a) instance
+fields, the same verdicts in both frontends (`fieldQtyDecls`); a program with them,
+compiled by the Lean compiler and by the self-hosted one (both collectors); the
+differential test's `MTm` descriptions carry a quantity (ω in the existing terms); two
+core terms from the review of this stage (`wiz-notes/fieldq-review.md, probes 7a and 15b)
+checked by Kernel.wiz with the Lean kernel's verdicts.
 ## 21y: modules and imports (A14, first milestone)
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
