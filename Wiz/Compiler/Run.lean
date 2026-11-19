@@ -626,11 +626,11 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
   | .neutral (.global "Bytes" _) sp, .bytes b =>
     if sp.isEmpty then .const (BytesModel.render b) [] else readbackData ty v
   | .neutral (.global "Array" _) sp, .arr xs =>
-    let elem : Option (Val R) := match sp[0]? with
+    let elem : Option (Val R) := match (sp : Array (Elim R))[0]? with
       | some (.app A) => some A
       | _ => none
     let render (x : RVal) : String := match elem with
-      | some A => (readback g builtins A x).pretty [] (some g)
+      | some A => (readback A x).pretty [] (some g)
       | none => match x.toNat? with
         | some n => toString n
         | none => "_"
