@@ -12,7 +12,7 @@ def ops : Scry.LatOps Nat :=
 
 def prog : Scry.Program Nat := Scry.Program.mk ops [2, 1] [] [] []
 def plan : Scry.Plan Nat :=
-  Scry.Plan.mk prog [Scry.EqCol.mk 0 0 0, Scry.EqCol.mk 0 1 0, Scry.EqCol.mk 1 0 0]
+  Scry.Plan.mk prog [Scry.EqCol.mk 0 0 0, Scry.EqCol.mk 0 1 0, Scry.EqCol.mk 1 0 0] [0]
 
 def db : Scry.State Nat :=
   let st := Scry.State.addTuple (Scry.State.addTuple Scry.State.empty 0 [u 1, u 2]) 0 [u 2, u 3];

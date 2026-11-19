@@ -1896,7 +1896,7 @@ and a union log) against the reference's five, so `EGraph.mk` takes seven argume
 record, reads a field, or calls those functions compiles against one import only. It
 adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
 rewrites), union explanations (a flat proof forest), node/round/clock limits with a
-reported stop reason, and `Option Nat` extraction costs. Only six of the seventeen
+reported stop reason, and `Option Nat` extraction costs. Only six of the eighteen
 `examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
 `extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
 compares; the analysis, explanation, limit and `EqPlan` surface has no reference
@@ -1907,12 +1907,18 @@ imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm
 operations, so a whole-library import that names both is an error. Every whole-library
 loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
 with everything except the reference family. `import Scry.EqPlan`
-is the Datalog seam: `eqsort` columns (`Scry.ColKind`), rules whose head is an equality
-assertion (`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and
-canonicalises the database between rounds. This is the second S12 slice: no
+is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
+relations (a column is not an assertion: a term table `un(term, op, child)` has two
+`eqsort` columns and unions nothing), rules whose head is an equality assertion
+(`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and canonicalises
+the database between rounds. A lattice relation keyed by an `eqsort` column is the
+e-class analysis (`itv : EClass → Interval`); `Plan.evalAn` adds guarded rewrites between
+canonicalise passes, so the analysis rule and the rewrite refine each other
+(`examples/scry-egraph-join.wiz` reproduces the analysis example's digest through the
+plan). This is the second S12 slice: no semi-naive delta across rebuild, no
 scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware provenance and
-no kernel-checked certificates yet; `wiz-notes/scry-egraph.md` has the design, the API
-and the gaps.
+no kernel-checked certificates yet; `wiz-notes/datalog-egraph-plan.md` and
+`wiz-notes/code-analysis-design.md` §10 have the design, the API and the gaps.
 
 ## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
 
