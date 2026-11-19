@@ -109,6 +109,7 @@ disappears.
 | reference types (`string`, classes, arrays, `object`, interfaces, generic parameters) | `Wil.Ty.ptr Wil.Ty.dyn`: a reference is a pointer to a heap block. **Generics are erased**: `List<T>` is the type `List` with `dyn` elements. `struct`s are values — slice 1 treats them like classes (a heap block); stack-slot structs are later. |
 | `new C(a…)` for a class the unit defines | `alloc (fields)` then a direct call `N.C..ctor(obj, a…)`; a field read/write is `gep obj k` + `load`/`store` (field index `k` in declaration order), so points-to and memory taint see objects |
 | `new T(a…)` for an external type | a direct call `T..ctor(a…)` whose result is the object; the rule engine's "a call's result is tainted by any tainted input" carries taint from constructor arguments into the object (this is what makes `new SqlCommand(query, conn)` tainted) |
+| a `record`/primary constructor's parameter list | an implied constructor `R..ctor(this, p…)` that stores each positional parameter into its field and runs `: B(a…)` first (§9.1) |
 | `x.M(a…)` on an external receiver | `T.M(x, a…)`: **the receiver is argument 0**, so a rule names `sink System.Data.SqlClient.SqlCommand.ExecuteReader arg 0`. `T` is the receiver's static type when known (declared local/parameter/field type, `new T`), else `?`; a static call `T.M(a…)` has no receiver |
 | properties `x.P` / `x.P = v` on external types | calls `T.get_P(x)` / `T.set_P(x, v)` (the CLR names). On a unit's own class, an auto-property is a field. |
 | `a[i]` on an array | `gepVar a i 1` + `load`/`store` (bounds: see below); on another type it is `T.get_Item(a, i)` / `T.set_Item(a, i, v)` |
@@ -331,7 +332,8 @@ diagnostic.
   endpoints do not build a command line from a request value);
 * 14 files produce no function: every one is `Dtos/*.cs`, and the 14 contain 83
   `public sealed record` declarations and nothing with a `=>` or `{` body. A
-  declaration-only file is not a silent skip;
+  declaration-only file is not a silent skip. (After §9.1 those records' implicit
+  constructors are lowered, so the 14 files now produce a function each.)
 * **0 files with an executable member and neither a function nor a warning** — the
   number that must be zero. Before the file-scoped-namespace fix it was every non-DTO
   file (61 of them), all silently empty;
@@ -669,3 +671,71 @@ no function (`4 621 - 4 279`), the same 342 as before the fix (the 16 now parse 
 lower). Those are not parse failures and are not conflated with them: each is either a
 declaration-only file or carries a lowering warning that `scry cs`'s coverage rows name,
 and §7.6 lists the out-of-scope constructs behind them.
+
+## 9. The parsed-but-not-lowered files (Nexus, 2026-11-18)
+
+`files: … parsed, … lowered` counts a file as **lowered only when it produced a
+function**, so the difference is files that parse and lower to nothing. §8 recorded
+4 605 parsed and 4 250 lowered (355 files). Re-running the same walk against the tree as
+it is now
+
+```
+scry cs /workspace/Nexus --json --no-taint
+```
+
+gives `walk: 5 560 before exclusions; 4 621 kept`, `files: 4 621 found, 4 605 parsed,
+4 263 lowered, 16 failed` (342 parsed-but-not-lowered files) and 36 334 functions — 13
+more files lower than in the recorded run, from changes that landed after it. The set is
+not one bug, and most of it is not a bug at all:
+
+| class | files | what the file contains | status |
+|---|---|---|---|
+| declaration-only | 161 | no member with a body, no initialiser, no primary constructor: 130 `interface` / `const`-only `static class` / attribute-class files, 31 `enum` files | out of scope **by design**: there is no executable member to lower |
+| primary constructor | 132 | a `record` / `record struct` / `class` / `struct` with a parameter list (`record R(int X, …)`, `class C(T t)`) | **fixed**, §9.1 |
+| initialisers only | 48 | the only executable code is a field or property initialiser (`T x = e;`, `T P { get; } = e;`) | out of scope for this slice, named by its warning |
+| empty | 1 | one `[assembly: …]` attribute and no declaration | nothing to lower |
+
+The 161 declaration-only files have no statement or expression to lower, so
+`no functions lowered` is the correct row (an `enum` is additionally named by
+`enum_declaration not modelled: no code is lowered for it`). The 48 initialiser-only
+files keep the warning `field initialiser of X not modelled: the field starts as its
+default` (or the property form); running field/property initialisers from a constructor
+is its own change, and such a file would still have no *function* until that is done.
+
+**No file in the set has a method, constructor or accessor body and no function.** The
+dangerous class — executable members that lowered to nothing without a diagnostic, the
+failure §7.1 is about — is empty: every file that parsed with a body produced at least
+one function. The classes above are declaration-only files (correct), generated
+constructors (§9.1), executable initialisers (still named) and one empty file.
+
+### 9.1 The fix: primary constructors
+
+A positional record lowered its parameters to fields, and `new R(a, b)` stored the
+arguments into them, but the constructor that the parameter list implies was never
+emitted. A file of DTO records (`public sealed record AgentDtos(…)` and nothing else)
+therefore produced **no function**, so the whole file counted as "not lowered"; and the
+`: this(…)` target of an explicit constructor overload was a call to a function that did
+not exist.
+
+`Scry.Cs.lowerPrimaryCtor` now lowers the implied constructor for a `record`,
+`record struct`, `class` or `struct` with a parameter list: the parameters are the
+leading fields, the body stores each one into its field (`gep` + `store`, exactly what
+`new R(a, b)` already did at the call site), runs the `: B(a…)` base call first, and
+returns the object. `Scry.Cs.baseArgsOf` unwraps the
+`primary_constructor_base_type` node tree-sitter uses for a record's base call (a
+class writes the base type directly), and `Scry.Cs.baseOf` reads the type through the
+same wrapper, so inherited calls from a record resolve too.
+
+Before/after on the same walk:
+
+| | before | after |
+|---|---|---|
+| files lowered | 4 263 | 4 395 |
+| parsed but not lowered | 342 | 210 |
+
+The 210 that remain are exactly the 161 declaration-only + 48 initialiser-only + 1 empty
+files above. The fixture `scry/corpus/csharp/lower/primary-ctor.{cs,cst,wil}` is the
+regression test: it has `record`, `record struct`, a record with a base call, and a class
+primary constructor with a base call. Before this change it lowered to zero functions;
+`lower/*.wil` now pins the five `..ctor` functions, their field stores, and the two base
+calls.
