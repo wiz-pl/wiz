@@ -28,6 +28,10 @@ run() { # proof script
 run p1-process-safe && expect p1-process-safe '^VERDICT[[:space:]]+ok$' \
   && expect p1-process-safe '^ROWS[[:space:]]+1$'
 run p1b-crux-api && expect p1b-crux-api '^REASON[[:space:]]+rejected: .*mload.*memory rules are not covered'
+run p1c-crux-api-vacuous && expect p1c-crux-api-vacuous '^VERDICT[[:space:]]+ok$' \
+  && expect p1c-crux-api-vacuous '^ROWS[[:space:]]+0$' \
+  && expect p1c-crux-api-vacuous '^SRC[[:space:]]+0$' \
+  && expect p1c-crux-api-vacuous '^SINK[[:space:]]+0$'
 run p2-sqlcommand && expect p2-sqlcommand '^REASON[[:space:]]+rejected: .*mload.*memory rules are not covered'
 run p3-header-processor && expect p3-header-processor '^VERDICT[[:space:]]+ok$' \
   && expect p3-header-processor '^ROWS[[:space:]]+10$'

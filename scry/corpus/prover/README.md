@@ -9,6 +9,7 @@ report is `wiz-notes/scry-prover-dogfood.md`.
 |---|---|---|---|
 | `p1-process-safe.sh` | `scry/corpus/csharp/taint/cwe78-process-safe.cs` (`Fixtures.Runner.Main`) | no `Console.ReadLine` value reaches `Process.Start` | `ok`, invariant 1 row |
 | `p1b-crux-api.sh` | `real/BootstrapPartnerCredentialSeeder.cs` (`Crux.Api.Hosting…RunAsync`) | the same claim over a real Crux.Api namespace | **refused**: `mload` (8 loads); no `Console.ReadLine`/`Process.Start` in the unit either |
+| `p1c-crux-api-vacuous.sh` | same file, `…EnsureAsync` | the same claim on a memory-free method | `ok`, but **vacuous**: `I = {}`, `SRC=0`, `SINK=0` |
 | `p2-sqlcommand.sh` | `real/SqlReportProvider.cs` (`ReportService.Provider…FetchRrnsAsync`) | no caller-supplied value reaches a `SqlCommand`'s text | **refused**: `mload` (2 loads at the `SqlCommand` point) |
 | `p3-header-processor.sh` | `real/CommunicationsWebhookEndpoints.cs` (`Crux.Api.Endpoints…SendGridMarketingWebhook`) | an unvalidated header value does not reach the webhook processor | `ok`, invariant 10 rows |
 | `p3b-logpath.sh` | `real/LogFileReader.cs` (`Crux.Dashboard.Api…Resolve`) | no request-supplied name reaches a filesystem handle | **refused**: `mtainted` (a tainted location seed) |
