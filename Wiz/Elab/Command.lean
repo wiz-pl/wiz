@@ -2197,7 +2197,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       if stx.isOfKind "term.depArrow" then concl (stx.getArg 2) else stx
     -- ((13b) this module's private types and classes by their kernel names, so that two
     -- modules' instances for their private `Color`s have different names)
-    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n => ((s.globals.resolve (stripScope n)).replace "." "").capitalize)
+    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n =>
+      (((s.globals.resolveName (stripScope n)).toOption.getD (stripScope n)).replace "." "").capitalize)
     -- (13t) an anonymous instance declared in a namespace is `Foo.inst…` too
     let base := if s.globals.namespacePrefix.isEmpty then base else s.globals.namespacePrefix ++ "." ++ base
     let given? : Option Name := if nameOpt.isNone then none else
@@ -2217,7 +2218,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let valStx : Except (String × String × SourceInfo) Syntax :=
       if !isWhere then pure body else do
         let some C := headIdent typeStx | throw ("an instance's type must be an application of a class", ErrorCode.unknownClass, cmd.info)
-        let C := s.globals.resolve C
+        let C := (s.globals.resolveName C).toOption.getD C
         let some info := s.classes.find? (·.name == C)
           | throw (if s.globals.contains C then s!"{C} is not a class" else s!"unknown class '{C}'", ErrorCode.unknownClass, cmd.info)
         let given := body.args.toList.map fun f => (((f.getArg 0).getId?).getD "_", f, f.getArg 2)
@@ -3059,14 +3060,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let iStx := cmd.getArg 5
-    let i := s.globals.resolve ((iStx.getId?).getD "_")
+    let i := (s.globals.resolveName ((iStx.getId?).getD "_")).toOption.getD ((iStx.getId?).getD "_")
     match s.instances.find? fun j => j.name == i && !j.isDefault with
     | none => report .error iStx.info s!"{i} is not an instance"
     | some j => modify fun s => { s with instances := s.instances.push { j with priority := prio, isDefault := true } }
   | "command.attrBinop" =>
     -- (7f) `attribute [binop] C.f`: numeral operands of `C.f` take the type of the others
     let fStx := cmd.getArg 4
-    let f := s.globals.resolve ((fStx.getId?).getD "_")
+    let f := (s.globals.resolveName ((fStx.getId?).getD "_")).toOption.getD ((fStx.getId?).getD "_")
     match s.classes.find? fun c => c.fields.any fun x => c.name ++ "." ++ x == f with
     | none => report .error fStx.info s!"{f} is not a method of a class"
     | some c => modify fun s => { s with classes := s.classes.map fun c' => if c'.name == c.name then { c' with binop := true } else c' }
@@ -3085,9 +3086,11 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.deriving" =>
     -- `deriving instance C₁, C₂ for T₁, T₂`
     let ids (stx : Syntax) := stx.args.toList.filter (·.getId?.isSome)
-    for T in ids (cmd.getArg 4) do
-      for C in ids (cmd.getArg 2) do
-        derive (C.getId?.getD "_") (s.globals.resolve (T.getId?.getD "_")) C.info
+    for TStx in ids (cmd.getArg 4) do
+      for CStx in ids (cmd.getArg 2) do
+        let T := (s.globals.resolveName (TStx.getId?.getD "_")).toOption.getD (TStx.getId?.getD "_")
+        let C := (s.globals.resolveName (CStx.getId?.getD "_")).toOption.getD (CStx.getId?.getD "_")
+        derive C T CStx.info
   | "command.erase" =>
     let nStx := cmd.getArg 1
     match s.globals.resolveName ((nStx.getId?).getD "_") with
