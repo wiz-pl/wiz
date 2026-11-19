@@ -1,0 +1,37 @@
+func Demo.Unsupported.OutOfScope.GetEnumerator(%0)
+  b0:
+    ret
+func Demo.Unsupported.Control.Flow(%0, %1)
+  b0:
+    %2 = fnptr $lambda:203
+    %3 = %2
+    %4 = call System.Exception..ctor()
+    goto b1
+  b1:
+    %5 = havoc u1
+    %6 = 0
+    br ne %5, %6 ? b3 : b5
+  b2:
+    ret
+  b3:
+    %7 = havoc dyn*
+    %8 = havoc u1
+    %9 = call System.Console.WriteLine(%7)
+    goto b2
+  b4:
+    ret
+  b5:
+    goto b4
+warning: Demo.Unsupported.OutOfScope.GetEnumerator:30: yield_statement not modelled
+warning: Demo.Unsupported.Control.Flow:38: local function Local not modelled: its body is not lowered and calls to it are unknown
+warning: Demo.Unsupported.Control.Flow:39: lambda body not lowered: an opaque function value
+warning: Demo.Unsupported.Control.Flow:41: lock_statement not modelled
+warning: Demo.Unsupported.Control.Flow:46: goto_statement not modelled
+warning: Demo.Unsupported.Control.Flow:48: labeled_statement not modelled
+warning: Demo.Unsupported.Control.Flow:58: is test not modelled: havoc
+warning: <global>:65: preproc_if not modelled: no code is lowered for it
+warning: <global>:10: delegate_declaration not modelled: no code is lowered for it
+warning: Demo.Unsupported.IBox:14: indexer_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:20: indexer_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:22: operator_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:24: destructor_declaration member not modelled: no code is lowered for it

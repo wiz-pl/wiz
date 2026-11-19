@@ -1988,6 +1988,31 @@ attached with `repro --witness FILE` and is accepted only at L2/L3 with
 `validated=true`; the prototype does not run symbolic execution.
 `wiz-notes/scry-workflow.md` has the UX, artifact schema and limits.
 
+## Scry: the C# repository driver (`scry/src/Scry/CsCmd.wiz`)
+
+`import Scry.CsCmd` is `scry cs PATH`, the tree-scale front door for the C# frontend
+(`Scry.CsCst`, `Scry.CsLower`; design `scry/CSHARP.md` §7). It walks a directory, a
+`.csproj` or a `.sln`/`.slnx` for `*.cs`, parses each file with tree-sitter-c-sharp
+through `Scry.Native`, lowers it, and runs the C# rule pack over the merged program. The
+output is a summary, not a wall of findings: `.cs` counts before and after exclusions,
+found/parsed/lowered/failed, findings by rule and severity, and a **coverage** section
+that names every construct or file that was skipped or warned about, with a count and one
+example location. `--json` is the same report; `--fail-on error|warning|note` gates
+findings and coverage rows; `--no-taint` stops after lowering.
+
+The exclusion rule is built in and deliberately small (it does not read `.gitignore`):
+`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs` and
+symbolic links. Excluded `.cs` files are still counted (names only) so the before/after
+difference is visible. Exit status is `0` clean, `1` at/above `--fail-on`, `2` usage/IO,
+`3` nothing analysed -- the last separates "no findings" from "the parser never ran". A
+file the grammar cannot parse is a `parse failure` row, never a silent omission.
+
+The `scry-csharp` group (`Tests/Groups/ScryCSharp.lean`) exercises the driver's pure core
+(`Scry.Cs.walkOfPaths`, `Scry.Cs.reportOf`, `Scry.Cs.statusOf`) on the fixture tree
+`scry/corpus/csharp/repo/`, which contains one deliberately invalid file and one of each
+excluded path, so the counts, the coverage rows, both renderings and all four exit
+statuses are pinned without the native shim.
+
 ## Scry: dynamic execution evidence (`scry/src/Scry/Dynamic.wiz`)
 
 `import Scry.Dynamic` is the dynamic-evidence layer, not a second analyser. `scry dynamic
