@@ -1,0 +1,64 @@
+import Prelude
+import Text
+
+/-!
+# Web.Examples
+
+The playground's examples, as plain source text: the runtime renders the menu and
+puts the chosen program in the editor. They lived in `web/playground-presets.js`;
+that file stays as the oracle `web/playground_examples_test.mjs` compares this list
+against, and `web/playground_test.mjs` runs every one through the engine until the
+Wasm test reads this list instead.
+
+A preset is data, not behaviour: the page never has to know an example exists.
+-/
+
+/-- One example: its URL/menu id, its label, and the program. -/
+structure Examples.Example where
+  id : String
+  title : String
+  code : String
+
+/-- The examples, in menu order (the first is the default). -/
+def Examples.examples : List Examples.Example :=
+  [ Examples.Example.mk "basics" "Basics"
+      "import Prelude\n\n-- Everything here runs in the page: the self-hosted Wiz frontend and kernel\n-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.\ndef twice (n : Nat) : Nat := n + n\n\n#check twice\n#eval twice 21\n",
+    Examples.Example.mk "arithmetic" "Arithmetic"
+      "import Prelude\n\ndef square (n : Nat) : Nat := n * n\n\n#check square\n#eval square 12\n#eval Nat.mod 100 7\n#eval Nat.beq (Nat.add 20 22) 42\n",
+    Examples.Example.mk "data" "Inductive data"
+      "import Prelude\n\ninductive Colour where\n  | red\n  | green\n  | blue\n\ndef favourite : Colour := Colour.green\n\n#check Colour\n#check favourite\n#eval favourite\n",
+    Examples.Example.mk "patterns" "Pattern matching"
+      "import Prelude\n\ndef negate : Bool → Bool\n  | .true => .false\n  | .false => .true\n\ndef even : Nat → Bool\n  | .zero => .true\n  | .succ n => negate (even n)\n\n#check even\n#eval even 10\n#eval even 7\n",
+    Examples.Example.mk "structures" "Structures"
+      "import Prelude\n\nstructure Point where\n  x : Nat\n  y : Nat\n\ndef origin : Point := Point.mk 0 0\ndef shift (p : Point) : Point := Point.mk (p.x + 1) (p.y + 1)\n\n#check Point\n#check shift\n#eval (shift origin).x\n",
+    Examples.Example.mk "lists" "Lists"
+      "import Prelude\n\ndef numbers : List Nat := .cons 1 (.cons 2 (.cons 3 .nil))\ndef double (n : Nat) : Nat := n + n\n\ndef mapList {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (mapList f xs)\n\n#check mapList\n#eval mapList double numbers\n",
+    Examples.Example.mk "tour" "Wiz in Y minutes"
+      "import Prelude\n\n-- Wiz in Y minutes: `--` starts a comment; commands begin at column 0, and\n-- layout (indentation) only matters inside `where` and `match`. The page runs\n-- this with the self-hosted frontend (selfhost/*.wiz) in WebAssembly; docs/tour.md is longer.\n\n-- Literals; `#check` gives a type, `#eval` the kernel's normal form.\n#check 42\n#eval 6 * 7\n\n-- Functions curry: `add3 1 2` waits for one more argument.\ndef add3 (a b c : Nat) : Nat := a + b + c\n\n#eval add3 1 2 3\n\n-- `let` binds an intermediate value; `if` is a two-branch match on Bool.\ndef parity (n : Nat) : Nat :=\n  let r := Nat.mod n 2; if Nat.beq r 0 then 0 else 1\n\n#eval parity 7\n\n-- An inductive type, and a function by pattern-matching equations.\ninductive Shape where\n  | circle (r : Nat)\n  | square (s : Nat)\n\ndef area : Shape → Nat\n  | .circle r => 3 * r * r\n  | .square s => s * s\n\n-- Lists, recursion, and a function passed to `List.map`.\ndef total : List Nat → Nat\n  | .nil => 0\n  | .cons x xs => x + total xs\n\n#eval total (.cons 1 (.cons 2 (.cons 3 .nil)))\n#eval List.map (fun n => n + 1) (.cons 1 (.cons 2 .nil))\n\n-- A structure's fields are projections: `p.x`.\nstructure Point where\n  x : Nat\n  y : Nat\n\n#eval (Point.mk 2 3).x\n\n-- A class and its instance; the dictionary comes from instance search.\nclass Describe (A : Type) where\n  describe : A → Nat\ninstance instDescribeNat : Describe Nat where\n  describe := fun n => n + 1\n\n#eval Describe.describe 41\n\n-- A dependent type: `Vec A n` has `n` elements, so `head` needs a default.\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A Nat.zero\n  | cons (n : Nat) (x : A) (xs : Vec A n) : Vec A (Nat.succ n)\n\ndef head {A : Type} {n : Nat} (d : A) (v : Vec A n) : A := match v with\n  | .cons _ x _ => x\n  | .nil => d\n\n#eval head 0 (Vec.cons 0 7 Vec.nil)\n\ndef twoPlusTwo : 2 + 2 = 4 := rfl   -- `rfl` closes a definitional equality\n\n-- Answers from a built-in, a recursion and a pattern match.\n#eval String.length \"Wiz\"\n#eval total (List.map (fun n => n + 1) (.cons 2 (.cons 3 .nil)))\n#eval area (.square 5)\n" ]
+
+/-- The example a fresh page opens with. -/
+def Examples.defaultExampleId : String := "basics"
+
+/-- The first example with `id`, if any. -/
+def Examples.exampleOfFrom (id : String) : List Examples.Example → Option Examples.Example
+  | .nil => .none
+  | .cons e es => match String.eq e.id id with
+    | .true => .some e
+    | .false => Examples.exampleOfFrom id es
+
+def Examples.exampleOf (id : String) : Option Examples.Example := Examples.exampleOfFrom id Examples.examples
+
+/-- The program `id` names; an unknown id is the default example (a stale URL or
+draft cannot leave the editor empty). -/
+def Examples.codeOf (id : String) : String :=
+  match Examples.exampleOf id with
+  | .some e => e.code
+  | .none => match Examples.exampleOf Examples.defaultExampleId with
+    | .some e => e.code
+    | .none => ""
+
+/-- The label `id` names (the menu's text). -/
+def Examples.titleOf (id : String) : String :=
+  match Examples.exampleOf id with
+  | .some e => e.title
+  | .none => ""

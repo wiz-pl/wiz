@@ -1,4 +1,4 @@
-/* (11ab) The static playground. The palette is web/infoview.html's; the page is an
+/* (11ab) The playground. The palette is web/infoview.html's; the page is an
    editor beside the self-hosted checker's output. The header is two deliberate rows
    (title/status, then actions) so the controls stay reachable on a phone. */
 :root { --bg: #fdfdfb; --fg: #1d1d1b; --dim: #777; --line: #ddd; --panel: #f5f5f0;

@@ -148,6 +148,17 @@ def Loom.on {M : Type} (event : String) (msg : M) (node : Loom.VNode M) : Loom.V
 /-- A group of siblings, for a children list (do not use a group as one child). -/
 def Loom.seq {M : Type} (kids : List (Loom.VNode M)) : Loom.VNode M := Loom.ofList kids
 
+/-- Lift a component's view into a page's message type (Elm's `Html.map`): a child with
+its own `Msg` composes into a page whose message type is larger, wrapping every handler's
+message with `f`. Handler order and indices are the child's, so the patches do not move.
+(`Loom.map` is the framework's list helper; this is the tree one.) -/
+def Loom.mapMsg {A B : Type} (f : A → B) : Loom.VNode A → Loom.VNode B
+  | .nil => .nil
+  | .text s n => .text s (Loom.mapMsg f n)
+  | .raw h n => .raw h (Loom.mapMsg f n)
+  | .el t k a cs n => .el t k a (Loom.mapMsg f cs) (Loom.mapMsg f n)
+  | .on e m b n => .on e (f m) (Loom.mapMsg f b) (Loom.mapMsg f n)
+
 -- ## Rendering
 
 /-- The rendered tree: text is raw (escaped when written out), attributes are strings,
