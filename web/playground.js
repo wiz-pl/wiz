@@ -179,7 +179,16 @@ const selfhost = typeof location !== "undefined" && wantsSelfhost(location.searc
   : undefined;
 
 function wireGoals() {
-  startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });
+  startInfoview({
+    editor,
+    panel: document.getElementById("goals"),
+    config: selfhost,
+    // The Loom app owns the page's DOM (including the editor element) and patches it
+    // from its own tree, so the editor's overlays stay off there: a mirror wrapper it
+    // did not render would put its patch paths out of step.
+    squiggles: !useLoom,
+    completions: !useLoom,
+  });
 }
 
 // ## Mounting the page

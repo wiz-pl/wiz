@@ -29,14 +29,8 @@ main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1
 @media (max-width: 760px) { .pane + .pane { border-left: 0; border-top: 1px solid var(--line); } }
 .pane-head { display: flex; gap: 12px; align-items: baseline; padding: 6px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .pane-head label, .pane-head span:first-child { font: 600 12px system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
-/* The right pane stacks the goals over the output. `?ui=react` renders the same stack
-   through web/playground-react.js, into #side-ui instead of #side-dom. */
-.side-dom, .side-ui { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.side-ui[hidden] { display: none; }
-.side-dom > .pane-head + .goals + .pane-head,
-.react-ui > .pane-head + .goals + .pane-head { border-top: 1px solid var(--line); }
-.react-ui { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.react-ui .output, .react-ui .goals { flex: 1 1 50%; }
+/* The right pane stacks the goals over the output. */
+.side > .pane-head + .goals + .pane-head { border-top: 1px solid var(--line); }
 .goals { flex: 1 1 46%; min-height: 0; overflow: auto; padding: 10px 16px; outline: none;
          font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .goals:focus-visible { box-shadow: inset 0 0 0 2px var(--sel); }
