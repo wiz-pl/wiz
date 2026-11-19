@@ -974,9 +974,10 @@ compiles the program the page runs.
   no Wiz build. The editor itself is a plain textarea plus overlays with no dependency:
   diagnostics are underlined by `web/squiggles.js`, the caret is re-asked on selection
   changes, and `web/completions.js` shows `textDocument/completion` at Ctrl-Space or while
-  typing. `?ui=loom` mounts the whole page from `lib/Web/Loom.wiz`
-  (`web/playground-ui.wiz`, built as its own small Wasm module) instead of the static
-  markup, which stays the default and the fallback.
+  typing. The page itself is one app in `lib/Web/Loom.wiz`
+  (`web/playground-ui.wiz`, built as its own small Wasm module): `web/playground.html`
+  points `web/playground.js` at the body, and `web/framework/mount.js` mounts the runtime
+  there. There is no static page.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
   call into Wasm is synchronous), and a very large normal form (a `Nat` in the thousands)
   can exhaust the Wasm stack, so the examples stay small. Only the embedded Prelude

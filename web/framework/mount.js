@@ -53,7 +53,8 @@ function resolveTarget(target, doc) {
 
 // The runtime: a factory (the dynamic import's default), a module object with
 // `default`/`create`, or the factory itself. Its ABI is checked before the page is
-// touched, so a module built by an older compiler leaves the fallback page in place.
+// touched, so a module built by an older compiler cannot half-render one: `mount` throws
+// and the page decides what to say.
 async function instantiate(module, options) {
   const factory = typeof module === "function" ? module
     : module && typeof module.default === "function" ? module.default

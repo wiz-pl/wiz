@@ -8,18 +8,18 @@
 // structure of its own and never touches the module's ABI: `mount`'s `call` is the only
 // way in, so the next page to migrate is this file with different effects.
 //
-// `?ui=loom` selects this page (it is the one being migrated); without it, or when the
-// runtime module is not built, the static markup's own script takes over
-// (`web/playground-static.js`). `?lsp=ws://host:port` gives the goals pane an external
-// language server; the default is the in-page one (`web/selfhost-lsp-shim.js`).
+// There is one page and one runtime. If the runtime cannot start (the module was not
+// built, the network failed, its ABI is not the Loom one), the mount point says so in
+// plain text; it does not switch to a second, hand-written UI. `?lsp=ws://host:port`
+// gives the goals pane an external language server; the default is the in-page one
+// (`web/selfhost-lsp-shim.js`).
 "use strict";
 import { mount } from "./framework/mount.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
 
-const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
-const useLoom = params.get("ui") === "loom";
+const runtimeModule = () => import("./wiz-playground-ui.mjs");
 
 let wasm = null;        // web/playground-engine.js: the self-hosted checker
 let handle = null;      // mount's handle: the runtime's entry points
@@ -115,10 +115,27 @@ function wireGoals(editor) {
   });
 }
 
-async function startLoom() {
+// There is no page to fall back to: if the runtime cannot start, the mount point says so
+// in plain text, with the reason. This is the whole failure path — no DOM construction
+// and no second UI, which is what keeps one page's behaviour in one place.
+function cannotStart(root, e) {
+  const reason = e && e.message ? e.message : String(e);
+  console.error("wiz playground: the runtime could not start: " + reason);
+  root.textContent =
+    "The playground could not start: " + reason + "\n\n" +
+    "This page runs the Wiz checker in WebAssembly. It needs the runtime module " +
+    "(wiz-playground-ui.mjs) and the engine (wiz-playground.mjs); see docs/building.md, " +
+    "\"The playground\".";
+}
+
+// Mount the runtime on `root` (the body by default) and give it its effects. Exported for
+// the Node tests, which pass a stub module and a DOM double; `web/playground.html` calls
+// it from a module script.
+export async function startPage({ root, module = runtimeModule } = {}) {
+  const target = root || document.body;
   try {
-    handle = await mount(document.body, {
-      module: () => import("./wiz-playground-ui.mjs"),
+    handle = await mount(target, {
+      module,
       transport: { engine: () => wasm },
       events: ["click", "input", "change"],
       // An example's load is the page's cue to run it: the runtime is pure, so it
@@ -126,8 +143,7 @@ async function startLoom() {
       onStep: (_state, event) => { if (event === "change") run(); },
     });
   } catch (e) {
-    console.warn("wiz playground: using the static page: " +
-      (e && e.message ? e.message : String(e)));
+    cannotStart(target, e);
     return false;
   }
   const editor = document.getElementById("editor");
@@ -135,17 +151,3 @@ async function startLoom() {
   await loadEngine();
   return true;
 }
-
-async function start() {
-  if (!useLoom) {
-    const { startStatic } = await import("./playground-static.js");
-    return startStatic();
-  }
-  if (await startLoom()) return;
-  // The runtime module is not built (or its ABI is not what mount expects): the page's
-  // own markup is still in the body, so the static script can take over untouched.
-  const { startStatic } = await import("./playground-static.js");
-  return startStatic();
-}
-
-start();

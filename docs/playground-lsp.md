@@ -14,9 +14,9 @@ tagged methods remain an external server's, so a tagged tree is only clickable t
 The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
 rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
 insertion), `web/squiggles.js` and `web/completions.js` draw them, and
-`web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
-the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=loom`
-(§ The Loom UI); the default page builds its DOM directly.
+`web/playground-lsp.js` connects them to the textarea. The page itself is one app in the
+repo's own Loom framework (`lib/Web/Loom.wiz`, § The page's runtime); the goals pane is
+an island in it.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
@@ -72,8 +72,8 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to start one), and the playground keeps working as a local checker. Nothing is logged
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
-  `?completions=off` the completion popup (§ The editor). `?ui=loom` mounts the whole
-  page as the repo's Loom app instead of the static markup (§ The Loom UI).
+  `?completions=off` the completion popup (§ The editor). There is no `?ui` switch: the
+  runtime page is the playground.
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -199,25 +199,29 @@ The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
 asking.
 
-## The Loom UI (`?ui=loom`)
+## The page's runtime
 
-The whole page can be mounted as one Loom app instead of the static markup: with
-`?ui=loom`, `web/playground.js` loads `wiz-playground-ui.mjs` (built by
-`web/build-playground-ui.sh` from `web/playground-ui.wiz`) and `web/framework/driver.js`
-mounts it on `body`.
+The whole page is one Loom app. `web/playground.js` (the entry point) points at the body
+and calls `mount(body, { module, transport })` from `web/framework/mount.js`, which loads
+`wiz-playground-ui.mjs` (built by `web/build-playground-ui.sh` from
+`web/playground-ui.wiz`), mounts its SSR and delegates DOM events. The app
+(`Web.Playground.pageApp`) renders the header and its examples menu, the editor, the
+goals container, the output pane and the footer; its state is `Page`.
 
 ```sh
 web/build-playground.sh web/out         # the engine (wiz-playground.mjs)
-web/build-playground-ui.sh web/out      # the Loom page (wiz-playground-ui.mjs)
-# open http://127.0.0.1:8000/playground.html?ui=loom
+web/build-playground-ui.sh web/out      # the page (wiz-playground-ui.mjs)
+# open http://127.0.0.1:8000/playground.html
 ```
 
 The UI is its own Wasm instance, so a trap or restart in the engine does not touch it.
 The page keeps the effects (the engine, the goals client, the editor overlays) and
-reports their results through the module's `wiz_loom_*` entry points; the static markup
-is the default and the fallback when the module is missing or its ABI is not what the
-driver expects. `web/playground_ui_test.mjs` mounts the real module under Node with the
-driver and the DOM double and checks the panes, the status pair, the count, the value
+reports their results through the module's `wiz_loom_*` entry points. There is no second
+page: if the runtime module cannot start (it was not built, the network refused it, or
+its ABI is not the Loom one), the mount point says so in plain text with the reason and
+the build documentation — it does not fall back to a hand-written UI.
+`web/playground_ui_test.mjs` mounts the real module under Node with the driver and the
+DOM double and checks the panes, the examples menu, the status pair, the count, the value
 classes and the entry points.
 
 ## Documents
@@ -554,8 +558,9 @@ server does.
   state before its step and at its end).
 * `node web/infoview_page_test.mjs` — the standalone page's URL rule (`?port=`, `?lsp=`)
   and its status text; the pane it mounts is the test above.
-* `node web/playground_ui_test.mjs` — the `?ui=loom` page: its module mounted under Node
-  with the framework's driver and DOM double, then the page's `wiz_loom_*` calls.
+* `node web/playground_ui_test.mjs` — the page: its module mounted under Node with the
+  framework's driver and DOM double, then the page's `wiz_loom_*` calls and the examples
+  menu.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `node web/hover_test.mjs` — the hover card and go-to-definition: the three LSP content

@@ -43,7 +43,7 @@ for (const p of presets) {
 }
 eq("the default example", "basics", fixture.defaultExampleId);
 
-// ## The first paint: the static markup's structure, rendered by the runtime
+// ## The first paint: the page's structure, rendered by the runtime
 const initial = fixture.initial;
 ok(initial.includes("<header>") && initial.includes("<main>") && initial.includes("<footer>"),
   "the whole page is the app: header, main and footer", initial.slice(0, 200));

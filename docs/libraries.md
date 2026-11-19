@@ -1706,8 +1706,8 @@ too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, a
 raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
 with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
 `#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
-`web/playground-ui.wiz` composes them into the whole page (`?ui=loom`) and exports its
-`wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
+`web/playground-ui.wiz` composes them into the whole page (`web/playground.html` mounts
+it) and exports its `wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
 module, so a user program's trap in the engine cannot touch the UI state. Tests:
 `web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
 (the page, mounted from the built module under Node).

@@ -3,11 +3,15 @@
 // runtime goes through mount's `call`, and the runtime module's exports are the driver's
 // and the mount's business, not the page's.
 //
-// This is a source-level check on purpose: it is the one property a page is not allowed
-// to erode as features move, and it fails at the first `_wiz_loom_show(...)` that creeps
-// back into a page. The behavioural half (the page's SSR, steps and patches) is
+// There is no second page: `?ui` is gone, `playground-static.js` does not exist, and the
+// one failure path is a text message in the mount point (web/playground_start_test.mjs
+// runs it). The behavioural half (the page's SSR, steps and patches) is
 // web/playground_page_test.mjs; the mount contract itself is
 // web/framework/mount_test.mjs.
+//
+// This is a source-level check on purpose: it is the one property a page is not allowed
+// to erode as features move, and it fails at the first `_wiz_loom_show(...)` that creeps
+// back into a page.
 //
 //   node web/playground_entry_test.mjs
 "use strict";
@@ -21,6 +25,7 @@ const ok = (cond, what, detail = "") => {
 
 const entry = readFileSync(new URL("./playground.js", import.meta.url), "utf-8");
 const mount = readFileSync(new URL("./framework/mount.js", import.meta.url), "utf-8");
+const html = readFileSync(new URL("./playground.html", import.meta.url), "utf-8");
 
 // ## The entry point is the mount contract
 ok(/from "\.\/framework\/mount\.js"/.test(entry),
@@ -34,17 +39,30 @@ ok(!/document\.createElement|replaceChildren|appendChild|innerHTML/.test(entry),
   "the entry builds no DOM (the runtime's patches do)");
 ok(/call\("wiz_loom_/.test(entry),
   "its effects use mount's `call`, not the module object");
+const exports = [...entry.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
+ok(exports.length === 1 && exports[0] === "startPage",
+  "the entry exports exactly one function (startPage)", exports.join(","));
+ok(/startPage\(\)/.test(html), "the page's HTML mounts it with startPage()");
 
-// ## The fallback is a module, not inline code
-ok(/import\("\.\/playground-static\.js"\)/.test(entry),
-  "the static page is loaded dynamically, as the fallback");
+// ## One page, one runtime
+ok(!/playground-static/.test(entry) && !/playground-static/.test(html),
+  "there is no static-page fallback in the entry or the HTML");
+ok(!/ui=loom|useLoom|params\.get\("ui"\)/.test(entry),
+  "there is no ?ui switch (the runtime is the page)");
 ok(!/function wireEditor|presetSelect|localStorage/.test(entry),
-  "the entry carries none of the static page's state");
+  "the entry carries none of the old page's state");
+
+// ## The failure path is text in the mount point, not a second UI
+ok(/function cannotStart\(root, e\)/.test(entry) &&
+  /root\.textContent\s*=/.test(entry),
+  "a startup failure is a text message on the mount point");
+ok(/could not start/.test(entry) && /docs\/building\.md/.test(entry),
+  "the message says what failed and points at the build docs");
 
 // ## mount is the only export (the contract's shape)
-const exports = [...mount.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
-ok(exports.length === 1 && exports[0] === "mount",
-  "mount.js exports exactly one function", exports.join(","));
+const mountExports = [...mount.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
+ok(mountExports.length === 1 && mountExports[0] === "mount",
+  "mount.js exports exactly one function", mountExports.join(","));
 
 // ## The runtime's ABI is the documented three exports, plus the page's effect hooks
 for (const name of ["_wiz_loom_init", "_wiz_loom_html", "_wiz_loom_step"]) {

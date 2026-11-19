@@ -1,5 +1,5 @@
-// The whole playground page as a Loom app (web/playground-ui.wiz), mounted for real
-// under Node: the module web/build-playground-ui.sh built is Emscripten's, web/framework/
+// The whole playground page as a Loom app (web/playground-ui.wiz) — the page, not an
+// option — mounted for real under Node: the module web/build-playground-ui.sh built is Emscripten's, web/framework/
 // driver.js mounts its SSR into minidom and delegates events, and its `wiz_loom_*` entry
 // points are the page's calls (a run's output, a failure, the status pair, Run's state,
 // the footer, the editor's text). No browser and no engine: the engine is the page's
