@@ -1,0 +1,6 @@
+import Prelude
+
+-- A tiny prelude for the `wiz repl --prelude` smoke test (tests/repl-prelude.wiz): it must
+-- be importable as an ordinary module and its definitions must be in scope from the first
+-- prompt. It lives in fixtures/, not tests/: every .wiz under tests/ is a test.
+def replPreludeAnswer : Nat := 42

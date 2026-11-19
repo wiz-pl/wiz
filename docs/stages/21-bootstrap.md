@@ -247,9 +247,21 @@ runtime; 21p). `implemented_by`, callbacks and `c_struct` came later (21q–21t)
 Finding K10 of audit 2: `Frontend.wiz` built every binder at ω, whatever was written, so
 `def twice (1 x : Nat) (f : Nat → Nat → Nat) : Nat := f x x` was accepted. It now reads
 the binder's `quantity` node as `elabQuantity` does in the Lean elaborator (`binderQ`,
-`writtenQ`): `0`, `1` or `ω`, by default ω on an explicit binder and 0 on an implicit
-one; a numeral other than 0 or 1, or a quantity term `%t`, is an error. The quantities
-reach the kernel, which already checks usage (`popUsage`):
+`writtenQ`): `0`, `1` or `ω`; a numeral other than 0 or 1, or a quantity term `%t`, is
+an error. With none written, an explicit binder is ω and an implicit one follows
+**rule (b)** (the language decision of 2026-11-16, `binderDefaultQty` in the Lean
+elaborator): 0 when its type is a sort or a proposition, ω otherwise (data). The rule
+reads the binder's type as elaborated at the binder, before anything after it: the type
+forced (solved metavariables, definitions unfolded at the head) is `Sort u`, or its own
+sort is `Prop`. An implicit with no type (`{A}`), or whose type is still a metavariable,
+is data (ω), and so is a type family (`{F : Type → Type}`: a function into a sort is not
+erased). Here `implicitQ`/`typeQC` decide it where the binder's type is elaborated
+(definition and partial-definition signatures, `∀`, a dependent arrow, an inferred
+`fun`, an inductive type's parameters, constructor fields via `ctorFieldsQ`);
+`binderQ` alone, on the scope-checked paths that never type the binder (a Π written
+inside a constructor field's or an index's type), decides from the syntax (a written
+`Type`, `Sort u` or `Prop`). The quantities reach the kernel, which already checks usage
+(`popUsage`):
 
 * the binders of a `def`, an `axiom` and a partial definition's signature (`defT`,
   `teleT`, and the match-compiled definitions' telescope, `piTeleQ`), `(1 x : A) → B`
@@ -258,14 +270,16 @@ reach the kernel, which already checks usage (`popUsage`):
 * a `fun` checked against a Π: a written quantity must be the Π's ("binder quantity 1
   does not match the expected ω", as `checkFun`); an unwritten one takes it;
 * `let 1 x := v; b` is the kernel's `letq` (the backend erases the value of a `let 0`);
-* a constructor's parameters are implicit at 0 (the Lean elaborator's `implicitΔ`), so
-  `List.cons` is `(x0 :0 U0) → (x1 : x0) → …`; an inductive type's own parameters keep
-  their binders' quantities. The helper definition that `withDefault'` makes writes an
-  implicit binder's 0 out when it makes the binder explicit.
+* a constructor's *generated* parameters are implicit at 0 (the Lean elaborator's
+  `implicitΔ`), so `List.cons` is `(x0 :0 U0) → (x1 : x0) → …`; an inductive type's own
+  parameters keep their binders' quantities. The helper definition that `withDefault'`
+  makes writes an implicit binder's quantity out when it makes the binder explicit: the
+  one rule (b) gave it (`defParamQs`), since a bare explicit binder would be ω.
 
-Erasure needs nothing new: arguments at 0 were erased already, and there are more of
-them now (an implicit `{w : Nat}` is no longer passed). The self-hosted sources needed no
-change: the Lean frontend checks them with the same rules.
+Erasure needs no new rule: an argument or field at 0 is erased as before, and a type or
+a proof is erased at any quantity. A bare data implicit is ω and passed at run time
+(write `{0 n}` to erase one whose value is only needed in types). The self-hosted
+sources needed no change: the Lean frontend checks them with the same rules.
 
 What does not match the Lean frontend (pinned in a test, and in
 [CoreSpec §15](../CoreSpec.md)): a linear variable used once in each branch of a `match`
@@ -278,9 +292,10 @@ eliminator rules (PR #84).
 
 **Tests** (group `selfhost`): `selfhostAgrees` runs 23 declarations through both
 frontends (accepted and rejected alike: linear functions passed and used twice, `let 1`,
-`let 0`, implicit parameters used at runtime, a `fun`'s quantity against the expected
-one, a quantity `2`); `selfhostVerdicts` pins the three differences above; a program
-with quantities is compiled and run under both collectors.
+`let 0`, data implicit parameters used at runtime, accepted now that rule (b) makes them
+ω, a `fun`'s quantity against the expected one, a quantity `2`);
+`selfhostVerdicts` pins the three differences above; a program with quantities is
+compiled and run under both collectors.
 
 ## 21n: `private`, and unknown commands, in the self-hosted frontend
 
@@ -356,6 +371,13 @@ kernel name; both are reachable only from the declaring module).
 An unknown command, or a modifier the frontend doesn't know (`sealed`, `noncomputable`
 when the grammar gets them), is an error naming it ("unsupported command
 command.sealed"), never ignored.
+
+**Tests.** The module cases in the `selfhost` group check the scope rules (A <- B <-
+input), the two private names of one spelling in two modules, the duplicate rules, the
+one-shot mode and the cache key. The compiler-level case runs that graph through the
+Lean frontend too (whose message text is exactly `'secret' is private to module A`)
+and through the self-hosted compiler's `build` (exit code 1, the same message on
+standard error, no C written).
 
 ## 21o: `link_c`, `link_lib` and `export`, self-hosted
 
@@ -615,8 +637,8 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
   memory and allocations), so it is the next representation step, not this one.
 * **63-bit `Nat`.** `rt.c`'s numbers are 63-bit words with wrapping arithmetic; `wiz.c`
   has 62-bit scalars and `T_BIG` GMP objects. The self-hosted tests rely on `2^63 - 1`
-  (`=selfhost` case 36), so this cannot change without either GMP in every self-hosted
-  program or a deliberate smaller `Nat`.
+  (`=selfhost` case 33, "big numerals with the self-hosted compiler"), so this cannot
+  change without either GMP in every self-hosted program or a deliberate smaller `Nat`.
 * **`T_HYP = 0xFFFF000C`.** `ind`'s lazily computed hypotheses have no `wiz.c` counterpart
   (it computes them in compiled Wiz, `PrimCode.lean`). It is the next free special tag;
   it must be added to the shared header before a value can cross runtimes.
@@ -635,10 +657,12 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
   `wiz_in_bool`, `wiz_in_u64`, … The raw `UInt64`/`Float64` boxes and foreign pointers
   already agree; `Nat` is 63-bit here, and a `Bool` result is the constructor payload
   above, not `wiz.c`'s scalar constructor.
-* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*`, channel, MVar,
-  lock and ref entry points; `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz`
-  emits, no POSIX layer and no thread library (the `rc < 0` rule is implemented but never
-  used). `wiz_live` and the proof budget are globals, not `__thread`.
+* **`lib/Sys` marshalling and threads.** `wiz.c` exports the `wiz_sys_*` entry points;
+  `rt.c` has only the `rt_*` FFI marshalling that `Backend.wiz` emits, no POSIX layer.
+  The thread natives are there (`wiz_chan_*`, `wiz_mvar_*`, `wiz_lock_*`, `wiz_ref_*`,
+  `rt_mark_mt`, the shared-thunk lock, `GC_THREADS` under Boehm, per-thread allocation
+  and live count), so values and threads cross between the two runtimes. The proof
+  budget stays a global.
 * **Leak check exit code.** `wiz.c` reports leaks with exit code 2; the self-hosted
   runtime exits 4 (and only in RC mode), which the `=selfhost` cases test.
 
@@ -664,9 +688,10 @@ after this section was written; "`wiz.c`" below means that runtime, whose header
    `T_BIG` objects (one `Nat` representation at last, at a cost), or accept 63-bit `Nat`
    in the self-hosted backend and keep `T_BIG` a Lean-runtime detail. The closure of this
    choice is what lets a *single* runtime object serve both compilers.
-6. **Threads last.** Port `wiz_mark_mt`, thunk locking and the channel/MVar/lock/ref
-   entry points to `rt.c` (or move the Wiz-side `Session`/`Conc` layer to the shared
-   runtime); the `rc < 0` rules are already in place.
+6. **Threads.** Done for the natives: `rt_mark_mt`, the shared-thunk lock and the
+   channel/MVar/lock/ref entry points are in `rt.c` (the `=selfhost` group's differential
+   case runs them in both runtimes). What remains is the self-hosted frontend's library
+   layer for the phantom indices and linear holes (`Chan p`, `MVar.Hole m`, `Lock.Guard l`).
 7. **Then the runtime is one object**: `wiz_rt.h` + `wiz_rt.c`, `-DWIZ_API=` for the
    object build, embedded inline for the default; the self-hosted compiler links the same
    object, and the fixpoint test checks that both compilers' C output is identical.
@@ -698,9 +723,11 @@ field's quantity as the Lean kernel's do (`Desc.arg q S D`, CoreSpec §9.1):
   two descriptions), `castDesc`, `groundEqDesc`, `eqPayload`, `quote` and `show`
   (`arg(0 Nat, …)`; nothing is printed at ω) follow the Lean kernel.
 
-`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit, 0
-implicit; `2` and `%t` are errors), kept in `Field` (now `mk name q impl ty`), and goes
-into the description (`ctorDesc`, `mctorDesc`) and the constructor's type (`ctorType`).
+`Frontend.wiz`: a field's quantity is read as `elabQuantity` reads it (ω explicit; an
+implicit field by rule (b), 21m: ω for data, 0 for a sort or a proposition; write
+`{0 n : Nat}` for an erased index; `2` and `%t` are errors),
+kept in `Field` (now `mk name q impl ty`), and goes into the description (`ctorDesc`,
+`mctorDesc`) and the constructor's type (`ctorType`).
 An implicit field (`| cons {n : Nat} …`) is an implicit argument of the constructor
 (`Global.implicits`), so a call leaves it out, and patterns name only the explicit
 fields (`explicitPats`, as `explicitIdx`). A match binds each field at its quantity
@@ -715,17 +742,30 @@ A `match` on a structure that has a field at 0 was a difference until #217 (the 
 elaborator projected the erased field at ω); both now bind it at 0, so no difference is
 pinned any more and the 21m test of pinned differences is gone.
 
+**Instance fields (22a).** A field written `[i : C A]` is an *instance* argument of the
+constructor, not an explicit one. `Field` keeps the binder's `BKind` (explicit, implicit
+or instance), so the constructor's mask is `.inst` there: a call leaves the field to
+instance resolution (and the description's quantity is the default ω, as `elabQuantity`
+gives an instance binder), and a pattern skips it exactly as it skips `{…}`
+(`explicitPats`). Before, `Field.mk` kept only an implicit flag, so `[i : C A]` became an
+explicit ω field: `T.mk 3` was rejected ("expected C A, got Nat") where the Lean
+frontend accepts it. The linear-field-at-elimination difference (`wrapTwice`, a `match`
+whose scrutinee is built from a linear variable) stays pinned: the self-hosted match is
+the case at ω (A21), which needs the linear case `casesOn1`/`split`, and `Kernel.wiz` has
+no `split` (B7).
+
 **Shapes changed** (selfhost/*.wiz): `Tm.darg/drec/dhrec` and `Val.vdarg/vdrec/vdhrec` take
 the quantity first; new `Tm.qty`, `Tm.qlit`, `Tm.sigmaQ`, `Val.vqty`, `Val.vqlit`,
-`Spine.ssigq`. Frontend: `Field.mk` has 4 fields, `Ctor.mk` 5, `Col.mk` 4;
+`Spine.ssigq`. Frontend: `Field.mk` has 4 fields (22a: the third is its `BKind`, not a
+bool), `Ctor.mk` 5, `Col.mk` 4;
 `ctorType`, `fieldCols`, `specialize`, `addCtors` take one more argument.
 
-**Tests** (group `selfhost`): field quantities 0/1/ω and implicit fields, the same verdicts
-in both frontends (`fieldQtyDecls`); a program with them, compiled by the Lean compiler and
-by the self-hosted one (both collectors); the differential test's `MTm` descriptions carry
-a quantity (ω in the existing terms); two core terms from the review of this stage
-(`wiz-notes/fieldq-review.md, probes 7a and 15b) checked by Kernel.wiz with the
-Lean kernel's verdicts.
+**Tests** (group `selfhost`): field quantities 0/1/ω, implicit fields and (22a) instance
+fields, the same verdicts in both frontends (`fieldQtyDecls`); a program with them,
+compiled by the Lean compiler and by the self-hosted one (both collectors); the
+differential test's `MTm` descriptions carry a quantity (ω in the existing terms); two
+core terms from the review of this stage (`wiz-notes/fieldq-review.md, probes 7a and 15b)
+checked by Kernel.wiz with the Lean kernel's verdicts.
 ## 21y: modules and imports (A14, first milestone)
 
 `import M` was silently the embedded Prelude: the self-hosted frontend had one module,
@@ -818,7 +858,8 @@ passes, and the self-hosted frontend still checks itself.
 `f a (x := e) b` now elaborates in the self-hosted frontend. The kernel's `Tm` and `Val`
 carry no binder names, so a `Global` keeps its parameters' names beside their implicit
 mask (`paramNames`, as `paramMask`; filled for definitions, axioms and partial
-definitions from their written binders; an `extern` writes no binders). An application
+definitions from their written binders, and for a constructor from the type's parameters
+followed by the constructor's fields; an `extern` writes no binders). An application
 with `term.namedArg`
 arguments is split into named and positional lists, in source order. A duplicate name is
 `argument 'x' was already given`. The telescope is then walked: a binder whose name has
@@ -836,17 +877,23 @@ arguments still match by name), and `f (b := 1) 5` gives `a` the `5`.
 Named arguments work for a global function whose parameters are written as binders, or
 in the leading Π binders of its type (`axiom f : {A : Type} → …`, so `MVar.new
 (A := B)` is accepted; that also reads the names an `extern` writes in its type).
-A constructor's fields and a local variable's Π type keep no names yet, so a named
-argument there is rejected (a clear error, not a silent mismatch); class/instance
-binders will use the same path once A10 stores their names. An implicit parameter
-written only in a declaration's type is still not inserted positionally when it is
-omitted (A3); it can be supplied by name.
+A constructor's parameters and fields are named too (`paramNames` is the type's `ps`
+followed by the constructor's fields, beside the same implicit mask): `P.mk (y := 2)
+(x := 1)` fills `x` and `y` in the telescope's own order, so a later field's type may
+mention an earlier named one, and an implicit constructor field or a parameter can be
+named (`Imp.mk (n := 3) 7`). A local variable's Π type, a dot-constructor (`.mk`, whose
+head needs the expected type) and an inductive type's own parameters
+(`List (A := Nat)`) keep no names yet, so a named argument there is rejected
+(a clear error, not a silent mismatch); class/instance binders will use the same path
+once A10 stores their names. An implicit parameter written only in a declaration's type
+is still not inserted positionally when it is omitted (A3); it can be supplied by name.
 
-**Tests** (group `selfhost`): explicit, implicit, reordered and interleaved named
-arguments, a named implicit, `@f` with a named implicit and with a named explicit, and
-implicit insertion around named arguments, checked against the Lean frontend; unknown,
-duplicate, ordering and bare named-argument errors; and the self-hosted frontend still
-checks itself.
+**Tests** (groups `selfhost`, `language`): explicit, implicit, reordered and interleaved
+named arguments, a named implicit, `@f` with a named implicit and with a named explicit,
+and implicit insertion around named arguments, checked against the Lean frontend; a
+constructor's named fields and parameters (reordered, a dependent later field, an
+implicit field); unknown, duplicate, ordering and bare named-argument errors; and the
+self-hosted frontend still checks itself.
 ## 21aa: `import_c`, `glue` and native representations, self-hosted
 
 The self-hosted frontend now reads C headers (`selfhost/CParse.wiz`) and checks the C
@@ -861,18 +908,26 @@ typedefs and struct definitions. `import_c` binds the scalar prototypes it can m
 access, then emits a static C wrapper called by the backend's normal foreign path.
 
 `attribute [implemented_by mk get] T.mk` is accepted on a sealed constructor; the
-constructor's implementation is registered (`mk`), as is the representation. A type
-whose operations are all `implemented_by` runtime natives (the `U32Array`/`U64Map`
-pattern) therefore compiles to its natives. Direct pattern matching on a native value
-still needs `get` in erasure.
+constructor's implementation is registered (`mk`), as is the representation: its tag,
+field count, one runtime field, and the arities of the two conversions. Erasure builds a
+value of `T` as `mk` applied to the constructor's runtime field, and feeds a match on a
+value of `T` the model's field chain (with `get` for that field), as the Lean compiler
+does. A type whose operations are all `implemented_by` runtime natives (the
+`U32Array`/`U64Map` pattern) therefore compiles to its natives, and pattern matching on
+a native value reads the field through `get`.
 
 **Not done.** No preprocessor, no automatic struct/pointer mapping from a header (declare
 a `c_struct`/`foreign_type`), no `for` loops, struct locals or `&struct` in self-hosted
-glue, no rewriting of matches through `get` (buffer parameters came in 21ad).
+glue, and no `nativeHome?` (a value with a native representation built or taken apart
+outside the type's module: the constructor's `private` is not enforced as a scope, so a
+multi-module program can do it).
 
 **Tests** (group `selfhost`): an `import_c` header whose functions are called from Wiz
 and from `glue`, and a native representation on a sealed constructor that runs through
-`wiz_u32array_*`, in GC and RC modes.
+`wiz_u32array_*`, in GC and RC modes. A `UIntN`-like sealed type whose `mk`/`get` are
+externs is compiled and run by the Lean host and by the self-hosted compiler, with the
+same output in GC and RC modes; the registrations' verdicts and the errors' wording are
+differential too.
 
 **ABI v1 (aligned with `wiz-notes/prior-art/compilers-runtime-ffi.md` §2.2, cheap
 parts only).** Kinds are explicit in every `Foreign.fn`: `n`/`u` are `uint64_t`, `f`
@@ -954,8 +1009,8 @@ command is parsed with the rules declared by the previous ones.
 **Not done.** The macro and tactic registrations name a *function* the host executes at
 elaboration time (`ListLit.expand`, `Ex.binderMacro`, ring reification, Feral's whole
 DSL). The self-hosted frontend has no elaborator-time evaluator, so it cannot run one:
-`lib/Prelude.wiz`'s list literals, `Logic`'s `∃` and the ring macros would elaborate to
-an "unsupported syntax" error. That is A12's other half, and it depends on the
+`Logic`'s `∃` and the ring macros would elaborate to an "unsupported syntax" error (list
+literals are the exception: `Parse.wiz` carries their surface rule itself). That is A12's other half, and it depends on the
 elaborator-time evaluation that A11 and A13 also need. Printing notation
 (`app_unexpander`) is accepted but `#check`/`#reduce` still print kernel terms; the
 host's notation-aware printer (`Wiz/Core/Pretty.lean`) is not ported. Keyword scopes
@@ -1067,7 +1122,7 @@ frontends, and the same failing `rw` in both, comparing verdicts and the error t
 unchanged and remains the host-side regression.
 
 **Verification on this branch** (A12+A11+A13 merged; the self-hosted compiler built from
-the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #147–#151), and
+the current `selfhost/*.wiz`): all five A13 cases pass (`=selfhost` #140–#144), and
 `=tactics` is 28/28. A full `=selfhost` run reached **112 cases, 0 failures** (and
 #112–#114 also passed) before the machine restarted; the remaining tail was being
 re-run when it restarted again, and the A13 cases were then re-checked individually. The
@@ -1081,10 +1136,40 @@ covers ordinary inductives only), no rewriting in hypotheses, no
 (A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
 type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
 whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
-written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+written ones), so the exact `unfold List.filter` steps of `lib/Data/ListLemmas` are not
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
+
+## 21af: how much of the parity group runs the pipeline
+
+`Tests/Groups/SelfHost.lean` used to be one group (185 cases when it was split; 175 when
+the audit measured it), and 35 of them never invoked the self-hosted compiler or checker:
+they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel in process.
+A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
+pipeline measurement. The group is now split by what a case runs:
+
+* `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
+  compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
+  (`selfhostChecker`/`selfhostCheckFile`/`selfhostOutput`) and compares what it says —
+  against a hand-written expectation, or against the Lean frontend/kernel for the
+  differential cases. This is the number to quote for parity.
+* `=selfhost-host` (**14 cases**) runs the Lean host only: the static `Tables.wiz`
+  regeneration check, the additive match (the self-hosted frontend has no additive
+  eliminator, A21), in-process probes of the Lean kernel/`MTm` (their Wiz counterpart is
+  the "and both kernels agree below" pipeline case), and the anti-vacuity case below.
+
+The anti-vacuity case builds a stub that writes `input.wiz` to standard output as both
+the compiler and the checker, runs every `=selfhost` case in a child process with
+`WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
+passes. That is the audit's measurement turned into a test, so the pipeline group cannot
+regress into cases that do not reach the pipeline. Twenty-two cases that used to
+compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
+type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.wiz`'s
+erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
+the cases that cannot — they call the Lean kernel API in process, need the additive
+eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
+`selfhost` shard split 6) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 
@@ -1135,14 +1220,33 @@ heavy --mem 4G .lake/build/bin/tests --libdiff --limit 10      # a first look
 heavy --mem 4G .lake/build/bin/tests --libdiff --only lib/Hoare.wiz
 heavy --mem 4G .lake/build/bin/tests --libdiff --json > gap.jsonl
 heavy --mem 4G .lake/build/bin/tests --libdiff --baseline libdiff-baseline.json
+heavy --mem 14G .lake/build/bin/tests --libdiff --jobs 3       # three files at a time
 lake test -- '=selfhost-libdiff'                               # the same, as a group
 ```
 
 The group skips (a skipped case is not a pass) when there is no C toolchain for the
-self-hosted compiler, and never fails because of a gap; it writes the full report to
-`.lake/libdiff/` (`records.jsonl`, `summary.txt`), because the harness hides a passing
-case's output. CI runs it as its own shard (`selfhost-libdiff` in
-`.github/test-shards.json`).
+self-hosted compiler, and never fails because of a gap. It is four cases, each over a
+contiguous range of the file list by index (every file is checked exactly once), and
+each writes its own report under `.lake/libdiff/` (`records-1-of-4.jsonl`,
+`summary-1-of-4.txt`, …), because the harness hides a passing case's output. CI runs
+one case per job (`selfhost-libdiff` in `.github/test-shards.json`: `"split": 4`,
+`"split-cases": true`), so the 45-minute sweep is four jobs of about 16 minutes instead
+of the run's critical path.
+
+The sweep is one case, because building the self-hosted compiler takes minutes and
+every file needs it, so it is split inside the case: `--jobs N` (on `tests --libdiff`, or
+the driver's `--jobs N`, which a group that runs its cases one at a time passes on to
+them; in CI the shard's `"jobs"`) checks N files at a time. The workers take the files off
+one list, each exactly once, and the records come back in the files' order, so the
+report, the verdicts and the baseline signatures are a sequential sweep's. Each file
+keeps its own bounds, which start when its run starts. What could change a verdict is
+an oversubscribed machine, so the workers are capped by the CPUs (`nproc`) and by the
+free memory at `--mem` per file: the least of `MemAvailable` and each enclosing cgroup's
+`memory.max` minus `memory.current`, so a `heavy --mem 7G` job runs one file at a time
+and a 16 GB runner three. A worker also starts its next file only while that much memory
+is free or no other file is running. The summary reports the slowest host and
+self-hosted runs (and `ms` per side in the records), the margin to the 60 s and 120 s
+bounds.
 
 `--only` and `--limit` make it usable as the A13 work list: the gap list groups the
 files whose verdicts differ by the construct the self-hosted frontend names
@@ -1208,6 +1312,399 @@ slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argu
 self-hosted one (collector and reference counting); `=ffi` has `#eval`/`#run` of the
 operations in the host interpreters.
 
-**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
+**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/Data/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21ah: the unit eliminator and `split` in the self-hosted toolchain (B7)
+
+The two eliminators linear data needs: `let () := u; b` (the unit eliminator, consuming
+`u : Unit`) and `let q (x, y) := s; b` (Σ elimination). `Kernel.wiz` had the `letUnit`
+rule; it gains `Tm.split q s m b` (the motive `m` under one binder `z`, the body `b`
+under `x` and then `y`), its stuck `Spine.ssplit`, `vSplit` (η on a pair, and a proof
+split by η when `kernelLazyProofs`, as the Lean kernel's `vSplit`), `forceSp`,
+`fromAbsurd`/`toAbsurd`, `quoteSpine`, `typeOfNe`, the conversion of two stuck splits,
+and the usage rule: the scrutinee at `q`, the components bound at `q·p` and `q` (for a
+Σ at `p`), with the erased positions of §7.1 of CoreSpec.
+
+`Frontend.wiz` elaborates the parser's `term.letUnit` (`letUnitT`) and `term.letPair`
+(`letPairT`), a tuple `let (x, y, z)` as nested pairs (`letTupleToPairs`), in check
+position (and `let ()` in infer position), and carries both forms through
+`tmMapChildren`, `zonk` and `inlineTm`.
+
+`Backend.wiz` no longer refuses `letUnit`: `u` is erased and its binding comes before the
+body (in the collector mode the generated C's `let` is a strict statement, so a call in
+`u` is evaluated, as the Lean erasure has it). A `split` becomes
+`let s := s'; let x := s.0; let y := s.1; b`; at quantity 0 the scrutinee, both
+components and the body are erased.
+
+**Tests** (group `selfhost`): the frontend verdicts against the Lean frontend (a linear
+`Unit` consumed once; a `let 1` pair whose second component is dropped or used twice; a
+`let (x, y)` and a three-tuple; a projection of a linear pair refused; `let ()` at
+quantity 0 refused), and a program both compilers build and run (collector and reference
+counting) that prints `40 1 42` from a `let 1` pair, a `letUnit` and a three-tuple.
+
+**Not done:** a destructuring `let 1 (.mk a b) := s` for structures, and a linear
+`match` (A21): a structure held at quantity 1 still has no eliminator.
+## 21ai: `#print axioms` and `set_option`, self-hosted (A23, first slice)
+
+The self-hosted frontend's command set was the closed list of A7 (plus the syntax
+commands): every other parsed command was `unsupported command …`. Two more now have the
+host's behaviour, with the host's text:
+
+* **`#print axioms f`** (`Frontend.wiz`, `printAxiomsCmd`/`tmConsts`/`axiomsOf`). As
+  `Globals.axiomsOf` (`Core/Check.lean`), it walks the declaration's type and value,
+  follows every constant, and names each declaration without a value (`axiom`, `extern`;
+  a partial definition's signature and body are two globals here, and neither is named,
+  its body walked only where the host walks an implementation), lists `native f := g`
+  for an `implemented_by` target (walked as code), and `native T := mk/get` for a native
+  representation, in the host's order and with the host's `(native: …)` note. A `sealed`
+  type's seal is named when the type is mentioned: the host's terms use the type at its
+  seal, while this frontend keeps the seal inside the index's `Π`, where no constant
+  names it. This frontend registers no `builtin`s, so `builtin k := n` never appears,
+  and a numeral adds no dependency (the host lists only the `nat` registrations made
+  outside the toolchain's library).
+* **`set_option pp.notation v` / `set_option pp.all v`** (`setOptionCmd`). Takes
+  `true`/`false` and reports the host's two errors, ``expected `true` or `false``` and
+  `unknown option … (there are pp.notation and pp.all)`. The option changes nothing
+  here: the self-hosted printer prints the kernel's normal form and has no notation to
+  turn off.
+
+**Tests** (group `selfhost`): "#print axioms lists the same axioms as the Lean frontend
+(A23)", "#print axioms walks a partial definition's body only as code, as the Lean
+frontend (A23)" and "set_option values and unknown options, as in the Lean frontend (A23)"
+run one file through both frontends and compare every message line (`selfhostSameLines`).
+The axioms file covers a definition with no axioms, a chain to two axioms, an axiom, an
+inductive type and its constructor, an `implemented_by` target whose implementation
+mentions an axiom, a `sealed` type's native representation, and a foreign function; the
+partial file checks that a partial definition's body is reached only as an implementation
+(so `modelA`, implemented by `loopA`, lists `pa`, while `loopA` and its users do not).
+
+**Not done (A23).**
+
+* `#erase`: the self-hosted *checker* is built from `Selfhost.checkerFiles`, which has the
+  frontend and no `Backend.wiz`, so it has no erasure pass; and the host's `#erase` needs
+  binder names the terms here lack. `ETm.lam` and `ETm.letE` carry none, and neither does
+  the kernel's `Tm.lam`/`letE` (`Kernel.wiz`) that the frontend keeps, where
+  `ETerm.toString` prints `(λx. …)` and `(let x := …; …)`; the host's `#erase` also
+  starts from the declaration's `impl` (the compiler's derived equations) with its level
+  instantiation, not from the value this frontend would erase.
+* `#ir`: no IR, and none of the services that would print one. The self-hosted backend
+  goes from `Tm` through erasure (`eraseCheck`) straight to C (`Backend.wiz`); there is
+  no `lowerProgram`, optimizer or IR printer.
+* `#run`: no IR interpreter or reference-counted checked heap; `#run` runs the host's IR
+  (`IR.runProgram`), which this frontend does not have. `#eval` is `#reduce` here (21u).
+* `#print` (plain), `#guard` and `example`: no such host commands
+  (`Wiz/Parser/Builtin.lean` has `#print` only as `#print axioms`), so there is no host
+  behaviour to match.
+* `builtin`, `universe` and notation attributes: still missing (needed by `lib/`).
+* `#print axioms`'s only textual gap: a *written* partial-definition witness
+  (`partial (default := a) def f`) is checked and then discarded (`witnessOf`), so an
+  axiom that only the witness mentions is not listed; the host walks the witness.
+## 21an: a `×` type as an inductive field, self-hosted
+
+The self-hosted frontend has two elaborators: `inferType`/`elabBy` check types and
+terms, and a **scope checker** (`elab`) names each global by its index in the
+declaration table, which `closeG` then closes over the globals so that a declaration is
+a term in the empty context (`closeG d t` turns every index at or beyond its `d`
+binders into a constant). The scope checker is what elaborates an inductive
+constructor's field types (and a `match`'s descriptions).
+
+`closeG` visited `var`, `pi`, `lam`, `app`, `letE` and `ann`, and returned every other
+form unchanged. That was invisible while the field types were only functions and
+constants, but `elab` reads `A × B` (`term.prod`) as a `sigma` whose **second component
+is under the pair's binder** — so a syntactic pair in a field type was left with its
+two components as *scope indices*, and the kernel rejected the declaration with
+
+```
+internal error: a variable out of scope
+```
+
+A pair written through a definition (`def P : Type := Nat × Bool`; `| mk (p : P)`) was
+fine, because there the pair is an `app` of constants and `closeG` closed it; the same
+type in a `def` was fine too, as `def` types go through `inferType`, not `elab`.
+
+`closeG` now closes a `sigma`'s first component at `d` and its second at `d + 1`, like
+`pi`. That is the whole fix: `structure React.Out (M : Type) where … handlers : List
+(String × M)` in `lib/Web/React.wiz` and `inductive … | mk (p : Nat × Bool)` in any
+module now elaborate and check, in the self-hosted frontend as on the Lean one.
+
+**Tests** (group `selfhost`): `sigmaFieldDecls` — a `×` as an inductive field, a
+structure field, a field of a parameterised type, two nested pairs in a structure, and a
+use of the pair's `.1`/`.2` in a `match`, with the same verdicts in both frontends; a
+pair argument of the wrong type is still rejected by both. The A17 case of
+`surfaceListProgram` checks the list literal itself (nested, empty, and in a pattern)
+against the host.
+
+**Measured** (`tests --libdiff` over the two library modules and three neighbours, the
+same harness before and after the one-line change):
+
+| file | before | after |
+|---|---|---|
+| `lib/Web/React.wiz` | 139 errors, first `internal error: a variable out of scope` (l. 182) | 136 errors, first `type mismatch: … (List (String × M))` (l. 221) |
+| `lib/Web/Widget.wiz` | 141 errors, first `type mismatch: expected Json, got …→ Json` (l. 130) | 138 errors, first the same |
+| `lib/Json.wiz`, `lib/Hoare.wiz` | 3, 261 errors | 3, 261 |
+| `scry/tests/ReplPrelude.wiz` | `ok` | `ok` |
+
+Neither record flips to `ok`: the counts are errors in the whole module graph, not in
+the file (21ae). React's first error is now a second, independent self-hosted bug that
+the fix uncovered — a `partial` definition **by equations** whose result is a pair and
+whose body calls itself:
+
+```
+structure Out (M : Type) where
+  handlers : List (String × M)
+
+partial def go {M : Type} : Nat → Out M → Nat × Out M
+  | .zero, o => (1, o)
+  | .succ k, o => go k o
+```
+
+The Lean frontend accepts it; the self-hosted one reports `type mismatch: expected
+(Nat × Out M), got (Nat × Out (… ?m …))`, a metavariable from the recursive call's
+inserted `{M}` left unsolved with a spine of the match's binders. Without the recursive
+call, or as a plain `def`, the same declaration passes.
+
+**Not done:** the two `lib/Web` modules this was found in are still not accepted by the
+self-hosted frontend, and the `=selfhost-libdiff` rows for them cannot flip to `ok`
+yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in these files:
+
+* `lib/Web/Widget.wiz` writes its attribute and child lists as `[a, b]`. List literals
+  parse (A17: `term.listLit` in `selfhost/Parse.wiz`, rewritten by the frontend), but
+  the other macros these files use do not: their rule names a function the host runs
+  at elaboration time (`ListLit.expand`, `Json.mkObj`'s), and the self-hosted frontend
+  has no elaborator-time macro evaluator (A12).
+* Both files import `Json`, `Text`, `Web.React` and their closures (`Optic`, `Tagged`,
+  `Logic`, `Result`). The Lean toolchain's prelude is `lib/Prelude.wiz` (266
+  declarations: `builtin`, `attribute`, macros, tactics, classes), while the
+  self-hosted loader always uses its embedded `Prelude` (`moduleRootSourcesAs`: "the
+  self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`"). The two
+  preludes disagree, so a `lib/` module that declares `List.map`, `List.length` or
+  `String.length` (as `lib/Text.wiz` does) is a duplicate declaration for the
+  self-hosted frontend, and names the embedded prelude lacks (`List.foldl`,
+  `List.revOnto`, `outParam`) are unknown. Until the self-hosted frontend can
+  elaborate `lib/Prelude.wiz` (A9–A23), a `lib/` row of the libdiff measures the
+  difference between two preludes, not the file.
+## 21al: the driver's cache: read-only layers, pruning and manifests (D5)
+
+The driver's elaboration cache was one writable directory (`--cache DIR`, default
+`~/.cache/wiz`) with one `.check` entry (the frontend's tagged lines and exit status)
+and one `.c` entry (the generated C) per graph key (21n). It now has the host's cache
+layers and housekeeping (`Wiz/Cache.lean`, `Wiz/Toolchain.lean`, `docs/stages/11-tooling.md`)
+where a one-file-per-graph cache can have them.
+
+* **Read-only layers.** `--cache-ro DIR` is repeatable and appends a read-only layer.
+  A lookup tries the writable `--cache` first, then the layers in the order given; a
+  missing or unparsable entry falls through to the next. Only a miss writes, and only
+  to `--cache`; a hit in a layer is served where it is and is never copied back. A
+  read-only layer is therefore never created or modified, and `-v` names it
+  (`cache hit: KEY (read-only DIR)`). `--no-cache` clears both lists, as the host's
+  does, so `--no-cache --cache-ro DIR` replays a shipped layer and writes nothing
+  (a later `--cache` or `--cache-ro` adds one again). A layer is one this driver wrote:
+  its keys and file names (`.check`/`.c`) are the driver's, not the host's `.wizc`
+  cache, so a layer shipped for the Lean-hosted `wiz` is not read here.
+* **Pruning.** `--cache-prune DAYS` runs before the command (so the process has not read
+  what it deletes) and walks the **write cache only**: the driver's keyed files
+  (`.check`, `.c`) whose modification time is older than DAYS days are removed,
+  recursively, and their bytes are reported. A layer is never passed to the pruner, a
+  manifest (`.mf`) and anything not named `.check`/`.c` is left alone, and a pruned entry
+  is an ordinary miss (the next run elaborates and rewrites it). DAYS must be a number
+  of at least one, with the host's messages (`--cache-prune needs at least one day`,
+  `--cache-prune needs a number of days, not …`) and exit 1. The walk uses the host
+  runtime's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns`
+  interfaces (`lib/Sys.wiz`); the selfhost runtime (`selfhost/rt.c`) now implements the
+  same leaves in its own value representation, so a driver built by either toolchain
+  can prune.
+* **Output manifests (`--cache-verify`).** Each entry can have a sidecar,
+  `<entry>.mf`: one line, `m<digest>`, where the digest is the driver's rolling hash
+  (`hashStep`, FNV-1a-shaped, modulo 4294967291) over the whole
+  `s<status>\n<payload>` text. `off` neither reads nor writes manifests;
+  `warn` (the default) verifies one when it exists and otherwise keeps the old
+  unverified lookup; `strict` (alias `require`) uses only manifested entries. A
+  mismatched, truncated or unparsable manifest is a miss (never a wrong result), and a
+  cold `strict` run writes the manifests, so the next one is a hit. Manifests are
+  written to the write cache only, never to a layer; an entry written by `--cache-verify
+  off` has no manifest, so `warn` still reads it and `strict` does not. This is the
+  host's policy, not its layout: the host has per-module SHA-256 manifests with a
+  Merkle root under `manifest.d/` and a per-layer generation index, while the driver's
+  graph key already names the whole input, so one digest per entry is enough to catch
+  the corruption and truncation the flag is for. There is no signature (the host has
+  none yet either; P3).
+
+**Tests.** Group `selfhost-cli`: `--cache-ro` with a layer copied from a warm write
+cache (a hit with a fresh, still absent write cache; the layer's bytes unchanged; the
+read-only-only form), layer order (the first layer's answer wins), `--cache-verify`
+cold/warm under `strict`, an `off` entry read by `warn` and refused by `strict`, a
+rewritten entry detected as a miss and re-elaborated, and `--cache-prune` removing the
+two aged keyed files from the write cache, leaving the aged layer and its manifests,
+then keeping fresh entries and rejecting `0`/`x` with the host's messages. Group
+`selfhost-cli-diff`: both tools accept `--cache-ro` (and `--no-cache --cache-ro`) and
+neither writes the layer, both reject a bad `--cache-prune` DAYS alike and prune before
+the run, and both modes of `--cache-verify strict` are warm on the second run.
+
+## The two preludes, and the drift check
+
+`import Prelude` names two different values depending on which compiler reads it.
+
+**The host copy.** `lib/Prelude.wiz` (1,574 lines, hand-written) is the library's
+prelude. `wiz` reads the `lib/` next to its binary (`Wiz/Module.lean:163`,
+`Module.toolchainLib`); the Nix package stages the checkout's `lib/` into
+`share/wiz/lib` with a plain copy (`flake.nix:94`), so the installed file is the same
+bytes as the source — a staged copy, not a second one that can drift. `Tests/`, the
+documentation examples and `wiz check` all see this one (the `check-prelude` corpus
+entry in [building.md](../building.md#the-wiz-memory-corpus) is `wiz check
+lib/Prelude.wiz`).
+
+**The embedded copy.** `selfhost/Frontend.wiz:7488` defines
+
+```wiz no-check
+def preludeText : String := "inductive Nat where\n…"
+```
+
+a single-line Wiz string literal (352 lines, about 16 KB when decoded;
+`scripts/check-prelude-drift.py --dump-embedded` prints it). It is hand-written from
+stage 19a, not generated. The self-hosted module loader substitutes it for every
+`import Prelude` (`Frontend.wiz:9210`) and canonicalises `IO`, `Std` and `Sys` to it
+(`Frontend.wiz:8963`–`8967`); the comment at `Frontend.wiz:8889` is explicit: "the
+self-hosted prelude is what this frontend can check, not `lib/Prelude.wiz`".
+
+**The page's copy is the embedded one.** `web/build-playground.sh` concatenates
+`frontendFiles` from `Wiz/Selfhost.lean:123` (which includes `Frontend.wiz`) into the
+Wasm engine, and `web/selfhost-lsp-shim.js:68` prepends `import Prelude` to a program
+that has no import. There is no third copy under `web/`: the page runs `preludeText`.
+The drift check fails if a `web/**/*prelude*.wiz` ever appears, because that would be a
+copy it does not compare.
+
+### The divergence, demonstrated
+
+The two are a subset and a superset at once.
+
+* The page is **ahead** of `import Prelude` on the host for two names: `List.map`
+  (`lib/Text.wiz:45`) and `String.length` (`lib/Text.wiz:191`) are in the embedded
+  prelude, so with only `import Prelude` a page program accepts them and `wiz check`
+  rejects them:
+
+  ```text
+  $ wiz check maptest.wiz
+  maptest.wiz:3:39: error: unknown identifier 'List.map'
+  maptest.wiz:4:31: error: unknown identifier 'String.length'
+  ```
+
+  (with `wiz 0.1.0-dev (aeaa34ef…)`). `import Text` makes the host accept them. The
+  page's Wasm engine is the mirror image: `#check List.map` gives a type, and
+  `#check Nat.subFrom` gives `error: unknown identifier Nat.subFrom`. So the roadmap's
+  example has the direction reversed: the playground tour's `List.map` works on the
+  page and is exactly what `wiz check` rejects. The tour file itself is on an unmerged
+  playground branch, not on `master`.
+
+* `Nat.blt` is the sharper case: `lib/Prelude.wiz:174` registers
+  `builtin nat.blt := Nat.lt`, but the host has no identifier `Nat.blt` (`#check`
+  rejects it; "did you mean `Nat.lt`"). The embedded prelude defines one, so the page
+  accepts a name the library does not have.
+
+* The page is **behind** on the library's runtime surface: `Nat.subFrom`
+  (`lib/Prelude.wiz:89`), `Nat.powFrom` (221), `pipe` (140), `outParam` (331),
+  `castRefl` (37), `Eq.cast`/`Eq.subst`/`Eq.substBack` (45, 52, 55) and all 27 classes
+  (283–475) are not in `preludeText`. A `lib/` file that uses them is one of
+  `selfhost-libdiff`'s gaps. This is partly deliberate: the embedded prelude is a
+  model, its arithmetic is monomorphic (`infixl " + " => Nat.add`), where the host has
+  `HAdd`/`Add` and instances.
+
+The checker reports 71 runtime declarations in `lib/Prelude.wiz`, 40 of them embedded,
+23 classes, and 8 reviewed gaps. `preludeText` has 162 names: 147 are also declared
+under `lib/`, 15 are reviewed embedded-only names (the `Bytes` model's helpers, `Prod`
+and its projections, `String.data`, `Nat.blt`). 87 names are *promoted*: the page
+offers them with `import Prelude`, while the host declares them in `lib/IO.wiz` (66),
+`lib/Std.wiz` (17), `lib/Sys.wiz` (2) or `lib/Text.wiz` (2, the two above).
+
+### The check
+
+`scripts/check-prelude-drift.py` compares the **semantic surface**, not bytes. Bytes —
+or a hash of either file — would fail forever, because the copies are not meant to be
+equal: one is a class/notation/metaprogramming library, the other a monomorphic model
+for a frontend that has none of those. A checked-in hash is the right comparison only
+for a *generated* file, and there is no generator, because one would have to elaborate
+the host prelude first.
+
+The script parses `lib/Prelude.wiz` (declarations, inductive constructors, structure
+and class fields; the line `-- (end of the Boolean section)` at line 479 separates the
+runtime surface from the metaprogramming layer) and the decoded `preludeText`, then
+enforces three invariants:
+
+1. **coverage** — every runtime `def`/`axiom`/`extern`/`inductive`/`structure` is in
+   the embedded copy with the same kind and the same constructors and fields, unless
+   it is in the script's `EXEMPT` list with a reason. A PR that adds a value
+   declaration to `lib/Prelude.wiz` without touching the embedded copy fails here.
+   (Classes and notation are out of scope by design: the embedded prelude defines a
+   fixed set of infix operators and no classes.)
+2. **origin** — every name in `preludeText` is declared somewhere under `lib/`, or is
+   in `EMBEDDED_ONLY` with a reason. The page cannot invent library surface, and a
+   private helper added to the embedded copy needs a reviewed entry.
+3. **staleness** — an `EXEMPT`, `EMBEDDED_ONLY` or `META_ROOTS` entry that matches
+   nothing is an error, so the lists cannot rot into a blanket exemption. `META_ROOTS`
+   is the set of namespaces after the runtime marker; it makes appending a declaration
+   at the end of the file a reviewed decision instead of an escape from coverage.
+
+Run it with `python3 scripts/check-prelude-drift.py`. It takes well under a second and
+needs only Python 3. `--self-test` runs ten fixtures (a clean pair, a new library
+name, an invented embedded name, a runtime declaration appended after the marker, a
+changed kind, a lost constructor, a stale and a matching exemption, and a redundant
+`EMBEDDED_ONLY` entry); `--verbose` lists every name, `--dump-embedded` prints the decoded
+prelude, `--root DIR` checks another checkout. CI runs `--self-test` and then the check
+in the `prelude_drift` job (`.github/workflows/ci.yml`), and `CI result` requires it. A
+failure names the line and the remedy:
+
+```text
+[coverage] lib/Prelude.wiz:182: def Nat.flatMap is not in preludeText
+(selfhost/Frontend.wiz:7488). Add it there, or add a reviewed EXEMPT entry with a
+reason in scripts/check-prelude-drift.py.
+```
+
+### What the real fix costs
+
+The destination is one prelude: the self-hosted compiler loads the library's own
+`lib/Prelude.wiz`, and the page embeds that same text instead of a second model. Three
+routes, cheapest first:
+
+1. **Extract the literal to `selfhost/Prelude.wiz`, and generate the string from it.**
+   `include_str` exists in the host but not in the self-hosted frontend
+   (`selfhost/Frontend.wiz` has no `term.includeStr`;
+   [dogfood notes](../notes/dogfood-new-features.md) item W7 is this extraction), so the
+   embedding has to happen where the selfhost sources are assembled. The repo already
+   has the pattern: `scripts/GenSelfhostTables.lean` writes `selfhost/Tables.wiz`, a
+   checked-in generated source that the `selfhost` group fails when stale. A small
+   generator can instead write `selfhost/PreludeText.wiz` — the escaped literal — from
+   a hand-maintained `selfhost/Prelude.wiz`; the source list gains that file before
+   `Frontend.wiz`, and `web/build-playground.sh` picks it up through `frontendFiles`
+   with no change. About a day: the generator, the lake target, the staleness test, and
+   moving 352 lines. The drift check then compares two real files. The bootstrap
+   identity changes (`toolchainId` hashes the sources), so caches go cold and the
+   fixpoint must be rerun. This does not make the two preludes equal; it makes the
+   second one readable, diffable, and still checked.
+2. **Load `lib/Prelude.wiz` through the `-I` roots (`--prelude-from-roots`).** This is
+   the real fix for the native compiler. There is a working opt-in for stage 21af on an
+   unmerged branch (669 lines in `Frontend.wiz`, 55 in `Cli.wiz`, 134 test lines and a
+   doc section). It is blocked by three elaboration gaps in `lib/Prelude.wiz` itself (a
+   constructor field of function type returning the type being defined, `×` in a
+   constructor field, a class field in `Type 1`), by `outParam` and default instances,
+   and by the Backend not knowing the library's externs and builtins. Cost: that branch
+   plus those fixes, and a re-run of `selfhost-libdiff` until `lib/` checks; weeks, not
+   days. It also cannot fix the page by itself: Wasm has no filesystem, so the browser
+   still needs the prelude text embedded at build time — the same splice as (1), but
+   reading `lib/Prelude.wiz`.
+3. **A checked-in generated file with a hash.** Only meaningful if a generator can
+   produce the embedded subset from `lib/Prelude.wiz`; today it cannot, because the
+   frontend cannot elaborate the host prelude. A hash of `lib/Prelude.wiz` in
+   `selfhost/Frontend.wiz` would pin an input to a copy that still has to be maintained
+   by hand. The surface check above is the honest version of that idea.
+
+Recommendation: keep the check (this change); do (1) next, so the embedded copy is a
+reviewable source file; do (2) when the 21af blockers land, and make the page embed
+`lib/Prelude.wiz` at build time. Only then is `selfhost-libdiff` on a prelude-only
+change a pure no-op.
+
+**Not covered.** Signature and body drift under the same name (the embedded `Nat.sub`
+recurses on a different argument than the host's), notations and operator precedence,
+and the class/instance layer (a new class or notation in the host prelude does not fail
+the check). Those need elaboration, not a regexp; `selfhost-libdiff`
+measures their consequences, and the check's report names the known gaps on every run.

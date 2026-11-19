@@ -23,11 +23,6 @@ def shows : List Nat → String
   | .nil => ""
   | .cons x xs => Hdl.show x <+> " " <+> shows xs
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def countOnes : List (List Nat) → Nat
   | .nil => 0
   | .cons o os => match Nat.beq (Hdl.nthD 0 o 0) 1 with
@@ -58,7 +53,7 @@ def baudReportW (label : String) (w n : Nat) : String :=
   let ins := Hdl.map (fun (k : Nat) => BitVec.ofNat 1 1) (Hdl.upto cycles 0);
   let c := Uart.baudCw w n;
   let outs := Circuit.runLeaves c ins;
-  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", ticks " <+> Hdl.show (countOnes outs)
 
 def baudReport (n : Nat) : String := baudReportW "baud" Uart.cntW n
@@ -96,9 +91,9 @@ def loopReportW (label : String) (w n : Nat) (datas : List Nat) : String :=
   let c := Uart.loopbackCw w n;
   let outs := Circuit.runLeaves c ins;
   let got := bytes outs;
-  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", sent " <+> shows datas <+> ", got " <+> shows got
-    <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", ok " <+> yes (BEq.beq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart" c))
 
 def loopReport (n : Nat) (datas : List Nat) : String := loopReportW "uart" Uart.cntW n datas
@@ -126,14 +121,11 @@ def txLine (w n : Nat) (datas : List Nat) : List Nat :=
 def shiftLine (xs : List Nat) : List Nat :=
   List.append (dropN 1 xs) (Hdl.map (fun (k : Nat) => 1) (Hdl.upto 4 0))
 
-def rxRE (w n : Nat) :
-    Circuit (HwTy.prod (HwTy.named "rst" Uart.Bit)
-      (HwTy.prod (HwTy.named "en" Uart.Bit) Uart.RxIn.code)) Uart.RxOut.code :=
+def rxRE (w n : Nat) : Circuit.RstEn Uart.RxIn.code Uart.RxOut.code :=
   Circuit.withResetEnable (Uart.rxCw w n)
 
 -- reset for the first two cycles, enable high, then the line bit of the cycle
-def reAt (k line : Nat) : HwTy.El (HwTy.prod (HwTy.named "rst" Uart.Bit)
-    (HwTy.prod (HwTy.named "en" Uart.Bit) Uart.RxIn.code)) :=
+def reAt (k line : Nat) : HwTy.El (HwTy.rstEn Uart.RxIn.code) :=
   let rst := match Nat.lt k 2 with
     | .true => 1
     | .false => 0;
@@ -148,8 +140,8 @@ def rxReport (label : String) (w n : Nat) (datas : List Nat) : String :=
   let c := rxRE w n;
   let outs := Circuit.runLeaves c ins;
   let got := rxBytes outs;
-  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
-    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+  label <+> " n=" <+> Hdl.show n <+> ": sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (BEq.beq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "uart-rx" c))
 
 def main : IO Unit := do

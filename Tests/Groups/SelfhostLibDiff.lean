@@ -42,9 +42,12 @@ Usage (a work list, not a gate):
     tests --libdiff --baseline FILE          # write it, or diff against it
     tests --libdiff --jobs 3                 # three files at a time (capped by CPUs and memory)
 
-`lake test -- '=selfhost-libdiff'` runs the sweep with the defaults (the driver's
-`--jobs N`, capped as above) and writes the report to `.lake/libdiff/` (the harness hides
-a passing case's output).
+`lake test -- '=selfhost-libdiff'` runs the sweep in `libDiffChunks` parts, each over a
+contiguous slice of the file list (every file is checked exactly once), with the defaults
+(the driver's `--jobs N`, capped as above), and writes one report per part under
+`.lake/libdiff/` (the harness hides a passing case's output). CI runs one part per job
+(`.github/test-shards.json`: `"split": 4`, `"split-cases": true`): the file payload, not
+the group, is what takes the time.
 -/
 
 /-- The module roots both toolchains resolve `import M` under, in order. The checkout's
@@ -67,6 +70,22 @@ partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array
 def libDiffFiles : IO (Array String) := do
   let all := (← libDiffWalk "lib" #[]) ++ (← libDiffWalk "scry" #[])
   pure (all.qsort (· < ·))
+
+/-- The number of parts the group's sweep is divided into. Each part is one case (one
+`--timings` line) over a contiguous slice of `libDiffFiles`, so CI can run the parts in
+different jobs: `.github/test-shards.json` sets `"split": 4, "split-cases": true` for
+`selfhost-libdiff`, and changing one number here means changing the other too. A part
+builds the self-hosted compiler itself (the shards' caches are per job), which is why the
+parts are not made smaller: 4 parts cost 3 extra builds and cut the 45-minute sweep to
+about 16 minutes each. -/
+def libDiffChunks : Nat := 4
+
+/-- The `k`th part of `files`: the contiguous slice `k * n / N` … `(k + 1) * n / N` by
+index (as equal as the list allows), so every file is in exactly one part. -/
+def libDiffChunk (files : Array String) (k : Nat) : Array String :=
+  let lo := files.size * k / libDiffChunks
+  let hi := files.size * (k + 1) / libDiffChunks
+  files.extract lo hi
 
 /-- The module a file's path names, for `--only`: `lib/Hdl/Uart.wiz` is `Hdl.Uart`. -/
 def libDiffModule (file : String) : String :=
@@ -102,6 +121,8 @@ structure Side where
   msg : String := ""
   status : String := "ok"
   note : String := ""
+  /-- the run's wall time (milliseconds), measured by the sweep -/
+  ms : Nat := 0
   deriving Inhabited
 
 def jsonOfSide (s : Side) : Lean.Json :=
@@ -109,7 +130,7 @@ def jsonOfSide (s : Side) : Lean.Json :=
     ("accepted", .bool s.accepted), ("exit", .num s.exitCode.toNat), ("errors", .num s.errors),
     ("decls", .num s.decls), ("code", .str s.code), ("file", .str s.efile),
     ("line", .num s.line), ("col", .num s.col), ("msg", .str s.msg),
-    ("status", .str s.status), ("note", .str s.note)]
+    ("status", .str s.status), ("note", .str s.note), ("ms", .num s.ms)]
 
 def jStr (j : Lean.Json) (k : String) : String := (j.getObjValAs? String k).toOption.getD ""
 
@@ -401,6 +422,9 @@ structure LibDiffOpts where
   capped by the free memory at `memMB` per file); an explicit `--jobs N` (or the
   driver's `--jobs N`) overrides it -/
   jobs : Nat := 0
+  /-- the files to sweep, when the group checks one part of the list (CI); `none` is every
+  `lib/` and `scry/` file (`--limit` and `--only` still narrow it) -/
+  files : Option (Array String) := none
   deriving Inhabited
 
 /-- A record as one line of the report: verdict, the two sides, and the first divergence. -/
@@ -422,9 +446,11 @@ def libDiffRender (r : LibRec) : String :=
     (if r.note.isEmpty then "" else s!"\t[{r.note}]")
 
 /-- One file through both compilers: the host child (`self` with `--libdiff-host FILE`,
-which is this binary) and the self-hosted compiler `exe`, each with its own bound. -/
+which is this binary) and the self-hosted compiler `exe`, each with its own bound, and
+their wall times. -/
 def libDiffFile (o : LibDiffOpts) (self : String) (flags : Array String)
     (exe : System.FilePath) (cache : String) (file : String) : IO LibRec := do
+  let t0 ← IO.monoMsNow
   -- the host child is Lean itself (whose runtime reserves address space): it gets the
   -- time bound, and the heavy job's memory cap, not a ulimit
   let h : Side ← match ← libDiffRun self (#["--libdiff-host", file] ++ flags) o.hostSecs 0 with
@@ -434,8 +460,10 @@ def libDiffFile (o : LibDiffOpts) (self : String) (flags : Array String)
       else match (out.splitOn "\n").findSome? (fun l => (Lean.Json.parse l).toOption) with
         | some j => pure (sideOfJson j)
         | none => pure ({ status := "crash", note := s!"no host record: {(err.take 200).toString}" } : Side)
+  let t1 ← IO.monoMsNow
   let s ← libDiffSelf exe file o.selfSecs o.memMB cache
-  pure (libDiffCompare file h s)
+  let t2 ← IO.monoMsNow
+  pure (libDiffCompare file { h with ms := t1 - t0 } { s with ms := t2 - t1 })
 
 /-! ## Checking files at once (`--jobs N`)
 
@@ -552,16 +580,44 @@ partial def libDiffPool {α : Type} (n jobs : Nat) (canStart : IO Bool)
     let _ ← IO.wait t
   return out
 
+/-- Every second until `stop` is set, and every `every` seconds of it (counted from
+`start`, a `monoMsNow`), `tell` the line `line` makes of the seconds elapsed. -/
+partial def libDiffHeartbeat (stop : IO.Ref Bool) (every start next : Nat)
+    (line : Nat → IO String) (tell : String → IO Unit) : IO Unit := do
+  if ← stop.get then return
+  IO.sleep 1000
+  let secs := ((← IO.monoMsNow) - start) / 1000
+  if secs ≥ next then
+    unless ← stop.get do tell (← line secs)
+    libDiffHeartbeat stop every start (next + every) line tell
+  else libDiffHeartbeat stop every start next line tell
+
+/-- A file's progress line, as it finishes: how many are done, its verdict, the file, and
+the seconds its two runs took. -/
+def libDiffProgressLine (done total : Nat) (r : LibRec) : String :=
+  s!"libdiff [{done}/{total}] {r.verdict} {r.file} {showMs (r.host.ms + r.self.ms)} s " ++
+    s!"(host {showMs r.host.ms} s, self {showMs r.self.ms} s)"
+
 /-- Run both compilers over the selected files, `libDiffWorkers` at a time; the records,
 and the number of workers. `none` when the self-hosted compiler could not be built for a
-toolchain reason (the caller skips). -/
-def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Array LibRec × Nat)) := do
-  let all ← libDiffFiles
+toolchain reason (the caller skips). With `tell` (the group passes the harness's
+`progress`), it also reports where it is: the compiler build, one line per file as it
+finishes (in the order they finish), a heartbeat every 60 s, and the counts at the end.
+These lines only report; the records and verdicts are the same without them. -/
+def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit)
+    (tell : Option (String → IO Unit) := none) : IO (Option (Array LibRec × Nat)) := do
+  let tell' : String → IO Unit := fun l => match tell with | some t => t l | none => pure ()
+  let all ← match o.files with
+    | some fs => pure fs
+    | none => libDiffFiles
   let picked := all.filter fun f =>
     (o.only.isEmpty || o.only.any (libDiffPicks · f)) && f.endsWith ".wiz"
   let picked := if o.limit == 0 then picked else picked.take o.limit
+  let t0 ← IO.monoMsNow
+  tell' s!"libdiff: building the self-hosted compiler ({picked.size} files to check)"
   match ← selfhostCompiler with
   | .error e =>
+    tell' s!"libdiff: no self-hosted compiler after {showMs ((← IO.monoMsNow) - t0)} s"
     if (e.splitOn "gmp.h").length > 1 then return none else throw (IO.userError e)
   | .ok exe =>
     let self ← IO.appPath
@@ -575,11 +631,37 @@ def libDiffSweep (o : LibDiffOpts) (say : String → IO Unit) : IO (Option (Arra
     -- each worker has its own self-hosted compiler cache: two workers writing one
     -- cache can read each other's half-written module records (the errors differ)
     let cache (w : Nat) : String := s!"/tmp/wiz-libdiff-cache-{w}"
-    let recs ← libDiffPool picked.size workers canStart
-      (fun i w => libDiffFile o self.toString flags exe (cache w) picked[i]!)
-      (fun _ r => if o.json then IO.println (Lean.Json.compress (jsonOfRec r)) else say (libDiffRender r))
+    let start ← IO.monoMsNow
+    tell' s!"libdiff: compiler ready ({showMs (start - t0)} s); {picked.size} files, {workers} at a time"
+    let done ← IO.mkRef (0 : Nat)
+    let stop ← IO.mkRef false
+    let beat ← if tell.isSome then
+        some <$> IO.asTask (libDiffHeartbeat stop 60 start 60 (fun secs => do
+          let free := match ← libDiffFreeMiB with | some f => s!"{f} MiB" | none => "unknown"
+          pure s!"libdiff: {← done.get}/{picked.size} files done, {secs} s elapsed (free memory {free})")
+          tell') Task.Priority.dedicated
+      else pure none
+    let finish : IO Unit := do
+      stop.set true
+      if let some t := beat then
+        let _ ← IO.wait t
+    let recs ← tryFinally
+        (libDiffPool picked.size workers canStart
+          (fun i w => do
+            let r ← libDiffFile o self.toString flags exe (cache w) picked[i]!
+            if tell.isSome then
+              let d ← done.modifyGet fun k => (k + 1, k + 1)
+              tell' (libDiffProgressLine d picked.size r)
+            pure r)
+          (fun _ r => if o.json then IO.println (Lean.Json.compress (jsonOfRec r)) else say (libDiffRender r)))
+        finish
     unless recs.size == picked.size && (recs.map (·.file)) == picked do
       throw (IO.userError s!"selfhost-libdiff: {recs.size} records for {picked.size} files")
+    let count (v : String) : Nat := (recs.filter (·.verdict == v)).size
+    let (ok, rej, div) := (count "ok", count "rejected", count "diverging")
+    tell' (s!"libdiff: done, {recs.size} files in {showMs ((← IO.monoMsNow) - start)} s " ++
+      s!"(compiler {showMs (start - t0)} s): ok {ok} rejected {rej} diverging {div} " ++
+      s!"bounded {recs.size - ok - rej - div}")
     pure (some (recs, workers))
 
 /-- The counts the summary prints. -/
@@ -599,6 +681,9 @@ structure LibSummary where
   byCode : List (String × Nat) := []
   /-- (file, class, message) for the differing verdicts -/
   blockers : List (String × String × String) := []
+  /-- the slowest host and self-hosted runs: (milliseconds, file) -/
+  slowHost : Nat × String := (0, "")
+  slowSelf : Nat × String := (0, "")
 
 def libDiffCount (xs : List String) : List (String × Nat) :=
   let counts := xs.foldl (fun m x => m.insert x (m.getD x 0 + 1)) ({} : Std.HashMap String Nat)
@@ -639,7 +724,9 @@ def libDiffSummarize (recs : Array LibRec) : LibSummary :=
   { s with
     byConstruct := byConstruct,
     byCode := libDiffCount (rejects.toList.map (·.self.code)),
-    blockers := blockers }
+    blockers := blockers,
+    slowHost := recs.foldl (fun m r => if r.host.ms > m.1 then (r.host.ms, r.file) else m) (0, ""),
+    slowSelf := recs.foldl (fun m r => if r.self.ms > m.1 then (r.self.ms, r.file) else m) (0, "") }
 
 /-- `s` padded with spaces on the right. -/
 def libDiffPad (s : String) (n : Nat) : String := s ++ "".pushn ' ' (n - s.length)
@@ -659,7 +746,9 @@ def libDiffSummaryText (s : LibSummary) : String :=
   let top := if s.blockers.isEmpty then [] else
     "\ntop 10 blockers (host accepts, self-hosted frontend rejects):" ::
       (s.blockers.take 10).zipIdx.map (fun ((f, k, m), i) => s!"  {i + 1}. {f}\t{k}\t{m}")
-  String.intercalate "\n" (lines ++ byC ++ byE ++ top)
+  let slow := if s.slowHost.1 == 0 && s.slowSelf.1 == 0 then [] else
+    [s!"  slowest     host {showMs s.slowHost.1} s ({s.slowHost.2}); self {showMs s.slowSelf.1} s ({s.slowSelf.2})"]
+  String.intercalate "\n" (lines ++ slow ++ byC ++ byE ++ top)
 
 /-- The signature a baseline stores per file: the parts progress is measured in. -/
 def libDiffSig (r : LibRec) : String :=
@@ -790,33 +879,57 @@ def libDiffMain (args : List String) : IO UInt32 := do
 
 /-! ## The group -/
 
-/-- The report the group leaves behind (its own output is hidden when it passes). -/
-def libDiffWriteReport (recs : Array LibRec) (sum : LibSummary) : IO Unit := do
+/-- The report a part leaves behind (its own output is hidden when it passes):
+`.lake/libdiff/records-<label>.jsonl` and `summary-<label>.txt`. -/
+def libDiffWriteReport (label : String) (recs : Array LibRec) (sum : LibSummary) : IO Unit := do
   let dir : System.FilePath := ".lake/libdiff"
   IO.FS.createDirAll dir
-  IO.FS.writeFile (dir / "records.jsonl")
+  IO.FS.writeFile (dir / s!"records-{label}.jsonl")
     (String.intercalate "\n" (recs.toList.map fun r => Lean.Json.compress (jsonOfRec r)) ++ "\n")
-  IO.FS.writeFile (dir / "summary.txt")
+  IO.FS.writeFile (dir / s!"summary-{label}.txt")
     (s!"{recs.size} files\n" ++ libDiffSummaryText sum ++ "\n")
+
+/-- One part of the sweep, as a case: files `k * n / N` … `(k + 1) * n / N` by index. -/
+def libDiffSweepCase (k : Nat) : Case :=
+  { name := s!"the library through both compilers: files {k + 1} of {libDiffChunks} by index (the parity gap list)"
+    run := fun _ => do
+      -- `--libdiff --jobs N` / the driver's `--jobs N` when it was given (so CI's
+      -- shard may set it, and `--jobs 1` is the serial control); else auto
+      let cj ← caseJobs
+      let given ← caseJobsGiven
+      let chunk := libDiffChunk (← libDiffFiles) k
+      let o : LibDiffOpts := { jobs := if given then cj else 0, files := some chunk }
+      let say := fun (_ : String) => pure ()
+      -- the per-file lines, a heartbeat and the counts reach the CI log while it runs
+      match ← libDiffSweep o say (some progress) with
+      | none => skip "no C toolchain (no self-hosted compiler)"
+      | some (recs, workers) =>
+        let sum := libDiffSummarize recs
+        let label := s!"{k + 1}-of-{libDiffChunks}"
+        libDiffWriteReport label recs sum
+        note s!"libdiff part={label} files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}"
+        note s!"libdiff part={label} slowest host={showMs sum.slowHost.1}s/{o.hostSecs}s ({sum.slowHost.2}) self={showMs sum.slowSelf.1}s/{o.selfSecs}s ({sum.slowSelf.2})" }
 
 def libDiffGroup : Group where
   name := "selfhost-libdiff"
   exercise := "replacement parity: lib/ and scry/ through both compilers"
   shard := "selfhost"
-  cases := [
-    { name := "the library through both compilers: the parity gap list", run := fun _ => do
-        -- `--libdiff --jobs N` / the driver's `--jobs N` when it was given (so CI's
-        -- shard may set it, and `--jobs 1` is the serial control); else auto
-        let cj ← caseJobs
-        let given ← caseJobsGiven
-        let o : LibDiffOpts := { jobs := if given then cj else 0 }
-        let say := fun (_ : String) => pure ()
-        match ← libDiffSweep o say with
-        | none => skip "no C toolchain (no self-hosted compiler)"
-        | some (recs, workers) =>
-          let sum := libDiffSummarize recs
-          libDiffWriteReport recs sum
-          note s!"libdiff files={recs.size} ok={sum.ok} rejected={sum.rejected} diverging={sum.diverging} bounded={sum.bounded} workers={workers}" },
+  cases :=
+    (List.range libDiffChunks).map libDiffSweepCase ++ [
+    { name := "the sweep's file parts: every file exactly once, and the parts differ by at most one", run := fun _ => do
+        for size in [0, 1, 3, 7, 182, 183] do
+          let files := ((List.range size).map toString).toArray
+          let parts := (List.range libDiffChunks).map (libDiffChunk files)
+          let joined := parts.foldl (· ++ ·) (#[] : Array String) -- complexity: ok (libDiffChunks is 4)
+          checkEq files joined
+          let lo := parts.foldl (fun m p => min m p.size) size
+          let hi := parts.foldl (fun m p => max m p.size) 0
+          check (hi - lo ≤ 1) s!"size {size}: part sizes differ: {lo}..{hi}"
+        -- and on the sweep's real list: every lib/ and scry/ file in exactly one part
+        let all ← libDiffFiles
+        let parts := (List.range libDiffChunks).map (libDiffChunk all)
+        checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) -- complexity: ok (libDiffChunks is 4)
+      },
     { name := "the sweep's worker pool: every file exactly once, results in order, any worker count", run := fun _ => do
         for jobs in [1, 2, 3, 8, 40] do
           let n := 17
@@ -856,7 +969,67 @@ def libDiffGroup : Group where
         let r := libDiffCompare "lib/BitVecAdd.wiz" h s
         checkEq "bounded" r.verdict
         checkEq "run" r.divergence
-        checkEq "self crash (wiz: out of memory)" r.note }
+        checkEq "self crash (wiz: out of memory)" r.note },
+    { name := "the sweep's worker pool: no files, and an exception is rethrown once the running files finish", run := fun _ => do
+        for n in [0, 1, 5, 17] do
+          for jobs in [1, 2, 3, 8, 40] do
+            let seen ← IO.mkRef (Array.replicate n 0)
+            let emitted ← IO.mkRef (#[] : Array Nat)
+            let out ← libDiffPool n jobs (pure true)
+              (fun i _ => do IO.sleep (UInt32.ofNat (i % 3)); seen.modify (fun a => a.modify i (· + 1)); pure (i * 10))
+              (fun i _ => emitted.modify (·.push i))
+            checkEq (Array.replicate n 1) (← seen.get)
+            checkEq ((Array.range n).map (· * 10)) out
+            checkEq (Array.range n) (← emitted.get)
+        -- an exception is rethrown, after the running items finish
+        let threw ← try
+            let _ ← libDiffPool 6 3 (pure true) (fun i _ => if i == 4 then throw (IO.userError "boom") else pure i) (fun _ _ => pure ())
+            pure false
+          catch _ => pure true
+        check threw "the pool swallowed a worker's exception" },
+    { name := "the sweep's workers: as asked, but no more than the CPUs and the free memory hold", run := fun _ => do
+        checkEq 1 (libDiffWorkers 1 4 (some 16000) 4096)
+        checkEq 3 (libDiffWorkers 3 4 (some 16000) 4096)
+        checkEq 3 (libDiffWorkers 8 4 (some 14000) 4096)  -- memory: 14000 / 4096
+        checkEq 2 (libDiffWorkers 8 2 (some 64000) 4096)  -- CPUs
+        checkEq 1 (libDiffWorkers 3 4 (some 6000) 4096)   -- a heavy job declared 7G
+        checkEq 1 (libDiffWorkers 3 4 (some 100) 4096)    -- never 0
+        checkEq 1 (libDiffWorkers 3 4 none 4096)          -- free memory unknown: one
+        checkEq 3 (libDiffWorkers 3 4 (some 100) 0) },    -- no memory bound
+    { name := "a sweep at three workers gives a sequential sweep's records, exit 3 (the runtime gave up) included", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let rx : IO.AccessRight := { read := true, execution := true }
+        let host := dir / "host.sh"
+        IO.FS.writeFile host "#!/bin/sh\necho '{\"accepted\":true,\"decls\":2}'\n"
+        let selfExe := dir / "self.sh"
+        IO.FS.writeFile selfExe (String.intercalate "\n" [
+          "#!/bin/sh",
+          "case \"$2\" in",
+          "  *oom*) echo partial; echo 'wiz: out of memory' >&2; exit 3;;",
+          "  *bad*) echo \"$2:3:1: error: unknown identifier X [unknown-identifier]\"; exit 1;;",
+          "  *) echo \"$2:1:1: info: a : Nat\"; echo \"$2:2:1: info: b : Nat\";;",
+          "esac", ""])
+        for f in [host, selfExe] do
+          IO.setAccessRights f { user := { rx with write := true }, group := rx, other := rx }
+        let files := #["a.wiz", "b-bad.wiz", "c-oom.wiz", "d.wiz", "e-bad.wiz", "f.wiz", "g-oom.wiz"]
+        let o : LibDiffOpts := {}
+        let run (jobs : Nat) : IO (Array LibRec) :=
+          libDiffPool files.size jobs (pure true)
+            (fun i _ => libDiffFile o host.toString #[] selfExe "/tmp/wiz-libdiff-test-cache" files[i]!)
+            (fun _ _ => pure ())
+        let seq ← run 1
+        let par ← run 3
+        IO.FS.removeDirAll dir
+        let sig (r : LibRec) := s!"{r.file} {libDiffSig r} {r.note} {r.self.exitCode}"
+        checkEq (seq.map sig) (par.map sig)
+        checkEq (files.toList) (par.toList.map (·.file))
+        let oom := par.filter (·.file.endsWith "-oom.wiz")
+        checkEq 2 oom.size
+        for r in oom do
+          checkEq "bounded" r.verdict
+          checkEq "self crash (wiz: out of memory)" r.note
+          check (!r.self.accepted || r.self.status == "crash") "an exit 3 counted as accepted"
+        checkEq ["ok", "diverging", "bounded", "ok", "diverging", "ok", "bounded"] (par.toList.map (·.verdict)) }
   ]
 
 builtin_initialize registerGroup libDiffGroup

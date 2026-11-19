@@ -861,3 +861,450 @@ def Wil.runFunction (p : Wil.Program) (fuel : Nat) (name : String) (args : List 
   match Wil.entry p name args with
   | .error m => .fault m
   | .ok c => Wil.run fuel c
+
+-- ## Threads, regions and synchronisation primitives
+--
+-- Everything above this line is the sequential machine and is *unchanged*: `Wil.step`,
+-- `Wil.Step` and `Wil.run` are the same functions, so every existing program and every
+-- existing analysis result is untouched. What follows is a concurrent machine layered
+-- over `Wil.step`: a thread is its own call stack, the store is shared, and a
+-- synchronisation primitive is a call to one of a small table of reserved names (so no
+-- `Wil.Stmt` constructor is added and the exhaustive matches in the analyses still
+-- compile). The design is `wiz-notes/scry-wil-concurrency.md`.
+
+/-- Which thread owns a block. `shared` blocks are visible to every thread (the root's
+allocations); `local owner` blocks belong to one thread. A `local` block may only be
+loaded, stored or freed by its owner: another thread's access faults, so thread locality
+is part of the step relation, not a comment. -/
+inductive Wil.Region where
+  | shared
+  | local (owner : Nat)
+
+/-- Why a thread cannot move: it is waiting for a thread to finish, or for a lock. A
+blocked thread retries the same instruction once the wait ends, so no instruction is
+lost and no bookkeeping is needed. -/
+inductive Wil.Wait where
+  | thread (tid : Nat)
+  | lock (id : Nat)
+
+/-- A thread's status: it can move, it is waiting for `why`, or it has returned `value`. -/
+inductive Wil.TStatus where
+  | runnable
+  | blocked (why : Wil.Wait)
+  | done (value : Wil.Val)
+
+/-- A thread: its own call stack (`frames`, head = current frame, as in `Wil.Config`),
+the locks it holds, and its status. The registers and the stack are thread-local; the
+store is `Wil.CConfig.mem`. -/
+structure Wil.Thread where
+  id : Nat
+  frames : List Wil.Frame
+  held : List Nat
+  status : Wil.TStatus
+
+/-- A concurrent configuration: the program, the ONE shared store (sequentially
+consistent), the region table, the lock table (lock id -> owner thread), the threads in
+ascending id order (thread 0 is the root), and the next id to hand out. -/
+structure Wil.CConfig where
+  prog : Wil.Program
+  mem : Wil.Mem
+  regions : List (Nat × Wil.Region)
+  locks : List (Nat × Nat)
+  threads : List Wil.Thread
+  nextTid : Nat
+
+/-- A synchronisation primitive: what a reserved callee name means. The table is shared
+by the concurrent machine and by the static race analysis, so they cannot disagree about
+what a `lock` is. -/
+inductive Wil.SyncOp where
+  | spawn (fn : String)
+  | joinOp
+  | lockOp
+  | unlockOp
+  | atomicAdd
+  | fenceOp
+
+/-- The reserved callee names. `spawn:<f>` starts a thread running `f` on the call's
+arguments; the other names are the primitives of the memory model (`atomic_add` is one
+step, `fence` is a no-op under sequential consistency). A sequential `Wil.run` of a
+program that calls one of these faults (`no such function`), exactly as before. -/
+def Wil.syncOf (name : String) : Option Wil.SyncOp :=
+  if String.eq name "lock" then .some .lockOp
+  else if String.eq name "unlock" then .some .unlockOp
+  else if String.eq name "join" then .some .joinOp
+  else if String.eq name "atomic_add" then .some .atomicAdd
+  else if String.eq name "fence" then .some .fenceOp
+  else if String.startsWith name "spawn:" then .some (.spawn (String.drop 6 name))
+  else .none
+
+-- ## Thread and configuration helpers
+
+def Wil.threadOf (c : Wil.CConfig) (tid : Nat) : Option Wil.Thread :=
+  List.find (fun t => Nat.beq t.id tid) c.threads
+
+def Wil.setThread (ts : List Wil.Thread) (t : Wil.Thread) : List Wil.Thread :=
+  List.map (fun u => match Nat.beq u.id t.id with
+    | .true => t
+    | .false => u) ts
+
+def Wil.regionOf (c : Wil.CConfig) (b : Nat) : Wil.Region :=
+  match List.find (fun p => Nat.beq p.1 b) c.regions with
+  | .none => Wil.Region.shared
+  | .some p => p.2
+
+/-- The new region entries for blocks `start … start+count-1`. -/
+def Wil.regionRange : Nat → Nat → Wil.Region → List (Nat × Wil.Region)
+  | .zero, _, _ => .nil
+  | .succ k, start, r => .cons (start, r) (Wil.regionRange k (Nat.succ start) r)
+
+/-- Record the region of the blocks a step appended to the store. A block the root
+allocates is shared; a block a spawned thread allocates is local to it. `oldLen` and
+`newLen` are the store's length before and after the step. -/
+def Wil.grownRegions (regions : List (Nat × Wil.Region)) (oldLen newLen owner : Nat) :
+    List (Nat × Wil.Region) :=
+  match Nat.sub newLen oldLen with
+  | .zero => regions
+  | .succ n =>
+    let r := match Nat.beq owner 0 with
+      | .true => Wil.Region.shared
+      | .false => Wil.Region.local owner;
+    List.append regions (Wil.regionRange (Nat.succ n) oldLen r)
+
+def Wil.resultOf (c : Wil.CConfig) (tid : Nat) : Option Wil.Val :=
+  match Wil.threadOf c tid with
+  | .none => .none
+  | .some t => match t.status with
+    | .done v => .some v
+    | _ => .none
+
+/-- The runnable thread ids, in ascending order (the threads list is ascending). -/
+def Wil.runnableIds (c : Wil.CConfig) : List Nat :=
+  List.map (fun t => t.id) (List.filter (fun t => match t.status with
+    | .runnable => .true
+    | _ => .false) c.threads)
+
+def Wil.allFinished (c : Wil.CConfig) : Bool :=
+  List.all (fun t => match t.status with
+    | .done _ => .true
+    | _ => .false) c.threads
+
+/-- Whether a wait can end in `c`: the joined thread has returned, or the lock is free. -/
+def Wil.waitOver (c : Wil.CConfig) (w : Wil.Wait) : Bool :=
+  match w with
+  | .thread tid => match Wil.threadOf c tid with
+    | .none => .true
+    | .some t => match t.status with
+      | .done _ => .true
+      | _ => .false
+  | .lock id => match List.find (fun p => Nat.beq p.1 id) c.locks with
+    | .none => .true
+    | .some _ => .false
+
+/-- Wake every blocked thread whose wait is over. Waking is not a step: it only changes
+a status, and the driver does it before choosing a thread. -/
+def Wil.wake (c : Wil.CConfig) : Wil.CConfig :=
+  { c with threads := List.map (fun t => match t.status with
+      | .blocked w => match Wil.waitOver c w with
+        | .true => { t with status := .runnable }
+        | .false => t
+      | _ => t) c.threads }
+
+-- ## Accessing the current instruction
+
+def Wil.curStmt (fr : Wil.Frame) : Option Wil.Stmt :=
+  match Wil.listNth fr.code.blocks fr.block.index with
+  | .none => .none
+  | .some blk => Wil.listNth blk.stmts fr.pc
+
+/-- The pointer a statement dereferences, if it dereferences one. -/
+def Wil.memAccessOf (fr : Wil.Frame) : Option Wil.Var :=
+  match Wil.curStmt fr with
+  | .none => .none
+  | .some s => match s with
+    | .assign _ (.load p) _ => .some p
+    | .store p _ _ => .some p
+    | .free p _ => .some p
+    | _ => .none
+
+/-- The reserved call at the thread's `pc`, if the current instruction is one. -/
+def Wil.syncAt (t : Wil.Thread) : Option (Wil.SyncOp × Option Wil.Var × List Wil.Var) :=
+  match t.frames with
+  | .nil => .none
+  | .cons fr _ => match Wil.curStmt fr with
+    | .some (.call r (.direct name) args _) => match Wil.syncOf name with
+      | .some op => .some (op, r, args)
+      | .none => .none
+    | _ => .none
+
+def Wil.advanceHead (t : Wil.Thread) : Wil.Thread :=
+  match t.frames with
+  | .nil => t
+  | .cons fr rest => { t with frames := .cons (Wil.advance fr) rest }
+
+def Wil.advanceHeadReg (t : Wil.Thread) (x : Wil.Var) (v : Wil.Val) : Wil.Thread :=
+  match t.frames with
+  | .nil => t
+  | .cons fr rest =>
+    let fr' := { fr with regs := Wil.setReg x.index (Wil.Val.fit x.ty v) fr.regs,
+                        pc := Nat.succ fr.pc };
+    { t with frames := .cons fr' rest }
+
+/-- The frame a thread would step, if it has one. -/
+def Wil.threadConfig (c : Wil.CConfig) (t : Wil.Thread) : Wil.Config :=
+  Wil.Config.mk c.prog c.mem t.frames
+
+-- ## The step relation
+
+inductive Wil.CStepResult where
+  | next (c : Wil.CConfig)
+  | fault (msg : String)
+
+/-- The lock a value names: the block of a pointer, or an integer id. -/
+def Wil.lockIdOf (v : Wil.Val) : Option Nat :=
+  match v with
+  | .ptr b _ => .some b
+  | .int _ _ bits => .some bits
+  | _ => .none
+
+/-- A thread's pointer must name a block its region allows: `shared` for everyone, a
+`local` block only for its owner. -/
+def Wil.ptrCheck (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) (p : Wil.Var) :
+    Except String Unit :=
+  match Wil.getReg fr p with
+  | .error _ => .ok ()            -- let the sequential step report the unbound register
+  | .ok v => match v with
+    | .ptr b _ => match Wil.regionOf c b with
+      | .shared => .ok ()
+      | .local o => match Nat.beq o t.id with
+        | .true => .ok ()
+        | .false => .error ("cross-thread access to a block local to thread " ++ Nat.repr o)
+    | _ => .ok ()
+
+/-- The region check for the instruction at the thread's `pc`: the sequential accesses
+(`load`, `store`, `free`) and `atomic_add`'s pointer. -/
+def Wil.regionCheck (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) : Except String Unit :=
+  match Wil.memAccessOf fr with
+  | .some p => Wil.ptrCheck c t fr p
+  | .none => match Wil.curStmt fr with
+    | .some (.call _ (.direct name) args _) => match Wil.syncOf name with
+      | .some .atomicAdd => match args with
+        | .cons p _ => Wil.ptrCheck c t fr p
+        | .nil => .ok ()
+      | _ => .ok ()
+    | _ => .ok ()
+
+/-- One synchronisation step of thread `t`. `fr` is its current frame, `dest` and `args`
+are the reserved call's destination and arguments. -/
+def Wil.syncStep (c : Wil.CConfig) (t : Wil.Thread) (fr : Wil.Frame) (op : Wil.SyncOp)
+    (dest : Option Wil.Var) (args : List Wil.Var) : Wil.CStepResult :=
+  match op with
+  | .spawn fn => match Wil.evalArgs fr args with
+    | .error m => .fault m
+    | .ok vals => match Wil.findFunc c.prog fn with
+      | .none => .fault ("spawn: no such function: " ++ fn)
+      | .some f => match Nat.beq (List.length vals) (List.length f.params) with
+        | .false => .fault ("spawn: arity mismatch in " ++ fn)
+        | .true =>
+          let nf := Wil.Frame.mk f f.entry 0 (Wil.initRegs f.params vals f.locals) .none;
+          let nt := Wil.Thread.mk c.nextTid (.cons nf .nil) .nil .runnable;
+          let t' := match dest with
+            | .none => Wil.advanceHead t
+            | .some x => Wil.advanceHeadReg t x (.int 64 .false c.nextTid);
+          .next { c with threads := List.append (Wil.setThread c.threads t') (.cons nt .nil),
+                          nextTid := Nat.succ c.nextTid }
+  | .joinOp => match args with
+    | .nil => .fault "join: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match v with
+        | .int _ _ bits => match Wil.threadOf c bits with
+          | .none => .fault ("join: no thread " ++ Nat.repr bits)
+          | .some u => match u.status with
+            | .done rv =>
+              let t' := match dest with
+                | .none => Wil.advanceHead t
+                | .some x => Wil.advanceHeadReg t x rv;
+              .next { c with threads := Wil.setThread c.threads t' }
+            | _ => .next { c with threads := Wil.setThread c.threads
+                { t with status := .blocked (.thread bits) } }
+        | _ => .fault "join: not an integer thread id"
+  | .lockOp => match args with
+    | .nil => .fault "lock: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match Wil.lockIdOf v with
+        | .none => .fault "lock: not a lock handle"
+        | .some l => match List.find (fun p => Nat.beq p.1 l) c.locks with
+          | .none =>
+            .next { c with locks := List.cons (l, t.id) c.locks,
+                            threads := Wil.setThread c.threads
+                              (Wil.advanceHead { t with held := List.cons l t.held }) }
+          | .some p => match Nat.beq p.2 t.id with
+            | .true => .fault "lock: already held by this thread (not reentrant)"
+            | .false => .next { c with threads := Wil.setThread c.threads
+                { t with status := .blocked (.lock l) } }
+  | .unlockOp => match args with
+    | .nil => .fault "unlock: missing argument"
+    | .cons a _ => match Wil.getReg fr a with
+      | .error m => .fault m
+      | .ok v => match Wil.lockIdOf v with
+        | .none => .fault "unlock: not a lock handle"
+        | .some l => match List.find (fun p => Nat.beq p.1 l) c.locks with
+          | .none => .fault "unlock: not held"
+          | .some p => match Nat.beq p.2 t.id with
+            | .false => .fault "unlock: not held by this thread"
+            | .true =>
+              let t' := Wil.advanceHead { t with held := List.filter (fun k => Bool.not (Nat.beq k l)) t.held };
+              .next { c with locks := List.filter (fun q => Bool.not (Nat.beq q.1 l)) c.locks,
+                              threads := Wil.setThread c.threads t' }
+  | .atomicAdd => match args with
+    | .cons p (.cons v _) => match Wil.getReg fr p, Wil.getReg fr v with
+      | .ok pv, .ok vv => match Wil.memLoad c.mem pv with
+        | .error m => .fault m
+        | .ok old => match Wil.Val.bin .add old vv with
+          | .error m => .fault m
+          | .ok nv => match Wil.memStore c.mem pv nv with
+            | .error m => .fault m
+            | .ok mem' =>
+              let t' := match dest with
+                | .none => Wil.advanceHead t
+                | .some x => Wil.advanceHeadReg t x old;
+              .next { c with mem := mem', threads := Wil.setThread c.threads t' }
+      | .error m, _ => .fault m
+      | _, .error m => .fault m
+    | _ => .fault "atomic_add: expected (pointer, value)"
+  | .fenceOp => .next { c with threads := Wil.setThread c.threads (Wil.advanceHead t) }
+
+/-- **One concurrent micro-step**: thread `tid` either takes one sequential step
+(statement, terminator, call, return) or performs one synchronisation step of the
+reserved call at its `pc`. The store is read and written whole, so the model is
+sequentially consistent. -/
+def Wil.cstep (c : Wil.CConfig) (tid : Nat) : Wil.CStepResult :=
+  match Wil.threadOf c tid with
+  | .none => .fault ("no thread " ++ Nat.repr tid)
+  | .some t => match t.status with
+    | .done _ => .fault "step: thread has finished"
+    | .blocked _ => .fault "step: thread is blocked"
+    | .runnable => match t.frames with
+      | .nil => .fault "step: runnable thread with no frame"
+      | .cons fr _ => match Wil.regionCheck c t fr with
+        | .error m => .fault m
+        | .ok _ => match Wil.syncAt t with
+          | .some (op, dest, args) => Wil.syncStep c t fr op dest args
+          | .none => match Wil.step (Wil.threadConfig c t) with
+            | .next c' =>
+              let oldLen := List.length c.mem;
+              .next { c with mem := c'.mem,
+                              regions := Wil.grownRegions c.regions oldLen (List.length c'.mem) t.id,
+                              threads := Wil.setThread c.threads { t with frames := c'.frames } }
+            | .done v => .next { c with threads := Wil.setThread c.threads
+                { t with frames := .nil, status := .done v } }
+            | .fault m => .fault m
+
+/-- The concurrent one-step relation: `c` goes to `c'` when thread `tid` moves. The
+counterpart of `Wil.Step`, for a soundness statement about a concurrent analysis. -/
+def Wil.CStep (c c' : Wil.CConfig) (tid : Nat) : Prop :=
+  Wil.cstep c tid = Wil.CStepResult.next c'
+
+-- ## Schedulers and the fuel-bounded interleaving driver
+
+/-- A scheduler: the step number, the id chosen last, and the runnable ids in ascending
+order, to one of those ids. It is a pure function of the state, so an interleaving is
+reproducible. -/
+def Wil.Sched : Type := Nat → Nat → List Nat → Nat
+
+def Wil.schedFirst : Wil.Sched := fun _ _ ids => match ids with
+  | .cons i _ => i
+  | .nil => 0
+
+def Wil.schedRoundRobin : Wil.Sched := fun _ last ids =>
+  match List.find (fun i => Nat.lt last i) ids with
+  | .some i => i
+  | .none => match ids with
+    | .cons i _ => i
+    | .nil => 0
+
+/-- `k` wrapped into the list (the head when empty). -/
+def Wil.nthWrap {A : Type} (xs : List A) (k : Nat) : Option A :=
+  match xs with
+  | .nil => .none
+  | _ => Wil.listNth xs (Nat.mod k (List.length xs))
+
+/-- A pinned schedule: choice `script[step]` (modulo the ready set). When the script runs
+out, the first runnable thread moves. -/
+def Wil.schedScript (script : List Nat) : Wil.Sched := fun step _ ids =>
+  match Wil.nthWrap script step with
+  | .some k => match Wil.nthWrap ids k with
+    | .some i => i
+    | .none => 0
+  | .none => match ids with
+    | .cons i _ => i
+    | .nil => 0
+
+inductive Wil.COut where
+  | allDone
+  | deadlock
+  | outOfFuel
+  | fault (tid : Nat) (msg : String)
+  | badEntry (msg : String)
+
+def Wil.COut.show : Wil.COut → String
+  | .allDone => "all-done"
+  | .deadlock => "deadlock"
+  | .outOfFuel => "out-of-fuel"
+  | .fault tid m => "fault t" ++ Nat.repr tid ++ ": " ++ m
+  | .badEntry m => "bad-entry: " ++ m
+
+/-- The outcome of a bounded run, the ids that moved in order, and the configuration it
+stopped at (also on `outOfFuel`, so a test can inspect the cut). -/
+structure Wil.CRun where
+  out : Wil.COut
+  trace : List Nat
+  final : Wil.CConfig
+
+def Wil.CRun.valueOf (r : Wil.CRun) (tid : Nat) : Option Wil.Val := Wil.resultOf r.final tid
+
+/-- The run's trace as `"0,1,1,0"`. -/
+def Wil.showIds (xs : List Nat) : String := String.intercalate "," (List.map Nat.repr xs)
+
+partial def Wil.crunAux (sched : Wil.Sched) (fuel last : Nat) (c : Wil.CConfig)
+    (acc : List Nat) : Wil.CRun :=
+  match fuel with
+  | .zero => Wil.CRun.mk .outOfFuel (List.reverse acc) c
+  | .succ k =>
+    let c0 := Wil.wake c;
+    match Wil.allFinished c0 with
+    | .true => Wil.CRun.mk .allDone (List.reverse acc) c0
+    | .false => match Wil.runnableIds c0 with
+      | .nil => Wil.CRun.mk .deadlock (List.reverse acc) c0
+      | ids =>
+        let tid := sched (List.length acc) last ids;
+        match Wil.cstep c0 tid with
+        | .next c' => Wil.crunAux sched k tid c' (List.cons tid acc)
+        | .fault m => Wil.CRun.mk (.fault tid m) (List.reverse acc) c0
+
+/-- Run `c` for at most `fuel` micro-steps, letting `sched` choose a runnable thread at
+every step. **One interleaving**, not all of them: a different scheduler may return a
+different value. -/
+def Wil.crun (sched : Wil.Sched) (fuel : Nat) (c : Wil.CConfig) : Wil.CRun :=
+  Wil.crunAux sched fuel 0 c .nil
+
+/-- The initial concurrent configuration of `name` applied to `args`: one root thread
+(thread 0), an empty store, and no locks. Region and lock ids stay empty until a thread
+allocates or locks. -/
+def Wil.centry (p : Wil.Program) (name : String) (args : List Wil.Val) : Except String Wil.CConfig :=
+  match Wil.findFunc p name with
+  | .none => .error (String.append "no such function: " name)
+  | .some fn => match Nat.beq (List.length args) (List.length fn.params) with
+    | .false => .error (String.append "arity mismatch calling " name)
+    | .true =>
+      let fr := Wil.Frame.mk fn fn.entry 0 (Wil.initRegs fn.params args fn.locals) .none;
+      let t := Wil.Thread.mk 0 (.cons fr .nil) .nil .runnable;
+      .ok (Wil.CConfig.mk p .nil .nil .nil (.cons t .nil) 1)
+
+/-- `Wil.crun` a whole function call, from `Wil.centry`. -/
+def Wil.crunFunction (p : Wil.Program) (fuel : Nat) (sched : Wil.Sched) (name : String)
+    (args : List Wil.Val) : Wil.CRun :=
+  match Wil.centry p name args with
+  | .error m => Wil.CRun.mk (.badEntry m) .nil (Wil.CConfig.mk p .nil .nil .nil .nil 1)
+  | .ok c => Wil.crun sched fuel c

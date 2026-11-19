@@ -50,10 +50,10 @@ def port (we wa wd ra : Nat) : HwTy.El Port.code :=
 def ins : List (HwTy.El Port.code) :=
   .cons (port 1 7 42 7) (.cons (port 1 9 99 7) (.cons (port 1 7 13 9) (.cons (port 0 7 0 7) (.cons (port 0 0 0 9) (.cons (port 0 0 0 3) (.cons (port 0 0 0 0) .nil))))))
 def ramOut : List Nat := Hdl.map (HwTy.pack B8) (Circuit.run ramC ins)
-def ramAgree : Bool := Hdl.natsEq (Hdl.map (HwTy.pack B8) (Circuit.run ramC ins)) (Circuit.simNet .true ramC (Hdl.map (HwTy.pack Port.code) ins))
+def ramAgree : Bool := BEq.beq (Hdl.map (HwTy.pack B8) (Circuit.run ramC ins)) (Circuit.simNet .true ramC (Hdl.map (HwTy.pack Port.code) ins))
 def romIns : List Nat := .cons 3 (.cons 15 (.cons 0 (.cons 7 (.cons 7 .nil))))
 def romOut : List Nat := Circuit.runPacked romC romIns
-def romAgree : Bool := Hdl.natsEq (Circuit.runPacked romC romIns) (Circuit.simNet .true romC romIns)
+def romAgree : Bool := BEq.beq (Circuit.runPacked romC romIns) (Circuit.simNet .true romC romIns)
 def vRam : String := Verilog.emit (Circuit.netlist "ram" ramC)
 def vRom : String := Verilog.emit (Circuit.netlist "rom" romC)
 def tbRam : String := Testbench.verilog (Circuit.netlist "ram" ramC) "ram.vec" 7
@@ -62,14 +62,14 @@ def ramR : List Nat × Bool := (ramOut, ramAgree)
 def romR : List Nat × Bool := (romOut, romAgree)
 -- under a clock enable a write happens only when enabled; a reset leaves the contents
 -- (the read register is reset): value and netlist simulations agree
-def ramE : Circuit (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code)) B8 :=
+def ramE : Circuit.RstEn Port.code B8 :=
   Circuit.withReset (Circuit.withEnable ramC)
-def ctl (rst en : Nat) (p : HwTy.El Port.code) : HwTy.El (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code)) :=
+def ctl (rst en : Nat) (p : HwTy.El Port.code) : HwTy.El (HwTy.rstEn Port.code) :=
   (BitVec.ofNat 1 rst, (BitVec.ofNat 1 en, p))
-def insE : List (HwTy.El (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code))) :=
+def insE : List (HwTy.El (HwTy.rstEn Port.code)) :=
   .cons (ctl 0 1 (port 1 7 42 7)) (.cons (ctl 0 0 (port 1 7 55 7)) (.cons (ctl 1 1 (port 0 0 0 7)) (.cons (ctl 0 1 (port 0 0 0 7)) (.cons (ctl 0 1 (port 0 0 0 0)) .nil))))
 def ramEOut : List Nat := Hdl.map (HwTy.pack B8) (Circuit.run ramE insE)
-def ramEAgree : Bool := Hdl.natsEq ramEOut (Circuit.simNet .true ramE (Hdl.map (HwTy.pack (HwTy.prod (HwTy.named "rst" Bit) (HwTy.prod (HwTy.named "en" Bit) Port.code))) insE))
+def ramEAgree : Bool := BEq.beq ramEOut (Circuit.simNet .true ramE (Hdl.map (HwTy.pack (HwTy.rstEn Port.code)) insE))
 def ramER : List Nat × Bool := (ramEOut, ramEAgree)
 
 -- what a netlist cannot express is reported (and printed as `// error:` in the Verilog)

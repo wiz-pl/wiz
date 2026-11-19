@@ -12,6 +12,9 @@ preprocessed with the toolchain's compiler (the frontend is pure).
 namespace Grail
 open Wiz
 
+/-- `--region-stats`' counters, per process (a grail job is one process). -/
+initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
+
 /-- Preprocess the headers (`import_c "h"`) of some sources with the toolchain's C compiler. -/
 def preprocessHeaders (tc : Toolchain) (srcs : List String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
@@ -83,18 +86,30 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
 any read-only ones). With `--region-cache` (`tc.regionCache`), module effects are also
 read from and written to `.wizr` regions in the same layers as the `.wizc` entries; the
-text entries stay the authority, and a missing or corrupt region is a miss. -/
+text entries stay the authority, and a missing or corrupt region is a miss.
+With `--region-stats` (`tc.regionStats`) the regions' counters are collected for this
+process; `printRegionStats` reports them (zeros when the cache is off). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
   | none, [] => Cache.elaborateUncached l.src l.init salt
   | write, reads =>
     let region := if tc.regionCache then
-        some ({ rig := RigTag.tag (R := ZeroOneMany) } : Cache.RegionOptions)
+        some ({ rig := RigTag.tag (R := ZeroOneMany),
+                stats := if tc.regionStats then some regionStats else none } :
+          Cache.RegionOptions)
       else none
     pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)
       (verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn)
       (rig := RigTag.tag (R := ZeroOneMany))
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := l.keyStrong)).1
+
+/-- `--region-stats`: one line for this process (a grail job). Without `--region-cache`
+there is no region store and the counters are zero, so a job says so instead of staying
+silent. -/
+def printRegionStats (tc : Toolchain) : IO Unit := do
+  if tc.regionStats then
+    let c ← regionStats.get
+    IO.println s!"region-stats: hits={c.hits} misses={c.misses} commands={c.commands}"
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=

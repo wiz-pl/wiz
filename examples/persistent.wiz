@@ -1,7 +1,7 @@
-import PMap
+import Data.PMap
 import WordMap
 
--- Persistent maps and sets (lib/PMap.wiz): persistence, the BST invariant, sorted
+-- Persistent maps and sets (lib/Data/PMap.wiz): persistence, the BST invariant, sorted
 -- `toList`, `fromList`/`toList` round trips, a differential test against `U64Map`, the
 -- expected laws, structural sharing, sets, and a generic key type. `main` returns 0 when
 -- every check holds, otherwise the first failing check's code. Run it under `#eval`,
@@ -75,7 +75,7 @@ def treeOkFrom : Tree Nat Nat → Option Nat → Option Nat → Bool
     Bool.and (Nat.beq n (Nat.succ (Nat.add (Tree.size l) (Tree.size r))))
       (Bool.and (balanceOk l r)
         (Bool.and (above lo k) (Bool.and (below hi k)
-          (Bool.and (treeOkFrom l lo (Option.some k)) (treeOkFrom r (Option.some k) hi)))))
+          (Bool.and (treeOkFrom l lo (.some k)) (treeOkFrom r (.some k) hi)))))
 def treeOk (t : Tree Nat Nat) : Bool := treeOkFrom t .none .none
 
 def log2Fuel : Nat → Nat → Nat

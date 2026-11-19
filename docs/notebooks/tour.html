@@ -156,7 +156,7 @@ compose : {A : Type} → {B : Type} → {C : Type} → (B → C) → (A → B) �
 </div>
 </section>
 <section class="cell cell-markdown" id="cell-14">
-<p>Values are printed as terms: a list is its constructors. Comparisons on <code>Nat</code> are functions that return a <code>Bool</code> (<code>Nat.lt</code>, <code>Nat.le</code>, <code>Nat.beq</code>); there are no <code>&lt;</code> or <code>==</code> operators yet. (<code>examples/tour/01-basics.wiz</code>.)</p>
+<p>Values are printed as terms: a list is its constructors. Comparisons on <code>Nat</code> are functions that return a <code>Bool</code> (<code>Nat.lt</code>, <code>Nat.le</code>, <code>Nat.beq</code>); <code>&lt;</code> and <code>≤</code> are notation on the order classes (<code>import Order</code>, through <code>import Nat</code>), <code>≈</code> is notation on <code>Equiv</code>, and <code>==</code> is still <code>BEq.beq</code>. (<code>examples/tour/01-basics.wiz</code>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-15">
 <h2>2: inductive types and pattern matching</h2>
@@ -487,7 +487,7 @@ def exists_double : ∃ n, double n = 8 := Ex.intro (fun n =&gt; double n = 8) 4
 <section class="cell cell-markdown" id="cell-69">
 <h2>7: quantities and linear resources</h2>
 <p>Every binder in Wiz carries a <strong>quantity</strong>, which says how often the body may use the variable at run time:</p>
-<p>| quantity | means | for | |---|---|---| | <code>0</code> | never: erased | types, proofs, indices like <code>Vec</code>&#x27;s length | | <code>1</code> | exactly once: linear | resources: a file handle, a channel end, the world | | <code>ω</code> | any number of times | everything else; the default |</p>
+<p>| quantity | means | for | |---|---|---| | <code>0</code> | never: erased | types, proofs, indices like <code>Vec</code>&#x27;s length | | <code>1</code> | exactly once: linear | resources: a file handle, a channel end, the world | | <code>ω</code> | any number of times | explicit binders: the default; an implicit binder defaults to <code>0</code> (erased) |</p>
 </section>
 <section class="cell cell-markdown" id="cell-70">
 <p>Quantities <code>0</code> and <code>1</code> on binders.</p>

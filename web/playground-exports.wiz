@@ -8,11 +8,22 @@
 -- signature, `#check` a type, `#eval`/`#reduce` the kernel's normal form, and errors
 -- start with `error:` or `parse error`. The page only moves text in and lines out.
 
+-- (engine-trampoline) A clean stop is how a program finishes, not a fault. The runtime's
+-- `wiz_stop_run` arms a `setjmp` and applies the closure; `Process.exit`, the
+-- one-threaded build's refusal to fork or block, and a failed `IO.writeFile` longjmp
+-- back to it instead of calling `exit`, so the module stays alive and the page keeps its
+-- state. `wiz_playground_exit` then holds the code + 1 (0: the call ran to the end).
+-- `wiz_panic` (out of memory) and a Wasm trap are not caught: those still cost the
+-- instance, which is the only reliable reset.
+extern "wiz_stop_run" pgStopRun : (String → String) → String
+extern "wiz_stop_code_value" pgStopCode : Nat → Nat
+
 def pgJoin : List String → String
   | .nil => ""
   | .cons s ss => String.append s (String.append "\n" (pgJoin ss))
 
-def playgroundEval (text : String) : String := pgJoin (checkFile cats tokens text)
+def playgroundEval (text : String) : String :=
+  pgStopRun (fun _ => pgJoin (checkFile cats tokens text))
 
 export "wiz_playground_eval" playgroundEval
 
@@ -28,8 +39,10 @@ export "wiz_playground_eval" playgroundEval
 -- and `text` is the line as `wiz_playground_eval` prints it (it may contain newlines: a
 -- tactic error lists the goals left). The page's in-page server
 -- (web/selfhost-lsp-shim.js) turns this into LSP diagnostics; the document state stays
--- in JavaScript and this export is pure (text in, JSON out). A later stage adds an
--- `index` field (positions → expected types and goal states) beside `lines`.
+-- in JavaScript and this export is pure (text in, JSON out). (stage 2) The answer also
+-- carries `index`, the positions the frontend recorded while elaborating: each checked
+-- node's expected type (a later stage adds tactic states). The page answers
+-- `wiz/plainTermGoal` from it with no further Wasm call.
 
 -- one hexadecimal digit, for `\u00XX`
 def pgcHex (n : Nat) : Char := match Nat.lt n 10 with
@@ -107,10 +120,51 @@ def pgcLines : List String → String
     | .nil => pgcLine l
     | .cons _ _ => String.append (pgcLine l) (String.append "," (pgcLines rest))
 
-def playgroundCheck (text : String) : String :=
+-- (stage 2) the position index beside the lines: each `LspEntry` the frontend recorded
+-- while elaborating, as `{"s","e","kind",…}`. `term` has the checked node's expected
+-- type (`expected`), `goal` the tactic state before a step (`goals`), and `decl` a
+-- declaration of the module being checked (`name`, `detail` its printed type, `ckind`
+-- an LSP CompletionItemKind). `s`/`e` are code-point offsets into the checked text,
+-- end-exclusive; the page's server turns them into UTF-16.
+def pgiGoals : List String → String
+  | .nil => ""
+  | .cons g rest => match rest with
+    | .nil => pgcStr g
+    | .cons _ _ => pgcStr g +++ "," +++ pgiGoals rest
+
+def pgiHead (s e : Nat) : String :=
+  "{\"s\":" +++ Nat.toString s +++ ",\"e\":" +++ Nat.toString e
+
+def pgiEntry (i : LspEntry) : String := match i with
+  | .term s e t => pgiHead s e +++ ",\"kind\":\"term\",\"expected\":" +++ pgcStr t +++ "}"
+  | .goal s e gs => pgiHead s e +++ ",\"kind\":\"goal\",\"goals\":[" +++ pgiGoals gs +++ "]}"
+  | .decl s e n ty k => pgiHead s e +++ ",\"kind\":\"decl\",\"name\":" +++ pgcStr n
+      +++ ",\"detail\":" +++ pgcStr ty +++ ",\"ckind\":" +++ Nat.toString k +++ "}"
+
+def pgiEntries : List LspEntry → String
+  | .nil => ""
+  | .cons i rest => match rest with
+    | .nil => pgiEntry i
+    | .cons _ _ => pgiEntry i +++ "," +++ pgiEntries rest
+
+-- the check's text; the export runs it under the boundary. (A named helper keeps the
+-- `match` at command indentation, where the layout parser wants it.)
+def playgroundCheckText (text : String) : String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
-  | .mk out _ _ _ _ => String.append "{\"v\":1,\"lines\":["
-      (String.append (pgcLines (List.reverseOf out .nil)) "]}")
+      (String.codes text) 0 (Globals.watching (Globals.setModule Globals.empty "input")) .nil with
+  | .mk out gs _ _ _ =>
+    let lines := pgcLines (List.reverseOf out .nil);
+    let index := pgiEntries (Globals.lspEntries gs);
+    "{\"v\":1,\"lines\":[" +++ lines +++ "],\"index\":[" +++ index +++ "]}"
+
+def playgroundCheck (text : String) : String :=
+  pgStopRun (fun _ => playgroundCheckText text)
 
 export "wiz_playground_check" playgroundCheck
+
+-- The code of the last eval/check's clean stop, as `code + 1` (0: it ran to the end), so
+-- the page can tell `exit 0` from no stop. The argument is unused: a C export needs a
+-- parameter, and the page passes 0.
+def playgroundExit (n : Nat) : Nat := pgStopCode n
+
+export "wiz_playground_exit" playgroundExit

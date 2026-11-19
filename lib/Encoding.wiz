@@ -1,0 +1,206 @@
+import Word
+import Text
+import Data.WordBytes
+/-!
+# Encoding
+
+Text encodings of bytes (`import Encoding`): base64 (RFC 4648) and hexadecimal, over
+`List U8` (and `Bytes`, at the end). They are pure and total, so `#eval` runs them and a
+program needs no I/O to use them; tower's `.sha256` files and archive hashes are hex or
+base64, and this is the module that reads and writes them.
+
+The two directions are separate functions, not a `Codec` class: the bytes in, text out
+side returns a `String`, and the text in side returns an `Except String` holding the
+bytes or the reason the text is not valid.
+
+* `Encoding.hexEncode`, `Encoding.hexDecode`: lower-case hex out; either case in; an
+  odd number of digits or a character outside `0-9a-fA-F` is an error.
+* `Encoding.base64Encode`, `Encoding.base64Decode`: the standard alphabet with padding
+  (`=`), strict on input: the length is a multiple of four, only the last group may have
+  padding, and no whitespace (strip it first if the source wraps lines). Every invalid
+  input is an `error`, never a silently shortened result. The unused low bits of the last
+  character are ignored, as RFC 4648 permits a decoder to do.
+* `Encoding.base64EncodeBytes`, `Encoding.base64DecodeBytes`, `Encoding.hexEncodeBytes`,
+  `Encoding.hexDecodeBytes`: the same over `Bytes` (lib/Data/WordBytes.wiz).
+
+```
+import Encoding
+
+#eval Encoding.hexEncode (.cons 0xDE (.cons 0xAD (.cons 0xBE (.cons 0xEF .nil))))
+-- "deadbeef"
+#eval Encoding.base64Encode (.cons 0x66 (.cons 0x6F (.cons 0x6F (.cons 0x62 (.cons 0x61 (.cons 0x72 .nil))))))
+-- "Zm9vYmFy"
+#eval Encoding.hexDecode "6A"                                   -- .ok (.cons 0x6A .nil)
+#eval Encoding.base64Decode "QQ"                                -- .error "base64: …"
+```
+-/
+
+-- ## Hex
+
+/-- The lower-case hex digit for `d < 16`. -/
+def Encoding.hexDigit (d : Nat) : Char := match Nat.lt d 10 with
+  | .true => Char.mk (48 + d)
+  | .false => Char.mk (87 + d)
+
+/-- `Encoding.hexEncode`'s loop: the digits of `bs`, reversed, in front of `acc`. -/
+def Encoding.hexChars : List U8 → List Char → List Char
+  | .nil, acc => acc
+  | .cons b bs, acc =>
+    let n := b.toNat;
+    Encoding.hexChars bs (.cons (Encoding.hexDigit (Nat.mod n 16))
+      (.cons (Encoding.hexDigit (Nat.div n 16)) acc))
+
+/-- The bytes of `bs` as lower-case hex: `"deadbeef"` for four bytes. -/
+def Encoding.hexEncode (bs : List U8) : String :=
+  String.ofChars (List.reverse (Encoding.hexChars bs .nil))
+
+/-- The value of a hex digit, upper or lower case; `none` for anything else. -/
+def Encoding.hexValue (c : Char) : Option Nat :=
+  let n := Char.code c;
+  match Bool.and (Nat.le 48 n) (Nat.le n 57) with
+  | .true => .some (n - 48)
+  | .false => match Bool.and (Nat.le 97 n) (Nat.le n 102) with
+    | .true => .some (n - 87)
+    | .false => match Bool.and (Nat.le 65 n) (Nat.le n 70) with
+      | .true => .some (n - 55)
+      | .false => .none
+
+/-- `Encoding.hexDecode`'s loop: `hi` is the high nibble of the next byte, if read. -/
+def Encoding.hexDecodeGo : List Char → Option Nat → Except String (List U8)
+  | .nil, hi => match hi with
+    | .none => .ok .nil
+    | .some _ => .error "hex: odd number of digits"
+  | .cons c rest, hi =>
+    match Encoding.hexValue c with
+    | .none => .error "hex: not a hex digit"
+    | .some v => match hi with
+      | .none => Encoding.hexDecodeGo rest (.some v)
+      | .some h =>
+        match Encoding.hexDecodeGo rest .none with
+        | .ok tail => .ok (.cons (U8.ofNat (Nat.add (Nat.mul h 16) v)) tail)
+        | .error e => .error e
+
+/-- The bytes spelled by hex `text` (either case), or why it is not hex. -/
+def Encoding.hexDecode (text : String) : Except String (List U8) :=
+  Encoding.hexDecodeGo (String.chars text) .none
+
+-- ## Base64
+
+/-- The base64 character for `i < 64`. -/
+def Encoding.base64Digit (i : Nat) : Char := match Nat.lt i 26 with
+  | .true => Char.mk (65 + i)
+  | .false => match Nat.lt i 52 with
+    | .true => Char.mk (71 + i)
+    | .false => match Nat.lt i 62 with
+      | .true => Char.mk (i - 4)
+      | .false => match Nat.lt i 63 with
+        | .true => Char.mk 43
+        | .false => Char.mk 47
+
+/-- The value of a base64 alphabet character; `none` for anything else (including `=`). -/
+def Encoding.base64Value (c : Char) : Option Nat :=
+  let n := Char.code c;
+  match Bool.and (Nat.le 65 n) (Nat.le n 90) with
+  | .true => .some (n - 65)
+  | .false => match Bool.and (Nat.le 97 n) (Nat.le n 122) with
+    | .true => .some (n - 71)
+    | .false => match Bool.and (Nat.le 48 n) (Nat.le n 57) with
+      | .true => .some (n + 4)
+      | .false => match Nat.beq n 43 with
+        | .true => .some 62
+        | .false => match Nat.beq n 47 with
+          | .true => .some 63
+          | .false => .none
+
+/-- The four base64 characters of the 24-bit number `n`, lowest index first: `c0 c1 c2
+c3` with `c0` the top six bits. -/
+def Encoding.base64Quad (n : Nat) (acc : List Char) : List Char :=
+  .cons (Encoding.base64Digit (Nat.mod n 64))
+    (.cons (Encoding.base64Digit (Nat.mod (Nat.div n 64) 64))
+    (.cons (Encoding.base64Digit (Nat.mod (Nat.div n 4096) 64))
+    (.cons (Encoding.base64Digit (Nat.div n 262144)) acc)))
+
+/-- `Encoding.base64Encode`'s loop: `count` bytes (`0`, `1` or `2`) are pending in `n`
+as a big-endian number, and `acc` holds the output characters reversed. -/
+def Encoding.base64Chars : List U8 → Nat → Nat → List Char → List Char
+  | .nil, count, n, acc => match count with
+    | .zero => acc
+    | .succ .zero =>
+      .cons (Char.mk 61)
+        (.cons (Char.mk 61)
+        (.cons (Encoding.base64Digit (Nat.mul (Nat.mod n 4) 16))
+        (.cons (Encoding.base64Digit (Nat.div n 4)) acc)))
+    | _ =>
+      .cons (Char.mk 61)
+        (.cons (Encoding.base64Digit (Nat.mul (Nat.mod n 16) 4))
+        (.cons (Encoding.base64Digit (Nat.mod (Nat.div n 16) 64))
+        (.cons (Encoding.base64Digit (Nat.div n 1024)) acc)))
+  | .cons b rest, count, n, acc =>
+    let n' := Nat.add (Nat.mul n 256) b.toNat;
+    match count with
+    | .zero => Encoding.base64Chars rest 1 n' acc
+    | .succ .zero => Encoding.base64Chars rest 2 n' acc
+    | _ => Encoding.base64Chars rest 0 0 (Encoding.base64Quad n' acc)
+
+/-- The bytes of `bs` as standard base64 with padding: `"Zm9vYmFy"` for `foobar`. -/
+def Encoding.base64Encode (bs : List U8) : String :=
+  String.ofChars (List.reverse (Encoding.base64Chars bs 0 0 .nil))
+
+/-- The three bytes of a full base64 group whose four values are `v0`–`v3`. -/
+def Encoding.base64Bytes (v0 v1 v2 v3 : Nat) : List U8 :=
+  .cons (U8.ofNat (Nat.add (Nat.mul v0 4) (Nat.div v1 16)))
+    (.cons (U8.ofNat (Nat.add (Nat.mul (Nat.mod v1 16) 16) (Nat.div v2 4)))
+    (.cons (U8.ofNat (Nat.add (Nat.mul (Nat.mod v2 4) 64) v3)) .nil))
+
+/-- `Encoding.base64Decode`'s loop: `quad` holds the values of the current group in
+reverse (newest first), `pad` its `=` characters; `rest` is what is left to read. -/
+def Encoding.base64DecodeGo : List Char → List Nat → Nat → Except String (List U8)
+  | .nil, quad, pad => match pad with
+    | .zero => match quad with
+      | .nil => .ok .nil
+      | _ => .error "base64: length is not a multiple of 4"
+    | .succ .zero => match quad with
+      | .cons v2 (.cons v1 (.cons v0 .nil)) =>
+        .ok (.cons (U8.ofNat (Nat.add (Nat.mul v0 4) (Nat.div v1 16)))
+          (.cons (U8.ofNat (Nat.add (Nat.mul (Nat.mod v1 16) 16) (Nat.div v2 4))) .nil))
+      | _ => .error "base64: length is not a multiple of 4"
+    | .succ (.succ .zero) => match quad with
+      | .cons v1 (.cons v0 .nil) =>
+        .ok (.cons (U8.ofNat (Nat.add (Nat.mul v0 4) (Nat.div v1 16))) .nil)
+      | _ => .error "base64: length is not a multiple of 4"
+    | _ => .error "base64: misplaced padding"
+  | .cons c rest, quad, pad =>
+    if Char.eq c (Char.mk 61) then
+      if Nat.lt 1 pad then .error "base64: misplaced padding"
+      else if Nat.lt (List.length quad) 2 then .error "base64: misplaced padding"
+      else Encoding.base64DecodeGo rest quad (Nat.add pad 1)
+    else if Nat.lt 0 pad then .error "base64: data after padding"
+    else match Encoding.base64Value c with
+      | .none => .error "base64: invalid character"
+      | .some v => match quad with
+        | .cons v2 (.cons v1 (.cons v0 .nil)) =>
+          match Encoding.base64DecodeGo rest .nil 0 with
+          | .ok tail => .ok (List.append (Encoding.base64Bytes v0 v1 v2 v) tail)
+          | .error e => .error e
+        | _ => Encoding.base64DecodeGo rest (.cons v quad) pad
+
+/-- The bytes spelled by base64 `text`, or why it is not base64. -/
+def Encoding.base64Decode (text : String) : Except String (List U8) :=
+  Encoding.base64DecodeGo (String.chars text) .nil 0
+
+-- ## Bytes
+
+/-- `Encoding.hexEncode` over a byte buffer. -/
+def Encoding.hexEncodeBytes (b : Bytes) : String := Encoding.hexEncode (Bytes.toU8s b)
+/-- `Encoding.hexDecode` over a byte buffer. -/
+def Encoding.hexDecodeBytes (text : String) : Except String Bytes :=
+  match Encoding.hexDecode text with
+  | .ok bs => .ok (Bytes.ofU8s bs)
+  | .error e => .error e
+/-- `Encoding.base64Encode` over a byte buffer. -/
+def Encoding.base64EncodeBytes (b : Bytes) : String := Encoding.base64Encode (Bytes.toU8s b)
+/-- `Encoding.base64Decode` over a byte buffer. -/
+def Encoding.base64DecodeBytes (text : String) : Except String Bytes :=
+  match Encoding.base64Decode text with
+  | .ok bs => .ok (Bytes.ofU8s bs)
+  | .error e => .error e

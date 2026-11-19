@@ -176,7 +176,7 @@ def Widget.sliderNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
       Loom.attr "step" w.step,
       Loom.attr "value" w.value,
       Loom.attr "data-wiz-widget-input" w.id
-    ] List.nil,
+    ] [],
     Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
@@ -187,21 +187,21 @@ def Widget.textNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
       Loom.attr "type" "text",
       Loom.attr "value" w.value,
       Loom.attr "data-wiz-widget-input" w.id
-    ] List.nil,
+    ] [],
     Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
 /-- The button control. -/
 def Widget.buttonNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
-  Loom.el "button" (List.append (Widget.attrs w) (List.cons (Loom.attr "type" "button") List.nil))
+  Loom.el "button" (List.append (Widget.attrs w) [(Loom.attr "type" "button")])
     [Loom.text w.label]
 
 /-- The plot placeholder. The payload is an attribute (opaque JSON for now); the front
 end draws it. -/
 def Widget.plotNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
   Loom.el "div" (List.append (Widget.attrs w)
-      (List.cons (Loom.attr "data-wiz-widget-data" w.data) List.nil)) [
-    Loom.el "div" [Loom.attr "class" "wiz-plot-canvas"] List.nil,
+      [(Loom.attr "data-wiz-widget-data" w.data)]) [
+    Loom.el "div" [Loom.attr "class" "wiz-plot-canvas"] [],
     Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
@@ -273,7 +273,7 @@ def Widget.parseDisplay (text : String) : Option Json :=
 def Widget.widgetsOf (text : String) : List Widget.Widget :=
   match Widget.parseDisplay text with
   | .some j => List.map Widget.ofJson (Json.getList j "widgets")
-  | .none => List.nil
+  | .none => []
 
 /-- The patches turning `old` into `new`, as a JSON value (for the same applier the
 Loom framework uses). -/
@@ -281,7 +281,7 @@ def Widget.patches (old new : List Widget.Widget) : Json :=
   match Json.parse (Loom.patchesJson
       (Loom.Rendered.diff (Loom.render (Widget.vnodes old)) (Loom.render (Widget.vnodes new)))) with
   | .ok j => j
-  | .error _ => Json.mkArr List.nil
+  | .error _ => Json.mkArr []
 
 /-- The bundle for an update: the new HTML and descriptors, the previous HTML (for a
 full re-mount), and the patches from old to new. -/

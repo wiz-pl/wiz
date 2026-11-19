@@ -2,7 +2,7 @@ import FeralCore
 -- REJECTED (Rust: "lifetime may not live long enough"; returning a `&'a` as a `&'b`
 -- without `'a : 'b`). check.sh expects a type error.
 -- fn longest {'a 'b} (x : &'a U64) (y : &'b U64) : &'b U64 := if *x < *y then y else x
-def longest {ρa ρb : Region} (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
+def longest {0 ρa ρb : Region} (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
   | .true => .ok y
   | .false => .ok x

@@ -150,7 +150,7 @@ def BitVec.toNat_eq {0 n : Nat} (a : BitVec n) : BitVec.toNat a = UIntN.toNat (B
   refl (BitVec.toNat a)
 /-- Addition of bit vectors is commutative. -/
 def BitVec.add_comm {ω n : Nat} (a b : BitVec n) : BitVec.add a b = BitVec.add b a :=
-  congrArg (UIntN.ofNat n) (Nat.add_comm a.toNat b.toNat)
+  Eq.congrArg (UIntN.ofNat n) (Nat.add_comm a.toNat b.toNat)
 /-- A one-bit word is 0 or 1 (its bits are below 2: `UIntN.toNat_lt`). -/
 def BitVec.lt2_cases : (n : Nat) → Nat.lt n 2 = .true → (n = 0) ∨ (n = 1)
   | .zero, _ => Or.inl rfl

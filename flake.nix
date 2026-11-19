@@ -9,8 +9,10 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed). CI pushes them to the Cachix
-  # cache `badlydrawnwizards`; see docs/building.md for `nix run`.
+  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
+  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
+  # derivation instead of in each CI job. CI pushes them to the Cachix cache
+  # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -97,22 +99,53 @@
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
               # The packaged read-only elaboration cache: elaborate every module of the
               # standard library once, with the binary the wrapper runs (the same bytes,
-              # and the same toolchain-library layout, so the keys match a user's run).
+              # the same toolchain flags and the same toolchain-library layout, so the
+              # keys match a user's run; `Toolchain.tag` hashes the flags and is part of
+              # every manifest's strong key, so omitting them would make the whole layer
+              # a clean miss).
               # Check a one-line `import M` rather than M's file: checking the file
               # elaborates it as the main file, whose commands are keyed by the main
               # text and never hit by an importer. `import M` stores M's effect under
               # M's module key and writes its seen marker, which is what a user hits.
-              # Each check reads what earlier ones wrote, so this is one pass over lib/.
-              # A lib module that does not check is a real failure: stop at the first.
+              # Run one check per module concurrently. The cache is content-addressed:
+              # a key is the chained hash of the text (and of the imports' keys), and every
+              # file is written to a temporary name and renamed into place
+              # (`Cache.writeAtomic`), so two processes that elaborate one import write the
+              # same bytes and a reader sees either the old file or the whole new one. Each
+              # module is still checked exactly once; the order only decides how much of an
+              # import's closure is already warm, not what is stored. `NIX_BUILD_CORES` is
+              # the build's `--cores` (4 on the CI runner); the cap keeps a very wide host
+              # from starting one wiz process per module.
+              # A lib module that does not check is a real failure: xargs runs the rest and
+              # exits non-zero, and the phase fails.
               export HOME=$TMPDIR
               cd $share
               cache=$share/cache
               mkdir -p "$cache"
-              while IFS= read -r f; do
+              jobs=''${NIX_BUILD_CORES:-0}
+              [ -n "$jobs" ] || jobs=0
+              case "$jobs" in *[!0-9]*) jobs=0 ;; esac
+              if [ "$jobs" -le 0 ]; then jobs=4; fi
+              [ "$jobs" -le 8 ] || jobs=8
+              echo "prewarm: $jobs concurrent wiz check processes"
+              cat > "$TMPDIR/check-module.sh" <<'EOF'
+#!/bin/sh
+# check-module.sh WIZ CACHE LIB TMP FLAGS... MODULE: check `import MODULE` through a
+# fresh root file (a module's own file would be keyed as a main file, never hit by an
+# importer).
+set -e
+wiz=$1 cache=$2 lib=$3 tmp=$4 module=$5
+shift 5
+root=$(mktemp "$tmp/lib-import.XXXXXX.wiz")
+trap 'rm -f "$root"' EXIT
+printf 'import %s\n' "$module" > "$root"
+"$wiz" "$@" --cache "$cache" -I "$lib" check "$root"
+EOF
+              find lib -name '*.wiz' | LC_ALL=C sort | while IFS= read -r f; do
                 m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
-                printf 'import %s\n' "$m" > "$TMPDIR/lib-import.wiz"
-                .lake/build/bin/wiz --cache "$cache" -I "$share/lib" check "$TMPDIR/lib-import.wiz"
-              done < <(find lib -name '*.wiz' | LC_ALL=C sort)
+                printf '%s\n' "$m"
+              done | xargs -P "$jobs" -I@ sh "$TMPDIR/check-module.sh" \
+                "$PWD/.lake/build/bin/wiz" "$cache" "$share/lib" "$TMPDIR" @ ${addFlags tcFlags}
               # grail elaborates in-process under its *own* binary hash (the build file,
               # Grail and Prelude, before every command, and each `check` job), so it
               # hits none of the entries above: the two namespaces are disjoint by
@@ -121,18 +154,22 @@
               # Std's closure, which is the fixed cost of a first `grail build` (measured:
               # 437 entries, 3.3 MB, ~3 s here, against ~0 store hits without it). A
               # module outside Std's closure is elaborated once into the user's cache.
-              # `grail build` reads the build file and runs the check job in one go; the
-              # binary needs no toolchain flags for either (lib/ imports no C headers).
+              # `grail build` reads the build file and runs the check job in one go.
+              # Warm both with the same toolchain flags the wrappers add
+              # (`addFlags tcFlags`): `Toolchain.tag` hashes exactly those fields and
+              # enters the strong key of every manifest, so a cache warmed without them
+              # is a clean miss for every wrapper invocation.
               warm=$TMPDIR/warm-pkg
               mkdir -p "$warm"
               printf '%s\n' 'import Grail' \
                 'def package : Package := Package.new "warm"' \
                 '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
               printf 'import Std\n' > "$warm/main.wiz"
-              .lake/build/bin/grail -C "$warm" --cache "$cache" build
-              # The binary's memo names the build-time executable path in its stamp; it
-              # is for the write cache, so the store ships none.
-              rm -rf "$cache/bin"
+              .lake/build/bin/grail ${addFlags tcFlags} -C "$warm" --cache "$cache" build
+              # The binary's memo names the build-time executable path in its stamp, and the
+              # per-root pointers name the build-time import files; both are write-cache
+              # aids that a `--cache-ro` layer never reads, so the store ships neither.
+              rm -rf "$cache/bin" "$cache/roots"
               chmod -R a-w "$cache"
               # wiz's module roots: ./lib (a checkout's), then the packaged standard library
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
@@ -198,6 +235,92 @@
             '';
             meta = {
               description = "The Wiz standard library reference manual (generated)";
+              platforms = systems;
+            };
+          };
+          # The two Wiz→wasm page modules (stages 11n/11ab) as derivations, so that Cachix
+          # serves them: CI's `web` job used to run both Emscripten builds inside its
+          # single test step (95 % of it, ~10 min and an 8–10 GiB `wasm-opt -O2` tail),
+          # and the `docs` job ran them again on every push. Each derivation runs the same
+          # script a developer runs, with the packaged wiz, `emcc` on PATH (so the script
+          # does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
+          # `nix build`): no network at build time. `$out` is the script's OUT directory
+          # — the module pair plus the page files it copies beside them — and the scripts
+          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`).
+          #
+          # The `src` filesets list exactly what each script reads: a change to a test or
+          # a page it does not touch leaves the module in the cache. A script that starts
+          # copying one more page file must add it here — the build fails loudly (a
+          # `cp: cannot stat`) rather than publishing a site with a missing file.
+          wiz-web = pkgs.stdenv.mkDerivation {
+            pname = "wiz-web";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
+                ./web/build.sh ./web/Web.wiz ./web/js.c
+                # the page files the script copies into OUT
+                ./web/infoview.html ./web/infoview.js ./web/tagged.js ./web/scroll.js
+                ./web/scroll-search.js ./web/scroll.css
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The web documentation module (wiz-infoview.mjs/.wasm, web/build.sh)";
+              platforms = systems;
+            };
+          };
+          wiz-playground = pkgs.stdenv.mkDerivation {
+            pname = "wiz-playground";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                # the engine (the self-hosted frontend) and the export
+                ./web/build-playground.sh ./web/playground-exports.wiz
+                # the module list the script reads from the Lean side, one source for both
+                ./Wiz/Selfhost.lean
+                ./selfhost/Lex.wiz ./selfhost/Parse.wiz ./selfhost/Kernel.wiz
+                ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
+                ./selfhost/Tables.wiz
+                # the page files the script copies into OUT
+                ./web/playground.html ./web/playground.js ./web/playground-values.js
+                ./web/playground.css ./web/lsp-client.js ./web/goals.js
+                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+                ./web/playground-engine.js
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              # -O1: emcc runs binaryen's `wasm-opt` at -O2 and up, and on this module that
+              # stage peaks at 16.9 GiB (measured 2026-11-18) — it is SIGKILLed on a 16 GB
+              # CI runner. -O1 (LLVM's, without binaryen) is 2.3 GiB and ~3 min faster, for
+              # a module 47 % larger (11.4 MB against 7.75 MB). The script still defaults
+              # to the compiler's -O2, so a local build is unchanged.
+              sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src} --opt 1
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
               platforms = systems;
             };
           };
@@ -304,11 +427,41 @@
           # generated by tree-sitter. scry's `link_c` lines compile it from
           # scry/native/tree-sitter-c-sharp, an uncommitted out-link to this path:
           #   nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
-          tree-sitter-c-sharp = pkgs.fetchFromGitHub {
-            owner = "tree-sitter";
-            repo = "tree-sitter-c-sharp";
-            rev = "cac6d5fb595f5811a076336682d5d595ac1c9e85"; # tag v0.23.5
-            hash = "sha256-N5AAlwQFGGi47cj0m7Te08bA486gwY6NBOx4Qcy4lpo=";
+          #
+          # One local patch fixes two grammar gaps (backports from upstream master,
+          # scry/CSHARP.md §8.2): `with`, `partial` and `required` are contextual keywords
+          # and valid identifiers outside their keyword position, but v0.23.5's
+          # `_reserved_identifier` omits them (`var with = …`, `partial.Member`); and a
+          # list-pattern slice with a designation (`['[', .. var middle, ']']`) needs
+          # master's `slice_pattern` rule. The patch touches grammar.js only; the parser is
+          # regenerated at build time by the tree-sitter in nixpkgs (ABI 15).
+          tree-sitter-c-sharp = pkgs.stdenv.mkDerivation {
+            pname = "tree-sitter-c-sharp";
+            version = "0.23.5";
+            src = pkgs.fetchFromGitHub {
+              owner = "tree-sitter";
+              repo = "tree-sitter-c-sharp";
+              rev = "cac6d5fb595f5811a076336682d5d595ac1c9e85"; # tag v0.23.5
+              hash = "sha256-N5AAlwQFGGi47cj0m7Te08bA486gwY6NBOx4Qcy4lpo=";
+            };
+            patches = [ ./scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch ];
+            nativeBuildInputs = [ pkgs.tree-sitter ];
+            dontConfigure = true;
+            buildPhase = ''
+              runHook preBuild
+              tree-sitter generate --js-runtime native --abi 15
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -r src grammar.js tree-sitter.json LICENSE queries $out/
+              runHook postInstall
+            '';
+            meta = {
+              description = "tree-sitter-c-sharp v0.23.5 with scry's contextual-keyword and slice-pattern fixes";
+              platforms = systems;
+            };
           };
 
           # scry's native parse library, built once here and substituted from Cachix: the
@@ -374,9 +527,29 @@
               platforms = systems;
             };
           };
-        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz; };
+          # The self-hosted toolchain chain (docs/bootstrap-chain.md): a prototype, not built
+          # by CI and not pinned by any commit until the chain's root is declared.
+          # `wizc` is the fixpoint compiler built from the Lean host's seed, `wizc-release`
+          # its self-contained release tarball; `legacyPackages.SYSTEM.bootstrapChain` has
+          # the functions (`step`, `fetchToolchain`).
+          bootstrapChain = import ./nix/bootstrap-chain.nix {
+            inherit pkgs lib;
+            hostWiz = wiz;
+            selfhostSrc = fs.toSource { root = ./.; fileset = ./selfhost; };
+            inherit (unwrapped) version;
+          };
+        in {
+          inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
+                   wiz-web wiz-playground; default = wiz;
+          wizc = bootstrapChain.wizc;
+          wizc-seed = bootstrapChain.seed;
+          wizc-release = bootstrapChain.release { };
+          inherit bootstrapChain;
+        };
     in {
-      packages = forAll packagesFor;
+      # (packages without the function set, which is not a derivation)
+      packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
+      legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
 
       apps = forAll (pkgs:
         let
@@ -391,6 +564,11 @@
         });
 
       devShells = forAll (pkgs: {
+        # CI's publish step: `cachix` from this flake's locked nixpkgs, so no global
+        # registry (`nixpkgs#cachix`) is consulted by a job with the push token.
+        ci = pkgs.mkShell {
+          packages = [ pkgs.cachix ];
+        };
         default = pkgs.mkShell {
           # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat`
           # groups (stage 28b: `sat_decide` finds it on PATH); yosys: the synthesis cases

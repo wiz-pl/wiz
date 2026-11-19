@@ -410,11 +410,15 @@ WebSocket clients, one of which edits a document of its own. -/
 def wsCase : IO Unit := do
         let ((srvIn, srvOut), (edIn, edOut)) ← Socket.pair
         let (ed, edW) := (IO.FS.Stream.ofHandle edIn, IO.FS.Stream.ofHandle edOut)
-        let port ← IO.Promise.new
+        let ready ← IO.Promise.new
         let done ← IO.asTask (prio := .dedicated)
           (LSP.serveWith (← server).libs (some (IO.FS.Stream.ofHandle srvIn, IO.FS.Stream.ofHandle srvOut))
-            { ws := some (Socket.loopback, 0) } (fun p => port.resolve p) ["Prelude"])
-        let port := port.result!.get
+            { ws := some (Socket.loopback, 0) } (fun p t => ready.resolve (p, t)) ["Prelude"])
+        let (port, token) := ready.result!.get
+        -- (#430) a fresh token for this launch: 128 bits in hex
+        let some token := token | throw (IO.userError "no token without --ws-insecure")
+        check (token.length == 32) s!"token: {token}"
+        let path := s!"/?token={token}"
         let next (h : IO.FS.Stream) : IO Lean.Json := do
           let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
           pure j
@@ -428,14 +432,40 @@ def wsCase : IO Unit := do
           match Lean.Json.parse t with
           | .ok j => pure j
           | .error e => throw (IO.userError s!"not JSON ({e}): {t}")
-        -- a page from another site is refused; so is a plain HTTP request
+        -- a page from another site is refused (even with the token); so is a plain HTTP request
         let (r, w) ← tcp
-        match ← WebSocket.connect r w s!"127.0.0.1:{port}" (origin := some "https://example.com") with
+        match ← WebSocket.connect r w s!"127.0.0.1:{port}" path (origin := some "https://example.com") with
         | .ok () => throw (IO.userError "a foreign origin was let in")
         | .error e => check ((e.splitOn "403").length > 1) s!"refused how: {e}"
+        -- (#430) a local program (no `Origin`) without the token, or with a wrong one, is
+        -- refused with 401 before any 101; so is a local page without it
+        let refused (what : String) (path : String) (origin : Option String := none) (bearer : Option String := none) : IO Unit := do
+          let (r, w) ← tcp
+          match ← WebSocket.connect r w s!"127.0.0.1:{port}" path origin bearer with
+          | .ok () => throw (IO.userError s!"{what}: let in")
+          | .error e => check ((e.splitOn "401").length > 1) s!"{what}: refused how: {e}"
+        refused "no token, no origin" "/"
+        refused "no token, a local page" "/" (origin := some s!"http://127.0.0.1:{port + 1}")
+        let wrong := toString (token.dropEnd 1) ++ (if token.endsWith "0" then "1" else "0")
+        refused "a wrong token" s!"/?token={wrong}"
+        refused "an empty token" "/?token="
+        refused "a token of another length" s!"/?token={token}0"
+        refused "a wrong bearer" "/" (bearer := some "0123456789abcdef0123456789abcdef")
+        -- the token as `Authorization: Bearer` (a program's way) is let in
+        let (r, w) ← tcp
+        match ← WebSocket.connect r w s!"127.0.0.1:{port}" "/" (bearer := some token) with
+        -- Do NOT send `exit` here: it stops the server, and the next check expects that same
+        -- server to refuse a plain GET with 426. The handshake succeeding is the point of this
+        -- case; the editor's `exit` near the end of this function stops the server.
+        | .ok () => pure ()
+        | .error e => throw (IO.userError s!"bearer handshake: {e}")
         let (r, w) ← tcp
         w.putStr "GET / HTTP/1.1\r\nHost: x\r\n\r\n"; w.flush
         check (((← r.getLine).splitOn "426").length > 1) "a plain GET was not refused"
+        -- a head that never ends (more than 100 header lines) is a `400`, not silence
+        let (r, w) ← tcp
+        w.putStr ("GET / HTTP/1.1\r\nHost: x\r\n" ++ String.join (List.replicate 101 "X: y\r\n")); w.flush
+        check (((← r.getLine).splitOn "400").length > 1) "a malformed head was not refused"
         -- the editor opens a document
         let src := "import Prelude\ndef k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n"
         LSP.writeMessage edW (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
@@ -445,7 +475,7 @@ def wsCase : IO Unit := do
         let _ ← next ed
         -- a local page connects and is told where the cursor is
         let (iv, ivW) ← tcp
-        match ← WebSocket.connect iv ivW s!"127.0.0.1:{port}" (origin := some s!"http://127.0.0.1:{port + 1}") with
+        match ← WebSocket.connect iv ivW s!"127.0.0.1:{port}" s!"/?port={port}&token={token}&follow=1" (origin := some s!"http://127.0.0.1:{port + 1}") with
         | .ok () => pure ()
         | .error e => throw (IO.userError s!"handshake: {e}")
         let c ← recv iv ivW
@@ -506,7 +536,7 @@ def wsCase : IO Unit := do
         checkEq "3" (LSP.get? (← next ed) ["id"]).get!.compress
         -- a second page connects and hears of the cursor too
         let (iv2, iv2W) ← tcp
-        match ← WebSocket.connect iv2 iv2W s!"localhost:{port}" with
+        match ← WebSocket.connect iv2 iv2W s!"localhost:{port}" path with
         | .ok () => pure ()
         | .error e => throw (IO.userError s!"handshake: {e}")
         checkEq "file:///w.wiz" (LSP.getStr (← recv iv2 iv2W) ["params", "textDocument", "uri"])
@@ -585,6 +615,92 @@ def serverGroup : Group where
         checkEq "\"x\"" (LSP.get? r ["goal", "userName"]).get!.compress
         let (_, out) ← openDoc src
         check (!(out.any (has · "wiz/elaborated"))) "unasked wiz/elaborated" },
+    { name := "#435: wiz/typeAt and wiz/coreTerm (one-shot: no session, no ref)", run := fun _ => do
+        let src := "import Prelude\ndef double (n : Nat) : Nat := Nat.add n n\ndef four : Nat := double 2\n" ++
+          "def k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n" ++
+          "inductive T where\n  | a\n  | b (t : T)\ndef f (t : T) : Nat := match t with\n  | .a => 0\n  | .b _ => 1\n" ++
+          "def myId {A : Type} (x : A) : A := x\ndef three : Nat := myId 3\naxiom ax : Nat\ndef s : Nat := 1 + 2\n"
+        let (srv, out) ← openDoc src
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        -- advertised, and answered on the infoview socket's side too
+        let (_, caps) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "wiz/typeAt" && has caps[0]! "wiz/coreTerm") "not advertised"
+        check (LSP.infoviewMethods.contains "wiz/typeAt" && LSP.infoviewMethods.contains "wiz/coreTerm") "not infoview methods"
+        -- wiz/typeAt, against what plainTermGoal says at the same place (`⊢ T`, same range)
+        let typeAt (srv : LSP.Server) (off : Nat) (what term ty kind : String) : IO LSP.Server := do
+          let (srv, r) ← ask srv "wiz/typeAt" src off
+          check (r != Lean.Json.null) s!"{what}: null"
+          -- ("" : whatever it is, as long as plainTermGoal agrees)
+          unless term.isEmpty do checkEq term (LSP.getStr r ["term"])
+          unless ty.isEmpty do checkEq ty (LSP.getStr r ["type"])
+          unless kind.isEmpty do checkEq kind (LSP.getStr r ["kind"])
+          let (srv, g) ← ask srv "wiz/plainTermGoal" src off
+          check ((LSP.getStr g ["goal"]).endsWith s!"⊢ {LSP.getStr r ["type"]}") s!"{what}: plainTermGoal says {g.compress}, typeAt {r.compress}"
+          checkEq (LSP.get? g ["range"]).get!.compress (LSP.get? r ["range"]).get!.compress
+          pure srv
+        let srv ← typeAt srv (offAfter src "double 2" (-1)) "a literal" "2" "Nat" "term"
+        let srv ← typeAt srv (offAfter src "four : Nat := double") "an application" "double 2" "Nat" "term"
+        -- (a tactic's arguments have no ranges of their own: what is around them)
+        let srv ← typeAt srv (offAfter src "exact n" (-1)) "inside a tactic proof" "" "" ""
+        let srv ← typeAt srv (offAfter src ":= matc" (-2)) "a match" "match t with | .a => 0 | .b _ => 1" "Nat" "term"
+        let srv ← typeAt srv (offAfter src "myId 3" (-1)) "an implicit argument's instance" "3" "Nat" "term"
+        -- an identifier: the type hover shows, and the name it resolved to
+        let (srv, r) ← ask srv "wiz/typeAt" src (offAfter src "four : Nat := dou")
+        checkEq "const" (LSP.getStr r ["kind"])
+        checkEq "double" (LSP.getStr r ["name"])
+        let (srv, h) ← ask srv "textDocument/hover" src (offAfter src "four : Nat := dou")
+        check ((LSP.getStr h ["contents", "value"]).startsWith s!"```wiz\ndouble : {LSP.getStr r ["type"]}\n") s!"hover {h.compress} vs {r.compress}"
+        checkEq "Nat → Nat" (LSP.getStr r ["type"])
+        -- a function with an implicit argument, applied: as hover shows it
+        let (srv, r) ← ask srv "wiz/typeAt" src (offAfter src "myId 3" (-3))
+        let (srv, h) ← ask srv "textDocument/hover" src (offAfter src "myId 3" (-3))
+        check ((LSP.getStr h ["contents", "value"]).startsWith s!"```wiz\nmyId : {LSP.getStr r ["type"]}\n") s!"hover {h.compress} vs {r.compress}"
+        -- nothing elaborated there: null
+        let (srv, r) ← ask srv "wiz/typeAt" src 2
+        check (r == Lean.Json.null) s!"in the import: {r.compress}"
+        -- wiz/coreTerm, by name
+        let core (srv : LSP.Server) (params : String) : IO (LSP.Server × Lean.Json) := do
+          let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"wiz/coreTerm\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"}{params}}}")
+          pure (srv, (out[0]!.getObjVal? "result").toOption.getD Lean.Json.null)
+        let (srv, r) ← core srv ",\"name\":\"double\""
+        checkEq "double" (LSP.getStr r ["name"])
+        checkEq "Nat → Nat" (LSP.getStr r ["type"])
+        checkEq "definition" (LSP.getStr r ["kind"])
+        check ((LSP.getStr r ["value"]).startsWith "fun " && has r "Nat.add") s!"value: {r.compress}"
+        check (LSP.get? r ["axioms"] matches some (Lean.Json.arr _)) s!"axioms: {r.compress}"
+        check (has r "\"location\":{" && !has r "\"raw\"") s!"location/raw: {r.compress}"
+        -- a tactic proof: its term, after the tactics ran
+        let (srv, r) ← core srv ",\"name\":\"k\""
+        checkEq "Nat → Bool → Nat" (LSP.getStr r ["type"])
+        check ((LSP.getStr r ["value"]).startsWith "fun ") s!"k: {r.compress}"
+        -- opaque things say so instead of unfolding: a constructor, an axiom (which is its own axiom)
+        let (srv, r) ← core srv ",\"name\":\"T.a\""
+        checkEq "opaque" (LSP.getStr r ["kind"])
+        check (LSP.get? r ["value"] == some Lean.Json.null) s!"T.a: {r.compress}"
+        let (srv, r) ← core srv ",\"name\":\"ax\""
+        checkEq "opaque" (LSP.getStr r ["kind"])
+        check (has (LSP.get? r ["axioms"]).get! "\"ax\"") s!"ax: {r.compress}"
+        let (srv, r) ← core srv ",\"name\":\"three\""
+        check (has (LSP.get? r ["axioms"]).get! "\"ax\"" == false) s!"three: {r.compress}"
+        -- by position: the global used there, else the declaration of the command there
+        let (srv, r) ← core srv s!",\"position\":{posJson src (offAfter src "four : Nat := dou")}"
+        checkEq "double" (LSP.getStr r ["name"])
+        let (srv, r) ← core srv s!",\"position\":{posJson src (offAfter src "def fou")}"
+        checkEq "four" (LSP.getStr r ["name"])
+        check (has r "double") s!"four: {r.compress}"
+        -- notation: the core term by default; with `notation: true` as hovers print it
+        let (srv, plain) ← core srv ",\"name\":\"s\""
+        check (!(LSP.getStr plain ["value"]).contains '+') s!"core with notation: {plain.compress}"
+        let (srv, pretty) ← core srv ",\"name\":\"s\",\"notation\":true"
+        check ((LSP.getStr pretty ["value"]).length > 0) s!"notation: {pretty.compress}"
+        -- raw: the core syntax trees; axioms: false leaves the list out
+        let (srv, r) ← core srv ",\"name\":\"double\",\"raw\":true,\"axioms\":false"
+        check ((LSP.getStr r ["raw", "value"]).length > 0 && LSP.get? r ["axioms"] == none) s!"raw: {r.compress}"
+        -- an unknown name, and no name or position: null
+        let (srv, r) ← core srv ",\"name\":\"nope\""
+        check (r == Lean.Json.null) s!"nope: {r.compress}"
+        let (_, r) ← core srv ""
+        check (r == Lean.Json.null) s!"nothing: {r.compress}" },
     { name := "code action: did you mean", run := fun _ => do
         let src := "import Prelude\ndef double (n : Nat) : Nat := n + n\ndef four : Nat := doubel 2\n"
         let (srv, out) ← openDoc src
@@ -1018,6 +1134,78 @@ def serverGroup : Group where
         let (_, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/rename\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src (offAfter src "Nat.add n" (-1))},\"newName\":\"m\"}}")
         let src' := applyEdit src (LSP.get? out[0]! ["result"]).get!
         check ((src'.splitOn "def double (m : Nat) : Nat := Nat.add m m\n").length > 1) s!"renamed:\n{src'}" },
+    { name := "#434: references, highlights and rename from a declaration's own name", run := fun _ => do
+        let src := "import Prelude\ndef double (n : Nat) : Nat := Nat.add n n\n\ndef four : Nat := double 2\n" ++
+          "inductive Col where\n  | red\n  | green\ndef pick (b : Bool) : Col := Col.red\n" ++
+          "def other : Col := Col.green\nstructure Point where\n  px : Nat\n  py : Nat\n" ++
+          "def getX (p : Point) : Nat := Point.px p\n"
+        let (srv, out) ← openDoc src
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        let rename (srv : LSP.Server) (off : Nat) (new : String) : IO Lean.Json := do
+          let (_, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/rename\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},\"position\":{posJson src off},\"newName\":\"{new}\"}}")
+          pure out[0]!
+        -- each: (what, an offset in the declaring name, an offset in a use, the name as written
+        -- where it is declared, its line and column there)
+        let sites : List (String × Nat × Nat × String × Nat × Nat) := [
+          ("a def (the issue's example: line 2, character 5)", offAfter src "def dou" (-2), offAfter src ":= dou", "double", 1, 4),
+          ("an inductive", offAfter src "inductive Co", offAfter src "Bool) : Co", "Col", 4, 10),
+          ("a constructor", offAfter src "  | re" (-1), offAfter src "Col.re", "red", 5, 4),
+          ("a constructor (the end of its name)", offAfter src "  | red", offAfter src "Col.r", "red", 5, 4),
+          ("a structure", offAfter src "structure Poi", offAfter src "(p : Poi", "Point", 9, 10),
+          ("a structure field", offAfter src "  px" (-1), offAfter src "Point.p", "px", 10, 2)]
+        let mut srv := srv
+        for (what, declOff, useOff, written, line, col) in sites do
+          -- references: the same from both places, the declaration among them
+          let (srv', atDecl) ← ask srv "textDocument/references" src declOff
+          let (srv', atUse) ← ask srv' "textDocument/references" src useOff
+          srv := srv'
+          check (atDecl != Lean.Json.null && atDecl.compress == atUse.compress)
+            s!"{what}: references\n  at the declaration: {atDecl.compress}\n  at a use: {atUse.compress}"
+          check (has atDecl s!"\"start\":\{\"character\":{col},\"line\":{line}}") s!"{what}: no declaration site in {atDecl.compress}"
+          -- document highlights
+          let (srv', hDecl) ← ask srv "textDocument/documentHighlight" src declOff
+          let (srv', hUse) ← ask srv' "textDocument/documentHighlight" src useOff
+          srv := srv'
+          check (hDecl != Lean.Json.null && hDecl.compress == hUse.compress) s!"{what}: highlights\n  {hDecl.compress}\n  {hUse.compress}"
+          -- prepareRename: the declaring name itself
+          let (srv', p) ← ask srv "textDocument/prepareRename" src declOff
+          srv := srv'
+          checkEq written (LSP.getStr p ["placeholder"])
+          checkEq line (LSP.getNat p ["range", "start", "line"])
+          checkEq col (LSP.getNat p ["range", "start", "character"])
+          -- rename: the same edits from both places
+          let rDecl ← rename srv declOff "Renamed"
+          let rUse ← rename srv useOff "Renamed"
+          check (has rDecl "\"result\"" && rDecl.compress == rUse.compress) s!"{what}: rename\n  {rDecl.compress}\n  {rUse.compress}"
+        -- renaming a def and a constructor from where they are declared gives a program that checks
+        let r ← rename srv (offAfter src "def dou" (-2)) "twice"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "double").length == 1 && (src'.splitOn "twice").length == 3) s!"renamed:\n{src'}"
+        checkEq ([] : List String) (← codes src')
+        let r ← rename srv (offAfter src "  | re" (-1)) "Col.crimson"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "  | crimson\n").length == 2 && (src'.splitOn "Col.crimson").length == 2 &&
+          (src'.splitOn "red").length == 1) s!"renamed:\n{src'}"
+        checkEq ([] : List String) (← codes src')
+        -- a new name in another namespace edits the uses only (the declaration can't say it)
+        let r ← rename srv (offAfter src "  | re" (-1)) "Other.red2"
+        let src' := applyEdit src (LSP.get? r ["result"]).get!
+        check ((src'.splitOn "  | red\n").length == 2 && (src'.splitOn "Other.red2").length == 2) s!"renamed:\n{src'}"
+        -- a local at its binder still works (`binderOf`): the binder and its two uses
+        let (srv1, r) ← ask srv "textDocument/documentHighlight" src (offAfter src "(n" (-1))
+        let some (.arr hs) := some r | throw (IO.userError s!"{r.compress}")
+        checkEq 3 hs.size
+        -- off any name (the `:` of a declaration, a keyword): nothing
+        let (srv2, r) ← ask srv1 "textDocument/references" src (offAfter src "inductiv" (-3))
+        check (r == Lean.Json.null) s!"in a keyword: {r.compress}"
+        let (_, r) ← ask srv2 "textDocument/references" src (offAfter src "(n : Nat) " (1))
+        check (r == Lean.Json.null || r == Lean.Json.arr #[]) s!"at `:`: {r.compress}"
+        -- the renaming rule
+        checkEq (some "new") (Refs.renameText "old" "new" "old")
+        checkEq (some "blue") (Refs.renameText "C.red" "C.blue" "red")
+        checkEq (none : Option String) (Refs.renameText "C.red" "D.blue" "red")
+        checkEq (none : Option String) (Refs.renameText "red" "blue" "C.red")
+        checkEq (some "D.blue") (Refs.renameText "C.red" "D.blue" "C.red") },
     { name := "document symbols, workspace symbols and folding ranges (11v)", run := fun _ => do
         let src := "import Prelude\n/- a block\n   comment -/\nstructure Point where\n  px : Nat\n  py : Nat\n" ++
           "def Point.norm (p : Point) : Nat := p.px\ndef k : Nat → Nat := by\n  intro n\n  exact n\n"
@@ -1082,7 +1270,7 @@ def serverGroup : Group where
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
         for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
-                       ("Result", "lib/Result.wiz"), ("Logic", "lib/Logic.wiz"),
+                       ("Data.Result", "lib/Data/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do
           if ← System.FilePath.pathExists p then
             libs := libs.insert m (p, ← IO.FS.readFile p)
@@ -1124,11 +1312,11 @@ def serverGroup : Group where
         IO.FS.writeFile (dir / "infoview.html") "<p>page</p>"
         IO.FS.writeFile (dir / "secret.txt") "no"
         -- one request, through `accept`, on a socket pair: the answer's text
-        let ask (req : String) (web : Option String := some dir.toString) : IO (Bool × String) := do
+        let ask (req : String) (web : Option String := some dir.toString) (token : Option String := some "s3cr3t") : IO (Bool × String) := do
           let ((r, w), (r', w')) ← Socket.pair
           let (r, w, r', w') := (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w, IO.FS.Stream.ofHandle r', IO.FS.Stream.ofHandle w')
           w.putStr req; w.flush
-          let ok ← WebSocket.accept r' w' web
+          let ok ← WebSocket.accept r' w' token web
           let mut out := ""
           for _ in [0:20] do
             let l ← r.getLine
@@ -1146,7 +1334,34 @@ def serverGroup : Group where
         check ((out.splitOn "403").length > 1) s!"foreign origin: {out}"
         -- without the directory (plain `--ws`): no files at all
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\n\r\n" none
-        check ((out.splitOn "426").length > 1) s!"no web directory: {out}" },
+        check ((out.splitOn "426").length > 1) s!"no web directory: {out}"
+        -- (#430) the page's URL carries the token for its WebSocket: the query does not
+        -- change which file is served (nor is a token needed for the files, which are the
+        -- toolchain's own); the token is checked on the upgrade only
+        let (ok, out) ← ask "GET /infoview.html?port=1&token=s3cr3t&follow=1 HTTP/1.1\r\n\r\n"
+        check (!ok && (out.splitOn "200 OK").length > 1 && (out.splitOn "text/html").length > 1) s!"page with token: {out}"
+        check ((out.splitOn "s3cr3t").length == 1) s!"the token is echoed: {out}"
+        let (_, out) ← ask "GET /secret.txt?token=s3cr3t HTTP/1.1\r\n\r\n"
+        check ((out.splitOn "404").length > 1) s!"a token opens no other file: {out}"
+        let upgrade (target : String) (extra : String := "") :=
+          s!"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+          s!"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
+        for (what, target, extra) in [("no token", "/", ""), ("wrong token", "/?token=s3cr3x", ""),
+            ("token prefix", "/?token=s3cr", ""), ("token as another parameter", "/?xtoken=s3cr3t", ""),
+            ("wrong bearer", "/", "Authorization: Bearer nope\r\n")] do
+          let (ok, out) ← ask (upgrade target extra)
+          check (!ok && (out.splitOn "401 Unauthorized").length > 1 && (out.splitOn "101").length == 1) s!"{what}: {out}"
+        for (what, target, extra) in [("query", "/?token=s3cr3t", ""), ("query among others", "/?port=1&token=s3cr3t&follow=1", ""),
+            ("bearer", "/", "Authorization: Bearer s3cr3t\r\n")] do
+          let (ok, out) ← ask (upgrade target extra)
+          check (ok && (out.splitOn "101 Switching Protocols").length > 1) s!"{what}: {out}"
+        -- `--ws-insecure` (no token): any local client
+        let (ok, _) ← ask (upgrade "/") (token := none)
+        check ok "insecure: refused"
+        -- the comparison
+        check (WebSocket.constantTimeEq "abc" "abc" && !WebSocket.constantTimeEq "abc" "abd" &&
+          !WebSocket.constantTimeEq "abc" "ab" && !WebSocket.constantTimeEq "" "a") "constantTimeEq"
+        check ((← WebSocket.freshToken) != (← WebSocket.freshToken)) "two launches, one token" },
     { name := "WebSocket transport (--ws): infoview requests, editing, origins", run := fun _ => do
         let _ ← IO.asTask (prio := .dedicated) (do IO.sleep 60000; IO.eprintln "timed out"; IO.Process.exit 3 : IO Unit)
         try wsCase; IO.Process.exit 0

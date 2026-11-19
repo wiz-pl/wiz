@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiz site licences</title>
+<meta name="color-scheme" content="light dark">
+<style>
+  :root { --bg: #fdfdfb; --fg: #1d1d1b; --dim: #777; --link: #1f4fbf; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1b1c1e; --fg: #e4e4e0; --dim: #999; --link: #8ab4ff; } }
+  body { margin: 0 auto; padding: 16px; max-width: 46rem; background: var(--bg); color: var(--fg);
+         font: 16px/1.55 system-ui, sans-serif; }
+  a { color: var(--link); } code { font-size: 14px; } .dim { color: var(--dim); }
+</style>
+</head>
+<body>
+<p><a href="../">&larr; Wiz</a></p>
+<h1>Licences</h1>
+
+<h2>Wiz</h2>
+<p>
+  Wiz is free software: you can redistribute it and/or modify it under the terms of the
+  GNU General Public License as published by the Free Software Foundation, either version 3
+  of the License, or (at your option) any later version
+  (<a href="GPL-3.0.txt">GPL-3.0.txt</a>). Its complete source is at
+  <a href="https://github.com/wiz-pl/wiz">https://github.com/wiz-pl/wiz</a>.
+</p>
+
+<h2>The WebAssembly modules</h2>
+<p>
+  The pages of this site run two WebAssembly modules compiled from Wiz by Emscripten:
+  <code>playground/wiz-playground.wasm</code> (the playground, built by
+  <code>web/build-playground.sh</code>) and <code>docs/wiz-infoview.wasm</code> (the infoview
+  of the documentation pages, built by <code>web/build.sh</code>).
+</p>
+<p>
+  Both include <strong>mini-gmp</strong> from <strong>GNU MP (GMP) 6.3.0</strong>, linked
+  statically, under the GNU LGPL v3 or later, or the GNU GPL v2 or later:
+  <a href="LGPL-3.0.txt">LGPL-3.0.txt</a> (the LGPL v3) and
+  <a href="GPL-3.0.txt">GPL-3.0.txt</a> (the GPL v3, which the LGPL v3 adds to).
+  Its source: <a href="https://gmplib.org/">https://gmplib.org/</a> (mini-gmp is the
+  <code>mini-gmp/</code> directory of the GMP 6.3.0 release tarball).
+</p>
+<p>
+  Because Wiz is itself under the GPL, with its complete source at
+  <a href="https://github.com/wiz-pl/wiz">https://github.com/wiz-pl/wiz</a>, you can
+  rebuild the modules against a modified mini-gmp:
+  <code>web/build.sh OUT --gmp-src GMP.tar.xz</code> and
+  <code>web/build-playground.sh OUT --gmp-src GMP.tar.xz</code> take mini-gmp from the
+  tarball you give them.
+</p>
+<p class="dim">
+  The release tarball's notice for the toolchain itself is <code>share/wiz/NOTICE</code>
+  (<a href="https://github.com/wiz-pl/wiz/blob/master/scripts/release-licenses/NOTICE">scripts/release-licenses/NOTICE</a>).
+</p>
+</body>
+</html>

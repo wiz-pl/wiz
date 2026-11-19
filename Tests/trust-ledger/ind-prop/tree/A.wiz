@@ -1,0 +1,27 @@
+import Prelude
+
+-- (issue #252) An inductive proposition is kernel-checked: formation, the guardedness
+-- check and the generated recursor are checked terms. The `prop` flag only restricts
+-- large elimination (a non-singleton proposition may eliminate only into `Prop`). The
+-- ledger must find no source of trust here; if a future change makes one an axiom or a
+-- partial definition, this fixture fails with a new source.
+inductive Le : Nat → Nat → Prop where
+  | refl (n : Nat) : Le n n
+  | step {n m : Nat} (h : Le n m) : Le n (Nat.succ m)
+
+def leSucc (n : Nat) : Le n (Nat.succ n) := .step (.refl n)
+
+-- Singleton elimination computes into Type, and is still kernel-checked.
+inductive EqP {A : Type} (a : A) : A → Prop where
+  | refl : EqP a a
+
+def eqPTest : Nat :=
+  EqP.rec (fun (b : Nat) (_ : EqP Nat.zero b) => Nat) (Nat.succ Nat.zero) (EqP.refl)
+
+-- A mutual block of inductive propositions: one propositional family, also no trust.
+mutual
+inductive PA : Prop where
+  | mk
+inductive PB : Prop where
+  | mkB (a : PA)
+end

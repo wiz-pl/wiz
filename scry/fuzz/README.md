@@ -40,7 +40,7 @@ reason in the report.
 
 ```sh
 cd scry
-# static half (34 cases on this branch)
+# static half (52 cases on master; `scry bench` prints the count)
 ./.grail/bin/scry bench --no-timing --json build/bench.json --markdown build/bench.md
 
 # bounded smoke: build, seed from the bench/tests corpus, fuzz, minimise, dedup,
@@ -154,7 +154,10 @@ A `clean` case means those bytes did not crash in one execution under ASan/UBSan
 not change the static TP/FP/TN/FN judgement and it is not a verdict on the analysis.
 `dynamic.md` is a human-readable rendering of the same document.
 
-## Results from this branch
+## Results from the first run
+
+The counts below are from the first run and its then-current corpus; the corpus and the
+rule pack have grown since, so `scry bench` is the authority for today's case count.
 
 * The first harness run found a **744-byte leak on every successful parse**: the shim
   pre-allocates an error store at entry and the success path returned without freeing it.
@@ -163,8 +166,9 @@ not change the static TP/FP/TN/FN judgement and it is not a verdict on the analy
 * Bounded smoke (`--runs 5000 --time 15 --seed 20261115`, clang 21.1.8,
   `-fsanitize=fuzzer,address,undefined`): 57 unique seeds, 5000 executions, 1625
   coverage edges, 4066 features, **0 artifacts**, and a 34/34 clean one-execution sweep
-  of the static corpus. The counts are in `build/fuzz/dynamic.json` and repeated in
-  `wiz-notes/scry-fuzz.md`. **This is a bounded observation, not a safety result.**
+  of the then-current static corpus (34 cases). The counts are in
+  `build/fuzz/dynamic.json` and repeated in `wiz-notes/scry-fuzz.md`. **This is a bounded
+  observation, not a safety result.**
 
 ## Limits
 
@@ -179,6 +183,6 @@ not change the static TP/FP/TN/FN judgement and it is not a verdict on the analy
   may no longer resemble valid C.
 * Dedup is textual stack-signature based; different root causes can share a signature.
 * Span mapping is ASCII-only and byte/character exact only under that restriction.
-* The static half is 34 cases on this branch (`agent/scry-bench` at the merge point); the
-  expanded rule-pack baseline lives on `agent/scry-rules`, so these counts are not the
-  headline bench numbers from `wiz-notes/scry-bench.md`.
+* The static half was 34 cases at the first run (the pre-merge `scry-bench` branch);
+  `scry bench` now reports 52. The expanded rule-pack baseline is on master, so these
+  counts are not the headline bench numbers from `wiz-notes/scry-bench.md`.

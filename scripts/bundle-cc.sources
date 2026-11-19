@@ -3,6 +3,19 @@
 # downloads keyed by this file's hash, and on master copies them to the release
 # `bundle-inputs` of this repository, which is the last mirror tried.
 # A $U in a URL is an Ubuntu pool (pool/main/...), $R the bundle-inputs release.
+#
+# The sysroot inputs (libc6, libc6-dev, linux-libc-dev) are glibc 2.27 and Linux 4.15
+# headers from Ubuntu 18.04, which is EOL (2023-05). They are link-time only:
+# share/wiz/cc is `clang --sysroot=...`, and the programs it builds link the host's
+# glibc dynamically, so no 18.04 code runs in a release. 2.27 is a compatibility
+# *floor* for those programs, chosen so they run on the oldest distribution anyone
+# might still use. Ubuntu 18.04 is the last distribution that requires 2.27; everything
+# supported in 2026 needs 2.28 or later (RHEL 8, the oldest still-supported one, has
+# 2.28 and is supported to 2029-05; Debian 10, 2.28, went EOL in 2024-06). Moving the
+# floor to 2.28 would drop 18.04 and is a support-policy decision, not a build detail.
+# TODO(2026-11-17, wiz-pl maintainers): decide whether to move the sysroot to a
+# supported release (glibc 2.28 or later) and drop the Ubuntu 18.04 floor; until then
+# this pin is deliberate and link-only, not a stale comment.
 libc6_2.27-3ubuntu1.6_amd64.deb 5b813d4512491cd8fb30b2eb9192349ee75ffe3c9f21ae136cc7b2429f70c3b2 $U/g/glibc/libc6_2.27-3ubuntu1.6_amd64.deb
 libc6-dev_2.27-3ubuntu1.6_amd64.deb 96ae7d2cf38f0547ca3cccb3344c8802fdf5bcd71c4b6d9aed09558ac8cc87db $U/g/glibc/libc6-dev_2.27-3ubuntu1.6_amd64.deb
 linux-libc-dev_4.15.0-213.224_amd64.deb 06d9f16644d3a1b2ab7dd01730e833d516b6f575d975855f496eea6463fef2f6 $U/l/linux/linux-libc-dev_4.15.0-213.224_amd64.deb

@@ -8,18 +8,21 @@
 // commands, the engine's lines as diagnostics (one per command, a parse error at its
 // offset in UTF-16, the added Prelude line, output that does not line up), the
 // handshake through `LspClient`, didOpen/didChange → publishDiagnostics (and
-// `wiz/elaborated`), the plain fallback answering "nothing at the cursor", an engine
-// that loads late or fails, the page's wiring (`startInfoview` with a stub textarea), and
-// no unhandled rejection anywhere.
+// `wiz/elaborated`), the plain fallback answering "nothing at the cursor", completion,
+// hover and definition from the check's declaration index (with their `textEdit`, Markdown
+// and `Location` shapes), an engine that loads late or fails, the page's wiring
+// (`startInfoview` with a stub textarea), and no unhandled rejection anywhere.
 "use strict";
 import {
   isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
   SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
+  completionPrefix, filterCompletions, splitGoals, wordAt,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
 import { startInfoview } from "./playground-lsp.js";
+import { document as minidoc } from "./framework/minidom.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -211,6 +214,7 @@ let notOpen = null;
 try { await client.plainGoal("file:///other.wiz", { line: 0, character: 0 }); } catch (e) { notOpen = e; }
 check("plainGoal: an unopened document", notOpen instanceof LspError ? notOpen.code : String(notOpen), -32602);
 check("hover: null", await client.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 0 } }), null);
+check("definition: null", await client.request("textDocument/definition", { textDocument: { uri }, position: { line: 0, character: 0 } }), null);
 let unknown = null;
 try { await client.request("wiz/frobnicate", {}); } catch (e) { unknown = e; }
 check("an unknown request: MethodNotFound", unknown && unknown.code, -32601);
@@ -292,6 +296,17 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
+// The DOM the squiggle overlay needs (minidom's elements plus a body).
+function fakeDocument() {
+  const base = minidoc();
+  return {
+    body: base.createElement("body"),
+    createElement: base.createElement,
+    createTextNode: base.createTextNode,
+    createRange: base.createRange,
+    defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
+  };
+}
 async function waitUntil(predicate, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -303,13 +318,19 @@ async function waitUntil(predicate, ms = 3000) {
 {
   const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval twice 21\n");
   const wire = fakePanel();
-  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz" });
+  const app = startInfoview({
+    editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    document: fakeDocument(),
+  });
   checkThat("wiring: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
   checkThat("wiring: the #eval result", await waitUntil(() => wire.innerHTML.includes("42")));
   editor.value = "def twice (n : Nat) : Nat := BAD\n";
   for (const fn of editor.listeners.input || []) fn();
   checkThat("wiring: an edit's error", await waitUntil(() => wire.innerHTML.includes("unknown identifier")), wire.innerHTML.slice(0, 600));
   checkThat("wiring: on line 1", wire.innerHTML.includes('data-span="0:0-0:'));
+  // The in-page server's diagnostics reach the editor's squiggle layer too.
+  checkThat("wiring: the error is underlined", !!app.squiggles() && app.squiggles().segments().length === 1,
+    JSON.stringify(app.squiggles() && app.squiggles().segments()));
   app.stop();
 }
 
@@ -430,7 +451,210 @@ check("check: no lines", parseCheck('{"v":1}'), null);
   c2.close();
 }
 
-// ## 9. Nothing escaped
+// ## 9. Completion, hover and definition (`textDocument/*` from the declaration index)
+
+// The index of a module's declarations: `{s,e,kind:"decl",name,detail,ckind}` in the
+// checked source (the Prelude line included), as `wiz_playground_check` emits them.
+function declCheck(source, decls, extra = {}) {
+  // the client passes the checked source, so the added Prelude is already in it
+  const p = source.startsWith("import Prelude\n\n") ? "import Prelude\n\n".length : 0;
+  const index = decls.map((d) => ({
+    s: p + d.s, e: p + d.e, kind: "decl", name: d.name, detail: d.detail, ckind: d.kind,
+  }));
+  return stubCheck(source, Object.assign({ index }, extra));
+}
+
+const DECLS = [
+  { name: "twice", detail: "(n : Nat) → Nat", kind: 3, s: 4, e: 9 },
+  { name: "pred", detail: "Nat → Nat", kind: 3, s: 39, e: 43 },
+  { name: "MyType", detail: "Type", kind: 7, s: 75, e: 81 },
+];
+const DECL_TEXT = "def twice (n : Nat) : Nat := n + n\n" +
+  "def pred (n : Nat) : Nat := n\n" +
+  "inductive MyType where\n" +
+  "  | mk\n" +
+  "#eval twice";
+
+const declarations = [
+  { label: "twice", kind: 3, detail: "(n : Nat) → Nat", range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } } },
+  { label: "pred", kind: 3, detail: "Nat → Nat", range: { start: { line: 0, character: 39 }, end: { line: 0, character: 43 } } },
+  { label: "MyType", kind: 7, detail: "Type", range: { start: { line: 0, character: 75 }, end: { line: 0, character: 81 } } },
+];
+
+check("prefix: after an identifier", completionPrefix("x := tw", 7), { start: 5, prefix: "tw" });
+check("prefix: a dotted name", completionPrefix("Nat.ad", 6).prefix, "Nat.ad");
+check("prefix: after a space", completionPrefix("= ", 2), { start: 2, prefix: "" });
+check("prefix: at the start", completionPrefix("twice", 0).prefix, "");
+check("word: at a name", wordAt("def twice (n : Nat)", 6), { start: 4, end: 9, word: "twice" });
+check("word: just after it", wordAt("def twice (n : Nat)", 9).word, "twice");
+check("word: a dotted name", wordAt("Nat.add", 4).word, "Nat.add");
+check("word: on a space", wordAt("   ", 1).word, "");
+check("filter: the prefix", filterCompletions(declarations, "tw").map((n) => n.label), ["twice"]);
+check("filter: case-insensitive", filterCompletions(declarations, "MY").map((n) => n.label), ["MyType"]);
+check("filter: dotted", filterCompletions(declarations, "Nat.").map((n) => n.label), []);
+check("filter: no match", filterCompletions(declarations, "zz"), []);
+check("filter: an empty prefix keeps the order", filterCompletions(declarations, "").map((n) => n.label),
+  ["twice", "pred", "MyType"]);
+check("filter: the detail survives", filterCompletions(declarations, "tw")[0].detail, "(n : Nat) → Nat");
+check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
+{
+  // the handshake advertises all three, and the answers come from the index
+  const c3 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (s) => declCheck(s, DECLS)
+  }) });
+  await c3.connect();
+  const caps = c3.capabilities || {};
+  checkThat("completion: advertised", (caps.completionProvider || {}).triggerCharacters !== undefined,
+    JSON.stringify(caps));
+  check("hover: advertised", caps.hoverProvider, true);
+  check("definition: advertised", caps.definitionProvider, true);
+  const got = waitFor(c3, "diagnostics");
+  c3.openDocument(uri, DECL_TEXT);
+  await got;
+
+  const answer = await c3.completion(uri, { line: 4, character: 8 });
+  check("completion: isIncomplete", answer.isIncomplete, false);
+  check("completion: the prefix", answer.items.map((i) => i.label), ["twice"]);
+  check("completion: the kind and detail", [answer.items[0].kind, answer.items[0].detail], [3, "(n : Nat) → Nat"]);
+  check("completion: a textEdit over the prefix", answer.items[0].textEdit,
+    { range: { start: { line: 4, character: 6 }, end: { line: 4, character: 8 } }, newText: "twice" });
+  const empty = await c3.completion(uri, { line: 4, character: 6 });
+  check("completion: an empty prefix lists them all", empty.items.map((i) => i.label),
+    ["twice", "pred", "MyType"]);
+  check("completion: none for an unknown prefix", (await c3.completion(uri, { line: 4, character: 3 })).items, []);
+
+  check("hover: a declaration's signature", await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 10 } }), {
+    contents: { kind: "markdown", value: "```wiz\ntwice : (n : Nat) → Nat\n```" },
+    range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } },
+  });
+  check("hover: on the declaration itself", (await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 6 } })).contents.value,
+    "```wiz\ntwice : (n : Nat) → Nat\n```");
+  check("hover: an unknown name is null", await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 4 } }), null);
+  check("definition: the declaration's Location", await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 4, character: 10 } }), {
+    uri, range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } },
+  });
+  check("definition: another declaration's Location", (await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 1, character: 6 } })).range,
+    { start: { line: 1, character: 4 }, end: { line: 1, character: 8 } });
+  check("definition: an unknown name is null", await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 4, character: 4 } }), null);
+  c3.close();
+}
+{
+  // a constructor is used after a dot; the index has its full name
+  const text = "inductive Box where\n  | mk\ndef b : Box := Box.mk\n";
+  const decls = [
+    { name: "Box", detail: "Type", kind: 7, s: 10, e: 13 },
+    { name: "Box.mk", detail: "Box", kind: 3, s: 24, e: 26 },
+  ];
+  const c4 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (s) => declCheck(s, decls),
+  }) });
+  await c4.connect();
+  const got4 = waitFor(c4, "diagnostics");
+  c4.openDocument(uri, text);
+  await got4;
+  check("definition: a constructor's suffix", (await c4.request("textDocument/definition", { textDocument: { uri }, position: { line: 2, character: 20 } })).range,
+    { start: { line: 1, character: 4 }, end: { line: 1, character: 6 } });
+  check("completion: a constructor's full name", (await c4.completion(uri, { line: 2, character: 21 })).items.map((i) => i.label),
+    ["Box.mk"]);
+  c4.close();
+}
+{
+  // a module without the export: empty lists and nulls, never an error
+  const server = new SelfhostServer({ evaluate: stubEval });
+  check("completion: no check is an empty list",
+    (await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'))[0].result
+      .capabilities.completionProvider !== undefined, true);
+  await server.handle(JSON.stringify({ jsonrpc: "2.0", method: "textDocument/didOpen",
+    params: { textDocument: { uri: "u", version: 1, text: "def a : Nat := 1\n" } } }));
+  const out = await server.handle('{"jsonrpc":"2.0","id":2,"method":"textDocument/completion",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("completion: no index, no items", [out[0].result.isIncomplete, out[0].result.items], [false, []]);
+  const hov = await server.handle('{"jsonrpc":"2.0","id":3,"method":"textDocument/hover",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("hover: no index is null", hov[0].result, null);
+  const def = await server.handle('{"jsonrpc":"2.0","id":4,"method":"textDocument/definition",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("definition: no index is null", def[0].result, null);
+  // before the handshake an unknown method is still refused, and an unopened document is
+  // an invalid parameter (not a crash)
+  const fresh = new SelfhostServer({ evaluate: stubEval });
+  const unknown = await fresh.handle('{"jsonrpc":"2.0","id":5,"method":"wiz/frobnicate","params":{}}');
+  check("before initialize: an unknown method", unknown[0].error.code, -32601);
+  const closed = await fresh.handle('{"jsonrpc":"2.0","id":6,"method":"textDocument/completion",' +
+    '"params":{"textDocument":{"uri":"nope"},"position":{"line":0,"character":0}}}');
+  check("before initialize: an unopened document", closed[0].error.code, -32602);
+}
+// ## 10. Stage 3: tactic states in the index (`wiz/plainGoal`)
+
+check("goals: two blocks", splitGoals("a : Nat\n⊢ Nat\n\nb : Bool\n⊢ Bool"),
+  ["a : Nat\n⊢ Nat", "b : Bool\n⊢ Bool"]);
+check("goals: a finished proof", splitGoals("no goals"), []);
+check("goals: nothing", splitGoals(""), []);
+{
+  // an index with the states a `by` block records: one per step, the block's end, and
+  // the expected types beside them (the shapes `wiz_playground_check` emits)
+  const text = "def f (n : Nat) : Nat := n + n\n";
+  const p = withPrelude(text).prefix.length;
+  const body = text.indexOf("n + n");               // 24
+  const second = text.lastIndexOf("n");             // 28
+  const index = [
+    { s: p + body, e: p + body + 5, kind: "term", expected: "Nat" },
+    { s: p + body, e: p + body + 1, kind: "term", expected: "Nat" },
+    { s: p + second, e: p + second + 1, kind: "term", expected: "Nat" },
+    { s: p + body, e: p + body + 5, kind: "goal", goals: ["n : Nat\n⊢ Nat"] },
+    { s: p + body, e: p + second + 1, kind: "goal", goals: ["n : Nat\n⊢ Nat\n\nm : Nat\n⊢ Nat"] },
+    { s: p + second + 1, e: p + second + 1, kind: "goal", goals: [] },
+  ];
+  const c5 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+  }) });
+  await c5.connect();
+  const got5 = waitFor(c5, "diagnostics");
+  c5.openDocument(uri, text);
+  await got5;
+  check("goals: the innermost step", await c5.plainGoal(uri, { line: 0, character: body + 1 }),
+    { goals: ["n : Nat\n⊢ Nat", "m : Nat\n⊢ Nat"], rendered: "```wiz\nn : Nat\n⊢ Nat\n\nm : Nat\n⊢ Nat\n```",
+      range: { start: { line: 0, character: body }, end: { line: 0, character: second + 1 } } });
+  check("goals: at the body's end, the finished proof", (await c5.plainGoal(uri, { line: 0, character: second + 1 })).goals, []);
+  check("goals: outside it is null", await c5.plainGoal(uri, { line: 0, character: 0 }), null);
+  // the expected type at the same carets
+  check("term: the second n", (await c5.plainTermGoal(uri, { line: 0, character: second })).goal, "Nat");
+  check("term: the whole body", (await c5.plainTermGoal(uri, { line: 0, character: body + 3 })).range,
+    { start: { line: 0, character: body }, end: { line: 0, character: body + 5 } });
+  // the panel shows both
+  const st5 = await readGoalState(c5, uri, { line: 0, character: 28 });
+  const p5 = { innerHTML: "" };
+  renderPanel(p5, { state: "open", endpoint: SELFHOST_URL, diagnostics: [], goals: st5.goals,
+    goalsKind: st5.goalsKind, term: st5.term, termKind: st5.termKind, info: null });
+  checkThat("panel: the tactic goals", p5.innerHTML.includes("n : Nat") && p5.innerHTML.includes("m : Nat"),
+    p5.innerHTML.slice(0, 500));
+  c5.close();
+}
+{
+  // a code-point offset after an astral character: the entry is inside the checked text,
+  // the caret is a UTF-16 position
+  const text = "-- 😀\ndef f (n : Nat) : Nat := n\n";
+  const p = withPrelude(text).prefix.length;
+  const caret = text.length - 2;                    // the last `n`
+  const cp = Array.from(text.slice(0, caret)).length;
+  const index = [{ s: p + cp, e: p + cp + 1, kind: "term", expected: "Nat" }];
+  const c6 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+  }) });
+  await c6.connect();
+  const got6 = waitFor(c6, "diagnostics");
+  c6.openDocument(uri, text);
+  await got6;
+  const at = positionOf(text, caret);
+  check("astral: the expected type", (await c6.plainTermGoal(uri, at)).goal, "Nat");
+  check("astral: its UTF-16 range", (await c6.plainTermGoal(uri, at)).range.start, at);
+  check("astral: elsewhere it is null", await c6.plainTermGoal(uri, { line: 1, character: 4 }), null);
+  c6.close();
+}
+
+// ## 11. Nothing escaped
+
+
 
 await sleep(30);
 check("no unhandled rejections", rejections.length, 0);

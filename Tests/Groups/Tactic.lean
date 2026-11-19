@@ -308,7 +308,7 @@ def tacticGroup : Group where
         -- No explicit rule list: append_nil, reverse_reverse and length_append_eq carry
         -- the goal to a reflexive equation, and the two append_nil occurrences are
         -- rewritten in separate passes (a rewrite restarts the pass).
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "def l1 {A : Type} (xs ys : List A) :\n" ++
           "    List.length (List.reverse (List.reverse (List.append xs (List.append ys List.nil)))) =\n" ++
           "      Nat.add (List.length xs) (List.length ys) := by\n" ++

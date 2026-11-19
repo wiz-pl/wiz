@@ -1,0 +1,82 @@
+import Web.Loom
+
+/-!
+# Web.Editor
+
+The playground's program editor as a Loom component: the page's `<textarea id="editor">`
+with its label and hint, and the Run button and `#count` beside it.
+
+It is pure. The text arrives from the browser as the event's payload (`Loom.LiveApp`;
+`web/framework/driver.js` sends the control's live value after the handler index), and
+`WebEditor.Msg.run` only counts the request (`runs`): running is an effect, so the page calls the
+Wasm engine and tells the component what happened (`disabled`, `count`, and the text with
+`WebEditor.withText` when the page changed it). That keeps the engine out of the UI instance
+and the textarea's live value in the DOM, where the user's caret is.
+
+`WebEditor.view` is the page's own markup (`web/playground.html`): the `.pane` section, the
+`.pane-head` label and hint, the `#editor` textarea and the `.actions` row with `#run`
+and `#count`. `web/playground_editor_gen.wiz` renders and steps it, and
+`web/playground_editor_test.mjs` applies its patches to the SSR in the DOM double.
+-/
+
+/-- The editor's state: the text the browser last sent, the page's `#count` text, whether
+Run is disabled (while the engine loads or runs), and how many times Run was asked for. -/
+structure WebEditor where
+  text : String
+  count : String
+  disabled : Bool
+  runs : Nat
+
+/-- What the editor's controls send: the textarea's value (`input`, with the text as the
+event's payload), or a Run request (`run`, a click on the button). -/
+inductive WebEditor.Msg where
+  | input
+  | run
+
+/-- The editor, showing `text`. Run starts disabled: the page enables it when its engine
+is ready. -/
+def WebEditor.initial (text : String) : WebEditor := WebEditor.mk text "" .true 0
+
+/-- The text replaced (`wiz_loom_show` on the page: the page may set it when it loads a
+sample, a share link, or the initial program). -/
+def WebEditor.withText (s : WebEditor) (text : String) : WebEditor :=
+  WebEditor.mk text s.count s.disabled s.runs
+
+/-- Enable or disable Run (the page while the engine loads and while a run is in flight). -/
+def WebEditor.withDisabled (s : WebEditor) (disabled : Bool) : WebEditor :=
+  WebEditor.mk s.text s.count disabled s.runs
+
+/-- The `#count` text (`2 lines · 1 error`, `exit code 3`; `lib/Web/Playground.wiz` makes
+it for a run's output). -/
+def WebEditor.withCount (s : WebEditor) (count : String) : WebEditor :=
+  WebEditor.mk s.text count s.disabled s.runs
+
+/-- The Run button's attributes: `disabled` only while it is. -/
+def WebEditor.runAttrs (disabled : Bool) : List Loom.Attr :=
+  match disabled with
+  | .true => [Loom.id "run", Loom.attr "type" "button", Loom.attr "disabled" "disabled"]
+  | .false => [Loom.id "run", Loom.attr "type" "button"]
+
+def WebEditor.update (m : WebEditor.Msg) (payload : String) (s : WebEditor) : WebEditor :=
+  match m with
+  | .input => WebEditor.mk payload s.count s.disabled s.runs
+  | .run => match s.disabled with
+    | .true => s
+    | .false => WebEditor.mk s.text s.count s.disabled (s.runs + 1)
+
+/-- The editor pane: the page's `section.pane`. -/
+def WebEditor.view (s : WebEditor) : Loom.VNode WebEditor.Msg :=
+  Loom.el "section" [Loom.class "pane"]
+    [ Loom.el "div" [Loom.class "pane-head"]
+        [ Loom.el "label" [Loom.attr "for" "editor"] [Loom.text "Program"]
+        , Loom.el "span" [Loom.class "hint"] [Loom.text "Ctrl/⌘+Enter runs"] ]
+    , Loom.on "input" WebEditor.Msg.input
+        (Loom.el "textarea" [Loom.id "editor", Loom.attr "spellcheck" "false"]
+          [Loom.text s.text])
+    , Loom.el "div" [Loom.class "actions"]
+        [ Loom.on "click" WebEditor.Msg.run (Loom.el "button" (WebEditor.runAttrs s.disabled) [Loom.text "Run"])
+        , Loom.el "span" [Loom.id "count", Loom.class "dim"] [Loom.text s.count] ] ]
+
+/-- The editor as a `Loom.LiveApp`: the textarea's `input` carries the new text. -/
+def WebEditor.app (text : String) : Loom.LiveApp WebEditor WebEditor.Msg :=
+  Loom.LiveApp.mk (WebEditor.initial text) WebEditor.update WebEditor.view
