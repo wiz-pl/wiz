@@ -16,7 +16,14 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   sees it (named nodes, field tokens, and the normalised fields of `Scry.CsCst`).
 * **Lowering golden**: `lower/*.cs` against `*.wil` (every lowered function and the
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
-  and returns the value C# would.
+  and returns the value C# would. `lower/modern` covers records, partial parts, switch
+  expressions, LINQ, `with`, collection expressions and a constructor initialiser;
+  `lower/toplevel` covers top-level statements (lowered as `<stem>.Main`);
+  `lower/unsupported` is the warning golden for everything out of scope.
+* **Silent skip**: `lower/{modern,toplevel,unsupported}` must each keep the warning that
+  names every out-of-scope construct they contain. The case fails when one of them
+  regresses from a warning to a silent skip (a construct that lowers to nothing without
+  a diagnostic, so the analysis reports nothing about code it never read).
 * **End-to-end taint**: `taint/cwe78-process-unsafe.cs` (console input reaches
   `Process.Start` through string concatenation) fires the `command-injection` rule of
   `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
@@ -89,6 +96,9 @@ def lowerImports : String := "import Scry.CsLower\n"
 def taintImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\nimport Scry.Interproc\n"
 
+def csCmdImports : String :=
+  "import Scry.CsCmd\nimport Scry.Wil\nimport Scry.Rules\nimport Scry.Interproc\nimport Json\n"
+
 /-- A fixture's C# text and its checked-in spill (`dir/name.cs`, `dir/name.cst`). -/
 def fixture (dir name : String) : IO (String × String) := do
   let src ← IO.FS.readFile s!"scry/corpus/csharp/{dir}/{name}.cs"
@@ -102,8 +112,11 @@ def fixtureDefs (src spill : String) : String :=
 /-- Every fixture, as `(dir, name)`. -/
 def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
-   ("lower", "basic"), ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
-   ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe")]
+   ("parse", "modern"),
+   ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
+   ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
+   ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
+   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -128,6 +141,39 @@ def lowerGolden (name : String) : IO Unit := do
       s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.wil" (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The rendering of a lowered fixture (functions and warnings), read from the lowering
+itself rather than from its golden. -/
+def loweredText (name : String) : IO String := do
+  let (src, spill) ← fixture "lower" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- `(fixture, message substring)` pairs the lowering must still report. Every construct
+of the first slice's out-of-scope list is here: the case fails when one of them regresses
+from a warning to a **silent skip** (the analysis then says nothing about code it never
+looked at), which is the failure mode this table exists to prevent. -/
+def requiredWarnings : List (String × String) :=
+  [("modern", "target-typed new() without a declared type"),
+   ("modern", "local function Label not modelled"),
+   ("modern", "is test not modelled"),
+   ("modern", "switch expression arms are not compared"),
+   ("modern", "with expression: the copy's members are not updated"),
+   ("toplevel", "is test not modelled"),
+   ("unsupported", "indexer_declaration member not modelled"),
+   ("unsupported", "operator_declaration member not modelled"),
+   ("unsupported", "destructor_declaration member not modelled"),
+   ("unsupported", "delegate_declaration not modelled"),
+   ("unsupported", "local function Local not modelled"),
+   ("unsupported", "lambda body not lowered"),
+   ("unsupported", "lock_statement not modelled"),
+   ("unsupported", "goto_statement not modelled"),
+   ("unsupported", "labeled_statement not modelled"),
+   ("unsupported", "yield_statement not modelled"),
+   ("unsupported", "preproc_if not modelled"),
+   ("unsupported", "is test not modelled")]
 
 /-- A spill's freshness, read from its text (no Wiz evaluation): the `language` is
 `c_sharp`, the `bytes` row is the `.cs` file's UTF-8 size, and the root's span starts at
@@ -169,6 +215,122 @@ def taintFindings (name : String) : IO (List String) := do
     pure (if fs.isEmpty then [] else fs.splitOn "|")
   | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
 
+/-! ## The `scry cs` fixture tree
+
+`scry/corpus/csharp/repo/` is a small tree with two excluded directories and three
+excluded file names. The group enumerates it with Lean's own `readDir` (the Wiz
+interpreter cannot call `FS.listDir`), hands the listing to `Scry.Cs.walkOfPaths` (the
+same exclusion rule the driver uses) and lowers the checked-in spills, so the report's
+counts and coverage rows are the driver's own aggregation, not a second implementation.
+`Broken.cs` has no spill: `scry-cst` refuses a tree with `ERROR` nodes, so the test builds
+the `.err` result the native path produces. -/
+
+partial def repoCs (dir : System.FilePath) (rel : String) : IO (List (String × String)) := do
+  let mut out : List (String × String) := []
+  for e in ← dir.readDir do
+    let name := e.fileName
+    let relC := if rel.isEmpty then name else rel ++ "/" ++ name
+    if ← e.path.isDir then
+      out := out ++ (← repoCs e.path relC)
+    else if name.endsWith ".cs" then
+      out := out ++ [(relC, e.path.toString)]   -- complexity: ok (test helper: walks the 75-file fixture tree)
+  pure out
+
+def repoFiles : IO (List (String × String)) := do
+  let fs ← repoCs ("scry/corpus/csharp/repo" : System.FilePath) ""
+  pure (fs.toArray.qsort (fun a b => a.1 < b.1)).toList
+
+/-- Wiz definitions for the whole tree: each `.cs` text, its spill when it has one, the
+listing, and one `FileResult` per file. -/
+def repoDefs (files : List (String × String)) : IO String := do
+  let mut defs := ""
+  let mut entries : List String := []
+  let mut i := 0
+  for (rel, full) in files do
+    let text ← IO.FS.readFile full
+    defs := defs ++ s!"def repoText{i} : String := {wizStr text}\n"
+    let spillPath := (full.take (full.length - 3)).toString ++ ".cst"
+    let spill? ← try some <$> IO.FS.readFile spillPath catch _ => pure none
+    match spill? with
+    | some spill =>
+      defs := defs ++ s!"def repoSpill{i} : String := {wizStr spill}\n"   -- complexity: ok (test helper: one chunk per fixture file)
+      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (Scry.Cs.frontend {wizStr rel} repoText{i} repoSpill{i})"]   -- complexity: ok (test helper: one row per fixture file)
+    | none =>
+      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"deliberately invalid C#: the native parse fails\")"]   -- complexity: ok (test helper: one row per fixture file)
+    i := i + 1
+  let paths := "[" ++ ", ".intercalate (files.map fun (r, _) => s!"({wizStr r}, {wizStr r})") ++ "]"
+  pure (defs ++ s!"def repoPaths : List (String × String) := {paths}\n"
+    ++ s!"def repoResults : List Scry.Cs.FileResult := [\n{",\n".intercalate entries}]\n")
+
+/-- The tree's report, built by the same functions `scry cs` calls. -/
+def repoBody (files : List (String × String)) : IO String := do
+  let defs ← repoDefs files
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  pure (defs ++
+    s!"def repoPack : Scry.RulePack := Scry.RulePack.withModels (Scry.parseRulePack {wizStr pack})\n" ++
+    "def repoWalk : Scry.Cs.Walk := Scry.Cs.walkOfPaths repoPaths\n" ++
+    "def repoKept : List Scry.Cs.FileResult := List.filter (fun r => List.any (fun p => String.eq p.1 r.path) repoWalk.files) repoResults\n" ++
+    "def repoFuncs : List Wil.Func := List.concat (List.map (fun r => r.funcs) repoKept)\n" ++
+    "def repoOrigins : Scry.OriginMap := Scry.Cs.originMapOf repoKept\n" ++
+    "def repoProgram : Scry.ProgramResult := Scry.analyze (Wil.program repoFuncs) repoPack\n" ++
+    "def repoFindings : List Scry.Cs.FindingRow := Scry.Cs.findingRows repoOrigins (Scry.programFindings repoProgram)\n" ++
+    "def repoDiags : List Scry.Cs.CoverRow := Scry.Cs.coverageOfDiags (List.map (Scry.Cs.diagOfMem repoOrigins) repoProgram.warnings)\n" ++
+    "def repoReport : Scry.Cs.Report := Scry.Cs.reportOf \"scry/corpus/csharp/repo\" \"directory\" repoWalk repoKept (.some \"scry/corpus/csharp/csharp.scry\") (List.length repoPack.rules) repoFindings repoDiags\n")
+
+def oneMessage (what body : String) : IO String := do
+  match ← runProbe csCmdImports body with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"{what}: expected one #eval message, got {ms.length}: {ms}")
+
+def repoSummary : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  golden "scry/corpus/csharp/repo/report.txt" (← oneMessage "repo summary" (body ++
+    "#eval Scry.Cs.render repoReport\n"))
+
+def repoJsonGolden : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  golden "scry/corpus/csharp/repo/report.json" (← oneMessage "repo json" (body ++
+    "#eval Json.render (Scry.Cs.jsonOf repoReport (Scry.Cs.statusOf (.report repoReport (.some .error))))\n"))
+
+def repoCounts : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  let m ← oneMessage "repo counts" (body ++
+    "#eval \"before=\" ++ Nat.repr repoReport.before ++ \" found=\" ++ Nat.repr repoReport.found ++ \" excluded=\" ++ Nat.repr repoReport.excluded ++ \" parsed=\" ++ Nat.repr repoReport.parsed ++ \" lowered=\" ++ Nat.repr repoReport.lowered ++ \" failed=\" ++ Nat.repr repoReport.failed\n")
+  checkEq "before=9 found=4 excluded=5 parsed=3 lowered=3 failed=1" m
+
+def repoCoverage : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  let m ← oneMessage "repo coverage" (body ++
+    "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
+  checkEq
+    ("error 1 parse failure"
+     ++ "|warning 5 unmodelled-external"
+     ++ "|warning 1 lambda body not lowered: an opaque function value"
+     ++ "|note 1 excluded: *.Designer.cs"
+     ++ "|note 1 excluded: *.g.cs"
+     ++ "|note 1 excluded: bin/"
+     ++ "|note 1 excluded: node_modules/"
+     ++ "|note 1 excluded: obj/") m
+
+def repoExitCodes : IO Unit := do
+  let files ← repoFiles
+  let body ← repoBody files
+  let ms ← runProbe csCmdImports (body ++
+    "def repoEmpty : Scry.Cs.Report := Scry.Cs.reportOf \"empty\" \"directory\" (Scry.Cs.walkOfPaths []) [] .none 0 [] []\n" ++
+    "def repoFailed : Scry.Cs.Report := Scry.Cs.reportOf \"failed\" \"directory\" (Scry.Cs.walkOfPaths [(\"x.cs\",\"x.cs\")]) [Scry.Cs.resultOfFront \"x.cs\" (.err \"no parse\")] .none 0 [] []\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf .usage)\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf (.report repoEmpty (Option.none : Option Scry.Severity)))\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf (.report repoFailed (Option.some .error)))\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf (.report repoReport (Option.none : Option Scry.Severity)))\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf (.report repoReport (Option.some .error)))\n" ++
+    "#eval Nat.repr (Scry.Cs.statusOf (.report repoReport (Option.some .warning)))\n" ++
+    "#eval match Scry.Cs.parseArgs [\"--bogus\"] with | .error _ => \"usage-error\" | .ok _ => \"accepted\"\n")
+  checkEq ["2", "3", "3", "0", "1", "1", "usage-error"] (ms.map unquote)
+
 def group : Group where
   name := "scry-csharp"
   exercise := "scry C# frontend (tree-sitter-c-sharp view, lowering, taint)"
@@ -188,8 +350,25 @@ def group : Group where
       run := fun _ => parseGolden "statements" },
     { name := "view: precedence, casts, is/as, new forms, lambdas, generic calls, ref/out, interpolation",
       run := fun _ => parseGolden "expressions" },
+    { name := "view: record, switch expression, with, collection expression, query syntax",
+      run := fun _ => parseGolden "modern" },
     { name := "lower: classes, fields, constructors, calls, strings, control flow, try/catch to Wil",
       run := fun _ => lowerGolden "basic" },
+    { name := "lower: record and record struct, partial parts, switch expression, LINQ, with, collection, ctor init, async",
+      run := fun _ => lowerGolden "modern" },
+    { name := "lower: top-level statements become <stem>.Main (with the file's classes)",
+      run := fun _ => lowerGolden "toplevel" },
+    { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
+      run := fun _ => lowerGolden "unsupported" },
+    { name := "silent skip: every out-of-scope construct keeps the warning that names it",
+      run := fun _ => do
+        let mut missing : List String := []
+        for name in ["modern", "toplevel", "unsupported"] do
+          let text ← loweredText name
+          for (n, sub) in requiredWarnings do
+            if n == name && !((text.splitOn sub).length > 1) then
+              missing := s!"{name}: no warning contains \"{sub}\"" :: missing
+        checkEq ([] : List String) missing.reverse },
     { name := "lower: a lowered C# loop runs under Wil.runFunction (Sum(10) = 45, Fact(5) = 120)",
       run := fun _ => do
         let (src, spill) ← fixture "lower" "basic"
@@ -216,7 +395,25 @@ def group : Group where
     { name := "taint: CWE-78 across an instance helper (parameter and return summary)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-helper-unsafe"
-        checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs }
+        checkEq ["command-injection Fixtures.Shell.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "cs: the fixture tree's walk counts (before/after exclusions, parsed/lowered/failed)",
+      run := fun _ => repoCounts },
+    { name := "cs: the summary lists every skipped or warned construct with a count and an example",
+      run := fun _ => repoCoverage },
+    { name := "cs: the human report (counts, findings and coverage rows)",
+      run := fun _ => repoSummary },
+    { name := "cs: the JSON report (same counts, findings by rule and exit status)",
+      run := fun _ => repoJsonGolden },
+    { name := "cs: exit 0 clean, 1 gated, 2 usage, 3 nothing analysed",
+      run := fun _ => repoExitCodes },
+    { name := "taint: CWE-78 through a LINQ query, a switch expression, a record field and a with copy",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-unsafe"
+        checkEq ["command-injection Crux.Api.Endpoints.ReportEndpoints.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-modern-safe"
+        checkEq ([] : List String) fs }
   ]
 
 builtin_initialize registerGroup group

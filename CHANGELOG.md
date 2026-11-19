@@ -32,6 +32,98 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   pull request that touched a reviewed site failed on a defect it had not introduced. The
   reason now travels with the code it excuses and appears in the same diff. `--all` lists
   the remaining backlog (152 sites) rather than hiding it behind rows.
+* loom: a form control's live value now reaches a pure `step`. `web/framework/driver.js`
+  sends the event string `event "\n" index "\n" payload` — a control's `value` for
+  `input`/`change`, the key for `keydown`/`keyup`, nothing otherwise — and
+  `lib/Web/Loom.wiz` parses it with `Loom.splitEvent`; an app that reads it is a
+  `Loom.LiveApp` (`update msg payload state`, `Loom.LiveApp.step`/`patches`). The driver
+  also grew `onStep` (the page's effect hook), `setState` (handing back a state the page
+  changed through its own entry point) and a `parse` argument (the DOM double in tests).
+  `web/framework/driver_test.mjs` pins the strings, and `web/framework/test.sh` runs it.
+* playground: the editor is a Loom component (`lib/Web/Editor.wiz`): the page's
+  `section.pane`, `#editor` textarea, its label and hint, `#run` and `#count`, with the
+  text arriving as the input event's payload and Run counting requests. It is tested the
+  way the output pane is: `web/playground_editor_gen.wiz` renders and steps it and
+  `web/playground_editor_test.mjs` applies the patches to the SSR in the DOM double
+  (both run in `web/playground-loom-test.sh`).
+* playground: `?ui=loom` mounts the whole page as one Loom app (`web/playground-ui.wiz`,
+  built by `web/build-playground-ui.sh` into `wiz-playground-ui.mjs`): the header and
+  `#status`, the editor, the goals pane's container, the output pane and the footer's
+  `#engine`. The page (`web/playground.js`) keeps the effects (the engine, the goals
+  client) and reports their results through the module's `wiz_loom_*` entry points; the
+  UI is its own Wasm instance, so neither a trap in the engine nor an engine restart
+  touches it. The static markup stays the default and the fallback when the module is
+  missing. The UI state is one opaque Wasm value passed by ownership (stage 9g's C ABI
+  consumes an argument): the driver takes an extra `wiz_retain` for the read-only first
+  paint, and the page hands each state to its `wiz_loom_*` calls and keeps the result.
+  `web/playground_ui_test.mjs` mounts the real module under Node with the driver and the
+  DOM double and checks the panes, the status pair, the count, the value classes and
+  the entry points.
+* web: the standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`)
+  now mounts the playground's goals pane (`web/playground-lsp.js` on `web/lsp-client.js`
+  and `web/goals.js`) instead of the Wiz program `web/Web.wiz` stepped through
+  `wiz_web_step`. One implementation serves both pages and both transports (a WebSocket
+  URL or the playground's in-page server); the page's own half (`web/infoview.js`) is
+  only its URL rule (`?port=`, `?lsp=`), follow mode (`?follow=1`, no document of its
+  own, moved by `wiz/infoview/cursor`), the `#info` box and the status/cursor line.
+  Clicking a subterm now selects it the way the arrow keys do (`.sel`), and the page no
+  longer loads `wiz-infoview.mjs` — that module is the documentation's renderer now.
+  `web/playground_lsp_test.mjs` gains follow mode, the separate `info` box and the
+  `onRender` hook; `web/infoview_page_test.mjs` covers the page's URL and status text.
+  `wiz lsp --ws` serves the three extra scripts the page needs.
+* playground: the output pane's first piece now exists as a Loom component,
+  `lib/Web/Playground.wiz`: `Model.ofText` splits a run's output into classified lines
+  and produces the page's `#count` text verbatim (`2 lines · 1 error`), `Model.ofFailure`
+  does the same for an engine failure with its own count (`exit code 3`), and
+  `Model.view` renders the `#output` element. It is pure, so `web/playground_loom_gen.wiz`
+  renders and diffs it and `web/playground_loom_test.mjs` applies the patches with the
+  same DOM double as the framework test; `web/playground-loom-test.sh` runs both in the
+  `web` job. The page still renders the pane by hand: the component needs its own Wasm
+  instance, because the engine's is deliberately dropped and re-instantiated after a
+  user `exit` (see `wiz-notes/playground-loom-plan.md`).
+* scry C#: the frontend survives real code. Re-checked against a real solution's
+  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  files under `src/`), the lowering no longer drops constructs silently. The headline
+  find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
+  function and no warning** — `typeDecls` recursed into the namespace node, but
+  tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type
+  in the project was dropped. Fixed, and `lower/{modern,unsupported}` pin it. Top-level
+  statements (the whole of a minimal-API `Program.cs`) become `<stem>.Main`
+  (`Program.Main` for `Program.cs`); a record's or primary constructor's positional
+  parameters become fields and `new R(a)` lowers and stores its arguments instead of
+  discarding them; `partial` parts in one file are merged; `: base(…)` / `: this(…)`
+  evaluates its arguments and calls the target constructor; an inherited call resolves
+  through `base_list`; collection expressions unwrap all three element wrappers;
+  `with` initialisers lower their values; `var (a, b) = …` evaluates its right-hand side
+  and binds each name to a havoc with a warning; an indexer, an operator, a destructor,
+  an event with accessors, a nested delegate and a `#if`-guarded member are each
+  reported by name. `switch` expressions, collection expressions, `with` expressions, LINQ query
+  syntax and target-typed `new()` in a declaration are lowered with their value flow
+  (taint included) instead of havoc'd. New fixtures
+  `lower/{modern,toplevel,unsupported}` and `taint/cwe78-modern-{unsafe,safe}`; the
+  `silent skip` case fails when any of the out-of-scope warnings disappears
+  (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
+  (frequencies, and per-file parse/lower/taint given a native build).
+* scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
+  reports a summary with a coverage section: `.cs` files before and after exclusions
+  (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
+  symbolic links), found/parsed/lowered/failed, findings by rule and severity, and every
+  construct or file that was skipped or warned about with a count and one example
+  location. `--json` is the same report, `--fail-on error|warning|note` gates findings
+  and coverage rows, and the exit status separates `0` clean, `1` gated, `2` usage/IO
+  from `3` nothing analysed (no `.cs`, or every file failed). Lowering warnings are
+  normalised to constructs, so a first run answers "what didn't you look at?" in one
+  screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
+  counts, coverage rows, JSON and every exit status.
+* tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
+  the test-side cases: `prop-kernels` now gates the generated normal forms (not only
+  accept/reject; a normal form the Lean kernel cannot print is counted as the known
+  PH-K2 shape), `hdl` pins the `stall_*`/`t1`–`t5` theorems it names, every `semantics`
+  pipeline requires a non-empty cell selection, `selfhost-cli-diff`'s "good file" case
+  requires exit 0 in both tools, and the `std` rows for `Nat.mul_assoc`, `Int.mul_add`
+  and `Q.lt_ceil` pin the statement as well as the axiom print; the `regions`
+  "no projection" check requires the lowering it inspects to exist. The alternate
+  `--lib`/`--llvm` skip reasons now start with their allow-list entries' reasons.
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
   `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
@@ -620,3 +712,11 @@ that pin each one):
   found no accepted closed `Empty` in either kernel and no verdict difference beyond the
   known quantity-only `Σ` observations (`Tests/FalseFuzz.lean:1-26`).
 * Not yet in Wiz: termination by measure, machine-integer and vector literals.
+* selfhost: a constructor's parameters and fields are named arguments too (A9). The
+  self-hosted frontend kept no binder names for a constructor's `Global`, so
+  `P.mk (y := 2) (x := 1)` was `no parameter named 'y'`; the names are now the type's
+  parameters followed by the constructor's fields, so fields can be given in any order
+  (a later field's type may mention an earlier named one), and an implicit field or a
+  parameter can be named. An inductive type's own parameters, a dot-constructor and a
+  local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
+  and rejected constructor forms against the Lean frontend (21ab, 13a).
