@@ -561,7 +561,7 @@ def big : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 1) (fun s x => let y :=
 def Rng.trace : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, s => .cons (Nat.mod s 256) (Rng.trace k (Nat.mod (s * 1103515245 + 12345) 2147483648))
-def ok : Bool × Nat := let xs := Rng.trace 100 7; (Hdl.natsEq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
+def ok : Bool × Nat := let xs := Rng.trace 100 7; (BEq.beq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
 #eval ok
 def ctr : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 0) (fun s x => Hw.pair (Hw.add s x) s)
 def Rep.go : Nat → List (HwTy.El u8) → List (HwTy.El u8)

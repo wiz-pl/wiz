@@ -103,12 +103,6 @@ exists. -/
 def Hdl.setNthPad {A : Type} (d v : A) (xs : List A) (k : Nat) : List A :=
   Hdl.setNth v (Hdl.padTo d xs (Nat.succ k)) k
 
-/-- Whether two lists of numbers are equal (the hash-consing table compares keys with it). -/
-def Hdl.natsEq : List Nat → List Nat → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (Hdl.natsEq as bs)
-  | _, _ => .false
-
 /-- The sum of a list of numbers. -/
 def Hdl.sum : List Nat → Nat
   | .nil => 0
@@ -856,7 +850,7 @@ def HTrie.depth : Nat := 20
 /-- Look a key up in a bucket. -/
 def HTrie.assoc {V : Type} (key : List Nat) : List (List Nat × V) → Option V
   | .nil => .none
-  | .cons kv kvs => match Hdl.natsEq key kv.1 with
+  | .cons kv kvs => match BEq.beq key kv.1 with
     | .true => .some kv.2
     | .false => HTrie.assoc key kvs
 
@@ -1023,7 +1017,9 @@ def Wire.op1 (op : NetOp) (w : Nat) (a : NetM Nat) : NetM Nat := do
 -- each, enabled only on its side (the sides exclude each other, so their order does not
 -- matter). Two different memories cannot be chosen between. A memory can only be
 -- written, not chosen, so choosing between two different ones is an error.
-/-- Whether two writes are the same (enable, address and data nodes). -/
+/-- Whether two writes are the same (enable, address and data nodes). (`×` is the kernel's
+product type, which has no `BEq` instance: a deriver needs an inductive, and the level
+generalisation for a written-out instance does not unify.) -/
 def Hdl.wEq (a b : Nat × (Nat × Nat)) : Bool := Bool.and (Nat.beq a.1 b.1) (Bool.and (Nat.beq a.2.1 b.2.1) (Nat.beq a.2.2 b.2.2))
 /-- The writes both lists start with, then the rest of each. -/
 def Hdl.commonW : List (Nat × (Nat × Nat)) → List (Nat × (Nat × Nat)) → List (Nat × (Nat × Nat)) × (List (Nat × (Nat × Nat)) × List (Nat × (Nat × Nat)))
@@ -1846,6 +1842,14 @@ def Circuit.withEnable {ω i o : HwTy} (c : Circuit i o) : Circuit (HwTy.prod (H
     let rc := c.step s (Hw.snd x);
     Hw.pair (Hw.hold (Hw.untag (Hw.fst x)) (Hw.fst rc) s) (Hw.snd rc))
 
+/-- The reset and enable inputs, `rst` then `en`, as `Circuit.withResetEnable` takes them:
+`HwTy.rstEn i` is `prod (named "rst" bit) (prod (named "en" bit) i)`. -/
+def HwTy.rstEn (i : HwTy) : HwTy :=
+  HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) i)
+/-- A circuit with reset and enable inputs: `Circuit.RstEn i o` is
+`Circuit (HwTy.rstEn i) o`. -/
+def Circuit.RstEn (i o : HwTy) : Type 1 := Circuit (HwTy.rstEn i) o
+
 /-- (H14 S4) The reset and enable convention. A design that has a reset or a clock enable
 takes them as its first inputs, named `rst` and `en`, reset first: `rst` wins over
 `en` (a held register is still reset), and both are synchronous and active high (as
@@ -1855,8 +1859,7 @@ takes them as its first inputs, named `rst` and `en`, reset first: `rst` wins ov
 cur next` (the next value of a register whose value is `cur`). Each of them becomes
 the register's reset and enable in the netlist, not a multiplexer. Every register still
 has its initial value (`initial` in Verilog: the iCE40 needs no reset). -/
-def Circuit.withResetEnable {ω i o : HwTy} (c : Circuit i o) :
-    Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) i)) o :=
+def Circuit.withResetEnable {ω i o : HwTy} (c : Circuit i o) : Circuit.RstEn i o :=
   Circuit.withReset (Circuit.withEnable c)
 /-- a register (`Circuit.delay`) with a reset to its initial value, with an enable, with both -/
 def Circuit.registerR (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) t) t :=
@@ -1865,8 +1868,7 @@ def Circuit.registerR (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwT
 def Circuit.registerE (ω t : HwTy) (init : HwTy.El t) : Circuit (HwTy.prod (HwTy.named "en" HwTy.bit) t) t :=
   Circuit.withEnable (Circuit.delay t init)
 /-- A register with a reset and an enable. -/
-def Circuit.registerRE (ω t : HwTy) (init : HwTy.El t) :
-    Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) t)) t :=
+def Circuit.registerRE (ω t : HwTy) (init : HwTy.El t) : Circuit.RstEn t t :=
   Circuit.withResetEnable (Circuit.delay t init)
 /-- inside a step function: `init` under `rst`, else `next` under `en`, else `cur` (for the
 netlist to see a reset, `init` must be the register's initial value; to see an enable,

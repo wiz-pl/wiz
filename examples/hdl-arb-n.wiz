@@ -18,16 +18,11 @@ def yes (b : Bool) : String := match b with
   | .true => "yes"
   | .false => "NO"
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 -- value simulation = netlist simulation (hash-consed and naive) = fast simulation
 def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
   let ω v := Circuit.runLeaves c ins;
-  Bool.and (leavesEq v (Circuit.simFast c ins))
-    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
 
 def allTrue : List Bool → Bool
   | .nil => .true
@@ -35,7 +30,7 @@ def allTrue : List Bool → Bool
 
 def units (n : Nat) : List Nat := Hdl.upto n 0
 
-def eqNatList (xs ys : List Nat) : Bool := Hdl.natsEq xs ys
+def eqNatList (xs ys : List Nat) : Bool := BEq.beq xs ys
 
 def bitAt (m k : Nat) : Bool :=
   Nat.beq (Nat.mod (Nat.div m (Nat.pow 2 k)) 2) 1

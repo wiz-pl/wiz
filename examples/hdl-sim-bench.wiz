@@ -148,11 +148,6 @@ def keys : Nat → Nat → List (List Nat) → List (List Nat)
     | .true => 1
     | .false => 0) .nil) acc)
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def sumAll : List (List Nat) → Nat → Nat
   | .nil, acc => acc
   | .cons l ls, acc => sumAll ls (Nat.mod (Hdl.sum l + acc * 3) 1000000007)
@@ -177,9 +172,9 @@ def main : IO Unit := do
       | .true => say net (Design.simFast d ins)
       | .false => do
         let f := Design.simFast d ins;
-        IO.println ("fast = value: " <+> (match leavesEq f (Design.runLeaves d ins) with
+        IO.println ("fast = value: " <+> (match BEq.beq f (Design.runLeaves d ins) with
           | .true => "yes"
-          | .false => "NO") <+> ", fast = net: " <+> (match leavesEq f (Netlist.simulate net ins) with
+          | .false => "NO") <+> ", fast = net: " <+> (match BEq.beq f (Netlist.simulate net ins) with
           | .true => "yes"
           | .false => "NO"));
         say net f
