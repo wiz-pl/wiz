@@ -28,7 +28,7 @@ def storageQuireImports : String :=
   "import WordArray\nimport IO\nimport Optic\nimport OpticDerive\n\n"
 
 /-- Every `import` line dropped, so the sources form one module. -/
-def dropImports (src : String) : String :=
+def dropImportsQ (src : String) : String :=
   "\n".intercalate ((src.splitOn "\n").filter (fun l => !(l.startsWith "import ")))
 
 def storageQuireBody : IO String := do
@@ -43,7 +43,7 @@ def storageQuireBody : IO String := do
     "drafts/storage-engine/QuireTest.wiz"]
   let mut body := storageQuireImports
   for f in files do
-    body := body ++ dropImports (← IO.FS.readFile f) ++ "\n"
+    body := body ++ dropImportsQ (← IO.FS.readFile f) ++ "\n"
   -- the case has no source file, so `link_c` resolves against the repo root
   pure (body.replace "link_c \"quire_seal.c\"" "link_c \"drafts/storage-engine/quire_seal.c\"")
 
