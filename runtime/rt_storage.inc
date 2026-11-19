@@ -67,6 +67,26 @@ WIZ_API wiz_val wiz_store_get_u64(void *p, uint64_t off) {
   return wiz_word_out(wiz_store_le64((const unsigned char *)m->addr + off));
 }
 
+/* Seal a freshly built page: FNV-1a-64 over its bytes with the 8-byte checksum field
+   at `off` read as zero, then write that hash at `off`. It takes and returns the Wiz
+   `Bytes` value (one ownership pass-through), so the builder never has to copy the page
+   or keep a consumed buffer. Doing this in C matters: a 4 KiB page is 4096 Wiz-level
+   steps, which dominates a small commit. */
+WIZ_API wiz_val wiz_store_seal(wiz_val v, uint64_t off) {
+  v = wiz_bytes_unique(v);
+  wiz_bytes *b = (wiz_bytes *)v;
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (uint64_t i = 0; i < b->len; i++) {
+    unsigned char c = (i >= off && i < off + 8) ? 0 : b->data[i];
+    h ^= (uint64_t)c;
+    h *= 0x100000001b3ULL;
+  }
+  if (b->len >= off + 8) {
+    for (int k = 0; k < 8; k++) b->data[off + k] = (unsigned char)(h >> (8 * k));
+  }
+  return v;
+}
+
 /* the safe load: none unless all eight bytes are inside the mapping */
 WIZ_API wiz_val wiz_store_get_u64_at(void *p, uint64_t off) {
   wiz_store_map *m = (wiz_store_map *)p;

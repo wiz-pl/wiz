@@ -1,0 +1,987 @@
+import Sys
+import Word
+import Text
+import Functor
+import WordMap
+import MVar
+import Storage
+import Core
+import Mmap
+import Durable
+/-!
+# Quire: the page-backed durable store
+
+`Durable.wiz` (slice 2) rewrites the whole record chain on every commit: a commit is
+`O(nodes)` pages, so appending one record at a time is `O(n²)`. `Mmap.wiz` (slice 3) can
+read pages but the writer never publishes a root it can use, and `StorageCursor.wiz`
+walks the in-memory `U64Map` index. Quire is the engine the benchmark needs: a commit is
+`O(1)` pages, an open is a meta pick (no map materialisation, no index rebuild), and a
+query walks index pages and nothing else.
+
+## Format (version 2)
+
+Little-endian, 4 KiB pages, the 32-byte header `Mmap.wiz` already decodes
+(`kind u16 | n u16 | free u16 | flags u16 | txid u64 | checksum u64 | right u32 |
+reserved u32`). Checksums are FNV-1a-64 over the page with the checksum field zeroed
+(the native `wiz_store_bytes_fnv`, so a 4 KiB page is one C loop, not 4096 Wiz steps).
+
+| page | kind | payload |
+|---|---|---|
+| 0, 1 | — | meta slots A/B (96 B at offset 0 / 4096), format 2 |
+| leaf | 1 | 32-byte `Rec`s (id, kind, label, count, version), sorted by id |
+| directory | 2 | 1016 `u32` child pages; `flags` is the level (0 = leaves) |
+| index fact | 3 | 24-byte `(value u64, node u64, add u64)` facts; `right` is the older chain |
+| index root | 4 | 1016 `u32` heads, one block per declared index (`slot = ord*width + value % width`) |
+
+A leaf holds the records of one *chunk*: chunk `= id / 127`. The directory is two levels
+(a level-1 root of level-0 pages), so it addresses `1016 * 1016 * 127 ≈ 131M` records
+without a format change. A commit copies the leaf (one page), the directory path (two
+pages), the index root (one page), and prepends one fact page per `(index, value)` it
+touched. That is constant work per commit and constant work per open.
+
+The index is **facts, not a mutable bucket**: an add is `(value, node, add)`, a move is a
+remove fact in the old value's slot and an add fact in the new value's slot, and a query
+folds the chain of the slots a `KeyRange` can reach. A slot's chain is newest first, so
+the first fact for a node wins; a node that moved out of a value cannot be returned for
+that value, and a node that moved in is. The same fold is therefore exact for an
+index-only scan (no primary read), which is what the page cursor in `QuireCursor.wiz`
+does.
+
+## What is still `O(n)`
+
+`toRecords` walks every live leaf (a test/compaction helper) and `compactQ` walks every
+live record once and writes a fresh image. Neither is on the commit, open or query path.
+-/
+
+-- ## Checksums in C
+
+/-- Seal a page: FNV-1a-64 over its bytes with the 8-byte checksum field at `off` read
+as zero, then write the hash there. Takes and returns the page (no copy). -/
+extern "wiz_store_seal" QFnv.seal : Bytes → Nat → Bytes
+
+-- ## Format constants
+
+/-- The format version this module writes and reads. -/
+def QFormat : U64 := U64.ofNat 2
+/-- The on-disk magic (nonzero; `Store.pickMeta` also requires a valid checksum). -/
+def QMagic : U64 := U64.ofNat 0x5155495245313031
+/-- Child slots in a directory page: `(4096 - 32) / 4`. -/
+def QDirCap : Nat := 1016
+/-- Index slots in one index-root page: `(4096 - 32) / 4`. -/
+def QIndexSlots : Nat := 1016
+/-- Facts in one index page: `(4096 - 32) / 24`. -/
+def QFactsPerPage : Nat := 169
+/-- The root level this writer maintains (two directory levels). -/
+def QRootDepth : Nat := 1
+
+-- ## Index facts (before the page builders use them)
+
+/-- One index fact before it is paged. -/
+structure QFact where
+  ord : Nat
+  value : U64
+  node : U64
+  add : Bool
+
+-- ## Page building
+
+/-- A page: the 32-byte header (checksum zero), the body, zero padding, checksum. -/
+def QPage.make (kind n flags : Nat) (txid right : U64) (body : Bytes) : Bytes :=
+  let h := LE.u16 Bytes.empty kind;
+  let h := LE.u16 h n;
+  let h := LE.u16 h 0;
+  let h := LE.u16 h flags;
+  let h := LE.u64 h txid;
+  let h := LE.u64 h (U64.ofNat 0);
+  let h := LE.u32 h (U32.ofNat right.toNat);
+  let h := LE.u32 h (U32.ofNat 0);
+  let b := Bytes.append h body;
+  let b := Bytes.append b (Bytes.zeros (Nat.sub pageSize (Bytes.size b)));
+  QFnv.seal b 16
+
+/-- A leaf page: sorted records, kind 1. -/
+def QPage.leaf (txid : U64) (recs : List Rec) : Bytes :=
+  QPage.make 1 (List.length recs) 0 txid (U64.ofNat 0)
+    (List.foldl (fun b r => Rec.encode b r) Bytes.empty recs)
+
+/-- A directory page: `flags` is the level, kind 2. -/
+def QPage.dir (txid : U64) (level : Nat) (entries : List Nat) : Bytes :=
+  QPage.make 2 (List.length entries) level txid (U64.ofNat 0)
+    (List.foldl (fun b e => LE.u32 b (U32.ofNat e)) Bytes.empty entries)
+
+/-- An index-root page: one block of heads per index, kind 4. -/
+def QPage.indexRoot (txid : U64) (heads : List Nat) : Bytes :=
+  QPage.make 4 (List.length heads) 0 txid (U64.ofNat 0)
+    (List.foldl (fun b e => LE.u32 b (U32.ofNat e)) Bytes.empty heads)
+
+/-- An index fact page: `(value, node, add)`, kind 3; `right` is the older chain. -/
+def QPage.facts (txid : U64) (right : U64) (fs : List QFact) : Bytes :=
+  QPage.make 3 (List.length fs) 0 txid right
+    (List.foldl (fun b f =>
+      LE.u64 (LE.u64 (LE.u64 b f.value) f.node)
+        (match f.add with | .true => U64.ofNat 1 | .false => U64.ofNat 0))
+      Bytes.empty fs)
+
+-- ## Reading pages
+
+/-- The byte offset of a page, or `none` when it is outside the mapping (0 is "no page"). -/
+def QBase (m : Map) (page : Nat) : Option Nat :=
+  match Nat.beq page 0 with
+  | .true => .none
+  | .false => match Store.pageBase m (U64.ofNat page) with
+    | .error _ => .none
+    | .ok b => .some b
+
+/-- The number in header `n`. -/
+def QPage.n (m : Map) (base : Nat) : Nat := (Store.headerAt m base).n
+
+/-- The level in header `flags`. -/
+def QPage.level (m : Map) (base : Nat) : Nat := (Store.headerAt m base).flags
+
+/-- The header's `right` page. -/
+def QPage.right (m : Map) (base : Nat) : Nat := (Store.headerAt m base).right.toNat
+
+/-- The directory entry at slot `i`. -/
+def QPage.entry (m : Map) (base : Nat) (i : Nat) : Nat :=
+  Nat.land (UIntN.toNat (Map.getU64 m (Nat.add base (Nat.add 32 (Nat.mul i 4)))))
+    0xffffffff
+
+/-- `n` zeros. -/
+def QZeros : Nat → List Nat
+  | .zero => []
+  | .succ k => List.cons 0 (QZeros k)
+
+/-- `base ^ e`. -/
+def QPow (base : Nat) : Nat → Nat
+  | .zero => 1
+  | .succ k => Nat.mul base (QPow base k)
+
+/-- `n` entries of a page from slot `i`. -/
+partial def QDirReadFrom (m : Map) (base : Nat) : Nat → Nat → List Nat
+  | .zero, _ => []
+  | .succ k, i => List.cons (QPage.entry m base i) (QDirReadFrom m base k (Nat.succ i))
+
+/-- The entries of a u32-array page (directory, or index root) padded to 1016. -/
+def QDirRead (m : Map) (page : Nat) : List Nat :=
+  match QBase m page with
+  | .none => QZeros QDirCap
+  | .some base =>
+    let n := QPage.n m base;
+    List.append (QDirReadFrom m base n 0) (QZeros (Nat.sub QDirCap n))
+
+/-- `n`th element, defaulting. -/
+def QNth : List Nat → Nat → Nat → Nat
+  | [], _, d => d
+  | List.cons x xs, .zero, _ => x
+  | List.cons x xs, .succ k, d => QNth xs k d
+
+/-- Set entry `i` of a list. -/
+def QSetAt : List Nat → Nat → Nat → List Nat
+  | [], _, _ => []
+  | List.cons x xs, .zero, v => List.cons v xs
+  | List.cons x xs, .succ k, v => List.cons x (QSetAt xs k v)
+
+/-- The leaf page holding `chunk`, or 0. `level` is the root's level. -/
+partial def QDirLookup (m : Map) (page : Nat) (level : Nat) (chunk : Nat) : Nat :=
+  match QBase m page with
+  | .none => 0
+  | .some base =>
+    match level with
+    | 0 => match Nat.lt chunk QDirCap with
+      | .true => QPage.entry m base chunk
+      | .false => 0
+    | .succ l =>
+      let div := QPow QDirCap (Nat.succ l);
+      let digit := Nat.mod (Nat.div chunk div) QDirCap;
+      QDirLookup m (QPage.entry m base digit) l (Nat.mod chunk div)
+
+/-- The root's level (0 for an empty root). -/
+def QRootLevel (m : Map) (root : Nat) : Nat :=
+  match QBase m root with
+  | .none => QRootDepth
+  | .some base => QPage.level m base
+
+/-- The leaf page for a node id. -/
+def QLeafOf (m : Map) (root : U64) (id : U64) : Nat :=
+  QDirLookup m root.toNat (QRootLevel m root.toNat) (Nat.div id.toNat 127)
+
+/-- Decode `n` records of a leaf at `base`. -/
+partial def QLeafRecsAt (m : Map) (base : Nat) (i : Nat) : Nat → List Rec
+  | .zero => []
+  | .succ k =>
+    let r := Store.recordAt m base i;
+    List.cons
+      (Rec.mk r.id (Node.mk (U32.ofNat r.kind.toNat) r.count (U32.ofNat r.label.toNat))
+        r.version)
+      (QLeafRecsAt m base (Nat.succ i) k)
+
+/-- The records of a leaf page. -/
+def QLeafRecs (m : Map) (page : Nat) : List Rec :=
+  match QBase m page with
+  | .none => []
+  | .some base => QLeafRecsAt m base 0 (QPage.n m base)
+
+/-- The `(chunk, leaf)` pairs under a directory (level 0: leaves; level 1: a child
+directory per entry). Used by compaction and by the test's record walk. -/
+mutual
+partial def QWalkDir (m : Map) (page : Nat) (level : Nat) (base : Nat) : List (Nat × Nat) :=
+  match QBase m page with
+  | .none => []
+  | .some b =>
+    let n := QPage.n m b;
+    match level with
+    | 0 => QWalkLevel0 m b n base 0
+    | .succ l => QWalkLevelN m b n l base 0
+
+/-- Level 0: entry `i` is a leaf for chunk `base + i`. -/
+partial def QWalkLevel0 (m : Map) (base : Nat) (n : Nat) (chunkBase : Nat) (i : Nat)
+    : List (Nat × Nat) :=
+  match Nat.lt i n with
+  | .true =>
+    let leaf := QPage.entry m base i;
+    let rest := QWalkLevel0 m base n chunkBase (Nat.succ i);
+    match Nat.beq leaf 0 with
+    | .true => rest
+    | .false => List.cons (Nat.add chunkBase i, leaf) rest
+  | .false => []
+
+/-- Level `l+1`: entry `i` is a level-`l` child covering `1016^(l+1)` chunks. -/
+partial def QWalkLevelN (m : Map) (base : Nat) (n : Nat) (l : Nat) (chunkBase : Nat)
+    (i : Nat) : List (Nat × Nat) :=
+  match Nat.lt i n with
+  | .true =>
+    let child := QPage.entry m base i;
+    let span := QPow QDirCap (Nat.succ l);
+    let sub := QWalkDir m child l (Nat.add chunkBase (Nat.mul i span));
+    List.append sub (QWalkLevelN m base n l chunkBase (Nat.succ i))
+  | .false => []
+end
+
+/-- Every live record, in chunk order. -/
+def QAllRecords (m : Map) (root : U64) : List Rec :=
+  List.flatMap (QWalkDir m root.toNat (QRootLevel m root.toNat) 0)
+    (fun (e : Nat × Nat) => QLeafRecs m e.2)
+
+/-- Find `id` among the first `k` records of a leaf. -/
+partial def QFindRec (m : Map) (base : Nat) : Nat → Nat → U64 → Option Rec
+  | .zero, _, _ => .none
+  | .succ k, i, id =>
+    let r := Store.recordAt m base i;
+    match UIntN.beq r.id id with
+    | .true =>
+      .some (Rec.mk r.id (Node.mk (U32.ofNat r.kind.toNat) r.count (U32.ofNat r.label.toNat))
+        r.version)
+    | .false => QFindRec m base k (Nat.succ i) id
+
+/-- The record for `id`, from `root` (the directory page). -/
+def QReadRec (m : Map) (root : U64) (id : U64) : Option Rec :=
+  match QBase m (QLeafOf m root id) with
+  | .none => .none
+  | .some base => match QPage.n m base with
+    | 0 => .none
+    | n => QFindRec m base n 0 id
+
+/-- The node for `id`. -/
+def QReadNode (m : Map) (root : U64) (id : U64) : Option Node :=
+  match QReadRec m root id with
+  | .none => .none
+  | .some r => .some r.node
+
+/-- The version for `id` (0 when the key has never been written). -/
+def QReadVersion (m : Map) (root : U64) (id : U64) : U64 :=
+  match QReadRec m root id with
+  | .none => U64.ofNat 0
+  | .some r => r.version
+
+-- ## Meta
+
+/-- The fields of a format-2 meta slot. -/
+structure QMeta where
+  txid : U64
+  root : U64
+  indexRoot : U64
+  pageCount : U64
+  delEpoch : U64
+
+/-- Encode a 96-byte meta slot (checksum at 88, field zeroed for the hash). -/
+def QMeta.encode (m : QMeta) : Bytes :=
+  let b := Bytes.empty;
+  let b := LE.u64 b QMagic;
+  let b := LE.u32 b (U32.ofNat 2);
+  let b := LE.u32 b (U32.ofNat 0);
+  let b := LE.u64 b m.txid;
+  let b := LE.u64 b m.root;
+  let b := LE.u64 b m.indexRoot;
+  let b := LE.u64 b (U64.ofNat 0);
+  let b := LE.u64 b (U64.ofNat 0);
+  let b := LE.u64 b m.delEpoch;
+  let b := LE.u64 b (U64.ofNat 0);
+  let b := LE.u64 b (U64.ofNat 0);
+  let b := LE.u64 b m.pageCount;
+  let b := LE.u64 b (U64.ofNat 0);
+  QFnv.seal b 88
+
+/-- The valid format-2 slot with the larger `txid`, if any. -/
+def QReadMeta (m : Map) : Option QMeta :=
+  match Store.pickMeta m with
+  | .error _ => .none
+  | .ok s => match Nat.beq s.format 2 with
+    | .true => .some (QMeta.mk s.txid s.root s.indexRoot s.pageCount s.delEpoch)
+    | .false => .none
+
+-- ## Snapshots and the handle
+
+/-- A page-backed snapshot: a generation, a mapping, the two roots, the schema, and the
+pending write-set. It is an ordinary value; the mapping is reference-counted. -/
+structure QSnapshot where
+  gen : U64
+  map : Map
+  root : U64
+  indexRoot : U64
+  indices : List IndexDef
+  delEpoch : U64
+  ws : WriteSet
+
+/-- The published state of a store. `fd` stays open for commits and compaction. -/
+structure QState where
+  fd : Fd
+  map : Map
+  gen : U64
+  root : U64
+  indexRoot : U64
+  pageCount : U64
+  delEpoch : U64
+
+/-- A store: its path, its published state behind the single-writer cell, and the
+schema (the slot layout of the index root is fixed at open). -/
+structure QHandle where
+  path : String
+  state : MVar QState
+  indices : List IndexDef
+
+-- ## Reading a snapshot
+
+/-- A node through the pending write-set (the overlay wins over the pages). -/
+def QSnapshot.getNode (s : QSnapshot) (id : U64) : Option Node :=
+  match U64Map.find s.ws id with
+  | .some p => Patch.apply p (QReadNode s.map s.root id)
+  | .none => QReadNode s.map s.root id
+
+/-- The version a snapshot's pages record for `id`. -/
+def QSnapshot.versionOf (s : QSnapshot) (id : U64) : U64 :=
+  QReadVersion s.map s.root id
+
+/-- Record a patch (a no-op leaves the snapshot alone). -/
+def QSnapshot.record (s : QSnapshot) (id : U64) (p : Option Patch) : QSnapshot :=
+  match p with
+  | .none => s
+  | .some q => { s with ws := WriteSet.combine s.ws id q }
+
+/-- The place of an existing node (partial lens: the backward function records). -/
+def qnodeAt (id : U64) : PLens QSnapshot Node := fun s =>
+  match QSnapshot.getNode s id with
+  | .none => .err .outOfBounds
+  | .some n => .ok (n, fun n' => QSnapshot.record s id (Patch.ofChange n n'))
+
+/-- The place of a node with a create-on-first-write default. -/
+def qnodeOr (id : U64) (d : Node) : Lens QSnapshot Node := fun s =>
+  let cur := match QSnapshot.getNode s id with
+    | .some n => n
+    | .none => d;
+  (cur, fun n' => match QSnapshot.getNode s id with
+    | .some old => QSnapshot.record s id (Patch.ofChange old n')
+    | .none => match Node.beq d n' with
+      | .true => s
+      | .false => QSnapshot.record s id (.some (.set n')))
+
+/-- Set a field through the optic (the benchmark's update). -/
+def qsetField (id : U64) (l : Lens Node U32) (v : U32) (s : QSnapshot) : QSnapshot :=
+  Lens.over (Lens.comp (qnodeOr id (Node.mk (U32.ofNat 0) (U64.ofNat 0) (U32.ofNat 0))) l)
+    (fun _ => v) s
+
+/-- `+1` on the counter through the optic. -/
+def qbump (id : U64) (s : QSnapshot) : QSnapshot :=
+  Lens.over (Lens.comp (qnodeOr id (Node.mk (U32.ofNat 0) (U64.ofNat 0) (U32.ofNat 0)))
+    Node.countL) (fun c => c + 1) s
+
+-- ## Index layout and facts
+
+/-- Facts per index when the schema has `k` indices (the identity of each `IndexDef` is
+its position in the list, which is also its slot block). -/
+def QSlotsPer (k : Nat) : Nat :=
+  match k with
+  | 0 => 1
+  | .succ _ => Nat.max 1 (Nat.div QIndexSlots k)
+
+/-- The global slot of value `v` for index ordinal `ord`. -/
+def QSlotOf (slots : Nat) (ord : Nat) (v : U64) : Nat :=
+  Nat.add (Nat.mul ord slots) (Nat.mod v.toNat slots)
+
+/-- The facts a changed record contributes to index `d` at position `ord`. -/
+def QFactsOfChange (ord : Nat) (d : IndexDef) (id : U64) (old new : Option Node)
+    : List QFact :=
+  match old, new with
+  | .none, .none => []
+  | .some a, .none => [QFact.mk ord (IndexDef.key d a) id .false]
+  | .none, .some b => [QFact.mk ord (IndexDef.key d b) id .true]
+  | .some a, .some b =>
+    match UIntN.beq (IndexDef.key d a) (IndexDef.key d b) with
+    | .true => []
+    | .false => [QFact.mk ord (IndexDef.key d a) id .false,
+                 QFact.mk ord (IndexDef.key d b) id .true]
+
+/-- Every fact a transaction's entries contribute, with each index's position. -/
+def QFactsOfEntriesFrom (defs : List IndexDef) : Nat → List (U64 × Patch) →
+    (U64 → Option Node) → List QFact
+  | _, .nil, _ => []
+  | ord, .cons (id, p) es, oldOf =>
+    let old := oldOf id;
+    let new := Patch.apply p old;
+    List.append
+      (List.flatMap defs (fun d => QFactsOfChange ord d id old new))
+      (QFactsOfEntriesFrom defs (Nat.succ ord) es oldOf)
+
+/-- Every fact a transaction's entries contribute. -/
+def QFactsOfEntries (defs : List IndexDef) (entries : List (U64 × Patch))
+    (oldOf : U64 → Option Node) : List QFact :=
+  QFactsOfEntriesFrom defs 0 entries oldOf
+
+/-- Group facts by global slot; within a slot the newest fact is first. -/
+def QGroupFacts (slots : Nat) (fs : List QFact) : List (U64 × List QFact) :=
+  U64Map.toList (List.foldl (fun m f =>
+    let slot := QSlotOf slots f.ord f.value;
+    match U64Map.find m (U64.ofNat slot) with
+    | .none => U64Map.insert m (U64.ofNat slot) [f]
+    | .some xs => U64Map.insert m (U64.ofNat slot) (List.cons f xs)) U64Map.empty fs)
+
+-- ## Writing pages
+
+/-- A page allocator: the next free page and the pages to write, in allocation order. -/
+structure QWriter where
+  next : Nat
+  pages : List (Nat × Bytes)
+
+/-- Allocate one page. -/
+def QWriter.emit (w : QWriter) (b : Bytes) : QWriter × Nat :=
+  (QWriter.mk (Nat.succ w.next) (List.append w.pages [(w.next, b)]), w.next)
+
+/-- Split facts into pages of `QFactsPerPage`, keeping order. -/
+partial def QChunkFacts (fs : List QFact) (acc : List (List QFact)) : List (List QFact) :=
+  match fs with
+  | [] => acc
+  | _ => QChunkFacts (List.drop QFactsPerPage fs)
+      (List.append acc [List.take QFactsPerPage fs])
+
+/-- Write a slot's facts as a chain whose head is the newest page and whose tail points
+at `oldHead`. `fs` is newest first. -/
+partial def QWriteFactPages (w : QWriter) (txid : U64) (oldHead : Nat)
+    (chunks : List (List QFact)) : QWriter × Nat :=
+  match chunks with
+  | [] => (w, oldHead)
+  | List.cons c cs =>
+    let (w1, p) := QWriter.emit w (QPage.facts txid (U64.ofNat oldHead) c);
+    QWriteFactPages w1 txid p cs
+
+/-- Prepend each slot's new fact chain to the index-root heads. `groups` is newest facts
+first per global slot. -/
+partial def QWriteFacts (w : QWriter) (txid : U64) (heads : List Nat)
+    (groups : List (U64 × List QFact)) : QWriter × List Nat :=
+  match groups with
+  | [] => (w, heads)
+  | List.cons (slot, fs) rest =>
+    let oldHead := QNth heads slot.toNat 0;
+    let chunks := List.reverse (QChunkFacts fs []);
+    let (w', head) := QWriteFactPages w txid oldHead chunks;
+    QWriteFacts w' txid (QSetAt heads slot.toNat head) rest
+
+/-- The new index root (or the old one when nothing changed). -/
+def QNewIndexRoot (w : QWriter) (m : Map) (txid : U64) (oldRoot : Nat)
+    (groups : List (U64 × List QFact)) : QWriter × Nat :=
+  match groups with
+  | .nil => (w, oldRoot)
+  | .cons _ _ =>
+    let (w', heads) := QWriteFacts w txid (QDirRead m oldRoot) groups;
+    let (w'', p) := QWriter.emit w' (QPage.indexRoot txid heads);
+    (w'', p)
+
+/-- Group `(chunk, leaf)` by the digit at this level; the child receives the chunk
+modulo the level's span. -/
+def QGroupChunks (div : Nat) (pairs : List (Nat × Nat)) : List (U64 × List (Nat × Nat)) :=
+  U64Map.toList (List.foldl (fun m e =>
+    let digit := Nat.mod (Nat.div e.1 div) QDirCap;
+    let child := (Nat.mod e.1 div, e.2);
+    match U64Map.find m (U64.ofNat digit) with
+    | .none => U64Map.insert m (U64.ofNat digit) [child]
+    | .some xs => U64Map.insert m (U64.ofNat digit) (List.cons child xs)) U64Map.empty pairs)
+
+/-- Write a new directory from the old one, copying only the touched subtrees. It never
+reads a page it has just allocated: every read is of the old image. -/
+partial def QWriteDir (w : QWriter) (m : Map) (txid : U64) (oldPage : Nat) (level : Nat)
+    (pairs : List (Nat × Nat)) : QWriter × Nat :=
+  let entries := QDirRead m oldPage;
+  match level with
+  | 0 =>
+    let entries' := List.foldl (fun es e => QSetAt es e.1 e.2) entries pairs;
+    let (w', p) := QWriter.emit w (QPage.dir txid 0 entries');
+    (w', p)
+  | .succ l =>
+    let base : Nat := match QBase m oldPage with
+      | .none => 0
+      | .some b => b;
+    let groups := QGroupChunks (QPow QDirCap (Nat.succ l)) pairs;
+    let step := fun (wp : QWriter × List Nat) (g : U64 × List (Nat × Nat)) =>
+      let oldChild : Nat := match Nat.beq base 0 with
+        | .true => 0
+        | .false => QPage.entry m base g.1.toNat;
+      let wc : QWriter × Nat := QWriteDir wp.1 m txid oldChild l g.2;
+      (wc.1, QSetAt wp.2 g.1.toNat wc.2);
+    let we : QWriter × List Nat := List.foldl step (w, entries) groups;
+    let (w'', p) := QWriter.emit we.1 (QPage.dir txid (Nat.succ l) we.2);
+    (w'', p)
+
+/-- Insert or replace `r`, keeping the records sorted by id. -/
+def QInsertRec : List Rec → Rec → List Rec
+  | [], r => [r]
+  | List.cons x xs, r =>
+    match UIntN.lt r.id x.id with
+    | .true => List.cons r (List.cons x xs)
+    | .false => match UIntN.beq r.id x.id with
+      | .true => List.cons r xs
+      | .false => List.cons x (QInsertRec xs r)
+
+/-- Apply one chunk's changes to its records, stamping the commit generation. -/
+def QApplyChanges (recs : List Rec) (cs : List (U64 × Option Node)) (g : U64) : List Rec :=
+  List.foldl (fun rs c =>
+    match c.2 with
+    | .none => List.filter (fun r => Bool.not (UIntN.beq r.id c.1)) rs
+    | .some n => QInsertRec rs (Rec.mk c.1 n g)) recs cs
+
+/-- The changed leaves, written once per chunk. Returns the new `(chunk, leaf)` pairs. -/
+def QWriteLeaves (w : QWriter) (m : Map) (txid : U64) (oldRoot : U64) (oldLevel : Nat)
+    (byChunk : List (U64 × List (U64 × Option Node))) (g : U64)
+    : QWriter × List (Nat × Nat) :=
+  List.foldl (fun (wp : QWriter × List (Nat × Nat)) (e : U64 × List (U64 × Option Node)) =>
+    let chunk := e.1.toNat;
+    let oldLeaf := QDirLookup m oldRoot.toNat oldLevel chunk;
+    let recs := QApplyChanges (QLeafRecs m oldLeaf) e.2 g;
+    let (w1, leaf) := QWriter.emit wp.1 (QPage.leaf txid recs);
+    (w1, List.append wp.2 [(chunk, leaf)])) (w, []) byChunk
+
+/-- The changes of a transaction, grouped by chunk. -/
+def QChangesByChunk (entries : List (U64 × Patch)) (oldOf : U64 → Option Node)
+    : U64Map (List (U64 × Option Node)) :=
+  List.foldl (fun m e =>
+    let chunk := Nat.div e.1.toNat 127;
+    let ch := (e.1, Patch.apply e.2 (oldOf e.1));
+    match U64Map.find m (U64.ofNat chunk) with
+    | .none => U64Map.insert m (U64.ofNat chunk) [ch]
+    | .some xs => U64Map.insert m (U64.ofNat chunk) (List.cons ch xs)) U64Map.empty entries
+
+-- ## Reading index facts (used by the cursor and by unique checks)
+
+/-- The facts on one page. -/
+partial def QFactPage (m : Map) (base : Nat) : Nat → Nat → Nat → List QFact
+  | .zero, _, _ => []
+  | .succ k, i, ord =>
+    let off := Nat.add base (Nat.add 32 (Nat.mul i 24));
+    let value := Map.getU64 m off;
+    let node := Map.getU64 m (Nat.add off 8);
+    let add := Map.getU64 m (Nat.add off 16);
+    List.cons (QFact.mk ord value node (Nat.beq add.toNat 1))
+      (QFactPage m base k (Nat.succ i) ord)
+
+/-- The facts of one chain, newest first, and the number of pages read. -/
+partial def QReadFactsGo (m : Map) (page : Nat) (fuel : Nat) (acc : List QFact)
+    (ord : Nat) : List QFact × Nat :=
+  match fuel with
+  | .zero => (acc, 0)
+  | .succ f =>
+    match QBase m page with
+    | .none => (acc, 0)
+    | .some base =>
+      let facts := QFactPage m base (QPage.n m base) 0 ord;
+      let (rest, pages) := QReadFactsGo m (QPage.right m base) f
+        (List.append acc facts) ord;
+      (rest, Nat.succ pages)
+
+/-- The facts of a slot, newest first, and the pages read. -/
+def QReadFacts (m : Map) (head : Nat) (fuel : Nat) (ord : Nat) : List QFact × Nat :=
+  QReadFactsGo m head fuel [] ord
+
+/-- `0, 1, …, n-1`. -/
+partial def QAllSlotsGo (i : Nat) : Nat → List Nat
+  | .zero => []
+  | .succ k => List.cons i (QAllSlotsGo (Nat.succ i) k)
+
+/-- Every slot. -/
+def QAllSlots (n : Nat) : List Nat := QAllSlotsGo 0 n
+
+/-- `n` values from `lo`, reduced modulo `slots`. -/
+partial def QSlotsRangeGo (lo slots : Nat) : Nat → Nat → List Nat
+  | .zero, _ => []
+  | .succ k, i => List.cons (Nat.mod (Nat.add lo i) slots)
+      (QSlotsRangeGo lo slots k (Nat.succ i))
+
+/-- Remove duplicates from a small list (keeps the first occurrence). -/
+partial def QDedup : List Nat → List Nat
+  | [] => []
+  | List.cons x xs =>
+    match List.any (fun y => Nat.beq x y) xs with
+    | .true => QDedup xs
+    | .false => List.cons x (QDedup xs)
+
+/-- The slots a range can reach. Equality is one slot; a narrow range is the distinct
+slots of its values; a wide range is every slot. -/
+def QSlotsFor (slots : Nat) (kr : KeyRange) : List Nat :=
+  match kr with
+  | .empty => []
+  | .eq v => [Nat.mod v.toNat slots]
+  | .all => QAllSlots slots
+  | .between lo hi =>
+    let width := Nat.succ (Nat.sub hi.toNat lo.toNat);
+    match Nat.le slots width with
+    | .true => QAllSlots slots
+    | .false => QDedup (QSlotsRangeGo lo.toNat slots width 0)
+
+-- ## Commit
+
+/-- The pages of a commit, written as one contiguous run. -/
+def QWriterBytes (w : QWriter) : Bytes :=
+  List.foldl (fun b e => match e with
+    | (_, p) => Bytes.append b p) Bytes.empty w.pages
+
+/-- Write `bytes` at page `start`. -/
+def QWriteAt (fd : Fd) (start : Nat) (bytes : Bytes) : EIO Unit := do
+  at ← Fd.seek fd (.start (Nat.mul start pageSize));
+  Fd.write fd bytes
+
+/-- Write the meta slot for `gen` and fsync: the commit point. -/
+def QWriteMeta (fd : Fd) (gen : U64) (m : QMeta) : EIO Unit := do
+  at ← Fd.seek fd (.start (Nat.mul (Nat.mod gen.toNat 2) pageSize));
+  Fd.write fd (QMeta.encode m);
+  Fd.sync fd
+
+/-- The changed records of a transaction: id → the node the commit would produce. -/
+def QChangedOf (entries : List (U64 × Patch)) (oldOf : U64 → Option Node)
+    : List (U64 × Option Node) :=
+  List.map (fun e => (e.1, Patch.apply e.2 (oldOf e.1))) entries
+
+/-- The effective node of `id` in the resulting state. -/
+def QEffective (changed : U64Map (Option Node)) (stMap : Map) (stRoot : U64)
+    (id : U64) : Option Node :=
+  match U64Map.find changed id with
+  | .some n => n
+  | .none => QReadNode stMap stRoot id
+
+/-- Fold a fact chain to the live nodes it describes (first fact per node wins). -/
+def QFoldLive (fs : List QFact) : List U64 :=
+  let m := List.foldl (fun m f =>
+    match U64Map.find m f.node with
+    | .none => U64Map.insert m f.node f.add
+    | .some _ => m) U64Map.empty fs;
+  List.map (fun e => e.1) (List.filter (fun e => e.2) (U64Map.toList m))
+
+/-- A duplicate among the transaction's own writes for `d`. -/
+partial def QDupInChanged (d : IndexDef) (key : U64) (id : U64)
+    : List (U64 × Option Node) → Option CommitError
+  | [] => .none
+  | List.cons (id2, new2) rest =>
+    match new2 with
+    | .none => QDupInChanged d key id rest
+    | .some n2 =>
+      match UIntN.beq id id2 with
+      | .true => QDupInChanged d key id rest
+      | .false => match UIntN.beq (IndexDef.key d n2) key with
+        | .true => .some (.duplicate d.id key)
+        | .false => QDupInChanged d key id rest
+
+/-- A duplicate against the old index bucket for `d`'s slot. -/
+partial def QDupInBucket (d : IndexDef) (changed : U64Map (Option Node)) (stMap : Map)
+    (stRoot : U64) (key : U64) (id : U64) : List U64 → Option CommitError
+  | [] => .none
+  | List.cons id2 rest =>
+    match UIntN.beq id id2 with
+    | .true => QDupInBucket d changed stMap stRoot key id rest
+    | .false => match QEffective changed stMap stRoot id2 with
+      | .none => QDupInBucket d changed stMap stRoot key id rest
+      | .some n2 => match UIntN.beq (IndexDef.key d n2) key with
+        | .true => .some (.duplicate d.id key)
+        | .false => QDupInBucket d changed stMap stRoot key id rest
+
+/-- `QSlotOf` with an explicit ordinal/slot pair (the index's position is `ord`). -/
+def QSlotOfAll (slots : Nat) (ord : Nat) (v : U64) : Nat :=
+  Nat.add (Nat.mul ord slots) (Nat.mod v.toNat slots)
+
+/-- Every record's add facts (the compacted index is recomputed, not copied). -/
+def QFactsOfRecordsFrom (defs : List IndexDef) : Nat → List Rec → List QFact
+  | _, [] => []
+  | ord, List.cons r rs =>
+    List.append
+      (List.flatMap defs (fun d =>
+        [QFact.mk ord (IndexDef.key d r.node) r.id .true]))
+      (QFactsOfRecordsFrom defs (Nat.succ ord) rs)
+
+/-- Write a fresh image (pages from 2) holding `recs` and the indices recomputed from
+them. Returns `(pageCount, root, indexRoot)`. -/
+def QWriteImage (fd : Fd) (src : Map) (recs : List Rec) (indices : List IndexDef)
+    (gen : U64) (del : U64) : EIO (Nat × Nat × Nat) := do
+  let slots := QSlotsPer (List.length indices);
+  let byChunk := U64Map.toList (List.foldl (fun m r =>
+    let c := Nat.div r.id.toNat 127;
+    match U64Map.find m (U64.ofNat c) with
+    | .none => U64Map.insert m (U64.ofNat c) [r]
+    | .some xs => U64Map.insert m (U64.ofNat c) (List.cons r xs)) U64Map.empty recs);
+  let w0 : QWriter := QWriter.mk 2 [];
+  let (w1, pairs) := List.foldl
+    (fun (wp : QWriter × List (Nat × Nat)) (e : U64 × List Rec) =>
+      let (w, leaf) := QWriter.emit wp.1 (QPage.leaf gen (List.reverse e.2));
+      (w, List.append wp.2 [(e.1.toNat, leaf)])) (w0, []) byChunk;
+  let (w2, root) := match pairs with
+    | [] => (w1, 0)
+    | _ => QWriteDir w1 src gen 0 QRootDepth pairs;
+  let (w3, indexRoot) := QNewIndexRoot w2 src gen 0
+    (QGroupFacts slots (QFactsOfRecordsFrom indices 0 recs));
+  let last := Nat.add 2 (List.length w3.pages);
+  QWriteAt fd 2 (QWriterBytes w3);
+  Fd.dataSync fd;
+  QWriteMeta fd gen (QMeta.mk gen (U64.ofNat root) (U64.ofNat indexRoot)
+    (U64.ofNat last) del);
+  EIO.pure (last, root, indexRoot)
+
+/-- The unique check for one index: every changed node's key appears nowhere else. -/
+partial def QUniqueForDef (d : IndexDef) (ord : Nat) (slots : Nat)
+    (changed : U64Map (Option Node)) (changedList : List (U64 × Option Node))
+    (stMap : Map) (stRoot : U64) (stIndexRoot : Nat) (fuel : Nat)
+    : List (U64 × Option Node) → Option CommitError
+  | [] => .none
+  | List.cons (id, new) rest =>
+    match new with
+    | .none => QUniqueForDef d ord slots changed changedList stMap stRoot stIndexRoot fuel rest
+    | .some n =>
+      let key := IndexDef.key d n;
+      let slot := QSlotOfAll slots ord key;
+      let head := QNth (QDirRead stMap stIndexRoot) slot 0;
+      let bucket := QFoldLive (QReadFacts stMap head fuel ord).1;
+      match QDupInChanged d key id changedList with
+      | .some e => .some e
+      | .none => match QDupInBucket d changed stMap stRoot key id bucket with
+        | .some e => .some e
+        | .none =>
+          QUniqueForDef d ord slots changed changedList stMap stRoot stIndexRoot fuel rest
+
+/-- The unique check over the schema (position `ord` is the index's slot block). -/
+partial def QUniqueDefs (h : QHandle) (st : QState) (slots : Nat) (fuel : Nat)
+    (changed : U64Map (Option Node)) (changedList : List (U64 × Option Node))
+    : Nat → List IndexDef → Option CommitError
+  | _, [] => .none
+  | ord, List.cons d ds =>
+    match d.unique with
+    | .false => QUniqueDefs h st slots fuel changed changedList (Nat.succ ord) ds
+    | .true => match QUniqueForDef d ord slots changed changedList st.map
+        st.root st.indexRoot.toNat fuel changedList with
+      | .some e => .some e
+      | .none => QUniqueDefs h st slots fuel changed changedList (Nat.succ ord) ds
+
+/-- The unique-index check on the resulting state. Small change sets only: the schema in
+the benchmark is non-unique, and the pure core has the general incremental check. -/
+def QUniqueCheck (h : QHandle) (st : QState) (entries : List (U64 × Patch))
+    (oldOf : U64 → Option Node) : Option CommitError :=
+  let changedList := QChangedOf entries oldOf;
+  let changed := U64Map.ofList changedList;
+  let slots := QSlotsPer (List.length h.indices);
+  let fuel := Nat.succ (Nat.div (Map.len st.map) pageSize);
+  QUniqueDefs h st slots fuel changed changedList 0 h.indices
+
+/-- First-committer-wins: `set`/`del` need the version the transaction read, `addCount`
+only needs the key to exist. `seen` is read from the transaction's own mapping, `now`
+from the published one. -/
+partial def QCheckOps (txMap : Map) (txRoot : U64) (stMap : Map) (stRoot : U64)
+    : List (U64 × Patch) → Option CommitError
+  | [] => .none
+  | List.cons (id, p) es =>
+    let seen := QReadVersion txMap txRoot id;
+    let now := QReadVersion stMap stRoot id;
+    match p with
+    | .addCount _ => match QReadNode stMap stRoot id with
+      | .none => .some (.missing id)
+      | .some _ => QCheckOps txMap txRoot stMap stRoot es
+    | .set _ => match UIntN.beq seen now with
+      | .true => QCheckOps txMap txRoot stMap stRoot es
+      | .false => .some (.conflict id seen now)
+    | .del => match UIntN.beq seen now with
+      | .true => QCheckOps txMap txRoot stMap stRoot es
+      | .false => .some (.conflict id seen now)
+
+/-- Re-map the file after a commit that appended pages (`oldPages` unchanged: keep the
+old map). -/
+def QRemap (fd : Fd) (old : Map) (last : Nat) (oldPages : Nat) : IO Map :=
+  match Nat.beq last oldPages with
+  | .true => IO.pure old
+  | .false => do
+    r ← Store.mapFile fd (Nat.mul last pageSize);
+    match r with
+    | .ok x => IO.pure x
+    | .error _ => IO.pure old
+
+/-- The validation of a transaction against the published state. -/
+def QValidate (h : QHandle) (st : QState) (tx : QSnapshot) : Option CommitError :=
+  let entries := U64Map.toList tx.ws;
+  let curOf := fun id => QReadNode st.map st.root id;
+  match QCheckOps tx.map tx.root st.map st.root entries with
+  | .some e => .some e
+  | .none => QUniqueCheck h st entries curOf
+
+/-- The commit: validate, write the pages, switch the meta. Returns the new state or an
+error; the caller keeps the old state on error. -/
+def QCommit (h : QHandle) (st : QState) (tx : QSnapshot) :
+    IO (QState × Except String Outcome) := do
+  let txGen := tx.gen;
+  match UIntN.lt txGen st.delEpoch with
+  | .true => IO.pure (st, .ok (.rejected (.stale txGen st.gen)))
+  | .false => do
+    let entries := U64Map.toList tx.ws;
+    let curOf := fun id => QReadNode st.map st.root id;
+    let verdict := QValidate h st tx;
+    match verdict with
+    | .some e => IO.pure (st, .ok (.rejected e))
+    | .none => do
+        let g := st.gen + U64.ofNat 1;
+        let slots := QSlotsPer (List.length h.indices);
+        let w0 : QWriter := QWriter.mk st.pageCount.toNat [];
+        let level := QRootLevel st.map st.root.toNat;
+        let chunks := QChangesByChunk entries curOf;
+        let byChunk := U64Map.toList chunks;
+        let (w1, pairs) := QWriteLeaves w0 st.map g st.root level byChunk g;
+        let (w2, root') := match pairs with
+          | [] => (w1, st.root.toNat)
+          | _ => QWriteDir w1 st.map g st.root.toNat QRootDepth pairs;
+        let facts := QFactsOfEntries h.indices entries curOf;
+        let (w3, indexRoot') := QNewIndexRoot w2 st.map g st.indexRoot.toNat
+          (QGroupFacts slots facts);
+        let last := Nat.add st.pageCount.toNat (List.length w3.pages);
+        let del := match List.any (fun e => match e.2 with | .del => .true | _ => .false)
+          entries with
+          | .true => g
+          | .false => st.delEpoch;
+        let meta := QMeta.mk g (U64.ofNat root') (U64.ofNat indexRoot') (U64.ofNat last) del;
+        r ← QWriteAt st.fd st.pageCount.toNat (QWriterBytes w3);
+        match r with
+        | .error e => IO.pure (st, .error e)
+        | .ok _ => do
+          rd ← Fd.dataSync st.fd;
+          match rd with
+          | .error e => IO.pure (st, .error e)
+          | .ok _ => do
+            rm ← QWriteMeta st.fd g meta;
+            match rm with
+            | .error e => IO.pure (st, .error e)
+            | .ok _ => do
+              m2 ← QRemap st.fd st.map last st.pageCount.toNat;
+              IO.pure (QState.mk st.fd m2 g (U64.ofNat root')
+                (U64.ofNat indexRoot') (U64.ofNat last) del, .ok (.committed g))
+
+-- ## Open, get, put, close
+
+/-- The current state of a mapped file. -/
+def QStateOf (fd : Fd) (m : Map) (size : Nat) : EIO QState :=
+  match QReadMeta m with
+  | .some meta =>
+    EIO.pure (QState.mk fd m meta.txid meta.root meta.indexRoot meta.pageCount meta.delEpoch)
+  | .none =>
+    let pages := Nat.max 2 (Nat.div size pageSize);
+    EIO.pure (QState.mk fd m (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0)
+      (U64.ofNat pages) (U64.ofNat 0))
+
+/-- Publish an initial meta for a fresh image, so a later open needs no special case. -/
+def QInitMeta (fd : Fd) (st : QState) (m : Map) : EIO QState :=
+  match QReadMeta m with
+  | .some _ => EIO.pure st
+  | .none => do
+    QWriteMeta fd st.gen
+      (QMeta.mk st.gen st.root st.indexRoot st.pageCount st.delEpoch);
+    EIO.pure st
+
+/-- Verify the pages an open serves: the meta slots (always, in `Store.pickMeta`) and,
+when `verify`, the two roots. Page reads later do not re-verify: the checksum is a
+start-up cost here, and a full-tree verify is `O(pages)` (the design note's "optional"). -/
+def QVerifyRoots (m : Map) (st : QState) : EIO QState := do
+  match Nat.beq st.root.toNat 0 with
+  | .true => EIO.pure st
+  | .false => match Store.verifyPage m st.root with
+    | .error e => EIO.fail (StoreError.message e)
+    | .ok _ => match Nat.beq st.indexRoot.toNat 0 with
+      | .true => EIO.pure st
+      | .false => match Store.verifyPage m st.indexRoot with
+        | .error e => EIO.fail (StoreError.message e)
+        | .ok _ => EIO.pure st
+
+/-- Open (creating if needed) a store. An open is a `stat`, an `mmap` and a meta pick:
+the primary map is not materialised and no index is rebuilt. With `verify`, the two root
+pages are checksummed as well. -/
+def openQV (path : String) (indices : List IndexDef) (verify : Bool) : EIO QHandle := do
+  fd ← Fd.open path .readWrite (OpenFlags.mk .true .false .false .false .false .false);
+  size ← Fd.seek fd (.fromEnd 0);
+  size' ← match Nat.lt size (Nat.mul 2 pageSize) with
+    | .true => do
+      Fd.truncate fd (Nat.mul 2 pageSize);
+      EIO.pure (Nat.mul 2 pageSize)
+    | .false => EIO.pure size;
+  m ← Store.mapFile fd size';
+  st ← QStateOf fd m size';
+  st' ← QInitMeta fd st m;
+  st'' ← match verify with
+    | .true => QVerifyRoots m st'
+    | .false => EIO.pure st';
+  cell ← EIO.lift (MVar.newFull st'');
+  EIO.pure (QHandle.mk path cell indices)
+
+/-- Open, verifying the meta and the two root pages (the default). -/
+def openQ (path : String) (indices : List IndexDef) : EIO QHandle :=
+  openQV path indices .true
+
+/-- The latest committed snapshot (no map materialisation). -/
+def getQ (h : QHandle) : EIO QSnapshot :=
+  EIO.lift (do
+    st ← MVar.read h.state;
+    IO.pure (QSnapshot.mk st.gen st.map st.root st.indexRoot h.indices st.delEpoch
+      U64Map.empty))
+
+/-- Commit a transaction. -/
+def putQ (h : QHandle) (tx : QSnapshot) : EIO Outcome :=
+  MVar.borrow h.state (fun st hole =>
+    IO.bind (QCommit h st tx)
+      (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
+
+/-- Close the descriptor. Outstanding snapshots keep their mapping but not the fd. -/
+def closeQ (h : QHandle) : EIO Unit := do
+  st ← EIO.lift (MVar.read h.state);
+  Fd.close st.fd
+
+/-- Compact: write the live records (and the recomputed indices) to `<path>.compact`,
+fsync it, rename it over the path, and reopen. A mapped old snapshot keeps the old
+inode (POSIX), so it survives. -/
+def QDoCompact (path : String) (indices : List IndexDef) (st : QState) : EIO QState := do
+  let tmp := String.append path ".compact";
+  fd ← Fd.open tmp .readWrite (OpenFlags.mk .true .true .false .false .false .false);
+  Fd.truncate fd (Nat.mul 2 pageSize);
+  let recs := QAllRecords st.map st.root;
+  QWriteImage fd st.map recs indices st.gen st.delEpoch;
+  Fd.close fd;
+  FS.rename tmp path;
+  fd2 ← Fd.open path .readWrite (OpenFlags.mk .true .false .false .false .false .false);
+  size ← Fd.seek fd2 (.fromEnd 0);
+  m2 ← Store.mapFile fd2 size;
+  st2 ← QStateOf fd2 m2 size;
+  Fd.close st.fd;
+  EIO.pure st2
+
+/-- Compact the store behind a handle, publishing the new state. -/
+def compactQ (h : QHandle) : EIO Unit :=
+  MVar.borrow h.state (fun st hole =>
+    IO.bind (QDoCompact h.path h.indices st)
+      (fun r => MVar.fill h.state hole
+        (match r with | .ok x => x | .error _ => st)
+        (IO.pure (match r with
+          | .ok _ => .ok ()
+          | .error e => .error e))))
+

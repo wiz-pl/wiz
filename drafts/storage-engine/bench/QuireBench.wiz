@@ -1,0 +1,167 @@
+import Sys
+import Word
+import Text
+import Functor
+import Storage
+import Quire
+import QuireCursor
+/-!
+# The Quire side of the findings-store benchmark
+
+`quire-bench OP N PATH` (compiled with `wiz build`), where `OP` is `build`, `batch`,
+`reopen`, `query` or `update`. Each run is one operation; the shell harness surrounds it
+with `/proc/self/status`'s `VmHWM` (peak RSS) and prints the operation's own
+`Clock.monotonic` time.
+
+A finding is a 32-byte `Node`: `kind` = rule id, `label` = state id, `count` packs the
+line, a path id and a function id. Strings are interned (the design's `lib/Intern.wiz`
+precedent), so the record is the numeric projection a findings query uses.
+-/
+
+def u64 (n : Nat) : U64 := U64.ofNat n
+def u32 (n : Nat) : U32 := U32.ofNat n
+
+/-- Findings schema: rule (field 0) and state (field 2), both non-unique. -/
+def ruleIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def stateIndex : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .false
+def schema : List IndexDef := [ruleIndex, stateIndex]
+
+/-- `count = line + path*2^20 + function*2^34 + severity*2^48`. -/
+def pack (i : Nat) : Nat :=
+  let sev := Nat.mod (Nat.div i 7) 5;
+  let path := Nat.mod i 16384;
+  let line := Nat.mod i 1048576;
+  let fn := Nat.mod i 16384;
+  Nat.add line (Nat.add (Nat.mul path 1048576)
+    (Nat.add (Nat.mul fn 17179869184) (Nat.mul sev 281474976710656)))
+
+/-- Rule `i % 100`, state `i % 5`, packed line/path/function/severity. -/
+def mkNode (i : Nat) : Node :=
+  Node.mk (u32 (Nat.mod i 100)) (u64 (pack i)) (u32 (Nat.mod i 5))
+
+def setNode (s : QSnapshot) (i : Nat) : QSnapshot :=
+  QSnapshot.record s (u64 i) (.some (.set (mkNode i)))
+
+/-- `n` records in one write-set (the batched load). -/
+partial def setMany (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => setMany (setNode s i) n (Nat.succ i)
+  | .false => s
+
+/-- `n` single-record commits (the append path). -/
+partial def buildLoop (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => do
+    s ← getQ h;
+    o ← putQ h (setNode s i);
+    match o with
+    | .committed _ => buildLoop h n (Nat.succ i)
+    | .rejected _ => EIO.fail "append: rejected"
+  | .false => EIO.pure ()
+
+/-- The peak RSS of this process, from `/proc/self/status`. -/
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println extra
+
+def parseArg (args : List String) : EIO (String × Nat × String) :=
+  match args with
+  | op :: n :: path :: _ => match String.parseNat n with
+    | .some k => EIO.pure (op, k, path)
+    | .none => EIO.fail "bad N"
+  | _ => EIO.fail "usage: quire-bench OP N PATH"
+
+def runBuild (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  buildLoop h n 1;
+  closeQ h
+
+def runBatch (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  o ← putQ h (setMany s n 1);
+  match o with
+  | .committed _ => closeQ h
+  | .rejected _ => EIO.fail "batch: rejected"
+
+def runReopen (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  let got := QSnapshot.getNode s (u64 n);
+  closeQ h;
+  match got with
+  | .some _ => EIO.lift (IO.println (String.append "found " (Nat.toString n)))
+  | .none => EIO.fail "reopen: last node absent"
+
+def runReopenFast (n : Nat) (path : String) : EIO Unit := do
+  h ← openQV path schema .false;
+  s ← getQ h;
+  let got := QSnapshot.getNode s (u64 n);
+  closeQ h;
+  match got with
+  | .some _ => EIO.lift (IO.println (String.append "found " (Nat.toString n)))
+  | .none => EIO.fail "reopen-fast: last node absent"
+
+def runQuery (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  let res := QCursor.foldWith
+    (QCursor.filterKey (KeyPred.eq (u64 2)) (QSnapshot.indexOnlyRange stateIndex KeyRange.all s))
+    (fun acc _ => Nat.succ acc) 0;
+  closeQ h;
+  EIO.lift (IO.println (String.append "count " (Nat.toString res.1)));
+  EIO.lift (IO.println (String.append "cost " (Cost.show res.2)))
+
+def runCompact (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  compactQ h;
+  closeQ h
+
+def runUpdate (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  o ← putQ h (qsetField (u64 (Nat.div n 2)) Node.labelL (u32 4) s);
+  closeQ h;
+  match o with
+  | .committed _ => EIO.pure ()
+  | .rejected _ => EIO.fail "update: rejected"
+
+def run (op : String) (n : Nat) (path : String) : EIO Unit :=
+  match op with
+  | "build" => runBuild n path
+  | "batch" => runBatch n path
+  | "reopen" => runReopen n path
+  | "reopen-fast" => runReopenFast n path
+  | "query" => runQuery n path
+  | "compact" => runCompact n path
+  | "update" => runUpdate n path
+  | _ => EIO.fail "unknown op"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  p ← parseArg args;
+  t0 ← EIO.lift Clock.monotonic;
+  run p.1 p.2.1 p.2.2;
+  t1 ← EIO.lift Clock.monotonic;
+  EIO.lift (report p.1 t0 t1 (String.append "n " (Nat.toString p.2.1))))

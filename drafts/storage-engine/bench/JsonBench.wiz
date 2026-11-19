@@ -1,0 +1,130 @@
+import Sys
+import Word
+import Text
+import Functor
+import Json
+/-!
+# The incumbent side of the findings-store benchmark
+
+`json-bench OP N PATH`: the same operations as `QuireBench.wiz`, using the way scry keeps
+its data today — `Json.render` + `FS.writeFile` for a whole array, `FS.readFile` +
+`Json.parse` for every read, and parse/mutate/render/rewrite for an update.
+
+A record is
+`{"id":i,"rule":"r7","severity":"s2","state":"o3","path":"p12","line":42,"function":"f9"}`
+(about 100 bytes). 100k records is ~10 MB, inside `Json.maxInput`.
+-/
+
+def i2s (n : Nat) : String := Nat.toString n
+
+def mkRec (i : Nat) : Json :=
+  let rule := Nat.mod i 100;
+  let sev := Nat.mod (Nat.div i 7) 5;
+  let state := Nat.mod i 5;
+  let path := Nat.mod i 16384;
+  let line := Nat.mod i 1048576;
+  let fn := Nat.mod i 16384;
+  Json.mkObj
+    [ ("id", Json.ofNat i)
+    , ("rule", Json.mkStr (String.append "r" (i2s rule)))
+    , ("severity", Json.mkStr (String.append "s" (i2s sev)))
+    , ("state", Json.mkStr (String.append "o" (i2s state)))
+    , ("path", Json.mkStr (String.append "p" (i2s path)))
+    , ("line", Json.ofNat line)
+    , ("function", Json.mkStr (String.append "f" (i2s fn))) ]
+
+partial def recsGo (n : Nat) (i : Nat) : List Json :=
+  match Nat.le i n with
+  | .true => List.cons (mkRec i) (recsGo n (Nat.succ i))
+  | .false => []
+
+def recs (n : Nat) : List Json := recsGo n 1
+
+def renderAll (xs : List Json) : String := Json.render (Json.mkArr xs)
+
+def readArray (path : String) : EIO (List Json) := do
+  text ← FS.readFile path;
+  match Json.parse text with
+  | .error e => EIO.fail (String.append "json parse: " e)
+  | .ok j => EIO.pure (Json.asList j)
+
+def withState (r : Json) (state : String) : Json :=
+  Json.mkObj
+    [ ("id", Json.ofNat (Json.getNat r "id"))
+    , ("rule", Json.mkStr (Json.getStr r "rule"))
+    , ("severity", Json.mkStr (Json.getStr r "severity"))
+    , ("state", Json.mkStr state)
+    , ("path", Json.mkStr (Json.getStr r "path"))
+    , ("line", Json.ofNat (Json.getNat r "line"))
+    , ("function", Json.mkStr (Json.getStr r "function")) ]
+
+def isState (r : Json) (s : String) : Bool := String.eq (Json.getStr r "state") s
+
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println extra
+
+def parseArg (args : List String) : EIO (String × Nat × String) :=
+  match args with
+  | op :: n :: path :: _ => match String.parseNat n with
+    | .some k => EIO.pure (op, k, path)
+    | .none => EIO.fail "bad N"
+  | _ => EIO.fail "usage: json-bench OP N PATH"
+
+def runBuild (n : Nat) (path : String) : EIO Unit :=
+  FS.writeFile path (renderAll (recs n))
+
+def runReopen (n : Nat) (path : String) : EIO Unit := do
+  xs ← readArray path;
+  EIO.lift (IO.println (String.append "count " (Nat.toString (List.length xs))))
+
+def runQuery (n : Nat) (path : String) : EIO Unit := do
+  xs ← readArray path;
+  let hits := List.filter (fun r => isState r "o2") xs;
+  EIO.lift (IO.println (String.append "count " (Nat.toString (List.length hits))))
+
+def runUpdate (n : Nat) (path : String) : EIO Unit := do
+  xs ← readArray path;
+  let mid := Nat.div n 2;
+  let xs' := List.map (fun r =>
+    match Nat.beq (Json.getNat r "id") mid with
+    | .true => withState r "o4"
+    | .false => r) xs;
+  FS.writeFile path (renderAll xs')
+
+def run (op : String) (n : Nat) (path : String) : EIO Unit :=
+  match op with
+  | "build" => runBuild n path
+  | "reopen" => runReopen n path
+  | "query" => runQuery n path
+  | "update" => runUpdate n path
+  | _ => EIO.fail "unknown op"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  p ← parseArg args;
+  t0 ← EIO.lift Clock.monotonic;
+  run p.1 p.2.1 p.2.2;
+  t1 ← EIO.lift Clock.monotonic;
+  EIO.lift (report p.1 t0 t1 (String.append "n " (Nat.toString p.2.1))))
