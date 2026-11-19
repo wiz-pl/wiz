@@ -10,6 +10,33 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground's **in-page** server answers `textDocument/completion`,
+  `textDocument/hover` and `textDocument/definition` from the check's own index, in the
+  shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
+  over the identifier prefix, a Markdown `Hover` with the declaration's signature, and a
+  `Location` in the editor's document. The check answer now records each declaration of
+  the module being checked (`{"s","e","kind":"decl","name","detail","ckind"}`: source
+  name, printed type and span) beside the expected types and tactic states it already
+  carried, so no second export is needed; the earlier `wiz_playground_names` attempt (an
+  enumeration of every global, which overflowed the wasm stack) is gone. Completions,
+  hover and definition therefore work with no language server to start; a name the
+  index does not have (a Prelude global, a local binder) answers `null` rather than
+  guessing.
+* web: the playground's `wiz/plainTermGoal` and `wiz/plainGoal` now read the same
+  `LspEntry` list the external `wiz lsp` uses (`selfhost/Frontend.wiz`'s `LspCtx`), with
+  a `watch` flag that records parser spans only for the page's check: a checked node's
+  expected type, the tactic state before each step, and the final state at the block's
+  end. The compiler and the external server pay one `Bool` check per command.
+* web: the playground's editor behaves like an editor, with no new dependency. Diagnostics
+  are underlined in the textarea by a mirrored overlay (`web/squiggles.js`, ranges
+  repaired and tested in `web/editor-model.js`: no end, empty, multi-line, overlapping);
+  the caret is sent to the server as UTF-16 `TextDocumentPositionParams` on selection
+  changes (120 ms debounce); and `textDocument/completion` gets a keyboard-navigable popup
+  (`web/completions.js`) on Ctrl-Space or while typing, inserting a `textEdit`/`insertText`
+  through the normal `input` path. `?squiggles=off` and `?completions=off` disable them.
+  The overlays and the hover card are mounted by `web/playground-lsp.js`, so they work
+  on both the static page and the `?ui=loom` app. `docs/playground-lsp.md` documents
+  both.
 * **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
   binder with no written quantity is `0` only when its type is a sort or a proposition
   (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index

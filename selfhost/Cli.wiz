@@ -1954,6 +1954,7 @@ def lspTermAt (es : List LspEntry) (off : Nat) : Option LspTerm :=
           | .false => .some b
         | .none => .some (LspTerm.mk s t g)
     | .goal _ _ _ => lspTermAt rest off
+    | .decl _ _ _ _ _ => lspTermAt rest off
 
 -- (D8 goals) the nearest goal snapshot at or before `off`, inside the `by` block it
 -- belongs to (its stop); a later snapshot wins
@@ -1974,6 +1975,7 @@ def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
           | .false => .some b
         | .none => .some (LspGoal.mk s t gs)
     | .term _ _ _ => lspGoalAt rest off
+    | .decl _ _ _ _ _ => lspGoalAt rest off
 
 -- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
 partial def lspOffGo : List Char → Nat → Nat → Nat
