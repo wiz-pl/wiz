@@ -8,6 +8,24 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- The theorems the file's header names, in the order the documentation lists them. A
+`#check` pins each name *and* its statement: deleting a theorem, renaming it or weakening
+its type is an error, not a silent pass (`okLibs` with no `infos` only asserted "no
+errors", which is why deleting any proof still passed — coverage audit §4, tests-27). -/
+def uartTheorems : List String :=
+  ["Tx.idleHigh", "Tx.frame", "Tx.returns", "Rx.receives", "Rx.badStop", "Rx.glitch",
+   "Loop.delivers"]
+
+/-- What `#check` prints for each name above (the file's own statements). -/
+def uartTheoremTypes : List String :=
+  ["Tx.idleHigh : (xs : Trace (Bool × Bits8)) → (□ TL.imp (TxS × Bool × Bits8) Tx.idleA (fun σ u => Tx.lineAt xs u = Tx.embOut .true)) (Tx.obs xs) 0",
+   "Tx.frame : (xs : Trace (Bool × Bits8)) → (t : Nat) → (e : Bits8) → TxS.l (Tx.run xs t) = 0 → xs t = (.true, e) → (m : Nat) → Nat.lt m 40 = .true → Tx.lineAt xs (Nat.add m (.succ t)) = Tx.embOut (Uart.frameBit e (Nat.div m 4))",
+   "Tx.returns : (xs : Trace (Bool × Bits8)) → (t : Nat) → (e : Bits8) → TxS.l (Tx.run xs t) = 0 → xs t = (.true, e) → Tx.run xs (Nat.add 40 (.succ t)) = .mk 0 0 e",
+   "Rx.receives : (rs : Trace Bool) → (v : Nat) → (c0 : Nat) → (cs : Bits8) → (e : Bits8) → Rx.run rs v = .mk 0 c0 cs → Rx.WellFormed rs v e → rs (Nat.add 38 v) = .true → (if Nat.beq (RxS.ph (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 rs (Nat.add 38 v))) 1 then Bool.and (Nat.beq (RxS.c (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 rs (Nat.add 38 v))) 3) (rs (Nat.add 38 v)) else .false, RxS.cs (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 rs (Nat.add 38 v))) = (.true, e)",
+   "Rx.badStop : (rs : Trace Bool) → (v : Nat) → (c0 : Nat) → (cs : Bits8) → (e : Bits8) → Rx.run rs v = .mk 0 c0 cs → Rx.WellFormed rs v e → rs (Nat.add 38 v) = .false → (Rx.outs rs (Nat.add 38 v)).1 = .false ∧ Rx.run rs (Nat.add 39 v) = .mk 0 0 e",
+   "Rx.glitch : (rs : Trace Bool) → (v : Nat) → (c0 : Nat) → (cs : Bits8) → Rx.run rs v = .mk 0 c0 cs → rs v = .false → rs (Nat.add 2 v) = .true → Rx.run rs (Nat.add 3 v) = .mk 0 0 cs",
+   "Loop.delivers : (xs : Trace (Bool × Bits8)) → (t : Nat) → (e : Bits8) → Loop.Quiet xs t → xs t = (.true, e) → (if Nat.beq (RxS.ph (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) 1 then Bool.and (Nat.beq (RxS.c (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) 3) (Loop.rs xs (Nat.add 38 (.succ (.succ (.succ t))))) else .false, RxS.cs (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) = (.true, e)"]
+
 /-- H14 T2: the temporal properties of the iCEstick UART, for every input trace and byte
 (`examples/hdl-uart-temporal.wiz`). One `wiz check` of the whole file: the transmitter is
 idle-high, frames a byte for 40 cycles, takes the next one; the receiver reports a

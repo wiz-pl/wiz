@@ -501,15 +501,32 @@ def descSweepApart : IO Unit := do
     unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
     check (n > 0) s!"{m}: no descriptions were compared"
 
-/-- The Desc sweep on chunk `k` of the examples (an example with errors is skipped, as
-an example of an error). -/
+/-- The examples that deliberately show an error (their `.expected` golden holds it):
+`procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
+sweep below treats an error in any other example as a failure, and an allow-listed file
+that stops erroring as one too. -/
+def errorExamples : List String := ["examples/procmacro.wiz", "examples/syntax.wiz"]
+
+/-- The Desc sweep on chunk `k` of the examples: an example other than `errorExamples`
+that reports an error is a failure, and an allow-listed one that stops erroring is one
+too. -/
 def descSweepExamples (k : Nat) : IO Unit := do
   let loader ← Tests.Elab.libLoader
   let fs := exampleChunk (← exampleFiles) k
   check (!fs.isEmpty) s!"chunk {k} of the examples is empty"
   for p in fs do
-    let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile p) { trustedModule := Tests.libModule, loader }
-    if st.messages.any (·.severity == .error) then continue
+    let src ← IO.FS.readFile p
+    let st := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
+    let errored := st.messages.any (·.severity == .error)
+    if errorExamples.contains p then
+      -- the two files that demonstrate a diagnostic must keep doing so
+      unless errored do throw (IO.userError s!"{p}: expected an error, got none")
+      continue
+    if errored then
+      let first := match (st.messages.filter (·.severity == .error))[0]? with
+        | some m => m.render src
+        | none => ""
+      throw (IO.userError s!"examples with errors (only {errorExamples} may fail):\n{p}: {first}")
     let (_, bad) := hypsMismatches st.globals
     unless bad.isEmpty do throw (IO.userError s!"{p}: {bad.take 3}")
 
