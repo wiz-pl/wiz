@@ -273,6 +273,11 @@ def Scry.wfEvidenceJson (static dynamic verify repro : Json) : Json :=
     | s => s;
   let certAuthority := match String.eq certStatus "checked" with | .true => "L2" | .false => "L0";
   let smtAuthority := match String.eq smtStatus "validated" with | .true => "L2" | .false => "L0";
+  let pocStatus := match Json.getPath dynamic ["run", "markerObserved"] with
+    | .some (.bool .true) => "observed"
+    | .some (.bool .false) => "not-observed"
+    | _ => "absent";
+  let pocAuthority := match String.eq pocStatus "observed" with | .true => "L1" | .false => "L0";
   Json.mkArr (List.map (fun x => x)
     [ Json.mkObj [ ("kind", Json.mkStr "static"), ("authority", Json.mkStr "L1")
         , ("path", Json.mkStr "static"), ("status", Json.mkStr staticStatus) ]
@@ -282,6 +287,8 @@ def Scry.wfEvidenceJson (static dynamic verify repro : Json) : Json :=
         , ("path", Json.mkStr "static.smt"), ("status", Json.mkStr smtStatus) ]
     , Json.mkObj [ ("kind", Json.mkStr "dynamic-observed"), ("authority", Json.mkStr "L1")
         , ("path", Json.mkStr "dynamic"), ("status", Json.mkStr dynStatus) ]
+    , Json.mkObj [ ("kind", Json.mkStr "poc"), ("authority", Json.mkStr pocAuthority)
+        , ("path", Json.mkStr "repro.plan"), ("status", Json.mkStr pocStatus) ]
     , Json.mkObj [ ("kind", Json.mkStr "concolic-witness"), ("authority", Json.mkStr witnessAuthority)
         , ("path", Json.mkStr "repro.witness"), ("status", Json.mkStr witnessStatus) ] ])
 
@@ -309,6 +316,9 @@ def Scry.wfRootBundle (r : Scry.WfRecord) (env : Json) : EIO Json := do
     , ("cweTier", Json.mkStr (Scry.wfCweTier (Json.getStr r.finding "rule")))
     , ("state", Json.mkStr (Scry.WfState.show r.state))
     , ("history", Json.mkArr (List.map Scry.wfHistoryJson r.history))
+    , ("candidate", match r.candidate with
+        | .some c => Scry.wfCandidateJson c
+        | .none => Json.mkNull)
     , ("finding", r.finding)
     , ("evidence", Json.mkObj
         [ ("static", Json.mkStr (match r.staticRel with | .some s => s | .none => ""))
@@ -347,7 +357,7 @@ def Scry.emptyScan : Scry.ScanOpts :=
   Scry.ScanOpts.mk .nil .none .none .none .false .none .false .false
 
 def Scry.scanUsage : String :=
-  "usage: scry findings scan FILE.c... [--rules FILE] [--db FILE]\n"
+  "usage: scry findings scan FILE.c|FILE.cs... [--rules FILE] [--db FILE]\n"
   ++ "                            [--artifacts DIR] [--allow-errors]\n"
   ++ "                            [--smt-model FILE] [--json] [--quiet]\n"
 
@@ -423,6 +433,9 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
       | .some e => e
       | .none => Json.mkNull;
     stepw2 ← Scry.wfWrite (Path.join art "environment.json") (String.append (Json.render envJson) "\n");
+    let candidate := Scry.wfScanCandidate;
+    stepw3 ← Scry.wfWrite (Path.join art "candidate.json")
+      (String.append (Json.render (Scry.wfCandidateJson candidate)) "\n");
     let finding := Scry.findingJson rep.origins f
       (match cert with | .some c => c.verified | .none => .false);
     let old := Scry.wfFind st id;
@@ -433,7 +446,8 @@ partial def Scry.wfScanPairs (o : Scry.ScanOpts) (st : Scry.WfStore) (file rules
     let state := match old with | .some r => r.state | .none => (.new : Scry.WfState);
     let record := Scry.WfRecord.mk id key lineHash state history file o.rules o.allowErrors
       finding art (.some "static.json") (match old with | .some r => r.dynamicRel | .none => .none)
-      (match old with | .some r => r.verifyRel | .none => .none) firstSeen now;
+      (match old with | .some r => r.verifyRel | .none => .none)
+      (.some candidate) (.some "candidate.json") firstSeen now;
     stepb1 ← Scry.wfWriteBundle record;
     (match o.json with
     | .true => EIO.pure ()
@@ -482,8 +496,10 @@ def Scry.scanCmd (args : List String) : EIO Nat :=
       steps1 ← Scry.wfSaveStore db st;
       match o.json with
       | .true => Scry.wfSay (Json.render (Scry.wfStoreJson st))
-      | .false => Scry.wfSay (String.append "wrote " (String.append db (String.append " ("
-          (String.append (Nat.repr (List.length st.findings)) " finding(s))"))));
+      | .false => match o.quiet with
+        | .true => EIO.pure ()
+        | .false => Scry.wfSay (String.append "wrote " (String.append db (String.append " ("
+            (String.append (Nat.repr (List.length st.findings)) " finding(s))"))));
       EIO.pure 0
 
 -- ## `list` / `show`
@@ -512,9 +528,14 @@ partial def Scry.listArgsGo (o : Scry.ListOpts) : List String → Except String 
     | _ => .error (String.append "unexpected argument " a)
 
 def Scry.wfRecordLine (r : Scry.WfRecord) : String :=
+  let cand := match r.candidate with
+    | .some c => String.append "rank " (String.append (Nat.repr c.rank)
+        (String.append " " c.verdict))
+    | .none => "unranked";
   String.intercalate "  "
     [ r.id
     , Scry.WfState.show r.state
+    , cand
     , Json.getStr r.finding "rule"
     , Json.getStr r.finding "callee"
     , r.source ]
@@ -584,7 +605,18 @@ def Scry.showCmd (args : List String) : EIO Nat :=
           , String.append "  artifacts: " r.artifacts
           , String.append "  static: " (match r.staticRel with | .some s => s | .none => "(none)")
           , String.append "  dynamic: " (match r.dynamicRel with | .some s => s | .none => "(none)")
-          , String.append "  verify: " (match r.verifyRel with | .some s => s | .none => "(none)") ];
+          , String.append "  verify: " (match r.verifyRel with | .some s => s | .none => "(none)")
+          , String.append "  candidate: " (match r.candidate with
+              | .some c => String.append "stage " (String.append c.stage
+                  (String.append ", rank " (String.append (Nat.repr c.rank)
+                    (String.append " " c.verdict))))
+              | .none => "(unranked)")
+          , String.append "  plan: " (match r.candidate with
+              | .some c => String.append c.plan.channel (String.append " marker "
+                  (String.append c.plan.marker (String.append " sink "
+                    (String.append c.plan.sinkCallee (String.append " arg "
+                      (Nat.repr c.plan.sinkArg))))))
+              | .none => "(none)") ];
         EIO.pure 0
 
 -- ## `triage`
@@ -660,15 +692,23 @@ structure Scry.DynCheck where
   summary : String
   ran : Bool
   crash : Bool
+  /-- The candidate plan's marker was observed in the verification run. -/
+  markerObserved : Bool
 
 def Scry.wfConfigOfJson (j : Json) : Scry.ReproConfig :=
   let envs := List.map (fun e => (Json.getStr e "name", Json.getStr e "value"))
     (Json.getList j "env");
+  let harnessSource := Json.getStr j "harnessSource";
   Scry.ReproConfig.mk (Json.getStr j "cc") (Json.getStr j "sanitize")
     (Scry.wfGetOptStr j "harness") (Scry.wfGetOptStr j "input")
     (Json.getStr j "generatedInput") (Scry.wfGetNatD j "timeoutSecs" 10) envs
     (Scry.wfGetOptStr j "witness") (Json.getStr j "witnessStatus")
     (Json.getStr j "witnessAuthority")
+    (match Json.get j "plan" with
+      | .some p => .some (Scry.wfPlanOfJson p)
+      | .none => .none)
+    (match String.isEmpty harnessSource with | .true => "template" | .false => harnessSource)
+    (Json.getStr j "derivedFrom")
 
 def Scry.wfRunVerifyRepro (reproJson : Option Json) (source vdir : String) : EIO Scry.DynCheck :=
   match reproJson with
@@ -676,12 +716,211 @@ def Scry.wfRunVerifyRepro (reproJson : Option Json) (source vdir : String) : EIO
       (Json.mkObj
         [ ("status", Json.mkStr "not-run")
         , ("reason", Json.mkStr "no repro was recorded; run scry findings repro first") ])
-      "not-run" .false .false)
+      "not-run" .false .false .false)
   | .some cj => do
     let cfg := Scry.wfConfigOfJson cj;
     res ← Scry.reproRun cfg source vdir "verify";
     EIO.pure (Scry.DynCheck.mk res.json res.status res.ran
-      (Bool.or res.crashed res.sanitizerHit))
+      (Bool.or res.crashed res.sanitizerHit) res.markerObserved)
+
+-- ## Small JSON readers used by `refine` and `verify`
+
+partial def Scry.wfBoolAt (j : Json) (path : List String) : Bool :=
+  match path with
+  | .nil => match j with | .bool b => b | _ => .false
+  | .cons k rest => match Json.get j k with
+    | .some x => Scry.wfBoolAt x rest
+    | .none => .false
+
+partial def Scry.wfNatAt (j : Json) (path : List String) : Nat :=
+  match path with
+  | .nil => match j with | .int _ n => n | _ => 0
+  | .cons k rest => match Json.get j k with
+    | .some x => Scry.wfNatAt x rest
+    | .none => 0
+
+-- ## `refine`: the semi-automated triage step
+--
+-- `refine` is deliberately *not* a second analysis: it reads the evidence `scan` already
+-- wrote (the static derivation, its path, the source line) and turns it into the value
+-- the rest of the loop carries. It ranks and deduplicates, derives the PoC plan from the
+-- path's source, and promotes `new -> triaged` only for candidates that survive. The
+-- reasons are written to `candidate.json`, so a reviewer can disagree with a number.
+
+structure Scry.Refined where
+  rec0 : Scry.WfRecord
+  source : Option Scry.WfSource
+  input : Scry.WfRankInput
+  rank0 : Nat
+  reasons : List String
+
+def Scry.wfNatOfJson (j : Json) (k : String) : Nat :=
+  match Json.get j k with
+  | .some (.int _ n) => n
+  | _ => 0
+
+def Scry.wfStaticPath (st : Option Json) : List Json :=
+  match st with
+  | .some j => Json.getList j "path"
+  | .none => []
+
+def Scry.wfSourceStep (steps : List Json) : Option Json :=
+  List.find (fun p => String.eq (Json.getStr p "kind") "source") steps
+
+/-- The source of a record, from the static path's first `source` step and the source
+line it points at. A store without static evidence has no source (`none`), which ranks
+the candidate lower rather than inventing one. -/
+def Scry.wfSourceOfRecord (r : Scry.WfRecord) : EIO (Option Scry.WfSource) := do
+  st ← Scry.wfReadJsonOpt (Path.join r.artifacts "static.json");
+  match Scry.wfSourceStep (Scry.wfStaticPath st) with
+  | .none => EIO.pure .none
+  | .some p => do
+    let loc := match Json.get p "location" with | .some x => x | .none => Json.mkNull;
+    let line := Scry.wfNatOfJson loc "startLine";
+    let col := Scry.wfNatOfJson loc "startColumn";
+    textOpt ← Scry.wfReadTextOpt r.source;
+    let lineText := match textOpt with | .some t => Scry.wfLineAt t line | .none => "";
+    let callee := Scry.wfCalleeOfLine lineText;
+    let channel := Scry.wfChannelOfCallee callee;
+    let detail := match String.eq channel "env" with
+      | .true => Scry.wfFirstLiteral lineText
+      | .false => "";
+    EIO.pure (.some (Scry.WfSource.mk callee channel detail
+      (Json.getStr p "function") line col (Scry.wfNatOfJson p "var")))
+
+def Scry.wfCheckedOf (r : Scry.WfRecord) (st : Option Json) : Bool :=
+  match st with
+  | .some j => Scry.wfBoolAt j ["derivation", "verified"]
+  | .none => .false
+
+def Scry.wfParseErrorsOf (st : Option Json) : Nat :=
+  match st with
+  | .some j => Scry.wfNatAt j ["analysis", "parseErrors"]
+  | .none => 0
+
+def Scry.wfBoundariesOf (st : Option Json) : Nat :=
+  match st with
+  | .some j => Scry.wfNatAt j ["analysis", "boundaryCount"]
+  | .none => 0
+
+def Scry.wfRefineOne (r : Scry.WfRecord) : EIO Scry.Refined := do
+  st ← Scry.wfReadJsonOpt (Path.join r.artifacts "static.json");
+  src ← Scry.wfSourceOfRecord r;
+  let rule := Json.getStr r.finding "rule";
+  let steps := Scry.wfStaticPath st;
+  let pathLen := match steps with
+    | .nil => List.length (Json.getList r.finding "path")
+    | _ => List.length steps;
+  let channel := match src with | .some s => s.channel | .none => "unknown";
+  let detail := match src with | .some s => s.detail | .none => "";
+  let inp := Scry.wfRankInputOf (Scry.wfCheckedOf r st) (Scry.wfParseErrorsOf st)
+    (Scry.wfBoundariesOf st) pathLen (Scry.wfCweTier rule) channel detail .false;
+  let (rank, reasons) := Scry.wfRank inp;
+  EIO.pure (Scry.Refined.mk r src inp rank reasons)
+
+partial def Scry.wfRefineAllGo : List Scry.WfRecord → EIO (List Scry.Refined)
+  | .nil => EIO.pure .nil
+  | .cons r rest => do
+    one ← Scry.wfRefineOne r;
+    rs ← Scry.wfRefineAllGo rest;
+    EIO.pure (List.cons one rs)
+
+def Scry.wfRefineAll (st : Scry.WfStore) : EIO (List Scry.Refined) :=
+  Scry.wfRefineAllGo st.findings
+
+/-- A duplicate of a better candidate: same function, sink callee and argument, and the
+other candidate ranks higher (ties go to the lexicographically smaller id). -/
+def Scry.wfDuplicateOf (items : List Scry.Refined) (self : Scry.Refined) : Bool :=
+  List.any (fun other =>
+    let same := Bool.and (Bool.not (String.eq other.rec0.id self.rec0.id))
+      (Bool.and (String.eq (Json.getStr other.rec0.finding "function")
+                   (Json.getStr self.rec0.finding "function"))
+        (Bool.and (String.eq (Json.getStr other.rec0.finding "callee")
+                     (Json.getStr self.rec0.finding "callee"))
+          (Nat.beq (Scry.wfNatOfJson other.rec0.finding "argument")
+                   (Scry.wfNatOfJson self.rec0.finding "argument"))));
+    let better := Bool.or (Nat.lt self.rank0 other.rank0)
+      (Bool.and (Nat.beq self.rank0 other.rank0) (String.lt other.rec0.id self.rec0.id));
+    Bool.and same better) items
+
+partial def Scry.wfApplyRefineGo (items : List Scry.Refined) (st : Scry.WfStore)
+    (now : Nat) : List Scry.Refined → EIO Scry.WfStore
+  | .nil => EIO.pure st
+  | .cons it rest => do
+    let duplicate := Scry.wfDuplicateOf items it;
+    let inp := { it.input with duplicate := duplicate };
+    let (rank, reasons) := Scry.wfRank inp;
+    let verdict := Scry.wfVerdict rank;
+    let cand := Scry.WfCandidate.mk "refined" rank verdict reasons it.source
+      (Scry.wfPlanFor it.rec0.id (Json.getStr it.rec0.finding "rule")
+        (Json.getStr it.rec0.finding "function")
+        (Json.getStr it.rec0.finding "callee")
+        (Scry.wfNatOfJson it.rec0.finding "argument") it.source);
+    let art := it.rec0.artifacts;
+    stepd ← Scry.wfEnsureDir art;
+    stepw ← Scry.wfWrite (Path.join art "candidate.json")
+      (String.append (Json.render (Scry.wfCandidateJson cand)) "\n");
+    let reason := String.append "refine: rank " (String.append (Nat.repr rank)
+      (String.append " " verdict));
+    let r0 := { it.rec0 with candidate := .some cand
+      , candidateRel := .some "candidate.json", lastSeen := now };
+    let r1 : Scry.WfRecord := match verdict, r0.state with
+      | "pursue", .new => match Scry.wfTriage r0 .triaged "scry refine" reason now with
+        | .ok x => x
+        | .error _ => r0
+      | _, _ => r0;
+    let st1 := Scry.wfUpsert st r1;
+    stepb ← Scry.wfWriteBundle r1;
+    Scry.wfApplyRefineGo items st1 now rest
+
+structure Scry.RefineOpts where
+  db : Option String
+  json : Bool
+  quiet : Bool
+
+def Scry.emptyRefine : Scry.RefineOpts := Scry.RefineOpts.mk .none .false .false
+
+def Scry.refineUsage : String :=
+  "usage: scry findings refine [--db FILE] [--json] [--quiet]\n"
+  ++ "  ranks every candidate from its static evidence, derives a PoC plan, and\n"
+  ++ "  promotes a surviving `new` candidate to `triaged` (writes candidate.json)"
+
+partial def Scry.refineArgsGo (o : Scry.RefineOpts) : List String → Except String Scry.RefineOpts
+  | .nil => .ok o
+  | .cons a rest => match a with
+    | "--db" => match rest with
+      | .cons p more => Scry.refineArgsGo { o with db := .some p } more
+      | .nil => .error "--db needs a file"
+    | "--json" => Scry.refineArgsGo { o with json := .true } rest
+    | "--quiet" => Scry.refineArgsGo { o with quiet := .true } rest
+    | "--help" => .error Scry.refineUsage
+    | _ => .error (String.append "unexpected argument " a)
+
+partial def Scry.wfPrintRefined : List Scry.Refined → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons it rest => do
+    let cand := match it.rec0.candidate with | .some c => c | .none => Scry.wfScanCandidate;
+    step ← Scry.wfSay (String.intercalate "  "
+      [ it.rec0.id, "rank " ++ Nat.repr cand.rank, cand.verdict, cand.stage
+      , Scry.WfState.show it.rec0.state ]);
+    Scry.wfPrintRefined rest
+
+def Scry.refineCmd (args : List String) : EIO Nat :=
+  match Scry.refineArgsGo Scry.emptyRefine args with
+  | .error e => EIO.fail e
+  | .ok o => do
+    let db := Scry.wfStorePath o.db;
+    st ← Scry.wfLoadStore db;
+    items ← Scry.wfRefineAll st;
+    now ← EIO.lift Scry.wfNow;
+    st' ← Scry.wfApplyRefineGo items st now items;
+    steps ← Scry.wfSaveStore db st';
+    stepOut ← match o.json with
+      | .true => Scry.wfSay (Json.render (Scry.wfStoreJson st'))
+      | .false => match o.quiet with
+        | .true => EIO.pure ()
+        | .false => Scry.wfPrintRecords st'.findings;
+    EIO.pure 0
 
 -- ## `repro`
 
@@ -768,7 +1007,10 @@ def Scry.wfReproConfigJson (cfg : Scry.ReproConfig) : Json :=
         [("name", Json.mkStr kv.1), ("value", Json.mkStr kv.2)]) cfg.env))
     , ("witness", Scry.wfOptStrJson cfg.witness)
     , ("witnessStatus", Json.mkStr cfg.witnessStatus)
-    , ("witnessAuthority", Json.mkStr cfg.witnessAuthority) ]
+    , ("witnessAuthority", Json.mkStr cfg.witnessAuthority)
+    , ("plan", match cfg.plan with | .some p => Scry.wfPlanJson p | .none => Json.mkNull)
+    , ("harnessSource", Json.mkStr cfg.harnessSource)
+    , ("derivedFrom", Json.mkStr cfg.derivedFrom) ]
 
 partial def Scry.wfPrintTraceOpt : List String → EIO Unit
   | .nil => EIO.pure ()
@@ -781,6 +1023,7 @@ def Scry.wfVerdictExit (v : String) : Nat :=
   | "not-reported-and-repro-clean" => 0
   | "not-reported-no-dynamic" => 0
   | "finding-present-witness-not-reproduced" => 0
+  | "finding-present-poc-observed" => 0
   | _ => 1
 
 partial def Scry.wfPrintTrace : List String → EIO Unit
@@ -843,6 +1086,15 @@ def Scry.wfPrepareWitness (src : Option String) (art : String) : EIO Scry.WfWitn
             EIO.pure (Scry.WfWitness.mk (.some (Path.join art "witness.json")) (.some ip)
               (Scry.wfWitnessEnv j) auth "accepted" "")
 
+/-- The harness a plan needs: how the controlled value reaches the program. It replaces
+the old fixed `exec "$1"` template; the channel comes from the source step's callee. -/
+def Scry.wfPlanHarness (p : Scry.WfPlan) : String :=
+  match p.channel with
+  | "stdin" => "#!/bin/sh\nexec \"$1\"\n"
+  | "env" => "#!/bin/sh\nexec \"$1\" < /dev/null\n"
+  | "argv" => "#!/bin/sh\nexec \"$1\" $SCRY_POC_ARGS\n"
+  | _ => Scry.wfDefaultHarnessText
+
 def Scry.reproCmd (args : List String) : EIO Nat :=
   match Scry.reproArgsGo Scry.emptyReproCmd args with
   | .error e => EIO.fail e
@@ -861,23 +1113,67 @@ def Scry.reproCmd (args : List String) : EIO Nat :=
         | .true => do
           let art := match o.artifacts with | .some a => Path.join a rec0.id | .none => rec0.artifacts;
           wi ← Scry.wfPrepareWitness o.witness art;
+          stepd ← Scry.wfEnsureDir art;
+          let plan : Option Scry.WfPlan := match rec0.candidate with | .some c => .some c.plan | .none => (.none : Option Scry.WfPlan);
+          let derived : Bool := match o.harness, o.input, plan with
+            | .none, .none, .some p => Bool.not (String.eq p.channel "none")
+            | _, _, _ => (.false : Bool);
+          planInput ← match plan, derived with
+            | .some p, .true => do
+              let inp := Path.join art "plan-input.txt";
+              stepi ← Scry.wfWrite inp p.inputText;
+              EIO.pure (.some inp)
+            | _, _ => EIO.pure (.none : Option String);
+          planHarness ← match plan, derived with
+            | .some p, .true => do
+              let hp := Path.join art "plan-harness.sh";
+              steph ← Scry.wfWrite hp (Scry.wfPlanHarness p);
+              EIO.pure (.some hp)
+            | _, _ => EIO.pure (.none : Option String);
+          let planEnv : List (String × String) := match plan, derived with
+            | .some p, .true => match p.channel with
+              | "env" => [(p.envName, p.inputText)]
+              | "argv" => [("SCRY_POC_ARGS", p.inputText)]
+              | _ => []
+            | _, _ => [];
           let generated := match o.input with
             | .some _ => ""
-            | .none => match Json.get rec0.finding "callee" with
-              | .some (.str callee) => match String.eq callee "gets" with
-                | .true => String.append (Scry.wfRepeatChar (Char.mk 65) 64) "\n"
-                | .false => ""
-              | _ => "";
-          let chosenInput := match wi.input with | .some p => .some p | .none => o.input;
-          let chosenEnv := List.append o.env wi.env;
-          let cfg := Scry.ReproConfig.mk o.cc o.sanitize o.harness chosenInput generated
-            o.timeoutSecs chosenEnv wi.path wi.status wi.authority;
-          stepd ← Scry.wfEnsureDir art;
+            | .none => match planInput with
+              | .some _ => ""
+              | .none => match Json.get rec0.finding "callee" with
+                | .some (.str callee) => match String.eq callee "gets" with
+                  | .true => String.append (Scry.wfRepeatChar (Char.mk 65) 64) "\n"
+                  | .false => ""
+                | _ => "";
+          let chosenInput := match o.input with
+            | .some p => .some p
+            | .none => match wi.input with
+              | .some p => .some p
+              | .none => planInput;
+          let chosenHarness : Option String := match o.harness with
+            | .some p => .some p
+            | .none => match planHarness with
+              | .some p => .some p
+              | .none => (.none : Option String);
+          let chosenEnv := List.append o.env (List.append planEnv wi.env);
+          let harnessSource := match o.harness with
+            | .some _ => "supplied"
+            | .none => match planHarness with
+              | .some _ => "derived"
+              | .none => "template";
+          let cfg := Scry.ReproConfig.mk o.cc o.sanitize chosenHarness chosenInput generated
+            o.timeoutSecs chosenEnv wi.path wi.status wi.authority plan harnessSource
+            (match derived with | .true => "candidate.json" | .false => "");
           stepw ← Scry.wfWrite (Path.join art "repro.json")
             (String.append (Json.render (Scry.wfReproConfigJson cfg)) "\n");
           res ← Scry.reproRun cfg rec0.source art "repro";
           now ← EIO.lift Scry.wfNow;
-          let r' := { rec0 with dynamicRel := .some "dynamic.json", lastSeen := now };
+          let recCand : Option Scry.WfCandidate := match rec0.candidate with
+            | .some c => .some { c with stage := (match res.markerObserved with
+                | .true => "poc" | .false => "poc-attempted") }
+            | .none => (.none : Option Scry.WfCandidate);
+          let r' := { rec0 with dynamicRel := .some "dynamic.json", lastSeen := now
+            , candidate := recCand };
           let st' := Scry.wfUpsert st r';
           steps ← Scry.wfSaveStore db st';
           stepb ← Scry.wfWriteBundle r';
@@ -892,24 +1188,12 @@ def Scry.reproCmd (args : List String) : EIO Nat :=
                   (String.append " exit " (String.append res.exitKind
                     (String.append " " (Nat.repr (match String.eq res.exitKind "signaled" with
                       | .true => res.signal | .false => res.exitCode)))))))))));
+            stepM ← Scry.wfSay (String.append "  marker: " (match res.markerObserved with
+              | .true => "observed" | .false => "not observed"));
             stepT ← Scry.wfPrintTraceOpt res.trace;
             EIO.pure (match String.eq res.status "ran" with | .true => 0 | .false => 1)
 
 -- ## `verify`
-
-partial def Scry.wfBoolAt (j : Json) (path : List String) : Bool :=
-  match path with
-  | .nil => match j with | .bool b => b | _ => .false
-  | .cons k rest => match Json.get j k with
-    | .some x => Scry.wfBoolAt x rest
-    | .none => .false
-
-partial def Scry.wfNatAt (j : Json) (path : List String) : Nat :=
-  match path with
-  | .nil => match j with | .int _ n => n | _ => 0
-  | .cons k rest => match Json.get j k with
-    | .some x => Scry.wfNatAt x rest
-    | .none => 0
 
 def Scry.wfStaticAfterJson (file : String) (rep : Scry.TaintReport) (ids : List String)
     (present : Bool) : Json :=
@@ -966,30 +1250,45 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
           | .some cj => Scry.wfGetOptStr cj "witness"
           | .none => (.none : Option String);
         let verdict := match present with
-          | .true =>
-            match witness with
-            | .some _ => match Bool.and dc.ran (Bool.not dc.crash) with
-              | .true => "finding-present-witness-not-reproduced"
-              | .false => "still-reported"
-            | .none => "still-reported"
+          | .true => match dc.markerObserved with
+            | .true => "finding-present-poc-observed"
+            | .false => match witness with
+              | .some _ => match Bool.and dc.ran (Bool.not dc.crash) with
+                | .true => "finding-present-witness-not-reproduced"
+                | .false => "still-reported"
+              | .none => "still-reported"
           | .false => match String.eq dc.summary "not-run" with
             | .true => "not-reported-no-dynamic"
-            | .false => match dc.ran with
-              | .false => "not-reported-repro-failed"
-              | .true => match Bool.and dc.crash (Bool.not origHit) with
-                | .true => "not-reported-but-repro-crashed"
-                | .false => "not-reported-and-repro-clean";
+            | .false => match dc.markerObserved with
+              | .true => "not-reported-but-poc-observed"
+              | .false => match dc.ran with
+                | .false => "not-reported-repro-failed"
+                | .true => match Bool.and dc.crash (Bool.not origHit) with
+                  | .true => "not-reported-but-repro-crashed"
+                  | .false => "not-reported-and-repro-clean";
         now ← EIO.lift Scry.wfNow;
+        let plan : Option Scry.WfPlan := match rec0.candidate with | .some c => .some c.plan | .none => (.none : Option Scry.WfPlan);
+        let recCand : Option Scry.WfCandidate := match rec0.candidate with
+          | .some c => .some { c with stage := "verified" }
+          | .none => (.none : Option Scry.WfCandidate);
         let verifyJson := Json.mkObj
           [ ("schema", Json.mkStr "scry-workflow-verify/1")
           , ("finding", Json.mkStr rec0.id)
           , ("verdict", Json.mkStr verdict)
+          , ("candidate", match recCand with
+              | .some c => Scry.wfCandidateJson c
+              | .none => Json.mkNull)
+          , ("poc", Json.mkObj
+              [ ("channel", match plan with | .some p => Json.mkStr p.channel | .none => Json.mkNull)
+              , ("marker", match plan with | .some p => Json.mkStr p.marker | .none => Json.mkNull)
+              , ("markerObserved", Json.mkBool dc.markerObserved) ])
           , ("staticAfter", after)
           , ("dynamicAfter", dc.json)
           , ("comparison", Json.mkObj
               [ ("findingPresent", Json.mkBool present)
               , ("reproRan", Json.mkBool dc.ran)
               , ("originalSanitizerHit", Json.mkBool origHit)
+              , ("markerObserved", Json.mkBool dc.markerObserved)
               , ("witness", Scry.wfOptStrJson witness) ])
           , ("run", Json.ofNat now)
           , ("limits", Scry.wfJsonList
@@ -999,7 +1298,8 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
               , "A witness is accepted only as 'no longer reproduces'; its path condition and model are recorded, not re-proved." ]) ];
         stepw ← Scry.wfWrite (Path.join vdir "verify.json")
           (String.append (Json.render verifyJson) "\n");
-        let r' := { rec0 with verifyRel := .some "verify/verify.json", lastSeen := now };
+        let r' := { rec0 with verifyRel := .some "verify/verify.json", lastSeen := now
+          , candidate := recCand };
         steps ← Scry.wfSaveStore dbPath (Scry.wfUpsert st r');
         stepb ← Scry.wfWriteBundle r';
         match json with
@@ -1011,6 +1311,8 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
           step2 ← Scry.wfSay (String.append "  static: " (match present with
             | .true => "still reported" | .false => "not reported by this run (not a proof of absence)"));
           step3 ← Scry.wfSay (String.append "  repro: " dc.summary);
+          step4 ← Scry.wfSay (String.append "  poc marker: " (match dc.markerObserved with
+            | .true => "observed" | .false => "not observed"));
           EIO.pure (Scry.wfVerdictExit verdict)
 
 -- ## dispatch and usage
@@ -1018,10 +1320,12 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
 def Scry.findingsUsage : String :=
   "usage: scry findings COMMAND …\n"
   ++ "\n"
-  ++ "  scan FILE.c... [--rules FILE] [--db FILE] [--artifacts DIR]\n"
+  ++ "  scan FILE.c|FILE.cs... [--rules FILE] [--db FILE] [--artifacts DIR]\n"
   ++ "                 [--allow-errors] [--smt-model FILE] [--json] [--quiet]\n"
   ++ "  list [--db FILE] [--state STATE] [--json]\n"
   ++ "  show ID [--db FILE] [--json]\n"
+  ++ "  refine [--db FILE] [--json] [--quiet]\n"
+  ++ "         rank candidates from their static evidence and derive PoC plans\n"
   ++ "  triage ID --state new|triaged|confirmed|false-positive|fixed [--reason TEXT]\n"
   ++ "            [--by NAME] [--db FILE]\n"
   ++ "  repro ID [--db FILE] [--artifacts DIR] [--cc CMD]\n"
@@ -1042,6 +1346,7 @@ def Scry.findingsCmd (args : List String) : EIO Nat := match args with
   | .cons "scan" rest => Scry.scanCmd rest
   | .cons "list" rest => Scry.listCmd rest
   | .cons "show" rest => Scry.showCmd rest
+  | .cons "refine" rest => Scry.refineCmd rest
   | .cons "triage" rest => Scry.triageCmd rest
   | .cons "repro" rest => Scry.reproCmd rest
   | .cons "verify" rest => Scry.verifyCmd rest

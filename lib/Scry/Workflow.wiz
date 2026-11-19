@@ -267,6 +267,255 @@ def Scry.wfCweTier (rule : String) : String :=
   | "strcpy-overflow" => "N/A"
   | _ => "unknown"
 
+-- ## The candidate contract
+--
+-- A finding that enters the workflow is a *candidate*, and every stage extends the same
+-- value instead of dropping what the previous stage learned:
+--
+--   scan     -> stage "scan",     verdict "unranked", path/sink known
+--   refine   -> stage "refined",  rank + reasons + a PoC plan derived from the source
+--   repro    -> stage "poc",      the plan's marker observed in a concrete run
+--   verify   -> stage "verified", the static finding and the PoC marked side by side
+--
+-- `candidate.json` is the artifact; `WfRecord.candidate` is the value in the store. A
+-- stage that cannot fill a field leaves it empty and says why rather than inventing one.
+
+/-- Where the attacker-controlled value enters, as the taint path and the source line
+name it. `channel` is the control a reproducer needs; `detail` is its name (an env var,
+an argv slot) or `""` when the source line does not name one. -/
+structure Scry.WfSource where
+  /-- The source callee as written (`getenv`, `System.Console.ReadLine`, `read`). -/
+  callee : String
+  /-- `stdin`, `env`, `argv`, `http` or `unknown`. -/
+  channel : String
+  /-- An environment variable name, an argv slot, or `""`. -/
+  detail : String
+  /-- Where the source sits. -/
+  function : String
+  line : Nat
+  column : Nat
+  variable : Nat
+
+/-- The reproducer plan: what the PoC must control and what it must observe. It is
+derived from the path (source channel, sink callee/arg), not hand-written. -/
+structure Scry.WfPlan where
+  /-- `stdin`, `env`, `argv`, `http` or `none`. -/
+  channel : String
+  envName : String
+  inputText : String
+  /-- A token the PoC must make observable at the sink. -/
+  marker : String
+  sinkFunction : String
+  sinkCallee : String
+  sinkArg : Nat
+  /-- What the plan was derived from (e.g. `static.json path; source line 7`). -/
+  derivedFrom : String
+
+/-- The value every stage carries. `rank`/`verdict` are the triage decision, `source`
+the path's entry point, `plan` the PoC the verifier will run. -/
+structure Scry.WfCandidate where
+  /-- `scan`, `refined`, `poc` or `verified`. -/
+  stage : String
+  /-- 0..100, higher is more likely a true positive. -/
+  rank : Nat
+  /-- `unranked`, `pursue`, `deprioritise` or `reject`. -/
+  verdict : String
+  reasons : List String
+  source : Option Scry.WfSource
+  plan : Scry.WfPlan
+
+def Scry.wfEmptySource : Scry.WfSource :=
+  Scry.WfSource.mk "" "unknown" "" "" 0 0 0
+
+def Scry.wfEmptyPlan : Scry.WfPlan :=
+  Scry.WfPlan.mk "none" "" "" "" "" "" 0 ""
+
+/-- The candidate a fresh scan writes: identity and sink, no rank yet. -/
+def Scry.wfScanCandidate : Scry.WfCandidate :=
+  Scry.WfCandidate.mk "scan" 0 "unranked"
+    ["found by scry taint; not refined"] .none Scry.wfEmptyPlan
+
+-- ## Deriving the source and the plan (pure)
+
+def Scry.wfIdentChar (c : Char) : Bool :=
+  Bool.or (Bool.or (Char.isDigit c)
+    (Bool.and (Nat.le 65 (Char.code c)) (Nat.le (Char.code c) 90)))
+    (Bool.or (Bool.and (Nat.le 97 (Char.code c)) (Nat.le (Char.code c) 122))
+      (Bool.or (Char.eq c (Char.mk 95)) (Char.eq c (Char.mk 46))))
+
+/-- The characters before the first `(`. -/
+partial def Scry.wfBeforeParen : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Char.eq c (Char.mk 40) with
+    | .true => .nil
+    | .false => List.cons c (Scry.wfBeforeParen cs)
+
+/-- The leading run of identifier characters. -/
+partial def Scry.wfTakeIdent : List Char → List Char
+  | .nil => .nil
+  | .cons x xs => match Scry.wfIdentChar x with
+    | .true => List.cons x (Scry.wfTakeIdent xs)
+    | .false => .nil
+
+/-- The identifier tail of a character list (after skipping white space and a `=`). -/
+partial def Scry.wfIdentTail (cs : List Char) : List Char :=
+  match List.reverse cs with
+  | .nil => .nil
+  | .cons c rest => match Char.isSpace c with
+    | .true => Scry.wfIdentTail (List.reverse rest)
+    | .false => match Char.eq c (Char.mk 61) with
+      | .true => .nil
+      | .false => Scry.wfTakeIdent (List.cons c rest)
+
+/-- The callee on a source/assignment line: `char *cmd = getenv(0);` -> `getenv`,
+`string host = Console.ReadLine();` -> `Console.ReadLine`. -/
+def Scry.wfCalleeOfLine (line : String) : String :=
+  String.ofChars (List.reverse (Scry.wfIdentTail (Scry.wfBeforeParen (String.chars line))))
+
+/-- The first double-quoted literal on a line, unescaped only for `\"`. `""` when the
+line has none (e.g. `getenv(0)`), which is itself a finding about the fixture. -/
+partial def Scry.wfLiteralGo : List Char → Bool → List Char → String
+  | .nil, _, _ => ""
+  | .cons c cs, .false, _ => match Char.eq c (Char.mk 34) with
+    | .true => Scry.wfLiteralGo cs .true .nil
+    | .false => Scry.wfLiteralGo cs .false .nil
+  | .cons c cs, .true, acc => match Char.eq c (Char.mk 34) with
+    | .true => String.ofChars (List.reverse acc)
+    | .false => match Char.eq c (Char.mk 92) with
+      | .true => match cs with
+        | .cons d ds => Scry.wfLiteralGo ds .true (List.cons d acc)
+        | .nil => String.ofChars (List.reverse acc)
+      | .false => Scry.wfLiteralGo cs .true (List.cons c acc)
+
+def Scry.wfFirstLiteral (line : String) : String :=
+  Scry.wfLiteralGo (String.chars line) .false .nil
+
+/-- The control channel a source callee needs. Conservative: an unrecognised callee is
+`unknown`, and the candidate is not rejected for it (it is only ranked lower). -/
+def Scry.wfChannelOfCallee (callee : String) : String :=
+  match String.contains callee "GetEnvironmentVariable" with
+  | .true => "env"
+  | .false => match String.contains callee "getenv" with
+    | .true => "env"
+    | .false => match String.contains callee "GetCommandLineArgs" with
+      | .true => "argv"
+      | .false => match String.contains callee "ReadLine" with
+        | .true => "stdin"
+        | .false => match String.contains callee "ReadToEnd" with
+          | .true => "stdin"
+          | .false => match String.contains callee "get_Query" with
+            | .true => "http"
+            | .false => match String.contains callee "get_Form" with
+              | .true => "http"
+              | .false => match String.contains callee "get_Headers" with
+                | .true => "http"
+                | .false => match String.contains callee "get_Body" with
+                  | .true => "http"
+                  | .false => match String.contains callee "fgets" with
+                    | .true => "stdin"
+                    | .false => match String.contains callee "scanf" with
+                      | .true => "stdin"
+                      | .false => match String.contains callee "argv" with
+                        | .true => "argv"
+                        | .false => match String.eq callee "read" with
+                          | .true => "stdin"
+                          | .false => "unknown"
+
+/-- The plan a candidate carries. The marker is unique per finding, so a run cannot
+match a marker left over from another candidate. For command injection the input is a
+shell command *plus* the marker, so a sink that runs a shell prints it. -/
+def Scry.wfPlanFor (id rule func callee : String) (arg : Nat)
+    (src : Option Scry.WfSource) : Scry.WfPlan :=
+  let marker := String.append "scry-poc-" id;
+  let channel := match src with | .some s => s.channel | .none => "none";
+  let envName := match src with
+    | .some s => match String.eq s.channel "env" with
+      | .true => match String.isEmpty s.detail with
+        | .true => "SCRY_INPUT"
+        | .false => s.detail
+      | .false => ""
+    | .none => "";
+  let inputText := match String.eq channel "none" with
+    | .true => ""
+    | .false => match String.eq rule "command-injection" with
+      | .true => String.append "true; echo " marker
+      | .false => match String.eq rule "path-traversal" with
+        | .true => String.append "../../" marker
+        | .false => marker;
+  let srcText := match src with
+    | .some s => "source " ++ s.callee ++ " at " ++ s.function ++ ":" ++ Nat.repr s.line
+    | .none => "no source step";
+  Scry.WfPlan.mk channel envName inputText marker func callee arg
+    (String.append "static.json path; " srcText)
+
+-- ## Ranking (pure, deterministic, auditable)
+
+/-- The inputs to the rank. Every field comes from an artifact (the static evidence, the
+path, the source line), not from the finding's prose. -/
+structure Scry.WfRankInput where
+  checked : Bool
+  parseErrors : Nat
+  boundaries : Nat
+  pathLength : Nat
+  tier : String
+  channel : String
+  sourceDetail : String
+  duplicate : Bool
+
+def Scry.wfRankInputOf (checked : Bool) (parseErrors boundaries pathLength : Nat)
+    (tier channel sourceDetail : String) (duplicate : Bool) : Scry.WfRankInput :=
+  Scry.WfRankInput.mk checked parseErrors boundaries pathLength tier channel sourceDetail
+    duplicate
+
+def Scry.wfSign (n : Nat) : String :=
+  String.append " (+" (String.append (Nat.repr n) ")")
+
+/-- A 0..100 rank and the reasons, one line per factor (including the ones that scored
+0), so a triage decision can be audited and the test can assert it. -/
+def Scry.wfRank (i : Scry.WfRankInput) : Nat × List String :=
+  let cert : Nat := match i.checked with | .true => 15 | .false => 0;
+  let chan : Nat := match i.channel with
+    | "stdin" => 20 | "env" => 20 | "argv" => 15 | "http" => 5 | _ => 0;
+  let tier : Nat := match i.tier with
+    | "T1" => 10 | "T2" => 8 | "T3" => 4 | _ => 0;
+  let path : Nat := match i.pathLength with
+    | 2 => 10 | 3 => 8 | 0 => 0 | 1 => 0 | _ => 4;
+  let base : Nat := 40;
+  let errPen : Nat := Nat.mul i.parseErrors 15;
+  let bndPen : Nat := Nat.mul i.boundaries 5;
+  let detailPen : Nat := match i.channel with
+    | "env" => match String.isEmpty i.sourceDetail with | .true => 10 | .false => 0
+    | _ => 0;
+  let dupPen : Nat := match i.duplicate with | .true => 100 | .false => 0;
+  let raw : Nat := Nat.add base (Nat.add cert (Nat.add chan (Nat.add tier path)));
+  let pen : Nat := Nat.add dupPen (Nat.add errPen (Nat.add bndPen detailPen));
+  let r0 : Nat := match Nat.lt raw pen with | .true => 0 | .false => Nat.sub raw pen;
+  let rank : Nat := match Nat.lt 100 r0 with | .true => 100 | .false => r0;
+  (rank,
+    [ "base 40"
+    , String.append (String.append "certificate " (match i.checked with
+        | .true => "checked" | .false => "unchecked")) (Scry.wfSign cert)
+    , String.append (String.append "channel " i.channel) (Scry.wfSign chan)
+    , String.append (String.append "tier " i.tier) (Scry.wfSign tier)
+    , String.append (String.append "path " (Nat.repr i.pathLength)) (Scry.wfSign path)
+    , String.append (String.append "parse errors " (Nat.repr i.parseErrors))
+        (String.append " (-" (String.append (Nat.repr errPen) ")"))
+    , String.append (String.append "boundary warnings " (Nat.repr i.boundaries))
+        (String.append " (-" (String.append (Nat.repr bndPen) ")"))
+    , String.append "source detail "
+        (String.append (match String.isEmpty i.sourceDetail with
+          | .true => "absent" | .false => i.sourceDetail)
+          (String.append " (-" (String.append (Nat.repr detailPen) ")")))
+    , String.append "duplicate of a better candidate"
+        (String.append " (-" (String.append (Nat.repr dupPen) ")")) ])
+
+def Scry.wfVerdict (rank : Nat) : String :=
+  match Nat.le 60 rank with
+  | .true => "pursue"
+  | .false => match Nat.le 30 rank with
+    | .true => "deprioritise"
+    | .false => "reject"
+
 -- ## Records
 
 structure Scry.WfHistory where
@@ -293,6 +542,11 @@ structure Scry.WfRecord where
   staticRel : Option String
   dynamicRel : Option String
   verifyRel : Option String
+  /-- The stage contract: identity at scan, rank/plan at refine, PoC and verification
+  after. A store written before this field existed parses as `none` (unranked). -/
+  candidate : Option Scry.WfCandidate
+  /-- The relative artifact (`candidate.json`) when one was written. -/
+  candidateRel : Option String
   firstSeen : Nat
   lastSeen : Nat
 
@@ -301,6 +555,38 @@ structure Scry.WfRecord where
 def Scry.wfOptStrJson : Option String → Json
   | .some s => Json.mkStr s
   | .none => Json.mkNull
+
+def Scry.wfSourceJson (s : Scry.WfSource) : Json :=
+  Json.mkObj
+    [ ("callee", Json.mkStr s.callee)
+    , ("channel", Json.mkStr s.channel)
+    , ("detail", Json.mkStr s.detail)
+    , ("function", Json.mkStr s.function)
+    , ("line", Json.ofNat s.line)
+    , ("column", Json.ofNat s.column)
+    , ("variable", Json.ofNat s.variable) ]
+
+def Scry.wfPlanJson (p : Scry.WfPlan) : Json :=
+  Json.mkObj
+    [ ("channel", Json.mkStr p.channel)
+    , ("envName", Json.mkStr p.envName)
+    , ("inputText", Json.mkStr p.inputText)
+    , ("marker", Json.mkStr p.marker)
+    , ("sink", Json.mkObj
+        [ ("function", Json.mkStr p.sinkFunction)
+        , ("callee", Json.mkStr p.sinkCallee)
+        , ("argument", Json.ofNat p.sinkArg) ])
+    , ("derivedFrom", Json.mkStr p.derivedFrom) ]
+
+def Scry.wfCandidateJson (c : Scry.WfCandidate) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-candidate/1")
+    , ("stage", Json.mkStr c.stage)
+    , ("rank", Json.ofNat c.rank)
+    , ("verdict", Json.mkStr c.verdict)
+    , ("reasons", Json.mkArr (List.map Json.mkStr c.reasons))
+    , ("source", match c.source with | .some s => Scry.wfSourceJson s | .none => Json.mkNull)
+    , ("plan", Scry.wfPlanJson c.plan) ]
 
 def Scry.wfHistoryJson (h : Scry.WfHistory) : Json :=
   Json.mkObj
@@ -325,6 +611,10 @@ def Scry.wfRecordJson (r : Scry.WfRecord) : Json :=
     , ("static", Scry.wfOptStrJson r.staticRel)
     , ("dynamic", Scry.wfOptStrJson r.dynamicRel)
     , ("verify", Scry.wfOptStrJson r.verifyRel)
+    , ("candidate", match r.candidate with
+        | .some c => Scry.wfCandidateJson c
+        | .none => Json.mkNull)
+    , ("candidateFile", Scry.wfOptStrJson r.candidateRel)
     , ("firstSeen", Json.ofNat r.firstSeen)
     , ("lastSeen", Json.ofNat r.lastSeen) ]
 
@@ -378,6 +668,39 @@ def Scry.wfHistoryOfJson (j : Json) : Scry.WfHistory :=
   Scry.WfHistory.mk state (Scry.wfGetNatD j "at" 0)
     (Json.getStr j "by") (Json.getStr j "reason")
 
+def Scry.wfStrsOfJson (j : Json) (k : String) : List String :=
+  List.map (fun x => match x with | .str s => s | _ => "") (Json.getList j k)
+
+def Scry.wfSourceOfJson (j : Json) : Option Scry.WfSource :=
+  match Json.get j "callee" with
+  | .some (.str callee) => .some (Scry.WfSource.mk callee (Json.getStr j "channel")
+      (Json.getStr j "detail") (Json.getStr j "function")
+      (Scry.wfGetNatD j "line" 0) (Scry.wfGetNatD j "column" 0)
+      (Scry.wfGetNatD j "variable" 0))
+  | _ => .none
+
+def Scry.wfPlanOfJson (j : Json) : Scry.WfPlan :=
+  let sink := match Json.get j "sink" with
+    | .some x => x
+    | .none => Json.mkNull;
+  Scry.WfPlan.mk (Json.getStr j "channel") (Json.getStr j "envName")
+    (Json.getStr j "inputText") (Json.getStr j "marker")
+    (Json.getStr sink "function") (Json.getStr sink "callee")
+    (Scry.wfGetNatD sink "argument" 0) (Json.getStr j "derivedFrom")
+
+def Scry.wfCandidateOfJson (j : Json) : Option Scry.WfCandidate :=
+  match Json.get j "stage" with
+  | .some (.str stage) => .some (Scry.WfCandidate.mk stage
+      (Scry.wfGetNatD j "rank" 0) (Json.getStr j "verdict")
+      (Scry.wfStrsOfJson j "reasons")
+      (match Json.get j "source" with
+        | .some s => Scry.wfSourceOfJson s
+        | .none => .none)
+      (match Json.get j "plan" with
+        | .some p => Scry.wfPlanOfJson p
+        | .none => Scry.wfEmptyPlan))
+  | _ => .none
+
 def Scry.wfRecordOfJson (j : Json) : Option Scry.WfRecord :=
   match Json.getStr j "id" with
   | "" => .none
@@ -393,6 +716,10 @@ def Scry.wfRecordOfJson (j : Json) : Option Scry.WfRecord :=
       (Json.getStr j "artifacts")
       (Scry.wfGetOptStr j "static") (Scry.wfGetOptStr j "dynamic")
       (Scry.wfGetOptStr j "verify")
+      (match Json.get j "candidate" with
+        | .some c => Scry.wfCandidateOfJson c
+        | .none => .none)
+      (Scry.wfGetOptStr j "candidateFile")
       (Scry.wfGetNatD j "firstSeen" 0) (Scry.wfGetNatD j "lastSeen" 0))
 
 partial def Scry.wfFilterMap {A B : Type} (f : A → Option B) : List A → List B

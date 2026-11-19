@@ -86,7 +86,7 @@ def Scry.usage : String :=
   ++ "                              --taint reports cross-TU findings/SARIF\n"
   ++ "  project query DIR --rel NAME | --func NAME\n"
   ++ "                              a project relation (symbols, callgraph, …) or function table\n"
-  ++ "  findings scan|list|show|triage|repro|verify …\n"
+  ++ "  findings scan|list|show|refine|triage|repro|verify …\n"
   ++ "                             finding identity, triage and evidence bundles\n"
   ++ "  report FILE.c|DIR [--out FILE] [--rules FILE] [--allow-errors]\n"
   ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
