@@ -23,7 +23,7 @@ def ex (a b : Nat) (h : a = b) (P : Nat → Prop) (pb : P b) : P a := by
 
 S1 is goal rewriting with an explicit rule list. S2 adds `attribute [simp]`, the
 per-library default sets (`lib/Nat.wiz`, `lib/Int.wiz`, `lib/Logic.wiz`,
-`lib/ListLemmas.wiz`, with `lib/SimpLemmas.wiz` as the umbrella), `local` scoping and
+`lib/Data/ListLemmas.wiz`, with `lib/SimpLemmas.wiz` as the umbrella), `local` scoping and
 the `Tac.getSimpLemmas` read; conditional rules (dischargers), `simp at h` and `simp?`
 are S3–S4 and need their own requests (premise goals, `changeHyp`/`addHyp`/`clearHyp`).
 There is no automatic closer: `simp` rewrites and the user writes

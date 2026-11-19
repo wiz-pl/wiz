@@ -303,7 +303,7 @@ def glue (keys : Array Name) (before : String := "") (unbox : Bool := false) : S
   for (key, sig) in sigs do
     if sig.header == "" && !sig.cname.startsWith "wiz_" then
       let ps := sig.params.filter (fun k => k != .k 'v' && k != .k 'e') |>.flatMap fun k =>
-        if k == .k 'y' then ["const void *", "size_t"]
+        if k == .k 'y' || k == .k 'Y' then ["const void *", "size_t"]
         else if let .callback _ c := k then [callbackType c, "void *"] else [ftype k]
       out := out ++ s!"extern {ftype sig.result} {sig.cname}({if ps.isEmpty then "void" else ", ".intercalate ps});\n"
     let n := sig.params.length
@@ -323,6 +323,13 @@ def glue (keys : Array Name) (before : String := "") (unbox : Bool := false) : S
       | .k 'p' => body := body ++ s!"  void *c{i} = wiz_in_ptr(a{i});\n"; cargs := cargs.push s!"c{i}"
       -- (9i) a byte buffer: its data and length, borrowed for the call
       | .k 'y' => cargs := cargs.push s!"(const void *)((wiz_bytes *)a{i})->data" |>.push s!"(size_t)((wiz_bytes *)a{i})->len"
+      -- (21ag) a writable buffer (`char *`/`unsigned char *`): a copy, so C's writes
+      -- cannot change the Wiz value (a `Bytes` is functional)
+      | .k 'Y' =>
+        body := body ++ s!"  wiz_bytes *c{i}b = (wiz_bytes *)a{i};\n  size_t c{i}n = c{i}b->len;\n" ++
+          s!"  unsigned char *c{i} = (unsigned char *)malloc(c{i}n ? c{i}n : 1);\n" ++
+          s!"  if (c{i}n) memcpy(c{i}, c{i}b->data, c{i}n);\n"
+        cargs := cargs.push s!"(void *)c{i}" |>.push s!"(size_t)c{i}n"
       | .k 'w' => cargs := cargs.push s!"a{i}"
       | .k 'e' => pure ()
       -- (9i) a struct by value: filled from the Wiz structure, which is released after the call
@@ -344,7 +351,8 @@ def glue (keys : Array Name) (before : String := "") (unbox : Bool := false) : S
     for k in sig.params, i in [0:n] do
       if k == .k 's' then body := body ++ s!"  free(c{i});\n"
       -- a foreign pointer or a buffer is borrowed for the call: release it after
-      if k == .k 'p' || k == .k 'y' then body := body ++ s!"  wiz_dec(a{i});\n"
+      if k == .k 'Y' then body := body ++ s!"  free(c{i});\n"
+      if k == .k 'p' || k == .k 'y' || k == .k 'Y' then body := body ++ s!"  wiz_dec(a{i});\n"
       if let .struct .. := k then body := body ++ s!"  wiz_sfree_{num k}(&c{i});\n  wiz_dec(a{i});\n"
       -- (9g) a borrowed callback is released after the call; an owned one is C's now
       if let .callback false _ := k then body := body ++ s!"  wiz_dec(a{i});\n"

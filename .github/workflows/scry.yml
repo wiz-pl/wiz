@@ -1,5 +1,5 @@
 # The Scry tool's own golden suite: `cd scry && grail test`, which runs the
-# `scry/tests/*.expected` goldens (26 today). The Lean-side groups (`=scry-taint`,
+# `scry/tests/*.expected` goldens (28 today). The Lean-side groups (`=scry-taint`,
 # `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
 # the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
 # `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what
@@ -7,7 +7,7 @@
 # it never gates. This workflow does: no `--update`, and a non-zero `grail test` fails.
 #
 # Cost and memory (measured on a loaded 32-core Linux box): `grail build scry` 11.5 min,
-# `grail test` 14 min for the 26 goldens; the whole run peaked at ~220 MiB of resident
+# `grail test` 14 min for the 28 goldens; the whole run peaked at ~220 MiB of resident
 # memory (the dev shell's `cc` included). No Lean/Lake build: `grail` and the
 # tree-sitter-c-sharp grammar are substituted from Cachix, so this needs no heavy runner
 # and no 7 GiB reservation; the job timeout is 60 min (about twice the measured cost,
@@ -103,10 +103,42 @@ jobs:
             exit 2
           fi
           echo "${#tests[@]} goldens"
+          # `tests/repl.wiz` keeps its session cache under `.scry-repl/`; it runs its
+          # session in a fresh temporary directory (see that test), so a leftover cache
+          # from an earlier run cannot change the transcript.
           # --update is deliberately absent: a drifted golden must be red, not rewritten.
-          # `tests/scale.wiz` parses the 3.9 MB generated grammar; on a hosted runner
-          # it needs more than grail's default 300 s per test (the file's own cap).
-          grail test --test-timeout 900 "${tests[@]}"
+          # `tests/scale.wiz` parses the 3.9 MB generated grammar: the test gives the
+          # analysis a 900 s budget, so the harness must allow the whole case more than
+          # that (its own default is 300 s per test). Keep the run's output for the
+          # summary step below. `set -o pipefail` is already on (the step shell), so the
+          # pipeline's status is still `grail test`'s, not tee's; `set +e` only stops the
+          # shell from exiting before we can pass it on.
+          log="$RUNNER_TEMP/grail-test.log"
+          set +e
+          grail test --test-timeout 2400 "${tests[@]}" 2>&1 | tee "$log"
+          rc=$?
+          set -e
+          exit "$rc"
+      - name: Failing goldens (expected/actual)
+        # `grail test` prints each failing case and the first line that differs, but this
+        # job runs 28 cases and can spend most of an hour before it reaches them: repeat
+        # that part in the run's summary, where the next person looks first, instead of
+        # making them find it in the log. (The harness already prints the first
+        # difference; this only moves it, it does not re-run or rewrite anything.)
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/grail-test.log"
+          if [ ! -f "$log" ]; then
+            echo "no grail test log (the job failed before the goldens ran)"
+            exit 0
+          fi
+          {
+            echo "### scry goldens: failing output"
+            echo
+            echo '```'
+            awk '/^  ✗ / { failing = 1 } failing' "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: No golden was rewritten
         # Belt and braces: if anything in the run writes a .expected (a tool calling
         # --update, or a test doing it itself), the job fails instead of accepting it.

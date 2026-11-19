@@ -104,6 +104,21 @@ run 1 new --check --tree "$root/Tests/trust-ledger/new/tree" \
 has "new source of trust (1)" new
 has "axiom bad" new
 
+# An inductive proposition (#252) is kernel-checked: no source, so an empty ledger is clean.
+run 0 ind-prop --check --tree "$root/Tests/trust-ledger/ind-prop/tree" \
+  --ledger "$root/Tests/trust-ledger/ind-prop/ledger.tsv" --today "$today"
+has "trust ledger: OK (0 sources" ind-prop
+
+# An `implemented_by` on a partial definition: the `partial` row alone hides the native
+# step compiled code runs, so the new-entry gate reports it as a second source.
+run 1 impl-partial --check --tree "$root/Tests/trust-ledger/impl-partial/tree" \
+  --ledger "$root/Tests/trust-ledger/impl-partial/ledger.tsv" --today "$today"
+has "new source of trust (1)" impl-partial
+has "native pBase := pOther" impl-partial
+run 0 impl-partial-ok --check --tree "$root/Tests/trust-ledger/impl-partial/tree" \
+  --ledger "$root/Tests/trust-ledger/impl-partial/ledger-ok.tsv" --today "$today"
+has "trust ledger: OK (2 sources" impl-partial-ok
+
 # A row that exists but has no reason: not a reviewed row.
 run 1 unreasoned --check --tree "$root/Tests/trust-ledger/unreasoned/tree" \
   --ledger "$root/Tests/trust-ledger/unreasoned/ledger.tsv" --today "$today"

@@ -97,7 +97,11 @@ cp "$lean/LICENSE" "$out/LICENSES/lean4-LICENSE"
 # (a file in current Lean toolchains: the third-party licences, CaDiCaL's among them)
 [ -e "$lean/LICENSES" ] && cp -R "$lean/LICENSES" "$out/LICENSES/lean4-LICENSES"
 
-# the sysroot: glibc 2.27 and the kernel headers, only what compiling and linking need
+# the sysroot: glibc 2.27 and the kernel headers, only what compiling and linking need.
+# 2.27 (Ubuntu 18.04, EOL 2023-05) is a link-time-only compatibility floor for the
+# programs built here, not an execution environment (they link the host's glibc
+# dynamically); 18.04 is the last distribution that requires it. See the dated note and
+# TODO(2026-11-17, wiz-pl maintainers) in scripts/bundle-cc.sources before changing it.
 sys=$out/sysroot
 mkdir -p "$work/deb" "$sys"
 for d in libc6_2.27-3ubuntu1.6_amd64.deb libc6-dev_2.27-3ubuntu1.6_amd64.deb linux-libc-dev_4.15.0-213.224_amd64.deb; do
@@ -181,7 +185,7 @@ find "$sys/usr/lib" -name '*.la' -delete
 cat > "$out/VERSIONS" <<EOF
 clang, ld.lld, compiler-rt: from $(basename "$lean") ($("$out/bin/clang" --version | head -1))
 cadical: from $(basename "$lean") ($("$out/bin/cadical" --version))
-glibc 2.27 (libc6, libc6-dev 2.27-3ubuntu1.6), Linux headers 4.15 (linux-libc-dev 4.15.0-213.224): Ubuntu 18.04
+glibc 2.27 (libc6, libc6-dev 2.27-3ubuntu1.6), Linux headers 4.15 (linux-libc-dev 4.15.0-213.224): Ubuntu 18.04, link-time only
 GMP 6.3.0 (static, --enable-fat), Boehm GC 8.2.8 (static, threads)
 EOF
 

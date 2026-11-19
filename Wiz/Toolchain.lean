@@ -33,6 +33,9 @@ structure Toolchain where
   same cache layers as the text entries; the text entries stay the authority and the
   fallback -/
   regionCache : Bool := false
+  /-- (`--region-stats`) print what the region cache served, per process (a process that
+  did not elaborate, or one without `regionCache`, reports zeros) -/
+  regionStats : Bool := false
   /-- module roots searched after the standard library -/
   searchPath : List System.FilePath := []
   /-- `--cache-verify off|warn|strict`: check cache output against its manifest (and
@@ -97,6 +100,7 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
   | "cache-verify" => some { t with cacheVerify := value }
   | "region-cache" => some { t with regionCache := value == "true" }
+  | "region-stats" => some { t with regionStats := value == "true" }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
   | "native-fuel" => value.toNat?.map fun n => { t with nativeFuel := some n }
   | _ => none
@@ -105,7 +109,8 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
 `--ldflags "…"`, `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"`,
 `--gc-ldflags "…"`, `--cache DIR` (the cache written to), `--cache-ro DIR` (repeatable:
 a read-only cache, searched in the order given), `--region-cache` (serve module effects
-from `.wizr` regions in those layers; experimental), `--no-cache` (both: no write cache and
+from `.wizr` regions in those layers; experimental), `--region-stats` (print what those
+regions served, per process), `--no-cache` (both: no write cache and
 no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
 `--trust-native`, `--native-fuel N`, (28b) `--sat-solver CMD`, `--solver-timeout MS`,
 (28a) `--trust-smt`, `--smt-solver CMD` (flags only, not settings of a grail file). -/
@@ -113,6 +118,7 @@ partial def parseFlags (t : Toolchain) : List String → Toolchain × List Strin
   | "--cache-verify" :: mode :: rest => parseFlags { t with cacheVerify := mode } rest
   | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
   | "--region-cache" :: rest => parseFlags { t with regionCache := true } rest
+  | "--region-stats" :: rest => parseFlags { t with regionStats := true } rest
   | "--trust-native" :: rest => parseFlags { t with trustNative := true } rest
   | "--sat-solver" :: cmd :: rest => parseFlags { t with satSolver := some cmd } rest
   | "--trust-smt" :: rest => parseFlags { t with trustSmt := true } rest
@@ -144,6 +150,7 @@ def toFlags (t : Toolchain) : List String :=
    | some d => reads ++ ["--cache", d.toString]
    | none => if t.readCaches.isEmpty then ["--no-cache"] else "--no-cache" :: reads) ++
   (if t.regionCache then ["--region-cache"] else []) ++
+  (if t.regionStats then ["--region-stats"] else []) ++
   (if t.cacheVerify == "warn" then [] else ["--cache-verify", t.cacheVerify]) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
@@ -181,7 +188,7 @@ def render (t : Toolchain) : String :=
   s!"cc {t.cc}\ncflags {" ".intercalate t.cflags}\nldflags {" ".intercalate t.ldflags}\nlibs {" ".intercalate t.libs}\ngmp {" ".intercalate t.gmp}\nllc {t.llc}\n" ++
   s!"gc-cflags {" ".intercalate t.gcCflags}\ngc-ldflags {" ".intercalate t.gcLdflags}\n" ++
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
-  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\n" ++
+  s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\nregion-stats {t.regionStats}\n" ++
   s!"roots {" ".intercalate (t.searchPath.map toString)}\n" ++
   s!"cache-verify {t.cacheVerify}\n"
 

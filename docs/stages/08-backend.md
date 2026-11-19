@@ -119,6 +119,12 @@ description).
   at their arguments, so they borrow them (`Expr.primBorrows`; the runtime's
   `wiz_nat_beq`/`wiz_nat_blt` no longer decrement): a lookup in a tree counts neither
   the key nor the keys it compares it with.
+* **Borrowed tag inspections**: `tag` and `natTag` also only read the argument (a
+  header tag, or whether a number is zero); they borrow it too, and
+  `wiz_tag_of`/`wiz_nat_tag` no longer decrement. The scrutinee of every `match` is
+  kept by the caller and dropped at its last use instead of being duplicated before
+  the inspection, so a recursive `Nat` function saves an `inc` and a `dec` per step
+  (`#ir` of a `Nat` counter has no `dup` before `natTag`).
 
 ## 8f: WebAssembly
 

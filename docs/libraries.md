@@ -44,7 +44,7 @@ Along the way the elaborator learned to:
   `0 h`);
 * prove an equation that has already computed with `rfl` (`Nat.succ a = Nat.succ a`
   is a Σ of `True`s and `a = a`), and recompute an equation stuck on a metavariable
-  once it is solved (`congrArg Nat.succ ih` against such a goal). The proof follows the
+  once it is solved (`Eq.congrArg Nat.succ ih` against such a goal). The proof follows the
   elaborator's computed form; where the kernel computes the equation to another shape
   (a numeral on one side, a constructor on the other), the kernel rejects it;
 * erase a `cast` against its source type (the solution rule casts a function, so
@@ -93,6 +93,52 @@ and `Bits.borrow_le`/`borrow_gt` (the borrow of `a + (2^32 - b)`, i.e. `a < b`).
 imports `BitVecShift` for the `Bits.low`/`low_low` lemmas, so it is a proof module too;
 what remains for SLT/SLTU is the 1-bit assembly around `bitOf 33` (see
 `drafts/rv-add/README.md` and `wiz-notes/rv-core-proofs.md`).
+
+## H0d: finger trees, measures and deques
+
+`lib/FingerTree.wiz` (`import FingerTree`): a finger tree and the monoidal measure
+interface. `Monoid M` has `one` and `mul`; `Monoid.Lawful` states associativity and the
+two unit laws (kept out of the class so instances stay data). `Measure A M` gives each
+element its contribution in `M`.
+
+A sequence is `Seq A` (`Deque A` is another name for it): `Seq.empty`, `Seq.single`,
+`Seq.ofList`, `Seq.toList`, `Seq.size`, `Seq.measure`, `Seq.push`, `Seq.pushFront`,
+`Seq.pop`, `Seq.popFront`, `Seq.get` and `Seq.append`. The tree itself is `FT A l`: a
+digit of 1–4 `Elem A l`s, a middle at level `l+1`, and another digit, where
+`Elem A 0 = A` and `Elem A (n+1)` is a node of 2–3 `Elem A n`s.
+
+The level index is not decoration. The textbook tree is non-uniform:
+
+```wiz no-check
+inductive FT (A : Type) where
+  | deep (prefix : Digit A) (middle : FT (Node A)) (suffix : Digit A)
+```
+
+Wiz rejects it: "constructor deep: the recursive field middle must use the same
+parameters" — a recursive field may change the type's *indices* but not its
+*parameters*. The type-level `Elem` moves the nesting into an index, which is allowed,
+and every operation is structural on its first argument: no `partial` and no `mutual`
+block, so the trust ledger is unchanged.
+
+The laws (structural recursion, no axiom):
+* `FT.size_eq`: `FT.size t = List.length (FT.toList t)`;
+* `FT.measure_eq`: for a `Monoid.Lawful m`, `FT.measure t = listMeasure (FT.toList t)`
+  (a non-commutative monoid gives the elements' order, `listMeasure` being their fold);
+* `FT.toList_push` and `FT.toList_pushFront`: the readings of the two pushes;
+* `Seq.toList_ofList`, `Seq.toList_append` and `Seq.size_append`: the list and
+  catenation laws.
+
+The readings go through accumulator helpers (`FT.toListGo`, `listMeasureGo`,
+`listElemSizeGo`), so the laws are right-nested and the measure proof needs the monoid
+laws only where a node combines its parts, not a reassociation at every step.
+
+Not here: for the same kernel restriction, `Seq.append` rebuilds from the two readings
+(O(n)) instead of the textbook O(log n) catenation, which needs one function to match
+two trees at the same level. The measure is recomputed by a fold — a node does not cache
+it — so `size`/`measure` are O(n), and `get` (which descends by recomputed subtree
+sizes) is O(n) as well; a cached measure would be a node carrying its value and its
+equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The deque ends
+(push, pop, pushFront, popFront) are the amortised-constant operations.
 
 ## H14 S0: hardware as tagless-final code, with sharing
 
@@ -495,6 +541,16 @@ unchanged, for every state (no evaluation needed). `Bundle.lens b` (with
 `Bundle.Lawful b`, `rfl` for derived bundles) and `HwTy.fstL`/`sndL` are the packed
 views at values. Example: `examples/hdl-optic.wiz` (group `hdl`).
 
+A profunctor-style optic quantifies over a type constructor (`p : Type → Type → Type`) and
+its class dictionaries, so by the kernel's predicative Π rule — `(x : A) → B` has sort
+`Sort (imax i j)` (`docs/CoreSpec.md:365`, `Wiz/Core/Check.lean:745-755`) — it lives in
+`Type 1`, not `Type 0`; cumulativity would not help, since subsumption raises a type's
+universe rather than lowering it. A `Type 0` container of such optics is therefore
+impossible, while the store lens `Lens S A = S → Store A S` is `Type` and stays that way.
+If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
+(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
+universe change.
+
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
 Compiled, the value simulation (`Circuit.run`, `Design.runLeaves`) runs the step function
@@ -673,7 +729,9 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   it, all of which the netlist turns into the register's reset and enable (not
   multiplexers):
   * a whole circuit: `Circuit.withResetEnable c` (= `withReset (withEnable c)`; S1's
-    `withReset`, `withEnable` alone);
+    `withReset`, `withEnable` alone); the inputs' type is `HwTy.rstEn i`
+    (`prod (named "rst" bit) (prod (named "en" bit) i)`) and the circuit's is
+    `Circuit.RstEn i o`;
   * one register: `Circuit.registerR t init`, `registerE`, `registerRE` (a `delay` with
     them; `Circuit.stepEl_registerRE` … say what they do in a cycle);
   * a field of a state, inside a step function: `Hw.regNext rst en init cur next`
@@ -1325,7 +1383,9 @@ the scrolling commands.
 ## Logic, heap predicates and Hoare triples
 
 `lib/Logic.wiz` (`∧`, `∨`, `∃` with binder notation `∃ x : A, P`, `↔`, `¬`, ASCII
-`/\`, `\/`, `exists`, `<->`, equality lemmas, `funext`, `propext`; [13e](stages/13-language.md)),
+`/\`, `\/`, `exists`, `<->`, level-polymorphic equality lemmas (`Eq.symm`, `Eq.trans`,
+`Eq.congrArg`, `Eq.congrArg2`, `Eq.substProp`, `Eq.mp'`/`Eq.mpr'`, `Eq.via`), `funext`,
+`propext`; [13e](stages/13-language.md)),
 `lib/HProp.wiz` (model heaps, `emp`, `↦`, `⋆`, `−∗`, entailment and the separation-logic
 laws), `lib/Hoare.wiz` (`wp`, triples, the frame rule, adequacy for an interpreter),
 `lib/HoareTactics.wiz` (SLF-style automation: `xsimpl`, `xpull`, `xstep`, `xapp`, …) and
@@ -1393,9 +1453,11 @@ operations: `File.writeOwned`, `readLineOwned`, `readAllOwned` and `flushOwned`;
 Each returns `(result, token)`. The releases are `File.closeOwned`, `Fd.closeOwned` and
 `Child.waitOwned`.
 
-`Child.releaseOwned` drains a piped stdout/stderr (`Child.communicate c ""`) before it
-waits, so a child that fills its pipe cannot deadlock the release; use
-`Child.communicateOwned` first if you want that output.
+A child from `Process.spawnOwned` is released by `Child.waitOwned` (through
+`Child.releaseOwned`), which drains a piped stdout and stderr — `Child.communicate c ""` —
+before it waits, so a child that fills a pipe cannot deadlock the release. The drained
+output is dropped: collect it first with `Child.communicateOwned` (or `Handle.use c o
+(fun c => Child.communicate c input)`).
 
 ```
 File.withOwned p "w" (fun f o => do1
@@ -1407,7 +1469,7 @@ File.withOwned p "w" (fun f o => do1
 `IO` is unchanged and so is lib/Sys.wiz's ω API; only the owned variants are `IO1`.
 Acquisition stays in continuation style until linear `match` lands (linear-case stage 2).
 
-## Quantity-polymorphic results (`lib/Result.wiz`, `lib/Region.wiz`)
+## Quantity-polymorphic results (`lib/Data/Result.wiz`, `lib/Region.wiz`)
 
 `ResultQ q A` is `Result` with its success value at quantity `q`: `ok` carries the value at
 `%q`, `err` only the `Error` (no payload). `ResultQ ω A` and `Result A` are the same type
@@ -1424,6 +1486,20 @@ keeping the handle. `Result1` stays the linear resource result: `ResultQ`'s erro
 has no value, so a handle cannot be threaded through it, and `ResultH`'s only useful
 instance is `q = 1` (at `q = ω` the handle is droppable, at `q = 0` unusable).
 Details and the `q = 0` representation caveat: `wiz-notes/result-q.md`.
+
+The library uses the family where a handle is threaded. `ResultH.elim` cases a `Result1`
+once, with no nested handle match inside each `ok`/`err` arm, and
+`ResultH.mapHandle`/`ResultH.ofResult` transform the handle, or attach one to a plain
+`Result`, on both branches. The borrow scopes in lib/Region.wiz use them: `Uniq.borrow`
+and `borrowIn` case once, and `reborrow`, `reborrowIn`, `share`, `shareIn`, `zoom`,
+`zoomIn` and `both` end the inner handle and rebuild the outer one once instead of in
+each arm. The value-level results of lib/Optic.wiz and lib/HeapBorrow.wiz use
+`Result.map`, `Result.bind` and `Result.elim`, which are the `ResultQ` functions at
+`q = ω` (the same functions, since `Result = ResultQ ω`): a Feral borrow's functional
+model threads ω data and its panic path carries no lender, so `ResultH`'s error branch (a
+handle on both branches) is not the right type there. lib/Handle.wiz, lib/Eff.wiz and
+lib/IO.wiz report failures as `Except String`/`EIO` and carry results in `IO1`, not
+`Result`, so the family does not apply to them.
 
 ## Functors and Booleans
 
@@ -1485,8 +1561,10 @@ byte is a `Nat` below 256: `Bytes.push b x` appends the low eight bits of `x`, a
 
 Pure helpers built on those: `Bytes.isEmpty`, `Bytes.at` (`Option Nat`), `Bytes.take`,
 `Bytes.drop` (past the end is the empty buffer), `Bytes.ofList`/`Bytes.toList` (each
-number mod 256), `Bytes.singleton`, `Bytes.range n` (0 … n−1) and `Bytes.show`
-(`[1, 2, 255]`, the form `#eval` prints a buffer in).
+number mod 256), `Bytes.singleton`, `Bytes.range n`, `Bytes.show`
+(`[1, 2, 255]`, the form `#eval` prints a buffer in), and `Bytes.startsWith b s` /
+`Bytes.matchesAt b i s` (a byte comparison with a string's UTF-8 bytes, without building
+its `List Char`).
 
 **Text and bytes meet only through a named encoding.** `Bytes.ofUtf8 s` and
 `Bytes.toUtf8 b : Except String String` encode and decode every character, NULs included;
@@ -1499,7 +1577,7 @@ characters and `Bytes.size` bytes, so one astral character is one character and 
 bytes.
 
 `Bytes.ofArray a`/`Bytes.toArray b` (in `Std`, where `Array` is) convert to and from an
-`Array Nat`, each element mod 256. `import WordBytes` adds `Bytes.ofU8s`/`toU8s`
+`Array Nat`, each element mod 256. `import Data.WordBytes` adds `Bytes.ofU8s`/`toU8s`
 (`List U8`); `U8Array ↔ Bytes` is not there yet (stage 29). `FS.readBytes`,
 `File.readBytes` and `Fd.read` hand back `Bytes` (9k).
 
@@ -1511,9 +1589,61 @@ Compiled code calls the runtime. The self-hosted toolchain's Prelude has a model
 `Bytes` (a private constructor over a `List Nat`) for `#reduce`, while its compiled code
 uses the same nine runtime natives (`selfhost/rt.c`).
 
-## 9j: list lemmas (`lib/ListLemmas.wiz`)
+## Hashing and encodings (`lib/Sha.wiz`, `lib/Encoding.wiz`)
 
-`import ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
+`import Sha` and `import Encoding` are pure and total (`#eval` runs them; no `partial`,
+no axiom, no `implemented_by`), so a release's `.sha256` and an archive's hash are
+computed by the same code a proof can see. Both are checked by the `library` group
+(`lake test -- '=library'`).
+
+| module | contents | test group |
+|--------|----------|------------|
+| `lib/Sha.wiz` (`import Sha`) | SHA-256 (FIPS 180-4) of a byte string: `Sha.sha256 : List U8 → List U8` is the 32-byte digest, big-endian as the standard writes it; `Sha.sha256Hex` renders it in lower-case hex (64 characters); `Sha.sha256Bytes` and `Sha.sha256BytesHex` are the same over a `Bytes` buffer | `=library` |
+| `lib/Encoding.wiz` (`import Encoding`) | base64 (RFC 4648, standard alphabet with `=` padding) and hex, in both directions, over `List U8` and over `Bytes`: `hexEncode`/`hexDecode`, `base64Encode`/`base64Decode`, and the four `…Bytes` forms | `=library` |
+
+The two directions are separate functions, not a `Codec` class: a decoder has to report
+why the text is not valid, so it returns `Except String` — the bytes in `.ok`, the reason
+in `.error`. A byte is a `U8`, a `Nat` below 256 (`lib/Word.wiz`); `Sha` imports
+`Encoding` (for `sha256Hex`), and neither module needs I/O.
+
+**Lengths and padding.** `Sha.sha256` pads the bytes it is given (a `1` bit, zeros up to
+56 mod 64, then the 64-bit big-endian bit length), so a caller hashes the message and not
+a block. The digest is 32 raw bytes; `Sha.sha256Hex` is `Encoding.hexEncode` of it.
+`Tests/Groups/Library.lean` pins the FIPS 180-4 vectors — the empty message, `"abc"`, the
+448-bit `"abcdbcde…"` message — and the quick-brown-fox and 64-`a` messages.
+
+**Strict decoders.** `Encoding.hexDecode` takes either case and rejects an odd number of
+digits (`"hex: odd number of digits"`) and any character outside `0-9a-fA-F`
+(`"hex: not a hex digit"`). `Encoding.base64Decode` takes the standard alphabet with
+padding: the length is a multiple of four, only the last group may carry `=`, and there is
+no whitespace (strip a line-wrapped source first). Every violation is an `error`
+that names the rule (`length is not a multiple of 4`, `misplaced padding`,
+`data after padding`, `invalid character`), never a silently shortened result. The unused
+low bits of the last character are ignored, as RFC 4648 permits a decoder to do.
+
+```wiz
+import Sha
+import Encoding
+
+def toBytes : List Char → List U8
+  | .nil => .nil
+  | .cons c cs => .cons (U8.ofNat (Char.code c)) (toBytes cs)
+def bytes (s : String) : List U8 := toBytes (String.chars s)
+
+def hexOf (r : Except String (List U8)) : String := match r with
+  | .ok bs => Encoding.hexEncode bs
+  | .error e => e
+
+#eval Sha.sha256Hex .nil                                    -- "e3b0c442…b855"
+#eval Sha.sha256Hex (bytes "abc")                           -- "ba7816bf…15ad"
+#eval hexOf (Encoding.hexDecode (Sha.sha256Hex (bytes "abc")))  -- the digest, as bytes
+#eval hexOf (Encoding.base64Decode "Zm9vYmFy")              -- "666f6f626172"
+#eval hexOf (Encoding.base64Decode "Zg")     -- "base64: length is not a multiple of 4"
+```
+
+## 9j: list lemmas (`lib/Data/ListLemmas.wiz`)
+
+`import Data.ListLemmas` (over `Text`, `Logic` and `Nat`): the laws a proof about lists needs,
 so a user proof is not a hand induction every time.
 
 * **Membership**: `List.Mem` (`x ∈ l`) is a proposition, with the binder notation
@@ -1533,7 +1663,7 @@ so a user proof is not a hand induction every time.
   and the `cons` equations `any_cons_true`/`any_cons_false`/`all_cons_true`/
   `all_cons_false`.
 
-All are structural recursions: no axiom, no `sorry`, so `lib/ListLemmas.wiz` leaves the
+All are structural recursions: no axiom, no `sorry`, so `lib/Data/ListLemmas.wiz` leaves the
 trust ledger unchanged. Wiz has no `simp` and no `[simp]` attribute, so they are stated
 left to right for `rw` (and `rw` does not close a goal: finish with `rfl`). The
 `list-lemmas` test group checks them, including `map` fusion and `filter`
@@ -1549,15 +1679,38 @@ rendering and a keyed diff to DOM patches. Nodes are `Loom.VNode M` (`text`, `ra
 `Loom.Rendered.diff` a `List Loom.Patch` (`replace`, `text`, `setAttr`,
 `removeAttr`, `insert`, `remove`, `move`) that `Loom.patchesJson` hands to
 `web/framework/runtime.js`. An app is `Loom.App S M` (`init`, `update`, `view`); a
+`Loom.LiveApp S M` takes the browser event's payload too (`update msg payload state`:
+a form control's live value for `input`/`change`, the key for `keydown`/`keyup`, parsed
+from the driver's `event\nindex\npayload` string by `Loom.splitEvent`); a
 component is `Loom.Component P S M`. Local state is a lens into the app state
 (`Loom.useState`/`setState`/`useReducer` over `Optic`'s `Lens`, so disjoint slices
 commute), and a one-shot resource is `Loom.Owned S`, a quantity-1 token the kernel
 makes you use exactly once (`new`, `read`, `peek`, `update`, `set`, `end`). `raw` is
 the only trust boundary (and must be one element); all other text and attribute values
-are escaped by `Tagged.esc`. There is no hydration yet (SSR then a re-render/mount),
-no effects, and `value`/`checked` would need property patches. Tests: group `loom`
-and `web/framework/test.sh` (Node DOM). Design, survey and migration analysis:
-`wiz-notes/react-framework.md`.
+are escaped by `Tagged.esc`. An empty text node is dropped from a sibling chain: the DOM
+has no node for it, so a patch path could not address it. There is no hydration yet
+(SSR then a re-render/mount), no effects, and `value`/`checked` would need property
+patches. An exported `wiz_loom_*` function owns the state it is given (stage 9g's C
+ABI): the browser half transfers it on every step and takes a `wiz_retain` for a
+read-only call. Tests: group `loom`
+and `web/framework/test.sh` (Node DOM; `driver_test.mjs` pins the event strings).
+Design, survey and migration analysis: `wiz-notes/react-framework.md`.
+
+## Web: the playground's Loom components (`lib/Web/Playground.wiz`, `lib/Web/Editor.wiz`)
+
+`import Web.Playground` is the playground's output pane: `Line` (the engine's text, the
+`err`/`val` classes, what the line shows and its tooltip), `Model` (the lines, the error
+count, the page's status pair and `#count` text), `Model.ofText`/`Model.ofFailure`, and
+`Model.view` for `#output`. The value grammar (`web/playground-values.js`) lives in it
+too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, and stays
+raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
+with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
+`#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
+`web/playground-ui.wiz` composes them into the whole page (`?ui=loom`) and exports its
+`wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
+module, so a user program's trap in the engine cannot touch the UI state. Tests:
+`web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
+(the page, mounted from the built module under Node).
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
@@ -1579,7 +1732,9 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
 widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
 held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
-the raw `Loom.on`/`Loom.App.event` path passes only a handler index.
+the raw `Loom.on`/`Loom.App.event` path passes only a handler index, and an app that
+wants a control's live value uses `Loom.LiveApp` (the driver puts it in the event
+string).
 
 ## Numbers: classes, integers, words
 
@@ -1627,7 +1782,7 @@ and doc comments; std's tests check one example of each.
 
 | module | contents |
 |--------|----------|
-| `lib/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
+| `lib/Data/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
 | `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
 | `lib/Ring.wiz` | `nat_ring! lhs = rhs`: identities of commutative semirings at `Nat`, by reflection |
 | `lib/IntRing.wiz` | `int_ring! lhs = rhs` at `Int`; the ring laws `Int.add_comm` … `Int.neg_mul`; the pair representation `Int.ofPair a b = a - b` |
@@ -1686,7 +1841,7 @@ use any lemma explicitly. Every rule is a theorem (no axiom, no `sorry`).
 | `lib/Nat.wiz` | `Nat.add_zero : n + 0 = n`, `Nat.mul_one : n * 1 = n`, `Nat.one_mul : 1 * n = n`, `Nat.mul_zero : n * 0 = 0` |
 | `lib/Int.wiz` | `Int.add_zero`, `Int.zero_add`, `Int.sub_zero`, `Int.mul_one`, `Int.one_mul`, `Int.mul_zero`, `Int.zero_mul` |
 | `lib/Logic.wiz` | `Bool.not_not`, `Bool.and_true`, `Bool.and_false`, `Bool.and_self`, `Bool.and_absorb`, `Bool.and_not_self`, `Bool.or_false`, `Bool.or_true_right`, `Bool.or_self`, `Bool.or_absorb`, `Bool.or_not_self`, `Bool.not_and`, `Bool.not_or` |
-| `lib/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
+| `lib/Data/ListLemmas.wiz` | `List.append_nil`, `List.map_id`, `List.map_map`, `List.map_append`, `List.length_map`, `List.length_append_eq`, `List.reverse_cons`, `List.reverse_append`, `List.reverse_reverse`, `List.map_reverse`, `List.length_reverse`, `List.filter_map`, `List.filter_filter`, `List.any_append`, `List.all_append` |
 | `lib/SimpLemmas.wiz` | none of its own: `Nat.pow_zero`/`Nat.pow_succ`, `Bool.if_true`/`Bool.if_false`, `Option.map_none`/`Option.map_some`, `Prod.fst_mk`/`Prod.snd_mk` stay explicit (see below) |
 
 * **Boolean notation.** `&&`, `||` and `!` are a `match` on the first argument and
@@ -1764,7 +1919,7 @@ in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets
 
-`lib/PMap.wiz` (`import PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
+`lib/Data/PMap.wiz` (`import Data.PMap`): `PMap K V` and `PSet K` (a `PMap K Unit`), immutable and
 structurally shared. A map is a size-balanced (weight-balanced, Adams scheme) binary
 search tree; every update returns a new map and leaves the old one valid, copying only
 the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotation).
@@ -1801,6 +1956,20 @@ Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
 in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
 S2 still needs.
 
+`Wil.cstep`, `Wil.CStep` and `Wil.crun` add a **concurrent machine** over the same
+sequential step: a thread is its own call stack, `Wil.CConfig.mem` is one shared store
+(sequentially consistent), and the synchronisation primitives are reserved callee names
+(`lock`, `unlock`, `spawn:<f>`, `join`, `atomic_add`, `fence` — the table `Wil.syncOf`)
+rather than new `Stmt` constructors, so the lowering and every existing analysis are
+unchanged. Blocks the root allocates are `shared`; a spawned thread's are `local` to it,
+and a cross-thread access faults in the step relation. `Wil.crun` is a fuel-bounded
+*interleaving* under a scheduler (`Wil.schedFirst`, `Wil.schedRoundRobin`,
+`Wil.schedScript`): one run is one interleaving, not all of them. `import
+Scry.ConcurrencyExamples` is the racing / locked / atomic corpus, and `import Scry.Race`
+is the lockset data-race check that consumes it (`Scry.raceFindings`). The model, its
+memory model, and what is proved vs tested are in `wiz-notes/scry-wil-concurrency.md`.
+
+
 ## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
 
 `import Scry.Analysis` numbers a Wil function's statements and terminators as program
@@ -1836,11 +2005,17 @@ The S4 rule pack and interprocedural slice are separate modules:
   (`getenv`, `read`/`recv`, the `exec*` family, `system`/`popen`, the
   `printf`/`sprintf`/`snprintf` family, the `strcpy`/`memcpy` family,
   `malloc`/`calloc`/`realloc`/`free`), the policy sanitisers, and the pure read-only
-  calls. Model source/sink/sanitiser facts are a deduplicated fallback after the pack;
-  model copy pairs become memory stores, model allocation/free drives the lowering, and
-  an unmodelled external with a pointer result/argument is an explicit
-  `unmodelled-external` warning (its result stays `Loc.unknown`). `RulePack.withModels`
-  supplies the model rule descriptors.
+  calls. For the C# frontend the same table carries the **CLR reads** it lowers to
+  (`T[].get_Item`/`get_Length`, `String.Length`/`Substring`/`Concat`/`Format`, property
+  getters, `System.Linq.Enumerable` projections, `Console.ReadLine` as a source); a
+  model read claims no write through an argument, no free and no new source, and taint
+  still flows through `gen`, so a model never launders. Writes through a receiver or an
+  argument (`set_*`, `Add`, `Append`, `CopyTo`, `Read`) and `Dispose` are not modelled
+  (they stay explicit `unmodelled-external`). Model source/sink/sanitiser facts are a
+  deduplicated fallback after the pack; model copy pairs become memory stores, model
+  allocation/free drives the lowering, and an unmodelled external with a pointer
+  result/argument is an explicit `unmodelled-external` warning (its result stays
+  `Loc.unknown`). `RulePack.withModels` supplies the model rule descriptors.
 * `import Scry.PointsTo` — a flow-insensitive, field-sensitive points-to analysis over
   the lowered Wil: the location lattice `Loc.stack/glob/heap/fn/field/anyOff/unknown`,
   per-register location sets (`Scry.ptIds`), per-location pointer contents (`mem`, for
@@ -1855,6 +2030,11 @@ The S4 rule pack and interprocedural slice are separate modules:
   the C-ABI entry policy: a non-`static`, non-`main` function with no caller in the unit
   and no address taken is an exported entry, and its parameters are sources
   (`Scry.entrySources`); `Scry.analyze` keeps the policy-free library behaviour.
+* `import Scry.Nullness` — the S5 nullness alarm wired to Wil: a `load`/`store` through a
+  pointer that may be null (a failed allocation, a call result, a literal `NULL`) is a
+  `scry/memory/null-dereference` diagnostic, and a `p != NULL`/`!p` guard kills the null
+  value on the other edge. It reuses `Scry.AiFixpoint`'s worklist and `Alarm.nullDeref`;
+  `Scry.analyze` does not run it; `Scry.analyzeWithNull` does (the CLI flag is `--null-deref`).
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after
@@ -1874,7 +2054,11 @@ The S4 rule pack and interprocedural slice are separate modules:
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
-`lib/Scry/rules/default.scry`, and SARIF 2.1.0. Memory is modelled: structs, arrays,
+`lib/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
+`scry/memory/null-dereference` diagnostic with `--null-deref` (opt-in); the CWE-22 `path-traversal` rule is
+opt-in as `lib/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
+`realpath` modelled as a sanitiser of its result and destination, not its input).
+Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
 are lowered to slots/heaps/`gep`/`load`/`store`, and points-to + the memory taint rules
 carry a flow through them. External calls have models (`Scry.Models`): `strcpy`'s copy,
@@ -1900,7 +2084,7 @@ and a union log) against the reference's five, so `EGraph.mk` takes seven argume
 record, reads a field, or calls those functions compiles against one import only. It
 adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
 rewrites), union explanations (a flat proof forest), node/round/clock limits with a
-reported stop reason, and `Option Nat` extraction costs. Only six of the seventeen
+reported stop reason, and `Option Nat` extraction costs. Only six of the eighteen
 `examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
 `extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
 compares; the analysis, explanation, limit and `EqPlan` surface has no reference
@@ -1911,12 +2095,18 @@ imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm
 operations, so a whole-library import that names both is an error. Every whole-library
 loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
 with everything except the reference family. `import Scry.EqPlan`
-is the Datalog seam: `eqsort` columns (`Scry.ColKind`), rules whose head is an equality
-assertion (`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and
-canonicalises the database between rounds. This is the second S12 slice: no
+is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
+relations (a column is not an assertion: a term table `un(term, op, child)` has two
+`eqsort` columns and unions nothing), rules whose head is an equality assertion
+(`Scry.Head.eqAssert`), and a plan interpreter that calls `mergeFacts` and canonicalises
+the database between rounds. A lattice relation keyed by an `eqsort` column is the
+e-class analysis (`itv : EClass → Interval`); `Plan.evalAn` adds guarded rewrites between
+canonicalise passes, so the analysis rule and the rewrite refine each other
+(`examples/scry-egraph-join.wiz` reproduces the analysis example's digest through the
+plan). This is the second S12 slice: no semi-naive delta across rebuild, no
 scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware provenance and
-no kernel-checked certificates yet; `wiz-notes/scry-egraph.md` has the design, the API
-and the gaps.
+no kernel-checked certificates yet; `wiz-notes/datalog-egraph-plan.md` and
+`wiz-notes/code-analysis-design.md` §10 have the design, the API and the gaps.
 
 ## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
 
@@ -1987,6 +2177,31 @@ The root bundle keeps `static`, `dynamic`, `verify` and `repro` separate and add
 attached with `repro --witness FILE` and is accepted only at L2/L3 with
 `validated=true`; the prototype does not run symbolic execution.
 `wiz-notes/scry-workflow.md` has the UX, artifact schema and limits.
+
+## Scry: the C# repository driver (`scry/src/Scry/CsCmd.wiz`)
+
+`import Scry.CsCmd` is `scry cs PATH`, the tree-scale front door for the C# frontend
+(`Scry.CsCst`, `Scry.CsLower`; design `scry/CSHARP.md` §7). It walks a directory, a
+`.csproj` or a `.sln`/`.slnx` for `*.cs`, parses each file with tree-sitter-c-sharp
+through `Scry.Native`, lowers it, and runs the C# rule pack over the merged program. The
+output is a summary, not a wall of findings: `.cs` counts before and after exclusions,
+found/parsed/lowered/failed, findings by rule and severity, and a **coverage** section
+that names every construct or file that was skipped or warned about, with a count and one
+example location. `--json` is the same report; `--fail-on error|warning|note` gates
+findings and coverage rows; `--no-taint` stops after lowering.
+
+The exclusion rule is built in and deliberately small (it does not read `.gitignore`):
+`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs` and
+symbolic links. Excluded `.cs` files are still counted (names only) so the before/after
+difference is visible. Exit status is `0` clean, `1` at/above `--fail-on`, `2` usage/IO,
+`3` nothing analysed -- the last separates "no findings" from "the parser never ran". A
+file the grammar cannot parse is a `parse failure` row, never a silent omission.
+
+The `scry-csharp` group (`Tests/Groups/ScryCSharp.lean`) exercises the driver's pure core
+(`Scry.Cs.walkOfPaths`, `Scry.Cs.reportOf`, `Scry.Cs.statusOf`) on the fixture tree
+`scry/corpus/csharp/repo/`, which contains one deliberately invalid file and one of each
+excluded path, so the counts, the coverage rows, both renderings and all four exit
+statuses are pinned without the native shim.
 
 ## Scry: dynamic execution evidence (`scry/src/Scry/Dynamic.wiz`)
 
@@ -2094,3 +2309,63 @@ no other kernel path consumes it.
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout
 policy), and text metrics (labels use fixed offsets, not measured widths).
+
+## Command-line parsing (`lib/Args.wiz`)
+
+**Provisional.** `lib/Args.wiz` is new, so the API and these rules may change; the `args`
+test group pins the behaviour described here.
+
+| module | contents | test group |
+|--------|----------|------------|
+| `lib/Args.wiz` (`import Args`) | a pure parser for a tool's command line: `Args.parse : Args.Spec → List String → Except Args.Usage Args.Parsed`, with long and short flags (`--mem 6G`, `--mem=6G`, `-m 6G`, `-m6G`, clusters), `--`, positionals and subcommands; `Args.Usage.message` is the text for the user | `=args` |
+
+`import Args` (over `Text`) has no `IO`, no environment and no process state, so a command
+line is testable with `#eval`. A specification is one `Args.Spec`: its flags and its
+subcommands. `Args.Flag.on long short` is a switch, `Args.Flag.arg long short` takes a
+value, and a flag's `name` is the key in the result, so `--mem` and `-m` share one value.
+
+```wiz
+import Args
+
+def spec : Args.Spec :=
+  Args.Spec.mk
+    [ Args.Flag.arg "mem" "m"        -- --mem 6G, --mem=6G, -m 6G, -m6G
+    , Args.Flag.on "verbose" "v" ]   -- --verbose, -v
+    ["build", "check", "run"]
+
+def memOf (args : List String) : String :=
+  match Args.parse spec args with
+  | .ok p => match Args.Parsed.value p "mem" with
+    | .some v => v
+    | .none => "(no --mem)"
+  | .error u => Args.Usage.message u
+
+#eval memOf ["-vm6G", "build", "one"]       -- "6G"
+#eval memOf ["--mem=6G"]                    -- "6G"
+#eval memOf ["build"]                       -- "(no --mem)"
+#eval memOf ["--bogus"]                     -- "unknown flag: --bogus"
+```
+
+A result gives `p.command` (`Option String`, the first positional when the spec names
+subcommands), `p.positionals`, and `Args.Parsed.value p name` / `Args.Parsed.has p name`
+for what was given. A failure is an `Args.Usage` and `Args.Usage.message` is the text for
+the user (`unknown flag: --bogus`, `flag needs a value: --mem`, `flag takes no value:
+--all`, `unknown command: frobnicate`), without a program-name prefix.
+
+**Rules.** A long flag takes `--mem 6G` or `--mem=6G` (everything after the first `=`,
+including further `=`, is the value), and a value flag takes the next argument even when
+it starts with `-` (`--mem --fast`), as Lean Grail does. A short flag takes `-m 6G` or
+`-m6G`; a cluster is read left to right, so switches accumulate and the first value flag
+takes the rest of the token (`-vm6G` is `-v` and `-m` with `6G`), or the next argument
+when nothing is left. There is no `=` stripping for short flags (`-m=6G` is `"=6G"`).
+`--` ends flag parsing unless a value flag is waiting for it, and a lone `-` is
+positional. Positionals keep their command-line order wherever the flags were, an
+unknown flag is an error rather than a positional, and the first positional is the
+subcommand when the spec names any (a first positional that is not one is
+`unknownCommand`). Repeated flags are explicit: the last value wins and is stored once,
+and a switch's repetition changes nothing.
+
+The scan is Grail's (`Grail/Cli.lean`: flags before and after positionals, the last value
+winning, a value flag consuming the next argument), plus what `grailOpts` lacks: `--`,
+short-flag clustering, `--flag=value`, and subcommands. An unknown flag, which Grail
+leaves for a later stage, is an error here.

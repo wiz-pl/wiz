@@ -1,5 +1,59 @@
 -- test: run
-import Scry.Cli
--- End to end over the synthetic store: the loader reads fixtures/demo.facts.json and
--- `facts` prints the report. The grail command targets run the same CLI on the same file.
-def main : IO Unit := Scry.mainArgs ["facts", "fixtures/demo.facts.json"]
+import Sys
+import Text
+-- End to end over the synthetic store and the built CLI: `facts` prints the demo report,
+-- and every command that has a subcommand (`project`, `findings`) or requires a
+-- positional (`egraph`) recognises `--help` **before** that positional: it prints a
+-- usage line and exits 0. A usage error (a missing argument, an unknown command) prints
+-- its `scry: …` line and exits 1 (scry/README.md, "Command-line reference").
+--
+-- The probes run `.grail/bin/scry` (the real entry point, so the exit status is the one
+-- a script sees); `grail build scry` produces it, and a tree without it skips.
+
+def ok (label : String) : EIO Unit := EIO.lift (IO.println (label ++ ": ok"))
+
+def failed (label why : String) : EIO Unit := EIO.lift
+  (IO.bind (IO.println (label ++ ": FAILED (" ++ why ++ ")")) (fun _ => Process.exit 1))
+
+def firstLine (s : String) : String := match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+/-- Run one probe: the exact exit status and the first line of stdout (or stderr for a
+failure, which `scry` writes on stderr) must match. -/
+def probe (label : String) (args : List String) (wantExit : Nat) (wantFirst : String) :
+    EIO Unit := do
+  out ← Process.output ".grail/bin/scry" args "";
+  let code := match out.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  let text := match String.isEmpty out.stdout with
+    | .true => out.stderr
+    | .false => out.stdout;
+  let line := firstLine text;
+  match Bool.and (Nat.beq code wantExit) (String.startsWith line wantFirst) with
+  | .true => ok label
+  | .false => failed label ("exit " ++ Nat.repr code ++ ", first line \"" ++ line ++ "\"")
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "cli: skip (.grail/bin/scry absent)")
+  | .true => do
+    out ← Process.output ".grail/bin/scry" ["facts", "fixtures/demo.facts.json"] "";
+    match out.status with
+    | .exited 0 => EIO.lift (IO.print out.stdout)
+    | _ => failed "facts" (ExitStatus.toString out.status);
+    -- `--help` is help, and exits 0, before the positional is parsed.
+    probe "project --help" ["project", "--help"] 0 "usage: scry project DIR";
+    probe "project query --help" ["project", "query", "--help"] 0
+      "usage: scry project query DIR";
+    probe "egraph --help" ["egraph", "--help"] 0 "usage: scry egraph FILE.c";
+    probe "findings show --help" ["findings", "show", "--help"] 0
+      "usage: scry findings COMMAND";
+    probe "findings verify --help" ["findings", "verify", "--help"] 0
+      "usage: scry findings COMMAND";
+    -- A usage error exits 1 (the README's contract), with a `scry: …` line.
+    probe "facts without a file" ["facts"] 1 "scry: usage: scry facts FILE";
+    probe "unknown command" ["nosuch"] 1 "scry: unknown command";
+    probe "taint without a file" ["taint"] 1 "scry: usage: scry taint FILE.c")

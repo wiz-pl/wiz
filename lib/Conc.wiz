@@ -1,6 +1,6 @@
 import Eff
 import Text
-import ListLemmas
+import Data.ListLemmas
 
 /-!
 # Conc
@@ -650,7 +650,7 @@ def Conc.beq_self : (n : Nat) → Nat.beq n n = .true
 def Conc.mem_tail (u x : Nat) (xs : List Nat) (he : Nat.beq x u = .false) (h : u ∈ List.cons x xs) : u ∈ xs :=
   Or.elim h
     (fun e => False.elim (Bool.trueNeFalse
-      (Eq.trans (Eq.symm (Eq.trans (congrArg (Nat.beq x) e) (Conc.beq_self x))) he)))
+      (Eq.trans (Eq.symm (Eq.trans (Eq.congrArg (Nat.beq x) e) (Conc.beq_self x))) he)))
     (fun h' => h')
 
 /-- The cons case of `Conc.pos_append`, for either answer `e` of `Nat.beq x u`. -/
@@ -658,7 +658,7 @@ def Conc.pos_append_cons (u : Nat) (tl : List Nat) (x : Nat) (xs : List Nat) : (
     u ∈ List.cons x xs → (u ∈ xs → Conc.pos u (List.append xs tl) = Conc.pos u xs) →
     Conc.posCons e (Conc.pos u (List.append xs tl)) = Conc.posCons e (Conc.pos u xs)
   | .true, he, h, ih => rfl
-  | .false, he, h, ih => congrArg Nat.succ (ih (Conc.mem_tail u x xs he h))
+  | .false, he, h, ih => Eq.congrArg Nat.succ (ih (Conc.mem_tail u x xs he h))
 
 /-- Adding threads at the back of a queue does not move a thread that is in it. -/
 def Conc.pos_append (u : Nat) (tl : List Nat) : (xs : List Nat) → u ∈ xs →
@@ -671,7 +671,7 @@ def Conc.not_here (ready : Nat → Bool) (u x : Nat) (hu : ready u = .true) (hb 
     Nat.beq x u = .false :=
   Or.elim (Bool.cases (Nat.beq x u))
     (fun h1 => False.elim (Bool.trueNeFalse
-      (Eq.trans (Eq.symm (Eq.trans (congrArg ready (Nat.beq_eq x u h1)) hu)) hb)))
+      (Eq.trans (Eq.symm (Eq.trans (Eq.congrArg ready (Nat.beq_eq x u h1)) hu)) hb)))
     (fun h2 => h2)
 
 /-- What one round-robin step means for a ready thread `u` of the queue `q`, given what

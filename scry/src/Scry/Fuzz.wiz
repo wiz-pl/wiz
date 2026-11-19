@@ -3,13 +3,15 @@ import Json
 import Text
 import IO
 import Scry.Parse
+import Scry.Preproc
 import Scry.CstStore
 import Scry.Native
 /-!
 # Scry.Fuzz: dynamic evidence from the C front end
 
 `scry fuzz-span` is the bridge between a fuzzer artifact and scry's own source model.
-It reads a file as text (`FS.readFile`), parses it with the vendored tree-sitter shim
+It reads a file as bytes (`FS.readBytes`) and parses it with the vendored tree-sitter
+shim
 (`scry_parse`),
 and reports the input's CST summary in the same `start`/`stop` span shape the static
 findings use:
@@ -20,10 +22,11 @@ findings use:
   (a native crash usually has no input offset; an invariant failure in
   `fuzz/ts_shim_fuzz.c` prints `input_offset=N`, which is what the driver passes here).
 
-Offsets are **bytes** (tree-sitter's spans), and the line/column helper counts
-characters. The C frontend's slice is ASCII, so the two agree for the checked-in corpus;
-the driver skips span mapping for an artifact that is not ASCII or contains NUL, because
-`FS.readFile` stops at NUL and would truncate it.
+Offsets are **bytes** (tree-sitter's spans), and the line/column helper converts through
+the text's `Scry.ByteMap` to a 1-based **character** column. The driver still skips span
+mapping for an artifact that contains NUL, because `FS.readFile` stops at NUL and would
+truncate it; non-ASCII text is fine now (byte and character offsets no longer have to
+coincide).
 
 This module produces evidence, not a verdict: a span says which source range the parser
 was looking at, not that the program is safe or that the analysis is complete.
@@ -39,13 +42,13 @@ structure Scry.FuzzSpan where
   status : String
   /-- The byte range `[start, stop)`. -/
   span : Scry.Span
-  /-- 1-based line of `start` (byte-exact for the ASCII C slice). -/
+  /-- 1-based line of `start`. -/
   line : Nat
-  /-- 1-based column of `start`. -/
+  /-- 1-based **character** column of `start`. -/
   column : Nat
   /-- 1-based line of `stop`. -/
   endLine : Nat
-  /-- 1-based column of `stop`. -/
+  /-- 1-based **character** column of `stop`. -/
   endColumn : Nat
 
 /-- A fuzz input's deterministic CST summary. -/
@@ -83,9 +86,11 @@ partial def Scry.fuzzLineColGo (cs : List Char) (fuel line col : Nat) : Nat × N
       | .true => Scry.fuzzLineColGo rest k (Nat.succ line) 1
       | .false => Scry.fuzzLineColGo rest k line (Nat.succ col)
 
-/-- The 1-based line/column of `off` in `text`. -/
+/-- The 1-based line/character-column of **byte** offset `off` in `text` (tree-sitter
+spans are bytes; a Wiz `String` is characters). -/
 def Scry.fuzzLineCol (text : String) (off : Nat) : Nat × Nat :=
-  Scry.fuzzLineColGo (String.chars text) off 1 1
+  let m := Scry.ByteMap.ofString text;
+  Scry.fuzzLineColGo (String.chars text) (Scry.ByteMap.charOfByte m off) 1 1
 
 -- ## Nodes
 
@@ -137,9 +142,9 @@ partial def Scry.fuzzErrorSpansGo (text : String) (s : Scry.CstStore) (i : Nat)
     Scry.fuzzErrorSpansGo text s (Nat.succ i) acc
 
 /-- Build the deterministic summary. -/
-def Scry.fuzzInputOf (path : String) (text : String) (s : Scry.CstStore)
+def Scry.fuzzInputOf (path : String) (bytes : Nat) (text : String) (s : Scry.CstStore)
     (errors roots : Nat) : Scry.FuzzInput :=
-  Scry.FuzzInput.mk path (Scry.Native.byteLength text) (Scry.CstStore.nodeCount s)
+  Scry.FuzzInput.mk path bytes (Scry.CstStore.nodeCount s)
     (Scry.CstStore.edgeCount s) roots errors (Scry.fuzzSpanOfNode text s 0)
     (Scry.fuzzErrorSpansGo text s 0 .nil) (Nat.lt 64 errors)
 
@@ -189,17 +194,21 @@ def Scry.fuzzBestAt (text : String) (s : Scry.CstStore) (off : Nat) : Option Scr
 
 -- ## Reading a file
 
-/-- Parse a file as text and summarise its CST. The shim always returns a recovery
+/-- Parse a file as bytes and summarise its CST. The shim always returns a recovery
 tree for C; a shim-level failure (not a parse error) is an `EIO` error. The driver
 only asks for a span map when the artifact is ASCII (no NUL), where character and
-byte offsets agree. -/
+byte offsets agree. The store is parsed from the raw bytes (the same path `scry
+taint`/`parse --stats` use), so the node/edge/error counts agree with them; `text` is
+decoded only for the line/column of the reported spans. -/
 def Scry.Fuzz.parseFile (path : String) : EIO Scry.FuzzParsed := do
-  text ← FS.readFile path;
-  st ← Scry.Native.parse "c" text;
+  src ← FS.readBytes path;
+  st ← Scry.Native.parseBytes "c" src;
   cst ← EIO.lift (Scry.Native.toCstStore path st);
   let errors := Scry.Native.errorCount st;
   let roots := Scry.fuzzRootCount cst;
-  EIO.pure (Scry.FuzzParsed.mk (Scry.fuzzInputOf path text cst errors roots) cst text)
+  let text := Scry.bytesText src;
+  EIO.pure (Scry.FuzzParsed.mk
+    (Scry.fuzzInputOf path (Bytes.size src) text cst errors roots) cst text)
 
 -- ## JSON
 

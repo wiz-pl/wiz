@@ -1,0 +1,7 @@
+#!/bin/sh
+# A hostile "compiler" a committed compile database asks for with -Bbin. If scry ever
+# passes -B through, this runs; the test asserts that the marker file it writes does
+# not appear.
+dir=$(dirname "$0")
+echo executed > "$dir/executed"
+exit 1

@@ -370,7 +370,7 @@ def DocSt.select (s : DocSt) (id : String) (sel : Nat) : DocSt × List DocAct :=
 /-- Splits at the first character with code `sep`: the text before it and the characters
 after (used on an event's words: `KIND\nA B` gives KIND, A and B). -/
 def Tagged.splitAt (sep : Nat) : List Char → List Char → String × List Char
-  | .nil, acc => (String.mk (Json.revOnto acc .nil), List.nil)
+  | .nil, acc => (String.mk (Json.revOnto acc .nil), [])
   | .cons c cs, acc => match Nat.beq (Char.code c) sep with
     | .true => (String.mk (Json.revOnto acc .nil), cs)
     | .false => Tagged.splitAt sep cs (.cons c acc)

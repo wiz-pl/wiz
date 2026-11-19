@@ -19,6 +19,7 @@ import {
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
 } from "./goals.js";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
+import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
 
 let failed = 0;
@@ -273,6 +274,12 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
+// The widget's document (`web/hover.js` appends its card to a body).
+function fakeDocument() {
+  const base = minidoc();
+  const body = base.createElement("body");
+  return { body, createElement: base.createElement, createTextNode: base.createTextNode };
+}
 async function waitUntil(predicate, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -285,8 +292,10 @@ async function waitUntil(predicate, ms = 3000) {
 const wireMock = await startMockServer();
 const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
+const pageDocument = fakeDocument();
 const app = startInfoview({
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
+  document: pageDocument,
 });
 checkThat("wiring: the pane says it is connecting", wirePanel.innerHTML.includes("connecting"));
 checkThat("wiring: goals arrive", await waitUntil(() => wirePanel.innerHTML.includes('class="names"')));
@@ -301,12 +310,49 @@ wirePanel.listeners.click[0]({ target: clickTarget, preventDefault() {} });
 check("wiring: a click selects the span", editor.selectionStart, line2 + 8);
 check("wiring: the selection ends there", editor.selectionEnd, line2 + 9);
 
+// Hover at the caret (`textDocument/hover`) and F12 / Ctrl-click go to definition
+// (`textDocument/definition`): the card is the page's, the answers are the mock's.
+editor.selectionStart = editor.selectionEnd = 0;
+const hovered = await app.hover().inquire();
+check("wiring: textDocument/hover was asked", wireMock.stats.hover, 1);
+checkThat("wiring: the hover card is up", hovered !== null && app.hover().isOpen());
+checkThat("wiring: the hover card shows the signature",
+  app.hover().content().includes("Nat.add : Nat → Nat → Nat"), app.hover().content());
+checkThat("wiring: the hover card shows the doc comment",
+  app.hover().content().includes("Adds two Nats."));
+
+// A definition in this document moves the caret and selects the name. The mock answers
+// in this file for a caret on the fixture's last line.
+const fixtureLastLine = offsetAt(FIXTURE_TEXT, { line: 4, character: 2 });
+editor.selectionStart = editor.selectionEnd = fixtureLastLine;
+for (const fn of editor.listeners.click || []) fn({ ctrlKey: true, metaKey: false, preventDefault() {} });
+checkThat("wiring: Ctrl-click asked for the definition",
+  await waitUntil(() => wireMock.stats.definition === 1), `requests = ${wireMock.stats.definition}`);
+checkThat("wiring: the definition moves the caret",
+  await waitUntil(() => editor.selectionStart === offsetAt(FIXTURE_TEXT, { line: 1, character: 4 })),
+  `caret = ${editor.selectionStart}`);
+checkThat("wiring: the card closes after a jump", !app.hover().isOpen());
+
+// A definition in a library has no page here: the card names the place instead.
+app.hover().close();
+editor.selectionStart = editor.selectionEnd = 0;
+for (const fn of editor.listeners.keydown || []) fn({ key: "F12", preventDefault() {} });
+checkThat("wiring: F12 asked for the definition",
+  await waitUntil(() => wireMock.stats.definition === 2), `requests = ${wireMock.stats.definition}`);
+checkThat("wiring: a library definition is named",
+  await waitUntil(() => app.hover().content().includes("Prelude.wiz:7:1")), app.hover().content());
+
+// `?hover=off` (or `hover: false`) mounts nothing.
+const noHover = startInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
+check("wiring: hover: false turns it off", noHover.hover(), null);
+
 // An edit sends didChange and the goals are asked again.
 editor.value = "nope import Prelude\n";
 for (const fn of editor.listeners.input || []) fn();
 checkThat("wiring: didChange after an edit",
   await waitUntil(() => wireMock.stats.didChange === 1 && wirePanel.innerHTML.includes("mock: unknown identifier")));
 app.stop();
+checkThat("wiring: stop closes the hover card", !app.hover().isOpen());
 await wireMock.close();
 
 const idlePanel = fakePanel();
@@ -324,7 +370,76 @@ checkThat("wiring: a failed connection is no server",
 checkThat("wiring: the failure is explained", deadPanel.innerHTML.includes("cannot connect"));
 checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-action="reconnect"'));
 
-// ## 10b. The token (#430): the mock refuses like `wiz lsp --ws`; a client with the
+// ## 10b. Follow mode (`web/infoview.html?follow=1`): no document of its own
+//
+// The standalone infoview page shows another editor's document. The server owns it, so
+// the pane must not open, change or close one; it moves with `wiz/infoview/cursor` and
+// asks about that URI.
+
+const followMock = await startMockServer();
+const followPanel = fakePanel();
+const followed = startInfoview({
+  editor: fakeEditor(""), panel: followPanel, config: { url: followMock.url }, follow: true,
+});
+checkThat("follow: the pane connects", await waitUntil(() => followPanel.innerHTML.includes("connected")));
+check("follow: no document of its own is opened", followMock.stats.didOpen, 0);
+checkThat("follow: the client is there to subscribe", !!followed.client());
+followed.client().on("wiz/infoview/cursor", (p) => followed.goTo(p.textDocument.uri, p.position));
+followMock.notify("wiz/infoview/cursor", {
+  textDocument: { uri: "file:///editor.wiz" },
+  position: { line: 4, character: 8 },
+  session: 1,
+});
+checkThat("follow: the state at the editor's cursor",
+  await waitUntil(() => followPanel.innerHTML.includes('class="names"')), followPanel.innerHTML.slice(0, 300));
+check("follow: still no document opened", followMock.stats.didOpen, 0);
+check("follow: still no document changed", followMock.stats.didChange, 0);
+check("follow: the followed position's line", followed.view.position && followed.view.position.line, 4);
+check("follow: the followed position's character", followed.view.position && followed.view.position.character, 8);
+check("follow: the target is the editor's document", followed.target(), "file:///editor.wiz");
+followed.stop();
+check("follow: it does not close the editor's document", followMock.stats.didClose, 0);
+await followMock.close();
+
+// ## 10c. The selected subterm in its own element (`#info` on the infoview page)
+//
+// With `info`, the panel leaves the selection out and the box renders it, so the
+// standalone page keeps its separate `#info` (and its CSS).
+
+const infoMock = await startMockServer();
+const infoPanel = fakePanel();
+const infoBox = { innerHTML: "" };
+const infoApp = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: infoPanel, info: infoBox,
+  config: { url: infoMock.url }, uri: "file:///info.wiz",
+});
+checkThat("info: the goals arrive", await waitUntil(() => infoPanel.innerHTML.includes('class="names"')));
+const infoTag = {
+  dataset: { ref: "5", span: "2:8-2:9" }, parentElement: null,
+  closest: () => infoTag,
+};
+infoPanel.listeners.click[0]({ target: infoTag, preventDefault() {} });
+checkThat("info: the subterm is described", await waitUntil(() => infoBox.innerHTML.includes('class="kind"')),
+  infoBox.innerHTML);
+checkThat("info: its kind", infoBox.innerHTML.includes('class="kind">const</span>'), infoBox.innerHTML);
+checkThat("info: its type", infoBox.innerHTML.includes("Type"), infoBox.innerHTML);
+checkThat("info: the panel does not repeat it", !infoPanel.innerHTML.includes('class="selection"'));
+infoApp.stop();
+await infoMock.close();
+
+// ## 10d. The page hook (`onRender`) sees every state
+
+const renders = [];
+const hookMock = await startMockServer();
+const hooked = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: fakePanel(), config: { url: hookMock.url },
+  onRender: (view) => renders.push(view.state),
+});
+check("hook: the first render", renders[0], "connecting");
+checkThat("hook: it reaches open", await waitUntil(() => renders.includes("open")));
+hooked.stop();
+await hookMock.close();
+// ## 10e. The token (#430): the mock refuses like `wiz lsp --ws`; a client with the
 // page's `?token=` gets in, one without it does not
 
 const tokenMock = await startMockServer({ token: "s3cr3t" });

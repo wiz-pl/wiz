@@ -15,7 +15,9 @@ Stage S5's untrusted fast path and its result checker.
   about termination is proved (widening makes it terminate for the finite-height
   domains here, but the engine is outside the trusted base).
 * `narrowOnce` improves a widened post-fixpoint once, as §4.6 describes.
-* `check` is the §5.3 certificate checker: every edge must satisfy
+* `checkCert` is the §5.3 certificate checker (named so a test file can keep its own
+  `check` helper; `Scry.Interproc` imports this module through `Scry.Nullness`): every
+  edge must satisfy
   `transfer (inv p) ⊑ inv q`, the entry must be covered, and every statement's alarm
   condition must be discharged by the invariant. It reports `Alarm`s; an empty list is
   acceptance. The checker never trusts the engine.
@@ -23,7 +25,7 @@ Stage S5's untrusted fast path and its result checker.
 ```
 import Scry.AiFixpoint
 
-#eval check (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
+#eval checkCert (AiMach.mk 8) exampleCfg (fixpoint (AiMach.mk 8) exampleCfg)  -- []
 ```
 -/
 
@@ -84,12 +86,16 @@ partial def solveGo (m : AiMach) (cfg : ACfg) (st : AState) (queue : List AEdge)
             | .false => List.cons e.dst seen
           solveGo m cfg st' (ACfg.enqueue cfg rest e.dst) seen'
 
-/-- The least fixed point above the initial state, starting from the entry block. The
+/-- The least fixed point above a given entry state, starting from the entry block. The
 engine widens at every re-reached block (a simple WTO stand-in; a Bourdoncle order can
 replace it without changing the checker). -/
-def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
-  let init := AState.set cfg.entry (AiEnv.topOf cfg.vars) (AState.bot cfg)
+def fixpointFrom (m : AiMach) (cfg : ACfg) (entryEnv : AiEnv) : AState :=
+  let init := AState.set cfg.entry entryEnv (AState.bot cfg)
   solveGo m cfg init (ACfg.outEdges cfg cfg.entry) (([cfg.entry]) : List Nat)
+
+/-- The least fixed point above the all-unknown entry state. -/
+def fixpoint (m : AiMach) (cfg : ACfg) : AState :=
+  fixpointFrom m cfg (AiEnv.topOf cfg.vars)
 
 /-- The join of the transfers of all incoming edges of `q`. -/
 def incomingJoin (m : AiMach) (cfg : ACfg) (st : AState) (q : Nat) : Option AiEnv :=
@@ -139,6 +145,24 @@ def Interval.within (m : AiMach) : Interval → Bool
   | .range _ hi => Nat.lt hi (AiMach.modulus m)
   | .top => .false
 
+/-- The null and bounds alarms of a memory access, without the index expression's own
+alarms. `bot` is unreachable (silent); `top` is an alarm. -/
+def AExpr.nullRangeAlarms (m : AiMach) (at : Nat) (env : AiEnv) (arr : Nat)
+    (idx : AExpr) (len : Nat) : List Alarm :=
+  let iv := AExpr.eval m env idx
+  let av := AiEnv.getD env arr Value.top
+  let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
+    | .true => List.cons (Alarm.nullDeref at) Alarm.none
+    | .false => Alarm.none
+  let rangeAlarm : List Alarm := match iv.itv with
+    | .bot => Alarm.none
+    | .top => List.cons (Alarm.outOfBounds at 0 len) Alarm.none
+    | .range _ hi =>
+        match Nat.lt hi len with
+        | .true => Alarm.none
+        | .false => List.cons (Alarm.outOfBounds at hi len) Alarm.none
+  List.append nullAlarm rangeAlarm
+
 /-- Alarm of an expression. An arithmetic operation alarms when its abstract result is
 `top` (the range may leave the machine word); a load alarms on a possibly-null array or
 a possibly-out-of-bounds index; a load of a `bot` index is unreachable and silent. -/
@@ -175,20 +199,12 @@ def AExpr.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AExpr → List Alarm
            | .false => List.cons (Alarm.overflow at "mul") Alarm.none))
   | .alloc e => AExpr.alarms m at env e
   | .load arr idx len =>
-      let iv := AExpr.eval m env idx
-      let av := AiEnv.getD env arr Value.top
-      let nullAlarm : List Alarm := match Null.mayBeNull av.nul with
-        | .true => List.cons (Alarm.nullDeref at) Alarm.none
-        | .false => Alarm.none
-      let rangeAlarm : List Alarm := match iv.itv with
-        | .bot => Alarm.none
-        | .top => List.cons (Alarm.outOfBounds at 0 len) Alarm.none
-        | .range _ hi =>
-            match Nat.lt hi len with
-            | .true => Alarm.none
-            | .false => List.cons (Alarm.outOfBounds at hi len) Alarm.none
-      List.append (AExpr.alarms m at env idx)
-        (List.append nullAlarm rangeAlarm)
+      List.append (AExpr.alarms m at env idx) (AExpr.nullRangeAlarms m at env arr idx len)
+
+/-- The alarms of a memory access, including the index expression's own alarms. -/
+def AExpr.memAlarms (m : AiMach) (at : Nat) (env : AiEnv) (arr : Nat) (idx : AExpr)
+    (len : Nat) : List Alarm :=
+  List.append (AExpr.alarms m at env idx) (AExpr.nullRangeAlarms m at env arr idx len)
 
 /-- Alarm of a guard's expression. -/
 def ACond.alarms (m : AiMach) (at : Nat) (env : AiEnv) : ACond → List Alarm
@@ -205,6 +221,7 @@ def ACond.alarms (m : AiMach) (at : Nat) (env : AiEnv) : ACond → List Alarm
 def AStmt.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AStmt → List Alarm
   | .assign _ e => AExpr.alarms m at env e
   | .assume c => ACond.alarms m at env c
+  | .store arr idx len => AExpr.memAlarms m at env arr idx len
   | .skip => Alarm.none
 
 -- ## The checker
@@ -234,13 +251,13 @@ def checkAlarms (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
   List.concat (List.map (fun p => AStmt.alarms m p.1 (AState.at cfg st p.1) p.2) cfg.stmts)
 
 /-- The post-fixpoint certificate check: edges, entry, alarms. -/
-def check (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
+def checkCert (m : AiMach) (cfg : ACfg) (st : AState) : List Alarm :=
   List.append (checkEntry cfg st)
     (List.append (checkEdges m cfg st) (checkAlarms m cfg st))
 
 /-- Did the checker accept? -/
 def accepts (m : AiMach) (cfg : ACfg) (st : AState) : Bool :=
-  List.isEmpty (check m cfg st)
+  List.isEmpty (checkCert m cfg st)
 
 /-- The number of alarms. -/
 def alarmCount (as : List Alarm) : Nat := List.length as

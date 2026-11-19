@@ -11,7 +11,13 @@
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
                                      cases balanced by .github/test-timings.json (needs
-                                     the test driver BIN; default .lake/build/bin/tests)
+                                     the test driver BIN; default .lake/build/bin/tests).
+                                     The shards are ordered by estimated cost, longest
+                                     first (the same `estimate`: a shard the baseline
+                                     cannot estimate goes last, by name), because GitHub
+                                     starts a matrix in that order and its 20-job cap
+                                     leaves the late entries waiting: the expensive work
+                                     should start in the first wave.
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
                                      shard (after splitting), and that every selector
                                      of a shard selects something. A group that no
@@ -44,7 +50,9 @@
                                      (default 1.5) times the median shard's, every case
                                      of a split shard is in .github/test-timings.json,
                                      and no shared program is built by two parts of one
-                                     split shard. Prints GitHub warning annotations and
+                                     split shard (a "split-cases" shard excepted: its
+                                     parts each build it by design). Prints GitHub warning
+                                     annotations and
                                      a Markdown report (stdout); on drift, writes the
                                      regenerated baseline to FILE. Exits 0 (1 with
                                      --strict when there is drift)
@@ -203,17 +211,21 @@ def part_cost(items, builds):
     return sum(it[3] for it in items) + sum(builds.get(r, 0.0) for r in uses)
 
 
-def partition(items, n, builds):
+def partition(items, n, builds, split_cases=False):
     """Split the cases into n parts with the smallest longest part (estimated). The
     cases that use the same shared programs (the self-hosted checker or compiler: the
     first case that needs one builds it) stay together, so each program is built by one
-    part only; the other cases fill the parts up. Greedy, longest first, then single
-    moves while they help; deterministic."""
+    part only; the other cases fill the parts up. With `split_cases`, each case is its own
+    unit instead: a shard of sibling cases over disjoint inputs (the `selfhost-libdiff`
+    file parts) wants them spread over the jobs, and `part_cost` charges every part the
+    build it then pays. Greedy, longest first, then single moves while they help;
+    deterministic."""
     clusters = {}
     for it in items:
         clusters.setdefault(it[4], []).append(it)
     # the units to place: a cluster per set of programs, and each remaining case
-    units = [c for uses, c in clusters.items() if uses] + [[it] for it in clusters.get((), [])]
+    units = ([[it] for it in items] if split_cases else
+             [c for uses, c in clusters.items() if uses] + [[it] for it in clusters.get((), [])])
     units.sort(key=lambda u: (-part_cost(u, builds), u[0][0], u[0][1]))
     parts = [[] for _ in range(n)]
     cost = lambda us: part_cost([it for u in us for it in u], builds)
@@ -256,7 +268,9 @@ def expanded(binary, base=None):
     estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
     shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
     time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
-    mode (selfhost-libdiff) can tell "not given" from "--jobs 1".)"""
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1". A shard with
+    "split-cases": true hands each case to `partition` on its own rather than keeping the
+    cases that use one shared program together (see `partition`)."""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
@@ -266,13 +280,23 @@ def expanded(binary, base=None):
             continue
         base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
-        for k, p in enumerate(partition(items, n, base["builds"]), 1):
+        split_cases = bool(s.get("split-cases"))
+        for k, p in enumerate(partition(items, n, base["builds"], split_cases), 1):
             if p:
                 out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
     return out
 
 
+def picks(group, index, sel):
+    """Does the selector `sel` pick case `index` of `group` (as `list_cases` would)?"""
+    if not sel.startswith("="):
+        return group.startswith(sel)
+    name, has, ixs = sel[1:].partition("#")
+    return group == name and (not has or index in {int(i) for i in ixs.split(",") if i})
+
+
 def matrix_entries(binary, only=None):
+    """The shards' matrix entries, longest first (see the ordering note below)."""
     # "heavy": true shards (and the parts of a split one) may run on the self-hosted
     # runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
     heavy = {s["name"] for s in shards() if s.get("heavy")}
@@ -282,8 +306,24 @@ def matrix_entries(binary, only=None):
         return n in heavy or (base in split and base in heavy)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
+    base = baseline()
+    cases = list_cases(binary, [])
+    def cost(name, sel, est):
+        """Estimated seconds: a split part's own estimate (which includes the programs it
+        builds), else the shard's cases from the baseline plus those builds. `None` when
+        the shard selects no case at all (`check-shards` reports that): it goes last."""
+        if est is not None:
+            return est
+        sel_cases = [(g, i, n) for g, i, n in cases if any(picks(g, i, s) for s in sel)]
+        return part_cost(estimate(sel_cases, base), base["builds"]) if sel_cases else None
+    rows = [(n, sel, jobs, cost(n, sel, est))
+            for n, sel, est, jobs in expanded(binary, base) if wanted(n)]
+    # GitHub starts a matrix in its listed order and the 20-concurrent-job cap leaves the
+    # late entries waiting (`test (prop)` started 16 minutes after the wave did), so the
+    # longest shards come first: the expensive work is in the first wave, not the tail.
+    rows.sort(key=lambda r: (r[3] is None, -(r[3] or 0.0), r[0]))
     return [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n), "jobs": jobs}
-            for n, sel, _, jobs in expanded(binary) if wanted(n)]
+            for n, sel, jobs, _ in rows]
 
 
 def matrix(binary, only=None):
@@ -738,6 +778,9 @@ def balance(args):
                         f"median shard ({median:.0f} s), over the limit of {factor}x")
     base = baseline()
     split = [s["name"] for s in shards() if s.get("split", 1) > 1]
+    # a "split-cases" shard spreads its sibling cases over the parts on purpose, so its
+    # parts each build the shared program: that is charged in the estimates, not drift
+    rebuilt = {s["name"] for s in shards() if s.get("split-cases")}
     new = sorted({(r["group"], r["case"]) for r in records if split_of(r["shard"], split)
                   and r["case"] not in base["cases"].get(r["group"], {})})
     if new:
@@ -749,7 +792,7 @@ def balance(args):
                 if note.startswith(NOTE_BUILT):
                     built.setdefault((n, note[len(NOTE_BUILT):].rsplit(" ", 1)[0]), set()).add(r["shard"])
     for (n, res), parts in sorted(built.items()):
-        if len(parts) > 1:
+        if len(parts) > 1 and n not in rebuilt:
             problems.append(f"the {res} is built by {len(parts)} parts of {n} ({', '.join(sorted(parts))}): "
                             f"its users are split, the baseline is stale")
     for p in problems:

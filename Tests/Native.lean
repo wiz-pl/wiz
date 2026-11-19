@@ -133,7 +133,13 @@ def trustModuleOf (g : Globals ZeroOneMany) (n : Name) : String :=
 witness), a `partial` definition (its body is compiled, not unfolded), a native
 implementation (`implemented_by`, and a type's `repr:` representation), a `native_refl`
 or `smt` axiom, and one per `builtin` registration. `only` restricts it to a scope (an
-example's own declarations). -/
+example's own declarations).
+
+An `implemented_by` on a **partial** definition is two sources, not one: the `partial`
+row for the declaration and a `native` row for the constant compiled code runs. The
+kernel's `Decl.nativeImpl?` suppresses every partial implementation (usually it is the
+compiled body), so the walk checks `d.impl` itself; otherwise the `partial` row would
+hide a native step that `#print axioms` also does not list. -/
 def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
     (only : Name → Bool := fun _ => true) : List TrustSource := Id.run do
   let mut out : Array TrustSource := #[]
@@ -152,6 +158,17 @@ def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
       out := out.push { module := m, name := n, item := "partial" }
     if let some i := d.nativeImpl? then
       out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+    else if d.witness.isSome then
+      -- An `implemented_by` on a partial definition. `Decl.nativeImpl?` deliberately
+      -- returns none for every partial declaration (normally its implementation is the
+      -- compiled body, not a native), but `setImpl` can replace that body with a
+      -- constant: compiled code then runs it, and the `partial` row alone would hide
+      -- the trust step. A partial body that is itself a bare constant is the same shape
+      -- and is recorded the same way (compiled code runs that constant).
+      match d.impl with
+      | some (.const i _) =>
+        if i != n then out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+      | _ => pure ()
   -- every registration, including `repr:` (a type's native representation) and `seal:`;
   -- `inline` (a compiler hint) and `int` (only how values print) are not trust
   for (k, nm) in g.builtins do
@@ -359,10 +376,11 @@ def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
-  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
-  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
-  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
-  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
+  "# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a\n" ++
+  "# second row next to `partial` when a partial definition's implementation is a native\n" ++
+  "# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`\n" ++
+  "# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,\n" ++
+  "# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
   "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
   "# trust and are not listed.\n" ++
   "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
@@ -845,11 +863,21 @@ def group : Group where
           let src ← IO.FS.readFile f
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
-    { name := "no library declaration depends on a native axiom", run := fun _ => do
+    { name := "every library source of trust is a reviewed ledger row", run := fun _ => do
         -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
-        -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new
+        -- each source listed must be a row in .github/trust-baseline.tsv, and a new
         -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
         -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
+        --
+        -- This case was `no library declaration depends on a native axiom`: that was a
+        -- goal from Stage 27a, when it checked only the `native✝` axioms `native_refl`
+        -- adds. It is not an invariant of lib/: InternTable, UIntN, IntN and Proc have
+        -- depended on reviewed `extern`/`implemented_by` natives (`wiz_itab_*`,
+        -- `wiz_*` builtins) since before the ledger, as `Task.*` and `Scope.spawn`
+        -- (`wiz_task_*`, `wiz_scope_*`) do now. What the gate guarantees is that such
+        -- a dependency is reviewed, dated and listed; a `native_refl` axiom is still
+        -- never allowed in lib/ (the `lib/ never uses native_refl` case, and no
+        -- `native_refl` row exists).
         let _ ← checkTrustLedger (includeExamples := false)
         pure () },
     { name := "the trust gate: fixture trees, exit codes and messages (Tests/trust-ledger/)", run := fun _ => do
@@ -859,7 +887,23 @@ def group : Group where
         -- cases above do that).
         let out ← IO.Process.output { cmd := "sh", args := #["Tests/trust-ledger/run.sh"] }
         unless out.exitCode == 0 do
-          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
+          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") },
+    { name := "the FFI audit: every extern's signature matches its C prototype (scripts/trust-ffi-audit.sh --check)", run := fun _ => do
+        -- (docs/trust-ledger.md, "The numeric/container FFI audit"; stage 22b/9.) The
+        -- ledger's `builtin extern:SYM:kinds:result` rows are only prose until this
+        -- script compiles a function pointer of the marshalled C signature against the
+        -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
+        -- this case nothing ran it — no test group and no CI job named it — so a
+        -- marshalling width that drifted from its C definition would have been silent.
+        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
+        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
+        -- not evidence (a pass here must have compiled the signatures).
+        let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
+        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
+          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        unless out.exitCode == 0 do
+          throw (IO.userError
+            s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat

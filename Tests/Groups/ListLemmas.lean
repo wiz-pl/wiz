@@ -8,18 +8,18 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
-/-- `lib/ListLemmas.wiz` (issue #255): the list lemma set, membership with `∈` and
+/-- `lib/Data/ListLemmas.wiz` (issue #255): the list lemma set, membership with `∈` and
 `∀ x ∈ l`, and the Boolean algebra of `lib/Logic.wiz`. -/
 def listLemmasGroup : Group where
   name := "list-lemmas"
   exercise := "Issue #255"
   cases := [
     { name := "the library checks, also next to Json, Vec and Functor", run := fun _ => do
-        okLibs "import ListLemmas"
-        okLibs ("import Json\nimport Vec\nimport Functor\nimport ListLemmas\n" ++
+        okLibs "import Data.ListLemmas"
+        okLibs ("import Json\nimport Vec\nimport Functor\nimport Data.ListLemmas\n" ++
           "#eval Nat.repr 42") ["\"42\""] },
     { name := "membership, the binder notation and evals (#check/#eval)", run := fun _ =>
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "#check List.map_map\n" ++
           "#check List.mem_append\n" ++
           "#check List.all_eq_true\n" ++
@@ -47,7 +47,7 @@ def listLemmasGroup : Group where
             "Bool.and_eq_true : (a : Bool) → (b : Bool) → (Bool.and a b = .true ↔ a = .true ∧ b = .true)"
           ] },
     { name := "map fusion, append and length in proofs", run := fun _ =>
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "def fusion {A B C : Type} (f : B → C) (g : A → B) (l : List A) :\n" ++
           "    List.map f (List.map g l) = List.map (fun x => f (g x)) l :=\n" ++
           "  List.map_map f g l\n" ++
@@ -66,7 +66,7 @@ def listLemmasGroup : Group where
           "def lengthReverse {A : Type} (l : List A) : List.length (List.reverse l) = List.length l :=\n" ++
           "  List.length_reverse l") },
     { name := "filter is sound and complete", run := fun _ =>
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "def filteredSound {A : Type} (p : A → Bool) (x : A) (l : List A)\n" ++
           "    (h : x ∈ List.filter p l) : p x = .true :=\n" ++
           "  (List.filter_sound p x l h).2\n" ++
@@ -80,7 +80,7 @@ def listLemmasGroup : Group where
           "    (h : List.all p (List.filter p l) = .true) : ∀ x ∈ List.filter p l, p x = .true :=\n" ++
           "  (List.all_eq_true p (List.filter p l)).1 h") },
     { name := "any/all, append and the Boolean bridge", run := fun _ =>
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "def anyWitness {A : Type} (p : A → Bool) (l : List A)\n" ++
           "    (h : List.any p l = .true) : ∃ x, x ∈ l ∧ p x = .true :=\n" ++
           "  (List.any_eq_true p l).1 h\n" ++
@@ -102,7 +102,7 @@ def listLemmasGroup : Group where
           "      (Bool.and (List.all p l) (List.all p m)) (fun t => t = .true)\n" ++
           "      (List.all_append p l m) h)") },
     { name := "reverse, membership and the Boolean laws", run := fun _ =>
-        okLibs ("import ListLemmas\n" ++
+        okLibs ("import Data.ListLemmas\n" ++
           "def reverseAppend {A : Type} (l m : List A) :\n" ++
           "    List.reverse (List.append l m) = List.append (List.reverse m) (List.reverse l) :=\n" ++
           "  List.reverse_append l m\n" ++

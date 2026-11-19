@@ -31,5 +31,5 @@ def line_kept (s : Tx HwTy.El) (go : BitVec 1) : (Hdl.zoom Tx.leftL countdown s 
 -- the same lens drives synthesis: the netlist and the value simulation agree
 def go : Trace (BitVec 1) := Trace.once (BitVec.ofNat 1 1) (BitVec.ofNat 1 0)
 def out : List Nat × Bool := (Hdl.map BitVec.toNat (Trace.take 12 (Circuit.trace txC go)),
-  Hdl.natsEq (Circuit.runPacked txC (Hdl.map BitVec.toNat (Trace.take 12 go))) (Circuit.simNet .true txC (Hdl.map BitVec.toNat (Trace.take 12 go))))
+  BEq.beq (Circuit.runPacked txC (Hdl.map BitVec.toNat (Trace.take 12 go))) (Circuit.simNet .true txC (Hdl.map BitVec.toNat (Trace.take 12 go))))
 #eval out

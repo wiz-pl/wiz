@@ -244,8 +244,9 @@ def FS.tempRoot : IO String := do
     | .some d => d
     | .none => "/tmp")
 /-- A new, empty directory under `FS.tempRoot`, named `wiz-…`; remove it with `FS.removeAll`. -/
-def FS.createTempDir : EIO String :=
-  IO.bind FS.tempRoot (fun root => Sys.check root (FS.mkdtempRaw (Path.join root "wiz-")))
+def FS.createTempDir : EIO String := do
+  root ← EIO.lift FS.tempRoot;
+  Sys.check root (FS.mkdtempRaw (Path.join root "wiz-"))
 
 -- Whole files. (Text stops at a NUL byte: use `Bytes` for binary data.)
 /-- The contents of a file, as text (it stops at a NUL byte: use `FS.readBytes` for binary data). -/
@@ -259,7 +260,11 @@ def FS.readBytes (p : String) : EIO Bytes := Sys.check p (FS.readBytesRaw p)
 /-- Replace the file's contents with the bytes (creating it). -/
 def FS.writeBytes (p : String) (b : Bytes) : EIO Unit := Sys.lift p (FS.writeBytesRaw p b .false)
 
-/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`). -/
+/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`).
+
+Like every foreign handle it is an ordinary (ω) value, so a `Chan.fork` child may
+capture it; the runtime serialises the operations on one handle (25a), so a close
+waits for a read already in progress and later operations are errors. -/
 foreign_type File (finalizer := "wiz_sys_file_free")
 /-- Raw `fopen`; use `File.open`. -/
 extern "wiz_sys_file_open" File.openRaw : String → String → IO File
@@ -293,19 +298,21 @@ loop f = do
   l ← File.readLine f;
   match l with | .some s => … | .none => …
 ``` -/
-def File.readLine (f : File) : EIO (Option String) :=
-  IO.bind (File.readLineRaw f) (fun l => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def File.readLine (f : File) : EIO (Option String) := do
+  l ← EIO.lift (File.readLineRaw f);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some l)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message "readLine" e))))
+      | .false => .error (Sys.message "readLine" e))
 /-- The rest of the file, as text. -/
 def File.readAll (f : File) : EIO String := Sys.check "read" (File.readAllRaw f)
 /-- Write text (UTF-8, up to the first NUL). -/
 def File.write (f : File) (s : String) : EIO Unit := Sys.lift "write" (File.writeRaw f s)
 /-- Write out what is buffered. -/
 def File.flush (f : File) : EIO Unit := Sys.lift "flush" (File.flushRaw f)
-/-- Close the handle now; later operations on it are errors. -/
+/-- Close the handle now; later operations on it are errors (a second close too). -/
 def File.close (f : File) : EIO Unit := Sys.lift "close" (File.closeRaw f)
 /-- Print a line on standard error. -/
 def IO.ePrintln (s : String) : IO Unit := do
@@ -356,7 +363,11 @@ def ExitStatus.toString : ExitStatus → String
   | .exited c => String.append "exit code " (Nat.toString c)
   | .signaled s => String.append "signal " (Nat.toString s)
 
-/-- A running (or finished) child process. Its pipes close when the last reference goes. -/
+/-- A running (or finished) child process. Its pipes close when the last reference goes.
+
+Like `File` it is an ω value and may be used from two threads: the runtime locks each
+pipe and the wait status (25a), so a second `closeStdin` is an error, two `wait`s
+agree, and `kill` works while another thread waits. -/
 foreign_type Child (finalizer := "wiz_sys_child_free")
 /-- Raw spawn; use `Process.spawn`. -/
 extern "wiz_sys_spawn" Process.spawnRaw : String → List String → Nat → Nat → Nat → IO Child
@@ -386,7 +397,7 @@ def Process.spawn (cmd : String) (args : List String) (stdin stdout stderr : Std
   Sys.check cmd (Process.spawnRaw cmd args (Stdio.toNat stdin) (Stdio.toNat stdout) (Stdio.toNat stderr))
 /-- Write to the child's stdin (which must be `.piped`). -/
 def Child.write (c : Child) (s : String) : EIO Unit := Sys.lift "write to child" (Child.writeRaw c s)
-/-- Close the child's stdin, so it sees the end of its input. -/
+/-- Close the child's stdin, so it sees the end of its input (the second close is an error). -/
 def Child.closeStdin (c : Child) : EIO Unit := Sys.lift "close child stdin" (Child.closeStdinRaw c)
 /-- The rest of the child's stdout (a pipe), to the end. -/
 def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (Child.readRaw c 1)
@@ -581,12 +592,14 @@ extern "wiz_sys_file_write_bytes" File.writeBytesRaw : File → Bytes → IO Nat
 /-- Raw `fseek`; use `File.seek`. -/
 extern "wiz_sys_file_seek" File.seekRaw : File → Nat → Nat → Bool → IO Nat
 /-- `Sys.check`, with the end of the file (errno 100000) as `none`. -/
-def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) :=
-  IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) := do
+  a ← EIO.lift x;
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some a)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message what e))))
+      | .false => .error (Sys.message what e))
 /-- Up to `n` bytes (fewer only at the end of the file); `none` at the end. -/
 def File.readBytes (f : File) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (File.readBytesRaw f n)
 /-- Write the bytes. -/
@@ -735,11 +748,11 @@ inductive Timed (A : Type) where
 /-- What a read of an exact number of bytes got: all of them, or what came before the end
 of the file or (only when `timed`) before the time ran out. -/
 inductive Got : Bool → Type where
-  | all {timed : Bool} (b : Bytes) : Got timed
-  | eof {timed : Bool} (b : Bytes) : Got timed
+  | all {0 timed : Bool} (b : Bytes) : Got timed
+  | eof {0 timed : Bool} (b : Bytes) : Got timed
   | timeout (b : Bytes) : Got .true
 /-- The bytes, however the read ended. -/
-def Got.bytes {timed : Bool} (g : Got timed) : Bytes := match g with
+def Got.bytes {0 timed : Bool} (g : Got timed) : Bytes := match g with
   | .all b => b
   | .eof b => b
   | .timeout b => b
@@ -755,21 +768,27 @@ def Sys.readResult (what : String) (e : Nat) (b : Bytes) : Except String (Timed 
 /-- One read: up to `n` bytes, as many as are there (at least one, waiting for it); `none` at the end of the file. -/
 def Fd.read (f : Fd) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (Fd.readRaw f n .false 0)
 /-- One read like `Fd.read`, giving up when nothing has come within `d`. -/
-def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) :=
-  IO.bind (Fd.readRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (Sys.readResult "read" e b)))
+def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) := do
+  b ← EIO.lift (Fd.readRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (Sys.readResult "read" e b)
 /-- Exactly `n` bytes, unless the end of the file comes first. -/
-def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) :=
-  IO.bind (Fd.readExactRaw f n .false 0) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
+def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) := do
+  b ← EIO.lift (Fd.readExactRaw f n .false 0);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
     | .true, _ => .ok (.all b)
     | _, .true => .ok (.eof b)
-    | _, _ => .error (Sys.message "read" e))))
+    | _, _ => .error (Sys.message "read" e))
 /-- Exactly `n` bytes within `d` in all (or what came: `.eof`, `.timeout`). -/
-def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) :=
-  IO.bind (Fd.readExactRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
+def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) := do
+  b ← EIO.lift (Fd.readExactRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
     | .true, _, _ => .ok (.all b)
     | _, .true, _ => .ok (.eof b)
     | _, _, .true => .ok (.timeout b)
-    | _, _, _ => .error (Sys.message "read" e))))
+    | _, _, _ => .error (Sys.message "read" e))
 /-- Write all of the bytes. -/
 def Fd.write (f : Fd) (b : Bytes) : EIO Unit := Sys.lift "write" (Fd.writeRaw f b)
 /-- Write text, as UTF-8. -/

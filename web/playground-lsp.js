@@ -1,24 +1,41 @@
-// The playground's goals pane: the bridge between the page's textarea and the language
-// client (`web/lsp-client.js`), with the rendering in `web/goals.js`.
+// The goals pane: the bridge between a page's editor and a language client
+// (`web/lsp-client.js`), with the rendering in `web/goals.js`. It is the one
+// implementation of the browser infoview, shared by the playground
+// (`web/playground.html`, `web/playground.js`) and the standalone infoview page
+// (`web/infoview.html`, `web/infoview.js`, served by `wiz lsp --ws`). The file keeps
+// the name it grew up with: `web/build-playground.sh` lists the playground's scripts by
+// name, and it is not this change's to touch (`agent/engine-trampoline` owns it);
+// renaming it is a one-line follow-up once that branch lands.
 //
-// What it does, in the order the page needs it:
+// What it does, in the order a page needs it:
 //
 //   * `?lsp=` (or a config object) names the server; with none, or when the connection
 //     fails, the pane says so and the playground stays exactly a local Wasm checker.
+//     The transport is the config's: a WebSocket URL (`ws://`, the standalone page and
+//     `?lsp=ws://…`), or a `WebSocketImpl` that is not a socket at all (the playground's
+//     in-page server, `web/selfhost-lsp-shim.js`, `?lsp=selfhost`).
 //   * After the handshake it opens the editor's text as one document (a fresh
 //     `file:///playground-….wiz` URI, so pages do not overwrite each other), sends
 //     `didChange` on edits, and asks for goals at the caret.
+//   * `follow: true` is the standalone page's `?follow=1`: no document of its own and no
+//     editor events. The page calls `goTo(uri, position)` on the server's
+//     `wiz/infoview/cursor` notification, and the pane shows the state there — the
+//     editor's document, not a copy (the server shares documents between connections).
 //   * The panel renders the goals, the expected type and the term tree; clicking a
-//     hypothesis or a subterm selects its source span in the textarea, and a `wiz/subtermInfo`
-//     answer (when the server has one) describes it. Hover and arrow keys reuse
-//     `web/tagged.js`'s `delegate`, the infoview's own highlighting code.
+//     hypothesis or a subterm selects its source span in the textarea, and a
+//     `wiz/subtermInfo` answer (when the server has one) describes it. Hover and arrow
+//     keys reuse `web/tagged.js`'s `delegate`, the infoview's own highlighting code.
+//   * `info` (an element) puts the selected subterm in its own box (the standalone
+//     page's `#info`) instead of at the end of the panel; `onRender(view)` is called
+//     after every render, so the page can mirror the state into its own status line.
 //
 // Positions are UTF-16 code units, as `lsp-client.js` negotiates; `positionAt` is the
 // only conversion the page needs.
 "use strict";
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
-import { readGoalState, renderPanel, positionAt, parseSpan, rangeOffsets } from "./goals.js";
+import { readGoalState, renderPanel, renderSelection, positionAt, parseSpan, rangeOffsets } from "./goals.js";
 import { delegate } from "./tagged.js";
+import { mountHover, wantsHover } from "./hover.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -28,13 +45,23 @@ function scratchUri() {
 }
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server) or the whole endpoint
-// from `parseEndpoint`; `search` defaults to the page's query string.
-export function startInfoview({ editor, panel, config, search, uri } = {}) {
+// from `parseEndpoint`; `search` defaults to the page's query string. `follow` makes the
+// pane a viewer of another editor's document (`api.goTo`); `info` is an optional element
+// for the selected subterm; `onRender` sees the view after every render.
+//
+// `hover: false` (or `?hover=off`) turns the hover card and go-to-definition off;
+// `document` is the page's document (the Node tests pass a double).
+export function startInfoview({
+  editor, panel, config, search, uri, follow = false, info, onRender,
+  hover: wantHover, document: pageDocument,
+} = {}) {
   if (!editor || !panel) return null;
+  const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined
-    ? endpointFromSearch(search === undefined ? (typeof location !== "undefined" ? location.search : "") : search)
+    ? endpointFromSearch(query)
     : (typeof config === "string" ? { url: config } : config);
-  const documentUri = uri || scratchUri();
+  let documentUri = uri || (follow ? null : scratchUri());
+  let followPosition = null;
   let client = null;
   let generation = 0;
   let refreshTimer = null;
@@ -58,13 +85,37 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     info: null,
     position: null,
     canReconnect: false,
+    follow,
   };
+
+  // ## Hover and go-to-definition
+
+  // The card shows the server's `textDocument/hover` at the caret and jumps to a
+  // definition (`textDocument/definition`). A definition in the editor's own document
+  // moves the caret and selects the name; one in a library has no page here, so the card
+  // says `Prelude.wiz:7:1` and the editor stays where it was.
+  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+    editor,
+    document: pageDocument,
+    onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
+    onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
+    onJump: (target) => {
+      if (!target || target.uri !== documentUri) return false;
+      highlight(target.range);
+      return true;
+    },
+  });
 
   // Keep the panel's scroll position across re-renders (a click re-renders the panel).
   function render() {
     const top = panel.scrollTop || 0;
-    renderPanel(panel, view);
+    // With `info`, the panel leaves the selection out and the box has it alone.
+    renderPanel(panel, info ? Object.assign({}, view, { info: null }) : view);
     panel.scrollTop = top;
+    if (info) info.innerHTML = view.info ? renderSelection(view.info) : "";
+    if (typeof onRender === "function") {
+      try { onRender(view); } catch (_) { /* a page hook must not break the pane */ }
+    }
   }
 
   // ## Source highlighting (a textarea's native selection: UTF-16 offsets)
@@ -95,10 +146,19 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
 
   // ## Asking the server
 
+  // The position the pane asks about: the caret in its own editor, or the position the
+  // followed editor announced (`?follow=1`).
+  function currentPosition() {
+    if (follow) return followPosition;
+    return positionAt(editor.value, editor.selectionStart || 0);
+  }
+
   async function refresh() {
     if (!client || client.state !== "open") return;
+    if (!documentUri) return;   // following: nothing announced yet
+    const position = currentPosition();
+    if (!position) return;
     const mine = ++generation;
-    const position = positionAt(editor.value, editor.selectionStart || 0);
     view.position = position;
     const state = await readGoalState(client, documentUri, position);
     if (mine !== generation) return;   // a newer cursor/edit won
@@ -158,7 +218,8 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     selected = Math.max(0, Math.min(tags.length - 1, index));
     for (let i = 0; i < tags.length; i++) tags[i].classList.toggle("sel", i === selected);
     const tag = tags[selected];
-    const span = spanOf(tag);
+    // Following another editor: there is no local source to select a span in.
+    const span = follow ? null : spanOf(tag);
     if (span) highlight(span);
     // Keep the keys on the panel: `highlight` focused the editor to show the selection,
     // and a second arrow must walk the tags again rather than the caret.
@@ -178,14 +239,15 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
       reconnect();
       return;
     }
-    const span = spanOf(event.target);
+    const span = follow ? null : spanOf(event.target);
     if (span) {
       event.preventDefault();
       highlight(span);
     }
     const tag = event.target.closest ? event.target.closest(".tt") : null;
     if (tag) {
-      selected = Array.from(panel.querySelectorAll(".tt")).indexOf(tag);
+      // Select it the way the arrows do (the infoview's `.sel`), then describe it.
+      selectTag(Array.from(panel.querySelectorAll(".tt")).indexOf(tag));
       describeSubterm(tag);
     }
   });
@@ -199,6 +261,15 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
       selectTag(selected < 0 ? 0 : selected + step);
     },
   });
+
+  // ## Following another editor's cursor (`?follow=1`)
+
+  function goTo(nextUri, position) {
+    if (!follow || !nextUri || !position) return;
+    documentUri = nextUri;
+    followPosition = { line: position.line || 0, character: position.character || 0 };
+    refresh();
+  }
 
   // ## The connection
 
@@ -216,6 +287,7 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     });
     client.on("close", (info) => {
       if (info && info.intentional) return;
+      if (hover) hover.close();
       view.state = "closed";
       view.info = null;
       render();
@@ -246,7 +318,8 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
     view.state = "open";
     view.serverInfo = client.serverInfo;
     view.infoview = client.infoview;
-    client.openDocument(documentUri, editor.value);
+    // Following: the document belongs to the editor that opened it; do not touch it.
+    if (!follow) client.openDocument(documentUri, editor.value);
     render();
     refresh();
     return api;
@@ -278,22 +351,30 @@ export function startInfoview({ editor, panel, config, search, uri } = {}) {
   }
 
   const api = {
+    // `uri` is the document opened at start; `target` is the one being shown (they differ
+    // only in follow mode, where the server's notification moves it).
     uri: documentUri,
+    target: () => documentUri,
     view,
     client: () => client,
+    hover: () => hover,
     refresh,
     reconnect,
+    goTo,
     stop() {
+      if (hover) hover.close();
       if (!client) return;
-      client.closeDocument(documentUri);
+      if (!follow && documentUri) client.closeDocument(documentUri);
       client.close();
     },
   };
 
-  editor.addEventListener("input", onEdit);
-  editor.addEventListener("keyup", onCursor);
-  editor.addEventListener("click", onCursor);
-  editor.addEventListener("select", onCursor);
+  if (!follow) {
+    editor.addEventListener("input", onEdit);
+    editor.addEventListener("keyup", onCursor);
+    editor.addEventListener("click", onCursor);
+    editor.addEventListener("select", onCursor);
+  }
   if (typeof addEventListener === "function") addEventListener("pagehide", () => api.stop());
 
   start();

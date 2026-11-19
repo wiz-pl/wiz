@@ -454,11 +454,18 @@ def wsCase : IO Unit := do
         -- the token as `Authorization: Bearer` (a program's way) is let in
         let (r, w) ← tcp
         match ← WebSocket.connect r w s!"127.0.0.1:{port}" "/" (bearer := some token) with
-        | .ok () => send w (req "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+        -- Do NOT send `exit` here: it stops the server, and the next check expects that same
+        -- server to refuse a plain GET with 426. The handshake succeeding is the point of this
+        -- case; the editor's `exit` near the end of this function stops the server.
+        | .ok () => pure ()
         | .error e => throw (IO.userError s!"bearer handshake: {e}")
         let (r, w) ← tcp
         w.putStr "GET / HTTP/1.1\r\nHost: x\r\n\r\n"; w.flush
         check (((← r.getLine).splitOn "426").length > 1) "a plain GET was not refused"
+        -- a head that never ends (more than 100 header lines) is a `400`, not silence
+        let (r, w) ← tcp
+        w.putStr ("GET / HTTP/1.1\r\nHost: x\r\n" ++ String.join (List.replicate 101 "X: y\r\n")); w.flush
+        check (((← r.getLine).splitOn "400").length > 1) "a malformed head was not refused"
         -- the editor opens a document
         let src := "import Prelude\ndef k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n"
         LSP.writeMessage edW (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
@@ -1263,7 +1270,7 @@ def serverGroup : Group where
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
         for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
-                       ("Result", "lib/Result.wiz"), ("Logic", "lib/Logic.wiz"),
+                       ("Data.Result", "lib/Data/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do
           if ← System.FilePath.pathExists p then
             libs := libs.insert m (p, ← IO.FS.readFile p)

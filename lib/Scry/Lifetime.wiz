@@ -1,6 +1,7 @@
 import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
+import Scry.Engine
 /-!
 # Scry.Lifetime: a CWE-416 use-after-free check on the points-to model
 
@@ -34,6 +35,28 @@ free), or a call argument (including an indirect callee). Free effects cross cal
 function's transitive frees are a summary, so a free in a callee or in an indirect
 callback is visible after the call. `realloc` is a free of its argument plus a fresh
 allocation at the call point, so `p = realloc(p, n)` leaves `p` on the new object.
+
+## The semantics parameter
+
+`Scry.useAfterFreeCheckWith (s : Scry.Sem Scry.Event)` is the analysis over a semantics;
+`Scry.useAfterFreeCheck` is `useAfterFreeCheckWith Scry.Wil.concrete`, so the CLI path is
+unchanged. The parameterised part is the **event projection** (`s.events p`): the
+finding dispatch (`uFindingsAtEvent`) reads `load`/`store`/`free`/`call`/`callIndirect`
+events, not `Wil.Stmt` constructors. A second semantics may therefore supply guarded or
+merged events (a symbolic or e-graph projection) as long as it speaks `Scry.Event`; its
+`Ir`/`Conf`/`Obs` may be entirely its own.
+
+Two parts remain Wil-shaped, and the type parameter stops being cheap there:
+
+* **the transfer** — `uStep` reads `Wil.Rhs` and `Wil.Callee` to compute the current and
+  freed location sets. An event that carried the whole right-hand side would be
+  a Wil statement under another name; the honest fix is the fact bundle (P3), not a
+  larger event type;
+* **the free summaries** — `uCompleteEffects`/`uEffectOf`/`uDirectFrees` and the
+  `effectAt` table are keyed by function *name* and walk `Wil.Func` statements, so they
+  assume the semantics' IR is a program of named Wil functions. `useAfterFreeCheckWith`
+  makes that assumption explicit as a `toWil : s.Ir → Wil.Program` cast (Wiz cannot state
+  `s.Ir = Wil.Program`).
 
 ## Deliberate limits
 
@@ -104,7 +127,7 @@ def Scry.uProvAdd (p : List (Scry.Loc × Scry.PathNode)) (l : Scry.Loc)
     (n : Scry.PathNode) : List (Scry.Loc × Scry.PathNode) :=
   match Scry.uProvGet p l with
   | .some _ => p
-  | .none => List.append p (List.cons (l, n) .nil)
+  | .none => List.append p [(l, n)]
 
 def Scry.uProvMerge (a b : List (Scry.Loc × Scry.PathNode)) :
     List (Scry.Loc × Scry.PathNode) :=
@@ -202,10 +225,10 @@ def Scry.uRhsLocs (st : Scry.UState) (pt : Scry.PtResult) (func : String) (point
       (Scry.uCurGet st pt func p.index)
   | .gep p k => List.map (fun l => Scry.addOff l k) (Scry.uCurGet st pt func p.index)
   | .gepVar p _ _ => List.map Scry.Loc.anyOff (Scry.uCurGet st pt func p.index)
-  | .alloc _ => List.cons (.heap func point) .nil
-  | .slot _ => List.cons (.stack func point) .nil
-  | .globalRef n => List.cons (.glob n) .nil
-  | .fnptr n => List.cons (.fn n) .nil
+  | .alloc _ => [(.heap func point)]
+  | .slot _ => [(.stack func point)]
+  | .globalRef n => [(.glob n)]
+  | .fnptr n => [(.fn n)]
   | .havoc _ => match Scry.ptrLike x.ty with
     | .true => Scry.unknownLocs
     | .false => .nil
@@ -290,7 +313,7 @@ def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect
       let freedLocs := List.map (fun q => q.1) extra;
       let rets := Scry.uCallRetFreed es p pt fn.name callee;
       let st1 := Scry.uMarkAliases st (Scry.locUnion rets freedLocs);
-      let freed := List.foldr (fun q acc => Scry.locUnion (List.cons q.1 .nil) acc)
+      let freed := List.foldr (fun q acc => Scry.locUnion [q.1] acc)
         st1.freed extra;
       let prov := List.foldr (fun q acc => Scry.uProvAdd acc q.1 q.2) st1.prov extra;
       let freed2 := Scry.locUnion rets freed;
@@ -429,7 +452,19 @@ def Scry.uFinding (rule : Scry.MemoryRule) (fn : Wil.Func) (point var : Nat)
       | .none => Scry.PathNode.mk fn.name point var Scry.PathKind.free;
   let use := Scry.PathNode.mk fn.name point var Scry.PathKind.sink;
   Scry.RuleFinding.mk rule.id rule.severity rule.message Scry.FindingKind.memory
-    fn.name point name arg (List.cons alloc (List.cons freeNode (List.cons use .nil)))
+    fn.name point name arg [alloc, freeNode, use]
+
+/-- The argument uses of a call event: a tainted-by-free argument is a sink. The
+positions come from `Scry.ptIndexed`, exactly as in the old statement dispatch. -/
+def Scry.uCallArgFindings (rule : Scry.MemoryRule) (fn : Wil.Func) (n : Nat)
+    (st : Scry.UState) (args : List Nat) : List Scry.RuleFinding :=
+  Scry.concatLists (fun p =>
+    let a := p.2;
+    match Scry.uFirstFreed st fn.name a with
+    | .none => .nil
+    | .some l => List.cons
+        (Scry.uFinding rule fn n a ("call argument " ++ Nat.repr p.1) p.1 l st) .nil)
+    (Scry.ptIndexed args 0)
 
 /-- The accesses at point `n` that use a freed location. -/
 def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Func)
@@ -440,20 +475,20 @@ def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Fun
     | .assign x (.load ptr) _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "load" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "load" 0 l st)]
     | .store ptr _ _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "store" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "store" 0 l st)]
     | .free ptr _ =>
       match Scry.uFirstFreed st fn.name ptr.index with
       | .none => .nil
-      | .some l => List.cons (Scry.uFinding rule fn n ptr.index "free (double free)" 0 l st) .nil
+      | .some l => [(Scry.uFinding rule fn n ptr.index "free (double free)" 0 l st)]
     | .call _ callee args _ =>
       let calleeFindings : List Scry.RuleFinding := match callee with
         | .indirect v => match Scry.uFirstFreed st fn.name v.index with
           | .none => .nil
-          | .some l => List.cons (Scry.uFinding rule fn n v.index "indirect call" 0 l st) .nil
+          | .some l => [(Scry.uFinding rule fn n v.index "indirect call" 0 l st)]
         | .direct _ => .nil;
       let argFindings := Scry.concatLists (fun p =>
         let a := p.2;
@@ -465,21 +500,100 @@ def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Fun
       List.append calleeFindings argFindings
     | _ => .nil
 
-def Scry.uFindingsOfFunc (rule : Scry.MemoryRule) (p : Wil.Program) (pt : Scry.PtResult)
-    (es : List Scry.FreeEffect) (fn : Wil.Func) : List Scry.RuleFinding :=
+/-- The findings one event produces at program point `n`, with the dataflow state at
+`n`. This replaces the Wil-constructor match of the old `uFindingsAt`: `load`, `store`
+and `free` are the same three accesses, a direct `call` contributes only its argument
+uses, and `callIndirect` adds the use of a freed function pointer. Every other event
+(including the semantics' `other`) is not a use. -/
+def Scry.uFindingsAtEvent (rule : Scry.MemoryRule) (fn : Wil.Func) (n : Nat)
+    (st : Scry.UState) (e : Scry.Event) : List Scry.RuleFinding :=
+  match e with
+  | .load _ ptr =>
+    match Scry.uFirstFreed st fn.name ptr with
+    | .none => .nil
+    | .some l => List.cons (Scry.uFinding rule fn n ptr "load" 0 l st) .nil
+  | .store ptr _ =>
+    match Scry.uFirstFreed st fn.name ptr with
+    | .none => .nil
+    | .some l => List.cons (Scry.uFinding rule fn n ptr "store" 0 l st) .nil
+  | .free ptr =>
+    match Scry.uFirstFreed st fn.name ptr with
+    | .none => .nil
+    | .some l => List.cons (Scry.uFinding rule fn n ptr "free (double free)" 0 l st) .nil
+  | .callIndirect _ v args =>
+    let calleeFindings : List Scry.RuleFinding :=
+      match Scry.uFirstFreed st fn.name v with
+      | .none => .nil
+      | .some l => List.cons (Scry.uFinding rule fn n v "indirect call" 0 l st) .nil;
+    List.append calleeFindings (Scry.uCallArgFindings rule fn n st args)
+  | .call _ _ args => Scry.uCallArgFindings rule fn n st args
+  | _ => .nil
+
+-- ## One function, over the semantics' events
+
+/-- One analysed unit: the function (the Wil-shaped fact bundle the transfer needs) and
+the semantics' events for it, in the order the semantics emits them. This is the same
+shape as `Scry.BoundsUnit`, except that the unit carries the function rather than only
+its name, because the transfer (`uStep`) still reads `Wil.Stmt`s. -/
+structure Scry.UUnit where
+  name : String
+  func : Wil.Func
+  events : List (Nat × Scry.Event)
+
+/-- Split the semantics' events into one unit per function, in the program's function
+order. The event order is the semantics' own (for `Wil.concrete`, function/point
+order), so the finding order is the order the old point loop produced. -/
+def Scry.uUnits (es : List (Scry.ObservedEvent Scry.Event)) (funcs : List Wil.Func) :
+    List Scry.UUnit :=
+  List.map (fun fn =>
+    Scry.UUnit.mk fn.name fn
+      (List.map (fun e => (e.point, e.event))
+        (List.filter (fun e => String.eq e.func fn.name) es))) funcs
+
+/-- Run one function's events through the finding dispatch. The dataflow state still
+comes from `uLoop`/`uStep` (the Wil-shaped transfer); only the *access dispatch* is the
+semantics' projection. -/
+def Scry.uFindingsOfUnit (rule : Scry.MemoryRule) (p : Wil.Program) (pt : Scry.PtResult)
+    (es : List Scry.FreeEffect) (u : Scry.UUnit) : List Scry.RuleFinding :=
+  let fn := u.func;
   let g := Scry.flatten fn;
   let fuel := Nat.add 8 (Nat.mul 4 g.count);
   let ins := Scry.uLoop p pt es fn g fuel
     (List.map (fun n => (n, Scry.uEntry pt fn)) (Scry.range g.count));
-  Scry.concatLists (fun n =>
-    Scry.uFindingsAt rule pt fn g n (Scry.uInFind ins n)) (Scry.range g.count)
+  Scry.concatLists (fun pe =>
+    Scry.uFindingsAtEvent rule fn pe.1 (Scry.uInFind ins pe.1) pe.2) u.events
 
-/-- Run the `use-after-free` memory rule of `pack` on the program. No memory rule in the
-pack means no findings (the pack is still the only way to enable the rule). -/
-def Scry.lifetimeFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
+-- ## Entry points
+
+/-- Run the `use-after-free` memory rule of `pack` over a semantics' events. `s` supplies
+the projection (`s.events p`); `toWil` is the fact bundle's cast from the semantics' IR
+to a Wil program (`fun t => t.prog` for `Scry.Wil.concrete`). Wiz cannot state
+`s.Ir = Wil.Program`, so the cast is explicit: the summaries (`uCompleteEffects`) and
+the transfer (`uStep`) are still Wil-shaped, and only a semantics that can present the
+same program can run them. That is the honest limit recorded in
+`wiz-notes/scry-generic-engine.md`. -/
+def Scry.useAfterFreeCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir)
+    (toWil : s.Ir → Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
     List Scry.RuleFinding :=
   match pack.memoryRuleFor "use-after-free" with
   | .none => .nil
   | .some rule =>
-    let es := Scry.uCompleteEffects p pt;
-    Scry.concatLists (fun fn => Scry.uFindingsOfFunc rule p pt es fn) p.funcs
+    let prog := toWil p;
+    let effects := Scry.uCompleteEffects prog pt;
+    Scry.concatLists (fun u => Scry.uFindingsOfUnit rule prog pt effects u)
+      (Scry.uUnits (s.events p) prog.funcs)
+
+/-- Run the `use-after-free` memory rule of `pack` on the program. No memory rule in the
+pack means no findings (the pack is still the only way to enable the rule). This is the
+**default instantiation**: `Scry.Wil.concrete`'s event projection, with the program
+itself for the fact bundle. -/
+def Scry.useAfterFreeCheck (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
+    List Scry.RuleFinding :=
+  Scry.useAfterFreeCheckWith Scry.Wil.concrete (Scry.WilTarget.mk p "" .nil)
+    (fun t => t.prog) pt pack
+
+/-- The pre-`Sem` name for `useAfterFreeCheck`, kept so library callers (and the design
+note's defaults table) still resolve. -/
+def Scry.lifetimeFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
+    List Scry.RuleFinding :=
+  Scry.useAfterFreeCheck p pt pack
