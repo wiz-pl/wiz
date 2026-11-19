@@ -119,7 +119,8 @@ def fixtures : List (String × String) :=
    ("lower", "unicode"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
+   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
+   ("taint", "cwe78-await-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -444,7 +445,11 @@ def group : Group where
     { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-safe"
-        checkEq ([] : List String) fs }
+        checkEq ([] : List String) fs },
+    { name := "taint: CWE-78 across an await (the awaited Task<T> value reaches the setter sink)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-await-unsafe"
+        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group
