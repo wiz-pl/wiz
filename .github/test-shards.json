@@ -63,6 +63,7 @@
     "=grail",
     "=grail-commands",
     "=grail-deps",
+    "=grail-e2e",
     "=grail-hygiene",
     "=grail-index",
     "=grail-jobs",
