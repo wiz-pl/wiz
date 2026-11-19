@@ -648,8 +648,10 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
   | .neutral (.global "Bytes" _) sp, .bytes b =>
     if sp.isEmpty then .const (BytesModel.render b) [] else readbackData ty v
   | .neutral (.global "Array" _) sp, .arr xs =>
-    let elem : Option (Val R) := match (sp : Array (Elim R))[0]? with
-      | some (.app A) => some A
+    -- (`.`-prefixed constructors do not elaborate inside `some (…)`: there the expected
+    -- type is still a metavariable, so the constructor is written in full)
+    let elem : Option (Val R) := match sp[0]? with
+      | some (Elim.app A) => some A
       | _ => none
     let render (x : RVal) : String := match elem with
       | some A => (readback A x).pretty [] (some g)

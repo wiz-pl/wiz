@@ -1,2 +1,15 @@
 heavy: template [lake build .*wiz.*tests] -> mem=8G cpus=4 time=14400s
 srun: job 2393 queued and waiting for resources
+srun: job 2393 has been allocated resources
+✖ [188/555] Building Wiz.Compiler.Run (962ms)
+trace: .> LEAN_PATH=/workspace/wt/train6/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/train6/Wiz/Compiler/Run.lean -o /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/Run.olean -i /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/Run.ilean -c /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/Run.c --setup /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/Run.setup.json --json
+error: Wiz/Compiler/Run.lean:652:14: Invalid dotted identifier notation: The expected type of `.app`
+  ?m.461
+is not of the form `C ...` or `... → C ...` where C is a constant
+error: Wiz/Compiler/Run.lean:652:6: Invalid pattern(s): `A` is an explicit pattern variable, but it only occurs in positions that are inaccessible to pattern matching:
+  some ?m.462
+Some required targets logged failures:
+- Wiz.Compiler.Run
+error: build failed
+srun: error: noobnoob: task 0: Exited with exit code 1
+rc=1
