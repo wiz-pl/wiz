@@ -46,7 +46,7 @@ def storageQuireBody : IO String := do
   pure (body.replace "link_c \"quire_seal.c\"" "link_c \"drafts/storage-engine/quire_seal.c\"")
 
 def storageQuireExpected : String :=
-  "quire: all checks passed: 28\n"
+  "quire: all checks passed: 29\n"
 
 def storageQuire : IO Unit := do
   -- the C companion's header (`quire_seal.h`) is on the draft include path

@@ -198,6 +198,7 @@ def runUpdate (n : Nat) (path : String) : EIO Unit := do
 def run (op : String) (n : Nat) (path : String) : EIO Unit :=
   match op with
   | "build" => runBuild n path
+  | "batch" => runBuild n path
   | "reopen" => runReopen n path
   | "query" => runQuery n path
   | "update" => runUpdate n path

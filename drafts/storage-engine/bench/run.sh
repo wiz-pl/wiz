@@ -72,7 +72,7 @@ for n in $ns; do
   QU="$out/quire-$n-update.db"
 
   # build / append
-  run_one json  build  "$n" "$bidir/json-bench"  "$J"
+  run_one json  batch  "$n" "$bidir/json-bench"  "$J"
   run_one quire batch  "$n" "$bidir/quire-bench" "$QB"
   run_one quire append "$n" "$bidir/quire-bench" "$QA"
 
@@ -96,7 +96,8 @@ done
 
 # The engine Quire replaces: train7's Durable (whole-chain rewrite on every commit).
 # Its append is O(n^2) pages, so only the small Ns are feasible.
-for n in ${BENCH_BEFORE_NS:-"1000 10000"}; do
+bns=${BENCH_BEFORE_NS:-1000 10000}
+for n in $bns; do
   B="$out/before-$n.db"
   BU="$out/before-$n-update.db"
   run_one before append "$n" "$bidir/before-bench" "$B"
@@ -141,6 +142,29 @@ BEGIN {
 }
 $1 == "before" {
   printf "%-6s %-7s | %10d %9d %10d\n", $3, $2, $4, $6, $7
+}' "$tsv"
+
+echo
+echo "=== operation time (the program's own Clock.monotonic; process start-up excluded) ==="
+awk -F '\t' '
+BEGIN {
+  printf "%-6s %-12s | %11s %9s %10s | %11s %9s %10s | %8s\n",
+    "N", "op", "json_ns", "json_kB", "json_B", "quire_ns", "quire_kB", "quire_B", "speedup"
+  printf "%s\n", "-----------------------------------------------------------------------------------------------"
+}
+{
+  if ($1 == "before") next
+  key = $3 SUBSEP $2
+  if ($1 == "json") { jt[key]=$5; jr[key]=$6; js[key]=$7 }
+  else { qt[key]=$5; qr[key]=$6; qs[key]=$7; order[++m]=key }
+}
+END {
+  for (i = 1; i <= m; i++) {
+    k = order[i]; split(k, p, SUBSEP); n = p[1]; op = p[2]
+    sp = (qt[k] > 0 && jt[k] > 0) ? jt[k] / qt[k] : 0
+    printf "%-6s %-12s | %11d %9d %10d | %11d %9d %10d | %7.2fx\n",
+      n, op, jt[k], jr[k], js[k], qt[k], qr[k], qs[k], sp
+  }
 }' "$tsv"
 
 echo
