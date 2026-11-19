@@ -1,0 +1,285 @@
+import Prelude
+import Text
+import Word
+import Logic
+import Scry.Analysis
+/-!
+# Scry.Engine: the generic engine's interfaces
+
+The four interfaces the generic engine is built from (`wiz-notes/scry-generic-engine.md`):
+`Sem` (an IR plus a semantics), `Lowering` (a source-to-target translation with an
+explicit preservation obligation), `Analysis` (a domain and transfer functions with a
+soundness obligation *relative to a `Sem`*), and the defaults that keep today's
+behaviour (`Scry.Wil.concrete`, the Datalog engine, `Scry.Bounds.boundsCheck`).
+
+## Why records, not type classes
+
+The pipeline chooses analyses and semantics by *value*: a rule pack names the check, a
+second semantics is a value a caller passes, and a registry is a list. A type class
+would need one instance per (IR, semantics) pair and would make two semantics for the
+same IR (the concrete one and an e-graph one) a coherence problem. Records also match
+`Scry.Datalog.LatOps`, which already passes lattice operations explicitly for the same
+reason.
+
+## What is and is not computable
+
+`Sem.step` is an executable step function: `next`, `done`, or `fault`. That covers Wil
+and any deterministic concrete semantics. A nondeterministic or symbolic semantics
+(e-graph saturation, a relational interpreter) is expressible as a `Prop` but not as
+this field; the fallback is a deterministic *choice* field (`step : Conf → List Conf`)
+or an oracle, and a bounded explorer. The design note records this as a gap.
+
+The soundness fields are propositions, not proofs (`proved : Scry.MaybeProof sound` is
+`no` for an analysis whose obligation is trusted or result-checked). That mirrors
+`Scry.AiDomain`'s `Transfer.sound_stmt`: the engine runs, and a separate certificate
+removes the engine from the trusted base.
+-/
+
+-- ## Steps and runs
+
+/-- One step of a semantics: continue in a configuration, finish with an observation,
+or fault. `fault` is an observation of the semantics, not a stuck function. -/
+inductive Scry.StepResult (C Obs : Type) where
+  | next (c : C)
+  | done (obs : Obs)
+  | fault (msg : String)
+
+/-- A fuel-bounded run. `outOfFuel` is observable, exactly as `Wil.Result` has it. -/
+inductive Scry.RunResult (Obs : Type) where
+  | done (obs : Obs)
+  | fault (msg : String)
+  | outOfFuel
+
+-- ## The event vocabulary
+
+/-- The memory/control events analyses consume. It is deliberately small: an analysis
+that needs a construct the vocabulary does not have gets a new constructor here, and
+every `Sem` decides how its IR produces it. The default (`Scry.Wil.concrete`) is a
+one-to-one projection of Wil's statement constructors, so `Scry.Bounds` sees exactly
+the statements it used to match on. -/
+inductive Scry.Event where
+  /-- `x = alloc cells` -/
+  | alloc (dst : Nat) (cells : Nat)
+  /-- `x = slot cells` (a stack aggregate) -/
+  | slot (dst : Nat) (cells : Nat)
+  /-- `x = load p` -/
+  | load (dst : Nat) (ptr : Nat)
+  /-- `store p v` -/
+  | store (ptr : Nat) (val : Nat)
+  /-- `x = p + i * scale` (a variable-index subscript) -/
+  | sub (dst : Nat) (base : Nat) (index : Nat) (scale : Nat)
+  /-- a direct or indirect call -/
+  | call (dst : Option Nat) (callee : String) (args : List Nat)
+  /-- `free p` -/
+  | free (ptr : Nat)
+  /-- a statement or terminator with no event the current analyses use -/
+  | other
+
+/-- One event at a program point of a named function. -/
+structure Scry.ObservedEvent where
+  func : String
+  point : Nat
+  event : Scry.Event
+
+-- ## Semantics
+
+/-- An IR with a semantics. `Ir` is the unit a frontend produces (a program, a
+translation unit, a graph); `Conf` its configurations; `Obs` its observations.
+`obsEq` is the semantics' own notion of "the same observation"; a lowering that crosses
+two semantics uses `Scry.Obligation.refines`'s explicit `rel`, because the two `Obs`
+types may differ. `events` is the analysis-facing projection; it is a
+field of `Sem` because whether two statements are the same memory event is a semantic
+question (an e-graph semantics may expose one event for a whole rewrite class). -/
+structure Scry.Sem where
+  Ir : Type
+  Conf : Type
+  Obs : Type
+  init : Ir → Conf
+  step : Conf → Scry.StepResult Conf Obs
+  obsEq : Obs → Obs → Bool
+  events : Ir → List Scry.ObservedEvent
+
+/-- The derived fuel-bounded run of a semantics. -/
+def Scry.Sem.run (s : Scry.Sem) : Nat → s.Conf → Scry.RunResult s.Obs
+  | .zero, _ => .outOfFuel
+  | .succ k, c => match s.step c with
+    | .next c' => Scry.Sem.run s k c'
+    | .done o => .done o
+    | .fault m => .fault m
+
+-- ## Lowering
+
+/-- The shape of a lowering's preservation obligation. -/
+inductive Scry.Obligation where
+  /-- One theorem per source construct: a source step is simulated by target steps. -/
+  | perConstruct
+  /-- A refinement relation between whole runs of the source and target semantics. -/
+  | refinesDefault
+
+/-- Whole-run refinement: every terminating source run and its lowered target run are
+related by `rel`. `sourceIr` says how a source unit is read by the source semantics (a
+CST store and a preprocessed text are the same `Src`). -/
+def Scry.Obligation.refines (Src : Type) (source target : Scry.Sem)
+    (sourceIr : Src → source.Ir) (lower : Src → target.Ir)
+    (rel : source.Obs → target.Obs → Prop) : Prop :=
+  (i : Src) → (n : Nat) → (o : source.Obs) → (o' : target.Obs) →
+    source.run n (source.init (sourceIr i)) = Scry.RunResult.done o →
+      target.run n (target.init (lower i)) = Scry.RunResult.done o' →
+        rel o o'
+
+/-- A lowering is a value: a source semantics, a target semantics, the translation, the
+obligation shape it claims, and the proposition that is that obligation. The engine does
+not inspect `preserves`; a proof would be `proved` in a `LoweringCertificate`, exactly
+as `Scry.Cert` does for findings. Today every frontend sets `obligation := .refinesDefault`
+and `preserves := True` (trusted), which is the honest state: the lowering is tested, not
+verified (design §4.3). -/
+structure Scry.Lowering where
+  Src : Type
+  source : Scry.Sem
+  /-- how a `Src` value is read as a unit of the source semantics -/
+  sourceIr : Src → source.Ir
+  target : Scry.Sem
+  lower : Src → target.Ir
+  obligation : Scry.Obligation
+  preserves : Prop
+
+-- ## Analysis
+
+/-- The classical soundness obligation: γ before, one concrete step, γ after. -/
+def Scry.Analysis.Sound (s : Scry.Sem) (D : Type) (gamma : D → s.Conf → Prop)
+    (transfer : s.Ir → D → D) : Prop :=
+  (i : s.Ir) → (d : D) → (c c' : s.Conf) → gamma d c →
+    s.step c = Scry.StepResult.next c' → gamma (transfer i d) c'
+
+/-- Membership with an explicit equality (findings are records, so no `BEq` search is
+involved). -/
+def Scry.listMem {A : Type} (eq : A → A → Bool) (x : A) : List A → Bool
+  | .nil => .false
+  | .cons y ys => match eq x y with
+    | .true => .true
+    | .false => Scry.listMem eq x ys
+
+/-- A sound bug-finding analysis, stated as the dual obligation: every reported fact is
+true of some terminating run's observation. Bounds and taint are *may* analyses, so this
+(not the classical γ obligation) is the shape their `sound` field names; today neither
+carries a proof. -/
+def Scry.Analysis.SoundFindings (s : Scry.Sem) (D F : Type) (eqF : F → F → Bool)
+    (report : D → List F) (claim : s.Obs → F → Prop) : Prop :=
+  (i : s.Ir) → (d : D) → (f : F) → Scry.listMem eqF f (report d) = .true →
+    ∃ (o : s.Obs), ∃ (n : Nat),
+      s.run n (s.init i) = Scry.RunResult.done o ∧ claim o f
+
+/-- `MaybeProof P` is `P` or no proof: the encoding of "an obligation that may be
+proved, trusted, or checked elsewhere". Wiz's `Option` takes a `Type`, and `P : Prop` is
+not one, so the proof-or-nothing choice is its own small inductive. -/
+inductive Scry.MaybeProof (P : Prop) where
+  | yes (h : P)
+  | no
+
+/-- An analysis over a semantics. `Domain` is the analysis's own state (an abstract
+environment, a points-to table, a finding list); `gamma` relates it to concrete
+configurations; `transfer` is the interface the engine runs. `sound` is the *statement*
+of the analysis's obligation (one of the two shapes above); `proved` carries a proof
+when one exists, and is `no` for a trusted or result-checked analysis. -/
+structure Scry.Analysis (s : Scry.Sem) where
+  Domain : Type
+  gamma : Domain → s.Conf → Prop
+  transfer : s.Ir → Domain → Domain
+  entry : Domain
+  sound : Prop
+  proved : Scry.MaybeProof sound
+
+-- ## The default semantics: Wil, concrete
+
+/-- The unit the concrete Wil semantics runs: a program, the entry function and its
+arguments. (Wil's own `Wil.entry` needs all three; a `Sem` whose `Ir` is just a program
+cannot express "run `main`".) -/
+structure Scry.WilTarget where
+  prog : Wil.Program
+  entry : String
+  args : List Wil.Val
+
+/-- What a Wil run observes. -/
+inductive Scry.WilObservation where
+  | returned (v : Wil.Val)
+  | faulted (msg : String)
+
+/-- Observation equality for the concrete semantics: values structurally, faults by
+message. -/
+def Scry.WilObsEq (a b : Scry.WilObservation) : Bool :=
+  match a, b with
+  | .returned x, .returned y => Wil.Val.beq x y
+  | .faulted x, .faulted y => String.eq x y
+  | _, _ => .false
+
+/-- The concrete initial configuration, as an `Option` because `Wil.entry` can fail (no
+such function, arity mismatch). A `none` first step is a fault. -/
+def Scry.WilInit (t : Scry.WilTarget) : Option Wil.Config :=
+  match Wil.entry t.prog t.entry t.args with
+  | .ok c => .some c
+  | .error _ => .none
+
+/-- One concrete Wil step, lifted into the generic `StepResult`. -/
+def Scry.WilStep (c : Option Wil.Config) :
+    Scry.StepResult (Option Wil.Config) Scry.WilObservation :=
+  match c with
+  | .none => .fault "initial configuration failed"
+  | .some cfg => match Wil.step cfg with
+    | Wil.StepResult.next c' => .next (.some c')
+    | Wil.StepResult.done v => .done (.returned v)
+    | Wil.StepResult.fault m => .fault m
+
+/-- The event a Wil statement projects to. This is a one-to-one mapping of the
+constructors `Scry.Bounds`, `Scry.Lifetime` and the taint engine match on; everything
+they do not look at is `other`. -/
+def Scry.Event.ofStmt : Wil.Stmt → Scry.Event
+  | .assign x (.alloc cells) _ => .alloc x.index cells
+  | .assign x (.slot cells) _ => .slot x.index cells
+  | .assign x (.load p) _ => .load x.index p.index
+  | .assign x (.gepVar p i k) _ => .sub x.index p.index i.index k
+  | .store p v _ => .store p.index v.index
+  | .free p _ => .free p.index
+  | .call r (.direct name) args _ =>
+    .call (match r with | .some v => .some v.index | .none => .none) name
+      (List.map (fun v => v.index) args)
+  | _ => .other
+
+/-- Every statement of a function as an observed event, at its program point. -/
+def Scry.WilEventsOfFunc (fn : Wil.Func) : List Scry.ObservedEvent :=
+  let g := Scry.flatten fn;
+  List.concat (List.map (fun n =>
+    match Scry.nodeStmt g n with
+    | .none => .nil
+    | .some s => .cons (Scry.ObservedEvent.mk fn.name n (Scry.Event.ofStmt s)) .nil)
+    (Scry.range g.count))
+
+/-- Every function's events, in function and point order. -/
+def Scry.WilEvents (t : Scry.WilTarget) : List Scry.ObservedEvent :=
+  List.concat (List.map Scry.WilEventsOfFunc t.prog.funcs)
+
+/-- **The default instantiation**: Wil with its concrete `Wil.step`/`Wil.run` semantics
+and its concrete observations. Nothing else in scry has to change to keep using it;
+`Scry.boundsCheck` is `Scry.boundsCheckWith Scry.Wil.concrete`. -/
+def Scry.Wil.concrete : Scry.Sem :=
+  Scry.Sem.mk Scry.WilTarget (Option Wil.Config) Scry.WilObservation
+    Scry.WilInit Scry.WilStep Scry.WilObsEq Scry.WilEvents
+
+/-- The default `Sem` run agrees with `Wil.run` (up to the observation wrapper): the
+generic engine adds no behaviour of its own. This is the lemma a lowering's refinement
+obligation uses for the default target. -/
+def Scry.WilConcreteRun (t : Scry.WilTarget) (fuel : Nat) : Scry.RunResult Scry.WilObservation :=
+  match Wil.entry t.prog t.entry t.args with
+  | .error m => .fault m
+  | .ok c => match Wil.run fuel c with
+    | .ok v => .done (.returned v)
+    | .fault m => .fault m
+    | .outOfFuel => .outOfFuel
+
+/-- The generic `Sem.run` at `Wil.concrete` is `Wil.run` under the observation wrapper.
+This is the lemma a lowering's refinement obligation uses for the default target. It is
+stated, not proved, here: the prototype's deliverable is the instantiation and its
+observational identity on the corpus. (The proof is a routine induction on fuel; Wiz
+needs the `Sem.run` successor unfolding stated as its own rewriting lemma first.) -/
+def Scry.Sem.runWilConcrete (t : Scry.WilTarget) (fuel : Nat) : Prop :=
+  Scry.Sem.run Scry.Wil.concrete fuel (Scry.Sem.init Scry.Wil.concrete t) =
+    Scry.WilConcreteRun t fuel
