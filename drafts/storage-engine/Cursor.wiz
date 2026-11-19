@@ -1,0 +1,130 @@
+import Optic
+import Word
+import Text
+import WordMap
+import Functor
+/-!
+# Linear cursors
+
+The query half of the storage design. A cursor is a linear handle: `next` consumes the
+cursor and hands back either the end or a value and the *next* cursor. `Step` is a
+bespoke sum because `Option`'s payload is unrestricted, so an `Option (a × Cursor a)`
+could drop or duplicate the cursor; the same reason gives the bespoke `Control` for
+early exit.
+
+The handle is linear, the plan's state (`rest` here) is ordinary ω data. A table scan
+and an index scan are the same `Cursor` type; `StorageCursor.wiz` supplies
+`tableCursor`, `indexCursor` and the index→primary composite `Cursor.follow`.
+
+`fold`/`foldUntil` are the supported loops: they take the linear handle apart once
+(matching it into the ω plan state) and then recurse on the *state*, not on the handle.
+Writing the loop by hand and recursing on the continuation is the language gap recorded
+in `CursorRecursive.wiz`; a `partial def` with a linear parameter is rejected (its
+inferred witness drops the parameter). Do not re-implement the loops in callers.
+-/
+
+/-- A cursor over `a`: a linear handle around the plan's state. The constructor is
+private, so a cursor is only made by the engine (`fromList` here, a page scan later) and
+consumed by `next`/`close`/`fold`. -/
+inductive Cursor (a : Type) where
+  | private mk (rest : List a)
+
+/-- One step: the end, or a value and the linear continuation. `Option` would not do:
+its payload is unrestricted, so it could drop or duplicate the cursor. -/
+inductive Step (a : Type) where
+  | done
+  | more (value : a) (1 next : Cursor a)
+
+/-- Whether to keep going after a step (early exit is `stop`). -/
+inductive Control (b : Type) where
+  | stop (b : b)
+  | go (b : b)
+
+-- ## Making a plan
+
+/-- The engine's constructor (a table scan, an index scan, a filtered plan). -/
+def Cursor.fromList {a : Type} (xs : List a) : Cursor a := Cursor.mk xs
+
+/-- The empty plan: `next` is `done` at once. -/
+def Cursor.empty {a : Type} : Cursor a := Cursor.mk []
+
+/-- A plan of one element. -/
+def Cursor.singleton {a : Type} (x : a) : Cursor a := Cursor.mk [x]
+
+-- ## Consuming the plan
+
+/-- Consume the cursor for one element: the end, or a value and the linear continuation.
+A `Cursor` is used exactly once, so `next` can only be called once on each handle. -/
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a :=
+  match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (Cursor.mk xs)
+
+/-- Early exit: consume the cursor without reading the rest. -/
+def Cursor.close {a : Type} (1 c : Cursor a) : Unit :=
+  match c with
+  | .mk _ => ()
+
+/-- Consume the cursor and continue with a value (early exit, keeping a result). -/
+def Cursor.closeThen {a b : Type} (1 c : Cursor a) (x : b) : b :=
+  match c with
+  | .mk _ => x
+
+/-- The first element, if any: consume the handle once, drop the continuation at once. -/
+def Cursor.first {a : Type} (1 c : Cursor a) : Option a :=
+  match Cursor.next c with
+  | .done => .none
+  | .more x c' => Cursor.closeThen c' (.some x)
+
+-- ## Folds: the supported loops
+
+/-- A pure fold: the handle is consumed once, the plan's state is folded. -/
+def Cursor.fold {a b : Type} (1 c : Cursor a) (k : b → a → b) (b0 : b) : b :=
+  match c with
+  | .mk xs => List.foldl (fun acc x => k acc x) b0 xs
+
+/-- Fold the plan's state; recursion is on the ω state, not on the linear handle. -/
+def Cursor.foldList {a b : Type} : List a → (b → a → Control b) → b → b
+  | .nil, _, b => b
+  | .cons x xs, k, b => match k b x with
+    | .stop b' => b'
+    | .go b' => Cursor.foldList xs k b'
+
+/-- A fold with early exit: consume the handle once, then loop over the state. A
+recursive consumer that threads the linear handle itself is the gap in
+`CursorRecursive.wiz`; this is the supported form. -/
+def Cursor.foldUntil {a b : Type} (1 c : Cursor a) (k : b → a → Control b) (b0 : b) : b :=
+  match c with
+  | .mk xs => Cursor.foldList xs k b0
+
+/-- The number of elements: a total fold, one pass. -/
+def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=
+  Cursor.fold c (fun n _ => n + 1) 0
+
+-- ## Plan combinators (each consumes the handle once)
+
+/-- Project every element in the plan (an index-only scan does this without `follow`). -/
+def Cursor.map {a b : Type} (f : a → b) (1 c : Cursor a) : Cursor b :=
+  match c with
+  | .mk xs => Cursor.mk (List.map f xs)
+
+/-- Keep the elements satisfying `p`. -/
+def Cursor.filter {a : Type} (p : a → Bool) (1 c : Cursor a) : Cursor a :=
+  match c with
+  | .mk xs => Cursor.mk (List.filter p xs)
+
+/-- `Option` as 0 or 1 element. -/
+def Option.toList {a : Type} : Option a → List a
+  | .none => []
+  | .some x => [x]
+
+/-- Keep the elements `f` maps to `some`. -/
+def Cursor.filterMap {a b : Type} (f : a → Option b) (1 c : Cursor a) : Cursor b :=
+  match c with
+  | .mk xs => Cursor.mk (List.flatMap xs (fun x => Option.toList (f x)))
+
+/-- The whole cursor as a list (materialising it ends the plan; the engine's scans do
+not use this). -/
+def Cursor.toList {a : Type} (1 c : Cursor a) : List a :=
+  match c with
+  | .mk xs => List.reverse (List.foldl (fun acc x => List.cons x acc) [] xs)

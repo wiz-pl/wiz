@@ -1,0 +1,40 @@
+import Storage
+import Cursor
+/-!
+# Storage cursors: table scans, index scans, and the index→primary composite
+
+The same `Cursor` type for a table scan and an index scan; `Cursor.follow` turns an
+index cursor (primary keys) into a node cursor. The snapshot is ω (copyable); only the
+cursor is linear, so a query does not make the transaction linear.
+
+A table scan is `Cursor Node`; an index scan is `Cursor U64` (the primary keys in one
+bucket), and `Cursor.follow` is the composite optic that follows each key to its node.
+An index-only scan is the same `Cursor U64` with the projection done in the plan, no
+`follow`: the same type, not a special case.
+
+The plan is list-backed here (slice 1). The production plan streams index/primary leaf
+pages; the API does not change.
+-/
+
+/-- The primary keys in the snapshot's base pages. -/
+def Snapshot.nodeIds (s : Snapshot) : List U64 := U64Map.keys s.root.pages
+
+/-- A table scan: every node, through the pending write-set. -/
+def Snapshot.tableCursor (s : Snapshot) : Cursor Node :=
+  Cursor.fromList (List.flatMap (Snapshot.nodeIds s)
+    (fun id => Option.toList (Snapshot.getNode s id)))
+
+/-- An index scan: the primary keys in one bucket. The production plan streams the
+index leaf pages; this one materialises the bucket. -/
+def Snapshot.indexCursor (d : IndexDef) (v : U64) (s : Snapshot) : Cursor U64 :=
+  Cursor.fromList (Root.lookupIndex s.root (IndexDef.uid d) v)
+
+/-- The composite: follow each primary key to its node (the index→table optic). A key
+the primary map does not have is skipped: the index is derived, so under repair it can
+lag, and the primary map is the source of truth. -/
+def Cursor.follow (s : Snapshot) (1 c : Cursor U64) : Cursor Node :=
+  Cursor.filterMap (fun id => Snapshot.getNode s id) c
+
+/-- An index scan whose elements are nodes: the same type as `tableCursor`. -/
+def Snapshot.indexNodes (d : IndexDef) (v : U64) (s : Snapshot) : Cursor Node :=
+  Cursor.follow s (Snapshot.indexCursor d v s)
