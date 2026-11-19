@@ -35,7 +35,7 @@
       "name": "wiz-x86_64-linux.tar.gz.sha256",
       "kind": "checksum",
       "system": "x86_64-linux",
-      "producer": ".github/workflows/release.yml",
+      "producer": "scripts/release-tarball.sh",
       "sha256": null,
       "size": null,
       "url": null
