@@ -1008,7 +1008,7 @@ What it costs:
   exactly one field, which silently dropped the others: nothing sound is lost. Linear
   data is a tuple for now; linear matching is wishful
   (`wiz-notes/wishful/linear-case.md`).
-* Kernel.wiz has no split form, so its fragment can't consume a linear pair at all
+* Kernel.wiz has the same split form now, so its fragment consumes a linear pair too
   (CoreSpec §15); both kernels reject the same terms.
 * Nothing in `lib/`, `examples/` or `selfhost/` needed a change: `lib/IO.wiz` already
   split the result of an action with `let 1 (a, w') := x w`.
@@ -1251,7 +1251,11 @@ None of these is implemented. Their status is **design and conjecture**:
 * **STC / normalisation plan**: `wiz-notes/stc-plan.md` (M0–M5): a
   specification of a fragment F0 in Lean, then normalisation by logical relations and an
   extracted checker. It targets modules with regularity off or a predicative `Prop`.
-  Nothing of it exists yet.
+  **M0 is partly done**: `STC/F0/` (26 files, about 4.3k lines, `lean_lib STC`, no `sorry`
+  or `axiom`) has the F0 syntax, typing, reduction and substitution/renaming, and the
+  sorting lemma is *reduced to* `TyUnique` + `ConvInjSort` with the rule-level gap named in
+  `STC/F0/Sorting.lean` — it is not proved. M1 (logical relations, certified checker) and
+  M2–M5 do not exist. Nothing in `STC/` is part of the kernel's trusted base.
 
 ---
 

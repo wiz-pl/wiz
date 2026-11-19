@@ -1,0 +1,3 @@
+/-- Fixture: the common importer; it declares no colliding name itself. -/
+import x
+import y

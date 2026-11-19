@@ -3,6 +3,7 @@ import Text
 import Functor
 import Scry.Project
 import Scry.ProjectCache
+import Scry.Models
 import Scry.TaintCmd
 import Scry.Sarif
 import Scry.Certify
@@ -110,15 +111,19 @@ def Scry.Project.boundaries (p : Scry.Project) : List Scry.BoundaryFinding :=
 
 /-- Analyse the whole project: points-to, cross-TU summaries, rules, certificates,
 origins and per-unit boundary warnings. -/
-def Scry.analyzeProject (p : Scry.Project) (pack : Scry.RulePack) (cache : Scry.CacheStats) :
-    Scry.ProjectReport :=
-  let pr := Scry.analyze p.program pack;
+def Scry.analyzeProjectModels (models : Scry.ModelPack) (p : Scry.Project)
+    (pack : Scry.RulePack) (cache : Scry.CacheStats) : Scry.ProjectReport :=
+  let pr := Scry.analyzeModels models p.program pack;
   let findings := Scry.programFindings pr;
   let checks := List.map (fun f => Scry.findingChecked pr f) findings;
   let origins := p.origins;
   let boundaries := p.boundaries;
   let memory := Scry.memoryFindings origins pr.warnings;
   Scry.ProjectReport.mk p pack findings checks origins boundaries memory pr.pointsTo cache
+
+def Scry.analyzeProject (p : Scry.Project) (pack : Scry.RulePack) (cache : Scry.CacheStats) :
+    Scry.ProjectReport :=
+  Scry.analyzeProjectModels Scry.defaultModels p pack cache
 
 /-- The origin URI of a finding's sink (`""` when the point has no physical origin). -/
 def Scry.ProjectReport.findingFile (r : Scry.ProjectReport) (f : Scry.RuleFinding) : String :=

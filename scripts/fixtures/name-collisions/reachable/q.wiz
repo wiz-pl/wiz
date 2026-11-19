@@ -1,0 +1,2 @@
+/-- Fixture: imported by p, so the pair is co-loadable. -/
+def other : Nat := 2

@@ -120,17 +120,28 @@ the neutral case of Status F13).
 * **The elaborator** writes the sorts it knows (a surface `(x : A) → B` gets them from the
   levels that elaborating `A` and `B` returns) and a hole, `Level.hole`, for the others.
   `Zonk` turns a sort with an unsolved level metavariable into a hole. Unification ignores
-  `σ`.
+  `σ`. A tuple literal it *infers* is annotated with the `Σ` it inferred for it
+  (`inferTuple`, as `Frontend.wiz` already did): the kernel only *checks* a pair against a
+  `Σ`, it never infers one, and a projection (`(a, b).2`) infers its scrutinee, so without
+  the annotation the term is one the kernel rejects ("cannot infer a type for (a, b)").
 * **The sorts pass** fills every hole before the kernel sees the declaration. It is the
   marking pass of the [proof marker](prf-marker.md) in a mode that places no markers
   (`Ctx.sortsOnly`; `Decl.withSorts` in `Wiz/Elab/Mark.lean`). It is total: it goes inside
   proofs and under every `fun`, in the type, the value, the implementation and the
-  witness, and it skips subterms with no hole. In the self-hosted toolchain the same pass
+  witness, and it skips subterms with no hole. A shape whose type only an expected type
+  gives is reached by inference; the pass visits its components there anyway
+  (`Mark.inferComponents`), because the elaborator wraps a lambda it *infers* in
+  `ann … (Π … ⟨hole, hole⟩)` (`term.fun`) and a pair literal in inference position (the
+  scrutinee of a projection) is where such a `Π` used to keep its hole; the annotation
+  above then gives the pass the `Σ` to check the pair's components against. In the self-hosted
+  toolchain the same pass
   runs at `TCtx.pm` 4 and 5 (`sortsTy`, `sortsClosed`, `sortsInfer`, `sortsTyIn`, guarded
   by `tmHasHole`).
 * **The kernels reject a hole** (`checkComponentSort`, `componentSort`, and
   `checkHeader`'s "without its sorts"). The pass is untrusted: a sort it fills wrongly is
-  a kernel error, never an acceptance.
+  a kernel error, never an acceptance. The elaborator reports a hole the pass *left*
+  before the kernel runs (`addDeclSorted`), as an ordinary error: a bug in this pass must
+  not reach the user as the kernel's "internal error".
 
 The pass has to be total in one step. An earlier version filled the sorts it could see and
 left proofs alone. Then `cast (U0 → U0) (U0 → U0) (reflTy (U0 → U0)) (fun x => x)` was
@@ -180,6 +191,10 @@ option (`eqTyLevelled`) and is tested there, but neither kernel uses it.
 
 ## Tests
 
+* Group `elab` (`Tests/Groups/Elab.lean`): "sorts pass: a lambda inferred inside a pair
+  literal gets its sorts (the inline store law)" — the inline spelling, with the same
+  program through a helper as the control — and group `trust` (`Tests/Groups/Trust.lean`):
+  "the sorts pass's own failures are ordinary errors, not the kernel's internal one".
 * Group `selfhost` (`Tests/Groups/SelfHost.lean`): "D2 (closed by mandatory sorts): a
   Π/Σ/ULift cast across components of different sorts is stuck, and its normal form is
   accepted (both kernels)"; "U5b: a cast at a Π/Σ whose sort depends on a level variable

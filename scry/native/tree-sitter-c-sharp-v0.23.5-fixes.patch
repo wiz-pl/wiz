@@ -1,0 +1,56 @@
+Two grammar fixes for valid C# that tree-sitter-c-sharp v0.23.5 refuses, both
+backported from upstream master (0.24.0). scry/CSHARP.md §8.2 lists the 16 real
+files that failed on them; after this patch the whole tree parses.
+
+1. `_reserved_identifier` omits `with`, `partial` and `required`. They are contextual
+   keywords, so `var with = ...`, `partial.Member` and `required.Member` are valid C#
+   identifiers outside their keyword position.
+2. `list_pattern` accepts a bare `..` but not a slice with a designation,
+   `['[', .. var middle, ']']` (C# 11). Upstream master's `slice_pattern` rule is
+   backported verbatim.
+
+`src/parser.c` is regenerated from this grammar at build time (`tree-sitter generate
+--abi 15` in flake.nix's `tree-sitter-c-sharp` derivation); the patch does not touch
+generated code.
+
+--- a/grammar.js	2026-11-18 21:24:17.456351921 +0200
++++ b/grammar.js	2026-11-18 21:24:17.462351910 +0200
+@@ -1216,13 +1216,21 @@
+     list_pattern: $ => prec.right(seq(
+       '[',
+       optional(seq(
+-        commaSep1(choice($.pattern, '..')),
++        commaSep1(choice($.pattern, $.slice_pattern)),
+         optional(','),
+       )),
+       ']',
+       optional($._variable_designation),
+     )),
+ 
++    // C# 11 slice pattern: `..` optionally followed by a subpattern that binds the
++    // captured slice (`[a, .. var rest, z]`, `[..]`, `[.. List<int> rest]`). Backported
++    // from tree-sitter-c-sharp master (0.24.0), which v0.23.5 predates.
++    slice_pattern: $ => choice(
++      prec(PREC.RANGE + 1, '..'),
++      prec.right(seq('..', $.pattern)),
++    ),
++
+     recursive_pattern: $ => prec.left(choice(
+       // name followed by positional pattern WITH variable designation
+       prec.dynamic(1, seq(
+@@ -2002,12 +2010,15 @@
+       'notnull',
+       'on',
+       'orderby',
++      'partial',
++      'required',
+       'scoped',
+       'select',
+       'unmanaged',
+       'var',
+       'when',
+       'where',
++      'with',
+       'yield',
+     ),
+ 

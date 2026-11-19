@@ -18,6 +18,8 @@
 # `wiz_doc_step` on every event, so nothing waits inside Wasm (no Asyncify).
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# without emcc on the PATH, run again with Emscripten from nixpkgs
+if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
 FROM=${WIZ_WEB_FROM:-}
 OPT=
@@ -56,7 +58,7 @@ CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
 # 1. mini-gmp from GMP's source tarball, behind a <gmp.h>
 if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
   mkdir -p "$OUT/gmp"
-  SRC=${GMPSRC:-$(nix build --no-link --print-out-paths nixpkgs#gmp.src)}
+  SRC=${GMPSRC:-$(nix build --inputs-from "$ROOT" --no-link --print-out-paths nixpkgs#gmp.src)}
   tar -C "$OUT/gmp" --strip-components=2 -xf "$SRC" --wildcards '*/mini-gmp/mini-gmp.[ch]'
   printf '#include "mini-gmp.h"\n' > "$OUT/gmp/gmp.h"
 fi

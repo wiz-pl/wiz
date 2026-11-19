@@ -116,6 +116,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="bounded CI profile: 120 executions, 3 s, 2 GiB, no minimisation")
     p.add_argument("--regressions-only", action="store_true",
                    help="replay scry/tests/fixtures/fuzz-regression/*.c and exit")
+    p.add_argument("--no-write-fixtures", action="store_true",
+                   help="do not add this run's findings to "
+                        "scry/tests/fixtures/fuzz-regression (a CI run must not "
+                        "replace the committed regression set); --ci implies it")
     p.add_argument("--no-minimise", action="store_true",
                    help="do not delta-minimise findings")
     p.add_argument("--max-minimise-evals", type=int, default=30,
@@ -1203,6 +1207,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.timeout = min(args.timeout, 3.0)
         args.memory_mb = min(args.memory_mb, 2048)
         args.no_minimise = True
+        # The bounded profile runs in CI against a checkout: never let a random
+        # finding delete or replace the committed regression fixtures.
+        args.no_write_fixtures = True
     scry = str(Path(args.scry).resolve())
     if not Path(scry).is_file():
         say(f"scry binary not found: {scry}\n"
@@ -1218,6 +1225,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not out.is_absolute():
         out = ROOT / out
     out.mkdir(parents=True, exist_ok=True)
+    # A CI run must not rewrite the checked-in campaign report either.
+    if args.no_write_fixtures and args.markdown == str(SCRY_DIR / "bench" / "fuzz.md"):
+        args.markdown = str(out / "fuzz.md")
     findings_dir = out / "findings"
     findings_dir.mkdir(exist_ok=True)
 
@@ -1329,9 +1339,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"{human_bytes(len(body))} in {f.minimise_evals} eval(s)")
 
     elapsed = time.monotonic() - start
-    # Regression fixtures: copy minimised crash/hang/oom/wrong inputs.
+    # Regression fixtures: copy minimised crash/hang/oom/wrong inputs. A CI run
+    # (`--no-write-fixtures`, implied by `--ci`) writes them under the run's output
+    # directory instead, so it cannot prune the committed set.
+    target = (out / "findings") if args.no_write_fixtures else FINDINGS_DIR
     if findings:
-        FINDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
     manifest = []
     written: set[str] = set()
     for f in findings:
@@ -1339,9 +1352,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         # original. `minimise` already verified the minimised form.
         body = f.minimised if f.minimised is not None else f.data
         name = f"fuzz-regression-{slug(f.run.signature() + '-' + f.origin)}.c"
-        (FINDINGS_DIR / name).write_bytes(body)
+        (target / name).write_bytes(body)
         written.add(name)
-        f.fixture = f"scry/tests/fixtures/fuzz-regression/{name}"
+        f.fixture = ("" if args.no_write_fixtures
+                     else f"scry/tests/fixtures/fuzz-regression/{name}")
         manifest.append({
             "file": name, "category": f.category, "mode": f.mode,
             "signature": f.run.signature(), "origin": f.origin,
@@ -1355,10 +1369,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if manifest:
         # A regenerated set must not leave fixtures from an older run with no
         # manifest row (they would replay with the wrong mode).
-        for old in FINDINGS_DIR.glob("fuzz-regression-*.c"):
+        for old in target.glob("fuzz-regression-*.c"):
             if old.name not in written:
                 old.unlink()
-        (FINDINGS_DIR / "manifest.json").write_text(
+        (target / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     report = {

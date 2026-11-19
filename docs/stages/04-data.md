@@ -70,15 +70,17 @@ A **structure** is such a Σ, and `s.field` is a projection: so a structure can 
 held unrestricted for now. `(1 g : Guard)` can be passed along, but no field of it can
 be read, `match` doesn't take it apart, and a nested `let 1 (x, y)` leaves the
 structure's marker tail unconsumed. Use a tuple for linear data, e.g. `Nat × Tok`
-instead of `structure Guard where n : Nat; tok : Tok`. (Linear matching is not there
-yet: `wiz-notes/wishful/linear-case.md`.)
-This includes a one-field wrapper (`structure Coin where value : Nat`, read with
-`c.value` at 1), which worked before: write it as `def Coin : Type := Nat`. The planned
-form is `let 1 (.mk a b) := s`, compiled to nested splits
-(`wiz-notes/linear-case-design.md`). The eliminators follow the same rule:
-`ind`, `sfix`, `scase` (and `coit`/`scofix` for their seed) bind what they take apart at
-ω, so their scrutinee counts ω times and a value of an inductive type held at 1 can be
-passed on but not eliminated; `match` already took its scrutinee at ω. The accepted follow-up is the linear-case plan (`wiz-notes/linear-case-design.md`): K2a (an unused variable may leave its binder when its type is `Unit`, so a linear `Unit` needs no consumer), re-encoding B of structures (the marker in a 0-quantity first component, so a nested `let 1` leaves no marker tail to consume), and a quantity on `scase` (`scase_π`: the scrutinee is used π times and its fields are bound at π·q), which gives structures a destructuring form and linear inductive values an eliminator.
+instead of `structure Guard where n : Nat; tok : Tok`. This includes a one-field wrapper
+(`structure Coin where value : Nat`, read with `c.value` at 1), which worked before:
+write it as `def Coin : Type := Nat`. A structure held at 1 still can't be taken apart
+because its marker tail can't be consumed (`docs/stages/13-language.md`, 13h).
+
+A value of an **inductive** type held at 1 can be eliminated: `match` selects
+`T.casesOn1` when the scrutinee mentions a variable bound at 1 (`Wiz/Elab/Recursor.lean`
+defines it; `Wiz/Elab/Term.lean` chooses it), and the `linear-case` group pins the linear
+match in both alternatives, nested matches, and the dropping and duplicating cases it
+rejects. The `let 1 (.mk a b) := s` form works for inductives (it is a `match`) and still
+stops on a structure's marker tail.
 
 | #   | Where              | What                                                       |
 |-----|--------------------|------------------------------------------------------------|

@@ -1,0 +1,8 @@
+[
+  {
+    "directory": ".",
+    "file": "main.c",
+    "arguments": ["cc", "-I", "include", "-DANSWER=42", "-std=c11",
+                  "-c", "main.c", "-o", "main.o", "-MMD", "-MP"]
+  }
+]

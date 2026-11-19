@@ -22,3 +22,12 @@ rule command-injection
   sink System.Diagnostics.ProcessStartInfo.set_FileName arg 1
   sink System.Diagnostics.ProcessStartInfo.set_Arguments arg 1
 end
+
+# CWE-117: a request value written to a log line. The sink facts for `ILogger.Log*` come
+# from `Scry.Models` (a log write is a model effect, like a libc call), so the rule only
+# declares the id, severity and message.
+rule log-injection
+  kind taint
+  severity warning
+  message Attacker-controlled data reaches a log line written to a file
+end

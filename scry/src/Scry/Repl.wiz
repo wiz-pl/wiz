@@ -148,6 +148,9 @@ def Scry.Repl.saveUnits (us : List Scry.Repl.Unit) : IO Unit := do
 
 /-- Parse one C file and cache its CST columns. -/
 def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := do
+  -- The cache directory must exist before the first `write`: `saveUnits` creates it
+  -- afterwards, which used to lose the cst of the first `load` in a fresh checkout.
+  Scry.Repl.ensureDir Scry.Repl.dir;
   text ← Scry.Repl.ioOr path "" (FS.readFile path);
   match String.isEmpty text with
   | .true => IO.pure .none
@@ -168,7 +171,7 @@ def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := 
         IO.pure (.some (Scry.Repl.Unit.mk path p))
 
 partial def Scry.Repl.sortGo (x : String) : List String → List String
-  | .nil => List.cons x .nil
+  | .nil => [x]
   | .cons y rest => match String.lt x y with
     | .true => List.cons x (List.cons y rest)
     | .false => List.cons y (Scry.Repl.sortGo x rest)
@@ -234,7 +237,7 @@ def Scry.Repl.load (path : String) : IO Unit := do
       match u with
       | .none => IO.println ("load: could not load " ++ path)
       | .some u => do
-        Scry.Repl.saveUnits (List.cons u .nil);
+        Scry.Repl.saveUnits [u];
         IO.println ("loaded " ++ path ++ " (1 unit; use facts/query/functions)")
 
 
@@ -439,7 +442,7 @@ def Scry.Repl.findingRecordJson (rep : Scry.TaintReport) (st : Scry.WfStore)
   let state := match old with | .some r => r.state | .none => (.new : Scry.WfState);
   let artifacts := Scry.Repl.pjoin (Scry.Repl.pjoin Scry.Repl.dir "artifacts") id;
   (finding, Scry.WfRecord.mk id key lineHash state history rep.file .none .false finding
-    artifacts .none .none .none firstSeen now)
+    artifacts .none .none .none .none .none firstSeen now)
 
 def Scry.Repl.recordOfPair (rep : Scry.TaintReport) (st : Scry.WfStore) (now : Nat)
     (pair : Scry.RuleFinding × Option Scry.Certificate) : Scry.WfRecord :=
@@ -471,11 +474,11 @@ def Scry.Repl.analyzeUnit (rules : Option String) (u : Scry.Repl.Unit) :
         IO.pure .none
       | .false => do
         -- the same pipeline as `scry taint` (`Scry.analyzeStore`), from the cached store
-        let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .none .none
-          .none (.some 300) (.some 2000000) .none .false;
+        let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .false .none .none
+          .none (.some 300) (.some 2000000) .none .false Scry.defaultModels;
         startMs ← Scry.nowMs;
-        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source (Scry.lineStartsOf source)
-          cst (Scry.CstStore.nodeCount cst))
+        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source
+          (Scry.TextIndex.ofString source) cst (Scry.CstStore.nodeCount cst))
 
 def Scry.Repl.taintJson (ru : Scry.Repl.ReportUnit) : Json :=
   let rep := ru.report;
@@ -703,9 +706,10 @@ def Scry.Repl.repro (id : String) : IO Nat := do
     | .false => do IO.println ("repro: source not found: " ++ r.source); IO.pure 1
     | .true => do
       Scry.Repl.ensureDir r.artifacts;
-      let cfg := Scry.ReproConfig.mk "cc" "none" .none .none "" 5 .nil .none "absent" "L0";
+      let cfg := Scry.ReproConfig.mk "cc" "none" .none .none "" 5 .nil .none "absent" "L0"
+        .none "template" "";
       res ← Scry.Repl.ioOr "repro" (Scry.ReproResult.mk "compile-failed" "none" .false
-          .false .false .false "exited" 127 0 Json.mkNull "" .nil)
+          .false .false .false "exited" 127 0 .false Json.mkNull "" .nil)
           (Scry.reproRun cfg r.source r.artifacts "repro");
       now ← IO.bind Clock.wall (fun d => IO.pure d.ns);
       Scry.Repl.saveStore (Scry.wfUpsert st (Scry.Repl.withDynamic now r));
@@ -800,8 +804,10 @@ def Scry.Repl.callSiteJson (c : Scry.Repl.CallSite) : Json := Json.mkObj
    ("source", Json.mkStr c.source), ("line", Json.ofNat c.line),
    ("column", Json.ofNat c.column)]
 
+/-- The source text of a span. `sp` is a byte range; `text` is character-indexed, so go
+through its byte map. -/
 partial def Scry.Repl.sourceAt (text : String) (sp : Scry.Span) : String :=
-  String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+  Scry.ByteMap.slice (Scry.ByteMap.ofString text) sp.start sp.stop
 
 partial def Scry.Repl.childWithField (f : Scry.Facts) (id : Nat) (field : String) :
     Option Scry.NodeId :=
@@ -909,7 +915,7 @@ partial def Scry.Repl.uniqCallers (acc : List String) : List Scry.Repl.CallSite 
   | .nil => acc
   | .cons c rest => match List.any (fun x => String.eq x c.function) acc with
     | .true => Scry.Repl.uniqCallers acc rest
-    | .false => Scry.Repl.uniqCallers (List.append acc (List.cons c.function .nil)) rest
+    | .false => Scry.Repl.uniqCallers (List.append acc [c.function]) rest
 
 /-- Functions that call `callee` (deduplicated). -/
 def Scry.Repl.callers (callee : String) : IO (List String) := do

@@ -1,2 +1,3 @@
-examples/import_c.wiz:4:1: info: C.strlen : String → IO Nat
-examples/import_c.wiz:5:1: info: C.pow : Float64 → Float64 → Float64
+12
+1024
+1.4142135623730951

@@ -62,13 +62,13 @@ def q1 : Nat × Nat × Nat := (Netlist.size chainS.1, Netlist.count NetOp.isAdd 
 def chain3 : Circuit u8 u8 := Circuit.mk none0 nil0 (fun s x => Hw.pair s (dbl 3 x))
 def q2 : List Nat × List Nat := (Circuit.runPacked chain3 trace, Circuit.simNet .true chain3 trace)
 #eval q2
-def inp : Wire u8 := NetM.emit (NetOp.input 0) 8 List.nil
+def inp : Wire u8 := NetM.emit (NetOp.input 0) 8 []
 def n1 : NetS := (Wire.build .true (dblNoShare 10 inp)).2
 def n2 : NetS := (Wire.build .false (dblNoShare 10 inp)).2
 def q3 : Nat × Nat × Nat := (n1.next, n1.work, n2.next)
 #eval q3
 -- identical subterms from different paths merge: (x + y) built twice, once as (y + x)
 def twoPaths {r : HwTy → Type} [Hw r] (x y : r u8) : r u8 := Hw.mul (Hw.add x y) (Hw.add y x)
-def inp2 : Wire u8 := NetM.emit (NetOp.input 1) 8 List.nil
+def inp2 : Wire u8 := NetM.emit (NetOp.input 1) 8 []
 def m1 : NetS := (Wire.build .true (twoPaths inp inp2)).2
 #eval m1.next

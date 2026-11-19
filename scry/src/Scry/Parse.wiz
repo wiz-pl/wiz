@@ -1,4 +1,5 @@
 import Sys
+import IO
 import Scry.Facts
 import Scry.CstStore
 import Scry.Native
@@ -107,21 +108,37 @@ def Scry.loadCstFile (path : String) : EIO Scry.CstStore := do
   | .ok s => EIO.pure s
   | .error e => EIO.fail (path ++ ": " ++ e)
 
+/-- The first byte of `b` that is not ASCII white space (the byte-wise `String.trim`
+prefix test), or `none` when the file is only white space. -/
+def Scry.firstNonSpaceByte (b : Bytes) : Option Nat :=
+  let i := Scry.skipSpaceBytes b 0 (Bytes.size b);
+  match Nat.lt i (Bytes.size b) with
+  | .true => .some (Bytes.get b i)
+  | .false => .none
+
 /-- The `parse --stats` block for one path: a `scry-cst` spill, a JSON store, or (when
-the text is neither) C source parsed by the native shim. -/
+the text is neither) C source parsed by the native shim. The file is read as `Bytes`:
+the store sniff and the C parse work on the bytes, and only a JSON/spill store is
+decoded to `String` (it has to be, its reader is text-based). -/
 def Scry.parseBlock (path : String) : EIO Scry.ParseBlock := do
-  text ← FS.readFile path;
-  match String.startsWith text "scry-cst " with
-  | .true => match Scry.CstStore.ofText text with
+  bytes ← FS.readBytes path;
+  match Bytes.startsWith bytes "scry-cst " with
+  | .true => match Scry.CstStore.ofText (Scry.bytesText bytes) with
     | .error e => EIO.fail (path ++ ": " ++ e)
     | .ok s => EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStatsCst s)
         (Scry.CstStore.statsOf s))
-  | .false => match String.startsWith (String.trim text) "{" with
-    | .true => match Scry.Facts.ofText text with
-      | .error e => EIO.fail (path ++ ": " ++ e)
-      | .ok f => EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStats f) (Scry.statsOf f))
-    | .false => do
-      st ← Scry.Native.parse "c" text;
+  | .false => match Scry.firstNonSpaceByte bytes with
+    | .some b => match Nat.beq b 123 with
+      | .true => match Scry.Facts.ofText (Scry.bytesText bytes) with
+        | .error e => EIO.fail (path ++ ": " ++ e)
+        | .ok f => EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStats f) (Scry.statsOf f))
+      | .false => do
+        st ← Scry.Native.parseBytes "c" bytes;
+        cst ← EIO.lift (Scry.Native.toCstStore path st);
+        EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStatsNative st cst)
+          (Scry.CstStore.statsOf cst))
+    | .none => do
+      st ← Scry.Native.parseBytes "c" bytes;
       cst ← EIO.lift (Scry.Native.toCstStore path st);
       EIO.pure (Scry.ParseBlock.mk (Scry.renderParseStatsNative st cst)
         (Scry.CstStore.statsOf cst))
@@ -129,6 +146,6 @@ def Scry.parseBlock (path : String) : EIO Scry.ParseBlock := do
 /-- Parse one C (or other supported language) file into the model store. The shim has
 tree-sitter-c only; another `lang` is an error from `Scry.Native.parse`. -/
 def Scry.parseSource (lang : String) (path : String) : EIO Scry.CstStore := do
-  text ← FS.readFile path;
-  st ← Scry.Native.parse lang text;
+  bytes ← FS.readBytes path;
+  st ← Scry.Native.parseBytes lang bytes;
   EIO.lift (Scry.Native.toCstStore path st)

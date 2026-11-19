@@ -22,12 +22,19 @@ initialize caseJobsRef : IO.Ref Nat ← IO.mkRef 1
 /-- Whether the driver was given `--jobs` (so a case can tell an explicit `--jobs 1`
 from the default, which means "choose for yourself"). -/
 initialize caseJobsSetRef : IO.Ref Bool ← IO.mkRef false
+/-- The driver's `--part i/n`, for a case that is one part of a split sweep
+(`=selfhost-libdiff`): `Group.run` passes it to each case's process. Empty when it was
+not given, which is the whole sweep (`1/1`). -/
+initialize casePartRef : IO.Ref String ← IO.mkRef ""
 
 /-- How many workers a case may use (`caseJobsRef`); at least 1. -/
 def caseJobs : IO Nat := do pure (max 1 (← caseJobsRef.get))
 
 /-- Whether `--jobs` was given on the command line. -/
 def caseJobsGiven : IO Bool := caseJobsSetRef.get
+
+/-- The driver's `--part i/n` as it was given, or `""`. -/
+def casePart : IO String := casePartRef.get
 
 def toolchain : IO Wiz.Toolchain := toolchainRef.get
 
@@ -244,13 +251,18 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let given ← caseJobsGiven
   let jobs ← caseJobs
   let jobArgs := if given then #["--jobs", toString jobs] else #[]
+  -- `--part i/n` is the split sweep's part (a case of a non-parallel group that opted
+  -- into it); the other cases ignore it
+  let part ← casePart
+  let partArgs := if part.isEmpty then #[] else #["--part", part]
   let mut results := #[]
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
     let start ← IO.monoMsNow
     let child ← IO.Process.spawn
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ jobArgs ++ (← flagsRef.get).toArray
+      { cmd := self.toString,
+        args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
         stdin := .null, stdout := .piped, stderr := .piped }
     let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
     let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
@@ -310,7 +322,8 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
   IO.println s!"── {g.name} ({g.exercise})"
   (← IO.getStdout).flush
   let self ← IO.appPath
-  let flags := (← flagsRef.get).toArray
+  let part ← casePart
+  let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)

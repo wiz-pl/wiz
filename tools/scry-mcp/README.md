@@ -13,18 +13,22 @@ that bridge's transport, its path confinement and its environment filter, so
 `.mcp.json` registers it for Claude Code as `scry`:
 `sh tools/scry-mcp/scry-mcp.sh --timeout 300`. It needs a built `scry` (`grail
 build` in `scry/`) that lives outside the workspace, or an explicit `--scry` /
-`$SCRY_BIN`. The first of these that exists is used:
+`$SCRY_BIN`. The search order is:
 
-1. `--scry PATH`
-2. `$SCRY_BIN`
-3. `scry` on `PATH`
+1. `--scry PATH` — used as given; a non-executable path is `scry_not_found` (there
+   is no fallback to the next entry);
+2. `$SCRY_BIN` — tried when `--scry` was not given (a bad value falls through to
+   `PATH`);
+3. `scry` on `PATH`.
 
 The workspace's own build (`scry/.grail/bin/scry`) is **not** found
 automatically: the workspace is the tree under review, and a server whose first
 tool call executes a program from that tree would run repository-controlled
 code. Point `--scry` or `$SCRY_BIN` at it explicitly if that is what you want.
-That is the one intentional trust decision in the server: everything else it
-starts is `cc` (the host preprocessor), `git diff`, or `uname`.
+That is the intentional trust decision about `scry` itself: the other programs it
+starts are `cc` (the host preprocessor) and `git diff`, each found through the inherited
+`PATH`. A relative entry in `PATH` is therefore a second trust decision, not a sandbox
+boundary.
 
 The default rule pack is `--rules`, else `./lib/Scry/rules/default.scry`, else
 the `default.scry` in the library of the `wiz` the workspace would use.
@@ -214,10 +218,16 @@ Every tool except the runners is annotated `readOnlyHint: true`,
   refused by name**, not stripped: `-B<dir>` (with a committed `cc1`),
   `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, `-cc1`, `-Xlinker`,
   `-imacros`, `--sysroot` and any other `-f…`/`-m…` option could change which
-  program runs or what it reads. The refusal is `invalid_args` and names the
-  flag; Scry's own parser enforces the same list
-  (`scry/src/Scry/Project.wiz`). `cc -E -ffreestanding` is the one host program
-  the server can start besides `scry` and `git diff`.
+  program runs or what it reads. The branch's explicit deny list of execution
+  vectors runs before the allowlist, so a refusal names the vector even if the
+  allowlist grows. The refusal is `invalid_args` and names the flag; Scry's own
+  parser enforces the same list (`scry/src/Scry/Project.wiz`). `cc -E
+  -ffreestanding` is the one host program the server can start besides `scry`
+  and `git diff`.
+* **Child output is bounded.** `stdout`/`stderr` are drained in chunks and only
+  the first 64 KiB of each is kept; past 8 MiB on either stream the child's
+  process group is killed, so a repository-chosen output size cannot OOM the
+  server.
 * **Outputs are confined.** Findings, SARIF results and findings-database
   records whose file is outside the roots are withheld: counted, never named.
   `show` of such a finding is `path_denied`. Within a report, `skipped[].file`
@@ -251,7 +261,9 @@ Error kinds:
 --workspace DIR   paths are relative to DIR (default: cwd)
 --scry PATH       the scry executable
 --rules FILE      the default rule pack
---timeout SECS    per-call deadline, also the cap on Scry's own --timeout (default: 300)
+--timeout SECS    the deadline for the taint/project tools and the cap on Scry's own
+                  --timeout (default: 300); scry_version uses 30 s, and the
+                  facts/query/explain/findings tools cap at 120 s
 --allow-root DIR  another directory tools may read (repeatable; never written)
 --pass-env NAME   pass another variable to Scry, not git diff (credential-like names dropped)
 --allow-scry-dynamic  list and allow scry_dynamic, scry_repro, scry_verify (heavy, sandboxed)
@@ -288,19 +300,3 @@ environment. They check:
   refusal when heavy is busy.
 
 The `tools` workflow runs them on every change under `tools/`.
-
-## Claims to check at merge time
-
-Found while writing the git section; left as written rather than changed
-silently.
-
-* "The first of these that exists is used" (Quick start): `resolve_scry` does
-  not fall back. An explicit `--scry` that is not executable is
-  `scry_not_found`; `$SCRY_BIN` and `PATH` are not tried after it.
-* `--timeout` is described as the per-call deadline (Options): `scry_version`
-  uses 30 seconds, `scry_facts`/`scry_query`/`scry_explain`/`scry_findings` cap
-  at 120, and only `scry_taint`/`scry_project` use the configured value.
-* "That is the one intentional trust decision in the server" (Quick start):
-  `git` is found through the inherited `PATH` and is not resolved to an
-  absolute host path, so a relative `PATH` entry is a second trust decision.
-  It is not changed here.

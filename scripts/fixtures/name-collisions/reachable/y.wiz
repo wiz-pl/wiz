@@ -1,0 +1,2 @@
+/-- Fixture: shares an importer (`all`) with x.wiz. -/
+def shared : Nat := 2

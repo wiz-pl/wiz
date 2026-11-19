@@ -1,15 +1,28 @@
 name: Wiz toolchain
 description: >
   Nix with the flake's dev shell (GMP, Boehm GC, LLVM, cc, yosys, Node, elan), the Cachix
-  binary cache if one is configured, and (for the jobs that still run Lake) the elan
+  binary cache if one is configured (and, for a pull request, an untrusted PR cache as an
+  extra substituter for this job), and (for the jobs that still run Lake) the elan
   toolchain from lean-toolchain (cached). Later steps run in the dev shell through
   `shell: nix develop --command bash -eo pipefail {0}`.
 inputs:
   cachix-name:
-    description: The Cachix cache to substitute from; empty for none (pushing is a separate step).
+    description: The trusted Cachix cache to substitute from; empty for none (pushing is a separate step).
     default: ""
   cachix-token:
-    description: The Cachix auth token for substitution; empty means anonymous (fork pull requests).
+    description: >
+      The trusted cache's auth token for substitution; empty means anonymous. A pull
+      request must pass empty here: only a push to master may use the trusted token.
+    default: ""
+  cachix-pr-name:
+    description: >
+      An additional, untrusted cache to add as a substituter for this job only (a pull
+      request's CACHIX_PR_NAME); empty for none. Its key is trusted in this job only.
+    default: ""
+  cachix-pr-token:
+    description: >
+      The untrusted PR cache's auth token; with no token the cache is not added (a fork
+      PR, or before the secret exists, builds instead).
     default: ""
   lean:
     description: >
@@ -23,13 +36,23 @@ runs:
     - if: runner.environment == 'github-hosted'
       uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
     # Substitution only: publishing is an explicit `cachix push` step in the build job
-    # (`nix shell nixpkgs#cachix -c cachix push …`, with the token in its environment), so
-    # this action never pushes whatever a job happened to build.
+    # (`nix develop .#ci -c cachix push …`, with the token in its environment), so
+    # this action never pushes whatever a job happened to build. Only master's push step
+    # names the trusted cache; a PR's push step names its own untrusted cache.
     - if: inputs.cachix-name != ''
       uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
       with:
         name: ${{ inputs.cachix-name }}
         authToken: ${{ inputs.cachix-token }}
+        skipPush: true
+    # A pull request may add its own cache as a second substituter. `skipPush` keeps it
+    # read-only here; the build job's explicit push is the only writer. The cache's key is
+    # added for this job only, so master and the docs/tower jobs never trust it.
+    - if: inputs.cachix-pr-name != '' && inputs.cachix-pr-token != ''
+      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+      with:
+        name: ${{ inputs.cachix-pr-name }}
+        authToken: ${{ inputs.cachix-pr-token }}
         skipPush: true
     - name: Dev shell
       shell: bash

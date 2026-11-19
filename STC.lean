@@ -8,6 +8,7 @@ import STC.F0.Substitution
 import STC.F0.WhRed
 import STC.F0.Obligations
 import STC.F0.Sorting
+import STC.F0.ConvJoin
 import STC.F0.Typing
 import STC.F0.TopSort
 import STC.F0.Sanity
@@ -54,6 +55,12 @@ The files:
   by `Sig.Closed`, that type the ends of conversions and move a context entry along one;
 * `F0/Sorting`: `SortUniqueAt` reduced to `TyUnique` + `ConvInjSort`, with the exact gap
   (the `trans` case needs normalisation/confluence, not a rule) written down;
+* `F0/ConvJoin`: `ConvJoin` ("conversion has a common reduct") is **refuted** — `irrel`/`η`
+  are conversions, not reductions, and the counterexample is strongly normalising
+  (`convJoin_false`). The true conditional form of the reduction fragment is proved from
+  strong normalisation + local confluence (Newman's lemma), and the sort-endpoint repair
+  `ConvHead` — implied by `ConvJoin`, and enough for `ConvInjSort`/`SortUniqueAt`/
+  `WhRed.empty_at_prop` — is recorded as the algorithmic obligation M1 proves;
 * `F0/Typing`: what the two structural rules buy (both endpoints of any conversion typed,
   both endpoints of a `Pi.cong`/`Sigma.cong` conclusion typed from its own premises), and
   the remaining law obligation (`StructRenClosed`, `StructSubClosed`);

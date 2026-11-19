@@ -21,11 +21,6 @@ def showsB : List Bool → String
   | .nil => ""
   | .cons x xs => (match x with | .true => "1" | .false => "0") <+> " " <+> showsB xs
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 -- One command of the sequence writer: a start pulse in the first cycle, then idle.
 def startAt (k : Nat) : HwTy.El Display.QIn.code :=
   Bundle.toEl Display.QIn.bundle
@@ -69,11 +64,11 @@ def runSeq (name : String) (xs : List Display.Byte) (cycles : Nat) : String :=
   let outs := Circuit.runLeaves c ins;
   let got := decoded outs;
   let want := Display.entries xs;
-  name <+> ": sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
-    <+> " netlist " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  name <+> ": sim " <+> yes (BEq.beq outs (Circuit.simLeaves .true c ins))
+    <+> " netlist " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", done " <+> Hdl.show (countDone outs)
     <+> ", bytes " <+> Hdl.show (List.length got) <+> "/" <+> Hdl.show (List.length want)
-    <+> ", ok " <+> yes (Hdl.natsEq got want)
+    <+> ", ok " <+> yes (BEq.beq got want)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist name c))
 
 -- The byte writer, fed one byte every 20 cycles (16 for the transfer, 4 idle).
@@ -93,10 +88,10 @@ def runSer : String :=
   let outs := Circuit.runLeaves c ins;
   let got := decoded outs;
   let want : List Nat := .cons 33 (.cons 384 (.cons 256 .nil));
-  "serC: sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
-    <+> " netlist " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  "serC: sim " <+> yes (BEq.beq outs (Circuit.simLeaves .true c ins))
+    <+> " netlist " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", done " <+> Hdl.show (countDone outs)
-    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got want)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (BEq.beq got want)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ser" c))
 
 def main : IO Unit := do
