@@ -315,8 +315,6 @@ def Scry.TextIndex.ofString (text : String) : Scry.TextIndex :=
 
 /-- A 1-based line and **character** column for a byte offset. The line table holds byte
 offsets; the column goes through the text's byte map, so a multibyte character before
-/-- A 1-based line and **character** column for a byte offset. The line table holds byte
-offsets; the column goes through the text's byte map, so a multibyte character before
 the span does not inflate it. -/
 def Scry.lineColFrom (idx : Scry.TextIndex) (off : Nat) : Nat × Nat :=
   let starts := idx.lineStarts;

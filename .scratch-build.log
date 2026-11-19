@@ -1,47 +1,5 @@
 heavy: template [lake build .*wiz.*tests] -> mem=8G cpus=4 time=14400s
-srun: job 2424 queued and waiting for resources
-srun: job 2424 has been allocated resources
-⚠ [41/555] Replayed Wiz.Elab.ProcMacro
-warning: Wiz/Elab/ProcMacro.lean:244:3: `String.mk` has been deprecated: Use `String.ofList` instead
-
-Hint: Replace the deprecated name:
-  String.m̵k̵o̲f̲L̲i̲s̲t̲
-⚠ [46/555] Replayed Wiz.Elab.Term
-warning: Wiz/Elab/Term.lean:441:24: Variable name `args` is not explicitly referenced.
-
-Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
-  [apply] _args
-
-Note: This linter can be disabled with `set_option linter.unusedVariables false`
-⚠ [49/555] Replayed Wiz.Elab.Recursor
-warning: Wiz/Elab/Recursor.lean:88:11: Variable name `h` is not explicitly referenced.
-
-Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
-  [apply] _h
-
-Note: This linter can be disabled with `set_option linter.unusedVariables false`
-warning: Wiz/Elab/Recursor.lean:140:7: Variable name `tele0` is not explicitly referenced.
-
-Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
-  [apply] _tele0
-
-Note: This linter can be disabled with `set_option linter.unusedVariables false`
-⚠ [71/555] Replayed Wiz.Compiler.C
-warning: Wiz/Compiler/C.lean:23:42: `List.asString` has been deprecated: Use `String.ofList` instead
-
-Note: The updated constant is in a different namespace. Dot notation may need to be changed (e.g., from `x.asString` to `String.ofList x`).
-warning: Wiz/Compiler/C.lean:313:12: Variable name `cb` is not explicitly referenced.
-
-Hint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:
-  [apply] _cb
-
-Note: This linter can be disabled with `set_option linter.unusedVariables false`
-✖ [232/555] Building Wiz.Compiler.IRRun (558ms)
-trace: .> LEAN_PATH=/workspace/wt/train6/.lake/build/lib/lean /home/reuben/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean /workspace/wt/train6/Wiz/Compiler/IRRun.lean -o /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.olean -i /workspace/wt/train6/.lake/build/lib/lean/Wiz/Compiler/IRRun.ilean -c /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.c --setup /workspace/wt/train6/.lake/build/ir/Wiz/Compiler/IRRun.setup.json --json
-error: Wiz/Compiler/IRRun.lean:272:12: typeclass instance problem is stuck, it is often due to metavariables
-  Decidable (i < a.size)
-Some required targets logged failures:
-- Wiz.Compiler.IRRun
-error: build failed
-srun: error: noobnoob: task 0: Exited with exit code 1
+srun: job 2432 queued and waiting for resources
+srun: Job has been cancelled
+srun: error: Unable to allocate resources: Job/step already completing or completed
 rc=1
