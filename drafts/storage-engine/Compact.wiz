@@ -22,7 +22,11 @@ compact offline". `Registry.wiz` is the policy; this module is the rest of it:
   written to `<path>.compact`, fsynced, then `rename`d over the path and the directory
   fsynced. `rename` is the single atomic switch; a reader holding a read-only mapping of
   the old file keeps the old inode (POSIX), so its snapshot survives, and the new
-  `getDb`s read the new file.
+  `getDb`s read the new file. The image writes the **new registry chain** (the remapped
+  retained roots and persisted `K`) before either meta record; the newest meta names it,
+  while the older slot gets `registry_root = 0` and so falls back to its bare root if a
+  crash leaves only that slot readable. The whole image, registry included, is fsynced
+  before the rename, so a crash before the switch leaves the old file valid.
 
 ## Why a second file, and not a tail truncate
 
@@ -145,12 +149,14 @@ structure Plan where
   newOf : List (U64 × U64)
   totalPages : Nat
 
-/-- Space accounting for one state of the file. `metaPages` is the two slots, which are
-overhead, not data. -/
+/-- Space accounting for one state of the file. `metaPages` is the two slots and
+`registryPages` is the registry chain the chosen slot names; both are overhead, not
+data. -/
 structure Stats where
   livePages : Nat
   totalPages : Nat
   metaPages : Nat
+  registryPages : Nat
   wastedPages : Nat
   wastedBytes : Nat
 
@@ -160,18 +166,20 @@ structure Compacted where
   before : Stats
   after : Stats
 
-/-- The statistics of a plan's *before* state. -/
-def Plan.stats (p : Plan) : Stats :=
+/-- The statistics of a plan's *before* state: `registryPages` is the chain the chosen
+meta slot names; older registry chains are waste, like old data pages. -/
+def Plan.stats (p : Plan) (registryPages : Nat) : Stats :=
   let live := List.length p.live;
   let total := p.totalPages;
-  let wasted := Nat.sub total (Nat.add live 2);
-  Stats.mk live total 2 wasted (Nat.mul wasted 4096)
+  let overhead := Nat.add 2 registryPages;
+  let wasted := Nat.sub total (Nat.add live overhead);
+  Stats.mk live total 2 registryPages wasted (Nat.mul wasted 4096)
 
-/-- The statistics of the *after* state: total pages are the live pages and the two meta
-slots, so nothing is wasted. -/
-def Plan.after (p : Plan) : Stats :=
+/-- The statistics of the *after* state: the live pages, the two meta slots and the new
+registry chain, so nothing is wasted. -/
+def Plan.after (p : Plan) (registryPages : Nat) : Stats :=
   let live := List.length p.live;
-  Stats.mk live (Nat.add live 2) 2 0 0
+  Stats.mk live (Nat.add (Nat.add live 2) registryPages) 2 registryPages 0 0
 
 /-- The pure compaction plan: mark the reachable pages of the retained roots, sort and
 renumber them from page 2, and report what the rewrite reclaims. -/
@@ -230,7 +238,7 @@ def planOf (st : StoreState) : EIO Plan := do
 /-- Live pages, total pages and wasted bytes: the policy's input. -/
 def statsOf (st : StoreState) : EIO Stats := do
   p ← planOf st;
-  EIO.pure (Plan.stats p)
+  EIO.pure (Plan.stats p st.registryPages)
 
 /-- The current store's statistics. -/
 def storeStats (h : Handle) : EIO Stats := do
@@ -271,9 +279,10 @@ def copyLive (from to : Fd) (m : List (U64 × U64)) : List U64 → Nat → EIO U
       writeAt to (U64.ofNat i) (retargetPage b (mappedPage m (rightOf b)));
       copyLive from to m ps (Nat.succ i)
 
-/-- A meta record for one compacted root. -/
-def metaOf (r : RootPlan) (pageCount minGen : U64) : Meta :=
-  Meta.mk r.gen r.newRoot (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0)
+/-- A meta record for one compacted root. `registryRoot = 0` is the older slot: it falls
+back to its bare root if it is the one recovery has to use. -/
+def metaOf (r : RootPlan) (registryRoot pageCount minGen : U64) : Meta :=
+  Meta.mk r.gen r.newRoot (U64.ofNat 0) registryRoot (U64.ofNat 0)
     r.delEpoch minGen (U64.ofNat 0) pageCount
 
 /-- Write a 96-byte meta record at a byte offset (no fsync: the caller syncs once). -/
@@ -309,19 +318,24 @@ structure Prepared where
   fd : Fd
   plan : Plan
   fromGen : U64
-
-/-- Write the older retained root into the other parity slot, when there is one. -/
-def writeOtherRoot (fd : Fd) (p : Plan) (parity : Nat) (pageCount minGen : U64) : EIO Unit :=
-  match Plan.otherRoot p parity with
-  | .none => EIO.pure ()
-  | .some r => writeMetaAt fd (slotOffset r.gen) (metaOf r pageCount minGen)
+  /-- Pages the new registry chain occupies in the prepared image. -/
+  registryPages : Nat
 
 /-- Build the compacted image at `<path>.compact` and fsync it. The store itself is not
-touched: this is crash states 1–3 of the module header. -/
+touched: this is crash states 1–3 of the module header. The new registry is written
+before either meta record, and the whole image is fsynced before the rename switch. -/
 def prepareCompaction (h : Handle) : EIO Prepared := do
   st ← EIO.lift (MVar.read h.state);
   p ← planOf st;
-  let newCount := U64.ofNat (Nat.add (List.length p.live) 2);
+  let remapped := Registry.remap st.registry p.rootMap;
+  let refs := Registry.roots remapped;
+  let liveN := List.length p.live;
+  let regStart := U64.ofNat (Nat.add 2 liveN);
+  let regPages := registryPageCount refs;
+  -- Keep the arithmetic in `Nat`: converting `regStart` back with `toNat` in the same
+  -- expression makes the checker unfold the registry-length recursion without a bound.
+  let newCountN := Nat.add (Nat.add 2 liveN) regPages;
+  let newCount := U64.ofNat newCountN;
   let parity := Nat.mod st.db.gen.toNat 2;
   let newest := match Registry.find st.registry st.db.gen with
     | .some e => RootPlan.mk e.gen e.root (mappedPage p.newOf e.root) e.pages e.delEpoch
@@ -329,14 +343,20 @@ def prepareCompaction (h : Handle) : EIO Prepared := do
   let temp := String.append h.path ".compact";
   fdt ← Fd.open temp .readWrite OpenFlags.createNew;
   copyLive st.fd fdt p.newOf p.live 2;
+  -- The registry (new roots, persisted K) before the meta switch.
+  writeRegistry fdt st.db.gen (U64.ofNat remapped.keep) refs regStart;
   writeMetaAt fdt (slotOffset st.db.gen)
-    (metaOf newest newCount (Registry.minGen st.registry));
-  writeOtherRoot fdt p parity newCount (Registry.minGen st.registry);
+    (metaOf newest regStart newCount (Registry.minGen remapped));
+  match Plan.otherRoot p parity with
+  | .none => EIO.pure ()
+  | .some r => writeMetaAt fdt (slotOffset r.gen)
+      (metaOf r (U64.ofNat 0) newCount (Registry.minGen remapped));
   -- The length is an invariant, not a consequence of the last write (an empty store
-  -- writes only its meta record, and a future preallocating writer would leave a tail).
+  -- writes only its meta and registry records, and a preallocating writer would leave a
+  -- tail).
   Fd.truncate fdt (Nat.mul newCount.toNat pageSize);
   Fd.sync fdt;
-  EIO.pure (Prepared.mk temp h.path fdt p st.db.gen)
+  EIO.pure (Prepared.mk temp h.path fdt p st.db.gen regPages)
 
 /-- Throw away a prepared image (the caller decided not to switch). -/
 def abandonCompaction (p : Prepared) : EIO Unit := do
@@ -359,15 +379,18 @@ def finishCompaction (h : Handle) (p : Prepared) : EIO Compacted :=
         | .error e => MVar.fill h.state hole st (EIO.fail e)
         | .ok _ =>
           let st' := { st with
-            pageCount := U64.ofNat (Nat.add (List.length p.plan.live) 2),
+            pageCount := U64.ofNat (Nat.add (Nat.add (List.length p.plan.live) 2)
+              p.registryPages),
             fd := p.fd,
-            registry := Registry.remap st.registry p.plan.rootMap };
+            registry := Registry.remap st.registry p.plan.rootMap,
+            registryPages := p.registryPages };
           IO.bind (Fd.close st.fd) (fun _ =>
             IO.bind (syncDir (parentOf p.target)) (fun rs =>
               MVar.fill h.state hole st' (match rs with
                 | .error e => EIO.fail e
-                | .ok _ => EIO.pure (Compacted.mk p.fromGen (Plan.stats p.plan)
-                    (Plan.after p.plan)))))))
+                | .ok _ => EIO.pure (Compacted.mk p.fromGen
+                    (Plan.stats p.plan st.registryPages)
+                    (Plan.after p.plan p.registryPages)))))))
 
 /-- The whole protocol: build, fsync, rename, fsync the directory, publish. -/
 def compactStore (h : Handle) : EIO Compacted := do
