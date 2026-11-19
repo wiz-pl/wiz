@@ -241,3 +241,28 @@ rank/verdict/plan/JSON values (rank 88/95, duplicate reject, `SCRY_CMD`).
   CWE-78; there are no CWE-22/476 fixtures to run, so this note does not claim them.
 * The C# reproducer runs the program; it does not build a project, restore packages, or
   use a sanitizer.
+
+## 7. How to resume the blocked run
+
+The build slot is the only missing step. When the queue is free:
+
+```sh
+# the patched toolchain used here (a copy of the store grail with the worktree's lib)
+TC=/workspace/wt/sec-workflow/.scratch/toolchain/share/wiz/.lake/build/bin/grail
+/workspace/wiz-tools/heavy "$TC" -C /workspace/wt/sec-workflow/scry build scry
+
+# then the loop test (writes the .expected on the first run; review the diff)
+cd /workspace/wt/sec-workflow/scry
+/workspace/wiz-tools/heavy "$TC" -C . test workflow-e2e --update
+```
+
+The toolchain copy is scratch (`.scratch/`, git-ignored): it is the store's grail and
+wiz with `share/wiz/lib` replaced by the worktree's `lib`, which is what makes the
+worktree's `Scry.Workflow` visible to the scry package. A normal toolchain built from
+this branch (`lake build wiz grail`) does the same thing; the copy only avoided a second
+Lean build.
+
+The batch queue estimate at the time of writing was after midnight for a 6 G/3 CPU
+`grail build`; the deck build ran but needed roughly one module every four minutes. No
+amount of local `nice` is a substitute, so this is a report of a blocked job, not a
+test that passed.
