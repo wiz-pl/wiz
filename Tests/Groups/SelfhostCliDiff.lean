@@ -757,7 +757,7 @@ def cliDiffGroup : Group where
         else do
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
-          skip "artifact: --lib's object/header match; --no-main writes an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
+          cliDiffKnown "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -773,8 +773,8 @@ def cliDiffGroup : Group where
           check (← cliDiffExists h "out") "the host's LLVM build wrote no artifact"
           cliDiffKnown "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
         else do
-          let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
-          skip s!"backend: the host builds through textual LLVM IR; --llvm here selects the host's LLVM path (exit {h.code}: {why}); the self-hosted backend is C only (C5)" },
+          let why := " ".intercalate ((cliDiffNormal false false false h.err).splitOn "\n")
+          cliDiffKnown s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
