@@ -1,3 +1,4 @@
+namespace __root__
 -- The parser, in Wiz (stage 12d). Load it after `Lex.wiz`.
 -- It follows `Wiz/Parser/{Descr,Monad,Interp}.lean`: grammars are data (`PD`, the
 -- `ParserDescr` combinators), organised into syntax categories of leading and trailing
@@ -668,3 +669,4 @@ def spansAt (input : Array Nat) (tokens : List String) (pos : Nat) (s : Syntax) 
   | .ok sp _ => .some sp
   | .bad => .none
 
+end

@@ -805,7 +805,13 @@ def expandAliases (g : Globals R) (x : Name) : Name :=
 With no namespace and no opens this is `resolve` (the module's own private `x` under its
 kernel name, or `x`). -/
 def resolveName (g : Globals R) (x : Name) : Except String Name :=
-  if x.contains '.' then
+  if x == "__root__" then
+    .error "'__root__' is not a name: write `__root__.x` for the global `x`"
+  else if x.startsWith "__root__." then
+    -- (13v) the escape is absolute: `__root__.x` is the root `x` (Lean's `_root_.x`)
+    let k := g.resolve ((x.drop (("__root__.").length)).toString)
+    .ok k
+  else if x.contains '.' then
     let x := g.expandAliases x
     let k := g.resolve x
     if g.decls.contains k || g.namespacePrefix.isEmpty then .ok k else

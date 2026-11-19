@@ -1,3 +1,4 @@
+namespace __root__
 /-!
 # Prelude
 
@@ -1576,3 +1577,4 @@ def Syntax.infoAt (path : List Nat) (msg : String) : Syntax :=
 at `path` (so errors in it point there). -/
 def Syntax.sourceAt (path : List Nat) (src : String) : Syntax :=
   Syntax.mkNode "macro.source" (.cons (Syntax.pathNode path) (.cons (.atom src) .nil))
+end

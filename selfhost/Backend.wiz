@@ -1,3 +1,4 @@
+namespace __root__
 -- The backend, in Wiz (stage 21): from the kernel terms the self-hosted frontend checks
 -- to C. Load it after `Frontend.wiz`. A first, minimal version (21a–b): no reference
 -- counting (the runtime collects garbage); payloads are nested pairs, though the
@@ -3097,3 +3098,4 @@ def missingLinks : List Foreign → IO (List String)
         | .true => List.cons (String.append "error: link_c: no file " (String.append p " (paths are relative to the .wiz file)")) more
         | .false => more)))
     | _ => IO.pure more)
+end

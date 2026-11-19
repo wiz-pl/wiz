@@ -3549,6 +3549,10 @@ def selfHostGroup : Group where
         selfhostCheckFile ("import Prelude\nnamespace N\nmutual\ninductive A where\n  | mk (b : B)\n" ++
           "inductive B where\n  | mk (a : A)\nend\nend N\n")
           "N.A : U0\nN.B : U0\n" },
+    { name := "(13v) `namespace __root__` keeps the block's declarations global", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace __root__\ndef r : Nat := 1\n" ++
+          "def G.x : Nat := 2\nend __root__\n#check r\n#check G.x\n")
+          "r : Nat\nG.x : Nat\n" },
     { name := "(13t) a module's `open` does not reach the file that imports it", run := fun _ =>
         selfhostCheckModules
           [("A.wiz", "import Prelude\nnamespace A\ndef x : Nat := 1\nend A\nopen A\n"),

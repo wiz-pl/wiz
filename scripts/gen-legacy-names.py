@@ -122,10 +122,16 @@ class Decl:
     line: int  # 1-based
     private: bool
     local: bool
+    rooted: bool = False  # inside `namespace __root__`: an explicitly global name
 
     @property
     def escaped(self) -> bool:
         return self.source == ROOT_ESCAPE or self.source.startswith(ROOT_ESCAPE + ".")
+
+    @property
+    def explicit_root(self) -> bool:
+        """Written global: a `__root__.` name, or a `namespace __root__` body."""
+        return self.escaped or self.rooted
 
     @property
     def bare(self) -> str:
@@ -142,7 +148,7 @@ class Decl:
     @property
     def future_name(self) -> str:
         """The absolute name under the default module prefix, with no allowlist."""
-        return self.full if self.escaped else self.module + "." + self.full
+        return self.full if self.explicit_root else self.module + "." + self.full
 
 
 def blank_comments_and_strings(text: str) -> str:
@@ -308,23 +314,29 @@ def parse_decl(line: str) -> tuple[str, str | None, bool, bool] | None:
     return (keyword, first_name(rest), private, local)
 
 
-def apply_namespace_path(stack: list[tuple[str, str | None, bool]], name: str) -> str:
-    """The absolute namespace path after opening `name` on `stack`.
+def apply_namespace_path(stack: list[tuple[str, str | None, bool, bool]], name: str) -> tuple[str, bool]:
+    """The absolute path and rootedness after opening `name` on `stack`.
 
-    A leading `__root__.` (Lean's `_root_.`) resets the path; otherwise the name
-    is relative to the enclosing namespace.
+    A leading `__root__` (Lean's `_root_.`) resets the path and makes the block
+    explicitly global; otherwise the name is relative to the enclosing namespace
+    (and inherits the enclosing block's rootedness).
     """
     if name == ROOT_ESCAPE:
-        return ""
+        return "", True
     if name.startswith(ROOT_ESCAPE + "."):
-        return name[len(ROOT_ESCAPE) + 1 :]
+        return name[len(ROOT_ESCAPE) + 1 :], True
     base = current_namespace(stack)
-    return (base + "." + name) if base else name
+    return ((base + "." + name) if base else name), enclosing_rooted(stack)
 
 
-def current_namespace(stack: list[tuple[str, str | None, bool]]) -> str:
+def enclosing_rooted(stack: list[tuple[str, str | None, bool, bool]]) -> bool:
+    """Whether the innermost enclosing block was opened under `namespace __root__`."""
+    return any(rooted for _, _, _, rooted in stack)
+
+
+def current_namespace(stack: list[tuple[str, str | None, bool, bool]]) -> str:
     """The namespace path of the innermost open namespace on `stack`."""
-    for kind, name, _ in reversed(stack):
+    for kind, name, _, _ in reversed(stack):
         if kind == "namespace" and name is not None:
             return name
     return ""
@@ -338,8 +350,8 @@ def scan_file(path: Path, module: str, rel: str) -> tuple[list[Decl], list[str]]
         raise OSError(f"cannot read {rel}: {exc}") from exc
     lines = blank_comments_and_strings(text).splitlines()
 
-    # ("namespace"|"section"|"mutual", resolved namespace name, private)
-    stack: list[tuple[str, str | None, bool]] = []
+    # ("namespace"|"section"|"mutual", resolved namespace name, private, rooted)
+    stack: list[tuple[str, str | None, bool, bool]] = []
     decls: list[Decl] = []
     imports: list[str] = []
 
@@ -357,8 +369,12 @@ def scan_file(path: Path, module: str, rel: str) -> tuple[list[Decl], list[str]]
             if not stack:
                 continue
             if name:
-                # `end Foo` closes the nearest matching namespace if there is one;
-                # otherwise the innermost block.
+                # `end __root__` closes a `namespace __root__` block; otherwise `end Foo`
+                # closes the nearest matching namespace if there is one, else the
+                # innermost block.
+                if name == ROOT_ESCAPE and stack[-1][0] == "namespace" and stack[-1][1] == "":
+                    stack.pop()
+                    continue
                 for index in range(len(stack) - 1, -1, -1):
                     if stack[index][0] == "namespace" and stack[index][1] == name:
                         del stack[index:]
@@ -373,15 +389,18 @@ def scan_file(path: Path, module: str, rel: str) -> tuple[list[Decl], list[str]]
             continue
 
         if kind in ("namespace", "section", "mutual"):
-            resolved = apply_namespace_path(stack, name) if kind == "namespace" and name else None
-            stack.append((kind, resolved, private))
+            if kind == "namespace" and name:
+                resolved, rooted = apply_namespace_path(stack, name)
+            else:
+                resolved, rooted = None, enclosing_rooted(stack)
+            stack.append((kind, resolved, private, rooted))
             continue
 
         if name is None or name == "_":
             continue
         in_private_mutual = any(
             block_kind == "mutual" and block_private
-            for block_kind, _, block_private in stack
+            for block_kind, _, block_private, _ in stack
         )
         private = private or in_private_mutual
         decls.append(
@@ -394,6 +413,7 @@ def scan_file(path: Path, module: str, rel: str) -> tuple[list[Decl], list[str]]
                 line=lineno,
                 private=private,
                 local=local,
+                rooted=enclosing_rooted(stack),
             )
         )
 
@@ -501,7 +521,7 @@ def rows_for(roots: list[Path], repo: Path) -> tuple[list[tuple[str, str, str, s
         scan = collect([root], repo)
         count = 0
         for decl in scan.decls:
-            if decl.escaped:
+            if decl.explicit_root:
                 continue
             key = (decl.module, decl.full)
             reason = reason_class(decl)

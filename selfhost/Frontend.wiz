@@ -1,3 +1,4 @@
+namespace __root__
 -- From text to a checked term, all in Wiz (stage 14b): the lexer and parser read the
 -- full Wiz grammar, and this scope checker turns the syntax of a few term forms into
 -- the kernel's `Tm` (names become de Bruijn indices), which `Kernel.wiz` type checks.
@@ -10452,6 +10453,17 @@ def nsShort (n : String) : String := match splitLast n with
   | .some (.mk _ s) => s
   | .none => n
 def nsErrStep (gs : Globals) (m : String) : Step := .mk ("error: " +++ m) gs
+-- (13v) `__root__` (Lean's `_root_`): `namespace __root__` opens the root and
+-- `namespace __root__.X` the root-level `X`; both are absolute, not `p`-relative.
+def nsTarget (p n : String) : String :=
+  match strEq n "__root__" with
+  | .true => ""
+  | .false => match startsWithS "__root__." n with
+    | .true => dropNChars 9 n
+    | .false => match p with
+      | .mk cs => match cs with
+        | .nil => n
+        | _ => p +++ "." +++ n
 -- (13t) `namespace Foo`, `end`/`end Foo`, `open M`/`open M as A`: the file's namespace
 -- state. A stray or mismatching `end` is an error at the `end`; an `open` names a
 -- namespace that already has declarations (elaboration is single-pass).
@@ -10463,20 +10475,20 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
       | .some n => n
       | .none => "_";
     let p := Globals.nsPrefix gs;
-    let full := match p with
-      | .mk cs => match cs with
-        | .nil => n
-        | _ => p +++ "." +++ n;
+    let full := nsTarget p n;
     .some (.mk "" (Globals.pushNs gs full start))
   | .false => match strEq k "command.end" with
     | .true => match Globals.nsStack gs with
       | .nil => .some (nsErrStep gs "`end` without an open `namespace`")
       | .cons (.mk full off) rest =>
-        let short := nsShort full;
+        let short := match strEq full "" with
+          | .true => "__root__"
+          | .false => nsShort full;
         let given : Option String := firstIdIn (kids (kid stx 1));
         let errOpt : Option String := match given with
           | .none => .none
-          | .some g => match Bool.or (strEq g short) (strEq g full) with
+          | .some g => match Bool.or (Bool.or (strEq g short) (strEq g full))
+              (Bool.and (strEq full "") (strEq g "__root__")) with
             | .true => .none
             | .false => .some ("`end " +++ g +++ "` does not close the namespace `" +++ full
                 +++ "` (write `end` or `end " +++ short +++ "`)");
@@ -10511,8 +10523,15 @@ def atLine (start : Nat) (l : Option String) : Option String := match l with
 -- line of its `namespace` (innermost first; the reverse of the output puts them in order)
 def nsUnclosedLines : List NsFrame → List String
   | .nil => .nil
-  | .cons (.mk full off) rest => .cons (match atLine off (.some (("error: namespace " +++ full)
-      +++ " is not closed: add `end` (or `end " +++ nsShort full +++ "`)")) with
+  | .cons (.mk full off) rest =>
+    let shown := match strEq full "" with
+      | .true => "__root__"
+      | .false => full;
+    let short := match strEq full "" with
+      | .true => "__root__"
+      | .false => nsShort full;
+    .cons (match atLine off (.some (("error: namespace " +++ shown)
+      +++ " is not closed: add `end` (or `end " +++ short +++ "`)")) with
     | .some l => l
     | .none => "") (nsUnclosedLines rest)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
@@ -11137,3 +11156,4 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
     | .mk run _ _ order => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)
+end
