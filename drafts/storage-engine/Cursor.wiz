@@ -1,36 +1,71 @@
-import Optic
+import Core
+import Storage
 import Word
 import Text
-import WordMap
 import Functor
 /-!
-# Linear cursors
+# Linear cursors over a plan
 
-The query half of the storage design. A cursor is a linear handle: `next` consumes the
-cursor and hands back either the end or a value and the *next* cursor. `Step` is a
-bespoke sum because `Option`'s payload is unrestricted, so an `Option (a × Cursor a)`
-could drop or duplicate the cursor; the same reason gives the bespoke `Control` for
-early exit.
+The query half of the storage design. A cursor is a linear handle around a **plan**:
+a source, a state (the entries or items not yet consumed), the filters and projection
+recorded so far, and the read-path cost. `next` consumes the handle and hands back
+either the end or a value and the *next* cursor.
 
-The handle is linear, the plan's state (`rest` here) is ordinary ω data. A table scan
-and an index scan are the same `Cursor` type; `StorageCursor.wiz` supplies
-`tableCursor`, `indexCursor` and the index→primary composite `Cursor.follow`.
+The plan replaces the prototype's `List a` "rest": `filter` appends to the plan's
+post-filter list instead of building a filtered list, `filterMap` composes the
+projection instead of nesting closures, and `first` stops after one value without
+walking the rest of the source. That is what lets the engine defer a primary-node
+fetch until an entry actually survives the plan (`Cost.nodes`) and lets an early exit
+stop the index walk (`Cost.keys`).
 
-`fold`/`foldUntil` are the supported loops: they take the linear handle apart once
-(matching it into the ω plan state) and then recurse on the *state*, not on the handle.
-Writing the loop by hand and recursing on the continuation is the language gap recorded
-in `CursorRecursive.wiz`; a `partial def` with a linear parameter is rejected (its
-inferred witness drops the parameter). Do not re-implement the loops in callers.
+`Step`/`Control` are bespoke because `Option`'s payload is unrestricted; the same
+reason keeps the handle linear. `fold`/`foldUntil` (and their `…With` variants, which
+also return the `Cost`) are the supported loops: they take the linear handle apart
+once and recurse on the ω plan state.
+
+A table scan and an index scan are the same `Cursor` type; `StorageCursor.wiz`
+supplies `tableCursor`, `indexCursor`, the index→primary composite `Cursor.follow`,
+and the pushdown entry points (`filterKey`, `filterOnNode`).
 -/
 
-/-- A cursor over `a`: a linear handle around the plan's state. The constructor is
-private, so a cursor is only made by the engine (`fromList` here, a page scan later) and
+-- ## The plan
+
+/-- The state a plan walks: a literal list (tests, `fromList`) or scan entries. Both
+are lists, so the evaluator recurses structurally. -/
+inductive State (a : Type) where
+  | items (xs : List a)
+  | entries (es : List Entry)
+
+/-- A query plan. `pre` filters run on an `Entry` **before** a primary fetch; `post`
+filters run on the projected value. `project` turns a fetched entry into the output
+(or skips it with `none`); `fetch` is the engine's counted primary read. `rerange` is
+the pushdown hook: when it is present, an inspectable key predicate can rebuild the
+entry list for a tighter range instead of filtering after the walk. -/
+structure Plan (a : Type) where
+  source : Source
+  state : State a
+  pre : List (Entry → Bool)
+  post : List (a → Bool)
+  project : Entry → Option Node → Option a
+  fetch : U64 → Option Node × Cost
+  needNode : Bool
+  indexOnly : Bool
+  projection : Projection
+  rerange : Option Rerange
+  cost : Cost
+
+/-- One advance of a plan: the end (with the final plan and its cost) or a value and
+the continuation plan. The continuation is ω data; only `Cursor` is linear. -/
+inductive Advanced (a : Type) where
+  | done (plan : Plan a)
+  | more (value : a) (plan : Plan a)
+
+/-- The linear handle. The constructor is private: a cursor is made by the engine and
 consumed by `next`/`close`/`fold`. -/
 inductive Cursor (a : Type) where
-  | private mk (rest : List a)
+  | private mk (plan : Plan a)
 
-/-- One step: the end, or a value and the linear continuation. `Option` would not do:
-its payload is unrestricted, so it could drop or duplicate the cursor. -/
+/-- One step: the end, or a value and the linear continuation. -/
 inductive Step (a : Type) where
   | done
   | more (value : a) (1 next : Cursor a)
@@ -42,23 +77,77 @@ inductive Control (b : Type) where
 
 -- ## Making a plan
 
-/-- The engine's constructor (a table scan, an index scan, a filtered plan). -/
-def Cursor.fromList {a : Type} (xs : List a) : Cursor a := Cursor.mk xs
+/-- A literal list: the plan's state is the list itself (no source, no fetch). -/
+def Cursor.fromList {a : Type} (xs : List a) : Cursor a :=
+  Cursor.mk (Plan.mk Source.literal (State.items xs) [] []
+    (fun _ _ => Option.none) (fun _ => (Option.none, Cost.zero))
+    .false .false Projection.other Option.none Cost.zero)
+
+/-- The engine's scan constructor: entries from an index or the table, a projection,
+and the counted fetcher. `indexOnly` records that `project` never needs the node;
+`projection` records which field the plan yields (`key`, `id`, `node`, `other`). -/
+def Cursor.fromEntries {a : Type} (source : Source) (es : List Entry)
+    (project : Entry → Option Node → Option a)
+    (fetch : U64 → Option Node × Cost)
+    (needNode : Bool) (indexOnly : Bool) (projection : Projection)
+    (rerange : Option Rerange) : Cursor a :=
+  Cursor.mk (Plan.mk source (State.entries es) [] [] project fetch
+    needNode indexOnly projection rerange Cost.zero)
 
 /-- The empty plan: `next` is `done` at once. -/
-def Cursor.empty {a : Type} : Cursor a := Cursor.mk []
+def Cursor.empty {a : Type} : Cursor a := Cursor.fromList []
 
 /-- A plan of one element. -/
-def Cursor.singleton {a : Type} (x : a) : Cursor a := Cursor.mk [x]
+def Cursor.singleton {a : Type} (x : a) : Cursor a := Cursor.fromList [x]
+
+-- ## Evaluating the plan
+
+/-- Consume literal items until one passes the post-filters. The plan is an accumulator
+(it changes per step), so this is a plain recursive loop rather than structural
+recursion on the list; like the fold helpers it has no linear argument. -/
+partial def advanceItems {a : Type} (p : Plan a) : List a → Advanced a
+  | .nil => .done p
+  | .cons x rest =>
+    let p' := { p with state := State.items rest, cost := Cost.add p.cost Cost.key };
+    match List.all (fun q => q x) p.post with
+    | .true => .more x p'
+    | .false => advanceItems p' rest
+
+/-- Consume entries until one projects and passes the post-filters. The pre-filters run
+before the fetch, so an entry excluded by the plan is never read from the primary. The
+plan is an accumulator, so this is a plain recursive loop (no linear argument). -/
+partial def advanceEntries {a : Type} (p : Plan a) : List Entry → Advanced a
+  | .nil => .done p
+  | .cons e rest =>
+    let p0 := { p with state := State.entries rest, cost := Cost.add p.cost Cost.key };
+    match List.all (fun q => q e) p.pre with
+    | .false => advanceEntries p0 rest
+    | .true =>
+      let got : Option Node × Cost := match p.needNode with
+        | .true => p.fetch e.id
+        | .false => (Option.none, Cost.zero);
+      let p1 := { p0 with cost := Cost.add p0.cost got.2 };
+      match p.project e got.1 with
+      | .none => advanceEntries p1 rest
+      | .some x =>
+        match List.all (fun q => q x) p.post with
+        | .true => .more x p1
+        | .false => advanceEntries p1 rest
+
+/-- One plan advance, without consuming the linear handle. -/
+def advance {a : Type} (p : Plan a) : Advanced a :=
+  match p.state with
+  | .items xs => advanceItems p xs
+  | .entries es => advanceEntries p es
 
 -- ## Consuming the plan
 
-/-- Consume the cursor for one element: the end, or a value and the linear continuation.
-A `Cursor` is used exactly once, so `next` can only be called once on each handle. -/
+/-- Consume the cursor for one element: the end, or a value and the linear continuation. -/
 def Cursor.next {a : Type} (1 c : Cursor a) : Step a :=
   match c with
-  | .mk .nil => .done
-  | .mk (.cons x xs) => .more x (Cursor.mk xs)
+  | .mk p => match advance p with
+    | .done _ => .done
+    | .more x p' => .more x (Cursor.mk p')
 
 /-- Early exit: consume the cursor without reading the rest. -/
 def Cursor.close {a : Type} (1 c : Cursor a) : Unit :=
@@ -70,61 +159,229 @@ def Cursor.closeThen {a b : Type} (1 c : Cursor a) (x : b) : b :=
   match c with
   | .mk _ => x
 
-/-- The first element, if any: consume the handle once, drop the continuation at once. -/
+/-- The first element, if any: one advance, then drop the continuation plan. The
+source is not drained (`Cost.keys` is the entries visited up to the first value). -/
+def Cursor.firstWith {a : Type} (1 c : Cursor a) : Option a × Cost :=
+  match c with
+  | .mk p => match advance p with
+    | .done p' => (Option.none, p'.cost)
+    | .more x p' => (Option.some x, p'.cost)
+
+/-- The first element, discarding the cost. It never asks for a second value. -/
 def Cursor.first {a : Type} (1 c : Cursor a) : Option a :=
-  match Cursor.next c with
-  | .done => .none
-  | .more x c' => Cursor.closeThen c' (.some x)
+  match c with
+  | .mk p => match advance p with
+    | .done _ => Option.none
+    | .more x _ => Option.some x
 
 -- ## Folds: the supported loops
+
+/-- Fold the plan's state; the recursion is on the ω plan, not the linear handle. -/
+partial def Cursor.foldPlan {a b : Type} (p : Plan a) (k : b → a → b) (b0 : b)
+    : b × Cost :=
+  match advance p with
+  | .done p' => (b0, p'.cost)
+  | .more x p' => Cursor.foldPlan p' k (k b0 x)
+
+/-- Fold the plan's state with early exit. -/
+partial def Cursor.foldUntilPlan {a b : Type} (p : Plan a)
+    (k : b → a → Control b) (b0 : b) : b × Cost :=
+  match advance p with
+  | .done p' => (b0, p'.cost)
+  | .more x p' => match k b0 x with
+    | .stop b' => (b', p'.cost)
+    | .go b' => Cursor.foldUntilPlan p' k b'
 
 /-- A pure fold: the handle is consumed once, the plan's state is folded. -/
 def Cursor.fold {a b : Type} (1 c : Cursor a) (k : b → a → b) (b0 : b) : b :=
   match c with
-  | .mk xs => List.foldl (fun acc x => k acc x) b0 xs
+  | .mk p => match Cursor.foldPlan p k b0 with
+    | (b, _) => b
 
-/-- Fold the plan's state; recursion is on the ω state, not on the linear handle. -/
-def Cursor.foldList {a b : Type} : List a → (b → a → Control b) → b → b
-  | .nil, _, b => b
-  | .cons x xs, k, b => match k b x with
-    | .stop b' => b'
-    | .go b' => Cursor.foldList xs k b'
-
-/-- A fold with early exit: consume the handle once, then loop over the state. A
-recursive consumer that threads the linear handle itself is the gap in
-`CursorRecursive.wiz`; this is the supported form. -/
-def Cursor.foldUntil {a b : Type} (1 c : Cursor a) (k : b → a → Control b) (b0 : b) : b :=
+/-- The fold and its read-path cost. -/
+def Cursor.foldWith {a b : Type} (1 c : Cursor a) (k : b → a → b) (b0 : b)
+    : b × Cost :=
   match c with
-  | .mk xs => Cursor.foldList xs k b0
+  | .mk p => Cursor.foldPlan p k b0
+
+/-- A fold with early exit: the handle is consumed once, then the plan is folded. -/
+def Cursor.foldUntil {a b : Type} (1 c : Cursor a) (k : b → a → Control b)
+    (b0 : b) : b :=
+  match c with
+  | .mk p => match Cursor.foldUntilPlan p k b0 with
+    | (b, _) => b
+
+/-- The early-exit fold and its read-path cost. -/
+def Cursor.foldUntilWith {a b : Type} (1 c : Cursor a) (k : b → a → Control b)
+    (b0 : b) : b × Cost :=
+  match c with
+  | .mk p => Cursor.foldUntilPlan p k b0
 
 /-- The number of elements: a total fold, one pass. -/
 def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=
-  Cursor.fold c (fun n _ => n + 1) 0
+  match c with
+  | .mk p => match Cursor.foldPlan p (fun n _ => n + 1) 0 with
+    | (n, _) => n
 
 -- ## Plan combinators (each consumes the handle once)
 
-/-- Project every element in the plan (an index-only scan does this without `follow`). -/
-def Cursor.map {a b : Type} (f : a → b) (1 c : Cursor a) : Cursor b :=
+/-- Keep the elements satisfying `p`. Fusion: the predicate is appended to the plan's
+post-filter list; nothing is walked until `next`/`fold`. -/
+def Cursor.filter {a : Type} (q : a → Bool) (1 c : Cursor a) : Cursor a :=
   match c with
-  | .mk xs => Cursor.mk (List.map f xs)
+  | .mk p => Cursor.mk { p with post := List.append p.post [q] }
 
-/-- Keep the elements satisfying `p`. -/
-def Cursor.filter {a : Type} (p : a → Bool) (1 c : Cursor a) : Cursor a :=
-  match c with
-  | .mk xs => Cursor.mk (List.filter p xs)
-
-/-- `Option` as 0 or 1 element. -/
-def Option.toList {a : Type} : Option a → List a
-  | .none => []
-  | .some x => [x]
-
-/-- Keep the elements `f` maps to `some`. -/
+/-- Map and keep: the old post-filters are applied first, then `f`. For a scan plan the
+projection is composed (one function, no data walk); literal items are mapped in the
+plan state. -/
 def Cursor.filterMap {a b : Type} (f : a → Option b) (1 c : Cursor a) : Cursor b :=
   match c with
-  | .mk xs => Cursor.mk (List.flatMap xs (fun x => Option.toList (f x)))
+  | .mk p =>
+    let keep : a → Bool := fun x => List.all (fun q => q x) p.post;
+    match p.state with
+    | .items xs =>
+      Cursor.mk (Plan.mk p.source
+        (State.items (List.flatMap xs (fun x => match keep x with
+          | .true => Option.toList (f x)
+          | .false => [])))
+        p.pre [] (fun _ _ => Option.none) p.fetch p.needNode .false
+        Projection.other Option.none p.cost)
+    | .entries es =>
+      Cursor.mk (Plan.mk p.source (State.entries es) p.pre []
+        (fun e n => match p.project e n with
+          | .some x => match keep x with
+            | .true => f x
+            | .false => Option.none
+          | .none => Option.none)
+        p.fetch p.needNode .false Projection.other Option.none p.cost)
+
+/-- Project every element in the plan (an index-only scan does this without `follow`). -/
+def Cursor.map {a b : Type} (f : a → b) (1 c : Cursor a) : Cursor b :=
+  Cursor.filterMap (fun x => Option.some (f x)) c
 
 /-- The whole cursor as a list (materialising it ends the plan; the engine's scans do
 not use this). -/
 def Cursor.toList {a : Type} (1 c : Cursor a) : List a :=
   match c with
-  | .mk xs => List.reverse (List.foldl (fun acc x => List.cons x acc) [] xs)
+  | .mk p => List.reverse (match Cursor.foldPlan p (fun acc x => List.cons x acc) [] with
+      | (xs, _) => xs)
+
+-- ## Pushdown
+
+/-- Add an opaque post-filter (and record whether it needs the primary node). -/
+def Plan.addFilter {a : Type} (p : Plan a) (q : a → Bool) (needsNode : Bool)
+    : Plan a :=
+  { p with post := List.append p.post [q],
+    needNode := Bool.or p.needNode needsNode }
+
+/-- Push a key predicate into *any* re-ranged index scan: the key **is** the source's
+indexed field. On a literal plan it becomes a post-filter. Pushdown rebuilds the walk,
+so it is only valid before the plan has advanced; after that the predicate is an
+ordinary post-filter (same results, no re-read). -/
+def Cursor.pushKeyAny {a : Type} (pred : KeyPred) (test : a → Bool)
+    (needsNode : Bool) (1 c : Cursor a) : Cursor a :=
+  match c with
+  | .mk p => match p.rerange with
+    | .some r => match Nat.beq p.cost.keys 0 with
+      | .true =>
+        let r' := KeyRange.tighten r.range pred;
+        Cursor.mk { p with state := State.entries (r.rebuild r'),
+          rerange := Option.some { r with range := r' } }
+      | .false => Cursor.mk (Plan.addFilter p test needsNode)
+    | .none => Cursor.mk (Plan.addFilter p test needsNode)
+
+/-- Push a predicate on `field` into an index scan of that field (a tightened key
+range, no post-filter), or keep it as a post-filter when the source is not that index
+(a non-indexed field, the table, or a literal). -/
+def Cursor.pushKey {a : Type} (field : U32) (pred : KeyPred) (test : a → Bool)
+    (needsNode : Bool) (1 c : Cursor a) : Cursor a :=
+  match c with
+  | .mk p => match p.rerange with
+    | .some r => match UIntN.beq r.field field with
+      | .true => match Nat.beq p.cost.keys 0 with
+        | .true =>
+          let r' := KeyRange.tighten r.range pred;
+          Cursor.mk { p with state := State.entries (r.rebuild r'),
+            rerange := Option.some { r with range := r' } }
+        | .false => Cursor.mk (Plan.addFilter p test needsNode)
+      | .false => Cursor.mk (Plan.addFilter p test needsNode)
+    | .none => Cursor.mk (Plan.addFilter p test needsNode)
+
+/-- The composite index→primary step: every entry of a `Cursor U64` (index keys) is
+followed to its node. The old key filters become *entry* pre-filters, so a key the plan
+rejects is not fetched. `project` sees the fetched node (`none` skips a lagging index
+entry). -/
+def Cursor.followKeys {b : Type} (fetch : U64 → Option Node × Cost)
+    (project : Entry → Option Node → Option b)
+    (1 c : Cursor U64) : Cursor b :=
+  match c with
+  | .mk p =>
+    let keepKey : U64 → Bool := fun k => List.all (fun q => q k) p.post;
+    let preKey : Entry → Bool := fun e =>
+      match p.project e Option.none with
+      | .some k => keepKey k
+      | .none => Bool.false;
+    match p.state with
+    | .items xs =>
+      let es := List.flatMap xs (fun k => match keepKey k with
+        | .true => [Entry.mk k k]
+        | .false => []);
+      Cursor.mk (Plan.mk p.source (State.entries es) p.pre [] project fetch
+        .true .false Projection.node p.rerange p.cost)
+    | .entries es =>
+      -- When the old plan needs no node, its filters are key tests and can run before
+      -- the fetch. When it does (a mapped field), they run on the fetched node, so the
+      -- entry is not fetched twice and no key is dropped for lack of a node.
+      let pre : List (Entry → Bool) := match p.needNode, p.post with
+        | .false, .cons _ _ => List.append p.pre [preKey]
+        | _, _ => p.pre;
+      let project' : Entry → Option Node → Option b := match p.needNode with
+        | .false => project
+        | .true => fun e n => match p.project e n with
+          | .some x => match keepKey x with
+            | .true => project e n
+            | .false => Option.none
+          | .none => Option.none;
+      Cursor.mk (Plan.mk p.source (State.entries es) pre [] project' fetch
+        .true .false Projection.node p.rerange p.cost)
+
+-- ## Inspecting a plan
+
+/-- The plan's shape and what it has spent so far. `range` is the source's key range
+(`all` when the plan is not a re-ranged index scan). -/
+structure Info where
+  source : Source
+  range : KeyRange
+  preFilters : Nat
+  filters : Nat
+  needNode : Bool
+  indexOnly : Bool
+  projection : Projection
+  cost : Cost
+
+/-- Read the plan's shape (consumes the handle; build a fresh cursor to run it). -/
+def Cursor.info {a : Type} (1 c : Cursor a) : Info :=
+  match c with
+  | .mk p => Info.mk p.source
+      (match p.rerange with
+        | .some r => r.range
+        | .none => KeyRange.all)
+      (List.length p.pre) (List.length p.post)
+      p.needNode p.indexOnly p.projection p.cost
+
+/-- `true`/`false`, for the shape line. -/
+def Bool.show : Bool → String
+  | .true => "true"
+  | .false => "false"
+
+/-- The plan, one line: source, range, filter counts, what it needs, what it spent. -/
+def Info.show (i : Info) : String :=
+  String.intercalate " "
+    [ String.append "source=" (Source.show i.source)
+    , String.append "range=" (KeyRange.show i.range)
+    , String.append "pre=" (Nat.repr i.preFilters)
+    , String.append "filters=" (Nat.repr i.filters)
+    , String.append "needNode=" (Bool.show i.needNode)
+    , String.append "indexOnly=" (Bool.show i.indexOnly)
+    , String.append "projection=" (Projection.show i.projection)
+    , Cost.show i.cost ]

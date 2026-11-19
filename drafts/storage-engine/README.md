@@ -2,12 +2,15 @@
 
 A pure (no IO) companion to `wiz-notes/storage-engine.md`: recording optics,
 secondary indices, and linear streaming cursors. This is slice 1 of the note's
-staged plan, extended with the pieces slice 4 needs (`indexTraversal`/`indexNodes`,
-`Cursor.follow`, `fold`/`foldUntil`, early exit, the rejection cases).
+staged plan, extended with the pieces slice 4 needs: a plan-backed cursor (fusing
+`filter`/`filterMap`), index-only scans, predicate pushdown, early exit through
+`follow`, and read-count shape checks (`indexTraversal`/`indexNodes`, `Cursor.follow`,
+`fold`/`foldUntil`, the rejection cases).
 
 Checked with a shipped `wiz` (no build needed; the pure half imports only `lib/`):
 
 ```text
+wiz check -I drafts/storage-engine drafts/storage-engine/Core.wiz
 wiz check -I drafts/storage-engine drafts/storage-engine/Cursor.wiz
 wiz check -I drafts/storage-engine drafts/storage-engine/Storage.wiz
 wiz check -I drafts/storage-engine drafts/storage-engine/StorageCursor.wiz
@@ -22,10 +25,11 @@ files and in the note.
 
 | file | contents |
 |---|---|
-| `Cursor.wiz` | the linear `Cursor`/`Step`/`Control`, `next`/`close`, `fold`/`foldUntil`, `map`/`filter`/`filterMap`, `first` |
-| `Storage.wiz` | `Node`, `Patch`/`WriteSet`, `Root`/`Snapshot`, `nodeAt`/`nodeOr`, `PLens.over`, `IndexDef`, `IndexFact`/`IndexDelta` (facts and tombstones), `Root.rebuildIndex`, `Traversal`/`indexTraversal`, `Db.commit` and validation |
-| `StorageCursor.wiz` | `tableCursor`, `indexCursor`, `Cursor.follow`, `indexNodes`: table and index scans are the same `Cursor` type |
-| `Tests.wiz` | the `#eval` cases (recorded patch, two `+1`s, stale `set`, unique duplicate, index delta fold, incremental = rebuild, index scan via `follow`, `foldUntil` early exit, snapshot ω) |
+| `Core.wiz` | `Node` (+ `field`/`beq`), `Cost` (the read-path counter), `Entry`, `KeyRange`/`KeyPred`, `Source`, `Projection`, `Rerange` (the pushdown hook) |
+| `Cursor.wiz` | the linear `Cursor`/`Step`/`Control` over a `Plan`; `next`/`close`, `fold`/`foldUntil` (and `…With` cost variants), `map`/`filter`/`filterMap`, `first`/`firstWith`, `filterKey`/`filterOnNode` pushdown, `followKeys`, `info`/`Info.show` |
+| `Storage.wiz` | `Patch`/`WriteSet`, `Root`/`Snapshot`, `Snapshot.fetch` (the counted read), `nodeAt`/`nodeOr`, `PLens.over`, `IndexDef`, `IndexFact`/`IndexDelta` (facts and tombstones), `Root.rebuildIndex`, `Traversal`/`indexTraversal`, `Db.commit` and validation |
+| `StorageCursor.wiz` | `tableCursor`, `indexCursor` (primary keys), `indexOnlyRange`/`indexOnlyWhere` (the indexed field, no node), `Cursor.follow`, `indexNodes`, `filterOnNode` |
+| `Tests.wiz` | the `#eval` cases (recording, commits/validation, index deltas, scans, early exit, and the plan: fusion, index-only, pushdown equivalence, read counts) |
 | `CursorReject.wiz` | the four rejected cursor programs (expected errors) |
 | `CursorRecursive.wiz` | the linear-recursion gap (expected error) and what a fix would need |
 
@@ -53,6 +57,63 @@ delta's fold applied to the base root is the committed index.
 Known slice-1 limits (from the note, not fixed here): the index is not
 read-your-writes inside a transaction (the primary is); a unique check runs on the
 whole resulting primary map rather than incrementally.
+
+## Plans, index-only scans, pushdown, read counts
+
+The cursor's old "rest list" is now a `Plan a` (`Cursor.wiz`):
+
+```text
+source : Source                 literal | table | index(field, unique)
+state  : State a                remaining items (literal) or entries (scan)
+pre    : List (Entry → Bool)    predicates that run before a primary fetch
+post   : List (a → Bool)        predicates on the projected value
+project: Entry → Option Node → Option a
+fetch  : U64 → Option Node × Cost   the counted read path (Snapshot.fetch)
+needNode, indexOnly, projection : metadata (which read path, which field)
+rerange: Option Rerange        key range + a rebuild closure (pushdown hook)
+cost   : Cost                  nodes = primary reads, keys = entries consumed
+```
+
+`filter` appends to `post` (nothing is walked), `filterMap` composes `project` (one
+function, no data walk), and `next`/`first` advance the plan by one entry at a time.
+`Cost` counts reads, never time.
+
+An index entry carries both the indexed key and the primary id, so an index scan can
+project either without touching the primary node:
+
+* `indexCursor`/`indexNodes` keep the prototype's `Cursor U64` of **primary keys**
+  (the index→primary composite is `Cursor.follow`);
+* `indexOnlyRange`/`indexOnlyWhere` yield the **indexed field** and record
+  `indexOnly = true`, `projection = key`; `Cost.nodes` is zero.
+
+`filterKey`/`filterOnNode` take an inspectable `KeyPred` (`eq`, `between`). If the
+plan's source is an index on that field, the predicate tightens `KeyRange` and the
+entry walk is rebuilt for the narrower range; otherwise it stays a post-filter.
+Opaque `a → Bool` predicates (`filter`) are never pushed. Pushdown is applied before
+the plan advances (after that it falls back to a post-filter).
+
+Read counts on the fixed three-node store (`Tests.wiz`, §10), where the kind index
+has two nodes under key 1 and one under key 2:
+
+| query | `Cost.nodes` (primary reads) | `Cost.keys` (entries) |
+|---|---|---|
+| full table scan | 3 | 3 |
+| index scan, all keys, `follow` | 3 | 3 |
+| one index bucket (key 1), `follow` | 2 | 2 |
+| index-only, key = 1 | 0 | 2 |
+| pushed equality, key = 1 | 2 | 2 |
+| pushed range on the label index (7..8) | 2 | 2 |
+| `first` on the all-keys index scan | 1 | 1 |
+
+`first`/`foldUntil` stop the plan: one entry and one node read, not the remaining
+bucket. The pushed and unfiltered-then-filtered paths are compared by value in the
+tests, not just by count.
+
+Not pushed down (still post-filters or not expressible): opaque predicates, a
+conjunction of fields (no `and` in `KeyPred`), predicates on non-indexed fields,
+`!=`/`not`/`or`, ordering/`limit` as plan operators, and a range on an index that is
+not ordered (the prototype's `U64Map` index is ordered; the plan records the range but
+the list-backed slice stream does not prune pages).
 
 ## The linear-recursion gap
 

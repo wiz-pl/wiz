@@ -289,3 +289,141 @@ def scanLength (1 c : Cursor Node) : Nat := Cursor.length c
   | .none => 0                                 -- 1
 #eval Cursor.length (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
   (Snapshot.tableCursor s0))                   -- 2
+
+-- ## 10. The plan: fusion, index-only scans, pushdown, early exit
+
+/-- Node-list equality by value (the node ids are not in the record). -/
+def sameNodes (a b : List Node) : Bool :=
+  Bool.and (List.all (fun x => List.any (fun y => Node.beq x y) b) a)
+    (List.all (fun y => List.any (fun x => Node.beq x y) a) b)
+
+def nodesOf (c : Cost) : Nat := c.nodes
+def keysOf (c : Cost) : Nat := c.keys
+
+/-- Run a constructed cursor and keep its read-path cost. The helpers take the store
+values, not a cursor, so no linear handle is duplicated. -/
+def tableCost (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.tableCursor s) (fun n _ => n + 1) 0).2
+
+def indexAllCost (d : IndexDef) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexNodesAll d s) (fun n _ => n + 1) 0).2
+
+def indexOnlyEqCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexOnlyWhere d (KeyPred.eq v) s)
+    (fun n _ => n + 1) 0).2
+
+def pushedEqCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.filterOnNode d (KeyPred.eq v) (Snapshot.indexNodesAll d s))
+    (fun n _ => n + 1) 0).2
+
+def pushedRangeCost (d : IndexDef) (lo hi : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.filterOnNode d (KeyPred.between lo hi)
+    (Snapshot.indexNodesAll d s)) (fun n _ => n + 1) 0).2
+
+/-- One index bucket, followed to nodes. -/
+def indexBucketCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Snapshot.indexNodes d v s) (fun n _ => n + 1) 0).2
+
+/-- A key predicate pushed before `follow`: only matching entries are fetched. -/
+def keyFilteredFollowCost (d : IndexDef) (v : U64) (s : Snapshot) : Cost :=
+  (Cursor.foldWith (Cursor.follow s
+    (Cursor.filterKey (KeyPred.eq v) (Snapshot.indexOnlyRange d KeyRange.all s)))
+    (fun n _ => n + 1) 0).2
+
+/-- The unfiltered-then-filter reference for a node predicate. -/
+def labelInRange (n : Node) : Bool :=
+  KeyPred.test (KeyPred.between (u64 7) (u64 8)) (Node.field n 2)
+
+-- ### Plan before and after pushdown
+
+#eval Info.show (Cursor.info (Snapshot.indexNodesAll kindIndex s0))
+-- source=index(field=0,nonunique) range=all ... needNode=true indexOnly=false
+#eval Info.show (Cursor.info (Cursor.filterOnNode kindIndex (KeyPred.eq (u64 1))
+  (Snapshot.indexNodesAll kindIndex s0)))
+-- ... range=eq(1) ... (the same plan, tightened)
+#eval Info.show (Cursor.info (Snapshot.indexCursor kindIndex (u64 1) s0))
+-- ... projection=id ... needNode=false indexOnly=true (primary keys from the index)
+#eval Info.show (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0))
+-- ... range=eq(1) ... needNode=false indexOnly=true projection=key
+
+-- ### Filter/filterMap fuse: recorded in the plan, nothing consumed
+
+#eval (Cursor.info (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Cursor.filter (fun n => Nat.beq n.count.toNat 0)
+    (Snapshot.indexNodesAll kindIndex s0)))).filters          -- 2
+#eval (Cursor.info (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Snapshot.indexNodesAll kindIndex s0))).cost.nodes          -- 0 (no read yet)
+#eval Cursor.length (Cursor.map (fun n => n.count)
+  (Snapshot.indexNodesAll kindIndex s0))                      -- 3
+#eval (Cursor.info (Cursor.filter (fun c => Nat.beq c.toNat 0)
+  (Cursor.map (fun n => n.count) (Snapshot.indexNodesAll kindIndex s0)))).filters -- 1
+
+-- ### Index-only scan: keys read, no primary node
+
+#eval (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).indexOnly -- true
+#eval (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).needNode  -- false
+#eval Projection.show (Cursor.info (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)).projection -- key
+#eval Cursor.length (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0) -- 2
+#eval Cursor.fold (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0)
+  (fun acc k => acc + k.toNat) 0                              -- 2 (the key is 1 for both)
+#eval nodesOf (indexOnlyEqCost kindIndex (u64 1) s0)          -- 0 primary reads
+#eval keysOf (indexOnlyEqCost kindIndex (u64 1) s0)           -- 2 index entries
+
+-- The prototype's index scan still yields primary keys (ids 1 and 3), from the same
+-- index entries; only the projection differs from the index-only scan above.
+#eval Cursor.fold (Snapshot.indexCursor kindIndex (u64 1) s0)
+  (fun acc k => acc + k.toNat) 0                              -- 4 (ids 1 and 3)
+
+-- ### Pushdown equivalence: pushed == unfiltered-then-filtered
+
+#eval boolToNat (sameIds
+  (Cursor.toList (Snapshot.indexOnlyWhere kindIndex (KeyPred.eq (u64 1)) s0))
+  (Cursor.toList (Cursor.filter (fun k => UIntN.beq k (u64 1))
+    (Snapshot.indexOnlyRange kindIndex KeyRange.all s0))))     -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.filterOnNode kindIndex (KeyPred.eq (u64 1))
+    (Snapshot.indexNodesAll kindIndex s0)))
+  (Cursor.toList (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+    (Snapshot.indexNodesAll kindIndex s0))))                   -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.filterOnNode uniqueLabel (KeyPred.between (u64 7) (u64 8))
+    (Snapshot.indexNodesAll uniqueLabel s0)))
+  (Cursor.toList (Cursor.filter labelInRange
+    (Snapshot.indexNodesAll uniqueLabel s0))))                 -- 1
+
+-- A predicate on a *non-indexed* field is not pushed: the range stays `all` and the
+-- predicate is a post-filter (the results are still right).
+#eval (Cursor.info (Cursor.filterOnNode countIndex (KeyPred.eq (u64 0))
+  (Snapshot.indexNodesAll kindIndex s0))).filters              -- 1
+#eval match (Cursor.info (Cursor.filterOnNode countIndex (KeyPred.eq (u64 0))
+  (Snapshot.indexNodesAll kindIndex s0))).range with
+  | .all => 1
+  | _ => 0                                                     -- 1 (not pushed)
+
+-- ### Read counts per query shape (counts, not timings)
+
+#eval nodesOf (tableCost s0)                                   -- 3 (full table scan)
+#eval keysOf (tableCost s0)                                    -- 3
+#eval nodesOf (indexAllCost kindIndex s0)                      -- 3 (index scan, follow)
+#eval keysOf (indexAllCost kindIndex s0)                       -- 3
+#eval nodesOf (indexOnlyEqCost kindIndex (u64 1) s0)           -- 0 (index-only)
+#eval keysOf (indexOnlyEqCost kindIndex (u64 1) s0)            -- 2
+#eval nodesOf (pushedEqCost kindIndex (u64 1) s0)              -- 2 (pushed equality)
+#eval keysOf (pushedEqCost kindIndex (u64 1) s0)               -- 2
+#eval nodesOf (pushedRangeCost uniqueLabel (u64 7) (u64 8) s0) -- 2 (pushed range)
+#eval keysOf (pushedRangeCost uniqueLabel (u64 7) (u64 8) s0)  -- 2
+#eval nodesOf (indexBucketCost kindIndex (u64 1) s0)           -- 2 (one bucket)
+#eval keysOf (indexBucketCost kindIndex (u64 1) s0)            -- 2
+#eval nodesOf (keyFilteredFollowCost kindIndex (u64 1) s0)     -- 2 (key filter before follow)
+#eval keysOf (keyFilteredFollowCost kindIndex (u64 1) s0)      -- 2
+
+-- ### Early exit: one value, then stop
+
+#eval (Cursor.firstWith (Snapshot.indexNodesAll kindIndex s0)).2.nodes -- 1
+#eval (Cursor.firstWith (Snapshot.indexNodesAll kindIndex s0)).2.keys  -- 1
+#eval (Cursor.firstWith (Cursor.filter (fun n => Nat.beq n.kind.toNat 1)
+  (Snapshot.indexNodesAll kindIndex s0))).2.keys               -- 1 (first entry passes)
+#eval (Cursor.foldUntilWith (Snapshot.indexNodesAll kindIndex s0)
+  (fun (acc : Nat) _ => Control.stop (acc + 1)) 0).2.nodes    -- 1 (stopped after one)
+#eval (Cursor.foldWith (Snapshot.indexNodesAll kindIndex s0)
+  (fun n _ => n + 1) 0).2.nodes                                -- 3 (the full walk)

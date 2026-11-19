@@ -4,7 +4,7 @@ import Word
 import Text
 import WordMap
 import Functor
-import Cursor
+import Core
 /-!
 # Storage engine, pure half: recording optics, indices, patches
 
@@ -172,6 +172,15 @@ def Snapshot.getNode (s : Snapshot) (id : U64) : Option Node :=
   match U64Map.find s.ws id with
   | .some p => Patch.apply p (U64Map.find s.root.pages id)
   | .none => U64Map.find s.root.pages id
+
+/-- The store's counted read path: one primary-node fetch, recorded as `Cost.node`.
+A query that never reaches this function (an index-only scan) reads no primary node,
+so its `Cost.nodes` is zero. -/
+def Snapshot.fetch (s : Snapshot) (id : U64) : Option Node × Cost :=
+  (Snapshot.getNode s id, Cost.node)
+
+/-- The primary keys in the snapshot's base pages (a table scan's entries). -/
+def Snapshot.nodeIds (s : Snapshot) : List U64 := U64Map.keys s.root.pages
 
 /-- Extend the write-set (a no-op patch leaves the snapshot alone, keeping GetPut). -/
 def Snapshot.record (s : Snapshot) (id : U64) (p : Option Patch) : Snapshot :=
