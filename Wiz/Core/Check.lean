@@ -250,6 +250,12 @@ structure Ctx (R : Type) where
   /-- (the elaborator's sorts pass, `Wiz/Elab/Mark.lean`; not read by the kernel) fill
   the holes in the `Π`/`Σ`/`ULift` sorts only, placing no proof markers -/
   sortsOnly : Bool := false
+  /-- checking a partial definition's **witness** (`addPartialDecl`), which is evidence
+  that the type is inhabited and is never run. Its usages are not enforced: the witness
+  may ignore a linear parameter, which is what the witness search writes (`fun c => 0`).
+  Nothing runs unchecked: a partial definition's *body* is checked strictly
+  (`addPartialImpl`), and it, not the witness, is the compiled code. -/
+  witness : Bool := false
 
 namespace Ctx
 
@@ -461,7 +467,13 @@ whose type is a proposition takes any usage. Its variable is a proof, erased and
 run (CoreSpec §6), so a linear proof that is used zero times or several times consumes
 nothing (prf-review L1: `(1 h : True) → True`, `let 1 (a, h) := p` at `(1 x : A) × P x`). -/
 def Ctx.popUsageAt (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (u : Usage R) : TCM (Usage R) :=
-  if ctx.isPropTy ty then
+  -- (a partial definition's witness never runs: it is evidence that the type is
+  -- inhabited, not a program, so its usages are not checked at all — see `Ctx.witness`)
+  if ctx.witness then
+    match u with
+    | _ :: rest => pure rest
+    | [] => pure []
+  else if ctx.isPropTy ty then
     match u with
     | _ :: rest => pure rest
     | [] => throw (.other "internal error: usage vector underflow")
@@ -1642,8 +1654,10 @@ def setImpl (g : Globals R) (name : Name) (impl : Term R) : TCM (Globals R) := d
 /-- A partial definition's signature (stage 13): `f : T` is opaque to the kernel, like an
 axiom, so the bodies of its group can call it. It must come with a **witness** `w : T`,
 which the kernel checks here: then `f` proves nothing `w` doesn't, whatever the bodies do.
-The witness is checked erased (quantity 0): it is only evidence that `T` is inhabited,
-never run, so it may ignore a linear argument. -/
+The witness is checked erased (quantity 0) and with usages unenforced (`Ctx.witness`): it
+is only evidence that `T` is inhabited, never run, so it may ignore a linear argument.
+The body that runs is checked strictly (`addPartialImpl`), so a linear parameter is still
+consumed exactly once by the code. -/
 def addPartialDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- constants are identified by name: a second declaration of one would change what
   -- everything checked against the first means
@@ -1652,7 +1666,7 @@ def addPartialDecl (g : Globals R) (d : Decl R) : TCM (Globals R) := do
     | throw (.other s!"partial definition {d.name} needs a witness, a term of its type")
   if d.value.isSome then throw (.other s!"partial definition {d.name} can't have a value")
   checkHeader g d
-  let ctx : Ctx R := { globals := g, erased := true }
+  let ctx : Ctx R := { globals := g, erased := true, witness := true }
   let _ ← check ctx w (ctx.eval d.type)
   pure (g.insert d)
 

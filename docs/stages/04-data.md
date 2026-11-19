@@ -82,6 +82,40 @@ match in both alternatives, nested matches, and the dropping and duplicating cas
 rejects. The `let 1 (.mk a b) := s` form works for inductives (it is a `match`) and still
 stops on a structure's marker tail.
 
+A **recursive consumer** may thread a linear value through its recursive call: the call
+consumes it at quantity 1, exactly as a call to any other linear function does, and the
+branch rule does the rest. `match` on a value held at 1 selects `casesOn1`, whose branches
+are alternatives, so a branch that drops the continuation (`next … used 0`) or a
+definition that calls itself twice on the same handle (`used ω`) is rejected, while one
+call on every path is accepted. `partial` changes nothing: without a termination proof
+the same rule applies, because a diverging path never returns and so never has to give
+the value back.
+
+```wiz
+inductive Cursor (a : Type) where
+  | mk (rest : List a)
+inductive Step (a : Type) where
+  | done
+  | more (value : a) (1 next : Cursor a)
+
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.count {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=
+  match Cursor.next c with
+  | .done => n
+  | .more _ c' => Cursor.count c' (Nat.succ n)
+```
+
+The recursive call's **result must not be consumed by an ω position**: `Nat.succ
+(Cursor.count c' n)` (or `1 + Cursor.count c' n`) scales the call's use of `c'` by ω,
+because an ω binder may duplicate its argument (`variable next … used ω`); write the
+counter as an accumulator (above) or a tail call. A `partial` definition's **witness**
+(the term that shows its type is inhabited) is checked without usages, so it may ignore a
+linear parameter — the body that runs is still checked strictly. (`Wiz/Core/Check.lean`,
+`Ctx.witness`; the self-hosted kernel's `TCtx.witness`.)
+
 | #   | Where              | What                                                       |
 |-----|--------------------|------------------------------------------------------------|
 | 4.3 | `Core/Eval.lean`   | `eval` cases for Σ / pairs / Unit / Empty                  |

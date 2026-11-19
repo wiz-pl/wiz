@@ -7551,7 +7551,7 @@ def applyGlobal (we : WEnv) (c : TCtx) (ty : Val) (f : Nat) (asg : List (Option 
       | .some v => applyGlobal we c ty f rest cod (.cons v env) (.app acc (quote (TCtx.lvl c) v))
       | .none => applyFound we c ty f rest dom cod env acc
     | .nil => applyFound we c ty f .nil dom cod env acc
-  | .done => match check (TCtx.erase c) (markCheck c acc ty) ty with
+  | .done => match check (TCtx.wit (TCtx.erase c)) (markCheck c acc ty) ty with
     | .ok _ _ => .some acc
     | .err _ => .none
 -- an argument the conclusion doesn't fix: found by the search
