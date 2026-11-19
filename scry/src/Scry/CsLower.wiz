@@ -480,8 +480,8 @@ partial def Scry.Cs.callRetRaw (c : Scry.Cst) (n : Nat) : Scry.Cs.M (Option Stri
           match Scry.Cs.methodOwner s.unit s.cls m with
           | .some om => Scry.Cs.pure (.some om.2.retRaw)
           | .none => Scry.Cs.pure (.none : Option String)
-        else
-          let ty0 ← (match Scry.Cs.lookupLocal s (c.textOf e) with
+        else do
+          ty0 ← (match Scry.Cs.lookupLocal s (c.textOf e) with
             | .some l => Scry.Cs.pure (.some l.ty)
             | .none => Scry.Cs.typePath c e);
           match ty0 with
@@ -508,8 +508,9 @@ partial def Scry.Cs.awaitedType (c : Scry.Cst) (e : Nat) (fallback : String) : S
       | .true => fallback
       | .false => l.awaitTy)
     | .none => Scry.Cs.pure fallback
-  else if String.eq k "invocation_expression" then
-    match Scry.Cs.callRetRaw c e with
+  else if String.eq k "invocation_expression" then do
+    rawOpt ← Scry.Cs.callRetRaw c e;
+    match rawOpt with
     | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
       | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
       | .true => Scry.Cs.pure (match Scry.Cs.asyncResult (Scry.Cs.calleeSimple c e) with
@@ -1476,7 +1477,9 @@ partial def Scry.Cs.declGo (c : Scry.Cst) (declTy declTyRaw : String) : List Nat
       -- takes it from the callee's raw return type
       aw ← (match String.eq declTyRaw "var" with
         | .true => match Scry.childF c v "value" with
-          | .some x => match Scry.Cs.callRetRaw c x with
+          | .some x => do
+            rawOpt ← Scry.Cs.callRetRaw c x;
+            match rawOpt with
             | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
               | .true => Scry.Cs.pure ""
               | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
