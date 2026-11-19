@@ -106,7 +106,7 @@ def Scry.rowPair (row : List U64) : Nat × Nat :=
   (Scry.rowNat row 0, Scry.rowNat row 1)
 
 def Scry.showPair (p : Nat × Nat) : String :=
-  String.append "(" (String.append (Nat.repr p.1) (String.append "," (String.append (Nat.repr p.2) ")")))
+  "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2 ++ ")"
 
 def Scry.showInv (I : List (Nat × Nat)) : String :=
   String.append "{" (String.append
@@ -135,9 +135,8 @@ def Scry.firstBadInstance (args : List Scry.Term) (I : List (Nat × Nat)) (ri : 
     let row := List.map (Scry.Term.eval m.1.vals) args;
     let p := Scry.rowPair row;
     if Scry.invMem p I then Scry.firstBadInstance args I ri rest
-    else .some (String.append "rule " (String.append (Nat.repr ri) (String.append
-      " derives tainted " (String.append (Scry.showPair p)
-        ", which is not in the invariant")))
+    else .some ("rule " ++ Nat.repr ri ++ " derives tainted " ++ Scry.showPair p ++
+      ", which is not in the invariant")
 
 /-- Check one rule: a `tainted` head must stay in `I`; any other head is not this
 obligation's business. -/
@@ -151,12 +150,21 @@ def Scry.checkRuleClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
   | .lat _ _ _ => .none
 
 def Scry.checkRulesClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
-    (I : List (Nat × Nat)) : Nat → List (Scry.Rule Nat) → Option String
-  | _, .nil => .none
-  | ri, .cons r rest =>
+    (I : List (Nat × Nat)) : List (Scry.Rule Nat) → Nat → Option String
+  | .nil, _ => .none
+  | .cons r rest, ri =>
     match Scry.checkRuleClosed p stI I ri r with
     | .some e => .some e
-    | .none => Scry.checkRulesClosed p stI I (Nat.succ ri) rest
+    | .none => Scry.checkRulesClosed p stI I rest (Nat.succ ri)
+
+/-- The first alert instance in a match list, as a counterexample message. -/
+def Scry.alertInstanceOf (args : List Scry.Term) :
+    List (Scry.Env Nat × List Nat) → Option String
+  | .nil => .none
+  | .cons m _ =>
+    let row := List.map (Scry.Term.eval m.1.vals) args;
+    .some ("the alert rule fires at sink " ++ Nat.repr (Scry.rowNat row 0) ++
+      " argument " ++ Nat.repr (Scry.rowNat row 1))
 
 /-- The alert rule's instances under `I`: any one is a counterexample to the claim. -/
 def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
@@ -166,13 +174,7 @@ def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
     match r.head with
     | .tuple rel args =>
       if Nat.beq rel Scry.rtAlert then
-        (match Scry.evalAtoms p.ops stI r.body Scry.Env.empty with
-        | .nil => Scry.checkAlertRules p stI rest
-        | .cons m _ =>
-          let row := List.map (Scry.Term.eval m.1.vals) args;
-          .some (String.append "the alert rule fires at sink " (String.append
-            (Nat.repr (Scry.rowNat row 0)) (String.append " argument "
-              (Nat.repr (Scry.rowNat row 1))))))
+        Scry.alertInstanceOf args (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
       else Scry.checkAlertRules p stI rest
     | .lat _ _ _ => Scry.checkAlertRules p stI rest
 
@@ -186,7 +188,7 @@ def Scry.check (p : Scry.Program Nat) (st : Scry.State Nat) (c : Scry.Claim) : S
   | .some e => .rejected e
   | .none =>
     let stI := Scry.invState st c.invariant;
-    match Scry.checkRulesClosed p stI c.invariant 0 p.rules with
+    match Scry.checkRulesClosed p stI c.invariant p.rules 0 with
     | .some e => .rejected e
     | .none => match Scry.checkAlertRules p stI p.rules with
       | .some e => .rejected e
@@ -213,19 +215,21 @@ def Scry.rowsOf (st : Scry.State Nat) (rel : Nat) : List (Nat × Nat) :=
   List.map Scry.rowPair (Scry.rtRows st rel)
 
 /-- Add every `tainted` head derivable in one round whose tainted premises are in `I`. -/
+def Scry.closeOne (p : Scry.Program Nat) (stI : Scry.State Nat)
+    (I : List (Nat × Nat)) (r : Scry.Rule Nat) : List (Nat × Nat) :=
+  match r.head with
+  | .tuple rel args =>
+    if Nat.beq rel Scry.rtTainted then
+      List.foldl (fun (acc : List (Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
+        Scry.invAdd (Scry.rowPair (List.map (Scry.Term.eval m.1.vals) args)) acc)
+        I (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
+    else I
+  | .lat _ _ _ => I
+
+/-- One closure round over every rule. -/
 def Scry.closeRound (p : Scry.Program Nat) (stI : Scry.State Nat)
-    (ri : Nat) (I : List (Nat × Nat)) : List (Scry.Rule Nat) → List (Nat × Nat)
-  | .nil => I
-  | .cons r rest =>
-    let I' := match r.head with
-      | .tuple rel args =>
-        if Nat.beq rel Scry.rtTainted then
-          List.foldl (fun (acc : List (Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
-            Scry.invAdd (Scry.rowPair (List.map (Scry.Term.eval m.1.vals) args)) acc)
-            I (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
-        else I
-      | .lat _ _ _ => I;
-    Scry.closeRound p stI (Nat.succ ri) I' rest
+    (rules : List (Scry.Rule Nat)) (I : List (Nat × Nat)) : List (Nat × Nat) :=
+  List.foldl (fun acc r => Scry.closeOne p stI acc r) I rules
 
 /-- One closure round: re-derive `tainted` heads from `I` until the round adds nothing.
 The recursion is bounded by the number of rows in the EDB (each round that changes `I`
@@ -234,7 +238,7 @@ def Scry.closeFix (p : Scry.Program Nat) (st : Scry.State Nat) :
     Nat → List (Nat × Nat) → List (Nat × Nat)
   | .zero, I => I
   | .succ k, I =>
-    let I' := Scry.closeRound p (Scry.invState st I) 0 I p.rules;
+    let I' := Scry.closeRound p (Scry.invState st I) p.rules I;
     if Nat.beq (List.length I') (List.length I) then I
     else Scry.closeFix p st k I'
 
@@ -258,7 +262,7 @@ def Scry.runTactic (p : Scry.Program Nat) (st : Scry.State Nat) :
     | .intro rel => Scry.runTactic p st rest (List.foldr (fun r acc => Scry.invAdd r acc) I (Scry.rowsOf st rel))
     | .apply ri =>
       let r := Scry.ruleAt p ri;
-      let I' := Scry.closeRound p (Scry.invState st I) ri I (List.cons r .nil);
+      let I' := Scry.closeRound p (Scry.invState st I) (List.cons r .nil) I;
       Scry.runTactic p st rest I'
     | .close => Scry.runTactic p st rest (Scry.closeFix p st (Scry.roundBudget st) I)
     | .closeN n => Scry.runTactic p st rest (Scry.closeFix p st n I)
