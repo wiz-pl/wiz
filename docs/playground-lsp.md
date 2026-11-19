@@ -416,8 +416,9 @@ server does.
   handshake, `didOpen` with empty diagnostics, goals/term rendering with spans and the
   term tree, a diagnostics update after `didChange`, the plain fallback, close and
   reconnect, `textDocument/completion`, the caret's position params, the squiggles and
-  the popup's wiring, the no-server path and no unhandled rejections. It needs no Wiz
-  build.
+  the popup's wiring, hover and go-to-definition, the token (a client without it, or with
+  a wrong one, is refused; the page's `?token=` gets in), the no-server path and no
+  unhandled rejections. It needs no Wiz build.
 * `node web/editor_test.mjs` — the editor's pure rules: UTF-16 versus code-point
   positions (including an astral character), squiggle ranges (no end, empty, multi-line,
   overlapping, past the text), and completion lists (shapes, filtering, ordering, the
@@ -429,9 +430,6 @@ server does.
   `wiz run` renders the fixture, the patch list is applied in minidom and must reproduce
   the next HTML, and `web/framework/driver.js`'s `startModel` is driven with a fake Wasm
   module. `web/framework/test.mjs` remains the framework's own browser-half test.
-* The same test covers the no-server path and no unhandled rejections, and the token (a
-  client without it, or with a wrong one, is refused; the page's `?token=` gets in). It
-  needs no Wiz build.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `node web/hover_test.mjs` — the hover card and go-to-definition: the three LSP content
