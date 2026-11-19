@@ -3,7 +3,8 @@
 # web/build-playground.sh); the generated benchmark page's fixtures and the site check
 # (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
-# playground's under Node (web/playground_test.mjs); then serve the infoview with
+# playground's under Node (web/playground_test.mjs); the playground's pure state and
+# URL encoding (web/playground-state_test.mjs) run first; then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
 # it in headless Chromium (web/chrome_test.mjs, over the DevTools protocol), put the
 # cursor in the page's proof, click a subterm and look for the goals and what the subterm
@@ -17,6 +18,14 @@ PORT=${1:-18765}
 OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# (11ab) the playground's pure state and URL encoding need neither the build nor a
+# browser; run it first so a broken share link fails fast.
+node "$ROOT/web/playground-state_test.mjs" > "$OUT/playground-state.txt"
+if grep -qF 'playground state: all checks passed' "$OUT/playground-state.txt"; then
+  echo "ok (playground state, node)"
+else
+  echo "FAIL (playground state, node)"; cat "$OUT/playground-state.txt"; exit 1
+fi
 # (11s) the search box's ranking and rendering (no build or browser needed)
 node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
@@ -63,7 +72,7 @@ node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
 done
-# (11ab) the playground's module: the self-hosted checker, one evaluation
+# (11ab) the playground's module: the self-hosted checker, every example
 node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
 if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
 # (loom) the whole page as one Loom app (?ui=loom): its module mounted under Node with
@@ -80,7 +89,10 @@ node "$ROOT/web/doc_node_test.mjs" "$OUT" "$OUT/doc/site/Col.json" > "$OUT/doc.t
 for want in 'class="tt k-const" data-ref=' 'info: <span class="kind">const</span> <code>Nat : Type</code>' 'tt k-pi sel'; do
   if grep -qF "$want" "$OUT/doc.txt"; then echo "ok (doc, node): $want"; else echo "FAIL (doc, node): missing $want"; cat "$OUT/doc.txt"; exit 1; fi
 done
-[ -n "$WIZ_WEB_NO_BROWSER" ] && exit 0
+if [ -n "$WIZ_WEB_NO_BROWSER" ]; then
+  echo "ok (browser skipped: WIZ_WEB_NO_BROWSER)"
+  exit 0
+fi
 if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell --inputs-from "$ROOT" nixpkgs#chromium -c sh -c 'command -v chromium'); fi
 # (11s) the documentation page in Chromium: signatures rendered by the Wasm module
 (cd "$OUT/doc/site" && exec python3 -m http.server $((PORT + 2)) --bind 127.0.0.1) > "$OUT/http.log" 2>&1 &
