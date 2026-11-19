@@ -83,9 +83,11 @@ the workstreams' main prizes and should not be read as rejected.
 
 **Big rocks, not in the scored top 10** (high impact, high effort, confidence still medium):
 
-* **CAF caching of closed top-level definitions**: the OLED demo's value simulation rebuilds
-  `RomT` tables every cycle and spends ~60% of its time in malloc/RC (profiled informally; caching closed constants is an open request);
-  compiler work (`Wiz/Compiler/{Reuse,C}.lean`), not a library change. Impact 5, confidence 2, effort 5 → 2.0.
+* **CAF caching of closed top-level definitions** — **done on master** (`3ef38ad8`, stage 15i,
+  PR #207; verified 2026-11-19 in `docs/notes/caf-closed-constants-2026-11-19.md`): the OLED demo's
+  value simulation rebuilt `RomT` tables every cycle and spent ~60% of its time in malloc/RC
+  (profiled informally before the feature); `IR.cafs` now caches closed definitions. The local
+  reproduction is 204.9M → ~1.9k mallocs for 100k lookups. No work left here.
 * **Selfhost `StrMap` keys**: `selfhost/Frontend.wiz:43-49` (`Scope.lookup`) converts the Wiz `String` to a native key
   with `Str.ofString` on every global lookup, and `selfhost/Backend.wiz:445,2465` does the same per
   `arity`/inlining lookup; intern once (`lib/Intern.wiz`) and key a `U64Map`, or hash the chars
