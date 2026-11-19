@@ -119,6 +119,7 @@ def fixtures : List (String × String) :=
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
    ("lower", "patterns"), ("lower", "switch"),
+   ("lower", "primary-ctor"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
@@ -367,6 +368,8 @@ def group : Group where
       run := fun _ => lowerGolden "patterns" },
     { name := "lower: switch labels compared (int, string, enum), typed binding, when guard, arms",
       run := fun _ => lowerGolden "switch" },
+    { name := "lower: a record's and a primary constructor's implicit constructor (field stores, base call)",
+      run := fun _ => lowerGolden "primary-ctor" },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []

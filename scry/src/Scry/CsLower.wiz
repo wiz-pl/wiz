@@ -2544,11 +2544,21 @@ def Scry.Cs.posParams (c : Scry.Cst) (n : Nat) : List (String × String) :=
       (Scry.childrenK c ps "parameter")
   | .none => .nil
 
+/-- The type of a `base_list` entry: a class writes the type directly
+(`class C : B`), a positional record wraps it in `primary_constructor_base_type`
+(`record R(int X) : B(X)`). -/
+def Scry.Cs.baseEntryText (c : Scry.Cst) (n : Nat) : String :=
+  if String.eq (c.kindOf n) "primary_constructor_base_type" then
+    match Scry.kids c n with
+    | .cons t _ => Scry.Cs.typeText c t
+    | .nil => c.textOf n
+  else Scry.Cs.typeText c n
+
 /-- The `base_list`'s first entry: the base class (`Base` in `class C : Base, IFoo`). -/
 def Scry.Cs.baseOf (c : Scry.Cst) (n : Nat) : String :=
   match Scry.childK c n "base_list" with
   | .some bl => match Scry.kids c bl with
-    | .cons t _ => Scry.Cs.typeText c t
+    | .cons t _ => Scry.Cs.baseEntryText c t
     | .nil => ""
   | .none => ""
 
@@ -2776,7 +2786,8 @@ value is returned unless `void`); `stmts` is a top-level statement list instead
 `isCtor` returns `this`. -/
 def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0 : Scry.LState)
     (n : Nat) (qname : String) (isStatic : Bool) (params : List (String × String))
-    (retVoid : Bool) (isCtor : Bool) (body : Option Nat) (stmts : List Nat) : Scry.LState × Wil.Func :=
+    (retVoid : Bool) (isCtor : Bool) (body : Option Nat) (stmts : List Nat)
+    (pre : Scry.Cs.M Unit) : Scry.LState × Wil.Func :=
   let ls1 := { ls0 with nextVar := 0, nextBlock := 1, curBlock := 0, curStmts := .nil
     , live := .true, done := .nil, locals := .nil, params := .nil, env := .nil
     , fname := qname, retTy := Wil.Ty.ptr Wil.Ty.dyn, funcOrigin := Scry.originOf c n
@@ -2795,6 +2806,7 @@ def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0
     (match isCtor with
       | .false => Scry.Cs.pure ()
       | .true => Scry.Cs.lowerCtorInit c n k);
+    pre;
     (match stmts with
       | .cons _ _ => Scry.Cs.lowerStmts c stmts
       | .nil => (match body with
@@ -2824,7 +2836,71 @@ def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0
 def Scry.Cs.lowerFunc (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0 : Scry.LState)
     (n : Nat) (qname : String) (isStatic : Bool) (params : List (String × String))
     (retVoid : Bool) (isCtor : Bool) (body : Option Nat) : Scry.LState × Wil.Func :=
-  Scry.Cs.lowerFuncOf c u k ls0 n qname isStatic params retVoid isCtor body .nil
+  Scry.Cs.lowerFuncOf c u k ls0 n qname isStatic params retVoid isCtor body .nil (Scry.Cs.pure ())
+
+/-- The `argument_list` of a type declaration's `base_list` (`record R(int X) : B(X)`),
+the primary constructor's base call. -/
+def Scry.Cs.baseArgsOf (c : Scry.Cst) (n : Nat) : Option Nat :=
+  match Scry.childK c n "base_list" with
+  | .none => .none
+  | .some bl => match Scry.kids c bl with
+    | .cons t _ => match String.eq (c.kindOf t) "primary_constructor_base_type" with
+      | .true => List.find (fun i => String.eq (c.kindOf i) "argument_list") (Scry.kids c t)
+      | .false => List.find (fun i => String.eq (c.kindOf i) "argument_list") (Scry.kids c bl)
+    | .nil => .none
+
+/-- Store each positional parameter into its field of `this`: the body C# generates for
+a record's or a primary constructor's parameters (`this.<X>k__BackingField = X`). -/
+partial def Scry.Cs.storePrimary (c : Scry.Cst) (n : Nat) : List (String × String) → Nat →
+    Scry.Cs.M Unit
+  | .nil, _ => Scry.Cs.pure ()
+  | .cons p rest, i => do
+    s ← Scry.Cs.st;
+    (match s.this, Scry.Cs.lookupLocal s p.1 with
+      | .some th, .some l => do
+        g ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
+        Scry.Cs.emit c n (Wil.gep g th i);
+        Scry.Cs.emit c n (Wil.store g l.var)
+      | _, _ => Scry.Cs.pure ());
+    Scry.Cs.storePrimary c n rest (Nat.succ i)
+
+/-- The primary constructor's base call (`record P(int A) : Money(A)`): its arguments are
+evaluated (a sink inside one is still analysed) and the target constructor is called
+with `this` as argument 0, exactly as for a `: base(…)` initializer. -/
+def Scry.Cs.lowerPrimaryBase (c : Scry.Cst) (k : Scry.Cs.Cls) :
+    Option Nat → Scry.Cs.M Unit
+  | .none => Scry.Cs.pure ()
+  | .some a => do
+    r ← Scry.Cs.lowerArgs c (Scry.kids c a);
+    Scry.Cs.bindOuts c r.2;
+    s ← Scry.Cs.st;
+    let target := Scry.Cs.canon s.unit k k.base;
+    match String.isEmpty target with
+    | .true => Scry.Cs.warn c a
+        "constructor initializer not modelled: the base type is unknown, so the target constructor is not called"
+    | .false => match s.this with
+      | .some th => Scry.Cs.emit c a (Wil.Stmt.call .none (.direct (target ++ "..ctor"))
+          (List.cons th r.1) Wil.noSpan)
+      | .none => Scry.Cs.pure ()
+
+/-- Lower the constructor a record's or a primary constructor's parameter list implies:
+the parameters are the leading fields, the body stores each one into its field and
+returns `this`, and a base call (`: B(a…)`) runs first. -/
+def Scry.Cs.lowerPrimaryCtor (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls)
+    (ls0 : Scry.LState) (n : Nat) (baseArgs : Option Nat) : Scry.LState × Wil.Func :=
+  let ps := List.take k.pos k.fields;
+  Scry.Cs.lowerFuncOf c u k ls0 n (k.qname ++ "..ctor") .false ps .true .true .none .nil
+    (do Scry.Cs.lowerPrimaryBase c k baseArgs;
+        Scry.Cs.storePrimary c n ps 0)
+
+/-- Whether the declaration needs the constructor its parameter list implies: a class,
+struct or record with positional parameters. The constructor is generated by C# even
+when the type has hand-written constructor *overloads* (a `: this(…)` call targets it),
+so `hasCtor` does not suppress it. -/
+def Scry.Cs.needsPrimaryCtor (c : Scry.Cst) (n : Nat) (k : Scry.Cs.Cls) : Bool :=
+  let kind := c.kindOf n;
+  Bool.and (Nat.lt 0 k.pos)
+    (String.elem kind ["class_declaration", "struct_declaration", "record_declaration"])
 
 /-- The functions of one class's members. -/
 def Scry.Cs.lowerMembers (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) :
@@ -2978,7 +3054,11 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
       | .some b => Scry.kids c b
       | .none => .nil;
     let r1 := Scry.Cs.lowerMembers c u k acc.1 ms;
-    (r1.1, List.append acc.2 r1.2)) (Scry.emptyState, (.nil : List Wil.Func)) decls;
+    let synth : List Wil.Func := match Scry.Cs.needsPrimaryCtor c d.2 k with
+      | .true => .cons (Scry.Cs.lowerPrimaryCtor c u k acc.1 d.2 (Scry.Cs.baseArgsOf c d.2)).2 .nil
+      | .false => .nil;
+    (r1.1, List.append acc.2 (List.append synth r1.2)))
+    (Scry.emptyState, (.nil : List Wil.Func)) decls;
   -- top-level statements are `Program.<Main>$` in C#: lower them as `<stem>.Main`.
   let globals := Scry.childrenK c 0 "global_statement";
   let stem := Scry.Cs.stemOf path;
@@ -2986,7 +3066,8 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
     | .nil => r
     | .cons g0 _ =>
       let k : Scry.Cs.Cls := { Scry.Cs.Cls.empty with qname := stem, simple := stem };
-      let gr := Scry.Cs.lowerFuncOf c u k r.1 g0 (stem ++ ".Main") .true .nil .true .false .none globals;
+      let gr := Scry.Cs.lowerFuncOf c u k r.1 g0 (stem ++ ".Main") .true .nil .true .false .none globals
+        (Scry.Cs.pure ());
       (gr.1, List.append r.2 (List.cons gr.2 .nil));
   Scry.Cs.Lowered.mk path text r2.2
     (List.append (Scry.Cs.initWarnings c u decls)
