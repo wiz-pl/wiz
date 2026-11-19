@@ -21,7 +21,7 @@ def add : Nat → Nat → Nat
 def head {A : Type} {n : Nat} : Vec A (.succ n) → A
   | .cons x _ => x
 
-def map {A B : Type} (f : A → B) {n : Nat} : Vec A n → Vec B n
+def map {A B : Type} (f : A → B) {0 n : Nat} : Vec A n → Vec B n
   | .nil => .nil
   | .cons x xs => .cons (f x) (map xs)
 #reduce head (Vec.cons Nat.zero Vec.nil)
