@@ -773,7 +773,7 @@ def cliDiffGroup : Group where
           check (← cliDiffExists h "out") "the host's LLVM build wrote no artifact"
           cliDiffKnown "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
         else do
-          let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
+          let why := " ".intercalate ((cliDiffNormal spec.columns spec.messages spec.continuations h.err).splitOn "\n")
           skip s!"backend: the host builds through textual LLVM IR; --llvm here selects the host's LLVM path (exit {h.code}: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost

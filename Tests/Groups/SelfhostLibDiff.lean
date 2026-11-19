@@ -929,6 +929,7 @@ def libDiffGroup : Group where
         let all ← libDiffFiles
         let parts := (List.range libDiffChunks).map (libDiffChunk all)
         checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) -- complexity: ok (libDiffChunks is 4)
+      },
     { name := "the sweep's worker pool: every file exactly once, results in order, any worker count", run := fun _ => do
         for jobs in [1, 2, 3, 8, 40] do
           let n := 17

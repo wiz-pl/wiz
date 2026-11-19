@@ -314,17 +314,6 @@ def Scry.TextIndex.ofString (text : String) : Scry.TextIndex :=
 
 /-- A 1-based line and **character** column for a byte offset. The line table holds byte
 offsets; the column goes through the text's byte map, so a multibyte character before
-the span does not inflate it. -/
-def Scry.lineColFrom (idx : Scry.TextIndex) (off : Nat) : Nat × Nat :=
-  let starts := idx.lineStarts;
-  let n := U32Array.size starts;
-  match Nat.beq n 0 with
-  | .true => (1, Nat.succ (Scry.ByteMap.charOfByte idx.map off))
-  | .false =>
-    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
-    let lo := UIntN.toNat (U32Array.get starts i);
-    (Nat.succ i, Scry.ByteMap.colOf idx.map off lo)
-
 /-- The old signature, kept for callers that only have the text (it builds the byte map
 and line table first, so prefer `originOfSpanAt` when several spans are located). -/
 def Scry.lineColAt (text : String) (off : Nat) : Nat × Nat :=

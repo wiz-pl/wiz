@@ -518,7 +518,7 @@ def descSweepExamples (k : Nat) : IO Unit := do
     let src ← IO.FS.readFile p
     let st := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
     let errored := st.messages.any (·.severity == .error)
-    if errorExamples.contains p then
+    if errorExamples.contains p.toString then
       -- the two files that demonstrate a diagnostic must keep doing so
       unless errored do throw (IO.userError s!"{p}: expected an error, got none")
       continue

@@ -4263,7 +4263,7 @@ def selfHostHostGroup : Group where
           "  | .z => z\n  | .s n => s n (natRec P z s n)\n")
         match s.globals.find? "natRec" with
         | some d => unless d.derivedEquations do throw (IO.userError "natRec has no derived equations: the test does not reach checkImplAgrees")
-        | none => throw (IO.userError "natRec was not declared") }
+        | none => throw (IO.userError "natRec was not declared") },
 
     { name := "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)", run := fun _ =>
         selfhostCheckFile superclassParam superclassParamExpected },
