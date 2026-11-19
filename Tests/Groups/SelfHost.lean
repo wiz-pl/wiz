@@ -3519,6 +3519,41 @@ def selfHostGroup : Group where
           ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
+    -- (13t) namespaces and `open`, as the Lean frontend has them (`Tests/Groups/Namespace.lean`)
+    { name := "(13t) namespaces, `open` and `open … as`, and a constructor of the matched type", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\nnamespace B\ninductive T where\n  | mk (n : Nat)\n" ++
+          "def x : Nat := 1\ndef get (t : T) : Nat := match t with\n  | T.mk n => n\nend B\n" ++
+          "def y : Nat := B.x\nend A\nopen A\ndef use : Nat := A.B.x + y\n" ++
+          "def p : Nat := A.B.get (A.B.T.mk 3)\nopen A as Al\ndef use2 : Nat := Al.y + A.B.x\n")
+          ("A.B.T : U0\nA.B.x : Nat\nA.B.get : (x0 : A.B.T) → Nat\nA.y : Nat\n" ++
+           "use : Nat\np : Nat\nuse2 : Nat\n") },
+    { name := "(13t) two opens that provide the same name are an error naming both (never last-wins)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "namespace B\ndef x : Nat := 2\nend B\nopen A\nopen B\ndef y : Nat := x\n")
+          ("A.x : Nat\nB.x : Nat\nerror: 'x' is ambiguous: it refers to 'A.x', 'B.x'; " ++
+           "qualify it with a namespace\n") },
+    { name := "(13t) `open A as Al` does not open A unqualified", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "open A as Al\ndef y : Nat := Al.x\ndef bad : Nat := x\n")
+          "A.x : Nat\ny : Nat\nerror: unknown identifier x\n" },
+    { name := "(13t) a namespace with no `end` is reported at the `namespace`; a stray or mismatching `end` at the `end`", run := fun _ => do
+        selfhostCheckFile "import Prelude\nnamespace A\ndef x : Nat := 1\n"
+          "A.x : Nat\nerror: namespace A is not closed: add `end` (or `end A`)\n"
+        selfhostCheckFile "import Prelude\nend\n"
+          "error: `end` without an open `namespace`\n"
+        selfhostCheckFile "import Prelude\nnamespace A\ndef x : Nat := 1\nend B\n"
+          "A.x : Nat\nerror: `end B` does not close the namespace `A` (write `end` or `end A`)\n"
+        selfhostCheckFile "import Prelude\nopen Z\n"
+          "error: unknown namespace 'Z': there is no declaration `Z.…`\n" },
+    { name := "(13t) mutual inductive types under a namespace", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace N\nmutual\ninductive A where\n  | mk (b : B)\n" ++
+          "inductive B where\n  | mk (a : A)\nend\nend N\n")
+          "N.A : U0\nN.B : U0\n" },
+    { name := "(13t) a module's `open` does not reach the file that imports it", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nnamespace A\ndef x : Nat := 1\nend A\nopen A\n"),
+           ("input.wiz", "import Prelude\nimport A\ndef y : Nat := x\n")]
+          "A.x : Nat\nerror: unknown identifier x\n" },
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"

@@ -652,92 +652,137 @@ def LspCtx.empty : LspCtx := .mk .false .false Array.empty 0 0 .nil
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
 -- reads them, since the frontend is pure), the derivers by class, (C14) whether
 -- `--trust-native` was given, (C15) whether `--trust-smt` was given (it selects the
--- `smt` refusal), and (D8 goals) the language server's collection state
+-- `smt` refusal), (D8 goals) the language server's collection state, and (13t) the
+-- namespace being elaborated, the `open`ed namespaces, the `open … as` aliases, and the
+-- namespaces still open (with where each was declared, for a missing `end`)
 --
 -- (C14) `trustNative` is the run's `--trust-native` (`--trust-native` of the host's
 -- `wiz`): `native_refl` is accepted only with it, and it is a flag of the run, not a
 -- property of the source (the host's `CommandState.trustNative`)
+-- (13t) `open M as A`: `A.x` is a spelling of `M.x`
+inductive NsAlias where
+  | mk (alias : String) (target : String)
+-- (13t) an open `namespace`: its full name and the offset of its `namespace` line
+inductive NsFrame where
+  | mk (name : String) (off : Nat)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String)) (trust : Bool) (smtTrust : Bool) (lsp : LspCtx)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .false .false LspCtx.empty
+       (priv : Bool) (ders : StrMap (Option String))
+       (nsPrefix : String) (opens : List String) (aliases : List NsAlias)
+       (nsStack : List NsFrame) (trust : Bool) (smtTrust : Bool) (lsp : LspCtx)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+  "" .nil .nil .nil .false .false LspCtx.empty
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ _ _ _ _ _ _ _ => sc
 -- (C14) `--trust-native`: `native_refl` may decide an equation by running it
 def Globals.trustNative : Globals → Bool
-  | .mk _ _ _ _ _ _ _ _ _ t _ _ => t
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ t _ _ => t
+-- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
+-- frontend can parse and refuse but not run; the flag says which refusal to give
+def Globals.smtTrust : Globals → Bool
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ s _ => s
+-- (D8 goals) the language server's collection state
+def Globals.lsp : Globals → LspCtx
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => l
 def Globals.withTrust (gs : Globals) (t : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d _ s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st _ s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
+def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d np o a st tr _ l => .mk all sc inds ffi cls ins hs p d np o a st tr t l
 -- (playground LSP, stage 2) whether to record spans and expected types at all: the
 -- page's check turns it on, the compiler and the external server leave it off
 def Globals.watch (gs : Globals) : Bool := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.watch l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.watch l
 def Globals.watching (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) .true (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) .true (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 def Globals.setWatch (gs : Globals) (w : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) w (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) w (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 -- (D8 goals) what the collection sees: the command's source range, and the entries so far
 def Globals.lspOn (gs : Globals) : Bool := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.on l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.on l
 def Globals.lspSrc (gs : Globals) : Array Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.src l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.src l
 def Globals.lspStart (gs : Globals) : Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStart l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStart l
 def Globals.lspStop (gs : Globals) : Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStop l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStop l
 def Globals.lspEntries : Globals → List LspEntry
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.entries l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.entries l
 def Globals.setCmd (gs : Globals) (src : Array Nat) (start stop : Nat) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) src start stop (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) src start stop (LspCtx.entries l))
 def Globals.addLsp (gs : Globals) (e : LspEntry) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match Bool.or (LspCtx.on l) (LspCtx.watch l) with
-    | .true => .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (.cons e (LspCtx.entries l)))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match Bool.or (LspCtx.on l) (LspCtx.watch l) with
+    | .true => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (.cons e (LspCtx.entries l)))
     | .false => gs
 def Globals.withLsp (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p d t s (.mk .true (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk .true (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 -- (a module's commands start a new document's entries; `modRunBody` resets it per module)
 def Globals.lspReset (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) 0 0 .nil)
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) 0 0 .nil)
+-- (13t) the namespace state, replaced as a whole
+def Globals.withNs (gs : Globals) (p : String) (ops : List String) (als : List NsAlias)
+    (st : List NsFrame) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs pr d _ _ _ _ t s l => .mk all sc inds ffi cls ins hs pr d p ops als st t s l
+-- (13t) the namespace being elaborated (`""` at the top of the file)
+def Globals.nsPrefix (gs : Globals) : String := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ p _ _ _ _ _ _ => p
+-- (13t) the namespaces `open`ed so far in this file (their names are visible unqualified)
+def Globals.opens (gs : Globals) : List String := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ os _ _ _ _ _ => os
+-- (13t) the `open M as A` aliases (`A.x` is `M.x`; an alias opens nothing unqualified)
+def Globals.aliases (gs : Globals) : List NsAlias := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ _ al _ _ _ _ => al
+-- (13t) the open namespaces, innermost first, with the offset of each `namespace`
+def Globals.nsStack (gs : Globals) : List NsFrame := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ st _ _ _ => st
+-- (13t) a file's namespaces and opens are its own: an importer starts without them
+def Globals.atModuleStart (gs : Globals) : Globals := Globals.withNs gs "" .nil .nil .nil
+-- (13t) `namespace Foo` (nested: `A.B`)
+def Globals.pushNs (gs : Globals) (n : String) (off : Nat) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs pr d p os als st t s l =>
+    .mk all sc inds ffi cls ins hs pr d n os als (.cons (.mk n off) st) t s l
+-- (13t) `end`: the innermost namespace, and the one outside it
+def Globals.popNs (gs : Globals) (outer : String) (rest : List NsFrame) : Globals :=
+  Globals.withNs gs outer (Globals.opens gs) (Globals.aliases gs) rest
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d np o a st t s l
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d t s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs _ d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ _ _ _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ _ _ _ _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match g with
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d t s l
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d np o a st t s l
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d t s l
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d np o a st t s l
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds (.cons f ffi) cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds (.cons f ffi) cls ins hs p d np o a st t s l
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ _ _ _ _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ _ _ _ _ _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d np o a st t s l
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -746,39 +791,33 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d t s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins _ p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ _ _ _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d np o a st t s l
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders _ _ _ => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders _ _ _ _ _ _ _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) t s l
--- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
--- frontend can parse and refuse but not run; the flag says which refusal to give
-def Globals.smtTrust : Globals → Bool
-  | .mk _ _ _ _ _ _ _ _ _ _ s _ => s
-def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d tr _ l => .mk all sc inds ffi cls ins hs p d tr t l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) np o a st t s l
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ _ _ _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ _ _ _ _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls (.cons i ins) hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls (.cons i ins) hs p d np o a st t s l
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d t s l
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d np o a st t s l
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -787,13 +826,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -805,8 +844,159 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
+-- (13t) the kernel name at index `i` (the latest is `0`)
+def globalNameOf (gs : Globals) (i : Nat) : String := match gs with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k _ _ _ _ _ _ => k
+-- (13t) a string's length (`lib/Prelude.wiz` has no `String.length`)
+def lenChars : List Char → Nat
+  | .nil => 0
+  | .cons _ cs => 1 + lenChars cs
+def lenStr (s : String) : Nat := match s with
+  | .mk cs => lenChars cs
+-- (13t) `p` a prefix of `s`
+def startsWithS (p s : String) : Bool := match p with
+  | .mk ps => match s with
+    | .mk ss => match matchPrefix ps ss with
+      | .some _ => .true
+      | .none => .false
+-- (13t) whether a namespace has any (public) declaration `n.…`: what `open n` needs
+partial def nameHasPrefix (all : Array Global) (i : Nat) (p : String) : Bool := match i with
+  | .zero => .false
+  | .succ j => match Array.getD all j (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ _ _ _ _ _ => Bool.or (startsWithS p n) (nameHasPrefix all j p)
+def Globals.hasDeclUnder (gs : Globals) (n : String) : Bool := match gs with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => nameHasPrefix all (Array.size all) (n +++ ".")
+
+-- (13t) **Names in a namespace.** `x` as written denotes: a local binder, else (in
+-- `namespace Foo`) `Foo.x`, else the module's own `x`, else `M.x` for each `open M`; two
+-- *different* declarations are an error naming both (`ambiguous-name`), never a
+-- silent last-wins. A qualified name (`A.x`) is used as written, after the longest
+-- `open … as` alias maps its prefix (`Al.x` is `A.x`); inside a namespace, `B.x` that
+-- names nothing is also tried as `Foo.B.x`. This is the host's `Globals.resolveName`
+-- (`Wiz/Core/Term.lean`) over this frontend's scope.
+inductive NameRes where
+  | ok (i : Nat)
+  | privTo (mod name : String)
+  | missing
+  | ambiguous (names : List String)
+-- `dropL` is defined later in this file; `Cli.wiz` has a `dropChars` of its own (the
+-- compiler is one source, so the names must differ)
+def dropNChars : Nat → List Char → List Char
+  | .zero, cs => cs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ cs => dropNChars k cs
+def hasDotC : List Char → Bool
+  | .nil => .false
+  | .cons c cs => Bool.or (Nat.beq (Char.code c) 46) (hasDotC cs)
+def memIdx (x : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons y ys => Bool.or (Nat.beq x y) (memIdx x ys)
+def strLtChars : List Char → List Char → Bool
+  | .nil, .nil => .false
+  | .nil, _ => .true
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => match Nat.lt (Char.code a) (Char.code b) with
+    | .true => .true
+    | .false => match Nat.beq (Char.code a) (Char.code b) with
+      | .true => strLtChars as bs
+      | .false => .false
+def strLtS (a b : String) : Bool := match a with
+  | .mk as => match b with
+    | .mk bs => strLtChars as bs
+def insertStr (x : String) : List String → List String
+  | .nil => .cons x .nil
+  | .cons y ys => match strLtS x y with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (insertStr x ys)
+def sortStr : List String → List String
+  | .nil => .nil
+  | .cons x xs => insertStr x (sortStr xs)
+def joinCommaStrs : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x rest => x +++ ", " +++ joinCommaStrs rest
+def quoteStr : List String → List String
+  | .nil => .nil
+  | .cons x rest => .cons ("'" +++ x +++ "'") (quoteStr rest)
+def ambiguousMsg (x : String) (names : List String) : String :=
+  "'" +++ x +++ "' is ambiguous: it refers to " +++ joinCommaStrs (quoteStr names)
+    +++ "; qualify it with a namespace"
+-- the longest `open … as` alias whose prefix matches `x`
+def aliasBest (x : String) : List NsAlias → Option NsAlias
+  | .nil => .none
+  | .cons (.mk a m) rest =>
+    let best := aliasBest x rest;
+    match Bool.and (startsWithS (a +++ ".") x) (match best with
+      | .none => .true
+      | .some (.mk b _) => Nat.lt (lenStr a) (lenStr b)) with
+    | .true => .some (.mk a m)
+    | .false => best
+def expandAliases (gs : Globals) (x : String) : String := match aliasBest x (Globals.aliases gs) with
+  | .none => x
+  | .some (.mk a m) => m +++ String.mk (dropNChars (lenStr a) (match x with | .mk cs => cs))
+def prefixOpens : List String → String → List String
+  | .nil, _ => .nil
+  | .cons m ms, x => .cons (m +++ "." +++ x) (prefixOpens ms x)
+-- the names an unqualified `x` may denote, in the host's order
+def nsCandidates (gs : Globals) (x : String) : List String :=
+  let p := Globals.nsPrefix gs;
+  let here : List String := match p with
+    | .mk cs => match cs with
+      | .nil => .nil
+      | _ => .cons (p +++ "." +++ x) .nil;
+  List.append here (.cons x (prefixOpens (Globals.opens gs) x))
+def candOf (sc : Scope) (acc : List Nat) (n : String) : List Nat := match lookupExact sc n with
+  | .ok i => match memIdx i acc with
+    | .true => acc
+    | .false => .cons i acc
+  | _ => acc
+partial def candsOf (sc : Scope) (acc : List Nat) : List String → List Nat
+  | .nil => acc
+  | .cons x xs => candsOf sc (candOf sc acc x) xs
+def nameOfIdx (gs : Globals) : List Nat → List String
+  | .nil => .nil
+  | .cons i is => .cons (privBase (globalNameOf gs i)) (nameOfIdx gs is)
+-- the scope-free name: a qualified one as written (after the longest alias), an
+-- unqualified one through the namespace/open candidates
+def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes := match x with
+  | .mk cs => match hasDotC cs with
+    | .true =>
+      let y := expandAliases gs x;
+      match lookupExact sc y with
+      | .ok i => .ok i
+      | .privTo m => .privTo m y
+      | .missing =>
+        let p := Globals.nsPrefix gs;
+        match p with
+        | .mk ps => match ps with
+          | .nil => .missing
+          | _ => (match lookupExact sc (p +++ "." +++ y) with
+            | .ok i => .ok i
+            | .privTo m => .privTo m (p +++ "." +++ y)
+            | .missing => .missing)
+    | .false => match candsOf sc .nil (nsCandidates gs x) with
+      | .nil => match lookupExact sc x with
+        -- the bare name is another module's private declaration: name the module (an
+        -- `open` cannot reach it, so a name found only through one is just unknown)
+        | .privTo m => .privTo m x
+        | _ => .missing
+      | .cons i .nil => .ok i
+      | found => .ambiguous (sortStr (nameOfIdx gs found))
+def resolveNameV (sc : Scope) (gs : Globals) (n : String) : NameRes :=
+  match indexOf (Scope.localNames sc) n 0 with
+  | .some i => .ok i
+  -- (13t) a helper this frontend generated keeps its `✝` in its name (`f✝s`, the
+  -- reordered structural parameter): its declaration is exactly that name, so it is
+  -- tried before the scope-free spelling; a macro's template is looked up stripped
+  | .none => match strEq n (stripScope n) with
+    | .false => match lookupExact sc n with
+      | .ok i => .ok i
+      | .privTo m => .privTo m n
+      | .missing => resolvePlain sc gs (stripScope n)
+    | .true => resolvePlain sc gs n
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
 -- globals (each command is checked in the empty context, so usage vectors and lookups
@@ -873,7 +1063,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -3268,11 +3458,11 @@ inductive TE where
   | err (msg : String)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -3321,11 +3511,15 @@ def ctorOfName (T n : String) : Option String := match String.append (privBase T
     | .mk ns => match dropPrefix ts ns with
       | .some c => .some (.mk c)
       | .none => .none
-def headCtor (T : String) (h : Syntax) : Option String := match strEq (kindOf h) "term.dotIdent" with
+def headCtor (gs : Globals) (T : String) (h : Syntax) : Option String := match strEq (kindOf h) "term.dotIdent" with
   | .true => match kid h 1 with
     | .ident c => .some c
     | _ => .none
-  | .false => ctorOfName T (identOf h)
+  -- (13t) a plain name goes through the same namespace/open/alias path as a term's: after
+  -- `open A`, a constructor of the matched type may be written unqualified
+  | .false => match resolveNameV (Globals.scope gs) gs (identOf h) with
+    | .ok i => ctorOfName T (globalNameOf gs i)
+    | _ => .none
 -- (A18) `x@y@p`: the names an as-pattern binds, and the pattern under them
 partial def asNames (p : Syntax) : List String := match strEq (kindOf (unparen p)) "term.asPat" with
   | .true => .cons (identOf (kid (unparen p) 0)) (asNames (kid (unparen p) 2))
@@ -3334,10 +3528,10 @@ partial def asInner (p : Syntax) : Syntax := match strEq (kindOf (unparen p)) "t
   | .true => asInner (kid (unparen p) 2)
   | .false => unparen p
 -- `x@p` matches `p` and also binds `x` to the scrutinee
-partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
-  | .true => patOf T (kid (unparen p) 2)
+partial def patOf (gs : Globals) (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
+  | .true => patOf gs T (kid (unparen p) 2)
   | .false => match strEq (kindOf p) "term.paren" with
-  | .true => patOf T (kid p 1)
+  | .true => patOf gs T (kid p 1)
   | .false => match strEq (kindOf p) "term.num" with
   -- a numeral: `0` is `.zero`, `n + 1` is `.succ n`
   | .true => match numValue p with
@@ -3349,16 +3543,16 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
       | .true => match kids (kid p 1) with
         | .cons a (.cons b .nil) => match strEq (kindOf b) "term.num" with
           | .true => match numValue b with
-            | .zero => patOf T a
+            | .zero => patOf gs T a
             | .succ k => .ctor "succ" (one (match k with
               | .zero => a
               | _ => mkNode "term.app" (.cons (kid p 0) (one (mkNull (.cons a (one (mkNode "term.num" (one (.atom (Nat.toString k)))))))))))
           | .false => .any "_"
         | _ => .any "_"
-      | .false => match headCtor T (kid p 0) with
+      | .false => match headCtor gs T (kid p 0) with
         | .some c => .ctor c (kids (kid p 1))
         | .none => .any "_"
-    | .false => match headCtor T p with
+    | .false => match headCtor gs T p with
       | .some c => .ctor c .nil
       | .none => .any (identOf p)
 def isVarPat (p : Syntax) : Bool := match strEq (kindOf p) "term.ident" with
@@ -3412,7 +3606,7 @@ def explicitPats : List Bool → List Syntax → List Syntax
 -- column `k` (`col`): a clause with `c` there gets its sub-patterns in place of that
 -- column (`padPats F`), one with a variable gets `F` holes and binds the variable to
 -- `col` (unless it is `_`), and one with another constructor is dropped.
-def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List Clause → List Clause
+def specialize (gs : Globals) (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List Clause → List Clause
   --<sol
   | .nil => .nil
   | .cons (.mk pats binds rhs) rest =>
@@ -3420,15 +3614,15 @@ def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List 
     let after := dropL (k + 1) pats;
     -- (A18) `x@p` binds `x` to this column and matches `p` in it
     let binds0 := List.append binds (asBinds (asNames (nthSyntax pats k)) col);
-    match patOf T (nthSyntax pats k) with
+    match patOf gs T (nthSyntax pats k) with
     | .ctor c' subs => match strEq c c' with
-      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
-      | .false => specialize T c k F impl col rest
+      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize gs T c k F impl col rest)
+      | .false => specialize gs T c k F impl col rest
     | .any x =>
       let binds' := match strEq x "_" with
         | .true => binds0
         | .false => List.append binds0 (.cons (Bind.mk x col) .nil);
-      .cons (.mk (List.append before (List.append (holes F) after)) binds' rhs) (specialize T c k F impl col rest)
+      .cons (.mk (List.append before (List.append (holes F) after)) binds' rhs) (specialize gs T c k F impl col rest)
   --|ex
   --| | _ => .nil
   --sol>
@@ -3930,7 +4124,8 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
+    | .mk _ _ inds _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+      match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
   | .none => match Globals.ind gs (String.append "structure " T) with
@@ -4849,8 +5044,9 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT) 
         | .err m => HE.err m
 def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
   let d := Cx.lvl cx;
-  match Scope.lookupV (Cx.sc cx) n with
-  | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+  match resolveNameV (Cx.sc cx) gs n with
+  | .privTo m nm => .err (("'" +++ privBase nm) +++ "' is private to module " +++ m)
+  | .ambiguous names => .err (ambiguousMsg n names)
   | .missing => match splitLast n with
     -- `x.f`: the projection `T.f x`, for `x : T …`
     | .some (.mk base f) => match identHead gs es cx base with
@@ -4877,13 +5073,15 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
 -- a fresh level metavariable). A local variable has no levels.
 def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syntax) : HE :=
   let d := Cx.lvl cx;
-  match Scope.lookup (Cx.sc cx) n with
-  | .some i => match Nat.lt i d with
+  match resolveNameV (Cx.sc cx) gs n with
+  | .privTo m nm => HE.err (("'" +++ privBase nm) +++ "' is private to module " +++ m)
+  | .ambiguous names => HE.err (ambiguousMsg n names)
+  | .ok i => match Nat.lt i d with
     | .true => HE.err (String.append "a local variable has no universe levels: " n)
     | .false => match globalUse gs es cx (i - d) ls with
       | .ok t ty es' m => .ok t ty es' m
       | .err msg => .err msg
-  | .none => match strEq n "Unit" with
+  | .missing => match strEq n "Unit" with
     | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
     | .false => .err (String.append "unknown identifier " n)
 -- the projection `T.f t`, for `t : T …`
@@ -5965,7 +6163,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     match col with
     | .mk L _ _ _ => match fieldCols np L d0 args ls cx5 0 qs fs with
       | .mk wrap fcols recs cx6 =>
-        let cls' := specialize T c k F impl col cls;
+        let cls' := specialize gs T c k F impl col cls;
         match Bool.and modeB (Bool.or (isNilCl cls') (otherMember idx res)) with
         | .true =>
           -- no clause (or another member's constructor): ruled out by the index (else a
@@ -6046,7 +6244,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                   let cols'' := match top with
                     | .true => regen p n (base + 1 + eB + eB) pts pts cols'
                     | .false => cols';
-                  match compileM gs mc es cx9 expected' cols'' .false ihLvls' (specialize T c k F impl curCol cls) with
+                  match compileM gs mc es cx9 expected' cols'' .false ihLvls' (specialize gs T c k F impl curCol cls) with
                   | .err m => .err (match strEq m "missing case" with
                     | .true => String.append "missing case " c
                     | .false => m)
@@ -6992,6 +7190,24 @@ def joinUnder : List String → String
   | .cons n rest => match rest with
     | .nil => n
     | .cons _ _ => String.append (String.append n "_") (joinUnder rest)
+-- (13t) `mutual` members in a namespace are `N.A`, `N.B`: one family `N.A_B` (the
+-- namespace before the underscore, so that `N.A_B.Tag` parses as a name)
+def shortName (n : String) : String := match splitLast n with
+  | .some (.mk _ f) => f
+  | .none => n
+def nsPart (n : String) : String := match splitLast n with
+  | .some (.mk b _) => b
+  | .none => ""
+def familyName (members : List String) : String :=
+  let first := match members with
+    | .cons n _ => n
+    | .nil => "";
+  let ns := nsPart first;
+  let shorts := joinUnder (mapL shortName members);
+  match ns with
+    | .mk cs => match cs with
+      | .nil => shorts
+      | _ => ns +++ "." +++ shorts
 -- the member types `A := fun ps => F ps (tag j)`
 def addMembers (F FI : Tm) (np : Nat) (pts : Tms) (m : Nat) : Globals → Nat → List String → Globals
   | gs, _, .nil => gs
@@ -7051,7 +7267,7 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
   | .none =>
   let members := memberNames defs;
   let m := List.length members;
-  let F := joinUnder members;
+  let F := familyName members;
   let mcs := memberCtors defs 0;
   let k := List.length mcs;
   let params := fieldsOf (kids (kid (nthSyntax defs 0) 3));
@@ -7175,6 +7391,146 @@ def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
 -- a generated parameter binder is implicit at quantity 0 (as the Lean elaborator's
 -- `implicitΔ`), whatever its type
+-- (13t) a node's name: an `ident`, or the first `ident` under it (a `term.ident`, or the
+-- `null` an `optional ident` makes), as the host's `Syntax.getId?` reads these commands
+partial def getIdOpt (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node _ _ => match kids s with
+    | .cons x _ => getIdOpt x
+    | .nil => .none
+  | _ => .none
+-- the first `ident` anywhere under a node (an `optional` sequence such as
+-- `open M as A`'s `as A`: its keywords are atoms, the alias is the only ident)
+mutual
+partial def firstIdName (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node _ _ => firstIdIn (kids s)
+  | _ => .none
+partial def firstIdIn : List Syntax → Option String
+  | .nil => .none
+  | .cons x xs => match firstIdName x with
+    | .some n => .some n
+    | .none => firstIdIn xs
+end
+-- (13t) rename every `ident` the function maps
+mutual
+partial def renameIdents (f : String → Option String) (s : Syntax) : Syntax := match s with
+  | .ident n => match f n with
+    | .some m => .ident m
+    | .none => s
+  | .node k args => .node k (renameIdsList f args)
+  | _ => s
+partial def renameIdsList (f : String → Option String) : SyntaxF .false → SyntaxF .false
+  | .nil => .nil
+  | .cons x xs => .cons (renameIdents f x) (renameIdsList f xs)
+end
+-- (13t) one of a `mutual` block's type names, as written: a member refers to its
+-- siblings unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
+def mutualTypeShorts : List Syntax → List String
+  | .nil => .nil
+  | .cons d rest =>
+    let d := match strEq (kindOf d) "command.private" with
+      | .true => kid d 1
+      | .false => d;
+    let shortOpt : Option String := match strEq (kindOf d) "command.inductive" with
+      | .true => getIdOpt (kid d 1)
+      | .false => match strEq (kindOf d) "command.structure" with
+        | .true => getIdOpt (kid d 1)
+        | .false => match strEq (kindOf d) "command.class" with
+          | .true => getIdOpt (kid d 1)
+          | .false => match strEq (kindOf d) "command.coinductive" with
+            | .true => getIdOpt (kid d 1)
+            | .false => .none;
+    match shortOpt with
+    | .some sh => .cons sh (mutualTypeShorts rest)
+    | .none => mutualTypeShorts rest
+def rewriteShort (p : String) : List String → String → Option String
+  | .nil, _ => .none
+  | .cons sh rest, n => match strEq n sh with
+    | .true => .some (p +++ "." +++ sh)
+    | .false => match startsWithS (sh +++ ".") n with
+      | .true => .some (p +++ "." +++ n)
+      | .false => rewriteShort p rest n
+-- (13t) Prefix the name a declaration command declares with the current namespace, so
+-- that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
+-- rewritten once, where it is elaborated (`stepCommand`); the handlers then see the full
+-- name, and references to `bar` in the body resolve through `resolveNameV`. Commands that
+-- declare no name (`open`, `end`, `#check`, …) are unchanged.
+partial def prefixDeclName (p : String) (cmd : Syntax) : Syntax := match p with
+  | .mk cs => match cs with
+    | .nil => cmd
+    | _ =>
+      let namedAt : Nat → Syntax := fun i => match getIdOpt (kid cmd i) with
+        | .some n => setKid cmd i (.ident (p +++ "." +++ n))
+        | .none => cmd;
+      -- an optional name: the `null` node `optional ident` makes, a bare ident, or nothing
+      let prefOpt : Syntax → Syntax := fun stx => match getIdOpt stx with
+        | .some n => .ident (p +++ "." +++ n)
+        | .none => match stx with
+          | .node k args => match args with
+            | .cons x rest => .node k (.cons (match getIdOpt x with
+                | .some n => .ident (p +++ "." +++ n)
+                | .none => x) rest)
+            | .nil => stx
+          | _ => stx;
+      -- a type declaration's own name, and its short spelling in its fields (`| mk : T →
+      -- T`, which the elaborator binds as `N.T`)
+      let typeDecl : Syntax :=
+        let named := match getIdOpt (kid cmd 1) with
+          | .some n => setKid cmd 1 (.ident (p +++ "." +++ n))
+          | .none => cmd;
+        match getIdOpt (kid cmd 1) with
+        | .some sh => renameIdents (fun n => match strEq n sh with
+            | .true => .some (p +++ "." +++ sh)
+            | .false => match startsWithS (sh +++ ".") n with
+              | .true => .some (p +++ "." +++ n)
+              | .false => .none) named
+        | .none => named;
+      let k := kindOf cmd;
+      match strEq k "command.def" with
+      | .true => namedAt 1
+      | .false => match strEq k "command.defEqns" with
+        | .true => namedAt 1
+        | .false => match strEq k "command.axiom" with
+          | .true => namedAt 1
+          | .false => match strEq k "command.glue" with
+            | .true => namedAt 1
+            | .false => match strEq k "command.foreignType" with
+              | .true => namedAt 1
+              | .false => match strEq k "command.inductive" with
+                | .true => typeDecl
+                | .false => match strEq k "command.structure" with
+                  | .true => typeDecl
+                  | .false => match strEq k "command.class" with
+                    | .true => typeDecl
+                    | .false => match strEq k "command.coinductive" with
+                      | .true => typeDecl
+                      | .false => match strEq k "command.extern" with
+                        | .true => namedAt 3
+                        | .false => match strEq k "command.cStruct" with
+                          | .true => namedAt 3
+                          | .false => match strEq k "command.instance" with
+                            | .true => setKid cmd 2 (prefOpt (kid cmd 2))
+                            | .false => match strEq k "command.partial" with
+                              | .true => setKid cmd 2 (prefixDeclName p (kid cmd 2))
+                              | .false => match strEq k "command.private" with
+                                | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                | .false => match strEq k "command.sealed" with
+                                  | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                  | .false => match strEq k "command.local" with
+                                    | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                    | .false => match strEq k "command.mutual" with
+                                      | .true =>
+                                        -- every member's name, and a member's unqualified
+                                        -- use of its siblings
+                                        let body := kid cmd 1;
+                                        let members := kids body;
+                                        let shorts := mutualTypeShorts members;
+                                        let step : Syntax → Syntax := fun c =>
+                                          renameIdents (rewriteShort p shorts) (prefixDeclName p c);
+                                        setKid cmd 1 (mkNode (kindOf body) (mapL step members))
+                                      | .false => cmd
+-- (an implicit binder keeps its quantity: its default 0 is written out, stage 21m)
 def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
 -- a quantity as binder syntax (ω is a bare binder)
 def qtyStxOf (q : Q) : Syntax := match q with
@@ -7494,7 +7850,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -7840,8 +8196,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -7908,7 +8264,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -8390,7 +8746,11 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
       | .ok vS =>
         let name := match optIdent (kid stx 2) with
           | .some n => n
-          | .none => freshName gs (String.append "inst" C) 0;
+          -- (13t) an anonymous instance in a namespace is `Foo.inst…` too
+          | .none => freshName gs (match Globals.nsPrefix gs with
+              | .mk cs => match cs with
+                | .nil => String.append "inst" C
+                | _ => Globals.nsPrefix gs +++ "." +++ "inst" +++ C) 0;
         match defT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) bs tyS vS .none with
         | .err m => errStep gs m
         | .ok ty0 v0 es0 => match finishElab gs es0 with
@@ -10084,6 +10444,77 @@ def mutualDeriving : List Syntax → Option String
 
 
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
+-- (13t) `namespace`/`open`/`end` print no line (an error is a line of its own)
+def quietCommand (k : String) : Bool := Bool.or (strEq k "command.namespace")
+  (Bool.or (strEq k "command.open") (strEq k "command.end"))
+-- (13t) the last component of a dotted name (`A.B` is `B`)
+def nsShort (n : String) : String := match splitLast n with
+  | .some (.mk _ s) => s
+  | .none => n
+def nsErrStep (gs : Globals) (m : String) : Step := .mk ("error: " +++ m) gs
+-- (13t) `namespace Foo`, `end`/`end Foo`, `open M`/`open M as A`: the file's namespace
+-- state. A stray or mismatching `end` is an error at the `end`; an `open` names a
+-- namespace that already has declarations (elaboration is single-pass).
+def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
+  let k := kindOf stx;
+  match strEq k "command.namespace" with
+  | .true =>
+    let n := match getIdOpt (kid stx 1) with
+      | .some n => n
+      | .none => "_";
+    let p := Globals.nsPrefix gs;
+    let full := match p with
+      | .mk cs => match cs with
+        | .nil => n
+        | _ => p +++ "." +++ n;
+    .some (.mk "" (Globals.pushNs gs full start))
+  | .false => match strEq k "command.end" with
+    | .true => match Globals.nsStack gs with
+      | .nil => .some (nsErrStep gs "`end` without an open `namespace`")
+      | .cons (.mk full off) rest =>
+        let short := nsShort full;
+        let given : Option String := firstIdIn (kids (kid stx 1));
+        let errOpt : Option String := match given with
+          | .none => .none
+          | .some g => match Bool.or (strEq g short) (strEq g full) with
+            | .true => .none
+            | .false => .some ("`end " +++ g +++ "` does not close the namespace `" +++ full
+                +++ "` (write `end` or `end " +++ short +++ "`)");
+        let outer : String := match rest with
+          | .cons (.mk p _) _ => p
+          | .nil => "";
+        -- the host reports the mismatch and still closes the namespace (so the file is
+        -- not also reported as leaving it open)
+        let gs' := Globals.popNs gs outer rest;
+        .some (match errOpt with
+          | .some m => .mk ("error: " +++ m) gs'
+          | .none => .mk "" gs')
+    | .false => match strEq k "command.open" with
+      | .true =>
+        let n := match getIdOpt (kid stx 1) with
+          | .some n => n
+          | .none => "_";
+        let aliasOpt : Option String := firstIdIn (kids (kid stx 2));
+        match Globals.hasDeclUnder gs n with
+        | .false => .some (nsErrStep gs (("unknown namespace '" +++ n)
+            +++ "': there is no declaration `" +++ n +++ ".…`"))
+        | .true => match aliasOpt with
+          | .some a => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs) (Globals.opens gs)
+              (.cons (.mk a n) (Globals.aliases gs)) (Globals.nsStack gs)))
+          | .none => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs)
+              (List.append (Globals.opens gs) (.cons n .nil)) (Globals.aliases gs) (Globals.nsStack gs)))
+      | .false => .none
+def atLine (start : Nat) (l : Option String) : Option String := match l with
+  | .none => .none
+  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+-- (13t) a file must close every `namespace` it opens: report each unclosed one at the
+-- line of its `namespace` (innermost first; the reverse of the output puts them in order)
+def nsUnclosedLines : List NsFrame → List String
+  | .nil => .nil
+  | .cons (.mk full off) rest => .cons (match atLine off (.some (("error: namespace " +++ full)
+      +++ " is not closed: add `end` (or `end " +++ nsShort full +++ "`)")) with
+    | .some l => l
+    | .none => "") (nsUnclosedLines rest)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
     (Bool.or (strEq k "command.reduce") (Bool.or (strEq k "command.eval")
@@ -10170,6 +10601,8 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
       -- (`privName`), and `stepCommand` clears the flag again after this command
       let stx := unwrapPrivate stx1;
       let sp := unwrapSp spA stx1 "command.private";
+      -- (13t) a declaration in a namespace is named `Foo.bar`: prefix it here, once
+      let stx := prefixDeclName (Globals.nsPrefix gs) stx;
       let gs0 := Globals.setPrivate gs (strEq (kindOf stx1) "command.private");
       match linkStep gs0 stx with
       | .some r => (match r with
@@ -10218,17 +10651,28 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
                       | .false => match strEq (kindOf stx) "command.import" with
                         | .true => errStep gs0 "`import` is not allowed inside a command: imports go at the top level of a file, before every other command"
                         | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
+                      -- an error naming it, never ignored)
+                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
+      -- (13t) the namespace commands change the state (and validate it), not the globals
+      let step := match nsCommand gs0 stx start with
+        | .some s => s
+        | .none => step;
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
         | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
-        -- (A11) `deriving instance` prints no line, as in the Lean toolchain
+        -- (A11) `deriving instance` prints no line, as in the Lean toolchain; (13t) so
+        -- do `namespace`, `open` and `end`
         | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
             | .true => .none
-            | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
+            | .false => match Bool.and (quietCommand (kindOf stx)) (strEq line "") with
+              | .true => .none
+              | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
 def runCommands (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports header cats tokens notes input pos gs with
-  | .done => .mk out gs cats tokens notes
+  -- (13t) a namespace the file left open is an error at its `namespace` (the output is
+  -- reversed, so prepending innermost-first leaves them last, outermost first)
+  | .done => .mk (List.append (nsUnclosedLines (Globals.nsStack gs)) out) (Globals.atModuleStart gs) cats tokens notes
   | .next line stop gs' cats' tokens' notes' => runCommands inlineImports (Bool.and header (startsImport input pos)) cats' tokens' notes' input stop gs' (match line with
     | .some l => .cons l out
     | .none => out)
@@ -10501,7 +10945,8 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- declarations are private to it, and every name it declares is marked in its name.
   -- (D8 goals) each module's entries start empty; the root (`Main`) is loaded last, so
   -- the graph's globals end with the document's own entries.
-  let gs0 := Globals.lspReset (Globals.setModule (Run.gs r) name);
+  -- (13t) its namespaces and opens are its own: an `open` does not reach an importer
+  let gs0 := Globals.atModuleStart (Globals.lspReset (Globals.setModule (Run.gs r) name));
   let r' := match strEq name "Prelude" with
     | .true => match runCommands .false .true (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
         (Run.notesOf r) (String.codes text) 0 gs0 .nil with
