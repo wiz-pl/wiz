@@ -82,6 +82,9 @@
             "--gc-cflags" tc.gc-cflags "--gc-ldflags" tc.gc-ldflags
           ];
           addFlags = flags: lib.escapeShellArg (lib.escapeShellArgs flags);
+          # The same flags as separate shell words, for a command line (the prewarm
+          # below); `addFlags` is for `--add-flags`, which takes one escaped string.
+          addArgs = flags: lib.concatMapStringsSep " " lib.escapeShellArg flags;
 
           # $out/share/wiz is laid out like a checkout (lib/ next to .lake/build/bin/),
           # which is where grail looks for the standard library.
