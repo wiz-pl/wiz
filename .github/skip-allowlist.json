@@ -82,12 +82,39 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "build --lib: both accept it and are silent (an object file, or the C)",
-      "reason": "artifact: --lib's object/header match",
+      "case": "build --lib: the object, its header and the C match the host's shapes",
+      "reason": "artifact: --lib's object/header/C match the host's shapes now; --no-main does not link",
       "parity": "D4/C9",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D4/C9): --no-main does not link without a `main` on the host's Wasm path; the driver writes the C. Allow-listed by the user (2026-11-17) for this one case only."
+      "expires": "2027-02-17",
+      "why": "documented self-host parity difference (D4/C9): the object, header and C now match the host's shapes; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build --lib: the object, its header and the C match the host's shapes",
+      "reason": "artifact: --no-main links an executable without a `main` in the host",
+      "parity": "D4/C9",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
+      "why": "documented self-host parity difference (D4/C9): the object, header and C now match the host's shapes; --no-main links an executable in the host, the driver writes the C."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build -o: a missing directory fails in both (exit 1, no artifact)",
+      "reason": "message: a missing `-o` directory is an uncaught `IO.FS.writeFile` exception",
+      "parity": "D4/D7",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
+      "why": "documented self-host parity difference (D4/D7): the host lets the C write throw (a machine-dependent trace on stderr); the driver writes one line. Both exit 1 and write nothing."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "build --header: the driver's header-only mode (the host has no such flag)",
+      "reason": "artifact: `--header` is the driver's header-only output",
+      "parity": "D4",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-02-17",
+      "why": "documented self-host parity difference (D4): `--header` is a driver-only output mode (the host has no such flag; `--lib` writes OUT.h)."
     },
     {
       "group": "selfhost-cli-diff",
