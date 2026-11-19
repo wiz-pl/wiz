@@ -274,7 +274,9 @@ def Scry.wgeExtract (g : Scry.EGraph) (allowed : List Nat) (e : Wil.Rhs) :
   | .some cls =>
     let costs := Scry.EGraph.costs g w;
     let root := Scry.EGraph.find g cls;
-    match Scry.egCostAt costs root with
+    -- `Scry.egCostAt` lives in `Scry.EgraphNative`, whose `egRep` collides with
+    -- `Scry.Egraph.egRep`; this is the same `List.getD` lookup without that import.
+    match List.getD costs root .none with
     | .none => .none
     | .some c => if Nat.lt c Scry.wgeForbidden then
         match Scry.EGraph.buildTerm g w costs (Nat.succ c) root with
