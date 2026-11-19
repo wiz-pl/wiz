@@ -73,6 +73,26 @@ cannot be checked; that program declares the natives directly, passes the type a
 by name, and sends on the channel without receiving. The `WIZ_NO_THREADS` one-thread
 build (the Wasm page) has the same natives without locks.
 
+**Handles.** A `File` or `Child` (lib/Sys.wiz) is an ordinary ω value, so the types do
+not stop a program from capturing one in a `Chan.fork` child while the parent keeps it:
+quantity 1 makes the *endpoint* of a channel linear, and a closure that captures an ω
+handle is still a linear function. Rather than trust a convention, the runtime
+serialises the operations on one handle (`runtime/rt_sys.inc`): a `File` holds a mutex
+across each read, write and close, so `File.close` cannot free a `FILE *` under a
+`getline` (the use-after-free otherwise allowed) and a second close is `EBADF`; a
+`Child` has a mutex per pipe plus one for the wait status and one for the blocking
+`waitpid`, so two `wait`s return the same status, a second `closeStdin` is `EBADF`
+(never a second `close(2)` of a descriptor another thread has reused), and `kill` and
+the other pipes stay usable while one pipe or a `wait` blocks. Operations on one handle
+are **serialised, not parallel**: a close waits for a read already in progress, and a
+read of one pipe waits for `Child.communicate` on the same child. The `conc` cases
+"handles (conc-02)" pin both halves. The deterministic one is `Child`: two threads wait
+on one child; before the lock both `waitpid`s raced, one reaped and the other never got
+a status (the case timed out), while now the second waiter returns the status the first
+recorded. The `File` case is a stress case — a reader loops over a file while the other
+thread closes it — because the use-after-free does not fault on every schedule; with
+the lock the in-flight read finishes and the next one is `EBADF`.
+
 An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and returns any
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
 typed precisely in Wiz.

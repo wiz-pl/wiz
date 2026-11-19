@@ -215,9 +215,11 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   included, but without a `main`: what that makes is the toolchain's business (with
   `--cc emcc --ldflags "--no-entry …"`, a Wasm module). A program with a `main` exports its
   functions too (C code linked with it, here through `--libs`, can call them).
-  Exported functions run on the caller's thread and stack (not `main`'s big stack);
-  a handle is used from the thread that got it (only 25a's shared objects cross
-  threads), and `wiz_live_objects()` counts the calling thread's objects.
+  Exported functions run on the caller's thread and stack (not `main`'s big stack).
+  A `File` or `Child` handle may be passed between threads (25a): the runtime
+  serialises the operations on one handle, so a close on one thread cannot free a
+  `FILE *` a read on another is using, and a second close is `EBADF`.
+  `wiz_live_objects()` counts the calling thread's objects.
 * The keys: an export is `export:cname:kinds:result:io` in the builtins (cached with
   them); a callback parameter is `k[<params>/<result>]` (`K` for `Callback`, `!` before
   a result in `IO`) in an `extern:` key (`RVal.ExternSig`). An export's code is an IR
@@ -286,7 +288,10 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   and the pipes, so a child this program starts does not inherit it — only the std
   streams pass to a child, when it is given them), `File.stdin`/`stdout`/`stderr`,
   `readLine` (`none` at the end), `readAll`, `write`, `flush`. `IO.ePrintln` prints
-  to stderr.
+  to stderr. The handle is an ω value; the operations on one handle are serialised by
+  a mutex, so it can be captured by a `Chan.fork` child: a close waits for an
+  in-flight read, and a read after close is `EBADF`, never a `FILE *` use after free
+  (25a).
 * **Processes.** `Process.spawn cmd args stdin stdout stderr` starts `cmd` (searched in
   `PATH`, `posix_spawnp`) with each stream `.inherit`, `.piped` or `.null`, giving a
   `Child` (a foreign type: its pipes close and a finished child is reaped when it
@@ -301,7 +306,10 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `EPIPE` error), asserts that ignore on every spawn, and restores it when `exec` fails
   (the program being replaced starts with the default action, but a failed `exec` must
   not leave this program able to be killed by a broken pipe); the pipes and the
-  `File`/`Fd` handles are close-on-exec, so other children don't keep them open.
+  `File`/`Fd` handles are close-on-exec, so other children don't keep them open. A
+  `Child` can be used from two threads (25a): each pipe and the wait status have their
+  own lock, so a second `closeStdin` is `EBADF` (no second `close(2)`), two `wait`s
+  return the same status, and `kill` works while a `wait` or a read blocks.
 * **Allocation failure.** The OS-surface natives take the runtime's out-of-memory exit
   (`wiz: out of memory`, code 3) instead of dereferencing NULL, and the readers that
   have an error channel (`FS.readFile`, `File.readAll`, `IO.readFile`) report `ENOMEM`
