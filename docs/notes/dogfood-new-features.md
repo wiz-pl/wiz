@@ -37,7 +37,7 @@ The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL
 | feature | status | where it lives / what is missing |
 |---|---|---|
 | `--cache-ro` (read-only cache layers) | **now** | `Wiz/Toolchain.lean:29-31,104-111`; grail passes it to jobs (`Grail/Elab.lean:67`); `docs/building.md:258`. CI never passes it; the Nix package ships no store cache. |
-| `--region-cache`, `--region-stats` | **now, `wiz` only** | `Main.lean:148-157,223-227,309-311`; `Wiz/Cache.lean:603-853`. Grail never builds a `RegionStore` (`elaborate` in `Grail/Elab.lean`). |
+| `--region-cache`, `--region-stats` | **landed in both**: `Toolchain.regionCache`/`regionStats`, `toFlags`, and one `region-stats:` line per grail job (`Grail/Elab.lean`, `Grail/Graph.lean`). | `Main.lean:190-194,551-553,872`; `Grail/Elab.lean:15,87-110`; `Wiz/Cache.lean:810-827`. |
 | `--split N` for `wiz build` | **after stack** | now [15k](../stages/15-performance.md). CI's shard `"split"` is a different feature (`.github/test-shards.json`). |
 | Grail one-job (`build F` = check+IR+C) | **now** | `Grail/Graph.lean:51-56,132-143`; informal measurement: one job avoids repeating the IR pipeline. |
 | tower / Nix packaging | **now** | `tower/`, `flake.nix:83-109`. No warmed cache; `source nix` and `toolchain link` are in `docs/building.md`. |

@@ -869,7 +869,9 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--pp-all")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
-  regionStatsOpt.set (args.contains "--region-stats")
+  -- (`--region-stats` is a toolchain flag, so `parseFlags` above has consumed it; a
+  -- grail job gets it from `Toolchain.toFlags`)
+  regionStatsOpt.set tc.regionStats
   let args := args.filter (· != "--region-stats")
   verifyStatsOpt.set (args.contains "--cache-verify-stats")
   let args := args.filter (· != "--cache-verify-stats")

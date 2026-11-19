@@ -93,6 +93,7 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   --source URL (grail publish: the archive's public URL),
   --region-cache (experimental: serve module effects from mmap'ed .wizr regions in the
   same cache layers; the text entries remain the authority and the fallback),
+  --region-stats (print what those regions served, per job),
   --trust-native (27a: allow `native_refl`, passed on to every check and to `wiz lsp`), --native-fuel N
 Machine settings (where GMP lives) go in an uncommitted grail.local.wiz:
   import Grail
