@@ -670,6 +670,10 @@ extern "wiz_sys_fd_write" Fd.writeRaw : Fd → Bytes → IO Nat
 extern "wiz_sys_fd_wait" Fd.waitRaw : Fd → Nat → Bool → Nat → IO Nat
 /-- Raw `lseek`; use `Fd.seek`. -/
 extern "wiz_sys_fd_seek" Fd.seekRaw : Fd → Nat → Nat → Bool → IO Nat
+/-- Raw `fsync`; use `Fd.sync`. -/
+extern "wiz_sys_fd_fsync" Fd.syncRaw : Fd → IO Nat
+/-- Raw `fdatasync`; use `Fd.dataSync`. -/
+extern "wiz_sys_fd_fdatasync" Fd.dataSyncRaw : Fd → IO Nat
 /-- Raw `poll`; use `Fd.poll`. -/
 extern "wiz_sys_fd_poll" Fd.pollRaw : List Fd → List Nat → Bool → Nat → IO (List Nat)
 /-- Raw pipe hand-over; use `Child.takePipe`. -/
@@ -804,6 +808,12 @@ def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool := do
 /-- Move, and say where that is (from the start), as `File.seek`. -/
 def Fd.seek (f : Fd) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (Fd.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
+/-- Flush this descriptor's data and metadata to stable storage (`fsync`). A commit that
+must survive a crash calls this before publishing the pointer to its pages. -/
+def Fd.sync (f : Fd) : EIO Unit := Sys.lift "fsync" (Fd.syncRaw f)
+/-- Flush this descriptor's data to stable storage (`fdatasync`), leaving metadata that is
+not needed to read the data back to the filesystem. -/
+def Fd.dataSync (f : Fd) : EIO Unit := Sys.lift "fdatasync" (Fd.dataSyncRaw f)
 
 -- Waiting on several descriptors.
 /-- What `Fd.poll` waits for on a descriptor. -/
