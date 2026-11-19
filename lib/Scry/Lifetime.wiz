@@ -1,6 +1,7 @@
 import Scry.Analysis
 import Scry.PointsTo
 import Scry.Rules
+import Scry.Models
 /-!
 # Scry.Lifetime: a CWE-416 use-after-free check on the points-to model
 
@@ -221,12 +222,21 @@ structure Scry.FreeEffect where
 def Scry.freeEffectEmpty (name : String) : Scry.FreeEffect :=
   Scry.FreeEffect.mk name .nil .nil
 
-def Scry.effectAt (es : List Scry.FreeEffect) (name : String) : Option Scry.FreeEffect :=
-  List.find (fun e => String.eq e.name name) es
+/-- A computed summary for `name`, or — for an external the unit does not define — the
+pack's statement that the call frees one argument. The external case has no per-function
+locations here; `Scry.uCallFrees` turns the argument into locations at the call site.
+The pack is the only source of that free table (`realloc` used to be a `String.eq`). -/
+def Scry.effectAt (models : Scry.ModelPack) (es : List Scry.FreeEffect) (name : String) :
+    Option Scry.FreeEffect :=
+  match List.find (fun e => String.eq e.name name) es with
+  | .some e => .some e
+  | .none => match Scry.ModelPack.freeArgOf models name with
+    | .some _ => .some (Scry.freeEffectEmpty name)
+    | .none => .none
 
-def Scry.effectFrees (es : List Scry.FreeEffect) (name : String) :
+def Scry.effectFrees (models : Scry.ModelPack) (es : List Scry.FreeEffect) (name : String) :
     List (Scry.Loc × Scry.PathNode) :=
-  match Scry.effectAt es name with
+  match Scry.effectAt models es name with
   | .none => .nil
   | .some e => e.frees
 
@@ -234,32 +244,35 @@ def Scry.uCallTargets (p : Wil.Program) (pt : Scry.PtResult) (func : String)
     (callee : Wil.Callee) : List String :=
   (Scry.callTargets p pt.state func callee).names
 
-/-- The frees a call adds: the callee summaries plus the external `realloc` model. -/
-def Scry.uCallFrees (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect)
-    (st : Scry.UState) (func : String) (point : Nat) (callee : Wil.Callee)
-    (args : List Wil.Var) : List (Scry.Loc × Scry.PathNode) :=
-  let fromCallees := Scry.concatLists (fun name => Scry.effectFrees es name)
+/-- The frees a call adds: the callee summaries plus the pack's external free model
+(`realloc` is now the entry's `.free 0`, not a `String.eq` here). -/
+def Scry.uCallFrees (models : Scry.ModelPack) (p : Wil.Program) (pt : Scry.PtResult)
+    (es : List Scry.FreeEffect) (st : Scry.UState) (func : String) (point : Nat)
+    (callee : Wil.Callee) (args : List Wil.Var) : List (Scry.Loc × Scry.PathNode) :=
+  let fromCallees := Scry.concatLists (fun name => Scry.effectFrees models es name)
     (Scry.uCallTargets p pt func callee);
   let direct := match callee with
     | .indirect _ => .nil
-    | .direct name => match Wil.listNth args 0 with
-      | .some a =>
-        if String.eq name "realloc" then
-          List.map (fun l => (l, Scry.PathNode.mk func point a.index Scry.PathKind.free))
+    | .direct name => match Scry.ModelPack.freeArgOfAt models name (List.length args) with
+      | .some ai => match Wil.listNth args ai with
+        | .some a => List.map (fun l =>
+            (l, Scry.PathNode.mk func point a.index Scry.PathKind.free))
             (Scry.uCurGet st pt func a.index)
-        else (.nil : List (Scry.Loc × Scry.PathNode))
+        | .none => (.nil : List (Scry.Loc × Scry.PathNode))
       | .none => (.nil : List (Scry.Loc × Scry.PathNode));
   List.append fromCallees direct
 
-def Scry.uCallRetFreed (es : List Scry.FreeEffect) (p : Wil.Program) (pt : Scry.PtResult)
-    (func : String) (callee : Wil.Callee) : List Scry.Loc :=
-  Scry.concatLists (fun name => match Scry.effectAt es name with
+def Scry.uCallRetFreed (models : Scry.ModelPack) (es : List Scry.FreeEffect)
+    (p : Wil.Program) (pt : Scry.PtResult) (func : String) (callee : Wil.Callee) :
+    List Scry.Loc :=
+  Scry.concatLists (fun name => match Scry.effectAt models es name with
     | .none => .nil
     | .some e => e.retFreed) (Scry.uCallTargets p pt func callee)
 
 /-- One statement's forward transfer. `point` is the statement's program point. -/
-def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect)
-    (fn : Wil.Func) (g : Scry.Fn) (n : Nat) (st : Scry.UState) : Scry.UState :=
+def Scry.uStep (models : Scry.ModelPack) (p : Wil.Program) (pt : Scry.PtResult)
+    (es : List Scry.FreeEffect) (fn : Wil.Func) (g : Scry.Fn) (n : Nat)
+    (st : Scry.UState) : Scry.UState :=
   match Scry.nodeStmt g n with
   | .none => st
   | .some s => match s with
@@ -286,9 +299,9 @@ def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect
       { st1 with freed := Scry.locUnion ls st.freed,
                  prov := List.foldr (fun l acc => Scry.uProvAdd acc l node) st1.prov ls }
     | .call r callee args _ =>
-      let extra := Scry.uCallFrees p pt es st fn.name n callee args;
+      let extra := Scry.uCallFrees models p pt es st fn.name n callee args;
       let freedLocs := List.map (fun q => q.1) extra;
-      let rets := Scry.uCallRetFreed es p pt fn.name callee;
+      let rets := Scry.uCallRetFreed models es p pt fn.name callee;
       let st1 := Scry.uMarkAliases st (Scry.locUnion rets freedLocs);
       let freed := List.foldr (fun q acc => Scry.locUnion (List.cons q.1 .nil) acc)
         st1.freed extra;
@@ -308,8 +321,8 @@ def Scry.uStep (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect
 -- ## Free summaries
 
 /-- Direct frees of a function, from the flow-insensitive points-to sets. -/
-def Scry.uDirectFrees (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) :
-    List (Scry.Loc × Scry.PathNode) :=
+def Scry.uDirectFrees (models : Scry.ModelPack) (pt : Scry.PtResult) (fn : Wil.Func)
+    (g : Scry.Fn) : List (Scry.Loc × Scry.PathNode) :=
   Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
@@ -317,47 +330,50 @@ def Scry.uDirectFrees (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn) :
       | .free ptr _ =>
         List.map (fun l => (l, Scry.PathNode.mk fn.name n ptr.index Scry.PathKind.free))
           (Scry.ptLocs pt fn.name ptr.index)
-      | .call _ (.direct "realloc") args _ => match Wil.listNth args 0 with
-        | .some a => List.map (fun l =>
-            (l, Scry.PathNode.mk fn.name n a.index Scry.PathKind.free))
-            (Scry.ptLocs pt fn.name a.index)
+      | .call _ (.direct name) args _ =>
+        match Scry.ModelPack.freeArgOfAt models name (List.length args) with
+        | .some ai => match Wil.listNth args ai with
+          | .some a => List.map (fun l =>
+              (l, Scry.PathNode.mk fn.name n a.index Scry.PathKind.free))
+              (Scry.ptLocs pt fn.name a.index)
+          | .none => .nil
         | .none => .nil
       | _ => .nil) (Scry.range g.count)
 
-def Scry.uEffectOf (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect)
-    (fn : Wil.Func) : Scry.FreeEffect :=
+def Scry.uEffectOf (models : Scry.ModelPack) (p : Wil.Program) (pt : Scry.PtResult)
+    (es : List Scry.FreeEffect) (fn : Wil.Func) : Scry.FreeEffect :=
   let g := Scry.flatten fn;
-  let direct := Scry.uDirectFrees pt fn g;
+  let direct := Scry.uDirectFrees models pt fn g;
   let callee := Scry.concatLists (fun n =>
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
       | .call _ callee args _ =>
-        Scry.uCallFrees p pt es Scry.uEmpty fn.name n callee args
+        Scry.uCallFrees models p pt es Scry.uEmpty fn.name n callee args
       | _ => .nil) (Scry.range g.count);
   Scry.FreeEffect.mk fn.name (List.append direct callee) (.nil : List Scry.Loc)
 
 def Scry.uEffectFreesEq (a b : Scry.FreeEffect) : Bool :=
   Scry.locSetEq (List.map (fun q => q.1) a.frees) (List.map (fun q => q.1) b.frees)
 
-def Scry.uEffectsEq (a b : List Scry.FreeEffect) : Bool :=
+def Scry.uEffectsEq (models : Scry.ModelPack) (a b : List Scry.FreeEffect) : Bool :=
   Bool.and
-    (List.all (fun e => match Scry.effectAt b e.name with
+    (List.all (fun e => match Scry.effectAt models b e.name with
       | .none => .false
       | .some f => Scry.uEffectFreesEq e f) a)
-    (List.all (fun e => match Scry.effectAt a e.name with
+    (List.all (fun e => match Scry.effectAt models a e.name with
       | .none => .false
       | .some f => Scry.uEffectFreesEq e f) b)
 
-partial def Scry.uEffectsLoop (p : Wil.Program) (pt : Scry.PtResult) (fuel : Nat)
-    (es : List Scry.FreeEffect) : List Scry.FreeEffect :=
+partial def Scry.uEffectsLoop (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (fuel : Nat) (es : List Scry.FreeEffect) : List Scry.FreeEffect :=
   match fuel with
   | .zero => es
   | .succ k =>
-    let next := List.map (fun fn => Scry.uEffectOf p pt es fn) p.funcs;
-    match Scry.uEffectsEq next es with
+    let next := List.map (fun fn => Scry.uEffectOf models p pt es fn) p.funcs;
+    match Scry.uEffectsEq models next es with
     | .true => next
-    | .false => Scry.uEffectsLoop p pt k next
+    | .false => Scry.uEffectsLoop models p pt k next
 
 /-- Add the dangling-return component: a function returns a location it freed. -/
 def Scry.uRetFreedOf (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn)
@@ -369,10 +385,10 @@ def Scry.uRetFreedOf (pt : Scry.PtResult) (fn : Wil.Func) (g : Scry.Fn)
       List.filter (fun l => Scry.uHitsFreed l freed) (Scry.ptLocs pt fn.name v.index)
     | _ => .nil) (Scry.range g.count)
 
-def Scry.uCompleteEffects (p : Wil.Program) (pt : Scry.PtResult) :
-    List Scry.FreeEffect :=
+def Scry.uCompleteEffects (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) : List Scry.FreeEffect :=
   let fuel := Nat.add 8 (Nat.add (List.length p.funcs) (Scry.totalPoints p));
-  let es := Scry.uEffectsLoop p pt fuel
+  let es := Scry.uEffectsLoop models p pt fuel
     (List.map (fun fn => Scry.freeEffectEmpty fn.name) p.funcs);
   List.map (fun e => match Wil.findFunc p e.name with
     | .none => e
@@ -396,13 +412,14 @@ def Scry.uInsEq (a b : List (Nat × Scry.UState)) : Bool :=
   List.all (fun p => Scry.uStateEq p.2 (Scry.uInFind b p.1)) a
 
 /-- The forward fixpoint of one function. -/
-partial def Scry.uLoop (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect)
-    (fn : Wil.Func) (g : Scry.Fn) (fuel : Nat) (ins : List (Nat × Scry.UState)) :
-    List (Nat × Scry.UState) :=
+partial def Scry.uLoop (models : Scry.ModelPack) (p : Wil.Program) (pt : Scry.PtResult)
+    (es : List Scry.FreeEffect) (fn : Wil.Func) (g : Scry.Fn) (fuel : Nat)
+    (ins : List (Nat × Scry.UState)) : List (Nat × Scry.UState) :=
   match fuel with
   | .zero => ins
   | .succ k =>
-    let outs := List.map (fun n => (n, Scry.uStep p pt es fn g n (Scry.uInFind ins n)))
+    let outs := List.map (fun n =>
+      (n, Scry.uStep models p pt es fn g n (Scry.uInFind ins n)))
       (Scry.range g.count);
     let entry := Scry.entryNode g;
     let ins' := List.map (fun n =>
@@ -414,7 +431,7 @@ partial def Scry.uLoop (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.Fr
         (n, merged)) (Scry.range g.count);
     match Scry.uInsEq ins' ins with
     | .true => ins'
-    | .false => Scry.uLoop p pt es fn g k ins'
+    | .false => Scry.uLoop models p pt es fn g k ins'
 
 def Scry.uFinding (rule : Scry.MemoryRule) (fn : Wil.Func) (point var : Nat)
     (name : String) (arg : Nat) (loc : Scry.Loc) (st : Scry.UState) : Scry.RuleFinding :=
@@ -465,21 +482,27 @@ def Scry.uFindingsAt (rule : Scry.MemoryRule) (pt : Scry.PtResult) (fn : Wil.Fun
       List.append calleeFindings argFindings
     | _ => .nil
 
-def Scry.uFindingsOfFunc (rule : Scry.MemoryRule) (p : Wil.Program) (pt : Scry.PtResult)
-    (es : List Scry.FreeEffect) (fn : Wil.Func) : List Scry.RuleFinding :=
+def Scry.uFindingsOfFunc (models : Scry.ModelPack) (rule : Scry.MemoryRule)
+    (p : Wil.Program) (pt : Scry.PtResult) (es : List Scry.FreeEffect) (fn : Wil.Func) :
+    List Scry.RuleFinding :=
   let g := Scry.flatten fn;
   let fuel := Nat.add 8 (Nat.mul 4 g.count);
-  let ins := Scry.uLoop p pt es fn g fuel
+  let ins := Scry.uLoop models p pt es fn g fuel
     (List.map (fun n => (n, Scry.uEntry pt fn)) (Scry.range g.count));
   Scry.concatLists (fun n =>
     Scry.uFindingsAt rule pt fn g n (Scry.uInFind ins n)) (Scry.range g.count)
 
-/-- Run the `use-after-free` memory rule of `pack` on the program. No memory rule in the
-pack means no findings (the pack is still the only way to enable the rule). -/
-def Scry.lifetimeFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
-    List Scry.RuleFinding :=
+/-- Run the `use-after-free` memory rule of `pack` on the program, reading external free
+effects from `models`. No memory rule in the pack means no findings (the pack is still
+the only way to enable the rule). -/
+def Scry.lifetimeFindingsWithModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (pack : Scry.RulePack) : List Scry.RuleFinding :=
   match pack.memoryRuleFor "use-after-free" with
   | .none => .nil
   | .some rule =>
-    let es := Scry.uCompleteEffects p pt;
-    Scry.concatLists (fun fn => Scry.uFindingsOfFunc rule p pt es fn) p.funcs
+    let es := Scry.uCompleteEffects models p pt;
+    Scry.concatLists (fun fn => Scry.uFindingsOfFunc models rule p pt es fn) p.funcs
+
+def Scry.lifetimeFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack) :
+    List Scry.RuleFinding :=
+  Scry.lifetimeFindingsWithModels Scry.defaultModels p pt pack

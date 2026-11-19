@@ -40,6 +40,30 @@ The model table has three kinds of entry:
 mixture of the format and its variadic arguments. It expands to `arity - first` copy
 pairs, so the taint layer can treat each argument as a source of the written object.
 
+## The pack and its keys
+
+The entries are a value, `Scry.ModelPack`: a name, the pack's default language, and
+`Scry.ModelEntry` values keyed by `(name, arity, language, module)`. `none` in a key is a
+wildcard; a lookup picks the matching entry with the most concrete key fields and, on a
+tie, the first in the pack. `Scry.defaultModels` is today's table with every field
+wildcarded, so its lookups are the old `List.find (String.eq m.name name)` exactly;
+`Scry.csModels` is the same table looked up in `c_sharp`. The lowering and the analyses
+take the pack as an argument (`Scry.lowerTUWithModels`, `Scry.analyzeModels`,
+`Scry.boundsCheckModels`, `Scry.lifetimeFindingsWithModels`), and the default spellings
+pass `Scry.defaultModels`.
+
+`Bounds` reads a call's copy/read shape from the pack's `copyBounds` effect instead of
+keeping the old `boundsCopyShape` name table. The five entries the old table named
+(`read`, `recv`, `memcpy`, `memmove`, `strncpy`) are the five with `copyBounds`; the
+bounded format copies (`sprintf`, `snprintf`, `vsnprintf`, `strncat`, `strlcpy`,
+`strlcat`) are modelled for taint but do not have a `copyBounds` effect, because adding
+one would add findings the old analysis never reported. That is a known table gap, not a
+silent fix.
+
+`Scry.ModelPack.conflictReports` reports overlapping entries of equal specificity that
+disagree about the effects, and `Scry.ModelPack.deadReport` (used by
+`Scry.deadModelReportOn`) reports entries a corpus never calls.
+
 ## Unknown is explicit
 
 `Scry.modelOf` returns `Option Scry.FnModel`; `Scry.modelFor` returns the `unknown` model
@@ -108,6 +132,11 @@ inductive Scry.Effect where
   | sanitise (ref : Scry.ArgRef)
   | copy (dst : Nat) (src : Nat)
   | copyArgs (dst : Nat) (first : Nat)
+  /-- A copy/read whose length is the value at argument `count`. `dst` is the buffer that
+  is written (`read`/`recv`) or the destination of a copy; `src` is the copied-from
+  argument for a copy and `none` for a read. `Bounds` reads this effect instead of
+  keeping its own name table (`boundsCopyShape`). -/
+  | copyBounds (dst : Nat) (src : Option Nat) (count : Nat)
   | alloc (sizeArg : Option Nat) (countArg : Option Nat)
   | free (arg : Nat)
   | unknown
@@ -124,6 +153,53 @@ structure Scry.FnModel where
   family : String
   effects : List Scry.Effect
   note : String
+
+/-- What a model entry is keyed by. `none` is a wildcard: the entry applies to every
+arity/language/module. A lookup prefers the most specific matching entry and, among
+equally specific ones, the first in the pack (the order `List.find` gave before the
+parameterisation). -/
+structure Scry.ModelKey where
+  /-- The external function name (`malloc`, `System.String.Concat`, …). -/
+  name : String
+  /-- The exact argument count, or `none` for "any arity" (variadic families). -/
+  arity : Option Nat
+  /-- The source language (`c`, `c_sharp`, …), or `none` for a language-independent model. -/
+  language : Option String
+  /-- The module/type a language-scoped name belongs to (`System.String`), or `none`. -/
+  module : Option String
+
+/-- One entry of a model pack: a key and the model it selects. -/
+structure Scry.ModelEntry where
+  key : Scry.ModelKey
+  model : Scry.FnModel
+
+/-- A request to a pack. `language` is the language of the unit being analysed;
+`arity` and `module` are `none` when the caller does not know them. A `none` in the
+request matches any entry value, while a `none` in the entry is a wildcard that matches
+any request. -/
+structure Scry.ModelQuery where
+  name : String
+  arity : Option Nat
+  language : String
+  module : Option String
+
+/-- A pack: named entries plus the language it is the default for. `Scry.defaultModels`
+is the historical table with every entry wildcard-keyed, so its lookups are exactly the
+old `List.find (String.eq m.name name)`. -/
+structure Scry.ModelPack where
+  name : String
+  language : String
+  entries : List Scry.ModelEntry
+
+/-- The copy/read shape `Bounds` consumes, derived from a model's `copyBounds` effect. -/
+structure Scry.CopyShape where
+  dst : Nat
+  src : Option Nat
+  count : Nat
+
+/-- Wrap a model as an any-arity, any-language, any-module entry. -/
+def Scry.ModelEntry.anyModel (m : Scry.FnModel) : Scry.ModelEntry :=
+  Scry.ModelEntry.mk (Scry.ModelKey.mk m.name .none .none .none) m
 
 -- ## Queries
 
@@ -160,6 +236,18 @@ def Scry.modelCopyPairs (m : Scry.FnModel) (arity : Nat) : List (Nat × Nat) :=
         (Scry.modelRangeFrom (Nat.sub arity first) first)
     | _ => .nil) m.effects
 
+/-- The first `copyBounds` effect whose length argument exists at this call arity. The
+arity test is `count + 1 <= arity`, the same `arity >= 3` test the old
+`boundsCopyShape` applied to every shape. -/
+def Scry.modelCopyBounds (m : Scry.FnModel) (arity : Nat) : Option Scry.CopyShape :=
+  match List.find (fun e => match e with
+    | .copyBounds _ _ count => Nat.le (Nat.succ count) arity
+    | _ => .false) m.effects with
+  | .none => .none
+  | .some e => match e with
+    | .copyBounds dst src count => .some (Scry.CopyShape.mk dst src count)
+    | _ => .none
+
 def Scry.modelAlloc (m : Scry.FnModel) : Option Scry.AllocShape :=
   match List.find (fun e => match e with
     | .alloc _ _ => .true
@@ -192,13 +280,15 @@ def Scry.sourceGetenv : Scry.FnModel :=
 def Scry.sourceRead : Scry.FnModel :=
   Scry.FnModel.mk "read" "syscall"
     (List.cons (.source (.arg 1))
-      (List.cons (.sink 2 .length) .nil))
+      (List.cons (.sink 2 .length)
+        (List.cons (.copyBounds 1 .none 2) .nil)))
     "fills buffer argument 1; the length argument 2 is a bound"
 
 def Scry.sourceRecv : Scry.FnModel :=
   Scry.FnModel.mk "recv" "syscall"
     (List.cons (.source (.arg 1))
-      (List.cons (.sink 2 .length) .nil))
+      (List.cons (.sink 2 .length)
+        (List.cons (.copyBounds 1 .none 2) .nil)))
     "fills buffer argument 1; the length argument 2 is a bound"
 
 def Scry.sourceFgets : Scry.FnModel :=
@@ -330,7 +420,9 @@ def Scry.copyStrcpy : Scry.FnModel :=
     "argument 1 is copied into the object argument 0 points at"
 
 def Scry.copyStrncpy : Scry.FnModel :=
-  Scry.FnModel.mk "strncpy" "libc" (List.cons (.copy 0 1) .nil)
+  Scry.FnModel.mk "strncpy" "libc"
+    (List.cons (.copy 0 1)
+      (List.cons (.copyBounds 0 (.some 1) 2) .nil))
     "a bounded copy, still a copy from argument 1 to argument 0"
 
 def Scry.copyStrcat : Scry.FnModel :=
@@ -354,12 +446,16 @@ def Scry.copyStrlcat : Scry.FnModel :=
     "a size-bounded append from argument 1 to argument 0"
 
 def Scry.copyMemcpy : Scry.FnModel :=
-  Scry.FnModel.mk "memcpy" "libc" (List.cons (.copy 0 1) .nil)
-    "argument 1 is copied into argument 0"
+  Scry.FnModel.mk "memcpy" "libc"
+    (List.cons (.copy 0 1)
+      (List.cons (.copyBounds 0 (.some 1) 2) .nil))
+    "argument 1 is copied into argument 0; argument 2 is the length"
 
 def Scry.copyMemmove : Scry.FnModel :=
-  Scry.FnModel.mk "memmove" "libc" (List.cons (.copy 0 1) .nil)
-    "argument 1 is moved into argument 0"
+  Scry.FnModel.mk "memmove" "libc"
+    (List.cons (.copy 0 1)
+      (List.cons (.copyBounds 0 (.some 1) 2) .nil))
+    "argument 1 is moved into argument 0; argument 2 is the length"
 
 def Scry.allocMalloc : Scry.FnModel :=
   Scry.FnModel.mk "malloc" "libc"
@@ -374,8 +470,9 @@ def Scry.allocCalloc : Scry.FnModel :=
 
 def Scry.allocRealloc : Scry.FnModel :=
   Scry.FnModel.mk "realloc" "libc"
-    (List.cons (.alloc (.some 1) .none) (List.cons (.sink 1 .size) .nil))
-    "a fresh object; the old object may also be freed (not modelled as a free here, to keep the may-alias result)"
+    (List.cons (.alloc (.some 1) .none)
+      (List.cons (.sink 1 .size) (List.cons (.free 0) .nil)))
+    "a fresh object; the old object (argument 0) may also be freed, which the lifetime analysis reads from `.free`"
 
 def Scry.freeFree : Scry.FnModel :=
   Scry.FnModel.mk "free" "libc" (List.cons (.free 0) .nil)
@@ -495,14 +592,93 @@ def Scry.policyModels : List Scry.FnModel :=
   , Scry.sanClampSize
   ]
 
-def Scry.models : List Scry.FnModel :=
+-- The entries, before they are keyed. Kept under its old list shape so a caller that
+-- builds or inspects the table (`Scry.libcModels`, `Scry.policyModels`, `Scry.pureModels`)
+-- does not have to know about the pack.
+def Scry.modelList : List Scry.FnModel :=
   List.append Scry.libcModels (List.append Scry.policyModels Scry.pureModels)
 
-def Scry.modelOf (name : String) : Option Scry.FnModel :=
-  List.find (fun m => String.eq m.name name) Scry.models
+/-- The default pack: today's table, every entry wildcard-keyed by arity, language and
+module, so a lookup returns exactly what the old `List.find (String.eq m.name name)` did.
+`Scry.models` is this value (the name is kept for compatibility). -/
+def Scry.defaultModels : Scry.ModelPack :=
+  Scry.ModelPack.mk "default" "c" (List.map Scry.ModelEntry.anyModel Scry.modelList)
 
-def Scry.isModelled (name : String) : Bool :=
-  match Scry.modelOf name with
+def Scry.models : Scry.ModelPack := Scry.defaultModels
+
+/-- The C# default: the same table, looked up with language `c_sharp`. An entry may still
+be made C#-specific by setting its `language` or `module` key. -/
+def Scry.csModels : Scry.ModelPack :=
+  Scry.ModelPack.mk "csharp-default" "c_sharp" Scry.defaultModels.entries
+
+-- ## Keyed lookup
+
+/-- How many key fields are concrete. The lookup prefers the largest number of concrete
+fields that match, which is what lets a `(name, arity, language, module)` entry override a
+wildcard entry of the same name. -/
+def Scry.ModelKey.specificity (k : Scry.ModelKey) : Nat :=
+  Nat.add (match k.arity with | .some _ => 1 | .none => 0)
+    (Nat.add (match k.language with | .some _ => 1 | .none => 0)
+      (match k.module with | .some _ => 1 | .none => 0))
+
+/-- Does this entry key answer this request? A `none` in the request means "not known
+here", so it matches every entry value; a `none` in the entry is a wildcard. -/
+def Scry.ModelKey.matches (k : Scry.ModelKey) (q : Scry.ModelQuery) : Bool :=
+  Bool.and (String.eq k.name q.name)
+    (Bool.and
+      (match q.arity with
+        | .none => .true
+        | .some a => match k.arity with
+          | .none => .true
+          | .some b => Nat.beq a b)
+      (Bool.and
+        (match k.language with
+          | .none => .true
+          | .some l => String.eq l q.language)
+        (match q.module with
+          | .none => .true
+          | .some m => match k.module with
+            | .none => .true
+            | .some n => String.eq m n)))
+
+def Scry.ModelPack.query (p : Scry.ModelPack) (name : String) (arity : Option Nat)
+    (module : Option String) : Scry.ModelQuery :=
+  Scry.ModelQuery.mk name arity p.language module
+
+/-- The most specific matching entry; on a tie the first one in the pack wins. -/
+def Scry.ModelPack.find (p : Scry.ModelPack) (q : Scry.ModelQuery) :
+    Option Scry.ModelEntry :=
+  List.foldl (fun best e =>
+    match Scry.ModelKey.matches e.key q with
+    | .false => best
+    | .true => match best with
+      | .none => .some e
+      | .some b => match Nat.lt (Scry.ModelKey.specificity b.key)
+            (Scry.ModelKey.specificity e.key) with
+        | .true => .some e
+        | .false => best) (.none : Option Scry.ModelEntry) p.entries
+
+def Scry.ModelPack.modelOf (p : Scry.ModelPack) (name : String) :
+    Option Scry.FnModel :=
+  match Scry.ModelPack.find p (Scry.ModelPack.query p name .none .none) with
+  | .some e => .some e.model
+  | .none => .none
+
+def Scry.ModelPack.modelOfArity (p : Scry.ModelPack) (name : String) (arity : Nat)
+    (module : Option String) : Option Scry.FnModel :=
+  match Scry.ModelPack.find p
+      (Scry.ModelPack.query p name (.some arity) module) with
+  | .some e => .some e.model
+  | .none => .none
+
+def Scry.ModelPack.isModelled (p : Scry.ModelPack) (name : String) : Bool :=
+  match Scry.ModelPack.modelOf p name with
+  | .some _ => .true
+  | .none => .false
+
+def Scry.ModelPack.isModelledAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Bool :=
+  match Scry.ModelPack.modelOfArity p name arity .none with
   | .some _ => .true
   | .none => .false
 
@@ -515,28 +691,94 @@ def Scry.unknownModel (name : String) : Scry.FnModel :=
   Scry.FnModel.mk name "unknown" (List.cons .unknown .nil)
     "unmodelled external: its result and memory effect are unknown"
 
-def Scry.modelFor (name : String) : Scry.FnModel :=
-  match Scry.modelOf name with
+def Scry.ModelPack.modelFor (p : Scry.ModelPack) (name : String) : Scry.FnModel :=
+  match Scry.ModelPack.modelOf p name with
   | .some m => m
   | .none => Scry.unknownModel name
 
+def Scry.ModelPack.modelAt (p : Scry.ModelPack) (name : String) (arity : Nat)
+    (module : Option String) : Scry.FnModel :=
+  match Scry.ModelPack.modelOfArity p name arity module with
+  | .some m => m
+  | .none => Scry.unknownModel name
+
+def Scry.ModelPack.sourcesOf (p : Scry.ModelPack) (name : String) : List Scry.ArgRef :=
+  Scry.modelSources (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sourcesOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List Scry.ArgRef :=
+  Scry.modelSources (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.sansOf (p : Scry.ModelPack) (name : String) : List Scry.ArgRef :=
+  Scry.modelSans (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sansOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List Scry.ArgRef :=
+  Scry.modelSans (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.sinksOf (p : Scry.ModelPack) (name : String) :
+    List (Nat × Scry.SinkClass) :=
+  Scry.modelSinkArgs (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.sinksOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List (Nat × Scry.SinkClass) :=
+  Scry.modelSinkArgs (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.copyPairsOf (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    List (Nat × Nat) :=
+  Scry.modelCopyPairs (Scry.ModelPack.modelAt p name arity .none) arity
+
+def Scry.ModelPack.allocOf (p : Scry.ModelPack) (name : String) :
+    Option Scry.AllocShape :=
+  Scry.modelAlloc (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.allocOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.AllocShape :=
+  Scry.modelAlloc (Scry.ModelPack.modelAt p name arity .none)
+
+def Scry.ModelPack.freeArgOf (p : Scry.ModelPack) (name : String) : Option Nat :=
+  Scry.modelFreeArg (Scry.ModelPack.modelFor p name)
+
+def Scry.ModelPack.freeArgOfAt (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Nat :=
+  Scry.modelFreeArg (Scry.ModelPack.modelAt p name arity .none)
+
+/-- The copy/read shape for this call, from the pack's `copyBounds` effect. This is the
+one table `Bounds` reads; it no longer keeps a second name list. -/
+def Scry.ModelPack.copyShapeOf (p : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.CopyShape :=
+  match Scry.ModelPack.find p (Scry.ModelPack.query p name (.some arity) .none) with
+  | .some e => Scry.modelCopyBounds e.model arity
+  | .none => .none
+
+-- The name-only defaults, now explicitly the default pack.
+
+def Scry.modelOf (name : String) : Option Scry.FnModel :=
+  Scry.ModelPack.modelOf Scry.defaultModels name
+
+def Scry.isModelled (name : String) : Bool :=
+  Scry.ModelPack.isModelled Scry.defaultModels name
+
+def Scry.modelFor (name : String) : Scry.FnModel :=
+  Scry.ModelPack.modelFor Scry.defaultModels name
+
 def Scry.sourcesOf (name : String) : List Scry.ArgRef :=
-  Scry.modelSources (Scry.modelFor name)
+  Scry.ModelPack.sourcesOf Scry.defaultModels name
 
 def Scry.sansOf (name : String) : List Scry.ArgRef :=
-  Scry.modelSans (Scry.modelFor name)
+  Scry.ModelPack.sansOf Scry.defaultModels name
 
 def Scry.sinksOf (name : String) : List (Nat × Scry.SinkClass) :=
-  Scry.modelSinkArgs (Scry.modelFor name)
+  Scry.ModelPack.sinksOf Scry.defaultModels name
 
 def Scry.copyPairsOf (name : String) (arity : Nat) : List (Nat × Nat) :=
-  Scry.modelCopyPairs (Scry.modelFor name) arity
+  Scry.ModelPack.copyPairsOf Scry.defaultModels name arity
 
 def Scry.allocOf (name : String) : Option Scry.AllocShape :=
-  Scry.modelAlloc (Scry.modelFor name)
+  Scry.ModelPack.allocOf Scry.defaultModels name
 
 def Scry.freeArgOf (name : String) : Option Nat :=
-  Scry.modelFreeArg (Scry.modelFor name)
+  Scry.ModelPack.freeArgOf Scry.defaultModels name
 
 -- Namespaced aliases for callers that read the table by name. The definitions above
 -- live in the `Scry` namespace (following the module style); these give the public
@@ -601,6 +843,10 @@ def Scry.Effect.render : Scry.Effect → String
   | .sanitise r => "sanitise " ++ Scry.ArgRef.show r
   | .copy dst src => "copy " ++ Nat.repr dst ++ " <- " ++ Nat.repr src
   | .copyArgs dst first => "copyArgs " ++ Nat.repr dst ++ " from " ++ Nat.repr first
+  | .copyBounds dst src count =>
+    "copyBounds " ++ Nat.repr dst
+      ++ (match src with | .none => "" | .some s => " <- " ++ Nat.repr s)
+      ++ " count " ++ Nat.repr count
   | .alloc size count =>
     "alloc" ++ (match size with | .some k => " size " ++ Nat.repr k | .none => "")
       ++ (match count with | .some k => " count " ++ Nat.repr k | .none => "")
@@ -610,3 +856,75 @@ def Scry.Effect.render : Scry.Effect → String
 def Scry.FnModel.render (m : Scry.FnModel) : String :=
   m.name ++ " [" ++ m.family ++ "]: "
     ++ String.intercalate "; " (List.map Scry.Effect.render m.effects)
+
+-- ## Pack lint
+
+/-- A canonical key for the effects, used only to compare two entries. -/
+def Scry.modelEffectsKey (m : Scry.FnModel) : String :=
+  String.intercalate ";" (List.map Scry.Effect.render m.effects)
+
+/-- A stable spelling of an entry key (for diagnostics). -/
+def Scry.ModelKey.render (k : Scry.ModelKey) : String :=
+  k.name
+    ++ (match k.arity with | .none => "(any)" | .some n => "/" ++ Nat.repr n)
+    ++ (match k.language with | .none => "" | .some l => " [" ++ l ++ "]")
+    ++ (match k.module with | .none => "" | .some m => " {" ++ m ++ "}")
+
+/-- Two keys with the same name overlap when no concrete field contradicts the other.
+This ignores specificity: a specific entry and its wildcard are not a conflict, they are
+the override the keying exists for. -/
+def Scry.optNatOverlap (a b : Option Nat) : Bool :=
+  match a, b with
+  | .none, _ => .true
+  | _, .none => .true
+  | .some x, .some y => Nat.beq x y
+
+def Scry.optStrOverlap (a b : Option String) : Bool :=
+  match a, b with
+  | .none, _ => .true
+  | _, .none => .true
+  | .some x, .some y => String.eq x y
+
+def Scry.ModelKey.overlaps (a b : Scry.ModelKey) : Bool :=
+  Bool.and (String.eq a.name b.name)
+    (Bool.and (Scry.optNatOverlap a.arity b.arity)
+      (Bool.and (Scry.optStrOverlap a.language b.language)
+        (Scry.optStrOverlap a.module b.module)))
+
+/-- Entries that overlap at the same specificity but disagree about the effects. This is
+the bug the keying is meant to expose: two tables (say `boundsCopyShape` and the model
+table) describing the same call differently. `none` for the default pack, which has one
+entry per name. -/
+def Scry.ModelPack.conflictReports (p : Scry.ModelPack) : List String :=
+  let step := fun (acc : List Scry.ModelEntry × List String) (e : Scry.ModelEntry) =>
+    let older := List.filter (fun b => Bool.and
+        (Scry.ModelKey.overlaps b.key e.key)
+        (Bool.and
+          (Nat.beq (Scry.ModelKey.specificity b.key) (Scry.ModelKey.specificity e.key))
+          (Bool.not (String.eq (Scry.modelEffectsKey b.model)
+            (Scry.modelEffectsKey e.model))))) acc.1;
+    let reports := List.map (fun b =>
+        "model conflict: " ++ Scry.ModelKey.render e.key ++ " and "
+          ++ Scry.ModelKey.render b.key ++ " have different effects ("
+          ++ Scry.modelEffectsKey e.model ++ " vs " ++ Scry.modelEffectsKey b.model
+          ++ ")") older;
+    (List.append acc.1 (List.cons e .nil), List.append acc.2 reports);
+  (List.foldl step ((.nil : List Scry.ModelEntry), (.nil : List String)) p.entries).2
+
+/-- The entries whose name never appears in `used`, the external names a corpus actually
+calls. The caller builds `used` (for the CLI, from the analysed program); this is the
+dead-model report P4 asks for. A language/module-specific entry is dead when its own name
+is never used; a broader "did any language call it" check is intentionally not guessed. -/
+def Scry.ModelPack.deadEntryList (p : Scry.ModelPack) (used : List String) :
+    List Scry.ModelEntry :=
+  List.filter (fun e => Bool.not
+    (List.any (fun n => String.eq n e.key.name) used)) p.entries
+
+def Scry.ModelPack.deadEntries (p : Scry.ModelPack) (used : List String) :
+    List Scry.FnModel :=
+  List.map (fun e => e.model) (Scry.ModelPack.deadEntryList p used)
+
+def Scry.ModelPack.deadReport (p : Scry.ModelPack) (used : List String) : List String :=
+  List.map (fun e => "dead model: " ++ Scry.ModelKey.render e.key
+      ++ " (" ++ e.model.family ++ ") is never used on this corpus")
+    (Scry.ModelPack.deadEntryList p used)

@@ -469,7 +469,7 @@ def Scry.Repl.analyzeUnit (rules : Option String) (u : Scry.Repl.Unit) :
       | .false => do
         -- the same pipeline as `scry taint` (`Scry.analyzeStore`), from the cached store
         let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .none .none
-          .none (.some 300) (.some 2000000) .none .false;
+          .none (.some 300) (.some 2000000) .none .false Scry.defaultModels;
         startMs ← Scry.nowMs;
         Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source (Scry.lineStartsOf source)
           cst (Scry.CstStore.nodeCount cst))

@@ -98,6 +98,9 @@ structure Scry.TaintOpts where
   maxRounds : Option Nat
   /-- `--progress`: print one stage line per phase on stderr. -/
   progress : Bool
+  /-- The external-function model pack. The default is `Scry.defaultModels`; a caller
+  (a test or a future `--models` flag) can pass another pack without changing the CLI. -/
+  models : Scry.ModelPack
 
 /-- The defaults are a **contract**, not an accident: a single file is analysed under a
 300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
@@ -105,7 +108,7 @@ clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` dis
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
   Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
-    (.some 300) (.some 2000000) .none .false
+    (.some 300) (.some 2000000) .none .false Scry.defaultModels
 
 /-- The budget view of the options (`--progress` is included there too). -/
 def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
@@ -902,7 +905,7 @@ partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : Strin
           ++ " elapsed=" ++ Nat.repr (Nat.sub now startMs) ++ "ms"))
       | .false => EIO.pure ()
     | .false => EIO.pure ();
-    let r := Scry.evalWithEntries graph pack pt entries sums fn;
+    let r := Scry.evalWithEntriesModels o.models graph pack pt entries sums fn;
     rs ← Scry.evalAllStaged o startMs tag graph pack pt entries sums rest (Nat.succ i) total;
     EIO.pure (List.cons r rs)
 
@@ -976,7 +979,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
     let c := Scry.Cst.ofStore text cst;
-    let tu := Scry.lowerTU o.file c;
+    let tu := Scry.lowerTUWithModels o.file o.models c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
@@ -1003,14 +1006,15 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    let bounds := Scry.boundsCheck prog pt pack results;
+    let bounds := Scry.boundsCheckModels o.models prog pt pack results;
     let warnings := Scry.dedupWarnings (List.append
       (List.filter (Scry.keepMemWarning hasLifetime)
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
-          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels o.models prog r) results)))
       bounds.warnings);
-    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
+    let memoryFindings := List.append
+      (Scry.lifetimeFindingsWithModels o.models prog pt pack) bounds.findings;
     let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
       ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"

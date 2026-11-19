@@ -228,22 +228,32 @@ def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed
 /-- Evaluate one function under the current summaries (the unit of the summary
 fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. The
 entry sources are the C-ABI policy's parameter seeds for exported entries. -/
-def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
-    (pt : Scry.PtResult) (entries : List (String × Nat)) (sums : List Scry.Summary)
-    (fn : Wil.Func) : Scry.FuncResult :=
-  Scry.evaluateFuncWith fn pack pt (Scry.seedsFor sums fn.name)
+def Scry.evalWithEntriesModels (models : Scry.ModelPack) (graph : Scry.CallGraph)
+    (pack : Scry.RulePack) (pt : Scry.PtResult) (entries : List (String × Nat))
+    (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWithModels models fn pack pt (Scry.seedsFor sums fn.name)
     (Scry.summaryOf sums fn.name).params
     (Scry.retSeedsOf graph sums fn.name)
     (Scry.entrySourcesFor entries fn.name)
+
+def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
+    (pt : Scry.PtResult) (entries : List (String × Nat)) (sums : List Scry.Summary)
+    (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evalWithEntriesModels Scry.defaultModels graph pack pt entries sums fn
 
 def Scry.evalWith (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
     (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
   Scry.evalWithEntries graph pack pt .nil sums fn
 
+def Scry.resultsWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult)
+    (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.FuncResult :=
+  List.map (Scry.evalWithEntriesModels models graph pack pt entries sums) p.funcs
+
 def Scry.resultsWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (graph : Scry.CallGraph) (pt : Scry.PtResult) (sums : List Scry.Summary)
     (entries : List (String × Nat)) : List Scry.FuncResult :=
-  List.map (Scry.evalWithEntries graph pack pt entries sums) p.funcs
+  Scry.resultsWithEntriesModels Scry.defaultModels p pack graph pt sums entries
 
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
@@ -265,25 +275,36 @@ def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
 
 /-- One summary round: evaluate every function under `prev`, then grow every summary
 with the argument-taint contributions the results expose and the return flags. -/
+def Scry.stepSummariesWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult)
+    (prev : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
+  Scry.growSummaries p graph prev
+    (Scry.resultsWithEntriesModels models p pack graph pt prev entries)
+
 def Scry.stepSummariesWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (graph : Scry.CallGraph) (pt : Scry.PtResult) (prev : List Scry.Summary)
     (entries : List (String × Nat)) : List Scry.Summary :=
-  Scry.growSummaries p graph prev (Scry.resultsWithEntries p pack graph pt prev entries)
+  Scry.stepSummariesWithEntriesModels Scry.defaultModels p pack graph pt prev entries
 
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
   Scry.stepSummariesWithEntries p pack graph pt prev .nil
 
-partial def Scry.summaryLoopWithEntries (p : Wil.Program) (pack : Scry.RulePack)
-    (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
+partial def Scry.summaryLoopWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
     (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
   match fuel with
   | .zero => sums
   | .succ k =>
-    let next := Scry.stepSummariesWithEntries p pack graph pt sums entries;
+    let next := Scry.stepSummariesWithEntriesModels models p pack graph pt sums entries;
     match Scry.summariesEq next sums with
     | .true => next
-    | .false => Scry.summaryLoopWithEntries p pack graph pt k next entries
+    | .false => Scry.summaryLoopWithEntriesModels models p pack graph pt k next entries
+
+partial def Scry.summaryLoopWithEntries (p : Wil.Program) (pack : Scry.RulePack)
+    (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
+    (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
+  Scry.summaryLoopWithEntriesModels Scry.defaultModels p pack graph pt fuel sums entries
 
 partial def Scry.summaryLoop (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (fuel : Nat) (sums : List Scry.Summary) : List Scry.Summary :=
@@ -321,7 +342,8 @@ with no model entry, and with a pointer result or argument, so its memory effect
 genuinely unknown. The warning is attached to the call point. A call to a function the
 unit defines is not external (`Wil.findFunc` is the discriminator), and a modelled call
 has a known effect, so neither warns here. -/
-def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+def Scry.unmodelledWarningsOfModels (models : Scry.ModelPack) (p : Wil.Program)
+    (r : Scry.FuncResult) : List Scry.MemWarning :=
   let g := r.plan.info.g;
   Scry.rulePackConcat (fun n =>
     match Scry.nodeStmt g n with
@@ -329,7 +351,7 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
       match Wil.findFunc p name with
       | .some _ => .nil
       | .none =>
-        if Scry.Models.isModelled name then .nil
+        if Scry.ModelPack.isModelledAt models name (List.length args) then .nil
         else
           let pointerArg := List.any (fun v => Scry.ptrLike v.ty) args;
           let pointerRet := match res with
@@ -341,6 +363,9 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
               r.fn.name n ("call to unmodelled external " ++ name
                 ++ ": result and memory effects are unknown")) .nil
     | _ => .nil) (Scry.range g.count)
+
+def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+  Scry.unmodelledWarningsOfModels Scry.defaultModels p r
 
 /-- The lifetime rule supersedes the old points-to `use-after-free` warning: once a
 `kind memory` rule is enabled its finding is the diagnostic, so do not print both. -/
@@ -356,8 +381,9 @@ rule id even when the textual pack does not repeat it. `entryMode` enables the C
 policy that seeds the parameters of exported entries; the library/old API passes
 `false` through `Scry.analyze`. `maxRounds` bounds the points-to fixpoint (a partial
 result when it is hit). -/
-def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
-    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+def Scry.analyzeEntriesBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack0 : Scry.RulePack) (entryMode : Bool) (maxRounds : Option Nat) :
+    Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsToBounded p maxRounds;
   let graph := Scry.callGraph p pt;
@@ -367,28 +393,41 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
   let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) p.funcs;
   let fuel := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs))
     (Scry.ptLocCount pt));
-  let sums := Scry.summaryLoopWithEntries p pack graph pt fuel sums0 entries;
-  let results := Scry.resultsWithEntries p pack graph pt sums entries;
+  let sums := Scry.summaryLoopWithEntriesModels models p pack graph pt fuel sums0 entries;
+  let results := Scry.resultsWithEntriesModels models p pack graph pt sums entries;
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let bounds := Scry.boundsCheck p pt pack results;
+  let bounds := Scry.boundsCheckModels models p pt pack results;
   let warnings := Scry.dedupWarnings (List.append
     (List.filter (Scry.keepMemWarning hasLifetime)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
-        (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
+        (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels models p r) results)))
     bounds.warnings);
-  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
+  let memoryFindings := List.append
+    (Scry.lifetimeFindingsWithModels models p pt pack) bounds.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
+
+def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBoundedModels Scry.defaultModels p pack0 entryMode maxRounds
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
   Scry.analyzeEntriesBounded p pack .false .none
 
+def Scry.analyzeModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBoundedModels models p pack .false .none
+
 /-- The C-ABI analysis: parameters of exported entry functions are sources. -/
 def Scry.analyzeC (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
   Scry.analyzeEntriesBounded p pack .true .none
+
+def Scry.analyzeCModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBoundedModels models p pack .true .none
 
 /-- The bounded analysis with the C-ABI entry policy (the `scry taint` driver uses the
 staged loop in `Scry.TaintCmd`; this is the library-level equivalent). -/
@@ -396,10 +435,40 @@ def Scry.analyzeEntries (p : Wil.Program) (pack : Scry.RulePack)
     (entryMode : Bool) : Scry.ProgramResult :=
   Scry.analyzeEntriesBounded p pack entryMode .none
 
+def Scry.analyzeEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (entryMode : Bool) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBoundedModels models p pack entryMode .none
+
 /-- The default analysis with an explicit points-to round bound. -/
 def Scry.analyzeBounded (p : Wil.Program) (pack : Scry.RulePack)
     (maxRounds : Option Nat) : Scry.ProgramResult :=
   Scry.analyzeEntriesBounded p pack .false maxRounds
+
+def Scry.analyzeBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (maxRounds : Option Nat) : Scry.ProgramResult :=
+  Scry.analyzeEntriesBoundedModels models p pack .false maxRounds
+
+-- ## Model-pack lint
+
+/-- Every external name a program calls directly, deduplicated in first-use order. This
+is the "used on the corpus" side of the dead-model report. -/
+def Scry.externalCallNames (p : Wil.Program) : List String :=
+  let all := Scry.concatLists (fun fn =>
+    let g := Scry.flatten fn;
+    Scry.concatLists (fun n => match Scry.nodeStmt g n with
+      | .some (.call _ (.direct name) _ _) =>
+        match Wil.findFunc p name with
+        | .some _ => .nil
+        | .none => List.cons name .nil
+      | _ => .nil) (Scry.range g.count)) p.funcs;
+  List.foldl (fun acc n =>
+    match List.any (fun m => String.eq m n) acc with
+    | .true => acc
+    | .false => List.append acc (List.cons n .nil)) (.nil : List String) all
+
+/-- The pack entries this program never uses (dead models). -/
+def Scry.deadModelReportOn (models : Scry.ModelPack) (p : Wil.Program) : List String :=
+  Scry.ModelPack.deadReport models (Scry.externalCallNames p)
 
 -- ## Stitching paths across calls
 
