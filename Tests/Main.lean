@@ -195,21 +195,29 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
 in still run one case at a time, but each of their cases is told N (`Tests.caseJobs`), so a
-long sweep may use N workers inside its one process (`=selfhost-libdiff`). `--jobs-all`
-also parallelizes groups that did not opt in (for auditing a group's isolation, not for
-CI).
+long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer when the
+memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
+auditing a group's isolation, not for CI).
 
-`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N]` runs the
-self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and reports
-where they disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
-documents the format). `--jobs N` checks N files at a time; with no `--jobs` it is auto
-(the CPUs minus one), capped by the free memory at `--mem` MB per file. The driver's
-`--jobs` reaches the group's one case; `--jobs 1` is the serial control. -/
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
+runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and
+reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
+`Tests/Groups/SelfhostLibDiff.lean` documents the format). `--jobs N` checks N files at a
+time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memory at
+`--mem` MB per file. The driver's `--jobs` reaches the group's one case; `--jobs 1` is the
+serial control. `--part i/n` (1-based) runs only the files whose index in the sorted list
+is `k % n = i - 1`: the parts are a deterministic partition of the one case, so CI can run
+its 3664 s on n jobs without changing what any file is compared against. -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
+  -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
+  -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
+  let traceGuesses := args.contains "--trace-guess-fallback"
+  let args := args.filter (· != "--trace-guess-fallback")
+  if traceGuesses then Wiz.traceGuessesRef.set true
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
   -- `--jobs N` (default 1): the cases of an opted-in group run N at a time, and a case
@@ -225,13 +233,17 @@ def main (args : List String) : IO UInt32 := do
     | IO.eprintln "--jobs needs a count of at least 1"; return 2
   caseJobsRef.set jobs
   caseJobsSetRef.set jobsArg.isSome
+  -- `--part i/n`: the part of a split sweep to run (`=selfhost-libdiff`), passed on to
+  -- each case's process; not given, a case runs the whole sweep (`1/1`)
+  let (partArg, args) := takeFlag "--part" args
+  casePartRef.set (partArg.getD "")
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set tc.toFlags
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
@@ -284,7 +296,13 @@ def main (args : List String) : IO UInt32 := do
   -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
   -- of one file (a bounded child of the sweep), and the sweep itself
   | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
-  | "--libdiff" :: rest => Elab.libDiffMain rest
+  -- `--part` was taken off above (it is a driver flag, not a toolchain flag); give it
+  -- back to the sweep's own command line, which validates it
+  | "--libdiff" :: rest =>
+    let rest := match partArg with
+      | some p => "--part" :: p :: rest
+      | none => rest
+    Elab.libDiffMain rest
   -- the trust ledger (`Tests/Native.lean`, scripts/trust-ledger.sh)
   | "--trust-ledger" :: rest => Native.trustLedgerMain rest
   | ["--list"] => do

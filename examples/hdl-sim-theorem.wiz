@@ -8,11 +8,6 @@ import Hdl.Temporal
 
 def Bit : HwTy := HwTy.bits 1
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 -- a one-bit delay: the output is the previous input (one register)
 def delayC : Circuit Bit Bit :=
   Circuit.mk Bit (BitVec.ofNat 1 0) (fun s x => Hw.pair x s)
@@ -40,4 +35,4 @@ def ins : List (HwTy.El Bit) :=
 
 #eval Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) ins)
 #eval Circuit.runLeaves delayC ins
-#eval leavesEq (Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) ins)) (Circuit.runLeaves delayC ins)
+#eval BEq.beq (Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) ins)) (Circuit.runLeaves delayC ins)

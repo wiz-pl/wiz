@@ -69,6 +69,8 @@ def nativesGroup : Group where
   cases := [
     { name := "word arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
         nativesSame "wordarray" "24057236113" },
+    { name := "arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
+        nativesSame "array" "1039243342" },
     { name := "word maps: the model and the natives agree (growing, erasing, keys above 2^63)", run := fun _ =>
         nativesSame "wordmap" "6735556925" },
     { name := "intern tables: the model and the natives agree", run := fun _ =>
@@ -112,9 +114,7 @@ def nativesGroup : Group where
           let tc ← toolchain
           match ← Build.runGlobal { tc with libs := tc.libs ++ [(dir / "helper.c").toString] } s "main" dir llvm (timeout := some 120) with
           | .ok v => checkEq "285000012884901896" v
-          | .error e =>
-            if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
-            else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}") },
+          | .error e => failRun e (if llvm then "(llvm) " else "") },
     { name := "shared between threads: each thread's update copies, nothing leaks (C, LLVM)", run := fun _ => do
         cRunLibs nativesThreads "624250724249\n"
         cRunLibs nativesThreads "624250724249\n" (llvm := true) }

@@ -31,6 +31,8 @@ structure Scry.ReproResult where
   exitKind : String
   exitCode : Nat
   signal : Nat
+  /-- The plan's marker was seen in the run's output (the PoC reached the sink). -/
+  markerObserved : Bool
   json : Json
   logText : String
   trace : List String
@@ -53,9 +55,16 @@ structure Scry.ReproConfig where
   witness : Option String
   witnessStatus : String
   witnessAuthority : String
+  /-- The candidate plan this reproducer was derived from, if any. -/
+  plan : Option Scry.WfPlan
+  /-- `derived`, `supplied`, `template` or `none`. -/
+  harnessSource : String
+  /-- `candidate.json` when the plan came from a refined candidate. -/
+  derivedFrom : String
 
 def Scry.defaultReproConfig : Scry.ReproConfig :=
   Scry.ReproConfig.mk "cc" "both" .none .none "" 10 .nil .none "absent" "L0"
+    .none "template" ""
 
 def Scry.reproSanFlags (s : String) : List String :=
   match s with
@@ -219,7 +228,7 @@ structure Scry.CompileResult where
   sanArgs : List String
   baseArgs : List String
 
-structure Scry.ReproRunResult where
+structure Scry.ReproRun where
   runOut : Output
   runCmd : List String
   timeoutUsed : String
@@ -259,18 +268,18 @@ def Scry.wfCompile (cfg : Scry.ReproConfig) (source bin : String) : EIO Scry.Com
     compileCmd opt1 opt2 sanArgs baseArgs)
 
 def Scry.wfExecute (cfg : Scry.ReproConfig) (compileOk : Bool) (harnessPath bin inputText : String)
-    : EIO Scry.ReproRunResult := do
+    : EIO Scry.ReproRun := do
   let envOpts := List.foldl (fun o kv => SpawnOptions.setEnv kv.1 kv.2 o)
     SpawnOptions.default cfg.env;
   let timeoutCmd := String.append (Nat.repr cfg.timeoutSecs) "s";
   let timedArgs := [timeoutCmd, "sh", harnessPath, bin];
   let runArgsDirect := ["sh", harnessPath, bin];
   runResult ← Scry.wfRunRepro compileOk timedArgs harnessPath bin inputText envOpts runArgsDirect;
-  EIO.pure (Scry.ReproRunResult.mk runResult.1 runResult.2.1 runResult.2.2)
+  EIO.pure (Scry.ReproRun.mk runResult.1 runResult.2.1 runResult.2.2)
 
 structure Scry.CompileRunResult where
   compile : Scry.CompileResult
-  run : Scry.ReproRunResult
+  run : Scry.ReproRun
 
 def Scry.wfCompileRun (cfg : Scry.ReproConfig) (source bin harnessPath inputText : String) :
     EIO Scry.CompileRunResult := do
@@ -284,7 +293,7 @@ def Scry.wfWriteReproArtifacts (outDir logText reproText : String) (dynamic : Js
   c ← Scry.wfWrite (Path.join outDir "dynamic.json") (String.append (Json.render dynamic) "\n");
   EIO.pure ()
 
-def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
+def Scry.reproRunC (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
     EIO Scry.ReproResult :=
   EIO.bind (Scry.wfPrepareRepro cfg outDir) (fun p0 =>
     let prepared := p0;
@@ -316,6 +325,16 @@ def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : Strin
         | .false => match crashed with
           | .true => "exit-or-signal"
           | .false => "none";
+      let markerObserved := match cfg.plan with
+        | .some p => Bool.and (Bool.not (String.eq p.marker ""))
+            (String.contains (String.append runOut.stdout runOut.stderr) p.marker)
+        | .none => (.false : Bool);
+      let markerText := match cfg.plan with
+        | .some p => Json.mkStr p.marker
+        | .none => Json.mkStr "";
+      let planJson := match cfg.plan with
+        | .some p => Scry.wfPlanJson p
+        | .none => Json.mkNull;
       let dynamic := Json.mkObj
         [ ("schema", Json.mkStr "scry-workflow-dynamic/1")
         , ("evidenceKind", Json.mkStr "dynamic")
@@ -334,9 +353,12 @@ def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : Strin
             , ("attempts", Json.mkArr
                 [ Scry.wfAttemptJson comp.requested comp.opt1
                 , Scry.wfAttemptJson "none" comp.opt2 ]) ])
+        , ("derivedFrom", Json.mkStr cfg.derivedFrom)
+        , ("plan", planJson)
         , ("harness", Json.mkObj
             [ ("path", Json.mkStr harnessPath)
-            , ("hash", Json.mkStr harnessHash) ])
+            , ("hash", Json.mkStr harnessHash)
+            , ("source", Json.mkStr cfg.harnessSource) ])
         , ("input", Json.mkObj
             [ ("path", Json.mkStr inputPath)
             , ("bytes", Json.ofNat (String.length inputText))
@@ -347,6 +369,8 @@ def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : Strin
             , ("result", Scry.wfOutputJson runOut)
             , ("sanitizerHit", Json.mkBool sanitizerHit)
             , ("crashed", Json.mkBool crashed)
+            , ("marker", markerText)
+            , ("markerObserved", Json.mkBool markerObserved)
             , ("traceKind", Json.mkStr traceKind)
             , ("trace", Scry.wfListJson interesting)
             , ("log", Json.mkStr (Path.join outDir "run.log")) ])
@@ -363,4 +387,120 @@ def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : Strin
           (match runOut.status with | .exited c => "exited" | .signaled _ => "signaled")
           (match runOut.status with | .exited c => c | .signaled _ => 0)
           (match runOut.status with | .exited _ => 0 | .signaled s => s)
-          dynamic logText interesting))))
+          markerObserved dynamic logText interesting))))
+
+-- ## C#: `dotnet run --file`
+--
+-- A C# finding cannot be reproduced by `cc`: the source is not C. The .NET SDK's
+-- file-based app mode (`dotnet run --file Program.cs`, .NET 10) compiles and runs one
+-- file without a project, which is the smallest honest reproducer for the C# corpus.
+-- There is no ASAN/UBSAN equivalent here, so the evidence is a concrete run (L1), and
+-- the record says so. A missing SDK is a clean `compile-failed`, never a clean run.
+
+def Scry.reproDotnetVersion : EIO String := do
+  o ← EIO.lift (Scry.wfTryOutput "dotnet" ["--version"] "" SpawnOptions.default);
+  EIO.pure (match o with
+    | .some x => Scry.wfFirstLine x.stdout
+    | .none => "")
+
+def Scry.reproRunDotnet (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
+    EIO Scry.ReproResult := do
+  stepd ← Scry.wfEnsureDir outDir;
+  prepared ← Scry.wfPrepareRepro cfg outDir;
+  let harnessPath := prepared.1;
+  let inputPath := prepared.2.1;
+  let inputText := prepared.2.2.1;
+  let harnessHash := prepared.2.2.2;
+  srcText ← FS.readFile source;
+  let program := Path.join outDir "Program.cs";
+  stepw ← FS.writeFile program srcText;
+  version ← Scry.reproDotnetVersion;
+  let envOpts := List.foldl (fun o kv => SpawnOptions.setEnv kv.1 kv.2 o)
+    (SpawnOptions.inDir outDir SpawnOptions.default) cfg.env;
+  let timedArgs := [String.append (Nat.repr cfg.timeoutSecs) "s", "dotnet", "run", "--file", program];
+  outOpt ← EIO.lift (Scry.wfTryOutput "timeout" timedArgs inputText envOpts);
+  let runOut := match outOpt with
+    | .some x => x
+    | .none => Output.mk (ExitStatus.exited 127) "" "dotnet not found";
+  let combined := String.append runOut.stdout runOut.stderr;
+  let compileError := String.contains combined "error CS";
+  let compileOk := Bool.and (Bool.not compileError) (Bool.not (Nat.beq (match runOut.status with
+    | .exited c => c | .signaled _ => 127) 127));
+  let crashed := match runOut.status with
+    | .signaled _ => .true
+    | .exited c => Nat.lt 0 c;
+  let markerObserved := match cfg.plan with
+    | .some p => Bool.and (Bool.not (String.eq p.marker "")) (String.contains combined p.marker)
+    | .none => (.false : Bool);
+  let planJson := match cfg.plan with
+    | .some p => Scry.wfPlanJson p
+    | .none => Json.mkNull;
+  let markerText := match cfg.plan with
+    | .some p => Json.mkStr p.marker
+    | .none => Json.mkStr "";
+  let dynamic := Json.mkObj
+    [ ("schema", Json.mkStr "scry-workflow-dynamic/1")
+    , ("evidenceKind", Json.mkStr "dynamic")
+    , ("tag", Json.mkStr tag)
+    , ("status", Json.mkStr (match compileOk with | .true => "ran" | .false => "compile-failed"))
+    , ("sanitizer", Json.mkObj
+        [ ("requested", Json.mkStr cfg.sanitize)
+        , ("used", Json.mkStr "none")
+        , ("fallback", Json.mkStr "the .NET SDK has no ASAN/UBSAN; this is a concrete run (L1)") ])
+    , ("compiler", Json.mkObj
+        [ ("command", Json.mkStr "dotnet")
+        , ("version", Json.mkStr (String.append "dotnet " version)) ])
+    , ("compile", Json.mkObj
+        [ ("command", Scry.wfListJson timedArgs)
+        , ("result", Scry.wfOutputJson runOut)
+        , ("attempts", Json.mkArr .nil) ])
+    , ("derivedFrom", Json.mkStr cfg.derivedFrom)
+    , ("plan", planJson)
+    , ("harness", Json.mkObj
+        [ ("path", Json.mkStr harnessPath)
+        , ("hash", Json.mkStr harnessHash)
+        , ("source", Json.mkStr cfg.harnessSource) ])
+    , ("input", Json.mkObj
+        [ ("path", Json.mkStr inputPath)
+        , ("bytes", Json.ofNat (String.length inputText))
+        , ("hash", Json.mkStr (Scry.wfHex (Scry.wfFnv inputText))) ])
+    , ("run", Json.mkObj
+        [ ("command", Scry.wfListJson timedArgs)
+        , ("timeout", Json.mkStr "timeout")
+        , ("result", Scry.wfOutputJson runOut)
+        , ("sanitizerHit", Json.mkBool .false)
+        , ("crashed", Json.mkBool crashed)
+        , ("marker", markerText)
+        , ("markerObserved", Json.mkBool markerObserved)
+        , ("traceKind", Json.mkStr (match markerObserved with
+            | .true => "marker" | .false => (match crashed with
+              | .true => "exit-or-signal" | .false => "none")))
+        , ("trace", Scry.wfListJson (Scry.wfInteresting 12 combined))
+        , ("log", Json.mkStr (Path.join outDir "run.log")) ])
+    , ("limits", Json.mkArr (List.map Json.mkStr
+        [ "dotnet runs the source as a file-based app; there is no sanitizer or coverage."
+        , "A run is evidence that this input reached this exit status, not a proof of exploitability."
+        , "The SDK version and environment are recorded, not pinned." ])) ];
+  let reproText := String.append "#!/bin/sh\nset -eu\n"
+    (String.append (Scry.wfShWords (List.cons "timeout" (List.append timedArgs .nil)))
+      (String.append " < " (String.append (Scry.wfShQuote inputPath) "\n")));
+  a ← Scry.wfWrite (Path.join outDir "run.log") (String.append "--- stdout ---\n"
+    (String.append runOut.stdout (String.append "\n--- stderr ---\n" runOut.stderr)));
+  b ← Scry.wfWrite (Path.join outDir "repro.sh") reproText;
+  c ← Scry.wfWrite (Path.join outDir "dynamic.json") (String.append (Json.render dynamic) "\n");
+  EIO.pure (Scry.ReproResult.mk
+    (match compileOk with | .true => "ran" | .false => "compile-failed")
+    "none" compileOk compileOk crashed .false
+    (match runOut.status with | .exited _ => "exited" | .signaled _ => "signaled")
+    (match runOut.status with | .exited c => c | .signaled _ => 0)
+    (match runOut.status with | .exited _ => 0 | .signaled s => s)
+    markerObserved dynamic
+    (String.append "--- stdout ---\n" (String.append runOut.stdout
+      (String.append "\n--- stderr ---\n" runOut.stderr)))
+    (Scry.wfInteresting 12 combined))
+
+def Scry.reproRun (cfg : Scry.ReproConfig) (source outDir : String) (tag : String) :
+    EIO Scry.ReproResult :=
+  match String.endsWith source ".cs" with
+  | .true => Scry.reproRunDotnet cfg source outDir tag
+  | .false => Scry.reproRunC cfg source outDir tag

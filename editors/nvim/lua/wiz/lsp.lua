@@ -85,6 +85,54 @@ function M.cmd(root)
   return cfg.cmd
 end
 
+--- The keys Neovim 0.11+ installs by itself, for the versions before that (and for
+--- `lsp.keymaps = true`). A key the user mapped is never replaced.
+local function diagnostic_jump(count)
+  if vim.diagnostic.jump then
+    return function() vim.diagnostic.jump { count = count } end
+  end
+  return function()
+    if count > 0 then vim.diagnostic.goto_next {} else vim.diagnostic.goto_prev {} end
+  end
+end
+
+local KEYMAPS = {
+  { 'n', 'K', function() vim.lsp.buf.hover() end, 'hover' },
+  { 'n', 'gd', function() vim.lsp.buf.definition() end, 'go to definition' },
+  { 'n', 'gD', function() vim.lsp.buf.declaration() end, 'go to declaration' },
+  { 'n', 'grn', function() vim.lsp.buf.rename() end, 'rename' },
+  { 'n', 'grr', function() vim.lsp.buf.references() end, 'references' },
+  { 'n', 'gra', function() vim.lsp.buf.code_action() end, 'code action' },
+  { 'n', 'gO', function() vim.lsp.buf.document_symbol() end, 'outline' },
+  { 'n', ']d', diagnostic_jump(1), 'next diagnostic' },
+  { 'n', '[d', diagnostic_jump(-1), 'previous diagnostic' },
+  { 'i', '<C-s>', function() vim.lsp.buf.signature_help() end, 'signature help' },
+}
+
+--- Install the LSP keymaps in `buf` (see `lsp.keymaps`): `true`, `false` or `'auto'`
+--- (the default: only where Neovim has no defaults of its own, i.e. 0.10). A key the
+--- user already mapped — buffer-local or global — is left alone.
+function M.keymaps(buf, mode)
+  local want = mode
+  if want == nil then
+    want = config.get().lsp.keymaps
+  end
+  if want == 'auto' then
+    want = vim.fn.has 'nvim-0.11' == 0
+  end
+  if not want or not config.get().mappings then
+    return
+  end
+  vim.api.nvim_buf_call(buf, function()
+    for _, map in ipairs(KEYMAPS) do
+      if vim.fn.maparg(map[2], map[1]) == '' then
+        vim.keymap.set(map[1], map[2], map[3],
+          { buffer = buf, silent = true, desc = 'wiz.nvim: ' .. map[4] })
+      end
+    end
+  end)
+end
+
 --- Turn on Neovim's built-in completion for the client (`lsp.completion`), and
 --- `lsp.folding`: fold with the server's ranges in the current window.
 --- `lsp.inlay_hints`: show the server's inlay hints in the buffer.
@@ -105,7 +153,18 @@ function M.on_attach(client, buf)
       vim.keymap.set('i', '<C-Space>', vim.lsp.completion.get,
         { buffer = buf, desc = 'wiz.nvim: complete (the language server)' })
     end
+  elseif want and vim.lsp.omnifunc then
+    -- Neovim 0.10: `vim.lsp.completion` does not exist, so enable the client's own
+    -- completion function instead, which `<C-x><C-o>` uses; `<C-Space>` types that.
+    vim.bo[buf].omnifunc = 'v:lua.vim.lsp.omnifunc'
+    if config.get().mappings then
+      vim.keymap.set('i', '<C-Space>', function()
+        vim.api.nvim_feedkeys(
+          vim.api.nvim_replace_termcodes('<C-x><C-o>', true, false, true), 'n', false)
+      end, { buffer = buf, desc = 'wiz.nvim: complete (the language server)' })
+    end
   end
+  M.keymaps(buf)
   if cfg.inlay_hints and vim.lsp.inlay_hint then
     vim.lsp.inlay_hint.enable(true, { bufnr = buf })
   end

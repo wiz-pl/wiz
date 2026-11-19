@@ -20,6 +20,7 @@ on:
       - 'tools/**'
       - '.github/workflows/tools.yml'
   push:
+    branches: [master]  # agent branches are tested through their pull request
     paths:
       - 'tools/**'
       - '.github/workflows/tools.yml'

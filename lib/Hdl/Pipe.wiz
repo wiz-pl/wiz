@@ -73,7 +73,7 @@ structure Pipe (i o : HwTy) where
   latency : Nat
 
 /-- Combinational identity (no hardware, no latency). -/
-def Comb.id {i : HwTy} : Comb i i := fun x => x
+def Comb.id {0 i : HwTy} : Comb i i := fun x => x
 
 /-- The identity pipeline: the same value, zero latency. -/
 def Pipe.id {ω i : HwTy} : Pipe i i := Pipe.mk (@Circuit.comb i i (Comb.id : Comb i i)) 0

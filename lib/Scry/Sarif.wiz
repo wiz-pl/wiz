@@ -41,8 +41,11 @@ structure Scry.Origin where
   uri : String
   /-- 1-based. -/
   line : Nat
+  /-- 1-based **character** column (a multibyte character counts once, even though a
+  `Wil.Span` range is a byte range; the conversion happens before the origin is built). -/
   column : Nat
   endLine : Nat
+  /-- 1-based character column, exclusive. -/
   endColumn : Nat
 
 structure Scry.OriginEntry where
@@ -272,7 +275,7 @@ def Scry.resultJsonFull (m : Scry.OriginMap) (pack : Scry.RulePack)
         , ("derivation", Json.mkStr (Scry.derivationText checked))
         , ("packRuleId", Json.mkStr f.rule) ]) ];
   Json.mkObj (List.append base (match baseline with
-    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .some b => [("baselineState", Json.mkStr b)]
     | .none => .nil))
 
 def Scry.resultJsonWith (m : Scry.OriginMap) (pack : Scry.RulePack)
@@ -285,8 +288,9 @@ def Scry.resultJson (m : Scry.OriginMap) (pack : Scry.RulePack)
   Scry.resultJsonWith m pack f .false
 
 /-- A warning result with its own rule id: a lowering-boundary warning (what S2 could not
-model: a havoc'd or skipped construct) or a points-to memory warning (`unknown-memory`,
-`use-after-free`, `unknown-indirect`). It has no rule descriptor; the location is the
+model: a havoc'd or skipped construct) or a points-to/nullness memory warning
+(`unknown-memory`, `use-after-free`, `unknown-indirect`, `unmodelled-external`,
+`null-dereference`). It has no rule descriptor; the location is the
 offending statement's span, or a logical location when no origin is known. -/
 def Scry.boundaryResultJsonFull (rule : String) (origin : Option Scry.Origin)
     (func : String) (point : Nat) (message : String) (file : String)
@@ -307,7 +311,7 @@ def Scry.boundaryResultJsonFull (rule : String) (origin : Option Scry.Origin)
         , ("programPoint", Json.ofNat point)
         , ("derivation", Json.mkStr "unchecked") ]) ];
   Json.mkObj (List.append base (match baseline with
-    | .some b => List.cons ("baselineState", Json.mkStr b) .nil
+    | .some b => [("baselineState", Json.mkStr b)]
     | .none => .nil))
 
 def Scry.boundaryResultJson (rule : String) (origin : Option Scry.Origin) (func : String)

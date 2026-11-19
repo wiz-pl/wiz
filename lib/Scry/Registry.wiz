@@ -38,10 +38,11 @@ event-parameterised — that is P1 — so its row names the default semantics it
 
 ## Why the table is an inductive, not `List`
 
-`Scry.Sem` has `Type`-valued fields, so `Scry.Sem : Type 1`, and a structure that stores
-one is itself `Type 1`. Wiz's `List (A : Type)` cannot hold it (the same reason
-`lib/Eff.wiz` declares `Row : Type 1` instead of using `List Effect`). `AnalysisTable` is
-the small cons-list that can; every helper below is the list operation the table needs.
+`Scry.Sem Scry.Event` has `Type`-valued fields, so a semantics value is `Type 1`, and a
+structure that stores one is itself `Type 1`. Wiz's `List (A : Type)` cannot hold it (the
+same reason `lib/Eff.wiz` declares `Row : Type 1` instead of using `List Effect`).
+`AnalysisTable` is the small cons-list that can; every helper below is the list operation
+the table needs.
 
 ## Exhaustiveness
 
@@ -83,7 +84,7 @@ frontend's Wil program is read as one of its units, and the analysis itself. -/
 structure Scry.AnalysisSpec where
   checks : List String
   label : String
-  sem : Scry.Sem
+  sem : Scry.Sem Scry.Event
   lift : Wil.Program → sem.Ir
   run : Scry.AnalysisInput → sem.Ir → Scry.AnalysisOutput
 
@@ -99,7 +100,7 @@ inductive Scry.AnalysisTable : Type 1 where
 `check` names from the pack, so one row serves both and the per-function finding order is
 the order the analysis has always produced. `s` is the semantics whose `events` the
 analysis consumes; the default row passes `Scry.Wil.concrete`. -/
-def Scry.boundsAnalysis (s : Scry.Sem) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
+def Scry.boundsAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
   Scry.AnalysisSpec.mk
     ["out-of-bounds-write", "out-of-bounds-read"]
     "bounds"
@@ -113,7 +114,7 @@ def Scry.boundsAnalysis (s : Scry.Sem) (lift : Wil.Program → s.Ir) : Scry.Anal
 directly (its event parameterisation is P1), so its row names the default semantics; the
 row shape is the same as bounds', so extending it later is an edit to this constructor,
 not to either pipeline. -/
-def Scry.lifetimeAnalysis (s : Scry.Sem) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
+def Scry.lifetimeAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
   Scry.AnalysisSpec.mk
     ["use-after-free"]
     "lifetime"

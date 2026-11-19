@@ -21,6 +21,11 @@ def package : Package := Package.new "scry"
   |> Package.exe "scry" "App.wiz"
   |> Package.exe "scry-schema" "tools/SchemaMain.wiz"
   |> Package.exe "scry-cst" "tools/CstMain.wiz"
+  -- the C# external-frequency probe (`scry/CSHARP.md` §"External models"): the merged
+  -- program's unmodelled callees, counted. Measurement only; no test depends on it.
+  |> Package.exe "cs-externals" "tools/CsExternalsMain.wiz"
+  -- one function's lowered Wil, source/sink facts and tainted rows (`CSHARP.md` §11).
+  |> Package.exe "cs-trace" "tools/CsTraceMain.wiz"
   |> Package.tests "tests" "tests"
   -- the S1 skeleton's end-to-end checks: each command runs the CLI over the fixture.
   -- They are ordinary build jobs (keyed by the exe, the fixture and the arguments), so
@@ -58,6 +63,17 @@ def package : Package := Package.new "scry"
        |> Command.arg "--json"
        |> Command.input "fixtures/broken.c"
        |> Command.stdout "build/fuzz-span.json")
+  -- The e-graph layer (S12): lowered Wil terms, folds/rewrites, deterministic report.
+  |> Package.command (Command.new "egraph" (Tool.exe "scry")
+       |> Command.arg "egraph"
+       |> Command.input "fixtures/egraph-const.c"
+       |> Command.stdout "build/egraph.txt")
+  -- The checked extraction back to Wil (S12): the same fixture, `--rewrite` mode.
+  |> Package.command (Command.new "egraph-rewrite" (Tool.exe "scry")
+       |> Command.arg "egraph"
+       |> Command.input "fixtures/egraph-const.c"
+       |> Command.arg "--rewrite"
+       |> Command.stdout "build/egraph-rewrite.txt")
   -- Schema codegen (design §4.2): `gen/C/Schema.wiz` is the checked-in output of this
   -- command, and `schema-check` (phony) refuses a stale one.
   |> Package.command (Command.new "schema" (Tool.exe "scry-schema")
@@ -67,3 +83,30 @@ def package : Package := Package.new "scry"
        |> Command.arg "--check"
        |> Command.input "gen/C/Schema.wiz"
        |> Command.input "grammars/tree-sitter-c/node-types.json")
+  -- Resource-limit regressions (findings scrydos-01/02): a few-MiB file must stay
+  -- below 20x its size in peak RSS, and 16/64/128/256 `a++;` statements must each
+  -- finish inside a small wall-clock budget. Manual, because it runs the built CLI over
+  -- generated multi-MiB inputs: `grail build dos-check` (CI's bench workflow runs it).
+  |> Package.command (Command.new "dos-check" (Tool.path "python3")
+       |> Command.arg "scripts/dos-check.py"
+       |> Command.arg "--scry"
+       |> Command.arg ".grail/bin/scry"
+       |> Command.uses (Tool.exe "scry")
+       |> Command.manual)
+  -- The C parse/lower fuzz campaign's replay: every minimised regression at the
+  -- cap and budget in `tests/fixtures/fuzz-regression/manifest.json`. Manual for the
+  -- same reason (it runs the built CLI); the CI bench workflow runs it and the
+  -- bounded `--ci` profile.
+  |> Package.command (Command.new "fuzz-regressions" (Tool.path "python3")
+       |> Command.arg "scripts/fuzz-lower.py"
+       |> Command.arg "--regressions-only"
+       |> Command.uses (Tool.exe "scry")
+       |> Command.manual)
+  |> Package.command (Command.new "fuzz-ci" (Tool.path "python3")
+       |> Command.arg "scripts/fuzz-lower.py"
+       |> Command.arg "--ci"
+       |> Command.arg "--iterations"
+       |> Command.arg "10"
+       |> Command.arg "--no-write-fixtures"
+       |> Command.uses (Tool.exe "scry")
+       |> Command.manual)

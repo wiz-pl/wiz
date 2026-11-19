@@ -94,10 +94,10 @@
             value: (identifier "total")
             body: (switch_body
               (switch_section
-                (case_switch_label
+                (constant_pattern
                   (integer_literal "1")))
               (switch_section
-                (case_switch_label
+                (constant_pattern
                   (integer_literal "2"))
                 (expression_statement
                   (assignment_expression

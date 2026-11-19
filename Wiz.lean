@@ -2,6 +2,7 @@ import Wiz.Version
 import Wiz.Rig
 import Wiz.Rig.Instances
 import Wiz.Core.Term
+import Wiz.Core.NatString
 import Wiz.Core.Value
 import Wiz.Core.Eval
 import Wiz.Core.Conv

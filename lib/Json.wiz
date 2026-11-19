@@ -164,6 +164,16 @@ inductive JParse (A : Type) where
   | ok (a : A) (rest : List Char)
   | err (msg : String) (rest : List Char)
 
+/-- The deepest array/object nesting `Json.parse` accepts. Every real document (a
+language-server message, a SARIF log, a facts store) is far shallower; the budget is
+what stops a file of `[` characters from recursing until the stack is gone. -/
+def Json.maxDepth : Nat := 512
+/-- The largest input (in characters) `Json.parse` will parse. A Wiz `String` is
+already a character list, so the cap cannot save the read, but it keeps the parser
+from walking and building values for an unbounded document (a facts store or a
+language-server message is orders of magnitude smaller). -/
+def Json.maxInput : Nat := 16 * 1024 * 1024
+
 /-- Whether a code point is JSON whitespace (space, newline, return, tab). -/
 def Json.isWs (c : Nat) : Bool :=
   Bool.or (Bool.or (Nat.beq c 32) (Nat.beq c 10)) (Bool.or (Nat.beq c 13) (Nat.beq c 9))
@@ -173,13 +183,9 @@ def Json.skipWs : List Char → List Char
   | .cons c cs => match Json.isWs (Char.code c) with
     | .true => Json.skipWs cs
     | .false => .cons c cs
-/-- The input after the literal `lit` (the first list), if it starts with it. -/
-def Json.expect : List Char → List Char → Option (List Char)
-  | .nil, s => .some s
-  | .cons l ls, .cons c cs => match Nat.beq (Char.code l) (Char.code c) with
-    | .true => Json.expect ls cs
-    | .false => .none
-  | _, _ => .none
+/-- The input after the literal `lit` (the first list), if it starts with it
+(`Chars.stripPrefix` in lib/Text.wiz). -/
+def Json.expect : List Char → List Char → Option (List Char) := Chars.stripPrefix
 /-- Parses the keyword `lit` (`true`, `false`, `null`) as the value `v`. -/
 def Json.keyword (lit : String) (v : Json) (s : List Char) : JParse Json :=
   match Json.expect (String.chars lit) s with
@@ -302,18 +308,18 @@ def Json.digits (s : List Char) (n k : Nat) (acc : List Char) : Nat × Nat × Li
 (`none` for a `.` without digits). -/
 def Json.fracPart (s : List Char) (acc : List Char) : Option (Bool × List Char × List Char) :=
   match Nat.beq (Json.peek s) 46 with
-  | .false => .some (Bool.false, acc, s)
+  | .false => .some (.false, acc, s)
   | .true =>
     let d := Json.digits (Json.drop1 s) 0 0 (.cons (Json.chr 46) acc);
     match Nat.beq d.2.1 0 with
     | .true => .none
-    | .false => .some (Bool.true, d.2.2.1, d.2.2.2)
+    | .false => .some (.true, d.2.2.1, d.2.2.2)
 /-- An optional exponent `e±digits`: whether there was one, the reversed text, and the rest
 (`none` for an `e` without digits). -/
 def Json.expPart (s : List Char) (acc : List Char) : Option (Bool × List Char × List Char) :=
   match s with
   | .cons e rest => match Bool.or (Nat.beq (Char.code e) 101) (Nat.beq (Char.code e) 69) with
-    | .false => .some (Bool.false, acc, s)
+    | .false => .some (.false, acc, s)
     | .true =>
       let signed : List Char × List Char := match rest with
         | .cons c r => match Bool.or (Nat.beq (Char.code c) 43) (Nat.beq (Char.code c) 45) with
@@ -323,8 +329,8 @@ def Json.expPart (s : List Char) (acc : List Char) : Option (Bool × List Char �
       let d := Json.digits signed.1 0 0 signed.2;
       match Nat.beq d.2.1 0 with
       | .true => .none
-      | .false => .some (Bool.true, d.2.2.1, d.2.2.2)
-  | .nil => .some (Bool.false, acc, s)
+      | .false => .some (.true, d.2.2.1, d.2.2.2)
+  | .nil => .some (.false, acc, s)
 
 /-- A number: `-`? (`0` | digits) fraction? exponent?. Without a fraction or an exponent
 it is a `Json.int`, else a `Json.dec` keeping its text. -/
@@ -351,14 +357,21 @@ def Json.number (s : List Char) : JParse Json :=
         | .true => .ok (.dec (.mk (Json.revOnto e.2.1 .nil))) e.2.2
 
 mutual
-/-- One value, after any whitespace: the parser's entry point for a value. -/
-def Json.value (s0 : List Char) : JParse Json :=
+/-- One value, after any whitespace: the parser's entry point for a value. `fuel` is the
+remaining nesting budget: entering an array or object spends one, and at zero the input
+is refused with its offset instead of recursing (a document of `[` characters must not
+crash the process). -/
+def Json.valueAt (fuel : Nat) (s0 : List Char) : JParse Json :=
   let s := Json.skipWs s0;
   let c := Json.peek s;
   match Nat.beq c 123 with
-  | .true => Json.object (Json.skipWs (Json.drop1 s)) .fnil
+  | .true => match fuel with
+    | .zero => .err ("nesting too deep (limit " ++ Nat.repr Json.maxDepth ++ ")") s
+    | .succ k => Json.objectAt k (Json.skipWs (Json.drop1 s)) .fnil
   | .false => match Nat.beq c 91 with
-    | .true => Json.array (Json.skipWs (Json.drop1 s)) .nil
+    | .true => match fuel with
+      | .zero => .err ("nesting too deep (limit " ++ Nat.repr Json.maxDepth ++ ")") s
+      | .succ k => Json.arrayAt k (Json.skipWs (Json.drop1 s)) .nil
     | .false => match Nat.beq c 34 with
       | .true => match Json.strBody (Json.drop1 s) .nil with
         | .ok str rest => .ok (.str str) rest
@@ -375,22 +388,22 @@ def Json.value (s0 : List Char) : JParse Json :=
                 | .true => .err "unexpected end of input" s
                 | .false => .err "unexpected character" s
 /-- The rest of an array, after `[` (and whitespace); `acc` is the elements so far,
-reversed. -/
-def Json.array (s : List Char) (acc : Jsons) : JParse Json :=
+reversed. `fuel` is the budget for each element (see `Json.valueAt`). -/
+def Json.arrayAt (fuel : Nat) (s : List Char) (acc : Jsons) : JParse Json :=
   match Bool.and (Nat.beq (Json.peek s) 93) (Json.isNil acc) with
   | .true => .ok (.arr .nil) (Json.drop1 s)
-  | .false => match Json.value s with
+  | .false => match Json.valueAt fuel s with
     | .err m r => .err m r
     | .ok v rest => match Json.skipWs rest with
       | .cons c r => match Nat.beq (Char.code c) 44 with
-        | .true => Json.array r (.cons v acc)
+        | .true => Json.arrayAt fuel r (.cons v acc)
         | .false => match Nat.beq (Char.code c) 93 with
           | .true => .ok (.arr (Json.revJsons (.cons v acc) .nil)) r
           | .false => .err "expected , or ]" (.cons c r)
       | .nil => .err "unexpected end of input" .nil
 /-- The rest of an object, after `{` (and whitespace); `acc` is the fields so far,
-reversed. -/
-def Json.object (s : List Char) (acc : JFields) : JParse Json :=
+reversed. `fuel` is the budget for each value (see `Json.valueAt`). -/
+def Json.objectAt (fuel : Nat) (s : List Char) (acc : JFields) : JParse Json :=
   match Bool.and (Nat.beq (Json.peek s) 125) (Json.isNilF acc) with
   | .true => .ok (.obj .fnil) (Json.drop1 s)
   | .false => match Nat.beq (Json.peek s) 34 with
@@ -400,17 +413,26 @@ def Json.object (s : List Char) (acc : JFields) : JParse Json :=
       | .ok k rest => match Json.skipWs rest with
         | .cons colon r => match Nat.beq (Char.code colon) 58 with
           | .false => .err "expected :" (.cons colon r)
-          | .true => match Json.value r with
+          | .true => match Json.valueAt fuel r with
             | .err m r2 => .err m r2
             | .ok v rest2 => match Json.skipWs rest2 with
               | .cons c r3 => match Nat.beq (Char.code c) 44 with
-                | .true => Json.object (Json.skipWs r3) (.fcons k v acc)
+                | .true => Json.objectAt fuel (Json.skipWs r3) (.fcons k v acc)
                 | .false => match Nat.beq (Char.code c) 125 with
                   | .true => .ok (.obj (Json.revFields (.fcons k v acc) .fnil)) r3
                   | .false => .err "expected , or }" (.cons c r3)
               | .nil => .err "unexpected end of input" .nil
         | .nil => .err "unexpected end of input" .nil
 end
+
+/-- One value with the default nesting budget (see `Json.valueAt`). -/
+def Json.value (s : List Char) : JParse Json := Json.valueAt Json.maxDepth s
+/-- An array body with the default nesting budget. -/
+def Json.array (s : List Char) (acc : Jsons) : JParse Json :=
+  Json.arrayAt Json.maxDepth s acc
+/-- An object body with the default nesting budget. -/
+def Json.object (s : List Char) (acc : JFields) : JParse Json :=
+  Json.objectAt Json.maxDepth s acc
 
 /-- A whole document: one value, then only whitespace. An error says what went wrong and
 where (in code points from the start):
@@ -420,15 +442,19 @@ Json.parse "[1, 2"    -- .error "unexpected end of input at offset 5"
 Json.parse "{\"a\":1}"  -- .ok (Json.mkObj [("a", Json.ofNat 1)])
 ``` -/
 def Json.parse (text : String) : Except String Json :=
-  let s := String.chars text;
-  let fail : String → List Char → Except String Json := fun m rest =>
-    .error (String.append m (String.append " at offset "
-      (Nat.repr (List.length s - List.length rest))));
-  match Json.value s with
-  | .err m rest => fail m rest
-  | .ok v rest => match Json.skipWs rest with
-    | .nil => .ok v
-    | .cons c r => fail "trailing characters" (.cons c r)
+  match Nat.lt Json.maxInput (String.length text) with
+  | .true => .error ("input too large: " ++ Nat.repr (String.length text)
+      ++ " characters (limit " ++ Nat.repr Json.maxInput ++ ")")
+  | .false =>
+    let s := String.chars text;
+    let fail : String → List Char → Except String Json := fun m rest =>
+      .error (String.append m (String.append " at offset "
+        (Nat.repr (List.length s - List.length rest))));
+    match Json.value s with
+    | .err m rest => fail m rest
+    | .ok v rest => match Json.skipWs rest with
+      | .nil => .ok v
+      | .cons c r => fail "trailing characters" (.cons c r)
 
 -- ## Building and taking apart
 

@@ -118,11 +118,21 @@ its own `grail.wiz` is left out). The first line gives the kind: `-- test: check
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
 compiled through C). `-- test: skip REASON` marks an example that the package-wide run
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
-needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
+needs no `.expected`, and is not a pass. A `check` or `run` line may end in
+`timeout SECS` (`-- test: run timeout 900`) for a test that needs more than
+`--test-timeout` gives every test: the larger limit applies to its job and to its
+program. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
-`grail test --update` writes the actual output. Every example is a test
-(`examples/*.expected`). The Lean tests stay in `lake test`.
+`grail test --update` writes the actual output. `grail test --rerun` runs the tests again
+even when a pass is recorded (a flaky test, a program that reads something outside its
+key): the old record is dropped, a pass is recorded again and a failure leaves none, so the
+next plain `grail test` reports what this run saw. Only the tests' own jobs run again;
+their programs' checks, objects and links are reused when up to date. Every example is a
+test (`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
+them in CI, in three cases over name ranges, so a change to a library that changes what
+an example prints fails the suite rather than only a command a person runs. The Lean
+tests stay in `lake test`.
 
 ## 23g: parallel jobs
 
@@ -136,8 +146,8 @@ dependencies are done (an object's key hashes the C its `c` node wrote); a node 
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
 (`grail --grail-job …` with the toolchain as flags, or the C compiler) with a time limit
-(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, so a test that
-hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
+(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, or the larger `timeout SECS` of a
+test's `-- test:` line (23f), so a test that hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
@@ -149,6 +159,12 @@ the `.wizr` regions in the same cache layers as the `.wizc` entries: the write c
 searched first, then the `--cache-ro` caches (which are never written), and a missing,
 truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
 a warm region build and a text build produce the same outputs.
+
+`--region-stats` is a toolchain flag too (`Toolchain.regionStats`, hence the same
+`region-stats` setting of `grail.wiz`), so every job receives it through `toFlags` and
+prints one line after its report: `region-stats: hits=… misses=… commands=…`. The counters
+are the job's own process; without `--region-cache` (or for a job that does not elaborate,
+such as a link) they are zero rather than absent.
 
 ## 23h: git dependencies and a lock file
 
@@ -595,7 +611,9 @@ The snapshot is additive: an index without one is read exactly as before.
   download size cap, and no build sandbox — `grail build` runs the package author's
   Wiz/C code. Expiry and sequence are checked at `update`/`index verify`, not on every
   build. A first use needs an external `--allowed-signers` policy; an index without a
-  snapshot is accepted unless `--require-signature` or a lock pinned one.
+  snapshot is accepted unless `--require-signature` or a lock pinned one. CI and the
+  install docs pass `--require-signature`; `--allow-unsigned` is the explicit escape for
+  a registry without a signed snapshot.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the

@@ -140,7 +140,7 @@ def Scry.appendAll {A : Type} : List A → List A → List A
   | .cons x xs, ys => .cons x (Scry.appendAll xs ys)
 
 /-- `a ++ [] = a`. -/
-def Scry.append_nil {A : Type} : (l : List A) → Scry.appendAll l List.nil = l
+def Scry.append_nil {A : Type} : (l : List A) → Scry.appendAll l [] = l
   | .nil => rfl
   | .cons x xs => Eq.congrArg (fun ys => List.cons x ys) (Scry.append_nil xs)
 
@@ -218,15 +218,15 @@ structure Scry.Derivation (L : Type) where
 /-- The default rule, used only when an index is out of range (the checker rejects
 that case before it matters). -/
 def Scry.defaultRule {L : Type} : Scry.Rule L :=
-  Scry.Rule.mk (Scry.Head.tuple 0 List.nil) List.nil
+  Scry.Rule.mk (Scry.Head.tuple 0 []) []
 
 /-- The default node, the result of an out-of-range premise lookup. -/
 def Scry.defaultNode {L : Type} : Scry.ProofNode L :=
-  Scry.ProofNode.mk (Scry.PFact.mk 0 List.nil .none) .edb
+  Scry.ProofNode.mk (Scry.PFact.mk 0 [] .none) .edb
 
 /-- The default provenance step, for an out-of-range lookup while explaining. -/
 def Scry.defaultStep {L : Type} : Scry.ProofStep L :=
-  Scry.ProofStep.mk 0 (Scry.PFact.mk 0 List.nil .none) .none List.nil
+  Scry.ProofStep.mk 0 (Scry.PFact.mk 0 [] .none) .none []
 
 /-- A head fact under an environment. -/
 def Scry.headFactOf {L : Type} (p : Scry.Program L) (head : Scry.Head L)
@@ -296,7 +296,7 @@ def Scry.factEqTLat {L : Type} (rel : Nat) (row : List U64)
     (lat : Option L) (r : Nat) (args : List U64) : Bool :=
   match lat with
   | .none => Bool.and (Nat.beq rel r) (Scry.rowEqB row args)
-  | .some _ => Bool.false
+  | .some _ => .false
 
 /-- The fields a tuple-fact equality pins. -/
 def Scry.factEqTLat_sound {L : Type} (rel : Nat) (row : List U64) :
@@ -444,7 +444,7 @@ def Scry.checkNodes {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
   | _done, .nil => .true
   | done, .cons n rest =>
     if Scry.checkNode p db done n.fact n.kind then
-      Scry.checkNodes p db (Scry.appendAll done (List.cons n List.nil)) rest
+      Scry.checkNodes p db (Scry.appendAll done [n]) rest
     else .false
 
 /-- **The certificate checker.** It accepts a derivation when the root position is
@@ -454,7 +454,7 @@ derivation, and its soundness does not need them (see the notes). -/
 def Scry.Derivation.check {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (d : Scry.Derivation L) : Bool :=
   if Nat.lt d.root (List.length d.nodes) then
-    Scry.checkNodes p db List.nil d.nodes
+    Scry.checkNodes p db [] d.nodes
   else .false
 
 -- ## The positive tuple fragment
@@ -532,7 +532,7 @@ def Scry.allInLfp_append {L : Type} (p : Scry.Program L) (db : Scry.Db L) :
 /-- A one-node list is checked when its fact is. -/
 def Scry.allInLfp_single {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (n : Scry.ProofNode L) (h : Scry.inLfp p db n.fact) :
-    Scry.allInLfp p db (List.cons n List.nil) :=
+    Scry.allInLfp p db [n] :=
   And.intro h True.intro
 
 /-- The fact at a valid position of a checked list is in the least fixpoint. -/
@@ -586,7 +586,7 @@ def Scry.checkAtoms_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
       Scry.ifTrueAnd (Nat.lt pid (List.length done))
         (if Scry.factEqT rel (Scry.evalTerms env.vals args)
             (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode))
-          then Scry.checkAtoms p db env done rest ps else Bool.false) hcheck;
+          then Scry.checkAtoms p db env done rest ps else .false) hcheck;
     let hf : Scry.factEqT rel (Scry.evalTerms env.vals args)
           (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode)) = .true ∧
         Scry.checkAtoms p db env done rest ps = .true :=
@@ -703,13 +703,13 @@ def Scry.checkNodes_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     Scry.checkNodes p db done nodes = .true →
     Scry.allInLfp p db (Scry.appendAll done nodes)
   | done, .nil, hdone, _, _ =>
-    Scry.allInLfp_congr p db done (Scry.appendAll done List.nil)
+    Scry.allInLfp_congr p db done (Scry.appendAll done [])
       (Eq.symm (Scry.append_nil done)) hdone
   | done, .cons n rest, hdone, hfree, hcheck =>
     let hcn : Scry.checkNode p db done n.fact n.kind = .true ∧
-        Scry.checkNodes p db (Scry.appendAll done (List.cons n List.nil)) rest = .true :=
+        Scry.checkNodes p db (Scry.appendAll done [n]) rest = .true :=
       Scry.ifTrueAnd (Scry.checkNode p db done n.fact n.kind)
-        (Scry.checkNodes p db (Scry.appendAll done (List.cons n List.nil)) rest) hcheck;
+        (Scry.checkNodes p db (Scry.appendAll done [n]) rest) hcheck;
     let hfreeN : Scry.ProofNode.joinFree n = .true :=
       Scry.andLeft (Scry.ProofNode.joinFree n)
         (Scry.allB Scry.ProofNode.joinFree rest) hfree;
@@ -718,17 +718,17 @@ def Scry.checkNodes_sound {L : Type} (p : Scry.Program L) (db : Scry.Db L)
         (Scry.allB Scry.ProofNode.joinFree rest) hfree;
     let hnode : Scry.inLfp p db n.fact :=
       Scry.checkNode_sound p db done hprog hdone n.fact n.kind hfreeN hcn.1;
-    let hdone' : Scry.allInLfp p db (Scry.appendAll done (List.cons n List.nil)) :=
-      Scry.allInLfp_append p db done (List.cons n List.nil) hdone
+    let hdone' : Scry.allInLfp p db (Scry.appendAll done [n]) :=
+      Scry.allInLfp_append p db done [n] hdone
         (Scry.allInLfp_single p db n hnode);
     let hrestAll : Scry.allInLfp p db
-        (Scry.appendAll (Scry.appendAll done (List.cons n List.nil)) rest) :=
+        (Scry.appendAll (Scry.appendAll done [n]) rest) :=
       Scry.checkNodes_sound p db hprog
-        (Scry.appendAll done (List.cons n List.nil)) rest hdone' hfreeRest hcn.2;
+        (Scry.appendAll done [n]) rest hdone' hfreeRest hcn.2;
     Scry.allInLfp_congr p db
-      (Scry.appendAll (Scry.appendAll done (List.cons n List.nil)) rest)
+      (Scry.appendAll (Scry.appendAll done [n]) rest)
       (Scry.appendAll done (List.cons n rest))
-      (Scry.append_assoc done (List.cons n List.nil) rest)
+      (Scry.append_assoc done [n] rest)
       hrestAll
 
 /-- **`Derivation.check` is sound on the positive tuple fragment**: an accepted
@@ -745,13 +745,13 @@ def Scry.check_sound_posTuple {L : Type} (p : Scry.Program L)
     (hprog : Scry.Program.posTuple p = .true) : Scry.checkSoundPosTupleStmt p :=
   fun db d f htuple hconcl hcheck =>
     let hb : Nat.lt d.root (List.length d.nodes) = .true ∧
-        Scry.checkNodes p db List.nil d.nodes = .true :=
+        Scry.checkNodes p db [] d.nodes = .true :=
       Scry.ifTrueAnd (Nat.lt d.root (List.length d.nodes))
-        (Scry.checkNodes p db List.nil d.nodes) hcheck;
-    let hnodes : Scry.allInLfp p db (Scry.appendAll List.nil d.nodes) :=
-      Scry.checkNodes_sound p db hprog List.nil d.nodes True.intro htuple hb.2;
+        (Scry.checkNodes p db [] d.nodes) hcheck;
+    let hnodes : Scry.allInLfp p db (Scry.appendAll [] d.nodes) :=
+      Scry.checkNodes_sound p db hprog [] d.nodes True.intro htuple hb.2;
     let hnodes' : Scry.allInLfp p db d.nodes :=
-      Scry.allInLfp_congr p db (Scry.appendAll List.nil d.nodes) d.nodes rfl hnodes;
+      Scry.allInLfp_congr p db (Scry.appendAll [] d.nodes) d.nodes rfl hnodes;
     let hroot : Scry.inLfp p db
         (Scry.ProofNode.fact (List.getD d.nodes d.root Scry.defaultNode)) :=
       Scry.allInLfp_getD p db d.nodes hnodes' d.root hb.1;
@@ -787,7 +787,7 @@ def Scry.renderKind {L : Type} (k : Scry.ProofKind L) : String :=
 /-- The lines of a derivation, one per node, numbering from `i`. -/
 def Scry.renderNodes {L : Type} (showL : L → String) :
     Nat → List (Scry.ProofNode L) → List String
-  | _, .nil => List.nil
+  | _, .nil => []
   | i, .cons n rest =>
     List.cons
       (String.append (Nat.repr i)
@@ -813,14 +813,14 @@ def Scry.explain {L : Type} (p : Scry.Program L) (db : Scry.Db L)
 /-- Insert a provenance step into a list sorted by id. -/
 def Scry.insertStep {L : Type} (s : Scry.ProofStep L) :
     List (Scry.ProofStep L) → List (Scry.ProofStep L)
-  | .nil => List.cons s List.nil
+  | .nil => [s]
   | .cons t ts =>
     if Nat.lt s.id t.id then List.cons s (List.cons t ts)
     else List.cons t (Scry.insertStep s ts)
 
 /-- Provenance steps sorted by id (a topological order: a premise's id is smaller). -/
 def Scry.sortSteps {L : Type} : List (Scry.ProofStep L) → List (Scry.ProofStep L)
-  | .nil => List.nil
+  | .nil => []
   | .cons s rest => Scry.insertStep s (Scry.sortSteps rest)
 
 /-- The position of a step id in a sorted list. -/
@@ -889,7 +889,7 @@ def Scry.nodeOfStep {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofSte
 /-- Turn every provenance step into a proof node. -/
 def Scry.nodesOfSteps {L : Type} (p : Scry.Program L) (steps : List (Scry.ProofStep L)) :
     List (Scry.ProofStep L) → Option (List (Scry.ProofNode L))
-  | .nil => .some List.nil
+  | .nil => .some []
   | .cons s rest =>
     match Scry.nodeOfStep p steps s with
     | .some n =>
@@ -1079,7 +1079,7 @@ def Scry.checkHeadEq_sound {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws 
 
 /-- `if c then false else t = true` gives both `c = false` and `t = true`. -/
 def Scry.ifFalseElse : (c t : Bool) ->
-    (if c then Bool.false else t) = .true -> c = .false ∧ t = .true
+    (if c then .false else t) = .true -> c = .false ∧ t = .true
   | .true, _, h => absurd h.1
   | .false, t, h => (rfl, h)
 
@@ -1155,7 +1155,7 @@ def Scry.AllOn_append {L : Type} (P : Scry.PFact L -> Prop) :
 
 def Scry.AllOn_single {L : Type} (P : Scry.PFact L -> Prop)
     (n : Scry.ProofNode L) (h : P n.fact) :
-    Scry.AllOn P (List.cons n List.nil) :=
+    Scry.AllOn P [n] :=
   And.intro h True.intro
 
 def Scry.AllOn_getD {L : Type} (P : Scry.PFact L -> Prop) :
@@ -1220,12 +1220,12 @@ def Scry.checkLatMatchB {L : Type} (p : Scry.Program L) (db : Scry.Db L)
     (rel : Nat) (key : List Scry.Term) (rest : List Scry.Atom)
     (ps : List Nat) (pid : Nat) (o : Option L) : Bool :=
   match o with
-  | .none => Bool.false
+  | .none => .false
   | .some v =>
     if Scry.factEq p.ops
         (Scry.PFact.mk rel (Scry.evalTerms env.vals key) (.some v))
         (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode))
-      then Scry.checkAtoms p db env done rest ps else Bool.false
+      then Scry.checkAtoms p db env done rest ps else .false
 
 /-- The lattice atom's meaning, with its matched value passed explicitly (so the proof can
 case on the `Option` as a variable). -/
@@ -1312,7 +1312,7 @@ def Scry.checkAtoms_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLa
       Scry.ifTrueAnd (Nat.lt pid (List.length done))
         (if Scry.factEqT rel (Scry.evalTerms env.vals args)
             (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode))
-          then Scry.checkAtoms p db env done rest ps else Bool.false) hcheck;
+          then Scry.checkAtoms p db env done rest ps else .false) hcheck;
     let hf : Scry.factEqT rel (Scry.evalTerms env.vals args)
           (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode)) = .true ∧
         Scry.checkAtoms p db env done rest ps = .true :=
@@ -1347,15 +1347,15 @@ def Scry.checkAtoms_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLa
            if Scry.factEq p.ops
                (Scry.PFact.mk rel (Scry.evalTerms env.vals key) (.some v))
                (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode))
-             then Scry.checkAtoms p db env done rest ps else Bool.false) = .true :=
+             then Scry.checkAtoms p db env done rest ps else .false) = .true :=
       Scry.ifTrueAnd (Nat.lt pid (List.length done))
         (match Scry.envGet vv env.lats with
-         | .none => Bool.false
+         | .none => .false
          | .some v =>
            if Scry.factEq p.ops
                (Scry.PFact.mk rel (Scry.evalTerms env.vals key) (.some v))
                (Scry.ProofNode.fact (List.getD done pid Scry.defaultNode))
-             then Scry.checkAtoms p db env done rest ps else Bool.false) hcheck;
+             then Scry.checkAtoms p db env done rest ps else .false) hcheck;
     let hres := Scry.checkLatAtom_sound p laws db agree db' hincl hclosed hagree env done
         rel key vv rest ps pid hdone hb.1 (Scry.envGet vv env.lats) hb.2;
     let hrestHolds : Scry.bodyHolds p db' rest env :=
@@ -1392,27 +1392,27 @@ def Scry.checkJoin_fields {L : Type} (p : Scry.Program L)
   let h1 : Nat.beq ra rb = .true ∧
       (if Nat.beq rf ra then
         (if Scry.rowEqB arga argb then
-          (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false)
-         else Bool.false)
+          (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else .false)
+         else .false)
        else Bool.false) = .true :=
     Scry.ifTrueAnd (Nat.beq ra rb)
       (if Nat.beq rf ra then
         (if Scry.rowEqB arga argb then
-          (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false)
-         else Bool.false)
-       else Bool.false) h;
+          (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else .false)
+         else .false)
+       else .false) h;
   let h2 : Nat.beq rf ra = .true ∧
       (if Scry.rowEqB arga argb then
-        (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false)
+        (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else .false)
        else Bool.false) = .true :=
     Scry.ifTrueAnd (Nat.beq rf ra)
       (if Scry.rowEqB arga argb then
-        (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false)
-       else Bool.false) h1.2;
+        (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else .false)
+       else .false) h1.2;
   let h3 : Scry.rowEqB arga argb = .true ∧
       (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false) = .true :=
     Scry.ifTrueAnd (Scry.rowEqB arga argb)
-      (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else Bool.false) h2.2;
+      (if Scry.rowEqB argf arga then p.ops.eq v (p.ops.join va vb) else .false) h2.2;
   let h4 : Scry.rowEqB argf arga = .true ∧
       p.ops.eq v (p.ops.join va vb) = .true :=
     Scry.ifTrueAnd (Scry.rowEqB argf arga)
@@ -1584,7 +1584,7 @@ def Scry.checkNode_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLaw
           Scry.checkJoin p
             (Scry.ProofNode.fact (List.getD done left Scry.defaultNode))
             (Scry.ProofNode.fact (List.getD done right Scry.defaultNode)) fact
-         else Bool.false) hcheck;
+         else .false) hcheck;
     let h2 : Nat.lt right (List.length done) = .true ∧
         Scry.checkJoin p
           (Scry.ProofNode.fact (List.getD done left Scry.defaultNode))
@@ -1631,27 +1631,27 @@ def Scry.checkNodes_sound_all {L : Type} (p : Scry.Program L) (laws : Scry.LatLa
     Scry.AllOn (Scry.inLfpAgree p db agree) (Scry.appendAll done nodes)
   | done, .nil, hdone, _ =>
     Scry.AllOn_congr (Scry.inLfpAgree p db agree) done
-      (Scry.appendAll done List.nil) (Eq.symm (Scry.append_nil done)) hdone
+      (Scry.appendAll done []) (Eq.symm (Scry.append_nil done)) hdone
   | done, .cons n rest, hdone, hcheck =>
     let hcn : Scry.checkNode p db done n.fact n.kind = .true ∧
-        Scry.checkNodes p db (Scry.appendAll done (List.cons n List.nil)) rest = .true :=
+        Scry.checkNodes p db (Scry.appendAll done [n]) rest = .true :=
       Scry.ifTrueAnd (Scry.checkNode p db done n.fact n.kind)
-        (Scry.checkNodes p db (Scry.appendAll done (List.cons n List.nil)) rest) hcheck;
+        (Scry.checkNodes p db (Scry.appendAll done [n]) rest) hcheck;
     let hnode : Scry.inLfpAgree p db agree n.fact :=
       Scry.checkNode_sound_all p laws db agree frozen done hdone
         n.fact n.kind hneg hokRule hcn.1;
     let hdone' : Scry.AllOn (Scry.inLfpAgree p db agree)
-        (Scry.appendAll done (List.cons n List.nil)) :=
-      Scry.AllOn_append (Scry.inLfpAgree p db agree) done (List.cons n List.nil) hdone
+        (Scry.appendAll done [n]) :=
+      Scry.AllOn_append (Scry.inLfpAgree p db agree) done [n] hdone
         (Scry.AllOn_single (Scry.inLfpAgree p db agree) n hnode);
     let hrestAll : Scry.AllOn (Scry.inLfpAgree p db agree)
-        (Scry.appendAll (Scry.appendAll done (List.cons n List.nil)) rest) :=
+        (Scry.appendAll (Scry.appendAll done [n]) rest) :=
       Scry.checkNodes_sound_all p laws db agree frozen hneg hokRule
-        (Scry.appendAll done (List.cons n List.nil)) rest hdone' hcn.2;
+        (Scry.appendAll done [n]) rest hdone' hcn.2;
     Scry.AllOn_congr (Scry.inLfpAgree p db agree)
-      (Scry.appendAll (Scry.appendAll done (List.cons n List.nil)) rest)
+      (Scry.appendAll (Scry.appendAll done [n]) rest)
       (Scry.appendAll done (List.cons n rest))
-      (Scry.append_assoc done (List.cons n List.nil) rest) hrestAll
+      (Scry.append_assoc done [n] rest) hrestAll
 
 /-- **`Derivation.check` is sound for all node kinds**, in the absence-preserving
 semantics: for any frozen set that contains every relation the program negates, the
@@ -1675,9 +1675,9 @@ def Scry.check_sound_neg {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.
     Scry.checkSoundNegStmt p frozen hokRule :=
   fun db d f hconcl hcheck =>
     let hb : Nat.lt d.root (List.length d.nodes) = .true ∧
-        Scry.checkNodes p db List.nil d.nodes = .true :=
+        Scry.checkNodes p db [] d.nodes = .true :=
       Scry.ifTrueAnd (Nat.lt d.root (List.length d.nodes))
-        (Scry.checkNodes p db List.nil d.nodes) hcheck;
+        (Scry.checkNodes p db [] d.nodes) hcheck;
     let hneg : (db' : Scry.Db L) -> Scry.NegTransfer frozen db db' -> (ri : Nat) ->
         (hri : Nat.lt ri (List.length p.rules) = .true) ->
         Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true ->
@@ -1686,12 +1686,12 @@ def Scry.check_sound_neg {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.
         Scry.Db.memTuple db' rel row = .false :=
       fun db' ha _ _ _ rel row hfrozen hfalse => ha rel hfrozen row hfalse;
     let hnodes : Scry.AllOn (Scry.inLfpAgree p db (Scry.NegTransfer frozen db))
-        (Scry.appendAll List.nil d.nodes) :=
+        (Scry.appendAll [] d.nodes) :=
       Scry.checkNodes_sound_all p laws db (Scry.NegTransfer frozen db) frozen hneg hokRule
-        List.nil d.nodes True.intro hb.2;
+        [] d.nodes True.intro hb.2;
     let hnodes' : Scry.AllOn (Scry.inLfpAgree p db (Scry.NegTransfer frozen db)) d.nodes :=
       Scry.AllOn_congr (Scry.inLfpAgree p db (Scry.NegTransfer frozen db))
-        (Scry.appendAll List.nil d.nodes) d.nodes rfl hnodes;
+        (Scry.appendAll [] d.nodes) d.nodes rfl hnodes;
     let hroot : Scry.inLfpAgree p db (Scry.NegTransfer frozen db)
         (Scry.ProofNode.fact (List.getD d.nodes d.root Scry.defaultNode)) :=
       Scry.AllOn_getD (Scry.inLfpAgree p db (Scry.NegTransfer frozen db)) d.nodes hnodes'
@@ -1733,7 +1733,7 @@ nodes included): the conclusion is in the least fixpoint in the original sense. 
 def Scry.check_sound_negFree {L : Type} (p : Scry.Program L) (laws : Scry.LatLaws p.ops)
     (hp : Scry.Program.negFree p = .true) : Scry.checkSoundNegFreeStmt p :=
   fun db d f hconcl hcheck =>
-    let frozen : Nat -> Bool := fun _ => Bool.false;
+    let frozen : Nat -> Bool := fun _ => .false;
     let hokRule : (ri : Nat) -> (hri : Nat.lt ri (List.length p.rules) = .true) ->
         Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true :=
       fun ri hri =>
@@ -1741,9 +1741,9 @@ def Scry.check_sound_negFree {L : Type} (p : Scry.Program L) (laws : Scry.LatLaw
           (List.getD p.rules ri Scry.defaultRule).body
           (Scry.ruleNegFree_of_program p hp ri hri);
     let hb : Nat.lt d.root (List.length d.nodes) = .true ∧
-        Scry.checkNodes p db List.nil d.nodes = .true :=
+        Scry.checkNodes p db [] d.nodes = .true :=
       Scry.ifTrueAnd (Nat.lt d.root (List.length d.nodes))
-        (Scry.checkNodes p db List.nil d.nodes) hcheck;
+        (Scry.checkNodes p db [] d.nodes) hcheck;
     let hneg : (db' : Scry.Db L) -> True -> (ri : Nat) ->
         (hri : Nat.lt ri (List.length p.rules) = .true) ->
         Scry.bodyNegRelsOk frozen (List.getD p.rules ri Scry.defaultRule).body = .true ->
@@ -1752,12 +1752,12 @@ def Scry.check_sound_negFree {L : Type} (p : Scry.Program L) (laws : Scry.LatLaw
         Scry.Db.memTuple db' rel row = .false :=
       fun db' _ ri hri hok rel row hfrozen hfalse => absurd hfrozen.1;
     let hnodes : Scry.AllOn (Scry.inLfpAgree p db (fun _ => True))
-        (Scry.appendAll List.nil d.nodes) :=
+        (Scry.appendAll [] d.nodes) :=
       Scry.checkNodes_sound_all p laws db (fun _ => True) frozen hneg hokRule
-        List.nil d.nodes True.intro hb.2;
+        [] d.nodes True.intro hb.2;
     let hnodes' : Scry.AllOn (Scry.inLfpAgree p db (fun _ => True)) d.nodes :=
       Scry.AllOn_congr (Scry.inLfpAgree p db (fun _ => True))
-        (Scry.appendAll List.nil d.nodes) d.nodes rfl hnodes;
+        (Scry.appendAll [] d.nodes) d.nodes rfl hnodes;
     let hroot : Scry.inLfpAgree p db (fun _ => True)
         (Scry.ProofNode.fact (List.getD d.nodes d.root Scry.defaultNode)) :=
       Scry.AllOn_getD (Scry.inLfpAgree p db (fun _ => True)) d.nodes hnodes'

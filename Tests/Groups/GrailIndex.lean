@@ -275,7 +275,9 @@ def grailIndexGroup : Group where
           ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app2\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
         let run2 (args : List String) : IO UInt32 :=
           Grail.cliMain (["-C", dir2.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
-        checkEq 1 (← run2 ["update", "--require-signature", "--allowed-signers", allowed.toString]) },
+        checkEq 1 (← run2 ["update", "--require-signature", "--allowed-signers", allowed.toString])
+        -- ... and --allow-unsigned is the explicit escape for a registry without one
+        checkEq 0 (← run2 ["update", "--allow-unsigned"]) },
     { name := "an edited entry, snapshot or expiry is refused", run := fun _ => do
         unless ← haveSshKeygen do
           skip "no ssh-keygen"

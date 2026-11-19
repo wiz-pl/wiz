@@ -1,0 +1,21 @@
+# Prover pack: the SQL command sinks used by the synthetic report provider.
+#
+# The claim is "every SqlCommand argument is a constant or a parameter bind", encoded
+# as a no-flow obligation over the untrusted sources: no caller-supplied or ambient
+# value reaches the command text.
+rule sql-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a SQL command text
+  source System.Console.ReadLine result
+  source System.Environment.GetEnvironmentVariable result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  sink Microsoft.Data.SqlClient.SqlCommand..ctor arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.set_CommandText arg 1
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteReader arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteNonQuery arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteScalar arg 0
+  sink System.Data.SqlClient.SqlCommand..ctor arg 0
+  sink System.Data.SqlClient.SqlCommand.set_CommandText arg 1
+end

@@ -1,0 +1,979 @@
+import Sys
+import Text
+import Json
+import Scry.Wil
+import Scry.Preproc
+import Scry.CstStore
+import Scry.Native
+import Scry.Rules
+import Scry.CsCst
+import Scry.CsLower
+import Scry.TaintCmd
+/-!
+# Scry.CsCmd: `scry cs`, the repository driver for C#
+
+`scry taint FILE.c` is one translation unit; `scry project DIR` walks C. This module is
+the C# equivalent for a **tree** of `.cs` files: it walks a directory, a `.csproj` or a
+`.sln`/`.slnx`, parses every file with tree-sitter-c-sharp, lowers it with `Scry.CsLower`,
+runs the rule pack over the merged program, and prints a summary whose **coverage**
+section names every file, construct and exclusion that was not fully analysed.
+
+```
+scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+```
+
+`PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or a single `.cs` file.
+
+## Exclusions
+
+C# repositories carry generated and vendored trees that are not the user's code. The
+walk uses a built-in, `.gitignore`-style rule list (it does not read `.gitignore`):
+
+* any path segment `bin/`, `obj/` or `node_modules/`;
+* any hidden directory (a segment starting with `.`);
+* a basename ending `.g.cs` or `.Designer.cs`;
+* symbolic links.
+
+Every exclusion is counted: the report prints the `.cs` count **before** exclusions and
+**after** them, and each rule appears as a coverage row with its count and one example.
+An explicitly named `.cs`, `.csproj` or `.sln` is taken as the user's request, so its own
+path is not excluded; files discovered *inside* it are. Explicit `<Compile Include="…">`
+items in a project are still subject to the rule list, and a missing item is an error row.
+
+For an SDK-style project (no `<Compile Include=` items) the project's directory is
+walked. `<Compile Remove=` and `EnableDefaultCompileItems` are not interpreted.
+
+## Coverage rows
+
+Nothing is dropped silently. A row is one of:
+
+* `parse failure` (error): the native grammar reported `ERROR`/`MISSING` nodes, so the
+  file's tree is recovery output and the file was **not** lowered. The row's location is
+  the first failing node's position and kind (`path:line:col (MISSING identifier)`), and
+  there is one row per file: an error is never summed into a single "16 parse failure"
+  row, because the operator then knows one file's name and not the other fifteen;
+* `unreadable file` (error): an IO error while reading a discovered file;
+* a lowering warning (warning): every message `Scry.CsLower` emits is normalised to a
+  construct and counted (`lambda body not lowered`, `out/ref argument …`, an unsupported
+  statement kind, a field/property initialiser, …);
+* `no functions lowered` (warning): a file parsed but produced no method;
+* an exclusion (note): the rule, its count and one example path;
+* `taint not run …` (note): `--no-taint`, or no rule pack was found.
+
+The process exit status is `Scry.Cs.statusOf`:
+
+* `0` at least one file was lowered, nothing reached `--fail-on`;
+* `1` a finding or coverage row reaches `--fail-on` (a parse failure is `error`, a
+  lowering/skip row is `warning`, an exclusion is `note`);
+* `2` usage or IO (a bad flag, a missing path, an unreadable project/solution);
+* `3` nothing could be analysed (no `.cs` file, or every discovered file failed).
+
+The last one distinguishes "no findings" from "did not run": an empty run is not clean.
+-/
+
+-- ## Severity and coverage rows
+
+/-- Try an `EIO` action, keeping its failure as a value (the driver must not abort a
+whole tree on one file). -/
+def Scry.Cs.attempt {A : Type} (x : EIO A) : EIO (Except String A) :=
+  IO.bind x (fun r => IO.pure (.ok r))
+
+/-- `error > warning > note`, the order `--fail-on` and the report use. -/
+def Scry.Cs.levelRank : Scry.Severity → Nat
+  | .note => 0
+  | .warning => 1
+  | .error => 2
+
+/-- One diagnostic in the coverage section, with a stable construct name and one
+example location. -/
+structure Scry.Cs.Diag where
+  level : Scry.Severity
+  construct : String
+  location : String
+  /-- The original message (JSON's `detail`; the human report shows `construct`). -/
+  detail : String
+
+/-- The result of one discovered file: parsed (and lowered) or failed. `funcs` and
+`text` are kept so the driver can build a program and an origin map; the pure report
+builders ignore them. -/
+structure Scry.Cs.FileResult where
+  path : String
+  parseOk : Bool
+  parseErrors : Nat
+  funcs : List Wil.Func
+  text : String
+  diags : List Scry.Cs.Diag
+
+/-- One aggregate coverage row: a construct, how many times it was seen, one example. -/
+structure Scry.Cs.CoverRow where
+  level : Scry.Severity
+  construct : String
+  count : Nat
+  example : String
+
+/-- One aggregate finding row: a rule with its severity, count and one sink location. -/
+structure Scry.Cs.FindingRow where
+  rule : String
+  severity : Scry.Severity
+  count : Nat
+  example : String
+
+/-- What the walk found. `files` is `(path relative to the target root, path on disk)`.
+`excludedCount` counts `.cs` files under excluded directories and files (a pre-exclusion
+total); `excludedRules` is `(rule, count, example)`. -/
+structure Scry.Cs.Walk where
+  files : List (String × String)
+  excludedCount : Nat
+  excludedRules : List (String × Nat × String)
+  /-- `(path, message)` for a directory that could not be listed. -/
+  errors : List (String × String)
+
+def Scry.Cs.Walk.empty : Scry.Cs.Walk := Scry.Cs.Walk.mk .nil 0 .nil .nil
+
+/-- Add one excluded `.cs` file to a rule's row (or start the row). -/
+def Scry.Cs.bumpRule (rule ex : String) : List (String × Nat × String) → List (String × Nat × String)
+  | .nil => .cons (rule, 1, ex) .nil
+  | .cons (r, n, e) rest => match String.eq r rule with
+    | .true => .cons (r, Nat.succ n, e) rest
+    | .false => .cons (r, n, e) (Scry.Cs.bumpRule rule ex rest)
+
+def Scry.Cs.Walk.addExcluded (w : Scry.Cs.Walk) (rule rel : String) : Scry.Cs.Walk :=
+  { w with excludedCount := Nat.succ w.excludedCount,
+    excludedRules := Scry.Cs.bumpRule rule rel w.excludedRules }
+
+def Scry.Cs.bumpRuleN (rule ex : String) (n : Nat) :
+    List (String × Nat × String) → List (String × Nat × String)
+  | .nil => .cons (rule, n, ex) .nil
+  | .cons (r, k, e) rest => match String.eq r rule with
+    | .true => .cons (r, Nat.add k n, e) rest
+    | .false => .cons (r, k, e) (Scry.Cs.bumpRuleN rule ex n rest)
+
+def Scry.Cs.Walk.addExcludedN (w : Scry.Cs.Walk) (rule rel : String) (n : Nat) :
+    Scry.Cs.Walk :=
+  match n with
+  | .zero => w
+  | _ => { w with excludedCount := Nat.add w.excludedCount n,
+      excludedRules := Scry.Cs.bumpRuleN rule rel n w.excludedRules }
+
+def Scry.Cs.Walk.addError (w : Scry.Cs.Walk) (rel msg : String) : Scry.Cs.Walk :=
+  { w with errors := .cons (rel, msg) w.errors }
+
+def Scry.Cs.Walk.addFile (w : Scry.Cs.Walk) (rel full : String) : Scry.Cs.Walk :=
+  { w with files := .cons (rel, full) w.files }
+
+/-- Merge two walks (solution/project aggregation). Counts add; per-rule rows merge. -/
+def Scry.Cs.Walk.merge (a b : Scry.Cs.Walk) : Scry.Cs.Walk :=
+  Scry.Cs.Walk.mk
+    (List.append a.files b.files)
+    (Nat.add a.excludedCount b.excludedCount)
+    (List.foldl (fun rows r => Scry.Cs.bumpRuleN r.1 r.2.2 r.2.1 rows)
+      a.excludedRules b.excludedRules)
+    (List.append a.errors b.errors)
+
+-- ## Paths and the exclusion rule
+
+def Scry.Cs.baseNameGo : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons _ rest => Scry.Cs.baseNameGo rest
+
+def Scry.Cs.baseName (p : String) : String := Scry.Cs.baseNameGo (String.splitOn p "/")
+
+def Scry.Cs.parentDir (p : String) : String :=
+  match List.dropLast (String.splitOn p "/") with
+  | .nil => "."
+  | parts => String.intercalate "/" parts
+
+/-- `p` without a trailing `/` (`/` itself is unchanged). -/
+def Scry.Cs.trimSlash (p : String) : String :=
+  match Bool.and (String.endsWith p "/") (Nat.lt 1 (String.length p)) with
+  | .true => String.take (Nat.sub (String.length p) 1) p
+  | .false => p
+
+def Scry.Cs.join (dir name : String) : String :=
+  match String.eq dir "." with
+  | .true => name
+  | .false => Path.join dir name
+
+/-- `full` relative to `root` (both without trailing slashes). `full` is returned when it
+is outside `root`. -/
+def Scry.Cs.relTo (root full : String) : String :=
+  let r := Scry.Cs.trimSlash root;
+  match String.startsWith full (String.append r "/") with
+  | .true => String.drop (Nat.succ (String.length r)) full
+  | .false => full
+
+def Scry.Cs.isHiddenSegment (s : String) : Bool :=
+  Bool.and (String.startsWith s ".") (Bool.not (Bool.or (String.eq s ".") (String.eq s "..")))
+
+/-- The exclusion rule for a path relative to the target root, or `none`. The first
+matching rule wins: `bin/`, `obj/`, `node_modules/`, a hidden directory, then the
+generated basenames. -/
+partial def Scry.Cs.exclusionSegs : List String → Option String
+  | .nil => .none
+  | .cons s rest =>
+    match String.eq s "bin" with
+    | .true => .some "bin/"
+    | .false => match String.eq s "obj" with
+      | .true => .some "obj/"
+      | .false => match String.eq s "node_modules" with
+        | .true => .some "node_modules/"
+        | .false => match Scry.Cs.isHiddenSegment s with
+          | .true => .some "hidden directory"
+          | .false => Scry.Cs.exclusionSegs rest
+
+/-- The built-in rule list. It is deliberately not a `.gitignore` reader: a checked-in
+ignore file can name anything, and a first run must be explainable from the source. -/
+def Scry.Cs.exclusionOf (rel : String) : Option String :=
+  match Scry.Cs.exclusionSegs (String.splitOn rel "/") with
+  | .some r => .some r
+  | .none =>
+    let base := Scry.Cs.baseName rel;
+    match String.endsWith base ".Designer.cs" with
+    | .true => .some "*.Designer.cs"
+    | .false => match String.endsWith base ".g.cs" with
+      | .true => .some "*.g.cs"
+      | .false => .none
+
+-- ## Counting and walking
+
+/-- `.cs` files under an excluded directory, and one example (relative). Counting does
+not read a file, only lists directories, so the "before exclusions" total is real. -/
+structure Scry.Cs.CountAcc where
+  n : Nat
+  first : Option String
+
+mutual
+partial def Scry.Cs.countNames (dir rel : String) : List String → Scry.Cs.CountAcc →
+    EIO Scry.Cs.CountAcc
+  | .nil, acc => EIO.pure acc
+  | .cons name rest, acc => do
+    let full := Scry.Cs.join dir name;
+    let relC := match String.isEmpty rel with
+      | .true => name
+      | .false => String.append rel (String.append "/" name);
+    st ← Scry.Cs.attempt (FS.linkStat full);
+    match st with
+    | .error _ => Scry.Cs.countNames dir rel rest acc
+    | .ok s => match s.kind with
+      | .dir => do
+        acc1 ← Scry.Cs.countDir full relC acc;
+        Scry.Cs.countNames dir rel rest acc1
+      | .file => match String.endsWith name ".cs" with
+        | .true => Scry.Cs.countNames dir rel rest
+            (Scry.Cs.CountAcc.mk (Nat.succ acc.n)
+              (match acc.first with
+                | .none => .some relC
+                | .some f => .some f))
+        | .false => Scry.Cs.countNames dir rel rest acc
+      | _ => Scry.Cs.countNames dir rel rest acc
+
+partial def Scry.Cs.countDir (dir rel : String) (acc : Scry.Cs.CountAcc) :
+    EIO Scry.Cs.CountAcc := do
+  names ← Scry.Cs.attempt (FS.listDir dir);
+  match names with
+  | .error _ => EIO.pure acc
+  | .ok ns => Scry.Cs.countNames dir rel ns acc
+end
+
+/-- A directory's entries: files are kept when they are `.cs` and not excluded;
+excluded directories are counted (never descended for analysis) and excluded files are
+counted with their rule. -/
+mutual
+partial def Scry.Cs.walkNames (dir rel : String) : List String → Scry.Cs.Walk →
+    EIO Scry.Cs.Walk
+  | .nil, acc => EIO.pure acc
+  | .cons name rest, acc => do
+    let full := Scry.Cs.join dir name;
+    let relC := match String.isEmpty rel with
+      | .true => name
+      | .false => String.append rel (String.append "/" name);
+    st ← Scry.Cs.attempt (FS.linkStat full);
+    match st with
+    | .error e => Scry.Cs.walkNames dir rel rest (acc.addError relC e)
+    | .ok s => match s.kind with
+      | .symlink => match String.endsWith name ".cs" with
+        | .true => Scry.Cs.walkNames dir rel rest
+            (acc.addExcluded "symbolic link" relC)
+        | .false => Scry.Cs.walkNames dir rel rest acc
+      | .dir => match Scry.Cs.exclusionOf relC with
+        | .some rule => do
+          counted ← Scry.Cs.countDir full relC (Scry.Cs.CountAcc.mk 0 .none);
+          let ex := match counted.first with
+            | .some f => f
+            | .none => relC;
+          Scry.Cs.walkNames dir rel rest (acc.addExcludedN rule ex counted.n)
+        | .none => do
+          acc1 ← Scry.Cs.walkDir full relC acc;
+          Scry.Cs.walkNames dir rel rest acc1
+      | .file => match String.endsWith name ".cs" with
+        | .false => Scry.Cs.walkNames dir rel rest acc
+        | .true => match Scry.Cs.exclusionOf relC with
+          | .some rule => Scry.Cs.walkNames dir rel rest (acc.addExcluded rule relC)
+          | .none => Scry.Cs.walkNames dir rel rest (acc.addFile relC full)
+      | _ => Scry.Cs.walkNames dir rel rest acc
+
+partial def Scry.Cs.walkDir (dir rel : String) (acc : Scry.Cs.Walk) : EIO Scry.Cs.Walk := do
+  names ← Scry.Cs.attempt (FS.listDir dir);
+  match names with
+  | .error e => EIO.pure (acc.addError (match String.isEmpty rel with | .true => dir | .false => rel) e)
+  | .ok ns => Scry.Cs.walkNames dir rel ns acc
+end
+
+/-- Reverse the accumulator lists into display order. -/
+def Scry.Cs.Walk.finish (w : Scry.Cs.Walk) : Scry.Cs.Walk :=
+  { w with files := List.reverse w.files, errors := List.reverse w.errors }
+
+def Scry.Cs.walkTree (dir : String) : EIO Scry.Cs.Walk := do
+  w ← Scry.Cs.walkDir dir "" Scry.Cs.Walk.empty;
+  EIO.pure w.finish
+
+/-- The pure heart of the walk: apply the exclusion rule to a list of
+`(relative path, path on disk)`. The driver's `walkTree` reaches the same rows through
+`FS.listDir`; the Lean tests, which cannot call `FS` externals, pass the listing in.
+`before` (`found + excludedCount`) and each rule's count are the same either way. -/
+def Scry.Cs.walkOfPaths (paths : List (String × String)) : Scry.Cs.Walk :=
+  List.foldl (fun w p => match Scry.Cs.exclusionOf p.1 with
+    | .some rule => w.addExcluded rule p.1
+    | .none => w.addFile p.1 p.2) Scry.Cs.Walk.empty paths
+
+-- ## Project and solution discovery
+
+/-- The parts of `line` inside double quotes, in order (the odd-indexed fields of
+`String.splitOn line "\""`). -/
+partial def Scry.Cs.oddParts (i : Nat) : List String → List String
+  | .nil => .nil
+  | .cons x rest => match Nat.beq (Nat.mod i 2) 1 with
+    | .true => .cons x (Scry.Cs.oddParts (Nat.succ i) rest)
+    | .false => Scry.Cs.oddParts (Nat.succ i) rest
+
+def Scry.Cs.quotedParts (line : String) : List String :=
+  Scry.Cs.oddParts 0 (String.splitOn line "\"")
+
+def Scry.Cs.slashes (p : String) : String := String.replace p "\\" "/"
+
+def Scry.Cs.hasWildcard (p : String) : Bool := String.contains p "*"
+
+/-- The `<Compile Include="…">` items of a project file (empty for an SDK-style
+project, whose default items are the files beside it). -/
+def Scry.Cs.csprojIncludes (text : String) : List String :=
+  List.concat (List.map (fun line =>
+    match Bool.and (String.contains line "<Compile") (String.contains line "Include=") with
+    | .true => List.filter (fun v => String.endsWith v ".cs") (Scry.Cs.quotedParts line)
+    | .false => (.nil : List String)) (String.splitOn text "\n"))
+
+/-- The `.csproj` paths named by a solution (`.sln` and `.slnx` both quote them). -/
+def Scry.Cs.slnProjects (text : String) : List String :=
+  List.concat (List.map (fun line =>
+    List.filter (fun v => String.endsWith v ".csproj")
+      (List.map Scry.Cs.slashes (Scry.Cs.quotedParts line))) (String.splitOn text "\n"))
+
+mutual
+/-- The files of one project, relative to `root`. `projectFull` may be outside `root`
+(a project referenced by a solution above it). -/
+partial def Scry.Cs.projectFiles (root projectFull : String) : EIO Scry.Cs.Walk := do
+  let dir := Scry.Cs.parentDir projectFull;
+  let relDir := Scry.Cs.relTo root dir;
+  text ← Scry.Cs.attempt (FS.readFile projectFull);
+  match text with
+  | .error e => EIO.pure (Scry.Cs.Walk.empty.addError relDir e)
+  | .ok body =>
+    let items := List.map (fun p => String.trim (Scry.Cs.slashes p))
+      (Scry.Cs.csprojIncludes body);
+    match items with
+    | .nil => Scry.Cs.walkDir dir relDir Scry.Cs.Walk.empty
+    | _ => match List.any Scry.Cs.hasWildcard items with
+      | .true => Scry.Cs.walkDir dir relDir Scry.Cs.Walk.empty
+      | .false => Scry.Cs.includeItems root dir items Scry.Cs.Walk.empty
+
+/-- Explicit `<Compile Include>` files: read from `dir`, reported relative to `root`.
+The exclusion list still applies, and a missing include is an error row. -/
+partial def Scry.Cs.includeItems (root dir : String) : List String → Scry.Cs.Walk →
+    EIO Scry.Cs.Walk
+  | .nil, acc => EIO.pure acc
+  | .cons item rest, acc => do
+    let full := match String.startsWith item "/" with
+      | .true => item
+      | .false => Scry.Cs.join dir item;
+    let rel := Scry.Cs.relTo root full;
+    there ← EIO.lift (FS.isFile full);
+    match there with
+    | .false => Scry.Cs.includeItems root dir rest
+        (acc.addError rel "compile item not found")
+    | .true => match Scry.Cs.exclusionOf rel with
+      | .some rule => Scry.Cs.includeItems root dir rest (acc.addExcluded rule rel)
+      | .none => Scry.Cs.includeItems root dir rest (acc.addFile rel full)
+end
+
+mutual
+/-- The files of a solution: each `.csproj` it names, or the solution's directory when
+it names none. -/
+partial def Scry.Cs.solutionFiles (slnFull : String) : EIO Scry.Cs.Walk := do
+  let root := Scry.Cs.parentDir slnFull;
+  text ← Scry.Cs.attempt (FS.readFile slnFull);
+  match text with
+  | .error e => EIO.pure (Scry.Cs.Walk.empty.addError slnFull e)
+  | .ok body =>
+    let projects := Scry.Cs.slnProjects body;
+    match projects with
+    | .nil => Scry.Cs.walkDir root "" Scry.Cs.Walk.empty
+    | _ => Scry.Cs.solutionProjects root root projects Scry.Cs.Walk.empty
+
+partial def Scry.Cs.solutionProjects (root dir : String) : List String → Scry.Cs.Walk →
+    EIO Scry.Cs.Walk
+  | .nil, acc => EIO.pure acc
+  | .cons p rest, acc => do
+    let full := match String.startsWith p "/" with
+      | .true => p
+      | .false => Scry.Cs.join dir p;
+    there ← EIO.lift (FS.isFile full);
+    match there with
+    | .false => Scry.Cs.solutionProjects root dir rest
+        ({ acc with errors := List.append acc.errors [(full, "project not found")] })
+    | .true => do
+      w ← Scry.Cs.projectFiles root full;
+      Scry.Cs.solutionProjects root dir rest (acc.merge w)
+end
+
+/-- The display root and kind of a target path. -/
+structure Scry.Cs.Target where
+  root : String
+  kind : String
+  walk : Scry.Cs.Walk
+
+/-- Discover the `.cs` files of a directory, project, solution or single file. The
+target's own path is not excluded; discovered files are. -/
+def Scry.Cs.discover (path : String) : EIO Scry.Cs.Target := do
+  isDir ← EIO.lift (FS.isDir path);
+  match isDir with
+  | .true => do
+    w ← Scry.Cs.walkTree path;
+    EIO.pure (Scry.Cs.Target.mk path "directory" w)
+  | .false => do
+    isFile ← EIO.lift (FS.isFile path);
+    match isFile with
+    | .false => EIO.fail ("no such file or directory: " ++ path)
+    | .true =>
+      let base := Scry.Cs.baseName path;
+      let root := Scry.Cs.parentDir path;
+      match String.endsWith base ".csproj" with
+      | .true => do
+        w ← Scry.Cs.projectFiles root path;
+        EIO.pure (Scry.Cs.Target.mk root "project" w)
+      | .false => match String.endsWith base ".sln", String.endsWith base ".slnx" with
+        | .true, _ => do
+          w ← Scry.Cs.solutionFiles path;
+          EIO.pure (Scry.Cs.Target.mk root "solution" w)
+        | _, .true => do
+          w ← Scry.Cs.solutionFiles path;
+          EIO.pure (Scry.Cs.Target.mk root "solution" w)
+        | _, _ => match String.endsWith base ".cs" with
+          | .true => EIO.pure (Scry.Cs.Target.mk root "file"
+              (Scry.Cs.Walk.empty.addFile base path))
+          | .false => EIO.fail ("not a directory, .cs, .csproj, .sln or .slnx: " ++ path)
+
+-- ## Lowering and results
+
+/-- A warning's source location. Every file is lowered on its own, so `span.file` is
+the one path the caller passed. -/
+def Scry.Cs.spanLoc (path : String) (sp : Wil.Span) : String :=
+  match Nat.beq sp.line 0 with
+  | .true => path
+  | .false => path ++ ":" ++ Nat.repr sp.line ++ ":" ++ Nat.repr sp.col
+
+/-- Normalise a lowering message into a stable coverage construct. The lowering's
+messages interpolate names and types; grouping them is what makes a first run's
+coverage readable ("what didn't you look at?", not "which identifier"). -/
+def Scry.Cs.constructOf (m : String) : String :=
+  match Bool.and (String.startsWith m "unknown name ") (String.contains m " not modelled") with
+  | .true => "unknown name not modelled: havoc"
+  | .false => match String.startsWith m "operator " with
+    | .true => "operator not modelled: havoc"
+    | .false => match String.startsWith m "call to " with
+      | .true => match String.contains m ": not a method of " with
+        | .true => "call to a delegate or unknown method"
+        | .false => m
+      | .false => match Bool.and (String.startsWith m "assignment to ")
+          (String.endsWith m " not modelled") with
+        | .true => "assignment target not modelled"
+        | .false => match String.startsWith m "field initialiser of " with
+          | .true => "field initialiser not modelled (starts as default)"
+          | .false => match String.startsWith m "property initialiser of " with
+            | .true => "property initialiser not modelled (starts as default)"
+            | .false => m
+
+def Scry.Cs.diagOfWarning (path : String) (w : Scry.Warning) : Scry.Cs.Diag :=
+  Scry.Cs.Diag.mk .warning (Scry.Cs.constructOf w.message) (Scry.Cs.spanLoc path w.span)
+    w.message
+
+/-- A points-to/memory diagnostic as a coverage row. These are not findings: they say
+the analysis did not know a memory location or an external call's effect. -/
+def Scry.Cs.diagOfMem (m : Scry.OriginMap) (w : Scry.MemWarning) : Scry.Cs.Diag :=
+  Scry.Cs.Diag.mk .warning (Scry.MemWarnKind.show w.kind)
+    (Scry.locationText m w.func w.point) w.detail
+
+/-- One lowered file's result. A file that parses but produces no function is a
+warning row, not a silent zero. -/
+def Scry.Cs.resultOfLowered (path text : String) (l : Scry.Cs.Lowered) : Scry.Cs.FileResult :=
+  let warnings := List.map (Scry.Cs.diagOfWarning path) l.warnings;
+  let extra := match l.funcs with
+    | .nil => [Scry.Cs.Diag.mk .warning "no functions lowered" path ""]
+    | _ => [];
+  Scry.Cs.FileResult.mk path .true 0 l.funcs text (List.append extra warnings)
+
+/-- One spill's result (the Lean tests' path: they cannot call the native shim). -/
+def Scry.Cs.resultOfFront (path : String) (r : Scry.Cs.FrontResult) : Scry.Cs.FileResult :=
+  match r with
+  | .ok l => Scry.Cs.resultOfLowered path l.text l
+  | .err m => Scry.Cs.FileResult.mk path .false 1 .nil ""
+      [Scry.Cs.Diag.mk .error "parse failure" path m]
+
+/-- The kind of a store's first failing node: `ERROR`, or `MISSING <token>` (the token
+the grammar expected). Naming the node is what lets a failing file be diagnosed without a
+second tool: the sweep row says which node is absent, not just that the file failed. -/
+def Scry.Cs.errorKind (s : Scry.CstStore) (i : Nat) : String :=
+  match Scry.CstStore.missingOf s i with
+  | .true => "MISSING " ++ Scry.CstStore.kindName s i
+  | .false => "ERROR"
+
+/-- Parse and lower one file. `rel` is the path the report uses; `full` is read.
+A tree with `ERROR`/`MISSING` nodes is a failure (never lowered as if recovered); the
+row's location names the first failing node's position and kind. -/
+def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
+  text ← FS.readFile full;
+  st ← Scry.Native.parse "c_sharp" text;
+  let errs := Scry.Native.errorCount st;
+  store ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
+  match Nat.beq errs 0 with
+  | .true => do
+    let l := Scry.Cs.lowerCst rel text (Scry.Cs.ofStore text store);
+    EIO.pure (Scry.Cs.resultOfLowered rel text l)
+  | .false => do
+    let pre := Scry.Preprocessed.plain rel text;
+    let loc := match Scry.CstStore.firstError store with
+      | .some i => let sp := Scry.CstStore.spanOf store i;
+        let pos := Scry.posOf pre sp.start;
+        rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
+          ++ " (" ++ Scry.Cs.errorKind store i ++ ")"
+      | .none => rel;
+    EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
+      [Scry.Cs.Diag.mk .error "parse failure" loc
+        (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")])
+
+partial def Scry.Cs.analyseAll : List (String × String) → EIO (List Scry.Cs.FileResult)
+  | .nil => EIO.pure .nil
+  | .cons (rel, full) rest => do
+    r ← Scry.Cs.attempt (Scry.Cs.analyseFile rel full);
+    let fr := match r with
+      | .ok x => x
+      | .error e => Scry.Cs.FileResult.mk rel .false 1 .nil ""
+          [Scry.Cs.Diag.mk .error "unreadable file" rel e];
+    rs ← Scry.Cs.analyseAll rest;
+    EIO.pure (List.cons fr rs)
+
+-- ## Aggregation
+
+def Scry.Cs.findCover (c : String) : List Scry.Cs.CoverRow → Option Nat
+  | .nil => .none
+  | .cons r rest => match String.eq r.construct c with
+    | .true => .some r.count
+    | .false => Scry.Cs.findCover c rest
+
+/-- Add a diagnostic to the coverage rows (same construct: count + 1). An `error` row is
+never merged: a count of "16 parse failure" with one example hides fifteen files, and the
+point of the coverage section is to name every file that was not analysed. Warnings still
+aggregate, because one construct repeated in a file is one construct. -/
+def Scry.Cs.addDiag (d : Scry.Cs.Diag) : List Scry.Cs.CoverRow → List Scry.Cs.CoverRow
+  | .nil => [Scry.Cs.CoverRow.mk d.level d.construct 1 d.location]
+  | .cons r rest => match d.level, String.eq r.construct d.construct with
+    | .error, _ => List.cons r (Scry.Cs.addDiag d rest)
+    | _, .true => List.cons { r with count := Nat.succ r.count } rest
+    | _, .false => List.cons r (Scry.Cs.addDiag d rest)
+
+def Scry.Cs.coverageOf (results : List Scry.Cs.FileResult) : List Scry.Cs.CoverRow :=
+  List.foldl (fun rows r => List.foldl (fun rs d => Scry.Cs.addDiag d rs) rows r.diags)
+    (.nil : List Scry.Cs.CoverRow) results
+
+/-- Aggregate a taint pass's diagnostics into the same rows (one row per construct,
+with its count and first example). -/
+def Scry.Cs.coverageOfDiags (diags : List Scry.Cs.Diag) : List Scry.Cs.CoverRow :=
+  List.foldl (fun rows d => Scry.Cs.addDiag d rows) (.nil : List Scry.Cs.CoverRow) diags
+
+def Scry.Cs.excludedRows (rules : List (String × Nat × String)) : List Scry.Cs.CoverRow :=
+  List.map (fun t => Scry.Cs.CoverRow.mk .note ("excluded: " ++ t.1) t.2.1 t.2.2) rules
+
+def Scry.Cs.errorRows (errors : List (String × String)) : List Scry.Cs.CoverRow :=
+  List.map (fun e => Scry.Cs.CoverRow.mk .error "walk error" 1 e.1) errors
+
+/-- Rows come out most severe first, then most frequent, then by name. -/
+def Scry.Cs.rowBefore (a b : Scry.Cs.CoverRow) : Bool :=
+  match Nat.lt (Scry.Cs.levelRank b.level) (Scry.Cs.levelRank a.level) with
+  | .true => .true
+  | .false => match Nat.lt (Scry.Cs.levelRank a.level) (Scry.Cs.levelRank b.level) with
+    | .true => .false
+    | .false => match Nat.lt b.count a.count with
+      | .true => .true
+      | .false => match Nat.lt a.count b.count with
+        | .true => .false
+        | .false => String.lt a.construct b.construct
+
+def Scry.Cs.insertCover (r : Scry.Cs.CoverRow) : List Scry.Cs.CoverRow → List Scry.Cs.CoverRow
+  | .nil => List.cons r .nil
+  | .cons x rest => match Scry.Cs.rowBefore r x with
+    | .true => List.cons r (List.cons x rest)
+    | .false => List.cons x (Scry.Cs.insertCover r rest)
+
+def Scry.Cs.sortCover (rows : List Scry.Cs.CoverRow) : List Scry.Cs.CoverRow :=
+  List.foldl (fun acc r => Scry.Cs.insertCover r acc) .nil rows
+
+def Scry.Cs.findingBefore (a b : Scry.Cs.FindingRow) : Bool :=
+  match Nat.lt (Scry.Cs.levelRank b.severity) (Scry.Cs.levelRank a.severity) with
+  | .true => .true
+  | .false => match Nat.lt (Scry.Cs.levelRank a.severity) (Scry.Cs.levelRank b.severity) with
+    | .true => .false
+    | .false => match Nat.lt b.count a.count with
+      | .true => .true
+      | .false => match Nat.lt a.count b.count with
+        | .true => .false
+        | .false => String.lt a.rule b.rule
+
+def Scry.Cs.insertFinding (r : Scry.Cs.FindingRow) :
+    List Scry.Cs.FindingRow → List Scry.Cs.FindingRow
+  | .nil => List.cons r .nil
+  | .cons x rest => match Scry.Cs.findingBefore r x with
+    | .true => List.cons r (List.cons x rest)
+    | .false => List.cons x (Scry.Cs.insertFinding r rest)
+
+def Scry.Cs.sortFindings (rows : List Scry.Cs.FindingRow) : List Scry.Cs.FindingRow :=
+  List.foldl (fun acc r => Scry.Cs.insertFinding r acc) .nil rows
+
+def Scry.Cs.findingKey (f : Scry.RuleFinding) : String :=
+  f.rule ++ "|" ++ Scry.Severity.show f.severity
+
+def Scry.Cs.addFinding (m : Scry.OriginMap) (f : Scry.RuleFinding) :
+    List Scry.Cs.FindingRow → List Scry.Cs.FindingRow
+  | .nil => [Scry.Cs.FindingRow.mk f.rule f.severity 1
+      (Scry.locationText m f.func f.sink)]
+  | .cons r rest => match String.eq (r.rule ++ "|" ++ Scry.Severity.show r.severity)
+      (Scry.Cs.findingKey f) with
+    | .true => List.cons { r with count := Nat.succ r.count } rest
+    | .false => List.cons r (Scry.Cs.addFinding m f rest)
+
+def Scry.Cs.findingRows (m : Scry.OriginMap) (fs : List Scry.RuleFinding) :
+    List Scry.Cs.FindingRow :=
+  Scry.Cs.sortFindings (List.foldl (fun rows f => Scry.Cs.addFinding m f rows)
+    (.nil : List Scry.Cs.FindingRow) fs)
+
+/-- The origin map of every lowered function, for finding locations. -/
+def Scry.Cs.originMapOf (results : List Scry.Cs.FileResult) : Scry.OriginMap :=
+  List.concat (List.map (fun r =>
+    Scry.originEntries r.path (Scry.TextIndex.ofString r.text) r.funcs) results)
+
+/-- The report. `found` is the number of `.cs` files analysed; `before` is
+`found + walk.excludedCount`. -/
+structure Scry.Cs.Report where
+  target : String
+  kind : String
+  before : Nat
+  found : Nat
+  parsed : Nat
+  lowered : Nat
+  failed : Nat
+  funcs : Nat
+  excluded : Nat
+  rulesPath : Option String
+  ruleCount : Nat
+  findings : List Scry.Cs.FindingRow
+  coverage : List Scry.Cs.CoverRow
+
+/-- The taint pass's contribution to a report. -/
+structure Scry.Cs.Analysis where
+  findings : List Scry.Cs.FindingRow
+  rulesPath : Option String
+  ruleCount : Nat
+  coverage : List Scry.Cs.Diag
+
+def Scry.Cs.countIf {A : Type} (p : A → Bool) (xs : List A) : Nat :=
+  List.length (List.filter p xs)
+
+def Scry.Cs.reportOf (target kind : String) (w : Scry.Cs.Walk)
+    (results : List Scry.Cs.FileResult) (rulesPath : Option String) (ruleCount : Nat)
+    (findings : List Scry.Cs.FindingRow) (extra : List Scry.Cs.CoverRow) : Scry.Cs.Report :=
+  let found := List.length results;
+  let parsed := Scry.Cs.countIf (fun r => r.parseOk) results;
+  let lowered := Scry.Cs.countIf (fun r => Bool.and r.parseOk (match r.funcs with
+    | .nil => .false | _ => .true)) results;
+  let failed := Scry.Cs.countIf (fun r => Bool.not r.parseOk) results;
+  let funcs := List.foldl (fun n r => Nat.add n (List.length r.funcs)) 0 results;
+  let coverage := Scry.Cs.sortCover (List.append extra
+    (List.append (Scry.Cs.coverageOf results)
+      (List.append (Scry.Cs.excludedRows w.excludedRules)
+        (Scry.Cs.errorRows w.errors))));
+  Scry.Cs.Report.mk target kind (Nat.add found w.excludedCount) found parsed lowered failed
+    funcs w.excludedCount rulesPath ruleCount findings coverage
+
+-- ## Rendering
+
+def Scry.Cs.padRight (n : Nat) (s : String) : String :=
+  match Nat.le n (String.length s) with
+  | .true => s
+  | .false => s ++ Scry.Cs.spaces (Nat.sub n (String.length s))
+
+def Scry.Cs.showCount (n : Nat) : String := Nat.repr n
+
+def Scry.Cs.findingTotal (rows : List Scry.Cs.FindingRow) : Nat :=
+  List.foldl (fun n r => Nat.add n r.count) 0 rows
+
+def Scry.Cs.countSeverity (sev : Scry.Severity) (rows : List Scry.Cs.FindingRow) : Nat :=
+  List.foldl (fun n r => match r.severity, sev with
+    | .error, .error => Nat.add n r.count
+    | .warning, .warning => Nat.add n r.count
+    | .note, .note => Nat.add n r.count
+    | _, _ => n) 0 rows
+
+def Scry.Cs.renderRules (path : Option String) (count : Nat) : String :=
+  match path with
+  | .some p => p ++ " (" ++ Nat.repr count ++ " rule(s))"
+  | .none => "none (no rule pack found; pass --rules FILE)"
+
+def Scry.Cs.renderFindings (rows : List Scry.Cs.FindingRow) : List String :=
+  match rows with
+  | .nil => ["  (none)"]
+  | _ => List.cons
+      ("  " ++ Scry.Cs.padRight 9 "SEVERITY" ++ Scry.Cs.padRight 7 "COUNT" ++ "RULE  EXAMPLE")
+      (List.map (fun r =>
+        "  " ++ Scry.Cs.padRight 9 (Scry.Severity.show r.severity)
+          ++ Scry.Cs.padRight 7 (Nat.repr r.count)
+          ++ r.rule ++ "  " ++ r.example) rows)
+
+def Scry.Cs.renderCoverage (rows : List Scry.Cs.CoverRow) : List String :=
+  match rows with
+  | .nil => ["  none: every discovered construct was lowered"]
+  | _ => List.cons
+      ("  " ++ Scry.Cs.padRight 9 "SEVERITY" ++ Scry.Cs.padRight 7 "COUNT"
+        ++ Scry.Cs.padRight 52 "CONSTRUCT" ++ " EXAMPLE")
+      (List.map (fun r =>
+        "  " ++ Scry.Cs.padRight 9 (Scry.Severity.show r.level)
+          ++ Scry.Cs.padRight 7 (Nat.repr r.count)
+          ++ Scry.Cs.padRight 52 r.construct ++ " " ++ r.example) rows)
+
+def Scry.Cs.render (r : Scry.Cs.Report) : String :=
+  String.intercalate "\n" (List.append
+    ["scry cs " ++ r.target,
+     "target: " ++ r.target ++ " (" ++ r.kind ++ ")",
+     "walk: " ++ Nat.repr r.before ++ " .cs file(s) before exclusions; "
+       ++ Nat.repr r.found ++ " kept, " ++ Nat.repr r.excluded ++ " excluded by rule",
+     "files: " ++ Nat.repr r.found ++ " found, " ++ Nat.repr r.parsed ++ " parsed, "
+       ++ Nat.repr r.lowered ++ " lowered, " ++ Nat.repr r.failed ++ " failed",
+     "functions: " ++ Nat.repr r.funcs ++ " lowered",
+     "rules: " ++ Scry.Cs.renderRules r.rulesPath r.ruleCount,
+     "findings: " ++ Nat.repr (Scry.Cs.findingTotal r.findings)
+       ++ " (error " ++ Nat.repr (Scry.Cs.countSeverity .error r.findings)
+       ++ ", warning " ++ Nat.repr (Scry.Cs.countSeverity .warning r.findings)
+       ++ ", note " ++ Nat.repr (Scry.Cs.countSeverity .note r.findings) ++ ")"]
+    (List.append (Scry.Cs.renderFindings r.findings)
+      (List.append
+        ["coverage: " ++ Nat.repr (List.length r.coverage) ++ " row(s) — what was "
+           ++ "skipped or warned about"]
+        (Scry.Cs.renderCoverage r.coverage))))
+
+-- ## JSON
+
+def Scry.Cs.coverageJson (r : Scry.Cs.CoverRow) : Json :=
+  Json.mkObj [("severity", Json.ofString (Scry.Severity.show r.level)),
+    ("construct", Json.ofString r.construct), ("count", Json.ofNat r.count),
+    ("example", Json.ofString r.example)]
+
+def Scry.Cs.findingJson (r : Scry.Cs.FindingRow) : Json :=
+  Json.mkObj [("rule", Json.ofString r.rule),
+    ("severity", Json.ofString (Scry.Severity.show r.severity)),
+    ("count", Json.ofNat r.count), ("example", Json.ofString r.example)]
+
+def Scry.Cs.rulesJson (r : Scry.Cs.Report) : Json :=
+  match r.rulesPath with
+  | .some p => Json.mkObj [("path", Json.ofString p), ("count", Json.ofNat r.ruleCount)]
+  | .none => Json.mkObj [("path", Json.mkNull), ("count", Json.ofNat 0)]
+
+def Scry.Cs.jsonOf (r : Scry.Cs.Report) (status : Nat) : Json :=
+  Json.mkObj [
+    ("schema", Json.ofString "scry-cs-report/1"),
+    ("target", Json.ofString r.target),
+    ("kind", Json.ofString r.kind),
+    ("walk", Json.mkObj [("before", Json.ofNat r.before), ("kept", Json.ofNat r.found),
+      ("excluded", Json.ofNat r.excluded)]),
+    ("files", Json.mkObj [("found", Json.ofNat r.found), ("parsed", Json.ofNat r.parsed),
+      ("lowered", Json.ofNat r.lowered), ("failed", Json.ofNat r.failed)]),
+    ("functions", Json.ofNat r.funcs),
+    ("rules", Scry.Cs.rulesJson r),
+    ("findings", Json.mkObj [
+      ("total", Json.ofNat (Scry.Cs.findingTotal r.findings)),
+      ("error", Json.ofNat (Scry.Cs.countSeverity .error r.findings)),
+      ("warning", Json.ofNat (Scry.Cs.countSeverity .warning r.findings)),
+      ("note", Json.ofNat (Scry.Cs.countSeverity .note r.findings)),
+      ("byRule", Json.mkArr (List.map Scry.Cs.findingJson r.findings))]),
+    ("coverage", Json.mkArr (List.map Scry.Cs.coverageJson r.coverage)),
+    ("exit", Json.ofNat status)]
+
+-- ## Status and options
+
+/-- At/above a threshold (`note < warning < error`). -/
+def Scry.Cs.atOrAbove (threshold sev : Scry.Severity) : Bool :=
+  Nat.le (Scry.Cs.levelRank threshold) (Scry.Cs.levelRank sev)
+
+def Scry.Cs.gated (r : Scry.Cs.Report) (sev : Scry.Severity) : Bool :=
+  Bool.or
+    (List.any (fun f => Scry.Cs.atOrAbove sev f.severity) r.findings)
+    (List.any (fun c => Scry.Cs.atOrAbove sev c.level) r.coverage)
+
+/-- The driver's outcome, before it becomes an exit status. `usage` is a flag/path
+problem; `report` is a completed run. -/
+inductive Scry.Cs.Outcome where
+  | usage
+  | report (r : Scry.Cs.Report) (failOn : Option Scry.Severity)
+
+/-- 0 clean, 1 gated, 2 usage/IO, 3 nothing analysed. -/
+def Scry.Cs.statusOf : Scry.Cs.Outcome → Nat
+  | .usage => 2
+  | .report r failOn => match r.found with
+    | 0 => 3
+    | _ => match r.lowered with
+      | 0 => 3
+      | _ => match failOn with
+        | .none => 0
+        | .some sev => match Scry.Cs.gated r sev with
+          | .true => 1
+          | .false => 0
+
+structure Scry.Cs.Opts where
+  target : String
+  json : Bool
+  failOn : Option Scry.Severity
+  rules : Option String
+  taint : Bool
+
+def Scry.Cs.usage : String :=
+  "usage: scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE]\n"
+  ++ "                 [--no-taint]\n"
+  ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.\n"
+  ++ "  Walks for *.cs (excluding bin/, obj/, node_modules/, hidden dirs, *.g.cs,\n"
+  ++ "  *.Designer.cs), parses and lowers each file, and reports findings plus a\n"
+  ++ "  coverage section naming every construct or file that was skipped.\n"
+  ++ "  exit: 0 clean, 1 at/above --fail-on, 2 usage/IO, 3 nothing analysed.\n"
+
+def Scry.Cs.parseFailOn (s : String) : Except String Scry.Severity :=
+  match s with
+  | "error" => .ok .error
+  | "warning" => .ok .warning
+  | "note" => .ok .note
+  | _ => .error ("--fail-on needs error, warning or note, not \"" ++ s ++ "\"\n"
+      ++ Scry.Cs.usage)
+
+partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
+    List String → Except String Scry.Cs.Opts
+  | .nil => match target with
+    | .some t => .ok { o with target := t }
+    | .none => .error Scry.Cs.usage
+  | .cons a rest => match a with
+    | "--json" => Scry.Cs.parseArgsGo target { o with json := .true } rest
+    | "--no-taint" => Scry.Cs.parseArgsGo target { o with taint := .false } rest
+    | "--fail-on" => match rest with
+      | .cons v r => match Scry.Cs.parseFailOn v with
+        | .ok sev => Scry.Cs.parseArgsGo target { o with failOn := .some sev } r
+        | .error e => .error e
+      | .nil => .error ("--fail-on needs a severity\n" ++ Scry.Cs.usage)
+    | "--rules" => match rest with
+      | .cons v r => Scry.Cs.parseArgsGo target { o with rules := .some v } r
+      | .nil => .error ("--rules needs a FILE\n" ++ Scry.Cs.usage)
+    | _ => match String.startsWith a "-" with
+      | .true => .error ("unknown option \"" ++ a ++ "\"\n" ++ Scry.Cs.usage)
+      | .false => match target with
+        | .some _ => .error ("scry cs takes one PATH\n" ++ Scry.Cs.usage)
+        | .none => Scry.Cs.parseArgsGo (.some a) o rest
+
+def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
+  Scry.Cs.parseArgsGo .none
+    (Scry.Cs.Opts.mk "" .false .none .none .true) args
+
+/-- The default C# rule pack: the corpus pack first (a checkout), then an installed
+`lib/Scry/rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
+def Scry.Cs.defaultPackCandidates : List String :=
+  ["scry/corpus/csharp/csharp.scry", "../scry/corpus/csharp/csharp.scry",
+   "lib/Scry/rules/csharp.scry", "../lib/Scry/rules/csharp.scry"]
+
+def Scry.Cs.loadPack (rules : Option String) : EIO (Option (String × Scry.RulePack)) :=
+  match rules with
+  | .some path => do
+    text ← FS.readFile path;
+    pack ← Scry.packFromText path text;
+    EIO.pure (.some (path, pack))
+  | .none => do
+    found ← Scry.readFirst Scry.Cs.defaultPackCandidates;
+    match found with
+    | .none => EIO.pure .none
+    | .some text => do
+      pack ← Scry.packFromText "scry/corpus/csharp/csharp.scry" text;
+      EIO.pure (.some ("scry/corpus/csharp/csharp.scry", pack))
+
+/-- Try an `EIO` action, keeping its failure as a value (the driver must not abort a
+whole tree on one file). -/
+def Scry.Cs.say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def Scry.Cs.sayErr (s : String) : EIO Unit := EIO.lift (IO.ePrintln s)
+
+-- ## The command
+
+/-- Print the report (human or JSON) and return its status. The driver's last step is
+shared by the tainted, untainted and pack-less runs. -/
+def Scry.Cs.finish (opts : Scry.Cs.Opts) (t : Scry.Cs.Target)
+    (results : List Scry.Cs.FileResult) (analysis : Scry.Cs.Analysis) : EIO Nat := do
+  let extra := Scry.Cs.coverageOfDiags analysis.coverage;
+  let r := Scry.Cs.reportOf opts.target t.kind t.walk results analysis.rulesPath
+    analysis.ruleCount analysis.findings extra;
+  let status := Scry.Cs.statusOf (.report r opts.failOn);
+  match opts.json with
+  | .true => Scry.Cs.say (Json.render (Scry.Cs.jsonOf r status))
+  | .false => Scry.Cs.say (Scry.Cs.render r);
+  EIO.pure status
+
+def Scry.Cs.run (args : List String) : EIO Nat := do
+  match Scry.Cs.parseArgs args with
+  | .error e => do
+    Scry.Cs.sayErr e;
+    EIO.pure (Scry.Cs.statusOf .usage)
+  | .ok opts => do
+    found ← Scry.Cs.attempt (Scry.Cs.discover opts.target);
+    match found with
+    | .error e => do
+      Scry.Cs.sayErr ("scry cs: " ++ e);
+      EIO.pure (Scry.Cs.statusOf .usage)
+    | .ok t => do
+      results ← Scry.Cs.analyseAll t.walk.files;
+      pack ← match opts.taint with
+        | .false => EIO.pure ((.ok .none) : Except String (Option (String × Scry.RulePack)))
+        | .true => Scry.Cs.attempt (Scry.Cs.loadPack opts.rules);
+      match pack with
+      | .error e => match opts.rules with
+        | .some _ => do
+          Scry.Cs.sayErr ("scry cs: " ++ e);
+          EIO.pure (Scry.Cs.statusOf .usage)
+        | .none => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil .none 0
+            [Scry.Cs.Diag.mk .note ("taint not run: " ++ e) "(none)" e])
+      | .ok .none => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil .none 0
+          [Scry.Cs.Diag.mk .note (match opts.taint with
+              | .true => "taint not run: no rule pack found"
+              | .false => "taint not run: --no-taint")
+            "(none)" (match opts.taint with
+              | .true => "pass --rules FILE"
+              | .false => "")])
+      | .ok (.some (path, p)) => do
+        let funcs := List.concat (List.map (fun r => r.funcs) results);
+        match funcs with
+        | .nil => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil (.some path) 0
+            [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""])
+        | _ => do
+          let pr := Scry.analyzeC (Scry.Cs.resolveCalls (Wil.program funcs)) p;
+          let m := Scry.Cs.originMapOf results;
+          Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk
+            (Scry.Cs.findingRows m (Scry.programFindings pr))
+            (.some path) (List.length p.rules)
+            (List.map (Scry.Cs.diagOfMem m) pr.warnings))

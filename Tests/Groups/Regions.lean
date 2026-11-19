@@ -11,21 +11,21 @@ namespace Tests.Elab
 /-! ## Regions: borrow checking as typing (lib/Region.wiz, Feral RD12) -/
 
 def regionsPush : String :=
-  "def push1 {ρ : Region} (1 v : Uniq ρ (List Nat)) : Result1 Unit (Uniq ρ (List Nat)) :=\n  let 1 (xs, v) := Uniq.peek v;\n  .ok () (Uniq.write v (List.cons 1 xs))\n"
+  "def push1 {0 ρ : Region} (1 v : Uniq ρ (List Nat)) : Result1 Unit (Uniq ρ (List Nat)) :=\n  let 1 (xs, v) := Uniq.peek v;\n  .ok () (Uniq.write v (List.cons 1 xs))\n"
 
 def regionsLongest : String :=
-  "def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa Nat) (y : Shr ρb Nat) : Result (Shr ρb Nat) :=\n" ++
+  "def longest {0 ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa Nat) (y : Shr ρb Nat) : Result (Shr ρb Nat) :=\n" ++
   "  match Nat.lt x.val y.val with\n  | .true => .ok y\n  | .false => .ok (Shr.weaken h x)\n"
 
 /-- `swap` through two `&mut`, called on two locals borrowed in nested scopes. -/
-def regionsSwap : String := r#"def swap {ρ₁ ρ₂ : Region} {A : Type} (1 x : Uniq ρ₁ A) (1 y : Uniq ρ₂ A) : Result1 Unit ((1 _ : Uniq ρ₁ A) × Uniq ρ₂ A) :=
+def regionsSwap : String := r#"def swap {0 ρ₁ ρ₂ : Region} {A : Type} (1 x : Uniq ρ₁ A) (1 y : Uniq ρ₂ A) : Result1 Unit ((1 _ : Uniq ρ₁ A) × Uniq ρ₂ A) :=
   let 1 (t, x) := Uniq.peek x;
   let 1 (u, y) := Uniq.peek y;
   .ok () (Uniq.write x u, Uniq.write y t)
 "#
 
 /-- A linked list through `&mut`: recursion on reborrows of the tails, and a cursor. -/
-def regionsList : String := r#"partial def incrAll {ρ : Region} (1 l : Uniq ρ (List Nat)) : Result1 Unit (Uniq ρ (List Nat)) :=
+def regionsList : String := r#"partial def incrAll {0 ρ : Region} (1 l : Uniq ρ (List Nat)) : Result1 Unit (Uniq ρ (List Nat)) :=
   Uniq.reborrow l (fun ρ' h l r =>
     let 1 (v, r) := Uniq.peek r;
     match v with
@@ -33,12 +33,12 @@ def regionsList : String := r#"partial def incrAll {ρ : Region} (1 l : Uniq ρ 
     | .cons x tail => (match Uniq.borrow ρ' tail (fun ρt ht tail rt => incrAll rt) with
       | .ok q => let (u, tail) := q; .ok () (Uniq.write r (List.cons (Nat.succ x) tail))
       | .err e => .err e r))
-partial def pushBack.loop {ρ : Region} (x : Nat) (1 cur : Mut ρ (List Nat) (List Nat)) : Mut ρ (List Nat) (List Nat) :=
+partial def pushBack.loop {0 ρ : Region} (x : Nat) (1 cur : Mut ρ (List Nat) (List Nat)) : Mut ρ (List Nat) (List Nat) :=
   let 1 (v, cur) := Mut.peek cur;
   match v with
   | .cons y next => pushBack.loop x (Mut.comp cur (fun (_ : List Nat) => (next, fun (n : List Nat) => List.cons y n)))
   | .nil => Mut.set cur (List.cons x List.nil)
-def pushBack {ρ : Region} (1 l : Uniq ρ (List Nat)) (x : Nat) : Result1 Unit (Uniq ρ (List Nat)) :=
+def pushBack {0 ρ : Region} (1 l : Uniq ρ (List Nat)) (x : Nat) : Result1 Unit (Uniq ρ (List Nat)) :=
   .ok () (Mut.release (pushBack.loop x (Mut.whole l)))
 def listMain (xs : List Nat) : Result (List Nat) :=
   match Uniq.borrow Region.static xs (fun ρ h xs r =>
@@ -53,7 +53,7 @@ def listMain (xs : List Nat) : Result (List Nat) :=
 lender not returned rides along in the backward function (`Mut.alongside`). -/
 def regionsPick (bound : Bool := true) : String :=
   let (hb, hx) := if bound then ("(0 h : Outlives ρa ρb) ", "Mut.weaken h (Mut.ofUniq x)") else ("", "Mut.ofUniq x")
-  s!"def pick \{ρa ρb : Region} {hb}(c : Bool) (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) :
+  s!"def pick \{0 ρa ρb : Region} {hb}(c : Bool) (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) :
     Borrowed (Mut ρb Nat ((1 _ : Uniq ρa Nat) × Uniq ρb Nat)) ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=
   match c with
   | .true => .ok (Mut.alongside ({hx}) y (fun (x : Uniq ρa Nat) (y : Uniq ρb Nat) => (x, y)))
@@ -61,7 +61,7 @@ def regionsPick (bound : Bool := true) : String :=
 "
 
 def regionsSetPick : String :=
-  "def setPick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
+  "def setPick {0 ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
   "  match pick h c x y with\n  | .ok m => .ok () (Mut.finish (Mut.set m 10))\n  | .err e q => .err e q\n"
 
 /-- Two locals `a := 1` and `b := 2`, borrowed in nested scopes (`outer` first; the outer
@@ -80,6 +80,32 @@ def regionsTwo (name outer body : String) : String :=
   | .ok p => let (x, y) := p; .ok {if o == "a" then "(y, x)" else "(x, y)"}
   | .err e => .err e
 "
+
+/-- Shared reborrows, zooms and pair borrows: the `ResultH.mapHandle`/`ofResult` paths of
+`Uniq.share(In)`, `Uniq.zoom(In)` and `Uniq.both`. -/
+def regionsOptics : String := r#"def share1 {ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
+  Uniq.share r (fun ρ' h x => .ok (List.length x.val))
+def shareIn1 {ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
+    Result1 Nat ((1 _ : Uniq ρa Nat) × Uniq ρb (List Nat)) :=
+  Uniq.shareIn r o (fun ρ' h o x => .ok (List.length x.val) o)
+def zoom1 {ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
+  Uniq.zoom Pair2.fstL p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))
+def both1 {ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
+  Uniq.both p (fun ρ' h a b =>
+    let 1 (x, a) := Uniq.peek a;
+    let 1 (y, b) := Uniq.peek b;
+    .ok (Nat.add x y) (a, b))
+def tShare : Result (Nat × List Nat) :=
+  Uniq.borrow Region.static (List.cons 1 (List.cons 2 List.nil)) (fun ρ h l r => share1 r)
+def tShareIn : Result ((Nat × List Nat) × Nat) :=
+  Uniq.borrow Region.static 5 (fun ρa ha la ra =>
+    Uniq.borrowIn Region.static (List.cons 3 List.nil) ra (fun ρb hb lb ra rb =>
+      shareIn1 rb ra))
+def tZoom : Result (Nat × Pair2 Nat Nat) :=
+  Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => zoom1 r)
+def tBoth : Result (Nat × (Nat × Nat)) :=
+  Uniq.borrow Region.static (1, 2) (fun ρ h l r => both1 r)
+"#
 
 /-- The front end's state for `src`, with every library importable. -/
 def libsState (src : String) (unbox : Bool := false) : IO (CommandState ZeroOneMany) := do
@@ -114,10 +140,10 @@ def regionsGroup : Group where
   parallel := true
   cases := [
     { name := "handles in different regions are different types; regions are inferred", run := fun _ => do
-        okLibs ("import Region\ndef same {ρ : Region} (m : Mut ρ Nat (List Nat)) : Mut ρ Nat (List Nat) := m\n" ++
-          "def get {ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n#eval Shr.borrow Region.static 4 (fun ρ h x => .ok (get x))") [".ok 4"]
-        failsLibs "import Region\ndef bad {ρ ρ' : Region} (m : Mut ρ Nat (List Nat)) : Mut ρ' Nat (List Nat) := m" "mismatch"
-        failsLibs "import Region\ndef bad {ρ ρ' : Region} (x : Shr ρ Nat) : Shr ρ' Nat := x" "mismatch" },
+        okLibs ("import Region\ndef same {0 ρ : Region} (m : Mut ρ Nat (List Nat)) : Mut ρ Nat (List Nat) := m\n" ++
+          "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n#eval Shr.borrow Region.static 4 (fun ρ h x => .ok (get x))") [".ok 4"]
+        failsLibs "import Region\ndef bad {0 ρ ρ' : Region} (m : Mut ρ Nat (List Nat)) : Mut ρ' Nat (List Nat) := m" "mismatch"
+        failsLibs "import Region\ndef bad {0 ρ ρ' : Region} (x : Shr ρ Nat) : Shr ρ' Nat := x" "mismatch" },
     { name := "a mutable borrow scope hands the lender back", run := fun _ =>
         okLibs ("import Region\n" ++ regionsPush ++
           "#eval Uniq.borrow Region.static List.nil (fun ρ h v r => push1 r)") [".ok ((), .cons 1 .nil)"] },
@@ -126,10 +152,10 @@ def regionsGroup : Group where
           "#eval Shr.borrow Region.static 3 (fun ρa ha a => Shr.borrow ρa 5 (fun ρb hb b =>\n" ++
           "  match longest hb a b with\n  | .ok r => .ok r.val\n  | .err e => .err e))") [".ok 5"] },
     { name := "without the bound, a &'a is not a &'b", run := fun _ =>
-        failsLibs ("import Region\ndef longest {ρa ρb : Region} (x : Shr ρa Nat) (y : Shr ρb Nat) : Result (Shr ρb Nat) :=\n" ++
+        failsLibs ("import Region\ndef longest {0 ρa ρb : Region} (x : Shr ρa Nat) (y : Shr ρb Nat) : Result (Shr ρb Nat) :=\n" ++
           "  match Nat.lt x.val y.val with\n  | .true => .ok y\n  | .false => .ok x") "mismatch" },
     { name := "returning a borrow of a local is a type error (E0515)", run := fun _ =>
-        failsLibs ("import Region\ndef bad {ρ : Region} (x : Shr ρ Nat) : Result (Shr ρ Nat) :=\n" ++
+        failsLibs ("import Region\ndef bad {0 ρ : Region} (x : Shr ρ Nat) : Result (Shr ρ Nat) :=\n" ++
           "  Shr.borrow ρ 5 (fun ρy hy y => .ok y)") "mismatch" },
     { name := "a borrow can't outlive its scope (E0597)", run := fun _ =>
         failsLibs ("import Region\n" ++ regionsLongest ++
@@ -158,18 +184,18 @@ def regionsGroup : Group where
         -- the bound pointing the wrong way: b is borrowed first, so only 'b : 'a is known
         failsLibs ("import Region\n" ++ regionsPick ++ regionsSetPick ++ regionsTwo "t" "b" "setPick ha .true ra rb") "mismatch" },
     { name := "a borrow is shortened, never lengthened, and a local's &mut can't be returned (E0515)", run := fun _ => do
-        failsLibs ("import Region\ndef bad {σ : Region} (1 v : Uniq σ Nat) : Result1 Unit (Uniq σ Nat) :=\n" ++
+        failsLibs ("import Region\ndef bad {0 σ : Region} (1 v : Uniq σ Nat) : Result1 Unit (Uniq σ Nat) :=\n" ++
           "  Uniq.reborrow v (fun ρ h v r => .ok () (Mut.finish (Mut.weaken h (Mut.ofUniq r))))") "mismatch"
         -- (the borrow of `l` would have to leave in the result and be handed back too)
-        failsLibs ("import Region\ndef bad {ρ : Region} (1 v : Uniq ρ Nat) : Borrowed (Mut ρ Nat (Uniq ρ Nat)) (Uniq ρ Nat) :=\n" ++
+        failsLibs ("import Region\ndef bad {0 ρ : Region} (1 v : Uniq ρ Nat) : Borrowed (Mut ρ Nat (Uniq ρ Nat)) (Uniq ρ Nat) :=\n" ++
           "  match Uniq.borrow ρ 5 (fun ρl hl l rl => .ok (Mut.ofUniq rl) rl) with\n" ++
           "  | .ok p => let (m, n) := p; .ok m\n  | .err e => .err e v") "escapes the scope" },
     { name := "two borrows of different regions are not interchangeable", run := fun _ =>
-        failsLibs ("import Region\ndef same {ρ : Region} (1 x : Uniq ρ Nat) (1 y : Uniq ρ Nat) : Result1 Unit ((1 _ : Uniq ρ Nat) × Uniq ρ Nat) := .ok () (x, y)\n" ++
+        failsLibs ("import Region\ndef same {0 ρ : Region} (1 x : Uniq ρ Nat) (1 y : Uniq ρ Nat) : Result1 Unit ((1 _ : Uniq ρ Nat) × Uniq ρ Nat) := .ok () (x, y)\n" ++
           regionsTwo "t" "a" "same ra rb") "mismatch" },
     { name := "linear handles: a scope's handle is used once and handed back on every path (formerly KNOWN GAPs 1 and 3)", run := fun _ => do
         okLibs ("import Region\n" ++
-          "def swap {ρa ρb : Region} (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
+          "def swap {0 ρa ρb : Region} (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
           "  Uniq.read x (fun a x => Uniq.read y (fun b y => Result1.ok () (Uniq.write x b, Uniq.write y a)))\n" ++
           "-- `let mut a := 1; let mut b := 2; swap (&mut a) (&mut b); (a, b)`\n" ++
           "def main : Result (Nat × Nat) :=\n" ++
@@ -182,7 +208,7 @@ def regionsGroup : Group where
           "#eval main\n") [".ok (2, 1)"]
         -- E0499 by linearity: one &mut passed twice
         failsLibs ("import Region\n" ++
-          "def swap {ρa ρb : Region} (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
+          "def swap {0 ρa ρb : Region} (1 x : Uniq ρa Nat) (1 y : Uniq ρb Nat) : Result1 Unit ((1 _ : Uniq ρa Nat) × Uniq ρb Nat) :=\n" ++
           "  Uniq.read x (fun a x => Uniq.read y (fun b y => Result1.ok () (Uniq.write x b, Uniq.write y a)))\n" ++
           "-- E0499: one &mut passed twice\n" ++
           "def dup : Result (Unit × Nat) := Uniq.borrow Region.static 1 (fun ρ h l r =>\n" ++
@@ -195,25 +221,28 @@ def regionsGroup : Group where
           "def esc (v : List Nat) : Result (((0 r : Region) × Uniq r (List Nat)) × List Nat) :=\n" ++
           "  Uniq.borrow Region.static v (fun ρ h l r => .ok (ρ, r) r)\n") "quantity 1"
         -- not forgeable
-        failsLibs "import Region\ndef forge {ρ : Region} (s : List Nat) : Uniq ρ (List Nat) := Uniq.mk s" "private"
+        failsLibs "import Region\ndef forge {0 ρ : Region} (s : List Nat) : Uniq ρ (List Nat) := Uniq.mk s" "private"
         -- KNOWN GAP (pinned; needs linear lenders and Copy, K3): the lender is an ω value,
         -- so a body that names the Lent token differently still reads it while it is lent (E0502)
         okLibs ("import Region\ndef lender (v : List Nat) : Result (Nat × List Nat) := Uniq.borrow Region.static v (fun ρ h tok r =>\n" ++
           "  .ok (List.length v) (Uniq.write r List.nil))\n#eval lender (List.cons 1 List.nil)") [".ok (1, .nil)"] },
     { name := "handles can't be forged outside lib/Region.wiz (private constructors, 13b)", run := fun _ => do
-        failsLibs "import Region\ndef forge {ρ : Region} : Shr ρ Nat := Shr.mk 5" "'Shr.mk' is private to module Region"
-        failsLibs "import Region\ndef forge {ρ : Region} (s : List Nat) : Uniq ρ (List Nat) := Uniq.mk s" "private"
-        failsLibs "import Region\ndef forge {ρ : Region} : Lent ρ Nat := .mk ()" "Lent"
-        failsLibs "import Region\ndef forge {ρ : Region} : Shr ρ Nat := (5, ())" "Shr"
+        failsLibs "import Region\ndef forge {0 ρ : Region} : Shr ρ Nat := Shr.mk 5" "'Shr.mk' is private to module Region"
+        failsLibs "import Region\ndef forge {0 ρ : Region} (s : List Nat) : Uniq ρ (List Nat) := Uniq.mk s" "private"
+        failsLibs "import Region\ndef forge {0 ρ : Region} : Lent ρ Nat := .mk ()" "Lent"
+        failsLibs "import Region\ndef forge {0 ρ : Region} : Shr ρ Nat := (5, ())" "Shr"
         failsLibs ("import Region\nstructure MyShr (ρ : Region) (A : Type) where\n  val : A\n" ++
-          "def forge {ρ : Region} : Shr ρ Nat := MyShr.mk 5") "mismatch"
+          "def forge {0 ρ : Region} : Shr ρ Nat := MyShr.mk 5") "mismatch"
         -- nor through an equation with a look-alike (the kernel compares by shape; `rfl`
         -- compares in the elaborator's view)
         failsLibs ("import Region\nstructure MyShr (ρ : Region) (A : Type) where\n  val : A\n" ++
           "def forge {ρ : Region} (x : Nat) : Shr ρ Nat := cast rfl (MyShr.mk x : MyShr ρ Nat)") "not definitionally equal" },
+    { name := "shared reborrows, zooms and pair borrows keep the lender and hand it back", run := fun _ =>
+        okLibs ("import Region\n" ++ regionsOptics ++ "#eval tShare\n#eval tShareIn\n#eval tZoom\n#eval tBoth")
+          [".ok (2, .cons 1 (.cons 2 .nil))", ".ok ((1, .cons 3 .nil), 5)", ".ok (1, 9, 2, ())", ".ok (3, 1, 2)"] },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
-          "def get {ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++
+          "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++
           "def scoped (xs : List Nat) : Result (Unit × List Nat) := Uniq.borrow Region.static xs (fun ρ h v r => push1 r)\n" ++
           "def direct (xs : List Nat) : Result (Unit × List Nat) := .ok ((), List.cons 1 xs)\n" ++
           "def nested (a b : List Nat) : Result (List Nat × List Nat) :=\n" ++
@@ -231,7 +260,8 @@ def regionsGroup : Group where
         checkEq [".ok ((), .cons 1 .nil)", ".ok ((), .cons 1 .nil)", ".ok (.nil, .cons 1 .nil)", ".ok 4"] msgs
         -- `x.val` is `x`: no projection
         let getIR ← libsIR s "get"
-        check (getIR.all fun d => (d.splitOn "proj").length == 1) s!"a projection:\n{"\n".intercalate getIR}"
+        check (!getIR.isEmpty && getIR.all fun d => (d.splitOn "proj").length == 1)
+          s!"no `get` declaration to check, or a projection:\n{"\n".intercalate getIR}"
         -- a shared borrow's scope is its body run in place: no closure, nothing lifted
         let shIR ← libsIR s "shared"
         check (shIR.length == 1 && shIR.all fun d => (d.splitOn "pap").length == 1)
