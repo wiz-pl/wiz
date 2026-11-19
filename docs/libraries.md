@@ -1729,9 +1729,10 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `web/widget/test.sh` (golden VDOM and patch application under Node),
 `tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
 (`nbclient`). Limits: no client-side state (every event is a kernel round trip),
-`plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
-widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
-held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+a plain `Widget.plot` still carries opaque JSON and renders the front end's placeholder
+(`Widget.plotOf` is the `Plot` adapter: its fragment is the self-contained SVG, and a
+plot with no callback needs no event round trip), and `Owned` cannot be held across
+events. The event's `value` (a slider's number) reaches `Widget.Callback`;
 the raw `Loom.on`/`Loom.App.event` path passes only a handler index, and an app that
 wants a control's live value uses `Loom.LiveApp` (the driver puts it in the event
 string).
@@ -2305,6 +2306,18 @@ Jupyter hook is **not wired**: a cell must print the bundle (`#eval Json.render
 `{"text/plain": …}` (`tools/jupyter/wiz_kernel/kernel.py`), so the SVG is not shown as
 an image until a display hook is added. `Plot.render` is the intended notebook hook;
 no other kernel path consumes it.
+
+**The infoview widget.** `#plot chart` evaluates the chart with the `Plot.widget`
+renderer and reports one `WIZ_WIDGET:` display value at the command: a Loom widget
+bundle with `schema` `wiz.widget/1`, `kind` `plot`, `mimeType` `image/svg+xml`,
+`title`, `summary`, `width`, `height`, `svg`, `html` and `count`. `html` is
+`Plot.html chart` (the self-contained `<figure class="wiz-plot">` around the same SVG)
+and `svg` is the drawing on its own. The browser infoview turns the message into a
+`widget` item in `wiz/interactiveInfo` and inserts the HTML; the terminal and Neovim
+infoviews show the title and point at the browser, because a terminal cannot draw it.
+The payload has no `href`/`src`, script or `url(…)`, so it needs no network and a
+client can insert it without running code. `Widget.plotOf "sales" chart`
+(`lib/Web/Widget.wiz`) is the same drawing as a notebook widget fragment.
 
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout

@@ -149,6 +149,7 @@ local item_titles = {
   import = 'Import',
   instance = 'Instances',
   declaration = 'Declarations',
+  widget = 'Widgets',
   message = 'Messages',
 }
 
@@ -159,7 +160,11 @@ end
 --- One item of wiz/interactiveInfo.
 function Builder:item(it)
   local srow = self:pos()
-  if it.kind == 'declaration' then
+  if it.kind == 'widget' then
+    -- A terminal cannot draw the SVG; name it and point at the browser infoview.
+    self:text(it.title or 'widget', 'WizInfoviewHypName')
+    self:text ' (open the browser infoview to draw it)', 'WizInfoviewMuted'
+  elseif it.kind == 'declaration' then
     self:text(it.title or '', 'WizInfoviewHypName')
     if present(it.type) then
       self:text ' : '

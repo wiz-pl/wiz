@@ -129,7 +129,8 @@ the same session. `definition` is set for a constant: its declaration site, with
 **`wiz/interactiveInfo`** returns `null` or `{"items": [Item], "session": nat}`, where
 
 ```
-Item = {"kind": "syntax" | "expansion" | "import" | "instance" | "declaration" | "message",
+Item = {"kind": "syntax" | "expansion" | "import" | "instance" | "declaration"
+               | "widget" | "message",
         "range": Range, "title": string, "text": string | null,
         "type": TaggedText | null, "location": Location | null}
 ```
@@ -140,6 +141,32 @@ it), or the `import` there; the instances found at the innermost application, wi
 class as tagged `type`; the declarations of the command at the cursor, with their types
 (auxiliary declarations the elaborator made for itself are left out, `auxiliaryDecl`);
 and the messages whose range contains the cursor, with the severity as `title`.
+
+## Widget items
+
+A message whose text starts with `WIZ_WIDGET:` is a **widget**, not prose. The command
+that produces it is `#plot expr` (`Wiz/Elab/Command.lean`, `command.plot`): it
+evaluates a `Plot.Chart` with `Plot.widget` (`lib/Plot.wiz`) and reports the display
+value as the command's message. `wiz/interactiveInfo` reports it with `kind: "widget"`,
+`title: "plot"` and `text` set to the whole display value (the prefix included).
+
+The display value is the Loom widget bundle used by `lib/Web/Widget.wiz`:
+
+```
+WIZ_WIDGET:{"schema":"wiz.widget/1","kind":"plot","mimeType":"image/svg+xml",
+            "title":string,"summary":string,"width":nat,"height":nat,
+            "svg":string,"html":string,"count":1}
+```
+
+`html` is the self-contained `<figure class="wiz-plot">` around the SVG and `svg` is
+the drawing on its own (`Plot.svg`); both are deterministic and contain no `href`,
+`src`, script or `url(…)`, so a client needs no network and can insert `html` without
+running code. The browser infoview (`web/goals.js` `renderInfoItems`) inserts it under
+`Widgets`; it refuses a payload containing a script or an external reference. The
+terminal (`lib/Infoview.wiz`) and Neovim (`editors/nvim/lua/wiz/infoview.lua`)
+infoviews show the title and say the picture is in the browser — they cannot draw SVG.
+The item is positioned like a message: the cursor has to be on the `#plot` command
+(`m.info`), so the `range` is the command's range.
 
 **`wiz/browserInfoview`** is sent by the editor only, with no params. It makes the server
 listen on a WebSocket on `127.0.0.1` (a free port) unless it already does, and answers

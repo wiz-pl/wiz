@@ -95,6 +95,7 @@ export function startInfoview({
     term: null,
     termKind: null,
     info: null,
+    items: [],
     position: null,
     canReconnect: false,
     follow,
@@ -189,7 +190,13 @@ export function startInfoview({
     const doc = client.docs.get(documentUri);
     const version = doc ? doc.version : null;
     view.position = position;
+    // What else is at the cursor (`wiz/interactiveInfo`): a `#plot` message is a widget
+    // item. A server without the request (or a stale session) simply shows none.
+    const infoP = client.interactiveInfo(documentUri, position).then(
+      (answer) => (answer && Array.isArray(answer.items) ? answer.items : []),
+      () => []);
     const state = await readGoalState(client, documentUri, position);
+    const items = await infoP;
     if (mine !== generation) return;   // a newer cursor/edit won
     // The text moved while the answer was in flight: the server answered about a
     // version the page no longer has, so its goals and ranges point at other text.
@@ -201,6 +208,7 @@ export function startInfoview({
     view.term = state.term;
     view.termKind = state.termKind;
     if (state.session !== null) view.session = state.session;
+    view.items = items;
     view.info = null;
     view.message = state.goalsKind === null && state.termKind === null && state.errors.length
       ? state.errors[0] : null;
