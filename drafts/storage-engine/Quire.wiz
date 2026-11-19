@@ -47,6 +47,24 @@ that value, and a node that moved in is. The same fold is therefore exact for an
 index-only scan (no primary read), which is what the page cursor in `QuireCursor.wiz`
 does.
 
+## Group commit
+
+`putQ` commits one transaction: two syncs (pages, then the meta that is the commit point)
+and the six-odd COW pages the change touches. A writer that commits one record per
+transaction pays that per record, and the benchmark's append row is 140-150x slower than
+JSON because of it. `putMany` is the batch form: a list of independent transactions,
+validated in order against the published state plus the batch's accepted prefix, written
+as **one** contiguous page run, made durable by **one** `fdatasync`, and published by
+**one** meta switch (`one fsync`). The commit point is still the meta write, so the
+snapshot contract is unchanged: a reader sees a committed root, and a crash between the
+pages and the meta leaves the previous root (the test's `putManyPagesOnly` is that
+crash).
+
+The batch keeps each key's *final* node: intermediate states inside a group are never
+published, so they need no index facts and no pages. A rejected transaction is not
+written and does not reject the others (the API is per-transaction; the batch is a
+durability grouping, not a logical unit).
+
 ## What is still `O(n)`
 
 `toRecords` walks every live leaf (a test/compaction helper) and `compactQ` walks every
@@ -671,6 +689,22 @@ def QWriteMeta (fd : Fd) (gen : U64) (m : QMeta) : EIO Unit := do
   Fd.write fd (QMeta.encode m);
   Fd.sync fd
 
+/-- One durability point: the pages, one `fdatasync`, the meta slot, one `fsync`. The
+first sync makes the pages durable before the root that points at them; the meta write is
+the commit point and the second sync makes it durable. A group commit is this sequence
+with the pages of *every* accepted transaction in one run, not one sequence per
+transaction. -/
+def QDurable (fd : Fd) (start : Nat) (bytes : Bytes) (gen : U64) (m : QMeta)
+    : IO (Except String Unit) := do
+  r ← QWriteAt fd start bytes;
+  match r with
+  | .error e => IO.pure (.error e)
+  | .ok _ => do
+    rd ← Fd.dataSync fd;
+    match rd with
+    | .error e => IO.pure (.error e)
+    | .ok _ => QWriteMeta fd gen m
+
 /-- The changed records of a transaction: id → the node the commit would produce. -/
 def QChangedOf (entries : List (U64 × Patch)) (oldOf : U64 → Option Node)
     : List (U64 × Option Node) :=
@@ -782,18 +816,35 @@ partial def QUniqueForDef (d : IndexDef) (ord : Nat) (slots : Nat)
         | .none =>
           QUniqueForDef d ord slots changed changedList stMap stRoot stIndexRoot fuel rest
 
-/-- The unique check over the schema (position `ord` is the index's slot block). -/
-partial def QUniqueDefs (h : QHandle) (st : QState) (slots : Nat) (fuel : Nat)
-    (changed : U64Map (Option Node)) (changedList : List (U64 × Option Node))
-    : Nat → List IndexDef → Option CommitError
-  | _, [] => .none
-  | ord, List.cons d ds =>
+/-- The unique check over the schema (position `ord` is the index's slot block).
+`check` is the set of changes to report; `changed` is the state to resolve them in (for
+a batch, the accepted prefix plus the current transaction). The sorted list of `changed`
+is built only when a unique index is actually reached: a schema with none (the findings
+store's) pays nothing, which is what keeps the per-transaction cost of a group constant. -/
+partial def QUniqueDefsOver (h : QHandle) (st : QState) (slots : Nat) (fuel : Nat)
+    (changed : U64Map (Option Node))
+    : Nat → List IndexDef → List (U64 × Option Node) → Option CommitError
+  | _, [], _ => .none
+  | ord, List.cons d ds, check =>
     match d.unique with
-    | .false => QUniqueDefs h st slots fuel changed changedList (Nat.succ ord) ds
-    | .true => match QUniqueForDef d ord slots changed changedList st.map
-        st.root st.indexRoot.toNat fuel changedList with
+    | .false => QUniqueDefsOver h st slots fuel changed (Nat.succ ord) ds check
+    | .true => match QUniqueForDef d ord slots changed (U64Map.toList changed) st.map
+        st.root st.indexRoot.toNat fuel check with
       | .some e => .some e
-      | .none => QUniqueDefs h st slots fuel changed changedList (Nat.succ ord) ds
+      | .none => QUniqueDefsOver h st slots fuel changed (Nat.succ ord) ds check
+
+/-- The unique check for one transaction: its changes, resolved against the state the
+commit would produce. -/
+def QUniqueCheckOver (h : QHandle) (st : QState) (check : List (U64 × Option Node))
+    (changed : U64Map (Option Node)) : Option CommitError :=
+  let slots := QSlotsPer (List.length h.indices);
+  let fuel := Nat.succ (Nat.div (Map.len st.map) pageSize);
+  QUniqueDefsOver h st slots fuel changed 0 h.indices check
+
+/-- Whether the schema has a unique index (the only reason to build the resulting
+state's change map for the unique check). -/
+def QHasUnique (defs : List IndexDef) : Bool :=
+  List.any (fun d => d.unique) defs
 
 /-- The unique-index check on the resulting state. Small change sets only: the schema in
 the benchmark is non-unique, and the pure core has the general incremental check. -/
@@ -801,9 +852,7 @@ def QUniqueCheck (h : QHandle) (st : QState) (entries : List (U64 × Patch))
     (oldOf : U64 → Option Node) : Option CommitError :=
   let changedList := QChangedOf entries oldOf;
   let changed := U64Map.ofList changedList;
-  let slots := QSlotsPer (List.length h.indices);
-  let fuel := Nat.succ (Nat.div (Map.len st.map) pageSize);
-  QUniqueDefs h st slots fuel changed changedList 0 h.indices
+  QUniqueCheckOver h st changedList changed
 
 /-- First-committer-wins: `set`/`del` need the version the transaction read, `addCount`
 only needs the key to exist. `seen` is read from the transaction's own mapping, `now`
@@ -836,13 +885,198 @@ def QRemap (fd : Fd) (old : Map) (last : Nat) (oldPages : Nat) : IO Map :=
     | .ok x => IO.pure x
     | .error _ => IO.pure old
 
+-- ## Group commit: many transactions, one durability point
+
+/-- A batch's acceptance state: the outcomes so far (newest first, reversed at the end),
+the effective node of every accepted change, and the pending delete epoch. -/
+structure QBatchAcc where
+  outcomes : List Outcome
+  nodes : U64Map (Option Node)
+  del : U64
+
+/-- The effective node of `id` in a batch: the batch's accepted change, else the
+published page. -/
+def QBatchNode (nodes : U64Map (Option Node)) (st : QState) (id : U64) : Option Node :=
+  match U64Map.find nodes id with
+  | .some n => n
+  | .none => QReadNode st.map st.root id
+
+/-- Add a transaction's changes to the batch's effective state. -/
+def QBatchMerge (nodes : U64Map (Option Node)) (st : QState)
+    (entries : List (U64 × Patch)) : U64Map (Option Node) :=
+  List.foldl (fun m e => U64Map.insert m e.1 (Patch.apply e.2 (QBatchNode m st e.1)))
+    nodes entries
+
+/-- First-committer-wins for one key inside a batch. `same` means the transaction's base
+is the published state, so a key the batch has not changed still has the version the
+transaction read: the hot path does no page read. A key the batch *has* changed is at the
+batch's generation, so `set`/`del` from an older base conflict. -/
+def QBatchSetCheck (same : Bool) (st : QState) (nodes : U64Map (Option Node)) (g : U64)
+    (txMap : Map) (txRoot : U64) (id : U64) : Option CommitError :=
+  match same with
+  | .true => match U64Map.find nodes id with
+    | .some _ => .some (.conflict id (QReadVersion txMap txRoot id) g)
+    | .none => .none
+  | .false =>
+    let seen := QReadVersion txMap txRoot id;
+    let now := match U64Map.find nodes id with
+      | .some _ => g
+      | .none => QReadVersion st.map st.root id;
+    match UIntN.beq seen now with
+    | .true => .none
+    | .false => .some (.conflict id seen now)
+
+/-- The per-key rule over a batch: `addCount` needs the key to exist (and rebases over the
+batch's earlier deltas), `set`/`del` need the version the transaction read. -/
+partial def QCheckBatchOps (same : Bool) (st : QState) (nodes : U64Map (Option Node))
+    (g : U64) (txMap : Map) (txRoot : U64)
+    : List (U64 × Patch) → Option CommitError
+  | [] => .none
+  | List.cons (id, p) es =>
+    match p with
+    | .addCount _ => match QBatchNode nodes st id with
+      | .none => .some (.missing id)
+      | .some _ => QCheckBatchOps same st nodes g txMap txRoot es
+    | .set _ => match QBatchSetCheck same st nodes g txMap txRoot id with
+      | .some e => .some e
+      | .none => QCheckBatchOps same st nodes g txMap txRoot es
+    | .del => match QBatchSetCheck same st nodes g txMap txRoot id with
+      | .some e => .some e
+      | .none => QCheckBatchOps same st nodes g txMap txRoot es
+
+/-- Validate one transaction of a batch: first-committer-wins against the published state
+plus the accepted prefix, then the unique indices against the prefix plus this
+transaction. (The delete barrier is the fold's check.) -/
+def QBatchValidate (h : QHandle) (st : QState) (g : U64) (acc : QBatchAcc)
+    (tx : QSnapshot) (entries : List (U64 × Patch)) : Option CommitError :=
+  match QCheckBatchOps (UIntN.beq tx.gen st.gen) st acc.nodes g tx.map tx.root entries with
+  | .some e => .some e
+  | .none => match QHasUnique h.indices with
+    | .false => .none
+    | .true =>
+      let changes := List.map (fun e =>
+        (e.1, Patch.apply e.2 (QBatchNode acc.nodes st e.1))) entries;
+      let after := List.foldl (fun m c => U64Map.insert m c.1 c.2) acc.nodes changes;
+      QUniqueCheckOver h st changes after
+
+/-- Reject one transaction of a batch (the others are unaffected). -/
+def QBatchReject (acc : QBatchAcc) (e : CommitError) : QBatchAcc :=
+  { acc with outcomes := List.cons (.rejected e) acc.outcomes }
+
+/-- Accept one transaction: its changes become the batch's effective state, its
+`committed` outcome joins the list (the final reverse restores input order), and a delete
+raises the batch's pending epoch. -/
+def QBatchAccept (acc : QBatchAcc) (st : QState) (g : U64)
+    (entries : List (U64 × Patch)) : QBatchAcc :=
+  let del := match List.any (fun e => Patch.isDel e.2) entries with
+    | .true => g
+    | .false => acc.del;
+  QBatchAcc.mk (List.cons (.committed g) acc.outcomes)
+    (QBatchMerge acc.nodes st entries) del
+
+/-- Fold the batch in list order. A transaction that is stale (its base is below the
+batch's pending delete epoch) or conflicts is rejected on its own; the accepted ones
+coalesce, the last write to each key deciding its final node. -/
+partial def QBatchFold (h : QHandle) (st : QState) (g : U64) (acc : QBatchAcc)
+    : List QSnapshot → QBatchAcc
+  | [] => { acc with outcomes := List.reverse acc.outcomes }
+  | List.cons tx rest =>
+    match UIntN.lt tx.gen acc.del with
+    | .true => QBatchFold h st g (QBatchReject acc (.stale tx.gen st.gen)) rest
+    | .false =>
+      match QBatchValidate h st g acc tx (U64Map.toList tx.ws) with
+      | .some e => QBatchFold h st g (QBatchReject acc e) rest
+      | .none => QBatchFold h st g (QBatchAccept acc st g (U64Map.toList tx.ws)) rest
+
+/-- A batch's changes grouped by chunk of 127 records. -/
+def QNodesByChunk (nodes : List (U64 × Option Node))
+    : U64Map (List (U64 × Option Node)) :=
+  List.foldl (fun m e =>
+    let chunk := Nat.div e.1.toNat 127;
+    match U64Map.find m (U64.ofNat chunk) with
+    | .none => U64Map.insert m (U64.ofNat chunk) [e]
+    | .some xs => U64Map.insert m (U64.ofNat chunk) (List.cons e xs))
+    U64Map.empty nodes
+
+/-- Every fact a batch's changes contribute, from the base node to the final one. A key
+changed twice inside the batch contributes one remove and one add, not two: no
+intermediate state is ever published. -/
+def QFactsOfNodeChanges (defs : List IndexDef) (changes : List (U64 × Option Node))
+    (oldOf : U64 → Option Node) : List QFact :=
+  List.flatMap changes (fun (c : U64 × Option Node) =>
+    QFactsOfDefs defs 0 c.1 (oldOf c.1) c.2)
+
+/-- The pages of a batch and its two new roots. -/
+structure QBatchPages where
+  writer : QWriter
+  root : Nat
+  indexRoot : Nat
+
+/-- The pages of a batch and its two new roots. Reads only the old image. -/
+def QBatchPlan (h : QHandle) (st : QState) (g : U64)
+    (changes : List (U64 × Option Node)) : QBatchPages :=
+  let w0 : QWriter := QWriter.mk st.pageCount.toNat [];
+  let level := QRootLevel st.map st.root.toNat;
+  let byChunk := U64Map.toList (QNodesByChunk changes);
+  let (w1, pairs) := QWriteLeaves w0 st.map g st.root level byChunk g;
+  let (w2, root') := match pairs with
+    | [] => (w1, st.root.toNat)
+    | _ => QWriteDir w1 st.map g st.root.toNat QRootDepth pairs;
+  let slots := QSlotsPer (List.length h.indices);
+  let facts := QFactsOfNodeChanges h.indices changes
+    (fun id => QReadNode st.map st.root id);
+  let (w3, indexRoot') := QNewIndexRoot w2 st.map g st.indexRoot.toNat
+    (QGroupFacts slots facts);
+  QBatchPages.mk w3 root' indexRoot'
+
+/-- The batch's one durability point, or (with `publish = false`, the crash test's hook)
+its page phase only: write the pages, sync them, and stop before the commit record. -/
+def QBatchWrite (publish : Bool) (st : QState) (bytes : Bytes) (g : U64) (meta : QMeta)
+    : IO (Except String Unit) :=
+  match publish with
+  | .true => QDurable st.fd st.pageCount.toNat bytes g meta
+  | .false => do
+    r0 ← QWriteAt st.fd st.pageCount.toNat bytes;
+    match r0 with
+    | .error e => IO.pure (.error e)
+    | .ok _ => Fd.dataSync st.fd
+
+/-- The group-commit core. With `publish`, the whole batch is one durability point; without
+it (the crash test's hook) the pages are written and synced but the commit record is not,
+so a reopen still sees the previous root. -/
+def QCommitBatchWith (publish : Bool) (h : QHandle) (st : QState)
+    (txs : List QSnapshot) : IO (QState × Except String (List Outcome)) := do
+  let g := st.gen + U64.ofNat 1;
+  let acc0 := QBatchAcc.mk [] (U64Map.empty : U64Map (Option Node)) st.delEpoch;
+  let acc := QBatchFold h st g acc0 txs;
+  match U64Map.size acc.nodes with
+  | 0 => IO.pure (st, .ok acc.outcomes)
+  | _ => do
+    let changes := U64Map.toList acc.nodes;
+    let plan := QBatchPlan h st g changes;
+    let last := Nat.add st.pageCount.toNat (List.length plan.writer.pages);
+    let meta := QMeta.mk g (U64.ofNat plan.root) (U64.ofNat plan.indexRoot)
+      (U64.ofNat last) acc.del;
+    let bytes := QWriterBytes plan.writer;
+    r ← QBatchWrite publish st bytes g meta;
+    match r with
+    | .error e => IO.pure (st, .error e)
+    | .ok _ => match publish with
+      | .false => IO.pure (st, .ok acc.outcomes)
+      | .true => do
+        m2 ← QRemap st.fd st.map last st.pageCount.toNat;
+        IO.pure (QState.mk st.fd m2 g (U64.ofNat plan.root)
+          (U64.ofNat plan.indexRoot) (U64.ofNat last) acc.del, .ok acc.outcomes)
+
 /-- The validation of a transaction against the published state. -/
 def QValidate (h : QHandle) (st : QState) (tx : QSnapshot) : Option CommitError :=
   let entries := U64Map.toList tx.ws;
   let curOf := fun id => QReadNode st.map st.root id;
   match QCheckOps tx.map tx.root st.map st.root entries with
   | .some e => .some e
-  | .none => QUniqueCheck h st entries curOf
+  | .none => match QHasUnique h.indices with
+    | .false => .none
+    | .true => QUniqueCheck h st entries curOf
 
 /-- The commit: validate, write the pages, switch the meta. Returns the new state or an
 error; the caller keeps the old state on error. -/
@@ -877,21 +1111,13 @@ def QCommit (h : QHandle) (st : QState) (tx : QSnapshot) :
           | .true => g
           | .false => st.delEpoch;
         let meta := QMeta.mk g (U64.ofNat root') (U64.ofNat indexRoot') (U64.ofNat last) del;
-        r ← QWriteAt st.fd st.pageCount.toNat (QWriterBytes w3);
+        r ← QDurable st.fd st.pageCount.toNat (QWriterBytes w3) g meta;
         match r with
         | .error e => IO.pure (st, .error e)
         | .ok _ => do
-          rd ← Fd.dataSync st.fd;
-          match rd with
-          | .error e => IO.pure (st, .error e)
-          | .ok _ => do
-            rm ← QWriteMeta st.fd g meta;
-            match rm with
-            | .error e => IO.pure (st, .error e)
-            | .ok _ => do
-              m2 ← QRemap st.fd st.map last st.pageCount.toNat;
-              IO.pure (QState.mk st.fd m2 g (U64.ofNat root')
-                (U64.ofNat indexRoot') (U64.ofNat last) del, .ok (.committed g))
+          m2 ← QRemap st.fd st.map last st.pageCount.toNat;
+          IO.pure (QState.mk st.fd m2 g (U64.ofNat root')
+            (U64.ofNat indexRoot') (U64.ofNat last) del, .ok (.committed g))
 
 -- ## Open, get, put, close
 
@@ -963,6 +1189,31 @@ def getQ (h : QHandle) : EIO QSnapshot :=
 def putQ (h : QHandle) (tx : QSnapshot) : EIO Outcome :=
   MVar.borrow h.state (fun st hole =>
     IO.bind (QCommit h st tx)
+      (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
+
+/-- Commit a batch of independent transactions with **one** durability point: the pages
+of every accepted transaction are one contiguous run, one `fdatasync` makes them durable,
+and one meta write (one `fsync`) is the commit point for the whole batch. The transactions
+are applied in list order; each is validated against the published state plus the batch's
+accepted prefix, and every accepted one publishes at the batch's single new generation.
+
+The outcome is per transaction: a stale or unique-violating entry is rejected on its own
+and the others commit. That is the honest reading of a group commit — the batch is a
+durability grouping of independent transactions, not a logical unit, and one stale writer
+must not be able to abort the durability of the writers grouped with it. The group is
+atomic at the page level: all accepted entries appear together at one root, and a crash
+before the meta leaves the previous root (all or none). -/
+def putMany (h : QHandle) (txs : List QSnapshot) : EIO (List Outcome) :=
+  MVar.borrow h.state (fun st hole =>
+    IO.bind (QCommitBatchWith .true h st txs)
+      (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
+
+/-- Test hook, not an API: write a batch's pages and `dataSync` them, but do not write the
+commit record. A reopen must still see the previous root: this is the kill between the
+batch's pages and its commit record. -/
+def putManyPagesOnly (h : QHandle) (txs : List QSnapshot) : EIO (List Outcome) :=
+  MVar.borrow h.state (fun st hole =>
+    IO.bind (QCommitBatchWith .false h st txs)
       (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
 
 /-- Close the descriptor. Outstanding snapshots keep their mapping but not the fd. -/

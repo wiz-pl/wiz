@@ -14,11 +14,17 @@ Each measurement is one process invocation, so peak RSS is that process's.
 |---|---|---|
 | `build` | build N `Json` objects, `Json.render`, one `FS.writeFile` | N commits (one record each) |
 | `batch` | (the same file) | one commit with N records |
+| `append` | (the `build` row) | N one-record transactions, group-committed (`putMany`, one durability point per 1000) |
 | `reopen` | `FS.readFile` + `Json.parse` + count | `openQ` + `getQ` + one node read |
 | `reopen-fast` | — | the same, without the two root-page checksums |
 | `query` | parse + `List.filter` on `state` | `indexCursor` + `filterKey` (index-only) |
 | `update` | parse, map one record's state, render, rewrite | `getQ`, lens `set`, `putQ` |
 | `compact` | — | rewrite the live image and rename (Quire only) |
+
+`append` and `batch` are different writes: `batch` is *one* transaction with N records,
+`append` is N independent one-record transactions. `append` uses `putMany`, which validates
+and writes the whole group but pays one `fdatasync` and one meta `fsync` for it, so the
+per-record durability no longer costs a sync per record.
 
 A finding is a 32-byte record: rule id in `kind`, state id in `label`, and line, path id,
 function id and severity packed into `count`. The strings are interned (the design's
