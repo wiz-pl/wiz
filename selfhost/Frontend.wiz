@@ -5113,6 +5113,8 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
               | .true => inferLetPair gs es cx s
               | .false => match strEq k "term.letTuple" with
               | .true => inferLetPair gs es cx s
+              | .false => match strEq k "term.letPat" with
+              | .true => letPatT gs es cx s .none
               | .false => match strEq k "term.asPat" with
               | .true => .err "an as-pattern `x@p` is only allowed in a pattern"
               | .false => match strEq k "term.field" with
@@ -5528,6 +5530,113 @@ def letPairT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Val) : 
           (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) sty')))
     | e => e
 
+-- (A18, B7) The pattern of a `term.letPat`: a tuple pattern of three or more is a
+-- `term.tuplePat` node, and every pattern with a quantity arrives here too. (Nothing
+-- here recurses: the nested pairs of a quantity pattern are built explicitly.)
+def letPatInner (p : Syntax) : Syntax := unparen p
+def letPatIsUnit (p : Syntax) : Bool := strEq (kindOf (letPatInner p)) "term.unitVal"
+def letPatIsAnon (p : Syntax) : Bool := strEq (kindOf (letPatInner p)) "term.anon"
+def letPatIsTuple (p : Syntax) : Bool :=
+  Bool.or (strEq (kindOf (letPatInner p)) "term.tuple")
+    (strEq (kindOf (letPatInner p)) "term.tuplePat")
+-- the components of a `term.tuplePat` (three or more)
+def letPatTupleItems (p : Syntax) : List Syntax :=
+  .cons (kid p 1) (.cons (kid p 3) (nonAtoms (kids (kid p 5))))
+-- the components of a tuple or anonymous-constructor pattern
+def letPatParts (p : Syntax) : List Syntax :=
+  let p := letPatInner p;
+  match strEq (kindOf p) "term.tuplePat" with
+  | .true => letPatTupleItems p
+  | .false => match strEq (kindOf p) "term.tuple" with
+    | .true => tupleItems p
+    | .false => match strEq (kindOf p) "term.anon" with
+      | .true => nonAtoms (kids (kid p 1))
+      | .false => .nil
+-- `⟨p₁, …, pₙ⟩` as the constructor pattern `.mk p₁ … pₙ`
+def letPatMkStx (ps : List Syntax) : Syntax :=
+  let h := mkNode "term.dotIdent" (.cons (.atom ".") (one (.ident "mk")));
+  match ps with
+  | .nil => h
+  | _ => mkNode "term.app" (.cons h (one (mkNull ps)))
+-- the pattern as the match compiler reads it (`term.tuplePat` and `⟨…⟩` are let forms)
+def letPatPattern (p : Syntax) : Syntax :=
+  let p := letPatInner p;
+  match strEq (kindOf p) "term.tuplePat" with
+  | .true => nestTuple (letPatTupleItems p)
+  | .false => match strEq (kindOf p) "term.anon" with
+    | .true => letPatMkStx (nonAtoms (kids (kid p 1)))
+    | .false => p
+def letPatMatch (pat e body : Syntax) : Syntax :=
+  let alt := mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (one pat))
+    (.cons (.atom "=>") (one body))));
+  mkNode "term.match" (.cons (.atom "match") (.cons (mkNull (one e))
+    (.cons (.atom "with") (one (mkNull (one alt))))))
+-- a `term.letPair` node at a written quantity
+def letPairQ (q x y e body : Syntax) : Syntax :=
+  mkNode "term.letPair" (.cons (.atom "let") (.cons q
+    (.cons (.atom "(") (.cons x (.cons (.atom ",") (.cons y (.cons (.atom ")")
+    (.cons (.atom ":=") (.cons e (.cons (mkNull .nil) (one body)))))))))))
+-- `let q (x₁, …, xₙ) := s; b` as nested pair lets (two to four names)
+def letPatPairs (s : Syntax) (xs : List Syntax) : Syntax :=
+  let q := kid s 1;
+  let e := kid s 4;
+  let b := kid s 6;
+  let r := fun (k : Nat) => mkNode "term.ident" (one (.ident ("tuple✝" +++ Nat.toString k)));
+  match xs with
+  | .cons x (.cons y .nil) => letPairQ q x y e b
+  | .cons x (.cons y (.cons z .nil)) =>
+    let r0 := r 0;
+    letPairQ q x r0 e (letPairQ q y z r0 b)
+  | .cons x (.cons y (.cons z (.cons w .nil))) =>
+    let r0 := r 0;
+    let r1 := r 1;
+    letPairQ q x r0 e (letPairQ q y r1 r0 (letPairQ q z w r1 b))
+  | .cons x (.cons y (.cons z (.cons w (.cons v .nil)))) =>
+    let r0 := r 0;
+    let r1 := r 1;
+    let r2 := r 2;
+    letPairQ q x r0 e (letPairQ q y r1 r0 (letPairQ q z r2 r1 (letPairQ q w v r2 b)))
+  | _ => s
+-- `let pat := e; b` with no quantity is `match e with | pat => b`; with a quantity it
+-- is nested splits; the pattern's shape must match the scrutinee's type (as in the host).
+def letPatT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option Val) : TE :=
+  let pat := kid s 2;
+  let e := kid s 4;
+  let body := kid s 6;
+  match writtenQ (kid s 1) with
+  | .bad => .err qtyErr
+  | .dflt => match letPatIsUnit pat with
+    | .true => letUnitT gs es cx s expected
+    | .false => let m := letPatMatch (letPatPattern pat) e body;
+      match expected with
+      | .some T => checkT gs es cx m T .none
+      | .none => inferT gs es cx m .none
+  | .is q => match expected with
+    | .none => .err "cannot infer the type of this expression; add a type ascription"
+    | .some T =>
+      match inferT gs es cx e .none with
+      | .ok sv sty es1 =>
+        let styf := force es1 sty;
+        match letPatIsUnit pat with
+        | .true => letUnitT gs es cx s (.some T)
+        | .false => match structOf gs es1 styf with
+          | .some S => match letPatIsAnon pat with
+            | .true => match q with
+              -- a structure here is an inductive (its constructor `mk`), so `ω` is a match
+              | .qw => checkT gs es1 cx (letPatMatch (letPatPattern pat) e body) T .none
+              | _ => .err ("cannot take a value of the structure " +++ S +++ " apart at quantity " +++ qName q +++
+                  ": the Σ type of a structure ends in a component that is not a field (its marker tail), and this " +++
+                  "`let` would bind it at quantity " +++ qName q +++ " and never use it. Take the structure at quantity ω, " +++
+                  "use a tuple type, or a one-constructor `inductive` with fields at 1 (taken apart by `match`) for linear data")
+            | .false => .err ("`let` with a quantity expects a pattern ⟨…⟩ or (.mk …) for the structure " +++ S)
+          | .none => match Bool.or (letPatIsTuple pat) (letPatIsAnon pat) with
+            | .true => match force es1 sty with
+              | .vsigma _ _ _ _ _ _ => letPairT gs es1 cx (letPatPairs s (letPatParts pat)) T
+              | sty' => .err (String.append "`let` with a quantity and a pattern expects a structure or a tuple, got "
+                  (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) sty')))
+            | .false => .err (String.append "`let` with a quantity and a pattern expects a structure or a tuple, got "
+                (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) styf)))
+      | e => e
 
 def inferLetUnit (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   match checkT gs es cx (kid s 4) (.vunit (ln 1)) .none with
@@ -5548,7 +5657,9 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
     | .true => letPairT gs es cx s ty
     | .false => match strEq k "term.letTuple" with
       | .true => letPairT gs es cx (letTupleToPairs s) ty
-      | .false => checkT0 gs es cx s ty sp0
+      | .false => match strEq k "term.letPat" with
+        | .true => letPatT gs es cx s (.some ty)
+        | .false => checkT0 gs es cx s ty sp0
 def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
   let k := kindOf s;
@@ -5577,6 +5688,8 @@ def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Op
         | .true => letPairT gs es cx s ty
         | .false => match strEq k "term.letTuple" with
         | .true => letPairT gs es cx s ty
+        | .false => match strEq k "term.letPat" with
+        | .true => letPatT gs es cx s (.some ty)
         | .false => match strEq k "term.rfl" with
         | .true => checkRfl gs es cx (force es ty)
         | .false => match (match strEq k "term.app" with
