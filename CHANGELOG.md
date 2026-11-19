@@ -379,6 +379,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   stays `bounded`). A case of a group that runs its cases one at a time now receives
   `--jobs` (`Tests.caseJobs`). The records carry each side's `ms`, the summary the
   slowest runs (21ae).
+* `lib/Hdl/Signal.wiz` (`import Hdl.Signal`): Clash-style signals as ν-streams with a
+  phantom `ClockDomain`, `register`/`registerR`/`registerEn`, `mealy`/`moore`, a pointwise
+  `Hw` instance so tagless hardware code and derived bundles run on signals, `Signal.Eqv`
+  and `Signal.sat` over `TL`, and `Signal.ofCircuit` with its proof that the signal is
+  `Circuit.trace` at every cycle. No `Signal.fix` yet: it needs sized `scofix` (34a).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
