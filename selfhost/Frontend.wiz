@@ -10540,13 +10540,8 @@ def Run.addLine (r : Run) (l : String) : Run := match r with
 inductive StepR where
   | done
   | next (line : Option String) (stop : Nat) (gs : Globals) (cats : List Cat) (tokens : List String) (notes : List Note)
--- (D6) every output line names the offset of the command that produced it, as
--- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
--- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
--- line leaves `stepCommand`: the driver entry.)
-def atLine (start : Nat) (l : Option String) : Option String := match l with
-  | .none => .none
-  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+-- (D6) every output line names the offset of the command that produced it (see `atLine`
+-- above); (13t) the namespace errors and this loop use it too.
 -- is the command at `pos` an `import`? (`import_c` is not: the next character is an id
 -- character). `runCommands` uses this to keep the header open across imports and close it
 -- at the first declaration.

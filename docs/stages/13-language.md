@@ -861,10 +861,10 @@ def two : Nat := 1 + 1
 
 Three rules, checked by both frontends:
 
-1. **Top level only.** An `import` inside a command (`private`, `sealed`, `local`,
-   `partial`, `mutual`) is an error that names the container, at the `import`'s
-   position. The wrappers are those containers; a term cannot contain an `import` at all (it is a reserved keyword, and the
-   parser says so where it was written).
+1. **Top level only.** An `import` inside a wrapper command (`private`, `sealed`,
+   `local`, `partial`, `mutual`) is an error that names the container, at the
+   `import`'s position. A term cannot contain an `import` at all (it is a reserved
+   keyword, and the parser says so where it was written).
 2. **Before every other command.** Once a non-import command has been elaborated, a
    later `import` is the error `imports must precede declarations` (code
    `import-order`), at the `import`'s position; it is not loaded.

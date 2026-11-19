@@ -13,9 +13,8 @@ namespace Tests.Elab
 from an `open`, prefix aliases (`open M as A`), the ambiguity error, and the interaction
 with `private` and `end`.
 
-The files here are under `Tests/` only: the self-hosted frontend does not have the two
-commands yet (its parser table and `elabCommand` walk are the follow-up), so nothing it
-compiles may use them. -/
+The self-hosted frontend mirrors these commands (`selfhost/Frontend.wiz`); its cases are
+in `Tests/Groups/SelfHost.lean`. -/
 
 /-- No errors, and exactly these messages (the `#check` lines), from a program with the
 given modules importable. -/

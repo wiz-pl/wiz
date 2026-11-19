@@ -4303,7 +4303,7 @@ def selfHostHostGroup : Group where
     { name := "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)", run := fun _ =>
         selfhostCheckFile superclassParam superclassParamExpected },
     { name := "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)", run := fun _ =>
-        selfhostCompileRun superclassProgram "5\n" }
+        selfhostCompileRun superclassProgram "5\n" },
     -- the import header (13u): the self-hosted loader skips imports, so it must agree
     { name := "13u: comments and imports form the header (accepted)", run := fun _ =>
         selfhostChecks "import Prelude\n-- a comment\n/- a block -/\ndef two : Nat := 1 + 1\n#check two\n" },
