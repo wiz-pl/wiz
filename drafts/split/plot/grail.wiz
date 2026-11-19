@@ -1,0 +1,7 @@
+import Grail
+-- The Plot package (prototype for `wiz-notes/lib-split.md`): `grail build plot` checks
+-- `lib/Plot.wiz` as its own module root; `grail check` runs the demo through the same
+-- root. Nothing here needs a compiler change.
+def package : Package := Package.new "plot"
+  |> Package.lib "plot" "lib"
+  |> Package.check "demo" "demo.wiz"
