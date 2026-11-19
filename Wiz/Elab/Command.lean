@@ -173,6 +173,11 @@ structure CommandState (R : Type) where
   /-- no command has been elaborated into this state yet (it is the initial state, up to
   messages and the info tree) -/
   pristine : Bool := true
+  /-- (import header) a command that is not an `import` has been elaborated in this file:
+  from then on an `import` is an error ("imports must precede declarations"). A module's
+  own state starts `false`; `endModule` restores the importer's value, so importing a
+  module does not close the importer's header. -/
+  headerDone : Bool := false
   /-- (13m) what `local` commands of the module being elaborated added, latest first: node
   kinds and syntax categories, and macro rules and `attribute [macro]` registrations
   (numbered from the oldest). They are dropped when the module's import ends
@@ -1472,6 +1477,8 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localSimps := outer.localSimps,
                             localPP := outer.localPP,
+                            -- (import header) the importer's header is not the module's
+                            headerDone := outer.headerDone,
                             globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
@@ -1704,10 +1711,25 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else
         reportKernel cmd.info name e (if ours then
           "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
+  -- (import header) `import` is parsed only at the top level, before every other command
+  -- (`Wiz.Frontend.Parse.parseCommand`, `Builtin.importDescr`); it is not a rule of the
+  -- extensible `command` category, so `syntax`/`macro_rules` cannot write it. A node of
+  -- this kind that still reaches the elaborator was built by a command macro (`Macro`
+  -- output) or hand-built: reject it here, the second half of the extension-proofing.
+  if cmd.isOfKind "command.import" then
+    reportC cmd.info "`import` is only allowed at the top level of a file, before every other command (a command macro cannot produce one)" ErrorCode.importOrder
+    return
+  -- the wrapper commands parse an `import` only to report which one contains it
+  let rejectImportIn (what : String) (inner : Syntax) : StateM (CommandState R) Bool := do
+    if inner.isOfKind "command.import" then
+      reportC inner.info s!"`import` is not allowed inside {what}: imports go at the top level of a file, before every other command" ErrorCode.importOrder
+      pure true
+    else pure false
   match cmd.kind with
   | "command.private" =>
     -- (13b) every name the command declares is private to this module
     let before := s.globals.order.size
+    if ← rejectImportIn "`private`" (cmd.getArg 1) then return
     -- In a module, a private type (`inductive`, `structure`, `class`, `coinductive`, or a
     -- `mutual` block of inductives) is declared under its private kernel name
     -- (`Globals.privateName`) from the start, so that its constructors, fields,
@@ -1748,6 +1770,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- declaration can write the name, and a constant is compared by name, so no other
     -- declaration is convertible to `T`.
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`sealed`" inner then return
     if !inner.isOfKind "command.inductive" then
       report .error cmd.info "`sealed` applies to an `inductive` declaration"
     else
@@ -1768,6 +1791,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.local" =>
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`local`" inner then return
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
             "command.macroRules", "command.attrMacro", "command.attrSimp", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
       report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance` and unexpanders can be `local`"
@@ -1898,6 +1922,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else (d, none)
     let members := if cmd.isOfKind "command.partial" then #[unwrap cmd] else (cmd.getArg 1).args.map unwrap
     let defs := members.map (·.1)
+    -- an `import` is not a definition: say which wrapper contains it
+    let container := if cmd.isOfKind "command.mutual" then "a `mutual` block" else "`partial`"
+    for (d, _) in members do
+      if ← rejectImportIn container d then return
     if cmd.isOfKind "command.mutual" && defs.all (·.isOfKind "command.inductive") then
       match mutualInductive s.tables defs with
       | .ok cmds =>

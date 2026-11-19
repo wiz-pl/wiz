@@ -275,6 +275,16 @@ def structureWhere : ParserDescr :=
 /-- `deriving C₁, C₂` after an `inductive` or `structure` (HD8) -/
 def derivingClause : ParserDescr := optional (seqs ["deriving", sepBy1 ident ","])
 
+/-- The `import` declaration: `import M`, a *header* declaration, parsed by
+`Wiz.Frontend.Parse.parseCommand` before it tries the `command` category.
+
+It is deliberately **not** a rule of `command`: `command` is the extensible category
+(`syntax`, `macro_rules`, `attribute [macro …]`), and a fixed header must not be
+producible by an extension. A `syntax` rule cannot mention it, and `` `(command| import M) ``
+does not parse. A node of kind `command.import` that reaches the elaborator anyway (a
+hand-built one from a command macro) is rejected in `Wiz.Elab.Command.elabCommand`. -/
+def importDescr : ParserDescr := node "command.import" (seqs ["import", ident])
+
 /-- Commands. Each command is parsed inside `withPosition`, so an application can't
 continue onto a line starting at the command's column.
 
@@ -314,17 +324,21 @@ def commandLeading : List LeadingParser := [
   { kind := "command.defEqns", prec := maxPrec,
     p := seqs ["def", ident, univParams, many (bracketedBinder false), typeSpec true, many1 matchAlt] },
   -- 13b: every name the command declares is visible only in this module
-  { kind := "command.private", prec := maxPrec, p := seqs ["private", cat "command" 0] },
+  -- (the `import` alternative lets the parser reach the elaborator, which reports that an
+  -- import is not allowed inside `private`; it does not make `import` a command rule)
+  { kind := "command.private", prec := maxPrec, p := seqs ["private", orelse (cat "command" 0) importDescr] },
   -- 22k: `sealed inductive T …`: only this declaration is the type `T` (a look-alike is
   -- another type); needed for a native representation
-  { kind := "command.sealed", prec := maxPrec, p := seqs ["sealed", cat "command" 0] },
+  { kind := "command.sealed", prec := maxPrec, p := seqs ["sealed", orelse (cat "command" 0) importDescr] },
   -- 13m: notation that importers don't see (`local` is not reserved)
-  { kind := "command.local", prec := maxPrec, p := seqs [nonReserved "local", cat "command" 0] },
+  { kind := "command.local", prec := maxPrec, p := seqs [nonReserved "local", orelse (cat "command" 0) importDescr] },
   -- stage 13: general recursion; a `mutual` block's definitions are partial too
   -- (a partial definition's type needs a witness: found, or given with `(default := w)`)
   { kind := "command.partial", prec := maxPrec,
-    p := seqs ["partial", optional (seqs ["(", nonReserved "default", ":=", term, ")"]), cat "command" 0] },
-  { kind := "command.mutual", prec := maxPrec, p := seqs ["mutual", many1 (cat "command" 0), "end"] },
+    p := seqs ["partial", optional (seqs ["(", nonReserved "default", ":=", term, ")"]),
+      orelse (cat "command" 0) importDescr] },
+  { kind := "command.mutual", prec := maxPrec,
+    p := seqs ["mutual", many1 (orelse (cat "command" 0) importDescr), "end"] },
   { kind := "command.axiom", prec := maxPrec,
     p := seqs ["axiom", ident, univParams, many (bracketedBinder false), typeSpec true] },
   { kind := "command.check", prec := maxPrec, p := seqs ["#check", term] },
@@ -332,7 +346,6 @@ def commandLeading : List LeadingParser := [
   { kind := "command.reduce", prec := maxPrec, p := seqs ["#reduce", term] },
   { kind := "command.eval", prec := maxPrec, p := seqs ["#eval", term] },
   { kind := "command.erase", prec := maxPrec, p := seqs ["#erase", ident] },
-  { kind := "command.import", prec := maxPrec, p := seqs ["import", ident] },
   -- stage 8: run through the backend pipeline (IR, reference counting), print the IR
   { kind := "command.run", prec := maxPrec, p := seqs ["#run", term] },
   { kind := "command.ir", prec := maxPrec, p := seqs ["#ir", ident] },
@@ -500,6 +513,10 @@ def tables : ParserTables :=
   let t := stxLeading.foldl (·.addLeading "stx" ·) t
   let t := stxTrailing.foldl (·.addTrailing "stx" ·) t
   let t := macroCommands.foldl (·.addLeading "command" ·) t
+  -- `import` is no longer a `command` rule, but it stays reserved: it is a keyword of the
+  -- fixed header (`importDescr`), parsed by `parseCommand` before the command category,
+  -- and `def import := 1` is an error as before.
+  let t := t.addTokens ["import"]
   ["term", "command", "level", "tactic"].foldl addMetaParsers t
 
 /-- The number of children a descriptor adds to its node, when that is fixed. -/

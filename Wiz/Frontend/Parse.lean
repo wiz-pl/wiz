@@ -80,10 +80,14 @@ def ParseError.explainKeywords (tables : ParserTables) (site : Name → Option S
     else x
   { e with expected := e.expected.map explain, shown := e.shown.map explain }
 
-/-- Parse the command starting at (or after whitespace following) `pos`. -/
+/-- Parse the command starting at (or after whitespace following) `pos`.
+
+`import M` is a **header declaration**, not a rule of the extensible `command`
+category: it is tried first, from `Builtin.importDescr`, so every top-level command
+position parses it and no `syntax`/macro rule can produce it. -/
 def parseCommand (chars : Array Char) (tables : ParserTables) (pos : Nat) :
     Except ParseError (Syntax × Nat) :=
-  (runDescr (.withPosition (.cat "command" 0)) >>= fun r => pure r[0]!).run chars tables pos
+  (runDescr (.withPosition (.orelse Builtin.importDescr (.cat "command" 0))) >>= fun r => pure r[0]!).run chars tables pos
 
 /-- The start of the next line beginning in column 0 with a non-space character,
 strictly after `pos`. -/
@@ -117,26 +121,62 @@ partial def updateTables (tables : ParserTables) (cmd : Syntax) : Except String 
 
 structure ParsedFile where
   commands : Array Syntax := #[]
+  /-- The header's imports, in order (`pad`, so a caller can list them cheaply). -/
+  imports : Array Name := #[]
   messages : Array Message := #[]
   tables : ParserTables
 
-/-- Parse a whole file, applying grammar-changing commands as they are seen. -/
+/-- The message for an `import` that a declaration already preceded. -/
+def importOrderMessage : String :=
+  "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)"
+
+/-- Parse a whole file, applying grammar-changing commands as they are seen. The header
+(comments and `import`s) comes first; an `import` after a non-import command is reported
+and parsing carries on, so one mistake gives one message. -/
 partial def parseFile (input : String) (tables : ParserTables := Builtin.tables) : ParsedFile :=
   let chars := input.toList.toArray
-  go chars 0 { tables }
+  go chars 0 { tables } true
 where
-  go (chars : Array Char) (pos : Nat) (acc : ParsedFile) : ParsedFile :=
+  go (chars : Array Char) (pos : Nat) (acc : ParsedFile) (header : Bool) : ParsedFile :=
     if skipWs chars pos ≥ chars.size then acc else
     match parseCommand chars acc.tables pos with
     | .ok (cmd, stop) =>
+      let isImport := cmd.isOfKind "command.import"
+      let acc :=
+        if isImport then
+          { acc with commands := acc.commands.push cmd,
+                     imports := acc.imports.push (((cmd.getArg 1).getId?).getD "_") }
+        else { acc with commands := acc.commands.push cmd }
+      let acc := if isImport && !header then
+          { acc with messages := acc.messages.push { pos := cmd.info.start, msg := importOrderMessage } }
+        else acc
+      let header := header && isImport
       match updateTables acc.tables cmd with
-      | .ok tables => go chars stop { acc with commands := acc.commands.push cmd, tables }
+      | .ok tables => go chars stop { acc with tables } header
       | .error msg =>
         go chars stop { acc with
-          commands := acc.commands.push cmd
-          messages := acc.messages.push { pos := cmd.info.start, msg } }
+          messages := acc.messages.push { pos := cmd.info.start, msg } } header
     | .error e =>
       let msg := ((e.explainKeywords acc.tables).render input).splitOn ": " |>.drop 1 |> ": ".intercalate
-      go chars (recoverPos chars (skipWs chars pos)) { acc with messages := acc.messages.push { pos := e.pos, msg } }
+      go chars (recoverPos chars (skipWs chars pos)) { acc with messages := acc.messages.push { pos := e.pos, msg } } header
+
+/-- The imports in a file's header, in order, without parsing past the first command that
+is not an `import` (and without elaborating anything). This is the cheap dependency fact a
+fixed header buys: `wiz parse --imports FILE`. -/
+partial def parseImports (input : String) (tables : ParserTables := Builtin.tables) :
+    Array Name × Array Message :=
+  go (input.toList.toArray) 0 tables #[]
+where
+  go (chars : Array Char) (pos : Nat) (tables : ParserTables) (acc : Array Name) :
+      Array Name × Array Message :=
+    if skipWs chars pos ≥ chars.size then (acc, #[]) else
+    match parseCommand chars tables pos with
+    | .ok (cmd, stop) =>
+      if cmd.isOfKind "command.import" then
+        go chars stop tables (acc.push (((cmd.getArg 1).getId?).getD "_"))
+      else (acc, #[])
+    | .error e =>
+      let msg := ((e.explainKeywords tables).render input).splitOn ": " |>.drop 1 |> ": ".intercalate
+      (acc, #[{ pos := e.pos, msg }])
 
 end Wiz

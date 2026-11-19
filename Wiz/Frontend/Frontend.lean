@@ -245,6 +245,10 @@ cost is instance arguments in the frontend loop; the measurement is in
   go input s input.toList.toArray 0 s
 where
   @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
+    -- a new text (a file, a REPL entry, a `:load`) has its own header: the state's
+    -- `headerDone` is from the previous one (`step` sets it). `pos > 0` is a continuation
+    -- of the same text (the cache's parse-error fallback, a query's single command).
+    let s := if pos == 0 then { s with headerDone := false } else s
     (go' input base chars pos s {}).1
   @[nospecialize] go' (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R)
       (memo : Std.HashMap Name (CommandState R)) : CommandState R × Std.HashMap Name (CommandState R) :=
@@ -252,54 +256,59 @@ where
     match parseCommand chars s.tables pos with
     | .ok (cmd, stop) =>
       if cmd.isOfKind "command.import" then
-        let m := ((cmd.getArg 1).getId?).getD "_"
-        if s.imported.contains m then go' input base chars stop s memo else
-        let err (text code : String) : CommandState R :=
-          { s with messages := s.messages.push { info := cmd.info, severity := .error, text, code } }
-        match s.loader m, s.checked.get? m with
-        | none, _ => go' input base chars stop (err s!"unknown module {m}" ErrorCode.unknownModule) memo
-        | some _, some none => go' input base chars stop (err s!"import cycle through {m}" ErrorCode.importCycle) memo
-        | some src, done =>
-          let srcChars := src.toList.toArray
-          -- in isolation (unless already done in this run)
-          let (isoErrs, checked, iso?, memo) : Array Msg × Std.HashMap Name (Option (Array Msg)) × Option (CommandState R) × Std.HashMap Name (CommandState R) := match done with
-            | some (some errs) => (errs, s.checked, memo.get? m, memo)
-            | _ =>
-              let isolate (_ : Unit) :=
-                let (iso, memo) := go' src base srcChars 0
-                  { base with imported := m :: base.imported, messages := #[], module := m,
-                              checked := s.checked.insert m none } memo
-                (({ state := iso, errs := iso.messages.filter (·.severity == .error) } : Isolated R), iso.checked, memo)
-              -- kept from an earlier run in this process, or elaborated (and kept)
-              let (e, checked, memo) := match IsoCache.ref (R := R), isoKey base m with
-                | some ref, some k => match isoGet ref k with
-                  | some e => (e, s.checked, memo)
-                  | none => let (e, checked, memo) := isolate (); (isoPut ref k e, checked, memo)
-                | _, _ => isolate ()
-              (e.errs, checked.insert m (some e.errs), some e.state, memo.insert m e.state)
-          let s := { s with checked }
-          let (inner, memo) := match iso? with
-            -- (a pristine state may still list imports, of modules without commands; the
-            -- isolated state may come from another run: the loader and headers are ours)
-            | some iso => if s.pristine then ({ iso with checked, loader := s.loader, cHeaders := s.cHeaders, cSources := s.cSources,
-                                                          includes := s.includes,
-                                                          imported := iso.imported.filter (!s.imported.contains ·) ++ s.imported }, memo) else
-                go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
-            | none => go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
-          let errs := if isoErrs.isEmpty then inner.messages.filter (·.severity == .error) else isoErrs
-          -- (a declaration this file already has is reported as it is, at the import)
-          let msg : Msg := match errs.find? (·.code == "duplicate-declaration") with
-            | some d => { info := cmd.info, severity := .error, text := d.text, code := d.code }
-            | none => { info := cmd.info, severity := .error, code := ErrorCode.moduleErrors,
-                        text := importErrorsText m src errs }
-          let msgs := if errs.isEmpty then s.messages else s.messages.push msg
-          -- (a module's warnings, such as an unchecked `builtin`, are shown at the import)
-          let msgs := msgs ++ (inner.messages.filter (·.severity == .warning)).map fun w =>
-            { info := cmd.info, severity := .warning, text := s!"module {m}: {w.render src}" }
-          -- the info tree is positions in this file: keep only ours (and (11q) the import)
-          -- (13m) the module's `local` notation stays in it
-          let infos := if s.termInfo then s.infos.push (.importMod (cmd.getArg 1).info m) else s.infos
-          go' input base chars stop { (inner.endModule s) with messages := msgs, module := s.module, infos } memo
+        if s.headerDone then
+          -- (import header) an import after a declaration: a fixed header, not a command
+          let msg : Msg := { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" }
+          go' input base chars stop { s with messages := s.messages.push msg } memo
+        else
+          let m := ((cmd.getArg 1).getId?).getD "_"
+          if s.imported.contains m then go' input base chars stop s memo else
+          let err (text code : String) : CommandState R :=
+            { s with messages := s.messages.push { info := cmd.info, severity := .error, text, code } }
+          match s.loader m, s.checked.get? m with
+          | none, _ => go' input base chars stop (err s!"unknown module {m}" ErrorCode.unknownModule) memo
+          | some _, some none => go' input base chars stop (err s!"import cycle through {m}" ErrorCode.importCycle) memo
+          | some src, done =>
+            let srcChars := src.toList.toArray
+            -- in isolation (unless already done in this run)
+            let (isoErrs, checked, iso?, memo) : Array Msg × Std.HashMap Name (Option (Array Msg)) × Option (CommandState R) × Std.HashMap Name (CommandState R) := match done with
+              | some (some errs) => (errs, s.checked, memo.get? m, memo)
+              | _ =>
+                let isolate (_ : Unit) :=
+                  let (iso, memo) := go' src base srcChars 0
+                    { base with imported := m :: base.imported, messages := #[], module := m,
+                                checked := s.checked.insert m none } memo
+                  (({ state := iso, errs := iso.messages.filter (·.severity == .error) } : Isolated R), iso.checked, memo)
+                -- kept from an earlier run in this process, or elaborated (and kept)
+                let (e, checked, memo) := match IsoCache.ref (R := R), isoKey base m with
+                  | some ref, some k => match isoGet ref k with
+                    | some e => (e, s.checked, memo)
+                    | none => let (e, checked, memo) := isolate (); (isoPut ref k e, checked, memo)
+                  | _, _ => isolate ()
+                (e.errs, checked.insert m (some e.errs), some e.state, memo.insert m e.state)
+            let s := { s with checked }
+            let (inner, memo) := match iso? with
+              -- (a pristine state may still list imports, of modules without commands; the
+              -- isolated state may come from another run: the loader and headers are ours)
+              | some iso => if s.pristine then ({ iso with checked, loader := s.loader, cHeaders := s.cHeaders, cSources := s.cSources,
+                                                            includes := s.includes, headerDone := s.headerDone,
+                                                            imported := iso.imported.filter (!s.imported.contains ·) ++ s.imported }, memo) else
+                  go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
+              | none => go' src base srcChars 0 { s with imported := m :: s.imported, messages := #[], module := m } memo
+            let errs := if isoErrs.isEmpty then inner.messages.filter (·.severity == .error) else isoErrs
+            -- (a declaration this file already has is reported as it is, at the import)
+            let msg : Msg := match errs.find? (·.code == "duplicate-declaration") with
+              | some d => { info := cmd.info, severity := .error, text := d.text, code := d.code }
+              | none => { info := cmd.info, severity := .error, code := ErrorCode.moduleErrors,
+                          text := importErrorsText m src errs }
+            let msgs := if errs.isEmpty then s.messages else s.messages.push msg
+            -- (a module's warnings, such as an unchecked `builtin`, are shown at the import)
+            let msgs := msgs ++ (inner.messages.filter (·.severity == .warning)).map fun w =>
+              { info := cmd.info, severity := .warning, text := s!"module {m}: {w.render src}" }
+            -- the info tree is positions in this file: keep only ours (and (11q) the import)
+            -- (13m) the module's `local` notation stays in it
+            let infos := if s.termInfo then s.infos.push (.importMod (cmd.getArg 1).info m) else s.infos
+            go' input base chars stop { (inner.endModule s) with messages := msgs, module := s.module, infos } memo
       else go' input base chars stop (step chars cmd s) memo
     | .error e =>
       -- (13o) a keyword where a name was expected: which notation, from which module
@@ -324,6 +333,8 @@ where
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)
     { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
+              -- (import header) this is a command that is not an import: the header is over
+              headerDone := true,
               declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
 
 end Wiz

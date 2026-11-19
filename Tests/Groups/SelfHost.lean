@@ -4269,6 +4269,15 @@ def selfHostHostGroup : Group where
         selfhostCheckFile superclassParam superclassParamExpected },
     { name := "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)", run := fun _ =>
         selfhostCompileRun superclassProgram "5\n" }
+    -- the import header (13u): the self-hosted loader skips imports, so it must agree
+    { name := "13u: comments and imports form the header (accepted)", run := fun _ =>
+        selfhostChecks "import Prelude\n-- a comment\n/- a block -/\ndef two : Nat := 1 + 1\n#check two\n" },
+    { name := "13u: an import after a declaration is an error", run := fun _ =>
+        selfhostCheckFails "import Prelude\ndef two : Nat := 1 + 1\nimport Prelude\n"
+          "input.wiz:3:1: error: imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)\n" },
+    { name := "13u: an import inside `mutual` is an error naming the block", run := fun _ =>
+        selfhostCheckFails "import Prelude\nmutual\nimport Prelude\ndef two : Nat := 1 + 1\nend\n"
+          "input.wiz:2:1: error: `import` is not allowed inside a `mutual`/`partial` block: imports go at the top level of a file, before every other command\n" }
 
   ]
 

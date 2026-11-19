@@ -2213,7 +2213,7 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
     | some _ => pure (some { module := init.module, effects := ← IO.mkRef #[], keys := ← IO.mkRef #[],
                              rerun := ← IO.mkRef #[], region := false, entries := ← IO.mkRef #[] })
     | none => pure none
-  let result ← go keys init [] input init chainKey .write manifestKey none rootSink
+  let result ← go keys init [] input { init with headerDone := false } chainKey .write manifestKey none rootSink
   match store.manifests with
   | some ms =>
     if !rootPath.isEmpty then
@@ -2319,6 +2319,11 @@ where
         let text := String.ofList (chars.extract pos stop).toList
         key := key.mixText text
         if cmd.isOfKind "command.import" then
+          if s.headerDone then
+            -- (import header) an import after a declaration: not brought in, one error
+            s := { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" } }
+            pos := stop
+            continue
           allCacheable := false
           if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
           let m := ((cmd.getArg 1).getId?).getD "_"
@@ -2408,6 +2413,8 @@ where
               if store.manifests.isSome then
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
+        -- (import header) a command that is not an import closes the header
+        s := { s with headerDone := true }
         pos := stop
     -- (write the module's region after a complete isolated run; a manifest is written even
     -- for an aborted run: the entries before a parse error were elaborated and their bytes
