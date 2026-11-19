@@ -15,8 +15,12 @@ trap 'rm -rf "$OUT"' EXIT
 
 # The compiler flags (GMP's include and library) come from /workspace/wiz-env.sh in the
 # dev shell; without them a plain `wiz run` still works where GMP is in the default path.
-set -- run "$ROOT/web/framework/gen.wiz"
+# `-I lib`: the framework's own modules (lib/Web/Loom.wiz) are in the checkout's library,
+# which a toolchain built before the rename or from another commit does not have.
+set -- run -I "$ROOT/lib" "$ROOT/web/framework/gen.wiz"
 if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
 if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 "$WIZ" "$@" > "$OUT/fixture.json"
 node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
+# The driver's ABI (event strings, payloads, onStep, js_patch): Node only, no wiz.
+node "$ROOT/web/framework/driver_test.mjs"

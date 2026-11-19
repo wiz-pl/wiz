@@ -311,7 +311,7 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|warning 3 unmodelled-external"
+     ++ "|warning 5 unmodelled-external"
      ++ "|warning 1 lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"

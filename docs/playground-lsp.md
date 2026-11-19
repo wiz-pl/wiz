@@ -16,15 +16,32 @@ is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
 the protocol below — the Lean one today, a self-hosted one later — is a drop-in: the page
 cannot tell them apart.
 
+`web/playground-lsp.js` is also the standalone browser infoview (`web/infoview.html`,
+served by `wiz lsp --ws` and `web/bridge.sh`): the same pane, the same rendering and the
+same requests, so the two pages and both transports have one implementation. The page's
+half (`web/infoview.js`) only maps its URL to an endpoint and passes `follow`/`info`/
+`onRender` to the pane; `web/infoview_page_test.mjs` covers that mapping. In follow mode
+(`?follow=1`, what `wiz/browserInfoview` opens) the pane opens no document of its own —
+the server shares the editor's — and moves with the `wiz/infoview/cursor` notification.
+
 ## Pointing the page at a server
 
 ```sh
 web/build-playground.sh web/out          # or use the published site
-wiz lsp --ws 8765 --no-stdio             # the server, on 127.0.0.1:8765
+wiz lsp --ws 8765 --no-stdio             # the server, on 127.0.0.1:8765; prints its token T
 python3 -m http.server -d web/out 8000   # the page, over HTTP
-# then open http://127.0.0.1:8000/playground.html?lsp=ws://127.0.0.1:8765
+# then open http://127.0.0.1:8000/playground.html?lsp=ws://127.0.0.1:8765&token=T
 ```
 
+* **The token.** `wiz lsp --ws` lets in only a client that presents its token (`?token=T`
+  in the socket's URL, or `Authorization: Bearer T`), and answers anything else with
+  `401` before the WebSocket opens. Without it, any program on the machine could connect,
+  open documents and have them elaborated with your privileges (the `Origin` check
+  stops other web sites, not local programs). The token is fresh for every launch and
+  printed on stderr; `--token-file FILE` reads it from FILE instead (and creates FILE,
+  mode 0600, with a fresh one if it does not exist). The page's `?token=` goes into the
+  socket's URL and is never shown in the pane. `--ws-insecure` turns the check off
+  (loopback only, with a warning).
 * With **no `lsp` parameter the in-page server is the default** (`?lsp=selfhost` names it
   explicitly): the pane's diagnostics and `#check`/`#eval` answers come from the same Wasm
   engine, with nothing to start. `?lsp=off` (also `none`, `0`, `false`) turns the pane
@@ -37,6 +54,10 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   `new LspClient({url, WebSocketImpl})` for the client alone. The config may also set
   `WebSocketImpl` (default `globalThis.WebSocket`), `requestTimeout` and `languageId`, so
   a self-hosted server that needs its own transport plugs in without touching the page.
+  The pane takes three more options the standalone page uses: `follow` (view another
+  editor's document, moved by `goTo`), `info` (an element for the selected subterm, the
+  page's `#info`) and `onRender(view)` (a hook after every render, for the page's status
+  line).
 * A page served over `https://` cannot open a `ws://` socket (mixed content); use a
   `wss://` endpoint or serve the page over `http://`.
 * With no endpoint or a failed connection the pane says "no language server" (and how
@@ -241,7 +262,9 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
 
 1. **Transport.** A WebSocket (RFC 6455) at a URL the page can name, with JSON-RPC 2.0
    text frames and one message per frame. Host and origin: a page on `127.0.0.1` or
-   `localhost` sends that as `Origin`, a `file://` page sends none or `null`.
+   `localhost` sends that as `Origin`, a `file://` page sends none or `null`. The page
+   adds the `?token=` of its own URL to the socket's URL; a server should refuse an
+   upgrade without its token, as `wiz lsp --ws` does.
 2. **Handshake.** `initialize` answered with `capabilities.textDocumentSync: 1` and
    `capabilities.experimental.wizInfoview = {version, methods}` (and `serverInfo`);
    `initialized` accepted (doing nothing is fine); `shutdown` and `exit` answered or
@@ -268,7 +291,12 @@ server does.
 * `node web/playground_lsp_test.mjs` — the client and panel against a mock server: the
   handshake, `didOpen` with empty diagnostics, goals/term rendering with spans and the
   term tree, a diagnostics update after `didChange`, the plain fallback, close and
-  reconnect, the no-server path and no unhandled rejections. It needs no Wiz build.
+  reconnect, follow mode (no document of its own), the separate `info` box, the page
+  hook, the no-server path, no unhandled rejections, and the token (a client without
+  it, or with a wrong one, is refused; the page's `?token=` gets in). It needs no Wiz
+  build.
+* `node web/infoview_page_test.mjs` — the standalone page's URL rule (`?port=`, `?lsp=`)
+  and its status text; the pane it mounts is the test above.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `web/test.sh` runs the test beside the other web tests; `web/build-site.sh` and

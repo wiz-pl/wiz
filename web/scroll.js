@@ -36,6 +36,11 @@ async function start() {
   const wasm = await loadWasm();
   const step = stepper(wasm, "_wiz_doc_init", "_wiz_doc_step");
   document.body.classList.add("interactive");
+  // the module links GMP's mini-gmp (LGPL v3+ / GPL v2+): say so where it runs
+  const notice = document.createElement("p");
+  notice.className = "wasm-notice";
+  notice.innerHTML = 'The interactive signatures run a WebAssembly module that includes mini-gmp from GMP 6.3.0 (LGPL v3+ / GPL v2+): <a href="https://wiz-pl.github.io/wiz/licenses/">licences and source</a>.';
+  document.body.append(notice);
   // a signature is handed to Wasm when it is (nearly) on screen
   const loaded = new Set();
   const load = (el) => {

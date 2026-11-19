@@ -592,9 +592,15 @@ row says so). `--rules FILE` selects a pack; otherwise the walk tries
 
 `scry/corpus/csharp/repo/` is a small tree: three analysable files (one with a real
 finding), one deliberately invalid file, and five excluded paths (`bin/`, `obj/`,
-`node_modules/`, `.g.cs`, `.Designer.cs`). The `scry-csharp` group enumerates it, applies
-`Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the driver's
-aggregation) to checked-in spills, and asserts the before/after counts, the coverage
-rows, both report renderings and all four exit statuses. The Lean interpreter cannot call
-the native shim, so the spills are checked in exactly as for the other C# fixtures; the
-invalid file has no spill and its `.err` result is built directly.
+`node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda and a
+`from … where … select` query: the lambda is still an opaque `fnptr` (its own warning),
+while the query lowers to `System.Int32[].get_Item` and
+`System.Linq.Enumerable.Select` calls, so those two calls are part of the five
+`unmodelled-external` rows (with `Console.ReadLine`, `Process.Start` and
+`System.Int32[].get_Length`) instead of a `query_expression not modelled` row: a query
+the lowering handles is analysed, not skipped. The `scry-csharp` group enumerates it,
+applies `Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the
+driver's aggregation) to checked-in spills, and asserts the before/after counts, the
+coverage rows, both report renderings and all four exit statuses. The Lean interpreter
+cannot call the native shim, so the spills are checked in exactly as for the other C#
+fixtures; the invalid file has no spill and its `.err` result is built directly.
