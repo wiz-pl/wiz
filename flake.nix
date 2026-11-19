@@ -82,6 +82,9 @@
             "--gc-cflags" tc.gc-cflags "--gc-ldflags" tc.gc-ldflags
           ];
           addFlags = flags: lib.escapeShellArg (lib.escapeShellArgs flags);
+          # The same flags as separate shell words, for a command line (the prewarm
+          # below); `addFlags` is for `--add-flags`, which takes one escaped string.
+          addArgs = flags: lib.concatMapStringsSep " " lib.escapeShellArg flags;
 
           # $out/share/wiz is laid out like a checkout (lib/ next to .lake/build/bin/),
           # which is where grail looks for the standard library.
@@ -145,7 +148,7 @@ EOF
                 m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
                 printf '%s\n' "$m"
               done | xargs -P "$jobs" -I@ sh "$TMPDIR/check-module.sh" \
-                "$PWD/.lake/build/bin/wiz" "$cache" "$share/lib" "$TMPDIR" @ ${addFlags tcFlags}
+                "$PWD/.lake/build/bin/wiz" "$cache" "$share/lib" "$TMPDIR" @ ${addArgs tcFlags}
               # grail elaborates in-process under its *own* binary hash (the build file,
               # Grail and Prelude, before every command, and each `check` job), so it
               # hits none of the entries above: the two namespaces are disjoint by
@@ -165,7 +168,7 @@ EOF
                 'def package : Package := Package.new "warm"' \
                 '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
               printf 'import Std\n' > "$warm/main.wiz"
-              .lake/build/bin/grail ${addFlags tcFlags} -C "$warm" --cache "$cache" build
+              .lake/build/bin/grail ${addArgs tcFlags} -C "$warm" --cache "$cache" build
               # The binary's memo names the build-time executable path in its stamp, and the
               # per-root pointers name the build-time import files; both are write-cache
               # aids that a `--cache-ro` layer never reads, so the store ships neither.
