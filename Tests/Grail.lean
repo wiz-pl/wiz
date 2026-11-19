@@ -89,6 +89,19 @@ def libFiles : List (String × String) :=
 package's `.grail/build` from an older one. -/
 def binId (tc : Toolchain) : IO UInt64 := Cache.binaryId tc.cacheDir
 
+/-- The toolchain with the package's settings (and the machine's, from
+`grail.local.wiz`) applied, as `grail` itself does: `grail.wiz` has `Package.set "libs"
+"-lm"`, and a test that runs a program must link it the same way. An unknown setting is
+ignored here (the CLI reports it); the harness is not the build tool. -/
+def withSettings (tc : Toolchain) (pkg : Grail.Package) (machine : List (String × String)) :
+    IO Toolchain := do
+  let mut tc := tc
+  for (k, v) in pkg.settings ++ machine do
+    match tc.set k v with
+    | some t => tc := t
+    | none => pure ()
+  pure tc
+
 /-- A runner for a package directory; its jobs run as `<this test driver> --grail-job …`,
 and its report goes to `log`. -/
 def runner (dir : System.FilePath) (tc : Toolchain) (pkg : Grail.Package) (jobs : Nat := 1)
@@ -102,7 +115,8 @@ def buildLog (dir : System.FilePath) (tc : Toolchain) (only : List String := [])
     (timeoutMs : Option Nat := none) : IO (Grail.Stats × Bool × String) := do
   match ← Grail.readConfig tc (← binId tc) "lib" dir with
   | .error e => throw (IO.userError e)
-  | .ok (pkg, _) =>
+  | .ok (pkg, machine) =>
+    let tc ← withSettings tc pkg machine
     let log ← IO.mkRef ""
     let r ← runner dir tc pkg jobs log
     let r := { r with timeoutMs := timeoutMs.getD r.timeoutMs }
@@ -159,16 +173,21 @@ def registryTree : IO (System.FilePath × System.FilePath × String × Toolchain
     ("app.wiz", "import Greet.Hello\n#eval hello + 1\n")]
   pure (root, dir, sha, { cacheDir := some cache })
 
-/-- Run `grail test` in-process on a package directory. -/
-def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false) (testTimeoutMs : Option Nat := none) :
+/-- Run `grail test` in-process on a package directory. `filters` are the same path
+substrings `grail test FILTER` takes (all the tests of the targets if empty), so a case
+can run the tests of a name range without copying the package. -/
+def runTests (dir : System.FilePath) (tc : Toolchain) (update : Bool := false)
+    (testTimeoutMs : Option Nat := none) (filters : List String := [])
+    (rerun : Bool := false) :
     IO (Array Grail.TestResult × Grail.Stats) := do
   let std : System.FilePath := "lib"
   match ← Grail.readConfig tc 7 std dir with
   | .error e => throw (IO.userError e)
-  | .ok (pkg, _) =>
+  | .ok (pkg, machine) =>
+    let tc ← withSettings tc pkg machine
     let r ← runner dir tc pkg 2 (← IO.mkRef "")
-    let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs }
-    let res ← r.tests pkg.targets [] update
+    let r := { r with testTimeoutMs := testTimeoutMs.getD r.testTimeoutMs, rerunTests := rerun }
+    let res ← r.tests pkg.targets filters update
     pure (res, ← r.stats.get)
 
 def cmdTc : IO Toolchain := do pure { cacheDir := some (← IO.FS.createTempDir) }

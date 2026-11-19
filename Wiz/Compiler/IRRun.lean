@@ -25,6 +25,10 @@ inductive IVal where
   | erased
   /-- a byte buffer (`Bytes`, stage 21ag): a scalar, like a number -/
   | bytes (data : ByteArray)
+  /-- an array (`Array`, the interpreters' model of the runtime buffer): a scalar
+  holding interpreter values. `dupV`/`dropV` visit the elements, so the heap's
+  reference counts stay right -/
+  | arr (data : Array IVal)
   | ptr (id : Nat)
   deriving Inhabited, BEq, Repr
 
@@ -61,6 +65,7 @@ partial def toRVal (h : Heap) : IVal → RVal
   | .tag t => .obj t #[]
   | .erased => .erased
   | .bytes b => .bytes b
+  | .arr xs => .arr (xs.map (toRVal h))
   | .ptr id => match h.objs.get? id with
     | some (_, .ctor 1000 _) => .coit .erased .erased .erased .erased
     | some (_, .ctor 1001 _) => .scofix .erased .erased .erased
@@ -78,10 +83,11 @@ def strIVal (s : String) : RunM IVal := do
     l ← alloc (.ctor 1 #[ch, l])
   alloc (.ctor 0 #[l])
 
-def dupV : IVal → RunM Unit
+partial def dupV : IVal → RunM Unit
   | .ptr id => do
     let (rc, o) ← getObj id
     modify fun h => { h with objs := h.objs.insert id (rc + 1, o) }
+  | .arr xs => xs.forM dupV
   | _ => pure ()
 
 partial def dropV : IVal → RunM Unit
@@ -94,6 +100,7 @@ partial def dropV : IVal → RunM Unit
       | .ctor _ fs => fs.forM dropV
       | .clo _ as => as.forM dropV
       | .token _ => pure ()
+  | .arr xs => xs.forM dropV
   | _ => pure ()
 
 /-- Field `i` of a number's unary view (`natView`): field 0 is its constructor tag. The
@@ -126,7 +133,6 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
       | some (.tag t) => pure t
       | some (.num k) => pure (if k == 0 then 0 else 1)
       | _ => pure 0
-    args.forM dropV
     pure (.tag t)
   | "fieldAt" =>
     match (args[0]? : Option IVal), (args[1]? : Option IVal) with
@@ -220,14 +226,55 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
         | "wiz_bytes_size", some b, _ => pure (some (.num b.size))
         | "wiz_bytes_get", some b, _ => pure (some (.num (BytesModel.get b (n 1))))
         | "wiz_bytes_of_string", _, _ => do
-          let s := (toRVal (← get) (args[0]?.getD .erased)).toString?
-          pure (s.map fun s => .bytes (BytesModel.ofCString s))
+          -- (the Wiz `String` value's own characters: a non-scalar code point is
+          -- U+FFFD, which a Lean `String` could not carry)
+          let rv := toRVal (← get) (args[0]?.getD .erased)
+          pure ((BytesModel.ofCString rv).map fun b => .bytes b)
         | "wiz_bytes_to_string", some b, _ => do
           pure (some (← strIVal (BytesModel.toCString b)))
         | "wiz_bytes_slice", some b, _ => pure (some (.bytes (BytesModel.slice b (n 1) (n 2))))
         | "wiz_bytes_append", some b, some c => pure (some (.bytes (BytesModel.append b c)))
         | "wiz_bytes_eq", some b, some c => pure (some (.tag (if b == c then 1 else 0)))
         | _, _, _ => pure none
+      -- `Array` (stage 12a), over the interpreter's `.arr`
+      let r ← match r with
+        | some v => pure (some v)
+        | none =>
+          let ix := match RVal.ExternSig.ofKey? op with
+            | some sig => sig.argIndices
+            | none => []
+          let argAt (j : Nat) : IVal := match ix[j]? with
+            | some i => (args[i]?).getD .erased
+            | none => .erased
+          let idx (j : Nat) : Nat := match argAt j with
+            | .num k | .tag k => k
+            | _ => 0
+          let arr : Option (Array IVal) := match argAt 0 with
+            | .arr a => some a
+            | _ => none
+          match c, arr with
+          | "wiz_array_empty", _ => pure (some (.arr #[]))
+          | "wiz_array_push", some a => do
+            let x := argAt 1
+            dupV x
+            for v in a do dupV v
+            pure (some (.arr (a.push x)))
+          | "wiz_array_size", some a => pure (some (.num a.size))
+          | "wiz_array_get", some a => do
+            let d := argAt 2
+            match a[(idx 1)]? with
+            | some x => do dupV x; pure (some x)
+            | none => do dupV d; pure (some d)
+          | "wiz_array_set", some a => do
+            let i := idx 1
+            let x := argAt 2
+            for v in a do dupV v
+            -- (an `if` on `i < a.size` leaves the `Decidable` instance stuck here, so
+            -- the in-range test is the element lookup, which is the same condition)
+            match a[i]? with
+            | some _ => do dupV x; pure (some (.arr (a.set! i x)))
+            | none => pure (some (.arr a))
+          | _, _ => pure none
       match r with
       | some v => do args.forM dropV; pure v
       | none => throw s!"{op}: foreign functions only run in compiled code (wiz run)"
@@ -330,6 +377,7 @@ partial def run (prog : Std.HashMap Name Decl) (env : Std.HashMap Var IVal)
         | _ => throw "case on a closure or token"
       | .erased => throw "case on ◾"
       | .bytes _ => throw "case on a byte buffer"
+      | .arr _ => throw "case on an array"
     match alts[t]? with
     | some alt => run prog env joins alt
     | none => throw s!"no branch for tag {t}"

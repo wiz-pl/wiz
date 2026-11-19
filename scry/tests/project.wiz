@@ -9,7 +9,8 @@ import Scry.ProjectCache
 import Scry.TaintCmd
 -- Multi-file project driver tests:
 --
--- * compile-database parsing (`arguments` vs `command`, flag filtering);
+-- * compile-database parsing (`arguments` vs `command`, flag filtering, and the
+--   preprocessor allowlist that refuses `-B`/`-fplugin`/`@file` by name);
 -- * shared-header dedupe, the static-symbol qualification, duplicate and unresolved
 --   policy;
 -- * cross-TU taint (a source in app.c reaching a sink in io.c), per-file counts and
@@ -84,6 +85,97 @@ def main : IO Unit := EIO.toIO (do
           (Bool.not (contains c1.flags "-o")))));
     check "compdb: command form keeps -Iinc2 and -DBAR=2"
       (Bool.and (contains c2.flags "-Iinc2") (contains c2.flags "-DBAR=2"));
+
+  -- security-01: only preprocessing flags are forwarded; a flag that can execute code
+  -- (or a response file) refuses the database instead of being filtered into silence.
+  let forbiddenB :=
+    "[{\"directory\":\".\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-Bbin\",\"a.c\"]}]";
+  match Scry.parseCompdb forbiddenB with
+  | .ok _ => check "compdb: -Bbin is refused" .false
+  | .error e => check "compdb: -Bbin is refused (names the flag)"
+      (String.contains e "-Bbin");
+  let forbiddenRsp :=
+    "[{\"directory\":\".\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"@args.rsp\",\"a.c\"]}]";
+  match Scry.parseCompdb forbiddenRsp with
+  | .ok _ => check "compdb: @file is refused" .false
+  | .error e => check "compdb: @file is refused (names the file)"
+      (String.contains e "@args.rsp");
+  -- #478: the allowlist is the policy. A real database's non-preprocessing options
+  -- (-O2/-Wall/-fPIC) are refused by name, not dropped; the branch's explicit deny list
+  -- is an additional first check. A whole command line is still accepted when every
+  -- word is on the allowlist.
+  let optDb :=
+    "[{\"directory\":\".\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"inc\",\"-DVAL=1\"," ++
+    "\"-std=c11\",\"-O2\",\"-Wall\",\"-fPIC\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]";
+  match Scry.parseCompdb optDb with
+  | .ok _ => check "compdb: non-allowlisted flags are refused (-O2 named)" .false
+  | .error e => check "compdb: non-allowlisted flags are refused (-O2 named)"
+      (String.contains e "-O2");
+  let normalDb :=
+    "[{\"directory\":\".\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"inc\",\"-DVAL=1\"," ++
+    "\"-std=c11\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]";
+  match Scry.parseCompdb normalDb with
+  | .error e => check ("compdb: normal flags parse (" ++ e ++ ")") .false
+  | .ok cmds => match cmds with
+    | .cons c _ => check "compdb: preprocessing flags kept, driver flags dropped"
+        (Bool.and (contains c.flags "-I") (Bool.and (contains c.flags "inc")
+          (Bool.and (contains c.flags "-DVAL=1") (Bool.and (contains c.flags "-std=c11")
+            (Bool.not (contains c.flags "-o"))))))
+    | .nil => check "compdb: normal flags parse" .false;
+
+  -- the same three cases end to end: the hostile databases are refused before `cc`
+  -- runs (the committed `bin/cc1` writes a marker if it is ever executed).
+  b1 ← EIO.lift (Scry.ProjectIO.buildProject "tests/fixtures/project/flags-b" .none "cc"
+    .true .false .false .nil Scry.CacheOpts.none);
+  match b1 with
+  | .ok _ => check "flags-b: compile database refused" .false
+  | .error e => check "flags-b: compile database refused (-Bbin named)"
+      (String.contains e "-Bbin");
+  ran ← EIO.lift (FS.exists "tests/fixtures/project/flags-b/bin/executed");
+  check "flags-b: the committed cc1 never ran" (Bool.not ran);
+  b2 ← EIO.lift (Scry.ProjectIO.buildProject "tests/fixtures/project/flags-rsp" .none "cc"
+    .true .false .false .nil Scry.CacheOpts.none);
+  match b2 with
+  | .ok _ => check "flags-rsp: response file refused" .false
+  | .error e => check "flags-rsp: response file refused (@args.rsp named)"
+      (String.contains e "@args.rsp");
+  b3 ← EIO.lift (Scry.ProjectIO.buildProject "tests/fixtures/project/flags-normal" .none "cc"
+    .true .false .false .nil Scry.CacheOpts.none);
+  match b3 with
+  | .error e => check ("flags-normal: still analysed (" ++ e ++ ")") .false
+  | .ok r => check "flags-normal: still analysed (one unit)"
+      (Nat.beq (List.length r.1.units) 1);
+  -- the flag allowlist: only preprocessing flags may reach `cc -E`; a database is
+  -- repository-supplied, so an execution vector is refused by name, never stripped
+  check "compdb: -Bbin is refused by name"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-Bbin\",\"a.c\"]}]" with
+      | .error e => String.contains e "-Bbin"
+      | .ok _ => .false);
+  check "compdb: -fplugin is refused by name"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"command\":\"cc -fplugin=bin/p.so a.c\"}]" with
+      | .error e => String.contains e "-fplugin=bin/p.so"
+      | .ok _ => .false);
+  check "compdb: @file is refused"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"@bin/args\",\"a.c\"]}]" with
+      | .error e => String.contains e "@bin/args"
+      | .ok _ => .false);
+  check "compdb: an option-shaped value is refused"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"-Bbin\",\"a.c\"]}]" with
+      | .error e => String.contains e "-Bbin"
+      | .ok _ => .false);
+  check "compdb: -std=c11 kept, -o/-c dropped"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-std=c11\",\"-DX=1\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]" with
+      | .error _ => .false
+      | .ok cmds => match cmds with
+        | .cons c _ => Bool.and (contains c.flags "-std=c11")
+            (Bool.and (contains c.flags "-DX=1")
+              (Bool.not (contains c.flags "-o")))
+        | .nil => .false);
 
   -- duplicate non-static definitions: reported, first analysed, no crash
   rd ← build "corpus/project/duplicate" Scry.CacheOpts.none;
@@ -199,5 +291,16 @@ def main : IO Unit := EIO.toIO (do
   c4 ← build "corpus/project/taint" cache;
   let s4 := c4.2;
   check "cache: warm again after corruption" (Nat.beq s4.hit 3);
+  -- a committed symlink at an entry's sibling `.tmp` must not be truncated through
+  FS.writeFile (String.append tmp "/victim.txt") "keep\n";
+  FS.symlink (String.append tmp "/victim.txt") (String.append tmp "/cache/k.tu.tmp");
+  saveRes ← EIO.lift (Scry.cacheSave (String.append tmp "/cache") "k" "pre" "0" "cst");
+  let tmpRefused :=
+    match saveRes with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "cache: symlink tmp refused" tmpRefused;
+  victimText ← FS.readFile (String.append tmp "/victim.txt");
+  check "cache: symlink target unchanged" (String.eq victimText "keep\n");
   FS.removeAll tmp;
   check "cache: cleanup" .true)

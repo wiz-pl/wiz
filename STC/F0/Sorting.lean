@@ -248,6 +248,16 @@ whnf-interleaved algorithmic conversion `DecConv`). It is stated here as `ConvJo
 `convInjSort_of_join` shows that it does close `ConvInjSort`: a common reduct of two
 sorts is the sorts themselves, because no reduction starts at a `Sort` (`red_not_sort`).
 
+**`ConvJoin` is false** (`F0/ConvJoin.lean`, `convJoin_false`): `Core.irrel` relates any
+two proofs of a proposition and `Pi.eta` relates any two pointwise-convertible functions,
+neither with a reduction premise, so two `λ`-proofs of `(x : Unit prop) → Unit prop` are
+convertible yet have no `RedStar` reduct — and both are normal forms, so no
+well-foundedness hypothesis repairs the statement. `F0/ConvJoin.lean` proves the true
+conditional form for the reduction-generated fragment (from strong normalisation + local
+confluence, `convJoin_of_sn_local`) and records the sort-endpoint repair `ConvHead`, which
+*is* implied by `ConvJoin`, is not refuted by `irrel`/`η`, and closes `ConvInjSort`. The
+statements below stand as conditional reductions; their `ConvJoin` hypothesis is refuted.
+
 `red_not_sort` is a rule-by-rule fact of the *reduction* rules only: every rule whose
 conclusion is a reduction has an application/formula former on the left (`.app`, `.fst`,
 `.cast`, `.eq`, …), never `.sort`; `Core.redConv` is the recursive case. `Struct`'s two

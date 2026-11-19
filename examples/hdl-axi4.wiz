@@ -26,15 +26,10 @@ def allTrue : List Bool → Bool
   | .nil => .true
   | .cons b bs => Bool.and b (allTrue bs)
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
   let ω v := Circuit.runLeaves c ins;
-  Bool.and (leavesEq v (Circuit.simFast c ins))
-    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
 
 def eqTriples : List (Nat × Nat × Nat) → List (Nat × Nat × Nat) → Bool
   | .nil, .nil => .true
@@ -53,7 +48,7 @@ def eqPairs : List (Nat × Nat) → List (Nat × Nat) → Bool
 def busAckS {ω dw : Nat} (r : Bus.Resp dw HwTy.El) : Bool :=
   Bool.or (Bus.Law.bit r.ready) (Bus.Law.bit r.rvalid)
 
-def eqNatList (xs ys : List Nat) : Bool := Hdl.natsEq xs ys
+def eqNatList (xs ys : List Nat) : Bool := BEq.beq xs ys
 
 -- A stall pattern: the bus answers one cycle in `period`.
 def stallReady (period k : Nat) : Nat :=
@@ -98,13 +93,13 @@ def genWr (fuel k : Nat) (st : Axi4.WrSt 8 16 4 HwTy.El) (awPending : Bool) (wId
     let awOk := Bool.and awPending (BitVec.isTrue o.awready);
     let wOk := Bool.and wv (BitVec.isTrue o.wready);
     .cons (Bundle.toEl (Axi4.WriteIn.bundle 8 16 4) i, Hw.snd step)
-      (genWr f (Nat.succ k) st' (if awOk then Bool.false else awPending)
+      (genWr f (Nat.succ k) st' (if awOk then .false else awPending)
         (if wOk then Nat.succ wIdx else wIdx) base len size burst id period errBeat)
 
 def wrInsFor (base len size burst id period errBeat : Nat) :
     List (HwTy.El (Axi4.WriteIn.code 8 16 4)) :=
   Hdl.fsts (genWr (Nat.add (Nat.mul (Nat.add len 1) period) 8) 0 (Axi4.wrInit 8 16 4)
-    Bool.true 0 base len size burst id period errBeat)
+    .true 0 base len size burst id period errBeat)
 
 def wrIn (x : HwTy.El (Axi4.WriteIn.code 8 16 4)) : Axi4.WriteIn 8 16 4 HwTy.El :=
   Axi4.WriteIn.unpack 8 16 4 x
@@ -165,7 +160,7 @@ def wrCheck (base len size burst id period errBeat : Nat) : Bool :=
   let resp := if Nat.lt errBeat (Axi4.beats len) then Axi4.slverr else Axi4.okay;
   Bool.and (eqTriples beats (wrExpBeats base len size burst))
     (Bool.and (eqTriples ws (wrExpWBeats base len))
-      (Bool.and (eqPairs bs (List.cons (id, resp) List.nil))
+      (Bool.and (eqPairs bs [(id, resp)])
         (Bool.and (Axi4.Law.beatCountOk len (List.length beats))
           (Bool.and (Nat.beq (List.length ws) (Axi4.beats len))
             (Bool.and (Nat.beq (List.length bs) 1)
@@ -198,13 +193,13 @@ def genRd (fuel k : Nat) (st : Axi4.RdSt 8 16 4 HwTy.El) (arPending : Bool)
     let o := Axi4.ReadOut.unpack 8 16 4 (Hw.snd step);
     let arOk := Bool.and arPending (BitVec.isTrue o.arready);
     .cons (Bundle.toEl (Axi4.ReadIn.bundle 8 16 4) i, Hw.snd step)
-      (genRd f (Nat.succ k) st' (if arOk then Bool.false else arPending)
+      (genRd f (Nat.succ k) st' (if arOk then .false else arPending)
         base len size burst id period errBeat)
 
 def rdInsFor (base len size burst id period errBeat : Nat) :
     List (HwTy.El (Axi4.ReadIn.code 8 16 4)) :=
   Hdl.fsts (genRd (Nat.add (Nat.mul (Nat.add len 1) (Nat.mul period 2)) 10) 0
-    (Axi4.rdInit 8 16 4) Bool.true base len size burst id period errBeat)
+    (Axi4.rdInit 8 16 4) .true base len size burst id period errBeat)
 
 def rdIn (x : HwTy.El (Axi4.ReadIn.code 8 16 4)) : Axi4.ReadIn 8 16 4 HwTy.El :=
   Axi4.ReadIn.unpack 8 16 4 x
@@ -265,7 +260,7 @@ def rdCheck (base len size burst id period errBeat : Nat) : Bool :=
   let beats := collectRdBus z;
   let rs := collectR z;
   let ids := collectRId z;
-  let idsOk := Hdl.natsEq ids (Hdl.map (fun (_ : Nat) => id) (units (Axi4.beats len)));
+  let idsOk := BEq.beq ids (Hdl.map (fun (_ : Nat) => id) (units (Axi4.beats len)));
   Bool.and (eqTriples beats (rdExpBus base len size burst))
     (Bool.and (eqTriples rs (rdExpR base len size burst errBeat))
       (Bool.and idsOk
@@ -305,31 +300,31 @@ def ax4BundlesOk : Bool :=
     (ax4RoundTrip (Axi4.SlaveOut.bundle 8 16 4) ax4SlaveOutV)
 
 def seqOk (burst base size len : Nat) (want : List Nat) : Bool :=
-  Hdl.natsEq (Axi4.beatSeq burst base size len) want
+  BEq.beq (Axi4.beatSeq burst base size len) want
 
 def addrModel : Bool :=
-  Bool.and (seqOk Axi4.incr 16 1 3 (List.cons 16 (List.cons 18 (List.cons 20 (List.cons 22 List.nil)))))
-    (Bool.and (seqOk Axi4.wrap 22 1 3 (List.cons 22 (List.cons 16 (List.cons 18 (List.cons 20 List.nil)))))
-      (Bool.and (seqOk Axi4.wrap 20 1 3 (List.cons 20 (List.cons 22 (List.cons 16 (List.cons 18 List.nil)))))
-        (Bool.and (seqOk Axi4.wrap 0 2 3 (List.cons 0 (List.cons 4 (List.cons 8 (List.cons 12 List.nil)))))
-          (Bool.and (seqOk Axi4.wrap 6 1 1 (List.cons 6 (List.cons 4 List.nil)))
-            (Bool.and (eqNatList (Axi4.beatSeq Axi4.incr 0 0 0) (List.cons 0 List.nil))
+  Bool.and (seqOk Axi4.incr 16 1 3 [16, 18, 20, 22])
+    (Bool.and (seqOk Axi4.wrap 22 1 3 [22, 16, 18, 20])
+      (Bool.and (seqOk Axi4.wrap 20 1 3 [20, 22, 16, 18])
+        (Bool.and (seqOk Axi4.wrap 0 2 3 [0, 4, 8, 12])
+          (Bool.and (seqOk Axi4.wrap 6 1 1 [6, 4])
+            (Bool.and (eqNatList (Axi4.beatSeq Axi4.incr 0 0 0) [0])
               (Nat.beq (List.length (Axi4.beatSeq Axi4.incr 5 2 7)) 8))))))
 
 def burst (id : Nat) (addrs : List Nat) : Axi4.Burst := Axi4.Burst.mk id addrs
 
 def orderModel : Bool :=
-  let a := burst 0 (List.cons 0 List.nil);
-  let b := burst 1 (List.cons 8 List.nil);
-  let c := burst 0 (List.cons 16 List.nil);
-  let issued := List.cons a (List.cons b (List.cons c List.nil));
-  Bool.and (Axi4.orderOf issued (List.cons a (List.cons b (List.cons c List.nil))))
-    (Bool.and (Axi4.orderOf issued (List.cons b (List.cons a (List.cons c List.nil))))
-      (Bool.and (Axi4.orderOf issued (List.cons a (List.cons c (List.cons b List.nil))))
-        (Bool.and (Bool.not (Axi4.orderOf issued (List.cons c (List.cons a (List.cons b List.nil)))))
-          (Bool.and (Bool.not (Axi4.orderOf issued (List.cons b (List.cons c (List.cons a List.nil)))))
-            (Bool.and (Bool.not (Axi4.orderOf issued (List.cons a (List.cons b List.nil))))
-              (Bool.not (Axi4.orderOf issued (List.cons a (List.cons b (List.cons c (List.cons a List.nil)))))))))))
+  let a := burst 0 [0];
+  let b := burst 1 [8];
+  let c := burst 0 [16];
+  let issued := [a, b, c];
+  Bool.and (Axi4.orderOf issued [a, b, c])
+    (Bool.and (Axi4.orderOf issued [b, a, c])
+      (Bool.and (Axi4.orderOf issued [a, c, b])
+        (Bool.and (Bool.not (Axi4.orderOf issued [c, a, b]))
+          (Bool.and (Bool.not (Axi4.orderOf issued [b, c, a]))
+            (Bool.and (Bool.not (Axi4.orderOf issued [a, b]))
+              (Bool.not (Axi4.orderOf issued [a, b, c, a])))))))
 
 def netWellFormed : Bool :=
   Bool.and (Netlist.wellFormed (Circuit.netlist "axi4_wr" (Axi4.wrC 8 16 4)))
@@ -340,7 +335,7 @@ def netWellFormed : Bool :=
 def main : IO Unit := do
   IO.println ("axi4 addr model: incr/wrap " <+> yes addrModel
     <+> ", legal wrap " <+> yes (allTrue (Hdl.map Axi4.legalWrap
-      (List.cons 1 (List.cons 3 (List.cons 7 (List.cons 15 List.nil))))))
+      [1, 3, 7, 15]))
     <+> ", bad " <+> yes (Bool.not (Bool.or (Axi4.legalWrap 0) (Bool.or (Axi4.legalWrap 4) (Axi4.legalWrap 5)))));
   IO.println ("axi4 write incr: beats/strobes/b " <+> yes (wrCheck 16 3 1 Axi4.incr 3 3 99)
     <+> ", value = simulate = simFast " <+> yes (wrAgree 16 3 1 Axi4.incr 3 3)

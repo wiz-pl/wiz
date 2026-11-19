@@ -130,7 +130,7 @@ def seplogicGroup : Group where
            ".some (1, .cons (.some 1) .nil)", ".some (3, .nil)"] },
     { name := "xgo steps through values computed through private structures (Region's Uniq, as Feral lowers)", run := fun _ => do
         let src := "import HoareTactics\nimport Region\n" ++
-          "def incrU {ρ : Region} (1 r : Uniq ρ Nat) : Result1 Unit (Uniq ρ Nat) :=\n" ++
+          "def incrU {0 ρ : Region} (1 r : Uniq ρ Nat) : Result1 Unit (Uniq ρ Nat) :=\n" ++
           "  let 1 (v, r) := Uniq.peek r;\n  Result1.ok () (Uniq.write r (Nat.succ v))\n" ++
           "def back (p : Nat) : Result (Unit × Nat) → Prog Nat Unit\n  | .ok x => .set p x.2 (.ret ())\n  | .err e => .fail\n" ++
           "def bumpCell (p : Nat) : Prog Nat Unit :=\n  .get p (fun a => back p (Uniq.borrow Region.static a (fun ρ h l r => incrU r)))\n"

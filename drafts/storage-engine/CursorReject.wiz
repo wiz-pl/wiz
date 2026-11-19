@@ -1,0 +1,39 @@
+import Cursor
+
+/-!
+# Linear cursor: what the checker rejects (prototype)
+
+`wiz check` rejects each `bad*` definition below; `goodFirst` is accepted. The
+messages are quoted in `wiz-notes/storage-engine.md`.
+-/
+
+-- rejected: the same cursor consumed twice
+def badDup {a : Type} (1 c : Cursor a) : Step a × Step a :=
+  (Cursor.next c, Cursor.next c)
+
+-- rejected: used after `next` already consumed it
+def badAfter {a : Type} (1 c : Cursor a) : Step a :=
+  let s := Cursor.next c;
+  Cursor.next c
+
+-- rejected: the continuation is dropped instead of consumed
+def badDrop {a : Type} (1 c : Cursor a) : List a :=
+  match Cursor.next c with
+  | .done => []
+  | .more x _ => [x]
+
+-- accepted: consume the continuation exactly once
+def goodFirst {a : Type} (1 c : Cursor a) : List a :=
+  match Cursor.next c with
+  | .done => []
+  | .more x c' => Cursor.closeThen c' [x]
+
+-- rejected: a linear pair cannot be projected (it would drop the cursor)
+def badProj {a : Type} (1 p : a × Cursor a) : a := p.1
+
+-- accepted: take the linear pair apart with `let 1`
+def goodPair {a : Type} (1 p : a × Cursor a) : List a :=
+  let 1 (x, c) := p;
+  match Cursor.next c with
+  | .done => [x]
+  | .more y c' => Cursor.closeThen c' [x, y]

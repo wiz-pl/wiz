@@ -22,3 +22,21 @@ outcome: unknown probe is unknown: ok
 corpus: missing manifest skips: ok
 baseline: corpus run is ok: ok
 baseline: checked-in baseline matches: ok
+baseline: safe corpus is TP 32, FP 1, TN 17, FN 0: ok
+gate: a deleted baseline fails with the flag: ok
+gate: a deleted baseline names the path: ok
+gate: a deleted baseline passes without the flag: ok
+gate: bootstrap permits an explicit first run: ok
+gate: a corrupted baseline is invalid: ok
+gate: a corrupted baseline fails with the flag: ok
+gate: a corrupted baseline passes without the flag: ok
+gate: a missing corpus is a skip: ok
+gate: a missing corpus fails with the flag: ok
+gate: a missing corpus names the status: ok
+gate: a missing corpus passes without the flag: ok
+gate: a removed case is present→absent: ok
+gate: a removed case fails with the flag: ok
+gate: a removed case is named: ok
+gate: a removed case passes without the flag: ok
+gate: a new case is absent→present: ok
+gate: a new case fails with the flag: ok

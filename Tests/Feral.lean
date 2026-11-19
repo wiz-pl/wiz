@@ -260,7 +260,7 @@ def group : Group where
           "    let t := *x;\n    *x := *y;\n    *y := t\n  }\nend\n"
         let s ← frontend src
         checkEq "[]" (toString (errorsOf s src))
-        checkEq ("[def swap {ρa ρb : Region} (1 x : (Uniq ρa U64)) (1 y : (Uniq ρb U64)) : Result1 Unit ((1 _ : (Uniq ρa U64)) × (Uniq ρb U64)) :=\n" ++
+        checkEq ("[def swap {0 ρa ρb : Region} (1 x : (Uniq ρa U64)) (1 y : (Uniq ρb U64)) : Result1 Unit ((1 _ : (Uniq ρa U64)) × (Uniq ρb U64)) :=\n" ++
           "  let 1 (d_2, x) := Uniq.peek x;\n  let t := d_2;\n  let 1 (d_5, y) := Uniq.peek y;\n  let 1 x := Uniq.write x d_5;\n" ++
           "  let 1 y := Uniq.write y t;\n  Result1.ok (()) (x, y)\n]") (toString (infosOf s)) },
     { name := "errors point into the block: the line and column of the offending expression", run := fun _ => do

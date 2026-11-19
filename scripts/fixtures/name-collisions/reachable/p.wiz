@@ -1,0 +1,4 @@
+/-- Fixture: a direct import, the CstStore/TaintCmd shape. -/
+import q
+
+def other : Nat := 1

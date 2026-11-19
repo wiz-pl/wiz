@@ -1,0 +1,875 @@
+import Sys
+import Word
+import Text
+import WordMap
+import Functor
+import MVar
+import Storage
+import Registry
+/-!
+# A durable single-file store (storage engine, slice 2)
+
+This is the file-backed half of `Storage.wiz`. The pure core there decides *what* a
+transaction means (`Db.commit`); this module decides *where* it lives:
+
+* one file of 4 KiB pages, little-endian; **format version 2 only**;
+* page 0 holds meta slot A (the first 96 bytes), page 1 meta slot B; data pages start
+  at page 2. Each slot is checksummed separately, so a torn write to one leaves the
+  other valid (the note's §2.2 diagram, rather than both slots in one page);
+* a data page is a header (32 B) and up to 127 fixed-size node records (32 B each),
+  chained through the header's `right` field. A commit appends a fresh chain for the
+  whole node map (pages are never reused) and then switches the inactive meta slot.
+  The B+tree internal pages of the note's final layout are slice 3; the records and
+  the page/commit discipline are the same, and the API does not see the difference;
+* a **registry page** (kind 8, chained through `right`) lists the retained roots as
+  `{gen, root, pageCount, delEpoch, pins}` and carries the persisted `K`. The meta
+  slot's `registry_root` names it. Version 2 uses the word the note reserves for the
+  (not yet implemented) `freelist_root`; the 96-byte slot has no spare bytes. A
+  missing or corrupt registry falls back to the slot's bare root, which is a
+  corruption case, not an old-format one: a slot with any other format version is
+  refused with an error;
+* a record is `key u64 | kind u32 | label u32 | count u64 | version u64` (32 B), the
+  same fixed-size node the note describes;
+* checksums are FNV-1a-64 over the page (or meta slot) with the checksum field zeroed.
+
+The commit protocol is §4.1 with the registry added before the meta switch:
+
+```
+1. take the handle's single-writer cell (an MVar) and the pure `Db.commit`
+2. append the new data pages at `page_count`               write each
+3. append the new registry chain                           retained roots + K
+4. `fdatasync`                                             pages and registry durable
+5. write the inactive meta slot (txid, root, registry_root, page_count, del_epoch)
+6. `fsync`                                                 commit point durable
+7. publish the new Db in the cell
+```
+
+A rejection (validation) writes nothing. An I/O error leaves the old Db published and
+leaks the pages it had written; the next commit uses a generation above every meta
+slot ever seen here, so a partially written attempt cannot be mistaken for it.
+
+Open reads both slots and ignores a slot whose magic or checksum fails; a
+checksum-valid slot with another format version is an error, not an empty store. It
+then tries the valid slots from the highest `txid` down: a slot is only *chosen* when
+its whole data chain verifies (kind, txid, per-page checksum, page bounds). The chosen
+slot's registry is read next; if it fails any check (kind/txid/checksum, strictly
+descending generations, duplicate nonzero root, bounds, its own generation present,
+`K >= 1`) the state opens at the bare root plus the other slot's root. So a torn or
+truncated last commit falls back to the previous slot, while the generation counter
+still moves past the torn one. A file with no valid slot opens as an empty store
+(anything it holds is unreachable pages from a crash before the first commit).
+
+`K` is persisted in the registry and a reopen uses it (the opener's `keep` is only the
+fallback when there is no usable registry). `pins` is in the entry for the layout but
+is always written as 0 and reset to 0 on read: leases are process-local bookkeeping, so
+an abandoned lease cannot leak across a restart.
+
+The public API is the note's: `getDb` and `putDb` are the only IO; a `Snapshot` is an
+ordinary immutable value. `getDb` reads the published `Db` and returns
+`Db.snapshot`; `putDb` runs the pure `Db.commit` in the handle's critical section and
+writes only a committed result.
+
+Deleted keys keep no tombstone on disk: the global delete epoch already rejects any
+transaction that began before a delete. The index is derived state and is rebuilt on
+open; there is no index page in this slice.
+-/
+
+-- ## Little-endian byte building (the runtime's `Bytes` has no in-place `set`)
+
+/-- The accumulator of `LE.push`: the low byte first, then the next one. -/
+def LE.pushAux : Nat → Bytes → Nat → Bytes
+  | .zero, b, _ => b
+  | .succ k, b, x =>
+    LE.pushAux k (Bytes.push b (Nat.mod x 256)) (Nat.div x 256)
+
+/-- `b` with `n` bytes of `x` pushed, least significant first. -/
+def LE.push (b : Bytes) (n x : Nat) : Bytes := LE.pushAux n b x
+
+/-- A 64-bit word, little-endian. -/
+def LE.u64 (b : Bytes) (x : U64) : Bytes := LE.push b 8 x.toNat
+/-- A 32-bit word, little-endian. -/
+def LE.u32 (b : Bytes) (x : U32) : Bytes := LE.push b 4 x.toNat
+/-- A 16-bit word, little-endian. -/
+def LE.u16 (b : Bytes) (x : Nat) : Bytes := LE.push b 2 x
+
+/-- The helper of `LE.read`: `acc` already holds the bytes above the next one. -/
+def LE.readAux (b : Bytes) (off : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => LE.readAux b off k (acc * 256 + Bytes.get b (Nat.add off k))
+/-- The low `n` bytes at `off`, little-endian (`0` past the end). -/
+def LE.read (b : Bytes) (off n : Nat) : Nat := LE.readAux b off n 0
+
+/-- `b` with the 8 bytes at `off` replaced by `x` (little-endian). -/
+def LE.setU64 (b : Bytes) (off : Nat) (x : U64) : Bytes :=
+  Bytes.append
+    (Bytes.append (Bytes.take b off) (LE.u64 Bytes.empty x))
+    (Bytes.drop b (Nat.add off 8))
+
+/-- `n` zero bytes. -/
+def Bytes.zerosAux : Nat → Bytes → Bytes
+  | .zero, b => b
+  | .succ k, b => Bytes.zerosAux k (Bytes.push b 0)
+def Bytes.zeros (n : Nat) : Bytes := Bytes.zerosAux n Bytes.empty
+
+-- ## Checksums
+
+/-- FNV-1a-64 over `n` bytes at `off`, continuing from hash `h`. -/
+def fnvRange (b : Bytes) : Nat → Nat → Nat → U64 → U64
+  | .zero, _, _, h => h
+  | .succ k, off, i, h =>
+    fnvRange b k off (Nat.succ i)
+      (UIntN.mul (UIntN.xor h (U64.ofNat (Bytes.get b (Nat.add off i))))
+        (U64.ofNat 0x100000001b3))
+
+/-- `fnvRange` in blocks of at most 512 bytes. A 4 KiB page in one recursion is 4096
+frames, which overflows the compiled program's stack; blocking keeps each call shallow
+and gives the same hash (FNV is a left fold). -/
+def fnvBlocks (b : Bytes) : Nat → Nat → U64 → U64
+  | .zero, _, h => h
+  | .succ k, off, h =>
+    let n := Word.min 512 (Nat.sub (Bytes.size b) off);
+    fnvBlocks b k (Nat.add off 512) (fnvRange b n off 0 h)
+/-- FNV-1a-64 over the whole buffer. -/
+def fnv (b : Bytes) : U64 :=
+  fnvBlocks b (Nat.succ (Nat.div (Bytes.size b) 512)) 0 (U64.ofNat 0xcbf29ce484222325)
+
+-- ## Pages
+
+def pageSize : Nat := 4096
+def pageHeaderSize : Nat := 32
+def recordSize : Nat := 32
+def recordsPerPage : Nat := 127
+def metaSize : Nat := 96
+def metaMagic : U64 := U64.ofNat 0x57495a53544f5245   -- "WIZSTORE"
+/-- The only on-disk format this build writes and reads. Version 2 adds the retained-root
+registry: the meta's `registry_root` and the `kind = 8` registry page. Version 1 files are
+not read: `open` refuses an unknown version instead of guessing a layout. -/
+def formatVersion : U64 := U64.ofNat 2
+/-- The registry page's kind (the note's kinds are 1…7; 8 is the registry). -/
+def registryKind : Nat := 8
+/-- One registry entry: `gen | root | pageCount | delEpoch | pins`, five `u64`s. -/
+def registryEntrySize : Nat := 40
+/-- The first entry: the page header is 32 B, then the persisted `keep` (8 B). -/
+def registryEntriesStart : Nat := 40
+/-- `(4096 - 40) / 40`: entries that fit on one registry page. -/
+def registryEntriesPerPage : Nat := 101
+
+/-- One fixed-size node record, with the generation of its last write. -/
+structure Rec where
+  id : U64
+  node : Node
+  version : U64
+
+/-- A 32-byte record. -/
+def Rec.encode (b : Bytes) (r : Rec) : Bytes :=
+  let b := LE.u64 b r.id;
+  let b := LE.u32 b r.node.kind;
+  let b := LE.u32 b r.node.label;
+  let b := LE.u64 b r.node.count;
+  LE.u64 b r.version
+
+/-- Read the record at byte `off` (32 bytes are available). -/
+def Rec.decodeAt (b : Bytes) (off : Nat) : Rec :=
+  let id := U64.ofNat (LE.read b off 8);
+  let kind := U32.ofNat (LE.read b (Nat.add off 8) 4);
+  let label := U32.ofNat (LE.read b (Nat.add off 12) 4);
+  let count := U64.ofNat (LE.read b (Nat.add off 16) 8);
+  let version := U64.ofNat (LE.read b (Nat.add off 24) 8);
+  Rec.mk id (Node.mk kind count label) version
+
+/-- A data page: header (kind 1, `n` records, `txid`, zero checksum, `right`), the
+records, zero padding to 4 KiB, then the checksum written into the header. -/
+def buildPage (txid right : U64) (recs : List Rec) : Bytes :=
+  let header :=
+    LE.u32
+      (LE.u32
+        (LE.u64
+          (LE.u64
+            (LE.u16
+              (LE.u16 (LE.u16 (LE.u16 Bytes.empty 1) (List.length recs)) 0) 0)
+            txid)
+          (U64.ofNat 0))
+        (U32.ofNat right.toNat))
+      (U32.ofNat 0);
+  let body := List.foldl (fun b r => Rec.encode b r) Bytes.empty recs;
+  let page := Bytes.append header body;
+  let padded := Bytes.append page (Bytes.zeros (Nat.sub pageSize (Bytes.size page)));
+  LE.setU64 padded 16 (fnv padded)
+
+/-- The page's header fields, when the page is well formed for `txid`. -/
+structure Page where
+  recs : List Rec
+  right : U64
+
+/-- Read `n` records from offset 32. -/
+def decodeRecs (b : Bytes) : Nat → Nat → List Rec
+  | .zero, _ => []
+  | .succ k, i =>
+    List.cons (Rec.decodeAt b (Nat.add pageHeaderSize (Nat.mul i recordSize)))
+      (decodeRecs b k (Nat.succ i))
+
+/-- A page, if its kind, record count, generation and checksum are right. -/
+def decodePage (b : Bytes) (txid : U64) : Option Page :=
+  match Nat.beq (Bytes.size b) pageSize with
+  | .false => .none
+  | .true =>
+    let kind := LE.read b 0 2;
+    let n := LE.read b 2 2;
+    let pageTxid := U64.ofNat (LE.read b 8 8);
+    let stored := U64.ofNat (LE.read b 16 8);
+    let computed := fnv (LE.setU64 b 16 (U64.ofNat 0));
+    let right := U64.ofNat (LE.read b 24 4);
+    match Bool.and (Nat.beq kind 1)
+        (Bool.and (Nat.le n recordsPerPage)
+          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed))) with
+    | .true => .some (Page.mk (decodeRecs b n 0) right)
+    | .false => .none
+
+-- ## Meta slots
+
+/-- A 96-byte meta slot (format 2). `registryRoot` names the retained-root registry
+page chain. The free list is not implemented, so the byte the note reserves for
+`freelist_root` carries the registry root in this version. -/
+structure Meta where
+  txid : U64
+  root : U64
+  indexRoot : U64
+  registryRoot : U64
+  logEnd : U64
+  delEpoch : U64
+  minGen : U64
+  schemaGen : U64
+  pageCount : U64
+
+/-- The slot's bytes, checksum included. -/
+def Meta.encode (m : Meta) : Bytes :=
+  let b := Bytes.empty;
+  let b := LE.u64 b metaMagic;
+  let b := LE.u32 b (U32.ofNat formatVersion.toNat);  -- format
+  let b := LE.u32 b (U32.ofNat 0);                    -- flags
+  let b := LE.u64 b m.txid;
+  let b := LE.u64 b m.root;
+  let b := LE.u64 b m.indexRoot;
+  let b := LE.u64 b m.registryRoot;
+  let b := LE.u64 b m.logEnd;
+  let b := LE.u64 b m.delEpoch;
+  let b := LE.u64 b m.minGen;
+  let b := LE.u64 b m.schemaGen;
+  let b := LE.u64 b m.pageCount;
+  let b := LE.u64 b (U64.ofNat 0);                    -- checksum
+  LE.setU64 b 88 (fnv b)
+
+/-- A slot's fields, when magic, format and checksum are right. Only format 2 is read. -/
+def Meta.decode (b : Bytes) : Option Meta :=
+  match Nat.beq (Bytes.size b) metaSize with
+  | .false => .none
+  | .true =>
+    let magic := U64.ofNat (LE.read b 0 8);
+    let format := U64.ofNat (LE.read b 8 4);
+    let stored := U64.ofNat (LE.read b 88 8);
+    let computed := fnv (LE.setU64 b 88 (U64.ofNat 0));
+    match Bool.and (UIntN.beq magic metaMagic)
+        (Bool.and (UIntN.beq format formatVersion) (UIntN.beq stored computed)) with
+    | .true =>
+      .some (Meta.mk
+        (U64.ofNat (LE.read b 16 8))     -- txid
+        (U64.ofNat (LE.read b 24 8))     -- root
+        (U64.ofNat (LE.read b 32 8))     -- index_root
+        (U64.ofNat (LE.read b 40 8))     -- registry_root
+        (U64.ofNat (LE.read b 48 8))     -- log_end
+        (U64.ofNat (LE.read b 56 8))     -- del_epoch
+        (U64.ofNat (LE.read b 64 8))     -- min_gen
+        (U64.ofNat (LE.read b 72 8))     -- schema_gen
+        (U64.ofNat (LE.read b 80 8)))    -- page_count
+    | .false => .none
+
+/-- What a raw meta slot is: absent/torn, a usable slot, or a real slot with a version
+this build does not read. The last case is an error at open, not an empty store. -/
+inductive SlotCheck where
+  | absent
+  | ok (m : Meta)
+  | badVersion (v : U64)
+
+/-- Check a raw slot: magic and checksum first, then the format. A torn slot is absent;
+a checksum-valid slot with another format is `badVersion`. -/
+def Meta.check (b : Bytes) : SlotCheck :=
+  match Nat.beq (Bytes.size b) metaSize with
+  | .false => .absent
+  | .true =>
+    let magic := U64.ofNat (LE.read b 0 8);
+    let stored := U64.ofNat (LE.read b 88 8);
+    let computed := fnv (LE.setU64 b 88 (U64.ofNat 0));
+    match Bool.and (UIntN.beq magic metaMagic) (UIntN.beq stored computed) with
+    | .false => .absent
+    | .true =>
+      let format := U64.ofNat (LE.read b 8 4);
+      match UIntN.beq format formatVersion with
+      | .true =>
+        match Meta.decode b with
+        | .some m => .ok m
+        | .none => .absent
+      | .false => .badVersion format
+
+/-- The message `open` gives for a slot this build cannot read. -/
+def Meta.versionMessage (v : U64) : String :=
+  String.append "store: unsupported format version "
+    (String.append (Nat.toString v.toNat)
+      (String.append " (this build reads version "
+        (String.append (Nat.toString formatVersion.toNat) ")")))
+
+-- ## The registry page (format 2)
+
+/-- One 40-byte registry entry. The `pins` word is reserved: leases are process-local, so
+it is always written as 0 and ignored on read (an abandoned lease cannot leak). -/
+def RegistryEntry.encode (b : Bytes) (r : RootRef) : Bytes :=
+  let b := LE.u64 b r.gen;
+  let b := LE.u64 b r.root;
+  let b := LE.u64 b (U64.ofNat r.pages);
+  let b := LE.u64 b r.delEpoch;
+  LE.u64 b (U64.ofNat 0)
+
+/-- A registry page: header (`kind = 8`, `n` entries, the writing `txid`, checksum,
+`right`), the persisted `keep` at byte 32, then the entries, zero padding, and the
+checksum in the header. -/
+def buildRegistryPage (txid right keep : U64) (refs : List RootRef) : Bytes :=
+  let header :=
+    LE.u32
+      (LE.u32
+        (LE.u64
+          (LE.u64
+            (LE.u16
+              (LE.u16 (LE.u16 (LE.u16 Bytes.empty registryKind) (List.length refs)) 0) 0)
+            txid)
+          (U64.ofNat 0))
+        (U32.ofNat right.toNat))
+      (U32.ofNat 0);
+  let body := List.foldl (fun b r => RegistryEntry.encode b r) Bytes.empty refs;
+  let page := Bytes.append (Bytes.append header (LE.u64 Bytes.empty keep)) body;
+  let padded := Bytes.append page (Bytes.zeros (Nat.sub pageSize (Bytes.size page)));
+  LE.setU64 padded 16 (fnv padded)
+
+/-- A decoded registry page. -/
+structure RegistryPage where
+  entries : List RootRef
+  keep : U64
+  right : U64
+
+/-- The entry at byte `off`. -/
+def RegistryEntry.decodeAt (b : Bytes) (off : Nat) : RootRef :=
+  RootRef.mk
+    (U64.ofNat (LE.read b off 8))
+    (U64.ofNat (LE.read b (Nat.add off 8) 8))
+    (LE.read b (Nat.add off 16) 8)
+    (U64.ofNat (LE.read b (Nat.add off 24) 8))
+    (LE.read b (Nat.add off 32) 8)
+
+/-- Read `n` entries from the first entry offset. -/
+def decodeRegistryEntries (b : Bytes) : Nat → Nat → List RootRef
+  | .zero, _ => []
+  | .succ k, i =>
+    List.cons
+      (RegistryEntry.decodeAt b (Nat.add registryEntriesStart (Nat.mul i registryEntrySize)))
+      (decodeRegistryEntries b k (Nat.succ i))
+
+/-- A registry page, if its kind, entry count, generation and checksum are right. -/
+def decodeRegistryPage (b : Bytes) (txid : U64) : Option RegistryPage :=
+  match Nat.beq (Bytes.size b) pageSize with
+  | .false => .none
+  | .true =>
+    let kind := LE.read b 0 2;
+    let n := LE.read b 2 2;
+    let pageTxid := U64.ofNat (LE.read b 8 8);
+    let stored := U64.ofNat (LE.read b 16 8);
+    let computed := fnv (LE.setU64 b 16 (U64.ofNat 0));
+    let right := U64.ofNat (LE.read b 24 4);
+    match Bool.and (Nat.beq kind registryKind)
+        (Bool.and (Nat.le n registryEntriesPerPage)
+          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed))) with
+    | .true => .some (RegistryPage.mk (decodeRegistryEntries b n 0)
+        (U64.ofNat (LE.read b 32 8)) right)
+    | .false => .none
+
+-- ## File IO
+
+/-- `n` bytes at `off`, or `none` when the file is shorter. -/
+def readAt (fd : Fd) (off n : Nat) : EIO (Option Bytes) := do
+  at ← Fd.seek fd (.start off);
+  g ← Fd.readExactly fd n;
+  let b := Got.bytes g;
+  match Nat.beq (Bytes.size b) n with
+  | .true => EIO.pure (.some b)
+  | .false => EIO.pure .none
+
+/-- A page, or `none` when it is short, torn or not part of `txid`'s commit. -/
+def readPage (fd : Fd) (txid page : U64) : EIO (Option Page) := do
+  r ← readAt fd (Nat.mul page.toNat pageSize) pageSize;
+  match r with
+  | .none => EIO.pure .none
+  | .some b => EIO.pure (decodePage b txid)
+
+/-- A registry page, or `none` when it is short, torn or not part of `txid`'s commit. -/
+def readRegistryPage (fd : Fd) (txid page : U64) : EIO (Option RegistryPage) := do
+  r ← readAt fd (Nat.mul page.toNat pageSize) pageSize;
+  match r with
+  | .none => EIO.pure .none
+  | .some b => EIO.pure (decodeRegistryPage b txid)
+
+/-- Generations strictly descending (newest first): no duplicate generation can pass. -/
+def refsDescending : List RootRef → Bool
+  | .nil => .true
+  | .cons a rest =>
+    match rest with
+    | .nil => .true
+    | .cons b bs => Bool.and (UIntN.lt b.gen a.gen) (refsDescending rest)
+
+/-- How many later entries name `root`. -/
+def rootCount (root : U64) : List RootRef → Nat
+  | .nil => 0
+  | .cons e es =>
+    match UIntN.beq e.root root with
+    | .true => Nat.succ (rootCount root es)
+    | .false => rootCount root es
+
+/-- No nonzero root is named twice (`root = 0` is the empty chain and may repeat across
+empty commits). -/
+def noDuplicateRoots : List RootRef → Bool
+  | .nil => .true
+  | .cons e es =>
+    match Nat.beq e.root.toNat 0 with
+    | .true => noDuplicateRoots es
+    | .false => match Nat.beq (rootCount e.root es) 0 with
+      | .true => noDuplicateRoots es
+      | .false => .false
+
+/-- A registry entry is in bounds for the slot that names it. -/
+def refSane (m : Meta) (r : RootRef) : Bool :=
+  Bool.and (UIntN.le r.gen m.txid)
+    (Bool.and (UIntN.le r.delEpoch r.gen)
+      (Bool.and (Nat.le r.pages m.pageCount.toNat)
+        (Bool.or (Nat.beq r.root.toNat 0) (Nat.lt r.root.toNat m.pageCount.toNat))))
+
+/-- Follow the registry chain from `page`, collecting entries and checking that every
+page carries the slot's `txid` and the same `keep`. `fuel` is `page_count`, so a cycle
+or an out-of-range `right` is corrupt. Returns the entries, `keep`, and the page count. -/
+def loadRegistryGo (fd : Fd) (txid pageCount : U64) :
+    Nat → U64 → List RootRef → Option U64 → Nat →
+    EIO (Option (List RootRef × U64 × Nat))
+  | .zero, _, _, _, _ => EIO.pure .none
+  | .succ k, page, acc, keep, seen =>
+    match Nat.beq page.toNat 0 with
+    | .true => match keep with
+      | .none => EIO.pure .none
+      | .some kk => EIO.pure (.some (acc, kk, seen))
+    | .false =>
+      match UIntN.lt page pageCount with
+      | .false => EIO.pure .none
+      | .true => do
+        r ← readRegistryPage fd txid page;
+        match r with
+        | .none => EIO.pure .none
+        | .some p =>
+          match keep with
+          | .none =>
+            loadRegistryGo fd txid pageCount k p.right (List.append acc p.entries)
+              (.some p.keep) (Nat.succ seen)
+          | .some kk =>
+            match UIntN.beq kk p.keep with
+            | .false => EIO.pure .none
+            | .true =>
+              loadRegistryGo fd txid pageCount k p.right (List.append acc p.entries)
+                (.some kk) (Nat.succ seen)
+
+/-- The registry a meta slot names, fully validated: checksum, kind and txid on every
+page; strictly descending generations; no duplicate nonzero root; every entry in bounds;
+the slot's own generation present; `keep` at least 1. `pins` is read but reset to 0,
+because leases are process-local. -/
+def loadRegistry (fd : Fd) (m : Meta) : EIO (Option (Registry × Nat)) :=
+  match Nat.beq m.registryRoot.toNat 0 with
+  | .true => EIO.pure .none
+  | .false => do
+    r ← loadRegistryGo fd m.txid m.pageCount m.pageCount.toNat m.registryRoot [] .none 0;
+    match r with
+    | .none => EIO.pure .none
+    | .some q =>
+      let refs := List.map (fun e => { e with pins := 0 }) q.1;
+      let keep := q.2.1;
+      let pages := q.2.2;
+      let ok := Bool.and (Nat.lt 0 keep.toNat)
+        (Bool.and (refsDescending refs)
+          (Bool.and (noDuplicateRoots refs)
+            (Bool.and (List.all (fun e => refSane m e) refs)
+              (List.any (fun e => UIntN.beq e.gen m.txid) refs))));
+      match ok with
+      | .true => EIO.pure (.some (Registry.mk refs keep.toNat, pages))
+      | .false => EIO.pure .none
+
+/-- Write one page at `page`. -/
+def writeAt (fd : Fd) (page : U64) (b : Bytes) : EIO Unit := do
+  at ← Fd.seek fd (.start (Nat.mul page.toNat pageSize));
+  Fd.write fd b
+
+/-- Follow a commit's page chain from its root, also counting its pages. `fuel` is the
+slot's `page_count`, so a cycle or an out-of-range `right` is corrupt rather than a loop. -/
+def loadChainCountGo (fd : Fd) (txid pageCount : U64) : Nat → U64 → List Rec → Nat →
+    EIO (Option (List Rec × Nat))
+  | .zero, _, _, _ => EIO.pure .none
+  | .succ k, page, acc, n =>
+    match Nat.beq page.toNat 0 with
+    | .true => EIO.pure (.some (acc, n))
+    | .false =>
+      match UIntN.lt page pageCount with
+      | .false => EIO.pure .none
+      | .true => do
+        r ← readPage fd txid page;
+        match r with
+        | .none => EIO.pure .none
+        | .some p =>
+          loadChainCountGo fd txid pageCount k p.right (List.append acc p.recs) (Nat.succ n)
+
+/-- The records of a slot's root and the chain's length, if the whole chain verifies. -/
+def loadChainCount (fd : Fd) (m : Meta) : EIO (Option (List Rec × Nat)) :=
+  match Nat.beq m.root.toNat 0 with
+  | .true => EIO.pure (.some ([], 0))
+  | .false => loadChainCountGo fd m.txid m.pageCount m.pageCount.toNat m.root [] 0
+
+/-- The records of a slot's root, if the whole chain verifies. -/
+def loadChain (fd : Fd) (m : Meta) : EIO (Option (List Rec)) := do
+  r ← loadChainCount fd m;
+  match r with
+  | .none => EIO.pure .none
+  | .some p => EIO.pure (.some p.1)
+
+-- ## A committed database on disk
+
+/-- The published state: the last committed `Db`, the next free page, the highest `txid`
+any checksum-valid slot has carried (it may be above `db.gen` after a fallback, so a new
+commit never reuses it), the descriptor compaction replaces, and the retention registry
+(the roots this process still serves). -/
+structure StoreState where
+  db : Db
+  pageCount : U64
+  genFloor : U64
+  fd : Fd
+  registry : Registry
+  /-- Pages in the registry chain the chosen meta slot names (0 on a fallback). -/
+  registryPages : Nat
+
+/-- An empty database with the schema's indices built (they are empty too). -/
+def emptyDb (indices : List IndexDef) : Db :=
+  let root := Root.mk (U64Map.empty : U64Map Node) (U64Map.empty : U64Map U64)
+    (U64Map.empty : U64Map (U64Map (List U64))) (U64.ofNat 0);
+  Db.mk (U64.ofNat 0) (Root.rebuildIndex root indices) indices
+
+/-- A `Db` from a slot and its records. The index is recomputed: it is derived state,
+and there is no index page in this slice. -/
+def dbOf (m : Meta) (recs : List Rec) (indices : List IndexDef) : Db :=
+  let pages := List.foldl (fun p r => U64Map.insert p r.id r.node) U64Map.empty recs;
+  let versions := List.foldl (fun v r => U64Map.insert v r.id r.version) U64Map.empty recs;
+  let root := Root.mk pages versions
+    (U64Map.empty : U64Map (U64Map (List U64))) m.delEpoch;
+  Db.mk m.txid (Root.rebuildIndex root indices) indices
+
+/-- The slots that passed magic/format/checksum, newest first. -/
+def validMetas (a b : Option Meta) : List Meta :=
+  match a, b with
+  | .some x, .some y =>
+    match UIntN.lt x.txid y.txid with
+    | .true => List.cons y (List.cons x [])
+    | .false => List.cons x (List.cons y [])
+  | .some x, .none => List.cons x []
+  | .none, .some y => List.cons y []
+  | .none, .none => []
+
+/-- The greatest `txid` among the valid slots (0 when there is none). -/
+def maxTxid (ms : List Meta) : U64 :=
+  List.foldl (fun g m => match UIntN.lt g m.txid with
+    | .true => m.txid
+    | .false => g) (U64.ofNat 0) ms
+
+/-- The greatest `page_count` among the valid slots (2 when there is none): a new
+commit starts after every page any slot might still name. -/
+def maxPages (ms : List Meta) : U64 :=
+  List.foldl (fun p m => match UIntN.lt p m.pageCount with
+    | .true => m.pageCount
+    | .false => p) (U64.ofNat 2) ms
+
+/-- The root a slot names, once its chain verifies. -/
+def refOf (m : Meta) (recs : List Rec) (n : Nat) : RootRef :=
+  RootRef.mk m.txid m.root n m.delEpoch 0
+
+/-- Try the slots newest first; the first whose chain verifies is the state. A valid
+registry page replaces the bare root and carries the persisted `K`; a missing or corrupt
+registry falls back to that single root (and reports `.false`), which is the corruption
+case, not an old format. -/
+def chooseState (fd : Fd) (indices : List IndexDef) (floor pages : U64) (keep : Nat) :
+    List Meta → EIO (Option (StoreState × Bool))
+  | .nil => EIO.pure .none
+  | .cons m rest => do
+    r ← loadChainCount fd m;
+    match r with
+    | .some p => do
+      rr ← loadRegistry fd m;
+      match rr with
+      | .some q =>
+        EIO.pure (.some (StoreState.mk (dbOf m p.1 indices) pages floor fd q.1 q.2, .true))
+      | .none =>
+        EIO.pure (.some (StoreState.mk (dbOf m p.1 indices) pages floor fd
+          (Registry.mk [refOf m p.1 p.2] keep) 0, .false))
+    | .none => chooseState fd indices floor pages keep rest
+
+/-- Add any other checksum-valid slot's root the chosen state does not already hold. The
+meta list is the decreasing argument; the state is threaded after it. -/
+def addOlder (fd : Fd) : List Meta → StoreState → EIO StoreState
+  | .nil, st => EIO.pure st
+  | .cons m rest, st =>
+    match Registry.find st.registry m.txid with
+    | .some _ => addOlder fd rest st
+    | .none => do
+      r ← loadChainCount fd m;
+      match r with
+      | .none => addOlder fd rest st
+      | .some p =>
+        addOlder fd rest { st with registry := Registry.add st.registry (refOf m p.1 p.2) }
+
+/-- Read both slots and recover the last committed state (or an empty store), returning
+the state and the first free page any valid slot names. -/
+def recoverWith (fd : Fd) (indices : List IndexDef) (keep : Nat) :
+    EIO (StoreState × U64) := do
+  a ← readAt fd 0 metaSize;
+  b ← readAt fd pageSize metaSize;
+  let ca : SlotCheck := match a with
+    | .none => .absent
+    | .some x => Meta.check x;
+  let cb : SlotCheck := match b with
+    | .none => .absent
+    | .some x => Meta.check x;
+  match ca, cb with
+  | .badVersion v, _ => EIO.fail (Meta.versionMessage v)
+  | _, .badVersion v => EIO.fail (Meta.versionMessage v)
+  | _, _ => do
+    let ma : Option Meta := match ca with
+      | .ok m => .some m
+      | _ => .none;
+    let mb : Option Meta := match cb with
+      | .ok m => .some m
+      | _ => .none;
+    let ms := validMetas ma mb;
+    let floor := maxTxid ms;
+    let pages := maxPages ms;
+    r ← chooseState fd indices floor pages keep ms;
+    st ← match r with
+      | .some e => match e.2 with
+        | .true => EIO.pure e.1
+        | .false => addOlder fd ms e.1
+      | .none =>
+        EIO.pure (StoreState.mk (emptyDb indices) pages floor fd
+          (Registry.mk [RootRef.mk (U64.ofNat 0) (U64.ofNat 0) 0 (U64.ofNat 0) 0] keep) 0);
+    EIO.pure (st, pages)
+
+/-- Read both slots and recover the last committed state (or an empty store). -/
+def recover (fd : Fd) (indices : List IndexDef) : EIO StoreState := do
+  p ← recoverWith fd indices 8;
+  EIO.pure p.1
+
+-- ## Commit
+
+/-- Split the sorted records into pages of at most 127. -/
+def chunksAux : Nat → List Rec → List (List Rec)
+  | .zero, _ => []
+  | .succ k, .nil => []
+  | .succ k, xs =>
+    List.cons (List.take recordsPerPage xs)
+      (chunksAux k (List.drop recordsPerPage xs))
+
+/-- The record list of a `Db`, with each key's version. -/
+def recsOf (db : Db) : List Rec :=
+  List.map (fun e => Rec.mk e.1 e.2 (Root.versionOf db.root e.1))
+    (U64Map.toList db.root.pages)
+
+/-- Append the chain for `recs`, starting at `page`; return the next free page. -/
+def writePages (fd : Fd) (txid : U64) : List (List Rec) → U64 → EIO U64
+  | .nil, page => EIO.pure page
+  | .cons c rest, page => do
+    let right := match rest with
+      | .nil => U64.ofNat 0
+      | .cons _ _ => U64.ofNat (Nat.succ page.toNat);
+    writeAt fd page (buildPage txid right c);
+    writePages fd txid rest (U64.ofNat (Nat.succ page.toNat))
+
+/-- Split the retained roots into registry pages of at most 101 entries. -/
+def registryChunksAux : Nat → List RootRef → List (List RootRef)
+  | .zero, _ => []
+  | .succ k, .nil => []
+  | .succ k, xs =>
+    List.cons (List.take registryEntriesPerPage xs)
+      (registryChunksAux k (List.drop registryEntriesPerPage xs))
+
+/-- The registry page chunks of a sorted, newest-first ref list. -/
+def registryChunks (refs : List RootRef) : List (List RootRef) :=
+  registryChunksAux (Nat.succ (Nat.div (List.length refs) registryEntriesPerPage)) refs
+
+/-- How many pages the registry needs. -/
+def registryPageCount (refs : List RootRef) : Nat := List.length (registryChunks refs)
+
+/-- Append the registry chain for `refs`, starting at `page`. Every page carries `txid`
+and the same persisted `keep`. -/
+def writeRegistryGo (fd : Fd) (txid keep : U64) : List (List RootRef) → U64 → EIO Unit
+  | .nil, page => EIO.pure ()
+  | .cons c rest, page => do
+    let right := match rest with
+      | .nil => U64.ofNat 0
+      | .cons _ _ => U64.ofNat (Nat.succ page.toNat);
+    writeAt fd page (buildRegistryPage txid right keep c);
+    writeRegistryGo fd txid keep rest (U64.ofNat (Nat.succ page.toNat))
+
+/-- Write the registry chain at `start`. -/
+def writeRegistry (fd : Fd) (txid keep : U64) (refs : List RootRef) (start : U64) :
+    EIO Unit :=
+  writeRegistryGo fd txid keep (registryChunks refs) start
+
+/-- The slot to write: `txid mod 2`, the opposite of the slot holding `txid - 1`. -/
+def slotOffset (txid : U64) : Nat :=
+  Nat.mul (Nat.mod txid.toNat 2) pageSize
+
+/-- Write the new meta slot and make it durable. This is the commit point. -/
+def writeMeta (fd : Fd) (g : U64) (m : Meta) : EIO Unit := do
+  at ← Fd.seek fd (.start (slotOffset g));
+  Fd.write fd (Meta.encode m);
+  Fd.sync fd
+
+/-- The commit's page/fsync/meta/fsync sequence. It returns the new state or an error;
+the caller keeps the old state on error. -/
+def commit (fd : Fd) (st : StoreState) (tx : Snapshot) :
+    IO (StoreState × Except String Outcome) := do
+  -- A generation above every slot ever seen: on a fallback the chosen state's `db.gen`
+  -- is older than a torn slot's `txid`, and reusing it would let a retry overwrite the
+  -- torn slot's pages with the same generation.
+  let base := match UIntN.lt st.db.gen st.genFloor with
+    | .true => { st.db with gen := st.genFloor }
+    | .false => st.db;
+  let (db', out) := Db.commit base tx;
+  match out with
+  | .rejected e => IO.pure (st, .ok (.rejected e))
+  | .committed g => do
+    let chunks := chunksAux (List.length (recsOf db')) (recsOf db');
+    let start := st.pageCount;
+    let n := List.length chunks;
+    let last := U64.ofNat (Nat.add start.toNat n);
+    let root := match chunks with
+      | .nil => U64.ofNat 0
+      | .cons _ _ => start;
+    -- The registry after this commit: the new root plus the newest `K` retained roots.
+    let ref := RootRef.mk g root n db'.root.delEpoch 0;
+    let reg := Registry.trim (Registry.add st.registry ref);
+    let refs := Registry.roots reg;
+    let regPages := registryPageCount refs;
+    let endPage := U64.ofNat (Nat.add last.toNat regPages);
+    let meta := Meta.mk g root (U64.ofNat 0) last (U64.ofNat 0)
+      db'.root.delEpoch (Registry.minGen reg) (U64.ofNat 0) endPage;
+    -- On an I/O error the pages are abandoned (never reused) and the generation floor
+    -- moves past `g`, so this attempt can never be mistaken for the next one.
+    let failed := StoreState.mk st.db endPage g fd st.registry st.registryPages;
+    r ← writePages fd g chunks start;
+    match r with
+    | .error e => IO.pure (failed, .error e)
+    | .ok _ => do
+      -- The registry is part of the old-or-new image: write it before the meta switch.
+      rw ← writeRegistry fd g (U64.ofNat reg.keep) refs last;
+      match rw with
+      | .error e => IO.pure (failed, .error e)
+      | .ok _ => do
+        -- Step 3: the pages (and the registry) are durable before the root that names them.
+        rs ← Fd.dataSync fd;
+        match rs with
+        | .error e => IO.pure (failed, .error e)
+        | .ok _ => do
+          -- Step 4/5: switch the inactive meta slot, then make the switch durable.
+          rm ← writeMeta fd g meta;
+          match rm with
+          | .error e => IO.pure (failed, .error e)
+          | .ok _ =>
+            IO.pure (StoreState.mk db' endPage g fd reg regPages, .ok (.committed g))
+
+-- ## The handle
+
+/-- A store: its path (compaction replaces the file), its published state behind the
+single-writer cell, and the schema's indices (rebuilt on open; there is no index page in
+this slice). -/
+structure Handle where
+  path : String
+  state : MVar StoreState
+  indices : List IndexDef
+
+/-- Drop bytes past `pages` pages: they were appended by a commit that crashed before the
+meta switch, so no valid slot names them. Only call it when no reader has the file
+mapped (open does). -/
+def trimTail (fd : Fd) (pages : U64) : EIO Unit := do
+  size ← Fd.seek fd (.fromEnd 0);
+  let target := Nat.mul pages.toNat pageSize;
+  match Nat.le size target with
+  | .true => EIO.pure ()
+  | .false => Fd.truncate fd target
+
+/-- Open (creating if needed) and recover a store, retaining the newest `keep` roots
+(plus leased ones; at least one). -/
+def openDbWith (path : String) (indices : List IndexDef) (keep : Nat) : EIO Handle := do
+  fd ← Fd.open path .readWrite
+    (OpenFlags.mk .true .false .false .false .false .false);
+  let k := match Nat.lt 0 keep with
+    | .true => keep
+    | .false => 1;
+  p ← recoverWith fd indices k;
+  trimTail fd p.2;
+  cell ← EIO.lift (MVar.newFull p.1);
+  EIO.pure (Handle.mk path cell indices)
+
+/-- Open with the default retention (K = 8). -/
+def openDb (path : String) (indices : List IndexDef) : EIO Handle :=
+  openDbWith path indices 8
+
+/-- The latest committed snapshot. -/
+def getDb (h : Handle) : EIO Snapshot :=
+  EIO.lift (do
+    st ← MVar.read h.state;
+    IO.pure (Db.snapshot st.db))
+
+/-- Commit a transaction, or reject it. The cell is held for the whole commit: one
+writer, and `getDb` never observes a half-written `Db`. A snapshot whose generation the
+retention policy no longer keeps is `expired` (its pages are gone or about to be). -/
+def putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
+  MVar.borrow h.state (fun st hole =>
+    match Registry.retained st.registry tx.gen with
+    | .false =>
+      MVar.fill h.state hole st
+        (IO.pure (.ok (.rejected (.expired tx.gen (Registry.minGen st.registry))))
+          : IO (Except String Outcome))
+    | .true =>
+      IO.bind (commit st.fd st tx)
+        (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
+
+/-- Close the descriptor. The in-memory state is dropped with the handle. -/
+def closeDb (h : Handle) : EIO Unit := do
+  st ← EIO.lift (MVar.read h.state);
+  Fd.close st.fd
+
+-- ## A test shape (compiled only: the natives are `wiz run` code)
+
+/-- `seedNodes s`: the two demo nodes as a write-set (`.set`, since they are new). -/
+def seedNodes (s : Snapshot) : Snapshot :=
+  Snapshot.record
+    (Snapshot.record s (U64.ofNat 1)
+      (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)))))
+    (U64.ofNat 2)
+    (.some (.set (Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8))))
+
+/-- The node count of a database, for a test's output. -/
+def countOfDb (db : Db) (id : U64) : Nat :=
+  match U64Map.find db.root.pages id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+/-- The number of a committed generation, for a test's output. -/
+def genOf (o : Outcome) : Nat :=
+  match o with
+  | .committed g => g.toNat
+  | .rejected _ => 0

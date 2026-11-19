@@ -274,6 +274,22 @@ def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → T
     throw (.other (s!"{shown} depends on the definition of {", ".intercalate (used.map show1)}, which is hidden outside " ++
       s!"its module (it has private parts): with the definition hidden, {e}"))
 
+/-- The implicit binders written in `stx` (a command), wherever they are. -/
+partial def implicitBinderViews (stx : Syntax) : Array Elab.BinderView :=
+  if stx.isOfKind "binder.implicit" then Elab.binderViews stx else stx.args.flatMap implicitBinderViews
+
+/-- The implicit binders of a declaration's type `ty` (its leading `Π`s) at the quantity
+rule (b) gives a data implicit, when that differs from the one for a type (ω, not 0). -/
+def dataImplicits (ty : Term R) : List Name :=
+  match ty with
+  | .pi x bi q _ B _ =>
+    let here : Bool := match q with
+      | .qlit r => bi == .implicit && r == QuantitySyntax.implicitDataDefault &&
+          r != QuantitySyntax.implicitDefault (R := R)
+      | _ => false
+    (if here then [x] else []) ++ dataImplicits B
+  | _ => []
+
 /-- `addDecl` with the sorts of the elaborator's `Π`/`Σ` filled in first (`Sorts`), the
 proof markers the kernel requires (`withMarksOnDemand`), and then the privacy check (with
 the markers too: an unmarked proof is not a privacy failure). -/
@@ -282,6 +298,13 @@ def addDeclSorted (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- whose `hidden` definitions (13b) `conv` would consult
   unless g.hidden.isEmpty do throw (.other s!"internal error: {d.name} checked against the elaborator's view")
   let d := d.withSorts g
+  -- (the sorts pass is untrusted and it is total — but it can be incomplete, and the hole
+  -- it left is a bug in this elaborator, not in the declaration. Report it here, where the
+  -- pass is, as an ordinary error: the kernel's message for the same hole says "internal
+  -- error", which is not a user-facing message. The kernel keeps its check: it is the
+  -- invariant's last line of defence, for declarations built by hand or by a tactic.)
+  if d.type.hasHole || d.value.any (·.hasHole) || d.impl.any (·.hasHole) || d.witness.any (·.hasHole) then
+    throw (.other "a Π/Σ/ULift sort could not be inferred: the sorts pass left it a hole (add a type annotation to the term that contains it)")
   let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g')
   let g' ← kind g d
   privacyCheck g d kind
@@ -368,6 +391,28 @@ def solveSortConstraints : ElabM R Unit := do
       try unify ctx.lvl (← refreshVal ctx A) ty catch _ => set s
     if (← solvedLevels) == before then break
 
+/-- (13b, `--trace-guess-fallback` of `wiz` and of the tests binary) print each declaration
+that reaches `checkGuessedDecl` (stderr). A process-wide switch, set once before anything
+is elaborated: the elaborator is pure and the test suite builds its states in some 180
+places, so it is read as the frontend reads its isolation memo (`isoGet`).
+
+**Invariant: the switch changes only what is printed, never what is accepted, rechecked
+or cached in a run without the flag.** It is false unless `--trace-guess-fallback` is
+given, and it is read in three places only: here, where it gates a `dbgTrace` and nothing
+else (whether `checkGuessedDecl` rechecks depends on `unifyGuessed` and the foreign
+opaque types alone); in `Cache.elaborateCached`, where a traced run reads and writes no
+cache (a cache is transparent by contract, so that changes no result either); and in
+`wiz`'s own cache switch (`Main.lean`). Like `isoGet`/`isoPut`, this host-side `unsafe`
+read is outside the trust ledger, which covers the Wiz sources of `lib/`. -/
+initialize traceGuessesRef : IO.Ref Bool ← IO.mkRef false
+
+private unsafe def traceGuessesOnImpl (_ : Name) : Bool := unsafeBaseIO traceGuessesRef.get
+
+/-- Is `--trace-guess-fallback` on? (The argument, the declaration's name, only keeps the
+compiler from evaluating this once, as a constant, before the switch is set.) -/
+@[implemented_by traceGuessesOnImpl]
+opaque traceGuessesOn (name : Name) : Bool
+
 /-- A declaration whose elaboration used a first-order solution that could not be typed
 where it was guessed (`ElabState.unifyGuessed`; a guess is normally checked against its
 hole's type on the spot, `checkGuess` in `Unify.lean`) is checked once more where opaque
@@ -376,12 +421,23 @@ environment, where a private type is its definition again, so it would accept a
 look-alike (the same view `rfl` and a holed `assign` already compare in). This is the
 fallback only: a quoted term can carry an evaluated `μ (T.desc …)` without the name `T`,
 which has no type in that view, so the check also rejects some honest declarations
-(`privacyCheck`). A declaration whose guesses were all typed is not affected. -/
+(`privacyCheck`). A declaration whose guesses were all typed is not affected. A guess
+whose type comparison met a hole is compared again first, with the declaration's holes
+solved (`recheckDeferredGuesses`): only one that is still undecided then reaches this
+recheck. -/
 def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Option (Term R)) :
     ElabM R Unit := do
+  -- (#411) the guesses whose comparison met a hole, now that the holes are solved
+  recheckDeferredGuesses info
   if (← get).unifyGuessed then
     let g := (← getGlobals).fullView
-    if !(foreignOpaques g).isEmpty then
+    let recheck := !(foreignOpaques g).isEmpty
+    -- (`--trace-guess-fallback`) one line per declaration that reaches the fallback: the
+    -- count to drive to zero (`scripts/guess-fallback-stats.sh`)
+    if traceGuessesOn name then
+      let reasons := "; ".intercalate (← get).guessReasons.toList
+      dbgTrace s!"guess-fallback: {if g.module.isEmpty then "_" else g.module} {name} recheck={if recheck then "ran" else "skipped"} reasons={reasons}" fun _ => pure ()
+    if recheck then
       -- (a partial definition's signature is already a global: the checked copy gets
       -- an internal name, and the message the declaration's)
       let internal := if g.contains name then name ++ "✝" else name
@@ -401,7 +457,7 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   let (ctx, tele) ← elabTelescope { info } (binders.flatMap binderViews).toList
   let ty ← match typeStx with
     | some s => pure (← Elab.checkType ctx s).1
-    | none => freshMeta ctx "the type of this definition"
+    | none => freshTypeMeta ctx "the type of this definition"
   -- (for the language server) the type after the binders, and where ` : T` would go
   if let some (n, ni, at_) := declName? then
     pushInfo (.decl ni n ctx ty typeStx.isSome at_)
@@ -1089,6 +1145,26 @@ def mkMetaCode (g : Globals R) (builtins procMacros tactics : List (Name × Name
     let roots := "TacticM.run" :: "Macro.run" :: (procMacros ++ tactics).map (·.2) ++ more
     (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the macros and tactics: {·}")
 
+/-- The projection `t.2…2.1` of a right-nested Σ, with `i` projections: field `i` of a
+value of a structure whose value is `x₀, (x₁, …)`. -/
+def projField (i : Nat) (t : Term R) : Term R :=
+  let rec snds : Nat → Term R → Term R
+    | 0, t => t
+    | n + 1, t => snds n (.snd t)
+  .fst (snds i t)
+
+/-- The type `A` of field `k` lives in `[f_{k-1} … f_0, Δ]`; in a method's context
+`[self, Δ]` field `f_i` is `projField i self`. Substituting them one at a time rebuilds
+`A` once per field, and copies each earlier projection into it (`k` rebuilds of a term
+that grows to `k²`); here they are replaced in one pass, each by a term of its own size. -/
+partial def substProjFields (k : Nat) (t : Term R) (d : Nat := 0) : Term R :=
+  match t with
+  | .var i =>
+    if i < d then t
+    else if i - d < k then projField (k - 1 - (i - d)) (.var d)
+    else .var (i + 1 - k)
+  | t => Id.run <| t.mapChildrenM pure fun dd c => pure (substProjFields k c (d + dd))
+
 /-- The method functions of a class `C` (from its structure declaration):
 `C.f : {Δ} → [self : C Δ] → F`, the field `f` of `self`, where earlier fields in `F`
 become projections of `self`. With `selfBi := .default`, the projection functions of a
@@ -1108,22 +1184,20 @@ def classMethods (sDecl : Decl R) (levelParams : List Name)
     | .sigma x q A rest _ => (x, q, A) :: fieldsOf rest
     | _ => []
   let fields := fieldsOf (stripLams nΔ (sDecl.value.getD .tt))
-  let proj (i : Nat) (t : Term R) : Term R := .fst ((List.range i).foldl (fun t _ => .snd t) t)
+  -- `t.2…2.1`: the `i`-th field of a right-nested Σ (`projField 0` is `.1`)
+  let proj := projField (R := R)
   let implicitΔ := Δ.map fun (x, _, _, A) => (x, BinderInfo.implicit, (.qlit 0 : Term R), A)
   let Capp : Term R := ((List.range nΔ).map fun j => Term.var (nΔ - 1 - j)).foldl .app (.const C us)
   let w : Term R := .qlit QuantitySyntax.explicitDefault
-  let mut out := []
+  let mut out : Array (Decl R) := #[]
   for (x, q, A) in fields, k in [0:fields.length] do
     if q == .qlit 0 then continue
-    -- `A` lives under the earlier fields: insert `self` below them, then replace them
-    let mut A' := A.lift 1 k
-    for i in (List.range k).reverse do
-      A' := A'.instantiateAt 0 (proj i (.var i))
+    let A' := substProjFields (R := R) k A
     let type := implicitΔ.foldr (fun (y, bi, q, B) acc => .pi y bi q B acc .hole) (.pi "self" selfBi w Capp A' .hole)
     let value := Δ.foldr (fun (y, _, _, _) acc => .lam y acc) (.lam "self" (proj k (.var 0)))
     let d : Decl R := { name := C ++ "." ++ x, levelParams, type, value := some value }
-    out := out ++ [d]
-  pure out
+    out := out.push d
+  pure out.toList
 
 /-- `notation` and `infixl`/`infixr`/`infix`: register a syntax rule and a macro rule.
 Returns the new tables and the macro rule. -/
@@ -1609,8 +1683,27 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       -- `elabDefEqns`) is the elaborator's own: if only it fails, the bug is ours
       let ours := impl.isSome &&
         (addDeclSorted s.globals { name, levelParams, type := ty, value := val }) matches .ok _
-      reportKernel cmd.info name e (if ours then
-        "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
+      -- ...except a quantity error. The definition is checked through the eliminator, whose
+      -- recursive results need none of the arguments, while the implementation calls
+      -- itself, passing them: a parameter at ω (a data implicit's default, rule (b)) given a
+      -- variable the match binds at 0 (an erased constructor field) is the user's error,
+      -- reported at that parameter's binder.
+      let qtyErr := kernelRejectedCode e == ErrorCode.quantity
+      if ours && qtyErr then
+        let cands := dataImplicits ty
+        let bv? := (implicitBinderViews cmd).find? fun b => b.qty.isNone && cands.contains b.name
+        let hint := match bv? with
+          | some b =>
+            s!"\n  in a recursive call of {name}: its implicit parameter {b.name} has the default quantity ω " ++
+            s!"of a data implicit, but the call passes it a value the match binds at quantity 0 (an erased " ++
+            s!"constructor field such as `\{0 n : Nat}`); write `\{0 {b.name} : …}` if {b.name} is only needed in types"
+          | none =>
+            s!"\n  in a recursive call of {name}: an argument is passed at a higher quantity than the match binds " ++
+            "it at (an erased constructor field is bound at quantity 0)"
+        reportC ((bv?.map (·.info)).getD cmd.info) (kernelRejected name e ++ hint) (kernelRejectedCode e)
+      else
+        reportKernel cmd.info name e (if ours then
+          "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
   match cmd.kind with
   | "command.private" =>
     -- (13b) every name the command declares is private to this module
@@ -2254,6 +2347,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .k 's' => .const "String" []
         | .k 'b' => .const "Bool" []
         | .k 'y' => .const "Bytes" []
+        | .k 'Y' => .const "Bytes" []
         | .k 'p' => .const "_" []
         | .struct c h fs =>
           let key := s!"cstruct:{(RVal.FKind.struct c h fs).toKey}"
@@ -2361,13 +2455,18 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ptr (.const .void) => true
         | .ptr t => isChar t
         | _ => false
+      -- (21ag) a `const` pointer is borrowed for the call (`y`); a writable one (`Y`) is
+      -- copied, so C never changes a Wiz `Bytes` value (it is functional)
+      let isConstPtr (t : FFI.CType) : Bool := match t with
+        | .ptr (.const _) => true
+        | _ => false
       for f in funcs do
         let name : Name := "C." ++ f.name
         if f.variadic || (← get).globals.contains name || skips.contains f.name then continue
         -- the parameters, with buffers and their lengths as one
         let names := f.paramNames ++ List.replicate (f.params.length - f.paramNames.length) ""
         let arr := (f.params.zip names).toArray
-        let mut ps : Array (Option FFI.CType) := #[]
+        let mut ps : Array (FFI.CType × Bool × Bool) := #[] -- (type, is a buffer, writable)
         let mut i := 0
         while i < arr.size do
           let t := arr[i]!.1
@@ -2375,15 +2474,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             | some (l, ln) => (match l with | .int _ | .const (.int _) => true | _ => false) && lenNames.contains ln
             | none => false
           if !noAuto && isBuf t && isLen then
-            ps := ps.push none; i := i + 2
+            ps := ps.push (t, true, !isConstPtr t); i := i + 2
           else
-            ps := ps.push (some t); i := i + 1
+            ps := ps.push (t, false, false); i := i + 1
         let mut ks : Array (RVal.FKind × Option Name) := #[]
         let mut ok := true
-        for p in ps do
-          match p with
-          | none => ks := ks.push (.k 'y', none)
-          | some t => match ← kindOf t false with
+        for (t, isb, wr) in ps do
+          if isb then ks := ks.push (.k (if wr then 'Y' else 'y'), none)
+          else match ← kindOf t false with
             | some k => ks := ks.push k
             | none => ok := false; break
         if !ok then continue

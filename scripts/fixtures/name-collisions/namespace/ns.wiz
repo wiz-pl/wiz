@@ -1,0 +1,12 @@
+/-- Fixture: namespace bodies keep names apart; the duplicate in A is the collision. -/
+namespace A
+def x : Nat := 1
+def x : Nat := 2
+end A
+
+namespace B
+def x : Nat := 3
+end B
+
+/-- Beside both namespace bodies, not inside either. -/
+def x : Nat := 4

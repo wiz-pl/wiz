@@ -1,0 +1,25 @@
+import Prelude
+import Logic
+/-!
+# Prototype: the dependent eliminator of a Church-encoded `∃` fails
+
+Expected **failure**, the cost of the impredicative route. Run:
+
+    .lake/build/bin/wiz check --no-cache --cache-verify off STC/Prototype/ChurchDep.wiz
+
+Observed:
+
+    ChurchDep.wiz:…: error: type mismatch
+      expected: ?m…
+      inferred: Q (Ex.intro A P a p)
+
+The encoding quantifies over a constant `R : Prop`, so it cannot be instantiated with a
+motive `Q : Ex P → Prop`; and the kernel does not identify `h` with `Ex.intro a p` inside
+`Q`, so the step's type does not match. This is the precise sense in which the encoding
+is a stopgap for `∨`/`∃`, not a replacement for an inductive proposition whose proofs are
+eliminated dependently (the `Derivable`/`LR` derivations of M1).
+-/
+
+def Ex.elimDep {A : Type} {P : A → Prop} (h : Ex P) (Q : Ex P → Prop)
+    (k : (a : A) → (p : P a) → Q (Ex.intro P a p)) : Q h :=
+  h (Q h) (fun a p => k a p)

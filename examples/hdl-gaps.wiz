@@ -18,7 +18,7 @@ def Rng.trace (m : Nat) : Nat → Nat → List Nat
 
 def agree {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : Bool × List Nat :=
   let ω ys := Circuit.runPacked c xs;
-  (Bool.and (Hdl.natsEq ys (Circuit.simNet .true c xs)) (Hdl.natsEq ys (Circuit.simNet .false c xs)), List.cons (Netlist.size (Circuit.netlist "c" c)) ys)
+  (Bool.and (BEq.beq ys (Circuit.simNet .true c xs)) (BEq.beq ys (Circuit.simNet .false c xs)), List.cons (Netlist.size (Circuit.netlist "c" c)) ys)
 def v (name : String) {ω i o : HwTy} (c : Circuit i o) : String := Verilog.emit (Circuit.netlist name c)
 def same {ω i o : HwTy} (a b : Circuit i o) : Bool := Hdl.strEq (v "m" a) (v "m" b)
 
@@ -142,16 +142,16 @@ def t5 : Bool × List Nat := agree txReg (Rng.trace 128 12 5)
 ------------------------------------------------------------------------------------
 -- 5. Registers with a reset and an enable
 
-def regRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) B8)) B8 :=
+def regRE : Circuit.RstEn B8 B8 :=
   Circuit.registerRE B8 (BitVec.ofNat 8 42)
 def regR : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) B8) B8 := Circuit.registerR B8 (BitVec.ofNat 8 42)
 def regE : Circuit (HwTy.prod (HwTy.named "en" HwTy.bit) B8) B8 := Circuit.registerE B8 (BitVec.ofNat 8 42)
 -- a counter with its own reset and enable, inside the step (`Hw.regNext`), and the same
 -- counter through `Circuit.withResetEnable`: one Verilog
 def cnt : Circuit B8 B8 := Circuit.mk B8 (BitVec.ofNat 8 0) (fun s x => Hw.pair (s + x) s)
-def cntRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) B8)) B8 :=
+def cntRE : Circuit.RstEn B8 B8 :=
   Circuit.withResetEnable cnt
-def cntRE' : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) B8)) B8 :=
+def cntRE' : Circuit.RstEn B8 B8 :=
   Circuit.mk B8 (BitVec.ofNat 8 0) (fun s x =>
     Hw.pair (Hw.regNext (Hw.untag (Hw.fst x)) (Hw.untag (Hw.fst (Hw.snd x))) (BitVec.ofNat 8 0) s (s + Hw.snd (Hw.snd x))) s)
 -- reset in about one cycle in eight, enable in three of four

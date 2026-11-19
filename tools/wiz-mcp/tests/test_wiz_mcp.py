@@ -253,6 +253,35 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(envelope["error"]["kind"], "timeout")
         self.assertLess(elapsed, 3.0)
 
+    def test_a_flooding_child_is_killed_and_clipped(self) -> None:
+        """security-07: drain in chunks; kill past the cap instead of buffering it all."""
+        flood = Path(self.workspace) / "flood-wiz"
+        flood.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "while True:\n"
+            "    sys.stdout.write('x' * 1000)\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.001)\n"
+        )
+        flood.chmod(0o755)
+        config = wiz_mcp.Config(workspace=self.workspace, wiz=str(flood), idle=0, timeout=3)
+        server = wiz_mcp.Server(config)
+        saved = getattr(wiz_mcp, "MAX_OUTPUT", None)
+        if saved is not None:
+            wiz_mcp.MAX_OUTPUT = 1_000_000
+        try:
+            envelope = server.call_tool("version", {})
+        finally:
+            if saved is not None:
+                wiz_mcp.MAX_OUTPUT = saved
+            server.close()
+        self.assertIsNotNone(envelope["exit"], envelope)
+        self.assertLess(envelope["exit"], 0, envelope)  # killed at the cap, not timed out
+        self.assertTrue(envelope["truncated"], envelope)
+        self.assertLessEqual(len(envelope["stdout"]), wiz_mcp.MAX_TEXT)
+        self.assertIn("truncated:", envelope["stdout"])
+
     def test_lsp_startup_failure_is_reported_with_stderr(self) -> None:
         failing = write_exe(
             self.workspace,
@@ -1189,6 +1218,11 @@ class PolicyTests(unittest.TestCase):
             if tool["name"] == "build":
                 self.assertIs(annotations["readOnlyHint"], False)
                 self.assertIs(annotations["destructiveHint"], True)
+            elif tool["name"] in wiz_mcp.RUNNER_TOOL_NAMES:
+                # The runners execute code: never advertised as read-only, and gated.
+                self.assertIs(annotations["readOnlyHint"], False, tool["name"])
+                self.assertIs(annotations["destructiveHint"], False, tool["name"])
+                self.assertIn(tool["name"], wiz_mcp.GATED_TOOLS)
             else:
                 self.assertIs(annotations["readOnlyHint"], True, tool["name"])
                 self.assertIs(annotations["destructiveHint"], False, tool["name"])
