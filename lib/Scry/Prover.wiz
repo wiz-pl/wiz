@@ -267,7 +267,7 @@ def Scry.runTactic (p : Scry.Program Nat) (st : Scry.State Nat) :
     | .close => Scry.runTactic p st rest (Scry.closeFix p st (Scry.roundBudget st) I)
     | .closeN n => Scry.runTactic p st rest (Scry.closeFix p st n I)
     | .split =>
-      match Scry.check p st (.mk "proved" I) with
+      match Scry.check p st (Scry.Claim.mk "proved" I) with
       | .ok => Scry.runTactic p st rest I
       | .rejected _ => .none
 
@@ -276,7 +276,7 @@ def Scry.proveWith (p : Scry.Program Nat) (st : Scry.State Nat)
     (script : List Scry.Tactic) : Option Scry.Claim :=
   match Scry.runTactic p st script .nil with
   | .none => .none
-  | .some I => .some (.mk "proved" I)
+  | .some I => .some (Scry.Claim.mk "proved" I)
 
 /-- The default script: seed the three taint relations, take the closure, check.
 This is the search; a different invariant (found by hand) can be checked directly. -/

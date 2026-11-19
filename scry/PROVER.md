@@ -150,21 +150,72 @@ Two honest caveats:
 
 The corpus is the C# taint pair; the analyser lowers it with `Scry.Cs.programOf`, then
 `Scry.analyze` produces the per-function EDB. The worked example uses the `edb` of
-`Fixtures.Runner.Main`.
+`Fixtures.Runner.Main` (10 `flow` rows, 11 `gen` rows, no stores or loads, so the
+fragment applies).
 
-<!-- FACTBLOCK: filled from the prototype run -->
+The proof script is the default one:
 
-The proof obligations checked for the safe twin:
+```
+intro 1; intro 6; intro 7; close; split          # src, param, retsrc, closure, check
+```
 
-<!-- OBLIGATIONS: filled from the prototype run -->
+**Safe twin** (`cwe78-process-safe.cs`, `int.Parse(Console.ReadLine())` before the
+`sink`). The prover produces
 
-The same script on the unsafe twin:
+```
+I = {(0,0)}                 # point 0, register 0: the Console.ReadLine result
+check = ok
+```
 
-<!-- UNSAFE: filled from the prototype run -->
+That is the whole certificate: one row, for a function with 10 flow edges and 11
+definitions. The `int.Parse` call is a result sanitiser, so the transfer rule has no
+instance at its point (`san` holds there), and closure adds nothing. A human can check
+the claim by reading the code and the script; the analysis trace is not consulted.
+
+The proof obligations the checker discharged:
+
+1. **closure** (`Scry.checkRulesClosed`): rules 0, 1, 2, 3 and 7 have `tainted` heads.
+   Rule 0's instance is `(0,0) ∈ I`; rules 1 and 2 have no `param`/`retsrc` rows; rule 7
+   has no `mtainted` premise; rule 3 has no instance because `san` holds at the
+   `int.Parse` point for the register it defines.
+2. **no alert** (`Scry.checkAlertRules`): the alert rule has no instance whose
+   `tainted` premise is in `I`; the sink's argument register is not `(0,0)`.
+3. **fragment**: no `mstore`/`mload`/`mtainted` rows.
+
+**Unsafe twin** (`cwe78-process-unsafe.cs`, the same script). The closure produces seven
+rows, printed newest first:
+
+```
+I = {(10,10) (9,9) (7,7) (4,4) (3,3) (1,1) (0,0)}
+check = rejected: the alert rule fires at sink 10 argument 1
+```
+
+`Scry.prove` returns `.none` at the `split` step: the script does not find a sink-free
+invariant, and (correctly) the refusal is not a proof of the property either way. The
+*checker* rejection is the refutation: with `I` covering the source, the alert rule has
+an instance.
 
 Wrong proofs, all rejected:
 
-<!-- WRONG: filled from the prototype run -->
+```
+I = [(1,1)]                     on the safe C# EDB
+  rejected: rule 0 derives tainted (0,0), which is not in the invariant
+I = []                          (the safe invariant minus its seed)
+  rejected: rule 0 derives tainted (0,0), which is not in the invariant
+I = the unsafe 7-row invariant  checked against the safe program
+  rejected: rule 3 derives tainted (2,2), which is not in the invariant
+I = anything                    on a function with an mstore row
+  rejected: the function stores (mstore); the memory rules are not covered by this checker
+```
+
+The third example is the point of the checker: the unsafe program's seven-row set is the
+closure *there* (its `check` fails at the alert, not at closure); checked against the
+safe program it is not even closed, because the two programs have different flow edges.
+Nothing about the prover's state is trusted.
+
+The tests also hand-write `I = [(0,0)]` for the tiny example and check it with no prover
+involved (`ok`), then hand-write `I = [(1,1)]` (rejected). That is the "check without
+search" path.
 
 ## 6. What is *not* proved
 
@@ -207,13 +258,23 @@ What makes the prototype more than decoration, concretely:
 | file | contents |
 |---|---|
 | `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the tactic datatype and `prove`/`proveWith` |
+| `lib/Scry/ProverExamples.wiz` | two hand-built EDBs (safe/unsafe) with exact rows, for reading and for the tests |
 | `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, wrong proofs rejected, memory refused |
 | `scry/PROVER.md` | this note |
 
 Test cases (all in the interpreter, reading the checked-in spills, so no tree-sitter and
 no .NET):
 
-<!-- TESTS: filled from the prototype run -->
+| case | result |
+|---|---|
+| tiny examples: safe proves (`ok`, `I={(0,0)}`), unsafe refuted, empty and cross invariants rejected, `prove` on the unsafe EDB returns none | pass |
+| the C# script: safe twin `ok` with a 1-row invariant; unsafe twin rejected at the alert; `prove` returns none | pass |
+| wrong proof 1: the invariant minus its seed is rejected by rule 0 | pass |
+| wrong proof 2: the unsafe invariant is rejected on the safe program (rule 3) | pass |
+| fragment boundary: a store is refused, not accepted | pass |
+
+`5 passed, 0 failed, 0 skipped` (`heavy --mem 5G`, `.lake/build/bin/tests --run
+scry-prover 0..4`).
 
 ## 8. Alternatives considered
 

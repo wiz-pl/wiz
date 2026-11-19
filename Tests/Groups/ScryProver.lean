@@ -111,8 +111,8 @@ def group : Group where
          "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand\" [(0,0)]))\n" ++
          "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand-wrong\" [(1,1)]))\n" ++
          "#eval match Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe with\n" ++
-         "  | .some _ => .true\n" ++
-         "  | .none => .false\n")
+         "  | .some _ => Bool.true\n" ++
+         "  | .none => Bool.false\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".false", ".false"] },
     { name := "the script proves the safe twin; the unsafe twin is refuted at the alert obligation",
       run := fun _ => do
@@ -124,23 +124,23 @@ def group : Group where
            "def safeClaim : Option Scry.Claim := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
            "#eval match safeClaim with\n" ++
            "  | .some c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb c)\n" ++
-           "  | .none => .false\n" ++
+           "  | .none => Bool.false\n" ++
            "#eval match safeClaim with\n" ++
-           "  | .some c => List.length c.invariant\n" ++
-           "  | .none => 999\n" ++
+           "  | .some c => String.eq (Scry.showInv c.invariant) \"{(0,0)}\"\n" ++
+           "  | .none => Bool.false\n" ++
            "def unsafeCover : Option Scry.Claim := Scry.proveWith Scry.ruleTaintProgram unsafeEdb\n" ++
            "  ([Scry.Tactic.intro Scry.rtSrc, Scry.Tactic.intro Scry.rtParam,\n" ++
            "    Scry.Tactic.intro Scry.rtRetSrc, Scry.Tactic.close] : List Scry.Tactic)\n" ++
            "#eval match unsafeCover with\n" ++
            "  | .some c => (match Scry.check Scry.ruleTaintProgram unsafeEdb c with\n" ++
-           "    | .rejected r => String.contains r \"alert rule fires at sink\"\n" ++
-           "    | .ok => .false)\n" ++
-           "  | .none => .false\n" ++
+           "    | .rejected r => String.contains r \"alert rule fires at sink 10 argument 1\"\n" ++
+           "    | .ok => Bool.false)\n" ++
+           "  | .none => Bool.false\n" ++
            "#eval match Scry.prove Scry.ruleTaintProgram unsafeEdb with\n" ++
-           "  | .some _ => .true\n" ++
-           "  | .none => .false\n" ++
+           "  | .some _ => Bool.true\n" ++
+           "  | .none => Bool.false\n" ++
            "#eval String.eq Scry.defaultScript \"intro 1;intro 6;intro 7;close;split;\"\n")
-          [".true", "1", ".true", ".false", ".true"] },
+          [".true", ".true", ".true", ".false", ".true"] },
     { name := "wrong proof 1: an invariant that omits the seed is rejected",
       run := fun _ => do
         let pack ← packText
@@ -154,12 +154,12 @@ def group : Group where
            "      (Scry.rtRows safeEdb Scry.rtSrc))) c.invariant }\n" ++
            "#eval match full with\n" ++
            "  | .some c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c))\n" ++
-           "  | .none => .true\n" ++
+           "  | .none => Bool.true\n" ++
            "#eval match full with\n" ++
            "  | .some c => (match Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c) with\n" ++
            "    | .rejected r => String.contains r \"rule 0 derives tainted\"\n" ++
-           "    | .ok => .false)\n" ++
-           "  | .none => .false\n")
+           "    | .ok => Bool.false)\n" ++
+           "  | .none => Bool.false\n")
           [".false", ".true"] },
     { name := "wrong proof 2: the unsafe program's invariant is rejected on the safe program",
       run := fun _ => do
@@ -188,7 +188,7 @@ def group : Group where
            "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram stored (Scry.Claim.mk \"stored\" []))\n" ++
            "#eval match Scry.check Scry.ruleTaintProgram stored (Scry.Claim.mk \"stored\" []) with\n" ++
            "  | .rejected r => String.contains r \"memory rules are not covered\"\n" ++
-           "  | .ok => .false\n")
+           "  | .ok => Bool.false\n")
           [".false", ".true"] }
   ]
 
