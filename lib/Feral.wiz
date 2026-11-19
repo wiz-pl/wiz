@@ -43,6 +43,11 @@ to definition and errors of the generated Wiz land on the Feral source.
 -/
 
 declare_syntax_cat feral_lt (keywords := feral_kw)
+-- a clause of a specification: `requires (P)` / `ensures (Q)` (declared first: its words
+-- must be reserved in the types that come before the clause list in a `fn` signature)
+declare_syntax_cat feral_clause (keywords := feral_kw)
+syntax (name := req) "requires" "(" term ")" : feral_clause
+syntax (name := ens) "ensures" "(" term ")" : feral_clause
 declare_syntax_cat feral_ty (keywords := feral_kw)
 declare_syntax_cat feral_pat (keywords := feral_kw)
 declare_syntax_cat feral_expr (keywords := feral_kw)
@@ -114,13 +119,14 @@ syntax (name := types) "{" ident+ ":" "Type" "}" : feral_binder
 -- items
 syntax (name := field) withPosition(ident ":" feral_ty) : feral_field
 syntax (name := ctor) "|" ident feral_binder* : feral_ctor
-syntax (name := fnI) withPosition("fn" ident feral_binder* ":" feral_ty ":=" feral_expr) : feral_item
+-- a function, with an optional inline specification between its binders and its result
+-- type (L18: `fn f (x : T) requires (P) ensures (Q) : R := e`; after the result type the
+-- clause words would be read as type arguments, since `requires`/`ensures` are not
+-- reserved identifiers of the type grammar)
+syntax (name := fnI) withPosition("fn" ident feral_binder* feral_clause* ":" feral_ty ":=" feral_expr) : feral_item
 -- a specification of a function declared in the same block (wishful: spec-clauses,
 -- final-specs): `spec f requires (P) ensures (Q)`, the clauses Wiz propositions over the
 -- arguments' values, `result`, and `final x` / `old x` for an `&mut` argument `x`
-declare_syntax_cat feral_clause (keywords := feral_kw)
-syntax (name := req) "requires" "(" term ")" : feral_clause
-syntax (name := ens) "ensures" "(" term ")" : feral_clause
 syntax (name := specI) withPosition("spec" ident feral_clause*) : feral_item
 syntax (name := structI) withPosition("struct" ident "where" feral_field*) : feral_item
 syntax (name := enumI) withPosition("enum" ident "where" feral_ctor*) : feral_item
@@ -2715,14 +2721,14 @@ the result's elided regions taken from the first reference parameter (else E0106
 the lenders of a returned borrow (L4). -/
 def Fe.sigOf (p : List Nat) (it : Syntax) : Fe.M Fe.Sig := do
   b ← Fe.binders (Fe.sub p 2) (Fe.kids (Fe.arg it 2)) (Fe.B.mk .nil .nil .nil .nil);
-  ret0 ← Fe.tyOf (Fe.sub p 4) (Fe.arg it 4);
+  ret0 ← Fe.tyOf (Fe.sub p 5) (Fe.arg it 5);
   el ← Fe.nameElided (List.revApp (Fe.paramVars b.params .nil) .nil);
   sb ← Fe.getSubst;
   let params := List.map (fun (q : String × Fe.Ty) => (q.1, Fe.zonk sb q.2)) b.params;
   (match Fe.firstRef params, Fe.tyVars ret0 .nil with
   | _, .nil => Fe.pure ()
   | .some r, vs => Fe.bindAll r vs
-  | .none, _ => Fe.fail (Fe.sub p 4) "error[E0106]: missing lifetime specifier: the result borrows, but no parameter does");
+  | .none, _ => Fe.fail (Fe.sub p 5) "error[E0106]: missing lifetime specifier: the result borrows, but no parameter does");
   ret ← Fe.zonkM ret0;
   let name := Fe.id (Fe.arg it 1);
   let rgs := List.append b.rgs el;
@@ -2734,11 +2740,11 @@ def Fe.sigOf (p : List Nat) (it : Syntax) : Fe.M Fe.Sig := do
     let idx := List.map (fun (l : Nat × Fe.Ty) => l.1) ls;
     let others := List.filter (fun (i : Nat) => Bool.not (Fe.memNat i idx)) muts;
     (match ls, rb.1, Bool.true with
-    | .nil, _, _ => Fe.fail (Fe.sub p 4) "the returned `&mut` has no lender: no `&mut` parameter of its region (or of a region with a bound `'x : 'r`)"
+    | .nil, _, _ => Fe.fail (Fe.sub p 5) "the returned `&mut` has no lender: no `&mut` parameter of its region (or of a region with a bound `'x : 'r`)"
     | .cons l .nil, .false, _ => Fe.pure (Fe.Sig.mk name rgs b.tys b.bounds params (Fe.Ty.mutb rb.2.1 rb.2.2 (Fe.pointee l.2)) .true idx others)
     | .cons l .nil, .true, _ => Fe.pure (Fe.Sig.mk name rgs b.tys b.bounds params (Fe.Ty.mopt rb.2.1 rb.2.2 (Fe.pointee l.2)) .true idx others)
     | _, .false, _ => Fe.pure (Fe.Sig.mk name rgs b.tys b.bounds params (Fe.Ty.mutb rb.2.1 rb.2.2 (Fe.prodAll ls)) .true idx others)
-    | _, .true, _ => Fe.fail (Fe.sub p 4) "not supported yet: an optional `&mut` from several lenders")
+    | _, .true, _ => Fe.fail (Fe.sub p 5) "not supported yet: an optional `&mut` from several lenders")
 
 /-- the type a `return` gives: a returned borrow is written `&'a mut T` in Feral -/
 def Fe.surfaceRet : Fe.Ty → Fe.Ty
@@ -2845,15 +2851,15 @@ def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M S
   let cx0 := Fe.Cx.mk g sig.name sigma ev .nil Fe.noRet (Fe.surfaceRet sig.ret) .true .nil (Fe.the String (match hs0 with
     | .nil => ""
     | _ => Fe.packH hs0));
-  let ret := Fe.fnRet cx0 (Fe.sub p 6) sig;
+  let ret := Fe.fnRet cx0 (Fe.sub p 7) sig;
   let cx := Fe.Cx.setRet cx0 ret;
   let env := List.revApp (List.map (fun (q : String × Fe.Ty) => Fe.mkVar q.1 q.2 .false) sig.params) .nil;
-  body ← Fe.body cx env (Fe.sub p 6) (Fe.arg it 6) cx.retTy .true ret;
+  body ← Fe.body cx env (Fe.sub p 7) (Fe.arg it 7) cx.retTy .true ret;
   aux ← Fe.takeAux;
   sb ← Fe.getSubst;
   let handed := List.filter (fun (w : Fe.Var) => String.elem w.name (Fe.paramNames sig sig.handed)) (List.revApp env .nil);
-  let kw := Fe.the String (match Bool.or (Fe.ment sig.name (Fe.arg it 6)) (Bool.not (List.isEmpty aux)) with
-    | .true => (match Fe.ment sig.name (Fe.arg it 6) with
+  let kw := Fe.the String (match Bool.or (Fe.ment sig.name (Fe.arg it 7)) (Bool.not (List.isEmpty aux)) with
+    | .true => (match Fe.ment sig.name (Fe.arg it 7) with
       | .true => "partial def "
       | .false => "def ")
     | .false => "def ");
@@ -2958,27 +2964,39 @@ def Fe.valOfL (ps : List (String × Fe.Ty)) (hs : List String) (x : String) : St
   match String.elem x hs with
   | .true => x
   | .false => Fe.valOf ps x
+/-- a token of a clause: `result`/`result.f` or an argument's value -/
+def Fe.specNorm (ps : List (String × Fe.Ty)) (hs : List String) (res : String) (t : String) : String :=
+  match String.eq t "result" with
+  | .true => res
+  | .false => (match Chars.isPrefix (String.chars "result.") (String.chars t) with
+    | .true => res +++ String.mk (List.drop 6 (String.chars t))
+    | .false => Fe.valOfL ps hs t)
 /-- the clause's tokens, with `result`, `final x`, `old x` and the arguments replaced
-(`fi`/`ol`: the previous token was `final`/`old`) -/
+(`fi`/`ol`: the previous token was `final`/`old`; `par`: `final(` opened a parenthesis,
+whose `)` is dropped after the argument) -/
 def Fe.specGo (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (String × String))
-    (res : String) : Bool → Bool → List String → List String
-  | _, _, .nil => .nil
-  | .true, _, .cons x rest => .cons (match String.lookup x fin with
-      | .some e => e
-      | .none => "(final " +++ x +++ ")") (Fe.specGo ps hs fin res .false .false rest)
-  | .false, .true, .cons x rest => .cons (Fe.valOfL ps hs x) (Fe.specGo ps hs fin res .false .false rest)
-  | .false, .false, .cons t rest => (match String.eq t "final", String.eq t "old", String.eq t "result" with
-    | .true, _, _ => Fe.specGo ps hs fin res .true .false rest
-    | _, .true, _ => Fe.specGo ps hs fin res .false .true rest
-    | _, _, .true => .cons res (Fe.specGo ps hs fin res .false .false rest)
-    | _, _, _ => (match Chars.isPrefix (String.chars "result.") (String.chars t) with
-      | .true => .cons (res +++ String.mk (List.drop 6 (String.chars t))) (Fe.specGo ps hs fin res .false .false rest)
-      | .false => .cons (Fe.valOfL ps hs t) (Fe.specGo ps hs fin res .false .false rest)))
+    (res : String) : Bool → Bool → Bool → List String → List String
+  | _, _, _, .nil => .nil
+  | .true, _, par, .cons x rest => (match String.eq x "(" with
+    | .true => Fe.specGo ps hs fin res .true .false .true rest
+    | .false => .cons (match String.lookup x fin with
+        | .some e => e
+        | .none => "(final " +++ x +++ ")") (Fe.specGo ps hs fin res .false .false par rest))
+  | .false, .true, par, .cons x rest => (match String.eq x "(" with
+    | .true => Fe.specGo ps hs fin res .false .true .true rest
+    | .false => .cons (Fe.valOfL ps hs x) (Fe.specGo ps hs fin res .false .false par rest))
+  | .false, .false, .true, .cons x rest => (match String.eq x ")" with
+    | .true => Fe.specGo ps hs fin res .false .false .false rest
+    | .false => .cons (Fe.specNorm ps hs res x) (Fe.specGo ps hs fin res .false .false .false rest))
+  | .false, .false, .false, .cons t rest => (match String.eq t "final", String.eq t "old" with
+    | .true, _ => Fe.specGo ps hs fin res .true .false .false rest
+    | _, .true => Fe.specGo ps hs fin res .false .true .false rest
+    | _, _ => .cons (Fe.specNorm ps hs res t) (Fe.specGo ps hs fin res .false .false .false rest))
 /-- The tokens of a `spec` clause, with the parameters, the handles and the result in the
 environment. -/
 def Fe.specToks (ps : List (String × Fe.Ty)) (hs : List String) (fin : List (String × String))
     (res : String) (ts : List String) : List String :=
-  Fe.specGo ps hs fin res .false .false ts
+  Fe.specGo ps hs fin res .false .false .false ts
 /-- the projections of `r` that hold the value and each handed-back argument
 (`Fe.packV`: `(v, (x₁, (x₂, …)))`) -/
 def Fe.handedProj : String → List String → List (String × String)
@@ -3022,7 +3040,7 @@ def Fe.rgsUsed (rs : List String) : List Fe.Ty → List String
 /-- the tokens as source: separated by spaces, except after a `.` (`.true`, `x.1`) -/
 def Fe.joinToks : String → List String → String
   | _, .nil => ""
-  | prev, .cons t ts => (match Bool.or (String.eq prev "") (String.eq prev ".") with
+  | prev, .cons t ts => (match Bool.or (Bool.or (String.eq prev "") (String.eq prev ".")) (String.eq t ".") with
     | .true => t
     | .false => " " +++ t) +++ Fe.joinToks t ts
 /-- The clauses of a `spec`'s `requires` or `ensures` (`k` is the keyword). -/
@@ -3086,42 +3104,45 @@ def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
         +++ ": Prop :=\n  " +++ Fe.arrows reqs
           ("Result.Holds (fun (r : " +++ Fe.nestTy (Fe.tyStr sig.ret) hts +++ ") => "
             +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")")))
+/-- The `def f.Spec … : Prop` of a clause list (a `spec f …` item's, or a `fn`'s own
+inline clauses). -/
+def Fe.specOf (sig : Fe.Sig) (cls : List (Nat × Syntax)) : Except String String :=
+  match sig.lenders with
+  | .cons _ _ => .error "spec: not supported yet: a function that returns a borrow (`final result`)"
+  | .nil =>
+    let ev := Fe.boundsEv sig.bounds 0;
+    let hs := Fe.paramNames sig sig.handed;
+    let hts := List.map (fun (h : String) => (match String.lookup h sig.params with
+      | .some t => Fe.tyStr t
+      | .none => "_")) hs;
+    let res := (match hs with
+      | .nil => "r"
+      | _ => "r.1");
+    let fin := Fe.handedProj "r.2" hs;
+    match List.isEmpty hs with
+    | .false => Fe.specLin sig hs cls ev
+    | .true =>
+      let reqs := Fe.clauses sig.params .nil fin res "feral_clause.req" cls;
+      let enss := Fe.clauses sig.params .nil fin res "feral_clause.ens" cls;
+      let call := Fe.unwords (.cons sig.name (List.append (List.map (fun (e : String × (String × String)) => e.1) ev)
+        (List.map (fun (q : String × Fe.Ty) => q.1) sig.params)));
+      .ok ("def " +++ sig.name +++ ".Spec "
+        +++ (match sig.rgs with
+          | .nil => ""
+          | rs => "{" +++ Fe.words rs +++ ": Region} ")
+        +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
+        +++ (match sig.tys with
+          | .nil => ""
+          | ts => "{" +++ Fe.words ts +++ ": Type} ")
+        +++ Fe.words (List.map (fun (q : String × Fe.Ty) => "(" +++ q.1 +++ " : " +++ Fe.tyStr q.2 +++ ")") sig.params)
+        +++ ": Prop :=\n  " +++ Fe.arrows reqs ("Result.Holds (fun (r : " +++ Fe.packTyStr (Fe.tyStr sig.ret) hts +++ ") => "
+          +++ Fe.joinWith " × " enss +++ ") (" +++ call +++ ")"))
 /-- The `def f.Spec … : Prop` of a `spec f requires … ensures …` item. -/
 def Fe.specText (g : Fe.Glob) (p : List Nat) (it : Syntax) : Except String String :=
   let f := Fe.id (Fe.arg it 1);
   match Fe.findSig f g.sigs with
   | .none => .error ("spec: no function `" +++ f +++ "` in this block")
-  | .some sig => (match sig.lenders with
-    | .cons _ _ => .error "spec: not supported yet: a function that returns a borrow (`final result`)"
-    | .nil =>
-      let ev := Fe.boundsEv sig.bounds 0;
-      let hs := Fe.paramNames sig sig.handed;
-      let hts := List.map (fun (h : String) => (match String.lookup h sig.params with
-        | .some t => Fe.tyStr t
-        | .none => "_")) hs;
-      let res := (match hs with
-        | .nil => "r"
-        | _ => "r.1");
-      let fin := Fe.handedProj "r.2" hs;
-      let cls := Fe.kids (Fe.arg it 2);
-      match List.isEmpty hs with
-      | .false => Fe.specLin sig hs cls ev
-      | .true =>
-        let reqs := Fe.clauses sig.params .nil fin res "feral_clause.req" cls;
-        let enss := Fe.clauses sig.params .nil fin res "feral_clause.ens" cls;
-        let call := Fe.unwords (.cons sig.name (List.append (List.map (fun (e : String × (String × String)) => e.1) ev)
-          (List.map (fun (q : String × Fe.Ty) => q.1) sig.params)));
-        .ok ("def " +++ sig.name +++ ".Spec "
-          +++ (match sig.rgs with
-            | .nil => ""
-            | rs => "{" +++ Fe.words rs +++ ": Region} ")
-          +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
-          +++ (match sig.tys with
-            | .nil => ""
-            | ts => "{" +++ Fe.words ts +++ ": Type} ")
-          +++ Fe.words (List.map (fun (q : String × Fe.Ty) => "(" +++ q.1 +++ " : " +++ Fe.tyStr q.2 +++ ")") sig.params)
-          +++ ": Prop :=\n  " +++ Fe.arrows reqs ("Result.Holds (fun (r : " +++ Fe.packTyStr (Fe.tyStr sig.ret) hts +++ ") => "
-            +++ Fe.joinWith " × " enss +++ ") (" +++ call +++ ")")))
+  | .some sig => Fe.specOf sig (Fe.kids (Fe.arg it 2))
 
 -- ## The command macro
 /-- An item after the first pass: generated data declarations, a function to lower, or an error. -/
@@ -3166,29 +3187,53 @@ structure Fe.Outp where
 def Fe.first {A : Type} : List A → List A
   | .nil => .nil
   | .cons a _ => .cons a .nil
+/-- The `def f.Spec` of a `fn`'s inline clauses, if it has any, added to the output. -/
+def Fe.addSpec (p : List Nat) (sig : Fe.Sig) (cls : List (Nat × Syntax)) (o : Fe.Outp) : Fe.Outp :=
+  match List.isEmpty cls with
+  | .true => o
+  | .false => (match Fe.specOf sig cls with
+    | .error m => Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt (Fe.sub p 3) m) .nil)) o.notes o.srcs
+    | .ok text => Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
+        (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
+/-- The functions of a block that carry inline clauses (so that a `spec f` item for one
+of them is a second specification). -/
+def Fe.inlineNames : List Fe.Item → List String
+  | .nil => .nil
+  | .cons it rest => (match it with
+    | .func _ stx => (match List.isEmpty (Fe.kids (Fe.arg stx 3)) with
+      | .true => Fe.inlineNames rest
+      | .false => .cons (Fe.id (Fe.arg stx 1)) (Fe.inlineNames rest))
+    | _ => Fe.inlineNames rest)
 /-- The second pass: lowers each function. `mode` 0 is `feral`, 1 `#lower feral`
-(also shows the generated code), 2 `#unchecked feral` (borrow errors become notes). -/
-def Fe.pass2 (g : Fe.Glob) (mode : Nat) : List Fe.Item → Fe.Outp → Fe.Outp
+(also shows the generated code), 2 `#unchecked feral` (borrow errors become notes).
+`inl` are the functions with inline clauses (a `spec` item for one is an error). -/
+def Fe.pass2 (g : Fe.Glob) (mode : Nat) (inl : List String) : List Fe.Item → Fe.Outp → Fe.Outp
   | .nil, o => o
   | .cons it rest, o => (match it with
-    | .bad p m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
-    | .data p text => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
+    | .bad p m => Fe.pass2 g mode inl rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
+    | .data p text => Fe.pass2 g mode inl rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
         (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
-    | .spec p stx => (match Fe.specText g p stx with
-      | .error m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
-      | .ok text => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
-          (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil))))
+    | .spec p stx =>
+      let f := Fe.id (Fe.arg stx 1);
+      (match String.elem f inl with
+      | .true => Fe.pass2 g mode inl rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt (Fe.sub p 1)
+          ("a function has one specification: `" +++ f +++ "` has inline `requires`/`ensures` clauses")) .nil)) o.notes o.srcs)
+      | .false => (match Fe.specText g p stx with
+        | .error m => Fe.pass2 g mode inl rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt p m) .nil)) o.notes o.srcs)
+        | .ok text => Fe.pass2 g mode inl rest (Fe.Outp.mk o.errs (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
+            (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))))
     | .func p stx => (match Fe.findSig (Fe.id (Fe.arg stx 1)) g.sigs with
-      | .none => Fe.pass2 g mode rest o
+      | .none => Fe.pass2 g mode inl rest o
       | .some sig => (match Fe.run (Fe.fnText g p stx sig) with
-        | .err q m => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt q m) .nil)) o.notes o.srcs)
+        | .err q m => Fe.pass2 g mode inl rest (Fe.Outp.mk (List.append o.errs (.cons (Syntax.errorAt q m) .nil)) o.notes o.srcs)
         | .ok text st =>
           let soft := List.map (fun (e : List Nat × String) => Syntax.errorAt e.1 e.2) (Fe.first st.soft);
           let softN := List.map (fun (e : List Nat × String) => Syntax.infoAt e.1 ("the front end's verdict (not enforced by #unchecked): " +++ e.2)) (Fe.first st.soft);
-          (match Nat.beq mode 2 with
-          | .true => Fe.pass2 g mode rest (Fe.Outp.mk o.errs (List.append o.notes softN) (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))
-          | .false => Fe.pass2 g mode rest (Fe.Outp.mk (List.append o.errs soft) (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
-              (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)))))))
+          let o1 := (match Nat.beq mode 2 with
+            | .true => Fe.Outp.mk o.errs (List.append o.notes softN) (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil))
+            | .false => Fe.Outp.mk (List.append o.errs soft) (List.append o.notes (.cons (Syntax.infoAt p text) .nil))
+                (List.append o.srcs (.cons (Syntax.sourceAt p text) .nil)));
+          Fe.pass2 g mode inl rest (Fe.addSpec p sig (Fe.kids (Fe.arg stx 3)) o1))))
 /-- The command macro behind `feral … end`, `#lower feral … end` and
 `#unchecked feral … end`: both passes, then the generated Wiz source (or the errors at
 their Feral source). -/
@@ -3201,7 +3246,7 @@ def Fe.macro : CommandMacro := fun stx =>
     | .zero => Nat.succ Nat.zero
     | _ => Nat.succ (Nat.succ Nat.zero));
   let r := Fe.pass1 (.cons idx .nil) (Fe.kids (Fe.arg stx idx)) (Fe.Glob.mk Fe.libSigs Fe.libEnums .nil);
-  let o := Fe.pass2 r.1 mode r.2 (Fe.Outp.mk .nil .nil .nil);
+  let o := Fe.pass2 r.1 mode (Fe.inlineNames r.2) r.2 (Fe.Outp.mk .nil .nil .nil);
   match o.errs, mode with
   | .nil, .zero => MacroM.pure o.srcs
   | .nil, .succ .zero => MacroM.pure (List.append o.notes o.srcs)
