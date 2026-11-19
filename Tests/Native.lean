@@ -845,11 +845,21 @@ def group : Group where
           let src ← IO.FS.readFile f
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
-    { name := "no library declaration depends on a native axiom", run := fun _ => do
+    { name := "every library source of trust is a reviewed ledger row", run := fun _ => do
         -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
-        -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new
+        -- each source listed must be a row in .github/trust-baseline.tsv, and a new
         -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
         -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
+        --
+        -- This case was `no library declaration depends on a native axiom`: that was a
+        -- goal from Stage 27a, when it checked only the `native✝` axioms `native_refl`
+        -- adds. It is not an invariant of lib/: InternTable, UIntN, IntN and Proc have
+        -- depended on reviewed `extern`/`implemented_by` natives (`wiz_itab_*`,
+        -- `wiz_*` builtins) since before the ledger, as `Task.*` and `Scope.spawn`
+        -- (`wiz_task_*`, `wiz_scope_*`) do now. What the gate guarantees is that such
+        -- a dependency is reviewed, dated and listed; a `native_refl` axiom is still
+        -- never allowed in lib/ (the `lib/ never uses native_refl` case, and no
+        -- `native_refl` row exists).
         let _ ← checkTrustLedger (includeExamples := false)
         pure () },
     { name := "the trust gate: fixture trees, exit codes and messages (Tests/trust-ledger/)", run := fun _ => do

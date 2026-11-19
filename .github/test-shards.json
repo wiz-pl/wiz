@@ -40,6 +40,7 @@
     "=c",
     "callbacks",
     "conc",
+    "=task",
     "effects",
     "ffi",
     "llvm",
