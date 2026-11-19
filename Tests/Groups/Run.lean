@@ -39,9 +39,13 @@ def runGroup : Group where
         okLib ("import Prelude\n" ++ zeroFieldDecls ++
             "def e5 : Nat := (fun (f : (0 x : Nat) → Nat) => f (loop ())) (fun _ => 4)\n" ++
             "def e6 : Nat := let 0 (x, y) := ((loop (), 2) : Nat × Nat); 6\n" ++
+            -- (the documented boundary: a call whose result is a proof is erased with its
+            -- argument, even at ω — erasure is not divergence-preserving)
+            "def lem (n : Nat) : 0 = 0 := rfl\n" ++
+            "def e7 : Nat := ((lem (loop ()), 7) : (0 = 0) × Nat).2\n" ++
             "#eval e1\n#run e1\n#eval e2\n#run e2\n#eval e3\n#run e3\n#eval e4\n#run e4\n" ++
-            "#eval e5\n#run e5\n#eval e6\n#run e6")
-          ["7", "7", "8", "8", "9", "9", "2", "2", "4", "4", "6", "6"] }
+            "#eval e5\n#run e5\n#eval e6\n#run e6\n#eval e7\n#run e7")
+          ["7", "7", "8", "8", "9", "9", "2", "2", "4", "4", "6", "6", "7", "7"] }
   ]
 
 builtin_initialize registerGroup runGroup

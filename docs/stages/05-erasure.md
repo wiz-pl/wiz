@@ -22,6 +22,13 @@
   effect, it is used at quantity `1` or ω, and erasure keeps it. The tests that pin this
   are "a 0 position is never evaluated" (group `eval`, both interpreters) and the
   `ffi` group's "compiled code never evaluates a 0 position" (C and LLVM).
+* **Erasure is not divergence-preserving, by design.** A call whose *result type* is a
+  proposition is erased with its arguments, even though the kernel checked those
+  arguments at their own (ω) quantities: `f (spin ())` with `f : Nat → 0 = 0` prints
+  nothing and does not diverge. That is the proof-irrelevance assumption erasure is
+  built on, and it is why an effect must be in `IO` (a function into `World`, never a
+  proposition) rather than hidden in a proof. `partial` is a convenience for
+  computations whose value is observed, not a promise that erasure keeps them.
 * **What erasure still carries.** Binders are kept, so an erased parameter is a real
   parameter: it is passed as a boxed `◾` (`WIZ_BOX(0)` in C, `i64 1` in Wasm), and
   reference counting dup/drops it like any scalar. The *index* of a `μ`/`ν` is a
