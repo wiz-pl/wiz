@@ -72,9 +72,11 @@ transitively.  This is the intersection of the modules' transitive importers, so
 `CstStore`/`TaintCmd` (TaintCmd imports CstStore) remains, while two independent
 entry points do not.  The graph is built from `import` lines in the scanned `.wiz`
 files; a module outside the roots is not resolved, and a program the Lean host
-assembles from a source list (`Wiz/Selfhost.lean`) is not in the graph.  The default
-project-wide check remains the backstop for those.  The baseline does not apply in
-this mode (it documents the project-wide model): `--reachable` is the stricter gate.
+assembles from a source list (`Wiz/Selfhost.lean`) is not in the graph.  If a module
+name occurs under more than one root, every candidate is an edge (conservative).
+The default project-wide check remains the backstop for those.  The baseline does
+not apply in this mode (it documents the project-wide model): `--reachable` is the
+stricter gate.
 
 Recognised forms (one declaration per line, at column 0, as Wiz's layout requires)
 -----------------------------------------------------------------------------------
